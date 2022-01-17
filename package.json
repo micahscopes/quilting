@@ -1,0 +1,25 @@
+{
+  "name": "quiltwork",
+  "source": "src/index.ts",
+  "main": "dist/main.js",
+  "module": "dist/module.js",
+  "types": "dist/types.d.ts",
+  "scripts": {
+    "watch": "parcel watch",
+    "build": "parcel build",
+    "test": "ts-node node_modules/tape-watch/bin/tape-watch test/**/*.ts"
+  },
+  "devDependencies": {
+    "@parcel/packager-ts": "^2.2.0",
+    "@parcel/transformer-typescript-types": "^2.2.0",
+    "@types/tape": "^4.13.2",
+    "parcel": "^2.2.0",
+    "tape": "^5.4.1",
+    "tape-watch": "^2.3.0",
+    "typescript": ">=3.0.0"
+  },
+  "dependencies": {
+    "@teropa/triangle-tessellation": "^1.1.0",
+    "ganja.js": "^1.0.194"
+  }
+}
