@@ -1,1 +1,1 @@
-{"mappings":"AAAA,OAAO,MAAM,iBAAiB,CAAA","sources":["src/src/index.ts","src/index.ts"],"sourcesContent":[null,"export const lol = () => \"hi!\""],"names":[],"version":3,"file":"types.d.ts.map"}
+{"mappings":"AAAA,OAAO,MAAM,qBAAyB,CAAA","sources":["src/src/index.ts","src/index.ts"],"sourcesContent":[null,"export const log = x => console.log(x)\n\n\n// export const tessellatePatch = (patch: Patch) : Mesh => ({})\n"],"names":[],"version":3,"file":"types.d.ts.map","sourceRoot":"../"}

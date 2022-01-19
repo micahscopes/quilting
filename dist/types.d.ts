@@ -1,3 +1,3 @@
-export const lol: () => string;
+export const log: (x: any) => void;
 
 //# sourceMappingURL=types.d.ts.map

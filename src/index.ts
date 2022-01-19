@@ -1,1 +1,4 @@
-export const lol = () => "hi!"
+export const log = x => console.log(x)
+
+
+// export const tessellatePatch = (patch: Patch) : Mesh => ({})
