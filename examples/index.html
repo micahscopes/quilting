@@ -1,37 +1,18 @@
 <head>
   <script type="module">
     import createREGL from "regl";
-    import bunny from "bunny";
-    import normals from "angle-normals";
     import createCamera from "inertial-turntable-camera";
     import interactionEvents from "normalized-interaction-events";
+    import patch from './patch'
+
+    import {GPU} from 'gpu.js'
+    window.GPU = GPU
+    import Algebra from 'ganja.js'
+    window.Algebra = Algebra
 
     document.addEventListener("DOMContentLoaded", function () {
       const regl = createREGL();
-      const drawBunny = regl({
-        vert: `
-      precision mediump float;
-      attribute vec3 positions, normals;
-      uniform mat4 projection, view;
-      varying vec3 n;
-      void main () {
-        n = normals;
-        gl_Position = projection * view * vec4(positions, 1);
-      }`,
-        frag: `
-      precision mediump float;
-      varying vec3 n;
-      void main () {
-        gl_FragColor = vec4(0.5 + 0.5 * n, 1);
-      }`,
-        cull: { enable: true, face: "back" },
-        attributes: {
-          ...bunny,
-          normals: normals(bunny.cells, bunny.positions),
-        },
-        elements: bunny.cells,
-        count: bunny.cells.length * 3,
-      });
+      const draw = patch(regl);
 
       const camera = (window.camera = createCamera({
         aspectRatio: window.innerWidth / window.innerHeight,
@@ -96,7 +77,7 @@
         setCameraUniforms(camera, () => {
           if (!camera.state.dirty) return;
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
-          drawBunny();
+          draw();
         });
       });
 

@@ -1,1 +1,0 @@
-{"mappings":"AAAO,KAAK,CAAC,yCAAG,IAAG,CAAC,GAAI,OAAO,CAAC,GAAG,CAAC,CAAC,CAGrC,CAA+D,AAA/D,EAA+D,AAA/D,6DAA+D","sources":["src/index.ts"],"sourcesContent":["export const log = x => console.log(x)\n\n\n// export const tessellatePatch = (patch: Patch) : Mesh => ({})\n"],"names":[],"version":3,"file":"module.js.map","sourceRoot":"../"}

@@ -2,21 +2,25 @@
   "name": "quiltwork",
   "source": "src/index.ts",
   "main": "dist/main.js",
-  "module": "dist/module.js",
+  "module": "dist/index.mjs",
   "types": "dist/types.d.ts",
   "scripts": {
     "build": "parcel build",
     "watch": "parcel watch --port 2345",
     "demo": "npx parcel examples/index.html --dist-dir examples/dist/",
     "dev": "npm-run-all --parallel watch demo",
-    "test": "ts-node node_modules/tape-watch/bin/tape-watch test/**/*.ts"
+    "test": "tap --ts test/**/*.ts"
   },
   "devDependencies": {
     "@parcel/packager-ts": "^2.2.0",
     "@parcel/transformer-typescript-types": "^2.2.0",
+    "@types/expect": "^24.3.0",
+    "@types/lodash-es": "^4.17.5",
+    "@types/mocha": "^9.1.0",
     "@types/tape": "^4.13.2",
     "angle-normals": "^1.0.0",
     "bunny": "^1.0.1",
+    "deno": "^0.1.1",
     "inertial-turntable-camera": "^2.0.4",
     "normalized-interaction-events": "^2.0.1",
     "npm-run-all": "^4.1.5",
@@ -24,13 +28,19 @@
     "parcel-transformer-svelte": "^1.2.3",
     "regl": "^2.1.0",
     "regl-camera": "^2.1.1",
+    "tap": "^15.1.6",
     "tape": "^5.4.1",
     "tape-watch": "^2.3.0",
+    "ts-mocha": "^9.0.2",
+    "ts-node": "^10.4.0",
     "typescript": ">=3.0.0"
   },
   "dependencies": {
     "@teropa/triangle-tessellation": "^1.1.0",
     "ganja.js": "^1.0.194",
-    "geom-triangulate": "^1.0.1"
+    "geom-triangulate": "^1.0.1",
+    "gpu.js": "^2.11.4",
+    "lodash-es": "^4.17.21",
+    "pascals-triangle": "^0.1.1"
   }
 }
