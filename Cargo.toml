@@ -1,0 +1,28 @@
+[package]
+authors = []
+edition = "2018"
+name = "bevy_app"
+repository = "https://github.com/mrk-its/bevy_webgl2_app_template"
+resolver = "2"
+version = "0.1.0"
+[dependencies]
+smooth-bevy-cameras = "*"
+rand = "0.8"
+tracing-wasm = "0.2.1"
+
+# Dependencies for native only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { version = "0.6", default-features = false, features = ["bevy_gltf", "bevy_winit", "render", "png"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.26.1", features=["x11"]}
+# Dependencies for WASM only.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "0.6", default-features = false, features = ["bevy_gltf", "bevy_winit", "render", "png"] }
+getrandom = { version="0.2", features=["wasm-bindgen"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+# lto = true
+# opt-level = 's'
