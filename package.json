@@ -1,0 +1,11 @@
+{
+  "devDependencies": {
+    "npm-run-all": "^4.1.5",
+    "parcel": "^2.2.1"
+  },
+  "scripts": {
+    "watch": "cargo watch -x 'make build-web'",
+    "serve": "parcel index.html",
+    "dev": "npm-run-all -p watch serve"
+  }
+}
