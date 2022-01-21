@@ -84,29 +84,13 @@ const $a8e101027d325e52$var$product = (...a1)=>a1.reduce((a, b)=>a.flatMap((d)=>
         )
     )
 ;
+const $a8e101027d325e52$export$d3acdbd672dd1635 = (uResolution, vResolution)=>$a8e101027d325e52$var$product($f3Ts0$range(0, 1, 1 / uResolution), $f3Ts0$range(0, 1, 1 / vResolution))
+;
 const $a8e101027d325e52$export$e5a7308a1ffbe909 = $893fa29f3010cfec$export$ede4745581eac3cc;
-const $a8e101027d325e52$export$9259594fd24395c0 = (uResolution, vResolution = -1)=>{
-    vResolution = vResolution < 0 ? uResolution : vResolution;
-    const U = $f3Ts0$range(0, 1, 1 / uResolution); //.map((u, i) => ({i, u}))
-    const V = $f3Ts0$range(0, 1, 1 / vResolution); //.map((v, j) => ({j, v}))
-    let UV = [];
-    let quads = [];
-    let k = 0;
-    // V.forEach((v, i) => {
-    //   U.forEach((u, j) => {
-    //     UV.push([u,v])
-    //     quads.push([[]])
-    //     k+=0
-    //   })
-    // }
-    return {
-        UV: UV,
-        U: U,
-        V: V
-    };
-};
 const $a8e101027d325e52$export$6ec3a15068727e5f = // todo: (Alg: any = CGA) =>
-(deg_u, deg_v, pointsVectorsUV, weightsUV)=>{
+(pointsVectorsUV, weightsUV)=>{
+    const deg_u = pointsVectorsUV.length;
+    const deg_v = pointsVectorsUV[0].length;
     const patchIndices = $a8e101027d325e52$var$product($f3Ts0$range(deg_u), $f3Ts0$range(deg_v));
     const points = patchIndices.map(([i, j])=>$893fa29f3010cfec$export$e1f445cd6eeea85e(pointsVectorsUV[i][j])
     );
@@ -126,5 +110,5 @@ const $a8e101027d325e52$export$6ec3a15068727e5f = // todo: (Alg: any = CGA) =>
 };
 
 
-export {$a8e101027d325e52$export$e5a7308a1ffbe909 as Alg, $a8e101027d325e52$export$9259594fd24395c0 as barePatchIndices, $a8e101027d325e52$export$6ec3a15068727e5f as fquad};
+export {$a8e101027d325e52$export$d3acdbd672dd1635 as uvGrid, $a8e101027d325e52$export$e5a7308a1ffbe909 as Alg, $a8e101027d325e52$export$6ec3a15068727e5f as fquad};
 //# sourceMappingURL=index.mjs.map

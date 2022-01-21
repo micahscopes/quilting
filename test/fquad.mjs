@@ -18,7 +18,7 @@ const weights = [
   [Alg.Vector(0,0,0.1), Alg.Vector(0,0,0.1)],
 ];
 
-const quad = fquad(2, 2, points, weights)
+const quad = fquad(points, weights)
 // console.log('result', range(0, 1, 0.05).map(x => quad(0.5, x).Vector));
 
 console.log(barePatchIndices(4))

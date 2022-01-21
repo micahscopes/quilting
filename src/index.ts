@@ -7,39 +7,16 @@ import { CGA, pointWeight, up, Mul3, ni } from "./ga-helpers.mjs";
 const product = (...a: any[][]) =>
   a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
 
+export const uvGrid = (uResolution: number, vResolution: number) =>
+  product(range(0, 1, 1 / uResolution), range(0, 1, 1 / vResolution));
 // todo: abstract this out
 export const Alg = CGA;
 
-export const barePatchIndices = (
-  uResolution: number,
-  vResolution: number = -1
-) => {
-  vResolution = vResolution < 0 ? uResolution : vResolution;
-  const U = range(0, 1, 1 / uResolution); //.map((u, i) => ({i, u}))
-  const V = range(0, 1, 1 / vResolution); //.map((v, j) => ({j, v}))
-  let UV = [];
-  let quads = [];
-
-  let k = 0;
-  // V.forEach((v, i) => {
-  //   U.forEach((u, j) => {
-  //     UV.push([u,v])
-  //     quads.push([[]])
-  //     k+=0
-  //   })
-  // }
-
-  return { UV, U, V };
-};
-
 export const fquad =
   // todo: (Alg: any = CGA) =>
-  (
-    deg_u: number,
-    deg_v: number,
-    pointsVectorsUV: any[][],
-    weightsUV: any[][]
-  ) => {
+  (pointsVectorsUV: any[][], weightsUV: any[][]) => {
+    const deg_u = pointsVectorsUV.length;
+    const deg_v = pointsVectorsUV[0].length;
     const patchIndices = product(range(deg_u), range(deg_v));
     const points = patchIndices.map(([i, j]: [number, number]) =>
       up(pointsVectorsUV[i][j])

@@ -9,8 +9,8 @@ function $parcel$interopDefault(a) {
   return a && a.__esModule ? a.default : a;
 }
 
+$parcel$export(module.exports, "uvGrid", () => $5e2f01247a5d6f10$export$d3acdbd672dd1635);
 $parcel$export(module.exports, "Alg", () => $5e2f01247a5d6f10$export$e5a7308a1ffbe909);
-$parcel$export(module.exports, "barePatchIndices", () => $5e2f01247a5d6f10$export$9259594fd24395c0);
 $parcel$export(module.exports, "fquad", () => $5e2f01247a5d6f10$export$6ec3a15068727e5f);
 
 
@@ -94,29 +94,13 @@ const $5e2f01247a5d6f10$var$product = (...a1)=>a1.reduce((a, b)=>a.flatMap((d)=>
         )
     )
 ;
+const $5e2f01247a5d6f10$export$d3acdbd672dd1635 = (uResolution, vResolution)=>$5e2f01247a5d6f10$var$product($1ZQrD$lodashes.range(0, 1, 1 / uResolution), $1ZQrD$lodashes.range(0, 1, 1 / vResolution))
+;
 const $5e2f01247a5d6f10$export$e5a7308a1ffbe909 = $0e40d3b2684983da$export$ede4745581eac3cc;
-const $5e2f01247a5d6f10$export$9259594fd24395c0 = (uResolution, vResolution = -1)=>{
-    vResolution = vResolution < 0 ? uResolution : vResolution;
-    const U = $1ZQrD$lodashes.range(0, 1, 1 / uResolution); //.map((u, i) => ({i, u}))
-    const V = $1ZQrD$lodashes.range(0, 1, 1 / vResolution); //.map((v, j) => ({j, v}))
-    let UV = [];
-    let quads = [];
-    let k = 0;
-    // V.forEach((v, i) => {
-    //   U.forEach((u, j) => {
-    //     UV.push([u,v])
-    //     quads.push([[]])
-    //     k+=0
-    //   })
-    // }
-    return {
-        UV: UV,
-        U: U,
-        V: V
-    };
-};
 const $5e2f01247a5d6f10$export$6ec3a15068727e5f = // todo: (Alg: any = CGA) =>
-(deg_u, deg_v, pointsVectorsUV, weightsUV)=>{
+(pointsVectorsUV, weightsUV)=>{
+    const deg_u = pointsVectorsUV.length;
+    const deg_v = pointsVectorsUV[0].length;
     const patchIndices = $5e2f01247a5d6f10$var$product($1ZQrD$lodashes.range(deg_u), $1ZQrD$lodashes.range(deg_v));
     const points = patchIndices.map(([i, j])=>$0e40d3b2684983da$export$e1f445cd6eeea85e(pointsVectorsUV[i][j])
     );
