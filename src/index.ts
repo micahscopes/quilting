@@ -8,7 +8,7 @@ const product = (...a: any[][]) =>
   a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
 
 export const uvGrid = (uResolution: number, vResolution: number) =>
-  product(range(0, 1, 1 / uResolution), range(0, 1, 1 / vResolution));
+  product([...range(0, 1, 1 / uResolution), 1], [...range(0, 1, 1 / vResolution), 1]);
 // todo: abstract this out
 export const Alg = CGA;
 

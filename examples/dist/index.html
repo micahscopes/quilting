@@ -143,13 +143,13 @@
       this[globalName] = mainExports;
     }
   }
-})({"h5LVK":[function(require,module,exports) {
+})({"3HAnj":[function(require,module,exports) {
+"use strict";
 var HMR_HOST = null;
 var HMR_PORT = null;
 var HMR_SECURE = false;
-var HMR_ENV_HASH = "4a236f9275d0a351";
-module.bundle.HMR_BUNDLE_ID = "a4cadb679fdc47db";
-"use strict";
+var HMR_ENV_HASH = "d6ea1d42532a7575";
+module.bundle.HMR_BUNDLE_ID = "1a834f6e4882f80a";
 function _toConsumableArray(arr) {
     return _arrayWithoutHoles(arr) || _iterableToArray(arr) || _unsupportedIterableToArray(arr) || _nonIterableSpread();
 }
@@ -157,14 +157,14 @@ function _nonIterableSpread() {
     throw new TypeError("Invalid attempt to spread non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.");
 }
 function _iterableToArray(iter) {
-    if (typeof Symbol !== "undefined" && Symbol.iterator in Object(iter)) return Array.from(iter);
+    if (typeof Symbol !== "undefined" && iter[Symbol.iterator] != null || iter["@@iterator"] != null) return Array.from(iter);
 }
 function _arrayWithoutHoles(arr) {
     if (Array.isArray(arr)) return _arrayLikeToArray(arr);
 }
 function _createForOfIteratorHelper(o, allowArrayLike) {
-    var it;
-    if (typeof Symbol === "undefined" || o[Symbol.iterator] == null) {
+    var it = typeof Symbol !== "undefined" && o[Symbol.iterator] || o["@@iterator"];
+    if (!it) {
         if (Array.isArray(o) || (it = _unsupportedIterableToArray(o)) || allowArrayLike && o && typeof o.length === "number") {
             if (it) o = it;
             var i = 0;
@@ -192,7 +192,7 @@ function _createForOfIteratorHelper(o, allowArrayLike) {
     var normalCompletion = true, didErr = false, err;
     return {
         s: function s() {
-            it = o[Symbol.iterator]();
+            it = it.call(o);
         },
         n: function n() {
             var step = it.next();
@@ -519,7 +519,7 @@ function hmrAcceptRun(bundle, id) {
     acceptedAssets[id] = true;
 }
 
-},{}],"5oAUC":[function(require,module,exports) {
+},{}],"5wngp":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 var _regl = require("regl");
 var _reglDefault = parcelHelpers.interopDefault(_regl);
@@ -531,6 +531,7 @@ var _patch = require("./patch");
 var _patchDefault = parcelHelpers.interopDefault(_patch);
 // import Algebra from 'ganja.js'
 // window.Algebra = Algebra
+console.log("hello");
 document.addEventListener("DOMContentLoaded", function() {
     const regl = _reglDefault.default({
         extensions: [
@@ -541,10 +542,10 @@ document.addEventListener("DOMContentLoaded", function() {
     const decayTime = 100;
     const camera1 = window.camera = _inertialTurntableCameraDefault.default({
         aspectRatio: window.innerWidth / window.innerHeight,
-        distance: 20,
+        distance: 30,
         center: [
             0,
-            4,
+            0,
             0
         ],
         rotationDecayTime: decayTime,
@@ -585,7 +586,7 @@ document.addEventListener("DOMContentLoaded", function() {
             far: camera1.params.distance * 2 + 200
         });
         setCameraUniforms(camera1, ()=>{
-            if (!camera1.state.dirty) return;
+            // if (!camera.state.dirty) return;
             regl.clear({
                 color: [
                     0,
@@ -605,7 +606,7 @@ document.addEventListener("DOMContentLoaded", function() {
     }, false);
 });
 
-},{"regl":"jjFlF","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV","inertial-turntable-camera":"9qnvA","normalized-interaction-events":"bg7jC","./patch":"4O6pF"}],"jjFlF":[function(require,module,exports) {
+},{"regl":"lnu7D","inertial-turntable-camera":"5CKZK","normalized-interaction-events":"dCWeH","./patch":"kHFgz","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lnu7D":[function(require,module,exports) {
 (function(global, factory) {
     typeof exports === 'object' && typeof module !== 'undefined' ? module.exports = factory() : typeof define === 'function' && define.amd ? define(factory) : global.createREGL = factory();
 })(this, function() {
@@ -7988,37 +7989,7 @@ document.addEventListener("DOMContentLoaded", function() {
     return wrapREGL;
 });
 
-},{}],"ciiiV":[function(require,module,exports) {
-exports.interopDefault = function(a) {
-    return a && a.__esModule ? a : {
-        default: a
-    };
-};
-exports.defineInteropFlag = function(a) {
-    Object.defineProperty(a, '__esModule', {
-        value: true
-    });
-};
-exports.exportAll = function(source, dest) {
-    Object.keys(source).forEach(function(key) {
-        if (key === 'default' || key === '__esModule' || dest.hasOwnProperty(key)) return;
-        Object.defineProperty(dest, key, {
-            enumerable: true,
-            get: function() {
-                return source[key];
-            }
-        });
-    });
-    return dest;
-};
-exports.export = function(dest, destName, get) {
-    Object.defineProperty(dest, destName, {
-        enumerable: true,
-        get: get
-    });
-};
-
-},{}],"9qnvA":[function(require,module,exports) {
+},{}],"5CKZK":[function(require,module,exports) {
 'use strict';
 var transformMat4 = require('gl-vec3/transformMat4');
 var vec3RotateY = require('gl-vec3/rotateY');
@@ -8373,7 +8344,7 @@ module.exports = function createCamera(opts) {
     return camera;
 };
 
-},{"gl-vec3/transformMat4":"88AnE","gl-vec3/rotateY":"4eq3L","gl-vec3/rotateX":"ddrK4","gl-vec3/equals":"jLwgD","gl-vec3/add":"nbFP0","gl-vec3/scaleAndAdd":"01muk","gl-vec3/copy":"cIOGT","gl-vec3/normalize":"hUHVL","gl-mat4/identity":"8MHPD","gl-mat4/invert":"9vMQM","gl-mat4/translate":"64uDI","gl-mat4/scale":"h4FQ1","gl-mat4/lookAt":"3JnqT","gl-mat4/perspective":"5BD8r"}],"88AnE":[function(require,module,exports) {
+},{"gl-vec3/transformMat4":"jdFWy","gl-vec3/rotateY":"2MkNl","gl-vec3/rotateX":"j3uo8","gl-vec3/equals":"eQSlu","gl-vec3/add":"4jO3Z","gl-vec3/scaleAndAdd":"7MdOU","gl-vec3/copy":"eEOwV","gl-vec3/normalize":"47kFh","gl-mat4/identity":"8Nw18","gl-mat4/invert":"efiFe","gl-mat4/translate":"eDucJ","gl-mat4/scale":"fww9u","gl-mat4/lookAt":"iwzqs","gl-mat4/perspective":"izBx6"}],"jdFWy":[function(require,module,exports) {
 module.exports = transformMat4;
 /**
  * Transforms the vec3 with a mat4.
@@ -8392,7 +8363,7 @@ module.exports = transformMat4;
     return out;
 }
 
-},{}],"4eq3L":[function(require,module,exports) {
+},{}],"2MkNl":[function(require,module,exports) {
 module.exports = rotateY;
 /**
  * Rotate a 3D vector around the y-axis
@@ -8416,7 +8387,7 @@ module.exports = rotateY;
     return out;
 }
 
-},{}],"ddrK4":[function(require,module,exports) {
+},{}],"j3uo8":[function(require,module,exports) {
 module.exports = rotateX;
 /**
  * Rotate a 3D vector around the x-axis
@@ -8440,7 +8411,7 @@ module.exports = rotateX;
     return out;
 }
 
-},{}],"jLwgD":[function(require,module,exports) {
+},{}],"eQSlu":[function(require,module,exports) {
 module.exports = equals;
 var EPSILON = require('./epsilon');
 /**
@@ -8459,10 +8430,10 @@ var EPSILON = require('./epsilon');
     return Math.abs(a0 - b0) <= EPSILON * Math.max(1, Math.abs(a0), Math.abs(b0)) && Math.abs(a1 - b1) <= EPSILON * Math.max(1, Math.abs(a1), Math.abs(b1)) && Math.abs(a2 - b2) <= EPSILON * Math.max(1, Math.abs(a2), Math.abs(b2));
 }
 
-},{"./epsilon":"6DFLd"}],"6DFLd":[function(require,module,exports) {
+},{"./epsilon":"5vta7"}],"5vta7":[function(require,module,exports) {
 module.exports = 0.000001;
 
-},{}],"nbFP0":[function(require,module,exports) {
+},{}],"4jO3Z":[function(require,module,exports) {
 module.exports = add;
 /**
  * Adds two vec3's
@@ -8478,7 +8449,7 @@ module.exports = add;
     return out;
 }
 
-},{}],"01muk":[function(require,module,exports) {
+},{}],"7MdOU":[function(require,module,exports) {
 module.exports = scaleAndAdd;
 /**
  * Adds two vec3's after scaling the second operand by a scalar value
@@ -8495,7 +8466,7 @@ module.exports = scaleAndAdd;
     return out;
 }
 
-},{}],"cIOGT":[function(require,module,exports) {
+},{}],"eEOwV":[function(require,module,exports) {
 module.exports = copy;
 /**
  * Copy the values from one vec3 to another
@@ -8510,7 +8481,7 @@ module.exports = copy;
     return out;
 }
 
-},{}],"hUHVL":[function(require,module,exports) {
+},{}],"47kFh":[function(require,module,exports) {
 module.exports = normalize;
 /**
  * Normalize a vec3
@@ -8531,7 +8502,7 @@ module.exports = normalize;
     return out;
 }
 
-},{}],"8MHPD":[function(require,module,exports) {
+},{}],"8Nw18":[function(require,module,exports) {
 module.exports = identity;
 /**
  * Set a mat4 to the identity matrix
@@ -8558,7 +8529,7 @@ module.exports = identity;
     return out;
 }
 
-},{}],"9vMQM":[function(require,module,exports) {
+},{}],"efiFe":[function(require,module,exports) {
 module.exports = invert;
 /**
  * Inverts a mat4
@@ -8590,7 +8561,7 @@ module.exports = invert;
     return out;
 }
 
-},{}],"64uDI":[function(require,module,exports) {
+},{}],"eDucJ":[function(require,module,exports) {
 module.exports = translate;
 /**
  * Translate a mat4 by the given vector
@@ -8639,7 +8610,7 @@ module.exports = translate;
     return out;
 }
 
-},{}],"h4FQ1":[function(require,module,exports) {
+},{}],"fww9u":[function(require,module,exports) {
 module.exports = scale;
 /**
  * Scales the mat4 by the dimensions in the given vec3
@@ -8669,7 +8640,7 @@ module.exports = scale;
     return out;
 }
 
-},{}],"3JnqT":[function(require,module,exports) {
+},{}],"iwzqs":[function(require,module,exports) {
 var identity = require('./identity');
 module.exports = lookAt;
 /**
@@ -8737,7 +8708,7 @@ module.exports = lookAt;
     return out;
 }
 
-},{"./identity":"8MHPD"}],"5BD8r":[function(require,module,exports) {
+},{"./identity":"8Nw18"}],"izBx6":[function(require,module,exports) {
 module.exports = perspective;
 /**
  * Generates a perspective projection matrix with the given bounds
@@ -8769,7 +8740,7 @@ module.exports = perspective;
     return out;
 }
 
-},{}],"bg7jC":[function(require,module,exports) {
+},{}],"dCWeH":[function(require,module,exports) {
 'use strict';
 module.exports = normalizedInteractionEvents;
 var mouseChange = require('mouse-change');
@@ -9174,7 +9145,7 @@ function normalizedInteractionEvents(element) {
     return emitter;
 }
 
-},{"mouse-change":"3agSH","mouse-event-offset":"ai1io","event-emitter":"5aWqO"}],"3agSH":[function(require,module,exports) {
+},{"mouse-change":"1v28E","mouse-event-offset":"j9PBS","event-emitter":"hxCKu"}],"1v28E":[function(require,module,exports) {
 'use strict';
 module.exports = mouseListen;
 var mouse = require('mouse-event');
@@ -9334,7 +9305,7 @@ function mouseListen(element, callback) {
     return result;
 }
 
-},{"mouse-event":"aWuO4"}],"aWuO4":[function(require,module,exports) {
+},{"mouse-event":"6q7od"}],"6q7od":[function(require,module,exports) {
 'use strict';
 function mouseButtons(ev) {
     if (typeof ev === 'object') {
@@ -9379,7 +9350,7 @@ function mouseRelativeY(ev) {
 }
 exports.y = mouseRelativeY;
 
-},{}],"ai1io":[function(require,module,exports) {
+},{}],"j9PBS":[function(require,module,exports) {
 var rootPosition = {
     left: 0,
     top: 0
@@ -9403,7 +9374,7 @@ function getBoundingClientOffset(element) {
     else return element.getBoundingClientRect();
 }
 
-},{}],"5aWqO":[function(require,module,exports) {
+},{}],"hxCKu":[function(require,module,exports) {
 'use strict';
 var d = require('d'), callable = require('es5-ext/object/valid-callable'), apply = Function.prototype.apply, call = Function.prototype.call, create = Object.create, defineProperty = Object.defineProperty, defineProperties = Object.defineProperties, hasOwnProperty = Object.prototype.hasOwnProperty, descriptor = {
     configurable: true,
@@ -9499,7 +9470,7 @@ module.exports = exports = function(o) {
 };
 exports.methods = methods;
 
-},{"d":"3PPWL","es5-ext/object/valid-callable":"1nSAM"}],"3PPWL":[function(require,module,exports) {
+},{"d":"7vf6J","es5-ext/object/valid-callable":"k9F7C"}],"7vf6J":[function(require,module,exports) {
 "use strict";
 var isValue = require("type/value/is"), isPlainFunction = require("type/plain-function/is"), assign = require("es5-ext/object/assign"), normalizeOpts = require("es5-ext/object/normalize-options"), contains = require("es5-ext/string/#/contains");
 var d = module.exports = function(dscr, value /*, options*/ ) {
@@ -9558,7 +9529,7 @@ d.gs = function(dscr, get, set /*, options*/ ) {
     return !options ? desc : assign(normalizeOpts(options), desc);
 };
 
-},{"type/value/is":"1sA70","type/plain-function/is":"3qrSx","es5-ext/object/assign":"6SPee","es5-ext/object/normalize-options":"6DVUt","es5-ext/string/#/contains":"gRLui"}],"1sA70":[function(require,module,exports) {
+},{"type/value/is":"8uxC8","type/plain-function/is":"1lQWE","es5-ext/object/assign":"5HUCf","es5-ext/object/normalize-options":"kP8i3","es5-ext/string/#/contains":"iezaE"}],"8uxC8":[function(require,module,exports) {
 "use strict";
 // ES3 safe
 var _undefined = void 0;
@@ -9566,7 +9537,7 @@ module.exports = function(value) {
     return value !== _undefined && value !== null;
 };
 
-},{}],"3qrSx":[function(require,module,exports) {
+},{}],"1lQWE":[function(require,module,exports) {
 "use strict";
 var isFunction = require("../function/is");
 var classRe = /^\s*class[\s{/}]/, functionToString = Function.prototype.toString;
@@ -9576,7 +9547,7 @@ module.exports = function(value) {
     return true;
 };
 
-},{"../function/is":"itkZn"}],"itkZn":[function(require,module,exports) {
+},{"../function/is":"a0wyy"}],"a0wyy":[function(require,module,exports) {
 "use strict";
 var isPrototype = require("../prototype/is");
 module.exports = function(value) {
@@ -9592,7 +9563,7 @@ module.exports = function(value) {
     return !isPrototype(value);
 };
 
-},{"../prototype/is":"3fCHy"}],"3fCHy":[function(require,module,exports) {
+},{"../prototype/is":"1x8nJ"}],"1x8nJ":[function(require,module,exports) {
 "use strict";
 var isObject = require("../object/is");
 module.exports = function(value) {
@@ -9605,7 +9576,7 @@ module.exports = function(value) {
     }
 };
 
-},{"../object/is":"cjejS"}],"cjejS":[function(require,module,exports) {
+},{"../object/is":"vKVc6"}],"vKVc6":[function(require,module,exports) {
 "use strict";
 var isValue = require("../value/is");
 // prettier-ignore
@@ -9619,11 +9590,11 @@ module.exports = function(value) {
     return hasOwnProperty.call(possibleTypes, typeof value);
 };
 
-},{"../value/is":"1sA70"}],"6SPee":[function(require,module,exports) {
+},{"../value/is":"8uxC8"}],"5HUCf":[function(require,module,exports) {
 "use strict";
 module.exports = require("./is-implemented")() ? Object.assign : require("./shim");
 
-},{"./is-implemented":"alvTD","./shim":"9IgAx"}],"alvTD":[function(require,module,exports) {
+},{"./is-implemented":"2I7tb","./shim":"6YxL3"}],"2I7tb":[function(require,module,exports) {
 "use strict";
 module.exports = function() {
     var assign = Object.assign, obj;
@@ -9639,7 +9610,7 @@ module.exports = function() {
     return obj.foo + obj.bar + obj.trzy === "razdwatrzy";
 };
 
-},{}],"9IgAx":[function(require,module,exports) {
+},{}],"6YxL3":[function(require,module,exports) {
 "use strict";
 var keys = require("../keys"), value = require("../valid-value"), max = Math.max;
 module.exports = function(dest, src /*, …srcn*/ ) {
@@ -9660,11 +9631,11 @@ module.exports = function(dest, src /*, …srcn*/ ) {
     return dest;
 };
 
-},{"../keys":"lHl92","../valid-value":"kqr9j"}],"lHl92":[function(require,module,exports) {
+},{"../keys":"9WOCj","../valid-value":"aAk8Y"}],"9WOCj":[function(require,module,exports) {
 "use strict";
 module.exports = require("./is-implemented")() ? Object.keys : require("./shim");
 
-},{"./is-implemented":"9S7AR","./shim":"ak7Gd"}],"9S7AR":[function(require,module,exports) {
+},{"./is-implemented":"bIvxo","./shim":"l8KFX"}],"bIvxo":[function(require,module,exports) {
 "use strict";
 module.exports = function() {
     try {
@@ -9675,7 +9646,7 @@ module.exports = function() {
     }
 };
 
-},{}],"ak7Gd":[function(require,module,exports) {
+},{}],"l8KFX":[function(require,module,exports) {
 "use strict";
 var isValue = require("../is-value");
 var keys = Object.keys;
@@ -9683,20 +9654,20 @@ module.exports = function(object) {
     return keys(isValue(object) ? Object(object) : object);
 };
 
-},{"../is-value":"dROJv"}],"dROJv":[function(require,module,exports) {
+},{"../is-value":"12xEm"}],"12xEm":[function(require,module,exports) {
 "use strict";
 var _undefined = require("../function/noop")(); // Support ES3 engines
 module.exports = function(val) {
     return val !== _undefined && val !== null;
 };
 
-},{"../function/noop":"jXtQn"}],"jXtQn":[function(require,module,exports) {
+},{"../function/noop":"jU5me"}],"jU5me":[function(require,module,exports) {
 "use strict";
 // eslint-disable-next-line no-empty-function
 module.exports = function() {
 };
 
-},{}],"kqr9j":[function(require,module,exports) {
+},{}],"aAk8Y":[function(require,module,exports) {
 "use strict";
 var isValue = require("./is-value");
 module.exports = function(value) {
@@ -9704,7 +9675,7 @@ module.exports = function(value) {
     return value;
 };
 
-},{"./is-value":"dROJv"}],"6DVUt":[function(require,module,exports) {
+},{"./is-value":"12xEm"}],"kP8i3":[function(require,module,exports) {
 "use strict";
 var isValue = require("./is-value");
 var forEach = Array.prototype.forEach, create = Object.create;
@@ -9722,11 +9693,11 @@ module.exports = function(opts1 /*, …options*/ ) {
     return result;
 };
 
-},{"./is-value":"dROJv"}],"gRLui":[function(require,module,exports) {
+},{"./is-value":"12xEm"}],"iezaE":[function(require,module,exports) {
 "use strict";
 module.exports = require("./is-implemented")() ? String.prototype.contains : require("./shim");
 
-},{"./is-implemented":"4dile","./shim":"2JaDv"}],"4dile":[function(require,module,exports) {
+},{"./is-implemented":"imGxB","./shim":"iesTs"}],"imGxB":[function(require,module,exports) {
 "use strict";
 var str = "razdwatrzy";
 module.exports = function() {
@@ -9734,21 +9705,21 @@ module.exports = function() {
     return str.contains("dwa") === true && str.contains("foo") === false;
 };
 
-},{}],"2JaDv":[function(require,module,exports) {
+},{}],"iesTs":[function(require,module,exports) {
 "use strict";
 var indexOf = String.prototype.indexOf;
 module.exports = function(searchString /*, position*/ ) {
     return indexOf.call(this, searchString, arguments[1]) > -1;
 };
 
-},{}],"1nSAM":[function(require,module,exports) {
+},{}],"k9F7C":[function(require,module,exports) {
 "use strict";
 module.exports = function(fn) {
     if (typeof fn !== "function") throw new TypeError(fn + " is not a function");
     return fn;
 };
 
-},{}],"4O6pF":[function(require,module,exports) {
+},{}],"kHFgz":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _angleNormals = require("angle-normals");
@@ -9759,147 +9730,112 @@ var _delaunatorDefault = parcelHelpers.interopDefault(_delaunator);
 var _lodashEs = require("lodash-es");
 var _glslSolidWireframe = require("glsl-solid-wireframe");
 var _glslSolidWireframeDefault = parcelHelpers.interopDefault(_glslSolidWireframe);
-const grid = _delaunatorDefault.default.from(_src.uvGrid(32, 32));
+var _libGlsl = require("../gpu/lib.glsl");
+var _libGlslDefault = parcelHelpers.interopDefault(_libGlsl);
+let gl = function(s) {
+    return `precision mediump float;
+  ${_libGlslDefault.default}\n\n${s[0]}`;
+};
+const grid = _delaunatorDefault.default.from(_src.uvGrid(200, 200));
 const D = 10;
 const r = (x)=>x + Math.random() * 20
 ;
 const patchGenerator = ()=>{
-    const guidePoints = [
-        [
-            _src.Alg.Vector(-r(D), -r(D), 0),
-            _src.Alg.Vector(-r(D), r(D), 0)
-        ],
-        [
-            _src.Alg.Vector(r(D), -r(D), 0),
-            _src.Alg.Vector(r(D), D, 0)
-        ], 
-    ];
-    const weights = [
-        [
-            _src.Alg.Vector(1, 0, -1),
-            _src.Alg.Vector(1, -1)
-        ],
-        [
-            _src.Alg.Vector(0, 0, -1),
-            _src.Alg.Vector(0, 1, -1)
-        ], 
-    ];
     return _src.fquad(guidePoints, weights);
 };
 let patch = {
 };
 patch.cells = _lodashEs.chunk(grid.triangles, 3);
 const updatePatch = ()=>{
-    let quad = patchGenerator();
-    const points = _lodashEs.chunk(grid.coords, 2).map((uv)=>quad(...uv)
+    // let quad = patchGenerator();
+    // const points = chunk(grid.coords, 2).map((uv) => quad(...uv));
+    patch.positions = _lodashEs.chunk(grid.coords, 2).map(([u, v])=>[
+            u,
+            v,
+            0
+        ]
     );
-    patch.positions = points.map((x)=>x.Vector.slice(0, 3)
-    );
+    console.log(patch.positions);
     patch.normals = _angleNormalsDefault.default(patch.cells, patch.positions);
 };
 updatePatch();
+// setInterval(updatePatch, 1000/90)
+window.el = _src.Alg.Vector(-r(D), -r(D) + 50, 0);
 exports.default = draw = (regl)=>regl({
-        vert: `
+        vert: gl`
       precision mediump float;
-      attribute vec3 normals;
-      attribute vec3 positions;
+
+      attribute vec3 normal;
+      attribute vec3 position;
+
+      uniform float p00[32], p01[32], p10[32], p11[32];
+      uniform float w00[32], w01[32], w10[32], w11[32];
       uniform mat4 projection, view;
+      uniform float time;
+
       varying vec3 n;
+      varying vec2 uv;
+
       void main () {
-        n = normals;
-        gl_Position = projection * view * vec4(positions, 1);
+
+      CGA3 animatedWeight = fromArray(w11);
+      animatedWeight.e1 = animatedWeight.e1 + 30.0*sin(time);
+      animatedWeight.e2 = animatedWeight.e2 + 20.0*cos(time);
+      CGA3 p =
+          bilinearQuad(
+            fromArray(p00),
+            fromArray(p01),
+            fromArray(p10),
+            fromArray(p11),
+            fromArray(w00),
+            fromArray(w01),
+            fromArray(w10),
+            animatedWeight,
+            position.x,
+            position.y
+        );
+        n = normal;
+        uv = vec2(position.x, position.y);
+        gl_Position = projection * view * vec4(vecFromPoint(p), 1.0);
       }`,
-        frag: `
+        frag: gl`
       precision mediump float;
+      uniform float time;
       varying vec3 n;
+      varying vec2 uv;
       void main () {
-        gl_FragColor = vec4(0.5 + 0.5 * n, 1);
+        vec3 light = vec3(0.5,0.9,0.5);
+        light = normalize(light);
+
+        gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
+        // gl_FragColor = vec4(1, 0, 0, 1);
       }`,
         attributes: {
-            positions: ()=>patch.positions
+            position: ()=>patch.positions
             ,
-            normals: ()=>patch.normals
+            normal: ()=>patch.normals
         },
-        // attributes: patch,
+        uniforms: {
+            // time(){ return Date.now() },
+            p00: _src.Alg.Vector(-r(D), -r(D), 0),
+            p01: _src.Alg.Vector(-r(D), r(D), 0),
+            p10: _src.Alg.Vector(r(D), -r(D), 0),
+            p11: _src.Alg.Vector(r(D), D, 0),
+            w00: _src.Alg.Vector(1, 0, -1),
+            w01: _src.Alg.Vector(1, -1),
+            w10: _src.Alg.Vector(0, 0, -1),
+            w11: _src.Alg.Vector(0, 1, -1),
+            time: ({ tick  })=>{
+                // console.log(Date.now())
+                return tick / 20;
+            }
+        },
         elements: patch.cells,
         count: patch.cells.length * 3
     })
 ;
 
-},{"angle-normals":"4yNS6","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV","../src":"7PGg5","delaunator":"juMqj","lodash-es":"ltJJg","glsl-solid-wireframe":"3ZvyR"}],"4yNS6":[function(require,module,exports) {
-'use strict';
-module.exports = angleNormals;
-function hypot(x, y, z) {
-    return Math.sqrt(Math.pow(x, 2) + Math.pow(y, 2) + Math.pow(z, 2));
-}
-function weight(s, r, a) {
-    return Math.atan2(r, s - a);
-}
-function mulAdd(dest, s, x, y, z) {
-    dest[0] += s * x;
-    dest[1] += s * y;
-    dest[2] += s * z;
-}
-function angleNormals(cells, positions) {
-    var numVerts = positions.length;
-    var numCells = cells.length;
-    //Allocate normal array
-    var normals = new Array(numVerts);
-    for(var i = 0; i < numVerts; ++i)normals[i] = [
-        0,
-        0,
-        0
-    ];
-    //Scan cells, and
-    for(var i = 0; i < numCells; ++i){
-        var cell = cells[i];
-        var a = positions[cell[0]];
-        var b = positions[cell[1]];
-        var c = positions[cell[2]];
-        var abx = a[0] - b[0];
-        var aby = a[1] - b[1];
-        var abz = a[2] - b[2];
-        var ab = hypot(abx, aby, abz);
-        var bcx = b[0] - c[0];
-        var bcy = b[1] - c[1];
-        var bcz = b[2] - c[2];
-        var bc = hypot(bcx, bcy, bcz);
-        var cax = c[0] - a[0];
-        var cay = c[1] - a[1];
-        var caz = c[2] - a[2];
-        var ca = hypot(cax, cay, caz);
-        if (Math.min(ab, bc, ca) < 0.000001) continue;
-        var s = 0.5 * (ab + bc + ca);
-        var r = Math.sqrt((s - ab) * (s - bc) * (s - ca) / s);
-        var nx = aby * bcz - abz * bcy;
-        var ny = abz * bcx - abx * bcz;
-        var nz = abx * bcy - aby * bcx;
-        var nl = hypot(nx, ny, nz);
-        nx /= nl;
-        ny /= nl;
-        nz /= nl;
-        mulAdd(normals[cell[0]], weight(s, r, bc), nx, ny, nz);
-        mulAdd(normals[cell[1]], weight(s, r, ca), nx, ny, nz);
-        mulAdd(normals[cell[2]], weight(s, r, ab), nx, ny, nz);
-    }
-    //Normalize all the normals
-    for(var i = 0; i < numVerts; ++i){
-        var n = normals[i];
-        var l = Math.sqrt(Math.pow(n[0], 2) + Math.pow(n[1], 2) + Math.pow(n[2], 2));
-        if (l < 0.00000001) {
-            n[0] = 1;
-            n[1] = 0;
-            n[2] = 0;
-            continue;
-        }
-        n[0] /= l;
-        n[1] /= l;
-        n[2] /= l;
-    }
-    return normals;
-}
-
-},{}],"7PGg5":[function(require,module,exports) {
+},{"../src":"h7u1C","delaunator":"1U5NA","lodash-es":"bXNwz","glsl-solid-wireframe":"7Jk6L","../gpu/lib.glsl":"9gN7w","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3","angle-normals":"3WkEt"}],"h7u1C":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "uvGrid", ()=>uvGrid
@@ -9919,7 +9855,13 @@ const product = (...a1)=>a1.reduce((a, b)=>a.flatMap((d)=>b.map((e)=>[
         )
     )
 ;
-const uvGrid = (uResolution, vResolution)=>product(_lodashEs.range(0, 1, 1 / uResolution), _lodashEs.range(0, 1, 1 / vResolution))
+const uvGrid = (uResolution, vResolution)=>product([
+        ..._lodashEs.range(0, 1, 1 / uResolution),
+        1
+    ], [
+        ..._lodashEs.range(0, 1, 1 / vResolution),
+        1
+    ])
 ;
 const Alg = _gaHelpersMjs.CGA;
 const fquad = // todo: (Alg: any = CGA) =>
@@ -9944,7 +9886,7 @@ const fquad = // todo: (Alg: any = CGA) =>
     };
 };
 
-},{"lodash-es":"ltJJg","./bernstein":"hVF7e","./ga-helpers.mjs":"3sf5p","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"ltJJg":[function(require,module,exports) {
+},{"lodash-es":"bXNwz","./bernstein":"h4vgq","./ga-helpers.mjs":"4nl9w","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bXNwz":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -11234,7 +11176,7 @@ var _zipWithJsDefault = parcelHelpers.interopDefault(_zipWithJs);
 var _lodashDefaultJs = require("./lodash.default.js");
 var _lodashDefaultJsDefault = parcelHelpers.interopDefault(_lodashDefaultJs);
 
-},{"./add.js":false,"./after.js":false,"./ary.js":false,"./assign.js":false,"./assignIn.js":false,"./assignInWith.js":false,"./assignWith.js":false,"./at.js":false,"./attempt.js":false,"./before.js":false,"./bind.js":false,"./bindAll.js":false,"./bindKey.js":false,"./camelCase.js":false,"./capitalize.js":false,"./castArray.js":false,"./ceil.js":false,"./chain.js":false,"./chunk.js":"hAQkW","./clamp.js":false,"./clone.js":false,"./cloneDeep.js":false,"./cloneDeepWith.js":false,"./cloneWith.js":false,"./commit.js":false,"./compact.js":false,"./concat.js":false,"./cond.js":false,"./conforms.js":false,"./conformsTo.js":false,"./constant.js":false,"./countBy.js":false,"./create.js":false,"./curry.js":false,"./curryRight.js":false,"./debounce.js":false,"./deburr.js":false,"./defaultTo.js":false,"./defaults.js":false,"./defaultsDeep.js":false,"./defer.js":false,"./delay.js":false,"./difference.js":false,"./differenceBy.js":false,"./differenceWith.js":false,"./divide.js":false,"./drop.js":false,"./dropRight.js":false,"./dropRightWhile.js":false,"./dropWhile.js":false,"./each.js":false,"./eachRight.js":false,"./endsWith.js":false,"./entries.js":false,"./entriesIn.js":false,"./eq.js":"fuW23","./escape.js":false,"./escapeRegExp.js":false,"./every.js":false,"./extend.js":false,"./extendWith.js":false,"./fill.js":false,"./filter.js":false,"./find.js":false,"./findIndex.js":false,"./findKey.js":false,"./findLast.js":false,"./findLastIndex.js":false,"./findLastKey.js":false,"./first.js":false,"./flatMap.js":false,"./flatMapDeep.js":false,"./flatMapDepth.js":false,"./flatten.js":false,"./flattenDeep.js":false,"./flattenDepth.js":false,"./flip.js":false,"./floor.js":false,"./flow.js":false,"./flowRight.js":false,"./forEach.js":false,"./forEachRight.js":false,"./forIn.js":false,"./forInRight.js":false,"./forOwn.js":false,"./forOwnRight.js":false,"./fromPairs.js":false,"./functions.js":false,"./functionsIn.js":false,"./get.js":"eCGp0","./groupBy.js":false,"./gt.js":false,"./gte.js":false,"./has.js":false,"./hasIn.js":"7j73N","./head.js":false,"./identity.js":"4kwkZ","./inRange.js":false,"./includes.js":false,"./indexOf.js":false,"./initial.js":false,"./intersection.js":false,"./intersectionBy.js":false,"./intersectionWith.js":false,"./invert.js":false,"./invertBy.js":false,"./invoke.js":false,"./invokeMap.js":false,"./isArguments.js":"c6XWh","./isArray.js":"fpPOq","./isArrayBuffer.js":false,"./isArrayLike.js":"av3lV","./isArrayLikeObject.js":false,"./isBoolean.js":false,"./isBuffer.js":"cVmnh","./isDate.js":false,"./isElement.js":false,"./isEmpty.js":false,"./isEqual.js":false,"./isEqualWith.js":false,"./isError.js":false,"./isFinite.js":false,"./isFunction.js":"4gztK","./isInteger.js":false,"./isLength.js":"aLlpX","./isMap.js":false,"./isMatch.js":false,"./isMatchWith.js":false,"./isNaN.js":false,"./isNative.js":false,"./isNil.js":false,"./isNull.js":false,"./isNumber.js":false,"./isObject.js":"3yMvk","./isObjectLike.js":"85060","./isPlainObject.js":false,"./isRegExp.js":false,"./isSafeInteger.js":false,"./isSet.js":false,"./isString.js":false,"./isSymbol.js":"4Ri4W","./isTypedArray.js":"dtM6z","./isUndefined.js":false,"./isWeakMap.js":false,"./isWeakSet.js":false,"./iteratee.js":false,"./join.js":false,"./kebabCase.js":false,"./keyBy.js":false,"./keys.js":"hZxiX","./keysIn.js":false,"./last.js":false,"./lastIndexOf.js":false,"./wrapperLodash.js":false,"./lowerCase.js":false,"./lowerFirst.js":false,"./lt.js":false,"./lte.js":false,"./map.js":false,"./mapKeys.js":false,"./mapValues.js":false,"./matches.js":false,"./matchesProperty.js":false,"./max.js":false,"./maxBy.js":false,"./mean.js":false,"./meanBy.js":false,"./memoize.js":"bgIQm","./merge.js":false,"./mergeWith.js":false,"./method.js":false,"./methodOf.js":false,"./min.js":false,"./minBy.js":false,"./mixin.js":false,"./multiply.js":false,"./negate.js":false,"./next.js":false,"./noop.js":false,"./now.js":false,"./nth.js":false,"./nthArg.js":false,"./omit.js":false,"./omitBy.js":false,"./once.js":false,"./orderBy.js":false,"./over.js":false,"./overArgs.js":false,"./overEvery.js":false,"./overSome.js":false,"./pad.js":false,"./padEnd.js":false,"./padStart.js":false,"./parseInt.js":false,"./partial.js":false,"./partialRight.js":false,"./partition.js":false,"./pick.js":false,"./pickBy.js":false,"./plant.js":false,"./property.js":"9dtZm","./propertyOf.js":false,"./pull.js":false,"./pullAll.js":false,"./pullAllBy.js":false,"./pullAllWith.js":false,"./pullAt.js":false,"./random.js":false,"./range.js":"l26BV","./rangeRight.js":false,"./rearg.js":false,"./reduce.js":"9BmKY","./reduceRight.js":"4w0SD","./reject.js":false,"./remove.js":false,"./repeat.js":false,"./replace.js":false,"./rest.js":false,"./result.js":false,"./reverse.js":false,"./round.js":false,"./sample.js":false,"./sampleSize.js":false,"./set.js":false,"./setWith.js":false,"./shuffle.js":false,"./size.js":false,"./slice.js":false,"./snakeCase.js":false,"./some.js":false,"./sortBy.js":false,"./sortedIndex.js":false,"./sortedIndexBy.js":false,"./sortedIndexOf.js":false,"./sortedLastIndex.js":false,"./sortedLastIndexBy.js":false,"./sortedLastIndexOf.js":false,"./sortedUniq.js":false,"./sortedUniqBy.js":false,"./split.js":false,"./spread.js":false,"./startCase.js":false,"./startsWith.js":false,"./stubArray.js":"ip0sP","./stubFalse.js":"1MTNB","./stubObject.js":false,"./stubString.js":false,"./stubTrue.js":false,"./subtract.js":false,"./sum.js":false,"./sumBy.js":false,"./tail.js":false,"./take.js":false,"./takeRight.js":false,"./takeRightWhile.js":false,"./takeWhile.js":false,"./tap.js":false,"./template.js":false,"./templateSettings.js":false,"./throttle.js":false,"./thru.js":false,"./times.js":false,"./toArray.js":false,"./toFinite.js":"4Xs9f","./toInteger.js":"6748N","./toIterator.js":false,"./toJSON.js":false,"./toLength.js":false,"./toLower.js":false,"./toNumber.js":"c9pBc","./toPairs.js":false,"./toPairsIn.js":false,"./toPath.js":false,"./toPlainObject.js":false,"./toSafeInteger.js":false,"./toString.js":"6j3bR","./toUpper.js":false,"./transform.js":false,"./trim.js":false,"./trimEnd.js":false,"./trimStart.js":false,"./truncate.js":false,"./unary.js":false,"./unescape.js":false,"./union.js":false,"./unionBy.js":false,"./unionWith.js":false,"./uniq.js":false,"./uniqBy.js":false,"./uniqWith.js":false,"./uniqueId.js":false,"./unset.js":false,"./unzip.js":false,"./unzipWith.js":false,"./update.js":false,"./updateWith.js":false,"./upperCase.js":false,"./upperFirst.js":false,"./value.js":false,"./valueOf.js":false,"./values.js":false,"./valuesIn.js":false,"./without.js":false,"./words.js":false,"./wrap.js":false,"./wrapperAt.js":false,"./wrapperChain.js":false,"./wrapperReverse.js":false,"./wrapperValue.js":false,"./xor.js":false,"./xorBy.js":false,"./xorWith.js":false,"./zip.js":false,"./zipObject.js":false,"./zipObjectDeep.js":false,"./zipWith.js":false,"./lodash.default.js":false,"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hAQkW":[function(require,module,exports) {
+},{"./add.js":false,"./after.js":false,"./ary.js":false,"./assign.js":false,"./assignIn.js":false,"./assignInWith.js":false,"./assignWith.js":false,"./at.js":false,"./attempt.js":false,"./before.js":false,"./bind.js":false,"./bindAll.js":false,"./bindKey.js":false,"./camelCase.js":false,"./capitalize.js":false,"./castArray.js":false,"./ceil.js":false,"./chain.js":false,"./chunk.js":"fPV8N","./clamp.js":false,"./clone.js":false,"./cloneDeep.js":false,"./cloneDeepWith.js":false,"./cloneWith.js":false,"./commit.js":false,"./compact.js":false,"./concat.js":false,"./cond.js":false,"./conforms.js":false,"./conformsTo.js":false,"./constant.js":false,"./countBy.js":false,"./create.js":false,"./curry.js":false,"./curryRight.js":false,"./debounce.js":false,"./deburr.js":false,"./defaultTo.js":false,"./defaults.js":false,"./defaultsDeep.js":false,"./defer.js":false,"./delay.js":false,"./difference.js":false,"./differenceBy.js":false,"./differenceWith.js":false,"./divide.js":false,"./drop.js":false,"./dropRight.js":false,"./dropRightWhile.js":false,"./dropWhile.js":false,"./each.js":false,"./eachRight.js":false,"./endsWith.js":false,"./entries.js":false,"./entriesIn.js":false,"./eq.js":"7el3s","./escape.js":false,"./escapeRegExp.js":false,"./every.js":false,"./extend.js":false,"./extendWith.js":false,"./fill.js":false,"./filter.js":false,"./find.js":false,"./findIndex.js":false,"./findKey.js":false,"./findLast.js":false,"./findLastIndex.js":false,"./findLastKey.js":false,"./first.js":false,"./flatMap.js":false,"./flatMapDeep.js":false,"./flatMapDepth.js":false,"./flatten.js":false,"./flattenDeep.js":false,"./flattenDepth.js":false,"./flip.js":false,"./floor.js":false,"./flow.js":false,"./flowRight.js":false,"./forEach.js":false,"./forEachRight.js":false,"./forIn.js":false,"./forInRight.js":false,"./forOwn.js":false,"./forOwnRight.js":false,"./fromPairs.js":false,"./functions.js":false,"./functionsIn.js":false,"./get.js":"9ZP5X","./groupBy.js":false,"./gt.js":false,"./gte.js":false,"./has.js":false,"./hasIn.js":"jfq4F","./head.js":false,"./identity.js":"1Y0KA","./inRange.js":false,"./includes.js":false,"./indexOf.js":false,"./initial.js":false,"./intersection.js":false,"./intersectionBy.js":false,"./intersectionWith.js":false,"./invert.js":false,"./invertBy.js":false,"./invoke.js":false,"./invokeMap.js":false,"./isArguments.js":"9k91Y","./isArray.js":"ETPQ1","./isArrayBuffer.js":false,"./isArrayLike.js":"8SdiO","./isArrayLikeObject.js":false,"./isBoolean.js":false,"./isBuffer.js":"llpEE","./isDate.js":false,"./isElement.js":false,"./isEmpty.js":false,"./isEqual.js":false,"./isEqualWith.js":false,"./isError.js":false,"./isFinite.js":false,"./isFunction.js":"e5kis","./isInteger.js":false,"./isLength.js":"bItM0","./isMap.js":false,"./isMatch.js":false,"./isMatchWith.js":false,"./isNaN.js":false,"./isNative.js":false,"./isNil.js":false,"./isNull.js":false,"./isNumber.js":false,"./isObject.js":"dHhyW","./isObjectLike.js":"iad76","./isPlainObject.js":false,"./isRegExp.js":false,"./isSafeInteger.js":false,"./isSet.js":false,"./isString.js":false,"./isSymbol.js":"gCyRJ","./isTypedArray.js":"2LIMs","./isUndefined.js":false,"./isWeakMap.js":false,"./isWeakSet.js":false,"./iteratee.js":false,"./join.js":false,"./kebabCase.js":false,"./keyBy.js":false,"./keys.js":"lbEZV","./keysIn.js":false,"./last.js":false,"./lastIndexOf.js":false,"./wrapperLodash.js":false,"./lowerCase.js":false,"./lowerFirst.js":false,"./lt.js":false,"./lte.js":false,"./map.js":false,"./mapKeys.js":false,"./mapValues.js":false,"./matches.js":false,"./matchesProperty.js":false,"./max.js":false,"./maxBy.js":false,"./mean.js":false,"./meanBy.js":false,"./memoize.js":"5zdei","./merge.js":false,"./mergeWith.js":false,"./method.js":false,"./methodOf.js":false,"./min.js":false,"./minBy.js":false,"./mixin.js":false,"./multiply.js":false,"./negate.js":false,"./next.js":false,"./noop.js":false,"./now.js":false,"./nth.js":false,"./nthArg.js":false,"./omit.js":false,"./omitBy.js":false,"./once.js":false,"./orderBy.js":false,"./over.js":false,"./overArgs.js":false,"./overEvery.js":false,"./overSome.js":false,"./pad.js":false,"./padEnd.js":false,"./padStart.js":false,"./parseInt.js":false,"./partial.js":false,"./partialRight.js":false,"./partition.js":false,"./pick.js":false,"./pickBy.js":false,"./plant.js":false,"./property.js":"kwvYw","./propertyOf.js":false,"./pull.js":false,"./pullAll.js":false,"./pullAllBy.js":false,"./pullAllWith.js":false,"./pullAt.js":false,"./random.js":false,"./range.js":"2xup9","./rangeRight.js":false,"./rearg.js":false,"./reduce.js":"gLQHe","./reduceRight.js":"3CjmV","./reject.js":false,"./remove.js":false,"./repeat.js":false,"./replace.js":false,"./rest.js":false,"./result.js":false,"./reverse.js":false,"./round.js":false,"./sample.js":false,"./sampleSize.js":false,"./set.js":false,"./setWith.js":false,"./shuffle.js":false,"./size.js":false,"./slice.js":false,"./snakeCase.js":false,"./some.js":false,"./sortBy.js":false,"./sortedIndex.js":false,"./sortedIndexBy.js":false,"./sortedIndexOf.js":false,"./sortedLastIndex.js":false,"./sortedLastIndexBy.js":false,"./sortedLastIndexOf.js":false,"./sortedUniq.js":false,"./sortedUniqBy.js":false,"./split.js":false,"./spread.js":false,"./startCase.js":false,"./startsWith.js":false,"./stubArray.js":"iwLLL","./stubFalse.js":"fF5mf","./stubObject.js":false,"./stubString.js":false,"./stubTrue.js":false,"./subtract.js":false,"./sum.js":false,"./sumBy.js":false,"./tail.js":false,"./take.js":false,"./takeRight.js":false,"./takeRightWhile.js":false,"./takeWhile.js":false,"./tap.js":false,"./template.js":false,"./templateSettings.js":false,"./throttle.js":false,"./thru.js":false,"./times.js":false,"./toArray.js":false,"./toFinite.js":"FJR8i","./toInteger.js":"1tdUD","./toIterator.js":false,"./toJSON.js":false,"./toLength.js":false,"./toLower.js":false,"./toNumber.js":"4CrK2","./toPairs.js":false,"./toPairsIn.js":false,"./toPath.js":false,"./toPlainObject.js":false,"./toSafeInteger.js":false,"./toString.js":"hF0LJ","./toUpper.js":false,"./transform.js":false,"./trim.js":false,"./trimEnd.js":false,"./trimStart.js":false,"./truncate.js":false,"./unary.js":false,"./unescape.js":false,"./union.js":false,"./unionBy.js":false,"./unionWith.js":false,"./uniq.js":false,"./uniqBy.js":false,"./uniqWith.js":false,"./uniqueId.js":false,"./unset.js":false,"./unzip.js":false,"./unzipWith.js":false,"./update.js":false,"./updateWith.js":false,"./upperCase.js":false,"./upperFirst.js":false,"./value.js":false,"./valueOf.js":false,"./values.js":false,"./valuesIn.js":false,"./without.js":false,"./words.js":false,"./wrap.js":false,"./wrapperAt.js":false,"./wrapperChain.js":false,"./wrapperReverse.js":false,"./wrapperValue.js":false,"./xor.js":false,"./xorBy.js":false,"./xorWith.js":false,"./zip.js":false,"./zipObject.js":false,"./zipObjectDeep.js":false,"./zipWith.js":false,"./lodash.default.js":false,"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fPV8N":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseSliceJs = require("./_baseSlice.js");
@@ -11275,7 +11217,7 @@ var _toIntegerJsDefault = parcelHelpers.interopDefault(_toIntegerJs);
 }
 exports.default = chunk;
 
-},{"./_baseSlice.js":"kmf0m","./_isIterateeCall.js":"jdxke","./toInteger.js":"6748N","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"kmf0m":[function(require,module,exports) {
+},{"./_baseSlice.js":"aUyi1","./_isIterateeCall.js":"1jM1r","./toInteger.js":"1tdUD","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"aUyi1":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -11299,7 +11241,37 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseSlice;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"jdxke":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gkKU3":[function(require,module,exports) {
+exports.interopDefault = function(a) {
+    return a && a.__esModule ? a : {
+        default: a
+    };
+};
+exports.defineInteropFlag = function(a) {
+    Object.defineProperty(a, '__esModule', {
+        value: true
+    });
+};
+exports.exportAll = function(source, dest) {
+    Object.keys(source).forEach(function(key) {
+        if (key === 'default' || key === '__esModule' || dest.hasOwnProperty(key)) return;
+        Object.defineProperty(dest, key, {
+            enumerable: true,
+            get: function() {
+                return source[key];
+            }
+        });
+    });
+    return dest;
+};
+exports.export = function(dest, destName, get) {
+    Object.defineProperty(dest, destName, {
+        enumerable: true,
+        get: get
+    });
+};
+
+},{}],"1jM1r":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _eqJs = require("./eq.js");
@@ -11327,7 +11299,7 @@ var _isObjectJsDefault = parcelHelpers.interopDefault(_isObjectJs);
 }
 exports.default = isIterateeCall;
 
-},{"./eq.js":"fuW23","./isArrayLike.js":"av3lV","./_isIndex.js":"jeuFZ","./isObject.js":"3yMvk","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"fuW23":[function(require,module,exports) {
+},{"./eq.js":"7el3s","./isArrayLike.js":"8SdiO","./_isIndex.js":"5DS1K","./isObject.js":"dHhyW","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"7el3s":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -11366,7 +11338,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = eq;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"av3lV":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8SdiO":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isFunctionJs = require("./isFunction.js");
@@ -11402,7 +11374,7 @@ var _isLengthJsDefault = parcelHelpers.interopDefault(_isLengthJs);
 }
 exports.default = isArrayLike;
 
-},{"./isFunction.js":"4gztK","./isLength.js":"aLlpX","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4gztK":[function(require,module,exports) {
+},{"./isFunction.js":"e5kis","./isLength.js":"bItM0","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"e5kis":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseGetTagJs = require("./_baseGetTag.js");
@@ -11435,7 +11407,7 @@ var _isObjectJsDefault = parcelHelpers.interopDefault(_isObjectJs);
 }
 exports.default = isFunction;
 
-},{"./_baseGetTag.js":"1JwEk","./isObject.js":"3yMvk","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1JwEk":[function(require,module,exports) {
+},{"./_baseGetTag.js":"gVDfP","./isObject.js":"dHhyW","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gVDfP":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _symbolJs = require("./_Symbol.js");
@@ -11458,7 +11430,7 @@ var _objectToStringJsDefault = parcelHelpers.interopDefault(_objectToStringJs);
 }
 exports.default = baseGetTag;
 
-},{"./_Symbol.js":"hpdhb","./_getRawTag.js":"4rNUq","./_objectToString.js":"21TGX","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hpdhb":[function(require,module,exports) {
+},{"./_Symbol.js":"jx216","./_getRawTag.js":"ijXom","./_objectToString.js":"fTkTn","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jx216":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _rootJs = require("./_root.js");
@@ -11466,7 +11438,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /** Built-in value references. */ var Symbol = _rootJsDefault.default.Symbol;
 exports.default = Symbol;
 
-},{"./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"3otD7":[function(require,module,exports) {
+},{"./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8yvCA":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _freeGlobalJs = require("./_freeGlobal.js");
@@ -11475,14 +11447,14 @@ var _freeGlobalJsDefault = parcelHelpers.interopDefault(_freeGlobalJs);
 /** Used as a reference to the global object. */ var root = _freeGlobalJsDefault.default || freeSelf || Function('return this')();
 exports.default = root;
 
-},{"./_freeGlobal.js":"59W0Z","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"59W0Z":[function(require,module,exports) {
+},{"./_freeGlobal.js":"98hMd","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"98hMd":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var global = arguments[3];
 /** Detect free variable `global` from Node.js. */ var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
 exports.default = freeGlobal;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4rNUq":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"ijXom":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _symbolJs = require("./_Symbol.js");
@@ -11517,7 +11489,7 @@ var _symbolJsDefault = parcelHelpers.interopDefault(_symbolJs);
 }
 exports.default = getRawTag;
 
-},{"./_Symbol.js":"hpdhb","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"21TGX":[function(require,module,exports) {
+},{"./_Symbol.js":"jx216","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fTkTn":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /** Used for built-in method references. */ var objectProto = Object.prototype;
@@ -11537,7 +11509,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = objectToString;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"3yMvk":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dHhyW":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -11570,7 +11542,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = isObject;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"aLlpX":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bItM0":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /** Used as references for various `Number` constants. */ var MAX_SAFE_INTEGER = 9007199254740991;
@@ -11604,7 +11576,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = isLength;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"jeuFZ":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"5DS1K":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /** Used as references for various `Number` constants. */ var MAX_SAFE_INTEGER = 9007199254740991;
@@ -11623,7 +11595,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = isIndex;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"6748N":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1tdUD":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _toFiniteJs = require("./toFinite.js");
@@ -11659,7 +11631,7 @@ var _toFiniteJsDefault = parcelHelpers.interopDefault(_toFiniteJs);
 }
 exports.default = toInteger;
 
-},{"./toFinite.js":"4Xs9f","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4Xs9f":[function(require,module,exports) {
+},{"./toFinite.js":"FJR8i","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"FJR8i":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _toNumberJs = require("./toNumber.js");
@@ -11698,7 +11670,7 @@ var _toNumberJsDefault = parcelHelpers.interopDefault(_toNumberJs);
 }
 exports.default = toFinite;
 
-},{"./toNumber.js":"c9pBc","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"c9pBc":[function(require,module,exports) {
+},{"./toNumber.js":"4CrK2","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4CrK2":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseTrimJs = require("./_baseTrim.js");
@@ -11748,7 +11720,7 @@ var _isSymbolJsDefault = parcelHelpers.interopDefault(_isSymbolJs);
 }
 exports.default = toNumber;
 
-},{"./_baseTrim.js":"bUY4k","./isObject.js":"3yMvk","./isSymbol.js":"4Ri4W","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"bUY4k":[function(require,module,exports) {
+},{"./_baseTrim.js":"4X9xl","./isObject.js":"dHhyW","./isSymbol.js":"gCyRJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4X9xl":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _trimmedEndIndexJs = require("./_trimmedEndIndex.js");
@@ -11765,7 +11737,7 @@ var _trimmedEndIndexJsDefault = parcelHelpers.interopDefault(_trimmedEndIndexJs)
 }
 exports.default = baseTrim;
 
-},{"./_trimmedEndIndex.js":"9lGl6","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"9lGl6":[function(require,module,exports) {
+},{"./_trimmedEndIndex.js":"lXShQ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lXShQ":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /** Used to match a single whitespace character. */ var reWhitespace = /\s/;
@@ -11783,7 +11755,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = trimmedEndIndex;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4Ri4W":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gCyRJ":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseGetTagJs = require("./_baseGetTag.js");
@@ -11812,7 +11784,7 @@ var _isObjectLikeJsDefault = parcelHelpers.interopDefault(_isObjectLikeJs);
 }
 exports.default = isSymbol;
 
-},{"./_baseGetTag.js":"1JwEk","./isObjectLike.js":"85060","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"85060":[function(require,module,exports) {
+},{"./_baseGetTag.js":"gVDfP","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"iad76":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -11843,7 +11815,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = isObjectLike;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"eCGp0":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"9ZP5X":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseGetJs = require("./_baseGet.js");
@@ -11878,7 +11850,7 @@ var _baseGetJsDefault = parcelHelpers.interopDefault(_baseGetJs);
 }
 exports.default = get;
 
-},{"./_baseGet.js":"afBd6","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"afBd6":[function(require,module,exports) {
+},{"./_baseGet.js":"3IUaj","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3IUaj":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _castPathJs = require("./_castPath.js");
@@ -11900,7 +11872,7 @@ var _toKeyJsDefault = parcelHelpers.interopDefault(_toKeyJs);
 }
 exports.default = baseGet;
 
-},{"./_castPath.js":"gRpny","./_toKey.js":"1Isyd","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"gRpny":[function(require,module,exports) {
+},{"./_castPath.js":"g21zK","./_toKey.js":"Zo68s","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"g21zK":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isArrayJs = require("./isArray.js");
@@ -11926,7 +11898,7 @@ var _toStringJsDefault = parcelHelpers.interopDefault(_toStringJs);
 }
 exports.default = castPath;
 
-},{"./isArray.js":"fpPOq","./_isKey.js":"eCEei","./_stringToPath.js":"lKdxT","./toString.js":"6j3bR","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"fpPOq":[function(require,module,exports) {
+},{"./isArray.js":"ETPQ1","./_isKey.js":"h7SfK","./_stringToPath.js":"cgxmj","./toString.js":"hF0LJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"ETPQ1":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -11954,7 +11926,7 @@ parcelHelpers.defineInteropFlag(exports);
  */ var isArray = Array.isArray;
 exports.default = isArray;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"eCEei":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"h7SfK":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isArrayJs = require("./isArray.js");
@@ -11977,7 +11949,7 @@ var _isSymbolJsDefault = parcelHelpers.interopDefault(_isSymbolJs);
 }
 exports.default = isKey;
 
-},{"./isArray.js":"fpPOq","./isSymbol.js":"4Ri4W","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"lKdxT":[function(require,module,exports) {
+},{"./isArray.js":"ETPQ1","./isSymbol.js":"gCyRJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"cgxmj":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _memoizeCappedJs = require("./_memoizeCapped.js");
@@ -12000,7 +11972,7 @@ var _memoizeCappedJsDefault = parcelHelpers.interopDefault(_memoizeCappedJs);
 });
 exports.default = stringToPath;
 
-},{"./_memoizeCapped.js":"lEN9x","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"lEN9x":[function(require,module,exports) {
+},{"./_memoizeCapped.js":"2kD71","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2kD71":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _memoizeJs = require("./memoize.js");
@@ -12023,7 +11995,7 @@ var _memoizeJsDefault = parcelHelpers.interopDefault(_memoizeJs);
 }
 exports.default = memoizeCapped;
 
-},{"./memoize.js":"bgIQm","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"bgIQm":[function(require,module,exports) {
+},{"./memoize.js":"5zdei","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"5zdei":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _mapCacheJs = require("./_MapCache.js");
@@ -12088,7 +12060,7 @@ var _mapCacheJsDefault = parcelHelpers.interopDefault(_mapCacheJs);
 memoize.Cache = _mapCacheJsDefault.default;
 exports.default = memoize;
 
-},{"./_MapCache.js":"l55os","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"l55os":[function(require,module,exports) {
+},{"./_MapCache.js":"kdqbj","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"kdqbj":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _mapCacheClearJs = require("./_mapCacheClear.js");
@@ -12123,7 +12095,7 @@ MapCache.prototype.has = _mapCacheHasJsDefault.default;
 MapCache.prototype.set = _mapCacheSetJsDefault.default;
 exports.default = MapCache;
 
-},{"./_mapCacheClear.js":"iOVhy","./_mapCacheDelete.js":"bGnSF","./_mapCacheGet.js":"iDh1J","./_mapCacheHas.js":"1SFzg","./_mapCacheSet.js":"i71gS","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"iOVhy":[function(require,module,exports) {
+},{"./_mapCacheClear.js":"6PhQB","./_mapCacheDelete.js":"eoP1L","./_mapCacheGet.js":"lbrg6","./_mapCacheHas.js":"lPQeP","./_mapCacheSet.js":"4UIYE","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"6PhQB":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _hashJs = require("./_Hash.js");
@@ -12148,7 +12120,7 @@ var _mapJsDefault = parcelHelpers.interopDefault(_mapJs);
 }
 exports.default = mapCacheClear;
 
-},{"./_Hash.js":"2459S","./_ListCache.js":"hZ4Zb","./_Map.js":"aD461","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"2459S":[function(require,module,exports) {
+},{"./_Hash.js":"1HkPM","./_ListCache.js":"cqhDQ","./_Map.js":"8spnB","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1HkPM":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _hashClearJs = require("./_hashClear.js");
@@ -12183,7 +12155,7 @@ Hash.prototype.has = _hashHasJsDefault.default;
 Hash.prototype.set = _hashSetJsDefault.default;
 exports.default = Hash;
 
-},{"./_hashClear.js":"cS8JP","./_hashDelete.js":"ltOYS","./_hashGet.js":"jKQuC","./_hashHas.js":"j8Fh0","./_hashSet.js":"ejpNV","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"cS8JP":[function(require,module,exports) {
+},{"./_hashClear.js":"5oLNs","./_hashDelete.js":"3Xo6B","./_hashGet.js":"j4Vuu","./_hashHas.js":"d5QIn","./_hashSet.js":"lQL69","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"5oLNs":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _nativeCreateJs = require("./_nativeCreate.js");
@@ -12201,7 +12173,7 @@ var _nativeCreateJsDefault = parcelHelpers.interopDefault(_nativeCreateJs);
 }
 exports.default = hashClear;
 
-},{"./_nativeCreate.js":"3B4a4","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"3B4a4":[function(require,module,exports) {
+},{"./_nativeCreate.js":"2XXd9","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2XXd9":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getNativeJs = require("./_getNative.js");
@@ -12209,7 +12181,7 @@ var _getNativeJsDefault = parcelHelpers.interopDefault(_getNativeJs);
 /* Built-in method references that are verified to be native. */ var nativeCreate = _getNativeJsDefault.default(Object, 'create');
 exports.default = nativeCreate;
 
-},{"./_getNative.js":"1oEQA","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1oEQA":[function(require,module,exports) {
+},{"./_getNative.js":"bQrQL","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bQrQL":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseIsNativeJs = require("./_baseIsNative.js");
@@ -12229,7 +12201,7 @@ var _getValueJsDefault = parcelHelpers.interopDefault(_getValueJs);
 }
 exports.default = getNative;
 
-},{"./_baseIsNative.js":"kPlvX","./_getValue.js":"fzcQL","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"kPlvX":[function(require,module,exports) {
+},{"./_baseIsNative.js":"eZuBv","./_getValue.js":"dHb8j","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"eZuBv":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isFunctionJs = require("./isFunction.js");
@@ -12263,7 +12235,7 @@ var _toSourceJsDefault = parcelHelpers.interopDefault(_toSourceJs);
 }
 exports.default = baseIsNative;
 
-},{"./isFunction.js":"4gztK","./_isMasked.js":"2HrQo","./isObject.js":"3yMvk","./_toSource.js":"8yhQH","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"2HrQo":[function(require,module,exports) {
+},{"./isFunction.js":"e5kis","./_isMasked.js":"8rXmg","./isObject.js":"dHhyW","./_toSource.js":"4wd66","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8rXmg":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _coreJsDataJs = require("./_coreJsData.js");
@@ -12283,7 +12255,7 @@ var _coreJsDataJsDefault = parcelHelpers.interopDefault(_coreJsDataJs);
 }
 exports.default = isMasked;
 
-},{"./_coreJsData.js":"feGzk","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"feGzk":[function(require,module,exports) {
+},{"./_coreJsData.js":"jb15d","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jb15d":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _rootJs = require("./_root.js");
@@ -12291,7 +12263,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /** Used to detect overreaching core-js shims. */ var coreJsData = _rootJsDefault.default['__core-js_shared__'];
 exports.default = coreJsData;
 
-},{"./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"8yhQH":[function(require,module,exports) {
+},{"./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4wd66":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /** Used for built-in method references. */ var funcProto = Function.prototype;
@@ -12317,7 +12289,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = toSource;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"fzcQL":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dHb8j":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -12332,7 +12304,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = getValue;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"ltOYS":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3Xo6B":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -12351,7 +12323,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = hashDelete;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"jKQuC":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"j4Vuu":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _nativeCreateJs = require("./_nativeCreate.js");
@@ -12377,7 +12349,7 @@ var _nativeCreateJsDefault = parcelHelpers.interopDefault(_nativeCreateJs);
 }
 exports.default = hashGet;
 
-},{"./_nativeCreate.js":"3B4a4","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"j8Fh0":[function(require,module,exports) {
+},{"./_nativeCreate.js":"2XXd9","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"d5QIn":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _nativeCreateJs = require("./_nativeCreate.js");
@@ -12398,7 +12370,7 @@ var _nativeCreateJsDefault = parcelHelpers.interopDefault(_nativeCreateJs);
 }
 exports.default = hashHas;
 
-},{"./_nativeCreate.js":"3B4a4","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"ejpNV":[function(require,module,exports) {
+},{"./_nativeCreate.js":"2XXd9","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lQL69":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _nativeCreateJs = require("./_nativeCreate.js");
@@ -12421,7 +12393,7 @@ var _nativeCreateJsDefault = parcelHelpers.interopDefault(_nativeCreateJs);
 }
 exports.default = hashSet;
 
-},{"./_nativeCreate.js":"3B4a4","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hZ4Zb":[function(require,module,exports) {
+},{"./_nativeCreate.js":"2XXd9","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"cqhDQ":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _listCacheClearJs = require("./_listCacheClear.js");
@@ -12456,7 +12428,7 @@ ListCache.prototype.has = _listCacheHasJsDefault.default;
 ListCache.prototype.set = _listCacheSetJsDefault.default;
 exports.default = ListCache;
 
-},{"./_listCacheClear.js":"a6wXY","./_listCacheDelete.js":"asRUQ","./_listCacheGet.js":"kIz2g","./_listCacheHas.js":"1QGhA","./_listCacheSet.js":"bQ9cm","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"a6wXY":[function(require,module,exports) {
+},{"./_listCacheClear.js":"bSUq2","./_listCacheDelete.js":"3kM5j","./_listCacheGet.js":"9nv7v","./_listCacheHas.js":"4N5RL","./_listCacheSet.js":"bA8oX","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bSUq2":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -12471,7 +12443,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = listCacheClear;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"asRUQ":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3kM5j":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _assocIndexOfJs = require("./_assocIndexOf.js");
@@ -12497,7 +12469,7 @@ var _assocIndexOfJsDefault = parcelHelpers.interopDefault(_assocIndexOfJs);
 }
 exports.default = listCacheDelete;
 
-},{"./_assocIndexOf.js":"feC5L","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"feC5L":[function(require,module,exports) {
+},{"./_assocIndexOf.js":"124Ga","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"124Ga":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _eqJs = require("./eq.js");
@@ -12518,7 +12490,7 @@ var _eqJsDefault = parcelHelpers.interopDefault(_eqJs);
 }
 exports.default = assocIndexOf;
 
-},{"./eq.js":"fuW23","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"kIz2g":[function(require,module,exports) {
+},{"./eq.js":"7el3s","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"9nv7v":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _assocIndexOfJs = require("./_assocIndexOf.js");
@@ -12537,7 +12509,7 @@ var _assocIndexOfJsDefault = parcelHelpers.interopDefault(_assocIndexOfJs);
 }
 exports.default = listCacheGet;
 
-},{"./_assocIndexOf.js":"feC5L","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1QGhA":[function(require,module,exports) {
+},{"./_assocIndexOf.js":"124Ga","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4N5RL":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _assocIndexOfJs = require("./_assocIndexOf.js");
@@ -12555,7 +12527,7 @@ var _assocIndexOfJsDefault = parcelHelpers.interopDefault(_assocIndexOfJs);
 }
 exports.default = listCacheHas;
 
-},{"./_assocIndexOf.js":"feC5L","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"bQ9cm":[function(require,module,exports) {
+},{"./_assocIndexOf.js":"124Ga","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bA8oX":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _assocIndexOfJs = require("./_assocIndexOf.js");
@@ -12582,7 +12554,7 @@ var _assocIndexOfJsDefault = parcelHelpers.interopDefault(_assocIndexOfJs);
 }
 exports.default = listCacheSet;
 
-},{"./_assocIndexOf.js":"feC5L","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"aD461":[function(require,module,exports) {
+},{"./_assocIndexOf.js":"124Ga","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8spnB":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getNativeJs = require("./_getNative.js");
@@ -12592,7 +12564,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /* Built-in method references that are verified to be native. */ var Map = _getNativeJsDefault.default(_rootJsDefault.default, 'Map');
 exports.default = Map;
 
-},{"./_getNative.js":"1oEQA","./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"bGnSF":[function(require,module,exports) {
+},{"./_getNative.js":"bQrQL","./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"eoP1L":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getMapDataJs = require("./_getMapData.js");
@@ -12612,7 +12584,7 @@ var _getMapDataJsDefault = parcelHelpers.interopDefault(_getMapDataJs);
 }
 exports.default = mapCacheDelete;
 
-},{"./_getMapData.js":"ld4LO","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"ld4LO":[function(require,module,exports) {
+},{"./_getMapData.js":"3xzxe","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3xzxe":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isKeyableJs = require("./_isKeyable.js");
@@ -12630,7 +12602,7 @@ var _isKeyableJsDefault = parcelHelpers.interopDefault(_isKeyableJs);
 }
 exports.default = getMapData;
 
-},{"./_isKeyable.js":"bJpEY","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"bJpEY":[function(require,module,exports) {
+},{"./_isKeyable.js":"9O1jG","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"9O1jG":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -12645,7 +12617,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = isKeyable;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"iDh1J":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lbrg6":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getMapDataJs = require("./_getMapData.js");
@@ -12663,7 +12635,7 @@ var _getMapDataJsDefault = parcelHelpers.interopDefault(_getMapDataJs);
 }
 exports.default = mapCacheGet;
 
-},{"./_getMapData.js":"ld4LO","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1SFzg":[function(require,module,exports) {
+},{"./_getMapData.js":"3xzxe","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lPQeP":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getMapDataJs = require("./_getMapData.js");
@@ -12681,7 +12653,7 @@ var _getMapDataJsDefault = parcelHelpers.interopDefault(_getMapDataJs);
 }
 exports.default = mapCacheHas;
 
-},{"./_getMapData.js":"ld4LO","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"i71gS":[function(require,module,exports) {
+},{"./_getMapData.js":"3xzxe","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4UIYE":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getMapDataJs = require("./_getMapData.js");
@@ -12703,7 +12675,7 @@ var _getMapDataJsDefault = parcelHelpers.interopDefault(_getMapDataJs);
 }
 exports.default = mapCacheSet;
 
-},{"./_getMapData.js":"ld4LO","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"6j3bR":[function(require,module,exports) {
+},{"./_getMapData.js":"3xzxe","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"hF0LJ":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseToStringJs = require("./_baseToString.js");
@@ -12733,7 +12705,7 @@ var _baseToStringJsDefault = parcelHelpers.interopDefault(_baseToStringJs);
 }
 exports.default = toString;
 
-},{"./_baseToString.js":"81Rmh","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"81Rmh":[function(require,module,exports) {
+},{"./_baseToString.js":"fQ5ds","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fQ5ds":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _symbolJs = require("./_Symbol.js");
@@ -12764,7 +12736,7 @@ var _isSymbolJsDefault = parcelHelpers.interopDefault(_isSymbolJs);
 }
 exports.default = baseToString;
 
-},{"./_Symbol.js":"hpdhb","./_arrayMap.js":"cA7nM","./isArray.js":"fpPOq","./isSymbol.js":"4Ri4W","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"cA7nM":[function(require,module,exports) {
+},{"./_Symbol.js":"jx216","./_arrayMap.js":"gDCVM","./isArray.js":"ETPQ1","./isSymbol.js":"gCyRJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gDCVM":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -12782,7 +12754,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = arrayMap;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1Isyd":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"Zo68s":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isSymbolJs = require("./isSymbol.js");
@@ -12801,7 +12773,7 @@ var _isSymbolJsDefault = parcelHelpers.interopDefault(_isSymbolJs);
 }
 exports.default = toKey;
 
-},{"./isSymbol.js":"4Ri4W","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"7j73N":[function(require,module,exports) {
+},{"./isSymbol.js":"gCyRJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jfq4F":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseHasInJs = require("./_baseHasIn.js");
@@ -12838,7 +12810,7 @@ var _hasPathJsDefault = parcelHelpers.interopDefault(_hasPathJs);
 }
 exports.default = hasIn;
 
-},{"./_baseHasIn.js":"kON9D","./_hasPath.js":"NPvlg","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"kON9D":[function(require,module,exports) {
+},{"./_baseHasIn.js":"8Hqdk","./_hasPath.js":"lcHZs","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8Hqdk":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -12853,7 +12825,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseHasIn;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"NPvlg":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lcHZs":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _castPathJs = require("./_castPath.js");
@@ -12890,7 +12862,7 @@ var _toKeyJsDefault = parcelHelpers.interopDefault(_toKeyJs);
 }
 exports.default = hasPath;
 
-},{"./_castPath.js":"gRpny","./isArguments.js":"c6XWh","./isArray.js":"fpPOq","./_isIndex.js":"jeuFZ","./isLength.js":"aLlpX","./_toKey.js":"1Isyd","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"c6XWh":[function(require,module,exports) {
+},{"./_castPath.js":"g21zK","./isArguments.js":"9k91Y","./isArray.js":"ETPQ1","./_isIndex.js":"5DS1K","./isLength.js":"bItM0","./_toKey.js":"Zo68s","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"9k91Y":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseIsArgumentsJs = require("./_baseIsArguments.js");
@@ -12924,7 +12896,7 @@ var _isObjectLikeJsDefault = parcelHelpers.interopDefault(_isObjectLikeJs);
 };
 exports.default = isArguments;
 
-},{"./_baseIsArguments.js":"fdmiP","./isObjectLike.js":"85060","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"fdmiP":[function(require,module,exports) {
+},{"./_baseIsArguments.js":"bnUuB","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bnUuB":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseGetTagJs = require("./_baseGetTag.js");
@@ -12943,7 +12915,7 @@ var _isObjectLikeJsDefault = parcelHelpers.interopDefault(_isObjectLikeJs);
 }
 exports.default = baseIsArguments;
 
-},{"./_baseGetTag.js":"1JwEk","./isObjectLike.js":"85060","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4kwkZ":[function(require,module,exports) {
+},{"./_baseGetTag.js":"gVDfP","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1Y0KA":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -12966,7 +12938,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = identity;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"cVmnh":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"llpEE":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _rootJs = require("./_root.js");
@@ -12997,7 +12969,7 @@ var _stubFalseJsDefault = parcelHelpers.interopDefault(_stubFalseJs);
  */ var isBuffer = nativeIsBuffer || _stubFalseJsDefault.default;
 exports.default = isBuffer;
 
-},{"./_root.js":"3otD7","./stubFalse.js":"1MTNB","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1MTNB":[function(require,module,exports) {
+},{"./_root.js":"8yvCA","./stubFalse.js":"fF5mf","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fF5mf":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13017,7 +12989,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = stubFalse;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"dtM6z":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2LIMs":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseIsTypedArrayJs = require("./_baseIsTypedArray.js");
@@ -13046,7 +13018,7 @@ var _nodeUtilJsDefault = parcelHelpers.interopDefault(_nodeUtilJs);
  */ var isTypedArray = nodeIsTypedArray ? _baseUnaryJsDefault.default(nodeIsTypedArray) : _baseIsTypedArrayJsDefault.default;
 exports.default = isTypedArray;
 
-},{"./_baseIsTypedArray.js":"6W6Qx","./_baseUnary.js":"48dUf","./_nodeUtil.js":"f2wh9","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"6W6Qx":[function(require,module,exports) {
+},{"./_baseIsTypedArray.js":"jcEk3","./_baseUnary.js":"jBUGV","./_nodeUtil.js":"cxU0K","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jcEk3":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseGetTagJs = require("./_baseGetTag.js");
@@ -13072,7 +13044,7 @@ typedArrayTags[argsTag] = typedArrayTags[arrayTag] = typedArrayTags[arrayBufferT
 }
 exports.default = baseIsTypedArray;
 
-},{"./_baseGetTag.js":"1JwEk","./isLength.js":"aLlpX","./isObjectLike.js":"85060","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"48dUf":[function(require,module,exports) {
+},{"./_baseGetTag.js":"gVDfP","./isLength.js":"bItM0","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jBUGV":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13088,7 +13060,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseUnary;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"f2wh9":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"cxU0K":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _freeGlobalJs = require("./_freeGlobal.js");
@@ -13109,7 +13081,7 @@ var _freeGlobalJsDefault = parcelHelpers.interopDefault(_freeGlobalJs);
 }();
 exports.default = nodeUtil;
 
-},{"./_freeGlobal.js":"59W0Z","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hZxiX":[function(require,module,exports) {
+},{"./_freeGlobal.js":"98hMd","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lbEZV":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _arrayLikeKeysJs = require("./_arrayLikeKeys.js");
@@ -13150,7 +13122,7 @@ var _isArrayLikeJsDefault = parcelHelpers.interopDefault(_isArrayLikeJs);
 }
 exports.default = keys;
 
-},{"./_arrayLikeKeys.js":"gTeHb","./_baseKeys.js":"de5oq","./isArrayLike.js":"av3lV","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"gTeHb":[function(require,module,exports) {
+},{"./_arrayLikeKeys.js":"b4sHy","./_baseKeys.js":"7rx4g","./isArrayLike.js":"8SdiO","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"b4sHy":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseTimesJs = require("./_baseTimes.js");
@@ -13183,7 +13155,7 @@ var _isTypedArrayJsDefault = parcelHelpers.interopDefault(_isTypedArrayJs);
 }
 exports.default = arrayLikeKeys;
 
-},{"./_baseTimes.js":"hEgLD","./isArguments.js":"c6XWh","./isArray.js":"fpPOq","./isBuffer.js":"cVmnh","./_isIndex.js":"jeuFZ","./isTypedArray.js":"dtM6z","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hEgLD":[function(require,module,exports) {
+},{"./_baseTimes.js":"6yWeR","./isArguments.js":"9k91Y","./isArray.js":"ETPQ1","./isBuffer.js":"llpEE","./_isIndex.js":"5DS1K","./isTypedArray.js":"2LIMs","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"6yWeR":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13201,7 +13173,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseTimes;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"de5oq":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"7rx4g":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isPrototypeJs = require("./_isPrototype.js");
@@ -13224,7 +13196,7 @@ var _nativeKeysJsDefault = parcelHelpers.interopDefault(_nativeKeysJs);
 }
 exports.default = baseKeys;
 
-},{"./_isPrototype.js":"6Pupx","./_nativeKeys.js":"grfsg","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"6Pupx":[function(require,module,exports) {
+},{"./_isPrototype.js":"jOAyW","./_nativeKeys.js":"4fIwW","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jOAyW":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /** Used for built-in method references. */ var objectProto = Object.prototype;
@@ -13240,7 +13212,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = isPrototype;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"grfsg":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4fIwW":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _overArgJs = require("./_overArg.js");
@@ -13248,7 +13220,7 @@ var _overArgJsDefault = parcelHelpers.interopDefault(_overArgJs);
 /* Built-in method references for those with the same name as other `lodash` methods. */ var nativeKeys = _overArgJsDefault.default(Object.keys, Object);
 exports.default = nativeKeys;
 
-},{"./_overArg.js":"gSdFu","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"gSdFu":[function(require,module,exports) {
+},{"./_overArg.js":"lqvyN","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lqvyN":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13265,7 +13237,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = overArg;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"9dtZm":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"kwvYw":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _basePropertyJs = require("./_baseProperty.js");
@@ -13302,7 +13274,7 @@ var _toKeyJsDefault = parcelHelpers.interopDefault(_toKeyJs);
 }
 exports.default = property;
 
-},{"./_baseProperty.js":"cSXne","./_basePropertyDeep.js":"4Po1V","./_isKey.js":"eCEei","./_toKey.js":"1Isyd","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"cSXne":[function(require,module,exports) {
+},{"./_baseProperty.js":"gAjZk","./_basePropertyDeep.js":"1xKss","./_isKey.js":"h7SfK","./_toKey.js":"Zo68s","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gAjZk":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13318,7 +13290,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseProperty;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4Po1V":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1xKss":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseGetJs = require("./_baseGet.js");
@@ -13336,7 +13308,7 @@ var _baseGetJsDefault = parcelHelpers.interopDefault(_baseGetJs);
 }
 exports.default = basePropertyDeep;
 
-},{"./_baseGet.js":"afBd6","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"l26BV":[function(require,module,exports) {
+},{"./_baseGet.js":"3IUaj","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2xup9":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _createRangeJs = require("./_createRange.js");
@@ -13384,7 +13356,7 @@ var _createRangeJsDefault = parcelHelpers.interopDefault(_createRangeJs);
  */ var range = _createRangeJsDefault.default();
 exports.default = range;
 
-},{"./_createRange.js":"80Puu","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"80Puu":[function(require,module,exports) {
+},{"./_createRange.js":"h5MaG","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"h5MaG":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseRangeJs = require("./_baseRange.js");
@@ -13414,7 +13386,7 @@ var _toFiniteJsDefault = parcelHelpers.interopDefault(_toFiniteJs);
 }
 exports.default = createRange;
 
-},{"./_baseRange.js":"gNvQV","./_isIterateeCall.js":"jdxke","./toFinite.js":"4Xs9f","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"gNvQV":[function(require,module,exports) {
+},{"./_baseRange.js":"1twHx","./_isIterateeCall.js":"1jM1r","./toFinite.js":"FJR8i","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1twHx":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /* Built-in method references for those with the same name as other `lodash` methods. */ var nativeCeil = Math.ceil, nativeMax = Math.max;
@@ -13438,7 +13410,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseRange;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"9BmKY":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gLQHe":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _arrayReduceJs = require("./_arrayReduce.js");
@@ -13493,7 +13465,7 @@ var _isArrayJsDefault = parcelHelpers.interopDefault(_isArrayJs);
 }
 exports.default = reduce;
 
-},{"./_arrayReduce.js":"lVaqZ","./_baseEach.js":"2pjUk","./_baseIteratee.js":"l4Bq0","./_baseReduce.js":"dM6Sh","./isArray.js":"fpPOq","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"lVaqZ":[function(require,module,exports) {
+},{"./_arrayReduce.js":"4xOgs","./_baseEach.js":"cgTz5","./_baseIteratee.js":"48kCP","./_baseReduce.js":"6ATyi","./isArray.js":"ETPQ1","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4xOgs":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13515,7 +13487,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = arrayReduce;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"2pjUk":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"cgTz5":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseForOwnJs = require("./_baseForOwn.js");
@@ -13532,7 +13504,7 @@ var _createBaseEachJsDefault = parcelHelpers.interopDefault(_createBaseEachJs);
  */ var baseEach = _createBaseEachJsDefault.default(_baseForOwnJsDefault.default);
 exports.default = baseEach;
 
-},{"./_baseForOwn.js":"6hbCQ","./_createBaseEach.js":"bE3Wu","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"6hbCQ":[function(require,module,exports) {
+},{"./_baseForOwn.js":"bGCTn","./_createBaseEach.js":"5mXl9","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bGCTn":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseForJs = require("./_baseFor.js");
@@ -13551,7 +13523,7 @@ var _keysJsDefault = parcelHelpers.interopDefault(_keysJs);
 }
 exports.default = baseForOwn;
 
-},{"./_baseFor.js":"7aXqv","./keys.js":"hZxiX","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"7aXqv":[function(require,module,exports) {
+},{"./_baseFor.js":"1Zprl","./keys.js":"lbEZV","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1Zprl":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _createBaseForJs = require("./_createBaseFor.js");
@@ -13569,7 +13541,7 @@ var _createBaseForJsDefault = parcelHelpers.interopDefault(_createBaseForJs);
  */ var baseFor = _createBaseForJsDefault.default();
 exports.default = baseFor;
 
-},{"./_createBaseFor.js":"3hsjY","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"3hsjY":[function(require,module,exports) {
+},{"./_createBaseFor.js":"1W89a","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1W89a":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13590,7 +13562,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = createBaseFor;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"bE3Wu":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"5mXl9":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isArrayLikeJs = require("./isArrayLike.js");
@@ -13615,7 +13587,7 @@ var _isArrayLikeJsDefault = parcelHelpers.interopDefault(_isArrayLikeJs);
 }
 exports.default = createBaseEach;
 
-},{"./isArrayLike.js":"av3lV","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"l4Bq0":[function(require,module,exports) {
+},{"./isArrayLike.js":"8SdiO","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"48kCP":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseMatchesJs = require("./_baseMatches.js");
@@ -13644,7 +13616,7 @@ var _propertyJsDefault = parcelHelpers.interopDefault(_propertyJs);
 }
 exports.default = baseIteratee;
 
-},{"./_baseMatches.js":"98m28","./_baseMatchesProperty.js":"hwgWm","./identity.js":"4kwkZ","./isArray.js":"fpPOq","./property.js":"9dtZm","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"98m28":[function(require,module,exports) {
+},{"./_baseMatches.js":"6vwVM","./_baseMatchesProperty.js":"4hv6L","./identity.js":"1Y0KA","./isArray.js":"ETPQ1","./property.js":"kwvYw","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"6vwVM":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseIsMatchJs = require("./_baseIsMatch.js");
@@ -13668,7 +13640,7 @@ var _matchesStrictComparableJsDefault = parcelHelpers.interopDefault(_matchesStr
 }
 exports.default = baseMatches;
 
-},{"./_baseIsMatch.js":"c5InF","./_getMatchData.js":"5ZCNp","./_matchesStrictComparable.js":"7F15G","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"c5InF":[function(require,module,exports) {
+},{"./_baseIsMatch.js":"519lF","./_getMatchData.js":"2HQJS","./_matchesStrictComparable.js":"19Pwe","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"519lF":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _stackJs = require("./_Stack.js");
@@ -13708,7 +13680,7 @@ var _baseIsEqualJsDefault = parcelHelpers.interopDefault(_baseIsEqualJs);
 }
 exports.default = baseIsMatch;
 
-},{"./_Stack.js":"4AcUO","./_baseIsEqual.js":"Q9p6g","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4AcUO":[function(require,module,exports) {
+},{"./_Stack.js":"dCpM5","./_baseIsEqual.js":"1zaYh","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dCpM5":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _listCacheJs = require("./_ListCache.js");
@@ -13741,7 +13713,7 @@ Stack.prototype.has = _stackHasJsDefault.default;
 Stack.prototype.set = _stackSetJsDefault.default;
 exports.default = Stack;
 
-},{"./_ListCache.js":"hZ4Zb","./_stackClear.js":"gShzx","./_stackDelete.js":"8KA06","./_stackGet.js":"fwH0t","./_stackHas.js":"3YyOj","./_stackSet.js":"445ga","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"gShzx":[function(require,module,exports) {
+},{"./_ListCache.js":"cqhDQ","./_stackClear.js":"4BuA3","./_stackDelete.js":"2mGxC","./_stackGet.js":"c3cE4","./_stackHas.js":"23Sz6","./_stackSet.js":"jnSxK","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4BuA3":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _listCacheJs = require("./_ListCache.js");
@@ -13758,7 +13730,7 @@ var _listCacheJsDefault = parcelHelpers.interopDefault(_listCacheJs);
 }
 exports.default = stackClear;
 
-},{"./_ListCache.js":"hZ4Zb","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"8KA06":[function(require,module,exports) {
+},{"./_ListCache.js":"cqhDQ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2mGxC":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13776,7 +13748,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = stackDelete;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"fwH0t":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"c3cE4":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13792,7 +13764,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = stackGet;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"3YyOj":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"23Sz6":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -13808,7 +13780,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = stackHas;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"445ga":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jnSxK":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _listCacheJs = require("./_ListCache.js");
@@ -13847,7 +13819,7 @@ var _mapCacheJsDefault = parcelHelpers.interopDefault(_mapCacheJs);
 }
 exports.default = stackSet;
 
-},{"./_ListCache.js":"hZ4Zb","./_Map.js":"aD461","./_MapCache.js":"l55os","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"Q9p6g":[function(require,module,exports) {
+},{"./_ListCache.js":"cqhDQ","./_Map.js":"8spnB","./_MapCache.js":"kdqbj","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1zaYh":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseIsEqualDeepJs = require("./_baseIsEqualDeep.js");
@@ -13874,7 +13846,7 @@ var _isObjectLikeJsDefault = parcelHelpers.interopDefault(_isObjectLikeJs);
 }
 exports.default = baseIsEqual;
 
-},{"./_baseIsEqualDeep.js":"2yFGU","./isObjectLike.js":"85060","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"2yFGU":[function(require,module,exports) {
+},{"./_baseIsEqualDeep.js":"hBKuk","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"hBKuk":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _stackJs = require("./_Stack.js");
@@ -13938,7 +13910,7 @@ var _isTypedArrayJsDefault = parcelHelpers.interopDefault(_isTypedArrayJs);
 }
 exports.default = baseIsEqualDeep;
 
-},{"./_Stack.js":"4AcUO","./_equalArrays.js":"gR19O","./_equalByTag.js":"6dHzF","./_equalObjects.js":"lQpNy","./_getTag.js":"lchEy","./isArray.js":"fpPOq","./isBuffer.js":"cVmnh","./isTypedArray.js":"dtM6z","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"gR19O":[function(require,module,exports) {
+},{"./_Stack.js":"dCpM5","./_equalArrays.js":"3xWWQ","./_equalByTag.js":"9KfIu","./_equalObjects.js":"7yAdV","./_getTag.js":"1kCom","./isArray.js":"ETPQ1","./isBuffer.js":"llpEE","./isTypedArray.js":"2LIMs","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3xWWQ":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _setCacheJs = require("./_SetCache.js");
@@ -13998,7 +13970,7 @@ var _cacheHasJsDefault = parcelHelpers.interopDefault(_cacheHasJs);
 }
 exports.default = equalArrays;
 
-},{"./_SetCache.js":"6Bnec","./_arraySome.js":"l9jw4","./_cacheHas.js":"iTR9s","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"6Bnec":[function(require,module,exports) {
+},{"./_SetCache.js":"6YwQx","./_arraySome.js":"9k95T","./_cacheHas.js":"jSrgN","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"6YwQx":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _mapCacheJs = require("./_MapCache.js");
@@ -14024,7 +13996,7 @@ SetCache.prototype.add = SetCache.prototype.push = _setCacheAddJsDefault.default
 SetCache.prototype.has = _setCacheHasJsDefault.default;
 exports.default = SetCache;
 
-},{"./_MapCache.js":"l55os","./_setCacheAdd.js":"g7Pfr","./_setCacheHas.js":"blVwn","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"g7Pfr":[function(require,module,exports) {
+},{"./_MapCache.js":"kdqbj","./_setCacheAdd.js":"7m7Pn","./_setCacheHas.js":"BJklm","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"7m7Pn":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /** Used to stand-in for `undefined` hash values. */ var HASH_UNDEFINED = '__lodash_hash_undefined__';
@@ -14043,7 +14015,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = setCacheAdd;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"blVwn":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"BJklm":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14059,7 +14031,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = setCacheHas;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"l9jw4":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"9k95T":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14080,7 +14052,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = arraySome;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"iTR9s":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jSrgN":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14095,7 +14067,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = cacheHas;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"6dHzF":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"9KfIu":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _symbolJs = require("./_Symbol.js");
@@ -14175,7 +14147,7 @@ var arrayBufferTag = '[object ArrayBuffer]', dataViewTag = '[object DataView]';
 }
 exports.default = equalByTag;
 
-},{"./_Symbol.js":"hpdhb","./_Uint8Array.js":"dAh8i","./eq.js":"fuW23","./_equalArrays.js":"gR19O","./_mapToArray.js":"1fTsj","./_setToArray.js":"cBtIB","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"dAh8i":[function(require,module,exports) {
+},{"./_Symbol.js":"jx216","./_Uint8Array.js":"5zVAV","./eq.js":"7el3s","./_equalArrays.js":"3xWWQ","./_mapToArray.js":"3RRCW","./_setToArray.js":"2ugef","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"5zVAV":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _rootJs = require("./_root.js");
@@ -14183,7 +14155,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /** Built-in value references. */ var Uint8Array = _rootJsDefault.default.Uint8Array;
 exports.default = Uint8Array;
 
-},{"./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1fTsj":[function(require,module,exports) {
+},{"./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3RRCW":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14204,7 +14176,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = mapToArray;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"cBtIB":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2ugef":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14222,7 +14194,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = setToArray;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"lQpNy":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"7yAdV":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getAllKeysJs = require("./_getAllKeys.js");
@@ -14280,7 +14252,7 @@ var _getAllKeysJsDefault = parcelHelpers.interopDefault(_getAllKeysJs);
 }
 exports.default = equalObjects;
 
-},{"./_getAllKeys.js":"acrCc","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"acrCc":[function(require,module,exports) {
+},{"./_getAllKeys.js":"68ZDs","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"68ZDs":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseGetAllKeysJs = require("./_baseGetAllKeys.js");
@@ -14300,7 +14272,7 @@ var _keysJsDefault = parcelHelpers.interopDefault(_keysJs);
 }
 exports.default = getAllKeys;
 
-},{"./_baseGetAllKeys.js":"cR4py","./_getSymbols.js":"8DlMG","./keys.js":"hZxiX","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"cR4py":[function(require,module,exports) {
+},{"./_baseGetAllKeys.js":"jHmw2","./_getSymbols.js":"egqKq","./keys.js":"lbEZV","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jHmw2":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _arrayPushJs = require("./_arrayPush.js");
@@ -14323,7 +14295,7 @@ var _isArrayJsDefault = parcelHelpers.interopDefault(_isArrayJs);
 }
 exports.default = baseGetAllKeys;
 
-},{"./_arrayPush.js":"9pLj8","./isArray.js":"fpPOq","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"9pLj8":[function(require,module,exports) {
+},{"./_arrayPush.js":"4BTrx","./isArray.js":"ETPQ1","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4BTrx":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14340,7 +14312,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = arrayPush;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"8DlMG":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"egqKq":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _arrayFilterJs = require("./_arrayFilter.js");
@@ -14365,7 +14337,7 @@ var _stubArrayJsDefault = parcelHelpers.interopDefault(_stubArrayJs);
 };
 exports.default = getSymbols;
 
-},{"./_arrayFilter.js":"ruUxu","./stubArray.js":"ip0sP","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"ruUxu":[function(require,module,exports) {
+},{"./_arrayFilter.js":"iZqHX","./stubArray.js":"iwLLL","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"iZqHX":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14386,7 +14358,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = arrayFilter;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"ip0sP":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"iwLLL":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14411,7 +14383,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = stubArray;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"lchEy":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1kCom":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _dataViewJs = require("./_DataView.js");
@@ -14457,7 +14429,7 @@ if (_dataViewJsDefault.default && getTag(new _dataViewJsDefault.default(new Arra
 };
 exports.default = getTag;
 
-},{"./_DataView.js":"y9Y0W","./_Map.js":"aD461","./_Promise.js":"hv5sl","./_Set.js":"aKlFM","./_WeakMap.js":"gGA6M","./_baseGetTag.js":"1JwEk","./_toSource.js":"8yhQH","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"y9Y0W":[function(require,module,exports) {
+},{"./_DataView.js":"4SeGN","./_Map.js":"8spnB","./_Promise.js":"lbYHf","./_Set.js":"jf3T7","./_WeakMap.js":"52eE0","./_baseGetTag.js":"gVDfP","./_toSource.js":"4wd66","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4SeGN":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getNativeJs = require("./_getNative.js");
@@ -14467,7 +14439,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /* Built-in method references that are verified to be native. */ var DataView = _getNativeJsDefault.default(_rootJsDefault.default, 'DataView');
 exports.default = DataView;
 
-},{"./_getNative.js":"1oEQA","./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hv5sl":[function(require,module,exports) {
+},{"./_getNative.js":"bQrQL","./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lbYHf":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getNativeJs = require("./_getNative.js");
@@ -14477,7 +14449,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /* Built-in method references that are verified to be native. */ var Promise = _getNativeJsDefault.default(_rootJsDefault.default, 'Promise');
 exports.default = Promise;
 
-},{"./_getNative.js":"1oEQA","./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"aKlFM":[function(require,module,exports) {
+},{"./_getNative.js":"bQrQL","./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jf3T7":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getNativeJs = require("./_getNative.js");
@@ -14487,7 +14459,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /* Built-in method references that are verified to be native. */ var Set = _getNativeJsDefault.default(_rootJsDefault.default, 'Set');
 exports.default = Set;
 
-},{"./_getNative.js":"1oEQA","./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"gGA6M":[function(require,module,exports) {
+},{"./_getNative.js":"bQrQL","./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"52eE0":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _getNativeJs = require("./_getNative.js");
@@ -14497,7 +14469,7 @@ var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
 /* Built-in method references that are verified to be native. */ var WeakMap = _getNativeJsDefault.default(_rootJsDefault.default, 'WeakMap');
 exports.default = WeakMap;
 
-},{"./_getNative.js":"1oEQA","./_root.js":"3otD7","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"5ZCNp":[function(require,module,exports) {
+},{"./_getNative.js":"bQrQL","./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2HQJS":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isStrictComparableJs = require("./_isStrictComparable.js");
@@ -14524,7 +14496,7 @@ var _keysJsDefault = parcelHelpers.interopDefault(_keysJs);
 }
 exports.default = getMatchData;
 
-},{"./_isStrictComparable.js":"dz4bd","./keys.js":"hZxiX","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"dz4bd":[function(require,module,exports) {
+},{"./_isStrictComparable.js":"ksPGX","./keys.js":"lbEZV","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"ksPGX":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isObjectJs = require("./isObject.js");
@@ -14541,7 +14513,7 @@ var _isObjectJsDefault = parcelHelpers.interopDefault(_isObjectJs);
 }
 exports.default = isStrictComparable;
 
-},{"./isObject.js":"3yMvk","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"7F15G":[function(require,module,exports) {
+},{"./isObject.js":"dHhyW","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"19Pwe":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14560,7 +14532,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = matchesStrictComparable;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hwgWm":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"4hv6L":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseIsEqualJs = require("./_baseIsEqual.js");
@@ -14594,7 +14566,7 @@ var _toKeyJsDefault = parcelHelpers.interopDefault(_toKeyJs);
 }
 exports.default = baseMatchesProperty;
 
-},{"./_baseIsEqual.js":"Q9p6g","./get.js":"eCGp0","./hasIn.js":"7j73N","./_isKey.js":"eCEei","./_isStrictComparable.js":"dz4bd","./_matchesStrictComparable.js":"7F15G","./_toKey.js":"1Isyd","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"dM6Sh":[function(require,module,exports) {
+},{"./_baseIsEqual.js":"1zaYh","./get.js":"9ZP5X","./hasIn.js":"jfq4F","./_isKey.js":"h7SfK","./_isStrictComparable.js":"ksPGX","./_matchesStrictComparable.js":"19Pwe","./_toKey.js":"Zo68s","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"6ATyi":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14617,7 +14589,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseReduce;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"4w0SD":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3CjmV":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _arrayReduceRightJs = require("./_arrayReduceRight.js");
@@ -14657,7 +14629,7 @@ var _isArrayJsDefault = parcelHelpers.interopDefault(_isArrayJs);
 }
 exports.default = reduceRight;
 
-},{"./_arrayReduceRight.js":"cqMvZ","./_baseEachRight.js":"aYHrg","./_baseIteratee.js":"l4Bq0","./_baseReduce.js":"dM6Sh","./isArray.js":"fpPOq","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"cqMvZ":[function(require,module,exports) {
+},{"./_arrayReduceRight.js":"2xI7E","./_baseEachRight.js":"gpoXa","./_baseIteratee.js":"48kCP","./_baseReduce.js":"6ATyi","./isArray.js":"ETPQ1","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"2xI7E":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -14679,7 +14651,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = arrayReduceRight;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"aYHrg":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gpoXa":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseForOwnRightJs = require("./_baseForOwnRight.js");
@@ -14696,7 +14668,7 @@ var _createBaseEachJsDefault = parcelHelpers.interopDefault(_createBaseEachJs);
  */ var baseEachRight = _createBaseEachJsDefault.default(_baseForOwnRightJsDefault.default, true);
 exports.default = baseEachRight;
 
-},{"./_baseForOwnRight.js":"kGZia","./_createBaseEach.js":"bE3Wu","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"kGZia":[function(require,module,exports) {
+},{"./_baseForOwnRight.js":"5Ywft","./_createBaseEach.js":"5mXl9","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"5Ywft":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseForRightJs = require("./_baseForRight.js");
@@ -14715,7 +14687,7 @@ var _keysJsDefault = parcelHelpers.interopDefault(_keysJs);
 }
 exports.default = baseForOwnRight;
 
-},{"./_baseForRight.js":"1dOpC","./keys.js":"hZxiX","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"1dOpC":[function(require,module,exports) {
+},{"./_baseForRight.js":"ai6xy","./keys.js":"lbEZV","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"ai6xy":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _createBaseForJs = require("./_createBaseFor.js");
@@ -14732,7 +14704,7 @@ var _createBaseForJsDefault = parcelHelpers.interopDefault(_createBaseForJs);
  */ var baseForRight = _createBaseForJsDefault.default(true);
 exports.default = baseForRight;
 
-},{"./_createBaseFor.js":"3hsjY","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"hVF7e":[function(require,module,exports) {
+},{"./_createBaseFor.js":"1W89a","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"h4vgq":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "B", ()=>B
@@ -14781,7 +14753,7 @@ const Btri = (d, i, j, u, v)=>fct(d - 1) / fct(d - 1 - i - j) / fct(i) / fct(j) 
 const BxB = (d1, d2, i, j, t1, t2)=>B(d1, i, t1) * B(d2, j, t2)
 ;
 
-},{"pascals-triangle":"etTuH","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"etTuH":[function(require,module,exports) {
+},{"pascals-triangle":"l2iB2","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"l2iB2":[function(require,module,exports) {
 'use strict';
 module.exports = function(numberOfRows) {
     var matrix;
@@ -14800,7 +14772,7 @@ module.exports = function(numberOfRows) {
     return matrix;
 };
 
-},{}],"3sf5p":[function(require,module,exports) {
+},{}],"4nl9w":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "CGA", ()=>CGA
@@ -14816,6 +14788,8 @@ parcelHelpers.export(exports, "ni", ()=>ni
 parcelHelpers.export(exports, "no", ()=>no
 );
 parcelHelpers.export(exports, "Mul3", ()=>Mul3
+);
+parcelHelpers.export(exports, "Mul4", ()=>Mul4
 );
 parcelHelpers.export(exports, "up", ()=>up
 );
@@ -14833,6 +14807,8 @@ const ni = Alg.Vector(0, 0, 0, 1, 1);
 const no = Alg.Vector(0, 0, 0, -0.5, 0.5);
 const Mul3 = (x, y, z)=>Alg.Mul(Alg.Mul(x, y), z)
 ;
+const Mul4 = (w, x, y, z)=>Alg.Mul(Alg.Mul(w, x), Alg.Mul(y, z))
+;
 const up = (x1)=>_lodashEs.reduce([
         no,
         x1,
@@ -14840,21 +14816,21 @@ const up = (x1)=>_lodashEs.reduce([
     ], (x, y)=>Alg.Add(x, y)
     , Alg.Scalar(0))
 ;
-const pointWeight = (point, weight)=>Alg.Add(Alg.Mul(Mul3(point, ni, weight), Alg.Scalar(0.5)), weight) // Create a Clifford Algebra with 4,1 metric for 3D CGA.
-     // export const { up, pointWeight } = CGA.inline(() => {
-     //   // We start by defining a null basis in which we will work.
-     //   var ni = 1e4 + 1e5,
-     //     no = 0.5e5 - 0.5e4;
-     //   // To create a conformal point, you upcast :
-     //   var up = (x) => no + x + (x * x * ni) * 0.5;
-     //   var pointWeight = (point, weight) =>
-     //     (point * weight * ni) / 2 + weight;
-     //   var Mul3 = (u, v, w) => u * v * w;
-     //   return { up, pointWeight, ni, no, Mul3 };
-     // })();
-;
+const pointWeight = (point, weight)=>Alg.Add(Alg.Mul4(point, ni, weight, Alg.Scalar(0.5)), weight)
+; // Create a Clifford Algebra with 4,1 metric for 3D CGA.
+ // export const { up, pointWeight } = CGA.inline(() => {
+ //   // We start by defining a null basis in which we will work.
+ //   var ni = 1e4 + 1e5,
+ //     no = 0.5e5 - 0.5e4;
+ //   // To create a conformal point, you upcast :
+ //   var up = (x) => no + x + (x * x * ni) * 0.5;
+ //   var pointWeight = (point, weight) =>
+ //     (point * weight * ni) / 2 + weight;
+ //   var Mul3 = (u, v, w) => u * v * w;
+ //   return { up, pointWeight, ni, no, Mul3 };
+ // })();
 
-},{"ganja.js":"afSZ1","lodash-es":"ltJJg","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"afSZ1":[function(require,module,exports) {
+},{"ganja.js":"aYkgc","lodash-es":"bXNwz","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"aYkgc":[function(require,module,exports) {
 (function(name, context, definition) {
     if (typeof module != 'undefined' && module.exports) module.exports = definition();
     else if (typeof define == 'function' && define.amd) define(name, definition);
@@ -19124,7 +19100,7 @@ const pointWeight = (point, weight)=>Alg.Add(Alg.Mul(Mul3(point, ni, weight), Al
     };
 });
 
-},{}],"juMqj":[function(require,module,exports) {
+},{}],"1U5NA":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _robustPredicates = require("robust-predicates");
@@ -19517,7 +19493,7 @@ function defaultGetY(p) {
     return p[1];
 }
 
-},{"robust-predicates":"96Ezg","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"96Ezg":[function(require,module,exports) {
+},{"robust-predicates":"7e0QE","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"7e0QE":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "orient2d", ()=>_orient2DJs.orient2d
@@ -19541,7 +19517,7 @@ var _orient3DJs = require("./esm/orient3d.js");
 var _incircleJs = require("./esm/incircle.js");
 var _insphereJs = require("./esm/insphere.js");
 
-},{"./esm/orient2d.js":"3B1q4","./esm/orient3d.js":"ifJ7f","./esm/incircle.js":"bbOYc","./esm/insphere.js":"j22Cf","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"3B1q4":[function(require,module,exports) {
+},{"./esm/orient2d.js":"gHqC4","./esm/orient3d.js":"dt5pN","./esm/incircle.js":"6yBsv","./esm/insphere.js":"6qjhA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gHqC4":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "orient2d", ()=>orient2d
@@ -19713,7 +19689,7 @@ function orient2dfast(ax, ay, bx, by, cx, cy) {
     return (ay - cy) * (bx - cx) - (ax - cx) * (by - cy);
 }
 
-},{"./util.js":"kdlbG","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"kdlbG":[function(require,module,exports) {
+},{"./util.js":"3OxkP","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3OxkP":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "epsilon", ()=>epsilon
@@ -19848,7 +19824,7 @@ function vec(n) {
     return new Float64Array(n);
 }
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"ifJ7f":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dt5pN":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "orient3d", ()=>orient3d
@@ -20249,7 +20225,7 @@ function orient3dfast(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz) {
     return adx * (bdy * cdz - bdz * cdy) + bdx * (cdy * adz - cdz * ady) + cdx * (ady * bdz - adz * bdy);
 }
 
-},{"./util.js":"kdlbG","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"bbOYc":[function(require,module,exports) {
+},{"./util.js":"3OxkP","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"6yBsv":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "incircle", ()=>incircle
@@ -20897,7 +20873,7 @@ function incirclefast(ax, ay, bx, by, cx, cy, dx, dy) {
     return alift * bcdet + blift * cadet + clift * abdet;
 }
 
-},{"./util.js":"kdlbG","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"j22Cf":[function(require,module,exports) {
+},{"./util.js":"3OxkP","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"6qjhA":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "insphere", ()=>insphere
@@ -21593,7 +21569,7 @@ function inspherefast(pax, pay, paz, pbx, pby, pbz, pcx, pcy, pcz, pdx, pdy, pdz
     return clift * dab - dlift * abc2 + (alift * bcd2 - blift * cda2);
 }
 
-},{"./util.js":"kdlbG","@parcel/transformer-js/src/esmodule-helpers.js":"ciiiV"}],"3ZvyR":[function(require,module,exports) {
+},{"./util.js":"3OxkP","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"7Jk6L":[function(require,module,exports) {
 module.exports = function(mesh, opts) {
     if (!opts) opts = {
     };
@@ -21646,7 +21622,83 @@ module.exports = function(mesh, opts) {
     return ret;
 };
 
-},{}]},["h5LVK","5oAUC"], "5oAUC", "parcelRequire3d94")
+},{}],"9gN7w":[function(require,module,exports) {
+module.exports = "#define GLSLIFY 1\n#define GLSLIFY 1\n// CGA3.glsl\nconst int I_CGA3_scalar = 0;\nconst int I_CGA3_e1 = 1;\nconst int I_CGA3_e2 = 2;\nconst int I_CGA3_e3 = 3;\nconst int I_CGA3_enil = 4;\nconst int I_CGA3_einf = 5;\nconst int I_CGA3_e12 = 6;\nconst int I_CGA3_e13 = 7;\nconst int I_CGA3_e1nil = 8;\nconst int I_CGA3_e1inf = 9;\nconst int I_CGA3_e23 = 10;\nconst int I_CGA3_e2nil = 11;\nconst int I_CGA3_e2inf = 12;\nconst int I_CGA3_e3nil = 13;\nconst int I_CGA3_e3inf = 14;\nconst int I_CGA3_enilinf = 15;\nconst int I_CGA3_e123 = 16;\nconst int I_CGA3_e12nil = 17;\nconst int I_CGA3_e12inf = 18;\nconst int I_CGA3_e13nil = 19;\nconst int I_CGA3_e13inf = 20;\nconst int I_CGA3_e1nilinf = 21;\nconst int I_CGA3_e23nil = 22;\nconst int I_CGA3_e23inf = 23;\nconst int I_CGA3_e2nilinf = 24;\nconst int I_CGA3_e3nilinf = 25;\nconst int I_CGA3_e123nil = 26;\nconst int I_CGA3_e123inf = 27;\nconst int I_CGA3_e12nilinf = 28;\nconst int I_CGA3_e13nilinf = 29;\nconst int I_CGA3_e23nilinf = 30;\nconst int I_CGA3_e123nilinf = 31;\n\nstruct CGA3 {\n    float scalar;\n    float e1;\n    float e2;\n    float e3;\n    float enil;\n    float einf;\n    float e12;\n    float e13;\n    float e1nil;\n    float e1inf;\n    float e23;\n    float e2nil;\n    float e2inf;\n    float e3nil;\n    float e3inf;\n    float enilinf;\n    float e123;\n    float e12nil;\n    float e12inf;\n    float e13nil;\n    float e13inf;\n    float e1nilinf;\n    float e23nil;\n    float e23inf;\n    float e2nilinf;\n    float e3nilinf;\n    float e123nil;\n    float e123inf;\n    float e12nilinf;\n    float e13nilinf;\n    float e23nilinf;\n    float e123nilinf;\n};\n\nCGA3 fromArray(float x[32]){\n    return CGA3(x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8], x[9], x[10], x[11], x[12], x[13], x[14], x[15], x[16], x[17], x[18], x[19], x[20], x[21], x[22], x[23], x[24], x[25], x[26], x[27], x[28], x[29], x[30], x[31]);\n}\n\nvoid toArray(CGA3 x, inout float x_ary[32]){\n    x_ary[0] = x.scalar;\n    x_ary[1] = x.e1;\n    x_ary[2] = x.e2;\n    x_ary[3] = x.e3;\n    x_ary[4] = x.enil;\n    x_ary[5] = x.einf;\n    x_ary[6] = x.e12;\n    x_ary[7] = x.e13;\n    x_ary[8] = x.e1nil;\n    x_ary[9] = x.e1inf;\n    x_ary[10] = x.e23;\n    x_ary[11] = x.e2nil;\n    x_ary[12] = x.e2inf;\n    x_ary[13] = x.e3nil;\n    x_ary[14] = x.e3inf;\n    x_ary[15] = x.enilinf;\n    x_ary[16] = x.e123;\n    x_ary[17] = x.e12nil;\n    x_ary[18] = x.e12inf;\n    x_ary[19] = x.e13nil;\n    x_ary[20] = x.e13inf;\n    x_ary[21] = x.e1nilinf;\n    x_ary[22] = x.e23nil;\n    x_ary[23] = x.e23inf;\n    x_ary[24] = x.e2nilinf;\n    x_ary[25] = x.e3nilinf;\n    x_ary[26] = x.e123nil;\n    x_ary[27] = x.e123inf;\n    x_ary[28] = x.e12nilinf;\n    x_ary[29] = x.e13nilinf;\n    x_ary[30] = x.e23nilinf;\n    x_ary[31] = x.e123nilinf;\n}\n\nvoid zero(inout float x[32]){\n    x[0] = 0.0;\n    x[1] = 0.0;\n    x[2] = 0.0;\n    x[3] = 0.0;\n    x[4] = 0.0;\n    x[5] = 0.0;\n    x[6] = 0.0;\n    x[7] = 0.0;\n    x[8] = 0.0;\n    x[9] = 0.0;\n    x[10] = 0.0;\n    x[11] = 0.0;\n    x[12] = 0.0;\n    x[13] = 0.0;\n    x[14] = 0.0;\n    x[15] = 0.0;\n    x[16] = 0.0;\n    x[17] = 0.0;\n    x[18] = 0.0;\n    x[19] = 0.0;\n    x[20] = 0.0;\n    x[21] = 0.0;\n    x[22] = 0.0;\n    x[23] = 0.0;\n    x[24] = 0.0;\n    x[25] = 0.0;\n    x[26] = 0.0;\n    x[27] = 0.0;\n    x[28] = 0.0;\n    x[29] = 0.0;\n    x[30] = 0.0;\n    x[31] = 0.0;\n}\n\nCGA3 add(CGA3 u, CGA3 v){\n    return CGA3(u.scalar + v.scalar, u.e1 + v.e1, u.e2 + v.e2, u.e3 + v.e3, u.enil + v.enil, u.einf + v.einf, u.e12 + v.e12, u.e13 + v.e13, u.e1nil + v.e1nil, u.e1inf + v.e1inf, u.e23 + v.e23, u.e2nil + v.e2nil, u.e2inf + v.e2inf, u.e3nil + v.e3nil, u.e3inf + v.e3inf, u.enilinf + v.enilinf, u.e123 + v.e123, u.e12nil + v.e12nil, u.e12inf + v.e12inf, u.e13nil + v.e13nil, u.e13inf + v.e13inf, u.e1nilinf + v.e1nilinf, u.e23nil + v.e23nil, u.e23inf + v.e23inf, u.e2nilinf + v.e2nilinf, u.e3nilinf + v.e3nilinf, u.e123nil + v.e123nil, u.e123inf + v.e123inf, u.e12nilinf + v.e12nilinf, u.e13nilinf + v.e13nilinf, u.e23nilinf + v.e23nilinf, u.e123nilinf + v.e123nilinf);\n}\n\nCGA3 add(CGA3 u, CGA3 v, CGA3 w){\n    return add(add(u, v), w);\n}\n\nCGA3 add(CGA3 u, CGA3 v, CGA3 w, CGA3 p){\n    return add(add(add(u, v), w), p);\n}\n\nCGA3 one(){\n    return CGA3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n}\n\nCGA3 sub(CGA3 u, CGA3 v){\n    return CGA3(u.scalar - v.scalar, u.e1 - v.e1, u.e2 - v.e2, u.e3 - v.e3, u.enil - v.enil, u.einf - v.einf, u.e12 - v.e12, u.e13 - v.e13, u.e1nil - v.e1nil, u.e1inf - v.e1inf, u.e23 - v.e23, u.e2nil - v.e2nil, u.e2inf - v.e2inf, u.e3nil - v.e3nil, u.e3inf - v.e3inf, u.enilinf - v.enilinf, u.e123 - v.e123, u.e12nil - v.e12nil, u.e12inf - v.e12inf, u.e13nil - v.e13nil, u.e13inf - v.e13inf, u.e1nilinf - v.e1nilinf, u.e23nil - v.e23nil, u.e23inf - v.e23inf, u.e2nilinf - v.e2nilinf, u.e3nilinf - v.e3nilinf, u.e123nil - v.e123nil, u.e123inf - v.e123inf, u.e12nilinf - v.e12nilinf, u.e13nilinf - v.e13nilinf, u.e23nilinf - v.e23nilinf, u.e123nilinf - v.e123nilinf);\n}\n\nCGA3 zero(){\n    return CGA3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n}\n\nCGA3 mul(float a, CGA3 x){\n    return CGA3(a*x.scalar, a*x.e1, a*x.e2, a*x.e3, a*x.enil, a*x.einf, a*x.e12, a*x.e13, a*x.e1nil, a*x.e1inf, a*x.e23, a*x.e2nil, a*x.e2inf, a*x.e3nil, a*x.e3inf, a*x.enilinf, a*x.e123, a*x.e12nil, a*x.e12inf, a*x.e13nil, a*x.e13inf, a*x.e1nilinf, a*x.e23nil, a*x.e23inf, a*x.e2nilinf, a*x.e3nilinf, a*x.e123nil, a*x.e123inf, a*x.e12nilinf, a*x.e13nilinf, a*x.e23nilinf, a*x.e123nilinf);\n}\n\nCGA3 mul(CGA3 u, CGA3 v){\n    return CGA3(u.e1*v.e1 - u.e12*v.e12 - u.e123*v.e123 + u.e123inf*v.e123nil + u.e123nil*v.e123inf - u.e123nilinf*v.e123nilinf - u.e12inf*v.e12nil - u.e12nil*v.e12inf - u.e12nilinf*v.e12nilinf - u.e13*v.e13 - u.e13inf*v.e13nil - u.e13nil*v.e13inf - u.e13nilinf*v.e13nilinf - u.e1inf*v.e1nil - u.e1nil*v.e1inf + u.e1nilinf*v.e1nilinf + u.e2*v.e2 - u.e23*v.e23 - u.e23inf*v.e23nil - u.e23nil*v.e23inf - u.e23nilinf*v.e23nilinf - u.e2inf*v.e2nil - u.e2nil*v.e2inf + u.e2nilinf*v.e2nilinf + u.e3*v.e3 - u.e3inf*v.e3nil - u.e3nil*v.e3inf + u.e3nilinf*v.e3nilinf + u.einf*v.enil + u.enil*v.einf + u.enilinf*v.enilinf + u.scalar*v.scalar, u.e1*v.scalar + u.e12*v.e2 - u.e123*v.e23 - u.e123inf*v.e23nil - u.e123nil*v.e23inf - u.e123nilinf*v.e23nilinf - u.e12inf*v.e2nil - u.e12nil*v.e2inf + u.e12nilinf*v.e2nilinf + u.e13*v.e3 - u.e13inf*v.e3nil - u.e13nil*v.e3inf + u.e13nilinf*v.e3nilinf + u.e1inf*v.enil + u.e1nil*v.einf + u.e1nilinf*v.enilinf - u.e2*v.e12 - u.e23*v.e123 + u.e23inf*v.e123nil + u.e23nil*v.e123inf - u.e23nilinf*v.e123nilinf - u.e2inf*v.e12nil - u.e2nil*v.e12inf - u.e2nilinf*v.e12nilinf - u.e3*v.e13 - u.e3inf*v.e13nil - u.e3nil*v.e13inf - u.e3nilinf*v.e13nilinf - u.einf*v.e1nil - u.enil*v.e1inf + u.enilinf*v.e1nilinf + u.scalar*v.e1, u.e1*v.e12 - u.e12*v.e1 + u.e123*v.e13 + u.e123inf*v.e13nil + u.e123nil*v.e13inf + u.e123nilinf*v.e13nilinf + u.e12inf*v.e1nil + u.e12nil*v.e1inf - u.e12nilinf*v.e1nilinf + u.e13*v.e123 - u.e13inf*v.e123nil - u.e13nil*v.e123inf + u.e13nilinf*v.e123nilinf + u.e1inf*v.e12nil + u.e1nil*v.e12inf + u.e1nilinf*v.e12nilinf + u.e2*v.scalar + u.e23*v.e3 - u.e23inf*v.e3nil - u.e23nil*v.e3inf + u.e23nilinf*v.e3nilinf + u.e2inf*v.enil + u.e2nil*v.einf + u.e2nilinf*v.enilinf - u.e3*v.e23 - u.e3inf*v.e23nil - u.e3nil*v.e23inf - u.e3nilinf*v.e23nilinf - u.einf*v.e2nil - u.enil*v.e2inf + u.enilinf*v.e2nilinf + u.scalar*v.e2, u.e1*v.e13 - u.e12*v.e123 - u.e123*v.e12 - u.e123inf*v.e12nil - u.e123nil*v.e12inf - u.e123nilinf*v.e12nilinf + u.e12inf*v.e123nil + u.e12nil*v.e123inf - u.e12nilinf*v.e123nilinf - u.e13*v.e1 + u.e13inf*v.e1nil + u.e13nil*v.e1inf - u.e13nilinf*v.e1nilinf + u.e1inf*v.e13nil + u.e1nil*v.e13inf + u.e1nilinf*v.e13nilinf + u.e2*v.e23 - u.e23*v.e2 + u.e23inf*v.e2nil + u.e23nil*v.e2inf - u.e23nilinf*v.e2nilinf + u.e2inf*v.e23nil + u.e2nil*v.e23inf + u.e2nilinf*v.e23nilinf + u.e3*v.scalar + u.e3inf*v.enil + u.e3nil*v.einf + u.e3nilinf*v.enilinf - u.einf*v.e3nil - u.enil*v.e3inf + u.enilinf*v.e3nilinf + u.scalar*v.e3, u.e1*v.e1nil - u.e12*v.e12nil - u.e123*v.e123nil + u.e123nil*v.e123 - u.e123nil*v.e123nilinf - u.e123nilinf*v.e123nil - u.e12nil*v.e12 + u.e12nil*v.e12nilinf - u.e12nilinf*v.e12nil - u.e13*v.e13nil - u.e13nil*v.e13 + u.e13nil*v.e13nilinf - u.e13nilinf*v.e13nil - u.e1nil*v.e1 + u.e1nil*v.e1nilinf + u.e1nilinf*v.e1nil + u.e2*v.e2nil - u.e23*v.e23nil - u.e23nil*v.e23 + u.e23nil*v.e23nilinf - u.e23nilinf*v.e23nil - u.e2nil*v.e2 + u.e2nil*v.e2nilinf + u.e2nilinf*v.e2nil + u.e3*v.e3nil - u.e3nil*v.e3 + u.e3nil*v.e3nilinf + u.e3nilinf*v.e3nil - u.enil*v.enilinf + u.enil*v.scalar + u.enilinf*v.enil + u.scalar*v.enil, u.e1*v.e1inf - u.e12*v.e12inf - u.e123*v.e123inf + u.e123inf*v.e123 + u.e123inf*v.e123nilinf + u.e123nilinf*v.e123inf - u.e12inf*v.e12 - u.e12inf*v.e12nilinf + u.e12nilinf*v.e12inf - u.e13*v.e13inf - u.e13inf*v.e13 - u.e13inf*v.e13nilinf + u.e13nilinf*v.e13inf - u.e1inf*v.e1 - u.e1inf*v.e1nilinf - u.e1nilinf*v.e1inf + u.e2*v.e2inf - u.e23*v.e23inf - u.e23inf*v.e23 - u.e23inf*v.e23nilinf + u.e23nilinf*v.e23inf - u.e2inf*v.e2 - u.e2inf*v.e2nilinf - u.e2nilinf*v.e2inf + u.e3*v.e3inf - u.e3inf*v.e3 - u.e3inf*v.e3nilinf - u.e3nilinf*v.e3inf + u.einf*v.enilinf + u.einf*v.scalar - u.enilinf*v.einf + u.scalar*v.einf, u.e1*v.e2 + u.e12*v.scalar + u.e123*v.e3 - u.e123inf*v.e3nil - u.e123nil*v.e3inf + u.e123nilinf*v.e3nilinf + u.e12inf*v.enil + u.e12nil*v.einf + u.e12nilinf*v.enilinf - u.e13*v.e23 - u.e13inf*v.e23nil - u.e13nil*v.e23inf - u.e13nilinf*v.e23nilinf - u.e1inf*v.e2nil - u.e1nil*v.e2inf + u.e1nilinf*v.e2nilinf - u.e2*v.e1 + u.e23*v.e13 + u.e23inf*v.e13nil + u.e23nil*v.e13inf + u.e23nilinf*v.e13nilinf + u.e2inf*v.e1nil + u.e2nil*v.e1inf - u.e2nilinf*v.e1nilinf + u.e3*v.e123 - u.e3inf*v.e123nil - u.e3nil*v.e123inf + u.e3nilinf*v.e123nilinf + u.einf*v.e12nil + u.enil*v.e12inf + u.enilinf*v.e12nilinf + u.scalar*v.e12, u.e1*v.e3 + u.e12*v.e23 - u.e123*v.e2 + u.e123inf*v.e2nil + u.e123nil*v.e2inf - u.e123nilinf*v.e2nilinf + u.e12inf*v.e23nil + u.e12nil*v.e23inf + u.e12nilinf*v.e23nilinf + u.e13*v.scalar + u.e13inf*v.enil + u.e13nil*v.einf + u.e13nilinf*v.enilinf - u.e1inf*v.e3nil - u.e1nil*v.e3inf + u.e1nilinf*v.e3nilinf - u.e2*v.e123 - u.e23*v.e12 - u.e23inf*v.e12nil - u.e23nil*v.e12inf - u.e23nilinf*v.e12nilinf + u.e2inf*v.e123nil + u.e2nil*v.e123inf - u.e2nilinf*v.e123nilinf - u.e3*v.e1 + u.e3inf*v.e1nil + u.e3nil*v.e1inf - u.e3nilinf*v.e1nilinf + u.einf*v.e13nil + u.enil*v.e13inf + u.enilinf*v.e13nilinf + u.scalar*v.e13, u.e1*v.enil + u.e12*v.e2nil - u.e123*v.e23nil - u.e123nil*v.e23 + u.e123nil*v.e23nilinf - u.e123nilinf*v.e23nil - u.e12nil*v.e2 + u.e12nil*v.e2nilinf + u.e12nilinf*v.e2nil + u.e13*v.e3nil - u.e13nil*v.e3 + u.e13nil*v.e3nilinf + u.e13nilinf*v.e3nil - u.e1nil*v.enilinf + u.e1nil*v.scalar + u.e1nilinf*v.enil - u.e2*v.e12nil - u.e23*v.e123nil + u.e23nil*v.e123 - u.e23nil*v.e123nilinf - u.e23nilinf*v.e123nil - u.e2nil*v.e12 + u.e2nil*v.e12nilinf - u.e2nilinf*v.e12nil - u.e3*v.e13nil - u.e3nil*v.e13 + u.e3nil*v.e13nilinf - u.e3nilinf*v.e13nil - u.enil*v.e1 + u.enil*v.e1nilinf + u.enilinf*v.e1nil + u.scalar*v.e1nil, u.e1*v.einf + u.e12*v.e2inf - u.e123*v.e23inf - u.e123inf*v.e23 - u.e123inf*v.e23nilinf + u.e123nilinf*v.e23inf - u.e12inf*v.e2 - u.e12inf*v.e2nilinf - u.e12nilinf*v.e2inf + u.e13*v.e3inf - u.e13inf*v.e3 - u.e13inf*v.e3nilinf - u.e13nilinf*v.e3inf + u.e1inf*v.enilinf + u.e1inf*v.scalar - u.e1nilinf*v.einf - u.e2*v.e12inf - u.e23*v.e123inf + u.e23inf*v.e123 + u.e23inf*v.e123nilinf + u.e23nilinf*v.e123inf - u.e2inf*v.e12 - u.e2inf*v.e12nilinf + u.e2nilinf*v.e12inf - u.e3*v.e13inf - u.e3inf*v.e13 - u.e3inf*v.e13nilinf + u.e3nilinf*v.e13inf - u.einf*v.e1 - u.einf*v.e1nilinf - u.enilinf*v.e1inf + u.scalar*v.e1inf, u.e1*v.e123 - u.e12*v.e13 + u.e123*v.e1 - u.e123inf*v.e1nil - u.e123nil*v.e1inf + u.e123nilinf*v.e1nilinf - u.e12inf*v.e13nil - u.e12nil*v.e13inf - u.e12nilinf*v.e13nilinf + u.e13*v.e12 + u.e13inf*v.e12nil + u.e13nil*v.e12inf + u.e13nilinf*v.e12nilinf - u.e1inf*v.e123nil - u.e1nil*v.e123inf + u.e1nilinf*v.e123nilinf + u.e2*v.e3 + u.e23*v.scalar + u.e23inf*v.enil + u.e23nil*v.einf + u.e23nilinf*v.enilinf - u.e2inf*v.e3nil - u.e2nil*v.e3inf + u.e2nilinf*v.e3nilinf - u.e3*v.e2 + u.e3inf*v.e2nil + u.e3nil*v.e2inf - u.e3nilinf*v.e2nilinf + u.einf*v.e23nil + u.enil*v.e23inf + u.enilinf*v.e23nilinf + u.scalar*v.e23, u.e1*v.e12nil - u.e12*v.e1nil + u.e123*v.e13nil + u.e123nil*v.e13 - u.e123nil*v.e13nilinf + u.e123nilinf*v.e13nil + u.e12nil*v.e1 - u.e12nil*v.e1nilinf - u.e12nilinf*v.e1nil + u.e13*v.e123nil - u.e13nil*v.e123 + u.e13nil*v.e123nilinf + u.e13nilinf*v.e123nil + u.e1nil*v.e12 - u.e1nil*v.e12nilinf + u.e1nilinf*v.e12nil + u.e2*v.enil + u.e23*v.e3nil - u.e23nil*v.e3 + u.e23nil*v.e3nilinf + u.e23nilinf*v.e3nil - u.e2nil*v.enilinf + u.e2nil*v.scalar + u.e2nilinf*v.enil - u.e3*v.e23nil - u.e3nil*v.e23 + u.e3nil*v.e23nilinf - u.e3nilinf*v.e23nil - u.enil*v.e2 + u.enil*v.e2nilinf + u.enilinf*v.e2nil + u.scalar*v.e2nil, u.e1*v.e12inf - u.e12*v.e1inf + u.e123*v.e13inf + u.e123inf*v.e13 + u.e123inf*v.e13nilinf - u.e123nilinf*v.e13inf + u.e12inf*v.e1 + u.e12inf*v.e1nilinf + u.e12nilinf*v.e1inf + u.e13*v.e123inf - u.e13inf*v.e123 - u.e13inf*v.e123nilinf - u.e13nilinf*v.e123inf + u.e1inf*v.e12 + u.e1inf*v.e12nilinf - u.e1nilinf*v.e12inf + u.e2*v.einf + u.e23*v.e3inf - u.e23inf*v.e3 - u.e23inf*v.e3nilinf - u.e23nilinf*v.e3inf + u.e2inf*v.enilinf + u.e2inf*v.scalar - u.e2nilinf*v.einf - u.e3*v.e23inf - u.e3inf*v.e23 - u.e3inf*v.e23nilinf + u.e3nilinf*v.e23inf - u.einf*v.e2 - u.einf*v.e2nilinf - u.enilinf*v.e2inf + u.scalar*v.e2inf, u.e1*v.e13nil - u.e12*v.e123nil - u.e123*v.e12nil - u.e123nil*v.e12 + u.e123nil*v.e12nilinf - u.e123nilinf*v.e12nil + u.e12nil*v.e123 - u.e12nil*v.e123nilinf - u.e12nilinf*v.e123nil - u.e13*v.e1nil + u.e13nil*v.e1 - u.e13nil*v.e1nilinf - u.e13nilinf*v.e1nil + u.e1nil*v.e13 - u.e1nil*v.e13nilinf + u.e1nilinf*v.e13nil + u.e2*v.e23nil - u.e23*v.e2nil + u.e23nil*v.e2 - u.e23nil*v.e2nilinf - u.e23nilinf*v.e2nil + u.e2nil*v.e23 - u.e2nil*v.e23nilinf + u.e2nilinf*v.e23nil + u.e3*v.enil - u.e3nil*v.enilinf + u.e3nil*v.scalar + u.e3nilinf*v.enil - u.enil*v.e3 + u.enil*v.e3nilinf + u.enilinf*v.e3nil + u.scalar*v.e3nil, u.e1*v.e13inf - u.e12*v.e123inf - u.e123*v.e12inf - u.e123inf*v.e12 - u.e123inf*v.e12nilinf + u.e123nilinf*v.e12inf + u.e12inf*v.e123 + u.e12inf*v.e123nilinf + u.e12nilinf*v.e123inf - u.e13*v.e1inf + u.e13inf*v.e1 + u.e13inf*v.e1nilinf + u.e13nilinf*v.e1inf + u.e1inf*v.e13 + u.e1inf*v.e13nilinf - u.e1nilinf*v.e13inf + u.e2*v.e23inf - u.e23*v.e2inf + u.e23inf*v.e2 + u.e23inf*v.e2nilinf + u.e23nilinf*v.e2inf + u.e2inf*v.e23 + u.e2inf*v.e23nilinf - u.e2nilinf*v.e23inf + u.e3*v.einf + u.e3inf*v.enilinf + u.e3inf*v.scalar - u.e3nilinf*v.einf - u.einf*v.e3 - u.einf*v.e3nilinf - u.enilinf*v.e3inf + u.scalar*v.e3inf, u.e1*v.e1nilinf - u.e12*v.e12nilinf - u.e123*v.e123nilinf - u.e123inf*v.e123nil + u.e123nil*v.e123inf - u.e123nilinf*v.e123 + u.e12inf*v.e12nil - u.e12nil*v.e12inf - u.e12nilinf*v.e12 - u.e13*v.e13nilinf + u.e13inf*v.e13nil - u.e13nil*v.e13inf - u.e13nilinf*v.e13 + u.e1inf*v.e1nil - u.e1nil*v.e1inf + u.e1nilinf*v.e1 + u.e2*v.e2nilinf - u.e23*v.e23nilinf + u.e23inf*v.e23nil - u.e23nil*v.e23inf - u.e23nilinf*v.e23 + u.e2inf*v.e2nil - u.e2nil*v.e2inf + u.e2nilinf*v.e2 + u.e3*v.e3nilinf + u.e3inf*v.e3nil - u.e3nil*v.e3inf + u.e3nilinf*v.e3 - u.einf*v.enil + u.enil*v.einf + u.enilinf*v.scalar + u.scalar*v.enilinf, u.e1*v.e23 + u.e12*v.e3 + u.e123*v.scalar + u.e123inf*v.enil + u.e123nil*v.einf + u.e123nilinf*v.enilinf - u.e12inf*v.e3nil - u.e12nil*v.e3inf + u.e12nilinf*v.e3nilinf - u.e13*v.e2 + u.e13inf*v.e2nil + u.e13nil*v.e2inf - u.e13nilinf*v.e2nilinf + u.e1inf*v.e23nil + u.e1nil*v.e23inf + u.e1nilinf*v.e23nilinf - u.e2*v.e13 + u.e23*v.e1 - u.e23inf*v.e1nil - u.e23nil*v.e1inf + u.e23nilinf*v.e1nilinf - u.e2inf*v.e13nil - u.e2nil*v.e13inf - u.e2nilinf*v.e13nilinf + u.e3*v.e12 + u.e3inf*v.e12nil + u.e3nil*v.e12inf + u.e3nilinf*v.e12nilinf - u.einf*v.e123nil - u.enil*v.e123inf + u.enilinf*v.e123nilinf + u.scalar*v.e123, u.e1*v.e2nil + u.e12*v.enil + u.e123*v.e3nil - u.e123nil*v.e3 + u.e123nil*v.e3nilinf + u.e123nilinf*v.e3nil - u.e12nil*v.enilinf + u.e12nil*v.scalar + u.e12nilinf*v.enil - u.e13*v.e23nil - u.e13nil*v.e23 + u.e13nil*v.e23nilinf - u.e13nilinf*v.e23nil - u.e1nil*v.e2 + u.e1nil*v.e2nilinf + u.e1nilinf*v.e2nil - u.e2*v.e1nil + u.e23*v.e13nil + u.e23nil*v.e13 - u.e23nil*v.e13nilinf + u.e23nilinf*v.e13nil + u.e2nil*v.e1 - u.e2nil*v.e1nilinf - u.e2nilinf*v.e1nil + u.e3*v.e123nil - u.e3nil*v.e123 + u.e3nil*v.e123nilinf + u.e3nilinf*v.e123nil + u.enil*v.e12 - u.enil*v.e12nilinf + u.enilinf*v.e12nil + u.scalar*v.e12nil, u.e1*v.e2inf + u.e12*v.einf + u.e123*v.e3inf - u.e123inf*v.e3 - u.e123inf*v.e3nilinf - u.e123nilinf*v.e3inf + u.e12inf*v.enilinf + u.e12inf*v.scalar - u.e12nilinf*v.einf - u.e13*v.e23inf - u.e13inf*v.e23 - u.e13inf*v.e23nilinf + u.e13nilinf*v.e23inf - u.e1inf*v.e2 - u.e1inf*v.e2nilinf - u.e1nilinf*v.e2inf - u.e2*v.e1inf + u.e23*v.e13inf + u.e23inf*v.e13 + u.e23inf*v.e13nilinf - u.e23nilinf*v.e13inf + u.e2inf*v.e1 + u.e2inf*v.e1nilinf + u.e2nilinf*v.e1inf + u.e3*v.e123inf - u.e3inf*v.e123 - u.e3inf*v.e123nilinf - u.e3nilinf*v.e123inf + u.einf*v.e12 + u.einf*v.e12nilinf - u.enilinf*v.e12inf + u.scalar*v.e12inf, u.e1*v.e3nil + u.e12*v.e23nil - u.e123*v.e2nil + u.e123nil*v.e2 - u.e123nil*v.e2nilinf - u.e123nilinf*v.e2nil + u.e12nil*v.e23 - u.e12nil*v.e23nilinf + u.e12nilinf*v.e23nil + u.e13*v.enil - u.e13nil*v.enilinf + u.e13nil*v.scalar + u.e13nilinf*v.enil - u.e1nil*v.e3 + u.e1nil*v.e3nilinf + u.e1nilinf*v.e3nil - u.e2*v.e123nil - u.e23*v.e12nil - u.e23nil*v.e12 + u.e23nil*v.e12nilinf - u.e23nilinf*v.e12nil + u.e2nil*v.e123 - u.e2nil*v.e123nilinf - u.e2nilinf*v.e123nil - u.e3*v.e1nil + u.e3nil*v.e1 - u.e3nil*v.e1nilinf - u.e3nilinf*v.e1nil + u.enil*v.e13 - u.enil*v.e13nilinf + u.enilinf*v.e13nil + u.scalar*v.e13nil, u.e1*v.e3inf + u.e12*v.e23inf - u.e123*v.e2inf + u.e123inf*v.e2 + u.e123inf*v.e2nilinf + u.e123nilinf*v.e2inf + u.e12inf*v.e23 + u.e12inf*v.e23nilinf - u.e12nilinf*v.e23inf + u.e13*v.einf + u.e13inf*v.enilinf + u.e13inf*v.scalar - u.e13nilinf*v.einf - u.e1inf*v.e3 - u.e1inf*v.e3nilinf - u.e1nilinf*v.e3inf - u.e2*v.e123inf - u.e23*v.e12inf - u.e23inf*v.e12 - u.e23inf*v.e12nilinf + u.e23nilinf*v.e12inf + u.e2inf*v.e123 + u.e2inf*v.e123nilinf + u.e2nilinf*v.e123inf - u.e3*v.e1inf + u.e3inf*v.e1 + u.e3inf*v.e1nilinf + u.e3nilinf*v.e1inf + u.einf*v.e13 + u.einf*v.e13nilinf - u.enilinf*v.e13inf + u.scalar*v.e13inf, u.e1*v.enilinf + u.e12*v.e2nilinf - u.e123*v.e23nilinf + u.e123inf*v.e23nil - u.e123nil*v.e23inf - u.e123nilinf*v.e23 + u.e12inf*v.e2nil - u.e12nil*v.e2inf + u.e12nilinf*v.e2 + u.e13*v.e3nilinf + u.e13inf*v.e3nil - u.e13nil*v.e3inf + u.e13nilinf*v.e3 - u.e1inf*v.enil + u.e1nil*v.einf + u.e1nilinf*v.scalar - u.e2*v.e12nilinf - u.e23*v.e123nilinf - u.e23inf*v.e123nil + u.e23nil*v.e123inf - u.e23nilinf*v.e123 + u.e2inf*v.e12nil - u.e2nil*v.e12inf - u.e2nilinf*v.e12 - u.e3*v.e13nilinf + u.e3inf*v.e13nil - u.e3nil*v.e13inf - u.e3nilinf*v.e13 + u.einf*v.e1nil - u.enil*v.e1inf + u.enilinf*v.e1 + u.scalar*v.e1nilinf, u.e1*v.e123nil - u.e12*v.e13nil + u.e123*v.e1nil - u.e123nil*v.e1 + u.e123nil*v.e1nilinf + u.e123nilinf*v.e1nil - u.e12nil*v.e13 + u.e12nil*v.e13nilinf - u.e12nilinf*v.e13nil + u.e13*v.e12nil + u.e13nil*v.e12 - u.e13nil*v.e12nilinf + u.e13nilinf*v.e12nil - u.e1nil*v.e123 + u.e1nil*v.e123nilinf + u.e1nilinf*v.e123nil + u.e2*v.e3nil + u.e23*v.enil - u.e23nil*v.enilinf + u.e23nil*v.scalar + u.e23nilinf*v.enil - u.e2nil*v.e3 + u.e2nil*v.e3nilinf + u.e2nilinf*v.e3nil - u.e3*v.e2nil + u.e3nil*v.e2 - u.e3nil*v.e2nilinf - u.e3nilinf*v.e2nil + u.enil*v.e23 - u.enil*v.e23nilinf + u.enilinf*v.e23nil + u.scalar*v.e23nil, u.e1*v.e123inf - u.e12*v.e13inf + u.e123*v.e1inf - u.e123inf*v.e1 - u.e123inf*v.e1nilinf - u.e123nilinf*v.e1inf - u.e12inf*v.e13 - u.e12inf*v.e13nilinf + u.e12nilinf*v.e13inf + u.e13*v.e12inf + u.e13inf*v.e12 + u.e13inf*v.e12nilinf - u.e13nilinf*v.e12inf - u.e1inf*v.e123 - u.e1inf*v.e123nilinf - u.e1nilinf*v.e123inf + u.e2*v.e3inf + u.e23*v.einf + u.e23inf*v.enilinf + u.e23inf*v.scalar - u.e23nilinf*v.einf - u.e2inf*v.e3 - u.e2inf*v.e3nilinf - u.e2nilinf*v.e3inf - u.e3*v.e2inf + u.e3inf*v.e2 + u.e3inf*v.e2nilinf + u.e3nilinf*v.e2inf + u.einf*v.e23 + u.einf*v.e23nilinf - u.enilinf*v.e23inf + u.scalar*v.e23inf, u.e1*v.e12nilinf - u.e12*v.e1nilinf + u.e123*v.e13nilinf - u.e123inf*v.e13nil + u.e123nil*v.e13inf + u.e123nilinf*v.e13 - u.e12inf*v.e1nil + u.e12nil*v.e1inf - u.e12nilinf*v.e1 + u.e13*v.e123nilinf + u.e13inf*v.e123nil - u.e13nil*v.e123inf + u.e13nilinf*v.e123 - u.e1inf*v.e12nil + u.e1nil*v.e12inf + u.e1nilinf*v.e12 + u.e2*v.enilinf + u.e23*v.e3nilinf + u.e23inf*v.e3nil - u.e23nil*v.e3inf + u.e23nilinf*v.e3 - u.e2inf*v.enil + u.e2nil*v.einf + u.e2nilinf*v.scalar - u.e3*v.e23nilinf + u.e3inf*v.e23nil - u.e3nil*v.e23inf - u.e3nilinf*v.e23 + u.einf*v.e2nil - u.enil*v.e2inf + u.enilinf*v.e2 + u.scalar*v.e2nilinf, u.e1*v.e13nilinf - u.e12*v.e123nilinf - u.e123*v.e12nilinf + u.e123inf*v.e12nil - u.e123nil*v.e12inf - u.e123nilinf*v.e12 - u.e12inf*v.e123nil + u.e12nil*v.e123inf - u.e12nilinf*v.e123 - u.e13*v.e1nilinf - u.e13inf*v.e1nil + u.e13nil*v.e1inf - u.e13nilinf*v.e1 - u.e1inf*v.e13nil + u.e1nil*v.e13inf + u.e1nilinf*v.e13 + u.e2*v.e23nilinf - u.e23*v.e2nilinf - u.e23inf*v.e2nil + u.e23nil*v.e2inf - u.e23nilinf*v.e2 - u.e2inf*v.e23nil + u.e2nil*v.e23inf + u.e2nilinf*v.e23 + u.e3*v.enilinf - u.e3inf*v.enil + u.e3nil*v.einf + u.e3nilinf*v.scalar + u.einf*v.e3nil - u.enil*v.e3inf + u.enilinf*v.e3 + u.scalar*v.e3nilinf, u.e1*v.e23nil + u.e12*v.e3nil + u.e123*v.enil - u.e123nil*v.enilinf + u.e123nil*v.scalar + u.e123nilinf*v.enil - u.e12nil*v.e3 + u.e12nil*v.e3nilinf + u.e12nilinf*v.e3nil - u.e13*v.e2nil + u.e13nil*v.e2 - u.e13nil*v.e2nilinf - u.e13nilinf*v.e2nil + u.e1nil*v.e23 - u.e1nil*v.e23nilinf + u.e1nilinf*v.e23nil - u.e2*v.e13nil + u.e23*v.e1nil - u.e23nil*v.e1 + u.e23nil*v.e1nilinf + u.e23nilinf*v.e1nil - u.e2nil*v.e13 + u.e2nil*v.e13nilinf - u.e2nilinf*v.e13nil + u.e3*v.e12nil + u.e3nil*v.e12 - u.e3nil*v.e12nilinf + u.e3nilinf*v.e12nil - u.enil*v.e123 + u.enil*v.e123nilinf + u.enilinf*v.e123nil + u.scalar*v.e123nil, u.e1*v.e23inf + u.e12*v.e3inf + u.e123*v.einf + u.e123inf*v.enilinf + u.e123inf*v.scalar - u.e123nilinf*v.einf - u.e12inf*v.e3 - u.e12inf*v.e3nilinf - u.e12nilinf*v.e3inf - u.e13*v.e2inf + u.e13inf*v.e2 + u.e13inf*v.e2nilinf + u.e13nilinf*v.e2inf + u.e1inf*v.e23 + u.e1inf*v.e23nilinf - u.e1nilinf*v.e23inf - u.e2*v.e13inf + u.e23*v.e1inf - u.e23inf*v.e1 - u.e23inf*v.e1nilinf - u.e23nilinf*v.e1inf - u.e2inf*v.e13 - u.e2inf*v.e13nilinf + u.e2nilinf*v.e13inf + u.e3*v.e12inf + u.e3inf*v.e12 + u.e3inf*v.e12nilinf - u.e3nilinf*v.e12inf - u.einf*v.e123 - u.einf*v.e123nilinf - u.enilinf*v.e123inf + u.scalar*v.e123inf, u.e1*v.e2nilinf + u.e12*v.enilinf + u.e123*v.e3nilinf + u.e123inf*v.e3nil - u.e123nil*v.e3inf + u.e123nilinf*v.e3 - u.e12inf*v.enil + u.e12nil*v.einf + u.e12nilinf*v.scalar - u.e13*v.e23nilinf + u.e13inf*v.e23nil - u.e13nil*v.e23inf - u.e13nilinf*v.e23 + u.e1inf*v.e2nil - u.e1nil*v.e2inf + u.e1nilinf*v.e2 - u.e2*v.e1nilinf + u.e23*v.e13nilinf - u.e23inf*v.e13nil + u.e23nil*v.e13inf + u.e23nilinf*v.e13 - u.e2inf*v.e1nil + u.e2nil*v.e1inf - u.e2nilinf*v.e1 + u.e3*v.e123nilinf + u.e3inf*v.e123nil - u.e3nil*v.e123inf + u.e3nilinf*v.e123 - u.einf*v.e12nil + u.enil*v.e12inf + u.enilinf*v.e12 + u.scalar*v.e12nilinf, u.e1*v.e3nilinf + u.e12*v.e23nilinf - u.e123*v.e2nilinf - u.e123inf*v.e2nil + u.e123nil*v.e2inf - u.e123nilinf*v.e2 - u.e12inf*v.e23nil + u.e12nil*v.e23inf + u.e12nilinf*v.e23 + u.e13*v.enilinf - u.e13inf*v.enil + u.e13nil*v.einf + u.e13nilinf*v.scalar + u.e1inf*v.e3nil - u.e1nil*v.e3inf + u.e1nilinf*v.e3 - u.e2*v.e123nilinf - u.e23*v.e12nilinf + u.e23inf*v.e12nil - u.e23nil*v.e12inf - u.e23nilinf*v.e12 - u.e2inf*v.e123nil + u.e2nil*v.e123inf - u.e2nilinf*v.e123 - u.e3*v.e1nilinf - u.e3inf*v.e1nil + u.e3nil*v.e1inf - u.e3nilinf*v.e1 - u.einf*v.e13nil + u.enil*v.e13inf + u.enilinf*v.e13 + u.scalar*v.e13nilinf, u.e1*v.e123nilinf - u.e12*v.e13nilinf + u.e123*v.e1nilinf + u.e123inf*v.e1nil - u.e123nil*v.e1inf + u.e123nilinf*v.e1 + u.e12inf*v.e13nil - u.e12nil*v.e13inf - u.e12nilinf*v.e13 + u.e13*v.e12nilinf - u.e13inf*v.e12nil + u.e13nil*v.e12inf + u.e13nilinf*v.e12 + u.e1inf*v.e123nil - u.e1nil*v.e123inf + u.e1nilinf*v.e123 + u.e2*v.e3nilinf + u.e23*v.enilinf - u.e23inf*v.enil + u.e23nil*v.einf + u.e23nilinf*v.scalar + u.e2inf*v.e3nil - u.e2nil*v.e3inf + u.e2nilinf*v.e3 - u.e3*v.e2nilinf - u.e3inf*v.e2nil + u.e3nil*v.e2inf - u.e3nilinf*v.e2 - u.einf*v.e23nil + u.enil*v.e23inf + u.enilinf*v.e23 + u.scalar*v.e23nilinf, u.e1*v.e23nilinf + u.e12*v.e3nilinf + u.e123*v.enilinf - u.e123inf*v.enil + u.e123nil*v.einf + u.e123nilinf*v.scalar + u.e12inf*v.e3nil - u.e12nil*v.e3inf + u.e12nilinf*v.e3 - u.e13*v.e2nilinf - u.e13inf*v.e2nil + u.e13nil*v.e2inf - u.e13nilinf*v.e2 - u.e1inf*v.e23nil + u.e1nil*v.e23inf + u.e1nilinf*v.e23 - u.e2*v.e13nilinf + u.e23*v.e1nilinf + u.e23inf*v.e1nil - u.e23nil*v.e1inf + u.e23nilinf*v.e1 + u.e2inf*v.e13nil - u.e2nil*v.e13inf - u.e2nilinf*v.e13 + u.e3*v.e12nilinf - u.e3inf*v.e12nil + u.e3nil*v.e12inf + u.e3nilinf*v.e12 + u.einf*v.e123nil - u.enil*v.e123inf + u.enilinf*v.e123 + u.scalar*v.e123nilinf);\n}\n\nCGA3 mul(int a, CGA3 x){\n    return mul(float(a), x);\n}\n\nCGA3 mul(CGA3 u, CGA3 v, CGA3 w){\n    return mul(mul(u, v), w);\n}\n\nCGA3 dual(CGA3 u){\n    return CGA3(u.e123nilinf, u.e23nilinf, -u.e13nilinf, u.e12nilinf, u.e123nil, -u.e123inf, -u.e3nilinf, u.e2nilinf, u.e23nil, -u.e23inf, -u.e1nilinf, -u.e13nil, u.e13inf, u.e12nil, -u.e12inf, u.e123, -u.enilinf, -u.e3nil, u.e3inf, u.e2nil, -u.e2inf, u.e23, -u.e1nil, u.e1inf, -u.e13, u.e12, -u.enil, u.einf, -u.e3, u.e2, -u.e1, -u.scalar);\n}\n\nCGA3 involve(CGA3 u){\n    return CGA3(u.scalar, -u.e1, -u.e2, -u.e3, -u.enil, -u.einf, u.e12, u.e13, u.e1nil, u.e1inf, u.e23, u.e2nil, u.e2inf, u.e3nil, u.e3inf, u.enilinf, -u.e123, -u.e12nil, -u.e12inf, -u.e13nil, -u.e13inf, -u.e1nilinf, -u.e23nil, -u.e23inf, -u.e2nilinf, -u.e3nilinf, u.e123nil, u.e123inf, u.e12nilinf, u.e13nilinf, u.e23nilinf, -u.e123nilinf);\n}\n\nCGA3 inner(CGA3 u, CGA3 v){\n    return CGA3(u.e1*v.e1 - u.e12*v.e12 - u.e123*v.e123 + u.e123inf*v.e123nil + u.e123nil*v.e123inf - u.e123nilinf*v.e123nilinf - u.e12inf*v.e12nil - u.e12nil*v.e12inf - u.e12nilinf*v.e12nilinf - u.e13*v.e13 - u.e13inf*v.e13nil - u.e13nil*v.e13inf - u.e13nilinf*v.e13nilinf - u.e1inf*v.e1nil - u.e1nil*v.e1inf + u.e1nilinf*v.e1nilinf + u.e2*v.e2 - u.e23*v.e23 - u.e23inf*v.e23nil - u.e23nil*v.e23inf - u.e23nilinf*v.e23nilinf - u.e2inf*v.e2nil - u.e2nil*v.e2inf + u.e2nilinf*v.e2nilinf + u.e3*v.e3 - u.e3inf*v.e3nil - u.e3nil*v.e3inf + u.e3nilinf*v.e3nilinf + u.einf*v.enil + u.enil*v.einf + u.enilinf*v.enilinf, u.e12*v.e2 - u.e123*v.e23 - u.e123inf*v.e23nil - u.e123nil*v.e23inf - u.e123nilinf*v.e23nilinf - u.e12inf*v.e2nil - u.e12nil*v.e2inf + u.e12nilinf*v.e2nilinf + u.e13*v.e3 - u.e13inf*v.e3nil - u.e13nil*v.e3inf + u.e13nilinf*v.e3nilinf + u.e1inf*v.enil + u.e1nil*v.einf + u.e1nilinf*v.enilinf - u.e2*v.e12 - u.e23*v.e123 + u.e23inf*v.e123nil + u.e23nil*v.e123inf - u.e23nilinf*v.e123nilinf - u.e2inf*v.e12nil - u.e2nil*v.e12inf - u.e2nilinf*v.e12nilinf - u.e3*v.e13 - u.e3inf*v.e13nil - u.e3nil*v.e13inf - u.e3nilinf*v.e13nilinf - u.einf*v.e1nil - u.enil*v.e1inf + u.enilinf*v.e1nilinf, u.e1*v.e12 - u.e12*v.e1 + u.e123*v.e13 + u.e123inf*v.e13nil + u.e123nil*v.e13inf + u.e123nilinf*v.e13nilinf + u.e12inf*v.e1nil + u.e12nil*v.e1inf - u.e12nilinf*v.e1nilinf + u.e13*v.e123 - u.e13inf*v.e123nil - u.e13nil*v.e123inf + u.e13nilinf*v.e123nilinf + u.e1inf*v.e12nil + u.e1nil*v.e12inf + u.e1nilinf*v.e12nilinf + u.e23*v.e3 - u.e23inf*v.e3nil - u.e23nil*v.e3inf + u.e23nilinf*v.e3nilinf + u.e2inf*v.enil + u.e2nil*v.einf + u.e2nilinf*v.enilinf - u.e3*v.e23 - u.e3inf*v.e23nil - u.e3nil*v.e23inf - u.e3nilinf*v.e23nilinf - u.einf*v.e2nil - u.enil*v.e2inf + u.enilinf*v.e2nilinf, u.e1*v.e13 - u.e12*v.e123 - u.e123*v.e12 - u.e123inf*v.e12nil - u.e123nil*v.e12inf - u.e123nilinf*v.e12nilinf + u.e12inf*v.e123nil + u.e12nil*v.e123inf - u.e12nilinf*v.e123nilinf - u.e13*v.e1 + u.e13inf*v.e1nil + u.e13nil*v.e1inf - u.e13nilinf*v.e1nilinf + u.e1inf*v.e13nil + u.e1nil*v.e13inf + u.e1nilinf*v.e13nilinf + u.e2*v.e23 - u.e23*v.e2 + u.e23inf*v.e2nil + u.e23nil*v.e2inf - u.e23nilinf*v.e2nilinf + u.e2inf*v.e23nil + u.e2nil*v.e23inf + u.e2nilinf*v.e23nilinf + u.e3inf*v.enil + u.e3nil*v.einf + u.e3nilinf*v.enilinf - u.einf*v.e3nil - u.enil*v.e3inf + u.enilinf*v.e3nilinf, u.e1*v.e1nil - u.e12*v.e12nil - u.e123*v.e123nil + u.e123nil*v.e123 - u.e123nil*v.e123nilinf - u.e123nilinf*v.e123nil - u.e12nil*v.e12 + u.e12nil*v.e12nilinf - u.e12nilinf*v.e12nil - u.e13*v.e13nil - u.e13nil*v.e13 + u.e13nil*v.e13nilinf - u.e13nilinf*v.e13nil - u.e1nil*v.e1 + u.e1nil*v.e1nilinf + u.e1nilinf*v.e1nil + u.e2*v.e2nil - u.e23*v.e23nil - u.e23nil*v.e23 + u.e23nil*v.e23nilinf - u.e23nilinf*v.e23nil - u.e2nil*v.e2 + u.e2nil*v.e2nilinf + u.e2nilinf*v.e2nil + u.e3*v.e3nil - u.e3nil*v.e3 + u.e3nil*v.e3nilinf + u.e3nilinf*v.e3nil - u.enil*v.enilinf + u.enilinf*v.enil, u.e1*v.e1inf - u.e12*v.e12inf - u.e123*v.e123inf + u.e123inf*v.e123 + u.e123inf*v.e123nilinf + u.e123nilinf*v.e123inf - u.e12inf*v.e12 - u.e12inf*v.e12nilinf + u.e12nilinf*v.e12inf - u.e13*v.e13inf - u.e13inf*v.e13 - u.e13inf*v.e13nilinf + u.e13nilinf*v.e13inf - u.e1inf*v.e1 - u.e1inf*v.e1nilinf - u.e1nilinf*v.e1inf + u.e2*v.e2inf - u.e23*v.e23inf - u.e23inf*v.e23 - u.e23inf*v.e23nilinf + u.e23nilinf*v.e23inf - u.e2inf*v.e2 - u.e2inf*v.e2nilinf - u.e2nilinf*v.e2inf + u.e3*v.e3inf - u.e3inf*v.e3 - u.e3inf*v.e3nilinf - u.e3nilinf*v.e3inf + u.einf*v.enilinf - u.enilinf*v.einf, u.e123*v.e3 - u.e123inf*v.e3nil - u.e123nil*v.e3inf + u.e123nilinf*v.e3nilinf + u.e12inf*v.enil + u.e12nil*v.einf + u.e12nilinf*v.enilinf + u.e3*v.e123 - u.e3inf*v.e123nil - u.e3nil*v.e123inf + u.e3nilinf*v.e123nilinf + u.einf*v.e12nil + u.enil*v.e12inf + u.enilinf*v.e12nilinf, -u.e123*v.e2 + u.e123inf*v.e2nil + u.e123nil*v.e2inf - u.e123nilinf*v.e2nilinf + u.e13inf*v.enil + u.e13nil*v.einf + u.e13nilinf*v.enilinf - u.e2*v.e123 + u.e2inf*v.e123nil + u.e2nil*v.e123inf - u.e2nilinf*v.e123nilinf + u.einf*v.e13nil + u.enil*v.e13inf + u.enilinf*v.e13nilinf, -u.e123nil*v.e23 - u.e123nilinf*v.e23nil - u.e12nil*v.e2 + u.e12nilinf*v.e2nil - u.e13nil*v.e3 + u.e13nilinf*v.e3nil + u.e1nilinf*v.enil - u.e2*v.e12nil - u.e23*v.e123nil - u.e23nil*v.e123nilinf + u.e2nil*v.e12nilinf - u.e3*v.e13nil + u.e3nil*v.e13nilinf + u.enil*v.e1nilinf, -u.e123inf*v.e23 + u.e123nilinf*v.e23inf - u.e12inf*v.e2 - u.e12nilinf*v.e2inf - u.e13inf*v.e3 - u.e13nilinf*v.e3inf - u.e1nilinf*v.einf - u.e2*v.e12inf - u.e23*v.e123inf + u.e23inf*v.e123nilinf - u.e2inf*v.e12nilinf - u.e3*v.e13inf - u.e3inf*v.e13nilinf - u.einf*v.e1nilinf, u.e1*v.e123 + u.e123*v.e1 - u.e123inf*v.e1nil - u.e123nil*v.e1inf + u.e123nilinf*v.e1nilinf - u.e1inf*v.e123nil - u.e1nil*v.e123inf + u.e1nilinf*v.e123nilinf + u.e23inf*v.enil + u.e23nil*v.einf + u.e23nilinf*v.enilinf + u.einf*v.e23nil + u.enil*v.e23inf + u.enilinf*v.e23nilinf, u.e1*v.e12nil + u.e123nil*v.e13 + u.e123nilinf*v.e13nil + u.e12nil*v.e1 - u.e12nilinf*v.e1nil + u.e13*v.e123nil + u.e13nil*v.e123nilinf - u.e1nil*v.e12nilinf - u.e23nil*v.e3 + u.e23nilinf*v.e3nil + u.e2nilinf*v.enil - u.e3*v.e23nil + u.e3nil*v.e23nilinf + u.enil*v.e2nilinf, u.e1*v.e12inf + u.e123inf*v.e13 - u.e123nilinf*v.e13inf + u.e12inf*v.e1 + u.e12nilinf*v.e1inf + u.e13*v.e123inf - u.e13inf*v.e123nilinf + u.e1inf*v.e12nilinf - u.e23inf*v.e3 - u.e23nilinf*v.e3inf - u.e2nilinf*v.einf - u.e3*v.e23inf - u.e3inf*v.e23nilinf - u.einf*v.e2nilinf, u.e1*v.e13nil - u.e12*v.e123nil - u.e123nil*v.e12 - u.e123nilinf*v.e12nil - u.e12nil*v.e123nilinf + u.e13nil*v.e1 - u.e13nilinf*v.e1nil - u.e1nil*v.e13nilinf + u.e2*v.e23nil + u.e23nil*v.e2 - u.e23nilinf*v.e2nil - u.e2nil*v.e23nilinf + u.e3nilinf*v.enil + u.enil*v.e3nilinf, u.e1*v.e13inf - u.e12*v.e123inf - u.e123inf*v.e12 + u.e123nilinf*v.e12inf + u.e12inf*v.e123nilinf + u.e13inf*v.e1 + u.e13nilinf*v.e1inf + u.e1inf*v.e13nilinf + u.e2*v.e23inf + u.e23inf*v.e2 + u.e23nilinf*v.e2inf + u.e2inf*v.e23nilinf - u.e3nilinf*v.einf - u.einf*v.e3nilinf, u.e1*v.e1nilinf - u.e12*v.e12nilinf - u.e123*v.e123nilinf - u.e123nilinf*v.e123 - u.e12nilinf*v.e12 - u.e13*v.e13nilinf - u.e13nilinf*v.e13 + u.e1nilinf*v.e1 + u.e2*v.e2nilinf - u.e23*v.e23nilinf - u.e23nilinf*v.e23 + u.e2nilinf*v.e2 + u.e3*v.e3nilinf + u.e3nilinf*v.e3, u.e123inf*v.enil + u.e123nil*v.einf + u.e123nilinf*v.enilinf - u.einf*v.e123nil - u.enil*v.e123inf + u.enilinf*v.e123nilinf, -u.e123nil*v.e3 + u.e123nilinf*v.e3nil + u.e12nilinf*v.enil + u.e3*v.e123nil + u.e3nil*v.e123nilinf - u.enil*v.e12nilinf, -u.e123inf*v.e3 - u.e123nilinf*v.e3inf - u.e12nilinf*v.einf + u.e3*v.e123inf - u.e3inf*v.e123nilinf + u.einf*v.e12nilinf, u.e123nil*v.e2 - u.e123nilinf*v.e2nil + u.e13nilinf*v.enil - u.e2*v.e123nil - u.e2nil*v.e123nilinf - u.enil*v.e13nilinf, u.e123inf*v.e2 + u.e123nilinf*v.e2inf - u.e13nilinf*v.einf - u.e2*v.e123inf + u.e2inf*v.e123nilinf + u.einf*v.e13nilinf, -u.e123nilinf*v.e23 + u.e12nilinf*v.e2 + u.e13nilinf*v.e3 - u.e2*v.e12nilinf - u.e23*v.e123nilinf - u.e3*v.e13nilinf, u.e1*v.e123nil - u.e123nil*v.e1 + u.e123nilinf*v.e1nil + u.e1nil*v.e123nilinf + u.e23nilinf*v.enil - u.enil*v.e23nilinf, u.e1*v.e123inf - u.e123inf*v.e1 - u.e123nilinf*v.e1inf - u.e1inf*v.e123nilinf - u.e23nilinf*v.einf + u.einf*v.e23nilinf, u.e1*v.e12nilinf + u.e123nilinf*v.e13 - u.e12nilinf*v.e1 + u.e13*v.e123nilinf + u.e23nilinf*v.e3 - u.e3*v.e23nilinf, u.e1*v.e13nilinf - u.e12*v.e123nilinf - u.e123nilinf*v.e12 - u.e13nilinf*v.e1 + u.e2*v.e23nilinf - u.e23nilinf*v.e2, u.e123nilinf*v.enil + u.enil*v.e123nilinf, -u.e123nilinf*v.einf - u.einf*v.e123nilinf, u.e123nilinf*v.e3 + u.e3*v.e123nilinf, -u.e123nilinf*v.e2 - u.e2*v.e123nilinf, u.e1*v.e123nilinf + u.e123nilinf*v.e1, 0.0);\n}\n\nCGA3 lcontract(CGA3 u, CGA3 v){\n    return CGA3(u.e1*v.e1 - u.e12*v.e12 - u.e123*v.e123 + u.e123inf*v.e123nil + u.e123nil*v.e123inf - u.e123nilinf*v.e123nilinf - u.e12inf*v.e12nil - u.e12nil*v.e12inf - u.e12nilinf*v.e12nilinf - u.e13*v.e13 - u.e13inf*v.e13nil - u.e13nil*v.e13inf - u.e13nilinf*v.e13nilinf - u.e1inf*v.e1nil - u.e1nil*v.e1inf + u.e1nilinf*v.e1nilinf + u.e2*v.e2 - u.e23*v.e23 - u.e23inf*v.e23nil - u.e23nil*v.e23inf - u.e23nilinf*v.e23nilinf - u.e2inf*v.e2nil - u.e2nil*v.e2inf + u.e2nilinf*v.e2nilinf + u.e3*v.e3 - u.e3inf*v.e3nil - u.e3nil*v.e3inf + u.e3nilinf*v.e3nilinf + u.einf*v.enil + u.enil*v.einf + u.enilinf*v.enilinf + u.scalar*v.scalar, -u.e2*v.e12 - u.e23*v.e123 + u.e23inf*v.e123nil + u.e23nil*v.e123inf - u.e23nilinf*v.e123nilinf - u.e2inf*v.e12nil - u.e2nil*v.e12inf - u.e2nilinf*v.e12nilinf - u.e3*v.e13 - u.e3inf*v.e13nil - u.e3nil*v.e13inf - u.e3nilinf*v.e13nilinf - u.einf*v.e1nil - u.enil*v.e1inf + u.enilinf*v.e1nilinf + u.scalar*v.e1, u.e1*v.e12 + u.e13*v.e123 - u.e13inf*v.e123nil - u.e13nil*v.e123inf + u.e13nilinf*v.e123nilinf + u.e1inf*v.e12nil + u.e1nil*v.e12inf + u.e1nilinf*v.e12nilinf - u.e3*v.e23 - u.e3inf*v.e23nil - u.e3nil*v.e23inf - u.e3nilinf*v.e23nilinf - u.einf*v.e2nil - u.enil*v.e2inf + u.enilinf*v.e2nilinf + u.scalar*v.e2, u.e1*v.e13 - u.e12*v.e123 + u.e12inf*v.e123nil + u.e12nil*v.e123inf - u.e12nilinf*v.e123nilinf + u.e1inf*v.e13nil + u.e1nil*v.e13inf + u.e1nilinf*v.e13nilinf + u.e2*v.e23 + u.e2inf*v.e23nil + u.e2nil*v.e23inf + u.e2nilinf*v.e23nilinf - u.einf*v.e3nil - u.enil*v.e3inf + u.enilinf*v.e3nilinf + u.scalar*v.e3, u.e1*v.e1nil - u.e12*v.e12nil - u.e123*v.e123nil - u.e123nil*v.e123nilinf + u.e12nil*v.e12nilinf - u.e13*v.e13nil + u.e13nil*v.e13nilinf + u.e1nil*v.e1nilinf + u.e2*v.e2nil - u.e23*v.e23nil + u.e23nil*v.e23nilinf + u.e2nil*v.e2nilinf + u.e3*v.e3nil + u.e3nil*v.e3nilinf - u.enil*v.enilinf + u.scalar*v.enil, u.e1*v.e1inf - u.e12*v.e12inf - u.e123*v.e123inf + u.e123inf*v.e123nilinf - u.e12inf*v.e12nilinf - u.e13*v.e13inf - u.e13inf*v.e13nilinf - u.e1inf*v.e1nilinf + u.e2*v.e2inf - u.e23*v.e23inf - u.e23inf*v.e23nilinf - u.e2inf*v.e2nilinf + u.e3*v.e3inf - u.e3inf*v.e3nilinf + u.einf*v.enilinf + u.scalar*v.einf, u.e3*v.e123 - u.e3inf*v.e123nil - u.e3nil*v.e123inf + u.e3nilinf*v.e123nilinf + u.einf*v.e12nil + u.enil*v.e12inf + u.enilinf*v.e12nilinf + u.scalar*v.e12, -u.e2*v.e123 + u.e2inf*v.e123nil + u.e2nil*v.e123inf - u.e2nilinf*v.e123nilinf + u.einf*v.e13nil + u.enil*v.e13inf + u.enilinf*v.e13nilinf + u.scalar*v.e13, -u.e2*v.e12nil - u.e23*v.e123nil - u.e23nil*v.e123nilinf + u.e2nil*v.e12nilinf - u.e3*v.e13nil + u.e3nil*v.e13nilinf + u.enil*v.e1nilinf + u.scalar*v.e1nil, -u.e2*v.e12inf - u.e23*v.e123inf + u.e23inf*v.e123nilinf - u.e2inf*v.e12nilinf - u.e3*v.e13inf - u.e3inf*v.e13nilinf - u.einf*v.e1nilinf + u.scalar*v.e1inf, u.e1*v.e123 - u.e1inf*v.e123nil - u.e1nil*v.e123inf + u.e1nilinf*v.e123nilinf + u.einf*v.e23nil + u.enil*v.e23inf + u.enilinf*v.e23nilinf + u.scalar*v.e23, u.e1*v.e12nil + u.e13*v.e123nil + u.e13nil*v.e123nilinf - u.e1nil*v.e12nilinf - u.e3*v.e23nil + u.e3nil*v.e23nilinf + u.enil*v.e2nilinf + u.scalar*v.e2nil, u.e1*v.e12inf + u.e13*v.e123inf - u.e13inf*v.e123nilinf + u.e1inf*v.e12nilinf - u.e3*v.e23inf - u.e3inf*v.e23nilinf - u.einf*v.e2nilinf + u.scalar*v.e2inf, u.e1*v.e13nil - u.e12*v.e123nil - u.e12nil*v.e123nilinf - u.e1nil*v.e13nilinf + u.e2*v.e23nil - u.e2nil*v.e23nilinf + u.enil*v.e3nilinf + u.scalar*v.e3nil, u.e1*v.e13inf - u.e12*v.e123inf + u.e12inf*v.e123nilinf + u.e1inf*v.e13nilinf + u.e2*v.e23inf + u.e2inf*v.e23nilinf - u.einf*v.e3nilinf + u.scalar*v.e3inf, u.e1*v.e1nilinf - u.e12*v.e12nilinf - u.e123*v.e123nilinf - u.e13*v.e13nilinf + u.e2*v.e2nilinf - u.e23*v.e23nilinf + u.e3*v.e3nilinf + u.scalar*v.enilinf, -u.einf*v.e123nil - u.enil*v.e123inf + u.enilinf*v.e123nilinf + u.scalar*v.e123, u.e3*v.e123nil + u.e3nil*v.e123nilinf - u.enil*v.e12nilinf + u.scalar*v.e12nil, u.e3*v.e123inf - u.e3inf*v.e123nilinf + u.einf*v.e12nilinf + u.scalar*v.e12inf, -u.e2*v.e123nil - u.e2nil*v.e123nilinf - u.enil*v.e13nilinf + u.scalar*v.e13nil, -u.e2*v.e123inf + u.e2inf*v.e123nilinf + u.einf*v.e13nilinf + u.scalar*v.e13inf, -u.e2*v.e12nilinf - u.e23*v.e123nilinf - u.e3*v.e13nilinf + u.scalar*v.e1nilinf, u.e1*v.e123nil + u.e1nil*v.e123nilinf - u.enil*v.e23nilinf + u.scalar*v.e23nil, u.e1*v.e123inf - u.e1inf*v.e123nilinf + u.einf*v.e23nilinf + u.scalar*v.e23inf, u.e1*v.e12nilinf + u.e13*v.e123nilinf - u.e3*v.e23nilinf + u.scalar*v.e2nilinf, u.e1*v.e13nilinf - u.e12*v.e123nilinf + u.e2*v.e23nilinf + u.scalar*v.e3nilinf, u.enil*v.e123nilinf + u.scalar*v.e123nil, -u.einf*v.e123nilinf + u.scalar*v.e123inf, u.e3*v.e123nilinf + u.scalar*v.e12nilinf, -u.e2*v.e123nilinf + u.scalar*v.e13nilinf, u.e1*v.e123nilinf + u.scalar*v.e23nilinf, u.scalar*v.e123nilinf);\n}\n\nCGA3 outer(CGA3 u, CGA3 v){\n    return CGA3(u.scalar*v.scalar, u.e1*v.scalar + u.scalar*v.e1, u.e2*v.scalar + u.scalar*v.e2, u.e3*v.scalar + u.scalar*v.e3, u.enil*v.scalar + u.scalar*v.enil, u.einf*v.scalar + u.scalar*v.einf, u.e1*v.e2 + u.e12*v.scalar - u.e2*v.e1 + u.scalar*v.e12, u.e1*v.e3 + u.e13*v.scalar - u.e3*v.e1 + u.scalar*v.e13, u.e1*v.enil + u.e1nil*v.scalar - u.enil*v.e1 + u.scalar*v.e1nil, u.e1*v.einf + u.e1inf*v.scalar - u.einf*v.e1 + u.scalar*v.e1inf, u.e2*v.e3 + u.e23*v.scalar - u.e3*v.e2 + u.scalar*v.e23, u.e2*v.enil + u.e2nil*v.scalar - u.enil*v.e2 + u.scalar*v.e2nil, u.e2*v.einf + u.e2inf*v.scalar - u.einf*v.e2 + u.scalar*v.e2inf, u.e3*v.enil + u.e3nil*v.scalar - u.enil*v.e3 + u.scalar*v.e3nil, u.e3*v.einf + u.e3inf*v.scalar - u.einf*v.e3 + u.scalar*v.e3inf, -u.einf*v.enil + u.enil*v.einf + u.enilinf*v.scalar + u.scalar*v.enilinf, u.e1*v.e23 + u.e12*v.e3 + u.e123*v.scalar - u.e13*v.e2 - u.e2*v.e13 + u.e23*v.e1 + u.e3*v.e12 + u.scalar*v.e123, u.e1*v.e2nil + u.e12*v.enil + u.e12nil*v.scalar - u.e1nil*v.e2 - u.e2*v.e1nil + u.e2nil*v.e1 + u.enil*v.e12 + u.scalar*v.e12nil, u.e1*v.e2inf + u.e12*v.einf + u.e12inf*v.scalar - u.e1inf*v.e2 - u.e2*v.e1inf + u.e2inf*v.e1 + u.einf*v.e12 + u.scalar*v.e12inf, u.e1*v.e3nil + u.e13*v.enil + u.e13nil*v.scalar - u.e1nil*v.e3 - u.e3*v.e1nil + u.e3nil*v.e1 + u.enil*v.e13 + u.scalar*v.e13nil, u.e1*v.e3inf + u.e13*v.einf + u.e13inf*v.scalar - u.e1inf*v.e3 - u.e3*v.e1inf + u.e3inf*v.e1 + u.einf*v.e13 + u.scalar*v.e13inf, u.e1*v.enilinf - u.e1inf*v.enil + u.e1nil*v.einf + u.e1nilinf*v.scalar + u.einf*v.e1nil - u.enil*v.e1inf + u.enilinf*v.e1 + u.scalar*v.e1nilinf, u.e2*v.e3nil + u.e23*v.enil + u.e23nil*v.scalar - u.e2nil*v.e3 - u.e3*v.e2nil + u.e3nil*v.e2 + u.enil*v.e23 + u.scalar*v.e23nil, u.e2*v.e3inf + u.e23*v.einf + u.e23inf*v.scalar - u.e2inf*v.e3 - u.e3*v.e2inf + u.e3inf*v.e2 + u.einf*v.e23 + u.scalar*v.e23inf, u.e2*v.enilinf - u.e2inf*v.enil + u.e2nil*v.einf + u.e2nilinf*v.scalar + u.einf*v.e2nil - u.enil*v.e2inf + u.enilinf*v.e2 + u.scalar*v.e2nilinf, u.e3*v.enilinf - u.e3inf*v.enil + u.e3nil*v.einf + u.e3nilinf*v.scalar + u.einf*v.e3nil - u.enil*v.e3inf + u.enilinf*v.e3 + u.scalar*v.e3nilinf, u.e1*v.e23nil + u.e12*v.e3nil + u.e123*v.enil + u.e123nil*v.scalar - u.e12nil*v.e3 - u.e13*v.e2nil + u.e13nil*v.e2 + u.e1nil*v.e23 - u.e2*v.e13nil + u.e23*v.e1nil - u.e23nil*v.e1 - u.e2nil*v.e13 + u.e3*v.e12nil + u.e3nil*v.e12 - u.enil*v.e123 + u.scalar*v.e123nil, u.e1*v.e23inf + u.e12*v.e3inf + u.e123*v.einf + u.e123inf*v.scalar - u.e12inf*v.e3 - u.e13*v.e2inf + u.e13inf*v.e2 + u.e1inf*v.e23 - u.e2*v.e13inf + u.e23*v.e1inf - u.e23inf*v.e1 - u.e2inf*v.e13 + u.e3*v.e12inf + u.e3inf*v.e12 - u.einf*v.e123 + u.scalar*v.e123inf, u.e1*v.e2nilinf + u.e12*v.enilinf - u.e12inf*v.enil + u.e12nil*v.einf + u.e12nilinf*v.scalar + u.e1inf*v.e2nil - u.e1nil*v.e2inf + u.e1nilinf*v.e2 - u.e2*v.e1nilinf - u.e2inf*v.e1nil + u.e2nil*v.e1inf - u.e2nilinf*v.e1 - u.einf*v.e12nil + u.enil*v.e12inf + u.enilinf*v.e12 + u.scalar*v.e12nilinf, u.e1*v.e3nilinf + u.e13*v.enilinf - u.e13inf*v.enil + u.e13nil*v.einf + u.e13nilinf*v.scalar + u.e1inf*v.e3nil - u.e1nil*v.e3inf + u.e1nilinf*v.e3 - u.e3*v.e1nilinf - u.e3inf*v.e1nil + u.e3nil*v.e1inf - u.e3nilinf*v.e1 - u.einf*v.e13nil + u.enil*v.e13inf + u.enilinf*v.e13 + u.scalar*v.e13nilinf, u.e2*v.e3nilinf + u.e23*v.enilinf - u.e23inf*v.enil + u.e23nil*v.einf + u.e23nilinf*v.scalar + u.e2inf*v.e3nil - u.e2nil*v.e3inf + u.e2nilinf*v.e3 - u.e3*v.e2nilinf - u.e3inf*v.e2nil + u.e3nil*v.e2inf - u.e3nilinf*v.e2 - u.einf*v.e23nil + u.enil*v.e23inf + u.enilinf*v.e23 + u.scalar*v.e23nilinf, u.e1*v.e23nilinf + u.e12*v.e3nilinf + u.e123*v.enilinf - u.e123inf*v.enil + u.e123nil*v.einf + u.e123nilinf*v.scalar + u.e12inf*v.e3nil - u.e12nil*v.e3inf + u.e12nilinf*v.e3 - u.e13*v.e2nilinf - u.e13inf*v.e2nil + u.e13nil*v.e2inf - u.e13nilinf*v.e2 - u.e1inf*v.e23nil + u.e1nil*v.e23inf + u.e1nilinf*v.e23 - u.e2*v.e13nilinf + u.e23*v.e1nilinf + u.e23inf*v.e1nil - u.e23nil*v.e1inf + u.e23nilinf*v.e1 + u.e2inf*v.e13nil - u.e2nil*v.e13inf - u.e2nilinf*v.e13 + u.e3*v.e12nilinf - u.e3inf*v.e12nil + u.e3nil*v.e12inf + u.e3nilinf*v.e12 + u.einf*v.e123nil - u.enil*v.e123inf + u.enilinf*v.e123 + u.scalar*v.e123nilinf);\n}\n\nCGA3 I(){\n    return CGA3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);\n}\n\nCGA3 rcontract(CGA3 u, CGA3 v){\n    return CGA3(u.e1*v.e1 - u.e12*v.e12 - u.e123*v.e123 + u.e123inf*v.e123nil + u.e123nil*v.e123inf - u.e123nilinf*v.e123nilinf - u.e12inf*v.e12nil - u.e12nil*v.e12inf - u.e12nilinf*v.e12nilinf - u.e13*v.e13 - u.e13inf*v.e13nil - u.e13nil*v.e13inf - u.e13nilinf*v.e13nilinf - u.e1inf*v.e1nil - u.e1nil*v.e1inf + u.e1nilinf*v.e1nilinf + u.e2*v.e2 - u.e23*v.e23 - u.e23inf*v.e23nil - u.e23nil*v.e23inf - u.e23nilinf*v.e23nilinf - u.e2inf*v.e2nil - u.e2nil*v.e2inf + u.e2nilinf*v.e2nilinf + u.e3*v.e3 - u.e3inf*v.e3nil - u.e3nil*v.e3inf + u.e3nilinf*v.e3nilinf + u.einf*v.enil + u.enil*v.einf + u.enilinf*v.enilinf + u.scalar*v.scalar, u.e1*v.scalar + u.e12*v.e2 - u.e123*v.e23 - u.e123inf*v.e23nil - u.e123nil*v.e23inf - u.e123nilinf*v.e23nilinf - u.e12inf*v.e2nil - u.e12nil*v.e2inf + u.e12nilinf*v.e2nilinf + u.e13*v.e3 - u.e13inf*v.e3nil - u.e13nil*v.e3inf + u.e13nilinf*v.e3nilinf + u.e1inf*v.enil + u.e1nil*v.einf + u.e1nilinf*v.enilinf, -u.e12*v.e1 + u.e123*v.e13 + u.e123inf*v.e13nil + u.e123nil*v.e13inf + u.e123nilinf*v.e13nilinf + u.e12inf*v.e1nil + u.e12nil*v.e1inf - u.e12nilinf*v.e1nilinf + u.e2*v.scalar + u.e23*v.e3 - u.e23inf*v.e3nil - u.e23nil*v.e3inf + u.e23nilinf*v.e3nilinf + u.e2inf*v.enil + u.e2nil*v.einf + u.e2nilinf*v.enilinf, -u.e123*v.e12 - u.e123inf*v.e12nil - u.e123nil*v.e12inf - u.e123nilinf*v.e12nilinf - u.e13*v.e1 + u.e13inf*v.e1nil + u.e13nil*v.e1inf - u.e13nilinf*v.e1nilinf - u.e23*v.e2 + u.e23inf*v.e2nil + u.e23nil*v.e2inf - u.e23nilinf*v.e2nilinf + u.e3*v.scalar + u.e3inf*v.enil + u.e3nil*v.einf + u.e3nilinf*v.enilinf, u.e123nil*v.e123 - u.e123nilinf*v.e123nil - u.e12nil*v.e12 - u.e12nilinf*v.e12nil - u.e13nil*v.e13 - u.e13nilinf*v.e13nil - u.e1nil*v.e1 + u.e1nilinf*v.e1nil - u.e23nil*v.e23 - u.e23nilinf*v.e23nil - u.e2nil*v.e2 + u.e2nilinf*v.e2nil - u.e3nil*v.e3 + u.e3nilinf*v.e3nil + u.enil*v.scalar + u.enilinf*v.enil, u.e123inf*v.e123 + u.e123nilinf*v.e123inf - u.e12inf*v.e12 + u.e12nilinf*v.e12inf - u.e13inf*v.e13 + u.e13nilinf*v.e13inf - u.e1inf*v.e1 - u.e1nilinf*v.e1inf - u.e23inf*v.e23 + u.e23nilinf*v.e23inf - u.e2inf*v.e2 - u.e2nilinf*v.e2inf - u.e3inf*v.e3 - u.e3nilinf*v.e3inf + u.einf*v.scalar - u.enilinf*v.einf, u.e12*v.scalar + u.e123*v.e3 - u.e123inf*v.e3nil - u.e123nil*v.e3inf + u.e123nilinf*v.e3nilinf + u.e12inf*v.enil + u.e12nil*v.einf + u.e12nilinf*v.enilinf, -u.e123*v.e2 + u.e123inf*v.e2nil + u.e123nil*v.e2inf - u.e123nilinf*v.e2nilinf + u.e13*v.scalar + u.e13inf*v.enil + u.e13nil*v.einf + u.e13nilinf*v.enilinf, -u.e123nil*v.e23 - u.e123nilinf*v.e23nil - u.e12nil*v.e2 + u.e12nilinf*v.e2nil - u.e13nil*v.e3 + u.e13nilinf*v.e3nil + u.e1nil*v.scalar + u.e1nilinf*v.enil, -u.e123inf*v.e23 + u.e123nilinf*v.e23inf - u.e12inf*v.e2 - u.e12nilinf*v.e2inf - u.e13inf*v.e3 - u.e13nilinf*v.e3inf + u.e1inf*v.scalar - u.e1nilinf*v.einf, u.e123*v.e1 - u.e123inf*v.e1nil - u.e123nil*v.e1inf + u.e123nilinf*v.e1nilinf + u.e23*v.scalar + u.e23inf*v.enil + u.e23nil*v.einf + u.e23nilinf*v.enilinf, u.e123nil*v.e13 + u.e123nilinf*v.e13nil + u.e12nil*v.e1 - u.e12nilinf*v.e1nil - u.e23nil*v.e3 + u.e23nilinf*v.e3nil + u.e2nil*v.scalar + u.e2nilinf*v.enil, u.e123inf*v.e13 - u.e123nilinf*v.e13inf + u.e12inf*v.e1 + u.e12nilinf*v.e1inf - u.e23inf*v.e3 - u.e23nilinf*v.e3inf + u.e2inf*v.scalar - u.e2nilinf*v.einf, -u.e123nil*v.e12 - u.e123nilinf*v.e12nil + u.e13nil*v.e1 - u.e13nilinf*v.e1nil + u.e23nil*v.e2 - u.e23nilinf*v.e2nil + u.e3nil*v.scalar + u.e3nilinf*v.enil, -u.e123inf*v.e12 + u.e123nilinf*v.e12inf + u.e13inf*v.e1 + u.e13nilinf*v.e1inf + u.e23inf*v.e2 + u.e23nilinf*v.e2inf + u.e3inf*v.scalar - u.e3nilinf*v.einf, -u.e123nilinf*v.e123 - u.e12nilinf*v.e12 - u.e13nilinf*v.e13 + u.e1nilinf*v.e1 - u.e23nilinf*v.e23 + u.e2nilinf*v.e2 + u.e3nilinf*v.e3 + u.enilinf*v.scalar, u.e123*v.scalar + u.e123inf*v.enil + u.e123nil*v.einf + u.e123nilinf*v.enilinf, -u.e123nil*v.e3 + u.e123nilinf*v.e3nil + u.e12nil*v.scalar + u.e12nilinf*v.enil, -u.e123inf*v.e3 - u.e123nilinf*v.e3inf + u.e12inf*v.scalar - u.e12nilinf*v.einf, u.e123nil*v.e2 - u.e123nilinf*v.e2nil + u.e13nil*v.scalar + u.e13nilinf*v.enil, u.e123inf*v.e2 + u.e123nilinf*v.e2inf + u.e13inf*v.scalar - u.e13nilinf*v.einf, -u.e123nilinf*v.e23 + u.e12nilinf*v.e2 + u.e13nilinf*v.e3 + u.e1nilinf*v.scalar, -u.e123nil*v.e1 + u.e123nilinf*v.e1nil + u.e23nil*v.scalar + u.e23nilinf*v.enil, -u.e123inf*v.e1 - u.e123nilinf*v.e1inf + u.e23inf*v.scalar - u.e23nilinf*v.einf, u.e123nilinf*v.e13 - u.e12nilinf*v.e1 + u.e23nilinf*v.e3 + u.e2nilinf*v.scalar, -u.e123nilinf*v.e12 - u.e13nilinf*v.e1 - u.e23nilinf*v.e2 + u.e3nilinf*v.scalar, u.e123nil*v.scalar + u.e123nilinf*v.enil, u.e123inf*v.scalar - u.e123nilinf*v.einf, u.e123nilinf*v.e3 + u.e12nilinf*v.scalar, -u.e123nilinf*v.e2 + u.e13nilinf*v.scalar, u.e123nilinf*v.e1 + u.e23nilinf*v.scalar, u.e123nilinf*v.scalar);\n}\n\nCGA3 reverse(CGA3 u){\n    return CGA3(u.scalar, u.e1, u.e2, u.e3, u.enil, u.einf, -u.e12, -u.e13, -u.e1nil, -u.e1inf, -u.e23, -u.e2nil, -u.e2inf, -u.e3nil, -u.e3inf, -u.enilinf, -u.e123, -u.e12nil, -u.e12inf, -u.e13nil, -u.e13inf, -u.e1nilinf, -u.e23nil, -u.e23inf, -u.e2nilinf, -u.e3nilinf, u.e123nil, u.e123inf, u.e12nilinf, u.e13nilinf, u.e23nilinf, u.e123nilinf);\n}\n\nCGA3 conjugate(CGA3 u){\n    return reverse(involve(u));\n}\n\nCGA3 outer(CGA3 u, CGA3 v, CGA3 w){\n    return outer(outer(u, v), w);\n}\n\nCGA3 INF(){\n    return CGA3(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n}\n\nCGA3 MNK(){\n    return CGA3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n}\n\nCGA3 NIL(){\n    return CGA3(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n}\n\nCGA3 point(CGA3 u){\n    return CGA3(-u.e12*u.e12nil - u.e123nil*u.e123nilinf - u.e13*u.e13nil + u.e1nil*u.e1nilinf - u.e23*u.e23nil + u.e2nil*u.e2nilinf + u.e3nil*u.e3nilinf + u.scalar, u.e1 - u.e123nil*u.e23 - u.e123nilinf*u.e23nil - u.e12nil*u.e2 + u.e12nilinf*u.e2nil - u.e13nil*u.e3 + u.e13nilinf*u.e3nil + u.e1nilinf*u.enil, u.e1*u.e12nil + u.e123nil*u.e13 + u.e123nilinf*u.e13nil - u.e12nilinf*u.e1nil + u.e2 - u.e23nil*u.e3 + u.e23nilinf*u.e3nil + u.e2nilinf*u.enil, u.e1*u.e13nil - u.e12*u.e123nil - u.e123nilinf*u.e12nil - u.e13nilinf*u.e1nil + u.e2*u.e23nil - u.e23nilinf*u.e2nil + u.e3 + u.e3nilinf*u.enil, u.enil + 1.0, 0.5*pow(u.e1, 2.0) - u.e1*u.e1nilinf - 0.5*pow(u.e12, 2.0) + u.e12*u.e12nilinf - 0.5*pow(u.e123, 2.0) + u.e123*u.e123nilinf + u.e123inf*u.e123nil - 0.5*pow(u.e123nilinf, 2.0) - u.e12inf*u.e12nil - 0.5*pow(u.e12nilinf, 2.0) - 0.5*pow(u.e13, 2.0) + u.e13*u.e13nilinf - u.e13inf*u.e13nil - 0.5*pow(u.e13nilinf, 2.0) - u.e1inf*u.e1nil + 0.5*pow(u.e1nilinf, 2.0) + 0.5*pow(u.e2, 2.0) - u.e2*u.e2nilinf - 0.5*pow(u.e23, 2.0) + u.e23*u.e23nilinf - u.e23inf*u.e23nil - 0.5*pow(u.e23nilinf, 2.0) - u.e2inf*u.e2nil + 0.5*pow(u.e2nilinf, 2.0) + 0.5*pow(u.e3, 2.0) - u.e3*u.e3nilinf - u.e3inf*u.e3nil + 0.5*pow(u.e3nilinf, 2.0) + u.einf*u.enil + u.einf + 0.5*pow(u.enilinf, 2.0), u.e12 + u.e123nilinf*u.e3nil, -u.e123nilinf*u.e2nil + u.e13, u.e1nil, -u.e123*u.e23 + u.e123nilinf*u.e23 - u.e123nilinf*u.e23nilinf - u.e12inf*u.e2nil - u.e12nil*u.e2inf - u.e13inf*u.e3nil - u.e13nil*u.e3inf + u.e1inf + u.e1nilinf*u.enilinf, u.e123nilinf*u.e1nil + u.e23, u.e2nil, u.e123*u.e13 - u.e123nilinf*u.e13 + u.e123nilinf*u.e13nilinf + u.e12inf*u.e1nil + u.e12nil*u.e1inf - u.e23inf*u.e3nil - u.e23nil*u.e3inf + u.e2inf + u.e2nilinf*u.enilinf, u.e3nil, -u.e12*u.e123 + u.e12*u.e123nilinf - u.e123nilinf*u.e12nilinf + u.e13inf*u.e1nil + u.e13nil*u.e1inf + u.e23inf*u.e2nil + u.e23nil*u.e2inf + u.e3inf + u.e3nilinf*u.enilinf, -u.e12*u.e12nil - u.e123nil*u.e123nilinf - u.e13*u.e13nil + u.e1nil*u.e1nilinf - u.e23*u.e23nil + u.e2nil*u.e2nilinf + u.e3nil*u.e3nilinf + u.enilinf, u.e123 + u.e123nilinf*u.enil, u.e12nil, u.e123*u.e3 - u.e123inf*u.e3nil - u.e123nil*u.e3inf - u.e123nilinf*u.e3 + u.e123nilinf*u.e3nilinf + u.e12inf*u.enil + u.e12inf + u.e12nil*u.einf + u.e12nilinf*u.enilinf, u.e13nil, -u.e123*u.e2 + u.e123inf*u.e2nil + u.e123nil*u.e2inf + u.e123nilinf*u.e2 - u.e123nilinf*u.e2nilinf + u.e13inf*u.enil + u.e13inf + u.e13nil*u.einf + u.e13nilinf*u.enilinf, -u.e123nil*u.e23 - u.e123nilinf*u.e23nil - u.e12nil*u.e2 + u.e12nilinf*u.e2nil - u.e13nil*u.e3 + u.e13nilinf*u.e3nil + u.e1nilinf*u.enil + u.e1nilinf, u.e23nil, u.e1*u.e123 - u.e1*u.e123nilinf - u.e123inf*u.e1nil - u.e123nil*u.e1inf + u.e123nilinf*u.e1nilinf + u.e23inf*u.enil + u.e23inf + u.e23nil*u.einf + u.e23nilinf*u.enilinf, u.e1*u.e12nil + u.e123nil*u.e13 + u.e123nilinf*u.e13nil - u.e12nilinf*u.e1nil - u.e23nil*u.e3 + u.e23nilinf*u.e3nil + u.e2nilinf*u.enil + u.e2nilinf, u.e1*u.e13nil - u.e12*u.e123nil - u.e123nilinf*u.e12nil - u.e13nilinf*u.e1nil + u.e2*u.e23nil - u.e23nilinf*u.e2nil + u.e3nilinf*u.enil + u.e3nilinf, u.e123nil, u.e123inf + u.e123nilinf*u.enilinf, u.e123nilinf*u.e3nil + u.e12nilinf, -u.e123nilinf*u.e2nil + u.e13nilinf, u.e123nilinf*u.e1nil + u.e23nilinf, u.e123nilinf*u.enil + u.e123nilinf);\n}\n\nCGA3 point_coords(CGA3 u){\n    return CGA3(u.scalar/u.enil, u.e1/u.enil, u.e2/u.enil, u.e3/u.enil, 1.0, u.einf/u.enil, u.e12/u.enil, u.e13/u.enil, u.e1nil/u.enil, u.e1inf/u.enil, u.e23/u.enil, u.e2nil/u.enil, u.e2inf/u.enil, u.e3nil/u.enil, u.e3inf/u.enil, u.enilinf/u.enil, u.e123/u.enil, u.e12nil/u.enil, u.e12inf/u.enil, u.e13nil/u.enil, u.e13inf/u.enil, u.e1nilinf/u.enil, u.e23nil/u.enil, u.e23inf/u.enil, u.e2nilinf/u.enil, u.e3nilinf/u.enil, u.e123nil/u.enil, u.e123inf/u.enil, u.e12nilinf/u.enil, u.e13nilinf/u.enil, u.e23nilinf/u.enil, u.e123nilinf/u.enil);\n}\n\n// injectOneBlade.glsl\n/* Inject array v at the indices for e1, e2, e3 in array u */\nvoid injectOneBladeArray(inout float u[32], float v[3]){\n    u[I_CGA3_e1] = v[0];\n    u[I_CGA3_e2] = v[1];\n    u[I_CGA3_e3] = v[2];\n}\n\n/* Inject array v into e1, e2, e3 of struct u */\nCGA3 injectOneBlade(CGA3 u, float v[3]){\n    float u_ary[32];\n    toArray(u, u_ary);\n    injectOneBladeArray(u_ary, v);\n    return fromArray(u_ary);\n}\n\n// copied from https://www.shadertoy.com/view/ttsGDM\n\n#define DEGREE 1\n\n// Kronecker delta\n#define kd(n, k) ((n == k) ? 1.0 : 0.0)\n\n// Horner-type algorithm for evaluating a Bernstein polynomial, from Farin (http://www.farinhansford.com/books/cagd/materials/allfiles.txt)\nfloat bernstein(int n, float x) {\n  int bc = 1;\n  float p = 1.0, y = 0.0;\n  float x1 = 1.0 - x;\n\n  for(int k = 0; k < DEGREE; k++) {\n    y = (y + p * float(bc) * kd(n, k)) * x1;\n    p *= x;\n    bc = (bc * (DEGREE - k)) / (k + 1);\n  }\n\n  return y + p * kd(n, DEGREE);\n}\n\n// interpolation weight for a rectangular patch of degrees d_u, d_v\n// for indices i, j evaluated at coordinates u, v\nfloat bernsteinQuad(int i, int j, float u, float v) {\n  return bernstein(i, u) * bernstein(j, v);\n}\n\n// // interpolation weight for a triangular patch of degree d for indices i,j\n// // evaluated at barycentric coordinates u,v\n// float bernsteinTriangle(int d, int i, int j, int u, int v) {\n//   (factorialOf(d) / factorialOf(d - i - j) / factorialOf(i) / factorialOf(j)) *\n//   pow(1 - u - v, d - 1 - i - j) *\n//   pow(u, i) *\n//   pow(v, j);\n// }\n\nCGA3 pointWeight(CGA3 point, CGA3 weight) {\n  return add(mul(0.5, mul(point, INF(), weight)), weight);\n}\n\nCGA3 bilinearQuad(\n  CGA3 p00, CGA3 p01, CGA3 p10, CGA3 p11,\n  CGA3 w00, CGA3 w01, CGA3 w10, CGA3 w11,\n  float u, float v) {\n    // w00 = pointWeight(p00, w00);\n    // w01 = pointWeight(p01, w01);\n    // w10 = pointWeight(p10, w10);\n    // w11 = pointWeight(p11, w11);\n    p00 = point(p00); p01 = point(p01); p10 = point(p10); p11 = point(p11);\n    CGA3 top = add(\n      mul(bernsteinQuad(0,0,u,v), pointWeight(p00, w00)),\n      mul(bernsteinQuad(0,1,u,v), pointWeight(p01, w01)),\n      mul(bernsteinQuad(1,0,u,v), pointWeight(p10, w10)),\n      mul(bernsteinQuad(1,1,u,v), pointWeight(p11, w11))\n    );\n    CGA3 bottom = add(\n      mul(bernsteinQuad(0,0,u,v), w00),\n      mul(bernsteinQuad(0,1,u,v), w01),\n      mul(bernsteinQuad(1,0,u,v), w10),\n      mul(bernsteinQuad(1,1,u,v), w11)\n    );\n    // return top;\n    return mul(1.0/reverse(lcontract(bottom, bottom)).scalar, reverse(top));\n}\n\nCGA3 outer(CGA3 p, CGA3 q, CGA3 r, CGA3 s){\n    return outer(outer(p,q,r),s);\n}\n\nCGA3 point(vec3 x){\n    float y[3];\n    y[0] = x[0];\n    y[1] = x[1];\n    y[2] = x[2];\n    return point(injectOneBlade(zero(), y));\n}\n\nvec3 vecFromPoint(CGA3 x) {\n    // x = point_coords(x);\n    return vec3(x.e1, x.e2, x.e3);\n}\n\n// replace this stuff with IPNS sphere stuff\nCGA3 sphere(vec3 a, vec3 b, vec3 c, vec3 d) {\n    return outer(point(a), point(b), point(c), point(d));\n}\n\nvec3 sphere_center(vec3 a, vec3 b, vec3 c, vec3 d){\n    CGA3 sphere = sphere(a,b,c,d);\n    return vecFromPoint(mul(sphere, INF(), sphere));\n}\n\nvec3 reflect_glsl(vec3 x, CGA3 R){\n    return vecFromPoint(mul(R,point(x),R));\n}\n\n// float sphere_radius(vec3 a, vec3 b, vec3 c, vec3 d){\n//     CGA2 circ = sphere(a,b,c,d);\n//     return circle_radius(circ);\n// }\n\n// CGA3 dual_sphere(vec3 x){\n//     float y[3];\n//     y[0] = x[0];\n//     y[1] = x[1];\n//     y[2] = x[2];\n//     return dual_sphere(injectOneBlade(zero(), y));\n// }\n";
+
+},{}],"3WkEt":[function(require,module,exports) {
+'use strict';
+module.exports = angleNormals;
+function hypot(x, y, z) {
+    return Math.sqrt(Math.pow(x, 2) + Math.pow(y, 2) + Math.pow(z, 2));
+}
+function weight(s, r, a) {
+    return Math.atan2(r, s - a);
+}
+function mulAdd(dest, s, x, y, z) {
+    dest[0] += s * x;
+    dest[1] += s * y;
+    dest[2] += s * z;
+}
+function angleNormals(cells, positions) {
+    var numVerts = positions.length;
+    var numCells = cells.length;
+    //Allocate normal array
+    var normals = new Array(numVerts);
+    for(var i = 0; i < numVerts; ++i)normals[i] = [
+        0,
+        0,
+        0
+    ];
+    //Scan cells, and
+    for(var i = 0; i < numCells; ++i){
+        var cell = cells[i];
+        var a = positions[cell[0]];
+        var b = positions[cell[1]];
+        var c = positions[cell[2]];
+        var abx = a[0] - b[0];
+        var aby = a[1] - b[1];
+        var abz = a[2] - b[2];
+        var ab = hypot(abx, aby, abz);
+        var bcx = b[0] - c[0];
+        var bcy = b[1] - c[1];
+        var bcz = b[2] - c[2];
+        var bc = hypot(bcx, bcy, bcz);
+        var cax = c[0] - a[0];
+        var cay = c[1] - a[1];
+        var caz = c[2] - a[2];
+        var ca = hypot(cax, cay, caz);
+        if (Math.min(ab, bc, ca) < 0.000001) continue;
+        var s = 0.5 * (ab + bc + ca);
+        var r = Math.sqrt((s - ab) * (s - bc) * (s - ca) / s);
+        var nx = aby * bcz - abz * bcy;
+        var ny = abz * bcx - abx * bcz;
+        var nz = abx * bcy - aby * bcx;
+        var nl = hypot(nx, ny, nz);
+        nx /= nl;
+        ny /= nl;
+        nz /= nl;
+        mulAdd(normals[cell[0]], weight(s, r, bc), nx, ny, nz);
+        mulAdd(normals[cell[1]], weight(s, r, ca), nx, ny, nz);
+        mulAdd(normals[cell[2]], weight(s, r, ab), nx, ny, nz);
+    }
+    //Normalize all the normals
+    for(var i = 0; i < numVerts; ++i){
+        var n = normals[i];
+        var l = Math.sqrt(Math.pow(n[0], 2) + Math.pow(n[1], 2) + Math.pow(n[2], 2));
+        if (l < 0.00000001) {
+            n[0] = 1;
+            n[1] = 0;
+            n[2] = 0;
+            continue;
+        }
+        n[0] /= l;
+        n[1] /= l;
+        n[2] /= l;
+    }
+    return normals;
+}
+
+},{}]},["3HAnj","5wngp"], "5wngp", "parcelRequire3d94")
 
 </script>
 </head>

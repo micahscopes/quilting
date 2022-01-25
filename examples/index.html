@@ -8,6 +8,7 @@
     // import Algebra from 'ganja.js'
     // window.Algebra = Algebra
 
+    console.log("hello")
     document.addEventListener("DOMContentLoaded", function () {
       const regl = createREGL({extensions: ['oes_standard_derivatives']});
       const draw = patch(regl);
@@ -15,8 +16,8 @@
       const decayTime = 100
       const camera = (window.camera = createCamera({
         aspectRatio: window.innerWidth / window.innerHeight,
-        distance: 20,
-        center: [0, 4, 0],
+        distance: 30,
+        center: [0, 0, 0],
         rotationDecayTime: decayTime,
         panDecayTime: decayTime,
         zoomDecayTime: decayTime
@@ -74,7 +75,7 @@
         });
 
         setCameraUniforms(camera, () => {
-          if (!camera.state.dirty) return;
+          // if (!camera.state.dirty) return;
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
           draw();
         });
