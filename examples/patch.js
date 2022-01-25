@@ -12,8 +12,9 @@ let gl = function (s) {
   ${glLib}\n\n${s[0]}`;
 };
 
-const grid = Delaunator.from(uvGrid(200,200));
-
+console.log('triangulating grid...')
+const grid = Delaunator.from(uvGrid(1024,1024));
+console.log(grid)
 const D = 10;
 const r = (x) => x + Math.random() * 20;
 
@@ -34,6 +35,9 @@ const updatePatch = () => {
 
 updatePatch();
 // setInterval(updatePatch, 1000/90)
+
+console.log('cells', patch.cells.length*3)
+console.log('positions', patch.positions.length)
 
 window.el = Alg.Vector(-r(D), -r(D)+50, 0)
 
@@ -56,9 +60,13 @@ export default draw = (regl) =>
 
       void main () {
 
-      CGA3 animatedWeight = fromArray(w11);
-      animatedWeight.e1 = animatedWeight.e1 + 30.0*sin(time);
-      animatedWeight.e2 = animatedWeight.e2 + 20.0*cos(time);
+      CGA3 animatedWeight01 = fromArray(w01);
+      animatedWeight01.e1 = animatedWeight01.e1 + 30.0*sin(time);
+      animatedWeight01.e2 = animatedWeight01.e2 + 20.0*cos(time);
+
+      CGA3 animatedWeight11 = fromArray(w11);
+      animatedWeight11.e2 = animatedWeight11.e2 + 10.0*sin(time/3.);
+      animatedWeight11.e3 = animatedWeight11.e3 + 15.0*cos(time/3.);
       CGA3 p =
           bilinearQuad(
             fromArray(p00),
@@ -66,9 +74,9 @@ export default draw = (regl) =>
             fromArray(p10),
             fromArray(p11),
             fromArray(w00),
-            fromArray(w01),
+            animatedWeight01,
             fromArray(w10),
-            animatedWeight,
+            animatedWeight11,
             position.x,
             position.y
         );
@@ -104,8 +112,9 @@ export default draw = (regl) =>
       w11: Alg.Vector(0, 1, -1),
       time: ({tick}) => {
         // console.log(Date.now())
-        return tick/20
+        return tick/50
       }
+      // time: 10
     },
     elements: patch.cells,
     count: patch.cells.length * 3,

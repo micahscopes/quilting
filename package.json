@@ -14,7 +14,9 @@
     "test": "tap --ts test/**/*.ts"
   },
   "glslify": {
-    "transform": ["glslify-import"]
+    "transform": [
+      "glslify-import"
+    ]
   },
   "devDependencies": {
     "@parcel/packager-ts": "^2.2.0",
@@ -32,6 +34,7 @@
     "glsl-solid-wireframe": "^1.0.1",
     "glslify": "^7.1.1",
     "glslify-import": "^3.1.0",
+    "glslify-squish": "^1.0.4",
     "inertial-turntable-camera": "^2.0.4",
     "normalized-interaction-events": "^2.0.1",
     "npm-run-all": "^4.1.5",
