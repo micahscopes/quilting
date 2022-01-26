@@ -4,7 +4,10 @@
     import createCamera from "inertial-turntable-camera";
     import interactionEvents from "normalized-interaction-events";
     import patch from './patch'
+    import { range } from 'lodash-es'
 
+    const product = (...a) =>
+      a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
     // import Algebra from 'ganja.js'
     // window.Algebra = Algebra
 
@@ -16,35 +19,14 @@
         'oes_standard_derivatives',
         'oes_element_index_uint' // necessary to support high resolution patches
       ]});
-      const patches = [
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-       patch(regl),
-      ]
+      const N = 10;
+      const patches = product(range(N), range(N), range(N)).map(([i,j,k]) => {
+        // console.log([i,j,k])
+        return patch(regl, 128, [i,j,k])
+      })
       // draw = patches.forEach((d, i) => d());
     draw = (number) => {
-        let i = 0;
-        for (let d of patches) {
-          d({
-            offset: i
-          })
-          i++
-        };
+        for (let d of patches) { d() };
     }
 
       const decayTime = 100
@@ -111,7 +93,7 @@
         setCameraUniforms(camera, () => {
           // if (!camera.state.dirty) return;
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
-          draw && draw();
+          draw();
         });
       });
 
