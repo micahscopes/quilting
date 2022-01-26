@@ -19,24 +19,24 @@ function addVector(a,b){
   return a.map((e,i) => e + b[i]);
 }
 
-export default draw = (regl, resolution = 64, defaultOffset = [0, 0, 0], randomness=1, squashFactor=5) => {
+export default draw = (regl,D=10, resolution = 64, defaultOffset = [0, 0, 0], randomness=1, squashFactor=5) => {
   const grid = Delaunator.from(uvGrid(resolution));
-  const D = 10;
   const r = (x) => x + Math.random() * 20;
   const randomUnit = (D=1) =>
     normalize([Math.random(), Math.random(), Math.random()]).map(x => x*D)
 
-  const period = Math.random()/30
+  const period = Math.random()/50
 
   let patch = {};
   patch.cells = chunk(grid.triangles, 3);
   patch.positions = chunk(grid.coords, 2).map(([u, v]) => [u, v, 0]);
   patch.normals = normals(patch.cells, patch.positions);
 
-  const p0 = addVector(normalize([0,0,randomness*Math.random()/5]).map(x => x*D), randomUnit(randomness*D/10));
-  const p1 = addVector(normalize([1,0,randomness*Math.random()/5]).map(x => x*D), randomUnit(randomness*D/10));
-  const p2 = addVector(normalize([0,1,randomness*Math.random()/5]).map(x => x*D), randomUnit(randomness*D/10));
-  const p3 = addVector(normalize([1,1,randomness*Math.random()/5]).map(x => x*D), randomUnit(randomness*D/10));
+  const D_SQUASHED = D*squashFactor;
+  const p0 = addVector(normalize([0,0,randomness*Math.random()/5]).map(x => x*D_SQUASHED), randomUnit(randomness*D_SQUASHED/10));
+  const p1 = addVector(normalize([1,0,randomness*Math.random()/5]).map(x => x*D_SQUASHED), randomUnit(randomness*D_SQUASHED/10));
+  const p2 = addVector(normalize([0,1,randomness*Math.random()/5]).map(x => x*D_SQUASHED), randomUnit(randomness*D_SQUASHED/10));
+  const p3 = addVector(normalize([1,1,randomness*Math.random()/5]).map(x => x*D_SQUASHED), randomUnit(randomness*D_SQUASHED/10));
 
   return regl({
     vert: gl`
@@ -82,7 +82,7 @@ export default draw = (regl, resolution = 64, defaultOffset = [0, 0, 0], randomn
         vec3 light = vec3(0.5,0.9,0.5);
         light = normalize(light);
 
-        gl_FragColor = vec4(redAmount, uv.x, uv.y, 0.2);
+        gl_FragColor = 1.5*vec4(redAmount, uv.x, uv.y, 0.75);
       }`,
     attributes: {
       position: () => patch.positions,
@@ -96,14 +96,14 @@ export default draw = (regl, resolution = 64, defaultOffset = [0, 0, 0], randomn
       enable: true,
       func: {
         // srcRGB: 'one minus dst alpha',
-        srcRGB: 1,
+        srcRGB: 'one minus dst alpha',
         srcAlpha: 1,
         dstRGB: 1,
         dstAlpha: 1
       },
       equation: {
         rgb: 'subtract',
-        alpha: 'add'
+        alpha: 'subtract'
       },
       color: [0, 0, 0, 0]
     },
@@ -117,8 +117,8 @@ export default draw = (regl, resolution = 64, defaultOffset = [0, 0, 0], randomn
       w2: randomUnit(D),
       w3: randomUnit(D),
       offset: (context, props) =>
-        props?.offset ? props.offset.map((x) => x * D / squashFactor) : defaultOffset.map(x => x*D/squashFactor),
-      redAmount: ({tick}) => (Math.cos(tick*period)+1)/3
+        props?.offset ? props.offset.map((x) => x*D) : defaultOffset.map(x => x*D),
+      redAmount: ({tick}) => 1.0+Math.cos(tick*period)
     },
     elements: patch.cells,
     count: patch.cells.length * 3,

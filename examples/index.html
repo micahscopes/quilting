@@ -8,10 +8,6 @@
 
     const product = (...a) =>
       a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
-    // import Algebra from 'ganja.js'
-    // window.Algebra = Algebra
-
-    let draw;
 
     console.log("hello")
     document.addEventListener("DOMContentLoaded", function () {
@@ -19,20 +15,26 @@
         'oes_standard_derivatives',
         'oes_element_index_uint' // necessary to support high resolution patches
       ]});
-      const RES = 512;
-      const N = 2;
+      const D = 10;
+      const N = 8;
+      const RES = 256;
+      const PROBABILITY = 0.3;
+      const SQUASH_FACTOR = 3;
+
       const patches = product(range(N), range(N), range(N)).map(([i,j,k]) => {
-        return patch(regl, RES, [i,j,k])
+        if (Math.random() > PROBABILITY) { return () => {}}
+        return patch(regl, D, RES, [i,j,k], SQUASH_FACTOR)
       })
-    draw = (number) => {
-        for (let d of patches) { d() };
-    }
+
+      const draw = (number) => {
+          for (let d of patches) { d() };
+      }
 
       const decayTime = 100
       const camera = (window.camera = createCamera({
         aspectRatio: window.innerWidth / window.innerHeight,
         distance: 30,
-        center: [0, 0, 0],
+        center: [0, 0, 0].map(() => D*N/2),
         rotationDecayTime: decayTime,
         panDecayTime: decayTime,
         zoomDecayTime: decayTime
