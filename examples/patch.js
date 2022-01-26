@@ -3,7 +3,6 @@ import { fquad, uvGrid, Alg } from "../src";
 
 import Delaunator from "delaunator";
 import { chunk } from "lodash-es";
-import wireframe from "glsl-solid-wireframe";
 
 import glLib from "../gpu/lib.glsl";
 
@@ -13,7 +12,7 @@ let gl = function (s) {
 };
 
 console.log('triangulating grid...')
-const grid = Delaunator.from(uvGrid(1024,1024));
+const grid = Delaunator.from(uvGrid(128,128));
 console.log(grid)
 const D = 10;
 const r = (x) => x + Math.random() * 20;
@@ -26,15 +25,12 @@ let patch = {};
 patch.cells = chunk(grid.triangles, 3);
 
 const updatePatch = () => {
-  // let quad = patchGenerator();
-  // const points = chunk(grid.coords, 2).map((uv) => quad(...uv));
   patch.positions = chunk(grid.coords, 2).map(([u, v]) => [u, v, 0]);
   console.log(patch.positions);
   patch.normals = normals(patch.cells, patch.positions);
 };
 
 updatePatch();
-// setInterval(updatePatch, 1000/90)
 
 console.log('cells', patch.cells.length*3)
 console.log('positions', patch.positions.length)
@@ -50,8 +46,9 @@ export default draw = (regl) =>
       attribute vec3 normal;
       attribute vec3 position;
 
-      uniform float p00[32], p01[32], p10[32], p11[32];
-      uniform float w00[32], w01[32], w10[32], w11[32];
+      uniform vec3
+        p0, p1, p2, p3,
+        w01, w02, w13, w23;
       uniform mat4 projection, view;
       uniform float time;
 
@@ -60,29 +57,22 @@ export default draw = (regl) =>
 
       void main () {
 
-      CGA3 animatedWeight01 = fromArray(w01);
-      animatedWeight01.e1 = animatedWeight01.e1 + 30.0*sin(time);
-      animatedWeight01.e2 = animatedWeight01.e2 + 20.0*cos(time);
-
-      CGA3 animatedWeight11 = fromArray(w11);
-      animatedWeight11.e2 = animatedWeight11.e2 + 10.0*sin(time/3.);
-      animatedWeight11.e3 = animatedWeight11.e3 + 15.0*cos(time/3.);
       CGA3 p =
           bilinearQuad(
-            fromArray(p00),
-            fromArray(p01),
-            fromArray(p10),
-            fromArray(p11),
-            fromArray(w00),
-            animatedWeight01,
-            fromArray(w10),
-            animatedWeight11,
+            p0,
+            p1,
+            p2,
+            p3,
+            w01,
+            w02,
+            w13,
+            w23,
             position.x,
             position.y
         );
         n = normal;
         uv = vec2(position.x, position.y);
-        gl_Position = projection * view * vec4(vecFromPoint(p), 1.0);
+        gl_Position = projection * view * vec4(p.e1, p.e2, p.e3, 1.0);
       }`,
     frag: gl`
       precision mediump float;
@@ -102,14 +92,18 @@ export default draw = (regl) =>
     },
     uniforms: {
       // time(){ return Date.now() },
-      p00: Alg.Vector(-r(D), -r(D), 0),
-      p01: Alg.Vector(-r(D), r(D), 0),
-      p10: Alg.Vector(r(D), -r(D), 0),
-      p11: Alg.Vector(r(D), D, 0),
-      w00: Alg.Vector(1, 0, -1),
-      w01: Alg.Vector(1, -1),
-      w10: Alg.Vector(0, 0, -1),
-      w11: Alg.Vector(0, 1, -1),
+      p0: [0, 0, 0],
+      p1: [0, D, 0],
+      p2: [D, 0, 0],
+      p3: [D, D, 0],
+      w01: [0, 0, 1],
+      w02: [0, 0, 1],
+      w13: [0, 0, 1],
+      w23: [0, 0, 1],
+      // w00: [1, 0, -1],
+      // w01: ({tick}) => [Math.sin(tick/150), 1, 0],
+      // w10: ({tick}) => [0, 0, 2*Math.sin(tick/150)],
+      // w11: ({tick}) => [0, 2*3.1415926*Math.sin(tick/50), -1],
       time: ({tick}) => {
         // console.log(Date.now())
         return tick/50

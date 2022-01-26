@@ -258,6 +258,58 @@ CGA3 injectOneBlade(CGA3 u, float v[3]){
     return fromArray(u_ary);
 }
 
+CGA3 outer(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
+    return outer(outer(p,q,r),s);
+}
+
+CGA3 fromVec(vec3 x){
+    float y[3];
+    y[0] = x[0];
+    y[1] = x[1];
+    y[2] = x[2];
+    return injectOneBlade(zero(), y);
+}
+
+CGA3 point(vec3 x){
+    return point(fromVec(x));
+}
+
+vec3 vecFromPoint(CGA3 x) {
+    x = point_coords(x);
+    return vec3(x.e1, x.e2, x.e3);
+}
+
+vec3 toVec(CGA3 x) {
+    return vec3(x.e1, x.e2, x.e3);
+}
+
+// replace this stuff with IPNS sphere stuff
+CGA3 sphere(vec3 a, vec3 b, vec3 c, vec3 d) {
+    return outer(point(a), point(b), point(c), point(d));
+}
+
+vec3 sphere_center(vec3 a, vec3 b, vec3 c, vec3 d){
+    CGA3 sphere = sphere(a,b,c,d);
+    return vecFromPoint(mul(sphere, INF(), sphere));
+}
+
+vec3 reflect_glsl(vec3 x, CGA3 R){
+    return vecFromPoint(mul(R,point(x),R));
+}
+
+// float sphere_radius(vec3 a, vec3 b, vec3 c, vec3 d){
+//     CGA2 circ = sphere(a,b,c,d);
+//     return circle_radius(circ);
+// }
+
+// CGA3 dual_sphere(vec3 x){
+//     float y[3];
+//     y[0] = x[0];
+//     y[1] = x[1];
+//     y[2] = x[2];
+//     return dual_sphere(injectOneBlade(zero(), y));
+// }
+
 // copied from https://www.shadertoy.com/view/ttsGDM
 
 #define DEGREE 1
@@ -295,75 +347,50 @@ float bernsteinQuad(int i, int j, float u, float v) {
 //   pow(v, j);
 // }
 
-CGA3 pointWeight(CGA3 point, CGA3 weight) {
-  return add(mul(0.5, mul(point, INF(), weight)), weight);
+// CGA3 pointWeight(vec3 controlPoint, vec3 weight) {
+//   return mul(
+//     add(
+//       mul(
+//         fromVec(controlPoint),
+//         mul( 0.5, INF())
+//       ),
+//       one()
+//     ),
+//     fromVec(weight)
+//   );
+// }
+
+CGA3 inverse(CGA3 x) {
+  return mul(1.0/mul(x, reverse(x)).scalar, reverse(x));
+}
+
+CGA3 div(CGA3 a, CGA3 b) {
+  return mul(a, inverse(b));
+}
+
+CGA3 weight(vec3 p, vec3 w) {
+  return inverse(fromVec(w));
 }
 
 CGA3 bilinearQuad(
-  CGA3 p00, CGA3 p01, CGA3 p10, CGA3 p11,
-  CGA3 w00, CGA3 w01, CGA3 w10, CGA3 w11,
+  vec3 p0, vec3 p1, vec3 p2, vec3 p3,
+  vec3 w01, vec3 w02, vec3 w13, vec3 w23,
   float u, float v) {
-    // w00 = pointWeight(p00, w00);
-    // w01 = pointWeight(p01, w01);
-    // w10 = pointWeight(p10, w10);
-    // w11 = pointWeight(p11, w11);
-    p00 = point(p00); p01 = point(p01); p10 = point(p10); p11 = point(p11);
+    CGA3 W01 = weight(p0, w01);
+    CGA3 W02 = weight(p0, w02);
+    CGA3 W13 = weight(p3, w13);
+    CGA3 W23 = weight(p3, w23);
     CGA3 top = add(
-      mul(bernsteinQuad(0,0,u,v), pointWeight(p00, w00)),
-      mul(bernsteinQuad(0,1,u,v), pointWeight(p01, w01)),
-      mul(bernsteinQuad(1,0,u,v), pointWeight(p10, w10)),
-      mul(bernsteinQuad(1,1,u,v), pointWeight(p11, w11))
+      mul(bernsteinQuad(0,0,u,v), mul(fromVec(p0), W02)),
+      mul(bernsteinQuad(0,1,u,v), mul(fromVec(p1), W01)),
+      mul(bernsteinQuad(1,0,u,v), mul(fromVec(p2), W13)),
+      mul(bernsteinQuad(1,1,u,v), mul(fromVec(p3), W23))
     );
     CGA3 bottom = add(
-      mul(bernsteinQuad(0,0,u,v), w00),
-      mul(bernsteinQuad(0,1,u,v), w01),
-      mul(bernsteinQuad(1,0,u,v), w10),
-      mul(bernsteinQuad(1,1,u,v), w11)
+      mul(bernsteinQuad(0,0,u,v), W02),
+      mul(bernsteinQuad(0,1,u,v), W01),
+      mul(bernsteinQuad(1,0,u,v), W13),
+      mul(bernsteinQuad(1,1,u,v), W23)
     );
-    // return top;
-    return mul(1.0/reverse(lcontract(bottom, bottom)).scalar, reverse(top));
+    return div(top, bottom);
 }
-
-CGA3 outer(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
-    return outer(outer(p,q,r),s);
-}
-
-CGA3 point(vec3 x){
-    float y[3];
-    y[0] = x[0];
-    y[1] = x[1];
-    y[2] = x[2];
-    return point(injectOneBlade(zero(), y));
-}
-
-vec3 vecFromPoint(CGA3 x) {
-    // x = point_coords(x);
-    return vec3(x.e1, x.e2, x.e3);
-}
-
-// replace this stuff with IPNS sphere stuff
-CGA3 sphere(vec3 a, vec3 b, vec3 c, vec3 d) {
-    return outer(point(a), point(b), point(c), point(d));
-}
-
-vec3 sphere_center(vec3 a, vec3 b, vec3 c, vec3 d){
-    CGA3 sphere = sphere(a,b,c,d);
-    return vecFromPoint(mul(sphere, INF(), sphere));
-}
-
-vec3 reflect_glsl(vec3 x, CGA3 R){
-    return vecFromPoint(mul(R,point(x),R));
-}
-
-// float sphere_radius(vec3 a, vec3 b, vec3 c, vec3 d){
-//     CGA2 circ = sphere(a,b,c,d);
-//     return circle_radius(circ);
-// }
-
-// CGA3 dual_sphere(vec3 x){
-//     float y[3];
-//     y[0] = x[0];
-//     y[1] = x[1];
-//     y[2] = x[2];
-//     return dual_sphere(injectOneBlade(zero(), y));
-// }

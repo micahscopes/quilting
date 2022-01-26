@@ -11,6 +11,7 @@
     "dev": "npm-run-all --parallel watch demo",
     "alglbraic": "python ./gpu/__init__.py --glslify --out gpu/gl/cga3 cga --size 3 injections 'injectOneBlade' 'e1 e2 e3'",
     "glslify": "glslify gpu/gl/index.glsl --output gpu/lib.glsl",
+    "dev-glsl": "watch 'npm run glslify' gpu/gl",
     "test": "tap --ts test/**/*.ts"
   },
   "glslify": {
@@ -47,7 +48,8 @@
     "tape-watch": "^2.3.0",
     "ts-mocha": "^9.0.2",
     "ts-node": "^10.4.0",
-    "typescript": ">=3.0.0"
+    "typescript": ">=3.0.0",
+    "watch": "^1.0.2"
   },
   "dependencies": {
     "ganja.js": "^1.0.194",

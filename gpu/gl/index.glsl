@@ -1,20 +1,27 @@
 #pragma glslify: import('./cga3/index.glsl')
-#pragma glslify: import('./snippets/patches.glsl')
 
 CGA3 outer(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
     return outer(outer(p,q,r),s);
 }
 
-CGA3 point(vec3 x){
+CGA3 fromVec(vec3 x){
     float y[3];
     y[0] = x[0];
     y[1] = x[1];
     y[2] = x[2];
-    return point(injectOneBlade(zero(), y));
+    return injectOneBlade(zero(), y);
+}
+
+CGA3 point(vec3 x){
+    return point(fromVec(x));
 }
 
 vec3 vecFromPoint(CGA3 x) {
-    // x = point_coords(x);
+    x = point_coords(x);
+    return vec3(x.e1, x.e2, x.e3);
+}
+
+vec3 toVec(CGA3 x) {
     return vec3(x.e1, x.e2, x.e3);
 }
 
@@ -44,3 +51,5 @@ vec3 reflect_glsl(vec3 x, CGA3 R){
 //     y[2] = x[2];
 //     return dual_sphere(injectOneBlade(zero(), y));
 // }
+
+#pragma glslify: import('./snippets/patches.glsl')
