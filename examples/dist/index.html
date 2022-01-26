@@ -549,16 +549,15 @@ document.addEventListener("DOMContentLoaded", function() {
             'oes_element_index_uint' // necessary to support high resolution patches
         ]
     });
-    const N = 10;
+    const RES = 512;
+    const N = 2;
     const patches = product(_lodashEs.range(N), _lodashEs.range(N), _lodashEs.range(N)).map(([i, j, k])=>{
-        // console.log([i,j,k])
-        return _patchDefault.default(regl, 128, [
+        return _patchDefault.default(regl, RES, [
             i,
             j,
             k
         ]);
     });
-    // draw = patches.forEach((d, i) => d());
     draw = (number)=>{
         for (let d of patches)d();
     };
@@ -9757,27 +9756,33 @@ let gl = function(s) {
     return `precision mediump float;
   ${_libGlslDefault.default}\n\n${s[0]}`;
 };
+const normalize = (x)=>{
+    const norm = x.reduce((a, b)=>a + b
+    , 0);
+    return x.map((n)=>n / norm
+    );
+};
+function addVector(a, b) {
+    return a.map((e, i)=>e + b[i]
+    );
+}
 exports.default = draw = (regl, resolution = 64, defaultOffset = [
     0,
     0,
     0
-])=>{
+], randomness = 1, squashFactor = 5)=>{
     const grid = _delaunatorDefault.default.from(_src.uvGrid(resolution));
     const D1 = 10;
     const r = (x)=>x + Math.random() * 20
     ;
-    const randomUnit = (D = 1)=>{
-        let x = [
+    const randomUnit = (D = 1)=>normalize([
             Math.random(),
             Math.random(),
-            Math.random(), 
-        ];
-        const norm = x.reduce((a, b)=>a + b
-        , 0);
-        return x.map((n)=>D * n / norm
-        );
-    };
-    const period = Math.random() / 10;
+            Math.random()
+        ]).map((x)=>x * D
+        )
+    ;
+    const period = Math.random() / 30;
     let patch = {
     };
     patch.cells = _lodashEs.chunk(grid.triangles, 3);
@@ -9788,6 +9793,30 @@ exports.default = draw = (regl, resolution = 64, defaultOffset = [
         ]
     );
     patch.normals = _angleNormalsDefault.default(patch.cells, patch.positions);
+    const p0 = addVector(normalize([
+        0,
+        0,
+        randomness * Math.random() / 5
+    ]).map((x)=>x * D1
+    ), randomUnit(randomness * D1 / 10));
+    const p1 = addVector(normalize([
+        1,
+        0,
+        randomness * Math.random() / 5
+    ]).map((x)=>x * D1
+    ), randomUnit(randomness * D1 / 10));
+    const p2 = addVector(normalize([
+        0,
+        1,
+        randomness * Math.random() / 5
+    ]).map((x)=>x * D1
+    ), randomUnit(randomness * D1 / 10));
+    const p3 = addVector(normalize([
+        1,
+        1,
+        randomness * Math.random() / 5
+    ]).map((x)=>x * D1
+    ), randomUnit(randomness * D1 / 10));
     return regl({
         vert: gl`
       precision highp float;
@@ -9825,50 +9854,65 @@ exports.default = draw = (regl, resolution = 64, defaultOffset = [
       }`,
         frag: gl`
       precision highp float;
-      uniform float time;
+      uniform float redAmount;
       varying vec3 n;
       varying vec2 uv;
       void main () {
         vec3 light = vec3(0.5,0.9,0.5);
         light = normalize(light);
 
-        // gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
-        gl_FragColor = vec4(0, pow(uv.x, 2.0), pow(uv.y, 2.0), 1);
+        gl_FragColor = vec4(redAmount, uv.x, uv.y, 0.2);
       }`,
         attributes: {
             position: ()=>patch.positions
             ,
             normal: ()=>patch.normals
         },
+        depth: {
+            enable: false
+        },
+        blend: {
+            enable: true,
+            func: {
+                // srcRGB: 'one minus dst alpha',
+                srcRGB: 1,
+                srcAlpha: 1,
+                dstRGB: 1,
+                dstAlpha: 1
+            },
+            equation: {
+                rgb: 'subtract',
+                alpha: 'add'
+            },
+            color: [
+                0,
+                0,
+                0,
+                0
+            ]
+        },
         uniforms: {
-            // time(){ return Date.now() },
-            // p0: [0, 0, Math.random()*D],
-            // p1: [D, 0, Math.random()*D],
-            // p2: [0, D, Math.random()*D],
-            // p3: [D, D, Math.random()*D],
-            p0: ({ tick  })=>[
-                    D1 / 2,
-                    0,
-                    0
-                ].map((x)=>x * Math.cos(tick * period)
+            p0: ({ tick  })=>p0.map((x)=>x * Math.cos(tick * period / 4)
                 )
             ,
-            p1: randomUnit(D1),
-            p2: ({ tick  })=>[
-                    0,
-                    D1 / 2,
-                    0
-                ].map((x)=>x * Math.sin(tick * period)
+            p1: ({ tick  })=>p1.map((x)=>x * Math.sin(tick * period / 3)
                 )
             ,
-            p3: randomUnit(D1),
-            w0: randomUnit(2),
-            w1: randomUnit(2),
-            w2: randomUnit(2),
-            w3: randomUnit(2),
-            offset: (context, props)=>props?.offset ? props.offset.map((x)=>x * D1
-                ) : defaultOffset.map((x)=>x * D1
+            p2: ({ tick  })=>p2.map((x)=>x * Math.sin(tick * period / 5)
                 )
+            ,
+            p3: ({ tick  })=>p3.map((x)=>x * Math.cos(tick * period / 7)
+                )
+            ,
+            w0: randomUnit(D1),
+            w1: randomUnit(D1),
+            w2: randomUnit(D1),
+            w3: randomUnit(D1),
+            offset: (context, props)=>props?.offset ? props.offset.map((x)=>x * D1 / squashFactor
+                ) : defaultOffset.map((x)=>x * D1 / squashFactor
+                )
+            ,
+            redAmount: ({ tick  })=>(Math.cos(tick * period) + 1) / 3
         },
         elements: patch.cells,
         count: patch.cells.length * 3
@@ -11303,7 +11347,355 @@ var _zipWithJsDefault = parcelHelpers.interopDefault(_zipWithJs);
 var _lodashDefaultJs = require("./lodash.default.js");
 var _lodashDefaultJsDefault = parcelHelpers.interopDefault(_lodashDefaultJs);
 
-},{"./add.js":false,"./after.js":false,"./ary.js":false,"./assign.js":false,"./assignIn.js":false,"./assignInWith.js":false,"./assignWith.js":false,"./at.js":false,"./attempt.js":false,"./before.js":false,"./bind.js":false,"./bindAll.js":false,"./bindKey.js":false,"./camelCase.js":false,"./capitalize.js":false,"./castArray.js":false,"./ceil.js":false,"./chain.js":false,"./chunk.js":"fPV8N","./clamp.js":false,"./clone.js":false,"./cloneDeep.js":false,"./cloneDeepWith.js":false,"./cloneWith.js":false,"./commit.js":false,"./compact.js":false,"./concat.js":false,"./cond.js":false,"./conforms.js":false,"./conformsTo.js":false,"./constant.js":false,"./countBy.js":false,"./create.js":false,"./curry.js":false,"./curryRight.js":false,"./debounce.js":false,"./deburr.js":false,"./defaultTo.js":false,"./defaults.js":false,"./defaultsDeep.js":false,"./defer.js":false,"./delay.js":false,"./difference.js":false,"./differenceBy.js":false,"./differenceWith.js":false,"./divide.js":false,"./drop.js":false,"./dropRight.js":false,"./dropRightWhile.js":false,"./dropWhile.js":false,"./each.js":false,"./eachRight.js":false,"./endsWith.js":false,"./entries.js":false,"./entriesIn.js":false,"./eq.js":"7el3s","./escape.js":false,"./escapeRegExp.js":false,"./every.js":false,"./extend.js":false,"./extendWith.js":false,"./fill.js":false,"./filter.js":false,"./find.js":false,"./findIndex.js":false,"./findKey.js":false,"./findLast.js":false,"./findLastIndex.js":false,"./findLastKey.js":false,"./first.js":false,"./flatMap.js":false,"./flatMapDeep.js":false,"./flatMapDepth.js":false,"./flatten.js":false,"./flattenDeep.js":false,"./flattenDepth.js":false,"./flip.js":false,"./floor.js":false,"./flow.js":false,"./flowRight.js":false,"./forEach.js":false,"./forEachRight.js":false,"./forIn.js":false,"./forInRight.js":false,"./forOwn.js":false,"./forOwnRight.js":false,"./fromPairs.js":false,"./functions.js":false,"./functionsIn.js":false,"./get.js":"9ZP5X","./groupBy.js":false,"./gt.js":false,"./gte.js":false,"./has.js":false,"./hasIn.js":"jfq4F","./head.js":false,"./identity.js":"1Y0KA","./inRange.js":false,"./includes.js":false,"./indexOf.js":false,"./initial.js":false,"./intersection.js":false,"./intersectionBy.js":false,"./intersectionWith.js":false,"./invert.js":false,"./invertBy.js":false,"./invoke.js":false,"./invokeMap.js":false,"./isArguments.js":"9k91Y","./isArray.js":"ETPQ1","./isArrayBuffer.js":false,"./isArrayLike.js":"8SdiO","./isArrayLikeObject.js":false,"./isBoolean.js":false,"./isBuffer.js":"llpEE","./isDate.js":false,"./isElement.js":false,"./isEmpty.js":false,"./isEqual.js":false,"./isEqualWith.js":false,"./isError.js":false,"./isFinite.js":false,"./isFunction.js":"e5kis","./isInteger.js":false,"./isLength.js":"bItM0","./isMap.js":false,"./isMatch.js":false,"./isMatchWith.js":false,"./isNaN.js":false,"./isNative.js":false,"./isNil.js":false,"./isNull.js":false,"./isNumber.js":false,"./isObject.js":"dHhyW","./isObjectLike.js":"iad76","./isPlainObject.js":false,"./isRegExp.js":false,"./isSafeInteger.js":false,"./isSet.js":false,"./isString.js":false,"./isSymbol.js":"gCyRJ","./isTypedArray.js":"2LIMs","./isUndefined.js":false,"./isWeakMap.js":false,"./isWeakSet.js":false,"./iteratee.js":false,"./join.js":false,"./kebabCase.js":false,"./keyBy.js":false,"./keys.js":"lbEZV","./keysIn.js":false,"./last.js":false,"./lastIndexOf.js":false,"./wrapperLodash.js":false,"./lowerCase.js":false,"./lowerFirst.js":false,"./lt.js":false,"./lte.js":false,"./map.js":false,"./mapKeys.js":false,"./mapValues.js":false,"./matches.js":false,"./matchesProperty.js":false,"./max.js":false,"./maxBy.js":false,"./mean.js":false,"./meanBy.js":false,"./memoize.js":"5zdei","./merge.js":false,"./mergeWith.js":false,"./method.js":false,"./methodOf.js":false,"./min.js":false,"./minBy.js":false,"./mixin.js":false,"./multiply.js":false,"./negate.js":false,"./next.js":false,"./noop.js":false,"./now.js":false,"./nth.js":false,"./nthArg.js":false,"./omit.js":false,"./omitBy.js":false,"./once.js":false,"./orderBy.js":false,"./over.js":false,"./overArgs.js":false,"./overEvery.js":false,"./overSome.js":false,"./pad.js":false,"./padEnd.js":false,"./padStart.js":false,"./parseInt.js":false,"./partial.js":false,"./partialRight.js":false,"./partition.js":false,"./pick.js":false,"./pickBy.js":false,"./plant.js":false,"./property.js":"kwvYw","./propertyOf.js":false,"./pull.js":false,"./pullAll.js":false,"./pullAllBy.js":false,"./pullAllWith.js":false,"./pullAt.js":false,"./random.js":false,"./range.js":"2xup9","./rangeRight.js":false,"./rearg.js":false,"./reduce.js":"gLQHe","./reduceRight.js":"3CjmV","./reject.js":false,"./remove.js":false,"./repeat.js":false,"./replace.js":false,"./rest.js":false,"./result.js":false,"./reverse.js":false,"./round.js":false,"./sample.js":false,"./sampleSize.js":false,"./set.js":false,"./setWith.js":false,"./shuffle.js":false,"./size.js":false,"./slice.js":false,"./snakeCase.js":false,"./some.js":false,"./sortBy.js":false,"./sortedIndex.js":false,"./sortedIndexBy.js":false,"./sortedIndexOf.js":false,"./sortedLastIndex.js":false,"./sortedLastIndexBy.js":false,"./sortedLastIndexOf.js":false,"./sortedUniq.js":false,"./sortedUniqBy.js":false,"./split.js":false,"./spread.js":false,"./startCase.js":false,"./startsWith.js":false,"./stubArray.js":"iwLLL","./stubFalse.js":"fF5mf","./stubObject.js":false,"./stubString.js":false,"./stubTrue.js":false,"./subtract.js":false,"./sum.js":false,"./sumBy.js":false,"./tail.js":false,"./take.js":false,"./takeRight.js":false,"./takeRightWhile.js":false,"./takeWhile.js":false,"./tap.js":false,"./template.js":false,"./templateSettings.js":false,"./throttle.js":false,"./thru.js":false,"./times.js":false,"./toArray.js":false,"./toFinite.js":"FJR8i","./toInteger.js":"1tdUD","./toIterator.js":false,"./toJSON.js":false,"./toLength.js":false,"./toLower.js":false,"./toNumber.js":"4CrK2","./toPairs.js":false,"./toPairsIn.js":false,"./toPath.js":false,"./toPlainObject.js":false,"./toSafeInteger.js":false,"./toString.js":"hF0LJ","./toUpper.js":false,"./transform.js":false,"./trim.js":false,"./trimEnd.js":false,"./trimStart.js":false,"./truncate.js":false,"./unary.js":false,"./unescape.js":false,"./union.js":false,"./unionBy.js":false,"./unionWith.js":false,"./uniq.js":false,"./uniqBy.js":false,"./uniqWith.js":false,"./uniqueId.js":false,"./unset.js":false,"./unzip.js":false,"./unzipWith.js":false,"./update.js":false,"./updateWith.js":false,"./upperCase.js":false,"./upperFirst.js":false,"./value.js":false,"./valueOf.js":false,"./values.js":false,"./valuesIn.js":false,"./without.js":false,"./words.js":false,"./wrap.js":false,"./wrapperAt.js":false,"./wrapperChain.js":false,"./wrapperReverse.js":false,"./wrapperValue.js":false,"./xor.js":false,"./xorBy.js":false,"./xorWith.js":false,"./zip.js":false,"./zipObject.js":false,"./zipObjectDeep.js":false,"./zipWith.js":false,"./lodash.default.js":false,"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fPV8N":[function(require,module,exports) {
+},{"./add.js":"CS0KS","./after.js":false,"./ary.js":false,"./assign.js":false,"./assignIn.js":false,"./assignInWith.js":false,"./assignWith.js":false,"./at.js":false,"./attempt.js":false,"./before.js":false,"./bind.js":false,"./bindAll.js":false,"./bindKey.js":false,"./camelCase.js":false,"./capitalize.js":false,"./castArray.js":false,"./ceil.js":false,"./chain.js":false,"./chunk.js":"fPV8N","./clamp.js":false,"./clone.js":false,"./cloneDeep.js":false,"./cloneDeepWith.js":false,"./cloneWith.js":false,"./commit.js":false,"./compact.js":false,"./concat.js":false,"./cond.js":false,"./conforms.js":false,"./conformsTo.js":false,"./constant.js":"a5s7V","./countBy.js":false,"./create.js":false,"./curry.js":false,"./curryRight.js":false,"./debounce.js":false,"./deburr.js":false,"./defaultTo.js":false,"./defaults.js":false,"./defaultsDeep.js":false,"./defer.js":false,"./delay.js":false,"./difference.js":false,"./differenceBy.js":false,"./differenceWith.js":false,"./divide.js":false,"./drop.js":false,"./dropRight.js":false,"./dropRightWhile.js":false,"./dropWhile.js":false,"./each.js":false,"./eachRight.js":false,"./endsWith.js":false,"./entries.js":false,"./entriesIn.js":false,"./eq.js":"7el3s","./escape.js":false,"./escapeRegExp.js":false,"./every.js":false,"./extend.js":false,"./extendWith.js":false,"./fill.js":false,"./filter.js":false,"./find.js":false,"./findIndex.js":false,"./findKey.js":false,"./findLast.js":false,"./findLastIndex.js":false,"./findLastKey.js":false,"./first.js":false,"./flatMap.js":false,"./flatMapDeep.js":false,"./flatMapDepth.js":false,"./flatten.js":false,"./flattenDeep.js":false,"./flattenDepth.js":false,"./flip.js":false,"./floor.js":false,"./flow.js":false,"./flowRight.js":false,"./forEach.js":false,"./forEachRight.js":false,"./forIn.js":false,"./forInRight.js":false,"./forOwn.js":false,"./forOwnRight.js":false,"./fromPairs.js":false,"./functions.js":false,"./functionsIn.js":false,"./get.js":"9ZP5X","./groupBy.js":false,"./gt.js":false,"./gte.js":false,"./has.js":false,"./hasIn.js":"jfq4F","./head.js":false,"./identity.js":"1Y0KA","./inRange.js":false,"./includes.js":false,"./indexOf.js":false,"./initial.js":false,"./intersection.js":false,"./intersectionBy.js":false,"./intersectionWith.js":false,"./invert.js":false,"./invertBy.js":false,"./invoke.js":false,"./invokeMap.js":false,"./isArguments.js":"9k91Y","./isArray.js":"ETPQ1","./isArrayBuffer.js":false,"./isArrayLike.js":"8SdiO","./isArrayLikeObject.js":"gArhC","./isBoolean.js":false,"./isBuffer.js":"llpEE","./isDate.js":false,"./isElement.js":false,"./isEmpty.js":false,"./isEqual.js":false,"./isEqualWith.js":false,"./isError.js":false,"./isFinite.js":false,"./isFunction.js":"e5kis","./isInteger.js":false,"./isLength.js":"bItM0","./isMap.js":false,"./isMatch.js":false,"./isMatchWith.js":false,"./isNaN.js":false,"./isNative.js":false,"./isNil.js":false,"./isNull.js":false,"./isNumber.js":false,"./isObject.js":"dHhyW","./isObjectLike.js":"iad76","./isPlainObject.js":false,"./isRegExp.js":false,"./isSafeInteger.js":false,"./isSet.js":false,"./isString.js":false,"./isSymbol.js":"gCyRJ","./isTypedArray.js":"2LIMs","./isUndefined.js":false,"./isWeakMap.js":false,"./isWeakSet.js":false,"./iteratee.js":false,"./join.js":false,"./kebabCase.js":false,"./keyBy.js":false,"./keys.js":"lbEZV","./keysIn.js":false,"./last.js":false,"./lastIndexOf.js":false,"./wrapperLodash.js":false,"./lowerCase.js":false,"./lowerFirst.js":false,"./lt.js":false,"./lte.js":false,"./map.js":false,"./mapKeys.js":false,"./mapValues.js":false,"./matches.js":false,"./matchesProperty.js":false,"./max.js":false,"./maxBy.js":false,"./mean.js":false,"./meanBy.js":false,"./memoize.js":"5zdei","./merge.js":false,"./mergeWith.js":false,"./method.js":false,"./methodOf.js":false,"./min.js":false,"./minBy.js":false,"./mixin.js":false,"./multiply.js":false,"./negate.js":false,"./next.js":false,"./noop.js":false,"./now.js":false,"./nth.js":false,"./nthArg.js":false,"./omit.js":false,"./omitBy.js":false,"./once.js":false,"./orderBy.js":false,"./over.js":false,"./overArgs.js":false,"./overEvery.js":false,"./overSome.js":false,"./pad.js":false,"./padEnd.js":false,"./padStart.js":false,"./parseInt.js":false,"./partial.js":false,"./partialRight.js":false,"./partition.js":false,"./pick.js":false,"./pickBy.js":false,"./plant.js":false,"./property.js":"kwvYw","./propertyOf.js":false,"./pull.js":false,"./pullAll.js":false,"./pullAllBy.js":false,"./pullAllWith.js":false,"./pullAt.js":false,"./random.js":false,"./range.js":"2xup9","./rangeRight.js":false,"./rearg.js":false,"./reduce.js":"gLQHe","./reduceRight.js":"3CjmV","./reject.js":false,"./remove.js":false,"./repeat.js":false,"./replace.js":false,"./rest.js":false,"./result.js":false,"./reverse.js":false,"./round.js":false,"./sample.js":false,"./sampleSize.js":false,"./set.js":false,"./setWith.js":false,"./shuffle.js":false,"./size.js":false,"./slice.js":false,"./snakeCase.js":false,"./some.js":false,"./sortBy.js":false,"./sortedIndex.js":false,"./sortedIndexBy.js":false,"./sortedIndexOf.js":false,"./sortedLastIndex.js":false,"./sortedLastIndexBy.js":false,"./sortedLastIndexOf.js":false,"./sortedUniq.js":false,"./sortedUniqBy.js":false,"./split.js":false,"./spread.js":false,"./startCase.js":false,"./startsWith.js":false,"./stubArray.js":"iwLLL","./stubFalse.js":"fF5mf","./stubObject.js":false,"./stubString.js":false,"./stubTrue.js":false,"./subtract.js":false,"./sum.js":false,"./sumBy.js":false,"./tail.js":false,"./take.js":false,"./takeRight.js":false,"./takeRightWhile.js":false,"./takeWhile.js":false,"./tap.js":false,"./template.js":false,"./templateSettings.js":false,"./throttle.js":false,"./thru.js":false,"./times.js":false,"./toArray.js":false,"./toFinite.js":"FJR8i","./toInteger.js":"1tdUD","./toIterator.js":false,"./toJSON.js":false,"./toLength.js":false,"./toLower.js":false,"./toNumber.js":"4CrK2","./toPairs.js":false,"./toPairsIn.js":false,"./toPath.js":false,"./toPlainObject.js":false,"./toSafeInteger.js":false,"./toString.js":"hF0LJ","./toUpper.js":false,"./transform.js":false,"./trim.js":false,"./trimEnd.js":false,"./trimStart.js":false,"./truncate.js":false,"./unary.js":false,"./unescape.js":false,"./union.js":false,"./unionBy.js":false,"./unionWith.js":false,"./uniq.js":false,"./uniqBy.js":false,"./uniqWith.js":false,"./uniqueId.js":false,"./unset.js":false,"./unzip.js":"j1DxS","./unzipWith.js":"bc76B","./update.js":false,"./updateWith.js":false,"./upperCase.js":false,"./upperFirst.js":false,"./value.js":false,"./valueOf.js":false,"./values.js":false,"./valuesIn.js":false,"./without.js":false,"./words.js":false,"./wrap.js":false,"./wrapperAt.js":false,"./wrapperChain.js":false,"./wrapperReverse.js":false,"./wrapperValue.js":false,"./xor.js":false,"./xorBy.js":false,"./xorWith.js":false,"./zip.js":"30Loa","./zipObject.js":false,"./zipObjectDeep.js":false,"./zipWith.js":false,"./lodash.default.js":false,"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"CS0KS":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _createMathOperationJs = require("./_createMathOperation.js");
+var _createMathOperationJsDefault = parcelHelpers.interopDefault(_createMathOperationJs);
+/**
+ * Adds two numbers.
+ *
+ * @static
+ * @memberOf _
+ * @since 3.4.0
+ * @category Math
+ * @param {number} augend The first number in an addition.
+ * @param {number} addend The second number in an addition.
+ * @returns {number} Returns the total.
+ * @example
+ *
+ * _.add(6, 4);
+ * // => 10
+ */ var add = _createMathOperationJsDefault.default(function(augend, addend) {
+    return augend + addend;
+}, 0);
+exports.default = add;
+
+},{"./_createMathOperation.js":"dCaXK","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dCaXK":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _baseToNumberJs = require("./_baseToNumber.js");
+var _baseToNumberJsDefault = parcelHelpers.interopDefault(_baseToNumberJs);
+var _baseToStringJs = require("./_baseToString.js");
+var _baseToStringJsDefault = parcelHelpers.interopDefault(_baseToStringJs);
+/**
+ * Creates a function that performs a mathematical operation on two values.
+ *
+ * @private
+ * @param {Function} operator The function to perform the operation.
+ * @param {number} [defaultValue] The value used for `undefined` arguments.
+ * @returns {Function} Returns the new mathematical operation function.
+ */ function createMathOperation(operator, defaultValue) {
+    return function(value, other) {
+        var result;
+        if (value === undefined && other === undefined) return defaultValue;
+        if (value !== undefined) result = value;
+        if (other !== undefined) {
+            if (result === undefined) return other;
+            if (typeof value == 'string' || typeof other == 'string') {
+                value = _baseToStringJsDefault.default(value);
+                other = _baseToStringJsDefault.default(other);
+            } else {
+                value = _baseToNumberJsDefault.default(value);
+                other = _baseToNumberJsDefault.default(other);
+            }
+            result = operator(value, other);
+        }
+        return result;
+    };
+}
+exports.default = createMathOperation;
+
+},{"./_baseToNumber.js":"fndP2","./_baseToString.js":"fQ5ds","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fndP2":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _isSymbolJs = require("./isSymbol.js");
+var _isSymbolJsDefault = parcelHelpers.interopDefault(_isSymbolJs);
+/** Used as references for various `Number` constants. */ var NAN = 0 / 0;
+/**
+ * The base implementation of `_.toNumber` which doesn't ensure correct
+ * conversions of binary, hexadecimal, or octal string values.
+ *
+ * @private
+ * @param {*} value The value to process.
+ * @returns {number} Returns the number.
+ */ function baseToNumber(value) {
+    if (typeof value == 'number') return value;
+    if (_isSymbolJsDefault.default(value)) return NAN;
+    return +value;
+}
+exports.default = baseToNumber;
+
+},{"./isSymbol.js":"gCyRJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gCyRJ":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _baseGetTagJs = require("./_baseGetTag.js");
+var _baseGetTagJsDefault = parcelHelpers.interopDefault(_baseGetTagJs);
+var _isObjectLikeJs = require("./isObjectLike.js");
+var _isObjectLikeJsDefault = parcelHelpers.interopDefault(_isObjectLikeJs);
+/** `Object#toString` result references. */ var symbolTag = '[object Symbol]';
+/**
+ * Checks if `value` is classified as a `Symbol` primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
+ * @example
+ *
+ * _.isSymbol(Symbol.iterator);
+ * // => true
+ *
+ * _.isSymbol('abc');
+ * // => false
+ */ function isSymbol(value) {
+    return typeof value == 'symbol' || _isObjectLikeJsDefault.default(value) && _baseGetTagJsDefault.default(value) == symbolTag;
+}
+exports.default = isSymbol;
+
+},{"./_baseGetTag.js":"gVDfP","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gVDfP":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _symbolJs = require("./_Symbol.js");
+var _symbolJsDefault = parcelHelpers.interopDefault(_symbolJs);
+var _getRawTagJs = require("./_getRawTag.js");
+var _getRawTagJsDefault = parcelHelpers.interopDefault(_getRawTagJs);
+var _objectToStringJs = require("./_objectToString.js");
+var _objectToStringJsDefault = parcelHelpers.interopDefault(_objectToStringJs);
+/** `Object#toString` result references. */ var nullTag = '[object Null]', undefinedTag = '[object Undefined]';
+/** Built-in value references. */ var symToStringTag = _symbolJsDefault.default ? _symbolJsDefault.default.toStringTag : undefined;
+/**
+ * The base implementation of `getTag` without fallbacks for buggy environments.
+ *
+ * @private
+ * @param {*} value The value to query.
+ * @returns {string} Returns the `toStringTag`.
+ */ function baseGetTag(value) {
+    if (value == null) return value === undefined ? undefinedTag : nullTag;
+    return symToStringTag && symToStringTag in Object(value) ? _getRawTagJsDefault.default(value) : _objectToStringJsDefault.default(value);
+}
+exports.default = baseGetTag;
+
+},{"./_Symbol.js":"jx216","./_getRawTag.js":"ijXom","./_objectToString.js":"fTkTn","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jx216":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _rootJs = require("./_root.js");
+var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
+/** Built-in value references. */ var Symbol = _rootJsDefault.default.Symbol;
+exports.default = Symbol;
+
+},{"./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8yvCA":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _freeGlobalJs = require("./_freeGlobal.js");
+var _freeGlobalJsDefault = parcelHelpers.interopDefault(_freeGlobalJs);
+/** Detect free variable `self`. */ var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
+/** Used as a reference to the global object. */ var root = _freeGlobalJsDefault.default || freeSelf || Function('return this')();
+exports.default = root;
+
+},{"./_freeGlobal.js":"98hMd","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"98hMd":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var global = arguments[3];
+/** Detect free variable `global` from Node.js. */ var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
+exports.default = freeGlobal;
+
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gkKU3":[function(require,module,exports) {
+exports.interopDefault = function(a) {
+    return a && a.__esModule ? a : {
+        default: a
+    };
+};
+exports.defineInteropFlag = function(a) {
+    Object.defineProperty(a, '__esModule', {
+        value: true
+    });
+};
+exports.exportAll = function(source, dest) {
+    Object.keys(source).forEach(function(key) {
+        if (key === 'default' || key === '__esModule' || dest.hasOwnProperty(key)) return;
+        Object.defineProperty(dest, key, {
+            enumerable: true,
+            get: function() {
+                return source[key];
+            }
+        });
+    });
+    return dest;
+};
+exports.export = function(dest, destName, get) {
+    Object.defineProperty(dest, destName, {
+        enumerable: true,
+        get: get
+    });
+};
+
+},{}],"ijXom":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _symbolJs = require("./_Symbol.js");
+var _symbolJsDefault = parcelHelpers.interopDefault(_symbolJs);
+/** Used for built-in method references. */ var objectProto = Object.prototype;
+/** Used to check objects for own properties. */ var hasOwnProperty = objectProto.hasOwnProperty;
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */ var nativeObjectToString = objectProto.toString;
+/** Built-in value references. */ var symToStringTag = _symbolJsDefault.default ? _symbolJsDefault.default.toStringTag : undefined;
+/**
+ * A specialized version of `baseGetTag` which ignores `Symbol.toStringTag` values.
+ *
+ * @private
+ * @param {*} value The value to query.
+ * @returns {string} Returns the raw `toStringTag`.
+ */ function getRawTag(value) {
+    var isOwn = hasOwnProperty.call(value, symToStringTag), tag = value[symToStringTag];
+    try {
+        value[symToStringTag] = undefined;
+        var unmasked = true;
+    } catch (e) {
+    }
+    var result = nativeObjectToString.call(value);
+    if (unmasked) {
+        if (isOwn) value[symToStringTag] = tag;
+        else delete value[symToStringTag];
+    }
+    return result;
+}
+exports.default = getRawTag;
+
+},{"./_Symbol.js":"jx216","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fTkTn":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+/** Used for built-in method references. */ var objectProto = Object.prototype;
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */ var nativeObjectToString = objectProto.toString;
+/**
+ * Converts `value` to a string using `Object.prototype.toString`.
+ *
+ * @private
+ * @param {*} value The value to convert.
+ * @returns {string} Returns the converted string.
+ */ function objectToString(value) {
+    return nativeObjectToString.call(value);
+}
+exports.default = objectToString;
+
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"iad76":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */ function isObjectLike(value) {
+    return value != null && typeof value == 'object';
+}
+exports.default = isObjectLike;
+
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fQ5ds":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _symbolJs = require("./_Symbol.js");
+var _symbolJsDefault = parcelHelpers.interopDefault(_symbolJs);
+var _arrayMapJs = require("./_arrayMap.js");
+var _arrayMapJsDefault = parcelHelpers.interopDefault(_arrayMapJs);
+var _isArrayJs = require("./isArray.js");
+var _isArrayJsDefault = parcelHelpers.interopDefault(_isArrayJs);
+var _isSymbolJs = require("./isSymbol.js");
+var _isSymbolJsDefault = parcelHelpers.interopDefault(_isSymbolJs);
+/** Used as references for various `Number` constants. */ var INFINITY = 1 / 0;
+/** Used to convert symbols to primitives and strings. */ var symbolProto = _symbolJsDefault.default ? _symbolJsDefault.default.prototype : undefined, symbolToString = symbolProto ? symbolProto.toString : undefined;
+/**
+ * The base implementation of `_.toString` which doesn't convert nullish
+ * values to empty strings.
+ *
+ * @private
+ * @param {*} value The value to process.
+ * @returns {string} Returns the string.
+ */ function baseToString(value) {
+    // Exit early for strings to avoid a performance hit in some environments.
+    if (typeof value == 'string') return value;
+    if (_isArrayJsDefault.default(value)) // Recursively convert values (susceptible to call stack limits).
+    return _arrayMapJsDefault.default(value, baseToString) + '';
+    if (_isSymbolJsDefault.default(value)) return symbolToString ? symbolToString.call(value) : '';
+    var result = value + '';
+    return result == '0' && 1 / value == -INFINITY ? '-0' : result;
+}
+exports.default = baseToString;
+
+},{"./_Symbol.js":"jx216","./_arrayMap.js":"gDCVM","./isArray.js":"ETPQ1","./isSymbol.js":"gCyRJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gDCVM":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+/**
+ * A specialized version of `_.map` for arrays without support for iteratee
+ * shorthands.
+ *
+ * @private
+ * @param {Array} [array] The array to iterate over.
+ * @param {Function} iteratee The function invoked per iteration.
+ * @returns {Array} Returns the new mapped array.
+ */ function arrayMap(array, iteratee) {
+    var index = -1, length = array == null ? 0 : array.length, result = Array(length);
+    while(++index < length)result[index] = iteratee(array[index], index, array);
+    return result;
+}
+exports.default = arrayMap;
+
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"ETPQ1":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+/**
+ * Checks if `value` is classified as an `Array` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an array, else `false`.
+ * @example
+ *
+ * _.isArray([1, 2, 3]);
+ * // => true
+ *
+ * _.isArray(document.body.children);
+ * // => false
+ *
+ * _.isArray('abc');
+ * // => false
+ *
+ * _.isArray(_.noop);
+ * // => false
+ */ var isArray = Array.isArray;
+exports.default = isArray;
+
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fPV8N":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _baseSliceJs = require("./_baseSlice.js");
@@ -11368,37 +11760,7 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = baseSlice;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gkKU3":[function(require,module,exports) {
-exports.interopDefault = function(a) {
-    return a && a.__esModule ? a : {
-        default: a
-    };
-};
-exports.defineInteropFlag = function(a) {
-    Object.defineProperty(a, '__esModule', {
-        value: true
-    });
-};
-exports.exportAll = function(source, dest) {
-    Object.keys(source).forEach(function(key) {
-        if (key === 'default' || key === '__esModule' || dest.hasOwnProperty(key)) return;
-        Object.defineProperty(dest, key, {
-            enumerable: true,
-            get: function() {
-                return source[key];
-            }
-        });
-    });
-    return dest;
-};
-exports.export = function(dest, destName, get) {
-    Object.defineProperty(dest, destName, {
-        enumerable: true,
-        get: get
-    });
-};
-
-},{}],"1jM1r":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1jM1r":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _eqJs = require("./eq.js");
@@ -11534,109 +11896,7 @@ var _isObjectJsDefault = parcelHelpers.interopDefault(_isObjectJs);
 }
 exports.default = isFunction;
 
-},{"./_baseGetTag.js":"gVDfP","./isObject.js":"dHhyW","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gVDfP":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-var _symbolJs = require("./_Symbol.js");
-var _symbolJsDefault = parcelHelpers.interopDefault(_symbolJs);
-var _getRawTagJs = require("./_getRawTag.js");
-var _getRawTagJsDefault = parcelHelpers.interopDefault(_getRawTagJs);
-var _objectToStringJs = require("./_objectToString.js");
-var _objectToStringJsDefault = parcelHelpers.interopDefault(_objectToStringJs);
-/** `Object#toString` result references. */ var nullTag = '[object Null]', undefinedTag = '[object Undefined]';
-/** Built-in value references. */ var symToStringTag = _symbolJsDefault.default ? _symbolJsDefault.default.toStringTag : undefined;
-/**
- * The base implementation of `getTag` without fallbacks for buggy environments.
- *
- * @private
- * @param {*} value The value to query.
- * @returns {string} Returns the `toStringTag`.
- */ function baseGetTag(value) {
-    if (value == null) return value === undefined ? undefinedTag : nullTag;
-    return symToStringTag && symToStringTag in Object(value) ? _getRawTagJsDefault.default(value) : _objectToStringJsDefault.default(value);
-}
-exports.default = baseGetTag;
-
-},{"./_Symbol.js":"jx216","./_getRawTag.js":"ijXom","./_objectToString.js":"fTkTn","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"jx216":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-var _rootJs = require("./_root.js");
-var _rootJsDefault = parcelHelpers.interopDefault(_rootJs);
-/** Built-in value references. */ var Symbol = _rootJsDefault.default.Symbol;
-exports.default = Symbol;
-
-},{"./_root.js":"8yvCA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8yvCA":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-var _freeGlobalJs = require("./_freeGlobal.js");
-var _freeGlobalJsDefault = parcelHelpers.interopDefault(_freeGlobalJs);
-/** Detect free variable `self`. */ var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
-/** Used as a reference to the global object. */ var root = _freeGlobalJsDefault.default || freeSelf || Function('return this')();
-exports.default = root;
-
-},{"./_freeGlobal.js":"98hMd","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"98hMd":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-var global = arguments[3];
-/** Detect free variable `global` from Node.js. */ var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
-exports.default = freeGlobal;
-
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"ijXom":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-var _symbolJs = require("./_Symbol.js");
-var _symbolJsDefault = parcelHelpers.interopDefault(_symbolJs);
-/** Used for built-in method references. */ var objectProto = Object.prototype;
-/** Used to check objects for own properties. */ var hasOwnProperty = objectProto.hasOwnProperty;
-/**
- * Used to resolve the
- * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
- * of values.
- */ var nativeObjectToString = objectProto.toString;
-/** Built-in value references. */ var symToStringTag = _symbolJsDefault.default ? _symbolJsDefault.default.toStringTag : undefined;
-/**
- * A specialized version of `baseGetTag` which ignores `Symbol.toStringTag` values.
- *
- * @private
- * @param {*} value The value to query.
- * @returns {string} Returns the raw `toStringTag`.
- */ function getRawTag(value) {
-    var isOwn = hasOwnProperty.call(value, symToStringTag), tag = value[symToStringTag];
-    try {
-        value[symToStringTag] = undefined;
-        var unmasked = true;
-    } catch (e) {
-    }
-    var result = nativeObjectToString.call(value);
-    if (unmasked) {
-        if (isOwn) value[symToStringTag] = tag;
-        else delete value[symToStringTag];
-    }
-    return result;
-}
-exports.default = getRawTag;
-
-},{"./_Symbol.js":"jx216","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fTkTn":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-/** Used for built-in method references. */ var objectProto = Object.prototype;
-/**
- * Used to resolve the
- * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
- * of values.
- */ var nativeObjectToString = objectProto.toString;
-/**
- * Converts `value` to a string using `Object.prototype.toString`.
- *
- * @private
- * @param {*} value The value to convert.
- * @returns {string} Returns the converted string.
- */ function objectToString(value) {
-    return nativeObjectToString.call(value);
-}
-exports.default = objectToString;
-
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dHhyW":[function(require,module,exports) {
+},{"./_baseGetTag.js":"gVDfP","./isObject.js":"dHhyW","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dHhyW":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
@@ -11882,65 +12142,33 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = trimmedEndIndex;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gCyRJ":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-var _baseGetTagJs = require("./_baseGetTag.js");
-var _baseGetTagJsDefault = parcelHelpers.interopDefault(_baseGetTagJs);
-var _isObjectLikeJs = require("./isObjectLike.js");
-var _isObjectLikeJsDefault = parcelHelpers.interopDefault(_isObjectLikeJs);
-/** `Object#toString` result references. */ var symbolTag = '[object Symbol]';
-/**
- * Checks if `value` is classified as a `Symbol` primitive or object.
- *
- * @static
- * @memberOf _
- * @since 4.0.0
- * @category Lang
- * @param {*} value The value to check.
- * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
- * @example
- *
- * _.isSymbol(Symbol.iterator);
- * // => true
- *
- * _.isSymbol('abc');
- * // => false
- */ function isSymbol(value) {
-    return typeof value == 'symbol' || _isObjectLikeJsDefault.default(value) && _baseGetTagJsDefault.default(value) == symbolTag;
-}
-exports.default = isSymbol;
-
-},{"./_baseGetTag.js":"gVDfP","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"iad76":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"a5s7V":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 /**
- * Checks if `value` is object-like. A value is object-like if it's not `null`
- * and has a `typeof` result of "object".
+ * Creates a function that returns `value`.
  *
  * @static
  * @memberOf _
- * @since 4.0.0
- * @category Lang
- * @param {*} value The value to check.
- * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @since 2.4.0
+ * @category Util
+ * @param {*} value The value to return from the new function.
+ * @returns {Function} Returns the new constant function.
  * @example
  *
- * _.isObjectLike({});
+ * var objects = _.times(2, _.constant({ 'a': 1 }));
+ *
+ * console.log(objects);
+ * // => [{ 'a': 1 }, { 'a': 1 }]
+ *
+ * console.log(objects[0] === objects[1]);
  * // => true
- *
- * _.isObjectLike([1, 2, 3]);
- * // => true
- *
- * _.isObjectLike(_.noop);
- * // => false
- *
- * _.isObjectLike(null);
- * // => false
- */ function isObjectLike(value) {
-    return value != null && typeof value == 'object';
+ */ function constant(value) {
+    return function() {
+        return value;
+    };
 }
-exports.default = isObjectLike;
+exports.default = constant;
 
 },{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"9ZP5X":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
@@ -12025,35 +12253,7 @@ var _toStringJsDefault = parcelHelpers.interopDefault(_toStringJs);
 }
 exports.default = castPath;
 
-},{"./isArray.js":"ETPQ1","./_isKey.js":"h7SfK","./_stringToPath.js":"cgxmj","./toString.js":"hF0LJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"ETPQ1":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-/**
- * Checks if `value` is classified as an `Array` object.
- *
- * @static
- * @memberOf _
- * @since 0.1.0
- * @category Lang
- * @param {*} value The value to check.
- * @returns {boolean} Returns `true` if `value` is an array, else `false`.
- * @example
- *
- * _.isArray([1, 2, 3]);
- * // => true
- *
- * _.isArray(document.body.children);
- * // => false
- *
- * _.isArray('abc');
- * // => false
- *
- * _.isArray(_.noop);
- * // => false
- */ var isArray = Array.isArray;
-exports.default = isArray;
-
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"h7SfK":[function(require,module,exports) {
+},{"./isArray.js":"ETPQ1","./_isKey.js":"h7SfK","./_stringToPath.js":"cgxmj","./toString.js":"hF0LJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"h7SfK":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isArrayJs = require("./isArray.js");
@@ -12832,56 +13032,7 @@ var _baseToStringJsDefault = parcelHelpers.interopDefault(_baseToStringJs);
 }
 exports.default = toString;
 
-},{"./_baseToString.js":"fQ5ds","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"fQ5ds":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-var _symbolJs = require("./_Symbol.js");
-var _symbolJsDefault = parcelHelpers.interopDefault(_symbolJs);
-var _arrayMapJs = require("./_arrayMap.js");
-var _arrayMapJsDefault = parcelHelpers.interopDefault(_arrayMapJs);
-var _isArrayJs = require("./isArray.js");
-var _isArrayJsDefault = parcelHelpers.interopDefault(_isArrayJs);
-var _isSymbolJs = require("./isSymbol.js");
-var _isSymbolJsDefault = parcelHelpers.interopDefault(_isSymbolJs);
-/** Used as references for various `Number` constants. */ var INFINITY = 1 / 0;
-/** Used to convert symbols to primitives and strings. */ var symbolProto = _symbolJsDefault.default ? _symbolJsDefault.default.prototype : undefined, symbolToString = symbolProto ? symbolProto.toString : undefined;
-/**
- * The base implementation of `_.toString` which doesn't convert nullish
- * values to empty strings.
- *
- * @private
- * @param {*} value The value to process.
- * @returns {string} Returns the string.
- */ function baseToString(value) {
-    // Exit early for strings to avoid a performance hit in some environments.
-    if (typeof value == 'string') return value;
-    if (_isArrayJsDefault.default(value)) // Recursively convert values (susceptible to call stack limits).
-    return _arrayMapJsDefault.default(value, baseToString) + '';
-    if (_isSymbolJsDefault.default(value)) return symbolToString ? symbolToString.call(value) : '';
-    var result = value + '';
-    return result == '0' && 1 / value == -INFINITY ? '-0' : result;
-}
-exports.default = baseToString;
-
-},{"./_Symbol.js":"jx216","./_arrayMap.js":"gDCVM","./isArray.js":"ETPQ1","./isSymbol.js":"gCyRJ","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gDCVM":[function(require,module,exports) {
-var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
-parcelHelpers.defineInteropFlag(exports);
-/**
- * A specialized version of `_.map` for arrays without support for iteratee
- * shorthands.
- *
- * @private
- * @param {Array} [array] The array to iterate over.
- * @param {Function} iteratee The function invoked per iteration.
- * @returns {Array} Returns the new mapped array.
- */ function arrayMap(array, iteratee) {
-    var index = -1, length = array == null ? 0 : array.length, result = Array(length);
-    while(++index < length)result[index] = iteratee(array[index], index, array);
-    return result;
-}
-exports.default = arrayMap;
-
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"Zo68s":[function(require,module,exports) {
+},{"./_baseToString.js":"fQ5ds","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"Zo68s":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _isSymbolJs = require("./isSymbol.js");
@@ -13065,7 +13216,43 @@ parcelHelpers.defineInteropFlag(exports);
 }
 exports.default = identity;
 
-},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"llpEE":[function(require,module,exports) {
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"gArhC":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _isArrayLikeJs = require("./isArrayLike.js");
+var _isArrayLikeJsDefault = parcelHelpers.interopDefault(_isArrayLikeJs);
+var _isObjectLikeJs = require("./isObjectLike.js");
+var _isObjectLikeJsDefault = parcelHelpers.interopDefault(_isObjectLikeJs);
+/**
+ * This method is like `_.isArrayLike` except that it also checks if `value`
+ * is an object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an array-like object,
+ *  else `false`.
+ * @example
+ *
+ * _.isArrayLikeObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isArrayLikeObject(document.body.children);
+ * // => true
+ *
+ * _.isArrayLikeObject('abc');
+ * // => false
+ *
+ * _.isArrayLikeObject(_.noop);
+ * // => false
+ */ function isArrayLikeObject(value) {
+    return _isObjectLikeJsDefault.default(value) && _isArrayLikeJsDefault.default(value);
+}
+exports.default = isArrayLikeObject;
+
+},{"./isArrayLike.js":"8SdiO","./isObjectLike.js":"iad76","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"llpEE":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 var _rootJs = require("./_root.js");
@@ -14831,7 +15018,280 @@ var _createBaseForJsDefault = parcelHelpers.interopDefault(_createBaseForJs);
  */ var baseForRight = _createBaseForJsDefault.default(true);
 exports.default = baseForRight;
 
-},{"./_createBaseFor.js":"1W89a","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"h4vgq":[function(require,module,exports) {
+},{"./_createBaseFor.js":"1W89a","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"j1DxS":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _arrayFilterJs = require("./_arrayFilter.js");
+var _arrayFilterJsDefault = parcelHelpers.interopDefault(_arrayFilterJs);
+var _arrayMapJs = require("./_arrayMap.js");
+var _arrayMapJsDefault = parcelHelpers.interopDefault(_arrayMapJs);
+var _basePropertyJs = require("./_baseProperty.js");
+var _basePropertyJsDefault = parcelHelpers.interopDefault(_basePropertyJs);
+var _baseTimesJs = require("./_baseTimes.js");
+var _baseTimesJsDefault = parcelHelpers.interopDefault(_baseTimesJs);
+var _isArrayLikeObjectJs = require("./isArrayLikeObject.js");
+var _isArrayLikeObjectJsDefault = parcelHelpers.interopDefault(_isArrayLikeObjectJs);
+/* Built-in method references for those with the same name as other `lodash` methods. */ var nativeMax = Math.max;
+/**
+ * This method is like `_.zip` except that it accepts an array of grouped
+ * elements and creates an array regrouping the elements to their pre-zip
+ * configuration.
+ *
+ * @static
+ * @memberOf _
+ * @since 1.2.0
+ * @category Array
+ * @param {Array} array The array of grouped elements to process.
+ * @returns {Array} Returns the new array of regrouped elements.
+ * @example
+ *
+ * var zipped = _.zip(['a', 'b'], [1, 2], [true, false]);
+ * // => [['a', 1, true], ['b', 2, false]]
+ *
+ * _.unzip(zipped);
+ * // => [['a', 'b'], [1, 2], [true, false]]
+ */ function unzip(array) {
+    if (!(array && array.length)) return [];
+    var length = 0;
+    array = _arrayFilterJsDefault.default(array, function(group) {
+        if (_isArrayLikeObjectJsDefault.default(group)) {
+            length = nativeMax(group.length, length);
+            return true;
+        }
+    });
+    return _baseTimesJsDefault.default(length, function(index) {
+        return _arrayMapJsDefault.default(array, _basePropertyJsDefault.default(index));
+    });
+}
+exports.default = unzip;
+
+},{"./_arrayFilter.js":"iZqHX","./_arrayMap.js":"gDCVM","./_baseProperty.js":"gAjZk","./_baseTimes.js":"6yWeR","./isArrayLikeObject.js":"gArhC","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"bc76B":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _applyJs = require("./_apply.js");
+var _applyJsDefault = parcelHelpers.interopDefault(_applyJs);
+var _arrayMapJs = require("./_arrayMap.js");
+var _arrayMapJsDefault = parcelHelpers.interopDefault(_arrayMapJs);
+var _unzipJs = require("./unzip.js");
+var _unzipJsDefault = parcelHelpers.interopDefault(_unzipJs);
+/**
+ * This method is like `_.unzip` except that it accepts `iteratee` to specify
+ * how regrouped values should be combined. The iteratee is invoked with the
+ * elements of each group: (...group).
+ *
+ * @static
+ * @memberOf _
+ * @since 3.8.0
+ * @category Array
+ * @param {Array} array The array of grouped elements to process.
+ * @param {Function} [iteratee=_.identity] The function to combine
+ *  regrouped values.
+ * @returns {Array} Returns the new array of regrouped elements.
+ * @example
+ *
+ * var zipped = _.zip([1, 2], [10, 20], [100, 200]);
+ * // => [[1, 10, 100], [2, 20, 200]]
+ *
+ * _.unzipWith(zipped, _.add);
+ * // => [3, 30, 300]
+ */ function unzipWith(array, iteratee) {
+    if (!(array && array.length)) return [];
+    var result = _unzipJsDefault.default(array);
+    if (iteratee == null) return result;
+    return _arrayMapJsDefault.default(result, function(group) {
+        return _applyJsDefault.default(iteratee, undefined, group);
+    });
+}
+exports.default = unzipWith;
+
+},{"./_apply.js":"kqJ3H","./_arrayMap.js":"gDCVM","./unzip.js":"j1DxS","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"kqJ3H":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+/**
+ * A faster alternative to `Function#apply`, this function invokes `func`
+ * with the `this` binding of `thisArg` and the arguments of `args`.
+ *
+ * @private
+ * @param {Function} func The function to invoke.
+ * @param {*} thisArg The `this` binding of `func`.
+ * @param {Array} args The arguments to invoke `func` with.
+ * @returns {*} Returns the result of `func`.
+ */ function apply(func, thisArg, args) {
+    switch(args.length){
+        case 0:
+            return func.call(thisArg);
+        case 1:
+            return func.call(thisArg, args[0]);
+        case 2:
+            return func.call(thisArg, args[0], args[1]);
+        case 3:
+            return func.call(thisArg, args[0], args[1], args[2]);
+    }
+    return func.apply(thisArg, args);
+}
+exports.default = apply;
+
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"30Loa":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _baseRestJs = require("./_baseRest.js");
+var _baseRestJsDefault = parcelHelpers.interopDefault(_baseRestJs);
+var _unzipJs = require("./unzip.js");
+var _unzipJsDefault = parcelHelpers.interopDefault(_unzipJs);
+/**
+ * Creates an array of grouped elements, the first of which contains the
+ * first elements of the given arrays, the second of which contains the
+ * second elements of the given arrays, and so on.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Array
+ * @param {...Array} [arrays] The arrays to process.
+ * @returns {Array} Returns the new array of grouped elements.
+ * @example
+ *
+ * _.zip(['a', 'b'], [1, 2], [true, false]);
+ * // => [['a', 1, true], ['b', 2, false]]
+ */ var zip = _baseRestJsDefault.default(_unzipJsDefault.default);
+exports.default = zip;
+
+},{"./_baseRest.js":"1fKJX","./unzip.js":"j1DxS","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"1fKJX":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _identityJs = require("./identity.js");
+var _identityJsDefault = parcelHelpers.interopDefault(_identityJs);
+var _overRestJs = require("./_overRest.js");
+var _overRestJsDefault = parcelHelpers.interopDefault(_overRestJs);
+var _setToStringJs = require("./_setToString.js");
+var _setToStringJsDefault = parcelHelpers.interopDefault(_setToStringJs);
+/**
+ * The base implementation of `_.rest` which doesn't validate or coerce arguments.
+ *
+ * @private
+ * @param {Function} func The function to apply a rest parameter to.
+ * @param {number} [start=func.length-1] The start position of the rest parameter.
+ * @returns {Function} Returns the new function.
+ */ function baseRest(func, start) {
+    return _setToStringJsDefault.default(_overRestJsDefault.default(func, start, _identityJsDefault.default), func + '');
+}
+exports.default = baseRest;
+
+},{"./identity.js":"1Y0KA","./_overRest.js":"d1Uaz","./_setToString.js":"3GXSg","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"d1Uaz":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _applyJs = require("./_apply.js");
+var _applyJsDefault = parcelHelpers.interopDefault(_applyJs);
+/* Built-in method references for those with the same name as other `lodash` methods. */ var nativeMax = Math.max;
+/**
+ * A specialized version of `baseRest` which transforms the rest array.
+ *
+ * @private
+ * @param {Function} func The function to apply a rest parameter to.
+ * @param {number} [start=func.length-1] The start position of the rest parameter.
+ * @param {Function} transform The rest array transform.
+ * @returns {Function} Returns the new function.
+ */ function overRest(func, start, transform) {
+    start = nativeMax(start === undefined ? func.length - 1 : start, 0);
+    return function() {
+        var args = arguments, index = -1, length = nativeMax(args.length - start, 0), array = Array(length);
+        while(++index < length)array[index] = args[start + index];
+        index = -1;
+        var otherArgs = Array(start + 1);
+        while(++index < start)otherArgs[index] = args[index];
+        otherArgs[start] = transform(array);
+        return _applyJsDefault.default(func, this, otherArgs);
+    };
+}
+exports.default = overRest;
+
+},{"./_apply.js":"kqJ3H","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"3GXSg":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _baseSetToStringJs = require("./_baseSetToString.js");
+var _baseSetToStringJsDefault = parcelHelpers.interopDefault(_baseSetToStringJs);
+var _shortOutJs = require("./_shortOut.js");
+var _shortOutJsDefault = parcelHelpers.interopDefault(_shortOutJs);
+/**
+ * Sets the `toString` method of `func` to return `string`.
+ *
+ * @private
+ * @param {Function} func The function to modify.
+ * @param {Function} string The `toString` result.
+ * @returns {Function} Returns `func`.
+ */ var setToString = _shortOutJsDefault.default(_baseSetToStringJsDefault.default);
+exports.default = setToString;
+
+},{"./_baseSetToString.js":"lc4dY","./_shortOut.js":"dmiNi","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"lc4dY":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _constantJs = require("./constant.js");
+var _constantJsDefault = parcelHelpers.interopDefault(_constantJs);
+var _definePropertyJs = require("./_defineProperty.js");
+var _definePropertyJsDefault = parcelHelpers.interopDefault(_definePropertyJs);
+var _identityJs = require("./identity.js");
+var _identityJsDefault = parcelHelpers.interopDefault(_identityJs);
+/**
+ * The base implementation of `setToString` without support for hot loop shorting.
+ *
+ * @private
+ * @param {Function} func The function to modify.
+ * @param {Function} string The `toString` result.
+ * @returns {Function} Returns `func`.
+ */ var baseSetToString = !_definePropertyJsDefault.default ? _identityJsDefault.default : function(func, string) {
+    return _definePropertyJsDefault.default(func, 'toString', {
+        'configurable': true,
+        'enumerable': false,
+        'value': _constantJsDefault.default(string),
+        'writable': true
+    });
+};
+exports.default = baseSetToString;
+
+},{"./constant.js":"a5s7V","./_defineProperty.js":"8u8dH","./identity.js":"1Y0KA","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"8u8dH":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+var _getNativeJs = require("./_getNative.js");
+var _getNativeJsDefault = parcelHelpers.interopDefault(_getNativeJs);
+var defineProperty = function() {
+    try {
+        var func = _getNativeJsDefault.default(Object, 'defineProperty');
+        func({
+        }, '', {
+        });
+        return func;
+    } catch (e) {
+    }
+}();
+exports.default = defineProperty;
+
+},{"./_getNative.js":"bQrQL","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"dmiNi":[function(require,module,exports) {
+var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
+parcelHelpers.defineInteropFlag(exports);
+/** Used to detect hot functions by number of calls within a span of milliseconds. */ var HOT_COUNT = 800, HOT_SPAN = 16;
+/* Built-in method references for those with the same name as other `lodash` methods. */ var nativeNow = Date.now;
+/**
+ * Creates a function that'll short out and invoke `identity` instead
+ * of `func` when it's called `HOT_COUNT` or more times in `HOT_SPAN`
+ * milliseconds.
+ *
+ * @private
+ * @param {Function} func The function to restrict.
+ * @returns {Function} Returns the new shortable function.
+ */ function shortOut(func) {
+    var count = 0, lastCalled = 0;
+    return function() {
+        var stamp = nativeNow(), remaining = HOT_SPAN - (stamp - lastCalled);
+        lastCalled = stamp;
+        if (remaining > 0) {
+            if (++count >= HOT_COUNT) return arguments[0];
+        } else count = 0;
+        return func.apply(undefined, arguments);
+    };
+}
+exports.default = shortOut;
+
+},{"@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3"}],"h4vgq":[function(require,module,exports) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "B", ()=>B

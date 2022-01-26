@@ -19,12 +19,11 @@
         'oes_standard_derivatives',
         'oes_element_index_uint' // necessary to support high resolution patches
       ]});
-      const N = 10;
+      const RES = 512;
+      const N = 2;
       const patches = product(range(N), range(N), range(N)).map(([i,j,k]) => {
-        // console.log([i,j,k])
-        return patch(regl, 128, [i,j,k])
+        return patch(regl, RES, [i,j,k])
       })
-      // draw = patches.forEach((d, i) => d());
     draw = (number) => {
         for (let d of patches) { d() };
     }
