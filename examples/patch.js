@@ -48,7 +48,7 @@ export default draw = (regl) =>
 
       uniform vec3
         p0, p1, p2, p3,
-        w01, w02, w13, w23;
+        w01, w12, w23, w30;
       uniform mat4 projection, view;
       uniform float time;
 
@@ -64,9 +64,9 @@ export default draw = (regl) =>
             p2,
             p3,
             w01,
-            w02,
-            w13,
+            w12,
             w23,
+            w30,
             position.x,
             position.y
         );
@@ -83,8 +83,8 @@ export default draw = (regl) =>
         vec3 light = vec3(0.5,0.9,0.5);
         light = normalize(light);
 
-        gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
-        // gl_FragColor = vec4(1, 0, 0, 1);
+        // gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
+        gl_FragColor = vec4(0, uv, 1);
       }`,
     attributes: {
       position: () => patch.positions,
@@ -93,13 +93,13 @@ export default draw = (regl) =>
     uniforms: {
       // time(){ return Date.now() },
       p0: [0, 0, 0],
-      p1: [0, D, 0],
-      p2: [D, 0, 0],
-      p3: [D, D, 0],
-      w01: [0, 0, 1],
-      w02: [0, 0, 1],
-      w13: [0, 0, 1],
-      w23: [0, 0, 1],
+      p1: [D, 0, 0],
+      p2: [D, D, 0],
+      p3: [0, D, 0],
+      w01: [1, 0, 0],
+      w12: [0, 1, 0],
+      w23: [-1, 0, 0],
+      w30: [0, -1, 0],
       // w00: [1, 0, -1],
       // w01: ({tick}) => [Math.sin(tick/150), 1, 0],
       // w10: ({tick}) => [0, 0, 2*Math.sin(tick/150)],
