@@ -21,31 +21,37 @@ CGA3 div(CGA3 a, CGA3 b) {
   return mul(a, inverse(b));
 }
 
-CGA3 weight(vec3 p1, vec3 p2, vec3 w) {
-  // return inverse(fromVec(p1-p2+w));
-  return inverse(mul(fromVec(p1-p2), fromVec(w)));
+CGA3 weight(vec3 w) {
+  // return one();
+  return inverse(fromVec(normalize(w)));
+  // return inverse(mul(fromVec(p1-p2), fromVec(w)));
 }
 
 
 CGA3 bilinearQuad(
   vec3 p0, vec3 p1, vec3 p2, vec3 p3,
-  vec3 w01, vec3 w12, vec3 w23, vec3 w30,
+  vec3 w0, vec3 w1, vec3 w2, vec3 w3,
   float u, float v) {
-    CGA3 W01 = mul(bernsteinQuad(0,0,u,v), weight(p0, p1, w01));
-    CGA3 W12 = mul(bernsteinQuad(1,0,u,v), weight(p1, p2, w12));
-    CGA3 W23 = mul(bernsteinQuad(1,1,u,v), weight(p2, p3, w23));
-    CGA3 W30 = mul(bernsteinQuad(0,1,u,v), weight(p3, p0, w30));
+    CGA3 W0 = mul((1.0-u)*(1.0-v),  weight(w0)); // 0, 0
+    CGA3 W1 = mul(u*(1.0-v),        weight(w1)); // 1, 0
+    CGA3 W2 = mul((1.0-u)*v,        weight(w2)); // 0, 1
+    CGA3 W3 = mul(u*v,              weight(w3)); // 1, 1
     CGA3 top = add(
-      mul(fromVec(p0), W01),
-      mul(fromVec(p1), W12),
-      mul(fromVec(p2), W23),
-      mul(fromVec(p3), W30)
+      mul(fromVec(p0), W0),
+      mul(fromVec(p1), W1),
+      mul(fromVec(p2), W2),
+      mul(fromVec(p3), W3)
     );
     CGA3 bottom = add(
-      W01,
-      W12,
-      W23,
-      W30
+      W0,
+      W1,
+      W2,
+      W3
     );
     return div(top, bottom);
+    // vec3 q0 = p0 * (1.0 - u) + p1 * u;
+    // vec3 q1 = p2 * (1.0 - u) + p3 * u;
+    // vec3 x = q0 * (1.0 - v) + q1*v;
+
+    // return fromVec(x);
 }

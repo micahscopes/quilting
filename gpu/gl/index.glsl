@@ -12,16 +12,29 @@ CGA3 fromVec(vec3 x){
     return injectOneBlade(zero(), y);
 }
 
+vec3 toVec(CGA3 x) {
+    return vec3(x.e1, x.e2, x.e3);
+}
+
+CGA3 fromVecInf(vec4 v){
+    CGA3 r = zero();
+    r.e1 = v.x;
+    r.e2 = v.y;
+    r.e3 = v.z;
+    r.enil = v.w;
+    return r;
+}
+
+vec4 toVecInf(CGA3 mv){
+    return vec4(mv.e1, mv.e2, mv.e3, mv.einf);
+}
+
 CGA3 point(vec3 x){
     return point(fromVec(x));
 }
 
 vec3 vecFromPoint(CGA3 x) {
     x = point_coords(x);
-    return vec3(x.e1, x.e2, x.e3);
-}
-
-vec3 toVec(CGA3 x) {
     return vec3(x.e1, x.e2, x.e3);
 }
 

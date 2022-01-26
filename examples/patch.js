@@ -12,7 +12,7 @@ let gl = function (s) {
 };
 
 console.log('triangulating grid...')
-const grid = Delaunator.from(uvGrid(128,128));
+const grid = Delaunator.from(uvGrid(256,256));
 console.log(grid)
 const D = 10;
 const r = (x) => x + Math.random() * 20;
@@ -41,14 +41,14 @@ window.el = Alg.Vector(-r(D), -r(D)+50, 0)
 export default draw = (regl) =>
   regl({
     vert: gl`
-      precision mediump float;
+      precision highp float;
 
       attribute vec3 normal;
       attribute vec3 position;
 
       uniform vec3
         p0, p1, p2, p3,
-        w01, w12, w23, w30;
+        w0, w1, w2, w3;
       uniform mat4 projection, view;
       uniform float time;
 
@@ -63,10 +63,10 @@ export default draw = (regl) =>
             p1,
             p2,
             p3,
-            w01,
-            w12,
-            w23,
-            w30,
+            w0,
+            w1,
+            w2,
+            w3,
             position.x,
             position.y
         );
@@ -75,7 +75,7 @@ export default draw = (regl) =>
         gl_Position = projection * view * vec4(p.e1, p.e2, p.e3, 1.0);
       }`,
     frag: gl`
-      precision mediump float;
+      precision highp float;
       uniform float time;
       varying vec3 n;
       varying vec2 uv;
@@ -84,7 +84,7 @@ export default draw = (regl) =>
         light = normalize(light);
 
         // gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
-        gl_FragColor = vec4(0, uv, 1);
+        gl_FragColor = vec4(0, pow(uv.x, 2.0), pow(uv.y, 2.0), 1);
       }`,
     attributes: {
       position: () => patch.positions,
@@ -94,14 +94,14 @@ export default draw = (regl) =>
       // time(){ return Date.now() },
       p0: [0, 0, 0],
       p1: [D, 0, 0],
-      p2: [D, D, 0],
-      p3: [0, D, 0],
-      w01: [1, 0, 0],
-      w12: [0, 1, 0],
-      w23: [-1, 0, 0],
-      w30: [0, -1, 0],
+      p2: [0, D, 0],
+      p3: [D, D, 0],
+      w0: [0, 0, 1],
+      w1: [1, 0, 0],
+      w2: [1, 0, 0],
+      w3: [0, 1, 0],
       // w00: [1, 0, -1],
-      // w01: ({tick}) => [Math.sin(tick/150), 1, 0],
+      // w0: ({tick}) => [Math.sin(tick/150), 1, 0],
       // w10: ({tick}) => [0, 0, 2*Math.sin(tick/150)],
       // w11: ({tick}) => [0, 2*3.1415926*Math.sin(tick/50), -1],
       time: ({tick}) => {
