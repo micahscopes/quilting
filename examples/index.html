@@ -8,13 +8,44 @@
     // import Algebra from 'ganja.js'
     // window.Algebra = Algebra
 
+    let draw;
+
     console.log("hello")
     document.addEventListener("DOMContentLoaded", function () {
       const regl = createREGL({extensions: [
         'oes_standard_derivatives',
         'oes_element_index_uint' // necessary to support high resolution patches
       ]});
-      const draw = patch(regl);
+      const patches = [
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+       patch(regl),
+      ]
+      // draw = patches.forEach((d, i) => d());
+    draw = (number) => {
+        let i = 0;
+        for (let d of patches) {
+          d({
+            offset: i
+          })
+          i++
+        };
+    }
 
       const decayTime = 100
       const camera = (window.camera = createCamera({
@@ -80,7 +111,7 @@
         setCameraUniforms(camera, () => {
           // if (!camera.state.dirty) return;
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
-          draw();
+          draw && draw();
         });
       });
 
