@@ -58,7 +58,7 @@ export default draw = (regl) =>
       void main () {
 
       CGA3 p =
-          bilinearQuad(
+          bilinearQuadCirculate(
             p0,
             p1,
             p2,
@@ -72,7 +72,7 @@ export default draw = (regl) =>
         );
         n = normal;
         uv = vec2(position.x, position.y);
-        gl_Position = projection * view * vec4(p.e1, p.e2, p.e3, 1.0);
+        gl_Position = projection * view * vec4(vecFromPoint(p), 1.0);
       }`,
     frag: gl`
       precision highp float;
@@ -96,10 +96,10 @@ export default draw = (regl) =>
       p1: [D, 0, 0],
       p2: [0, D, 0],
       p3: [D, D, 0],
-      w0: [0, 0, 1],
-      w1: [1, 0, 0],
-      w2: [1, 0, 0],
-      w3: [0, 1, 0],
+      w0: [0, 0, 0],
+      w1: [0, 0, 1],
+      w2: [0, 0, 0],
+      w3: [0, 0, 0],
       // w00: [1, 0, -1],
       // w0: ({tick}) => [Math.sin(tick/150), 1, 0],
       // w10: ({tick}) => [0, 0, 2*Math.sin(tick/150)],
