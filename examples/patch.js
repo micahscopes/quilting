@@ -82,7 +82,7 @@ export default draw = (regl,D=10, resolution = 64, defaultOffset = [0, 0, 0], ra
         vec3 light = vec3(0.5,0.9,0.5);
         light = normalize(light);
 
-        gl_FragColor = 0.1*vec4((1.0-length(uv)/sqrt(2.0)*0.5), uv.x, uv.y, gbellmf(uv.x, 0.5, 0.2, 0.5)*gbellmf(uv.y, 0.5, 0.2, 0.5))*0.2;
+        gl_FragColor = 0.4*vec4((1.0-length(uv)/sqrt(2.0)*1.5), uv.x, uv.y*2.0, 1.0 - gbellmf(uv.x, 0.1, 0.5, 0.5)*gbellmf(uv.y, 0.1, 0.5, 0.5))*1.5;
       }`,
     attributes: {
       position: () => patch.positions,
@@ -95,15 +95,15 @@ export default draw = (regl,D=10, resolution = 64, defaultOffset = [0, 0, 0], ra
     blend: {
       enable: true,
       func: {
-        // srcRGB: 'one minus dst alpha',
-        srcRGB: 1,
+        srcRGB: 'one minus dst alpha',
+        // srcRGB: 1,
         srcAlpha: 1,
         dstRGB: 1,
-        dstAlpha: 1
+        dstAlpha: 'src alpha',
       },
       equation: {
-        rgb: 'add',
-        alpha: 'add'
+        rgb: 'subtract',
+        alpha: 'subtract'
       },
       color: [0, 0, 0, 0]
     },
