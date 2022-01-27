@@ -15,11 +15,11 @@
         'oes_standard_derivatives',
         'oes_element_index_uint' // necessary to support high resolution patches
       ]});
-      const D = 10;
-      const N = 8;
+      const D = 50;
+      const N = 5;
       const RES = 256;
-      const PROBABILITY = 0.3;
-      const SQUASH_FACTOR = 3;
+      const PROBABILITY = 0.8;
+      const SQUASH_FACTOR = 5;
 
       const patches = product(range(N), range(N), range(N)).map(([i,j,k]) => {
         if (Math.random() > PROBABILITY) { return () => {}}

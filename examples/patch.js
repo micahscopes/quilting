@@ -82,7 +82,7 @@ export default draw = (regl,D=10, resolution = 64, defaultOffset = [0, 0, 0], ra
         vec3 light = vec3(0.5,0.9,0.5);
         light = normalize(light);
 
-        gl_FragColor = 1.5*vec4(redAmount, uv.x, uv.y, 0.75);
+        gl_FragColor = 0.1*vec4((1.0-length(uv)/sqrt(2.0)*0.5), uv.x, uv.y, gbellmf(uv.x, 0.5, 0.2, 0.5)*gbellmf(uv.y, 0.5, 0.2, 0.5))*0.2;
       }`,
     attributes: {
       position: () => patch.positions,
@@ -96,14 +96,14 @@ export default draw = (regl,D=10, resolution = 64, defaultOffset = [0, 0, 0], ra
       enable: true,
       func: {
         // srcRGB: 'one minus dst alpha',
-        srcRGB: 'one minus dst alpha',
+        srcRGB: 1,
         srcAlpha: 1,
         dstRGB: 1,
         dstAlpha: 1
       },
       equation: {
-        rgb: 'subtract',
-        alpha: 'subtract'
+        rgb: 'add',
+        alpha: 'add'
       },
       color: [0, 0, 0, 0]
     },
@@ -118,7 +118,7 @@ export default draw = (regl,D=10, resolution = 64, defaultOffset = [0, 0, 0], ra
       w3: randomUnit(D),
       offset: (context, props) =>
         props?.offset ? props.offset.map((x) => x*D) : defaultOffset.map(x => x*D),
-      redAmount: ({tick}) => 1.0+Math.cos(tick*period)
+      redAmount: ({tick}) => (2.0+Math.cos(tick*period))/3
     },
     elements: patch.cells,
     count: patch.cells.length * 3,

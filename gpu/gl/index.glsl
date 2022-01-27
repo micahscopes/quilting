@@ -1,5 +1,12 @@
 #pragma glslify: import('./cga3/index.glsl')
 
+
+float gbellmf(float x, float a, float b, float c) {
+    return 1.0/(1.0 + pow(
+    abs((x - c)/a), 2.0 * b
+    ));
+}
+
 CGA3 outer(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
     return outer(outer(p,q,r),s);
 }
