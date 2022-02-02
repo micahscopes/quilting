@@ -4,18 +4,30 @@
     import createCamera from "inertial-turntable-camera";
     import interactionEvents from "normalized-interaction-events";
     import patch from './patch'
+    import { range } from 'lodash-es'
 
+    const product = (...a) =>
+      a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
     // import Algebra from 'ganja.js'
     // window.Algebra = Algebra
+
+    let draw;
 
     console.log("hello")
     document.addEventListener("DOMContentLoaded", function () {
       const regl = createREGL({extensions: [
-        // 'khr_parallel_shader_compile',
         'oes_standard_derivatives',
         'oes_element_index_uint' // necessary to support high resolution patches
       ]});
-      const draw = patch(regl);
+      const N = 2;
+      const patches = product(range(N), range(N), range(N)).map(([i,j,k]) => {
+        // console.log([i,j,k])
+        return patch(regl, 256, [i,j,k])
+      })
+      // draw = patches.forEach((d, i) => d());
+    draw = (number) => {
+        for (let d of patches) { d() };
+    }
 
       const decayTime = 100
       const camera = (window.camera = createCamera({
