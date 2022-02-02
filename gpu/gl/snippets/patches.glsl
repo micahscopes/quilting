@@ -22,18 +22,18 @@
 // }
 
 CGA3 weight(vec3 w) {
-  return inv(fromVec(normalize(w)));
+  return inverse(fromVec(normalize(w)));
 }
 
 CGA3 U(float u) {
   CGA3 U = scalar_CGA3(u);
-  U.scalar.enil1 = 1.0;
+  U.edual1 = 1.0;
   return U;
 }
 
 CGA3 V(float v) {
   CGA3 V = scalar_CGA3(v);
-  V.scalar.enil2 = 1.0;
+  V.edual2 = 1.0;
   return V;
 }
 

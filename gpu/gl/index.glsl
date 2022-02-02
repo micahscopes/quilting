@@ -10,14 +10,14 @@ CGA3 mul(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
 
 CGA3 fromVec(vec3 v){
     CGA3 X = ZERO_CGA3;
-    X.e1 = scalar_Dual(v.x);
-    X.e2 = scalar_Dual(v.y);
-    X.e3 = scalar_Dual(v.z);
+    X.e1 = v.x;
+    X.e2 = v.y;
+    X.e3 = v.z;
     return X;
 }
 
 vec3 toVec(CGA3 x) {
-    return vec3(x.e1.scalar, x.e2.scalar, x.e3.scalar);
+    return vec3(x.e1, x.e2, x.e3);
 }
 
 // CGA3 fromVecU(vec3 v){
@@ -42,13 +42,13 @@ vec3 toVec(CGA3 x) {
 //     return X;
 // }
 
-CGA3 point(vec3 x){
-    return point(fromVec(x));
-}
+// CGA3 point(vec3 x){
+//     return point(fromVec(x));
+// }
 
 vec3 vecFromPoint(CGA3 x) {
     // x = point_coords(x);
-    return vec3(x.e1.scalar, x.e2.scalar, x.e3.scalar);
+    return vec3(x.e1, x.e2, x.e3);
 }
 
 // replace this stuff with IPNS sphere stuff

@@ -70,9 +70,10 @@ export default draw = (regl) =>
             position.x,
             position.y
         );
-        n = normal;
+        n = normalize(vec3(p.e1dual2, p.e2dual2, p.e3dual2));
         uv = vec2(position.x, position.y);
-        gl_Position = projection * view * vec4(toVec(p), 2.0);
+
+        gl_Position = projection * view * vec4(p.e1, p.e2, p.e3, 1.0);
       }`,
     frag: gl`
       precision highp float;
@@ -84,7 +85,8 @@ export default draw = (regl) =>
         light = normalize(light);
 
         // gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
-        gl_FragColor = vec4(0, pow(uv.x, 2.0), pow(uv.y, 2.0), 1);
+        // gl_FragColor = vec4(0, pow(uv.x, 2.0), pow(uv.y, 2.0), 1);
+        gl_FragColor = vec4(n, 1.0);
       }`,
     attributes: {
       position: () => patch.positions,
