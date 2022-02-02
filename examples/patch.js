@@ -12,7 +12,7 @@ let gl = function (s) {
 };
 
 console.log('triangulating grid...')
-const grid = Delaunator.from(uvGrid(256,256));
+const grid = Delaunator.from(uvGrid(16,16));
 console.log(grid)
 const D = 10;
 const r = (x) => x + Math.random() * 20;
@@ -72,7 +72,7 @@ export default draw = (regl) =>
         );
         n = normal;
         uv = vec2(position.x, position.y);
-        gl_Position = projection * view * vec4(p.e1, p.e2, p.e3, 1.0);
+        gl_Position = projection * view * vec4(toVec(p), 2.0);
       }`,
     frag: gl`
       precision highp float;

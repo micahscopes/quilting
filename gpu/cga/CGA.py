@@ -35,31 +35,12 @@ class CGA(ConformalGeometricAlgebra):
         result = Pt(u)
         return self.algebraic_operation("point", result, n=1)
 
-    @GLSL
-    def point_coords(self):
-        nil, inf = self.nil, self.inf
-        u = self.algebraic_arguments(1)
-        normalize = lambda pt: pt / (pt | inf).scalar()
-        result = normalize(u)
-        # result = (-u/(u.grade(2)|self.inf)^self.mnk)/self.mnk
-
-        return self.algebraic_operation("point_coords", result, n=1)
-
     # @GLSL
-    # def dual_sphere(self):
+    # def point_coords(self):
     #     nil, inf = self.nil, self.inf
-    #     Sph = lambda x, rad: ((x | x) - rad ** 2) * inf / 2 + x + nil
-    #     center = self.algebraic_arguments(1)
-    #     radius = Symbol("radius")
-    #     result = Sph(center, radius)
+    #     u = self.algebraic_arguments(1)
+    #     normalize = lambda pt: pt / (pt | inf).scalar()
+    #     result = normalize(u)
+    #     # result = (-u/(u.grade(2)|self.inf)^self.mnk)/self.mnk
 
-    #     input_types = [self.type_name, self.base_ring]
-    #     input_argnames = [self.U, "radius"]
-
-    #     return map(
-    #         "dual_sphere",
-    #         input_types,
-    #         input_argnames,
-    #         self.type_name,
-    #         self._coefficients_from_algebraic_element(result),
-    #     )
+    #     return self.algebraic_operation("point_coords", result, n=1)

@@ -9,7 +9,7 @@
     "watch": "parcel watch --port 2345",
     "demo": "npx parcel examples/index.html --dist-dir examples/dist/",
     "dev": "npm-run-all --parallel watch demo",
-    "alglbraic": "python ./gpu/__init__.py --glslify --out gpu/gl/cga3 cga --size 3 injections 'injectOneBlade' 'e1 e2 e3'",
+    "alglbraic": "python ./gpu/__init__.py --glslify --out gpu/gl/cga3 dual-numbers --size 2 cga --base Dual --size 3",
     "glslify": "glslify gpu/gl/index.glsl --output gpu/lib.glsl",
     "dev-glsl": "watch 'npm run glslify' gpu/gl",
     "test": "tap --ts test/**/*.ts"
