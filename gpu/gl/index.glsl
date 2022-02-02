@@ -1,4 +1,5 @@
 #pragma glslify: import('./cga3/index.glsl')
+#pragma glslify: matcap = require(matcap)
 
 CGA3 outer(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
     return outer(outer(p,q,r),s);

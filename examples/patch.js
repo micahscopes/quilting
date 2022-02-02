@@ -1,6 +1,5 @@
 import normals from "angle-normals";
 import { fquad, uvGrid, Alg } from "../src";
-
 import Delaunator from "delaunator";
 import { chunk } from "lodash-es";
 
@@ -11,7 +10,8 @@ let gl = function (s) {
   ${glLib}\n\n${s[0]}`;
 };
 
-export default draw = (regl, resolution = 256, defaultOffset = [0, 0, 0]) => {
+
+export default draw = (regl, resolution = 256, defaultOffset = [0, 0, 0], matcap) => {
   const grid = Delaunator.from(uvGrid(resolution));
 const D = 10;
 const r = (x) => x + Math.random() * 20;
@@ -67,15 +67,24 @@ patch.cells = chunk(grid.triangles, 3);
     frag: gl`
       precision highp float;
       uniform float time;
+      uniform sampler2D texture;
+      uniform vec3 eye;
       varying vec3 n;
       varying vec2 uv;
       void main () {
-        vec3 light = vec3(0.5,0.9,0.5);
-        light = normalize(light);
+        // vec3 eyeVector = vec3(1.0,0.0,0.0);
+        vec2 mat_uv = matcap(normalize(eye), n);
+
+        gl_FragColor = vec4(texture2D(
+          texture, mat_uv
+        ).rgb, 1.0);
+
+        // vec3 light = vec3(0.5,0.9,0.5);
+        // light = normalize(light);
+        // gl_FragColor = vec4(normalize(n/2.0+vec3(1,1,1)/2.0), 1.0);
 
         // gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
         // gl_FragColor = vec4(0, pow(uv.x, 2.0), pow(uv.y, 2.0), 1);
-        gl_FragColor = vec4(normalize(n/2.0+vec3(1,1,1)/2.0), 1.0);
         // gl_FragColor = vec4(0.8*dot(light,n),1.0*dot(light,n),1.0*dot(light,n), 1);
       }`,
     attributes: {
@@ -83,6 +92,9 @@ patch.cells = chunk(grid.triangles, 3);
       normal: () => patch.normals,
     },
     uniforms: {
+      texture: matcap,
+      eye: (context, props) => props?.eye || [1,0,0],
+
       // time(){ return Date.now() },
       // p0: [0, 0, Math.random()*D],
       // p1: [D, 0, Math.random()*D],
@@ -113,3 +125,5 @@ patch.cells = chunk(grid.triangles, 3);
     count: patch.cells.length * 3,
   });
 };
+
+// console.log(matcap)

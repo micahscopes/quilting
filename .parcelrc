@@ -2,5 +2,6 @@
   "extends": ["@parcel/config-default"],
   "transformers": {
     "*.svelte": ["parcel-transformer-svelte"]
-  }
+  },
+  "resolvers": ["@parcel/resolver-glob", "..."]
 }

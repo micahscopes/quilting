@@ -1,10 +1,14 @@
 <head>
-  <script type="module">
+  <script type="module" async>
     import createREGL from "regl";
+    import createRESL from "resl";
+    import matcapUrls from "./matcaps/*.png";
     import createCamera from "inertial-turntable-camera";
     import interactionEvents from "normalized-interaction-events";
-    import patch from './patch'
-    import { range } from 'lodash-es'
+    import patch from "./patch";
+    import { range } from "lodash-es";
+
+    const randomElement = array => array[Math.floor(Math.random() * array.length)];
 
     const product = (...a) =>
       a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
@@ -13,30 +17,50 @@
 
     let draw;
 
-    console.log("hello")
-    document.addEventListener("DOMContentLoaded", function () {
-      const regl = createREGL({extensions: [
-        'oes_standard_derivatives',
-        'oes_element_index_uint' // necessary to support high resolution patches
-      ]});
-      const N = 2;
-      const patches = product(range(N), range(N), range(N)).map(([i,j,k]) => {
-        // console.log([i,j,k])
-        return patch(regl, 256, [i,j,k])
-      })
-      // draw = patches.forEach((d, i) => d());
-    draw = (number) => {
-        for (let d of patches) { d() };
-    }
+    console.log("hello");
+    document.addEventListener("DOMContentLoaded", async function () {
+      const regl = createREGL({
+        extensions: [
+          "oes_standard_derivatives",
+          "oes_element_index_uint", // necessary to support high resolution patches
+        ],
+      });
 
-      const decayTime = 100
+      console.log(Object.values(matcapUrls))
+      const matcapImages = await Promise.all(
+        Object.values(matcapUrls).map(
+          (url) =>
+            new Promise((resolve) => {
+              const im = new Image();
+              im.crossOrigin = "anonymous";
+              im.src = url;
+              im.onload = () =>
+                resolve(Object.assign(im, { style: "max-width:200px" }));
+            })
+        )
+      );
+
+      const N = 2;
+      const patches = product(range(N), range(N), range(N)).map(([i, j, k]) => {
+        // console.log([i,j,k])matcap:
+        const matcap = regl.texture({data: randomElement(matcapImages)})
+        return patch(regl, 128, [i, j, k], matcap);
+      });
+      // draw = patches.forEach((d, i) => d());
+      draw = (props) => {
+        for (let d of patches) {
+          d(props);
+        }
+      };
+
+      const decayTime = 100;
       const camera = (window.camera = createCamera({
         aspectRatio: window.innerWidth / window.innerHeight,
         distance: 30,
         center: [0, 0, 0],
         rotationDecayTime: decayTime,
         panDecayTime: decayTime,
-        zoomDecayTime: decayTime
+        zoomDecayTime: decayTime,
       }));
 
       const setCameraUniforms = regl({
@@ -84,6 +108,7 @@
         .on("touchstart", (ev) => ev.originalEvent.preventDefault())
         .on("pinchstart", (ev) => ev.originalEvent.preventDefault());
 
+console.log(camera)
       regl.frame(() => {
         camera.tick({
           near: camera.params.distance * 0.01,
@@ -93,7 +118,7 @@
         setCameraUniforms(camera, () => {
           // if (!camera.state.dirty) return;
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
-          draw();
+          draw({eye: camera.state.eye});
         });
       });
 

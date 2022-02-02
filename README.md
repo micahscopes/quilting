@@ -1,1 +1,23 @@
 # quiltwork
+todo:
+- [x] proof of concept with CPU
+- [x] proof of concept with GPU
+- [x] compute normals
+  - [x] method (1): tried automatic differentiation with `Cl{4,1} x Cl{0,0,2}` and failed
+  - [x] method (2): tried with `Cl{4,1,2}` and the shader actually compiled but I didn't figure out how to get the normals
+  - [x] method (3): computed nearby points at `u+eps, v+eps` and used the cross product, seems to work! it's fast too.
+- [ ] triangular patches
+- [ ] multiple patches per shader (?)
+- [ ] convert polygon mesh to patches
+- [ ] control point/weight CGA transformations
+  - could try on CPU or GPU
+- [ ] compute area-wise stretch factor
+- [ ] initial triangulation of UV square with variable level of detail
+  - deterministic constraint at edges
+  - poisson sampling with RTree index for uniform distribution of inner points
+    - add and remove points continuously?
+  - using delaunay triangulation of sampled points
+- [ ] rework API
+- [ ] tests
+- [ ] examples
+- [ ] documentation

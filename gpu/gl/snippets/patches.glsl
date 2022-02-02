@@ -97,8 +97,8 @@ Patch bilinearQuad(
     vec3 x = vec3(X.e1, X.e2, X.e3);
     // CGA3 Normal = outer(sub(X, X_uu), sub(X, X_vv));
     // vec3 normal_alt = normalize(vec3(Normal.e12, Normal.e13, Normal.e23));
-    vec3 x_uu = normalize(vec3(X_uu.e1, X_uu.e2, X_uu.e3)-x);
-    vec3 x_vv = normalize(vec3(X_vv.e1, X_vv.e2, X_vv.e3)-x);
+    vec3 x_uu = vec3(X_uu.e1, X_uu.e2, X_uu.e3)-x;
+    vec3 x_vv = vec3(X_vv.e1, X_vv.e2, X_vv.e3)-x;
     vec3 crossed = cross(x_uu, x_vv);
     vec3 normal = normalize(crossed);
     return Patch(x, normal);
