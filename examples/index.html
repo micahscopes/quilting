@@ -3,12 +3,14 @@
     import createREGL from "regl";
     import createRESL from "resl";
     import matcapUrls from "./matcaps/*.png";
+    import seafoam from "./textures/seafoam.png";
     import createCamera from "inertial-turntable-camera";
     import interactionEvents from "normalized-interaction-events";
     import patch from "./patch";
     import { range } from "lodash-es";
 
-    const randomElement = array => array[Math.floor(Math.random() * array.length)];
+    const randomElement = (array) =>
+      array[Math.floor(Math.random() * array.length)];
 
     const product = (...a) =>
       a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
@@ -26,7 +28,14 @@
         ],
       });
 
-      console.log(Object.values(matcapUrls))
+      console.log(Object.values(matcapUrls));
+      const seafoamImage = await new Promise((resolve) => {
+        const im = new Image();
+        im.crossOrigin = "anonymous";
+        im.src = seafoam;
+        im.onload = () =>
+          resolve(Object.assign(im, { style: "max-width:200px" }));
+      });
       const matcapImages = await Promise.all(
         Object.values(matcapUrls).map(
           (url) =>
@@ -43,8 +52,9 @@
       const N = 2;
       const patches = product(range(N), range(N), range(N)).map(([i, j, k]) => {
         // console.log([i,j,k])matcap:
-        const matcap = regl.texture({data: randomElement(matcapImages)})
-        return patch(regl, 128, [i, j, k], matcap);
+        const matcapTexture = regl.texture({ data: randomElement(matcapImages) });
+        const seafoamTexture = regl.texture({ data: seafoamImage });
+        return patch(regl, 256, [i, j, k], matcapTexture, seafoamTexture);
       });
       // draw = patches.forEach((d, i) => d());
       draw = (props) => {
@@ -108,7 +118,7 @@
         .on("touchstart", (ev) => ev.originalEvent.preventDefault())
         .on("pinchstart", (ev) => ev.originalEvent.preventDefault());
 
-console.log(camera)
+      console.log(camera);
       regl.frame(() => {
         camera.tick({
           near: camera.params.distance * 0.01,
@@ -118,7 +128,7 @@ console.log(camera)
         setCameraUniforms(camera, () => {
           // if (!camera.state.dirty) return;
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
-          draw({eye: camera.state.eye});
+          draw({ eye: camera.state.eye });
         });
       });
 

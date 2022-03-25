@@ -527,6 +527,8 @@ var _resl = require("resl");
 var _reslDefault = parcelHelpers.interopDefault(_resl);
 var _png = require("./matcaps/*.png");
 var _pngDefault = parcelHelpers.interopDefault(_png);
+var _seafoamPng = require("./textures/seafoam.png");
+var _seafoamPngDefault = parcelHelpers.interopDefault(_seafoamPng);
 var _inertialTurntableCamera = require("inertial-turntable-camera");
 var _inertialTurntableCameraDefault = parcelHelpers.interopDefault(_inertialTurntableCamera);
 var _normalizedInteractionEvents = require("normalized-interaction-events");
@@ -556,6 +558,15 @@ document.addEventListener("DOMContentLoaded", async function() {
         ]
     });
     console.log(Object.values(_pngDefault.default));
+    const seafoamImage = await new Promise((resolve)=>{
+        const im = new Image();
+        im.crossOrigin = "anonymous";
+        im.src = _seafoamPngDefault.default;
+        im.onload = ()=>resolve(Object.assign(im, {
+                style: "max-width:200px"
+            }))
+        ;
+    });
     const matcapImages = await Promise.all(Object.values(_pngDefault.default).map((url)=>new Promise((resolve)=>{
             const im = new Image();
             im.crossOrigin = "anonymous";
@@ -569,14 +580,17 @@ document.addEventListener("DOMContentLoaded", async function() {
     const N = 2;
     const patches = product(_lodashEs.range(N), _lodashEs.range(N), _lodashEs.range(N)).map(([i, j, k])=>{
         // console.log([i,j,k])matcap:
-        const matcap = regl.texture({
+        const matcapTexture = regl.texture({
             data: randomElement(matcapImages)
         });
-        return _patchDefault.default(regl, 128, [
+        const seafoamTexture = regl.texture({
+            data: seafoamImage
+        });
+        return _patchDefault.default(regl, 256, [
             i,
             j,
             k
-        ], matcap);
+        ], matcapTexture, seafoamTexture);
     });
     // draw = patches.forEach((d, i) => d());
     draw = (props)=>{
@@ -652,7 +666,7 @@ document.addEventListener("DOMContentLoaded", async function() {
     }, false);
 });
 
-},{"regl":"lnu7D","inertial-turntable-camera":"5CKZK","normalized-interaction-events":"dCWeH","./patch":"kHFgz","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3","resl":"czgcb","lodash-es":"bXNwz","./matcaps/*.png":"loniq"}],"lnu7D":[function(require,module,exports) {
+},{"regl":"lnu7D","inertial-turntable-camera":"5CKZK","normalized-interaction-events":"dCWeH","./patch":"kHFgz","@parcel/transformer-js/src/esmodule-helpers.js":"gkKU3","resl":"czgcb","lodash-es":"bXNwz","./matcaps/*.png":"loniq","./textures/seafoam.png":"74nsu"}],"lnu7D":[function(require,module,exports) {
 (function(global, factory) {
     typeof exports === 'object' && typeof module !== 'undefined' ? module.exports = factory() : typeof define === 'function' && define.amd ? define(factory) : global.createREGL = factory();
 })(this, function() {
@@ -9784,7 +9798,7 @@ exports.default = draw = (regl, resolution = 256, defaultOffset = [
     0,
     0,
     0
-], matcap)=>{
+], matcap, texture)=>{
     const grid = _delaunatorDefault.default.from(_src.uvGrid(resolution));
     const D1 = 10;
     const r = (x)=>x + Math.random() * 20
@@ -9793,7 +9807,7 @@ exports.default = draw = (regl, resolution = 256, defaultOffset = [
         let x = [
             Math.random(),
             Math.random(),
-            Math.random(), 
+            Math.random()
         ];
         const norm = x.reduce((a, b)=>a + b
         , 0);
@@ -9850,33 +9864,48 @@ exports.default = draw = (regl, resolution = 256, defaultOffset = [
         frag: gl`
       precision highp float;
       uniform float time;
+      uniform sampler2D matcapTexture;
       uniform sampler2D texture;
       uniform vec3 eye;
       varying vec3 n;
       varying vec2 uv;
       void main () {
-        // vec3 eyeVector = vec3(1.0,0.0,0.0);
-        vec2 mat_uv = matcap(normalize(eye), n);
+        vec4 color = texture2D(texture, uv);
+        vec2 mat_uv = matcap(normalize(eye), vec3(color.r*n.x, color.g*n.y, color.b*n.z));
 
         gl_FragColor = vec4(texture2D(
-          texture, mat_uv
-        ).rgb, 1.0);
+          matcapTexture, mat_uv
+        ).rgb, color.r);
 
-        // vec3 light = vec3(0.5,0.9,0.5);
-        // light = normalize(light);
-        // gl_FragColor = vec4(normalize(n/2.0+vec3(1,1,1)/2.0), 1.0);
-
-        // gl_FragColor = vec4(uv, 0.25+0.5*abs(cos(time/2.0)), 1.0);
-        // gl_FragColor = vec4(0, pow(uv.x, 2.0), pow(uv.y, 2.0), 1);
-        // gl_FragColor = vec4(0.8*dot(light,n),1.0*dot(light,n),1.0*dot(light,n), 1);
+        // gl_FragColor = texture2D(texture, uv);
       }`,
+        blend: {
+            enable: true,
+            func: {
+                srcRGB: "src alpha",
+                srcAlpha: 1,
+                dstRGB: "one minus src alpha",
+                dstAlpha: 1
+            },
+            equation: {
+                rgb: "add",
+                alpha: "add"
+            },
+            color: [
+                0,
+                0,
+                0,
+                0
+            ]
+        },
         attributes: {
             position: ()=>patch.positions
             ,
             normal: ()=>patch.normals
         },
         uniforms: {
-            texture: matcap,
+            matcapTexture: matcap,
+            texture,
             eye: (context, props)=>props?.eye || [
                     1,
                     0,
@@ -22306,6 +22335,9 @@ module.exports = require('./helpers/bundle-url').getBundleURL('2h7UU') + "00048.
 
 },{"./helpers/bundle-url":"lgJ39"}],"aiMYk":[function(require,module,exports) {
 module.exports = require('./helpers/bundle-url').getBundleURL('2h7UU') + "00049.c12e4cb7.png" + "?" + Date.now();
+
+},{"./helpers/bundle-url":"lgJ39"}],"74nsu":[function(require,module,exports) {
+module.exports = require('./helpers/bundle-url').getBundleURL('2h7UU') + "seafoam.e32bd1c6.png" + "?" + Date.now();
 
 },{"./helpers/bundle-url":"lgJ39"}]},["3HAnj","5wngp"], "5wngp", "parcelRequire3d94")
 
