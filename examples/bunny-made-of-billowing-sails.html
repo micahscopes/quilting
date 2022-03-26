@@ -67,7 +67,7 @@
 
       const draw = (props) => {
         // for (let p of patches) {
-        props = patchesProps.map((patches) => ({ ...patches, ...props.map }));
+        props = patchesProps.map((patches) => ({ ...patches, ...props }));
 
         const batch = [
           ///
