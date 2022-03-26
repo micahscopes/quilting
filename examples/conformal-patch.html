@@ -10,9 +10,10 @@
     import Patch from "../src/patch";
     import Stats from "stats.js";
     import { range, sample } from "lodash-es";
-    var stats = new Stats();
-stats.showPanel(0 ); // 0: fps, 1: ms, 2: mb, 3+: custom
-document.body.appendChild( stats.dom );
+    import FPS from 'fpsmeter'
+    console.log(FPS)
+    const meter = new FPSMeter()
+
 
     const randomElement = (array) =>
       array[Math.floor(Math.random() * array.length)];
@@ -58,7 +59,7 @@ document.body.appendChild( stats.dom );
       //   // console.log('getting textures')
       //   return patch(regl, 32, [i, j, k], matcapTexture, seafoamTexture);
       // });
-      const p = Patch(regl, 4096);
+      const p = Patch(regl, 128);
 
       const matcap = regl.texture({ data: randomElement(matcapImages) });
       const matcaps = matcapImages.map((data) => regl.texture({ data }));
@@ -80,7 +81,7 @@ document.body.appendChild( stats.dom );
           // ...props,
           // ...props,
           // ...props,
-        ]
+        ];
         // console.log(batch.length)
         p(batch);
         // }
@@ -141,9 +142,10 @@ document.body.appendChild( stats.dom );
         .on("touchstart", (ev) => ev.originalEvent.preventDefault())
         .on("pinchstart", (ev) => ev.originalEvent.preventDefault());
 
+
       console.log(camera);
       regl.frame(() => {
-        stats.begin()
+        meter.tickStart();
         camera.tick({
           near: camera.params.distance * 0.01,
           far: camera.params.distance * 2 + 200,
@@ -154,7 +156,7 @@ document.body.appendChild( stats.dom );
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
           draw({ eye: camera.state.eye });
         });
-        stats.end()
+        meter.tick();
       });
 
       window.addEventListener(

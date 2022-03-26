@@ -5,16 +5,26 @@ import { chunk } from "lodash-es";
 
 import glLib from "../gpu/lib.glsl";
 import moize from "moize";
+import { quadPatch, triPatch } from "./lod-patches";
 
-const tessellation = moize.infinite((resolution) =>
-  Delaunator.from(uvGrid(resolution))
-);
+const tessellation = moize((type, resolution) => {
+  resolution = resolution.length
+    ? resolution
+    : type === QUAD
+    ? [resolution, resolution, resolution, resolution]
+    : [resolution, resolution, resolution];
+  const { points } =
+    type === QUAD ? quadPatch(...resolution) : triPatch(...resolution); // uvGrid(resolution)
+  console.log(points);
+  return Delaunator.from(points);
+});
 
 const prepareMesh = moize(
   (grid) => {
     console.log("preparing patch");
     let mesh = {};
     mesh.cells = chunk(grid.triangles, 3);
+    console.log(grid.triangles.length, grid.coords.length);
     mesh.positions = chunk(grid.coords, 2).map(([u, v]) => [u, v, 0]);
     mesh.normals = normals(mesh.cells, mesh.positions);
     return mesh;
@@ -22,21 +32,33 @@ const prepareMesh = moize(
   { maxSize: 40 }
 );
 
-let gl = function (s) {
+let gl = function (s, ...values) {
+  let str = "";
+  s.forEach((string, i) => {
+    str += string + (values[i] || "");
+  });
+
   return `precision mediump float;
-  ${glLib}\n\n${s[0]}`;
+  ${glLib}\n\n${str}`;
 };
 
-const randomUnit = (D = 1) => {
-  let x = [Math.random(), Math.random(), Math.random()];
+const randomUnit = (D = 1, key = null) => {
+  let x = [Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5];
   const norm = x.reduce((a, b) => a + b, 0);
   return x.map((n) => (D * n) / norm);
 };
 
-export default function Patch(regl, resolution, { offset } = {}) {
-  const grid = tessellation(resolution);
+const QUAD = "quad";
+const TRI = "tri";
+const defaultOptions = {
+  type: QUAD,
+};
+
+export default function Patch(regl, resolution, options = defaultOptions) {
+  const { offset, type } = { ...defaultOptions, ...options };
+  const grid = tessellation(type, resolution);
   let { positions, cells, normals } = prepareMesh(grid);
-  offset = offset;
+  console.log(type, offset);
   // positions = regl.buffer(positions);
   // cells = regl.buffer(cells);
   // normals = regl.buffer(normals);
@@ -60,15 +82,15 @@ export default function Patch(regl, resolution, { offset } = {}) {
       void main () {
 
       Patch p =
-          bilinearQuad(
+          ${type === QUAD ? "bilinearQuad(" : "bilinearTri("}
             p0,
             p1,
             p2,
-            p3,
+          ${type === QUAD ? "p3," : "//"}
             w0,
             w1,
             w2,
-            w3,
+          ${type === QUAD ? "w3," : "//"}
             position.x,
             position.y
         );
@@ -119,19 +141,18 @@ export default function Patch(regl, resolution, { offset } = {}) {
       texture: regl.prop("texture"),
       eye: (context, props) => props?.eye || [1, 0, 0],
 
-      p0: (context, props) => props?.p0 || randomUnit(30),
-      p1: (context, props) => props?.p1 || randomUnit(30),
-      p2: (context, props) => props?.p2 || randomUnit(30),
-      p3: (context, props) => props?.p3 || randomUnit(30),
-      w0: (context, props) => props?.w0 || randomUnit(2),
-      w1: (context, props) => props?.w1 || randomUnit(2),
-      w2: (context, props) => props?.w2 || randomUnit(2),
-      w3: (context, props) => props?.w3 || randomUnit(2),
+      p0: (context, props) => props?.p0 || randomUnit(8, "p1"),
+      p1: (context, props) => props?.p1 || randomUnit(8, "p2"),
+      p2: (context, props) => props?.p2 || randomUnit(8, "p3"),
+      p3: (context, props) => props?.p3 || randomUnit(8, "p4"),
+      w0: (context, props) => props?.w0 || randomUnit(2, "w1"),
+      w1: (context, props) => props?.w1 || randomUnit(2, "w2"),
+      w2: (context, props) => props?.w2 || randomUnit(2, "w3"),
+      w3: (context, props) => props?.w3 || randomUnit(2, "w4"),
 
-      offset: (context, props) =>
-        props?.offset || offset || randomUnit(30),
+      offset: (context, props) => props?.offset || offset || [0, 0, 0], //|| randomUnit(30, 'offset'),
     },
     elements: cells,
-    count: cells.length*3,
+    count: cells.length * 3,
   });
 }

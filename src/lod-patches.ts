@@ -114,10 +114,10 @@ const getRadiusTri =
   };
 
 const defaultOptions = {
-  iter: 1,
-  jitter: 0.005,
-  max: 30000,
-  quality: 10000,
+  iter: 3,
+  jitter: 0.00001,
+  max: 3000000,
+  quality: 2000,
 };
 
 export const quadPatchPrototype = (
@@ -293,9 +293,9 @@ export const triPatch = (
 ) => {
   opts = { ...defaultOptions, ...opts };
   const corners: [Point2D, Point2D, Point2D] = [
-    [0.5, Math.sqrt(3) / 2],
-    [0, 0],
+    [0, 1],
     [1, 0],
+    [0, 0],
   ];
 
   const index = new KdTreeSet(2);
@@ -310,23 +310,25 @@ export const triPatch = (
     index.add([a, 0]);
   }
   for (let b = 0; b <= 1; b += 1 / resB) {
-    index.add([b * 0.5, (b * Math.sqrt(3)) / 2]);
+    index.add([0, b]);
   }
   for (let c = 0; c <= 1; c += 1 / resC) {
-    index.add([1 - c * 0.5, (c * Math.sqrt(3)) / 2]);
+    index.add([1-c, c]);
   }
 
   const interpolation = getRadiusTri(corners, [resA, resB, resC]);
+  // const interpolation = (x) =>
+  //   1 / triEdgeWeightInterpolator(resA, resB, resC)(x);
   const sampleTri = (
     corners: [Point2D, Point2D, Point2D],
     weights: [number, number, number]
   ) => {
-    const points = () => [Math.random(), Math.random()];
-    const density = (x: Point2D) => 1 / interpolation(x);
+    const points = sampleTriangle(corners);
+    const density = interpolation;
     return samplePoisson({
       index,
       points,
-      density: density as DensityFunction,
+      density: interpolation as DensityFunction,
       max: 0,
       ...opts,
     });
