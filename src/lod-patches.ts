@@ -16,9 +16,25 @@
  * @return {function: } an interpolation function.
  */
 export const quadEdgeWeightInterpolator =
-  (A: number, B: number, C: number, D: number, n = 4) =>
-  ([u, v]: number[]) =>
-    u ** n * C + (1 - v) ** n * D + (1 - u) ** n * A + v ** n * B;
+  (A: number, B: number, C: number, D: number, n = 1) =>
+  ([x, y]: number[]) => {
+    const z = 1 - x;
+    const w = 1 - y;
+    const e0 = y * z * w;
+    const e1 = x * z * w;
+    const e2 = x * y * w;
+    const e3 = x * y * z;
+    const sum = e0 + e1 + e2 + e3;
+
+    const c0 = A;
+    const c1 = B;
+    const c2 = C;
+    const c3 = D;
+
+    return (
+      ((e0 * c0) ** n + (e1 * c1) ** n + (e2 * c2) ** n + e3 * c3) / sum ** n
+    );
+  };
 
 /**
  * Generate a function that interpolates between edge weights of a triangle
@@ -31,31 +47,21 @@ export const quadEdgeWeightInterpolator =
 export const triEdgeWeightInterpolator =
   (A: number, B: number, C: number, n = 1) =>
   ([x, y, z]: number[]) => {
-    // x = 1-x; y=1-y; z=1-z;
-    // float e0 = barys.x * barys.y;
-    // float e1 = barys.y * barys.z;
-    // float e2 = barys.z * barys.x;
-    const e0 = y*z;
-    const e1 = x*z
-    const e2 = x*y
-    // float sum = e0+e1+e2;
-    const sum = e0+e1+e2;
+    const e0 = y * z;
+    const e1 = x * z;
+    const e2 = x * y;
+    const sum = e0 + e1 + e2;
 
     const c0 = A;
     const c1 = B;
-    const c2 = C
+    const c2 = C;
 
-    return ((e0*c0)**n + (e1*c1)**n + (e2*c2)**n) / sum**n;
-
-    // return (
-    //   ((y * z) ** n * A + (x * z) ** n * B + (x * y) ** n * C) *
-    //   (y * z + x * z + x * y)
-    // );
+    return ((e0 * c0) ** n + (e1 * c1) ** n + (e2 * c2) ** n) / sum ** n;
   };
 
 import { KdTreeSet } from "@thi.ng/geom-accel";
 import { DensityFunction, samplePoisson } from "@thi.ng/poisson";
-import { randMinMax2 } from "@thi.ng/vectors";
+import { dist, div2, div3, divN, divN2, randMinMax2 } from "@thi.ng/vectors";
 import { range, sum } from "lodash-es";
 import bc from "barycentric-coordinates";
 import barycentric from "barycentric";
@@ -135,11 +141,17 @@ export const quadPatch = (
       //   [...pt, 1],
       //   triangle.map((x) => [...x, 1])
       // );
-      const bary = barycentric(triangle, pt)
+      let bary = barycentric(triangle, pt);
+      const D = dist([0, 0], [0.5, 0.5]);
+      bary = [
+        divN2(null, bary[0], 1),
+        divN2(null, bary[1], D),
+        divN2(null, bary[2], D),
+      ];
       const x = triEdgeWeightInterpolator(
         1 / weights[0],
         1 / weights[1],
-        1 / weights[2],
+        1 / weights[2]
         // 0.45
       )(bary);
       // console.log(x, bary, pt, triangle, weights)
@@ -202,7 +214,7 @@ export const quadPatch = (
     // const points = () => randMinMax2(null, [0, 0], [1, 1])
     const points = () => [Math.random(), Math.random()];
     const density = getRadiusAuto as DensityFunction;
-    window.density = density;
+    // window.density = density;
     ////////////////////////
     return samplePoisson({
       index,
@@ -210,10 +222,10 @@ export const quadPatch = (
       points,
       density,
       ///////////////////////////
-      iter: 2,
-      jitter: 0.00001,
-      max: 5000,
-      quality: 5000,
+      iter: 1,
+      jitter: 0.0001,
+      max: 20000,
+      quality: 2000,
     });
   };
   const boundaryPoints = index.keys();
