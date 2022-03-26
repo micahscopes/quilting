@@ -60,7 +60,7 @@ export const triEdgeWeightInterpolator =
   };
 
 import { KdTreeSet } from "@thi.ng/geom-accel";
-import { DensityFunction, samplePoisson } from "@thi.ng/poisson";
+import { DensityFunction, PoissonOpts, samplePoisson } from "@thi.ng/poisson";
 import { dist, div2, div3, divN, divN2, randMinMax2 } from "@thi.ng/vectors";
 import { range, sum } from "lodash-es";
 import bc from "barycentric-coordinates";
@@ -110,15 +110,24 @@ const getRadiusTri =
       // 0.45
     )(bary);
     // console.log(x, bary, pt, triangle, weights)
-    return 1/x;
+    return 1 / x;
   };
+
+const defaultOptions = {
+  iter: 1,
+  jitter: 0.005,
+  max: 30000,
+  quality: 10000,
+};
 
 export const quadPatchPrototype = (
   resA: number,
   resB: number,
   resC: number,
-  resD: number
+  resD: number,
+  opts: object
 ) => {
+  opts = { ...defaultOptions, ...opts };
   const triangleFanWeights: [number, number, number][] = [
     [resA, (resA + resB) / 2, (resA + resD) / 2],
     [resB, (resB + resC) / 2, (resB + resA) / 2],
@@ -210,10 +219,8 @@ export const quadPatchPrototype = (
       index,
       points,
       density,
-      iter: 1,
-      jitter: 0.0001,
-      max: 50000,
-      quality: 50000,
+      max: 0,
+      ...opts,
     });
   };
   const boundaryPoints = index.keys();
@@ -230,8 +237,10 @@ export const quadPatch = (
   resA: number,
   resB: number,
   resC: number,
-  resD: number
+  resD: number,
+  opts: object
 ) => {
+  opts = { ...defaultOptions, ...opts };
   const index = new KdTreeSet(2);
   const addPoint = (radius: number) => (x: number[]) =>
     index.add(
@@ -253,19 +262,17 @@ export const quadPatch = (
     index.add([d, 1]);
   }
 
-  const interpolation = x => 1/quadEdgeWeightInterpolator(resA,resB,resC,resD)(x)
-  const sample = (
-  ) => {
+  const interpolation = (x) =>
+    1 / quadEdgeWeightInterpolator(resA, resB, resC, resD)(x);
+  const sample = () => {
     const points = () => [Math.random(), Math.random()];
-    const density = interpolation as DensityFunction
+    const density = interpolation as DensityFunction;
     return samplePoisson({
       index,
       points,
       density,
-      iter: 1,
-      jitter: 0.005,
-      max: 30000,
-      quality: 50000,
+      max: 0,
+      ...opts,
     });
   };
   const boundaryPoints = index.keys();
@@ -273,6 +280,62 @@ export const quadPatch = (
   const points = [
     ...boundaryPoints, //
     ...sample(),
+  ];
+
+  return { points, index };
+};
+
+export const triPatch = (
+  resA: number,
+  resB: number,
+  resC: number,
+  opts: object
+) => {
+  opts = { ...defaultOptions, ...opts };
+  const corners: [Point2D, Point2D, Point2D] = [
+    [0.5, Math.sqrt(3) / 2],
+    [0, 0],
+    [1, 0],
+  ];
+
+  const index = new KdTreeSet(2);
+  const addPoint = (radius: number) => (x: number[]) =>
+    index.add(
+      x.map((x) => x * 1000),
+      radius
+    );
+
+  // add stitching points
+  for (let a = 0; a <= 1; a += 1 / resA) {
+    index.add([a, 0]);
+  }
+  for (let b = 0; b <= 1; b += 1 / resB) {
+    index.add([b * 0.5, (b * Math.sqrt(3)) / 2]);
+  }
+  for (let c = 0; c <= 1; c += 1 / resC) {
+    index.add([1 - c * 0.5, (c * Math.sqrt(3)) / 2]);
+  }
+
+  const interpolation = getRadiusTri(corners, [resA, resB, resC]);
+  const sampleTri = (
+    corners: [Point2D, Point2D, Point2D],
+    weights: [number, number, number]
+  ) => {
+    const points = () => [Math.random(), Math.random()];
+    const density = (x: Point2D) => 1 / interpolation(x);
+    return samplePoisson({
+      index,
+      points,
+      density: density as DensityFunction,
+      max: 0,
+      ...opts,
+    });
+  };
+  const boundaryPoints = index.keys();
+
+  const points = [
+    ...boundaryPoints, //
+    ...sampleTri(corners, [resA, resB, resC]),
   ];
 
   return { points, index };

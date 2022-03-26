@@ -2,7 +2,7 @@
 <body>
   <div id="container"></div>
   <script type="module" async>
-    import { quadPatchPrototype, quadPatch} from "../src/lod-patches.ts";
+    import { quadPatchPrototype, quadPatch } from "../src/lod-patches.ts";
     import {
       asSvg,
       circle,
@@ -18,21 +18,7 @@
     import { zip } from "lodash-es";
     import { DVMesh } from "@thi.ng/geom-voronoi";
 
-    // working on generating an atless of seamless LOD patches for sampling
-    // parametric surfaces in webgl where there aren't geometry shaders
-
-    const patches = [
-      [32, 64, 64, 4],
-      [64, 16, 16, 32],
-      [8, 4, 16, 8],
-      [16, 32, 64, 256],
-    ].map((weights) => ({ ...quadPatchPrototype(...weights), weights }));
-    // console.log(patches)
-
-    const scale = 400;
-    const rescale = (x) => scale * x;
-
-    patches.forEach(({ points, index, weights }) => {
+    const drawQuad = ({ points, index, weights }) => {
       points = points.map((p) => p.map(rescale));
       const labelPoints = [
         [0.1, 0.5],
@@ -40,64 +26,72 @@
         [0.9, 0.5],
         [0.5, 0.9],
       ].map((p) => p.map(rescale));
-      // console.log(points)
+
+      const bounds = vertices(rect(scale));
       const mesh = new DVMesh(points);
-      const circles = points.map(
-        (p) => circle(p, 2) //500*dist(p, index.queryKeys(p, 40, 2)[1]) / 2)
-      );
+      const circles = points.map((p) => circle(p, 2));
 
       const labels = zip(labelPoints, weights).map(([pt, lod]) =>
         text(pt, lod)
       );
 
-      const svg = document.createElement("svg");
-      document.querySelector("div#container").appendChild(svg);
-      const bounds = vertices(rect(scale));
-
-      svg.outerHTML = asSvg(
-        svgDoc(
+      return svgDoc(
+        {
+          fill: "deeppink",
+          stroke: "none",
+          "stroke-width": "0.25",
+          //
+          // width: "100%",
+        },
+        group(
           {
-            fill: "deeppink",
-            stroke: "none",
-            "stroke-width": "0.25",
-            //
-            // width: "100%",
+            fill: "none",
+            stroke: "white",
           },
-          group(
-            {
-              fill: "none",
-              stroke: "white",
-            },
-            mesh.delaunay(bounds).map((p) => polygon(p))
-          ),
+          mesh.delaunay(bounds).map((p) => polygon(p))
+        ),
 
-          group(
-            {
-              "text-anchor": "middle",
-              "font": "sans",
-              "alignment-baseline": "middle",
-              "font-size": "16pt",
-            }, // height: "100%",
-            [
-              group(
-                {
-                  stroke: "black",
-                  "stroke-opacity": 0.7,
-                  "stroke-width": 20,
-                }, // height: "100%",
-                labels
-              ),
-              group(
-                {
-                  stroke: "none",
-                }, // height: "100%",
-                labels
-              ),
-            ]
-          )
+        group(
+          {
+            "text-anchor": "middle",
+            font: "sans",
+            "alignment-baseline": "middle",
+            "font-size": "16pt",
+          },
+          [
+            group(
+              {
+                stroke: "black",
+                "stroke-opacity": 0.7,
+                "stroke-width": 20,
+              },
+              labels
+            ),
+            group(
+              {
+                stroke: "none",
+              },
+              labels
+            ),
+          ]
         )
       );
-    });
+    };
+    const patches = [
+      [32, 64, 64, 4],
+      [64, 16, 16, 32],
+      [8, 4, 16, 8],
+      [16, 32, 64, 256],
+    ].map((weights) => ({ ...quadPatch(...weights), weights }));
+
+    const scale = 400;
+    const rescale = (x) => scale * x;
+
+    const patchesSvg = patches.map(drawQuad);
+    console.log(patchesSvg);
+    const svg = document.createElement("svg");
+    document.querySelector("div#container").appendChild(svg);
+    svg.outerHTML = asSvg(...patchesSvg);
   </script>
   <style>
     body {

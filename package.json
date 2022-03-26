@@ -65,6 +65,7 @@
     "d3-ternary": "^2.0.14",
     "ganja.js": "^1.0.194",
     "lodash-es": "^4.17.21",
+    "moize": "^6.1.0",
     "pascals-triangle": "^0.1.1"
   }
 }
