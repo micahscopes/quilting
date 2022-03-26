@@ -3,6 +3,7 @@ node_modules
 *.log
 .vscode
 .idea
+dist/
 .parcel*/*
 examples/dist
 **/*.pyc
