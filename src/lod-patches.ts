@@ -89,7 +89,31 @@ const sampleTriangle = (corners: [Point2D, Point2D, Point2D]) => () => {
   return pt;
 };
 
-export const quadPatch = (
+const getRadiusTri =
+  (triangle: [Point2D, Point2D, Point2D], weights: [number, number, number]) =>
+  (pt: Point2D) => {
+    // const bary = triangleBarycentricCoords(
+    //   [...pt, 1],
+    //   triangle.map((x) => [...x, 1])
+    // );
+    let bary = barycentric(triangle, pt);
+    const D = dist([0, 0], [0.5, 0.5]);
+    bary = [
+      divN2(null, bary[0], 1),
+      divN2(null, bary[1], D),
+      divN2(null, bary[2], D),
+    ];
+    const x = triEdgeWeightInterpolator(
+      weights[0],
+      weights[1],
+      weights[2]
+      // 0.45
+    )(bary);
+    // console.log(x, bary, pt, triangle, weights)
+    return 1/x;
+  };
+
+export const quadPatchPrototype = (
   resA: number,
   resB: number,
   resC: number,
@@ -130,33 +154,6 @@ export const quadPatch = (
       [0, 1],
     ],
   ];
-
-  const getRadiusTri =
-    (
-      triangle: [Point2D, Point2D, Point2D],
-      weights: [number, number, number]
-    ) =>
-    (pt: Point2D) => {
-      // const bary = triangleBarycentricCoords(
-      //   [...pt, 1],
-      //   triangle.map((x) => [...x, 1])
-      // );
-      let bary = barycentric(triangle, pt);
-      const D = dist([0, 0], [0.5, 0.5]);
-      bary = [
-        divN2(null, bary[0], 1),
-        divN2(null, bary[1], D),
-        divN2(null, bary[2], D),
-      ];
-      const x = triEdgeWeightInterpolator(
-        1 / weights[0],
-        1 / weights[1],
-        1 / weights[2]
-        // 0.45
-      )(bary);
-      // console.log(x, bary, pt, triangle, weights)
-      return x;
-    };
 
   const downward = (x: number) => -(x - 0.5) + 0.5;
   const upward = (x: number) => x - 0.5 + 0.5;
@@ -207,25 +204,16 @@ export const quadPatch = (
     corners: [Point2D, Point2D, Point2D],
     weights: [number, number, number]
   ) => {
-    ////////////////////////
-    // const density = getRadiusTri(corners, weights) as DensityFunction
-    // const points = sampleTriangle(corners)
-    ////////////////////////
-    // const points = () => randMinMax2(null, [0, 0], [1, 1])
     const points = () => [Math.random(), Math.random()];
     const density = getRadiusAuto as DensityFunction;
-    // window.density = density;
-    ////////////////////////
     return samplePoisson({
       index,
-      ////////////////////////
       points,
       density,
-      ///////////////////////////
       iter: 1,
       jitter: 0.0001,
-      max: 20000,
-      quality: 2000,
+      max: 50000,
+      quality: 50000,
     });
   };
   const boundaryPoints = index.keys();
@@ -233,9 +221,58 @@ export const quadPatch = (
   const points = [
     ...boundaryPoints, //
     ...sampleTri(triangleFanCoords[0], triangleFanWeights[0]),
-    // ...sampleTri(triangleFanCoords[1], triangleFanWeights[1]),
-    // ...sampleTri(triangleFanCoords[2], triangleFanWeights[2]),
-    // ...sampleTri(triangleFanCoords[3], triangleFanWeights[3]),
+  ];
+
+  return { points, index };
+};
+
+export const quadPatch = (
+  resA: number,
+  resB: number,
+  resC: number,
+  resD: number
+) => {
+  const index = new KdTreeSet(2);
+  const addPoint = (radius: number) => (x: number[]) =>
+    index.add(
+      x.map((x) => x * 1000),
+      radius
+    );
+
+  // add stitching points
+  for (let a = 0; a <= 1; a += 1 / resA) {
+    index.add([0, a]);
+  }
+  for (let b = 0; b <= 1; b += 1 / resB) {
+    index.add([b, 0]);
+  }
+  for (let c = 0; c <= 1; c += 1 / resC) {
+    index.add([1, c]);
+  }
+  for (let d = 0; d <= 1; d += 1 / resD) {
+    index.add([d, 1]);
+  }
+
+  const interpolation = x => 1/quadEdgeWeightInterpolator(resA,resB,resC,resD)(x)
+  const sample = (
+  ) => {
+    const points = () => [Math.random(), Math.random()];
+    const density = interpolation as DensityFunction
+    return samplePoisson({
+      index,
+      points,
+      density,
+      iter: 1,
+      jitter: 0.005,
+      max: 30000,
+      quality: 50000,
+    });
+  };
+  const boundaryPoints = index.keys();
+
+  const points = [
+    ...boundaryPoints, //
+    ...sample(),
   ];
 
   return { points, index };

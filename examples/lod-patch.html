@@ -2,7 +2,7 @@
 <body>
   <div id="container"></div>
   <script type="module" async>
-    import { quadPatch } from "../src/lod-patches.ts";
+    import { quadPatchPrototype, quadPatch} from "../src/lod-patches.ts";
     import {
       asSvg,
       circle,
@@ -22,12 +22,11 @@
     // parametric surfaces in webgl where there aren't geometry shaders
 
     const patches = [
-      // [2, 4, 8, 2],
       [32, 64, 64, 4],
       [64, 16, 16, 32],
       [8, 4, 16, 8],
       [16, 32, 64, 256],
-    ].map((weights) => ({ ...quadPatch(...weights), weights }));
+    ].map((weights) => ({ ...quadPatchPrototype(...weights), weights }));
     // console.log(patches)
 
     const scale = 400;
@@ -71,11 +70,6 @@
             },
             mesh.delaunay(bounds).map((p) => polygon(p))
           ),
-          // group(
-          //   {}, // height: "100%",
-          //   circles
-          //   //   mesh.delaunay().map((p) => polygon(p))
-          // ),
 
           group(
             {
@@ -92,14 +86,12 @@
                   "stroke-width": 20,
                 }, // height: "100%",
                 labels
-                //   mesh.delaunay().map((p) => polygon(p))
               ),
               group(
                 {
                   stroke: "none",
                 }, // height: "100%",
                 labels
-                //   mesh.delaunay().map((p) => polygon(p))
               ),
             ]
           )
