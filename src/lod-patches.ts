@@ -114,10 +114,10 @@ const getRadiusTri =
   };
 
 const defaultOptions = {
-  iter: 3,
+  iter: 1,
   jitter: 0.00001,
   max: 3000000,
-  quality: 2000,
+  quality: 150,
 };
 
 export const quadPatchPrototype = (

@@ -1,6 +1,8 @@
+
 <head> </head>
 <body>
   <script type="module" async>
+    import FPS from 'fpsmeter'
     import createREGL from "regl";
     import createRESL from "resl";
     import matcapUrls from "./matcaps/*.png";
@@ -9,10 +11,10 @@
     import interactionEvents from "normalized-interaction-events";
     import Patch, {randomPoints, QUAD, TRI} from "../src/patch";
     import { range, sample } from "lodash-es";
-    import FPS from 'fpsmeter'
-    console.log(FPS)
+    import bunny from 'bunny';
+    import simplify from 'mesh-simplify'
+    // console.log(FPS)
     const meter = new FPSMeter()
-
 
     const randomElement = (array) =>
       array[Math.floor(Math.random() * array.length)];
@@ -29,7 +31,6 @@
         ],
       });
 
-      // console.log(Object.values(matcapUrls));
       const seafoamImage = await new Promise((resolve) => {
         const im = new Image();
         im.crossOrigin = "anonymous";
@@ -50,13 +51,17 @@
         )
       );
 
+      const simpleBunny = simplify(bunny.cells, bunny.positions)(500)
+      const bunnyPolys = simpleBunny.cells.map(cell => cell.map(i => simpleBunny.positions[i]))
+      console.log('bunny polys', bunnyPolys)
+
       const N = 5;
-      const patch = Patch(regl, 1024, {type: QUAD});
+      const patch = Patch(regl, 32, {type: TRI});
 
       const matcap = regl.texture({ data: randomElement(matcapImages) });
       const matcaps = matcapImages.map((data) => regl.texture({ data }));
       const texture = regl.texture({ data: seafoamImage });
-      const patchesProps = matcaps.map((matcap) => ({ matcap, texture, ...randomPoints(4, 8) }));
+      const patchesProps = bunnyPolys.map(([p0, p1, p2]) => ({ matcap: sample(matcaps), texture, ...randomPoints(1, 1), p0, p1, p2, w0:[1,0,0], w1:[0,1,0], w2:[0,0,1] }));
 
       const draw = (props) => {
         // for (let p of patches) {
@@ -65,15 +70,6 @@
         const batch = [
           ///
           ...props,
-          // ...props,
-          // ...props,
-          // ...props,
-          // ...props,
-          // ...props,
-          // ...props,
-          // ...props,
-          // ...props,
-          // ...props,
         ];
         // console.log(batch.length)
         patch(batch);
@@ -136,7 +132,7 @@
         .on("pinchstart", (ev) => ev.originalEvent.preventDefault());
 
 
-      console.log(camera);
+      // console.log(camera);
       regl.frame(() => {
         meter.tickStart();
         camera.tick({
