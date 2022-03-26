@@ -1,5 +1,5 @@
 import normals from "angle-normals";
-import { fquad, uvGrid, Alg } from "../src";
+import { fquad, uvGrid, Alg } from "./index.ts";
 import Delaunator from "delaunator";
 import { chunk } from "lodash-es";
 
@@ -10,16 +10,16 @@ const tessellation = moize.infinite((resolution) =>
   Delaunator.from(uvGrid(resolution))
 );
 
-const preparePatch = moize(
+const prepareMesh = moize(
   (grid) => {
-    console.log('preparing patch')
-    let patch = {};
-    patch.cells = chunk(grid.triangles, 3);
-    patch.positions = chunk(grid.coords, 2).map(([u, v]) => [u, v, 0]);
-    patch.normals = normals(patch.cells, patch.positions);
-    return patch;
+    console.log("preparing patch");
+    let mesh = {};
+    mesh.cells = chunk(grid.triangles, 3);
+    mesh.positions = chunk(grid.coords, 2).map(([u, v]) => [u, v, 0]);
+    mesh.normals = normals(mesh.cells, mesh.positions);
+    return mesh;
   },
-  { maxSize: 20 }
+  { maxSize: 40 }
 );
 
 let gl = function (s) {
@@ -27,25 +27,20 @@ let gl = function (s) {
   ${glLib}\n\n${s[0]}`;
 };
 
-export default draw = (
-  regl,
-  resolution = 256,
-  defaultOffset = [0, 0, 0],
-  matcap,
-  texture
-) => {
+const randomUnit = (D = 1) => {
+  let x = [Math.random(), Math.random(), Math.random()];
+  const norm = x.reduce((a, b) => a + b, 0);
+  return x.map((n) => (D * n) / norm);
+};
+
+export default function Patch(regl, resolution, { offset } = {}) {
   const grid = tessellation(resolution);
-  const D = 10;
-  const r = (x) => x + Math.random() * 20;
-  const randomUnit = (D = 1) => {
-    let x = [Math.random(), Math.random(), Math.random()];
-    const norm = x.reduce((a, b) => a + b, 0);
-    return x.map((n) => (D * n) / norm);
-  };
-  const patch = preparePatch(grid)
-
-  const period = Math.random() / 50;
-
+  let { positions, cells, normals } = prepareMesh(grid);
+  offset = offset;
+  // positions = regl.buffer(positions);
+  // cells = regl.buffer(cells);
+  // normals = regl.buffer(normals);
+  const count = cells.length * 3;
   return regl({
     vert: gl`
       precision highp float;
@@ -116,45 +111,27 @@ export default draw = (
     },
 
     attributes: {
-      position: () => patch.positions,
-      normal: () => patch.normals,
+      position: () => positions,
+      normal: () => normals,
     },
     uniforms: {
-      matcapTexture: matcap,
-      texture,
+      matcapTexture: regl.prop("matcap"),
+      texture: regl.prop("texture"),
       eye: (context, props) => props?.eye || [1, 0, 0],
 
-      // time(){ return Date.now() },
-      // p0: [0, 0, Math.random()*D],
-      // p1: [D, 0, Math.random()*D],
-      // p2: [0, D, Math.random()*D],
-      // p3: [D, D, Math.random()*D],
-      p0: ({ tick }) => [D / 2, 0, 0].map((x) => x * Math.cos(tick * period)),
-      p1: randomUnit(D),
-      p2: ({ tick }) => [0, D / 2, 0].map((x) => x * Math.sin(tick * period)),
-      p3: randomUnit(D),
-      w0: randomUnit(2),
-      w1: randomUnit(2),
-      w2: randomUnit(2),
-      w3: randomUnit(2),
+      p0: (context, props) => props?.p0 || randomUnit(30),
+      p1: (context, props) => props?.p1 || randomUnit(30),
+      p2: (context, props) => props?.p2 || randomUnit(30),
+      p3: (context, props) => props?.p3 || randomUnit(30),
+      w0: (context, props) => props?.w0 || randomUnit(2),
+      w1: (context, props) => props?.w1 || randomUnit(2),
+      w2: (context, props) => props?.w2 || randomUnit(2),
+      w3: (context, props) => props?.w3 || randomUnit(2),
+
       offset: (context, props) =>
-        props?.offset
-          ? props.offset.map((x) => x * D)
-          : defaultOffset.map((x) => x * D),
-
-      // w00: [1, 0, -1],
-      // w0: ({tick}) => [Math.sin(tick/150), 1, 0],
-      // w10: ({tick}) => [0, 0, 2*Math.sin(tick/150)],
-      // w11: ({tick}) => [0, 2*3.1415926*Math.sin(tick/50), -1],
-      // time: ({tick}) => {
-      //   // console.log(Date.now())
-      //   return tick/50
-      // }
-      // time: 10
+        props?.offset || offset || randomUnit(30),
     },
-    elements: patch.cells,
-    count: patch.cells.length * 3,
+    elements: cells,
+    count: cells.length*3,
   });
-};
-
-// console.log(matcap)
+}

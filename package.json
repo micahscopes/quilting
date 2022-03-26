@@ -48,6 +48,7 @@
     "regl": "^2.1.0",
     "regl-camera": "^2.1.1",
     "resl": "^1.0.3",
+    "stats.js": "^0.17.0",
     "tap": "^15.1.6",
     "tape": "^5.4.1",
     "tape-watch": "^2.3.0",
@@ -66,6 +67,8 @@
     "ganja.js": "^1.0.194",
     "lodash-es": "^4.17.21",
     "moize": "^6.1.0",
-    "pascals-triangle": "^0.1.1"
+    "pascals-triangle": "^0.1.1",
+    "pex-context": "^2.10.4",
+    "pex-io": "^2.1.0"
   }
 }

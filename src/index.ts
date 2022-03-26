@@ -10,21 +10,6 @@ const product = (...a: any[][]) =>
 export const uvGrid = (uResolution: number, vResolution: number) =>
   product([...range(0, 1, 1 / uResolution), 1], [...range(0, 1, 1 / vResolution), 1]);
 
-
-export const bilinearGrid = (resU0: number, resU1: number, resV0: number, resV1: number) => {
-  /*
-    Generates a grid of varying resolution
-
-    ┌────resU0────┐
-    │             │
-  resV0         resV1
-    │             │
-    └────resU1────┘
-
-  */
-  const points = [];
-
-}
 // todo: abstract this out
 export const Alg = CGA;
 

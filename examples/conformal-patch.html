@@ -1,4 +1,5 @@
-<head>
+<head> </head>
+<body>
   <script type="module" async>
     import createREGL from "regl";
     import createRESL from "resl";
@@ -6,18 +7,18 @@
     import seafoam from "./textures/seafoam.png";
     import createCamera from "inertial-turntable-camera";
     import interactionEvents from "normalized-interaction-events";
-    import patch from "./patch";
-    import { range } from "lodash-es";
+    import Patch from "../src/patch";
+    import Stats from "stats.js";
+    import { range, sample } from "lodash-es";
+    var stats = new Stats();
+stats.showPanel(0 ); // 0: fps, 1: ms, 2: mb, 3+: custom
+document.body.appendChild( stats.dom );
 
     const randomElement = (array) =>
       array[Math.floor(Math.random() * array.length)];
 
     const product = (...a) =>
       a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
-    // import Algebra from 'ganja.js'
-    // window.Algebra = Algebra
-
-    let draw;
 
     console.log("hello");
     document.addEventListener("DOMContentLoaded", async function () {
@@ -28,7 +29,7 @@
         ],
       });
 
-      console.log(Object.values(matcapUrls));
+      // console.log(Object.values(matcapUrls));
       const seafoamImage = await new Promise((resolve) => {
         const im = new Image();
         im.crossOrigin = "anonymous";
@@ -50,18 +51,39 @@
       );
 
       const N = 5;
-      const patches = product(range(N), range(N), range(N)).map(([i, j, k]) => {
-        // console.log([i,j,k])matcap:
-        const matcapTexture = regl.texture({ data: randomElement(matcapImages) });
-        const seafoamTexture = regl.texture({ data: seafoamImage });
-        // console.log('getting textures')
-        return patch(regl, 32, [i, j, k], matcapTexture, seafoamTexture);
-      });
-      // draw = patches.forEach((d, i) => d());
-      draw = (props) => {
-        for (let d of patches) {
-          d(props);
-        }
+      // const patches = product(range(N), range(N), range(N)).map(([i, j, k]) => {
+      //   // console.log([i,j,k])matcap:
+      //   const matcapTexture = regl.texture({ data: randomElement(matcapImages) });
+      //   const seafoamTexture = regl.texture({ data: seafoamImage });
+      //   // console.log('getting textures')
+      //   return patch(regl, 32, [i, j, k], matcapTexture, seafoamTexture);
+      // });
+      const p = Patch(regl, 4096);
+
+      const matcap = regl.texture({ data: randomElement(matcapImages) });
+      const matcaps = matcapImages.map((data) => regl.texture({ data }));
+      const texture = regl.texture({ data: seafoamImage });
+
+      const draw = (props) => {
+        // for (let p of patches) {
+        props = matcaps.map((matcap) => ({ matcap, texture, ...props }));
+
+        const batch = [
+          ///
+          ...props,
+          // ...props,
+          // ...props,
+          // ...props,
+          // ...props,
+          // ...props,
+          // ...props,
+          // ...props,
+          // ...props,
+          // ...props,
+        ]
+        // console.log(batch.length)
+        p(batch);
+        // }
       };
 
       const decayTime = 100;
@@ -121,6 +143,7 @@
 
       console.log(camera);
       regl.frame(() => {
+        stats.begin()
         camera.tick({
           near: camera.params.distance * 0.01,
           far: camera.params.distance * 2 + 200,
@@ -131,6 +154,7 @@
           regl.clear({ color: [0, 0, 0, 1], depth: 1 });
           draw({ eye: camera.state.eye });
         });
+        stats.end()
       });
 
       window.addEventListener(
@@ -144,5 +168,4 @@
       );
     });
   </script>
-</head>
-<body></body>
+</body>

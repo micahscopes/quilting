@@ -1,0 +1,146 @@
+<head> </head>
+<body>
+  <div id="container"></div>
+  <script type="module" async>
+    import { quadPatchPrototype, quadPatch } from "../src/lod-patches.ts";
+    import {
+      asSvg,
+      circle,
+      svgDoc,
+      group,
+      polygon,
+      vertices,
+      center,
+      rect,
+      text,
+    } from "@thi.ng/geom";
+    import { dist } from "@thi.ng/vectors";
+    import { zip, mean } from "lodash-es";
+    import { DVMesh } from "@thi.ng/geom-voronoi";
+
+    function neighbors(arr, m, n) {
+      let v = [
+        [0, -1],
+        [-1, 0],
+        [0, 1],
+        [1, 0],
+      ];
+      return v.map(([h, j]) => (arr[h + m] ? arr[h + m][j + n] : undefined));
+    }
+
+    function allWithNeighbors(arr) {
+      return arr.flatMap((row, i) =>
+        row.map((item, j) => [item, neighbors(arr, i, j)])
+      );
+    }
+
+    const drawQuad = ({ points, index, weights }) => {
+      points = points.map((p) => p.map(rescale));
+      const labelPoints = [
+        [0.1, 0.5],
+        [0.5, 0.1],
+        [0.9, 0.5],
+        [0.5, 0.9],
+      ].map((p) => p.map(rescale));
+
+      const bounds = vertices(rect(scale));
+      const mesh = new DVMesh(points);
+      const circles = points.map((p) => circle(p, 2));
+
+      const labels = zip(labelPoints, weights).map(([pt, lod]) =>
+        text(pt, lod)
+      );
+
+      return svgDoc(
+        {
+          fill: "deeppink",
+          stroke: "none",
+          "stroke-width": "0.25",
+        },
+        group(
+          {
+            fill: "none",
+            stroke: "white",
+          },
+          mesh.delaunay(bounds).map((p) => polygon(p))
+        ),
+        // group(
+        //   {},
+        //   circles
+        // ),
+        group(
+          {
+            "text-anchor": "middle",
+            font: "sans",
+            "alignment-baseline": "middle",
+            "font-size": "9pt",
+          },
+          [
+            group(
+              {
+                stroke: "black",
+                "stroke-opacity": 0.7,
+                "stroke-width": 5,
+              },
+              labels
+            ),
+            group(
+              {
+                stroke: "none",
+              },
+              labels
+            ),
+          ]
+        )
+      );
+    };
+    const patchMap = [
+      [1, 2, 3, 2],
+      [1, 3, 7, 4],
+      [1, 3, 5, 7],
+    ]
+    document.documentElement.style.setProperty('--columns', patchMap[0].length)
+    const patches = allWithNeighbors(patchMap)
+      .map(([item, neighbors]) =>
+        neighbors.map(
+          (d) => (d ? 2 ** Math.ceil((d + item) / 2) : 2 ** item) / 2
+        )
+      )
+      .map((weights) => ({
+        ...quadPatch(...weights, { quality: 100, max: 200000 }),
+        weights,
+      }));
+    console.log(patches);
+
+    const scale = 200;
+    const rescale = (x) => scale * x;
+
+    const patchesSvg = patches.map(drawQuad);
+    console.log(patchesSvg);
+    const svg = document.createElement("svg");
+    document.querySelector("div#container").appendChild(svg);
+    svg.outerHTML = asSvg(...patchesSvg);
+  </script>
+  <style>
+    :root {
+      --columns: 7;
+    }
+    body {
+      margin: 5em;
+      background-color: black;
+    }
+    #container {
+      display: grid;
+      grid-template-columns: repeat(var(--columns), 1fr);
+      grid-gap: 0;
+      width: 1000px;
+    }
+    svg {
+      aspect-ratio: 1/1;
+      padding: 0;
+      margin: 0;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</body>
