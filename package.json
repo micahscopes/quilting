@@ -1,5 +1,5 @@
 {
-  "name": "quiltwork",
+  "name": "quilting",
   "source": "src/index.ts",
   "main": "dist/main.js",
   "module": "dist/index.mjs",
@@ -70,5 +70,21 @@
     "pascals-triangle": "^0.1.1",
     "pex-context": "^2.10.4",
     "pex-io": "^2.1.0"
-  }
+  },
+  "description": "work in progress",
+  "version": "0.0.0",
+  "directories": {
+    "example": "examples",
+    "test": "test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/micahscopes/quilting.git"
+  },
+  "author": "micahscopes",
+  "license": "AGPL-3.0-or-later",
+  "bugs": {
+    "url": "https://github.com/micahscopes/quilting/issues"
+  },
+  "homepage": "https://github.com/micahscopes/quilting#readme"
 }
