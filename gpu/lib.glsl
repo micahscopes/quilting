@@ -270,6 +270,15 @@ CGA3 fromVec(vec3 v){
     return X;
 }
 
+CGA3 fromVec(vec4 v){
+    CGA3 X = ZERO_CGA3;
+    X.scalar = v.w;
+    X.e1 = v.x;
+    X.e2 = v.y;
+    X.e3 = v.z;
+    return X;
+}
+
 vec3 toVec(CGA3 x) {
     return vec3(x.e1, x.e2, x.e3);
 }
@@ -394,6 +403,11 @@ CGA3 weight(vec3 w) {
   return inverse(fromVec(normalize(w)));
   // return inverse(mul(fromVec(p1-p2), fromVec(w)));
 }
+CGA3 weight(vec4 w) {
+  // return one();
+  return inverse(fromVec(normalize(w)));
+  // return inverse(mul(fromVec(p1-p2), fromVec(w)));
+}
 
 struct Patch {
   vec3 vertex;
@@ -402,7 +416,7 @@ struct Patch {
 
 float eps = 0.01;
 
-Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec3 w0, vec3 w1, vec3 w2, vec3 w3, float u, float v) {
+Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec4 w0, vec4 w1, vec4 w2, vec4 w3, float u, float v) {
   CGA3 weight0 = weight(w0);
   CGA3 weight1 = weight(w1);
   CGA3 weight2 = weight(w2);
@@ -450,7 +464,7 @@ Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec3 w0, vec3 w1, vec3 w2
   return Patch(x, normal);
 }
 
-Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec3 w0, vec3 w1, vec3 w2, float u, float v) {
+Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec4 w0, vec4 w1, vec4 w2, float u, float v) {
   CGA3 weight0 = weight(w0);
   CGA3 weight1 = weight(w1);
   CGA3 weight2 = weight(w2);

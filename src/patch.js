@@ -88,7 +88,8 @@ export default function Patch(regl, resolution, options = defaultOptions) {
       attribute vec3 position;
 
       uniform vec3
-        p0, p1, p2, p3,
+        p0, p1, p2, p3;
+      uniform vec4
         w0, w1, w2, w3;
       uniform mat4 projection, view;
       uniform vec3 offset;
@@ -162,10 +163,10 @@ export default function Patch(regl, resolution, options = defaultOptions) {
       p1: (context, props) => props?.p1, // || randomUnit(8),
       p2: (context, props) => props?.p2, // || randomUnit(8),
       p3: (context, props) => props?.p3, // || randomUnit(8),
-      w0: (context, props) => props?.w0, // || randomUnit(2),
-      w1: (context, props) => props?.w1, // || randomUnit(2),
-      w2: (context, props) => props?.w2, // || randomUnit(2),
-      w3: (context, props) => props?.w3, // || randomUnit(2),
+      w0: (context, props) => prepareWeight(props?.w0), // || randomUnit(2),
+      w1: (context, props) => prepareWeight(props?.w1), // || randomUnit(2),
+      w2: (context, props) => prepareWeight(props?.w2), // || randomUnit(2),
+      w3: (context, props) => prepareWeight(props?.w3), // || randomUnit(2),
 
       offset: (context, props) => props?.offset || offset || [0, 0, 0], //|| randomUnit(30, 'offset'),
     },
@@ -173,3 +174,5 @@ export default function Patch(regl, resolution, options = defaultOptions) {
     count: cells.length * 3,
   });
 }
+
+const prepareWeight = w => w?.length === 4 ? w : w ? [...w.slice(0,3), 0] : [0,0,0,1]
