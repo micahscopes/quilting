@@ -1,10 +1,9 @@
-from alglbraic.algebras.clifford_algebra import ConformalGeometricAlgebra
+from alglbraic.algebras.clifford_algebra import ConformalGeometricAlgebra, GeometricAlgebra
 from sympy import diag, Matrix, sqrt, symbols, Symbol
 from sympy.tensor import IndexedBase
 
 from alglbraic.glsl import GLSL
 from alglbraic.functions import map
-
 
 class CGA(ConformalGeometricAlgebra):
     def __init__(self, size, **opts):

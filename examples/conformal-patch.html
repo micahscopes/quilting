@@ -51,7 +51,7 @@
       );
 
       const N = 5;
-      const patch = Patch(regl, 1024, {type: QUAD});
+      const patch = Patch(regl, 1024, {shape: QUAD});
 
       const matcap = regl.texture({ data: randomElement(matcapImages) });
       const matcaps = matcapImages.map((data) => regl.texture({ data }));

@@ -56,7 +56,7 @@
       console.log('bunny polys', bunnyPolys)
 
       const N = 5;
-      const patch = Patch(regl, 32, {type: TRI});
+      const patch = Patch(regl, 32, {shape: TRI });
 
       const matcap = regl.texture({ data: randomElement(matcapImages) });
       const matcaps = matcapImages.map((data) => regl.texture({ data }));

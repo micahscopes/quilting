@@ -19,10 +19,10 @@ CGA3 fromVec(vec3 v){
 
 CGA3 fromVec(vec4 v){
     CGA3 X = ZERO_CGA3;
-    X.scalar = v.w;
-    X.e1 = v.x;
-    X.e2 = v.y;
-    X.e3 = v.z;
+    X.scalar = v.x;
+    X.e1 = v.y;
+    X.e2 = v.z;
+    X.e3 = v.w;
     return X;
 }
 

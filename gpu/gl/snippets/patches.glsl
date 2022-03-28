@@ -33,7 +33,7 @@ CGA3 weight(vec4 w) {
 
 CGA3 weight(CGA3 w) {
   // return one();
-  return inverse(w);
+  return inverse(mul(sqrt(lcontract(w,w).scalar), w));
   // return inverse(mul(fromVec(p1-p2), fromVec(w)));
 }
 
@@ -84,6 +84,10 @@ Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec4 w0, vec4 w1, vec4 w2
   return bilinearQuad(fromVec(p0), fromVec(p1), fromVec(p2), fromVec(p3), weight(w0), weight(w1), weight(w2), weight(w3), u, v);
 }
 
+Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec3 w0, vec3 w1, vec3 w2, vec3 w3, float u, float v) {
+  return bilinearQuad(fromVec(p0), fromVec(p1), fromVec(p2), fromVec(p3), weight(w0), weight(w1), weight(w2), weight(w3), u, v);
+}
+
 Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, CGA3 w0, CGA3 w1, CGA3 w2, CGA3 w3, float u, float v) {
   return bilinearQuad(fromVec(p0), fromVec(p1), fromVec(p2), fromVec(p3), weight(w0), weight(w1), weight(w2), weight(w3), u, v);
 }
@@ -123,6 +127,10 @@ Patch bilinearTri(CGA3 point0, CGA3 point1, CGA3 point2, CGA3 weight0, CGA3 weig
 }
 
 Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec4 w0, vec4 w1, vec4 w2, float u, float v) {
+  return bilinearTri(fromVec(p0), fromVec(p1), fromVec(p2), weight(w0), weight(w1), weight(w2), u, v);
+}
+
+Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec3 w0, vec3 w1, vec3 w2, float u, float v) {
   return bilinearTri(fromVec(p0), fromVec(p1), fromVec(p2), weight(w0), weight(w1), weight(w2), u, v);
 }
 
