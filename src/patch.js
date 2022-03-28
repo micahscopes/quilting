@@ -48,7 +48,7 @@ const prepareMesh = moize(
   { maxSize: 40 }
 );
 
-let gl = function (s, ...values) {
+export const gl = function (s, ...values) {
   let str = "";
   s.forEach((string, i) => {
     str += string + (values[i] || "");
@@ -58,9 +58,9 @@ let gl = function (s, ...values) {
   ${glLib}\n\n${str}`;
 };
 
-const randomUnit =
-  (D = 1, key = null) => {
-    let x = [Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5];
+export const randomUnit =
+  (D = 1, size=3) => {
+    let x = new Array(size).map(() => Math.random() - 0.5);
     const norm = x.reduce((a, b) => a + b, 0);
     return x.map((n) => (D * n) / norm);
   }
@@ -75,13 +75,10 @@ export default function Patch(regl, resolution, options = defaultOptions) {
   const { offset, type } = { ...defaultOptions, ...options };
   const grid = tessellation(type, resolution);
   let { positions, cells, normals } = prepareMesh(grid);
-  // console.log(type, offset);
-  // positions = regl.buffer(positions);
-  // cells = regl.buffer(cells);
-  // normals = regl.buffer(normals);
+
   const count = cells.length * 3;
   return regl({
-    vert: gl`
+    vert: options.vert || gl`
       precision highp float;
 
       attribute vec3 normal;

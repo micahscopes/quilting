@@ -409,6 +409,12 @@ CGA3 weight(vec4 w) {
   // return inverse(mul(fromVec(p1-p2), fromVec(w)));
 }
 
+CGA3 weight(CGA3 w) {
+  // return one();
+  return inverse(w);
+  // return inverse(mul(fromVec(p1-p2), fromVec(w)));
+}
+
 struct Patch {
   vec3 vertex;
   vec3 normal;
@@ -416,16 +422,7 @@ struct Patch {
 
 float eps = 0.01;
 
-Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec4 w0, vec4 w1, vec4 w2, vec4 w3, float u, float v) {
-  CGA3 weight0 = weight(w0);
-  CGA3 weight1 = weight(w1);
-  CGA3 weight2 = weight(w2);
-  CGA3 weight3 = weight(w3);
-  CGA3 point0 = fromVec(p0);
-  CGA3 point1 = fromVec(p1);
-  CGA3 point2 = fromVec(p2);
-  CGA3 point3 = fromVec(p3);
-
+Patch bilinearQuad(CGA3 point0, CGA3 point1, CGA3 point2, CGA3 point3, CGA3 weight0, CGA3 weight1, CGA3 weight2, CGA3 weight3, float u, float v) {
   CGA3 W0 = mul((1.0 - u) * (1.0 - v), weight0); // 0, 0
   CGA3 W1 = mul(u * (1.0 - v), weight1); // 1, 0
   CGA3 W2 = mul((1.0 - u) * v, weight2); // 0, 1
@@ -451,12 +448,9 @@ Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec4 w0, vec4 w1, vec4 w2
   CGA3 bottom = add(W0, W1, W2, W3);
 
   CGA3 X = div(top, bottom);
-    // CGA3 X_vv= div(top_vv, bottom);
   CGA3 X_uu = div(top_uu, bottom);
   CGA3 X_vv = div(top_vv, bottom);
   vec3 x = vec3(X.e1, X.e2, X.e3);
-    // CGA3 Normal = outer(sub(X, X_uu), sub(X, X_vv));
-    // vec3 normal_alt = normalize(vec3(Normal.e12, Normal.e13, Normal.e23));
   vec3 x_uu = vec3(X_uu.e1, X_uu.e2, X_uu.e3) - x;
   vec3 x_vv = vec3(X_vv.e1, X_vv.e2, X_vv.e3) - x;
   vec3 crossed = cross(x_uu, x_vv);
@@ -464,14 +458,15 @@ Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec4 w0, vec4 w1, vec4 w2
   return Patch(x, normal);
 }
 
-Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec4 w0, vec4 w1, vec4 w2, float u, float v) {
-  CGA3 weight0 = weight(w0);
-  CGA3 weight1 = weight(w1);
-  CGA3 weight2 = weight(w2);
-  CGA3 point0 = fromVec(p0);
-  CGA3 point1 = fromVec(p1);
-  CGA3 point2 = fromVec(p2);
+Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec4 w0, vec4 w1, vec4 w2, vec4 w3, float u, float v) {
+  return bilinearQuad(fromVec(p0), fromVec(p1), fromVec(p2), fromVec(p3), weight(w0), weight(w1), weight(w2), weight(w3), u, v);
+}
 
+Patch bilinearQuad(vec3 p0, vec3 p1, vec3 p2, vec3 p3, CGA3 w0, CGA3 w1, CGA3 w2, CGA3 w3, float u, float v) {
+  return bilinearQuad(fromVec(p0), fromVec(p1), fromVec(p2), fromVec(p3), weight(w0), weight(w1), weight(w2), weight(w3), u, v);
+}
+
+Patch bilinearTri(CGA3 point0, CGA3 point1, CGA3 point2, CGA3 weight0, CGA3 weight1, CGA3 weight2, float u, float v) {
   CGA3 W0 = mul((1.0 - u - v), weight0); // 0, 0
   CGA3 W1 = mul(u, weight1); // 1, 0
   CGA3 W2 = mul(v, weight2); // 0, 1
@@ -503,4 +498,12 @@ Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec4 w0, vec4 w1, vec4 w2, float u,
   vec3 crossed = cross(x_uu, x_vv);
   vec3 normal = normalize(crossed);
   return Patch(x, normal);
+}
+
+Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec4 w0, vec4 w1, vec4 w2, float u, float v) {
+  return bilinearTri(fromVec(p0), fromVec(p1), fromVec(p2), weight(w0), weight(w1), weight(w2), u, v);
+}
+
+Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, CGA3 w0, CGA3 w1, CGA3 w2, float u, float v) {
+  return bilinearTri(fromVec(p0), fromVec(p1), fromVec(p2), weight(w0), weight(w1), weight(w2), u, v);
 }
