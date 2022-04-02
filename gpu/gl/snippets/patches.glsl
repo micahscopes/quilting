@@ -1,12 +1,12 @@
 #pragma glslify: import('./bernstein.glsl')
 CGA3 weight(vec3 w) {
-  return inverse(fromVec(normalize(w)));
+  return invert(fromVec(normalize(w)));
 }
 CGA3 weight(vec4 w) {
-  return inverse(fromVec(normalize(w)));
+  return invert(fromVec(normalize(w)));
 }
 CGA3 weight(CGA3 w) {
-  return inverse(mul(sqrt(lcontract(w,w).scalar), w));
+  return invert(mul(sqrt(lcontract(w,w).scalar), w));
 }
 
 struct Patch {

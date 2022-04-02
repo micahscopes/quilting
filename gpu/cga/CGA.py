@@ -1,4 +1,4 @@
-from alglbraic.algebras.clifford_algebra import ConformalGeometricAlgebra, GeometricAlgebra
+from alglbraic.algebras.clifford_algebra import ConformalGeometricAlgebra
 from sympy import diag, Matrix, sqrt, symbols, Symbol
 from sympy.tensor import IndexedBase
 

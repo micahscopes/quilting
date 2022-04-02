@@ -1,2 +1,1 @@
-declare module 'ga-helpers';
-declare module '*.glsl?raw';
+declare module '*.glsl';

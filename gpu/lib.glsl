@@ -236,12 +236,12 @@ CGA3 point_coords(CGA3 X){
     return CGA3(X.scalar/X.enil, X.e1/X.enil, X.e2/X.enil, X.e3/X.enil, 1.0, X.einf/X.enil, X.e12/X.enil, X.e13/X.enil, X.e1nil/X.enil, X.e1inf/X.enil, X.e23/X.enil, X.e2nil/X.enil, X.e2inf/X.enil, X.e3nil/X.enil, X.e3inf/X.enil, X.enilinf/X.enil, X.e123/X.enil, X.e12nil/X.enil, X.e12inf/X.enil, X.e13nil/X.enil, X.e13inf/X.enil, X.e1nilinf/X.enil, X.e23nil/X.enil, X.e23inf/X.enil, X.e2nilinf/X.enil, X.e3nilinf/X.enil, X.e123nil/X.enil, X.e123inf/X.enil, X.e12nilinf/X.enil, X.e13nilinf/X.enil, X.e23nilinf/X.enil, X.e123nilinf/X.enil);
 }
 
-CGA3 inverse(CGA3 X){
+CGA3 invert(CGA3 X){
     return mul(1.0/lcontract(X,conjugate(X)).scalar, conjugate(X));
 }
 
 CGA3 div(CGA3 X, CGA3 Y){
-    return mul(X, inverse(Y));
+    return mul(X, invert(Y));
 }
 
 CGA3 dual(CGA3 X){
@@ -379,13 +379,13 @@ float bernsteinQuad(int i, int j, float u, float v) {
 // }
 
 CGA3 weight(vec3 w) {
-  return inverse(fromVec(normalize(w)));
+  return invert(fromVec(normalize(w)));
 }
 CGA3 weight(vec4 w) {
-  return inverse(fromVec(normalize(w)));
+  return invert(fromVec(normalize(w)));
 }
 CGA3 weight(CGA3 w) {
-  return inverse(mul(sqrt(lcontract(w,w).scalar), w));
+  return invert(mul(sqrt(lcontract(w,w).scalar), w));
 }
 
 struct Patch {

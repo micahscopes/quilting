@@ -1,6 +1,6 @@
 from alglbraic.util.cli import build_cli
 import alglbraic
-from .algebras import cli as cga
+import cga
 
 cli = build_cli(modules=[alglbraic, cga])
 

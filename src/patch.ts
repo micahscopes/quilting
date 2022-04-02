@@ -1,6 +1,6 @@
 import { PicoGL } from "picogl";
 import type { App } from "picogl";
-import glLib from "../gpu/lib.glsl?raw";
+import glLib from "../gpu/gl/index.glsl";
 
 export const glsl = function (s: TemplateStringsArray, ...values: string[]) {
   let str = "";
@@ -8,11 +8,13 @@ export const glsl = function (s: TemplateStringsArray, ...values: string[]) {
     str += string + (values[i] || "");
   });
 
-  return `#version 300 es\n
-${glLib}\n\n${str}`;
+  return str;
 };
 
 const vsUpdate = glsl`
+#version 300 es
+precision highp float;
+${glLib}
 #define M_2PI 6.28318530718
 
 // We simulate the wandering of agents using transform feedback in this vertex shader
@@ -66,10 +68,13 @@ void main() {
 
 const fsUpdate = `
 #version 300 es
+precision highp float;
 void main() {}
-`
+`;
 
 const vsDraw = glsl`
+#version 300 es
+precision highp float;
 #define OFFSET_LOCATION 0
 #define ROTATION_LOCATION 1
 #define POSITION_LOCATION 2
@@ -93,11 +98,11 @@ void main() {
     );
     gl_Position = vec4(rot * aPosition + aOffset, 0.0, 1.0);
 }
-`
+`;
 
 const fsDraw = glsl`
+#version 300 es
 precision highp float;
-
 flat in vec3 vColor;
 
 out vec4 fragColor;
@@ -105,8 +110,12 @@ out vec4 fragColor;
 void main() {
     fragColor = vec4(vColor, 1.0);
 }
-`
+`;
 
-export const createPatchProgram = (app: App) => {
-  return app.createProgram(vsUpdate, fsUpdate);
+export const createPatchPrograms = (app: App) => {
+  const updateProgram = app.createProgram(vsUpdate, fsUpdate, {
+    transformFeedbackVaryings: ["vOffset", "vRotation"],
+  });
+  const drawProgram = app.createProgram(vsDraw, fsDraw);
+  return { updateProgram, drawProgram };
 };
