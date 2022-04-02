@@ -1,15 +1,8 @@
 import { PicoGL } from "picogl";
 import type { App } from "picogl";
-import glLib from "../gpu/gl/index.glsl";
+import glLib from "../gl/patch.glsl";
+import { glsl } from "./util";
 
-export const glsl = function (s: TemplateStringsArray, ...values: string[]) {
-  let str = "";
-  s.forEach((string, i) => {
-    str += string + (values[i] || "");
-  });
-
-  return str;
-};
 
 const vsUpdate = glsl`
 #version 300 es

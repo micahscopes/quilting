@@ -16,7 +16,7 @@
     "watch": "parcel watch --port 2345",
     "demo": "npx parcel examples/index.html --dist-dir examples/dist/ --port 2345",
     "dev": "npm-run-all --parallel watch demo",
-    "alglbraic": "python ./gpu/__init__.py --glslify --out gpu/gl/cga3 cga --size 3",
+    "alglbraic": "python ./gl/generator/__init__.py --glslify --out gl/algebra cga --size 3 quaternions",
     "glslify": "glslify gpu/gl/index.glsl --output gpu/lib.glsl",
     "dev-glsl": "watch 'npm run glslify' gpu/gl",
     "test": "tap --ts test/**/*.ts"
