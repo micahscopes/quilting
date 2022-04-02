@@ -378,41 +378,14 @@ float bernsteinQuad(int i, int j, float u, float v) {
 //   pow(v, j);
 // }
 
-// CGA3 pointWeight(vec3 controlPoint, vec3 weight) {
-//   return mul(
-//     add(
-//       mul(
-//         fromVec(controlPoint),
-//         mul( 0.5, INF())
-//       ),
-//       one()
-//     ),
-//     fromVec(weight)
-//   );
-// }
-
-// CGA3 inverse(CGA3 x) {
-//   return mul(1.0/mul(x, reverse(x)).scalar, reverse(x));
-// }
-
-// CGA3 div(CGA3 a, CGA3 b) {
-//   return mul(a, inverse(b));
-// }
 CGA3 weight(vec3 w) {
-  // return one();
   return inverse(fromVec(normalize(w)));
-  // return inverse(mul(fromVec(p1-p2), fromVec(w)));
 }
 CGA3 weight(vec4 w) {
-  // return one();
   return inverse(fromVec(normalize(w)));
-  // return inverse(mul(fromVec(p1-p2), fromVec(w)));
 }
-
 CGA3 weight(CGA3 w) {
-  // return one();
   return inverse(mul(sqrt(lcontract(w,w).scalar), w));
-  // return inverse(mul(fromVec(p1-p2), fromVec(w)));
 }
 
 struct Patch {

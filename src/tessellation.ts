@@ -15,6 +15,13 @@
  * @param {number} D - edge D weight.
  * @return {function: } an interpolation function.
  */
+
+const product = (...a: any[][]) =>
+  a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
+
+export const uvGrid = (uResolution: number, vResolution: number) =>
+  product([...range(0, 1, 1 / uResolution), 1], [...range(0, 1, 1 / vResolution), 1]);
+
 export const quadEdgeWeightInterpolator =
   (A: number, B: number, C: number, D: number, n = 1) =>
   ([x, y]: number[]) => {
@@ -60,22 +67,16 @@ export const triEdgeWeightInterpolator =
   };
 
 import { KdTreeSet } from "@thi.ng/geom-accel";
-import { DensityFunction, PoissonOpts, samplePoisson } from "@thi.ng/poisson";
-import { dist, div2, div3, divN, divN2, randMinMax2 } from "@thi.ng/vectors";
-import { range, sum } from "lodash-es";
-import bc from "barycentric-coordinates";
+import { DensityFunction, samplePoisson } from "@thi.ng/poisson";
+import { dist, divN2 } from "@thi.ng/vectors";
 import barycentric from "barycentric";
+import { range } from "lodash-es";
 
 const cartesian = (bc, corners) => [
   bc[0] * corners[0][0] + bc[1] * corners[1][0] + bc[2] * corners[2][0],
   bc[0] * corners[0][1] + bc[1] * corners[1][1] + bc[2] * corners[2][1],
 ];
 
-const {
-  // triangleCartesianCoords,
-  triangleBarycentricCoords,
-} = bc;
-// console.log(bc)
 
 type Point2D = [number, number];
 
@@ -92,10 +93,6 @@ const sampleTriangle = (corners: [Point2D, Point2D, Point2D]) => () => {
 const getRadiusTri =
   (triangle: [Point2D, Point2D, Point2D], weights: [number, number, number]) =>
   (pt: Point2D) => {
-    // const bary = triangleBarycentricCoords(
-    //   [...pt, 1],
-    //   triangle.map((x) => [...x, 1])
-    // );
     let bary = barycentric(triangle, pt);
     const D = dist([0, 0], [0.5, 0.5]);
     bary = [
