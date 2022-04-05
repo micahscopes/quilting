@@ -5,7 +5,7 @@ import glslifyRollup from "rollup-plugin-glslify";
 
 const glslifyOptions = {
   extensions: ["vs", "fs", ".glsl", ".frag.shader"],
-  compress: true,
+  compress: false,
   transform: ["glslify-import"],
 };
 

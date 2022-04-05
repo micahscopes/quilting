@@ -1,6 +1,7 @@
-import { cellTransformer } from "../src/transformation";
+import { cellsTransformer } from "../src/transformation";
 import { PicoGL } from "picogl";
-import type { VertexBuffer } from "picogl";
+import { fill } from "lodash-es";
+import { setStructUniforms } from "../src/util";
 
 const canvas = document.createElement("canvas");
 canvas.width = window.innerWidth;
@@ -9,36 +10,43 @@ document.body.appendChild(canvas);
 const app = PicoGL.createApp(canvas).clearColor(0.0, 0.0, 0.0, 1.0);
 app.clear();
 
-let pointIn = app.createVertexBuffer(
-  PicoGL.FLOAT,
-  3,
-  new Float32Array([1, 2, 3])
+const {
+  drawer,
+  getTransformedWeights,
+  getTransformedPoints,
+  getLODs,
+  numCells,
+} = cellsTransformer(
+  app,
+  [
+    [1, 1, 1],
+    [2, 2, 2],
+    [3, 3, 3],
+  ],
+  [
+    [4, 4, 4, 4],
+    [5, 5, 5, 5],
+    [6, 6, 6, 6],
+  ]
 );
-let pointOut = app.createVertexBuffer(PicoGL.FLOAT, 3, 3);
 
-const vertexArray = app.createVertexArray().vertexAttributeBuffer(0, pointIn);
+setStructUniforms(drawer, "transformation", { scalar: 2, e1: 32 })
+  .uniform("scale", 1)
+  .draw();
 
-var transformFeedback = app
-  .createTransformFeedback()
-  .feedbackBuffer(0, pointOut);
+console.log(drawer.setTransformation);
+// console.log(drawCall.appState)
 
-const transformer = cellTransformer(app);
+// var arrBuffer = new ArrayBuffer((9+12) * Float32Array.BYTES_PER_ELEMENT);
+const gl = drawer.gl;
+let tmpBuffer = new Float32Array(9 * numCells);
+getTransformedPoints(tmpBuffer);
+console.log(tmpBuffer);
 
-var drawCall = app
-  .createDrawCall(transformer, vertexArray)
-  .primitive(PicoGL.POINTS)
-  .transformFeedback(transformFeedback);
+tmpBuffer = new Float32Array(12 * numCells);
+getTransformedWeights(tmpBuffer);
+console.log(tmpBuffer);
 
-app.enable(PicoGL.RASTERIZER_DISCARD);
-app.clear();
-
-drawCall.uniform("scale", 40).draw();
-drawCall.draw();
-
-// output
-const gl = drawCall.gl;
-const outputBuffer = new Float32Array(3)
-gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, pointOut.buffer);
-gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outputBuffer)
-console.log(outputBuffer)
-
+tmpBuffer = new Float32Array(numCells);
+getLODs(tmpBuffer);
+console.log(tmpBuffer);
