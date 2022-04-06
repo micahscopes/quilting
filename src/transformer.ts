@@ -29,16 +29,17 @@ void main() {}
 
 export const cellsTransformer = (
   app: App,
-  points: number[][] | Float32Array,
-  weights: number[][] | Float32Array
+  cellPositions: number[][] | Float32Array,
+  cellWeights: number[][] | Float32Array
 ) => {
-  const numCells = points.length / 3;
-  points = new Float32Array(flatten(points));
-  weights = new Float32Array(flatten(weights));
+  const numCells = cellPositions.length;
+  let positions = new Float32Array(flatten(flatten(cellPositions)));
+  let weights = new Float32Array(flatten(flatten(cellWeights)));
 
-  console.log(points, weights);
+  console.log(cellPositions, cellWeights);
+  console.log(positions, weights);
 
-  let pointsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT3, points);
+  let pointsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT3, positions);
   let weightsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT4x3, weights);
 
   let transformedPointsBuffer = app.createMatrixBuffer(
@@ -49,7 +50,7 @@ export const cellsTransformer = (
     PicoGL.FLOAT_MAT3x4,
     numCells * 12
   );
-  let lodBuffer = app.createVertexBuffer(PicoGL.FLOAT, 4, 2);
+  let lodBuffer = app.createVertexBuffer(PicoGL.FLOAT, 4, numCells);
 
   const vertexArray = app
     .createVertexArray()

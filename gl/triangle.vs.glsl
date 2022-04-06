@@ -1,20 +1,20 @@
-
+#version 300 es
 precision highp float;
 #pragma glslify: import('./patch.glsl')
-attribute vec3 normal;
-attribute vec3 position;
+layout(location = 0) in vec3 position;
+layout(location = 1) in mat3 points;
+layout(location = 4) in mat3x4 weights;
 
-uniform vec3 p0, p1, p2;
-uniform vec4 w0, w1, w2;
 uniform mat4 projection, view;
 uniform vec3 offset;
 
-varying vec3 n;
-varying vec2 uv;
+out vec3 n;
+out vec2 uv;
 
 void main() {
 
-  Patch p = bilinearTri(p0, p1, p2, w0, w1, w2, position.x, position.y);
+  Patch p = bilinearTri(points[0], points[1], points[2], weights[0], weights[1],
+                        weights[2], position.x, position.y);
 
   n = p.normal;
   uv = vec2(position.x, position.y);
