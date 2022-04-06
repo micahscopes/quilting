@@ -22,8 +22,8 @@ const fs = glsl`
           matcapTexture, mat_uv
         ).rgb, color.r);
 
-        // gl_FragColor = texture2D(texture, uv);
-        // gl_FragColor = vec4(0,1,1,1);
+        gl_FragColor = texture2D(texture, uv);
+        gl_FragColor = vec4(0,1,1,1);
       }`;
 
 const patchProgram = moize((app: App) => app.createProgram(vs, fs), {
@@ -35,7 +35,7 @@ const meshVertexArray = moize.infinite((mesh: any, app: App) => {
   const positionBuffer = app.createVertexBuffer(
     PicoGL.FLOAT,
     3,
-    new Float32Array(flatten(flatten(mesh.cellPositions)))
+    new Float32Array(flatten(flatten(mesh.positions)))
   );
   const normalBuffer = app.createVertexBuffer(
     PicoGL.FLOAT,

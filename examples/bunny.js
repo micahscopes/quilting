@@ -41,7 +41,6 @@ window.mv = up(CGA.Vector(1, 2));
 
 setStructUniforms(transformer, "transformation", { scalar: 2, e1: 32 }).draw();
 
-// import Patch, {randomPoints, QUAD, TRI} from "../src/patch";
 import { sample } from "lodash-es";
 // import { sub, normalize } from "@thi.ng/vectors";
 
@@ -75,38 +74,12 @@ document.addEventListener("DOMContentLoaded", async function () {
     ...defaultWeights(),
   }));
 
-  const blankDrawCall = (window.blankDrawCall = patchDrawCall(app, [32, 32, 32]))
-    // .uniform("eye", camera.state.eye)
-    .uniform("projection", camera.state.projection)
-    .uniform("view", camera.state.view)
-    // .uniform("offset", new Float32Array([0, 0, 0]))
-    .texture("texture", texture)
-    .texture("matcapTexture", matcap);
-
-  const testPatchesUniforms = [
-    {
-      p0: new Float32Array([0, 0, 0]),
-      p1: new Float32Array([10, 0, 0]),
-      p2: new Float32Array([0, 0, 10]),
-      ...defaultWeights(),
-    },
-    {
-      p0: new Float32Array([10, 0, 0]),
-      p1: new Float32Array([0, 10, 0]),
-      p2: new Float32Array([0, 0, 10]),
-      ...defaultWeights(),
-    },
-  ];
   const drawCalls = patchesUniforms.map((p) =>
     Object.entries(p)
       .reduce((drawCall, [k, v]) => {
-        // console.log(k, v);
         return drawCall.uniform(k, v);
       },
-      patchDrawCall(app, 32))
-      .uniform("eye", camera.state.eye)
-      .uniform("projection", camera.state.projection)
-      .uniform("view", camera.state.view)
+      patchDrawCall(app, 4))
       .texture("texture", texture)
       .texture("matcapTexture", matcap)
   );
