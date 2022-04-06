@@ -19,8 +19,14 @@
 const product = (...a: any[][]) =>
   a.reduce((a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())));
 
-export const uvGrid = (uResolution: number, vResolution: number) =>
-  product([...range(0, 1, 1 / uResolution), 1], [...range(0, 1, 1 / vResolution), 1]);
+export const uvGrid = (
+  uResolution: number,
+  vResolution: number | null = null
+) =>
+  product(
+    [...range(0, 1, 1 / uResolution), 1],
+    [...range(0, 1, 1 / (vResolution || uResolution)), 1]
+  );
 
 export const quadEdgeWeightInterpolator =
   (A: number, B: number, C: number, D: number, n = 1) =>
@@ -70,13 +76,14 @@ import { KdTreeSet } from "@thi.ng/geom-accel";
 import { DensityFunction, samplePoisson } from "@thi.ng/poisson";
 import { dist, divN2 } from "@thi.ng/vectors";
 import barycentric from "barycentric";
-import { range } from "lodash-es";
+import Delaunator from "delaunator";
+import { chunk, range } from "lodash-es";
+import moize from "moize";
 
 const cartesian = (bc, corners) => [
   bc[0] * corners[0][0] + bc[1] * corners[1][0] + bc[2] * corners[2][0],
   bc[0] * corners[0][1] + bc[1] * corners[1][1] + bc[2] * corners[2][1],
 ];
-
 
 type Point2D = [number, number];
 
@@ -235,9 +242,9 @@ export const quadPatch = (
   resB: number,
   resC: number,
   resD: number,
-  opts: object
+  opts: object | null = null
 ) => {
-  opts = { ...defaultOptions, ...opts };
+  opts = { ...defaultOptions, ...(opts || {}) };
   const index = new KdTreeSet(2);
   const addPoint = (radius: number) => (x: number[]) =>
     index.add(
@@ -286,9 +293,9 @@ export const triPatch = (
   resA: number,
   resB: number,
   resC: number,
-  opts: object
+  opts: object | null = null
 ) => {
-  opts = { ...defaultOptions, ...opts };
+  opts = { ...defaultOptions, ...(opts || {}) };
   const corners: [Point2D, Point2D, Point2D] = [
     [0, 1],
     [1, 0],
@@ -310,7 +317,7 @@ export const triPatch = (
     index.add([0, b]);
   }
   for (let c = 0; c <= 1; c += 1 / resC) {
-    index.add([1-c, c]);
+    index.add([1 - c, c]);
   }
 
   const interpolation = getRadiusTri(corners, [resA, resB, resC]);
@@ -339,3 +346,52 @@ export const triPatch = (
 
   return { points, index };
 };
+
+type triResolutions = [number, number, number];
+type quadResolutions = [number, number, number, number];
+type patchResolutions = triResolutions | quadResolutions;
+
+export const tessellation = moize((sideLODs: number | patchResolutions = 8) => {
+  let points;
+  if (Array.isArray(sideLODs)) {
+    sideLODs = sideLODs as patchResolutions;
+    points = (
+      sideLODs.length === 4
+        ? quadPatch(...(sideLODs as quadResolutions))
+        : triPatch(...(sideLODs as triResolutions))
+    ).points; // uvGrid(resolution)
+  } else {
+    points = triPatch(sideLODs, sideLODs, sideLODs).points;
+  }
+  return Delaunator.from(points);
+});
+
+interface mesh {
+  cells: number[][];
+  positions: number[][];
+  normals: number[][];
+}
+
+import normals from "angle-normals";
+const prepareMesh = moize(
+  (grid) => {
+    let mesh: mesh | any = {};
+    mesh.cells = chunk(grid.triangles, 3);
+    mesh.positions = chunk(grid.coords, 2).map(([u, v]) => [
+      u,
+      v,
+      0,
+    ]) as number[][];
+    mesh.normals = normals(mesh.cells, mesh.positions);
+    mesh.cellPositions = mesh.cells.map((indices: number[]) =>
+      indices.map((i) => mesh.positions[i])
+    );
+    return mesh;
+  },
+  { maxSize: 40 }
+);
+
+export const tesselationMesh = moize(
+  (sideLODs: number | patchResolutions) => prepareMesh(tessellation(sideLODs)),
+  { maxSize: 40 }
+);

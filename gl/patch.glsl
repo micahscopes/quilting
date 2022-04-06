@@ -1,5 +1,4 @@
 // for some reason `require` only works at top level
-#pragma glslify: matcap = require(matcap)
 #pragma glslify: import('./lib.glsl')
 
 H fromVec(vec4 w) {

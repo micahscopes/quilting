@@ -1,7 +1,7 @@
-import { cellsTransformer } from "../src/transformation";
+import { cellsTransformer } from "../src/transformer";
 import { PicoGL } from "picogl";
-import { fill } from "lodash-es";
 import { setStructUniforms } from "../src/util";
+import Algebra from 'ganja.js';
 
 const canvas = document.createElement("canvas");
 canvas.width = window.innerWidth;
@@ -11,7 +11,7 @@ const app = PicoGL.createApp(canvas).clearColor(0.0, 0.0, 0.0, 1.0);
 app.clear();
 
 const {
-  drawer,
+  drawer: transformer,
   getTransformedWeights,
   getTransformedPoints,
   getLODs,
@@ -30,15 +30,18 @@ const {
   ]
 );
 
-setStructUniforms(drawer, "transformation", { scalar: 2, e1: 32 })
-  .uniform("scale", 1)
+app.enable(PicoGL.RASTERIZER_DISCARD)
+
+const CGA = Algebra(4,1)
+const ni = CGA.Vector(0,0,0,1,1)
+const no = CGA.Vector(0,0,0,-0.5,0.5)
+const up = (x) => CGA.Add(no, x).Add(CGA.Scalar(.5).Mul(x).Mul(x).Mul(ni))
+window.mv = up(CGA.Vector(1,2))
+
+setStructUniforms(transformer, "transformation", { scalar: 2, e1: 32 })
   .draw();
 
-console.log(drawer.setTransformation);
-// console.log(drawCall.appState)
-
-// var arrBuffer = new ArrayBuffer((9+12) * Float32Array.BYTES_PER_ELEMENT);
-const gl = drawer.gl;
+const gl = transformer.gl;
 let tmpBuffer = new Float32Array(9 * numCells);
 getTransformedPoints(tmpBuffer);
 console.log(tmpBuffer);

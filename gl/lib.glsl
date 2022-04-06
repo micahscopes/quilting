@@ -24,6 +24,7 @@ void toVec(out vec3 x, CGA3 X) {
 
 H vecToH(vec3 v){
     H X = ZERO_H;
+    X.real = 1.0;
     X.i = v.x;
     X.j = v.y;
     X.k = v.z;

@@ -32,6 +32,7 @@
     "@teropa/triangle-tessellation": "^1.1.0",
     "@thi.ng/geom": "^3.2.0",
     "@thi.ng/vectors": "^7.5.0",
+    "@types/delaunator": "^5.0.0",
     "@types/expect": "^24.3.0",
     "@types/lodash-es": "^4.17.5",
     "@types/mocha": "^9.1.0",

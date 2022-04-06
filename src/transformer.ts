@@ -5,22 +5,18 @@
 // - writes transformed points/weights as vectors into output buffer
 
 import { flatten } from "lodash-es";
-import type { App, DrawCall } from "picogl";
+import type { App } from "picogl";
 import { PicoGL } from "picogl";
-import { bufferGetter, glsl, setStructUniforms } from "./util";
+import { bufferGetter, glsl } from "./util";
 import transformationGL from "../gl/transformation.glsl";
 
-export const cellTransformerProgram = (app: App, numSides = 3) =>
+const cellTransformerProgram = (app: App, numSides = 3) =>
   app.createProgram(
     transformationGL,
     glsl`
 #version 300 es
 precision highp float;
-
-out vec4 fragColor;
-void main() {
-    fragColor = vec4(0,0,0,1.0);
-}
+void main() {}
 `,
     {
       transformFeedbackVaryings: [
@@ -84,7 +80,7 @@ export const cellsTransformer = (
   const drawer = app
       .createDrawCall(transformer, vertexArray)
       .primitive(PicoGL.POINTS)
-      .transformFeedback(transformFeedback) as TransformationDrawCall
+      .transformFeedback(transformFeedback)
 
 
   return {

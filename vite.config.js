@@ -11,6 +11,9 @@ const glslifyOptions = {
 
 export default defineConfig({
   plugins: [glslify(glslifyOptions), glslifyRollup(glslifyOptions)],
+    define: {
+      global: {},
+    },
 
   build: {
     lib: {
