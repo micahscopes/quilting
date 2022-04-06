@@ -72,12 +72,17 @@ export const patchDrawCall =
   ) => {
     const mesh = tesselationMesh(sideLODs);
     const vertexArray = meshVertexArray(mesh, app)
-      .instanceAttributeBuffer(1, pointsBuffer ) //  , {type: PicoGL.FLOAT, size: 3})
-      .instanceAttributeBuffer(2, pointsBuffer ) //  , {type: PicoGL.FLOAT, size: 3, offset: 3*4})
-      .instanceAttributeBuffer(3, pointsBuffer ) //  , {type: PicoGL.FLOAT, size: 3, offset: 6*4})
-      .instanceAttributeBuffer(4, weightsBuffer) //  , {type: PicoGL.FLOAT, size: 4 })
-      .instanceAttributeBuffer(5, weightsBuffer) //  , {type: PicoGL.FLOAT, size: 4, offset: 4*4})
-      .instanceAttributeBuffer(6, weightsBuffer) //  , {type: PicoGL.FLOAT, size: 4, offset: 8*4})
+      .instanceAttributeBuffer(1, pointsBuffer)
+      // .instanceAttributeBuffer(2, pointsBuffer, {type: PicoGL.FLOAT, stride: 3*3*4, offset: 3*4})
+      // .instanceAttributeBuffer(2, pointsBuffer) //, {type: PicoGL.FLOAT_MAT3, size: 1, stride: 3*3*4, offset: 0})
+      // .instanceAttributeBuffer(3, pointsBuffer) //, {type: PicoGL.FLOAT_MAT3, size: 1, stride: 3*3*4, offset: 0})
+      .instanceAttributeBuffer(4, weightsBuffer)//, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
+      // .instanceAttributeBuffer(1, pointsBuffer , {type: PicoGL.FLOAT, size: 3, stride: 3*3*4, offset: 0})
+      // .instanceAttributeBuffer(2, pointsBuffer , {type: PicoGL.FLOAT, size: 3, stride: 3*3*4, offset: 3*4})
+      // .instanceAttributeBuffer(3, pointsBuffer , {type: PicoGL.FLOAT, size: 3, stride: 3*3*4, offset: 6*4})
+      // .instanceAttributeBuffer(4, weightsBuffer, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
+      // .instanceAttributeBuffer(5, weightsBuffer, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 4*4})
+      // .instanceAttributeBuffer(6, weightsBuffer, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 8*4})
 
     return app
       .createDrawCall(patchProgram(app), vertexArray)

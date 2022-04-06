@@ -55,11 +55,7 @@ export const cellsTransformer = (
   const vertexArray = app
     .createVertexArray()
     .vertexAttributeBuffer(0, pointsIn)
-    .vertexAttributeBuffer(1, pointsIn)
-    .vertexAttributeBuffer(2, pointsIn)
     .vertexAttributeBuffer(3, weightsIn)
-    .vertexAttributeBuffer(4, weightsIn)
-    .vertexAttributeBuffer(5, weightsIn);
 
   const transformFeedback = app
     .createTransformFeedback()

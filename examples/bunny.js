@@ -104,8 +104,11 @@ document.addEventListener("DOMContentLoaded", async function () {
   // window.drawCalls = drawCalls;
 
   const raf = () => {
-    app.clear();
     camera.tick();
+    app.enable(PicoGL.RASTERIZER_DISCARD);
+    setStructUniforms(transformer, "transformation", { scalar: 1+Math.random()*0.01, e1: 1 }).draw();
+    app.disable(PicoGL.RASTERIZER_DISCARD);
+    app.clear();
     drawCall
         .uniform("projection", camera.state.projection)
         .uniform("eye", camera.state.eye)
