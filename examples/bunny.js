@@ -63,11 +63,11 @@ document.addEventListener("DOMContentLoaded", async function () {
   const texture = app.createTexture2D(seafoamImage);
 
   const defaultWeights = () => ({
-    w0: new Float32Array([ 0, 0.5, 1, 0, ]),
-    w1: new Float32Array([ 0, 0.5, 1, 0, ]),
-    w2: new Float32Array([ 0, 0.5, 1, 0, ]),
+    w0: new Float32Array([ 0, 0.5, 1, 0.2, ]),
+    w1: new Float32Array([ 0, 0.1, 1, 0.2, ]),
+    w2: new Float32Array([ 0, 0.5, 0.1, 0.4, ]),
   });
-  const patchesUniforms = bunnyPolys.map(([p0, p1, p2]) => ({
+  const patchesUniforms = bunnyPolys(20).map(([p0, p1, p2]) => ({
     p0: new Float32Array(p0),
     p1: new Float32Array(p1),
     p2: new Float32Array(p2),
@@ -79,19 +79,17 @@ document.addEventListener("DOMContentLoaded", async function () {
       .reduce((drawCall, [k, v]) => {
         return drawCall.uniform(k, v);
       },
-      patchDrawCall(app, 2))
+      patchDrawCall(app, 128))
       .texture("texture", texture)
       .texture("matcapTexture", matcap)
   );
 
   app.disable(PicoGL.RASTERIZER_DISCARD);
   app.enable(PicoGL.DEPTH_TEST);
-  app.enable(PicoGL.BLEND);
+  // app.enable(PicoGL.BLEND);
   // app.colorMask(true, true, true, true);
   // app.depthMask(true);
 
-  // app.gl.clearDepth(0);
-  // console.log("camera", camera);
   console.log(drawCalls);
   window.drawCalls = drawCalls;
 

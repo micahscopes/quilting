@@ -1,8 +1,10 @@
 import bunny from "bunny";
 import simplify from "mesh-simplify";
+import moize from "moize";
 
-const simpleBunny = simplify(bunny.cells, bunny.positions)(200);
+export const simpleBunny = moize(num => simplify(bunny.cells, bunny.positions)(num));
 // export default simpleBunny
-export default simpleBunny.cells.map((cell) =>
-  cell.map((i) => simpleBunny.positions[i])
+const defaultBunny = simpleBunny(400)
+export default (num=400) => simpleBunny(num).cells.map((cell) =>
+  cell.map((i) => simpleBunny(num).positions[i])
 );
