@@ -386,6 +386,9 @@ const prepareMesh = moize(
     mesh.cellPositions = mesh.cells.map((indices: number[]) =>
       indices.map((i) => mesh.positions[i])
     );
+    mesh.cellNormals = mesh.cells.map((indices: number[]) =>
+      indices.map((i) => mesh.normals[i])
+    );
     return mesh;
   },
   { maxSize: 40 }

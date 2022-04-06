@@ -1,4 +1,4 @@
-import { flatten } from "lodash-es";
+import { flatten, reverse } from "lodash-es";
 import moize from "moize";
 import { App, PicoGL } from "picogl";
 import patchGL from "../gl/patch.glsl";
@@ -22,8 +22,8 @@ const fs = glsl`
           matcapTexture, mat_uv
         ).rgb, color.r);
 
-        gl_FragColor = texture2D(texture, uv);
-        gl_FragColor = vec4(0,1,1,1);
+        // gl_FragColor = texture2D(texture, uv);
+        // gl_FragColor = vec4(0,1,1,1);
       }`;
 
 const patchProgram = moize((app: App) => app.createProgram(vs, fs), {
@@ -35,17 +35,24 @@ const meshVertexArray = moize.infinite((mesh: any, app: App) => {
   const positionBuffer = app.createVertexBuffer(
     PicoGL.FLOAT,
     3,
-    new Float32Array(flatten(flatten(mesh.positions)))
+    new Float32Array(flatten(flatten(mesh.cellPositions )))
+    // new Float32Array(flatten(mesh.positions))
+  );
+  const indexBuffer = app.createIndexBuffer(
+    PicoGL.UNSIGNED_SHORT,
+    new Uint32Array(flatten(mesh.cells))
   );
   const normalBuffer = app.createVertexBuffer(
     PicoGL.FLOAT,
     3,
+    // new Float32Array(flatten(flatten(mesh.cellNormals)))
     new Float32Array(flatten(mesh.normals))
   );
   const vertexArray = app
     .createVertexArray()
     .vertexAttributeBuffer(0, positionBuffer)
-    .vertexAttributeBuffer(1, normalBuffer);
+  // .vertexAttributeBuffer(0, positionBuffer)
+  // .vertexAttributeBuffer(1, normalBuffer);
 
   return vertexArray;
 });
