@@ -9,12 +9,20 @@ var documentReady = async function () {
 
 const matcapUrls = import.meta.glob("./matcaps/*.png");
 import seafoam from "./textures/seafoam.png";
+import swoosh from "./textures/swoosh.png";
 
 export const seafoamImage = await new Promise(async (resolve) => {
   await documentReady();
   const im = new Image();
   im.crossOrigin = "anonymous";
   im.src = seafoam;
+  im.onload = () => resolve(Object.assign(im, { style: "max-width:200px" }));
+});
+export const swooshImage = await new Promise(async (resolve) => {
+  await documentReady();
+  const im = new Image();
+  im.crossOrigin = "anonymous";
+  im.src = swoosh;
   im.onload = () => resolve(Object.assign(im, { style: "max-width:200px" }));
 });
 export const matcapImages = await Promise.all(

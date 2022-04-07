@@ -1,3 +1,4 @@
+import { fromPairs, zip } from "lodash-es";
 
 export const membersCGA3 = [
   `scalar`,
@@ -37,5 +38,5 @@ export const membersCGA3 = [
 export const getStructVarNames = (varName, structMembers) =>
   structMembers.map((member) => `${varName}.${member}`);
 
-export const arrayToCga3StructProps = (array, varName) =>
-  fromPairs(zip(cga3structNames(varName), array));
+export const arrayToCga3StructProps = (array) =>
+  fromPairs(zip(membersCGA3, array));

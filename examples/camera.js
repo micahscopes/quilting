@@ -4,11 +4,14 @@ import interactionEvents from "normalized-interaction-events";
 const decayTime = 100;
 export const makeCamera = () => createCamera({
   aspectRatio: window.innerWidth / window.innerHeight,
-  distance: 30,
+  distance: 100,
   center: [0, 0, 0],
   rotationDecayTime: decayTime,
   panDecayTime: decayTime,
   zoomDecayTime: decayTime,
+  fovY: Math.PI*5/7,
+  far: 100000000000000000,
+  near: 0.01
 })
 
 const radiansPerHalfScreenWidth = Math.PI * 1;

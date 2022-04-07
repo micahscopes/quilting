@@ -8,22 +8,31 @@ const canvas = document.createElement("canvas");
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 document.body.appendChild(canvas);
-const app = PicoGL.createApp(canvas).clearColor(0.0, 0.0, 0.0, 1.0);
+const app = PicoGL.createApp(canvas)
+  .clearColor(0.0, 0.0, 0.0, 1.0)
+  // .enable(PicoGL.BLEND)
+  .blendFunc(PicoGL.ONE, PicoGL.ONE_MINUS_SRC_ALPHA);
 app.clear();
 
-  const defaultWeights = () => [
-    [ 0, 0.5, 1, 0.2, ],
-    [ 0, 0.1, 1, 0.2, ],
-    [ 0, 0.5, 0.1, 0.4, ],
-  ];
-  // const patchesUniforms = bunnyPolys(20).map(([p0, p1, p2]) => ({
-  //   p0: new Float32Array(p0),
-  //   p1: new Float32Array(p1),
-  //   p2: new Float32Array(p2),
-  //   ...defaultWeights(),
-  // }));
+// const defaultWeights = () => [
+//   [0, 0.5, 1, 0.2],
+//   [0, 0.1, 1, 0.2],
+//   [0, 0.5, 0.1, 0.4],
+// ];
+const defaultWeights = () => [
+  [0, 0, 0, 0],
+  [0, 0, 0, 0],
+  [0, 0, 0, 0],
+];
+// const patchesUniforms = bunnyPolys(20).map(([p0, p1, p2]) => ({
+//   p0: new Float32Array(p0),
+//   p1: new Float32Array(p1),
+//   p2: new Float32Array(p2),
+//   ...defaultWeights(),
+// }));
 
-const meshPolys = bunnyPolys(20)
+// const meshPolys = refineBunny(bunny, {});
+const meshPolys = prepareMesh(simpleBunny(200));
 
 const {
   drawer: transformer,
@@ -32,7 +41,7 @@ const {
   getLODs,
   numCells,
   transformedPointsBuffer,
-  transformedWeightsBuffer
+  transformedWeightsBuffer,
 } = cellsTransformer(
   app,
   meshPolys,
@@ -41,45 +50,36 @@ const {
 
 app.enable(PicoGL.RASTERIZER_DISCARD);
 
-// const CGA = Algebra(4, 1);
-// const ni = CGA.Vector(0, 0, 0, 1, 1);
-// const no = CGA.Vector(0, 0, 0, -0.5, 0.5);
-// const up = (x) => CGA.Add(no, x).Add(CGA.Scalar(0.5).Mul(x).Mul(x).Mul(ni));
-// window.mv = up(CGA.Vector(1, 2));
-
-setStructUniforms(transformer, "transformation", { scalar: 1, e1: 1 }).draw();
-
-// console.log('numCells', numCells, 'mesh cells', meshPolys.length)
-// const gl = transformer.gl;
-// let tmpBuffer = new Float32Array(9 * numCells);
-// getTransformedPoints(tmpBuffer);
-// console.log(tmpBuffer);
-
-// tmpBuffer = new Float32Array(12 * numCells);
-// getTransformedWeights(tmpBuffer);
-// console.log(tmpBuffer);
+setStructUniforms(transformer, "transformation", {
+  scalar: 1,
+  e1: 1,
+  e2: 1,
+  e3: 1,
+}).draw();
 
 import { sample } from "lodash-es";
-// import { sub, normalize } from "@thi.ng/vectors";
 
 const randomElement = (array) =>
   array[Math.floor(Math.random() * array.length)];
 
-import bunnyPolys from "./simple-bunny-polys";
+import bunnyPolys, { prepareMesh, simpleBunny } from "./polys";
 import { makeCamera, setupCamera } from "./camera";
 import { requestAnimationFrame } from "@luma.gl/api";
+import { arrayToCga3StructProps } from "../src/struct-interface";
+import { randomUnit } from "../src/patch-old";
 
 document.addEventListener("DOMContentLoaded", async function () {
   const camera = makeCamera();
   setupCamera(canvas, camera);
-  const { seafoamImage, matcapImages } = await import("./load-textures");
+  const { swooshImage, seafoamImage, matcapImages } = await import(
+    "./load-textures"
+  );
   // const N = 5;
   // const patch = Patch(regl, 64, {type: TRI});
 
   const matcap = app.createTexture2D(randomElement(matcapImages));
   const matcaps = matcapImages.map((data) => app.createTexture2D(data));
   const texture = app.createTexture2D(seafoamImage);
-
 
   // const drawCalls = patchesUniforms.map((p) =>
   //   Object.entries(p)
@@ -90,30 +90,48 @@ document.addEventListener("DOMContentLoaded", async function () {
   //     .texture("texture", texture)
   //     .texture("matcapTexture", matcap)
   // );
-  const drawCall = patchDrawCall(app, 32, transformedPointsBuffer, transformedWeightsBuffer)
-      .texture("colorTexture", texture)
-      .texture("matcapTexture", matcap)
+  const t = {
+    // transformation: arrayToCga3StructProps(randomUnit(2, 32)),
+    transformation: arrayToCga3StructProps([
+      0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 1,
+    ]),
+    lod: 32,
+  };
 
-  app.disable(PicoGL.RASTERIZER_DISCARD);
-  app.enable(PicoGL.DEPTH_TEST);
-  // app.enable(PicoGL.BLEND);
-  // app.colorMask(true, true, true, true);
-  // app.depthMask(true);
+  setInterval(() => {
+    t.transformation = arrayToCga3StructProps(randomUnit(1, 32));
+  }, 10*1000);
 
-  // console.log(drawCalls);
-  // window.drawCalls = drawCalls;
+  setInterval(() => {
+    t.lod = sample([4, 64, 256]);
+  }, 0.5*1000);
 
   const raf = () => {
+    const drawCall = patchDrawCall(
+      app,
+      t.lod || 32,
+      transformedPointsBuffer,
+      transformedWeightsBuffer
+    )
+      .texture("colorTexture", texture)
+      .texture("matcapTexture", matcap);
     camera.tick();
     app.enable(PicoGL.RASTERIZER_DISCARD);
-    setStructUniforms(transformer, "transformation", { scalar: 1+Math.random()*0.01, e1: 1 }).draw();
+    app.disable(PicoGL.DEPTH_TEST);
+    setStructUniforms(transformer, "transformation", t.transformation)
+      .uniform("angle", Math.PI)
+      // .uniform("angle", Date.now() / 1000 - 1649250660482 / 1000)
+      .draw();
     app.disable(PicoGL.RASTERIZER_DISCARD);
+    app.enable(PicoGL.DEPTH_TEST);
     app.clear();
     drawCall
-        .uniform("projection", camera.state.projection)
-        .uniform("eye", camera.state.eye)
-        .uniform("view", camera.state.view)
-        .draw()
+      // .drawRanges(...(new Array(50)).fill([0,90*4,1]))
+      .uniform("projection", camera.state.projection)
+      .uniform("eye", camera.state.eye)
+      .uniform("view", camera.state.view)
+      .draw();
     // drawCalls.forEach((d) =>
     //   d
     //     .uniform("projection", camera.state.projection)

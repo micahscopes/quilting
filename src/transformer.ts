@@ -78,6 +78,7 @@ export const cellsTransformer = (
       .createDrawCall(transformer, vertexArray)
       .primitive(PicoGL.POINTS)
       .transformFeedback(transformFeedback)
+      .uniform('angle', Math.PI)
 
 
   return {

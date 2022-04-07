@@ -18,13 +18,17 @@ const fs = glsl`
       out vec4 fragColor;
       void main () {
         vec4 color = texture(colorTexture, uv);
-        vec2 mat_uv = matcap(normalize(eye), vec3(color.r*n.x, color.g*n.y, color.b*n.z));
+        // vec2 mat_uv = matcap(normalize(eye), vec3(color.r*n.x, color.g*n.y, color.b*n.z));
+        vec2 mat_uv = matcap(normalize(eye), n);
 
         fragColor = vec4(texture(
           matcapTexture, mat_uv
-        ).rgb, color.r);
+        ));
+        // fragColor = vec4(texture(
+        //   matcapTexture, mat_uv
+        // ).rgb, color.r);
 
-        // gl_FragColor = texture2D(texture, uv);
+        // fragColor = color;
         // gl_FragColor = vec4(0,1,1,1);
       }`;
 
@@ -33,9 +37,7 @@ const patchProgram = moize((app: App) => app.createProgram(vs, fs), {
   maxSize: Infinity,
 });
 
-const meshVertexArray =
-// moize.infinite(
-  (mesh: any, app: App) => {
+const meshVertexArray = moize.infinite((mesh: any, app: App) => {
   const positionBuffer = app.createVertexBuffer(
     PicoGL.FLOAT,
     3,
@@ -55,15 +57,12 @@ const meshVertexArray =
   const vertexArray = app
     .createVertexArray()
     .vertexAttributeBuffer(0, positionBuffer);
-  // .vertexAttributeBuffer(0, positionBuffer)
-  // .vertexAttributeBuffer(1, normalBuffer);
 
   return vertexArray;
-}
-// );
+});
 
 export const patchDrawCall =
-  // moize(
+  // moize.infinite(
   (
     app: App,
     sideLODs: [number, number, number] | number,
@@ -73,19 +72,10 @@ export const patchDrawCall =
     const mesh = tesselationMesh(sideLODs);
     const vertexArray = meshVertexArray(mesh, app)
       .instanceAttributeBuffer(1, pointsBuffer)
-      // .instanceAttributeBuffer(2, pointsBuffer, {type: PicoGL.FLOAT, stride: 3*3*4, offset: 3*4})
-      // .instanceAttributeBuffer(2, pointsBuffer) //, {type: PicoGL.FLOAT_MAT3, size: 1, stride: 3*3*4, offset: 0})
-      // .instanceAttributeBuffer(3, pointsBuffer) //, {type: PicoGL.FLOAT_MAT3, size: 1, stride: 3*3*4, offset: 0})
-      .instanceAttributeBuffer(4, weightsBuffer)//, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
-      // .instanceAttributeBuffer(1, pointsBuffer , {type: PicoGL.FLOAT, size: 3, stride: 3*3*4, offset: 0})
-      // .instanceAttributeBuffer(2, pointsBuffer , {type: PicoGL.FLOAT, size: 3, stride: 3*3*4, offset: 3*4})
-      // .instanceAttributeBuffer(3, pointsBuffer , {type: PicoGL.FLOAT, size: 3, stride: 3*3*4, offset: 6*4})
-      // .instanceAttributeBuffer(4, weightsBuffer, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
-      // .instanceAttributeBuffer(5, weightsBuffer, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 4*4})
-      // .instanceAttributeBuffer(6, weightsBuffer, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 8*4})
+      .instanceAttributeBuffer(4, weightsBuffer); //, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
 
     return app
       .createDrawCall(patchProgram(app), vertexArray)
       .uniform("eye", new Float32Array([0, 0, 1]));
-  };
+  }
 // );
