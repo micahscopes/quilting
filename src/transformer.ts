@@ -39,12 +39,12 @@ export const cellsTransformer = (
   // console.log(cellPositions, cellWeights);
   // console.log(positions, weights);
 
-  let pointsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT3, positions);
-  let weightsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT4x3, weights);
+  let pointsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT3x4, positions);
+  let weightsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT3x4, weights);
 
   let transformedPointsBuffer = app.createMatrixBuffer(
-    PicoGL.FLOAT_MAT3,
-    numCells * 9
+    PicoGL.FLOAT_MAT3x4,
+    numCells * 12
   );
   let transformedWeightsBuffer = app.createMatrixBuffer(
     PicoGL.FLOAT_MAT3x4,

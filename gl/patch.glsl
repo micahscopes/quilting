@@ -20,7 +20,7 @@ H weight(vec4 w) {
 }
 
 H weight(H w) {
-  return fromVec(w);
+  return w;
   // return invert(mul(sqrt(lcontract(w, w).real), w));
 }
 
@@ -113,7 +113,7 @@ Patch bilinearTri(H point0, H point1, H point2, H weight0, H weight1, H weight2,
   return Patch(x, normal);
 }
 
-Patch bilinearTri(vec3 p0, vec3 p1, vec3 p2, vec4 w0, vec4 w1, vec4 w2, float u, float v) {
+Patch bilinearTri(vec4 p0, vec4 p1, vec4 p2, vec4 w0, vec4 w1, vec4 w2, float u, float v) {
   return bilinearTri(fromVec(p0), fromVec(p1), fromVec(p2), weight(w0), weight(w1), weight(w2), u, v);
 }
 

@@ -2,7 +2,7 @@
 precision highp float;
 #pragma glslify: import('./patch.glsl')
 layout(location = 0) in vec3 position;
-layout(location = 1) in mat3 points;
+layout(location = 1) in mat3x4 points;
 layout(location = 4) in mat3x4 weights;
 
 uniform mat4 projection, view;

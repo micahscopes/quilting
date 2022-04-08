@@ -19,9 +19,9 @@ const {
 } = cellsTransformer(
   app,
   [
-    [1, 1, 1],
-    [2, 2, 2],
-    [3, 3, 3],
+    [0, 1, 1, 1],
+    [0, 2, 2, 2],
+    [0, 3, 3, 3],
   ],
   [
     [4, 4, 4, 4],
@@ -42,7 +42,7 @@ setStructUniforms(transformer, "transformation", { scalar: 2, e1: 32 })
   .draw();
 
 const gl = transformer.gl;
-let tmpBuffer = new Float32Array(9 * numCells);
+let tmpBuffer = new Float32Array(4 * numCells);
 getTransformedPoints(tmpBuffer);
 console.log(tmpBuffer);
 

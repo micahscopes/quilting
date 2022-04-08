@@ -5,7 +5,7 @@ import {vertexNormals} from "normals";
 import moize from "moize";
 
 export const prepareMesh = ({ cells, positions }) =>
-  cells.map((cell) => cell.map((i) => [...positions[i]]));
+  cells.map((cell) => cell.map((i) => [1, ...positions[i]]));
 
 export const simpleBunny = moize((num) =>
   simplify(bunny.cells, bunny.positions)(num)

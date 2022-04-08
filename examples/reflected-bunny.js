@@ -3,7 +3,7 @@ import { PicoGL } from "picogl";
 import { setStructUniforms } from "../src/util";
 import Algebra, { Element } from "ganja.js";
 import { patchDrawCall } from "../src/patch";
-import createCube from 'primitive-cube';
+import createCube from "primitive-cube";
 
 const canvas = document.createElement("canvas");
 canvas.width = window.innerWidth;
@@ -58,48 +58,87 @@ const cga = Algebra(4, 1, () => {
     { conformal: true, gl: true, grid: true, alpha: true }
   );
   graph.setAttribute("id", "graph");
-  window.graph = graph
+  window.graph = graph;
   document.body.appendChild(graph);
-  return this
+  return this;
 });
 
-import normalize from 'vectors/normalize'
-import H from 'quaternion'
-// const defaultWeights = () => [
-//   [0, 0.5, 1, 0.2],
-//   [0, 0.1, 1, 0.2],
-//   [0, 0.5, 0.1, 0.4],
-// ].map(x => (new H(...x)).normalize().inverse().toVector());
+import normalize from "vectors/normalize";
+import { add, div, sub } from "vectors";
+import H from "quaternion";
+const defaultWeights = () =>
+  [
+    [0, 0.5, 1, 0.2],
+    [0, 0.1, 1, 0.2],
+    [0, 0.5, 0.1, 0.4],
+  ].map((x) => new H(...x).normalize().inverse().toVector());
 // const defaultWeights = () => [
 //   [1, 0, 0, 0],
 //   [1, 0, 0, 0],
 //   [1, 0, 0, 0],
 // ].map(x => (new H(...x)).normalize().inverse().toVector()); //.map(normalize(4));
-const defaultWeights = () => [
-  [0, 0, 0, 0],
-  [0, 0, 0, 0],
-  [0, 0, 0, 0],
-].map(x => (new H(...x)).inverse().normalize().toVector()); //.map(normalize(4));
-console.log(defaultWeights())
 
-const weightsForTriangle = (p1, p2, p3) => [
-  []
-]
+// const patchWeights = (p1, p2, p3) => [
+//   [1, 0, 0, 0],
+//   div(4)(sub(4)(p2, p1), 2),
+//   div(4)(sub(4)(p3, p1), 2),
+// ]//.map(x => (new H(...x)).inverse().toVector()); //.map(normalize(4));
 
-// const patchesUniforms = bunnyPolys(20).map(([p0, p1, p2]) => ({
-//   p0: new Float32Array(p0),
-//   p1: new Float32Array(p1),
-//   p2: new Float32Array(p2),
-//   ...defaultWeights(),
-// }));
+// const patchWeights = (p1, p2, p3) => [
+//   [1, 0, 0, 0],
+//   [0,...div(3)(sub(3)(p2, p1), 2)],
+//   [0,...div(3)(sub(3)(p3, p1), 2)],
+// ] //.map(x => (new H(...x)).inverse().toVector()); //.map(normalize(4));
+const edgeCentroid = (x, y) => x.add(y).div(2);
+const centroid = (...pts) =>
+  pts.reduce((x, y) => x.add(y), new H(0)).div(pts.length);
+const inv = (x) => new H(1).div(x);
+const edgeInf = (x, y) => inv(centroid(x, y));
+const patchWeights = (p1, p2, p3) => {
+  // const centroid = div(3)(add(3)(add(3)(p1, p2), p3), 3);
+  // const pinf = new H(-1).div(new H(0, ...centroid).toVector());
+  // const pinf = (new H(0,...p1)).inverse().neg().toVector()
+
+  console.log(p1)
+  p1 = new H(...p1);
+  p2 = new H(...p2);
+  p3 = new H(...p3);
+  // console.log("p1, p inf", p1, pinf);
+
+  // return [[0,0,0,0],[0,0,0,0],[0,0,0,0]]
+
+  let weights = [
+    // p1.sub(centroid(p1, p2)),
+    // p2.sub(centroid(p2, p3)),
+    // p3.sub(centroid(p3, p1)),
+    // p1.sub(centroid(p1, p2, p3)),
+    // p2.sub(centroid(p2, p3, p1)),
+    // p3.sub(centroid(p3, p1, p2)),
+    p1.sub(inv(centroid(p1, p2, p3))),
+    p2.sub(inv(centroid(p2, p3, p1))),
+    p3.sub(inv(centroid(p3, p1, p2))),
+    // p1.sub(inv(centroid(p1, p2))),
+    // p2.sub(inv(centroid(p2, p3))),
+    // p3.sub(inv(centroid(p3, p1))),
+  ];
+  // weights = weights.map(x => x.normalize())
+  weights = weights.map((x) => x.inverse());
+  // weights = weights.map((x) => x.div(weights[0]));
+
+  // console.log(p1.sub(edgeInf(p1,p2)));
+  return weights.map((x) => x.toVector());
+}; //.map(normalize(4));
+console.log(patchWeights([1, 1, 1, 1], [10, 10, 10, 10], [32, 32, 32, 32]));
+
 // const meshPolys = refineBunny(bunny, {});
 // const mesh = refinedBunny(0.2);
 // const mesh = simpleBunny(200);
-const divs = 1
+const divs = 1;
 const mesh = createCube(1, 1, 1, divs);
 console.log("number of cells", mesh.cells.length);
 const meshPolys = prepareMesh(mesh);
-
+const meshWeights = meshPolys.map((points) => patchWeights(...points))
+console.log(meshPolys, meshWeights)
 const {
   drawer: transformer,
   getTransformedWeights,
@@ -111,7 +150,7 @@ const {
 } = cellsTransformer(
   app,
   meshPolys,
-  meshPolys.map(() => defaultWeights())
+  meshWeights
 );
 
 app.enable(PicoGL.RASTERIZER_DISCARD);
@@ -136,7 +175,7 @@ import { randomUnit } from "../src/patch-old";
 
 document.addEventListener("DOMContentLoaded", async function () {
   const camera = makeCamera();
-  window.cam = camera
+  window.cam = camera;
   setupCamera(canvas, camera);
   const { swooshImage, seafoamImage, matcapImages } = await import(
     "./load-textures"
@@ -184,7 +223,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     .texture("matcapTexture", matcap);
 
   const raf = () => {
-    const sph = arrayToCga3StructProps(graph.value[13]())
+    const sph = arrayToCga3StructProps(graph.value[13]());
     // console.log(sph)
     camera.tick();
     app.enable(PicoGL.RASTERIZER_DISCARD);
@@ -204,12 +243,11 @@ document.addEventListener("DOMContentLoaded", async function () {
       .draw();
 
     requestAnimationFrame(raf);
-  // const gl = transformer.gl;
-  // let tmpBuffer = new Float32Array(9);
-  // getTransformedWeights(tmpBuffer);
-  // console.log(tmpBuffer);
+    // const gl = transformer.gl;
+    // let tmpBuffer = new Float32Array(9);
+    // getTransformedWeights(tmpBuffer);
+    // console.log(tmpBuffer);
   };
 
   requestAnimationFrame(raf);
-
 });
