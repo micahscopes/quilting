@@ -82,15 +82,20 @@ const patchWeights = (p1, p2, p3) => {
     // p1.sub(centroid(p1, p2, p3)),
     // p2.sub(centroid(p2, p3, p1)),
     // p3.sub(centroid(p3, p1, p2)),
-    p1.sub(inv(centroid(p1, p2, p3))),
-    p2.sub(inv(centroid(p2, p3, p1))),
-    p3.sub(inv(centroid(p3, p1, p2))),
-    // p1.sub(inv(centroid(p1, p2))),
-    // p2.sub(inv(centroid(p2, p3))),
-    // p3.sub(inv(centroid(p3, p1))),
+    // p1.sub(inv(centroid(p1, p2, p3))),
+    // p2.sub(inv(centroid(p2, p3, p1))),
+    // p3.sub(inv(centroid(p3, p1, p2))),
+    p1.sub(inv(centroid(p1, p2))),
+    p2.sub(inv(centroid(p2, p3))),
+    p3.sub(inv(centroid(p3, p1))),
   ];
+  // weights = [
+  //   new H(0,),
+  //   new H(0,),
+  //   new H(0,),
+  // ]
+  // weights = weights.map(inv);
   // weights = weights.map(x => x.normalize())
-  weights = weights.map((x) => x.inverse());
   // weights = weights.map((x) => x.div(weights[0]));
 
   // console.log(p1.sub(edgeInf(p1,p2)));

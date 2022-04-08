@@ -13,7 +13,7 @@ out float lod;
 
 #define ni CGA3(0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0)
 #define no CGA3(0.0,0.0,0.0,0.0,-0.5,0.5,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0)
-#define E outer(no,ni) // could optimize
+#define E outer(ni,no) // could optimize
 
 CGA3 upPoint(vec4 p) {
   CGA3 X = vecToCGA(p);
@@ -21,8 +21,6 @@ CGA3 upPoint(vec4 p) {
 }
 
 vec4 downPoint(CGA3 P) {
-  // CGA3 X = div(outer(mul(1.0/inner(P,ni).scalar, P), E), E);
-  // X = P;
   CGA3 X = mul(div(outer(mul(1.0, invert(lcontract(P,ni))), P), E), E);
   return vec4(X.scalar, X.e1, X.e2, X.e3);
 }
@@ -37,9 +35,10 @@ CGA3 upWeight(vec4 w, vec4 p) {
   return mul(add(mul(0.5, mul(P, ni)), ONE_CGA3), W);
 }
 
-vec4 downWeight(CGA3 W, vec4 p) {
-  CGA3 P = vecToCGA(p);
-  CGA3 X = div(W, add(mul(mul(0.5,P),ni), ONE_CGA3));
+vec4 downWeight(CGA3 W, vec4 pTransformed) {
+  CGA3 transformedP = vecToCGA(pTransformed);
+  CGA3 X = mul(invert(add(mul(mul(0.5,transformedP),ni), ONE_CGA3)), W);
+  // P = W;
   return vec4(X.scalar, X.e1, X.e2, X.e3); }
 
 vec4 sandwichWeight(CGA3 T, vec4 w, CGA3 hatT, vec4 p, vec4 pTransformed) {
@@ -55,7 +54,7 @@ void main() {
   // CGA3 T = ONE_CGA3;
   // T.e123nilinf = 1.0;
   // CGA3 hatT = ONE_CGA3;
-  CGA3 hatT = conjugate(div(T, inner(T, T)));
+  CGA3 hatT = conjugate(div(T, lcontract(T, T)));
   transformedPoints[0] = sandwichPoint(T, points[0], hatT);
   transformedPoints[1] = sandwichPoint(T, points[1], hatT);
   transformedPoints[2] = sandwichPoint(T, points[2], hatT);
