@@ -25,7 +25,7 @@ H weight(H w) {
 }
 
 struct Patch {
-  vec3 vertex;
+  vec4 vertex;
   vec3 normal;
 };
 
@@ -59,9 +59,9 @@ Patch bilinearQuad(H point0, H point1, H point2, H point3, H weight0, H weight1,
   H X = div(top, bottom);
   H X_uu = div(top_uu, bottom);
   H X_vv = div(top_vv, bottom);
-  vec3 x = vec3(X.i, X.j, X.k);
-  vec3 x_uu = vec3(X_uu.i, X_uu.j, X_uu.k) - x;
-  vec3 x_vv = vec3(X_vv.i, X_vv.j, X_vv.k) - x;
+  vec4 x = vec4(X.i, X.j, X.k, X.real);
+  vec3 x_uu = vec3(X_uu.i, X_uu.j, X_uu.k) - x.xyz;
+  vec3 x_vv = vec3(X_vv.i, X_vv.j, X_vv.k) - x.xyz;
   vec3 crossed = cross(x_uu, x_vv);
   vec3 normal = normalize(crossed);
   return Patch(x, normal);
@@ -102,12 +102,11 @@ Patch bilinearTri(H point0, H point1, H point2, H weight0, H weight1, H weight2,
   H bottom = add(W0, W1, W2);
 
   H X = div(top, bottom);
-    // H X_vv= div(top_vv, bottom);
   H X_uu = div(top_uu, bottom);
   H X_vv = div(top_vv, bottom);
-  vec3 x = vec3(X.i, X.j, X.k);
-  vec3 x_uu = vec3(X_uu.i, X_uu.j, X_uu.k) - x;
-  vec3 x_vv = vec3(X_vv.i, X_vv.j, X_vv.k) - x;
+  vec4 x = vec4(X.i, X.j, X.k, X.real);
+  vec3 x_uu = vec3(X_uu.i, X_uu.j, X_uu.k) - x.xyz;
+  vec3 x_vv = vec3(X_vv.i, X_vv.j, X_vv.k) - x.xyz;
   vec3 crossed = cross(x_uu, x_vv);
   vec3 normal = normalize(crossed);
   return Patch(x, normal);

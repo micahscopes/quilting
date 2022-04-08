@@ -1,7 +1,7 @@
 import { cellsTransformer } from "../src/transformer";
 import { PicoGL } from "picogl";
 import { setStructUniforms } from "../src/util";
-import Algebra, { Element } from "ganja.js";
+import Algebra from "ganja.js";
 import { patchDrawCall } from "../src/patch";
 import createCube from "primitive-cube";
 
@@ -63,50 +63,18 @@ const cga = Algebra(4, 1, () => {
   return this;
 });
 
-import normalize from "vectors/normalize";
-import { add, div, sub } from "vectors";
 import H from "quaternion";
-const defaultWeights = () =>
-  [
-    [0, 0.5, 1, 0.2],
-    [0, 0.1, 1, 0.2],
-    [0, 0.5, 0.1, 0.4],
-  ].map((x) => new H(...x).normalize().inverse().toVector());
-// const defaultWeights = () => [
-//   [1, 0, 0, 0],
-//   [1, 0, 0, 0],
-//   [1, 0, 0, 0],
-// ].map(x => (new H(...x)).normalize().inverse().toVector()); //.map(normalize(4));
 
-// const patchWeights = (p1, p2, p3) => [
-//   [1, 0, 0, 0],
-//   div(4)(sub(4)(p2, p1), 2),
-//   div(4)(sub(4)(p3, p1), 2),
-// ]//.map(x => (new H(...x)).inverse().toVector()); //.map(normalize(4));
-
-// const patchWeights = (p1, p2, p3) => [
-//   [1, 0, 0, 0],
-//   [0,...div(3)(sub(3)(p2, p1), 2)],
-//   [0,...div(3)(sub(3)(p3, p1), 2)],
-// ] //.map(x => (new H(...x)).inverse().toVector()); //.map(normalize(4));
 const edgeCentroid = (x, y) => x.add(y).div(2);
 const centroid = (...pts) =>
   pts.reduce((x, y) => x.add(y), new H(0)).div(pts.length);
-const inv = (x) => new H(1).div(x);
+const inv = (x) => new H(-1).div(x);
 const edgeInf = (x, y) => inv(centroid(x, y));
 const patchWeights = (p1, p2, p3) => {
-  // const centroid = div(3)(add(3)(add(3)(p1, p2), p3), 3);
-  // const pinf = new H(-1).div(new H(0, ...centroid).toVector());
-  // const pinf = (new H(0,...p1)).inverse().neg().toVector()
-
-  console.log(p1)
+  // console.log(p1)
   p1 = new H(...p1);
   p2 = new H(...p2);
   p3 = new H(...p3);
-  // console.log("p1, p inf", p1, pinf);
-
-  // return [[0,0,0,0],[0,0,0,0],[0,0,0,0]]
-
   let weights = [
     // p1.sub(centroid(p1, p2)),
     // p2.sub(centroid(p2, p3)),
@@ -133,7 +101,7 @@ console.log(patchWeights([1, 1, 1, 1], [10, 10, 10, 10], [32, 32, 32, 32]));
 // const meshPolys = refineBunny(bunny, {});
 // const mesh = refinedBunny(0.2);
 // const mesh = simpleBunny(200);
-const divs = 1;
+const divs = 10;
 const mesh = createCube(1, 1, 1, divs);
 console.log("number of cells", mesh.cells.length);
 const meshPolys = prepareMesh(mesh);
@@ -202,7 +170,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1,
     ]),
-    lod: 64,
+    lod: 32,
   };
 
   setInterval(() => {

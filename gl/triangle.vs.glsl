@@ -18,6 +18,6 @@ void main() {
 
   n = p.normal;
   uv = vec2(position.x, position.y);
-  gl_Position = projection * view * vec4(p.vertex + offset, 1.0);
+  gl_Position = projection * view * vec4(p.vertex.xyz, 1.0);
   // gl_Position = vec4(position, 1.0);
 }
