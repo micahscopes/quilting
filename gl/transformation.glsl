@@ -21,8 +21,9 @@ CGA3 upPoint(vec4 p) {
 }
 
 vec4 downPoint(CGA3 P) {
-  CGA3 X = div(outer(mul(1.0/inner(P,ni).scalar, P), E), E);
-  // CGA3 X = mul(div(outer(mul(1.0, invert(lcontract(P,ni))), P), E), E);
+  // CGA3 X = div(outer(mul(1.0/inner(P,ni).scalar, P), E), E);
+  // X = P;
+  CGA3 X = mul(div(outer(mul(1.0, invert(lcontract(P,ni))), P), E), E);
   return vec4(X.scalar, X.e1, X.e2, X.e3);
 }
 
@@ -54,7 +55,7 @@ void main() {
   // CGA3 T = ONE_CGA3;
   // T.e123nilinf = 1.0;
   // CGA3 hatT = ONE_CGA3;
-  CGA3 hatT = conjugate(div(T, lcontract(T, T)));
+  CGA3 hatT = conjugate(div(T, inner(T, T)));
   transformedPoints[0] = sandwichPoint(T, points[0], hatT);
   transformedPoints[1] = sandwichPoint(T, points[1], hatT);
   transformedPoints[2] = sandwichPoint(T, points[2], hatT);

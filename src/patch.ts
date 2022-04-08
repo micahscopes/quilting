@@ -72,7 +72,7 @@ export const patchDrawCall =
     const mesh = tesselationMesh(sideLODs);
     const vertexArray = meshVertexArray(mesh, app)
       .instanceAttributeBuffer(1, pointsBuffer)
-      .instanceAttributeBuffer(2, weightsBuffer); //, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
+      .instanceAttributeBuffer(4, weightsBuffer); //, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
 
     return app
       .createDrawCall(patchProgram(app), vertexArray)
