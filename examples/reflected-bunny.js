@@ -3,6 +3,7 @@ import { PicoGL } from "picogl";
 import { setStructUniforms } from "../src/util";
 import Algebra, { Element } from "ganja.js";
 import { patchDrawCall } from "../src/patch";
+import createCube from 'primitive-cube';
 
 const canvas = document.createElement("canvas");
 canvas.width = window.innerWidth;
@@ -62,16 +63,29 @@ const cga = Algebra(4, 1, () => {
   return this
 });
 
+import normalize from 'vectors/normalize'
+import H from 'quaternion'
 // const defaultWeights = () => [
 //   [0, 0.5, 1, 0.2],
 //   [0, 0.1, 1, 0.2],
 //   [0, 0.5, 0.1, 0.4],
-// ];
+// ].map(x => (new H(...x)).normalize().inverse().toVector());
+// const defaultWeights = () => [
+//   [1, 0, 0, 0],
+//   [1, 0, 0, 0],
+//   [1, 0, 0, 0],
+// ].map(x => (new H(...x)).normalize().inverse().toVector()); //.map(normalize(4));
 const defaultWeights = () => [
-  [1, 0, 0, 0],
-  [1, 0, 0, 0],
-  [1, 0, 0, 0],
-];
+  [0, 0, 0, 0],
+  [0, 0, 0, 0],
+  [0, 0, 0, 0],
+].map(x => (new H(...x)).inverse().normalize().toVector()); //.map(normalize(4));
+console.log(defaultWeights())
+
+const weightsForTriangle = (p1, p2, p3) => [
+  []
+]
+
 // const patchesUniforms = bunnyPolys(20).map(([p0, p1, p2]) => ({
 //   p0: new Float32Array(p0),
 //   p1: new Float32Array(p1),
@@ -80,7 +94,9 @@ const defaultWeights = () => [
 // }));
 // const meshPolys = refineBunny(bunny, {});
 // const mesh = refinedBunny(0.2);
-const mesh = simpleBunny(200);
+// const mesh = simpleBunny(200);
+const divs = 1
+const mesh = createCube(1, 1, 1, divs);
 console.log("number of cells", mesh.cells.length);
 const meshPolys = prepareMesh(mesh);
 
@@ -106,12 +122,8 @@ setStructUniforms(transformer, "transformation", {
   e2: 1,
   e3: 1,
 }).draw();
-  // const gl = transformer.gl;
-  // let tmpBuffer = new Float32Array(9);
-  // getTransformedPoints(tmpBuffer);
-  // console.log(tmpBuffer);
 
-import { sample } from "lodash-es";
+import { sample, sum } from "lodash-es";
 
 const randomElement = (array) =>
   array[Math.floor(Math.random() * array.length)];
@@ -151,7 +163,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1,
     ]),
-    lod: 128,
+    lod: 64,
   };
 
   setInterval(() => {
@@ -178,7 +190,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     app.enable(PicoGL.RASTERIZER_DISCARD);
     app.disable(PicoGL.DEPTH_TEST);
     setStructUniforms(transformer, "transformation", sph)
-      .uniform("angle", Math.PI)
+      // .uniform("angle", Math.PI)
       // .uniform("angle", Date.now() / 1000 - 1649250660482 / 1000)
       .draw();
     app.disable(PicoGL.RASTERIZER_DISCARD);
@@ -192,6 +204,10 @@ document.addEventListener("DOMContentLoaded", async function () {
       .draw();
 
     requestAnimationFrame(raf);
+  // const gl = transformer.gl;
+  // let tmpBuffer = new Float32Array(9);
+  // getTransformedWeights(tmpBuffer);
+  // console.log(tmpBuffer);
   };
 
   requestAnimationFrame(raf);

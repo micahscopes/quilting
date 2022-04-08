@@ -13,7 +13,7 @@ out float lod;
 
 #define ni CGA3(0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0)
 #define no CGA3(0.0,0.0,0.0,0.0,-0.5,0.5,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0)
-#define E outer(no, ni) // could optimize
+#define E outer(ni,no) // could optimize
 
 CGA3 upPoint(vec3 p) {
   CGA3 X = vecToCGA(p);
@@ -41,7 +41,7 @@ vec4 downWeight(CGA3 W, vec3 p) {
   return vec4(X.scalar, X.e1, X.e2, X.e3); }
 
 vec4 sandwichWeight(CGA3 T, vec4 w, CGA3 hatT, vec3 p, vec3 pTransformed) {
-  return downWeight(mul(T, upWeight(w, p), hatT), pTransformed);
+  return downWeight(mul(T, upWeight(w, p), hatT), p);
 }
 
 void main() {
@@ -53,7 +53,7 @@ void main() {
   // CGA3 T = ONE_CGA3;
   // T.e123nilinf = 1.0;
   // CGA3 hatT = ONE_CGA3;
-  CGA3 hatT = conjugate(div(T, inner(T, T)));
+  CGA3 hatT = conjugate(div(T, lcontract(T, T)));
   transformedPoints[0] = sandwichPoint(T, points[0], hatT);
   transformedPoints[1] = sandwichPoint(T, points[1], hatT);
   transformedPoints[2] = sandwichPoint(T, points[2], hatT);

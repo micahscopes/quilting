@@ -10,15 +10,18 @@ H fromVec(vec3 w) {
 }
 
 H weight(vec3 w) {
-  return invert(fromVec(normalize(w)));
+  return fromVec(w);
+  // return invert(fromVec(normalize(w)));
 }
 
 H weight(vec4 w) {
-  return invert(fromVec(normalize(w)));
+  return fromVec(w);
+  // return invert(fromVec(normalize(w)));
 }
 
 H weight(H w) {
-  return invert(mul(sqrt(lcontract(w, w).real), w));
+  return fromVec(w);
+  // return invert(mul(sqrt(lcontract(w, w).real), w));
 }
 
 struct Patch {
