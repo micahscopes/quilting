@@ -16,7 +16,7 @@
     "watch": "parcel watch --port 2345",
     "demo": "npx parcel examples/index.html --dist-dir examples/dist/ --port 2345",
     "dev": "npm-run-all --parallel watch demo",
-    "alglbraic": "python ./gl/generator/__init__.py --glslify --out gl/algebra cga --size 3 quaternions",
+    "alglbraic": "python ./gl/generator/__init__.py --glslify --out gl/algebra clifford-algebra CGA3 '1 1 1 1 -1' quaternions",
     "glslify": "glslify gpu/gl/index.glsl --output gpu/lib.glsl",
     "dev-glsl": "watch 'npm run glslify' gpu/gl",
     "test": "tap --ts test/**/*.ts"
@@ -27,6 +27,7 @@
     ]
   },
   "devDependencies": {
+    "@loaders.gl/gltf": "^3.1.8",
     "@parcel/resolver-glob": "^2.4.1",
     "@parcel/transformer-glsl": "^2.4.1",
     "@teropa/triangle-tessellation": "^1.1.0",
@@ -43,6 +44,7 @@
     "deno": "^0.1.1",
     "esbuild-plugin-glslify": "^1.0.1",
     "fpsmeter": "^0.3.1",
+    "ganja.js": "^1.0.194",
     "glsl-solid-wireframe": "^1.0.1",
     "glslify": "^7.1.1",
     "glslify-import": "^3.1.0",
@@ -51,10 +53,12 @@
     "matcap": "^0.0.2",
     "mesh-simplify": "^2.0.0",
     "normalized-interaction-events": "^2.0.1",
+    "normals": "^1.1.0",
     "npm-run-all": "^4.1.5",
     "parcel": "^2.2.0",
     "parcel-transformer-svelte": "^1.2.3",
     "primitive-cube": "^2.0.1",
+    "refine-mesh": "^1.0.1",
     "regl": "^2.1.0",
     "regl-camera": "^2.1.1",
     "resl": "^1.0.3",
@@ -81,7 +85,6 @@
     "@thi.ng/geom-voronoi": "^2.2.8",
     "@thi.ng/poisson": "^2.1.8",
     "barycentric": "^1.0.1",
-    "ganja.js": "^1.0.194",
     "lodash-es": "^4.17.21",
     "moize": "^6.1.0",
     "picogl": "^0.17.9"

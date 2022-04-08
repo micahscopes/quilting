@@ -36,8 +36,8 @@ export const cellsTransformer = (
   let positions = new Float32Array(flatten(flatten(cellPositions)));
   let weights = new Float32Array(flatten(flatten(cellWeights)));
 
-  console.log(cellPositions, cellWeights);
-  console.log(positions, weights);
+  // console.log(cellPositions, cellWeights);
+  // console.log(positions, weights);
 
   let pointsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT3, positions);
   let weightsIn = app.createMatrixBuffer(PicoGL.FLOAT_MAT4x3, weights);

@@ -10,12 +10,19 @@ const glslifyOptions = {
 };
 
 export default defineConfig({
+  optimizeDeps: {
+    include: ['ganja.js']
+  },
+
   plugins: [glslify(glslifyOptions), glslifyRollup(glslifyOptions)],
     define: {
       global: {},
     },
 
   build: {
+    commonjsOptions: {
+      include: [/ganja.js/, /node_modules/]
+    },
     lib: {
       entry: path.resolve(dirname("src/index.ts")),
       name: "quilting",

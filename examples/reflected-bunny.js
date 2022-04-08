@@ -13,52 +13,54 @@ const app = PicoGL.createApp(canvas)
   // .enable(PicoGL.BLEND)
   .blendFunc(PicoGL.ONE, PicoGL.ONE_MINUS_SRC_ALPHA);
 app.clear();
-// Create a Clifford Algebra with 4,1 metric for 3D CGA.
-// const cga = Algebra(4, 1);
-
-// const ni = cga.Vector(0, 0, 0, 1, 1);
-// const no = cga.Vector(0, 0, 0, -0.5, 0.5);
-// const up = (x) => cga.Add(no, x).Add(x.Mul(x).Mul(ni).Mul(0.5));
-// let p1 = up(cga.Vector(1));
-// let p2 = up(cga.Vector(0, 1));
-// let p3 = up(cga.Vector(0, 0, -1));
-// let p4 = up(cga.Vector(0, -1));
-// let s = cga.Wedge(p1, p2).Wedge(p3).Wedge(p4)
-// document.body.appendChild(
-//   cga.graph(
-//     [
-//       0x00FF0000, p1, "p1", p2, "p2", p3, "p3", p4, "p4", // points
-//       // 0xE0008800, p, "p",                                 // plane
-//       0xE00000FF, s, "s"                                  // sphere
-//     ],
-//     { conformal: true, gl: true, grid: true }
-//   )
-// );
 
 // Create a Clifford Algebra with 4,1 metric for 3D CGA.
-Algebra(4,1,()=>{
-    const Element = this
+const cga = Algebra(4, 1, () => {
+  const Element = this;
   // We start by defining a null basis, and upcasting for points
-    var ni = 1e4+1e5, no = .5e5-.5e4;
-    var up = (x)=> no + x + .5*x*x*ni;
+  var ni = 1e4 + 1e5,
+    no = 0.5e5 - 0.5e4;
+  var up = (x) => no + x + 0.5 * x * x * ni;
 
   // Next we'll define 4 points
-    var p1 = up(1e1), p2 = up(1e2), p3 = up(-1e3), p4 = up(-1e2);
+  var p1 = up(1e1),
+    p2 = up(1e2),
+    p3 = up(-1e3),
+    p4 = up(-1e2);
 
   // The outer product can be used to construct the sphere through
   // any four points.
-    var s = ()=>p1^p2^p3^p4;
+  var s = () => p1 ^ p2 ^ p3 ^ p4;
 
   // The outer product between any three points and infinity is a plane.
-    var p = ()=>p1^p2^p3^ni;
+  var p = () => p1 ^ p2 ^ p3 ^ ni;
 
   // Graph the items.
-    document.body.appendChild(this.graph([
-        0x00FF0000, p1, "p1", p2, "p2", p3, "p3", p4, "p4", // points
-        0xE0008800, p, "p",                                 // plane
-        0xE00000FF, s, "s"                                  // sphere
-    ],{conformal:true,gl:true,grid:true}));
-  });
+  const graph = this.graph(
+    [
+      0x00ff0000,
+      p1,
+      "p1",
+      p2,
+      "p2",
+      p3,
+      "p3",
+      p4,
+      "p4", // points
+      0xe0008800,
+      p,
+      "p", // plane
+      0xe00000ff,
+      s,
+      "s", // sphere
+    ],
+    { conformal: true, gl: true, grid: true, alpha: true }
+  );
+  graph.setAttribute("id", "graph");
+  window.graph = graph
+  document.body.appendChild(graph);
+  return this
+});
 
 // const defaultWeights = () => [
 //   [0, 0.5, 1, 0.2],
@@ -76,9 +78,9 @@ const defaultWeights = () => [
 //   p2: new Float32Array(p2),
 //   ...defaultWeights(),
 // }));
-
 // const meshPolys = refineBunny(bunny, {});
-const mesh = refinedBunny(0.2);
+// const mesh = refinedBunny(0.2);
+const mesh = simpleBunny(200);
 console.log("number of cells", mesh.cells.length);
 const meshPolys = prepareMesh(mesh);
 
@@ -104,6 +106,10 @@ setStructUniforms(transformer, "transformation", {
   e2: 1,
   e3: 1,
 }).draw();
+  // const gl = transformer.gl;
+  // let tmpBuffer = new Float32Array(9);
+  // getTransformedPoints(tmpBuffer);
+  // console.log(tmpBuffer);
 
 import { sample } from "lodash-es";
 
@@ -118,6 +124,7 @@ import { randomUnit } from "../src/patch-old";
 
 document.addEventListener("DOMContentLoaded", async function () {
   const camera = makeCamera();
+  window.cam = camera
   setupCamera(canvas, camera);
   const { swooshImage, seafoamImage, matcapImages } = await import(
     "./load-textures"
@@ -144,16 +151,16 @@ document.addEventListener("DOMContentLoaded", async function () {
       0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1,
     ]),
-    lod: 4,
+    lod: 32,
   };
 
   setInterval(() => {
     t.transformation = arrayToCga3StructProps(randomUnit(1, 32));
   }, 10 * 1000);
 
-  setInterval(() => {
-    t.lod = sample([1, 2, 3]);
-  }, 0.5 * 1000);
+  // setInterval(() => {
+  //   t.lod = sample([1, 2, 3]);
+  // }, 0.5 * 1000);
 
   const drawCall = patchDrawCall(
     app,
@@ -165,10 +172,12 @@ document.addEventListener("DOMContentLoaded", async function () {
     .texture("matcapTexture", matcap);
 
   const raf = () => {
+    const sph = arrayToCga3StructProps(graph.value[13]())
+    // console.log(sph)
     camera.tick();
     app.enable(PicoGL.RASTERIZER_DISCARD);
     app.disable(PicoGL.DEPTH_TEST);
-    setStructUniforms(transformer, "transformation", t.transformation)
+    setStructUniforms(transformer, "transformation", sph)
       .uniform("angle", Math.PI)
       // .uniform("angle", Date.now() / 1000 - 1649250660482 / 1000)
       .draw();
@@ -177,13 +186,14 @@ document.addEventListener("DOMContentLoaded", async function () {
     app.clear();
     drawCall
       // .drawRanges(...(new Array(50)).fill([0,90*4,1]))
-      .uniform("projection", camera.state.projection)
+      .uniform("projection", new Float32Array(graph.options.proj))
       .uniform("eye", camera.state.eye)
-      .uniform("view", camera.state.view)
+      .uniform("view", new Float32Array(graph.options.mv))
       .draw();
 
     requestAnimationFrame(raf);
   };
 
   requestAnimationFrame(raf);
+
 });

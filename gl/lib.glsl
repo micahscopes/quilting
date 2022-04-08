@@ -47,14 +47,14 @@ void toVec(H X, inout vec4 x) {
     x.w = X.k;
 }
 
-CGA3 point(vec3 x){
-    return point(vecToCGA(x));
-}
+// CGA3 point(vec3 x){
+//     return point(vecToCGA(x));
+// }
 
-vec3 vecFromPoint(CGA3 x) {
-    x = point_coords(x);
-    return vec3(x.e1, x.e2, x.e3);
-}
+// vec3 vecFromPoint(CGA3 x) {
+//     x = point_coords(x);
+//     return vec3(x.e1, x.e2, x.e3);
+// }
 
 CGA3 outer(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
     return outer(outer(p,q,r),s);
@@ -65,18 +65,18 @@ CGA3 mul(CGA3 p, CGA3 q, CGA3 r, CGA3 s){
 }
 
 // replace this stuff with IPNS sphere stuff
-CGA3 sphere(vec3 a, vec3 b, vec3 c, vec3 d) {
-    return outer(point(a), point(b), point(c), point(d));
-}
+// CGA3 sphere(vec3 a, vec3 b, vec3 c, vec3 d) {
+//     return outer(point(a), point(b), point(c), point(d));
+// }
 
-vec3 sphere_center(vec3 a, vec3 b, vec3 c, vec3 d){
-    CGA3 sphere = sphere(a,b,c,d);
-    return vecFromPoint(mul(sphere, INF(), sphere));
-}
+// vec3 sphere_center(vec3 a, vec3 b, vec3 c, vec3 d){
+//     CGA3 sphere = sphere(a,b,c,d);
+//     return vecFromPoint(mul(sphere, INF(), sphere));
+// }
 
-vec3 reflect_glsl(vec3 x, CGA3 R){
-    return vecFromPoint(mul(R,point(x),R));
-}
+// vec3 reflect_glsl(vec3 x, CGA3 R){
+//     return vecFromPoint(mul(R,point(x),R));
+// }
 
 // float sphere_radius(vec3 a, vec3 b, vec3 c, vec3 d){
 //     CGA2 circ = sphere(a,b,c,d);

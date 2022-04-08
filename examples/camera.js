@@ -9,7 +9,7 @@ export const makeCamera = () => createCamera({
   rotationDecayTime: decayTime,
   panDecayTime: decayTime,
   zoomDecayTime: decayTime,
-  fovY: Math.PI*5/7,
+  // fovY: Math.PI*5/7,
   far: 100000000000000000,
   near: 0.01
 })
