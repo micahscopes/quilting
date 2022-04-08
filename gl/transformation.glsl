@@ -40,8 +40,8 @@ vec4 downWeight(CGA3 W, vec3 p) {
   CGA3 X = div(W, add(mul(mul(0.5,P),ni), ONE_CGA3));
   return vec4(X.scalar, X.e1, X.e2, X.e3); }
 
-vec4 sandwichWeight(CGA3 T, vec4 w, CGA3 hatT, vec3 p) {
-  return downWeight(mul(T, upWeight(w, p), hatT),p);
+vec4 sandwichWeight(CGA3 T, vec4 w, CGA3 hatT, vec3 p, vec3 pTransformed) {
+  return downWeight(mul(T, upWeight(w, p), hatT), pTransformed);
 }
 
 void main() {
@@ -57,9 +57,9 @@ void main() {
   transformedPoints[0] = sandwichPoint(T, points[0], hatT);
   transformedPoints[1] = sandwichPoint(T, points[1], hatT);
   transformedPoints[2] = sandwichPoint(T, points[2], hatT);
-  transformedWeights[0] = sandwichWeight(T, weights[0], hatT, points[0]);
-  transformedWeights[1] = sandwichWeight(T, weights[1], hatT, points[1]);
-  transformedWeights[2] = sandwichWeight(T, weights[2], hatT, points[2]);
+  transformedWeights[0] = sandwichWeight(T, weights[0], hatT, points[0], transformedPoints[0]);
+  transformedWeights[1] = sandwichWeight(T, weights[1], hatT, points[1], transformedPoints[1]);
+  transformedWeights[2] = sandwichWeight(T, weights[2], hatT, points[2], transformedPoints[2]);
   lod = transformation.e1;
 
 // override

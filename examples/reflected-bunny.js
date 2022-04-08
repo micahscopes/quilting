@@ -68,9 +68,9 @@ const cga = Algebra(4, 1, () => {
 //   [0, 0.5, 0.1, 0.4],
 // ];
 const defaultWeights = () => [
-  [0, 0, 0, 0],
-  [0, 0, 0, 0],
-  [0, 0, 0, 0],
+  [1, 0, 0, 0],
+  [1, 0, 0, 0],
+  [1, 0, 0, 0],
 ];
 // const patchesUniforms = bunnyPolys(20).map(([p0, p1, p2]) => ({
 //   p0: new Float32Array(p0),
@@ -151,7 +151,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1,
     ]),
-    lod: 32,
+    lod: 128,
   };
 
   setInterval(() => {
