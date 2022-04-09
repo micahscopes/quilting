@@ -24,10 +24,10 @@ const cga = Algebra(4, 1, () => {
   var up = (x) => no + x + 0.5 * x * x * ni;
 
   // Next we'll define 4 points
-  var p1 = up(1e1),
-    p2 = up(1e2),
-    p3 = up(-1e3),
-    p4 = up(-1e2);
+  var p1 = up(0.5e1),
+      p2 = up(0 + 1e2),
+      p3 = up(0 - 1e2),
+      p4 = up(0 + 1e1 + 1e2);
 
   // The outer product can be used to construct the sphere through
   // any four points.
@@ -95,9 +95,9 @@ const patchWeights = (p1, p2, p3) => {
   //   new H(1,),
   // ]
   // weights = weights.map(inv);
-  // weights = weights.map(x => x.inverse())
+  weights = weights.map(x => x.inverse())
   // weights = weights.map((x) => x.div(weights[0]));
-  weights = weights.map(x => x.normalize())
+  // weights = weights.map(x => x.normalize())
 
   // console.log(p1.sub(edgeInf(p1,p2)));
   return weights.map((x) => x.toVector());
@@ -107,7 +107,7 @@ console.log(patchWeights([1, 1, 1, 1], [10, 10, 10, 10], [32, 32, 32, 32]));
 // const meshPolys = refineBunny(bunny, {});
 // const mesh = refinedBunny(0.2);
 // const mesh = simpleBunny(200);
-const divs = 3;
+const divs = 4;
 const mesh = createCube(1, 1, 1, divs);
 console.log("number of cells", mesh.cells.length);
 const meshPolys = prepareMesh(mesh);
@@ -157,7 +157,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   // const N = 5;
   // const patch = Patch(regl, 64, {type: TRI});
 
-  const matcap = app.createTexture2D(randomElement(matcapImages));
+  // const matcap = app.createTexture2D(randomElement(matcapImages));
+  const matcap = app.createTexture2D(matcapImages[4]);
   const matcaps = matcapImages.map((data) => app.createTexture2D(data));
   const texture = app.createTexture2D(seafoamImage);
 
@@ -176,7 +177,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1,
     ]),
-    lod: 64,
+    lod: 50,
   };
 
   setInterval(() => {

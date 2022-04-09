@@ -18,6 +18,23 @@ CGA3 vecToCGA(vec4 v){
     return X;
 }
 
+CGA3 weightVecToCGA(vec3 v){
+    CGA3 X = ZERO_CGA3;
+    X.e12 = v.x;
+    X.e23 = v.y;
+    X.e13 = -v.z;
+    return X;
+}
+
+CGA3 weightVecToCGA(vec4 v){
+    CGA3 X = ZERO_CGA3;
+    X.scalar = v.x;
+    X.e23 = -v.y;
+    X.e13 = v.z;
+    X.e12 = -v.w;
+    return X;
+}
+
 void toVec(out vec3 x, CGA3 X) {
     x = vec3(X.e1, X.e2, X.e3);
 }
