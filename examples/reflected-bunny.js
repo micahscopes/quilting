@@ -68,7 +68,7 @@ import H from "quaternion";
 const edgeCentroid = (x, y) => x.add(y).div(2);
 const centroid = (...pts) =>
   pts.reduce((x, y) => x.add(y), new H(0)).div(pts.length);
-const inv = (x) => new H(-1).div(x);
+const inv = (x) => new H(1).div(x);
 const edgeInf = (x, y) => inv(centroid(x, y));
 const patchWeights = (p1, p2, p3) => {
   // console.log(p1)
@@ -82,21 +82,22 @@ const patchWeights = (p1, p2, p3) => {
     // p1.sub(centroid(p1, p2, p3)),
     // p2.sub(centroid(p2, p3, p1)),
     // p3.sub(centroid(p3, p1, p2)),
-    // p1.sub(inv(centroid(p1, p2, p3))),
-    // p2.sub(inv(centroid(p2, p3, p1))),
-    // p3.sub(inv(centroid(p3, p1, p2))),
-    p1.sub(inv(centroid(p1, p2))),
-    p2.sub(inv(centroid(p2, p3))),
-    p3.sub(inv(centroid(p3, p1))),
+    p1.sub(inv(centroid(p1, p2, p3))),
+    p2.sub(inv(centroid(p2, p3, p1))),
+    p3.sub(inv(centroid(p3, p1, p2))),
+    // p1.sub(inv(centroid(p1, p2))),
+    // p2.sub(inv(centroid(p2, p3))),
+    // p3.sub(inv(centroid(p3, p1))),
   ];
   // weights = [
-  //   new H(0,),
-  //   new H(0,),
-  //   new H(0,),
+  //   new H(1,),
+  //   new H(1,),
+  //   new H(1,),
   // ]
   // weights = weights.map(inv);
-  // weights = weights.map(x => x.normalize())
+  // weights = weights.map(x => x.inverse())
   // weights = weights.map((x) => x.div(weights[0]));
+  weights = weights.map(x => x.normalize())
 
   // console.log(p1.sub(edgeInf(p1,p2)));
   return weights.map((x) => x.toVector());
@@ -106,7 +107,7 @@ console.log(patchWeights([1, 1, 1, 1], [10, 10, 10, 10], [32, 32, 32, 32]));
 // const meshPolys = refineBunny(bunny, {});
 // const mesh = refinedBunny(0.2);
 // const mesh = simpleBunny(200);
-const divs = 10;
+const divs = 3;
 const mesh = createCube(1, 1, 1, divs);
 console.log("number of cells", mesh.cells.length);
 const meshPolys = prepareMesh(mesh);
@@ -175,7 +176,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1,
     ]),
-    lod: 32,
+    lod: 64,
   };
 
   setInterval(() => {
