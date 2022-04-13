@@ -1,4 +1,4 @@
-import { _ as __vitePreload } from './index.e85b05b8.js';
+import { _ as __vitePreload } from './index.5934c948.js';
 
 var seafoam = "/quilting/prerelease/april-13-2022/assets/seafoam.8d324085.png";
 
@@ -30,12 +30,13 @@ const swooshImage = await new Promise(async (resolve) => {
   im.onload = () => resolve(Object.assign(im, { style: "max-width:200px" }));
 });
 const matcapImages = await Promise.all(
-  Object.keys(matcapUrls).map(
-    (url) =>
+  Object.values(matcapUrls).map(
+    (urlModule) =>
       new Promise(async (resolve) => {
         await documentReady();
         const im = new Image();
         im.crossOrigin = "anonymous";
+        const url = (await urlModule()).default;
         im.src = url;
         im.onload = () =>
           resolve(Object.assign(im, { style: "max-width:200px" }));

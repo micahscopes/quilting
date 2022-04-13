@@ -27246,7 +27246,6 @@ app.clear();
 
 // Create a Clifford Algebra with 4,1 metric for 3D CGA.
 Algebra(4, 1, () => {
-  const Element = globalThis;
   // We start by defining a null basis, and upcasting for points
   var ni = 1e4 + 1e5,
     no = 0.5e5 - 0.5e4;
@@ -27266,7 +27265,7 @@ Algebra(4, 1, () => {
   var p = () => p1 ^ p2 ^ p3 ^ ni;
 
   // Graph the items.
-  const graph = Element.graph(
+  const graph = eval('Element').graph(
     [
       0x00ff0000,
       p1,
@@ -27307,7 +27306,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   window.cam = camera;
   setupCamera(canvas, camera);
   const { swooshImage, seafoamImage, matcapImages } = await __vitePreload(() => import(
-    './load-textures.061de84c.js'
+    './load-textures.f086bb52.js'
   ),true?[]:void 0);
   const matcap = app.createTexture2D(matcapImages[4]);
   matcapImages.map((data) => app.createTexture2D(data));
