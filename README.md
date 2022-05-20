@@ -1,5 +1,13 @@
 # quilting
-work in progress
+![Screenshot from 2022-04-16 22-06-19](https://user-images.githubusercontent.com/389782/169445957-f268cf18-0881-4ec7-b283-c68c836f7369.png)
+
+## coming soon...
+![unknown-9](https://user-images.githubusercontent.com/389782/169445496-c760ec7a-4f7f-4bc2-a640-bed6be4e8e5a.png)
+
+
+https://user-images.githubusercontent.com/389782/169445431-d8bdbf5a-977a-46a0-98d1-b2a801fda0f7.mp4
+
+
 
 ### todo
 - [x] proof of concept with CPU
