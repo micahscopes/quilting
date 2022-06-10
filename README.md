@@ -2,6 +2,16 @@
 work in progress
 
 ### todo
+
+#### reboot
+- [ ] tessellation atlas generator interface
+  - LODs share common vertices and a common mesh... distinguished by ranges of edge indices
+  - generated atlas contents:
+    - [ ] quantized vertices
+    - [ ] dictionary of detail levels --> edge indices
+
+
+#### old todo from the past
 - [x] proof of concept with CPU
 - [x] proof of concept with GPU
 - [x] compute normals

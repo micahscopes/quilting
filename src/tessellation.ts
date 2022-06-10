@@ -77,12 +77,24 @@ import { DensityFunction, samplePoisson } from "@thi.ng/poisson";
 import { dist, divN2 } from "@thi.ng/vectors";
 import barycentric from "barycentric";
 import Delaunator from "delaunator";
-import { chunk, range } from "lodash-es";
+import {
+  chunk,
+  flatten,
+  fromPairs,
+  isEqual,
+  range,
+  sortBy,
+  sortedUniq,
+  uniq,
+  uniqBy,
+  uniqWith,
+  zip,
+} from "lodash-es";
 import moize from "moize";
 
-const cartesian = (bc, corners) => [
-  bc[0] * corners[0][0] + bc[1] * corners[1][0] + bc[2] * corners[2][0],
-  bc[0] * corners[0][1] + bc[1] * corners[1][1] + bc[2] * corners[2][1],
+const cartesian = (bary, corners) => [
+  bary[0] * corners[0][0] + bary[1] * corners[1][0] + bary[2] * corners[2][0],
+  bary[0] * corners[0][1] + bary[1] * corners[1][1] + bary[2] * corners[2][1],
 ];
 
 type Point2D = [number, number];
@@ -122,119 +134,6 @@ const defaultOptions = {
   jitter: 0.00001,
   max: 3000000,
   quality: 150,
-};
-
-export const quadPatchPrototype = (
-  resA: number,
-  resB: number,
-  resC: number,
-  resD: number,
-  opts: object
-) => {
-  opts = { ...defaultOptions, ...opts };
-  const triangleFanWeights: [number, number, number][] = [
-    [resA, (resA + resB) / 2, (resA + resD) / 2],
-    [resB, (resB + resC) / 2, (resB + resA) / 2],
-    [resC, (resC + resD) / 2, (resC + resB) / 2],
-    [resD, (resD + resA) / 2, (resD + resC) / 2],
-  ];
-  // const triangleFanWeights: [number, number, number][] = [
-  //   [resA, 2, 2],
-  //   [resB, 2, 2],
-  //   [resC, 2, 2],
-  //   [resD, 2, 2],
-  // ];
-  console.log(triangleFanWeights, resA, resB, resC, resD);
-  const triangleFanCoords: [Point2D, Point2D, Point2D][] = [
-    [
-      [0.5, 0.5],
-      [0, 1],
-      [0, 0],
-    ],
-    [
-      [0.5, 0.5],
-      [0, 0],
-      [1, 0],
-    ],
-    [
-      [0.5, 0.5],
-      [1, 0],
-      [1, 1],
-    ],
-    [
-      [0.5, 0.5],
-      [1, 1],
-      [0, 1],
-    ],
-  ];
-
-  const downward = (x: number) => -(x - 0.5) + 0.5;
-  const upward = (x: number) => x - 0.5 + 0.5;
-
-  const getTriangleInfoForPoint = ([x, y]: number[]) => {
-    let i = 0;
-    const down = downward(x);
-    const up = upward(x);
-    if (y < down && y > up) {
-      i = 0;
-    } else if (y < down && y < up) {
-      i = 1;
-    } else if (y > down && y < up) {
-      i = 2;
-    } else if (y > down && y > up) {
-      i = 3;
-    }
-    return { weights: triangleFanWeights[i], corners: triangleFanCoords[i], i };
-  };
-
-  const getRadiusAuto = (pt: Point2D) => {
-    const { corners, weights, i } = getTriangleInfoForPoint(pt);
-    return getRadiusTri(corners, weights)(pt);
-  };
-
-  const index = new KdTreeSet(2);
-  const addPoint = (radius: number) => (x: number[]) =>
-    index.add(
-      x.map((x) => x * 1000),
-      radius
-    );
-
-  // add stitching points
-  for (let a = 0; a <= 1; a += 1 / resA) {
-    index.add([0, a]);
-  }
-  for (let b = 0; b <= 1; b += 1 / resB) {
-    index.add([b, 0]);
-  }
-  for (let c = 0; c <= 1; c += 1 / resC) {
-    index.add([1, c]);
-  }
-  for (let d = 0; d <= 1; d += 1 / resD) {
-    index.add([d, 1]);
-  }
-
-  const sampleTri = (
-    corners: [Point2D, Point2D, Point2D],
-    weights: [number, number, number]
-  ) => {
-    const points = () => [Math.random(), Math.random()];
-    const density = getRadiusAuto as DensityFunction;
-    return samplePoisson({
-      index,
-      points,
-      density,
-      max: 0,
-      ...opts,
-    });
-  };
-  const boundaryPoints = index.keys();
-
-  const points = [
-    ...boundaryPoints, //
-    ...sampleTri(triangleFanCoords[0], triangleFanWeights[0]),
-  ];
-
-  return { points, index };
 };
 
 export const quadPatch = (
@@ -321,18 +220,16 @@ export const triPatch = (
   }
 
   const interpolation = getRadiusTri(corners, [resA, resB, resC]);
-  // const interpolation = (x) =>
-  //   1 / triEdgeWeightInterpolator(resA, resB, resC)(x);
   const sampleTri = (
     corners: [Point2D, Point2D, Point2D],
     weights: [number, number, number]
   ) => {
     const points = sampleTriangle(corners);
-    const density = interpolation;
+    const density = interpolation as DensityFunction;
     return samplePoisson({
       index,
       points,
-      density: interpolation as DensityFunction,
+      density,
       max: 0,
       ...opts,
     });
@@ -394,7 +291,44 @@ const prepareMesh = moize(
   { maxSize: 40 }
 );
 
-export const tesselationMesh = moize(
+export const tessellationMesh = moize(
   (sideLODs: number | patchResolutions) => prepareMesh(tessellation(sideLODs)),
   { maxSize: 40 }
 );
+
+import {
+  permutationsWithReplacement,
+  permutations,
+} from "combinatorial-generators";
+import cumulativeSum from "cumulative-sum";
+import meshCombine from "mesh-combine";
+import { permutationIndices3 } from "./permutator";
+
+export const makeTessellationAtlas = (LODs: number[]) => {
+  console.log();
+  const reducedLODs = uniqBy(
+    [
+      ...permutationsWithReplacement(
+        LODs.sort((a, b) => b - a),
+        3
+      ),
+    ],
+    (x) => JSON.stringify(sortBy(x))
+  );
+
+  const meshes = reducedLODs.map((sideLODs) =>
+    tessellationMesh(sideLODs as triResolutions)
+  );
+  const combinedMesh = meshCombine(meshes);
+  const counts = reducedLODs.map((_, i) => meshes[i].cells.length);
+  const baseIndices = [0, ...cumulativeSum(counts).slice(0, -1)];
+  const lookup = 
+    uniqWith(reducedLODs.flatMap((lod, i) =>
+      permutationIndices3.map((pidxs) =>
+        [JSON.stringify(pidxs.map((pi) => lod[pi])), i, lod, pidxs]
+      )
+    ), ([a], [b]) => a===b).map(
+      ([prm_i, lod_i, lod, permutation]) => [prm_i, {lod, baseIndex: baseIndices[lod_i], count: counts[lod_i], permutation}]
+    )
+  return { meshes, combinedMesh, counts, baseIndices, lookup };
+};

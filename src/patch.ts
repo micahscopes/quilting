@@ -3,7 +3,7 @@ import moize from "moize";
 import { App, PicoGL } from "picogl";
 import patchGL from "../gl/patch.glsl";
 import triangleVertexGL from "../gl/triangle.vs.glsl";
-import { tesselationMesh } from "./tessellation";
+import { tessellationMesh } from "./tessellation";
 import { glsl } from "./util";
 const vs = triangleVertexGL;
 const fs = glsl`
@@ -69,7 +69,7 @@ export const patchDrawCall =
     pointsBuffer: any,
     weightsBuffer: any
   ) => {
-    const mesh = tesselationMesh(sideLODs);
+    const mesh = tessellationMesh(sideLODs);
     const vertexArray = meshVertexArray(mesh, app)
       .instanceAttributeBuffer(1, pointsBuffer)
       .instanceAttributeBuffer(4, weightsBuffer); //, {type: PicoGL.FLOAT, size: 4, stride: 4*3*4, offset: 0})
