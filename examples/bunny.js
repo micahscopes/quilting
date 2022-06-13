@@ -1,8 +1,8 @@
 import { cellsTransformer } from "../src/transformer";
+import { patchDrawCall } from "../src/patch";
 import { PicoGL } from "picogl";
 import { setStructUniforms } from "../src/util";
 import Algebra, { Element } from "ganja.js";
-import { patchDrawCall } from "../src/patch";
 
 const canvas = document.createElement("canvas");
 canvas.width = window.innerWidth;
