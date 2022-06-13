@@ -319,33 +319,50 @@ export const makeTessellationAtlas = (LODs: number[]) => {
   const meshes = reducedLODs.map((sideLODs) =>
     tessellationMesh(sideLODs as triResolutions)
   );
-  
+
   // const combinedMesh = meshCombine(meshes);
-  const combinedMesh = meshes.reduce((acc, next) => {
-    console.log(acc, next)
-    return {
-      cells: [...acc.cells, ...next.cells],
-      positions: [...acc.positions, ...flatten(next.cellPositions)]
-    }},
-    {cells: [], positions: []}
-  )
-  
+  const combinedMesh = meshes.reduce(
+    (acc, next) => {
+      console.log(acc, next);
+      return {
+        cells: [...acc.cells, ...next.cells],
+        positions: [
+          ...acc.positions,
+          ...flatten(next.cellPositions).map((xyz) =>
+            barycentric(
+              [
+                [0, 0],
+                [1, 0],
+                [0, 1],
+              ],
+              xyz.slice(0, 2)
+            ).map(x => x*2**15).map(Math.floor)
+          ),
+        ],
+        // positions: [...acc.positions, ...flatten(next.cellPositions)]
+      };
+    },
+    { cells: [], positions: [] }
+  );
+
   // const counts = reducedLODs.map((_, i) => meshes[i].cells.length);
-  const counts = reducedLODs.map((_, i) => meshes[i].cellPositions.length*3);
-  const baseIndices = [0, ...cumulativeSum(counts.map(x => x)).slice(0, -1)];
-  const lookup = fromPairs(uniqWith(
-    reducedLODs.flatMap((lod, i) =>
-      permutationIndices3.map((pidxs) => [
-        JSON.stringify(pidxs.map((pi) => lod[pi])),
-        i,
-        lod,
-        pidxs,
-      ])
-    ),
-    ([a], [b]) => a === b
-  ).map(([prm_i, lod_i, lod, permutation]) => [
-    prm_i,
-    { lod, baseIndex: baseIndices[lod_i], count: counts[lod_i], permutation },
-  ]));
+  const counts = reducedLODs.map((_, i) => meshes[i].cellPositions.length * 3);
+  const baseIndices = [0, ...cumulativeSum(counts.map((x) => x)).slice(0, -1)];
+  const lookup = fromPairs(
+    uniqWith(
+      reducedLODs.flatMap((lod, i) =>
+        permutationIndices3.map((pidxs) => [
+          JSON.stringify(pidxs.map((pi) => lod[pi])),
+          i,
+          lod,
+          pidxs,
+        ])
+      ),
+      ([a], [b]) => a === b
+    ).map(([prm_i, lod_i, lod, permutation]) => [
+      prm_i,
+      { lod, baseIndex: baseIndices[lod_i], count: counts[lod_i], permutation },
+    ])
+  );
   return { meshes, combinedMesh, counts, baseIndices, lookup };
 };
