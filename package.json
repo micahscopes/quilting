@@ -75,6 +75,9 @@
     "watch": "^1.0.2"
   },
   "dependencies": {
+    "@most/core": "^1.6.1",
+    "@most/dom-event": "^2.2.0",
+    "@most/scheduler": "^1.3.0",
     "@teropa/triangle-tessellation": "^1.1.0",
     "@thi.ng/geom": "^3.2.0",
     "@thi.ng/geom-accel": "^3.1.8",
@@ -83,14 +86,20 @@
     "@thi.ng/vectors": "^7.5.5",
     "angle-normals": "^1.0.0",
     "barycentric": "^1.0.1",
+    "bound-points": "^1.0.0",
     "combinatorial-generators": "^1.1.2",
     "delaunator": "^5.0.0",
     "extract-svg-path": "^2.1.0",
     "gl-matrix": "^3.4.3",
     "load-svg": "^1.0.0",
     "lodash-es": "^4.17.21",
+    "mda": "^1.1.1",
+    "merge-vertices": "^1.0.1",
     "moize": "^6.1.0",
     "picogl": "github:micahscopes/picogl.js#base-vertex-base-instance-build",
+    "rbush": "^3.0.1",
+    "rbush-knn": "^3.0.1",
+    "simplicial-complex": "^1.0.0",
     "svg-mesh-3d": "^1.1.0"
   },
   "description": "work in progress",
@@ -102,6 +111,9 @@
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/micahscopes/quilting.git"
+  },
+  "alias": {
+    "tinyqueue": "./node_modules/tinyqueue/tinyqueue.js"
   },
   "author": "micahscopes",
   "license": "AGPL-3.0-or-later",

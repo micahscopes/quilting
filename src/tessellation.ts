@@ -270,15 +270,28 @@ interface mesh {
 }
 
 import normals from "angle-normals";
-const prepareMesh = moize(
+import {Mesh} from 'mda'
+// import top from 'simplicial-complex';
+// import mergeVertices from "merge-vertices";
+
+export const prepareMesh = moize(
   (grid) => {
     let mesh: mesh | any = {};
-    mesh.cells = chunk(grid.triangles, 3);
-    mesh.positions = chunk(grid.coords, 2).map(([u, v]) => [
+    const cells = chunk(grid.triangles, 3);
+    const positions = chunk(grid.coords, 2).map(([u, v]) => [
       u,
       v,
       0,
     ]) as number[][];
+    // mesh = mergeVertices(mesh.cells, mesh.positions)
+    // top.normalize(mesh.cells)
+    // mesh.incidence = top.incidence(mesh.cells, mesh.cells)
+    const M = mesh.mda = new Mesh()
+    mesh.mda.setPositions(positions)
+    mesh.mda.setCells(cells)
+    mesh.mda.process()
+    mesh.cells = M.getCells()
+    mesh.positions = M.getPositions()
     mesh.normals = normals(mesh.cells, mesh.positions);
     mesh.cellPositions = mesh.cells.map((indices: number[]) =>
       indices.map((i) => mesh.positions[i])
@@ -303,6 +316,7 @@ import {
 import cumulativeSum from "cumulative-sum";
 import meshCombine from "mesh-combine";
 import { permutationIndices3 } from "./permutator";
+// import { Mesh } from '../examples/gltf/src/gltf-spec/glTF2';
 
 export const makeTessellationAtlas = (LODs: number[]) => {
   console.log();

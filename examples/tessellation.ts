@@ -1,14 +1,13 @@
 import { constant, flatten, repeat, sample, times } from "lodash-es";
 import PicoGL from "picogl";
 import { makeTessellationAtlas } from "../src/tessellation";
-
-import "./util";
+import "./pico-util";
 
 import { glsl } from "../src/util";
 import { permutationIndices3 } from "../src/permutator";
-import { FLOAT_MAT2x3 } from "./gltf/src/gltf/gl-const";
+import randomMesh from "./random-mesh";
 
-const atlas = makeTessellationAtlas([0,1,2,3].map((x) => 2 ** (2*x)));
+const atlas = makeTessellationAtlas([0, 1, 7].map((x) => 2 ** x));
 // console.log("meshes", atlas);
 console.log(permutationIndices3);
 
@@ -32,7 +31,7 @@ const vs = glsl`
           baryCo[I[0]]*corners[0][0] + baryCo[I[1]]*corners[1][0] + baryCo[I[2]]*corners[2][0],
           baryCo[I[0]]*corners[0][1] + baryCo[I[1]]*corners[1][1] + baryCo[I[2]]*corners[2][1]
         );
-        gl_Position = vec4(p.xy*4.0 - 1.0, 0.0, 1.0);
+        gl_Position = vec4(p.xy*2.0, 0.0, 1.0);
     }
 `;
 const fs = glsl`
@@ -47,6 +46,16 @@ const fs = glsl`
         fragColor = vec4(vColor,1);
     }
 `;
+
+import mda from "mda";
+
+import { tap, runEffects, merge, map } from "@most/core";
+import { newDefaultScheduler } from "@most/scheduler";
+import positionInElement from "./position-in-element";
+import { mousemove, touchmove } from "@most/dom-event";
+import { positionInCanvas } from "./position-in-element";
+import { flow } from "lodash-es";
+import knn from 'rbush-knn'
 
 document.addEventListener("DOMContentLoaded", async function () {
   const canvas = document.createElement("canvas");
@@ -67,20 +76,38 @@ document.addEventListener("DOMContentLoaded", async function () {
     3,
     new Uint16Array(flatten(atlas.combinedMesh.positions))
   );
+11
+  const numPatches = 200;
+  const patchesPerMeshlet = numPatches / 1;
 
-  const numPatches = 10000;
-  const patchesPerMeshlet = numPatches/50;
+  const mesh = randomMesh(numPatches);
 
+  window.M = mesh.mda;
+  window.mda = mda;
+
+  const mouseInCanvas$ = flow(
+    map(({x,y}) => knn(mesh.rbush, x, y, 2)),
+    map(faces => faces.map(({faceIndex}) => faceIndex))
+  )(
+    positionInCanvas(merge(mousemove(canvas), touchmove(canvas)))
+  );
+
+  runEffects(tap(console.log, mouseInCanvas$), newDefaultScheduler());
+
+  console.log(mesh);
   let corners = app.createMatrixBuffer(
     PicoGL.FLOAT_MAT3x2,
     new Float32Array(
-      flatten(
-        new Array(numPatches)
-          .fill(null)
-          .map(Math.random)
-          .map((x) => new Array(6).fill(null).map(() => x + Math.random() / 10))
-      )
+      flatten(flatten(mesh.cellPositions).map(([x, y]) => [x, y]))
     )
+    // new Float32Array(
+    //   flatten(
+    //     new Array(numPatches)
+    //       .fill(null)
+    //       .map(() => [Math.random(), Math.random()])
+    //       .map(([x,y]) => new Array(6).fill(null).flatMap(() => [x + (Math.random() - 0.5) / 10, y + (Math.random() - 0.5) / 10]))
+    //   )
+    // )
   );
 
   let permutations = app.createVertexBuffer(PicoGL.BYTE, 3, 3 * numPatches);
@@ -98,6 +125,21 @@ document.addEventListener("DOMContentLoaded", async function () {
   // CREATE DRAW CALL FROM PROGRAM AND VERTEX ARRAY
   let drawCall = app.createDrawCall(program, triangleArray);
 
+  let meshlets = new Array(numPatches / patchesPerMeshlet)
+    .fill(null)
+    .map(() => sample(Object.values(atlas.lookup)));
+
+  permutations.data(
+    new Int8Array(
+      flatten(
+        flatten(
+          times(patchesPerMeshlet, constant(meshlets.map((m) => m.permutation)))
+        )
+      )
+    )
+  );
+
+  console.log(meshlets);
 
   const draw = () => {
     if (timer.ready()) {
@@ -105,48 +147,40 @@ document.addEventListener("DOMContentLoaded", async function () {
     }
 
     timer.start();
-    const meshlets = new Array(numPatches/patchesPerMeshlet)
+    meshlets = new Array(numPatches / patchesPerMeshlet)
       .fill(null)
       .map(() => sample(Object.values(atlas.lookup)));
 
     // console.log(meshlets)
     permutations.data(
-      new Int8Array(flatten(flatten(times(patchesPerMeshlet, constant(meshlets.map((m) => m.permutation))))))
+      new Int8Array(
+        flatten(
+          flatten(
+            times(
+              patchesPerMeshlet,
+              constant(meshlets.map((m) => m.permutation))
+            )
+          )
+        )
+      )
     );
     //   console.log(atlas.combinedMesh)
 
     // DRAW
     app.clear();
     drawCall.drawRanges(
-      ...meshlets.map((m, i) => [m.baseIndex, m.count, patchesPerMeshlet, i*patchesPerMeshlet])
+      ...meshlets.map((m, i) => [
+        m.baseIndex,
+        m.count,
+        patchesPerMeshlet,
+        i * patchesPerMeshlet,
+      ])
     );
     drawCall.draw();
-
-      // let offset = meshlet.baseIndex;
-      // let numElements = meshlet.count;
-      // let numInstances = 0;
-      // let baseInstance = 1;
-      // let baseElement = undefined;
-
-      // drawCall.drawRanges([
-      //     offset,
-      //     numElements,
-      //     numInstances,
-      //     baseInstance,
-      //     baseElement
-      // ]);
 
     timer.end();
     requestAnimationFrame(draw);
   };
-  
+
   draw();
-
-  //   window.glcheck_renderDone = true;
-
-  // CLEANUP
-  //   program.delete();
-  //   positions.delete();
-  //   colors.delete();
-  //   triangleArray.delete();
 });
