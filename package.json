@@ -91,6 +91,7 @@
     "delaunator": "^5.0.0",
     "extract-svg-path": "^2.1.0",
     "gl-matrix": "^3.4.3",
+    "invert-permutation": "^1.0.0",
     "load-svg": "^1.0.0",
     "lodash-es": "^4.17.21",
     "mda": "^1.1.1",

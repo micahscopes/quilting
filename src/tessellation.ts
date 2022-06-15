@@ -313,6 +313,7 @@ import {
   permutationsWithReplacement,
   permutations,
 } from "combinatorial-generators";
+import invertPermutation from 'invert-permutation'
 import cumulativeSum from "cumulative-sum";
 import meshCombine from "mesh-combine";
 import { permutationIndices3 } from "./permutator";
@@ -375,7 +376,7 @@ export const makeTessellationAtlas = (LODs: number[]) => {
       ([a], [b]) => a === b
     ).map(([prm_i, lod_i, lod, permutation]) => [
       prm_i,
-      { lod, baseIndex: baseIndices[lod_i], count: counts[lod_i], permutation },
+      { lod, baseIndex: baseIndices[lod_i], count: counts[lod_i], permutation: invertPermutation(permutation) },
     ])
   );
   return { meshes, combinedMesh, counts, baseIndices, lookup };
