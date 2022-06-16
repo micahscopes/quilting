@@ -2,22 +2,20 @@ import Delaunator from "delaunator";
 import { flatten } from "lodash-es";
 import { prepareMesh, uvGrid } from "../src/tessellation";
 import RBush from "rbush";
-// import mda from "mda";
-// import boundPoints from "bound-points";
 
 export default function (points = 100, width = 1, height = 1, center = [0, 0]) {
-  // const coords = flatten(
-  //   new Array(points)
-  //     .fill(null)
-  //     .map(() => [
-  //       center[0] +
-  //         (Math.random() - 0.5) * width +
-  //         center[1] +
-  //         (Math.random() - 0.5) * height,
-  //     ])
-  // );
+  let coords = flatten(
+    new Array(3*points)
+      .fill(null)
+      .map(() => [
+        center[0] +
+          (Math.random() - 0.5) * width +
+          center[1] +
+          (Math.random() - 0.5) * height,
+      ])
+  );
   
-  const coords = flatten(uvGrid(Math.sqrt(points)).map(([x,y])=>[x-0.5,y-0.5]))
+  // coords = flatten(uvGrid(Math.sqrt(points)).map(([x,y])=>[x-0.5,y-0.5]))
 
   const delaunay = new Delaunator(coords);
 

@@ -4,7 +4,9 @@ import {
   flatten,
   repeat,
   sample,
+  sum,
   times,
+  uniq,
   zipWith,
 } from "lodash-es";
 import PicoGL from "picogl";
@@ -15,8 +17,14 @@ import { glsl } from "../src/util";
 import { permutationIndices3 } from "../src/permutator";
 import randomMesh from "./random-mesh";
 
-const [low, mid, high] = [0, 2, 7];
-const lodLevels = [low, mid, high].map((x) => 2 ** x);
+const closeVerts = 1;
+const farVerts = closeVerts * 10;
+const numVerts = 100;
+const debugText = false;
+
+const [low, mid, high] = [0, 2, 4];
+const lods = [0,1,2,3,4,5,6];
+const lodLevels = uniq([...lods, ...[low, mid, high]]).map((x) => 2 ** x);
 const exampleLodLookup = (i) => `[${2 ** i},${2 ** i},${2 ** i}]`;
 const lowLodKey = exampleLodLookup(low);
 const midLodKey = exampleLodLookup(mid);
@@ -37,7 +45,7 @@ const vs = glsl`
 
     void main() {
         vec3 subpatchBary;
-        ivec3 I = J.yxz;
+        ivec3 I = J.xyz;
         int i = gl_VertexID % 3;
         subpatchBary.x = float(i == 0 || i == 1);
         subpatchBary.y = float(i == 1 || i == 2);
@@ -91,6 +99,7 @@ import { mousemove, touchmove } from "@most/dom-event";
 import { positionInCanvas } from "./position-in-element";
 import { flow } from "lodash-es";
 import knn from "rbush-knn";
+import humanFormat from "human-format"
 
 document.addEventListener("DOMContentLoaded", async function () {
   const canvas = document.createElement("canvas");
@@ -105,9 +114,14 @@ document.addEventListener("DOMContentLoaded", async function () {
   canvas2d.height = window.innerHeight;
   document.body.appendChild(canvas2d);
   const ctx2D = canvas2d.getContext("2d");
-  ctx2D!.font = "18px Helvetica";
+  ctx2D!.font = "12px Helvetica";
 
   const app = PicoGL.createApp(canvas).clearColor(0.0, 0.0, 0.0, 1.0);
+  
+  app.gl.enable(app.gl.CULL_FACE);
+  app.gl.cullFace(app.gl.BACK);
+
+
   const timer = app.createTimer();
   window.utils.addTimerElement();
 
@@ -121,16 +135,19 @@ document.addEventListener("DOMContentLoaded", async function () {
     new Uint16Array(flatten(atlas.combinedMesh.positions))
   );
   11;
-  const numPatches = 30;
-  const patchesPerMeshlet = numPatches / 1;
+  const patchesPerMeshlet = numVerts / 1;
 
-  const mesh = randomMesh(numPatches);
+  const mesh = randomMesh(numVerts);
+  // mesh.mda.faces.forEach(face => face.fallbackLod = sample([0,0,1,1,2]))
 
   window.M = mesh.mda;
   window.mda = mda;
 
   const mouseInCanvas$ = flow(
-    map(({ x, y }) => [knn(mesh.rbush, x, y, 1), knn(mesh.rbush, x, y, 2)]),
+    map(({ x, y }) => [
+      knn(mesh.rbush, x, y, closeVerts),
+      knn(mesh.rbush, x, y, farVerts),
+    ]),
     map(([closer, further]) => [
       closer.flatMap(({ index }) => {
         try {
@@ -154,7 +171,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   )(positionInCanvas(merge(mousemove(canvas), touchmove(canvas))));
   const scheduler = newDefaultScheduler();
 
-  runEffects(tap(console.log, mouseInCanvas$), scheduler);
+  // runEffects(tap(console.log, mouseInCanvas$), scheduler);
 
   console.log(mesh);
   let corners = app.createMatrixBuffer(
@@ -185,7 +202,7 @@ document.addEventListener("DOMContentLoaded", async function () {
 
   let meshlets = mesh.mda.faces.map(() => atlas.lookup[lowLodKey]);
   console.log("meshlets", meshlets);
-  // permutations.data(new Int8Array())
+
   permutations.data(
     new Int8Array(flatten(meshlets.flatMap((m) => m.permutation)))
   );
@@ -206,13 +223,14 @@ document.addEventListener("DOMContentLoaded", async function () {
       });
       mesh.mda.faces.forEach((face) => {
         const lodKey = JSON.stringify(
-              mda
-                .FaceHalfEdges(face)
-                .map((he) =>
-                  Math.max(face.lod || low, he.flipHalfEdge?.face.lod || low)
-                )
-                .map((i) => 2 ** i)
+          mda
+            .FaceHalfEdges(face)
+            .map((he) =>
+              // Math.max(face.lod || (face.fallbackLod || low), he.flipHalfEdge?.face.lod || (face.fallbackLod || low))
+              Math.max(face.lod || face.fallbackLod || low, he.flipHalfEdge?.face.lod || he.flipHalfEdge?.face.fallbackLod || low)
             )
+            .map((i) => 2 ** i)
+        );
         face.lodKey = lodKey;
         face.meshlet = atlas.lookup[lodKey];
       });
@@ -220,27 +238,46 @@ document.addEventListener("DOMContentLoaded", async function () {
       permutations.data(
         new Int8Array(flatten(meshlets.flatMap((m) => m.permutation)))
       );
-      console.log(meshlets.map((m) => m.permutation));
-      ctx2D?.clearRect(-ctx2D.canvas.width/2, -ctx2D.canvas.height/2, ctx2D.canvas.width, ctx2D.canvas.height);
+      // console.log(meshlets.map((m) => m.permutation));
+      ctx2D?.clearRect(
+        -ctx2D.canvas.width / 2,
+        -ctx2D.canvas.height / 2,
+        ctx2D.canvas.width,
+        ctx2D.canvas.height
+      );
 
       mesh.mda.faces.forEach((face) => {
         const faceMidpoint = zipWith(
           ...mda.FaceVertices(face).map((v) => mesh.mda.positions[v.index]),
-          (x,y,z) => x+y+z
+          (x, y, z) => x + y + z
         )
           .map((x) => x / 3)
           .slice(0, 2);
         // const faceMidpoint = mesh.mda.positions[face.halfEdge.vertex.index].slice(0,2);
 
         // ctx2D?.fillText(1, faceMidpoint[0]*ctx2D.canvas.width, faceMidpoint[1]*ctx2D.canvas.height);
-        ctx2D?.fillText(
-          // `${[face.meshlet.lod || "0"]} :: ${face.meshlet.permutation}`,
-          // face.lodKey,
-          `${face.lodKey} @ ${face.meshlet.permutation}`,
-          faceMidpoint[0] * ctx2D.canvas.width,
-          -faceMidpoint[1] * ctx2D.canvas.height
-        );
+        if (debugText) {
+          ctx2D?.fillText(
+            // face.lod,
+            `${[face.meshlet.lod || "0"]} :: ${face.meshlet.permutation}`,
+            // face.lodKey,
+            // `${face.meshlet.lod} @ ${face.meshlet.permutation}`,
+            faceMidpoint[0] * ctx2D.canvas.width,
+            -faceMidpoint[1] * ctx2D.canvas.height
+          );
+        }
       });
+      const triangles = `
+      <p>
+      triangles: 
+        ${humanFormat(sum(mesh.mda.faces.map(({meshlet}) => meshlet.count))/3)}
+      </p><p>
+      patches:
+        ${mesh.mda.faces.length} 
+      </p>
+      `
+      // console.log(triangles)
+      document.querySelector('#stats')!.innerHTML = triangles 
     }, mouseInCanvas$),
     scheduler
   );

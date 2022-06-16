@@ -270,7 +270,7 @@ interface mesh {
 }
 
 import normals from "angle-normals";
-import {Mesh} from 'mda'
+import { Mesh } from "mda";
 // import top from 'simplicial-complex';
 // import mergeVertices from "merge-vertices";
 
@@ -286,12 +286,12 @@ export const prepareMesh = moize(
     // mesh = mergeVertices(mesh.cells, mesh.positions)
     // top.normalize(mesh.cells)
     // mesh.incidence = top.incidence(mesh.cells, mesh.cells)
-    const M = mesh.mda = new Mesh()
-    mesh.mda.setPositions(positions)
-    mesh.mda.setCells(cells)
-    mesh.mda.process()
-    mesh.cells = M.getCells()
-    mesh.positions = M.getPositions()
+    const M = (mesh.mda = new Mesh());
+    mesh.mda.setPositions(positions);
+    mesh.mda.setCells(cells);
+    mesh.mda.process();
+    mesh.cells = M.getCells();
+    mesh.positions = M.getPositions();
     mesh.normals = normals(mesh.cells, mesh.positions);
     mesh.cellPositions = mesh.cells.map((indices: number[]) =>
       indices.map((i) => mesh.positions[i])
@@ -313,10 +313,10 @@ import {
   permutationsWithReplacement,
   permutations,
 } from "combinatorial-generators";
-import invertPermutation from 'invert-permutation'
+import invertPermutation from "invert-permutation";
 import cumulativeSum from "cumulative-sum";
 import meshCombine from "mesh-combine";
-import { permutationIndices3 } from "./permutator";
+import { permutationIndices3, vertPermFromEdgePerm } from './permutator';
 // import { Mesh } from '../examples/gltf/src/gltf-spec/glTF2';
 
 export const makeTessellationAtlas = (LODs: number[]) => {
@@ -351,7 +351,9 @@ export const makeTessellationAtlas = (LODs: number[]) => {
                 [0, 1],
               ],
               xyz.slice(0, 2)
-            ).map(x => x*2**15).map(Math.floor)
+            )
+              .map((x) => x * 2 ** 15)
+              .map(Math.floor)
           ),
         ],
         // positions: [...acc.positions, ...flatten(next.cellPositions)]
@@ -374,9 +376,30 @@ export const makeTessellationAtlas = (LODs: number[]) => {
         ])
       ),
       ([a], [b]) => a === b
-    ).map(([prm_i, lod_i, lod, permutation]) => [
+    ).map(([prm_i, lod_i, lod, edgePermutation]) => [
       prm_i,
-      { lod, baseIndex: baseIndices[lod_i], count: counts[lod_i], permutation: invertPermutation(permutation) },
+      {
+        lod,
+        baseIndex: baseIndices[lod_i],
+        count: counts[lod_i],
+        // edgePermutation: invertPermutation(permutation),
+        // permutation: invertPermutation(permutation),
+        permutation: vertPermFromEdgePerm(edgePermutation)
+        // permutation: invertPermutation(
+        //   uniq(
+        //     flatten(
+        //       invertPermutation(permutation).flatMap(
+        //         (i) =>
+        //           [
+        //             [0, 1],
+        //             [1, 2],
+        //             [2, 0],
+        //           ][i]
+        //       )
+        //     )
+        //   )
+        // ).slice(0, 3),
+      },
     ])
   );
   return { meshes, combinedMesh, counts, baseIndices, lookup };
