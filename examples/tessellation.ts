@@ -18,9 +18,9 @@ import { permutationIndices3 } from "../src/permutator";
 import randomMesh from "./random-mesh";
 
 const closeVerts = 1;
-const farVerts = closeVerts * 10;
-const numVerts = 100;
-const debugText = false;
+const farVerts = closeVerts * 5;
+const numVerts = 70;
+const debugText = true;
 
 const [low, mid, high] = [0, 2, 4];
 const lods = [0,1,2,3,4,5,6];
@@ -256,13 +256,13 @@ document.addEventListener("DOMContentLoaded", async function () {
         // const faceMidpoint = mesh.mda.positions[face.halfEdge.vertex.index].slice(0,2);
 
         // ctx2D?.fillText(1, faceMidpoint[0]*ctx2D.canvas.width, faceMidpoint[1]*ctx2D.canvas.height);
-        if (debugText) {
+        if (debugText && JSON.stringify(face.meshlet.edgePermutation) === "[2,0,1]") {
           ctx2D?.fillText(
             // face.lod,
-            `${[face.meshlet.lod || "0"]} :: ${face.meshlet.permutation}`,
+            `${[face.meshlet.lod || "0"]} :: ${face.meshlet.edgePermutation} :: ${face.meshlet.permutation}`,
             // face.lodKey,
             // `${face.meshlet.lod} @ ${face.meshlet.permutation}`,
-            faceMidpoint[0] * ctx2D.canvas.width,
+            faceMidpoint[0] * ctx2D.canvas.width - 40,
             -faceMidpoint[1] * ctx2D.canvas.height
           );
         }

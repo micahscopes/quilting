@@ -382,7 +382,7 @@ export const makeTessellationAtlas = (LODs: number[]) => {
         lod,
         baseIndex: baseIndices[lod_i],
         count: counts[lod_i],
-        // edgePermutation: invertPermutation(permutation),
+        edgePermutation,
         // permutation: invertPermutation(permutation),
         permutation: vertPermFromEdgePerm(edgePermutation)
         // permutation: invertPermutation(
