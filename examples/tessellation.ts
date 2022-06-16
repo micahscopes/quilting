@@ -17,13 +17,13 @@ import { glsl } from "../src/util";
 import { permutationIndices3 } from "../src/permutator";
 import randomMesh from "./random-mesh";
 
-const closeVerts = 1;
-const farVerts = closeVerts * 5;
-const numVerts = 70;
+const closeVerts = 2;
+const farVerts = closeVerts * 15;
+const numVerts = 100;
 const debugText = true;
 
-const [low, mid, high] = [0, 2, 4];
-const lods = [0,1,2,3,4,5,6];
+const [low, mid, high] = [0, 3, 7];
+const lods = [0,1,2,3,4,5,6,7];
 const lodLevels = uniq([...lods, ...[low, mid, high]]).map((x) => 2 ** x);
 const exampleLodLookup = (i) => `[${2 ** i},${2 ** i},${2 ** i}]`;
 const lowLodKey = exampleLodLookup(low);
@@ -72,21 +72,18 @@ const fs = glsl`
 
     out vec4 fragColor;
     void main() {
-        // fragColor = vec4(1,1,0,1);
-        // fragColor = vec4(vColor,1);
-        
-        float threshold = 0.95;
-        bool c1 = cornerColor.x > threshold;
-        bool c2 = cornerColor.y > threshold;
-        bool c3 = cornerColor.z > threshold;
-        
-        vec3 color = vec3(
-          c1 ? 1.0 : !(c2 || c3) ? vColor.x : 0.0, //vColor.r,
-          c2 ? 1.0 : !(c1 || c3) ? vColor.y : 0.0, //vColor.g,
-          c3 ? 1.0 : !(c1 || c2) ? vColor.z : 0.0 //vColor.b
-        );
-        
-        fragColor = vec4(color, 1.0);
+        // float threshold = 0.95;
+        // bool c1 = cornerColor.x > threshold;
+        // bool c2 = cornerColor.y > threshold;
+        // bool c3 = cornerColor.z > threshold;
+        // vec3 color = vec3(
+        //   c1 ? 1.0 : !(c2 || c3) ? vColor.x : 0.0, //vColor.r,
+        //   c2 ? 1.0 : !(c1 || c3) ? vColor.y : 0.0, //vColor.g,
+        //   c3 ? 1.0 : !(c1 || c2) ? vColor.z : 0.0 //vColor.b
+        // );
+        // fragColor = vec4(color, 1.0);
+
+        fragColor = vec4(vColor, 1.0);
     }
 `;
 
@@ -114,7 +111,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   canvas2d.height = window.innerHeight;
   document.body.appendChild(canvas2d);
   const ctx2D = canvas2d.getContext("2d");
-  ctx2D!.font = "12px Helvetica";
+  ctx2D!.font = "8px Helvetica";
 
   const app = PicoGL.createApp(canvas).clearColor(0.0, 0.0, 0.0, 1.0);
   
@@ -138,7 +135,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   const patchesPerMeshlet = numVerts / 1;
 
   const mesh = randomMesh(numVerts);
-  // mesh.mda.faces.forEach(face => face.fallbackLod = sample([0,0,1,1,2]))
+  mesh.mda.faces.forEach(face => face.fallbackLod = sample([0,0,1,1,2]))
 
   window.M = mesh.mda;
   window.mda = mda;
@@ -256,7 +253,7 @@ document.addEventListener("DOMContentLoaded", async function () {
         // const faceMidpoint = mesh.mda.positions[face.halfEdge.vertex.index].slice(0,2);
 
         // ctx2D?.fillText(1, faceMidpoint[0]*ctx2D.canvas.width, faceMidpoint[1]*ctx2D.canvas.height);
-        if (debugText && JSON.stringify(face.meshlet.edgePermutation) === "[2,0,1]") {
+        if (debugText) {
           ctx2D?.fillText(
             // face.lod,
             `${[face.meshlet.lod || "0"]} :: ${face.meshlet.edgePermutation} :: ${face.meshlet.permutation}`,

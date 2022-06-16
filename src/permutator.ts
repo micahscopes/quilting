@@ -21,13 +21,15 @@ export function permutator(inputArr: any[]) : any[] {
   
 export const permutationIndices3 = permutator([0,1,2])
 
-export const vertPermFromEdgePerm = (edgePerm) => {
+type permute3index = [number,number,number]
+
+export const vertPermFromEdgePerm = (edgePerm: permute3index) => {
   return {
-    "[0,1,2]": [0,1,2],
-    "[1,2,0]": [1,2,0],
-    "[2,0,1]": [1,2,0],
-    "[0,2,1]": [1,0,2],
-    "[1,0,2]": [2,1,0],
-    "[2,1,0]": [0,2,1]
+    "[0,1,2]": [1,0,2],
+    "[1,2,0]": [0,2,1],
+    "[2,0,1]": [2,1,0],
+    "[0,2,1]": [0,2,1],
+    "[1,0,2]": [2,0,1],
+    "[2,1,0]": [1,2,0]
   }[JSON.stringify(edgePerm)]
 }
