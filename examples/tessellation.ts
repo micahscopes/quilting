@@ -2,6 +2,7 @@ import {
   add,
   constant,
   flatten,
+  isEqual,
   repeat,
   sample,
   sum,
@@ -10,29 +11,30 @@ import {
   zipWith,
 } from "lodash-es";
 import PicoGL from "picogl";
-import { makeTessellationAtlas } from "../src/tessellation";
+import { loadTessellationAtlas } from "../src/tessellation";
 import "./pico-util";
 
 import { glsl } from "../src/util";
-import { permutationIndices3 } from "../src/permutator";
 import randomMesh from "./random-mesh";
+// import { decode, UnpackrStream, unpack} from "msgpackr";
 
-const closeVerts = 2;
-const farVerts = closeVerts * 15;
-const numVerts = 100;
-const debugText = true;
+// console.log(tessellations)
 
-const [low, mid, high] = [0, 3, 7];
-const lods = [0,1,2,3,4,5,6,7];
+const closeVerts = 20;
+const farVerts = closeVerts * 3;
+const numVerts = 200;
+const debugText = false;
+
+const [low, mid, high] = [1,3,4];
+const lods = [low, mid, high];
 const lodLevels = uniq([...lods, ...[low, mid, high]]).map((x) => 2 ** x);
 const exampleLodLookup = (i) => `[${2 ** i},${2 ** i},${2 ** i}]`;
 const lowLodKey = exampleLodLookup(low);
 const midLodKey = exampleLodLookup(mid);
 const highLodKey = exampleLodLookup(high);
 
-const atlas = makeTessellationAtlas(lodLevels);
-console.log("meshlet atlas", atlas);
-console.log(permutationIndices3);
+// console.log("meshlet atlas", atlas);
+// console.log(permutationIndices3);
 
 const vs = glsl`
     #version 300 es
@@ -89,16 +91,26 @@ const fs = glsl`
 
 import mda from "mda";
 
-import { tap, runEffects, merge, map } from "@most/core";
+import {
+  tap,
+  runEffects,
+  merge,
+  map,
+  debounce,
+  throttle,
+  periodic,
+  delay,
+} from "@most/core";
 import { newDefaultScheduler } from "@most/scheduler";
-import positionInElement from "./position-in-element";
-import { mousemove, touchmove } from "@most/dom-event";
-import { positionInCanvas } from "./position-in-element";
+// import positionInElement from "./position-in-element";
+// import { mousemove, touchmove } from "@most/dom-event";
+// import { positionInCanvas } from "./position-in-element";
 import { flow } from "lodash-es";
 import knn from "rbush-knn";
-import humanFormat from "human-format"
+import humanFormat from "human-format";
 
 document.addEventListener("DOMContentLoaded", async function () {
+  const atlas = await loadTessellationAtlas(lodLevels);
   const canvas = document.createElement("canvas");
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
@@ -114,10 +126,9 @@ document.addEventListener("DOMContentLoaded", async function () {
   ctx2D!.font = "8px Helvetica";
 
   const app = PicoGL.createApp(canvas).clearColor(0.0, 0.0, 0.0, 1.0);
-  
+
   app.gl.enable(app.gl.CULL_FACE);
   app.gl.cullFace(app.gl.BACK);
-
 
   const timer = app.createTimer();
   window.utils.addTimerElement();
@@ -135,7 +146,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   const patchesPerMeshlet = numVerts / 1;
 
   const mesh = randomMesh(numVerts);
-  mesh.mda.faces.forEach(face => face.fallbackLod = sample([0,0,1,1,2]))
+  mesh.mda.faces.forEach((face) => (face.fallbackLod = sample([low, low])));
 
   window.M = mesh.mda;
   window.mda = mda;
@@ -165,7 +176,16 @@ document.addEventListener("DOMContentLoaded", async function () {
         }
       }),
     ])
-  )(positionInCanvas(merge(mousemove(canvas), touchmove(canvas))));
+  )(
+    map(
+      () => ({
+        x: 0.5 * Math.sin(Date.now() / 1000),
+        y: 0.5 * Math.cos(Date.now() / 1000),
+      }),
+      periodic(15)
+    )
+  );
+  // (positionInCanvas(merge(mousemove(canvas), touchmove(canvas))));
   const scheduler = newDefaultScheduler();
 
   // runEffects(tap(console.log, mouseInCanvas$), scheduler);
@@ -191,6 +211,8 @@ document.addEventListener("DOMContentLoaded", async function () {
     .instanceAttributeBuffer(1, permutations)
     .instanceAttributeBuffer(2, corners);
 
+  window.triangleArray = triangleArray;
+
   app.gl.disable(app.gl.CULL_FACE);
 
   const program = (await app.createPrograms([vs, fs]))[0];
@@ -204,8 +226,10 @@ document.addEventListener("DOMContentLoaded", async function () {
     new Int8Array(flatten(meshlets.flatMap((m) => m.permutation)))
   );
 
+  let ranges = [];
+
   runEffects(
-    tap(([closerFaceIDs, furtherFaceIds]) => {
+    tap(async ([closerFaceIDs, furtherFaceIds]) => {
       mesh.mda.faces.forEach((face) => {
         if (closerFaceIDs.includes(face.index)) {
           face.lod = high;
@@ -224,7 +248,12 @@ document.addEventListener("DOMContentLoaded", async function () {
             .FaceHalfEdges(face)
             .map((he) =>
               // Math.max(face.lod || (face.fallbackLod || low), he.flipHalfEdge?.face.lod || (face.fallbackLod || low))
-              Math.max(face.lod || face.fallbackLod || low, he.flipHalfEdge?.face.lod || he.flipHalfEdge?.face.fallbackLod || low)
+              Math.max(
+                face.lod || face.fallbackLod || low,
+                he.flipHalfEdge?.face.lod ||
+                  he.flipHalfEdge?.face.fallbackLod ||
+                  low
+              )
             )
             .map((i) => 2 ** i)
         );
@@ -235,47 +264,45 @@ document.addEventListener("DOMContentLoaded", async function () {
       permutations.data(
         new Int8Array(flatten(meshlets.flatMap((m) => m.permutation)))
       );
-      // console.log(meshlets.map((m) => m.permutation));
-      ctx2D?.clearRect(
-        -ctx2D.canvas.width / 2,
-        -ctx2D.canvas.height / 2,
-        ctx2D.canvas.width,
-        ctx2D.canvas.height
-      );
+      if (debugText) {
+        ctx2D?.clearRect(
+          -ctx2D.canvas.width / 2,
+          -ctx2D.canvas.height / 2,
+          ctx2D.canvas.width,
+          ctx2D.canvas.height
+        );
 
-      mesh.mda.faces.forEach((face) => {
-        const faceMidpoint = zipWith(
-          ...mda.FaceVertices(face).map((v) => mesh.mda.positions[v.index]),
-          (x, y, z) => x + y + z
-        )
-          .map((x) => x / 3)
-          .slice(0, 2);
-        // const faceMidpoint = mesh.mda.positions[face.halfEdge.vertex.index].slice(0,2);
-
-        // ctx2D?.fillText(1, faceMidpoint[0]*ctx2D.canvas.width, faceMidpoint[1]*ctx2D.canvas.height);
-        if (debugText) {
+        mesh.mda.faces.forEach((face) => {
+          const faceMidpoint = zipWith(
+            ...mda.FaceVertices(face).map((v) => mesh.mda.positions[v.index]),
+            (x, y, z) => x + y + z
+          )
+            .map((x) => x / 3)
+            .slice(0, 2);
           ctx2D?.fillText(
-            // face.lod,
-            `${[face.meshlet.lod || "0"]} :: ${face.meshlet.edgePermutation} :: ${face.meshlet.permutation}`,
+            face.lod || face.fallbackLod,
+            // `${[face.meshlet.lod || "0"]} :: ${face.meshlet.edgePermutation} :: ${face.meshlet.permutation}`,
             // face.lodKey,
             // `${face.meshlet.lod} @ ${face.meshlet.permutation}`,
             faceMidpoint[0] * ctx2D.canvas.width - 40,
             -faceMidpoint[1] * ctx2D.canvas.height
           );
-        }
-      });
+        });
+      }
       const triangles = `
       <p>
       triangles: 
-        ${humanFormat(sum(mesh.mda.faces.map(({meshlet}) => meshlet.count))/3)}
+        ${humanFormat(
+          sum(mesh.mda.faces.map(({ meshlet }) => meshlet.count)) / 3
+        )}
       </p><p>
       patches:
         ${mesh.mda.faces.length} 
       </p>
-      `
+      `;
       // console.log(triangles)
-      document.querySelector('#stats')!.innerHTML = triangles 
-    }, mouseInCanvas$),
+      document.querySelector("#stats")!.innerHTML = triangles;
+    }, throttle(30, mouseInCanvas$)),
     scheduler
   );
 
@@ -289,17 +316,29 @@ document.addEventListener("DOMContentLoaded", async function () {
 
     // DRAW
     app.clear();
-    drawCall.drawRanges(
-      ...meshlets.map((m, i) => [
-        m.baseIndex,
-        m.count,
-        //
-        1,
-        i,
-        // patchesPerMeshlet,
-        // i * patchesPerMeshlet,
-      ])
+
+    let nextRanges = [];
+    for (let i = 0; i < meshlets.length; i++) {
+      const mNext = meshlets[i];
+      const prev = nextRanges.at(-1);
+      if (isEqual(mNext.lod, prev?.at(-1))) {
+        prev[2] += 1;
+      } else {
+        nextRanges.push([mNext.baseIndex, mNext.count, 1, i, mNext.lod]);
+      }
+    }
+    ranges = nextRanges.map(
+      ([baseIndex, count, numInstances, baseInstance]) => [
+        baseIndex,
+        count,
+        numInstances,
+        baseInstance,
+      ]
     );
+
+    // console.log('num ranges', ranges.length)
+
+    drawCall.drawRanges(...ranges);
     drawCall.draw();
 
     timer.end();

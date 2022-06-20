@@ -75,6 +75,7 @@ export const triEdgeWeightInterpolator =
 import { KdTreeSet } from "@thi.ng/geom-accel";
 import { DensityFunction, samplePoisson } from "@thi.ng/poisson";
 import { dist, divN2 } from "@thi.ng/vectors";
+// @ts-ignore
 import barycentric from "barycentric";
 import Delaunator from "delaunator";
 import {
@@ -82,6 +83,7 @@ import {
   flatten,
   fromPairs,
   isEqual,
+  mapKeys,
   range,
   sortBy,
   sortedUniq,
@@ -92,7 +94,8 @@ import {
 } from "lodash-es";
 import moize from "moize";
 
-const cartesian = (bary, corners) => [
+type Point3D = [number, number, number];
+const cartesian = (bary: Point3D, corners: [Point2D, Point2D, Point2D]) => [
   bary[0] * corners[0][0] + bary[1] * corners[1][0] + bary[2] * corners[2][0],
   bary[0] * corners[0][1] + bary[1] * corners[1][1] + bary[2] * corners[2][1],
 ];
@@ -165,7 +168,7 @@ export const quadPatch = (
     index.add([d, 1]);
   }
 
-  const interpolation = (x) =>
+  const interpolation = (x: any) =>
     1 / quadEdgeWeightInterpolator(resA, resB, resC, resD)(x);
   const sample = () => {
     const points = () => [Math.random(), Math.random()];
@@ -244,9 +247,9 @@ export const triPatch = (
   return { points, index };
 };
 
-type triResolutions = [number, number, number];
-type quadResolutions = [number, number, number, number];
-type patchResolutions = triResolutions | quadResolutions;
+export type triResolutions = [number, number, number];
+export type quadResolutions = [number, number, number, number];
+export type patchResolutions = triResolutions | quadResolutions;
 
 export const tessellation = moize((sideLODs: number | patchResolutions = 8) => {
   let points;
@@ -269,57 +272,51 @@ interface mesh {
   normals: number[][];
 }
 
+// @ts-ignore
 import normals from "angle-normals";
+// @ts-ignore
 import { Mesh } from "mda";
 // import top from 'simplicial-complex';
 // import mergeVertices from "merge-vertices";
 
-export const prepareMesh = moize(
-  (grid) => {
-    let mesh: mesh | any = {};
-    const cells = chunk(grid.triangles, 3);
-    const positions = chunk(grid.coords, 2).map(([u, v]) => [
-      u,
-      v,
-      0,
-    ]) as number[][];
-    // mesh = mergeVertices(mesh.cells, mesh.positions)
-    // top.normalize(mesh.cells)
-    // mesh.incidence = top.incidence(mesh.cells, mesh.cells)
-    const M = (mesh.mda = new Mesh());
-    mesh.mda.setPositions(positions);
-    mesh.mda.setCells(cells);
-    mesh.mda.process();
-    mesh.cells = M.getCells();
-    mesh.positions = M.getPositions();
-    mesh.normals = normals(mesh.cells, mesh.positions);
-    mesh.cellPositions = mesh.cells.map((indices: number[]) =>
-      indices.map((i) => mesh.positions[i])
-    );
-    mesh.cellNormals = mesh.cells.map((indices: number[]) =>
-      indices.map((i) => mesh.normals[i])
-    );
-    return mesh;
-  },
-  { maxSize: 40 }
-);
+export const prepareMesh = (grid: any) => {
+  let mesh: mesh | any = {};
+  const cells = chunk(grid.triangles, 3);
+  const positions = chunk(grid.coords, 2).map(([u, v]) => [
+    u,
+    v,
+    0,
+  ]) as number[][];
+  // mesh = mergeVertices(mesh.cells, mesh.positions)
+  // top.normalize(mesh.cells)
+  // mesh.incidence = top.incidence(mesh.cells, mesh.cells)
+  const M = (mesh.mda = new Mesh());
+  mesh.mda.setPositions(positions);
+  mesh.mda.setCells(cells);
+  mesh.mda.process();
+  mesh.cells = M.getCells();
+  mesh.positions = M.getPositions();
+  mesh.normals = normals(mesh.cells, mesh.positions);
+  mesh.cellPositions = mesh.cells.map((indices: number[]) =>
+    indices.map((i) => mesh.positions[i])
+  );
+  mesh.cellNormals = mesh.cells.map((indices: number[]) =>
+    indices.map((i) => mesh.normals[i])
+  );
+  return mesh;
+};
 
-export const tessellationMesh = moize(
-  (sideLODs: number | patchResolutions) => prepareMesh(tessellation(sideLODs)),
-  { maxSize: 40 }
-);
+export const tessellationMesh = (sideLODs: number | patchResolutions) =>
+  prepareMesh(tessellation(sideLODs));
 
-import {
-  permutationsWithReplacement,
-  permutations,
-} from "combinatorial-generators";
-import invertPermutation from "invert-permutation";
+import { permutationsWithReplacement } from "combinatorial-generators";
 import cumulativeSum from "cumulative-sum";
-import meshCombine from "mesh-combine";
-import { permutationIndices3, vertPermFromEdgePerm } from './permutator';
-// import { Mesh } from '../examples/gltf/src/gltf-spec/glTF2';
+import { permutationIndices3, vertPermFromEdgePerm } from "./permutator";
 
-export const makeTessellationAtlas = (LODs: number[]) => {
+// import tessellations from '../tessellations/*.json'
+// const allTessellations = mapKeys(tessellations, (_, key) => JSON.stringify(key.split('-').map(Number)))
+
+export const loadTessellationAtlas = async (LODs: number[]) => {
   console.log();
   const reducedLODs = uniqBy(
     [
@@ -331,6 +328,10 @@ export const makeTessellationAtlas = (LODs: number[]) => {
     (x) => JSON.stringify(sortBy(x))
   );
 
+  console.log(reducedLODs)
+  // const meshes = reducedLODs.map()
+  // const meshes = reducedLODs.map(k => allTessellations[JSON.stringify(k)])
+  // console.log(meshes);
   const meshes = reducedLODs.map((sideLODs) =>
     tessellationMesh(sideLODs as triResolutions)
   );
@@ -339,11 +340,12 @@ export const makeTessellationAtlas = (LODs: number[]) => {
   const combinedMesh = meshes.reduce(
     (acc, next) => {
       console.log(acc, next);
+      // next.cellPositions = next.cells.map(cell => cell.map(i => next.positions[i]));
       return {
         cells: [...acc.cells, ...next.cells],
         positions: [
           ...acc.positions,
-          ...flatten(next.cellPositions).map((xyz) =>
+          ...flatten(next.cellPositions).map((xyz: any) =>
             barycentric(
               [
                 [0, 0],
@@ -352,24 +354,22 @@ export const makeTessellationAtlas = (LODs: number[]) => {
               ],
               xyz.slice(0, 2)
             )
-              .map((x) => x * 2 ** 15)
+              .map((x: number) => x * 2 ** 15)
               .map(Math.floor)
           ),
         ],
-        // positions: [...acc.positions, ...flatten(next.cellPositions)]
       };
     },
     { cells: [], positions: [] }
   );
 
-  // const counts = reducedLODs.map((_, i) => meshes[i].cells.length);
   const counts = reducedLODs.map((_, i) => meshes[i].cellPositions.length * 3);
   const baseIndices = [0, ...cumulativeSum(counts.map((x) => x)).slice(0, -1)];
   const lookup = fromPairs(
     uniqWith(
       reducedLODs.flatMap((lod, i) =>
         permutationIndices3.map((pidxs) => [
-          JSON.stringify(pidxs.map((pi) => lod[pi])),
+          JSON.stringify(pidxs.map((pi: any) => lod[pi])),
           i,
           lod,
           pidxs,
@@ -383,22 +383,7 @@ export const makeTessellationAtlas = (LODs: number[]) => {
         baseIndex: baseIndices[lod_i],
         count: counts[lod_i],
         edgePermutation,
-        // permutation: invertPermutation(permutation),
-        permutation: vertPermFromEdgePerm(edgePermutation)
-        // permutation: invertPermutation(
-        //   uniq(
-        //     flatten(
-        //       invertPermutation(permutation).flatMap(
-        //         (i) =>
-        //           [
-        //             [0, 1],
-        //             [1, 2],
-        //             [2, 0],
-        //           ][i]
-        //       )
-        //     )
-        //   )
-        // ).slice(0, 3),
+        permutation: vertPermFromEdgePerm(edgePermutation),
       },
     ])
   );

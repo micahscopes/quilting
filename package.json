@@ -28,8 +28,10 @@
   },
   "devDependencies": {
     "@loaders.gl/gltf": "^3.1.8",
-    "@parcel/resolver-glob": "^2.4.1",
+    "@parcel/optimizer-data-url": "^2.6.1",
+    "@parcel/resolver-glob": "^2.6.1",
     "@parcel/transformer-glsl": "^2.4.1",
+    "@parcel/transformer-inline-string": "^2.6.1",
     "@types/delaunator": "^5.0.0",
     "@types/expect": "^24.3.0",
     "@types/lodash-es": "^4.17.5",
@@ -88,6 +90,7 @@
     "barycentric": "^1.0.1",
     "bound-points": "^1.0.0",
     "combinatorial-generators": "^1.1.2",
+    "cumulative-sum": "^1.0.0",
     "delaunator": "^5.0.0",
     "extract-svg-path": "^2.1.0",
     "gl-matrix": "^3.4.3",
@@ -98,6 +101,8 @@
     "mda": "^1.1.1",
     "merge-vertices": "^1.0.1",
     "moize": "^6.1.0",
+    "msgpack": "^1.0.3",
+    "msgpackr": "^1.6.1",
     "picogl": "github:micahscopes/picogl.js#base-vertex-base-instance-build",
     "rbush": "^3.0.1",
     "rbush-knn": "^3.0.1",
@@ -115,7 +120,8 @@
     "url": "git+ssh://git@github.com/micahscopes/quilting.git"
   },
   "alias": {
-    "tinyqueue": "./node_modules/tinyqueue/tinyqueue.js"
+    "tinyqueue": "./node_modules/tinyqueue/tinyqueue.js",
+    "process": false
   },
   "author": "micahscopes",
   "license": "AGPL-3.0-or-later",

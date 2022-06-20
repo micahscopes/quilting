@@ -15,7 +15,7 @@ export default function (points = 100, width = 1, height = 1, center = [0, 0]) {
       ])
   );
   
-  coords = flatten(uvGrid(Math.sqrt(points)).map(([x,y])=>[x-0.5,y-0.5]))
+  // coords = flatten(uvGrid(Math.sqrt(points)).map(([x,y])=>[x-0.5,y-0.5]))
 
   const delaunay = new Delaunator(coords);
 
