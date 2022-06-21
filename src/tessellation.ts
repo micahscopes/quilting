@@ -80,16 +80,11 @@ import barycentric from "barycentric";
 import Delaunator from "delaunator";
 import {
   chunk,
-  flatten,
-  fromPairs,
   isEqual,
   mapKeys,
   range,
-  sortBy,
   sortedUniq,
   uniq,
-  uniqBy,
-  uniqWith,
   zip,
 } from "lodash-es";
 import moize from "moize";
@@ -251,7 +246,7 @@ export type triResolutions = [number, number, number];
 export type quadResolutions = [number, number, number, number];
 export type patchResolutions = triResolutions | quadResolutions;
 
-export const tessellation = moize((sideLODs: number | patchResolutions = 8) => {
+export const tessellation = (sideLODs: number | patchResolutions = 8) => {
   let points;
   if (Array.isArray(sideLODs)) {
     sideLODs = sideLODs as patchResolutions;
@@ -264,7 +259,7 @@ export const tessellation = moize((sideLODs: number | patchResolutions = 8) => {
     points = triPatch(sideLODs, sideLODs, sideLODs).points;
   }
   return Delaunator.from(points);
-});
+};
 
 interface mesh {
   cells: number[][];
@@ -275,11 +270,11 @@ interface mesh {
 // @ts-ignore
 import normals from "angle-normals";
 // @ts-ignore
-import { Mesh } from "mda";
+import MDA from "mda";
 // import top from 'simplicial-complex';
 // import mergeVertices from "merge-vertices";
 
-export const prepareMesh = (grid: any) => {
+export const prepareMesh = (grid: any, includeMda = true) => {
   let mesh: mesh | any = {};
   const cells = chunk(grid.triangles, 3);
   const positions = chunk(grid.coords, 2).map(([u, v]) => [
@@ -290,10 +285,10 @@ export const prepareMesh = (grid: any) => {
   // mesh = mergeVertices(mesh.cells, mesh.positions)
   // top.normalize(mesh.cells)
   // mesh.incidence = top.incidence(mesh.cells, mesh.cells)
-  const M = (mesh.mda = new Mesh());
-  mesh.mda.setPositions(positions);
-  mesh.mda.setCells(cells);
-  mesh.mda.process();
+  const M = new MDA.Mesh();
+  M.setPositions(positions);
+  M.setCells(cells);
+  M.process();
   mesh.cells = M.getCells();
   mesh.positions = M.getPositions();
   mesh.normals = normals(mesh.cells, mesh.positions);
@@ -303,89 +298,15 @@ export const prepareMesh = (grid: any) => {
   mesh.cellNormals = mesh.cells.map((indices: number[]) =>
     indices.map((i) => mesh.normals[i])
   );
+  
+  if(includeMda){
+    mesh.mda = M;
+  }
+  // console.log('mesh', mesh)
   return mesh;
 };
 
-export const tessellationMesh = (sideLODs: number | patchResolutions) =>
-  prepareMesh(tessellation(sideLODs));
-
-import { permutationsWithReplacement } from "combinatorial-generators";
-import cumulativeSum from "cumulative-sum";
-import { permutationIndices3, vertPermFromEdgePerm } from "./permutator";
-
-// import tessellations from '../tessellations/*.json'
-// const allTessellations = mapKeys(tessellations, (_, key) => JSON.stringify(key.split('-').map(Number)))
-
-export const loadTessellationAtlas = async (LODs: number[]) => {
-  console.log();
-  const reducedLODs = uniqBy(
-    [
-      ...permutationsWithReplacement(
-        LODs.sort((a, b) => b - a),
-        3
-      ),
-    ],
-    (x) => JSON.stringify(sortBy(x))
-  );
-
-  console.log(reducedLODs)
-  // const meshes = reducedLODs.map()
-  // const meshes = reducedLODs.map(k => allTessellations[JSON.stringify(k)])
-  // console.log(meshes);
-  const meshes = reducedLODs.map((sideLODs) =>
-    tessellationMesh(sideLODs as triResolutions)
-  );
-
-  // const combinedMesh = meshCombine(meshes);
-  const combinedMesh = meshes.reduce(
-    (acc, next) => {
-      console.log(acc, next);
-      // next.cellPositions = next.cells.map(cell => cell.map(i => next.positions[i]));
-      return {
-        cells: [...acc.cells, ...next.cells],
-        positions: [
-          ...acc.positions,
-          ...flatten(next.cellPositions).map((xyz: any) =>
-            barycentric(
-              [
-                [0, 0],
-                [1, 0],
-                [0, 1],
-              ],
-              xyz.slice(0, 2)
-            )
-              .map((x: number) => x * 2 ** 15)
-              .map(Math.floor)
-          ),
-        ],
-      };
-    },
-    { cells: [], positions: [] }
-  );
-
-  const counts = reducedLODs.map((_, i) => meshes[i].cellPositions.length * 3);
-  const baseIndices = [0, ...cumulativeSum(counts.map((x) => x)).slice(0, -1)];
-  const lookup = fromPairs(
-    uniqWith(
-      reducedLODs.flatMap((lod, i) =>
-        permutationIndices3.map((pidxs) => [
-          JSON.stringify(pidxs.map((pi: any) => lod[pi])),
-          i,
-          lod,
-          pidxs,
-        ])
-      ),
-      ([a], [b]) => a === b
-    ).map(([prm_i, lod_i, lod, edgePermutation]) => [
-      prm_i,
-      {
-        lod,
-        baseIndex: baseIndices[lod_i],
-        count: counts[lod_i],
-        edgePermutation,
-        permutation: vertPermFromEdgePerm(edgePermutation),
-      },
-    ])
-  );
-  return { meshes, combinedMesh, counts, baseIndices, lookup };
-};
+export function tessellationMesh(sideLODs: number | patchResolutions){
+  const mesh = prepareMesh(tessellation(sideLODs), false);
+  return mesh
+}

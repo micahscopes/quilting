@@ -1,6 +1,5 @@
 import {
   add,
-  constant,
   flatten,
   isEqual,
   repeat,
@@ -11,7 +10,7 @@ import {
   zipWith,
 } from "lodash-es";
 import PicoGL from "picogl";
-import { loadTessellationAtlas } from "../src/tessellation";
+import { loadTessellationAtlas } from "../src/load-tessellation-atlas";
 import "./pico-util";
 
 import { glsl } from "../src/util";
@@ -20,12 +19,12 @@ import randomMesh from "./random-mesh";
 
 // console.log(tessellations)
 
-const closeVerts = 20;
+const closeVerts = 50;
 const farVerts = closeVerts * 3;
-const numVerts = 200;
+const numVerts = 2000;
 const debugText = false;
 
-const [low, mid, high] = [1,3,4];
+const [low, mid, high] = [6,7,8];
 const lods = [low, mid, high];
 const lodLevels = uniq([...lods, ...[low, mid, high]]).map((x) => 2 ** x);
 const exampleLodLookup = (i) => `[${2 ** i},${2 ** i},${2 ** i}]`;
@@ -94,21 +93,25 @@ import mda from "mda";
 import {
   tap,
   runEffects,
-  merge,
   map,
   debounce,
   throttle,
   periodic,
   delay,
+  combine,
+  filter,
+  takeWhile,
 } from "@most/core";
 import { newDefaultScheduler } from "@most/scheduler";
 // import positionInElement from "./position-in-element";
-// import { mousemove, touchmove } from "@most/dom-event";
+import { domEvent } from "@most/dom-event";
 // import { positionInCanvas } from "./position-in-element";
 import { flow } from "lodash-es";
 import knn from "rbush-knn";
 import humanFormat from "human-format";
+import { whileTabFocus } from "./whileTabFocus";
 
+  
 document.addEventListener("DOMContentLoaded", async function () {
   const atlas = await loadTessellationAtlas(lodLevels);
   const canvas = document.createElement("canvas");
@@ -151,6 +154,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   window.M = mesh.mda;
   window.mda = mda;
 
+
   const mouseInCanvas$ = flow(
     map(({ x, y }) => [
       knn(mesh.rbush, x, y, closeVerts),
@@ -177,12 +181,15 @@ document.addEventListener("DOMContentLoaded", async function () {
       }),
     ])
   )(
-    map(
-      () => ({
-        x: 0.5 * Math.sin(Date.now() / 1000),
-        y: 0.5 * Math.cos(Date.now() / 1000),
-      }),
-      periodic(15)
+    filter(
+      () => !document.hidden,
+      map(
+        () => ({
+          x: 0.5 * Math.sin(Date.now() / 1000),
+          y: 0.5 * Math.cos(Date.now() / 1000),
+        }),
+        whileTabFocus(periodic(15))
+      )
     )
   );
   // (positionInCanvas(merge(mousemove(canvas), touchmove(canvas))));
@@ -230,6 +237,8 @@ document.addEventListener("DOMContentLoaded", async function () {
 
   runEffects(
     tap(async ([closerFaceIDs, furtherFaceIds]) => {
+      // console.log("computing LODs", Math.round(Date.now() / 1000));
+      // if (!document.hidden) {
       mesh.mda.faces.forEach((face) => {
         if (closerFaceIDs.includes(face.index)) {
           face.lod = high;
@@ -302,12 +311,14 @@ document.addEventListener("DOMContentLoaded", async function () {
       `;
       // console.log(triangles)
       document.querySelector("#stats")!.innerHTML = triangles;
-    }, throttle(30, mouseInCanvas$)),
+      // }
+    }, throttle(100, mouseInCanvas$)),
     scheduler
   );
 
   ctx2D?.translate(ctx2D.canvas.width / 2, ctx2D.canvas.height / 2);
   const draw = () => {
+    // console.log("drawing", Math.round(Date.now() / 1000));
     if (timer.ready()) {
       utils.updateTimerElement(timer.cpuTime, timer.gpuTime);
     }

@@ -98,7 +98,7 @@
     "invert-permutation": "^1.0.0",
     "load-svg": "^1.0.0",
     "lodash-es": "^4.17.21",
-    "mda": "^1.1.1",
+    "mda": "github:micahscopes/mda.js",
     "merge-vertices": "^1.0.1",
     "moize": "^6.1.0",
     "msgpack": "^1.0.3",
@@ -107,7 +107,9 @@
     "rbush": "^3.0.1",
     "rbush-knn": "^3.0.1",
     "simplicial-complex": "^1.0.0",
-    "svg-mesh-3d": "^1.1.0"
+    "svg-mesh-3d": "^1.1.0",
+    "threads": "^1.7.0",
+    "workerpool": "^6.2.1"
   },
   "description": "work in progress",
   "version": "0.0.0",
