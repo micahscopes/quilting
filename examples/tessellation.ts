@@ -19,13 +19,13 @@ import randomMesh from "./random-mesh";
 
 // console.log(tessellations)
 
-const closeVerts = 50;
-const farVerts = closeVerts * 3;
-const numVerts = 2000;
+const closeVerts = 40;
+const farVerts = closeVerts * 4;
+const numVerts = 500;
 const debugText = false;
 
-const [low, mid, high] = [6,7,8];
-const lods = [low, mid, high];
+const [low, mid, high] = [3,5,8];
+const lods = [];
 const lodLevels = uniq([...lods, ...[low, mid, high]]).map((x) => 2 ** x);
 const exampleLodLookup = (i) => `[${2 ** i},${2 ** i},${2 ** i}]`;
 const lowLodKey = exampleLodLookup(low);
@@ -88,6 +88,7 @@ const fs = glsl`
     }
 `;
 
+// @ts-ignore
 import mda from "mda";
 
 import {
@@ -107,7 +108,11 @@ import { newDefaultScheduler } from "@most/scheduler";
 import { domEvent } from "@most/dom-event";
 // import { positionInCanvas } from "./position-in-element";
 import { flow } from "lodash-es";
+
+// @ts-ignore
 import knn from "rbush-knn";
+
+// @ts-ignore
 import humanFormat from "human-format";
 import { whileTabFocus } from "./whileTabFocus";
 
@@ -151,8 +156,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   const mesh = randomMesh(numVerts);
   mesh.mda.faces.forEach((face) => (face.fallbackLod = sample([low, low])));
 
-  window.M = mesh.mda;
-  window.mda = mda;
+  // window.M = mesh.mda;
+  // window.mda = mda;
 
 
   const mouseInCanvas$ = flow(
@@ -185,8 +190,8 @@ document.addEventListener("DOMContentLoaded", async function () {
       () => !document.hidden,
       map(
         () => ({
-          x: 0.5 * Math.sin(Date.now() / 1000),
-          y: 0.5 * Math.cos(Date.now() / 1000),
+          x: 0.5 * Math.sin(Date.now() / 4000),
+          y: 0.5 * Math.cos(Date.now() / 4000),
         }),
         whileTabFocus(periodic(15))
       )
@@ -312,7 +317,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       // console.log(triangles)
       document.querySelector("#stats")!.innerHTML = triangles;
       // }
-    }, throttle(100, mouseInCanvas$)),
+    }, throttle(15, mouseInCanvas$)),
     scheduler
   );
 
