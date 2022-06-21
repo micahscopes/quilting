@@ -1,0 +1,51 @@
+<script src="/quilting/2022-june-21-A/tessellation.55e84101.js" defer=""></script>
+<style>
+  body,
+  html {
+    padding: 0;
+    margin: 0;
+    background-color: black;
+    color: white;
+    font-family: Helvetica, sans-serif
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    position: absolute;
+  }
+  #timer {
+    position: absolute;
+    color: white;
+    background: rgba(0, 0, 0, 0.5);
+    padding: 10px;
+  }
+  #stats {
+    top: 80px;
+    width: 12vw;
+    min-width: 300px;
+    position: absolute;
+    color: white;
+    background: rgba(0, 0, 0, 0.5);
+    padding: 10px;
+    z-index: 10;
+  }
+  #spinner {
+    position: absolute;
+    height: 100%;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  paper-spinner-lite {
+    /* z-index: 10; */
+    position: absolute;
+    width: 20em;
+    height: 20em;
+    /* width: 10em; */
+  }
+
+</style>
+<div id="stats">hello</div>
+<div id="spinner"><paper-spinner-lite active=""></paper-spinner-lite><h3>generating tessellations...</h3></div>
