@@ -25,7 +25,7 @@ const farVerts = closeVerts * 4;
 const numVerts = 500;
 const debugText = false;
 
-const [low, mid, high] = [3,5,8];
+const [low, mid, high] = [1,2,6];
 const lods = [];
 const lodLevels = uniq([...lods, ...[low, mid, high]]).map((x) => 2 ** x);
 const exampleLodLookup = (i) => `[${2 ** i},${2 ** i},${2 ** i}]`;
@@ -103,10 +103,11 @@ import {
   combine,
   filter,
   takeWhile,
+  merge,
 } from "@most/core";
 import { newDefaultScheduler } from "@most/scheduler";
 // import positionInElement from "./position-in-element";
-import { domEvent } from "@most/dom-event";
+import { domEvent, mousemove, touchmove } from "@most/dom-event";
 // import { positionInCanvas } from "./position-in-element";
 import { flow } from "lodash-es";
 
@@ -116,6 +117,7 @@ import knn from "rbush-knn";
 // @ts-ignore
 import humanFormat from "human-format";
 import { whileTabFocus } from "./whileTabFocus";
+import { positionInCanvas } from "./position-in-element";
 
   
 document.addEventListener("DOMContentLoaded", async function () {
@@ -186,19 +188,21 @@ document.addEventListener("DOMContentLoaded", async function () {
         }
       }),
     ])
-  )(
-    filter(
-      () => !document.hidden,
-      map(
-        () => ({
-          x: 0.5 * Math.sin(Date.now() / 4000),
-          y: 0.5 * Math.cos(Date.now() / 4000),
-        }),
-        whileTabFocus(periodic(15))
-      )
-    )
-  );
-  // (positionInCanvas(merge(mousemove(canvas), touchmove(canvas))));
+  )
+  (whileTabFocus(positionInCanvas(merge(mousemove(canvas), map(({touches}) => touches[0], touchmove(canvas))))));
+  // (
+  //   filter(
+  //     () => !document.hidden,
+  //     map(
+  //       () => ({
+  //         x: 0.5 * Math.sin(Date.now() / 4000),
+  //         y: 0.5 * Math.cos(Date.now() / 4000),
+  //       }),
+  //       whileTabFocus(periodic(15))
+  //     )
+  //   )
+  // );
+  
   const scheduler = newDefaultScheduler();
 
   // runEffects(tap(console.log, mouseInCanvas$), scheduler);
