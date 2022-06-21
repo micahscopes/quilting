@@ -15,6 +15,7 @@ import "./pico-util";
 
 import { glsl } from "../src/util";
 import randomMesh from "./random-mesh";
+import '@polymer/paper-spinner/paper-spinner-lite.js';
 // import { decode, UnpackrStream, unpack} from "msgpackr";
 
 // console.log(tessellations)
