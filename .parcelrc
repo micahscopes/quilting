@@ -2,7 +2,8 @@
   "extends": ["@parcel/config-default"],
   "transformers": {
     "*.svelte": ["parcel-transformer-svelte"],
-    "*.bin": ["...", "@parcel/transformer-raw"]
+    "*.bin": ["...", "@parcel/transformer-raw"],
+    "*.glsl": ["...", "@parcel/transformer-glsl"]
   },
   "resolvers": ["@parcel/resolver-glob", "..."]
 }

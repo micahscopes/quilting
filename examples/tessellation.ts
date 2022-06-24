@@ -20,13 +20,13 @@ import '@polymer/paper-spinner/paper-spinner-lite.js';
 
 // console.log(tessellations)
 
-const closeVerts = 40;
+const closeVerts = 10;
 const farVerts = closeVerts * 4;
 const numVerts = 500;
 const debugText = false;
 
-const [low, mid, high] = [1,2,6];
-const lods = [];
+const [low, mid, high] = [1,3,5];
+const lods = [0];
 const lodLevels = uniq([...lods, ...[low, mid, high]]).map((x) => 2 ** x);
 const exampleLodLookup = (i) => `[${2 ** i},${2 ** i},${2 ** i}]`;
 const lowLodKey = exampleLodLookup(low);
@@ -53,7 +53,7 @@ const vs = glsl`
         subpatchBary.y = float(i == 1 || i == 2);
         subpatchBary.z = float(i == 2 || i == 0);
         vColor = subpatchBary;
-        cornerColor = vec3(patchBary[I[0]], patchBary[I[1]], patchBary[I[2]]) * 2.0;
+        cornerColor = vec3(patchBary[I[0]], patchBary[I[1]], patchBary[I[2]]) * 4.0;
         // cornerColor = patchBary*2.0;
 
         vec2 p = vec2(
@@ -62,7 +62,7 @@ const vs = glsl`
         );
         // vColor = patchBary ? patchBary * 2.0;
         // vColor = patchBary;
-        gl_Position = vec4(p.xy*4.0, 0.0, 1.0);
+        gl_Position = vec4(p.xy * 4.0, 0.0, 1.0);
     }
 `;
 const fs = glsl`
@@ -116,7 +116,7 @@ import knn from "rbush-knn";
 
 // @ts-ignore
 import humanFormat from "human-format";
-import { whileTabFocus } from "./whileTabFocus";
+import { whileTabFocus } from "./while-tab-focus";
 import { positionInCanvas } from "./position-in-element";
 
   
@@ -368,3 +368,5 @@ document.addEventListener("DOMContentLoaded", async function () {
 
   draw();
 });
+
+// a function that 

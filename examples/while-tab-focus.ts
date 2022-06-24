@@ -11,5 +11,6 @@ export const tabFocusOff$ = filter(
   map(() => document.hidden, visibilitychange)
 );
 
+// start/stop a given stream automatically depending on whether or not the tab is in focus
 export const whileTabFocus = ($) =>
   join(constant(until(tabFocusOff$, $), merge(tabFocusOn$, now(null))));

@@ -15,28 +15,23 @@ export default function (points = 100, width = 1, height = 1, center = [0, 0]) {
       ])
   );
   
-  // coords = flatten(uvGrid(Math.sqrt(points)).map(([x,y])=>[x-0.5,y-0.5]))
+  coords = flatten(uvGrid(Math.sqrt(points)).map(([x,y])=>[x-0.5,y-0.5]))
 
   const delaunay = new Delaunator(coords);
 
   const mesh = prepareMesh(delaunay);
-  const eps = 0.001
-  const faceBounds = mesh.mda.vertices.map((vertex) => {
-    const [x, y] = mesh.mda.positions[vertex.index]
-    return {
-      minX: x-eps,
-      minY: y-eps,
-      maxX: x+eps,
-      maxY: y+eps,
-      index: vertex.index,
-    };
-
-    //.map(([[minX, maxX], [minY, maxY]]) => ({ minX, maxX, minY, maxY }))
-  });
-  // console.log('faceBounds',faceBounds)
-  mesh.rbush = new RBush();
-  mesh.rbush.load(faceBounds);
-  // mesh.mda.faces
-  // return mesh.mda.
+  // const eps = 0.001
+  // const faceBounds = mesh.mda.vertices.map((vertex) => {
+  //   const [x, y] = mesh.mda.positions[vertex.index]
+  //   return {
+  //     minX: x-eps,
+  //     minY: y-eps,
+  //     maxX: x+eps,
+  //     maxY: y+eps,
+  //     index: vertex.index,
+  //   };
+  // });
+  // mesh.rbush = new RBush();
+  // mesh.rbush.load(faceBounds);
   return mesh;
 }

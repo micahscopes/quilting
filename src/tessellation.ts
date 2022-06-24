@@ -1,3 +1,5 @@
+// TODO: refactor this code to make it easier to understand, more modular
+
 /* Generate a function that interpolates between edge weights of a UV square.
 
   v
