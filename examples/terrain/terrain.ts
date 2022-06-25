@@ -8,9 +8,9 @@ import vs from "./terrain.vs.glsl";
 // @ts-ignore
 import fs from "./terrain.fs.glsl";
 
-import randomMesh from "../random-mesh";
+import randomMesh, { gridMesh } from "../get-an-arbitrary-mesh";
 import "@polymer/paper-spinner/paper-spinner-lite.js";
-import { scaleLinear } from 'd3-scale'
+import { scaleQuantize, scaleLinear, scaleSqrt } from 'd3-scale'
 
 // @ts-ignore
 import createCamera from "inertial-turntable-camera";
@@ -18,8 +18,7 @@ import createCamera from "inertial-turntable-camera";
 const numVerts = 400;
 // const debugText = false;
 
-
-const lodFn = (x) => 2 ** (2*x);
+const lodFn = (x) => 2 ** (3*x);
 const possibleLods = [0,1,2,3];
 const lodLevels = uniq(possibleLods).map(lodFn);
 const low = Math.min(...possibleLods);
@@ -42,6 +41,7 @@ import { whileTabFocus } from "../while-tab-focus";
 const clamper = (min, max) => num => Math.min(Math.max(num, min), max)
 
 document.addEventListener("DOMContentLoaded", async function () {
+
   // generate the tiling tessellation mesh atlas
   const atlas = await loadTessellationAtlas(lodLevels);
 
@@ -51,15 +51,12 @@ document.addEventListener("DOMContentLoaded", async function () {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
 
-  // setup webgl2 context
+  // setup webgl2 context / Pico
   const app = PicoGL.createApp(canvas)
     .clearColor(0.0, 0.0, 0.0, 1.0)
     .enable(PicoGL.DEPTH_TEST)
     .depthFunc(PicoGL.LEQUAL)
-    .enable(PicoGL.CULL_FACE);
-
-  app.gl.enable(app.gl.CULL_FACE);
-  app.gl.cullFace(app.gl.BACK);
+    .disable(PicoGL.CULL_FACE);
 
   window.onresize = function () {
     app.resize(window.innerWidth, window.innerHeight);
@@ -77,37 +74,28 @@ document.addEventListener("DOMContentLoaded", async function () {
 
   setupCamera(canvas, camera);
 
-  // debug info canvas
-  // const canvas2d = document.createElement("canvas");
-  // canvas2d.style.pointerEvents = "none";
-  // canvas2d.width = window.innerWidth;
-  // canvas2d.height = window.innerHeight;
-  // document.body.appendChild(canvas2d);
-  // const ctx2D = canvas2d.getContext("2d");
-  // ctx2D!.font = "8px Helvetica";
-  // ctx2D?.translate(ctx2D.canvas.width / 2, ctx2D.canvas.height / 2);
 
-
-  // stats
+  // stats / info
   const timer = app.createTimer();
   // @ts-ignore
   window.utils.addTimerElement();
 
 
-  // initialize buffers and mesh
+  // initialize control mesh and buffers
+
+  const mesh = gridMesh(numVerts);
+  mesh.mda.faces.forEach((face) => (face.fallbackLod = low));
+
   let positions = app.createVertexBuffer(
     PicoGL.UNSIGNED_SHORT,
     3,
     new Uint16Array(flatten(atlas.combinedMesh.positions))
   );
 
-  const mesh = randomMesh(numVerts);
-  mesh.mda.faces.forEach((face) => (face.fallbackLod = low));
-
   window.M = mesh.mda;
   window.mda = mda;
 
-  let corners = app.createMatrixBuffer(
+  let controlPoints = app.createMatrixBuffer(
     PicoGL.FLOAT_MAT3x2,
     new Float32Array(
       flatten(flatten(mesh.cellPositions).map(([x, y]) => [x, y]))
@@ -122,61 +110,35 @@ document.addEventListener("DOMContentLoaded", async function () {
 
   let lods = app.createVertexBuffer(PicoGL.FLOAT, 3, mesh.mda.faces.length * 3);
 
-  // COMBINE VERTEX BUFFERS INTO VERTEX AR
-  let triangleArray = app
+  let vertexArray = app
     .createVertexArray()
     .vertexAttributeBuffer(0, positions, { normalized: true })
     .instanceAttributeBuffer(1, permutations)
-    .instanceAttributeBuffer(2, corners)
+    .instanceAttributeBuffer(2, controlPoints)
     .instanceAttributeBuffer(5, lods);
 
-  // @ts-ignore
-  window.triangleArray = triangleArray;
-
-  app.gl.disable(app.gl.CULL_FACE);
 
   const program = (await app.createPrograms([vs, fs]))[0];
-  // CREATE DRAW CALL FROM PROGRAM AND VERTEX ARRAY
-  let drawCall = app.createDrawCall(program, triangleArray);
+  let drawCall = app.createDrawCall(program, vertexArray);
 
-  let meshlets: any[] = []; // = mesh.mda.faces.map(() => atlas.lookup[lowLodKey]);
+  let meshlets: any[] = [];
 
   permutations.data(
     new Int8Array(flatten(meshlets.flatMap((m) => m.permutation)))
   );
 
-  const scale = scaleLinear([0, 1], [high, low])
-  const clamp = clamper(low, high)
-  const computeLod = x => clamp(2 * Math.round(scale(x)))
+  // const scale = scaleQuantize([0, 1], possibleLods.reverse())//.clamp(true)
+  const scale = scaleLinear([0, 0.5], [high, low]).clamp(true)
+  // const clamp = clamper(low, high)
+  // const computeLod = x => lodFn(scale(x))
+  const computeLod = x => Math.round(scale(x-0.15))
 
   // setup LOD update pipeline (async from draw loop)
   const scheduler = newDefaultScheduler();
 
 
   // helper function for updating debug info / stats
-  const updateDebugInfo = () => {
-    // if (debugText) {
-    //   ctx2D?.clearRect(
-    //     -ctx2D.canvas.width / 2,
-    //     -ctx2D.canvas.height / 2,
-    //     ctx2D.canvas.width,
-    //     ctx2D.canvas.height
-    //   );
-
-    //   mesh.mda.faces.forEach((face) => {
-    //     const faceMidpoint = zipWith(
-    //       ...mda.FaceVertices(face).map((v) => mesh.mda.positions[v.index]),
-    //       (x, y, z) => x + y + z
-    //     )
-    //       .map((x) => x / 3)
-    //       .slice(0, 2);
-    //     ctx2D?.fillText(
-    //       face.lod || face.fallbackLod,
-    //       faceMidpoint[0] * ctx2D.canvas.width - 40,
-    //       -faceMidpoint[1] * ctx2D.canvas.height
-    //     );
-    //   });
-    // }
+  const updateStats = () => {
     const triangles = `
       <p>
       triangles: 
@@ -188,7 +150,6 @@ document.addEventListener("DOMContentLoaded", async function () {
         ${mesh.mda.faces.length} 
       </p>
       `;
-    // console.log(triangles)
     document.querySelector("#stats")!.innerHTML = triangles;
   }
 
@@ -265,8 +226,8 @@ document.addEventListener("DOMContentLoaded", async function () {
         )
       );
 
-      // draw debug info
-      updateDebugInfo()
+      // draw stats
+      updateStats()
 
     }, whileTabFocus(periodic(100))),
     scheduler

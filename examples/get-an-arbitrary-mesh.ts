@@ -1,7 +1,7 @@
 import Delaunator from "delaunator";
 import { flatten } from "lodash-es";
 import { prepareMesh, uvGrid } from "../src/tessellation";
-import RBush from "rbush";
+// import RBush from "rbush";
 
 export default function (points = 100, width = 1, height = 1, center = [0, 0]) {
   let coords = flatten(
@@ -33,5 +33,13 @@ export default function (points = 100, width = 1, height = 1, center = [0, 0]) {
   // });
   // mesh.rbush = new RBush();
   // mesh.rbush.load(faceBounds);
+  return mesh;
+}
+
+export function gridMesh(points = 100){
+  const coords = flatten(uvGrid(Math.sqrt(points)).map(([x,y])=>[x-0.5,y-0.5]))
+  const delaunay = new Delaunator(coords);
+  const mesh = prepareMesh(delaunay);
+
   return mesh;
 }

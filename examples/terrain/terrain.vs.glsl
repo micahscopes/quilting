@@ -34,7 +34,7 @@
           patchBary[I[0]]*corners[0][1] + patchBary[I[1]]*corners[1][1] + patchBary[I[2]]*corners[2][1]
         );
 
-        float cloudy = fbm3d(vec3(p.xy*96.0, 1.0), 1);
+        float cloudy = fbm3d(vec3(p.xy*512.0, 1.0), 1);
         // float r = fbm3d(vec3(p.xy*1.0, 1912323.0), 1);
         // float g = fbm3d(vec3(p.xy*1.0, 1281248.0), 1);
         // float b = fbm3d(vec3(p.xy*1.0, 3005209.0), 1);
