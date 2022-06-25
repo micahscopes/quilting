@@ -38,6 +38,7 @@ https://user-images.githubusercontent.com/389782/169445431-d8bdbf5a-977a-46a0-98
   - [ ] manual moebius transformation input w/normalization
   - [ ] draw both original and transformed patches
   - [ ] basic matcap shading
+- [ ] faster tessellation atlas generation for high LODs
 - [ ] blog post
 - [ ] matcap-based spherical reflection example
   - [ ] draggable reflection sphere control widget

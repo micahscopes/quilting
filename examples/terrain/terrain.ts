@@ -19,7 +19,7 @@ const numVerts = 400;
 // const debugText = false;
 
 const lodFn = (x) => 2 ** x;
-const possibleLods = [0,1,3,9];
+const possibleLods = [0,1,5,9];
 const lodLevels = uniq(possibleLods).map(lodFn);
 const low = Math.min(...possibleLods);
 const high = Math.max(...possibleLods);
