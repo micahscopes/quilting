@@ -18,8 +18,8 @@ import createCamera from "inertial-turntable-camera";
 const numVerts = 400;
 // const debugText = false;
 
-const lodFn = (x) => 2 ** (3*x);
-const possibleLods = [0,1,2,3];
+const lodFn = (x) => 2 ** x;
+const possibleLods = [0,1,3,9];
 const lodLevels = uniq(possibleLods).map(lodFn);
 const low = Math.min(...possibleLods);
 const high = Math.max(...possibleLods);
@@ -128,10 +128,11 @@ document.addEventListener("DOMContentLoaded", async function () {
   );
 
   // const scale = scaleQuantize([0, 1], possibleLods.reverse())//.clamp(true)
-  const scale = scaleLinear([0, 0.5], [high, low]).clamp(true)
+  // const scale = scaleLinear([0, 0.5], [high, low]).clamp(true)
+  const scale = scaleQuantize([0, 0.5], possibleLods.reverse())
   // const clamp = clamper(low, high)
   // const computeLod = x => lodFn(scale(x))
-  const computeLod = x => Math.round(scale(x-0.15))
+  const computeLod = x => Math.round(scale(x))
 
   // setup LOD update pipeline (async from draw loop)
   const scheduler = newDefaultScheduler();
