@@ -47,3 +47,7 @@ https://user-images.githubusercontent.com/389782/169445431-d8bdbf5a-977a-46a0-98
 - [ ] refactor/modularize
   - [ ] documentation
 - [ ] more fully featured glTF loader
+
+---
+https://user-images.githubusercontent.com/389782/175750591-c230b927-ac74-46e8-ac75-eb05f7a7042b.mp4
+
