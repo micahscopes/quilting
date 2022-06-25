@@ -2,7 +2,11 @@
 #### Tessellation and parametric surface tools for WebGL2
 [![status: experimental](https://github.com/GIScience/badges/raw/master/status/experimental.svg)](https://github.com/GIScience/badges#experimental)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+##### Examples are licensed for non-commercial use at this time:
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
+
+![Screenshot from 2022-06-24 13-42-42](https://user-images.githubusercontent.com/389782/175647917-effa3246-f015-44e8-b2e6-670785b8a47f.png)
 
 
 <!-- ![Screenshot from 2022-04-16 22-06-19](https://user-images.githubusercontent.com/389782/169445957-f268cf18-0881-4ec7-b283-c68c836f7369.png) -->
