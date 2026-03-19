@@ -11,7 +11,8 @@
 /// Only a subset of operations are implemented — those needed for
 /// constructing and composing conformal transformations.
 
-use crate::quaternion::{Quat, Mobius};
+// CGA3 operates independently — no Möbius conversion needed.
+// For QB patch evaluation, use Mobius directly from quaternion.rs.
 
 /// Indices for the 32 basis blades of Cl(4,1).
 /// Ordered by grade: scalar, vectors, bivectors, trivectors, 4-vectors, pseudoscalar.
@@ -206,6 +207,55 @@ impl Cga3 {
     /// Scalar part.
     pub fn scalar_part(&self) -> f64 { self.data[0] }
 
+    /// Outer product (wedge) of two multivectors — grade-raising part.
+    pub fn outer(&self, other: &Self) -> Self {
+        let mut result = Self::ZERO;
+        for i in 0..32u32 {
+            if self.data[i as usize] == 0.0 { continue; }
+            let gi = i.count_ones();
+            for j in 0..32u32 {
+                if other.data[j as usize] == 0.0 { continue; }
+                let gj = j.count_ones();
+                let (sign, blade) = blade_product(i as usize, j as usize);
+                // Outer product keeps only the grade gi+gj part
+                if (blade as u32).count_ones() == gi + gj {
+                    result.data[blade] += sign * self.data[i as usize] * other.data[j as usize];
+                }
+            }
+        }
+        result
+    }
+
+    /// Inner product (left contraction).
+    pub fn inner(&self, other: &Self) -> Self {
+        let mut result = Self::ZERO;
+        for i in 0..32u32 {
+            if self.data[i as usize] == 0.0 { continue; }
+            let gi = i.count_ones() as i32;
+            for j in 0..32u32 {
+                if other.data[j as usize] == 0.0 { continue; }
+                let gj = j.count_ones() as i32;
+                let (sign, blade) = blade_product(i as usize, j as usize);
+                // Left contraction keeps grade |gj - gi| when gj >= gi
+                if gj >= gi && (blade as u32).count_ones() as i32 == gj - gi {
+                    result.data[blade] += sign * self.data[i as usize] * other.data[j as usize];
+                }
+            }
+        }
+        result
+    }
+
+    /// Extract a specific grade from the multivector.
+    pub fn grade(&self, g: u32) -> Self {
+        let mut result = Self::ZERO;
+        for i in 0..32u32 {
+            if i.count_ones() == g {
+                result.data[i as usize] = self.data[i as usize];
+            }
+        }
+        result
+    }
+
     // --- Versor constructors for common conformal transformations ---
 
     /// Translator: T = 1 - ½t·ni, where t is a translation vector.
@@ -278,172 +328,80 @@ impl Cga3 {
         mv
     }
 
-    /// Convert a CGA3 versor to a Möbius transformation (2×2 quaternion matrix).
+    /// Construct a sphere in CGA3 with center (cx,cy,cz) and radius r.
     ///
-    /// Given a versor V that acts as X' = VXV̄, extract the equivalent
-    /// Möbius transformation F(x) = (ax+b)(cx+d)⁻¹.
-    pub fn to_mobius(&self) -> Mobius {
-        // Apply the versor to the canonical basis points to extract a,b,c,d.
-        // The Möbius transformation maps:
-        //   0 → b·d⁻¹
-        //   ∞ → a·c⁻¹
-        //   eᵢ → (a·eᵢ + b)(c·eᵢ + d)⁻¹
-        //
-        // Strategy: transform the origin and three unit points,
-        // then solve for a,b,c,d.
-        //
-        // Simpler approach: use the known relationship between CGA versors
-        // and 2×2 quaternion matrices. For even versors, the map is:
-        //
-        // Transform no → extract b,d from the result
-        // Transform ni → extract a,c from the result
-
-        let origin = Self::up_point(0.0, 0.0, 0.0);
-        let p1 = Self::up_point(1.0, 0.0, 0.0);
-        let p2 = Self::up_point(0.0, 1.0, 0.0);
-        let p3 = Self::up_point(0.0, 0.0, 1.0);
-
-        let o_t = self.sandwich(&origin).down_point();
-        let p1_t = self.sandwich(&p1).down_point();
-        let p2_t = self.sandwich(&p2).down_point();
-        let p3_t = self.sandwich(&p3).down_point();
-
-        // F(0) = b·d⁻¹ → b = F(0)·d
-        // F(eᵢ) = (a·eᵢ + b)(c·eᵢ + d)⁻¹
-        // For unit weights, d=1, c=0 gives similarity; for full Möbius we need
-        // to solve the system. Use 4 point correspondences.
-        //
-        // Actually, for most practical cases (rotations, translations, dilations),
-        // c=0 and the Möbius reduces to an affine map F(x) = ax + b with d⁻¹ = 1.
-        // For inversions, c≠0.
-        //
-        // General extraction: use the approach from Dorst's GA textbook.
-        // For now, use a numerical approach: solve from 4 point correspondences.
-
-        let o = Quat::from_point(o_t[0], o_t[1], o_t[2]);
-        let f1 = Quat::from_point(p1_t[0], p1_t[1], p1_t[2]);
-        let f2 = Quat::from_point(p2_t[0], p2_t[1], p2_t[2]);
-        let f3 = Quat::from_point(p3_t[0], p3_t[1], p3_t[2]);
-
-        // F(x) = (ax+b)(cx+d)⁻¹
-        // Assume d=1 (can always normalize). Then:
-        // F(0) = b(d)⁻¹ = b → b = o
-        // F(eᵢ) = (a·eᵢ + b)(c·eᵢ + 1)⁻¹
-        //
-        // For conformal (not full Möbius with inversion): c=0
-        // Then F(eᵢ) = a·eᵢ + b
-        // So a·e1 = f1 - b = f1 - o
-        // Similarly for e2, e3.
-        //
-        // Check if c=0 works (similarity transformation):
-        let a_times_e1 = f1 - o;
-        let a_times_e2 = f2 - o;
-        let a_times_e3 = f3 - o;
-
-        // a is the quaternion such that a·eᵢ gives the right result.
-        // a·i = a_times_e1, a·j = a_times_e2, a·k = a_times_e3
-        // From quaternion multiplication:
-        // a·i: if a = w+xi+yj+zk, then a·i = -x + wi + zj - yk
-        // We have 3 equations, 4 unknowns, but the system is overdetermined
-        // in practice. Use the e1 and e2 results:
-        let ae1 = a_times_e1;
-        let ae2 = a_times_e2;
-        let _ae3 = a_times_e3;
-
-        // a * i = ae1 → a = ae1 * i⁻¹ = ae1 * (-i) = -ae1 * i
-        let a = ae1 * (-Quat::I);
-
-        // Verify with e2: a * j should = ae2
-        let check = a * Quat::J;
-        let err = (check - ae2).norm();
-
-        if err < 1e-6 {
-            // Similarity transformation (c=0)
-            Mobius::new(a, o, Quat::ZERO, Quat::ONE)
-        } else {
-            // Full Möbius — need to solve for c too.
-            // Use an additional point (e.g., -e1) for more constraints.
-            // For now, fall back to numerical solve with 4 points.
-            // This handles inversions and general conformal maps.
-            solve_mobius_4pt(
-                [Quat::ZERO, Quat::I, Quat::J, Quat::K],
-                [o, f1, f2, f3],
-            )
+    /// In the conformal model, a sphere is a grade-1 vector:
+    ///   S = C - ½r²ni
+    /// where C = up_point(center) is the conformal embedding of the center.
+    /// This is the "direct" representation (the sphere itself, not its dual).
+    pub fn sphere(cx: f64, cy: f64, cz: f64, r: f64) -> Self {
+        let mut s = Self::up_point(cx, cy, cz);
+        // Subtract ½r²ni
+        let half_r2 = 0.5 * r * r;
+        let ni = Self::ni();
+        for i in 0..32 {
+            s.data[i] -= half_r2 * ni.data[i];
         }
-    }
-}
-
-/// Solve for Möbius coefficients from 4 point correspondences.
-/// F(xᵢ) = yᵢ where F(x) = (ax+b)(cx+d)⁻¹
-fn solve_mobius_4pt(x: [Quat; 4], y: [Quat; 4]) -> Mobius {
-    // F(x₀) = b·d⁻¹ = y₀ (when x₀ = 0)
-    // Set d = 1. Then b = y₀.
-    // F(xᵢ) = (a·xᵢ + b)(c·xᵢ + 1)⁻¹ = yᵢ
-    // → a·xᵢ + b = yᵢ·(c·xᵢ + 1)
-    // → a·xᵢ - yᵢ·c·xᵢ = yᵢ - b
-    //
-    // For x₀=0: b = y₀, confirmed.
-    // For i=1,2,3: a·xᵢ - yᵢ·c·xᵢ = yᵢ - y₀
-    //
-    // This is a system of 3 quaternion equations in a,c (8 real unknowns).
-    // With 3×4=12 real equations, it's overdetermined.
-    //
-    // Simplification: try c=0 first (affine), then if residual is large,
-    // solve the full system iteratively.
-
-    let b = y[0];
-    let d = Quat::ONE;
-
-    // Try c=0: a·xᵢ = yᵢ - b for i=1,2,3
-    // Since x₁=i, a·i = y₁-b → a = (y₁-b)·(-i)
-    let a = (y[1] - b) * (-x[1]); // right-multiply by inverse of x[1]
-
-    // Check residual
-    let mut max_err: f64 = 0.0;
-    for i in 1..4 {
-        let predicted = a * x[i] + b;
-        max_err = max_err.max((predicted - y[i]).norm());
+        s
     }
 
-    if max_err < 1e-6 {
-        return Mobius::new(a, b, Quat::ZERO, d);
+    /// Construct a plane in CGA3 with normal (nx,ny,nz) and distance d from origin.
+    ///
+    /// A plane is: π = n + d·ni, where n = nx·e1 + ny·e2 + nz·e3.
+    /// (n should be unit length.)
+    pub fn plane(nx: f64, ny: f64, nz: f64, d: f64) -> Self {
+        let len = (nx*nx + ny*ny + nz*nz).sqrt();
+        let (nx, ny, nz) = if len > 1e-12 {
+            (nx/len, ny/len, nz/len)
+        } else {
+            (0.0, 0.0, 1.0)
+        };
+        let mut mv = Self::ZERO;
+        mv.data[E1] = nx;
+        mv.data[E2] = ny;
+        mv.data[E3] = nz;
+        let ni = Self::ni();
+        for i in 0..32 {
+            mv.data[i] += d * ni.data[i];
+        }
+        mv
     }
 
-    // Full Möbius with c≠0:
-    // For each i: (a - yᵢ·c)·xᵢ = yᵢ - b
-    // With xᵢ being unit quaternions (i, j, k), we can solve:
-    //
-    // Let u = a, v = c. Then for i=1,2,3:
-    //   (u - yᵢ·v)·xᵢ = yᵢ - b
-    //   u·xᵢ - yᵢ·v·xᵢ = yᵢ - b
-    //
-    // This is linear in u, v (8 unknowns, 12 equations).
-    // Use least squares via the normal equations, or just use
-    // two equations to solve for u and v.
+    /// Reflection through a sphere (or plane). The sphere/plane versor S
+    /// reflects points via the sandwich product: X' = S X S⁻¹.
+    ///
+    /// This is a single reflection — an *improper* conformal transformation
+    /// (orientation-reversing). Compose two sphere reflections for a proper
+    /// (orientation-preserving) Möbius transformation: inversion through
+    /// a sphere pair, or equivalently, the composition S₂ S₁.
+    ///
+    /// For the unit sphere at origin: equivalent to the classical inversion
+    /// x ↦ x/|x|².
+    pub fn sphere_reflection(cx: f64, cy: f64, cz: f64, r: f64) -> Self {
+        // The versor is the sphere itself — applying it as a sandwich
+        // reflects through the sphere.
+        Self::sphere(cx, cy, cz, r)
+    }
 
-    // From i=1 (x₁=i): u·i - y₁·v·i = y₁ - b
-    // From i=2 (x₂=j): u·j - y₂·v·j = y₂ - b
-    // Two quat equations → 8 real equations, 8 unknowns. Solvable!
+    /// Inversion through a sphere pair: compose two sphere reflections
+    /// to get a proper (orientation-preserving) Möbius transformation.
+    ///
+    /// Geometrically: reflects through sphere1, then through sphere2.
+    pub fn sphere_inversion(
+        c1: [f64; 3], r1: f64,
+        c2: [f64; 3], r2: f64,
+    ) -> Self {
+        let s1 = Self::sphere(c1[0], c1[1], c1[2], r1);
+        let s2 = Self::sphere(c2[0], c2[1], c2[2], r2);
+        s2.gp(&s1) // apply s1 first, then s2
+    }
 
-    let r1 = y[1] - b;
-    let r2 = y[2] - b;
-
-    // u·i = r1 + y₁·v·i
-    // u·j = r2 + y₂·v·j
-    // u = (r1 + y₁·v·i)·(-i) = -r1·i + y₁·v·i·(-i) = -r1·i - y₁·v
-    // Substitute into second: (-r1·i - y₁·v)·j = r2 + y₂·v·j
-    // -r1·i·j - y₁·v·j = r2 + y₂·v·j
-    // -r1·k - y₁·v·j - y₂·v·j = r2
-    // -(y₁ + y₂)·v·j = r2 + r1·k
-    // v = -(y₁ + y₂)⁻¹ · (r2 + r1·k) · j⁻¹
-    // v = -(y₁ + y₂)⁻¹ · (r2 + r1·k) · (-j)
-
-    let sum_y = y[1] + y[2];
-    let rhs = r2 + r1 * Quat::K;
-    let c = -(sum_y.inv() * rhs * (-Quat::J));
-    let a = -(r1 * Quat::I) - y[1] * c;
-
-    Mobius::new(a, b, c, d)
+    /// Transform a 3D point using this versor via CGA sandwich product.
+    /// This works for ANY conformal transformation — no Möbius extraction needed.
+    pub fn transform_point(&self, x: f64, y: f64, z: f64) -> [f64; 3] {
+        let p = Self::up_point(x, y, z);
+        self.sandwich(&p).down_point()
+    }
 }
 
 #[cfg(test)]
@@ -486,23 +444,19 @@ mod tests {
     }
 
     #[test]
-    fn translator_to_mobius() {
+    fn transform_point_translate() {
         let t = Cga3::translator(5.0, 0.0, 0.0);
-        let m = t.to_mobius();
-        let p = Quat::from_point(1.0, 2.0, 3.0);
-        let result = m.apply(p).to_point();
+        let result = t.transform_point(1.0, 2.0, 3.0);
         assert!(approx_eq_3(result, [6.0, 2.0, 3.0]),
-            "Möbius translation: {:?}", result);
+            "translate: {:?}", result);
     }
 
     #[test]
-    fn rotor_to_mobius() {
+    fn transform_point_rotate() {
         let r = Cga3::rotor(0.0, 0.0, 1.0, std::f64::consts::FRAC_PI_2);
-        let m = r.to_mobius();
-        let p = Quat::from_point(1.0, 0.0, 0.0);
-        let result = m.apply(p).to_point();
+        let result = r.transform_point(1.0, 0.0, 0.0);
         assert!(approx_eq_3(result, [0.0, 1.0, 0.0]),
-            "Möbius rotation: {:?}", result);
+            "rotate: {:?}", result);
     }
 
     #[test]
@@ -517,5 +471,67 @@ mod tests {
         let via_comp = composed.sandwich(&p).down_point();
         assert!(approx_eq_3(direct, via_comp),
             "composition: direct={:?} composed={:?}", direct, via_comp);
+    }
+
+    #[test]
+    fn unit_sphere_reflection() {
+        // Reflection through the unit sphere at origin: x ↦ x/|x|²
+        // Point (2,0,0) should map to (0.5, 0, 0)
+        let s = Cga3::sphere_reflection(0.0, 0.0, 0.0, 1.0);
+        let p = Cga3::up_point(2.0, 0.0, 0.0);
+        let result = s.sandwich(&p).down_point();
+        assert!(approx_eq_3(result, [0.5, 0.0, 0.0]),
+            "unit sphere reflection of (2,0,0): {:?}", result);
+    }
+
+    #[test]
+    fn sphere_reflection_on_sphere() {
+        // A point ON the sphere should map to itself
+        let s = Cga3::sphere_reflection(0.0, 0.0, 0.0, 2.0);
+        let p = Cga3::up_point(2.0, 0.0, 0.0);
+        let result = s.sandwich(&p).down_point();
+        assert!(approx_eq_3(result, [2.0, 0.0, 0.0]),
+            "point on sphere should be fixed: {:?}", result);
+    }
+
+    #[test]
+    fn offset_sphere_reflection() {
+        // Sphere centered at (1,0,0) with radius 1
+        // Point (1,0,0) is the center — reflection maps center to infinity
+        // Point (2,0,0) is on the sphere — should map to itself
+        let s = Cga3::sphere_reflection(1.0, 0.0, 0.0, 1.0);
+        let p = Cga3::up_point(2.0, 0.0, 0.0);
+        let result = s.sandwich(&p).down_point();
+        assert!(approx_eq_3(result, [2.0, 0.0, 0.0]),
+            "point on offset sphere: {:?}", result);
+    }
+
+    #[test]
+    fn sphere_inversion_proper() {
+        // Two concentric sphere reflections = a dilation
+        // Unit sphere then sphere of radius 2 at origin:
+        // First: x ↦ x/|x|², then: x ↦ 4x/|x|²
+        // Composed: x ↦ 4x (scaling by 4)
+        let v = Cga3::sphere_inversion([0.0, 0.0, 0.0], 1.0, [0.0, 0.0, 0.0], 2.0);
+        let p = Cga3::up_point(1.0, 0.0, 0.0);
+        let result = v.sandwich(&p).down_point();
+        assert!(approx_eq_3(result, [4.0, 0.0, 0.0]),
+            "double inversion should scale by r2²/r1²=4: {:?}", result);
+    }
+
+    #[test]
+    fn sphere_reflection_transform_point() {
+        let s = Cga3::sphere_reflection(0.0, 0.0, 0.0, 1.0);
+        let result = s.transform_point(2.0, 0.0, 0.0);
+        assert!(approx_eq_3(result, [0.5, 0.0, 0.0]),
+            "sphere reflection: {:?}", result);
+    }
+
+    #[test]
+    fn sphere_inversion_transform_point() {
+        let v = Cga3::sphere_inversion([0.0, 0.0, 0.0], 1.0, [0.0, 0.0, 0.0], 2.0);
+        let result = v.transform_point(1.0, 2.0, 3.0);
+        assert!(approx_eq_3(result, [4.0, 8.0, 12.0]),
+            "sphere inversion (4x scale): {:?}", result);
     }
 }

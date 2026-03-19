@@ -68,7 +68,7 @@ impl Quat {
     #[inline]
     pub fn inv(self) -> Self {
         let n2 = self.norm_sq();
-        debug_assert!(n2 > 1e-30, "inverting near-zero quaternion");
+        assert!(n2 > 1e-30, "inverting near-zero quaternion: {:?}", self);
         let inv_n2 = 1.0 / n2;
         Self {
             w: self.w * inv_n2,
@@ -214,6 +214,74 @@ impl Mobius {
     #[inline]
     pub fn transform_weight(&self, x: Quat, w: Quat) -> Quat {
         (self.c * x + self.d) * w
+    }
+
+    /// Rotation: x ↦ qxq̄ where q is a unit quaternion.
+    /// Axis (ax,ay,az), angle in radians.
+    pub fn rotation(ax: f64, ay: f64, az: f64, angle: f64) -> Self {
+        let half = angle / 2.0;
+        let s = half.sin();
+        let c = half.cos();
+        let len = (ax * ax + ay * ay + az * az).sqrt();
+        let (nx, ny, nz) = if len > 1e-12 {
+            (ax / len, ay / len, az / len)
+        } else {
+            (0.0, 0.0, 1.0)
+        };
+        let q = Quat::new(c, s * nx, s * ny, s * nz);
+        // F(x) = qxq̄ = (qx)(q̄)⁻¹ · ... but actually for rotations:
+        // F(x) = (qx + 0)(0x + q̄⁻¹)⁻¹ ... no.
+        // Rotation via Möbius: a=q, b=0, c=0, d=q̄ doesn't work because
+        // F(x) = qx(q̄)⁻¹ = qxq (since q̄⁻¹ = q for unit quaternions).
+        // That's wrong — we want qxq̄.
+        // Actually: F(x) = (ax+b)(cx+d)⁻¹ with a=q, b=0, c=0, d=1
+        // gives F(x) = qx which is NOT a rotation (it's a left multiplication).
+        //
+        // The correct Möbius for rotation qxq̄:
+        // This is a similarity, expressible as F(x) = qxq̄ = q·x·q̄.
+        // In Möbius form: not directly (ax+b)(cx+d)⁻¹ because that's
+        // left-linear, but rotation is a conjugation.
+        //
+        // However, for PURE IMAGINARY x (3D points), qxq̄ IS a Möbius map.
+        // We need: (ax+b)(cx+d)⁻¹ = qxq̄ for all pure imaginary x.
+        // Setting c=0, d=q̄: F(x) = (ax+b)·q = axq + bq
+        // We need axq = qx, so a = qxq⁻¹·x⁻¹... that depends on x.
+        //
+        // The trick: for pure imaginary quaternions, qxq̄ = qx·q̄.
+        // As a Möbius: a=q, b=0, c=0, d=conj(q)⁻¹ = q (for unit q, q̄⁻¹=q).
+        // Then F(x) = qx · q⁻¹ = qx · (q̄)⁻¹... wait.
+        // d = conj(q), d⁻¹ = conj(conj(q))/|conj(q)|² = q (unit).
+        // F(x) = (qx + 0)(0 + conj(q))⁻¹ = qx · q = qxq. NOT qxq̄.
+        //
+        // For unit quaternions: q̄ = q⁻¹, so qxq̄ = qxq⁻¹.
+        // Möbius: a=q, b=0, c=0, d=q. Then F(x) = qx·q⁻¹ = qxq̄. ✓
+        Self::new(q, Quat::ZERO, Quat::ZERO, q)
+    }
+
+    /// Sphere reflection: x ↦ c + r²(x-c)/|x-c|²
+    ///
+    /// For pure imaginary quaternions (3D points), this is:
+    ///   F(x) = c - r²·(x-c)⁻¹ = (cx - c² - r²)(x - c)⁻¹
+    ///
+    /// So a=c, b=-(c²+r²), c_coeff=1, d=-c.
+    /// Note: this is an IMPROPER (orientation-reversing) transformation.
+    pub fn sphere_reflection(center: Quat, r: f64) -> Self {
+        let c_sq = center * center; // c² (for pure imaginary c, this is -|c|²)
+        let r_sq = Quat::new(r * r, 0.0, 0.0, 0.0);
+        Self::new(
+            center,             // a = c
+            -(c_sq + r_sq),     // b = -(c² + r²)
+            Quat::ONE,          // c_coeff = 1
+            -center,            // d = -c
+        )
+    }
+
+    /// Sphere inversion: compose two sphere reflections for a proper
+    /// (orientation-preserving) Möbius transformation.
+    pub fn sphere_inversion(c1: Quat, r1: f64, c2: Quat, r2: f64) -> Self {
+        let s1 = Self::sphere_reflection(c1, r1);
+        let s2 = Self::sphere_reflection(c2, r2);
+        s2.compose(&s1)
     }
 
     /// Compose two Möbius transformations (matrix multiplication).
