@@ -130,6 +130,9 @@ fn mesh_to_json(mesh: &TessellationMesh, sample_ms: f64, tri_ms: f64, source: &s
 
 const HTML: &str = include_str!("web_demo.html");
 const HTML_3D: &str = include_str!("mesh_demo.html");
+const HTML_WASM: &str = include_str!("../../../index.html");
+const WASM_JS: &str = include_str!("../../../pkg/quilting_wasm.js");
+const WASM_BIN: &[u8] = include_bytes!("../../../pkg/quilting_wasm_bg.wasm");
 
 fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, String) {
     if request.starts_with("GET /patch?") {
@@ -300,10 +303,20 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n".to_string(),
             HTML_3D.to_string(),
         )
-    } else if request.starts_with("GET / ") || request.starts_with("GET /index.html") {
+    } else if request.starts_with("GET /2d") {
         (
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n".to_string(),
             HTML.to_string(),
+        )
+    } else if request.starts_with("GET /pkg/quilting_wasm.js") {
+        (
+            "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n".to_string(),
+            WASM_JS.to_string(),
+        )
+    } else if request.starts_with("GET / ") || request.starts_with("GET /index.html") {
+        (
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n".to_string(),
+            HTML_WASM.to_string(),
         )
     } else {
         (
@@ -343,12 +356,24 @@ fn main() {
 
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        let mut buf = [0u8; 2048];
+        let mut buf = [0u8; 4096];
         let n = match stream.read(&mut buf) {
             Ok(n) => n,
             Err(_) => continue,
         };
         let request = String::from_utf8_lossy(&buf[..n]);
+
+        // Check for WASM binary request
+        if request.starts_with("GET /pkg/quilting_wasm_bg.wasm") {
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/wasm\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                WASM_BIN.len()
+            );
+            let _ = stream.write_all(headers.as_bytes());
+            let _ = stream.write_all(WASM_BIN);
+            continue;
+        }
+
         let (headers, body) = handle_request(&request, &cache);
         let response = format!(
             "{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",

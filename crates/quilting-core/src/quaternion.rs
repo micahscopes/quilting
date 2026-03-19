@@ -68,7 +68,11 @@ impl Quat {
     #[inline]
     pub fn inv(self) -> Self {
         let n2 = self.norm_sq();
-        assert!(n2 > 1e-30, "inverting near-zero quaternion: {:?}", self);
+        if n2 < 1e-30 {
+            // Near-zero quaternion — return a large but finite value
+            // This happens at singularities of Möbius transformations
+            return Self { w: 1e15, x: 0.0, y: 0.0, z: 0.0 };
+        }
         let inv_n2 = 1.0 / n2;
         Self {
             w: self.w * inv_n2,

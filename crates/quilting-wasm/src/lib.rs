@@ -1,8 +1,10 @@
 use wasm_bindgen::prelude::*;
-use quilting_core::atlas::TessellationAtlas;
-use quilting_core::sampling::{tri_patch, PatchConfig};
 use quilting_core::delaunay::triangulate_2d;
-use quilting_core::mesh::TessellationMesh;
+use quilting_core::evaluate::{compute_instances, FaceInstance};
+use quilting_core::quaternion::{Quat, Mobius};
+use quilting_core::sampling::{tri_patch, PatchConfig};
+use quilting_core::shapes;
+use std::collections::HashMap;
 
 #[wasm_bindgen(start)]
 pub fn init() {
@@ -10,87 +12,143 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-/// Generate a single tessellated triangle patch.
-/// Returns { positions: Float64Array, triangles: Uint32Array, vertex_count, triangle_count }
+/// Get a built-in shape. Returns flat arrays [positions, faces].
 #[wasm_bindgen]
-pub fn generate_patch(res_a: f64, res_b: f64, res_c: f64, seed: u64) -> JsValue {
-    let config = PatchConfig {
-        k_candidates: 30,
-        seed,
-    };
-    let sample = tri_patch([res_a, res_b, res_c], &config);
-
-    if sample.positions.len() < 3 {
-        return serde_wasm_bindgen::to_value(&PatchResult::empty()).unwrap();
-    }
-
-    let tri = triangulate_2d(&sample.positions);
-    let mesh = TessellationMesh::from_2d(tri.positions, tri.triangles);
-
-    let result = PatchResult::from_mesh(&mesh);
-    serde_wasm_bindgen::to_value(&result).unwrap()
-}
-
-/// Build a full tessellation atlas for the given LOD levels.
-/// Returns serialized atlas as Uint8Array.
-#[wasm_bindgen]
-pub fn build_atlas(lod_levels: &[u32], seed: u64) -> Vec<u8> {
-    let config = PatchConfig {
-        k_candidates: 30,
-        seed,
-    };
-    let atlas = TessellationAtlas::build(lod_levels, &config);
-    atlas.to_bytes()
-}
-
-/// Look up a patch from a serialized atlas.
-/// Returns { positions, triangles, vertex_count, triangle_count }
-#[wasm_bindgen]
-pub fn get_patch_from_atlas(atlas_bytes: &[u8], res_a: u32, res_b: u32, res_c: u32) -> JsValue {
-    let atlas = match TessellationAtlas::from_bytes(atlas_bytes) {
-        Ok(a) => a,
-        Err(_) => return serde_wasm_bindgen::to_value(&PatchResult::empty()).unwrap(),
+pub fn get_shape(name: &str) -> JsValue {
+    let (verts, faces) = match name {
+        "tetrahedron" => shapes::tetrahedron(),
+        "octahedron" => shapes::octahedron(),
+        "icosahedron" => shapes::icosahedron(),
+        _ => shapes::cube(),
     };
 
-    match atlas.get_patch([res_a, res_b, res_c]) {
-        Some(mesh) => {
-            let result = PatchResult::from_mesh(&mesh);
-            serde_wasm_bindgen::to_value(&result).unwrap()
-        }
-        None => serde_wasm_bindgen::to_value(&PatchResult::empty()).unwrap(),
-    }
+    let positions: Vec<f64> = verts.iter().flat_map(|v| [v[0], v[1], v[2]]).collect();
+    let indices: Vec<u32> = faces.iter().flat_map(|f| [f[0] as u32, f[1] as u32, f[2] as u32]).collect();
+
+    serde_wasm_bindgen::to_value(&ShapeData {
+        positions,
+        faces: indices,
+        num_verts: verts.len(),
+        num_faces: faces.len(),
+    }).unwrap()
 }
 
 #[derive(serde::Serialize)]
-struct PatchResult {
-    positions: Vec<f64>,    // flat [x0, y0, x1, y1, ...]
-    triangles: Vec<u32>,    // flat [i0, j0, k0, i1, j1, k1, ...]
-    vertex_count: usize,
-    triangle_count: usize,
+struct ShapeData {
+    positions: Vec<f64>,
+    faces: Vec<u32>,
+    num_verts: usize,
+    num_faces: usize,
 }
 
-impl PatchResult {
-    fn empty() -> Self {
-        Self {
-            positions: vec![],
-            triangles: vec![],
-            vertex_count: 0,
-            triangle_count: 0,
+/// Compute transform instances for a mesh.
+/// positions: flat [x0,y0,z0, x1,y1,z1, ...]
+/// faces: flat [a0,b0,c0, a1,b1,c1, ...]
+/// transform: "identity" | "sphere_reflection"
+/// params: [cx, cy, cz, r] for sphere_reflection
+///
+/// Returns batched data grouped by LOD triple.
+#[wasm_bindgen]
+pub fn compute_mesh_batches(
+    positions: &[f64],
+    faces: &[u32],
+    transform_type: &str,
+    params: &[f64],
+    override_res: u32,
+) -> JsValue {
+    let verts: Vec<[f64; 3]> = positions.chunks(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let tris: Vec<[usize; 3]> = faces.chunks(3)
+        .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize])
+        .collect();
+
+    let transform = match transform_type {
+        "sphere_reflection" if params.len() >= 4 => {
+            Mobius::sphere_reflection(
+                Quat::from_point(params[0], params[1], params[2]),
+                params[3],
+            )
         }
+        "rotation" if params.len() >= 4 => {
+            Mobius::rotation(params[0], params[1], params[2], params[3])
+        }
+        "translation" if params.len() >= 3 => {
+            Mobius::translation(Quat::from_point(params[0], params[1], params[2]))
+        }
+        _ => Mobius::identity(),
+    };
+
+    let instances_orig = compute_instances(&verts, &tris, &Mobius::identity());
+    let instances_xform = compute_instances(&verts, &tris, &transform);
+
+    // Group by LOD triple
+    let mut groups: HashMap<[u32; 3], Vec<usize>> = HashMap::new();
+    for (fi, inst) in instances_xform.iter().enumerate() {
+        let lod = if override_res > 0 {
+            [override_res, override_res, override_res]
+        } else {
+            inst.edge_lods
+        };
+        let mut key = lod;
+        key.sort();
+        groups.entry(key).or_default().push(fi);
     }
 
-    fn from_mesh(mesh: &TessellationMesh) -> Self {
-        let positions: Vec<f64> = mesh.positions.iter()
-            .flat_map(|p| [p[0], p[1]])
-            .collect();
-        let triangles: Vec<u32> = mesh.triangles.iter()
-            .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
-            .collect();
-        Self {
-            vertex_count: mesh.positions.len(),
-            triangle_count: mesh.triangles.len(),
-            positions,
-            triangles,
-        }
+    let config = PatchConfig { k_candidates: 30, seed: 42 };
+    let mut batches = Vec::new();
+
+    for (lod_key, face_indices) in &groups {
+        let tess = tri_patch(
+            [lod_key[0] as f64, lod_key[1] as f64, lod_key[2] as f64],
+            &config,
+        );
+        let tri_result = triangulate_2d(&tess.positions);
+
+        let tess_bary: Vec<f64> = tess.bary.iter()
+            .flat_map(|b| [b[0], b[1], b[2]]).collect();
+        let tess_tris: Vec<u32> = tri_result.triangles.iter()
+            .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+
+        let orig_data: Vec<f32> = face_indices.iter()
+            .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
+        let xform_data: Vec<f32> = face_indices.iter()
+            .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
+
+        batches.push(BatchData {
+            lod: [lod_key[0], lod_key[1], lod_key[2]],
+            instances_orig: orig_data,
+            instances_xform: xform_data,
+            tess_bary,
+            tess_triangles: tess_tris,
+            num_faces: face_indices.len(),
+            verts_per_face: tess.bary.len(),
+            tris_per_face: tri_result.triangles.len(),
+        });
     }
+
+    serde_wasm_bindgen::to_value(&MeshBatches {
+        batches,
+        total_faces: tris.len(),
+        num_batches: groups.len(),
+    }).unwrap()
+}
+
+#[derive(serde::Serialize)]
+struct BatchData {
+    lod: [u32; 3],
+    instances_orig: Vec<f32>,
+    instances_xform: Vec<f32>,
+    tess_bary: Vec<f64>,
+    tess_triangles: Vec<u32>,
+    num_faces: usize,
+    verts_per_face: usize,
+    tris_per_face: usize,
+}
+
+#[derive(serde::Serialize)]
+struct MeshBatches {
+    batches: Vec<BatchData>,
+    total_faces: usize,
+    num_batches: usize,
 }
