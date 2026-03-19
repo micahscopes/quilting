@@ -41,9 +41,41 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     elapsed
 }
 
+/// Generate a single tessellation patch and store it in the atlas.
+/// Used for progressive refinement — generates missing LODs on demand.
+#[wasm_bindgen]
+pub fn generate_and_store_patch(res_a: u32, res_b: u32, res_c: u32) {
+    let config = PatchConfig { k_candidates: 30, seed: 42 };
+    let res = [res_a as f64, res_b as f64, res_c as f64];
+    let sample = quilting_core::sampling::tri_patch(res, &config);
+    if sample.positions.len() < 3 { return; }
+    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
+
+    ATLAS.with(|atlas_cell| {
+        let mut atlas_opt = atlas_cell.borrow_mut();
+        if let Some(atlas) = atlas_opt.as_mut() {
+            let mut key = [res_a, res_b, res_c];
+            key.sort();
+            if atlas.patches.contains_key(&key) { return; }
+
+            let base_vertex = atlas.positions.len();
+            let base_triangle = atlas.triangles.len();
+            atlas.positions.extend_from_slice(&tri.positions);
+            for t in &tri.triangles {
+                atlas.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
+            }
+            atlas.patches.insert(key, quilting_core::atlas::PatchEntry {
+                base_vertex,
+                vertex_count: tri.positions.len(),
+                base_triangle,
+                triangle_count: tri.triangles.len(),
+            });
+        }
+    });
+}
+
 /// Generate a single tessellation patch for a given LOD triple.
-/// Returns { bary: Float64Array, triangles: Uint32Array, n_verts, n_tris }
-/// Used by web workers for parallel atlas construction.
+/// Returns { bary, triangles, n_verts, n_tris }
 #[wasm_bindgen]
 pub fn generate_patch(res_a: u32, res_b: u32, res_c: u32) -> JsValue {
     let config = PatchConfig { k_candidates: 30, seed: 42 };

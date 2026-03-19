@@ -442,10 +442,25 @@ async function update() {
     return `[${b.lod}]`;
   }).join(' ');
   $('stats').innerHTML = `Faces: ${data.total_faces}<br>Batches: ${data.num_batches}` +
-    (fallbacks.length ? `<br><span style="color:#e94560">${fallbacks.length} pending</span>` : '') +
+    (fallbacks.length ? `<br><span style="color:#e94560">${fallbacks.length} generating...</span>` : '') +
     `<br>LODs: ${lods}<br>Worker: ${ms.toFixed(0)}ms`;
 
   updating = false;
+
+  // If there are fallback batches, generate the missing patches then re-render
+  if (fallbacks.length > 0 && !pendingUpdate) {
+    const missing = [...new Set(fallbacks.map(b => b.wanted_lod.join(',')))];
+    for (const key of missing) {
+      const [a,b,c] = key.split(',').map(Number);
+      await workerCall('generate_single', { a, b, c });
+    }
+    // Re-render with the now-available patches
+    if (!pendingUpdate) {
+      update();
+      return;
+    }
+  }
+
   if (pendingUpdate) { pendingUpdate = false; update(); }
 }
 

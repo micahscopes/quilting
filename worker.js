@@ -23,6 +23,13 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'generate_single') {
+    const { a, b, c } = data;
+    wasm.generate_and_store_patch(a, b, c);
+    self.postMessage({ type: 'generated', id });
+    return;
+  }
+
   if (type === 'compute_batches') {
     const { positions, faces, transformType, params, overrideRes } = data;
     const result = wasm.compute_mesh_batches(
