@@ -299,57 +299,72 @@ impl PoissonSampler {
             }
         }
 
-        // March rows from bottom to top with adaptive row height.
-        // Each row steps horizontally at the local spacing.
+        // Place points on a hex grid where the step size at each position
+        // is the local spacing. We march in Cartesian space but advance by
+        // the local density in both axes, keeping the hex aspect ratio
+        // (row_step = col_step * sqrt(3)/2) at each point.
+        //
+        // To avoid squashed triangles, we track the LOCAL spacing for both
+        // the column step and row height at each point independently.
         let mut y = y0;
-        let mut row_parity = false;
+        let mut row_idx = 0usize;
+
         while y <= y1 {
-            // Sample spacing at left edge of this row for the row step
-            let row_x_start = x0;
-            let row_spacing = if domain.contains([row_x_start, y]) {
-                density_fn([row_x_start, y])
-            } else {
-                // Scan right to find first in-domain point for row spacing
-                let mid_x = (x0 + x1) * 0.5;
-                if domain.contains([mid_x, y]) {
-                    density_fn([mid_x, y])
-                } else {
-                    min_radius
+            // Determine the row's vertical spacing by sampling
+            // at the first in-domain point we find
+            let mut first_spacing = min_radius;
+            {
+                let mut probe_x = x0;
+                while probe_x <= x1 {
+                    if domain.contains([probe_x, y]) {
+                        first_spacing = density_fn([probe_x, y]);
+                        break;
+                    }
+                    probe_x += min_radius;
                 }
-            };
+            }
 
-            let x_offset = if row_parity { row_spacing * 0.5 } else { 0.0 };
+            let hex_offset = if row_idx % 2 == 1 { first_spacing * 0.5 } else { 0.0 };
+            let mut x = x0 + hex_offset;
 
-            // March across the row with adaptive step
-            let mut x = x0 + x_offset;
             while x <= x1 {
                 if domain.contains([x, y]) {
-                    let local_spacing = density_fn([x, y]);
-                    let jitter = local_spacing * 0.35;
+                    let s = density_fn([x, y]);
+                    let jitter = s * 0.35;
                     let jx = x + (rng.gen::<f64>() - 0.5) * jitter;
                     let jy = y + (rng.gen::<f64>() - 0.5) * jitter;
 
                     if domain.contains([jx, jy]) {
                         points.push([jx, jy]);
                     }
-
-                    // Step by local spacing
-                    x += local_spacing;
+                    x += s;
                 } else {
-                    // Outside domain — step by min_radius to find the edge
                     x += min_radius;
                 }
             }
 
-            // Adaptive row height: use spacing at the center of the row
-            let center_x = (x0 + x1) * 0.5;
-            let center_spacing = if domain.contains([center_x, y]) {
-                density_fn([center_x, y])
+            // Row height: sample spacing at a few points along this row
+            // and use the AVERAGE to keep rows evenly spaced through
+            // density transitions
+            let mut sum_spacing = 0.0;
+            let mut n_samples = 0;
+            {
+                let mut sx = x0;
+                while sx <= x1 {
+                    if domain.contains([sx, y]) {
+                        sum_spacing += density_fn([sx, y]);
+                        n_samples += 1;
+                    }
+                    sx += (x1 - x0) / 8.0;
+                }
+            }
+            let avg_spacing = if n_samples > 0 {
+                sum_spacing / n_samples as f64
             } else {
-                row_spacing
+                first_spacing
             };
-            y += center_spacing * SQRT3_OVER_2;
-            row_parity = !row_parity;
+            y += avg_spacing * SQRT3_OVER_2;
+            row_idx += 1;
         }
 
         points
