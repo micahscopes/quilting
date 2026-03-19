@@ -101,7 +101,8 @@ fn serve_patch(
         }
     }
 
-    // On-demand generation
+    // On-demand generation (unreachable by subdivision)
+    eprintln!("fallback: ({},{},{}) mode={:?} — no ancestor in atlas", res[0], res[1], res[2], mode);
     let (m, sm, tm) = generate_on_demand(res, sampler);
     (m, sm, tm, sampler.to_string())
 }
