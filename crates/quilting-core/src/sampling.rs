@@ -75,11 +75,39 @@ pub fn tri_patch(res: [f64; 3], config: &PatchConfig) -> PatchSample {
     PatchSample { positions, bary }
 }
 
-/// Fast O(N) jittered hex grid sampling. No conflict checking — much faster
-/// for high resolutions (>64) but without strict Poisson disk guarantees.
+/// Fast patch sampling. Uses O(N) jittered hex grid for uniform density
+/// (all edges same resolution), falls back to Bridson for variable density.
 pub fn tri_patch_jittered(res: [f64; 3], config: &PatchConfig) -> PatchSample {
-    let mut seeds = Vec::new();
+    let is_uniform = res[0] == res[1] && res[1] == res[2];
 
+    if !is_uniform {
+        // Variable density: Bridson is the only correct approach
+        return tri_patch(res, config);
+    }
+
+    // Uniform density: regular jittered hex grid, O(N)
+    let spacing = 1.0 / res[0];
+
+    let seeds = make_seeds(res);
+
+    let sampler = PoissonSampler::new(SamplerConfig {
+        k_candidates: config.k_candidates,
+        seed: config.seed,
+        domain: Domain::EquilateralTriangle,
+    })
+    .with_seed_points(seeds);
+
+    let positions = sampler.sample_jittered(|_| spacing);
+    let bary: Vec<[f64; 3]> = positions
+        .iter()
+        .map(|&[x, y]| triangle::cartesian_to_bary(x, y))
+        .collect();
+
+    PatchSample { positions, bary }
+}
+
+fn make_seeds(res: [f64; 3]) -> Vec<[f64; 2]> {
+    let mut seeds = Vec::new();
     let n_ab = res[2] as usize;
     for i in 0..=n_ab {
         seeds.push(triangle::lerp(VERTEX_A, VERTEX_B, i as f64 / n_ab as f64));
@@ -92,26 +120,7 @@ pub fn tri_patch_jittered(res: [f64; 3], config: &PatchConfig) -> PatchSample {
     for i in 1..n_bc {
         seeds.push(triangle::lerp(VERTEX_B, VERTEX_C, i as f64 / n_bc as f64));
     }
-
-    let sampler = PoissonSampler::new(SamplerConfig {
-        k_candidates: config.k_candidates,
-        seed: config.seed,
-        domain: Domain::EquilateralTriangle,
-    })
-    .with_seed_points(seeds);
-
-    let density_fn = |p: [f64; 2]| -> f64 {
-        let bary = triangle::cartesian_to_bary(p[0], p[1]);
-        tri_edge_weight(bary, res)
-    };
-
-    let positions = sampler.sample_jittered(density_fn);
-    let bary: Vec<[f64; 3]> = positions
-        .iter()
-        .map(|&[x, y]| triangle::cartesian_to_bary(x, y))
-        .collect();
-
-    PatchSample { positions, bary }
+    seeds
 }
 
 #[cfg(test)]

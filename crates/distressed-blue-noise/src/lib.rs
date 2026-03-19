@@ -273,9 +273,9 @@ impl PoissonSampler {
         points
     }
 
-    /// Fast O(N) sampling via adaptive-step jittered hex grid. Marches across
-    /// each row stepping by the local spacing, so density varies smoothly
-    /// without random thinning. No spatial index or conflict checking.
+    /// Fast O(N) jittered hex grid for constant-density domains.
+    /// The density_fn is evaluated once to get the uniform spacing.
+    /// Produces well-shaped equilateral triangles with small random jitter.
     pub fn sample_jittered<F: Fn([f64; 2]) -> f64 + Sync>(
         &self,
         density_fn: F,
@@ -283,14 +283,24 @@ impl PoissonSampler {
         let mut rng = Pcg64Mcg::seed_from_u64(self.config.seed);
         let domain = &self.config.domain;
 
-        let min_radius = self.estimate_min_radius(&density_fn);
+        // Uniform spacing — evaluate at domain center
+        let cx = domain.x_min() + domain.width() * 0.5;
+        let cy = domain.y_min() + domain.height() * 0.5;
+        let spacing = density_fn([cx, cy]);
+
+        let col_step = spacing;
+        let row_step = spacing * SQRT3_OVER_2;
+        let jitter = spacing * 0.35;
 
         let x0 = domain.x_min();
         let y0 = domain.y_min();
         let x1 = x0 + domain.width();
         let y1 = y0 + domain.height();
 
-        let mut points = Vec::with_capacity(1024);
+        let n_rows = ((y1 - y0) / row_step).ceil() as usize + 1;
+        let n_cols = ((x1 - x0) / col_step).ceil() as usize + 1;
+
+        let mut points = Vec::with_capacity(n_rows * n_cols / 2);
 
         // Insert seed points (not jittered)
         for &sp in &self.seed_points {
@@ -299,72 +309,24 @@ impl PoissonSampler {
             }
         }
 
-        // Place points on a hex grid where the step size at each position
-        // is the local spacing. We march in Cartesian space but advance by
-        // the local density in both axes, keeping the hex aspect ratio
-        // (row_step = col_step * sqrt(3)/2) at each point.
-        //
-        // To avoid squashed triangles, we track the LOCAL spacing for both
-        // the column step and row height at each point independently.
-        let mut y = y0;
-        let mut row_idx = 0usize;
+        for iy in 0..n_rows {
+            let y = y0 + iy as f64 * row_step;
+            let hex_offset = if iy % 2 == 1 { col_step * 0.5 } else { 0.0 };
 
-        while y <= y1 {
-            // Determine the row's vertical spacing by sampling
-            // at the first in-domain point we find
-            let mut first_spacing = min_radius;
-            {
-                let mut probe_x = x0;
-                while probe_x <= x1 {
-                    if domain.contains([probe_x, y]) {
-                        first_spacing = density_fn([probe_x, y]);
-                        break;
-                    }
-                    probe_x += min_radius;
+            for ix in 0..n_cols {
+                let x = x0 + ix as f64 * col_step + hex_offset;
+
+                if !domain.contains([x, y]) {
+                    continue;
+                }
+
+                let jx = x + (rng.gen::<f64>() - 0.5) * jitter;
+                let jy = y + (rng.gen::<f64>() - 0.5) * jitter;
+
+                if domain.contains([jx, jy]) {
+                    points.push([jx, jy]);
                 }
             }
-
-            let hex_offset = if row_idx % 2 == 1 { first_spacing * 0.5 } else { 0.0 };
-            let mut x = x0 + hex_offset;
-
-            while x <= x1 {
-                if domain.contains([x, y]) {
-                    let s = density_fn([x, y]);
-                    let jitter = s * 0.35;
-                    let jx = x + (rng.gen::<f64>() - 0.5) * jitter;
-                    let jy = y + (rng.gen::<f64>() - 0.5) * jitter;
-
-                    if domain.contains([jx, jy]) {
-                        points.push([jx, jy]);
-                    }
-                    x += s;
-                } else {
-                    x += min_radius;
-                }
-            }
-
-            // Row height: sample spacing at a few points along this row
-            // and use the AVERAGE to keep rows evenly spaced through
-            // density transitions
-            let mut sum_spacing = 0.0;
-            let mut n_samples = 0;
-            {
-                let mut sx = x0;
-                while sx <= x1 {
-                    if domain.contains([sx, y]) {
-                        sum_spacing += density_fn([sx, y]);
-                        n_samples += 1;
-                    }
-                    sx += (x1 - x0) / 8.0;
-                }
-            }
-            let avg_spacing = if n_samples > 0 {
-                sum_spacing / n_samples as f64
-            } else {
-                first_spacing
-            };
-            y += avg_spacing * SQRT3_OVER_2;
-            row_idx += 1;
         }
 
         points
