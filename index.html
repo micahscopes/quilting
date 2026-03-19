@@ -263,8 +263,8 @@ function uploadBatches(data) {
     // Line indices for wireframe
     const lines = [];
     for (let i=0;i<tris.length;i+=3) lines.push(tris[i],tris[i+1],tris[i+1],tris[i+2],tris[i+2],tris[i]);
-    const lineIdx = new Uint16Array(lines);
-    const triIdx = new Uint16Array(tris);
+    const lineIdx = new Uint32Array(lines);
+    const triIdx = new Uint32Array(tris);
 
     drawBatches.push({
       vaoOrig: makeVAO(bary, lineIdx, new Float32Array(batch.instances_orig)),
@@ -310,7 +310,7 @@ function render() {
     gl.uniform3f(gl.getUniformLocation(progFlat,'u_edgeLod'), 1, 1, 1);
     for (const b of drawBatches) {
       gl.bindVertexArray(b.vaoOrig);
-      gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
+      gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
   }
 
@@ -324,7 +324,7 @@ function render() {
       gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), b.color);
       gl.uniform3f(gl.getUniformLocation(progMatcap,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
       gl.bindVertexArray(b.vaoXformTri);
-      gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
+      gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
   }
 
@@ -338,7 +338,7 @@ function render() {
       gl.uniform3fv(gl.getUniformLocation(progFlat,'u_lodColor'), b.color);
       gl.uniform3f(gl.getUniformLocation(progFlat,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
       gl.bindVertexArray(b.vaoXform);
-      gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
+      gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
   }
 

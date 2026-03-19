@@ -151,7 +151,7 @@ function upload(data) {
     for (let i = 0; i < tris.length; i += 3) {
       lines.push(tris[i],tris[i+1], tris[i+1],tris[i+2], tris[i+2],tris[i]);
     }
-    const lineData = new Uint16Array(lines);
+    const lineData = new Uint32Array(lines);
 
     const origData = new Float32Array(batch.instances_orig);
     const xformData = new Float32Array(batch.instances_xform);
@@ -214,7 +214,7 @@ function render() {
   gl.uniform1i(uUseQB, 0);
   for (const b of drawBatches) {
     gl.bindVertexArray(b.vaoOrig);
-    gl.drawElementsInstanced(gl.LINES, b.numIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
+    gl.drawElementsInstanced(gl.LINES, b.numIdx, gl.UNSIGNED_INT, 0, b.numInst);
   }
 
   // Draw transformed (bright) — all batches with QB
@@ -222,7 +222,7 @@ function render() {
   gl.uniform1i(uUseQB, 1);
   for (const b of drawBatches) {
     gl.bindVertexArray(b.vaoXform);
-    gl.drawElementsInstanced(gl.LINES, b.numIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
+    gl.drawElementsInstanced(gl.LINES, b.numIdx, gl.UNSIGNED_INT, 0, b.numInst);
   }
 
   gl.bindVertexArray(null);
