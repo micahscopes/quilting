@@ -1,45 +1,42 @@
 use std::time::Instant;
-use quilting_core::sampling::{tri_patch, tri_patch_jittered, PatchConfig};
+use quilting_core::atlas::{TessellationAtlas, BuildMode};
+use quilting_core::sampling::PatchConfig;
 
 fn main() {
     let config = PatchConfig { k_candidates: 30, seed: 42 };
 
-    println!("=== Bridson (Poisson disk) ===");
-    for &res in &[16.0, 32.0, 64.0, 128.0, 256.0, 512.0] {
+    for &max_exp in &[7u32, 8, 9] {
+        let lods: Vec<u32> = (0..=max_exp).map(|n| 1u32 << n).collect();
+        let n = canonical_triple_count(&lods);
+
         let t0 = Instant::now();
-        let sample = tri_patch([res, res, res], &config);
-        let elapsed = t0.elapsed();
+        let direct = TessellationAtlas::build_with_mode(&lods, &config, BuildMode::Direct);
+        let td = t0.elapsed();
+
+        let t0 = Instant::now();
+        let hier = TessellationAtlas::build_with_mode(&lods, &config, BuildMode::Hierarchical);
+        let th = t0.elapsed();
+
         println!(
-            "  res={:>4}: {:>6} points, {:>8.1}ms",
-            res as u32, sample.positions.len(), elapsed.as_secs_f64() * 1000.0
+            "2^0..2^{}: {} triples | direct: {:>6} verts {:>7.0}ms | hier: {:>6} verts {:>7.0}ms | {:.1}x",
+            max_exp, n,
+            direct.positions.len(), td.as_secs_f64() * 1000.0,
+            hier.positions.len(), th.as_secs_f64() * 1000.0,
+            td.as_secs_f64() / th.as_secs_f64(),
         );
     }
+}
 
-    println!("\n=== Jittered hex grid ===");
-    for &res in &[16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0] {
-        let t0 = Instant::now();
-        let sample = tri_patch_jittered([res, res, res], &config);
-        let elapsed = t0.elapsed();
-        println!(
-            "  res={:>4}: {:>6} points, {:>8.1}ms",
-            res as u32, sample.positions.len(), elapsed.as_secs_f64() * 1000.0
-        );
+fn canonical_triple_count(lods: &[u32]) -> usize {
+    let mut triples = Vec::new();
+    for &a in lods {
+        for &b in lods {
+            for &c in lods {
+                let mut k = [a, b, c];
+                k.sort();
+                if !triples.contains(&k) { triples.push(k); }
+            }
+        }
     }
-
-    println!("\n=== Variable density comparison (2, 2, 256) ===");
-    let res = [2.0, 2.0, 256.0];
-    let t0 = Instant::now();
-    let a = tri_patch(res, &config);
-    let ta = t0.elapsed();
-    let t0 = Instant::now();
-    let b = tri_patch_jittered(res, &config);
-    let tb = t0.elapsed();
-    println!(
-        "  Bridson:  {:>6} points, {:>8.1}ms",
-        a.positions.len(), ta.as_secs_f64() * 1000.0
-    );
-    println!(
-        "  Jittered: {:>6} points, {:>8.1}ms",
-        b.positions.len(), tb.as_secs_f64() * 1000.0
-    );
+    triples.len()
 }

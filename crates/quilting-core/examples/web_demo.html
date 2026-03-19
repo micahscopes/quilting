@@ -96,6 +96,13 @@
       </div>
     </div>
     <div class="control-group">
+      <label>Atlas build</label>
+      <div class="mode-toggle">
+        <button id="build-direct" class="active">Direct</button>
+        <button id="build-hierarchical">Hierarchical</button>
+      </div>
+    </div>
+    <div class="control-group">
       <label>Display</label>
       <div class="mode-toggle">
         <button id="mode-wire" class="active">Wireframe</button>
@@ -117,6 +124,7 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 let displayMode = 'wire';
 let samplerMethod = 'bridson';
+let buildMode = 'direct';
 let currentPatch = null;
 let fetchController = null;
 
@@ -178,7 +186,7 @@ async function fetchPatch() {
   const t0 = performance.now();
   try {
     const resp = await fetch(
-      `/patch?a=${res[0]}&b=${res[1]}&c=${res[2]}&seed=${seed}&method=${samplerMethod}`,
+      `/patch?a=${res[0]}&b=${res[1]}&c=${res[2]}&seed=${seed}&method=${samplerMethod}&build=${buildMode}`,
       { signal: fetchController.signal }
     );
     const patch = await resp.json();
@@ -296,6 +304,16 @@ function setSampler(m) {
   samplerMethod = m;
   document.getElementById('sampler-bridson').classList.toggle('active', m === 'bridson');
   document.getElementById('sampler-jittered').classList.toggle('active', m === 'jittered');
+  fetchPatch();
+}
+
+document.getElementById('build-direct').onclick = () => setBuild('direct');
+document.getElementById('build-hierarchical').onclick = () => setBuild('hierarchical');
+
+function setBuild(m) {
+  buildMode = m;
+  document.getElementById('build-direct').classList.toggle('active', m === 'direct');
+  document.getElementById('build-hierarchical').classList.toggle('active', m === 'hierarchical');
   fetchPatch();
 }
 
