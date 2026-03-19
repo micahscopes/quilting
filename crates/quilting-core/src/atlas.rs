@@ -140,67 +140,91 @@ impl TessellationAtlas {
         }
     }
 
-    /// Hierarchical build: generate base patches at min LOD, then derive
-    /// higher-resolution patches by adaptive subdivision using the density
-    /// function. Each patch starts from its min-resolution uniform base and
-    /// refines until the local density is met everywhere.
+    /// Hierarchical build: derive patches by uniform subdivision where possible.
+    ///
+    /// (2p, 2q, 2r) is derived from (p, q, r) by splitting every triangle into 4.
+    /// This preserves boundary invariants exactly — midpoints of parent boundary
+    /// edges become the child's boundary vertices at the correct stitching positions.
+    ///
+    /// Triples that can't be halved evenly to reach an existing patch (e.g., (1,1,2048)
+    /// where 1 can't be halved) are generated directly.
     fn build_hierarchical(lod_levels: &[u32], config: &PatchConfig) -> Self {
-        use crate::interpolation::tri_edge_weight;
-        use crate::triangle;
-
         let triples = canonical_triples(lod_levels);
-        let _min_lod = *lod_levels.iter().min().unwrap_or(&1);
+        let min_lod = *lod_levels.iter().min().unwrap_or(&1);
 
-        // For each triple, generate a base mesh at the minimum edge resolution,
-        // then adaptively subdivide to match the target density.
-        let generate_hierarchical = |key: [u32; 3]| -> Option<(Vec<[f64; 2]>, Vec<[usize; 3]>)> {
-            let base_res = key[0]; // sorted, so key[0] is the minimum
+        let mut patch_meshes: HashMap<[u32; 3], (Vec<[f64; 2]>, Vec<[usize; 3]>)> = HashMap::new();
 
-            // Generate base mesh at uniform min resolution
-            let base_key = [base_res, base_res, base_res];
-            let (base_pos, base_tris) = generate_patch(base_key, config)?;
-
-            if key == base_key {
-                // Uniform — no adaptive refinement needed
-                return Some((base_pos, base_tris));
+        // Classify: for each triple, find its base (halve all until we can't)
+        // and how many subdivisions are needed.
+        struct Entry {
+            key: [u32; 3],
+            base: [u32; 3],
+            n_sub: u32,
+        }
+        let mut entries: Vec<Entry> = triples.iter().map(|&key| {
+            let mut base = key;
+            let mut n = 0u32;
+            while base[0] > min_lod
+                && base[0] % 2 == 0
+                && base[1] % 2 == 0
+                && base[2] % 2 == 0
+            {
+                base = [base[0] / 2, base[1] / 2, base[2] / 2];
+                n += 1;
             }
+            Entry { key, base, n_sub: n }
+        }).collect();
 
-            // Adaptive refinement with the target density function
-            let res = [key[0] as f64, key[1] as f64, key[2] as f64];
-            let density_fn = |p: [f64; 2]| -> f64 {
-                let bary = triangle::cartesian_to_bary(p[0], p[1]);
-                tri_edge_weight(bary, res)
-            };
+        // Sort by n_sub so bases are processed first
+        entries.sort_by_key(|e| e.n_sub);
 
-            // Max subdivisions needed = log2(max_res / min_res)
-            let max_ratio = key[2] as f64 / key[0] as f64;
-            let max_iters = (max_ratio.log2().ceil() as usize).max(1);
+        // Collect all base triples that need direct generation
+        let base_keys: Vec<[u32; 3]> = entries.iter()
+            .filter(|e| e.n_sub == 0)
+            .map(|e| e.key)
+            .collect();
 
-            let (pos, tris) = subdivide::subdivide_adaptive(
-                &base_pos, &base_tris, &density_fn, 1.2, max_iters,
-            );
-            Some((pos, tris))
-        };
-
+        // Generate bases (in parallel if available)
         #[cfg(feature = "parallel")]
-        let results = {
+        {
             use rayon::prelude::*;
-            triples
+            let results: Vec<_> = base_keys
                 .par_iter()
-                .filter_map(|&key| {
-                    generate_hierarchical(key).map(|(p, t)| (key, p, t))
-                })
-                .collect::<Vec<_>>()
-        };
+                .filter_map(|&key| generate_patch(key, config).map(|m| (key, m)))
+                .collect();
+            for (key, mesh) in results {
+                patch_meshes.insert(key, mesh);
+            }
+        }
         #[cfg(not(feature = "parallel"))]
-        let results = {
-            triples
-                .iter()
-                .filter_map(|&key| {
-                    generate_hierarchical(key).map(|(p, t)| (key, p, t))
-                })
-                .collect::<Vec<_>>()
-        };
+        {
+            for &key in &base_keys {
+                if let Some(mesh) = generate_patch(key, config) {
+                    patch_meshes.insert(key, mesh);
+                }
+            }
+        }
+
+        // Derive higher levels by subdivision, level by level
+        for entry in &entries {
+            if entry.n_sub == 0 || patch_meshes.contains_key(&entry.key) {
+                continue;
+            }
+            // Find the parent (one level down)
+            let parent = [entry.key[0] / 2, entry.key[1] / 2, entry.key[2] / 2];
+            if let Some((pos, tris)) = patch_meshes.get(&parent) {
+                let (new_pos, new_tris) = subdivide::subdivide(pos, tris);
+                patch_meshes.insert(entry.key, (new_pos, new_tris));
+            } else if let Some((pos, tris)) = patch_meshes.get(&entry.base) {
+                // Parent not computed yet but base exists — subdivide from base
+                let (new_pos, new_tris) = subdivide::subdivide_n(pos, tris, entry.n_sub);
+                patch_meshes.insert(entry.key, (new_pos, new_tris));
+            }
+        }
+
+        let results: Vec<_> = triples.iter()
+            .filter_map(|key| patch_meshes.remove(key).map(|(p, t)| (*key, p, t)))
+            .collect();
 
         merge_patches(lod_levels, results)
     }
