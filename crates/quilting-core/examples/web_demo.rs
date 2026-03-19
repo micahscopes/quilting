@@ -152,9 +152,8 @@ fn handle_request(request: &str, server: &PatchServer) -> (String, String) {
 }
 
 fn main() {
-    // Pre-build atlas for LODs 2^0 through 2^7 (1..128)
-    // With parallel feature, this uses rayon and takes ~25ms in release
-    let server = PatchServer::build(7);
+    // Pre-build atlas for LODs 2^0 through 2^8 (1..256)
+    let server = PatchServer::build(8);
 
     let port = std::env::var("PORT")
         .ok()
