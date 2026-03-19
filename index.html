@@ -147,22 +147,49 @@ float edgeDensity(vec3 bary, vec3 res) {
   return exp(logRes);
 }
 
+// Compute bary-safe finite difference offsets.
+// Moves along the two tangent directions of the bary simplex
+// while clamping so no coordinate goes negative.
+vec3 baryOffset(vec3 b, float eps, int axis) {
+  // axis 0: move from vertex 0 toward edge BC (decrease x, increase y)
+  // axis 1: move from vertex 0 toward edge BC (decrease x, increase z)
+  vec3 d;
+  if (axis == 0) {
+    float e = min(eps, b.x);  // don't go past x=0
+    d = vec3(-e, e, 0.0);
+  } else {
+    float e = min(eps, b.x);
+    d = vec3(-e, 0.0, e);
+  }
+  return b + d;
+}
+
 void main(){
   vec3 p;
-  float eps = 0.001;
+  float eps = 0.002;
   vec3 du, dv;
+  vec3 bu = baryOffset(a_bary, eps, 0);
+  vec3 bv = baryOffset(a_bary, eps, 1);
   if (u_useQB == 1) {
     p  = evalQB(a_bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
-    vec3 pu = evalQB(a_bary+vec3(-eps,eps,0.), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
-    vec3 pv = evalQB(a_bary+vec3(-eps,0.,eps), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
-    du = pu - p; dv = pv - p;
+    du = evalQB(bu, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2) - p;
+    dv = evalQB(bv, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2) - p;
   } else {
     p  = evalFlat(a_bary, a_p0,a_p1,a_p2);
-    vec3 pu = evalFlat(a_bary+vec3(-eps,eps,0.), a_p0,a_p1,a_p2);
-    vec3 pv = evalFlat(a_bary+vec3(-eps,0.,eps), a_p0,a_p1,a_p2);
-    du = pu - p; dv = pv - p;
+    du = evalFlat(bu, a_p0,a_p1,a_p2) - p;
+    dv = evalFlat(bv, a_p0,a_p1,a_p2) - p;
   }
-  vec3 n = normalize(cross(du, dv));
+  // Fallback for degenerate cross product (at vertices where du≈dv)
+  vec3 n = cross(du, dv);
+  float nl = length(n);
+  if (nl < 1e-8) {
+    // Use face normal from control points
+    vec3 e1 = a_p1.yzw - a_p0.yzw;
+    vec3 e2 = a_p2.yzw - a_p0.yzw;
+    n = cross(e1, e2);
+    nl = length(n);
+  }
+  n = nl > 1e-12 ? n / nl : vec3(0.0, 0.0, 1.0);
   v_normal_vs = normalize(mat3(u_mv) * n);
 
   // Density heatmap: normalize to 0..1 using global max
