@@ -27,7 +27,15 @@ pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
         let p1 = points[t[1]];
         let p2 = points[t[2]];
 
-        // Reject triangles with centroid outside the equilateral reference triangle
+        // Reject triangles with ANY vertex outside the reference triangle
+        for p in &[p0, p1, p2] {
+            let [u, v, w] = triangle::cartesian_to_bary(p[0], p[1]);
+            if u < -0.02 || v < -0.02 || w < -0.02 {
+                return false;
+            }
+        }
+
+        // Reject triangles with centroid outside
         let cx = (p0[0] + p1[0] + p2[0]) / 3.0;
         let cy = (p0[1] + p1[1] + p2[1]) / 3.0;
         let [u, v, w] = triangle::cartesian_to_bary(cx, cy);
@@ -35,17 +43,23 @@ pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
             return false;
         }
 
-        // Reject degenerate slivers: aspect ratio > 5
-        let e0 = ((p1[0]-p0[0]).powi(2) + (p1[1]-p0[1]).powi(2)).sqrt();
-        let e1 = ((p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2)).sqrt();
-        let e2 = ((p0[0]-p2[0]).powi(2) + (p0[1]-p2[1]).powi(2)).sqrt();
-        let longest = e0.max(e1).max(e2);
-        let shortest = e0.min(e1).min(e2);
-        if shortest < 1e-15 || longest / shortest > 5.0 {
-            return false;
-        }
+        // Reject slivers using area/perimeter² ratio.
+        // For an equilateral triangle this is ~0.048. For a sliver it approaches 0.
+        // Threshold at 0.01 catches most slivers while keeping decent triangles.
+        let e0_sq = (p1[0]-p0[0]).powi(2) + (p1[1]-p0[1]).powi(2);
+        let e1_sq = (p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2);
+        let e2_sq = (p0[0]-p2[0]).powi(2) + (p0[1]-p2[1]).powi(2);
 
-        true
+        // Signed area × 2
+        let area2 = ((p1[0]-p0[0]) * (p2[1]-p0[1]) - (p2[0]-p0[0]) * (p1[1]-p0[1])).abs();
+        let perimeter = e0_sq.sqrt() + e1_sq.sqrt() + e2_sq.sqrt();
+
+        if perimeter < 1e-15 { return false; }
+
+        let compactness = area2 / (perimeter * perimeter);
+        // Equilateral: area2/(perim²) ≈ 0.096. Reject below 0.01.
+        compactness > 0.01
+
     });
     tri
 }
