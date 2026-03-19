@@ -231,8 +231,6 @@ impl PoissonSampler {
             grid.insert(p, 0);
         }
 
-        let min_search = (min_radius * inv_cell_size).ceil() as isize + 1;
-
         while !active.is_empty() {
             let active_idx = rng.gen_range(0..active.len());
             let point_idx = active[active_idx];
@@ -249,20 +247,12 @@ impl PoissonSampler {
                     continue;
                 }
 
-                // Quick check with source radius first
-                let source_r_sq = radii_sq[point_idx];
-                if grid.conflicts(candidate, source_r_sq, &points, &radii_sq, min_search) {
-                    continue;
-                }
-
-                // Full check with candidate's actual radius
                 let candidate_r = density_fn(candidate);
                 let candidate_r_sq = candidate_r * candidate_r;
-                if candidate_r_sq > source_r_sq {
-                    let search = (candidate_r * inv_cell_size).ceil() as isize + 1;
-                    if grid.conflicts(candidate, candidate_r_sq, &points, &radii_sq, search) {
-                        continue;
-                    }
+                let search = (candidate_r * inv_cell_size).ceil() as isize + 1;
+
+                if grid.conflicts(candidate, candidate_r_sq, &points, &radii_sq, search) {
+                    continue;
                 }
 
                 let idx = points.len();
