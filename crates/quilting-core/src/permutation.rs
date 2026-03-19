@@ -70,8 +70,7 @@ pub fn inverse_perm(perm_index: usize) -> usize {
 /// On the equilateral triangle this corresponds to actual rotations/reflections.
 pub fn remap_position(perm_index: usize, pos: [f64; 2]) -> [f64; 2] {
     let bary = triangle::cartesian_to_bary(pos[0], pos[1]);
-    let inv = inverse_perm(perm_index);
-    let perm = S3_PERMUTATIONS[inv];
+    let perm = S3_PERMUTATIONS[perm_index];
     let new_bary = [bary[perm[0]], bary[perm[1]], bary[perm[2]]];
     triangle::bary_to_cartesian(new_bary)
 }
