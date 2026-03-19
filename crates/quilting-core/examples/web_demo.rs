@@ -47,6 +47,65 @@ fn generate_on_demand(res: [u32; 3], sampler: &str) -> (TessellationMesh, f64, f
     (TessellationMesh::from_2d(tri.positions, tri.triangles), sample_ms, tri_ms)
 }
 
+/// Find the best ancestor triple in the atlas and subdivide up to the target.
+/// Returns (ancestor_key, n_subdivisions) or None if no ancestor exists.
+fn find_ancestor(res: [u32; 3], max_atlas_lod: u32) -> Option<([u32; 3], u32)> {
+    let mut ancestor = res;
+    let mut n = 0u32;
+    loop {
+        if ancestor.iter().all(|&r| r <= max_atlas_lod) {
+            return Some((ancestor, n));
+        }
+        // All must be even to halve
+        if ancestor.iter().any(|&r| r % 2 != 0 || r == 0) {
+            return None;
+        }
+        ancestor = [ancestor[0] / 2, ancestor[1] / 2, ancestor[2] / 2];
+        n += 1;
+    }
+}
+
+fn serve_patch(
+    res: [u32; 3],
+    sampler: &str,
+    mode: BuildMode,
+    max_atlas_lod: u32,
+    cache: &RefCell<CachedAtlas>,
+) -> (TessellationMesh, f64, f64, String) {
+    // Try atlas lookup (exact match)
+    if res.iter().all(|&r| r <= max_atlas_lod) {
+        let c = cache.borrow();
+        let t0 = Instant::now();
+        if let Some(mesh) = c.atlas.get_patch(res) {
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            return (mesh, 0.0, ms, format!("atlas/{:?}", mode).to_lowercase());
+        }
+    }
+
+    // Hierarchical: subdivide from nearest ancestor in the atlas
+    if mode == BuildMode::Hierarchical {
+        if let Some((ancestor, n_sub)) = find_ancestor(res, max_atlas_lod) {
+            let c = cache.borrow();
+            if let Some(mesh) = c.atlas.get_patch(ancestor) {
+                let t0 = Instant::now();
+                let (pos, tris) = quilting_core::subdivide::subdivide_n(
+                    &mesh.positions, &mesh.triangles, n_sub,
+                );
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                return (
+                    TessellationMesh::from_2d(pos, tris),
+                    0.0, ms,
+                    format!("subdivide({}x)", n_sub),
+                );
+            }
+        }
+    }
+
+    // On-demand generation
+    let (m, sm, tm) = generate_on_demand(res, sampler);
+    (m, sm, tm, sampler.to_string())
+}
+
 fn mesh_to_json(mesh: &TessellationMesh, sample_ms: f64, tri_ms: f64, source: &str) -> String {
     if mesh.positions.is_empty() {
         return format!(
@@ -111,23 +170,9 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
             }
         }
 
-        // Serve from atlas or generate on demand
-        let (mesh, sample_ms, tri_ms, source) =
-            if res.iter().all(|&r| r <= max_atlas_lod) {
-                let c = cache.borrow();
-                let t0 = Instant::now();
-                if let Some(mesh) = c.atlas.get_patch(res) {
-                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                    (mesh, 0.0, ms, format!("atlas/{:?}", mode).to_lowercase())
-                } else {
-                    drop(c);
-                    let (m, sm, tm) = generate_on_demand(res, &sampler);
-                    (m, sm, tm, sampler.clone())
-                }
-            } else {
-                let (m, sm, tm) = generate_on_demand(res, &sampler);
-                (m, sm, tm, sampler.clone())
-            };
+        let (mesh, sample_ms, tri_ms, source) = serve_patch(
+            res, &sampler, mode, max_atlas_lod, &cache,
+        );
 
         let json = mesh_to_json(&mesh, sample_ms, tri_ms, &source);
         (
