@@ -1,0 +1,16 @@
+# Build artifacts
+/target/
+/pkg/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode
+.idea
+
+# Logs
+*.log
+
+# wasm-pack
+/wasm-pack.log
