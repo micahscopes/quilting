@@ -147,49 +147,25 @@ float edgeDensity(vec3 bary, vec3 res) {
   return exp(logRes);
 }
 
-// Compute bary-safe finite difference offsets.
-// Moves along the two tangent directions of the bary simplex
-// while clamping so no coordinate goes negative.
-vec3 baryOffset(vec3 b, float eps, int axis) {
-  // axis 0: move from vertex 0 toward edge BC (decrease x, increase y)
-  // axis 1: move from vertex 0 toward edge BC (decrease x, increase z)
-  vec3 d;
-  if (axis == 0) {
-    float e = min(eps, b.x);  // don't go past x=0
-    d = vec3(-e, e, 0.0);
-  } else {
-    float e = min(eps, b.x);
-    d = vec3(-e, 0.0, e);
-  }
-  return b + d;
-}
-
 void main(){
   vec3 p;
-  float eps = 0.002;
-  vec3 du, dv;
-  vec3 bu = baryOffset(a_bary, eps, 0);
-  vec3 bv = baryOffset(a_bary, eps, 1);
   if (u_useQB == 1) {
-    p  = evalQB(a_bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
-    du = evalQB(bu, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2) - p;
-    dv = evalQB(bv, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2) - p;
+    p = evalQB(a_bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
   } else {
-    p  = evalFlat(a_bary, a_p0,a_p1,a_p2);
-    du = evalFlat(bu, a_p0,a_p1,a_p2) - p;
-    dv = evalFlat(bv, a_p0,a_p1,a_p2) - p;
+    p = evalFlat(a_bary, a_p0,a_p1,a_p2);
   }
-  // Fallback for degenerate cross product (at vertices where du≈dv)
-  vec3 n = cross(du, dv);
-  float nl = length(n);
-  if (nl < 1e-8) {
-    // Use face normal from control points
-    vec3 e1 = a_p1.yzw - a_p0.yzw;
-    vec3 e2 = a_p2.yzw - a_p0.yzw;
-    n = cross(e1, e2);
-    nl = length(n);
+
+  // Flat shading: face normal from the three QB-evaluated corners.
+  // Consistent across all vertices of the same instance — no seams.
+  vec3 c0, c1, c2;
+  if (u_useQB == 1) {
+    c0 = evalQB(vec3(1,0,0), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
+    c1 = evalQB(vec3(0,1,0), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
+    c2 = evalQB(vec3(0,0,1), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
+  } else {
+    c0 = a_p0.yzw; c1 = a_p1.yzw; c2 = a_p2.yzw;
   }
-  n = nl > 1e-12 ? n / nl : vec3(0.0, 0.0, 1.0);
+  vec3 n = normalize(cross(c1 - c0, c2 - c0));
   v_normal_vs = normalize(mat3(u_mv) * n);
 
   // Density heatmap: normalize to 0..1 using global max
