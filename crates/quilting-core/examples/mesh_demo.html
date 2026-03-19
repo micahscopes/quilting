@@ -17,7 +17,7 @@ input[type=range] { flex:1; accent-color:#e94560; }
 .btns button { flex:1; padding:5px; font-size:10px; font-family:inherit; border:1px solid #0f3460; background:transparent; color:#8899aa; cursor:pointer; border-radius:3px; }
 .btns button.a { background:#e94560; color:#fff; border-color:#e94560; }
 .stats { font-size:10px; color:#556677; line-height:1.5; margin-top:auto; padding-top:12px; border-top:1px solid #0f3460; }
-canvas { flex:1; }
+#cv { flex:1; display:block; }
 </style>
 </head>
 <body>
@@ -44,275 +44,159 @@ canvas { flex:1; }
     <div class="sr"><input type="range" id="sz" min="-30" max="30" value="0" step="1"><span class="v" id="sz-v">0.0</span></div>
   </div>
   <div class="cg"><label>Sphere radius</label>
-    <div class="sr"><input type="range" id="sr" min="0" max="50" value="0" step="1"><span class="v" id="sr-v">0.0</span></div>
-  </div>
-  <div class="cg"><label>Render</label>
-    <div class="btns" id="render-btns">
-      <button class="a" data-v="solid">Solid</button>
-      <button data-v="wire">Wire</button>
-    </div>
+    <div class="sr"><input type="range" id="sr" min="0" max="50" value="20" step="1"><span class="v" id="sr-v">2.0</span></div>
   </div>
   <div class="stats" id="stats">Loading...</div>
 </div>
-<canvas id="c"></canvas>
+<canvas id="cv"></canvas>
 <script>
 const $ = s => document.getElementById(s);
-const gl = $('c').getContext('webgl2');
-if (!gl) document.body.innerHTML = '<h1 style="color:red;padding:2em">WebGL2 required</h1>';
+const canvas = $('cv');
+const gl = canvas.getContext('webgl2', {antialias:true});
+if(!gl){document.body.innerHTML='<h1 style="color:red;padding:2em">WebGL2 required</h1>';throw 0;}
 
-let shape='cube', renderMode='solid', meshData=null, rotX=0.3, rotY=0.5, fetching=false;
+let shape='cube', meshData=null, rotX=0.4, rotY=0.6, fetching=false;
 
-// --- Shaders ---
-const VS = `#version 300 es
+const VS=`#version 300 es
 precision highp float;
-// Per-vertex: barycentric coords from tessellation
-in vec3 a_bary;
-// Per-instance: 3 positions + 3 weights (quaternions)
-in vec4 a_p0, a_p1, a_p2;
-in vec4 a_w0, a_w1, a_w2;
-
+layout(location=0) in vec3 a_bary;
+layout(location=1) in vec4 a_p0;
+layout(location=2) in vec4 a_p1;
+layout(location=3) in vec4 a_p2;
+layout(location=4) in vec4 a_w0;
+layout(location=5) in vec4 a_w1;
+layout(location=6) in vec4 a_w2;
 uniform mat4 u_vp;
+out vec3 v_n;
 
-out vec3 v_normal;
-out vec3 v_pos;
+vec4 qm(vec4 a,vec4 b){return vec4(a.x*b.x-a.y*b.y-a.z*b.z-a.w*b.w,a.x*b.y+a.y*b.x+a.z*b.w-a.w*b.z,a.x*b.z-a.y*b.w+a.z*b.x+a.w*b.y,a.x*b.w+a.y*b.z-a.z*b.y+a.w*b.x);}
+vec4 qi(vec4 q){return vec4(q.x,-q.yzw)/dot(q,q);}
 
-// Quaternion multiply
-vec4 qmul(vec4 a, vec4 b) {
-  return vec4(
-    a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
-    a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
-    a.x*b.z - a.y*b.w + a.z*b.x + a.w*b.y,
-    a.x*b.w + a.y*b.z - a.z*b.y + a.w*b.x
-  );
+vec3 ev(vec3 b,vec4 p0,vec4 p1,vec4 p2,vec4 w0,vec4 w1,vec4 w2){
+  vec4 top=b.x*qm(p0,w0)+b.y*qm(p1,w1)+b.z*qm(p2,w2);
+  vec4 bot=b.x*w0+b.y*w1+b.z*w2;
+  return qm(top,qi(bot)).yzw;
 }
 
-vec4 qinv(vec4 q) {
-  float n2 = dot(q,q);
-  return vec4(q.x, -q.yzw) / n2;
-}
-
-// Evaluate QB surface: X = (Σ λᵢ pᵢ wᵢ) / (Σ λᵢ wᵢ)
-vec3 evalQB(vec3 bary, vec4 p0, vec4 p1, vec4 p2, vec4 w0, vec4 w1, vec4 w2) {
-  vec4 top = bary.x * qmul(p0, w0) + bary.y * qmul(p1, w1) + bary.z * qmul(p2, w2);
-  vec4 bot = bary.x * w0 + bary.y * w1 + bary.z * w2;
-  vec4 X = qmul(top, qinv(bot));
-  return X.yzw; // imaginary part = 3D position
-}
-
-void main() {
-  vec3 pos = evalQB(a_bary, a_p0, a_p1, a_p2, a_w0, a_w1, a_w2);
-
-  // Finite-diff normal
-  float eps = 0.001;
-  vec3 bu = a_bary + vec3(-eps, eps, 0.0);
-  vec3 bv = a_bary + vec3(-eps, 0.0, eps);
-  vec3 pu = evalQB(bu, a_p0, a_p1, a_p2, a_w0, a_w1, a_w2);
-  vec3 pv = evalQB(bv, a_p0, a_p1, a_p2, a_w0, a_w1, a_w2);
-  vec3 n = normalize(cross(pu - pos, pv - pos));
-
-  v_normal = n;
-  v_pos = pos;
-  gl_Position = u_vp * vec4(pos, 1.0);
+void main(){
+  vec3 p=ev(a_bary,a_p0,a_p1,a_p2,a_w0,a_w1,a_w2);
+  float e=0.002;
+  vec3 du=ev(a_bary+vec3(-e,e,0.),a_p0,a_p1,a_p2,a_w0,a_w1,a_w2)-p;
+  vec3 dv=ev(a_bary+vec3(-e,0.,e),a_p0,a_p1,a_p2,a_w0,a_w1,a_w2)-p;
+  v_n=normalize(cross(du,dv));
+  gl_Position=u_vp*vec4(p,1);
 }`;
 
-const FS = `#version 300 es
+const FS=`#version 300 es
 precision highp float;
-in vec3 v_normal;
-in vec3 v_pos;
-out vec4 fragColor;
-
-void main() {
-  vec3 light = normalize(vec3(1.0, 2.0, 3.0));
-  vec3 n = gl_FrontFacing ? v_normal : -v_normal;
-  float diff = max(dot(n, light), 0.0) * 0.7 + 0.3;
-  vec3 col = vec3(0.91, 0.27, 0.37) * diff;
-  fragColor = vec4(col, 1.0);
+in vec3 v_n;
+out vec4 o;
+void main(){
+  vec3 l=normalize(vec3(1,2,3));
+  vec3 n=gl_FrontFacing?v_n:-v_n;
+  float d=max(dot(n,l),0.)*.7+.3;
+  o=vec4(vec3(.91,.27,.37)*d,1);
 }`;
 
-const FS_WIRE = `#version 300 es
-precision highp float;
-in vec3 v_normal;
-in vec3 v_pos;
-out vec4 fragColor;
-void main() {
-  fragColor = vec4(0.91, 0.27, 0.37, 1.0);
-}`;
+function mkShader(src,type){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){console.error(gl.getShaderInfoLog(s));}return s;}
+const prog=gl.createProgram();
+gl.attachShader(prog,mkShader(VS,gl.VERTEX_SHADER));
+gl.attachShader(prog,mkShader(FS,gl.FRAGMENT_SHADER));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(prog));
+const uVP=gl.getUniformLocation(prog,'u_vp');
 
-function compileShader(src, type) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
-  return s;
-}
-function linkProgram(vs, fs) {
-  const p = gl.createProgram();
-  gl.attachShader(p, compileShader(vs, gl.VERTEX_SHADER));
-  gl.attachShader(p, compileShader(fs, gl.FRAGMENT_SHADER));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p));
-  return p;
-}
+let vao=null,numIdx=0,numInst=0;
 
-const progSolid = linkProgram(VS, FS);
-const progWire = linkProgram(VS, FS_WIRE);
-
-function mat4Perspective(fov, aspect, near, far) {
-  const f = 1/Math.tan(fov/2);
-  return new Float32Array([
-    f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)/(near-far),-1, 0,0,2*far*near/(near-far),0
-  ]);
-}
-function mat4Mul(a,b) {
-  const r = new Float32Array(16);
-  for(let i=0;i<4;i++) for(let j=0;j<4;j++) {
-    let s=0; for(let k=0;k<4;k++) s+=a[i+k*4]*b[k*4+j]; r[i+j*4]=s;
-  } return r;
-}
-function mat4RotX(a) {
-  const c=Math.cos(a),s=Math.sin(a);
-  return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]);
-}
-function mat4RotY(a) {
-  const c=Math.cos(a),s=Math.sin(a);
-  return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]);
-}
-function mat4Translate(x,y,z) {
-  return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]);
-}
-
-let vao=null, numIndices=0, numInstances=0;
-
-function uploadMesh(data) {
-  meshData = data;
-  const prog = progSolid; // use solid for attribute setup
-  if (vao) gl.deleteVertexArray(vao);
-  vao = gl.createVertexArray();
+function upload(d){
+  meshData=d;
+  if(vao)gl.deleteVertexArray(vao);
+  vao=gl.createVertexArray();
   gl.bindVertexArray(vao);
 
-  // Tessellation bary coords (per-vertex, shared across instances)
-  const baryBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, baryBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data.tess_bary), gl.STATIC_DRAW);
-  const aB = gl.getAttribLocation(prog, 'a_bary');
-  gl.enableVertexAttribArray(aB);
-  gl.vertexAttribPointer(aB, 3, gl.FLOAT, false, 0, 0);
+  // Bary (per-vertex)
+  const bb=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,bb);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(d.tess_bary),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
 
-  // Instance data: 6 vec4s per instance (p0,p1,p2,w0,w1,w2)
-  const instBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data.instances), gl.STATIC_DRAW);
-
-  const names = ['a_p0','a_p1','a_p2','a_w0','a_w1','a_w2'];
-  const stride = 24 * 4; // 24 floats per instance
-  for (let i = 0; i < 6; i++) {
-    const loc = gl.getAttribLocation(prog, names[i]);
-    if (loc < 0) continue;
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, stride, i * 4 * 4);
-    gl.vertexAttribDivisor(loc, 1);
-  }
-  // Also set up for wire program
-  for (let i = 0; i < 6; i++) {
-    const loc = gl.getAttribLocation(progWire, names[i]);
-    if (loc >= 0) {
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, stride, i * 4 * 4);
-      gl.vertexAttribDivisor(loc, 1);
-    }
+  // Instances (per-face): 6 vec4 = 24 floats
+  const ib=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,ib);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(d.instances),gl.STATIC_DRAW);
+  const stride=24*4;
+  for(let i=0;i<6;i++){
+    gl.enableVertexAttribArray(1+i);
+    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,stride,i*16);
+    gl.vertexAttribDivisor(1+i,1);
   }
 
   // Index buffer
-  const idxBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(data.tess_triangles), gl.STATIC_DRAW);
+  const eb=gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,eb);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(d.tess_triangles),gl.STATIC_DRAW);
 
-  numIndices = data.tris_per_face * 3;
-  numInstances = data.num_faces;
-
+  numIdx=d.tris_per_face*3;
+  numInst=d.num_faces;
   gl.bindVertexArray(null);
 }
 
-function render() {
-  const c = $('c');
-  c.width = c.clientWidth * devicePixelRatio;
-  c.height = c.clientHeight * devicePixelRatio;
-  gl.viewport(0, 0, c.width, c.height);
-  gl.clearColor(0.06, 0.06, 0.14, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+function m4p(f,a,n,r){const t=1/Math.tan(f/2);return new Float32Array([t/a,0,0,0,0,t,0,0,0,0,(r+n)/(n-r),-1,0,0,2*r*n/(n-r),0]);}
+function m4m(a,b){const r=new Float32Array(16);for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;for(let k=0;k<4;k++)s+=a[i+k*4]*b[k*4+j];r[i+j*4]=s;}return r;}
+function m4rx(a){const c=Math.cos(a),s=Math.sin(a);return new Float32Array([1,0,0,0,0,c,s,0,0,-s,c,0,0,0,0,1]);}
+function m4ry(a){const c=Math.cos(a),s=Math.sin(a);return new Float32Array([c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1]);}
+function m4t(x,y,z){return new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1]);}
+
+function render(){
+  canvas.width=canvas.clientWidth*devicePixelRatio;
+  canvas.height=canvas.clientHeight*devicePixelRatio;
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.clearColor(0.06,0.06,0.14,1);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
+  if(!vao||!numInst)return;
 
-  if (!vao || numInstances === 0) return;
-
-  const aspect = c.width / c.height;
-  const proj = mat4Perspective(0.8, aspect, 0.1, 100);
-  const view = mat4Mul(mat4Translate(0, 0, -5), mat4Mul(mat4RotX(rotX), mat4RotY(rotY)));
-  const vp = mat4Mul(proj, view);
-
-  const prog = renderMode === 'wire' ? progWire : progSolid;
+  const vp=m4m(m4p(0.8,canvas.width/canvas.height,0.1,200),m4m(m4t(0,0,-8),m4m(m4rx(rotX),m4ry(rotY))));
   gl.useProgram(prog);
-  gl.uniformMatrix4fv(gl.getUniformLocation(prog, 'u_vp'), false, vp);
-
+  gl.uniformMatrix4fv(uVP,false,vp);
   gl.bindVertexArray(vao);
-  if (renderMode === 'wire') {
-    // Draw each triangle as 3 lines
-    for (let i = 0; i < numIndices; i += 3) {
-      gl.drawElementsInstanced(gl.LINE_LOOP, 3, gl.UNSIGNED_SHORT, i * 2, numInstances);
-    }
-  } else {
-    gl.drawElementsInstanced(gl.TRIANGLES, numIndices, gl.UNSIGNED_SHORT, 0, numInstances);
-  }
+  gl.drawElementsInstanced(gl.TRIANGLES,numIdx,gl.UNSIGNED_SHORT,0,numInst);
   gl.bindVertexArray(null);
 }
 
-async function fetchMesh() {
-  if (fetching) return;
-  fetching = true;
-  const res = 1 << parseInt($('res').value);
-  const sx = parseInt($('sx').value) / 10;
-  const sy = parseInt($('sy').value) / 10;
-  const sz = parseInt($('sz').value) / 10;
-  const sr = parseInt($('sr').value) / 10;
-
-  $('res-v').textContent = res;
-  $('sx-v').textContent = sx.toFixed(1);
-  $('sy-v').textContent = sy.toFixed(1);
-  $('sz-v').textContent = sz.toFixed(1);
-  $('sr-v').textContent = sr.toFixed(1);
-
-  try {
-    const t0 = performance.now();
-    const r = await fetch(`/mesh?shape=${shape}&res=${res}&sx=${sx}&sy=${sy}&sz=${sz}&sr=${sr}`);
-    const data = await r.json();
-    const ms = performance.now() - t0;
-    uploadMesh(data);
-    render();
-    $('stats').innerHTML = `Faces: ${data.num_faces}<br>Verts/face: ${data.verts_per_face}<br>` +
-      `Tris/face: ${data.tris_per_face}<br>Round-trip: ${ms.toFixed(0)}ms`;
-  } catch(e) { console.error(e); }
-  fetching = false;
+async function fetchMesh(){
+  if(fetching)return;fetching=true;
+  const res=1<<parseInt($('res').value);
+  const sx=parseInt($('sx').value)/10;
+  const sy=parseInt($('sy').value)/10;
+  const sz=parseInt($('sz').value)/10;
+  const sr=parseInt($('sr').value)/10;
+  $('res-v').textContent=res;
+  $('sx-v').textContent=sx.toFixed(1);
+  $('sy-v').textContent=sy.toFixed(1);
+  $('sz-v').textContent=sz.toFixed(1);
+  $('sr-v').textContent=sr.toFixed(1);
+  try{
+    const t0=performance.now();
+    const r=await fetch(`/mesh?shape=${shape}&res=${res}&sx=${sx}&sy=${sy}&sz=${sz}&sr=${sr}`);
+    const d=await r.json();
+    const ms=performance.now()-t0;
+    upload(d);render();
+    $('stats').innerHTML=`Faces: ${d.num_faces}<br>Verts/face: ${d.verts_per_face}<br>Tris/face: ${d.tris_per_face}<br>Round-trip: ${ms.toFixed(0)}ms`;
+  }catch(e){console.error(e);}
+  fetching=false;
 }
 
-// Controls
-for (const b of document.querySelectorAll('#shape-btns button'))
-  b.onclick = () => { shape=b.dataset.v; document.querySelectorAll('#shape-btns button').forEach(x=>x.classList.remove('a')); b.classList.add('a'); fetchMesh(); };
-for (const b of document.querySelectorAll('#render-btns button'))
-  b.onclick = () => { renderMode=b.dataset.v; document.querySelectorAll('#render-btns button').forEach(x=>x.classList.remove('a')); b.classList.add('a'); render(); };
-for (const id of ['res','sx','sy','sz','sr'])
-  $(id).addEventListener('input', fetchMesh);
+for(const b of document.querySelectorAll('#shape-btns button'))
+  b.onclick=()=>{shape=b.dataset.v;document.querySelectorAll('#shape-btns button').forEach(x=>x.classList.remove('a'));b.classList.add('a');fetchMesh();};
+for(const id of['res','sx','sy','sz','sr'])$(id).addEventListener('input',fetchMesh);
 
-// Mouse rotation
-let dragging=false, lastX=0, lastY=0;
-$('c').addEventListener('mousedown', e => { dragging=true; lastX=e.clientX; lastY=e.clientY; });
-window.addEventListener('mouseup', () => dragging=false);
-window.addEventListener('mousemove', e => {
-  if (!dragging) return;
-  rotY += (e.clientX-lastX)*0.01;
-  rotX += (e.clientY-lastY)*0.01;
-  lastX=e.clientX; lastY=e.clientY;
-  render();
-});
-window.addEventListener('resize', render);
+let drag=false,lx=0,ly=0;
+canvas.addEventListener('mousedown',e=>{drag=true;lx=e.clientX;ly=e.clientY;});
+window.addEventListener('mouseup',()=>drag=false);
+window.addEventListener('mousemove',e=>{if(!drag)return;rotY+=(e.clientX-lx)*.01;rotX+=(e.clientY-ly)*.01;lx=e.clientX;ly=e.clientY;render();});
+window.addEventListener('resize',render);
 
 fetchMesh();
 </script>
