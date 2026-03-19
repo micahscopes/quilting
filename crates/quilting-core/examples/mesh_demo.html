@@ -46,6 +46,12 @@ input[type=range] { flex:1; accent-color:#e94560; }
   <div class="cg"><label>Sphere radius</label>
     <div class="sr"><input type="range" id="sr" min="0" max="50" value="20" step="1"><span class="v" id="sr-v">2.0</span></div>
   </div>
+  <div class="cg"><label>Render</label>
+    <div class="btns" id="render-btns">
+      <button class="a" data-v="solid">Solid</button>
+      <button data-v="wire">Wire</button>
+    </div>
+  </div>
   <div class="stats" id="stats">Loading...</div>
 </div>
 <canvas id="cv"></canvas>
@@ -55,7 +61,7 @@ const canvas = $('cv');
 const gl = canvas.getContext('webgl2', {antialias:true});
 if(!gl){document.body.innerHTML='<h1 style="color:red;padding:2em">WebGL2 required</h1>';throw 0;}
 
-let shape='cube', meshData=null, rotX=0.4, rotY=0.6, fetching=false;
+let shape='cube', meshData=null, rotX=0.4, rotY=0.6, zoom=6, wireframe=false, fetching=false;
 
 const VS=`#version 300 es
 precision highp float;
@@ -157,11 +163,15 @@ function render(){
   gl.enable(gl.DEPTH_TEST);
   if(!vao||!numInst)return;
 
-  const vp=m4m(m4p(0.8,canvas.width/canvas.height,0.1,200),m4m(m4t(0,0,-8),m4m(m4rx(rotX),m4ry(rotY))));
+  const vp=m4m(m4p(0.8,canvas.width/canvas.height,0.01,500),m4m(m4t(0,0,-zoom),m4m(m4rx(rotX),m4ry(rotY))));
   gl.useProgram(prog);
   gl.uniformMatrix4fv(uVP,false,vp);
   gl.bindVertexArray(vao);
-  gl.drawElementsInstanced(gl.TRIANGLES,numIdx,gl.UNSIGNED_SHORT,0,numInst);
+  if(wireframe){
+    gl.drawElementsInstanced(gl.LINES,numIdx,gl.UNSIGNED_SHORT,0,numInst);
+  } else {
+    gl.drawElementsInstanced(gl.TRIANGLES,numIdx,gl.UNSIGNED_SHORT,0,numInst);
+  }
   gl.bindVertexArray(null);
 }
 
@@ -191,11 +201,14 @@ async function fetchMesh(){
 for(const b of document.querySelectorAll('#shape-btns button'))
   b.onclick=()=>{shape=b.dataset.v;document.querySelectorAll('#shape-btns button').forEach(x=>x.classList.remove('a'));b.classList.add('a');fetchMesh();};
 for(const id of['res','sx','sy','sz','sr'])$(id).addEventListener('input',fetchMesh);
+for(const b of document.querySelectorAll('#render-btns button'))
+  b.onclick=()=>{wireframe=b.dataset.v==='wire';document.querySelectorAll('#render-btns button').forEach(x=>x.classList.remove('a'));b.classList.add('a');render();};
 
 let drag=false,lx=0,ly=0;
 canvas.addEventListener('mousedown',e=>{drag=true;lx=e.clientX;ly=e.clientY;});
 window.addEventListener('mouseup',()=>drag=false);
 window.addEventListener('mousemove',e=>{if(!drag)return;rotY+=(e.clientX-lx)*.01;rotX+=(e.clientY-ly)*.01;lx=e.clientX;ly=e.clientY;render();});
+canvas.addEventListener('wheel',e=>{zoom*=e.deltaY>0?1.1:0.9;zoom=Math.max(0.5,Math.min(200,zoom));render();e.preventDefault();},{passive:false});
 window.addEventListener('resize',render);
 
 fetchMesh();
