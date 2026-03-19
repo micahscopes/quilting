@@ -421,7 +421,7 @@ onresize = render;
 
 await init();
 $('stats').textContent = 'Building atlas...';
-const atlasMs = build_atlas(8, 'hierarchical');
+const atlasMs = build_atlas(10, 'hierarchical');
 wasmReady = true;
 $('stats').textContent = `Atlas built in ${atlasMs.toFixed(0)}ms`;
 loadShape('cube');
