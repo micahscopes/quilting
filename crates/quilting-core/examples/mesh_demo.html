@@ -56,7 +56,6 @@ const gl=canvas.getContext('webgl2',{antialias:true});
 
 let shape='cube', rotX=0.3, rotY=0.5, zoom=5, fetching=false;
 
-// --- Simple linear interpolation shader (wireframe, used for both copies) ---
 const VS=`#version 300 es
 layout(location=0) in vec3 a_bary;
 layout(location=1) in vec4 a_p0;
@@ -68,7 +67,6 @@ layout(location=6) in vec4 a_w2;
 uniform mat4 u_mvp;
 uniform int u_useQB;
 
-// Quaternion multiply
 vec4 qm(vec4 a, vec4 b) {
   return vec4(
     a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
@@ -81,17 +79,10 @@ vec4 qinv(vec4 q) { return vec4(q.x, -q.yzw) / dot(q,q); }
 void main(){
   vec3 p;
   if (u_useQB == 1) {
-    // QB evaluation: X = (sum bary_i * p_i * w_i) / (sum bary_i * w_i)
-    vec4 top = a_bary.x * qm(a_p0, a_w0)
-             + a_bary.y * qm(a_p1, a_w1)
-             + a_bary.z * qm(a_p2, a_w2);
-    vec4 bot = a_bary.x * a_w0
-             + a_bary.y * a_w1
-             + a_bary.z * a_w2;
-    vec4 X = qm(top, qinv(bot));
-    p = X.yzw;
+    vec4 top = a_bary.x * qm(a_p0, a_w0) + a_bary.y * qm(a_p1, a_w1) + a_bary.z * qm(a_p2, a_w2);
+    vec4 bot = a_bary.x * a_w0 + a_bary.y * a_w1 + a_bary.z * a_w2;
+    p = qm(top, qinv(bot)).yzw;
   } else {
-    // Plain linear interpolation (positions are pure imaginary: w=0, xyz in yzw)
     p = a_bary.x * a_p0.yzw + a_bary.y * a_p1.yzw + a_bary.z * a_p2.yzw;
   }
   gl_Position = u_mvp * vec4(p, 1.0);
@@ -113,73 +104,68 @@ const uMVP=gl.getUniformLocation(prog,'u_mvp');
 const uColor=gl.getUniformLocation(prog,'u_color');
 const uUseQB=gl.getUniformLocation(prog,'u_useQB');
 
-// We need two VAOs: one for the original mesh, one for the transformed
-let vaoOrig=null, vaoXform=null, numIdx=0, numInstOrig=0, numInstXform=0;
+// Each batch = {vaoOrig, vaoXform, numIdx, numInst}
+let drawBatches = [];
 
-function uploadInstances(instances, numFaces) {
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(instances), gl.STATIC_DRAW);
-  // 6 vec4s = 24 floats = 96 bytes per instance
-  for (let i=0; i<6; i++) {
+function makeVAO(baryData, lineData, instanceData, numFaces) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  const bb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, bb);
+  gl.bufferData(gl.ARRAY_BUFFER, baryData, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
+  for (let i = 0; i < 6; i++) {
     gl.enableVertexAttribArray(1+i);
     gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 96, i*16);
     gl.vertexAttribDivisor(1+i, 1);
   }
+
+  const eb = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, lineData, gl.STATIC_DRAW);
+
+  gl.bindVertexArray(null);
+  return vao;
 }
 
-function upload(d) {
-  // Build wireframe index buffer (shared between both VAOs)
-  const tris = d.tess_triangles;
-  const lines = [];
-  for (let i=0; i<tris.length; i+=3) {
-    lines.push(tris[i],tris[i+1], tris[i+1],tris[i+2], tris[i+2],tris[i]);
+function upload(data) {
+  // Clean up old batches
+  for (const b of drawBatches) {
+    gl.deleteVertexArray(b.vaoOrig);
+    gl.deleteVertexArray(b.vaoXform);
   }
-  const lineData = new Uint16Array(lines);
-  numIdx = lines.length;
+  drawBatches = [];
 
-  const baryData = new Float32Array(d.tess_bary);
+  for (const batch of data.batches) {
+    const baryData = new Float32Array(batch.tess_bary);
 
-  // --- Original (untransformed) VAO ---
-  if (vaoOrig) gl.deleteVertexArray(vaoOrig);
-  vaoOrig = gl.createVertexArray();
-  gl.bindVertexArray(vaoOrig);
+    // Build wireframe line indices from triangles
+    const tris = batch.tess_triangles;
+    const lines = [];
+    for (let i = 0; i < tris.length; i += 3) {
+      lines.push(tris[i],tris[i+1], tris[i+1],tris[i+2], tris[i+2],tris[i]);
+    }
+    const lineData = new Uint16Array(lines);
 
-  const bb1 = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, bb1);
-  gl.bufferData(gl.ARRAY_BUFFER, baryData, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    const origData = new Float32Array(batch.instances_orig);
+    const xformData = new Float32Array(batch.instances_xform);
 
-  uploadInstances(d.instances_orig, d.num_faces);
-
-  const eb1 = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb1);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, lineData, gl.STATIC_DRAW);
-  numInstOrig = d.num_faces;
-  gl.bindVertexArray(null);
-
-  // --- Transformed VAO ---
-  if (vaoXform) gl.deleteVertexArray(vaoXform);
-  vaoXform = gl.createVertexArray();
-  gl.bindVertexArray(vaoXform);
-
-  const bb2 = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, bb2);
-  gl.bufferData(gl.ARRAY_BUFFER, baryData, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-
-  uploadInstances(d.instances_xform, d.num_faces);
-
-  const eb2 = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb2);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, lineData, gl.STATIC_DRAW);
-  numInstXform = d.num_faces;
-  gl.bindVertexArray(null);
+    drawBatches.push({
+      vaoOrig: makeVAO(baryData, lineData, origData, batch.num_faces),
+      vaoXform: makeVAO(baryData, lineData, xformData, batch.num_faces),
+      numIdx: lines.length,
+      numInst: batch.num_faces,
+      lod: batch.lod,
+    });
+  }
 }
 
-// --- Matrix math ---
 function perspective(fov, aspect, near, far) {
   const f = 1.0 / Math.tan(fov * 0.5);
   const ri = 1.0 / (near - far);
@@ -212,30 +198,32 @@ function render() {
   gl.clearColor(0.06, 0.06, 0.14, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
-  if (!vaoOrig) return;
+  if (!drawBatches.length) return;
 
   const aspect = canvas.width / canvas.height;
   const eyeX = zoom * Math.sin(rotY) * Math.cos(rotX);
   const eyeY = zoom * Math.sin(rotX);
   const eyeZ = zoom * Math.cos(rotY) * Math.cos(rotX);
-  const proj = perspective(Math.PI/3, aspect, 0.1, 100.0);
-  const view = lookAt(eyeX,eyeY,eyeZ, 0,0,0, 0,1,0);
-  const mvp = mulMat4(proj, view);
+  const mvp = mulMat4(perspective(Math.PI/3, aspect, 0.1, 100.0), lookAt(eyeX,eyeY,eyeZ, 0,0,0, 0,1,0));
 
   gl.useProgram(prog);
   gl.uniformMatrix4fv(uMVP, false, mvp);
 
-  // Draw original mesh (dim color, no QB)
+  // Draw original (dim) — all batches
   gl.uniform3f(uColor, 0.3, 0.3, 0.4);
   gl.uniform1i(uUseQB, 0);
-  gl.bindVertexArray(vaoOrig);
-  gl.drawElementsInstanced(gl.LINES, numIdx, gl.UNSIGNED_SHORT, 0, numInstOrig);
+  for (const b of drawBatches) {
+    gl.bindVertexArray(b.vaoOrig);
+    gl.drawElementsInstanced(gl.LINES, b.numIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
+  }
 
-  // Draw transformed mesh (bright color, QB evaluation)
+  // Draw transformed (bright) — all batches with QB
   gl.uniform3f(uColor, 0.91, 0.27, 0.37);
   gl.uniform1i(uUseQB, 1);
-  gl.bindVertexArray(vaoXform);
-  gl.drawElementsInstanced(gl.LINES, numIdx, gl.UNSIGNED_SHORT, 0, numInstXform);
+  for (const b of drawBatches) {
+    gl.bindVertexArray(b.vaoXform);
+    gl.drawElementsInstanced(gl.LINES, b.numIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
+  }
 
   gl.bindVertexArray(null);
 }
@@ -258,8 +246,8 @@ async function fetchMesh() {
     const r = await fetch(`/mesh?shape=${shape}&res=${res}&sx=${sx}&sy=${sy}&sz=${sz}&sr=${sr}`);
     const d = await r.json();
     upload(d); render();
-    const autoInfo = d.auto_res ? ` (auto=${d.auto_res})` : '';
-    $('stats').innerHTML = `Faces: ${d.num_faces}<br>Verts/face: ${d.verts_per_face}<br>Tris/face: ${d.tris_per_face}${autoInfo}<br>${(performance.now()-t0).toFixed(0)}ms`;
+    const lods = d.batches.map(b => `[${b.lod}]`).join(' ');
+    $('stats').innerHTML = `Faces: ${d.total_faces}<br>Batches: ${d.num_batches}<br>LODs: ${lods}<br>${(performance.now()-t0).toFixed(0)}ms`;
   } catch(e) { console.error(e); }
   fetching = false;
 }
