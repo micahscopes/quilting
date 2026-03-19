@@ -32,6 +32,12 @@ input[type=range]{flex:1;accent-color:#e94560}
       <button data-v="icosahedron">Ico</button>
     </div>
   </div>
+  <div><label>Atlas</label>
+    <div class="btns" id="atlas-btns">
+      <button class="a" data-v="hierarchical">Hierarchical</button>
+      <button data-v="direct">Direct (Poisson)</button>
+    </div>
+  </div>
   <div><label>Render</label>
     <div class="btns" id="render-btns">
       <button class="a" data-v="matcap">Matcap</button>
@@ -460,6 +466,15 @@ for (const b of document.querySelectorAll('#shape-btns button'))
   b.onclick = () => { document.querySelectorAll('#shape-btns button').forEach(x=>x.classList.remove('a')); b.classList.add('a'); loadShape(b.dataset.v); };
 for (const b of document.querySelectorAll('#render-btns button'))
   b.onclick = () => { renderMode=b.dataset.v; document.querySelectorAll('#render-btns button').forEach(x=>x.classList.remove('a')); b.classList.add('a'); render(); };
+for (const b of document.querySelectorAll('#atlas-btns button'))
+  b.onclick = async () => {
+    document.querySelectorAll('#atlas-btns button').forEach(x=>x.classList.remove('a'));
+    b.classList.add('a');
+    $('stats').textContent = `Rebuilding atlas (${b.dataset.v})...`;
+    const resp = await workerCall('build_atlas', { maxLodExp: 10, mode: b.dataset.v });
+    $('stats').textContent = `Atlas rebuilt in ${resp.ms.toFixed(0)}ms`;
+    update();
+  };
 for (const id of ['res','sx','sy','sz','sr'])
   $(id).addEventListener('input', update);
 
