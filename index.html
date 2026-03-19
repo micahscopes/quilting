@@ -130,14 +130,31 @@ out vec4 o;
 void main(){
   vec3 n = normalize(v_normal_vs);
   n = gl_FrontFacing ? n : -n;
-  // Matcap UV from view-space normal
-  vec2 muv = n.xy * 0.5 + 0.5;
-  // Procedural matcap: warm highlight + cool shadow
-  float rim = 1.0 - max(dot(n, vec3(0,0,1)), 0.0);
-  float light = max(dot(n, normalize(vec3(0.5, 0.8, 1.0))), 0.0);
-  vec3 warm = u_lodColor * (0.3 + 0.7 * light);
-  vec3 cool = vec3(0.1, 0.1, 0.2) * (1.0 - light);
-  vec3 col = warm + cool + vec3(1.0, 0.95, 0.9) * pow(rim, 3.0) * 0.15;
+
+  // View direction is (0,0,1) in view space
+  float NdV = max(n.z, 0.0);
+
+  // Two-tone matcap: lit hemisphere vs shadow
+  vec3 lightDir = normalize(vec3(0.4, 0.7, 0.9));
+  float NdL = dot(n, lightDir);
+  float diff = NdL * 0.5 + 0.5; // half-lambert wrap
+
+  // Specular — Blinn-Phong in view space
+  vec3 H = normalize(lightDir + vec3(0,0,1));
+  float spec = pow(max(dot(n, H), 0.0), 40.0);
+
+  // Fresnel rim
+  float rim = pow(1.0 - NdV, 3.0);
+
+  // Compose
+  vec3 base = u_lodColor;
+  vec3 shadow = base * 0.15 + vec3(0.02, 0.02, 0.06);
+  vec3 lit = base * 1.2;
+  vec3 col = mix(shadow, lit, diff);
+  col += vec3(1.0, 0.97, 0.92) * spec * 0.6;  // white specular
+  col += base * rim * 0.3;                       // colored rim
+  col += vec3(0.04, 0.03, 0.08);                // ambient floor
+
   o = vec4(col, 1.0);
 }`;
 
@@ -153,16 +170,27 @@ function mkProg(vs,fs){const p=gl.createProgram();gl.attachShader(p,mkS(vs,gl.VE
 const progMatcap = mkProg(VS, FS_MATCAP);
 const progFlat = mkProg(VS, FS_FLAT);
 
-// LOD → color mapping (HSL-based, warmer = higher LOD)
+// LOD → vivid color via HSL rainbow
 function lodColor(lod) {
   const maxLod = Math.max(...lod);
   const logLod = Math.log2(Math.max(maxLod, 1));
-  const t = Math.min(logLod / 8.0, 1.0); // 0..1 over LOD range 1..256
-  // Blue (cold, low LOD) → red (hot, high LOD)
-  const r = 0.2 + 0.7 * t;
-  const g = 0.3 + 0.4 * (1-t) * (1-t);
-  const b = 0.8 * (1-t);
-  return [r, g, b];
+  const t = Math.min(logLod / 8.0, 1.0);
+  // Hue: 240° (blue, low) → 0° (red, high)
+  const h = (1.0 - t) * 240;
+  const s = 0.85;
+  const l = 0.55;
+  // HSL to RGB
+  const c = (1 - Math.abs(2*l - 1)) * s;
+  const x = c * (1 - Math.abs((h/60)%2 - 1));
+  const m = l - c/2;
+  let r,g,b;
+  if (h<60) { r=c;g=x;b=0; }
+  else if (h<120) { r=x;g=c;b=0; }
+  else if (h<180) { r=0;g=c;b=x; }
+  else if (h<240) { r=0;g=x;b=c; }
+  else if (h<300) { r=x;g=0;b=c; }
+  else { r=c;g=0;b=x; }
+  return [r+m, g+m, b+m];
 }
 
 let drawBatches = [];
