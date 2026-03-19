@@ -194,33 +194,32 @@ pub fn compute_mesh_batches(
         let atlas_ref = atlas_cell.borrow();
 
         for (&(canonical_lod, perm_index), face_indices) in &groups {
-            // Find the best available LOD: exact match first, then halve until found
+            // Find the best available LOD that preserves edge stitching.
+            // Safe fallback: uniform patch at min(edge LODs). This ensures
+            // shared edges still match — the min-LOD edges are correct and
+            // higher-LOD edges just get undersampled.
             let (mesh, used_lod) = {
-                let mut try_lod = canonical_lod;
                 let mut found = None;
                 if let Some(atlas) = atlas_ref.as_ref() {
                     // Try exact match
-                    if let Some(m) = atlas.get_patch(try_lod) {
-                        found = Some((m, try_lod));
+                    if let Some(m) = atlas.get_patch(canonical_lod) {
+                        found = Some((m, canonical_lod));
                     } else {
-                        // Fall back to lower LODs by halving
-                        while try_lod[0] > 1 || try_lod[1] > 1 || try_lod[2] > 1 {
-                            try_lod = [
-                                (try_lod[0] / 2).max(1),
-                                (try_lod[1] / 2).max(1),
-                                (try_lod[2] / 2).max(1),
-                            ];
-                            let mut sorted = try_lod;
-                            sorted.sort();
-                            if let Some(m) = atlas.get_patch(sorted) {
-                                found = Some((m, sorted));
+                        // Fall back to uniform at min edge LOD, then halve
+                        let min_lod = canonical_lod[0]; // sorted, so [0] is min
+                        let mut try_res = min_lod;
+                        while try_res >= 1 {
+                            let uniform = [try_res, try_res, try_res];
+                            if let Some(m) = atlas.get_patch(uniform) {
+                                found = Some((m, uniform));
                                 break;
                             }
+                            if try_res <= 1 { break; }
+                            try_res /= 2;
                         }
                     }
                 }
                 found.unwrap_or_else(|| {
-                    // Absolute fallback: generate (1,1,1)
                     let config = PatchConfig { k_candidates: 30, seed: 42 };
                     let sample = quilting_core::sampling::tri_patch([1.0, 1.0, 1.0], &config);
                     let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
