@@ -283,6 +283,82 @@ impl PoissonSampler {
         points
     }
 
+    /// Fast O(N) sampling via jittered hexagonal grid with variable-density
+    /// thinning. No spatial index or conflict checking — just a grid walk.
+    ///
+    /// Produces well-distributed points suitable for Delaunay tessellation.
+    /// Much faster than Bridson for large point counts (>10k), but without
+    /// the strict minimum-distance guarantee.
+    pub fn sample_jittered<F: Fn([f64; 2]) -> f64 + Sync>(
+        &self,
+        density_fn: F,
+    ) -> Vec<[f64; 2]> {
+        let mut rng = Pcg64Mcg::seed_from_u64(self.config.seed);
+        let domain = &self.config.domain;
+
+        let min_radius = self.estimate_min_radius(&density_fn);
+
+        // Hex grid spacing: rows offset by half a column.
+        // Row height = min_radius * sqrt(3)/2 for tight packing.
+        let col_step = min_radius;
+        let row_step = min_radius * SQRT3_OVER_2;
+        let jitter_amount = min_radius * 0.4; // 40% of spacing
+
+        let x0 = domain.x_min();
+        let y0 = domain.y_min();
+        let x1 = x0 + domain.width();
+        let y1 = y0 + domain.height();
+
+        let n_rows = ((y1 - y0) / row_step).ceil() as usize + 1;
+        let n_cols = ((x1 - x0) / col_step).ceil() as usize + 1;
+
+        let mut points = Vec::with_capacity(n_rows * n_cols / 2);
+
+        // Insert seed points first (these are not jittered)
+        for &sp in &self.seed_points {
+            if domain.contains(sp) {
+                points.push(sp);
+            }
+        }
+
+        let inv_min_radius_sq = 1.0 / (min_radius * min_radius);
+
+        for iy in 0..n_rows {
+            let y = y0 + iy as f64 * row_step;
+            let x_offset = if iy % 2 == 0 { 0.0 } else { col_step * 0.5 };
+
+            for ix in 0..n_cols {
+                let x = x0 + ix as f64 * col_step + x_offset;
+
+                if !domain.contains([x, y]) {
+                    continue;
+                }
+
+                let local_spacing = density_fn([x, y]);
+
+                // Thin: keep point with probability (min_radius / local_spacing)²
+                // For uniform density this is always 1.0. For sparse areas, we skip.
+                if local_spacing > min_radius {
+                    let keep_prob = min_radius * min_radius * inv_min_radius_sq
+                        / (local_spacing * local_spacing * inv_min_radius_sq);
+                    if rng.gen::<f64>() > keep_prob {
+                        continue;
+                    }
+                }
+
+                // Jitter
+                let jx = x + (rng.gen::<f64>() - 0.5) * jitter_amount;
+                let jy = y + (rng.gen::<f64>() - 0.5) * jitter_amount;
+
+                if domain.contains([jx, jy]) {
+                    points.push([jx, jy]);
+                }
+            }
+        }
+
+        points
+    }
+
     fn estimate_min_radius<F: Fn([f64; 2]) -> f64>(&self, density_fn: &F) -> f64 {
         let mut min_r = f64::MAX;
         for &sp in &self.seed_points {
