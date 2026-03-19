@@ -1,7 +1,10 @@
 use quilting_core::atlas::{BuildMode, TessellationAtlas};
 use quilting_core::delaunay::triangulate_2d;
+use quilting_core::evaluate::compute_instances;
 use quilting_core::mesh::TessellationMesh;
+use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::{tri_patch, tri_patch_jittered, PatchConfig};
+use quilting_core::shapes;
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -126,6 +129,7 @@ fn mesh_to_json(mesh: &TessellationMesh, sample_ms: f64, tri_ms: f64, source: &s
 }
 
 const HTML: &str = include_str!("web_demo.html");
+const HTML_3D: &str = include_str!("mesh_demo.html");
 
 fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, String) {
     if request.starts_with("GET /patch?") {
@@ -179,6 +183,91 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         (
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n".to_string(),
             json,
+        )
+    } else if request.starts_with("GET /mesh?") {
+        let query = request
+            .split('?').nth(1).unwrap_or("")
+            .split(' ').next().unwrap_or("");
+
+        let mut shape = "cube";
+        let mut res = 4u32;
+        let mut sphere_x = 0.0f64;
+        let mut sphere_y = 0.0;
+        let mut sphere_z = 0.0;
+        let mut sphere_r = 0.0; // 0 = no transform
+
+        for pair in query.split('&') {
+            let mut kv = pair.splitn(2, '=');
+            let key = kv.next().unwrap_or("");
+            let val = kv.next().unwrap_or("");
+            match key {
+                "shape" => shape = val,
+                "res" => res = val.parse().unwrap_or(4),
+                "sx" => sphere_x = val.parse().unwrap_or(0.0),
+                "sy" => sphere_y = val.parse().unwrap_or(0.0),
+                "sz" => sphere_z = val.parse().unwrap_or(0.0),
+                "sr" => sphere_r = val.parse().unwrap_or(0.0),
+                _ => {}
+            }
+        }
+
+        let (verts, faces) = match shape {
+            "tetrahedron" => shapes::tetrahedron(),
+            "octahedron" => shapes::octahedron(),
+            "icosahedron" => shapes::icosahedron(),
+            _ => shapes::cube(),
+        };
+
+        let transform = if sphere_r > 0.001 {
+            Mobius::sphere_reflection(
+                Quat::from_point(sphere_x, sphere_y, sphere_z),
+                sphere_r,
+            )
+        } else {
+            Mobius::identity()
+        };
+
+        let t0 = Instant::now();
+        let instances = compute_instances(&verts, &faces, &transform);
+        let inst_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Get tessellation patch
+        let tess_config = PatchConfig { k_candidates: 30, seed: 42 };
+        let tess = tri_patch([res as f64; 3], &tess_config);
+        let tri_result = triangulate_2d(&tess.positions);
+
+        // Pack instance data as flat f32 arrays
+        let instance_data: Vec<f32> = instances.iter()
+            .flat_map(|inst| inst.to_f32_array())
+            .collect();
+
+        // Pack tessellation bary coords and triangles
+        let tess_bary: Vec<f64> = tess.bary.iter()
+            .flat_map(|b| [b[0], b[1], b[2]])
+            .collect();
+        let tess_tris: Vec<usize> = tri_result.triangles.iter()
+            .flat_map(|t| [t[0], t[1], t[2]])
+            .collect();
+
+        let json = format!(
+            r#"{{"instances":[{}],"tess_bary":[{}],"tess_triangles":[{}],"num_faces":{},"verts_per_face":{},"tris_per_face":{},"inst_ms":{:.1}}}"#,
+            instance_data.iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>().join(","),
+            tess_bary.iter().map(|v| format!("{:.8}", v)).collect::<Vec<_>>().join(","),
+            tess_tris.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            faces.len(),
+            tess.bary.len(),
+            tri_result.triangles.len(),
+            inst_ms,
+        );
+
+        (
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n".to_string(),
+            json,
+        )
+    } else if request.starts_with("GET /3d") {
+        (
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n".to_string(),
+            HTML_3D.to_string(),
         )
     } else if request.starts_with("GET / ") || request.starts_with("GET /index.html") {
         (

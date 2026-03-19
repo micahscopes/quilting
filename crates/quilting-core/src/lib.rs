@@ -9,3 +9,5 @@ pub mod mesh;
 pub mod permutation;
 pub mod atlas;
 pub mod patch;
+pub mod shapes;
+pub mod evaluate;
