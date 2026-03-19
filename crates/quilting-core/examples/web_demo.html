@@ -267,11 +267,12 @@ function render(patch) {
 
   const sm = patch.sample_ms != null ? patch.sample_ms.toFixed(1) : '?';
   const tm = patch.tri_ms != null ? patch.tri_ms.toFixed(1) : '?';
+  const src = patch.source || samplerMethod;
   document.getElementById('stats').innerHTML =
     `Vertices: ${vertex_count}<br>Triangles: ${triangle_count}<br>` +
     `Sample: ${sm}ms / Tri: ${tm}ms<br>` +
     `Round-trip: ${patch.time.toFixed(1)}ms<br>` +
-    `<span style="color:#e94560">${samplerMethod}</span>`;
+    `<span style="color:#e94560">${src}</span>`;
 }
 
 for (const id of ['slider-a','slider-b','slider-c','slider-seed'])
