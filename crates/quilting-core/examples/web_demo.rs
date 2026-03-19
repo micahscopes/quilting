@@ -234,31 +234,44 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         let instances_orig = compute_instances(&verts, &faces, &Mobius::identity());
         let instances_xform = compute_instances(&verts, &faces, &transform);
 
-        // Group faces by their LOD triple → one batch per unique triple
-        let mut batches: std::collections::HashMap<[u32; 3], Vec<usize>> =
+        use quilting_core::permutation::{canonical_form, remap_position};
+
+        // Group by (canonical LOD, perm_index) for correct edge mapping
+        let mut batches: std::collections::HashMap<([u32; 3], usize), Vec<usize>> =
             std::collections::HashMap::new();
         for (fi, inst) in instances_xform.iter().enumerate() {
             let lod = if res > 1 { [res, res, res] } else { inst.edge_lods };
-            let mut key = lod;
-            key.sort();
-            batches.entry(key).or_default().push(fi);
+            let key = canonical_form(lod);
+            batches.entry((key.res, key.perm_index)).or_default().push(fi);
         }
 
         let tess_config = PatchConfig { k_candidates: 30, seed: 42 };
+        let mut tess_cache: std::collections::HashMap<[u32; 3], (Vec<[f64; 3]>, Vec<[f64; 2]>, Vec<[usize; 3]>)> =
+            std::collections::HashMap::new();
 
-        // Build JSON batches array
         let fmt_f32 = |v: &[f32]| v.iter().map(|x| format!("{:.6}", x)).collect::<Vec<_>>().join(",");
         let mut batch_json_parts = Vec::new();
         let mut total_verts = 0usize;
         let mut total_tris = 0usize;
 
-        for (lod_key, face_indices) in &batches {
-            let tess = tri_patch([lod_key[0] as f64, lod_key[1] as f64, lod_key[2] as f64], &tess_config);
-            let tri_result = triangulate_2d(&tess.positions);
+        for (&(canonical_lod, perm_index), face_indices) in &batches {
+            let (bary_data, pos_data, tri_data) = tess_cache
+                .entry(canonical_lod)
+                .or_insert_with(|| {
+                    let tess = tri_patch([canonical_lod[0] as f64, canonical_lod[1] as f64, canonical_lod[2] as f64], &tess_config);
+                    let tri_result = triangulate_2d(&tess.positions);
+                    (tess.bary, tri_result.positions, tri_result.triangles)
+                });
 
-            let tess_bary: Vec<f64> = tess.bary.iter()
-                .flat_map(|b| [b[0], b[1], b[2]]).collect();
-            let tess_tris: Vec<usize> = tri_result.triangles.iter()
+            let tess_bary: Vec<f64> = if perm_index == 0 {
+                bary_data.iter().flat_map(|b| [b[0], b[1], b[2]]).collect()
+            } else {
+                pos_data.iter().map(|p| {
+                    let r = remap_position(perm_index, *p);
+                    quilting_core::triangle::cartesian_to_bary(r[0], r[1])
+                }).flat_map(|b| [b[0], b[1], b[2]]).collect()
+            };
+            let tess_tris: Vec<usize> = tri_data.iter()
                 .flat_map(|t| [t[0], t[1], t[2]]).collect();
 
             let orig_data: Vec<f32> = face_indices.iter()
@@ -266,19 +279,21 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
             let xform_data: Vec<f32> = face_indices.iter()
                 .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
 
-            total_verts += tess.bary.len();
-            total_tris += tri_result.triangles.len();
+            total_verts += bary_data.len();
+            total_tris += tri_data.len();
+
+            let actual_lod = if res > 1 { [res, res, res] } else { instances_xform[face_indices[0]].edge_lods };
 
             batch_json_parts.push(format!(
                 r#"{{"lod":[{},{},{}],"instances_orig":[{}],"instances_xform":[{}],"tess_bary":[{}],"tess_triangles":[{}],"num_faces":{},"verts_per_face":{},"tris_per_face":{}}}"#,
-                lod_key[0], lod_key[1], lod_key[2],
+                actual_lod[0], actual_lod[1], actual_lod[2],
                 fmt_f32(&orig_data),
                 fmt_f32(&xform_data),
                 tess_bary.iter().map(|v| format!("{:.8}", v)).collect::<Vec<_>>().join(","),
                 tess_tris.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
                 face_indices.len(),
-                tess.bary.len(),
-                tri_result.triangles.len(),
+                bary_data.len(),
+                tri_data.len(),
             ));
         }
 

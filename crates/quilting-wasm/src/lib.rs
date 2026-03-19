@@ -1,9 +1,11 @@
 use wasm_bindgen::prelude::*;
 use quilting_core::delaunay::triangulate_2d;
-use quilting_core::evaluate::{compute_instances, FaceInstance};
+use quilting_core::evaluate::compute_instances;
+use quilting_core::permutation::{canonical_form, remap_position};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::{tri_patch, PatchConfig};
 use quilting_core::shapes;
+use quilting_core::triangle;
 use std::collections::HashMap;
 
 #[wasm_bindgen(start)]
@@ -82,32 +84,51 @@ pub fn compute_mesh_batches(
     let instances_orig = compute_instances(&verts, &tris, &Mobius::identity());
     let instances_xform = compute_instances(&verts, &tris, &transform);
 
-    // Group by LOD triple
-    let mut groups: HashMap<[u32; 3], Vec<usize>> = HashMap::new();
+    // Group by (canonical sorted LOD, permutation index) so each batch
+    // gets the right tessellation with edges mapped correctly.
+    let mut groups: HashMap<([u32; 3], usize), Vec<usize>> = HashMap::new();
     for (fi, inst) in instances_xform.iter().enumerate() {
         let lod = if override_res > 0 {
             [override_res, override_res, override_res]
         } else {
             inst.edge_lods
         };
-        let mut key = lod;
-        key.sort();
-        groups.entry(key).or_default().push(fi);
+        let key = canonical_form(lod);
+        groups.entry((key.res, key.perm_index)).or_default().push(fi);
     }
 
     let config = PatchConfig { k_candidates: 30, seed: 42 };
+
+    // Cache tessellations by canonical key (shared across permutations)
+    let mut tess_cache: HashMap<[u32; 3], (Vec<[f64; 3]>, Vec<[f64; 2]>, Vec<[usize; 3]>)> = HashMap::new();
     let mut batches = Vec::new();
 
-    for (lod_key, face_indices) in &groups {
-        let tess = tri_patch(
-            [lod_key[0] as f64, lod_key[1] as f64, lod_key[2] as f64],
-            &config,
-        );
-        let tri_result = triangulate_2d(&tess.positions);
+    for (&(canonical_lod, perm_index), face_indices) in &groups {
+        // Get or generate the canonical tessellation
+        let (bary_data, pos_data, tri_data) = tess_cache
+            .entry(canonical_lod)
+            .or_insert_with(|| {
+                let tess = tri_patch(
+                    [canonical_lod[0] as f64, canonical_lod[1] as f64, canonical_lod[2] as f64],
+                    &config,
+                );
+                let tri_result = triangulate_2d(&tess.positions);
+                (tess.bary, tri_result.positions, tri_result.triangles)
+            });
 
-        let tess_bary: Vec<f64> = tess.bary.iter()
-            .flat_map(|b| [b[0], b[1], b[2]]).collect();
-        let tess_tris: Vec<u32> = tri_result.triangles.iter()
+        // Apply the permutation to remap bary coords so edges match the face's LOD order
+        let remapped_bary: Vec<f64> = if perm_index == 0 {
+            // Identity — no remapping needed
+            bary_data.iter().flat_map(|b| [b[0], b[1], b[2]]).collect()
+        } else {
+            // Remap each position through the permutation, then recompute bary
+            pos_data.iter().map(|p| {
+                let remapped = remap_position(perm_index, *p);
+                triangle::cartesian_to_bary(remapped[0], remapped[1])
+            }).flat_map(|b| [b[0], b[1], b[2]]).collect()
+        };
+
+        let tess_tris: Vec<u32> = tri_data.iter()
             .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
 
         let orig_data: Vec<f32> = face_indices.iter()
@@ -115,15 +136,22 @@ pub fn compute_mesh_batches(
         let xform_data: Vec<f32> = face_indices.iter()
             .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
 
+        // The actual LOD for this batch (unsorted, matches the face's edge order)
+        let actual_lod = if override_res > 0 {
+            [override_res, override_res, override_res]
+        } else {
+            instances_xform[face_indices[0]].edge_lods
+        };
+
         batches.push(BatchData {
-            lod: [lod_key[0], lod_key[1], lod_key[2]],
+            lod: actual_lod,
             instances_orig: orig_data,
             instances_xform: xform_data,
-            tess_bary,
+            tess_bary: remapped_bary,
             tess_triangles: tess_tris,
             num_faces: face_indices.len(),
-            verts_per_face: tess.bary.len(),
-            tris_per_face: tri_result.triangles.len(),
+            verts_per_face: bary_data.len(),
+            tris_per_face: tri_data.len(),
         });
     }
 
