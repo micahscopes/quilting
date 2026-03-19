@@ -89,6 +89,13 @@
       </div>
     </div>
     <div class="control-group">
+      <label>Sampler</label>
+      <div class="mode-toggle">
+        <button id="sampler-bridson" class="active">Bridson</button>
+        <button id="sampler-jittered">Jittered</button>
+      </div>
+    </div>
+    <div class="control-group">
       <label>Display</label>
       <div class="mode-toggle">
         <button id="mode-wire" class="active">Wireframe</button>
@@ -109,6 +116,7 @@
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 let displayMode = 'wire';
+let samplerMethod = 'bridson';
 let currentPatch = null;
 let fetchController = null;
 
@@ -170,7 +178,7 @@ async function fetchPatch() {
   const t0 = performance.now();
   try {
     const resp = await fetch(
-      `/patch?a=${res[0]}&b=${res[1]}&c=${res[2]}&seed=${seed}`,
+      `/patch?a=${res[0]}&b=${res[1]}&c=${res[2]}&seed=${seed}&method=${samplerMethod}`,
       { signal: fetchController.signal }
     );
     const patch = await resp.json();
@@ -257,9 +265,13 @@ function render(patch) {
   ctx.fillText('B='+res[1], (a0+c0)/2+10, (a1+c1)/2);
   ctx.fillText('C='+res[2], (a0+b0)/2-35, (a1+b1)/2);
 
+  const sm = patch.sample_ms != null ? patch.sample_ms.toFixed(1) : '?';
+  const tm = patch.tri_ms != null ? patch.tri_ms.toFixed(1) : '?';
   document.getElementById('stats').innerHTML =
     `Vertices: ${vertex_count}<br>Triangles: ${triangle_count}<br>` +
-    `Round-trip: ${patch.time.toFixed(1)}ms<br><span style="color:#e94560">Rust backend</span>`;
+    `Sample: ${sm}ms / Tri: ${tm}ms<br>` +
+    `Round-trip: ${patch.time.toFixed(1)}ms<br>` +
+    `<span style="color:#e94560">${samplerMethod}</span>`;
 }
 
 for (const id of ['slider-a','slider-b','slider-c','slider-seed'])
@@ -274,6 +286,16 @@ function setMode(m) {
   document.querySelectorAll('.mode-toggle button').forEach(b => b.classList.remove('active'));
   document.getElementById('mode-'+m).classList.add('active');
   if (currentPatch) render(currentPatch);
+}
+
+document.getElementById('sampler-bridson').onclick = () => setSampler('bridson');
+document.getElementById('sampler-jittered').onclick = () => setSampler('jittered');
+
+function setSampler(m) {
+  samplerMethod = m;
+  document.getElementById('sampler-bridson').classList.toggle('active', m === 'bridson');
+  document.getElementById('sampler-jittered').classList.toggle('active', m === 'jittered');
+  fetchPatch();
 }
 
 resizeCanvas();

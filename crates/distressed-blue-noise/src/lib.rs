@@ -283,12 +283,9 @@ impl PoissonSampler {
         points
     }
 
-    /// Fast O(N) sampling via jittered hexagonal grid with variable-density
-    /// thinning. No spatial index or conflict checking — just a grid walk.
-    ///
-    /// Produces well-distributed points suitable for Delaunay tessellation.
-    /// Much faster than Bridson for large point counts (>10k), but without
-    /// the strict minimum-distance guarantee.
+    /// Fast O(N) sampling via adaptive-step jittered hex grid. Marches across
+    /// each row stepping by the local spacing, so density varies smoothly
+    /// without random thinning. No spatial index or conflict checking.
     pub fn sample_jittered<F: Fn([f64; 2]) -> f64 + Sync>(
         &self,
         density_fn: F,
@@ -298,62 +295,71 @@ impl PoissonSampler {
 
         let min_radius = self.estimate_min_radius(&density_fn);
 
-        // Hex grid spacing: rows offset by half a column.
-        // Row height = min_radius * sqrt(3)/2 for tight packing.
-        let col_step = min_radius;
-        let row_step = min_radius * SQRT3_OVER_2;
-        let jitter_amount = min_radius * 0.4; // 40% of spacing
-
         let x0 = domain.x_min();
         let y0 = domain.y_min();
         let x1 = x0 + domain.width();
         let y1 = y0 + domain.height();
 
-        let n_rows = ((y1 - y0) / row_step).ceil() as usize + 1;
-        let n_cols = ((x1 - x0) / col_step).ceil() as usize + 1;
+        let mut points = Vec::with_capacity(1024);
 
-        let mut points = Vec::with_capacity(n_rows * n_cols / 2);
-
-        // Insert seed points first (these are not jittered)
+        // Insert seed points (not jittered)
         for &sp in &self.seed_points {
             if domain.contains(sp) {
                 points.push(sp);
             }
         }
 
-        let inv_min_radius_sq = 1.0 / (min_radius * min_radius);
-
-        for iy in 0..n_rows {
-            let y = y0 + iy as f64 * row_step;
-            let x_offset = if iy % 2 == 0 { 0.0 } else { col_step * 0.5 };
-
-            for ix in 0..n_cols {
-                let x = x0 + ix as f64 * col_step + x_offset;
-
-                if !domain.contains([x, y]) {
-                    continue;
+        // March rows from bottom to top with adaptive row height.
+        // Each row steps horizontally at the local spacing.
+        let mut y = y0;
+        let mut row_parity = false;
+        while y <= y1 {
+            // Sample spacing at left edge of this row for the row step
+            let row_x_start = x0;
+            let row_spacing = if domain.contains([row_x_start, y]) {
+                density_fn([row_x_start, y])
+            } else {
+                // Scan right to find first in-domain point for row spacing
+                let mid_x = (x0 + x1) * 0.5;
+                if domain.contains([mid_x, y]) {
+                    density_fn([mid_x, y])
+                } else {
+                    min_radius
                 }
+            };
 
-                let local_spacing = density_fn([x, y]);
+            let x_offset = if row_parity { row_spacing * 0.5 } else { 0.0 };
 
-                // Thin: keep point with probability (min_radius / local_spacing)²
-                // For uniform density this is always 1.0. For sparse areas, we skip.
-                if local_spacing > min_radius {
-                    let keep_prob = min_radius * min_radius * inv_min_radius_sq
-                        / (local_spacing * local_spacing * inv_min_radius_sq);
-                    if rng.gen::<f64>() > keep_prob {
-                        continue;
+            // March across the row with adaptive step
+            let mut x = x0 + x_offset;
+            while x <= x1 {
+                if domain.contains([x, y]) {
+                    let local_spacing = density_fn([x, y]);
+                    let jitter = local_spacing * 0.35;
+                    let jx = x + (rng.gen::<f64>() - 0.5) * jitter;
+                    let jy = y + (rng.gen::<f64>() - 0.5) * jitter;
+
+                    if domain.contains([jx, jy]) {
+                        points.push([jx, jy]);
                     }
-                }
 
-                // Jitter
-                let jx = x + (rng.gen::<f64>() - 0.5) * jitter_amount;
-                let jy = y + (rng.gen::<f64>() - 0.5) * jitter_amount;
-
-                if domain.contains([jx, jy]) {
-                    points.push([jx, jy]);
+                    // Step by local spacing
+                    x += local_spacing;
+                } else {
+                    // Outside domain — step by min_radius to find the edge
+                    x += min_radius;
                 }
             }
+
+            // Adaptive row height: use spacing at the center of the row
+            let center_x = (x0 + x1) * 0.5;
+            let center_spacing = if domain.contains([center_x, y]) {
+                density_fn([center_x, y])
+            } else {
+                row_spacing
+            };
+            y += center_spacing * SQRT3_OVER_2;
+            row_parity = !row_parity;
         }
 
         points
