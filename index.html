@@ -478,7 +478,8 @@ for (const b of document.querySelectorAll('#atlas-btns button'))
     document.querySelectorAll('#atlas-btns button').forEach(x=>x.classList.remove('a'));
     b.classList.add('a');
     $('stats').textContent = `Rebuilding atlas (${b.dataset.v})...`;
-    const resp = await workerCall('build_atlas', { maxLodExp: 10, mode: b.dataset.v });
+    const maxExp = b.dataset.v === 'direct' ? 8 : 10;
+    const resp = await workerCall('build_atlas', { maxLodExp: maxExp, mode: b.dataset.v });
     $('stats').textContent = `Atlas rebuilt in ${resp.ms.toFixed(0)}ms`;
     update();
   };
