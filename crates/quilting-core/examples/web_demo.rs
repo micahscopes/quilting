@@ -228,7 +228,8 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         };
 
         let t0 = Instant::now();
-        let instances = compute_instances(&verts, &faces, &transform);
+        let instances_orig = compute_instances(&verts, &faces, &Mobius::identity());
+        let instances_xform = compute_instances(&verts, &faces, &transform);
         let inst_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Get tessellation patch
@@ -236,22 +237,23 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         let tess = tri_patch([res as f64; 3], &tess_config);
         let tri_result = triangulate_2d(&tess.positions);
 
-        // Pack instance data as flat f32 arrays
-        let instance_data: Vec<f32> = instances.iter()
-            .flat_map(|inst| inst.to_f32_array())
-            .collect();
+        // Pack both instance sets
+        let orig_data: Vec<f32> = instances_orig.iter()
+            .flat_map(|inst| inst.to_f32_array()).collect();
+        let xform_data: Vec<f32> = instances_xform.iter()
+            .flat_map(|inst| inst.to_f32_array()).collect();
 
-        // Pack tessellation bary coords and triangles
         let tess_bary: Vec<f64> = tess.bary.iter()
-            .flat_map(|b| [b[0], b[1], b[2]])
-            .collect();
+            .flat_map(|b| [b[0], b[1], b[2]]).collect();
         let tess_tris: Vec<usize> = tri_result.triangles.iter()
-            .flat_map(|t| [t[0], t[1], t[2]])
-            .collect();
+            .flat_map(|t| [t[0], t[1], t[2]]).collect();
+
+        let fmt_f32 = |v: &[f32]| v.iter().map(|x| format!("{:.6}", x)).collect::<Vec<_>>().join(",");
 
         let json = format!(
-            r#"{{"instances":[{}],"tess_bary":[{}],"tess_triangles":[{}],"num_faces":{},"verts_per_face":{},"tris_per_face":{},"inst_ms":{:.1}}}"#,
-            instance_data.iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>().join(","),
+            r#"{{"instances_orig":[{}],"instances_xform":[{}],"tess_bary":[{}],"tess_triangles":[{}],"num_faces":{},"verts_per_face":{},"tris_per_face":{},"inst_ms":{:.1}}}"#,
+            fmt_f32(&orig_data),
+            fmt_f32(&xform_data),
             tess_bary.iter().map(|v| format!("{:.8}", v)).collect::<Vec<_>>().join(","),
             tess_tris.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
             faces.len(),
