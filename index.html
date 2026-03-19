@@ -58,7 +58,8 @@ input[type=range]{flex:1;accent-color:#e94560}
 </div>
 <div id="wrap"><canvas id="cv"></canvas></div>
 <script type="module">
-import init, { get_shape, compute_mesh_batches, build_atlas } from './pkg/quilting_wasm.js';
+// All WASM computation happens in a web worker to keep UI responsive.
+// Main thread only does WebGL rendering.
 
 const $=s=>document.getElementById(s);
 const canvas=$('cv');
@@ -66,7 +67,29 @@ const gl=canvas.getContext('webgl2',{antialias:true});
 
 let shape='cube', rotX=0.3, rotY=0.5, zoom=5;
 let renderMode = 'matcap';
-let shapeData = null, wasmReady = false;
+let shapeData = null, workerReady = false;
+let pendingUpdate = false;
+
+const worker = new Worker('./worker.js', { type: 'module' });
+let msgId = 0;
+const pending = new Map();
+
+function workerCall(type, data) {
+  return new Promise((resolve) => {
+    const id = ++msgId;
+    pending.set(id, resolve);
+    worker.postMessage({ type, data, id });
+  });
+}
+
+worker.onmessage = (e) => {
+  const { type, id } = e.data;
+  const resolve = pending.get(id);
+  if (resolve) {
+    pending.delete(id);
+    resolve(e.data);
+  }
+};
 
 const VS = `#version 300 es
 layout(location=0) in vec3 a_bary;
@@ -375,8 +398,12 @@ function render() {
   gl.bindVertexArray(null);
 }
 
-function update() {
-  if (!wasmReady || !shapeData) return;
+let updating = false;
+async function update() {
+  if (!workerReady || !shapeData) return;
+  if (updating) { pendingUpdate = true; return; }
+  updating = true;
+
   const resVal = parseInt($('res').value);
   const res = resVal === 0 ? 0 : (1 << resVal);
   const sx = parseInt($('sx').value)/10;
@@ -391,19 +418,43 @@ function update() {
 
   const t0 = performance.now();
   const tType = sr > 0.01 ? 'sphere_reflection' : 'identity';
-  const data = compute_mesh_batches(
-    new Float64Array(shapeData.positions),
-    new Uint32Array(shapeData.faces),
-    tType, new Float64Array([sx, sy, sz, sr]), res,
-  );
+  const resp = await workerCall('compute_batches', {
+    positions: Array.from(shapeData.positions),
+    faces: Array.from(shapeData.faces),
+    transformType: tType,
+    params: [sx, sy, sz, sr],
+    overrideRes: res,
+  });
   const ms = performance.now() - t0;
+  const data = resp.result;
   uploadBatches(data);
   render();
   const lods = data.batches.map(b => `[${b.lod}]`).join(' ');
-  $('stats').innerHTML = `Faces: ${data.total_faces}<br>Batches: ${data.num_batches}<br>LODs: ${lods}<br>WASM: ${ms.toFixed(1)}ms`;
+  $('stats').innerHTML = `Faces: ${data.total_faces}<br>Batches: ${data.num_batches}<br>LODs: ${lods}<br>Worker: ${ms.toFixed(0)}ms`;
+
+  updating = false;
+  if (pendingUpdate) { pendingUpdate = false; update(); }
 }
 
-function loadShape(name) { shape=name; shapeData=get_shape(name); update(); }
+async function loadShape(name) {
+  shape = name;
+  // get_shape runs in main thread (tiny) — but we need it in the worker for compute_batches
+  // For now, get shapes from a hardcoded list and send positions/faces to worker
+  const shapes = {
+    cube: {positions:[-1,-1,-1,1,-1,-1,1,1,-1,-1,1,-1,-1,-1,1,1,-1,1,1,1,1,-1,1,1],faces:[0,1,2,0,2,3,5,4,7,5,7,6,4,0,3,4,3,7,1,5,6,1,6,2,3,2,6,3,6,7,4,5,1,4,1,0]},
+    tetrahedron: {positions:[1,1,1,1,-1,-1,-1,1,-1,-1,-1,1],faces:[0,1,2,0,2,3,0,3,1,1,3,2]},
+    octahedron: {positions:[1,0,0,-1,0,0,0,1,0,0,-1,0,0,0,1,0,0,-1],faces:[0,2,4,2,1,4,1,3,4,3,0,4,2,0,5,1,2,5,3,1,5,0,3,5]},
+    icosahedron: (() => {
+      const p=(1+Math.sqrt(5))/2, a=1, b=a/p;
+      return {
+        positions:[-b,a,0,b,a,0,-b,-a,0,b,-a,0,0,-b,a,0,b,a,0,-b,-a,0,b,-a,a,0,-b,a,0,b,-a,0,-b,-a,0,b],
+        faces:[0,11,5,0,5,1,0,1,7,0,7,10,0,10,11,1,5,9,5,11,4,11,10,2,10,7,6,7,1,8,3,9,4,3,4,2,3,2,6,3,6,8,3,8,9,4,9,5,2,4,11,6,2,10,8,6,7,9,8,1]
+      };
+    })(),
+  };
+  shapeData = shapes[name] || shapes.cube;
+  update();
+}
 
 for (const b of document.querySelectorAll('#shape-btns button'))
   b.onclick = () => { document.querySelectorAll('#shape-btns button').forEach(x=>x.classList.remove('a')); b.classList.add('a'); loadShape(b.dataset.v); };
@@ -419,11 +470,13 @@ onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.client
 canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); e.preventDefault(); };
 onresize = render;
 
-await init();
+// Init: start worker, build atlas, then load shape
+$('stats').textContent = 'Starting worker...';
+await workerCall('init', {});
 $('stats').textContent = 'Building atlas...';
-const atlasMs = build_atlas(10, 'hierarchical');
-wasmReady = true;
-$('stats').textContent = `Atlas built in ${atlasMs.toFixed(0)}ms`;
+const atlasResp = await workerCall('build_atlas', { maxLodExp: 10, mode: 'hierarchical' });
+workerReady = true;
+$('stats').textContent = `Atlas built in ${atlasResp.ms.toFixed(0)}ms`;
 loadShape('cube');
 </script>
 </body>

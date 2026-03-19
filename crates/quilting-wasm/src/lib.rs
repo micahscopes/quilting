@@ -36,10 +36,85 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     let atlas = TessellationAtlas::build_with_mode(&lods, &config, build_mode);
     let elapsed = js_sys::Date::now() - start;
 
-    let n_patches = atlas.patches.len();
     ATLAS.with(|a| *a.borrow_mut() = Some(atlas));
 
     elapsed
+}
+
+/// Generate a single tessellation patch for a given LOD triple.
+/// Returns { bary: Float64Array, triangles: Uint32Array, n_verts, n_tris }
+/// Used by web workers for parallel atlas construction.
+#[wasm_bindgen]
+pub fn generate_patch(res_a: u32, res_b: u32, res_c: u32) -> JsValue {
+    let config = PatchConfig { k_candidates: 30, seed: 42 };
+    let sample = quilting_core::sampling::tri_patch(
+        [res_a as f64, res_b as f64, res_c as f64], &config,
+    );
+    if sample.positions.len() < 3 {
+        return serde_wasm_bindgen::to_value(&PatchData {
+            bary: vec![], triangles: vec![], n_verts: 0, n_tris: 0,
+        }).unwrap();
+    }
+    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
+
+    let bary: Vec<f64> = sample.bary.iter().flat_map(|b| [b[0], b[1], b[2]]).collect();
+    let triangles: Vec<u32> = tri.triangles.iter()
+        .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+
+    serde_wasm_bindgen::to_value(&PatchData {
+        bary,
+        triangles,
+        n_verts: sample.positions.len(),
+        n_tris: tri.triangles.len(),
+    }).unwrap()
+}
+
+/// Store a patch into the atlas from worker results.
+/// bary: flat [u0,v0,w0, u1,v1,w1, ...]
+/// triangles: flat [i0,j0,k0, ...]
+#[wasm_bindgen]
+pub fn store_patch(res_a: u32, res_b: u32, res_c: u32, positions_2d: &[f64], triangles: &[u32]) {
+    let pos: Vec<[f64; 2]> = positions_2d.chunks(2).map(|c| [c[0], c[1]]).collect();
+    let tris: Vec<[usize; 3]> = triangles.chunks(3).map(|c| [c[0] as usize, c[1] as usize, c[2] as usize]).collect();
+
+    ATLAS.with(|atlas_cell| {
+        let mut atlas_opt = atlas_cell.borrow_mut();
+        if atlas_opt.is_none() {
+            *atlas_opt = Some(TessellationAtlas {
+                positions: Vec::new(),
+                triangles: Vec::new(),
+                patches: HashMap::new(),
+                lod_levels: Vec::new(),
+            });
+        }
+        let atlas = atlas_opt.as_mut().unwrap();
+        let key = {
+            let mut k = [res_a, res_b, res_c];
+            k.sort();
+            k
+        };
+
+        let base_vertex = atlas.positions.len();
+        let base_triangle = atlas.triangles.len();
+        atlas.positions.extend_from_slice(&pos);
+        for t in &tris {
+            atlas.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
+        }
+        atlas.patches.insert(key, quilting_core::atlas::PatchEntry {
+            base_vertex,
+            vertex_count: pos.len(),
+            base_triangle,
+            triangle_count: tris.len(),
+        });
+    });
+}
+
+#[derive(serde::Serialize)]
+struct PatchData {
+    bary: Vec<f64>,
+    triangles: Vec<u32>,
+    n_verts: usize,
+    n_tris: usize,
 }
 
 /// Get a built-in shape.
