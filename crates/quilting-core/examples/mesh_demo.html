@@ -31,8 +31,8 @@ input[type=range]{flex:1;accent-color:#e94560}
       <button data-v="icosahedron">Ico</button>
     </div>
   </div>
-  <div><label>Resolution (2<sup>n</sup>)</label>
-    <div class="sr"><input type="range" id="res" min="0" max="6" value="2"><span class="v" id="res-v">4</span></div>
+  <div><label>Resolution (0=auto)</label>
+    <div class="sr"><input type="range" id="res" min="0" max="6" value="0"><span class="v" id="res-v">auto</span></div>
   </div>
   <div><label>Sphere X</label>
     <div class="sr"><input type="range" id="sx" min="-30" max="30" value="5"><span class="v" id="sx-v">0.5</span></div>
@@ -242,12 +242,13 @@ function render() {
 
 async function fetchMesh() {
   if (fetching) return; fetching = true;
-  const res = 1 << parseInt($('res').value);
+  const resVal = parseInt($('res').value);
+  const res = resVal === 0 ? 0 : (1 << resVal);
   const sx = parseInt($('sx').value)/10;
   const sy = parseInt($('sy').value)/10;
   const sz = parseInt($('sz').value)/10;
   const sr = parseInt($('sr').value)/10;
-  $('res-v').textContent = res;
+  $('res-v').textContent = res === 0 ? 'auto' : res;
   $('sx-v').textContent = sx.toFixed(1);
   $('sy-v').textContent = sy.toFixed(1);
   $('sz-v').textContent = sz.toFixed(1);
@@ -257,7 +258,8 @@ async function fetchMesh() {
     const r = await fetch(`/mesh?shape=${shape}&res=${res}&sx=${sx}&sy=${sy}&sz=${sz}&sr=${sr}`);
     const d = await r.json();
     upload(d); render();
-    $('stats').innerHTML = `Faces: ${d.num_faces}<br>Verts/face: ${d.verts_per_face}<br>Tris/face: ${d.tris_per_face}<br>${(performance.now()-t0).toFixed(0)}ms`;
+    const autoInfo = d.auto_res ? ` (auto=${d.auto_res})` : '';
+    $('stats').innerHTML = `Faces: ${d.num_faces}<br>Verts/face: ${d.verts_per_face}<br>Tris/face: ${d.tris_per_face}${autoInfo}<br>${(performance.now()-t0).toFixed(0)}ms`;
   } catch(e) { console.error(e); }
   fetching = false;
 }

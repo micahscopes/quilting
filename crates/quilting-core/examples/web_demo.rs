@@ -232,9 +232,20 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         let instances_xform = compute_instances(&verts, &faces, &transform);
         let inst_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-        // Get tessellation patch
+        // Use the auto LOD from the transformed instances, or the slider if > 0
+        let auto_res = if res > 1 {
+            res
+        } else {
+            // Auto: use max edge LOD across all faces
+            instances_xform.iter()
+                .flat_map(|i| i.edge_lods.iter())
+                .copied()
+                .max()
+                .unwrap_or(1)
+        };
+
         let tess_config = PatchConfig { k_candidates: 30, seed: 42 };
-        let tess = tri_patch([res as f64; 3], &tess_config);
+        let tess = tri_patch([auto_res as f64; 3], &tess_config);
         let tri_result = triangulate_2d(&tess.positions);
 
         // Pack both instance sets
@@ -242,6 +253,10 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
             .flat_map(|inst| inst.to_f32_array()).collect();
         let xform_data: Vec<f32> = instances_xform.iter()
             .flat_map(|inst| inst.to_f32_array()).collect();
+
+        // Pack per-face edge LODs
+        let lod_data: Vec<u32> = instances_xform.iter()
+            .flat_map(|i| i.edge_lods.iter().copied()).collect();
 
         let tess_bary: Vec<f64> = tess.bary.iter()
             .flat_map(|b| [b[0], b[1], b[2]]).collect();
@@ -251,14 +266,16 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         let fmt_f32 = |v: &[f32]| v.iter().map(|x| format!("{:.6}", x)).collect::<Vec<_>>().join(",");
 
         let json = format!(
-            r#"{{"instances_orig":[{}],"instances_xform":[{}],"tess_bary":[{}],"tess_triangles":[{}],"num_faces":{},"verts_per_face":{},"tris_per_face":{},"inst_ms":{:.1}}}"#,
+            r#"{{"instances_orig":[{}],"instances_xform":[{}],"edge_lods":[{}],"tess_bary":[{}],"tess_triangles":[{}],"num_faces":{},"verts_per_face":{},"tris_per_face":{},"auto_res":{},"inst_ms":{:.1}}}"#,
             fmt_f32(&orig_data),
             fmt_f32(&xform_data),
+            lod_data.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
             tess_bary.iter().map(|v| format!("{:.8}", v)).collect::<Vec<_>>().join(","),
             tess_tris.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
             faces.len(),
             tess.bary.len(),
             tri_result.triangles.len(),
+            auto_res,
             inst_ms,
         );
 
