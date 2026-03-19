@@ -1,5 +1,5 @@
 use quilting_core::atlas::{BuildMode, TessellationAtlas};
-use quilting_core::delaunay::triangulate_2d;
+use quilting_core::delaunay::triangulate_2d_clipped;
 use quilting_core::evaluate::compute_instances;
 use quilting_core::mesh::TessellationMesh;
 use quilting_core::quaternion::{Quat, Mobius};
@@ -45,7 +45,7 @@ fn generate_on_demand(res: [u32; 3], sampler: &str) -> (TessellationMesh, f64, f
     }
 
     let t0 = Instant::now();
-    let tri = triangulate_2d(&sample.positions);
+    let tri = triangulate_2d_clipped(&sample.positions);
     let tri_ms = t0.elapsed().as_secs_f64() * 1000.0;
     (TessellationMesh::from_2d(tri.positions, tri.triangles), sample_ms, tri_ms)
 }
@@ -259,7 +259,7 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
                 .entry(canonical_lod)
                 .or_insert_with(|| {
                     let tess = tri_patch([canonical_lod[0] as f64, canonical_lod[1] as f64, canonical_lod[2] as f64], &tess_config);
-                    let tri_result = triangulate_2d(&tess.positions);
+                    let tri_result = triangulate_2d_clipped(&tess.positions);
                     (tess.bary, tri_result.positions, tri_result.triangles)
                 });
 

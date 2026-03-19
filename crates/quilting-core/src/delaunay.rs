@@ -1,25 +1,34 @@
 use delaunator::{triangulate, Point};
+use crate::triangle;
 
 pub struct Triangulation {
     pub positions: Vec<[f64; 2]>,
     pub triangles: Vec<[usize; 3]>,
 }
 
+/// General Delaunay triangulation (no filtering).
 pub fn triangulate_2d(points: &[[f64; 2]]) -> Triangulation {
     let del_points: Vec<Point> = points.iter().map(|p| Point { x: p[0], y: p[1] }).collect();
-
     let result = triangulate(&del_points);
-
-    let triangles: Vec<[usize; 3]> = result
-        .triangles
+    let triangles: Vec<[usize; 3]> = result.triangles
         .chunks(3)
         .map(|t| [t[0], t[1], t[2]])
         .collect();
+    Triangulation { positions: points.to_vec(), triangles }
+}
 
-    Triangulation {
-        positions: points.to_vec(),
-        triangles,
-    }
+/// Delaunay triangulation with exterior triangle removal.
+/// Filters out triangles whose centroid falls outside the equilateral
+/// reference triangle — eliminates convex-hull slivers.
+pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
+    let mut tri = triangulate_2d(points);
+    tri.triangles.retain(|t| {
+        let cx = (points[t[0]][0] + points[t[1]][0] + points[t[2]][0]) / 3.0;
+        let cy = (points[t[0]][1] + points[t[1]][1] + points[t[2]][1]) / 3.0;
+        let [u, v, w] = triangle::cartesian_to_bary(cx, cy);
+        u > -0.01 && v > -0.01 && w > -0.01
+    });
+    tri
 }
 
 #[cfg(test)]

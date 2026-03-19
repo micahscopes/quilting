@@ -137,7 +137,7 @@ fn estimate_face_lod(inst: &FaceInstance) -> u32 {
     let power = 1.0;
     let raw_lod = (scale * ratio.powf(power)).ceil() as u32;
 
-    raw_lod.max(1).min(512)
+    raw_lod.max(1).min(256) // capped to atlas max
 }
 
 /// Snap to the nearest power of 2 (round up).

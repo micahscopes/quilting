@@ -141,7 +141,7 @@ pub fn compute_mesh_batches(
                     [canonical_lod[0] as f64, canonical_lod[1] as f64, canonical_lod[2] as f64],
                     &config,
                 );
-                let tri_result = quilting_core::delaunay::triangulate_2d(&sample.positions);
+                let tri_result = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
 
                 let bary: Vec<f64> = sample.bary.iter().map(|b| {
                     if perm_index == 0 { *b } else {

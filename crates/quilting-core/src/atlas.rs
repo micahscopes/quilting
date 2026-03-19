@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::delaunay::triangulate_2d;
+use crate::delaunay::triangulate_2d_clipped;
 use crate::mesh::TessellationMesh;
 use crate::permutation::{canonical_form, remap_position};
 use crate::sampling::{tri_patch, PatchConfig};
@@ -62,7 +62,7 @@ fn generate_patch(
     if sample.positions.len() < 3 {
         return None;
     }
-    let tri = triangulate_2d(&sample.positions);
+    let tri = triangulate_2d_clipped(&sample.positions);
     Some((tri.positions, tri.triangles))
 }
 
