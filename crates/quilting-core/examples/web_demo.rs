@@ -1,4 +1,3 @@
-use quilting_core::atlas::TessellationAtlas;
 use quilting_core::delaunay::triangulate_2d;
 use quilting_core::sampling::{tri_patch, PatchConfig};
 use std::io::{Read, Write};
@@ -87,20 +86,7 @@ fn handle_request(request: &str) -> (String, String) {
 }
 
 fn main() {
-    // Print atlas stats
-    let config = PatchConfig::default();
-    let lods: Vec<u32> = (1..=4).map(|n| 1u32 << n).collect();
-    eprintln!("Building atlas for LODs: {:?}", lods);
-    let t0 = std::time::Instant::now();
-    let atlas = TessellationAtlas::build(&lods, &config);
-    let elapsed = t0.elapsed();
-    eprintln!(
-        "Atlas: {} patches, {} vertices, {} triangles ({:.1}ms)",
-        atlas.patches.len(),
-        atlas.positions.len(),
-        atlas.triangles.len(),
-        elapsed.as_secs_f64() * 1000.0
-    );
+    eprintln!("Patches generated on demand (no atlas precomputation)");
 
     // Start HTTP server
     let port = std::env::var("PORT")

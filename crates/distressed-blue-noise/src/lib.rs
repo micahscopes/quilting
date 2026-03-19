@@ -126,8 +126,7 @@ impl Grid {
         self.cells[row * self.cols + col] = idx;
     }
 
-    /// Check if candidate conflicts with any neighbor. Uses cached radii
-    /// instead of calling density_fn — the big performance win.
+    /// Conflict check using cached radii — no density_fn calls.
     #[inline]
     fn conflicts(
         &self,
@@ -153,7 +152,6 @@ impl Grid {
                 let dx = candidate[0] - neighbor[0];
                 let dy = candidate[1] - neighbor[1];
                 let dist_sq = dx * dx + dy * dy;
-                // max(candidate_r, neighbor_r) — both pre-squared
                 let min_dist_sq = if candidate_radius_sq > unsafe { *radii_sq.get_unchecked(idx) } {
                     candidate_radius_sq
                 } else {
@@ -168,7 +166,6 @@ impl Grid {
     }
 }
 
-/// Generate a random unit direction without trig (rejection in unit circle).
 #[inline]
 fn random_direction(rng: &mut Pcg64Mcg) -> (f64, f64) {
     loop {
@@ -208,15 +205,16 @@ impl PoissonSampler {
         );
 
         let mut points: Vec<[f64; 2]> = Vec::with_capacity(1024);
+        let mut radii: Vec<f64> = Vec::with_capacity(1024);
         let mut radii_sq: Vec<f64> = Vec::with_capacity(1024);
         let mut active: Vec<usize> = Vec::with_capacity(512);
 
-        // Insert seed points
         for &sp in &self.seed_points {
             if domain.contains(sp) {
                 let idx = points.len();
                 let r = density_fn(sp);
                 points.push(sp);
+                radii.push(r);
                 radii_sq.push(r * r);
                 active.push(idx);
                 grid.insert(sp, idx);
@@ -227,17 +225,19 @@ impl PoissonSampler {
             let p = self.random_initial_point(&mut rng);
             let r = density_fn(p);
             points.push(p);
+            radii.push(r);
             radii_sq.push(r * r);
             active.push(0);
             grid.insert(p, 0);
         }
 
+        let min_search = (min_radius * inv_cell_size).ceil() as isize + 1;
+
         while !active.is_empty() {
             let active_idx = rng.gen_range(0..active.len());
             let point_idx = active[active_idx];
             let point = points[point_idx];
-            let r_sq = radii_sq[point_idx];
-            let r = r_sq.sqrt();
+            let r = radii[point_idx];
 
             let mut found = false;
             for _ in 0..k {
@@ -249,16 +249,25 @@ impl PoissonSampler {
                     continue;
                 }
 
+                // Quick check with source radius first
+                let source_r_sq = radii_sq[point_idx];
+                if grid.conflicts(candidate, source_r_sq, &points, &radii_sq, min_search) {
+                    continue;
+                }
+
+                // Full check with candidate's actual radius
                 let candidate_r = density_fn(candidate);
                 let candidate_r_sq = candidate_r * candidate_r;
-                let search = (candidate_r * inv_cell_size).ceil() as isize + 1;
-
-                if grid.conflicts(candidate, candidate_r_sq, &points, &radii_sq, search) {
-                    continue;
+                if candidate_r_sq > source_r_sq {
+                    let search = (candidate_r * inv_cell_size).ceil() as isize + 1;
+                    if grid.conflicts(candidate, candidate_r_sq, &points, &radii_sq, search) {
+                        continue;
+                    }
                 }
 
                 let idx = points.len();
                 points.push(candidate);
+                radii.push(candidate_r);
                 radii_sq.push(candidate_r_sq);
                 active.push(idx);
                 grid.insert(candidate, idx);
@@ -276,11 +285,9 @@ impl PoissonSampler {
 
     fn estimate_min_radius<F: Fn([f64; 2]) -> f64>(&self, density_fn: &F) -> f64 {
         let mut min_r = f64::MAX;
-
         for &sp in &self.seed_points {
             min_r = min_r.min(density_fn(sp));
         }
-
         let steps = 16;
         let domain = &self.config.domain;
         let x0 = domain.x_min();
@@ -298,7 +305,6 @@ impl PoissonSampler {
                 }
             }
         }
-
         assert!(min_r > 0.0 && min_r.is_finite(),
             "density function must return positive finite values");
         min_r
@@ -351,10 +357,8 @@ mod tests {
             for j in (i + 1)..points.len() {
                 let dx = points[i][0] - points[j][0];
                 let dy = points[i][1] - points[j][1];
-                assert!(
-                    dx*dx + dy*dy >= spacing * spacing * 0.998,
-                    "points {} and {} too close", i, j
-                );
+                assert!(dx*dx + dy*dy >= spacing * spacing * 0.998,
+                    "points {} and {} too close", i, j);
             }
         }
     }
@@ -395,9 +399,7 @@ mod tests {
         let a = PoissonSampler::new(config.clone()).sample(|_| 0.08);
         let b = PoissonSampler::new(config).sample(|_| 0.08);
         assert_eq!(a.len(), b.len());
-        for (pa, pb) in a.iter().zip(b.iter()) {
-            assert_eq!(pa, pb);
-        }
+        for (pa, pb) in a.iter().zip(b.iter()) { assert_eq!(pa, pb); }
     }
 
     #[test]
