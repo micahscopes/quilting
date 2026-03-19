@@ -80,6 +80,7 @@ uniform mat4 u_mvp;
 uniform mat4 u_mv;
 uniform int u_useQB;
 uniform vec3 u_edgeLod; // edge resolutions for this batch (a, b, c)
+uniform float u_globalMaxLogLod; // log2 of the global max LOD across all batches
 
 out vec3 v_normal_vs;
 out float v_density;  // interpolated density from edge-based formula
@@ -135,10 +136,9 @@ void main(){
   vec3 n = normalize(cross(du, dv));
   v_normal_vs = normalize(mat3(u_mv) * n);
 
-  // Density heatmap: normalize to 0..1 range
-  float maxRes = max(u_edgeLod.x, max(u_edgeLod.y, u_edgeLod.z));
+  // Density heatmap: normalize to 0..1 using global max
   float density = edgeDensity(a_bary, u_edgeLod);
-  v_density = log2(max(density, 1.0)) / max(log2(maxRes), 1.0);
+  v_density = log2(max(density, 1.0)) / max(u_globalMaxLogLod, 1.0);
 
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
@@ -254,9 +254,17 @@ function makeVAO(baryData, idxData, instanceData) {
   return vao;
 }
 
+let globalMaxLogLod = 1;
+
 function uploadBatches(data) {
   for (const b of drawBatches) { gl.deleteVertexArray(b.vaoOrig); gl.deleteVertexArray(b.vaoXform); if(b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri); }
   drawBatches = [];
+  // Compute global max LOD across all batches
+  globalMaxLogLod = 1;
+  for (const batch of data.batches) {
+    const m = Math.max(...batch.lod);
+    globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(m, 1)));
+  }
   for (const batch of data.batches) {
     const bary = new Float32Array(batch.tess_bary);
     const tris = batch.tess_triangles;
@@ -308,6 +316,7 @@ function render() {
     gl.uniform1i(gl.getUniformLocation(progFlat,'u_useQB'), 0);
     gl.uniform3f(gl.getUniformLocation(progFlat,'u_lodColor'), 0.25, 0.25, 0.35);
     gl.uniform3f(gl.getUniformLocation(progFlat,'u_edgeLod'), 1, 1, 1);
+    gl.uniform1f(gl.getUniformLocation(progFlat,'u_globalMaxLogLod'), globalMaxLogLod);
     for (const b of drawBatches) {
       gl.bindVertexArray(b.vaoOrig);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
@@ -320,6 +329,7 @@ function render() {
     gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progMatcap,'u_useQB'), 1);
+    gl.uniform1f(gl.getUniformLocation(progMatcap,'u_globalMaxLogLod'), globalMaxLogLod);
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), b.color);
       gl.uniform3f(gl.getUniformLocation(progMatcap,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
@@ -334,6 +344,7 @@ function render() {
     gl.uniformMatrix4fv(gl.getUniformLocation(progFlat,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progFlat,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progFlat,'u_useQB'), 1);
+    gl.uniform1f(gl.getUniformLocation(progFlat,'u_globalMaxLogLod'), globalMaxLogLod);
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progFlat,'u_lodColor'), b.color);
       gl.uniform3f(gl.getUniformLocation(progFlat,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
