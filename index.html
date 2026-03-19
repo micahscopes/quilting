@@ -435,8 +435,15 @@ async function update() {
   const data = resp.result;
   uploadBatches(data);
   render();
-  const lods = data.batches.map(b => `[${b.lod}]`).join(' ');
-  $('stats').innerHTML = `Faces: ${data.total_faces}<br>Batches: ${data.num_batches}<br>LODs: ${lods}<br>Worker: ${ms.toFixed(0)}ms`;
+
+  const fallbacks = data.batches.filter(b => b.is_fallback);
+  const lods = data.batches.map(b => {
+    if (b.is_fallback) return `<span style="color:#e94560">[${b.used_lod}→${b.wanted_lod}]</span>`;
+    return `[${b.lod}]`;
+  }).join(' ');
+  $('stats').innerHTML = `Faces: ${data.total_faces}<br>Batches: ${data.num_batches}` +
+    (fallbacks.length ? `<br><span style="color:#e94560">${fallbacks.length} pending</span>` : '') +
+    `<br>LODs: ${lods}<br>Worker: ${ms.toFixed(0)}ms`;
 
   updating = false;
   if (pendingUpdate) { pendingUpdate = false; update(); }

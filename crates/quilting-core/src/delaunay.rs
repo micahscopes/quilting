@@ -23,10 +23,29 @@ pub fn triangulate_2d(points: &[[f64; 2]]) -> Triangulation {
 pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
     let mut tri = triangulate_2d(points);
     tri.triangles.retain(|t| {
-        let cx = (points[t[0]][0] + points[t[1]][0] + points[t[2]][0]) / 3.0;
-        let cy = (points[t[0]][1] + points[t[1]][1] + points[t[2]][1]) / 3.0;
+        let p0 = points[t[0]];
+        let p1 = points[t[1]];
+        let p2 = points[t[2]];
+
+        // Reject triangles with centroid outside the equilateral reference triangle
+        let cx = (p0[0] + p1[0] + p2[0]) / 3.0;
+        let cy = (p0[1] + p1[1] + p2[1]) / 3.0;
         let [u, v, w] = triangle::cartesian_to_bary(cx, cy);
-        u > -0.01 && v > -0.01 && w > -0.01
+        if u < -0.01 || v < -0.01 || w < -0.01 {
+            return false;
+        }
+
+        // Reject degenerate slivers: aspect ratio > 5
+        let e0 = ((p1[0]-p0[0]).powi(2) + (p1[1]-p0[1]).powi(2)).sqrt();
+        let e1 = ((p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2)).sqrt();
+        let e2 = ((p0[0]-p2[0]).powi(2) + (p0[1]-p2[1]).powi(2)).sqrt();
+        let longest = e0.max(e1).max(e2);
+        let shortest = e0.min(e1).min(e2);
+        if shortest < 1e-15 || longest / shortest > 5.0 {
+            return false;
+        }
+
+        true
     });
     tri
 }

@@ -194,39 +194,49 @@ pub fn compute_mesh_batches(
         let atlas_ref = atlas_cell.borrow();
 
         for (&(canonical_lod, perm_index), face_indices) in &groups {
-            // Look up from atlas
-            let mesh_opt = atlas_ref.as_ref()
-                .and_then(|atlas| atlas.get_patch(canonical_lod));
+            // Find the best available LOD: exact match first, then halve until found
+            let (mesh, used_lod) = {
+                let mut try_lod = canonical_lod;
+                let mut found = None;
+                if let Some(atlas) = atlas_ref.as_ref() {
+                    // Try exact match
+                    if let Some(m) = atlas.get_patch(try_lod) {
+                        found = Some((m, try_lod));
+                    } else {
+                        // Fall back to lower LODs by halving
+                        while try_lod[0] > 1 || try_lod[1] > 1 || try_lod[2] > 1 {
+                            try_lod = [
+                                (try_lod[0] / 2).max(1),
+                                (try_lod[1] / 2).max(1),
+                                (try_lod[2] / 2).max(1),
+                            ];
+                            let mut sorted = try_lod;
+                            sorted.sort();
+                            if let Some(m) = atlas.get_patch(sorted) {
+                                found = Some((m, sorted));
+                                break;
+                            }
+                        }
+                    }
+                }
+                found.unwrap_or_else(|| {
+                    // Absolute fallback: generate (1,1,1)
+                    let config = PatchConfig { k_candidates: 30, seed: 42 };
+                    let sample = quilting_core::sampling::tri_patch([1.0, 1.0, 1.0], &config);
+                    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
+                    (quilting_core::mesh::TessellationMesh::from_2d(tri.positions, tri.triangles), [1, 1, 1])
+                })
+            };
 
-            let (bary_data, tess_tris) = if let Some(mesh) = mesh_opt {
-                // Remap positions through the permutation
+            let is_fallback = used_lod != canonical_lod;
+
+            let (bary_data, tess_tris) = {
                 let bary: Vec<f64> = mesh.positions.iter().map(|p| {
                     let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
                     triangle::cartesian_to_bary(remapped[0], remapped[1])
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect();
 
                 let tris: Vec<u32> = mesh.triangles.iter()
-                    .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
-
-                (bary, tris)
-            } else {
-                // Not in atlas — generate on the fly (shouldn't happen if atlas is built)
-                let config = PatchConfig { k_candidates: 30, seed: 42 };
-                let sample = quilting_core::sampling::tri_patch(
-                    [canonical_lod[0] as f64, canonical_lod[1] as f64, canonical_lod[2] as f64],
-                    &config,
-                );
-                let tri_result = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
-
-                let bary: Vec<f64> = sample.bary.iter().map(|b| {
-                    if perm_index == 0 { *b } else {
-                        let p = triangle::bary_to_cartesian(*b);
-                        let r = remap_position(perm_index, p);
-                        triangle::cartesian_to_bary(r[0], r[1])
-                    }
-                }).flat_map(|b| [b[0], b[1], b[2]]).collect();
-
-                let tris: Vec<u32> = tri_result.triangles.iter()
                     .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
 
                 (bary, tris)
@@ -248,6 +258,9 @@ pub fn compute_mesh_batches(
 
             batches.push(BatchData {
                 lod: actual_lod,
+                wanted_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
+                used_lod: [used_lod[0], used_lod[1], used_lod[2]],
+                is_fallback,
                 instances_orig: orig_data,
                 instances_xform: xform_data,
                 tess_bary: bary_data,
@@ -269,6 +282,9 @@ pub fn compute_mesh_batches(
 #[derive(serde::Serialize)]
 struct BatchData {
     lod: [u32; 3],
+    wanted_lod: [u32; 3],
+    used_lod: [u32; 3],
+    is_fallback: bool,
     instances_orig: Vec<f32>,
     instances_xform: Vec<f32>,
     tess_bary: Vec<f64>,
