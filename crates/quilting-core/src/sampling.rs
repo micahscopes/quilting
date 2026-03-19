@@ -54,6 +54,8 @@ pub fn tri_patch(res: [f64; 3], config: &PatchConfig) -> PatchSample {
         seeds.push(triangle::lerp(VERTEX_B, VERTEX_C, t));
     }
 
+    let n_seeds = seeds.len();
+
     let sampler = PoissonSampler::new(SamplerConfig {
         k_candidates: config.k_candidates,
         seed: config.seed,
@@ -65,12 +67,34 @@ pub fn tri_patch(res: [f64; 3], config: &PatchConfig) -> PatchSample {
         let bary = triangle::cartesian_to_bary(p[0], p[1]);
         tri_edge_weight(bary, res)
     };
+    let raw_positions = sampler.sample(density_fn);
 
-    let positions = sampler.sample(density_fn);
-    let bary: Vec<[f64; 3]> = positions
-        .iter()
-        .map(|&[x, y]| triangle::cartesian_to_bary(x, y))
-        .collect();
+    // Filter: remove interior points too close to boundary edges.
+    // A point's min barycentric coord is proportional to its distance
+    // from the nearest edge. Reject if it's within half the local spacing
+    // of any edge — these create degenerate slivers in the Delaunay.
+    let min_res = res[0].min(res[1]).min(res[2]);
+    let edge_margin = 0.4 / min_res; // ~40% of minimum edge spacing in bary
+
+    let mut positions = Vec::with_capacity(raw_positions.len());
+    let mut bary = Vec::with_capacity(raw_positions.len());
+
+    for (i, &p) in raw_positions.iter().enumerate() {
+        let b = triangle::cartesian_to_bary(p[0], p[1]);
+
+        if i < n_seeds {
+            // Seed points (boundary) — always keep
+            positions.push(p);
+            bary.push(b);
+        } else {
+            // Interior point — reject if too close to any edge
+            let min_bary = b[0].min(b[1]).min(b[2]);
+            if min_bary > edge_margin {
+                positions.push(p);
+                bary.push(b);
+            }
+        }
+    }
 
     PatchSample { positions, bary }
 }
@@ -89,6 +113,7 @@ pub fn tri_patch_jittered(res: [f64; 3], config: &PatchConfig) -> PatchSample {
     let spacing = 1.0 / res[0];
 
     let seeds = make_seeds(res);
+    let n_seeds = seeds.len();
 
     let sampler = PoissonSampler::new(SamplerConfig {
         k_candidates: config.k_candidates,
@@ -97,11 +122,25 @@ pub fn tri_patch_jittered(res: [f64; 3], config: &PatchConfig) -> PatchSample {
     })
     .with_seed_points(seeds);
 
-    let positions = sampler.sample_jittered(|_| spacing);
-    let bary: Vec<[f64; 3]> = positions
-        .iter()
-        .map(|&[x, y]| triangle::cartesian_to_bary(x, y))
-        .collect();
+    let raw_positions = sampler.sample_jittered(|_| spacing);
+
+    let edge_margin = 0.4 / res[0];
+    let mut positions = Vec::with_capacity(raw_positions.len());
+    let mut bary = Vec::with_capacity(raw_positions.len());
+
+    for (i, &p) in raw_positions.iter().enumerate() {
+        let b = triangle::cartesian_to_bary(p[0], p[1]);
+        if i < n_seeds {
+            positions.push(p);
+            bary.push(b);
+        } else {
+            let min_bary = b[0].min(b[1]).min(b[2]);
+            if min_bary > edge_margin {
+                positions.push(p);
+                bary.push(b);
+            }
+        }
+    }
 
     PatchSample { positions, bary }
 }
