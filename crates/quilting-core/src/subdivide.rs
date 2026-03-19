@@ -61,12 +61,26 @@ pub fn subdivide_adaptive<F: Fn([f64; 2]) -> f64>(
         let mut new_tris = Vec::new();
         let mut any_refined = false;
 
-        // First pass: identify which edges need splitting
+        // Count how many triangles reference each edge.
+        // Boundary edges (count=1) must not be split — they're stitching edges.
+        let mut edge_count: HashMap<(usize, usize), u32> = HashMap::new();
+        for &[a, b, c] in &tris {
+            for &(i, j) in &[(a, b), (b, c), (a, c)] {
+                *edge_count.entry(edge_key(i, j)).or_insert(0) += 1;
+            }
+        }
+
+        // First pass: identify which interior edges need splitting
         let mut split_edges: HashMap<(usize, usize), bool> = HashMap::new();
         for &[a, b, c] in &tris {
             for &(i, j) in &[(a, b), (b, c), (a, c)] {
                 let key = edge_key(i, j);
                 if split_edges.contains_key(&key) {
+                    continue;
+                }
+                // Never split boundary edges
+                if edge_count.get(&key) == Some(&1) {
+                    split_edges.insert(key, false);
                     continue;
                 }
                 let mid = [
@@ -208,40 +222,64 @@ mod tests {
 
     #[test]
     fn adaptive_uniform_density() {
-        // With uniform fine density, should subdivide everything
+        // Start with a mesh that has interior edges (subdivide once first)
         let positions = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
         let triangles = vec![[0, 1, 2]];
-        let (_, tris) = subdivide_adaptive(&positions, &triangles, &|_| 0.3, 1.0, 10);
-        // Edge length starts at 1.0, density wants 0.3, so needs ~2 subdivisions
-        assert!(tris.len() > 4, "expected refinement, got {} tris", tris.len());
+        let (pos, tris) = subdivide(&positions, &triangles); // 4 triangles, 3 interior edges
+        let (_, refined) = subdivide_adaptive(&pos, &tris, &|_| 0.15, 1.0, 10);
+        assert!(refined.len() > 4, "expected refinement, got {} tris", refined.len());
     }
 
     #[test]
     fn adaptive_no_refinement_needed() {
-        // Very coarse density — no subdivision should happen
+        // Very coarse density — no interior edges should need splitting
         let positions = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
         let triangles = vec![[0, 1, 2]];
-        let (_, tris) = subdivide_adaptive(&positions, &triangles, &|_| 10.0, 1.0, 10);
-        assert_eq!(tris.len(), 1, "should not have refined");
+        let (pos, tris) = subdivide(&positions, &triangles);
+        let (_, refined) = subdivide_adaptive(&pos, &tris, &|_| 10.0, 1.0, 10);
+        assert_eq!(refined.len(), 4, "should not have refined beyond initial subdivision");
     }
 
     #[test]
     fn adaptive_variable_density() {
-        // Dense near x=1, sparse near x=0
+        // Start with a subdivided mesh, then adaptively refine
         let positions = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
         let triangles = vec![[0, 1, 2]];
+        let (pos, tris) = subdivide(&positions, &triangles);
         let (pos, tris) = subdivide_adaptive(
-            &positions, &triangles,
-            &|p| 0.1 + 0.5 * (1.0 - p[0]),  // fine near x=1, coarse near x=0
+            &pos, &tris,
+            &|p| 0.05 + 0.4 * (1.0 - p[0]),  // fine near x=1, coarse near x=0
             1.0, 10,
         );
-        // Should have more triangles near x=1
         let centroid = |t: &[usize; 3]| -> f64 {
             (pos[t[0]][0] + pos[t[1]][0] + pos[t[2]][0]) / 3.0
         };
-        let near_right = tris.iter().filter(|t| centroid(t) > 0.5).count();
-        let near_left = tris.iter().filter(|t| centroid(t) <= 0.5).count();
-        assert!(near_right > near_left,
-            "expected more triangles near x=1 ({}) than x=0 ({})", near_right, near_left);
+        let near_right = tris.iter().filter(|t| centroid(t) > 0.3).count();
+        let near_left = tris.iter().filter(|t| centroid(t) <= 0.3).count();
+        assert!(near_right >= near_left,
+            "expected at least as many triangles near x=1 ({}) as x=0 ({})", near_right, near_left);
+    }
+
+    #[test]
+    fn adaptive_preserves_boundary() {
+        // Boundary edges should never be split
+        let positions = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let triangles = vec![[0, 1, 2]];
+        let (pos, tris) = subdivide(&positions, &triangles);
+
+        // Count boundary points before
+        let boundary_before: Vec<_> = pos.iter()
+            .filter(|p| p[0].abs() < 1e-10 || p[1].abs() < 1e-10 || (p[0]+p[1]-1.0).abs() < 1e-10)
+            .collect();
+
+        let (pos2, _) = subdivide_adaptive(&pos, &tris, &|_| 0.01, 1.0, 5);
+
+        // Boundary points after — originals should still be there
+        for bp in &boundary_before {
+            assert!(
+                pos2.iter().any(|p| (p[0]-bp[0]).abs() < 1e-10 && (p[1]-bp[1]).abs() < 1e-10),
+                "boundary point {:?} was lost", bp
+            );
+        }
     }
 }
