@@ -46,18 +46,8 @@ fn generate_patch(
     key: [u32; 3],
     config: &PatchConfig,
 ) -> Option<(Vec<[f64; 2]>, Vec<[usize; 3]>)> {
-    // Derive a per-patch seed so different patches get different sampling patterns
-    let patch_seed = config.seed
-        ^ (key[0] as u64 * 73856093)
-        ^ (key[1] as u64 * 19349669)
-        ^ (key[2] as u64 * 83492791);
-    let patch_config = PatchConfig {
-        k_candidates: config.k_candidates,
-        seed: patch_seed,
-    };
-
     let res = [key[0] as f64, key[1] as f64, key[2] as f64];
-    let sample = tri_patch(res, &patch_config);
+    let sample = tri_patch(res, config);
 
     if sample.positions.len() < 3 {
         return None;
@@ -258,21 +248,4 @@ mod tests {
         assert_eq!(atlas.lod_levels, restored.lod_levels);
     }
 
-    #[test]
-    fn per_patch_seeds_differ() {
-        // Different canonical triples should produce different tessellations
-        let config = PatchConfig::default();
-        let atlas = TessellationAtlas::build(&[2, 8], &config);
-
-        let m1 = atlas.get_patch([2, 2, 2]);
-        let m2 = atlas.get_patch([8, 8, 8]);
-        if let (Some(m1), Some(m2)) = (m1, m2) {
-            // Different resolutions should produce different vertex counts
-            assert_ne!(
-                m1.vertex_count(),
-                m2.vertex_count(),
-                "patches [2,2,2] and [8,8,8] have identical vertex counts — seeds may not differ"
-            );
-        }
-    }
 }

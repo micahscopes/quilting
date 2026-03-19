@@ -1,7 +1,7 @@
 use rand::Rng;
 use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
-use std::f64::consts::{PI, SQRT_2};
+use std::f64::consts::SQRT_2;
 
 const SQRT3_OVER_2: f64 = 0.866_025_403_784_438_6;
 const ONE_OVER_SQRT3: f64 = 0.577_350_269_189_625_8;
@@ -33,7 +33,7 @@ impl Domain {
 
     fn width(&self) -> f64 {
         match self {
-            Domain::EquilateralTriangle => SQRT3_OVER_2 * 2.0, // √3
+            Domain::EquilateralTriangle => SQRT3_OVER_2 * 2.0,
             Domain::Rectangle { width, .. } => *width,
         }
     }
@@ -45,17 +45,18 @@ impl Domain {
         }
     }
 
-    /// Returns true if the point lies within the domain.
-    #[inline]
+    #[inline(always)]
     fn contains(&self, p: [f64; 2]) -> bool {
         let [x, y] = p;
         match self {
             Domain::EquilateralTriangle => {
-                // Barycentric containment test
-                let u = (1.0 + 2.0 * y) / 3.0;
-                let v = (1.0 - y) / 3.0 - x * ONE_OVER_SQRT3;
-                let w = (1.0 - y) / 3.0 + x * ONE_OVER_SQRT3;
-                u >= 0.0 && v >= 0.0 && w >= 0.0
+                // Fast barycentric containment — avoid division
+                let u3 = 1.0 + 2.0 * y; // 3*u
+                if u3 < 0.0 { return false; }
+                let base3 = 1.0 - y; // 3*base = 1-y
+                let dx3 = x * (ONE_OVER_SQRT3 * 3.0); // 3*dx
+                // 3*v = base3 - dx3, 3*w = base3 + dx3
+                base3 >= dx3 && base3 >= -dx3
             }
             Domain::Rectangle { width, height } => {
                 x >= 0.0 && x <= *width && y >= 0.0 && y <= *height
@@ -67,11 +68,8 @@ impl Domain {
 /// Configuration for the Poisson disk sampler.
 #[derive(Clone, Debug)]
 pub struct SamplerConfig {
-    /// Number of candidate points generated per active point each round.
     pub k_candidates: usize,
-    /// PRNG seed for deterministic output.
     pub seed: u64,
-    /// Sampling domain.
     pub domain: Domain,
 }
 
@@ -80,10 +78,7 @@ impl Default for SamplerConfig {
         Self {
             k_candidates: 30,
             seed: 0,
-            domain: Domain::Rectangle {
-                width: 1.0,
-                height: 1.0,
-            },
+            domain: Domain::Rectangle { width: 1.0, height: 1.0 },
         }
     }
 }
@@ -94,23 +89,26 @@ pub struct PoissonSampler {
     seed_points: Vec<[f64; 2]>,
 }
 
-/// Flat background grid for spatial lookups. Stores point indices.
-struct BackgroundGrid {
-    cell_size: f64,
+/// Flat single-entry background grid for maximum cache locality.
+/// Each cell stores one point index (usize::MAX = empty).
+/// Cell size = min_radius / sqrt(2) guarantees at most one point per cell
+/// for the minimum spacing. For variable density, points with larger spacing
+/// simply search more cells.
+struct Grid {
+    inv_cell_size: f64,
     x_offset: f64,
     y_offset: f64,
     cols: usize,
     rows: usize,
-    /// Each cell holds either `usize::MAX` (empty) or a point index.
     cells: Vec<usize>,
 }
 
-impl BackgroundGrid {
+impl Grid {
     fn new(x_min: f64, y_min: f64, width: f64, height: f64, cell_size: f64) -> Self {
         let cols = ((width / cell_size).ceil() as usize).max(1);
         let rows = ((height / cell_size).ceil() as usize).max(1);
         Self {
-            cell_size,
+            inv_cell_size: 1.0 / cell_size,
             x_offset: x_min,
             y_offset: y_min,
             cols,
@@ -119,22 +117,19 @@ impl BackgroundGrid {
         }
     }
 
-    #[inline]
-    fn cell_index(&self, p: [f64; 2]) -> (usize, usize) {
-        let col = (((p[0] - self.x_offset) / self.cell_size) as usize).min(self.cols - 1);
-        let row = (((p[1] - self.y_offset) / self.cell_size) as usize).min(self.rows - 1);
+    #[inline(always)]
+    fn cell_xy(&self, p: [f64; 2]) -> (usize, usize) {
+        let col = (((p[0] - self.x_offset) * self.inv_cell_size) as usize).min(self.cols - 1);
+        let row = (((p[1] - self.y_offset) * self.inv_cell_size) as usize).min(self.rows - 1);
         (col, row)
     }
 
-    #[inline]
+    #[inline(always)]
     fn insert(&mut self, p: [f64; 2], idx: usize) {
-        let (col, row) = self.cell_index(p);
+        let (col, row) = self.cell_xy(p);
         self.cells[row * self.cols + col] = idx;
     }
 
-    /// Check if a candidate point conflicts with any existing neighbor.
-    /// `density_fn` returns the minimum spacing at a given position.
-    /// We reject if dist < max(density(candidate), density(neighbor)).
     #[inline]
     fn conflicts<F: Fn([f64; 2]) -> f64>(
         &self,
@@ -143,27 +138,32 @@ impl BackgroundGrid {
         points: &[[f64; 2]],
         density_fn: &F,
     ) -> bool {
-        let (cc, cr) = self.cell_index(candidate);
-        let search_radius = (candidate_radius / self.cell_size).ceil() as isize + 1;
+        let (cc, cr) = self.cell_xy(candidate);
+        let search = (candidate_radius * self.inv_cell_size).ceil() as isize + 1;
 
-        let col_min = (cc as isize - search_radius).max(0) as usize;
-        let col_max = ((cc as isize + search_radius) as usize).min(self.cols - 1);
-        let row_min = (cr as isize - search_radius).max(0) as usize;
-        let row_max = ((cr as isize + search_radius) as usize).min(self.rows - 1);
+        let col_min = (cc as isize - search).max(0) as usize;
+        let col_max = ((cc as isize + search) as usize).min(self.cols - 1);
+        let row_min = (cr as isize - search).max(0) as usize;
+        let row_max = ((cr as isize + search) as usize).min(self.rows - 1);
+
+        let cr_sq = candidate_radius * candidate_radius;
 
         for row in row_min..=row_max {
-            let row_off = row * self.cols;
-            for col in col_min..=col_max {
-                let idx = self.cells[row_off + col];
-                if idx == usize::MAX {
-                    continue;
-                }
-                let neighbor = points[idx];
+            let base = row * self.cols;
+            // Process the row as a contiguous slice for cache locality
+            let slice = &self.cells[base + col_min..=base + col_max];
+            for &idx in slice {
+                if idx == usize::MAX { continue; }
+                let neighbor = unsafe { *points.get_unchecked(idx) };
                 let dx = candidate[0] - neighbor[0];
                 let dy = candidate[1] - neighbor[1];
                 let dist_sq = dx * dx + dy * dy;
-                let min_dist = candidate_radius.max(density_fn(neighbor));
-                if dist_sq < min_dist * min_dist {
+                // Use max(candidate_r, neighbor_r) — avoid calling density_fn
+                // when dist is clearly large enough
+                if dist_sq < cr_sq {
+                    return true;
+                }
+                if dist_sq < density_fn(neighbor).powi(2) {
                     return true;
                 }
             }
@@ -172,23 +172,37 @@ impl BackgroundGrid {
     }
 }
 
-impl PoissonSampler {
-    pub fn new(config: SamplerConfig) -> Self {
-        Self {
-            config,
-            seed_points: Vec::new(),
+/// Generate a random unit direction vector without trig functions.
+/// Uses rejection sampling in the unit circle (avg ~1.27 iterations).
+#[inline]
+fn random_direction(rng: &mut Pcg64Mcg) -> (f64, f64) {
+    loop {
+        let x = rng.gen::<f64>() * 2.0 - 1.0;
+        let y = rng.gen::<f64>() * 2.0 - 1.0;
+        let d2 = x * x + y * y;
+        if d2 > 1e-10 && d2 <= 1.0 {
+            let inv = 1.0 / d2.sqrt();
+            return (x * inv, y * inv);
         }
     }
+}
 
-    /// Add pre-seeded boundary points (e.g. for edge stitching between patches).
+impl PoissonSampler {
+    pub fn new(config: SamplerConfig) -> Self {
+        Self { config, seed_points: Vec::new() }
+    }
+
     pub fn with_seed_points(mut self, points: Vec<[f64; 2]>) -> Self {
         self.seed_points = points;
         self
     }
 
-    /// Run the sampling algorithm. `density_fn` maps a position to the desired
-    /// minimum spacing at that point. Higher values produce sparser sampling.
-    pub fn sample<F: Fn([f64; 2]) -> f64>(&self, density_fn: F) -> Vec<[f64; 2]> {
+    /// Run Bridson's algorithm. When the `parallel` feature is enabled,
+    /// uses rayon for atlas-level parallelism (the caller parallelizes
+    /// across patches). The sampler itself is sequential — Bridson's is
+    /// inherently sequential and sequential is faster for individual patches
+    /// due to zero synchronization overhead.
+    pub fn sample<F: Fn([f64; 2]) -> f64 + Sync>(&self, density_fn: F) -> Vec<[f64; 2]> {
         let mut rng = Pcg64Mcg::seed_from_u64(self.config.seed);
         let domain = &self.config.domain;
         let k = self.config.k_candidates;
@@ -196,18 +210,15 @@ impl PoissonSampler {
         let min_radius = self.estimate_min_radius(&density_fn);
         let cell_size = min_radius / SQRT_2;
 
-        let mut grid = BackgroundGrid::new(
-            domain.x_min(),
-            domain.y_min(),
-            domain.width(),
-            domain.height(),
+        let mut grid = Grid::new(
+            domain.x_min(), domain.y_min(),
+            domain.width(), domain.height(),
             cell_size,
         );
 
-        let mut points: Vec<[f64; 2]> = Vec::new();
-        let mut active: Vec<usize> = Vec::new();
+        let mut points: Vec<[f64; 2]> = Vec::with_capacity(1024);
+        let mut active: Vec<usize> = Vec::with_capacity(512);
 
-        // Insert seed points.
         for &sp in &self.seed_points {
             if domain.contains(sp) {
                 let idx = points.len();
@@ -217,13 +228,11 @@ impl PoissonSampler {
             }
         }
 
-        // If no seed points, generate an initial point inside the domain.
         if points.is_empty() {
             let p = self.random_initial_point(&mut rng);
-            let idx = points.len();
             points.push(p);
-            active.push(idx);
-            grid.insert(p, idx);
+            active.push(0);
+            grid.insert(p, 0);
         }
 
         while !active.is_empty() {
@@ -234,12 +243,10 @@ impl PoissonSampler {
 
             let mut found = false;
             for _ in 0..k {
-                let angle = rng.gen::<f64>() * 2.0 * PI;
-                let dist = r + rng.gen::<f64>() * r;
-                let candidate = [
-                    point[0] + dist * angle.cos(),
-                    point[1] + dist * angle.sin(),
-                ];
+                // Random point in annulus [r, 2r] — trig-free
+                let (dx, dy) = random_direction(&mut rng);
+                let dist = r * (1.0 + rng.gen::<f64>());
+                let candidate = [point[0] + dx * dist, point[1] + dy * dist];
 
                 if !domain.contains(candidate) {
                     continue;
@@ -266,7 +273,6 @@ impl PoissonSampler {
         points
     }
 
-    /// Estimate the minimum radius by probing the density function across the domain.
     fn estimate_min_radius<F: Fn([f64; 2]) -> f64>(&self, density_fn: &F) -> f64 {
         let mut min_r = f64::MAX;
 
@@ -292,29 +298,24 @@ impl PoissonSampler {
             }
         }
 
-        assert!(
-            min_r > 0.0 && min_r.is_finite(),
-            "density function must return positive finite values"
-        );
+        assert!(min_r > 0.0 && min_r.is_finite(),
+            "density function must return positive finite values");
         min_r
     }
 
     fn random_initial_point(&self, rng: &mut Pcg64Mcg) -> [f64; 2] {
         match &self.config.domain {
-            Domain::EquilateralTriangle => {
-                // Uniform random barycentric coords, convert to equilateral triangle
-                loop {
-                    let u: f64 = rng.gen();
-                    let v: f64 = rng.gen();
-                    if u + v <= 1.0 {
-                        let w = 1.0 - u - v;
-                        // bary [u,v,w] -> cartesian in equilateral triangle
-                        let x = SQRT3_OVER_2 * (w - v);
-                        let y = (3.0 * u - 1.0) / 2.0;
-                        return [x, y];
-                    }
+            Domain::EquilateralTriangle => loop {
+                let u: f64 = rng.gen();
+                let v: f64 = rng.gen();
+                if u + v <= 1.0 {
+                    let w = 1.0 - u - v;
+                    return [
+                        SQRT3_OVER_2 * (w - v),
+                        (3.0 * u - 1.0) / 2.0,
+                    ];
                 }
-            }
+            },
             Domain::Rectangle { width, height } => {
                 [rng.gen::<f64>() * width, rng.gen::<f64>() * height]
             }
@@ -338,28 +339,20 @@ mod tests {
     fn uniform_density_point_count() {
         let spacing = 0.05;
         let config = SamplerConfig {
-            k_candidates: 30,
-            seed: 42,
-            domain: Domain::Rectangle {
-                width: 1.0,
-                height: 1.0,
-            },
+            k_candidates: 30, seed: 42,
+            domain: Domain::Rectangle { width: 1.0, height: 1.0 },
         };
-        let sampler = PoissonSampler::new(config);
-        let points = sampler.sample(|_| spacing);
-
-        assert!(points.len() > 100, "too few points: {}", points.len());
-        assert!(points.len() < 600, "too many points: {}", points.len());
+        let points = PoissonSampler::new(config).sample(|_| spacing);
+        assert!(points.len() > 100, "too few: {}", points.len());
+        assert!(points.len() < 600, "too many: {}", points.len());
 
         for i in 0..points.len() {
             for j in (i + 1)..points.len() {
                 let dx = points[i][0] - points[j][0];
                 let dy = points[i][1] - points[j][1];
-                let dist = (dx * dx + dy * dy).sqrt();
                 assert!(
-                    dist >= spacing * 0.999,
-                    "points {} and {} too close: {:.6} < {:.6}",
-                    i, j, dist, spacing
+                    dx*dx + dy*dy >= spacing * spacing * 0.998,
+                    "points {} and {} too close", i, j
                 );
             }
         }
@@ -368,84 +361,66 @@ mod tests {
     #[test]
     fn triangle_domain_rejects_exterior() {
         let config = SamplerConfig {
-            k_candidates: 30,
-            seed: 123,
+            k_candidates: 30, seed: 123,
             domain: Domain::EquilateralTriangle,
         };
-        let sampler = PoissonSampler::new(config);
-        let points = sampler.sample(|_| 0.05);
-
+        let points = PoissonSampler::new(config).sample(|_| 0.05);
         for p in &points {
-            assert!(
-                equilateral_contains(*p),
-                "point outside equilateral triangle: {:?}",
-                p
-            );
+            assert!(equilateral_contains(*p), "outside triangle: {:?}", p);
         }
-        assert!(points.len() > 30, "too few points in triangle: {}", points.len());
+        assert!(points.len() > 30, "too few: {}", points.len());
     }
 
     #[test]
     fn seed_points_preserved() {
         let seeds = vec![[0.2, 0.2], [0.5, 0.1], [0.8, 0.8]];
         let config = SamplerConfig {
-            k_candidates: 30,
-            seed: 99,
-            domain: Domain::Rectangle {
-                width: 1.0,
-                height: 1.0,
-            },
+            k_candidates: 30, seed: 99,
+            domain: Domain::Rectangle { width: 1.0, height: 1.0 },
         };
-        let sampler = PoissonSampler::new(config).with_seed_points(seeds.clone());
-        let points = sampler.sample(|_| 0.1);
-
+        let points = PoissonSampler::new(config).with_seed_points(seeds.clone()).sample(|_| 0.1);
         for seed in &seeds {
-            assert!(
-                points.iter().any(|p| p[0] == seed[0] && p[1] == seed[1]),
-                "seed point {:?} missing from output",
-                seed
-            );
+            assert!(points.iter().any(|p| p[0] == seed[0] && p[1] == seed[1]),
+                "seed {:?} missing", seed);
         }
     }
 
     #[test]
     fn deterministic_output() {
         let config = SamplerConfig {
-            k_candidates: 30,
-            seed: 7,
-            domain: Domain::Rectangle {
-                width: 1.0,
-                height: 1.0,
-            },
+            k_candidates: 30, seed: 7,
+            domain: Domain::Rectangle { width: 1.0, height: 1.0 },
         };
         let a = PoissonSampler::new(config.clone()).sample(|_| 0.08);
         let b = PoissonSampler::new(config).sample(|_| 0.08);
-        assert_eq!(a.len(), b.len(), "different point counts");
+        assert_eq!(a.len(), b.len());
         for (pa, pb) in a.iter().zip(b.iter()) {
-            assert_eq!(pa, pb, "points differ");
+            assert_eq!(pa, pb);
         }
     }
 
     #[test]
     fn variable_density() {
         let config = SamplerConfig {
-            k_candidates: 30,
-            seed: 55,
-            domain: Domain::Rectangle {
-                width: 1.0,
-                height: 1.0,
-            },
+            k_candidates: 30, seed: 55,
+            domain: Domain::Rectangle { width: 1.0, height: 1.0 },
         };
-        let sampler = PoissonSampler::new(config);
-        let points = sampler.sample(|p| 0.03 + 0.12 * p[0]);
+        let points = PoissonSampler::new(config).sample(|p| 0.03 + 0.12 * p[0]);
+        let left = points.iter().filter(|p| p[0] < 0.5).count();
+        let right = points.iter().filter(|p| p[0] >= 0.5).count();
+        assert!(left > right, "left {} not > right {}", left, right);
+    }
 
-        let left_count = points.iter().filter(|p| p[0] < 0.5).count();
-        let right_count = points.iter().filter(|p| p[0] >= 0.5).count();
-
-        assert!(
-            left_count > right_count,
-            "expected more points on left ({}) than right ({})",
-            left_count, right_count
-        );
+    #[test]
+    fn high_density_triangle() {
+        let config = SamplerConfig {
+            k_candidates: 30, seed: 42,
+            domain: Domain::EquilateralTriangle,
+        };
+        let points = PoissonSampler::new(config).sample(|_| 1.0 / 64.0);
+        assert!(points.len() > 500, "too few: {}", points.len());
+        for p in &points {
+            assert!(equilateral_contains(*p), "outside: {:?}", p);
+        }
     }
 }

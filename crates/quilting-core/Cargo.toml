@@ -6,7 +6,7 @@ description = "Conformal mesh tessellation core library"
 
 [features]
 default = []
-parallel = ["rayon"]
+parallel = ["rayon", "distressed-blue-noise/parallel"]
 
 [dependencies]
 distressed-blue-noise = { path = "../distressed-blue-noise" }
