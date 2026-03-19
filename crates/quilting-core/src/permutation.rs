@@ -1,13 +1,17 @@
 use serde::{Deserialize, Serialize};
+use crate::triangle;
 
 /// The 6 permutations of S3 (symmetric group on 3 elements).
+///
+/// On the equilateral reference triangle, these correspond to geometric
+/// symmetries: cyclic perms → 120°/240° rotations, transpositions → reflections.
 pub const S3_PERMUTATIONS: [[usize; 3]; 6] = [
     [0, 1, 2], // identity
-    [0, 2, 1], // swap 1,2
-    [1, 0, 2], // swap 0,1
-    [1, 2, 0], // cycle right
-    [2, 0, 1], // cycle left
-    [2, 1, 0], // swap 0,2
+    [0, 2, 1], // swap 1,2 (reflect across altitude from A)
+    [1, 0, 2], // swap 0,1 (reflect across altitude from C)
+    [1, 2, 0], // cycle right (120° rotation)
+    [2, 0, 1], // cycle left (240° rotation)
+    [2, 1, 0], // swap 0,2 (reflect across altitude from B)
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -32,7 +36,6 @@ pub fn canonical_form(res: [u32; 3]) -> CanonicalKey {
         }
     }
 
-    // Fallback (shouldn't happen for valid inputs)
     CanonicalKey {
         res: sorted,
         perm_index: 0,
@@ -63,35 +66,30 @@ pub fn inverse_perm(perm_index: usize) -> usize {
 
 /// Remap positions under a triangle vertex permutation.
 ///
-/// The unit triangle vertices are A=(0,0), B=(1,0), C=(0,1).
-/// Permuting vertices means remapping the 2D coordinates.
+/// Converts to barycentric, permutes the bary coords, converts back.
+/// On the equilateral triangle this corresponds to actual rotations/reflections.
 pub fn remap_position(perm_index: usize, pos: [f64; 2]) -> [f64; 2] {
-    let [x, y] = pos;
-    // Barycentric: u = 1-x-y, v = x, w = y
-    let bary = [1.0 - x - y, x, y];
+    let bary = triangle::cartesian_to_bary(pos[0], pos[1]);
     let inv = inverse_perm(perm_index);
     let perm = S3_PERMUTATIONS[inv];
     let new_bary = [bary[perm[0]], bary[perm[1]], bary[perm[2]]];
-    // Back to 2D: x = new_bary[1], y = new_bary[2]
-    [new_bary[1], new_bary[2]]
+    triangle::bary_to_cartesian(new_bary)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::triangle::{VERTICES, VERTEX_A, VERTEX_B, VERTEX_C};
 
     #[test]
     fn s3_group_closure() {
-        // Composing any two permutations should yield another permutation in the group
         for &a in &S3_PERMUTATIONS {
             for &b in &S3_PERMUTATIONS {
                 let composed = [a[b[0]], a[b[1]], a[b[2]]];
                 assert!(
                     S3_PERMUTATIONS.contains(&composed),
                     "composition {:?} o {:?} = {:?} not in S3",
-                    a,
-                    b,
-                    composed
+                    a, b, composed
                 );
             }
         }
@@ -99,41 +97,25 @@ mod tests {
 
     #[test]
     fn canonical_always_sorted() {
-        let cases = [
-            [4, 8, 2],
-            [8, 4, 2],
-            [2, 4, 8],
-            [8, 8, 4],
-            [4, 4, 4],
-        ];
+        let cases = [[4, 8, 2], [8, 4, 2], [2, 4, 8], [8, 8, 4], [4, 4, 4]];
         for res in cases {
             let key = canonical_form(res);
             assert!(
                 key.res[0] <= key.res[1] && key.res[1] <= key.res[2],
                 "canonical {:?} not sorted for input {:?}",
-                key.res,
-                res
+                key.res, res
             );
         }
     }
 
     #[test]
     fn canonical_roundtrip() {
-        let cases = [
-            [4, 8, 2],
-            [8, 4, 16],
-            [2, 2, 8],
-            [4, 4, 4],
-        ];
+        let cases = [[4, 8, 2], [8, 4, 16], [2, 2, 8], [4, 4, 4]];
         for res in cases {
             let key = canonical_form(res);
             let perm = S3_PERMUTATIONS[key.perm_index];
             let recovered = [key.res[perm[0]], key.res[perm[1]], key.res[perm[2]]];
-            assert_eq!(
-                recovered, res,
-                "roundtrip failed for {:?}: canonical={:?}, perm_index={}, recovered={:?}",
-                res, key.res, key.perm_index, recovered
-            );
+            assert_eq!(recovered, res);
         }
     }
 
@@ -144,50 +126,39 @@ mod tests {
             let perm = S3_PERMUTATIONS[idx];
             let inv_perm = S3_PERMUTATIONS[inv];
             let composed = [inv_perm[perm[0]], inv_perm[perm[1]], inv_perm[perm[2]]];
-            assert_eq!(
-                composed,
-                [0, 1, 2],
-                "inverse_perm({}) = {} is not the inverse",
-                idx,
-                inv
-            );
+            assert_eq!(composed, [0, 1, 2]);
         }
     }
 
     #[test]
     fn remap_identity() {
-        let pos = [0.3, 0.2];
-        let remapped = remap_position(0, pos); // identity permutation
+        // A point inside the equilateral triangle
+        let pos = [0.1, 0.2];
+        let remapped = remap_position(0, pos);
         assert!(
             (remapped[0] - pos[0]).abs() < 1e-12 && (remapped[1] - pos[1]).abs() < 1e-12,
             "identity remap changed position: {:?} -> {:?}",
-            pos,
-            remapped
+            pos, remapped
         );
     }
 
     #[test]
     fn remap_preserves_triangle() {
-        // All remapped positions should stay inside the unit triangle
         let positions = [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.3, 0.3],
-            [0.5, 0.0],
-            [0.0, 0.5],
-            [0.25, 0.25],
+            VERTEX_A, VERTEX_B, VERTEX_C,
+            [0.0, 0.0],    // centroid
+            [0.0, -0.5],   // midpoint of BC
+            [0.1, 0.2],
         ];
         for perm_idx in 0..6 {
             for &pos in &positions {
                 let [x, y] = remap_position(perm_idx, pos);
                 assert!(
-                    x >= -1e-10 && y >= -1e-10 && x + y <= 1.0 + 1e-10,
-                    "remap({}, {:?}) = [{}, {}] outside triangle",
-                    perm_idx,
-                    pos,
-                    x,
-                    y
+                    triangle::contains(x + 1e-10, y + 1e-10)
+                        || triangle::contains(x - 1e-10, y - 1e-10)
+                        || triangle::contains(x, y),
+                    "remap({}, {:?}) = [{}, {}] outside equilateral triangle",
+                    perm_idx, pos, x, y
                 );
             }
         }
@@ -195,22 +166,36 @@ mod tests {
 
     #[test]
     fn remap_vertices_permuted() {
-        // Remapping should send triangle vertices to other triangle vertices
-        let vertices = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
         for perm_idx in 0..6 {
-            let remapped: Vec<[f64; 2]> = vertices.iter().map(|&v| remap_position(perm_idx, v)).collect();
-            // Each remapped vertex should be close to one of the original vertices
+            let remapped: Vec<[f64; 2]> = VERTICES
+                .iter()
+                .map(|&v| remap_position(perm_idx, v))
+                .collect();
             for r in &remapped {
-                let close_to_vertex = vertices.iter().any(|v| {
+                let close_to_vertex = VERTICES.iter().any(|v| {
                     (r[0] - v[0]).abs() < 1e-10 && (r[1] - v[1]).abs() < 1e-10
                 });
                 assert!(
                     close_to_vertex,
                     "remap({}) produced {:?} which isn't a vertex",
-                    perm_idx,
-                    r
+                    perm_idx, r
                 );
             }
         }
+    }
+
+    #[test]
+    fn remap_120_rotation_is_cyclic() {
+        // Perm [1,2,0] (cycle right) should be a 120° rotation
+        let p = [0.1, 0.3];
+        let r1 = remap_position(3, p); // [1,2,0]
+        let r2 = remap_position(3, r1);
+        let r3 = remap_position(3, r2);
+        // Three applications should return to original
+        assert!(
+            (r3[0] - p[0]).abs() < 1e-10 && (r3[1] - p[1]).abs() < 1e-10,
+            "3x 120° rotation didn't return to start: {:?} -> {:?}",
+            p, r3
+        );
     }
 }

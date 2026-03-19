@@ -1,3 +1,4 @@
+pub mod triangle;
 pub mod interpolation;
 pub mod sampling;
 pub mod delaunay;

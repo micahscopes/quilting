@@ -1,4 +1,7 @@
 use crate::interpolation::tri_edge_weight;
+use crate::triangle::{
+    self, VERTEX_A, VERTEX_B, VERTEX_C,
+};
 use distressed_blue_noise::{Domain, PoissonSampler, SamplerConfig};
 
 pub struct PatchConfig {
@@ -20,56 +23,54 @@ pub struct PatchSample {
     pub bary: Vec<[f64; 3]>,
 }
 
-/// Generate sample points for a triangular patch.
-///
-/// Unit triangle: A=(0,0), B=(1,0), C=(0,1).
+/// Generate sample points for a triangular patch on the equilateral reference
+/// triangle (vertices A=(0,1), B=(-√3/2,-1/2), C=(√3/2,-1/2)).
 ///
 /// `res` = [res_a, res_b, res_c]:
-///   - res_a = subdivisions on edge BC
-///   - res_b = subdivisions on edge AC
-///   - res_c = subdivisions on edge AB
+///   - res_a = subdivisions on edge BC (opposite vertex A)
+///   - res_b = subdivisions on edge AC (opposite vertex B)
+///   - res_c = subdivisions on edge AB (opposite vertex C)
 pub fn tri_patch(res: [f64; 3], config: &PatchConfig) -> PatchSample {
     let mut seeds = Vec::new();
 
-    // Edge AB (from A=(0,0) to B=(1,0)), resolution res_c
+    // Edge AB (from A to B), resolution res_c (opposite C)
     let n_ab = res[2] as usize;
     for i in 0..=n_ab {
         let t = i as f64 / n_ab as f64;
-        seeds.push([t, 0.0]);
+        seeds.push(triangle::lerp(VERTEX_A, VERTEX_B, t));
     }
 
-    // Edge AC (from A=(0,0) to C=(0,1)), resolution res_b
+    // Edge AC (from A to C), resolution res_b (opposite B)
     let n_ac = res[1] as usize;
     for i in 1..=n_ac {
-        // skip (0,0), already added
         let t = i as f64 / n_ac as f64;
-        seeds.push([0.0, t]);
+        seeds.push(triangle::lerp(VERTEX_A, VERTEX_C, t));
     }
 
-    // Edge BC (from B=(1,0) to C=(0,1)), resolution res_a
+    // Edge BC (from B to C), resolution res_a (opposite A)
     let n_bc = res[0] as usize;
     for i in 1..n_bc {
-        // skip endpoints, already added
         let t = i as f64 / n_bc as f64;
-        seeds.push([1.0 - t, t]);
+        seeds.push(triangle::lerp(VERTEX_B, VERTEX_C, t));
     }
 
     let sampler = PoissonSampler::new(SamplerConfig {
         k_candidates: config.k_candidates,
         seed: config.seed,
-        domain: Domain::UnitTriangle,
+        domain: Domain::EquilateralTriangle,
     })
     .with_seed_points(seeds);
 
     let density_fn = |p: [f64; 2]| -> f64 {
-        let u = 1.0 - p[0] - p[1]; // bary coord for A
-        let v = p[0]; // bary coord for B
-        let w = p[1]; // bary coord for C
-        tri_edge_weight([u, v, w], res)
+        let bary = triangle::cartesian_to_bary(p[0], p[1]);
+        tri_edge_weight(bary, res)
     };
 
     let positions = sampler.sample(density_fn);
-    let bary: Vec<[f64; 3]> = positions.iter().map(|&[x, y]| [1.0 - x - y, x, y]).collect();
+    let bary: Vec<[f64; 3]> = positions
+        .iter()
+        .map(|&[x, y]| triangle::cartesian_to_bary(x, y))
+        .collect();
 
     PatchSample { positions, bary }
 }
@@ -95,12 +96,11 @@ mod tests {
         let config = PatchConfig::default();
         let sample = tri_patch([8.0, 8.0, 8.0], &config);
         for (i, &[x, y]) in sample.positions.iter().enumerate() {
+            let [u, v, w] = triangle::cartesian_to_bary(x, y);
             assert!(
-                x >= -1e-12 && y >= -1e-12 && x + y <= 1.0 + 1e-12,
-                "point {} = [{}, {}] outside unit triangle",
-                i,
-                x,
-                y
+                u >= -1e-10 && v >= -1e-10 && w >= -1e-10,
+                "point {} = [{}, {}] (bary [{}, {}, {}]) outside equilateral triangle",
+                i, x, y, u, v, w
             );
         }
     }
@@ -115,15 +115,13 @@ mod tests {
             assert!(
                 (u + v + w - 1.0).abs() < 1e-10,
                 "barycentric coords don't sum to 1 at point {}: [{}, {}, {}]",
-                i,
-                u,
-                v,
-                w
+                i, u, v, w
             );
+            let back = triangle::bary_to_cartesian([u, v, w]);
             assert!(
-                (v - x).abs() < 1e-10 && (w - y).abs() < 1e-10,
-                "bary mismatch at point {}",
-                i
+                (back[0] - x).abs() < 1e-10 && (back[1] - y).abs() < 1e-10,
+                "bary roundtrip mismatch at point {}: [{},{}] vs [{},{}]",
+                i, x, y, back[0], back[1]
             );
         }
     }

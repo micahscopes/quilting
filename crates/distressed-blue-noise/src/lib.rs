@@ -3,26 +3,44 @@ use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::f64::consts::{PI, SQRT_2};
 
+const SQRT3_OVER_2: f64 = 0.866_025_403_784_438_6;
+const ONE_OVER_SQRT3: f64 = 0.577_350_269_189_625_8;
+
 /// Domain over which to generate samples.
 #[derive(Clone, Debug)]
 pub enum Domain {
-    /// Unit triangle with vertices (0,0), (1,0), (0,1).
-    UnitTriangle,
+    /// Equilateral triangle centered at origin, vertices on the unit circle:
+    /// A=(0,1), B=(-√3/2,-1/2), C=(√3/2,-1/2). Side length √3.
+    EquilateralTriangle,
     /// Axis-aligned rectangle from (0,0) to (width, height).
     Rectangle { width: f64, height: f64 },
 }
 
 impl Domain {
+    fn x_min(&self) -> f64 {
+        match self {
+            Domain::EquilateralTriangle => -SQRT3_OVER_2,
+            Domain::Rectangle { .. } => 0.0,
+        }
+    }
+
+    fn y_min(&self) -> f64 {
+        match self {
+            Domain::EquilateralTriangle => -0.5,
+            Domain::Rectangle { .. } => 0.0,
+        }
+    }
+
     fn width(&self) -> f64 {
         match self {
-            Domain::UnitTriangle => 1.0,
+            Domain::EquilateralTriangle => SQRT3_OVER_2 * 2.0, // √3
             Domain::Rectangle { width, .. } => *width,
         }
     }
 
     fn height(&self) -> f64 {
         match self {
-            Domain::UnitTriangle => 1.0,
+            Domain::EquilateralTriangle => 1.5,
             Domain::Rectangle { height, .. } => *height,
         }
     }
@@ -32,7 +50,13 @@ impl Domain {
     fn contains(&self, p: [f64; 2]) -> bool {
         let [x, y] = p;
         match self {
-            Domain::UnitTriangle => x >= 0.0 && y >= 0.0 && (x + y) <= 1.0,
+            Domain::EquilateralTriangle => {
+                // Barycentric containment test
+                let u = (1.0 + 2.0 * y) / 3.0;
+                let v = (1.0 - y) / 3.0 - x * ONE_OVER_SQRT3;
+                let w = (1.0 - y) / 3.0 + x * ONE_OVER_SQRT3;
+                u >= 0.0 && v >= 0.0 && w >= 0.0
+            }
             Domain::Rectangle { width, height } => {
                 x >= 0.0 && x <= *width && y >= 0.0 && y <= *height
             }
@@ -73,6 +97,8 @@ pub struct PoissonSampler {
 /// Flat background grid for spatial lookups. Stores point indices.
 struct BackgroundGrid {
     cell_size: f64,
+    x_offset: f64,
+    y_offset: f64,
     cols: usize,
     rows: usize,
     /// Each cell holds either `usize::MAX` (empty) or a point index.
@@ -80,11 +106,13 @@ struct BackgroundGrid {
 }
 
 impl BackgroundGrid {
-    fn new(width: f64, height: f64, cell_size: f64) -> Self {
+    fn new(x_min: f64, y_min: f64, width: f64, height: f64, cell_size: f64) -> Self {
         let cols = ((width / cell_size).ceil() as usize).max(1);
         let rows = ((height / cell_size).ceil() as usize).max(1);
         Self {
             cell_size,
+            x_offset: x_min,
+            y_offset: y_min,
             cols,
             rows,
             cells: vec![usize::MAX; cols * rows],
@@ -93,8 +121,8 @@ impl BackgroundGrid {
 
     #[inline]
     fn cell_index(&self, p: [f64; 2]) -> (usize, usize) {
-        let col = ((p[0] / self.cell_size) as usize).min(self.cols - 1);
-        let row = ((p[1] / self.cell_size) as usize).min(self.rows - 1);
+        let col = (((p[0] - self.x_offset) / self.cell_size) as usize).min(self.cols - 1);
+        let row = (((p[1] - self.y_offset) / self.cell_size) as usize).min(self.rows - 1);
         (col, row)
     }
 
@@ -116,10 +144,6 @@ impl BackgroundGrid {
         density_fn: &F,
     ) -> bool {
         let (cc, cr) = self.cell_index(candidate);
-
-        // We need to search enough cells to cover the maximum possible radius.
-        // Since cell_size = min_radius / sqrt(2), and candidate_radius >= min_radius,
-        // we need to search ceil(candidate_radius / cell_size) + 1 cells in each direction.
         let search_radius = (candidate_radius / self.cell_size).ceil() as isize + 1;
 
         let col_min = (cc as isize - search_radius).max(0) as usize;
@@ -169,14 +193,16 @@ impl PoissonSampler {
         let domain = &self.config.domain;
         let k = self.config.k_candidates;
 
-        // Determine minimum radius across the domain by sampling a grid of probe points
-        // plus any seed points. This sets the background grid cell size.
         let min_radius = self.estimate_min_radius(&density_fn);
         let cell_size = min_radius / SQRT_2;
 
-        let w = domain.width();
-        let h = domain.height();
-        let mut grid = BackgroundGrid::new(w, h, cell_size);
+        let mut grid = BackgroundGrid::new(
+            domain.x_min(),
+            domain.y_min(),
+            domain.width(),
+            domain.height(),
+            cell_size,
+        );
 
         let mut points: Vec<[f64; 2]> = Vec::new();
         let mut active: Vec<usize> = Vec::new();
@@ -201,7 +227,6 @@ impl PoissonSampler {
         }
 
         while !active.is_empty() {
-            // Pick a random active point.
             let active_idx = rng.gen_range(0..active.len());
             let point_idx = active[active_idx];
             let point = points[point_idx];
@@ -209,7 +234,6 @@ impl PoissonSampler {
 
             let mut found = false;
             for _ in 0..k {
-                // Generate candidate in annulus [r, 2r].
                 let angle = rng.gen::<f64>() * 2.0 * PI;
                 let dist = r + rng.gen::<f64>() * r;
                 let candidate = [
@@ -246,22 +270,23 @@ impl PoissonSampler {
     fn estimate_min_radius<F: Fn([f64; 2]) -> f64>(&self, density_fn: &F) -> f64 {
         let mut min_r = f64::MAX;
 
-        // Probe seed points.
         for &sp in &self.seed_points {
             min_r = min_r.min(density_fn(sp));
         }
 
-        // Probe a coarse grid across the domain.
         let steps = 16;
-        let w = self.config.domain.width();
-        let h = self.config.domain.height();
+        let domain = &self.config.domain;
+        let x0 = domain.x_min();
+        let y0 = domain.y_min();
+        let w = domain.width();
+        let h = domain.height();
         for iy in 0..=steps {
             for ix in 0..=steps {
                 let p = [
-                    w * (ix as f64) / (steps as f64),
-                    h * (iy as f64) / (steps as f64),
+                    x0 + w * (ix as f64) / (steps as f64),
+                    y0 + h * (iy as f64) / (steps as f64),
                 ];
-                if self.config.domain.contains(p) {
+                if domain.contains(p) {
                     min_r = min_r.min(density_fn(p));
                 }
             }
@@ -276,13 +301,17 @@ impl PoissonSampler {
 
     fn random_initial_point(&self, rng: &mut Pcg64Mcg) -> [f64; 2] {
         match &self.config.domain {
-            Domain::UnitTriangle => {
-                // Uniform sampling in the unit triangle via folding.
+            Domain::EquilateralTriangle => {
+                // Uniform random barycentric coords, convert to equilateral triangle
                 loop {
                     let u: f64 = rng.gen();
                     let v: f64 = rng.gen();
                     if u + v <= 1.0 {
-                        return [u, v];
+                        let w = 1.0 - u - v;
+                        // bary [u,v,w] -> cartesian in equilateral triangle
+                        let x = SQRT3_OVER_2 * (w - v);
+                        let y = (3.0 * u - 1.0) / 2.0;
+                        return [x, y];
                     }
                 }
             }
@@ -296,6 +325,14 @@ impl PoissonSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn equilateral_contains(p: [f64; 2]) -> bool {
+        let [x, y] = p;
+        let u = (1.0 + 2.0 * y) / 3.0;
+        let v = (1.0 - y) / 3.0 - x * ONE_OVER_SQRT3;
+        let w = (1.0 - y) / 3.0 + x * ONE_OVER_SQRT3;
+        u >= -1e-12 && v >= -1e-12 && w >= -1e-12
+    }
 
     #[test]
     fn uniform_density_point_count() {
@@ -311,22 +348,9 @@ mod tests {
         let sampler = PoissonSampler::new(config);
         let points = sampler.sample(|_| spacing);
 
-        // Theoretical max packing for radius r in unit square is roughly 1/(pi*r^2 / 2)
-        // but Poisson disk is less dense. Expect roughly 0.65-0.85 of hex packing density.
-        // Hex packing: 2 / (sqrt(3) * r^2). For r=0.05 that's ~462 points.
-        // We expect something in the range of 200-500.
-        assert!(
-            points.len() > 100,
-            "too few points: {}",
-            points.len()
-        );
-        assert!(
-            points.len() < 600,
-            "too many points: {}",
-            points.len()
-        );
+        assert!(points.len() > 100, "too few points: {}", points.len());
+        assert!(points.len() < 600, "too many points: {}", points.len());
 
-        // Verify minimum distance constraint.
         for i in 0..points.len() {
             for j in (i + 1)..points.len() {
                 let dx = points[i][0] - points[j][0];
@@ -335,10 +359,7 @@ mod tests {
                 assert!(
                     dist >= spacing * 0.999,
                     "points {} and {} too close: {:.6} < {:.6}",
-                    i,
-                    j,
-                    dist,
-                    spacing
+                    i, j, dist, spacing
                 );
             }
         }
@@ -349,19 +370,18 @@ mod tests {
         let config = SamplerConfig {
             k_candidates: 30,
             seed: 123,
-            domain: Domain::UnitTriangle,
+            domain: Domain::EquilateralTriangle,
         };
         let sampler = PoissonSampler::new(config);
         let points = sampler.sample(|_| 0.05);
 
         for p in &points {
             assert!(
-                p[0] >= 0.0 && p[1] >= 0.0 && p[0] + p[1] <= 1.0 + 1e-12,
-                "point outside unit triangle: {:?}",
+                equilateral_contains(*p),
+                "point outside equilateral triangle: {:?}",
                 p
             );
         }
-        // Should still produce a decent number of points.
         assert!(points.len() > 30, "too few points in triangle: {}", points.len());
     }
 
@@ -408,7 +428,6 @@ mod tests {
 
     #[test]
     fn variable_density() {
-        // Denser on the left (small spacing), sparser on the right (large spacing).
         let config = SamplerConfig {
             k_candidates: 30,
             seed: 55,
@@ -423,12 +442,10 @@ mod tests {
         let left_count = points.iter().filter(|p| p[0] < 0.5).count();
         let right_count = points.iter().filter(|p| p[0] >= 0.5).count();
 
-        // Left side should have significantly more points.
         assert!(
             left_count > right_count,
             "expected more points on left ({}) than right ({})",
-            left_count,
-            right_count
+            left_count, right_count
         );
     }
 }

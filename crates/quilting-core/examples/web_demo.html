@@ -21,6 +21,7 @@
       flex-direction: column;
       gap: 16px;
       overflow-y: auto;
+      flex-shrink: 0;
     }
     h1 { font-size: 18px; color: #e94560; letter-spacing: 2px; }
     .control-group { display: flex; flex-direction: column; gap: 6px; }
@@ -40,7 +41,7 @@
     }
     #canvas-wrap {
       flex: 1; display: flex; align-items: center;
-      justify-content: center; padding: 20px;
+      justify-content: center; padding: 10px;
     }
     canvas { background: #0f0f23; border-radius: 4px; }
     .mode-toggle { display: flex; gap: 4px; }
@@ -101,7 +102,7 @@
   </div>
 
   <div id="canvas-wrap">
-    <canvas id="canvas" width="800" height="800"></canvas>
+    <canvas id="canvas"></canvas>
   </div>
 
 <script>
@@ -111,19 +112,31 @@ let displayMode = 'wire';
 let currentPatch = null;
 let fetchController = null;
 
+// Equilateral triangle: A=(0,1), B=(-sqrt3/2,-0.5), C=(sqrt3/2,-0.5)
+const S3O2 = Math.sqrt(3) / 2;
+const TRI_A = [0, 1], TRI_B = [-S3O2, -0.5], TRI_C = [S3O2, -0.5];
+const X_MIN = -S3O2, X_MAX = S3O2, Y_MIN = -0.5, Y_MAX = 1.0;
+
+function cartToBary(x, y) {
+  const u = (1 + 2*y) / 3;
+  const v = (1 - y) / 3 - x / Math.sqrt(3);
+  const w = (1 - y) / 3 + x / Math.sqrt(3);
+  return [u, v, w];
+}
+
+function pointInTriangle(x, y) {
+  const [u, v, w] = cartToBary(x, y);
+  return u >= 0 && v >= 0 && w >= 0;
+}
+
 function triEdgeWeight(bary, res) {
   const [x, y, z] = bary;
-  const e0 = y * z; // edge A
-  const e1 = x * z; // edge B
-  const e2 = x * y; // edge C
+  const e0 = y * z, e1 = x * z, e2 = x * y;
   const sum = e0 + e1 + e2;
   if (sum < 1e-30) return 1.0 / Math.max(...res);
-  // Weighted geometric mean for perceptually smooth density transitions
   const logRes = (e0*Math.log(res[0]) + e1*Math.log(res[1]) + e2*Math.log(res[2])) / sum;
   return 1.0 / Math.exp(logRes);
 }
-
-function pointInTriangle(x, y) { return x >= 0 && y >= 0 && x + y <= 1; }
 
 function getCurrentRes() {
   return [
@@ -132,6 +145,15 @@ function getCurrentRes() {
     1 << parseInt(document.getElementById('slider-c').value),
   ];
 }
+
+function resizeCanvas() {
+  const wrap = document.getElementById('canvas-wrap');
+  const size = Math.min(wrap.clientWidth, wrap.clientHeight) - 20;
+  canvas.width = size;
+  canvas.height = size;
+  if (currentPatch) render(currentPatch);
+}
+window.addEventListener('resize', resizeCanvas);
 
 async function fetchPatch() {
   const res = getCurrentRes();
@@ -152,8 +174,7 @@ async function fetchPatch() {
       { signal: fetchController.signal }
     );
     const patch = await resp.json();
-    const elapsed = performance.now() - t0;
-    patch.time = elapsed;
+    patch.time = performance.now() - t0;
     currentPatch = patch;
     render(patch);
   } catch (e) {
@@ -165,21 +186,32 @@ function render(patch) {
   if (!patch) return;
   const { positions, triangles, vertex_count, triangle_count } = patch;
   const w = canvas.width, h = canvas.height;
-  const margin = 60;
-  const scale = Math.min(w, h) - margin * 2;
+  const margin = 40;
   const res = getCurrentRes();
+
+  // Map equilateral triangle bounding box to canvas, preserving aspect ratio
+  const triW = X_MAX - X_MIN;  // sqrt(3)
+  const triH = Y_MAX - Y_MIN;  // 1.5
+  const scaleX = (w - margin*2) / triW;
+  const scaleY = (h - margin*2) / triH;
+  const scale = Math.min(scaleX, scaleY);
+  const cx = w / 2, cy = h / 2;
+  const triCenterY = (Y_MIN + Y_MAX) / 2;  // 0.25
+
+  function tx(x, y) {
+    return [cx + x * scale, cy - (y - triCenterY) * scale];
+  }
 
   ctx.clearRect(0, 0, w, h);
 
-  function tx(x, y) { return [margin + x * scale, h - margin - y * scale]; }
-
   if (displayMode === 'density') {
-    const step = 4;
+    const step = 3;
     for (let py = 0; py < h; py += step) {
       for (let px = 0; px < w; px += step) {
-        const x = (px - margin) / scale, y = (h - py - margin) / scale;
+        const x = (px - cx) / scale;
+        const y = triCenterY - (py - cy) / scale;
         if (!pointInTriangle(x, y)) continue;
-        const bary = [1-x-y, x, y];
+        const bary = cartToBary(x, y);
         const spacing = triEdgeWeight(bary, res);
         const density = 1 / spacing;
         const t = Math.min(density / Math.max(...res), 1);
@@ -194,11 +226,11 @@ function render(patch) {
       const ai = triangles[i], bi = triangles[i+1], ci = triangles[i+2];
       const [ax,ay] = tx(positions[ai*2], positions[ai*2+1]);
       const [bx,by] = tx(positions[bi*2], positions[bi*2+1]);
-      const [cx,cy] = tx(positions[ci*2], positions[ci*2+1]);
+      const [cx2,cy2] = tx(positions[ci*2], positions[ci*2+1]);
       ctx.beginPath();
-      ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.lineTo(cx,cy); ctx.closePath();
+      ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.lineTo(cx2,cy2); ctx.closePath();
       if (displayMode === 'fill') {
-        const area = Math.abs((bx-ax)*(cy-ay)-(cx-ax)*(by-ay)) / 2;
+        const area = Math.abs((bx-ax)*(cy2-ay)-(cx2-ax)*(by-ay)) / 2;
         ctx.fillStyle = `rgba(233,69,96,${0.15 + Math.min(area/400,1) * 0.4})`;
         ctx.fill();
       }
@@ -214,14 +246,16 @@ function render(patch) {
     ctx.fillStyle = '#e94560'; ctx.fill();
   }
 
-  const [a0,a1] = tx(0,0), [b0,b1] = tx(1,0), [c0,c1] = tx(0,1);
+  // Triangle outline
+  const [a0,a1] = tx(...TRI_A), [b0,b1] = tx(...TRI_B), [c0,c1] = tx(...TRI_C);
   ctx.beginPath(); ctx.moveTo(a0,a1); ctx.lineTo(b0,b1); ctx.lineTo(c0,c1); ctx.closePath();
   ctx.strokeStyle = '#e94560'; ctx.lineWidth = 2; ctx.stroke();
 
+  // Edge labels: A=BC (bottom), B=AC (top-right), C=AB (top-left)
   ctx.font = '12px monospace'; ctx.fillStyle = '#8899aa';
-  ctx.fillText('A='+res[0], (b0+c0)/2+8, (b1+c1)/2);
-  ctx.fillText('B='+res[1], (a0+c0)/2-30, (a1+c1)/2);
-  ctx.fillText('C='+res[2], (a0+b0)/2, a1+16);
+  ctx.fillText('A='+res[0], (b0+c0)/2-12, (b1+c1)/2+16);
+  ctx.fillText('B='+res[1], (a0+c0)/2+10, (a1+c1)/2);
+  ctx.fillText('C='+res[2], (a0+b0)/2-35, (a1+b1)/2);
 
   document.getElementById('stats').innerHTML =
     `Vertices: ${vertex_count}<br>Triangles: ${triangle_count}<br>` +
@@ -242,6 +276,7 @@ function setMode(m) {
   if (currentPatch) render(currentPatch);
 }
 
+resizeCanvas();
 fetchPatch();
 </script>
 </body>

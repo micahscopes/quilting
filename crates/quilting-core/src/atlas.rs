@@ -232,16 +232,17 @@ mod tests {
 
     #[test]
     fn get_patch_positions_in_triangle() {
+        use crate::triangle;
         let config = PatchConfig::default();
         let atlas = TessellationAtlas::build(&[4], &config);
 
         let mesh = atlas.get_patch([4, 4, 4]).unwrap();
         for &[x, y] in &mesh.positions {
+            let [u, v, w] = triangle::cartesian_to_bary(x, y);
             assert!(
-                x >= -1e-10 && y >= -1e-10 && x + y <= 1.0 + 1e-10,
-                "position [{}, {}] outside unit triangle",
-                x,
-                y
+                u >= -1e-10 && v >= -1e-10 && w >= -1e-10,
+                "position [{}, {}] (bary [{}, {}, {}]) outside equilateral triangle",
+                x, y, u, v, w
             );
         }
     }
