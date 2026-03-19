@@ -492,14 +492,19 @@ onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.client
 canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); e.preventDefault(); };
 onresize = render;
 
-// Init: start worker, build atlas, then load shape
+// Init: fast atlas first (2^8), start rendering, then extend in background
 $('stats').textContent = 'Starting worker...';
 await workerCall('init', {});
-$('stats').textContent = 'Building atlas...';
-const atlasResp = await workerCall('build_atlas', { maxLodExp: 10, mode: 'hierarchical' });
+$('stats').textContent = 'Building atlas (2^8)...';
+const r1 = await workerCall('build_atlas', { maxLodExp: 8, mode: 'hierarchical' });
 workerReady = true;
-$('stats').textContent = `Atlas built in ${atlasResp.ms.toFixed(0)}ms`;
+$('stats').textContent = `Atlas 2^8 in ${r1.ms.toFixed(0)}ms, extending...`;
 loadShape('cube');
+// Extend to 2^10 in background — UI is already interactive
+workerCall('build_atlas', { maxLodExp: 10, mode: 'hierarchical' }).then(r2 => {
+  $('stats').textContent = `Atlas 2^10 in ${r2.ms.toFixed(0)}ms`;
+  update(); // re-render with higher LODs now available
+});
 </script>
 </body>
 </html>
