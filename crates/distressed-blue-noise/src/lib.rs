@@ -50,12 +50,10 @@ impl Domain {
         let [x, y] = p;
         match self {
             Domain::EquilateralTriangle => {
-                // Fast barycentric containment — avoid division
-                let u3 = 1.0 + 2.0 * y; // 3*u
+                let u3 = 1.0 + 2.0 * y;
                 if u3 < 0.0 { return false; }
-                let base3 = 1.0 - y; // 3*base = 1-y
-                let dx3 = x * (ONE_OVER_SQRT3 * 3.0); // 3*dx
-                // 3*v = base3 - dx3, 3*w = base3 + dx3
+                let base3 = 1.0 - y;
+                let dx3 = x * (ONE_OVER_SQRT3 * 3.0);
                 base3 >= dx3 && base3 >= -dx3
             }
             Domain::Rectangle { width, height } => {
@@ -89,11 +87,9 @@ pub struct PoissonSampler {
     seed_points: Vec<[f64; 2]>,
 }
 
-/// Flat single-entry background grid for maximum cache locality.
-/// Each cell stores one point index (usize::MAX = empty).
-/// Cell size = min_radius / sqrt(2) guarantees at most one point per cell
-/// for the minimum spacing. For variable density, points with larger spacing
-/// simply search more cells.
+/// Flat single-entry background grid. Each cell stores one point index
+/// (usize::MAX = empty). Radii are cached in a parallel array to avoid
+/// recomputing the density function during conflict checks.
 struct Grid {
     inv_cell_size: f64,
     x_offset: f64,
@@ -130,27 +126,26 @@ impl Grid {
         self.cells[row * self.cols + col] = idx;
     }
 
+    /// Check if candidate conflicts with any neighbor. Uses cached radii
+    /// instead of calling density_fn — the big performance win.
     #[inline]
-    fn conflicts<F: Fn([f64; 2]) -> f64>(
+    fn conflicts(
         &self,
         candidate: [f64; 2],
-        candidate_radius: f64,
+        candidate_radius_sq: f64,
         points: &[[f64; 2]],
-        density_fn: &F,
+        radii_sq: &[f64],
+        search: isize,
     ) -> bool {
         let (cc, cr) = self.cell_xy(candidate);
-        let search = (candidate_radius * self.inv_cell_size).ceil() as isize + 1;
 
         let col_min = (cc as isize - search).max(0) as usize;
         let col_max = ((cc as isize + search) as usize).min(self.cols - 1);
         let row_min = (cr as isize - search).max(0) as usize;
         let row_max = ((cr as isize + search) as usize).min(self.rows - 1);
 
-        let cr_sq = candidate_radius * candidate_radius;
-
         for row in row_min..=row_max {
             let base = row * self.cols;
-            // Process the row as a contiguous slice for cache locality
             let slice = &self.cells[base + col_min..=base + col_max];
             for &idx in slice {
                 if idx == usize::MAX { continue; }
@@ -158,12 +153,13 @@ impl Grid {
                 let dx = candidate[0] - neighbor[0];
                 let dy = candidate[1] - neighbor[1];
                 let dist_sq = dx * dx + dy * dy;
-                // Use max(candidate_r, neighbor_r) — avoid calling density_fn
-                // when dist is clearly large enough
-                if dist_sq < cr_sq {
-                    return true;
-                }
-                if dist_sq < density_fn(neighbor).powi(2) {
+                // max(candidate_r, neighbor_r) — both pre-squared
+                let min_dist_sq = if candidate_radius_sq > unsafe { *radii_sq.get_unchecked(idx) } {
+                    candidate_radius_sq
+                } else {
+                    unsafe { *radii_sq.get_unchecked(idx) }
+                };
+                if dist_sq < min_dist_sq {
                     return true;
                 }
             }
@@ -172,8 +168,7 @@ impl Grid {
     }
 }
 
-/// Generate a random unit direction vector without trig functions.
-/// Uses rejection sampling in the unit circle (avg ~1.27 iterations).
+/// Generate a random unit direction without trig (rejection in unit circle).
 #[inline]
 fn random_direction(rng: &mut Pcg64Mcg) -> (f64, f64) {
     loop {
@@ -197,11 +192,6 @@ impl PoissonSampler {
         self
     }
 
-    /// Run Bridson's algorithm. When the `parallel` feature is enabled,
-    /// uses rayon for atlas-level parallelism (the caller parallelizes
-    /// across patches). The sampler itself is sequential — Bridson's is
-    /// inherently sequential and sequential is faster for individual patches
-    /// due to zero synchronization overhead.
     pub fn sample<F: Fn([f64; 2]) -> f64 + Sync>(&self, density_fn: F) -> Vec<[f64; 2]> {
         let mut rng = Pcg64Mcg::seed_from_u64(self.config.seed);
         let domain = &self.config.domain;
@@ -209,6 +199,7 @@ impl PoissonSampler {
 
         let min_radius = self.estimate_min_radius(&density_fn);
         let cell_size = min_radius / SQRT_2;
+        let inv_cell_size = 1.0 / cell_size;
 
         let mut grid = Grid::new(
             domain.x_min(), domain.y_min(),
@@ -217,12 +208,16 @@ impl PoissonSampler {
         );
 
         let mut points: Vec<[f64; 2]> = Vec::with_capacity(1024);
+        let mut radii_sq: Vec<f64> = Vec::with_capacity(1024);
         let mut active: Vec<usize> = Vec::with_capacity(512);
 
+        // Insert seed points
         for &sp in &self.seed_points {
             if domain.contains(sp) {
                 let idx = points.len();
+                let r = density_fn(sp);
                 points.push(sp);
+                radii_sq.push(r * r);
                 active.push(idx);
                 grid.insert(sp, idx);
             }
@@ -230,7 +225,9 @@ impl PoissonSampler {
 
         if points.is_empty() {
             let p = self.random_initial_point(&mut rng);
+            let r = density_fn(p);
             points.push(p);
+            radii_sq.push(r * r);
             active.push(0);
             grid.insert(p, 0);
         }
@@ -239,11 +236,11 @@ impl PoissonSampler {
             let active_idx = rng.gen_range(0..active.len());
             let point_idx = active[active_idx];
             let point = points[point_idx];
-            let r = density_fn(point);
+            let r_sq = radii_sq[point_idx];
+            let r = r_sq.sqrt();
 
             let mut found = false;
             for _ in 0..k {
-                // Random point in annulus [r, 2r] — trig-free
                 let (dx, dy) = random_direction(&mut rng);
                 let dist = r * (1.0 + rng.gen::<f64>());
                 let candidate = [point[0] + dx * dist, point[1] + dy * dist];
@@ -253,12 +250,16 @@ impl PoissonSampler {
                 }
 
                 let candidate_r = density_fn(candidate);
-                if grid.conflicts(candidate, candidate_r, &points, &density_fn) {
+                let candidate_r_sq = candidate_r * candidate_r;
+                let search = (candidate_r * inv_cell_size).ceil() as isize + 1;
+
+                if grid.conflicts(candidate, candidate_r_sq, &points, &radii_sq, search) {
                     continue;
                 }
 
                 let idx = points.len();
                 points.push(candidate);
+                radii_sq.push(candidate_r_sq);
                 active.push(idx);
                 grid.insert(candidate, idx);
                 found = true;

@@ -112,6 +112,7 @@ impl TessellationAtlas {
         }
     }
 
+    #[allow(dead_code)]
     fn build_sequential(
         triples: &[[u32; 3]],
         lod_levels: &[u32],
