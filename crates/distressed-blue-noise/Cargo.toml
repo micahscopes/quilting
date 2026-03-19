@@ -1,0 +1,9 @@
+[package]
+name = "distressed-blue-noise"
+version = "0.1.0"
+edition = "2021"
+description = "Variable-density Poisson disk sampling"
+
+[dependencies]
+rand = "0.8"
+rand_pcg = "0.3"

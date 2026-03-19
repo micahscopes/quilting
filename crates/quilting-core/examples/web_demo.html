@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Quilting — Tessellation Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      display: flex;
+      height: 100vh;
+    }
+    #sidebar {
+      width: 280px;
+      padding: 20px;
+      background: #16213e;
+      border-right: 1px solid #0f3460;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+    h1 { font-size: 18px; color: #e94560; letter-spacing: 2px; }
+    .control-group { display: flex; flex-direction: column; gap: 6px; }
+    label {
+      font-size: 12px; color: #8899aa;
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+    .slider-row { display: flex; align-items: center; gap: 8px; }
+    input[type="range"] { flex: 1; accent-color: #e94560; }
+    .value {
+      font-size: 14px; min-width: 32px; text-align: right;
+      color: #e94560; font-weight: bold;
+    }
+    .stats {
+      font-size: 11px; color: #556677; line-height: 1.6;
+      margin-top: auto; padding-top: 16px; border-top: 1px solid #0f3460;
+    }
+    #canvas-wrap {
+      flex: 1; display: flex; align-items: center;
+      justify-content: center; padding: 20px;
+    }
+    canvas { background: #0f0f23; border-radius: 4px; }
+    .mode-toggle { display: flex; gap: 4px; }
+    .mode-toggle button {
+      flex: 1; padding: 6px; font-size: 11px; font-family: inherit;
+      border: 1px solid #0f3460; background: transparent;
+      color: #8899aa; cursor: pointer; border-radius: 3px;
+      transition: all 0.15s;
+    }
+    .mode-toggle button.active { background: #e94560; color: #fff; border-color: #e94560; }
+    .mode-toggle button:hover:not(.active) { border-color: #e94560; color: #e0e0e0; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h1>QUILTING</h1>
+    <p style="font-size: 12px; color: #556677;">Tessellation patch demo</p>
+
+    <div class="control-group">
+      <label>Edge A resolution (2<sup>n</sup>)</label>
+      <div class="slider-row">
+        <input type="range" id="slider-a" min="0" max="8" value="2" step="1">
+        <span class="value" id="val-a">4</span>
+      </div>
+    </div>
+    <div class="control-group">
+      <label>Edge B resolution (2<sup>n</sup>)</label>
+      <div class="slider-row">
+        <input type="range" id="slider-b" min="0" max="8" value="2" step="1">
+        <span class="value" id="val-b">4</span>
+      </div>
+    </div>
+    <div class="control-group">
+      <label>Edge C resolution (2<sup>n</sup>)</label>
+      <div class="slider-row">
+        <input type="range" id="slider-c" min="0" max="8" value="2" step="1">
+        <span class="value" id="val-c">4</span>
+      </div>
+    </div>
+    <div class="control-group">
+      <label>Seed</label>
+      <div class="slider-row">
+        <input type="range" id="slider-seed" min="0" max="255" value="42" step="1">
+        <span class="value" id="val-seed">42</span>
+      </div>
+    </div>
+    <div class="control-group">
+      <label>Display</label>
+      <div class="mode-toggle">
+        <button id="mode-wire" class="active">Wireframe</button>
+        <button id="mode-fill">Filled</button>
+        <button id="mode-density">Density</button>
+      </div>
+    </div>
+    <div class="stats" id="stats">
+      Vertices: &mdash;<br>Triangles: &mdash;<br>Gen time: &mdash;
+    </div>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="canvas" width="800" height="800"></canvas>
+  </div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let displayMode = 'wire';
+let currentPatch = null;
+let fetchController = null;
+
+function triEdgeWeight(bary, res) {
+  const [x, y, z] = bary;
+  const e0 = y * z; // edge A
+  const e1 = x * z; // edge B
+  const e2 = x * y; // edge C
+  const sum = e0 + e1 + e2;
+  if (sum < 1e-30) return 1.0 / Math.max(...res);
+  // Weighted geometric mean for perceptually smooth density transitions
+  const logRes = (e0*Math.log(res[0]) + e1*Math.log(res[1]) + e2*Math.log(res[2])) / sum;
+  return 1.0 / Math.exp(logRes);
+}
+
+function pointInTriangle(x, y) { return x >= 0 && y >= 0 && x + y <= 1; }
+
+function getCurrentRes() {
+  return [
+    1 << parseInt(document.getElementById('slider-a').value),
+    1 << parseInt(document.getElementById('slider-b').value),
+    1 << parseInt(document.getElementById('slider-c').value),
+  ];
+}
+
+async function fetchPatch() {
+  const res = getCurrentRes();
+  const seed = parseInt(document.getElementById('slider-seed').value);
+
+  document.getElementById('val-a').textContent = res[0];
+  document.getElementById('val-b').textContent = res[1];
+  document.getElementById('val-c').textContent = res[2];
+  document.getElementById('val-seed').textContent = seed;
+
+  if (fetchController) fetchController.abort();
+  fetchController = new AbortController();
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(
+      `/patch?a=${res[0]}&b=${res[1]}&c=${res[2]}&seed=${seed}`,
+      { signal: fetchController.signal }
+    );
+    const patch = await resp.json();
+    const elapsed = performance.now() - t0;
+    patch.time = elapsed;
+    currentPatch = patch;
+    render(patch);
+  } catch (e) {
+    if (e.name !== 'AbortError') console.error(e);
+  }
+}
+
+function render(patch) {
+  if (!patch) return;
+  const { positions, triangles, vertex_count, triangle_count } = patch;
+  const w = canvas.width, h = canvas.height;
+  const margin = 60;
+  const scale = Math.min(w, h) - margin * 2;
+  const res = getCurrentRes();
+
+  ctx.clearRect(0, 0, w, h);
+
+  function tx(x, y) { return [margin + x * scale, h - margin - y * scale]; }
+
+  if (displayMode === 'density') {
+    const step = 4;
+    for (let py = 0; py < h; py += step) {
+      for (let px = 0; px < w; px += step) {
+        const x = (px - margin) / scale, y = (h - py - margin) / scale;
+        if (!pointInTriangle(x, y)) continue;
+        const bary = [1-x-y, x, y];
+        const spacing = triEdgeWeight(bary, res);
+        const density = 1 / spacing;
+        const t = Math.min(density / Math.max(...res), 1);
+        ctx.fillStyle = `rgb(${30+t*200|0},${30+(1-t)*80|0},${80+t*100|0})`;
+        ctx.fillRect(px, py, step, step);
+      }
+    }
+  }
+
+  if (triangle_count > 0) {
+    for (let i = 0; i < triangles.length; i += 3) {
+      const ai = triangles[i], bi = triangles[i+1], ci = triangles[i+2];
+      const [ax,ay] = tx(positions[ai*2], positions[ai*2+1]);
+      const [bx,by] = tx(positions[bi*2], positions[bi*2+1]);
+      const [cx,cy] = tx(positions[ci*2], positions[ci*2+1]);
+      ctx.beginPath();
+      ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.lineTo(cx,cy); ctx.closePath();
+      if (displayMode === 'fill') {
+        const area = Math.abs((bx-ax)*(cy-ay)-(cx-ax)*(by-ay)) / 2;
+        ctx.fillStyle = `rgba(233,69,96,${0.15 + Math.min(area/400,1) * 0.4})`;
+        ctx.fill();
+      }
+      ctx.strokeStyle = displayMode === 'density' ? 'rgba(255,255,255,0.3)' : 'rgba(233,69,96,0.6)';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+  }
+
+  for (let i = 0; i < vertex_count; i++) {
+    const [sx,sy] = tx(positions[i*2], positions[i*2+1]);
+    ctx.beginPath(); ctx.arc(sx,sy,2,0,Math.PI*2);
+    ctx.fillStyle = '#e94560'; ctx.fill();
+  }
+
+  const [a0,a1] = tx(0,0), [b0,b1] = tx(1,0), [c0,c1] = tx(0,1);
+  ctx.beginPath(); ctx.moveTo(a0,a1); ctx.lineTo(b0,b1); ctx.lineTo(c0,c1); ctx.closePath();
+  ctx.strokeStyle = '#e94560'; ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.font = '12px monospace'; ctx.fillStyle = '#8899aa';
+  ctx.fillText('A='+res[0], (b0+c0)/2+8, (b1+c1)/2);
+  ctx.fillText('B='+res[1], (a0+c0)/2-30, (a1+c1)/2);
+  ctx.fillText('C='+res[2], (a0+b0)/2, a1+16);
+
+  document.getElementById('stats').innerHTML =
+    `Vertices: ${vertex_count}<br>Triangles: ${triangle_count}<br>` +
+    `Round-trip: ${patch.time.toFixed(1)}ms<br><span style="color:#e94560">Rust backend</span>`;
+}
+
+for (const id of ['slider-a','slider-b','slider-c','slider-seed'])
+  document.getElementById(id).addEventListener('input', fetchPatch);
+
+document.getElementById('mode-wire').onclick = () => setMode('wire');
+document.getElementById('mode-fill').onclick = () => setMode('fill');
+document.getElementById('mode-density').onclick = () => setMode('density');
+
+function setMode(m) {
+  displayMode = m;
+  document.querySelectorAll('.mode-toggle button').forEach(b => b.classList.remove('active'));
+  document.getElementById('mode-'+m).classList.add('active');
+  if (currentPatch) render(currentPatch);
+}
+
+fetchPatch();
+</script>
+</body>
+</html>
