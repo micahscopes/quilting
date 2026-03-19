@@ -68,7 +68,6 @@ let shape='cube', rotX=0.3, rotY=0.5, zoom=5;
 let renderMode = 'matcap';
 let shapeData = null, wasmReady = false;
 
-// --- Shared QB vertex shader (outputs position + normal in view space) ---
 const VS = `#version 300 es
 layout(location=0) in vec3 a_bary;
 layout(location=1) in vec4 a_p0;
@@ -78,9 +77,12 @@ layout(location=4) in vec4 a_w0;
 layout(location=5) in vec4 a_w1;
 layout(location=6) in vec4 a_w2;
 uniform mat4 u_mvp;
-uniform mat4 u_mv;  // model-view (no projection) for normal transform
+uniform mat4 u_mv;
 uniform int u_useQB;
-out vec3 v_normal_vs; // view-space normal for matcap
+uniform vec3 u_edgeLod; // edge resolutions for this batch (a, b, c)
+
+out vec3 v_normal_vs;
+out float v_density;  // interpolated density from edge-based formula
 
 vec4 qm(vec4 a, vec4 b) {
   return vec4(
@@ -101,6 +103,20 @@ vec3 evalFlat(vec3 bary, vec4 p0,vec4 p1,vec4 p2) {
   return bary.x*p0.yzw + bary.y*p1.yzw + bary.z*p2.yzw;
 }
 
+// Edge-based density interpolation (product-of-bary-coords weighting)
+// Matches the Rust tri_edge_weight with geometric mean
+float edgeDensity(vec3 bary, vec3 res) {
+  float x = bary.x, y = bary.y, z = bary.z;
+  float e0 = y * z; // edge A (between verts y,z)
+  float e1 = x * z; // edge B
+  float e2 = x * y; // edge C
+  float sum = e0 + e1 + e2;
+  if (sum < 1e-10) return max(res.x, max(res.y, res.z));
+  // Weighted geometric mean in log space
+  float logRes = (e0*log(max(res.x,1.0)) + e1*log(max(res.y,1.0)) + e2*log(max(res.z,1.0))) / sum;
+  return exp(logRes);
+}
+
 void main(){
   vec3 p;
   float eps = 0.001;
@@ -118,6 +134,12 @@ void main(){
   }
   vec3 n = normalize(cross(du, dv));
   v_normal_vs = normalize(mat3(u_mv) * n);
+
+  // Density heatmap: normalize to 0..1 range
+  float maxRes = max(u_edgeLod.x, max(u_edgeLod.y, u_edgeLod.z));
+  float density = edgeDensity(a_bary, u_edgeLod);
+  v_density = log2(max(density, 1.0)) / max(log2(maxRes), 1.0);
+
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
 
@@ -125,41 +147,55 @@ void main(){
 const FS_MATCAP = `#version 300 es
 precision mediump float;
 in vec3 v_normal_vs;
+in float v_density;
 uniform vec3 u_lodColor;
 out vec4 o;
+
+// Viridis-like colormap for density heatmap
+vec3 heatmap(float t) {
+  t = clamp(t, 0.0, 1.0);
+  // Dark purple → blue → teal → green → yellow
+  vec3 c0 = vec3(0.27, 0.00, 0.33);
+  vec3 c1 = vec3(0.13, 0.37, 0.73);
+  vec3 c2 = vec3(0.12, 0.68, 0.55);
+  vec3 c3 = vec3(0.56, 0.85, 0.27);
+  vec3 c4 = vec3(0.99, 0.91, 0.15);
+  if (t < 0.25) return mix(c0, c1, t*4.0);
+  if (t < 0.5)  return mix(c1, c2, (t-0.25)*4.0);
+  if (t < 0.75) return mix(c2, c3, (t-0.5)*4.0);
+  return mix(c3, c4, (t-0.75)*4.0);
+}
+
 void main(){
   vec3 n = normalize(v_normal_vs);
   n = gl_FrontFacing ? n : -n;
 
-  // View direction is (0,0,1) in view space
   float NdV = max(n.z, 0.0);
-
-  // Two-tone matcap: lit hemisphere vs shadow
   vec3 lightDir = normalize(vec3(0.4, 0.7, 0.9));
   float NdL = dot(n, lightDir);
-  float diff = NdL * 0.5 + 0.5; // half-lambert wrap
+  float diff = NdL * 0.5 + 0.5;
 
-  // Specular — Blinn-Phong in view space
   vec3 H = normalize(lightDir + vec3(0,0,1));
   float spec = pow(max(dot(n, H), 0.0), 40.0);
-
-  // Fresnel rim
   float rim = pow(1.0 - NdV, 3.0);
 
-  // Compose
-  vec3 base = u_lodColor;
+  // Blend density heatmap with matcap LOD color
+  vec3 base = mix(u_lodColor, heatmap(v_density), 0.7);
+
   vec3 shadow = base * 0.15 + vec3(0.02, 0.02, 0.06);
   vec3 lit = base * 1.2;
   vec3 col = mix(shadow, lit, diff);
-  col += vec3(1.0, 0.97, 0.92) * spec * 0.6;  // white specular
-  col += base * rim * 0.3;                       // colored rim
-  col += vec3(0.04, 0.03, 0.08);                // ambient floor
+  col += vec3(1.0, 0.97, 0.92) * spec * 0.6;
+  col += base * rim * 0.3;
+  col += vec3(0.04, 0.03, 0.08);
 
   o = vec4(col, 1.0);
 }`;
 
 const FS_FLAT = `#version 300 es
 precision mediump float;
+in vec3 v_normal_vs;
+in float v_density;
 uniform vec3 u_lodColor;
 out vec4 o;
 void main(){ o = vec4(u_lodColor, 1.0); }`;
@@ -271,6 +307,7 @@ function render() {
     gl.uniformMatrix4fv(gl.getUniformLocation(progFlat,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progFlat,'u_useQB'), 0);
     gl.uniform3f(gl.getUniformLocation(progFlat,'u_lodColor'), 0.25, 0.25, 0.35);
+    gl.uniform3f(gl.getUniformLocation(progFlat,'u_edgeLod'), 1, 1, 1);
     for (const b of drawBatches) {
       gl.bindVertexArray(b.vaoOrig);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
@@ -285,6 +322,7 @@ function render() {
     gl.uniform1i(gl.getUniformLocation(progMatcap,'u_useQB'), 1);
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), b.color);
+      gl.uniform3f(gl.getUniformLocation(progMatcap,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
     }
@@ -298,6 +336,7 @@ function render() {
     gl.uniform1i(gl.getUniformLocation(progFlat,'u_useQB'), 1);
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progFlat,'u_lodColor'), b.color);
+      gl.uniform3f(gl.getUniformLocation(progFlat,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_SHORT, 0, b.numInst);
     }
