@@ -50,11 +50,14 @@ impl Domain {
         let [x, y] = p;
         match self {
             Domain::EquilateralTriangle => {
+                // Small epsilon so boundary points (vertices, edge seeds)
+                // aren't rejected by floating point rounding
+                const EPS: f64 = 1e-12;
                 let u3 = 1.0 + 2.0 * y;
-                if u3 < 0.0 { return false; }
+                if u3 < -EPS { return false; }
                 let base3 = 1.0 - y;
                 let dx3 = x * (ONE_OVER_SQRT3 * 3.0);
-                base3 >= dx3 && base3 >= -dx3
+                base3 + EPS >= dx3 && base3 + EPS >= -dx3
             }
             Domain::Rectangle { width, height } => {
                 x >= 0.0 && x <= *width && y >= 0.0 && y <= *height
