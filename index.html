@@ -179,8 +179,8 @@ void main(){
   float spec = pow(max(dot(n, H), 0.0), 40.0);
   float rim = pow(1.0 - NdV, 3.0);
 
-  // Blend density heatmap with matcap LOD color
-  vec3 base = mix(u_lodColor, heatmap(v_density), 0.7);
+  // Density heatmap dominates, LOD batch color as subtle tint
+  vec3 base = mix(u_lodColor, heatmap(v_density), 0.85);
 
   vec3 shadow = base * 0.15 + vec3(0.02, 0.02, 0.06);
   vec3 lit = base * 1.2;
@@ -211,8 +211,8 @@ function lodColor(lod) {
   const maxLod = Math.max(...lod);
   const logLod = Math.log2(Math.max(maxLod, 1));
   const t = Math.min(logLod / 8.0, 1.0);
-  // Hue: 240° (blue, low) → 0° (red, high)
-  const h = (1.0 - t) * 240;
+  // Hue: 270° (purple, low) → 0° (red, high) with wider range
+  const h = (1.0 - t) * 270;
   const s = 0.85;
   const l = 0.55;
   // HSL to RGB
