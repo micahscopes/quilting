@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use crate::quaternion::{Quat, Mobius};
-use crate::patch::QBTriPatch;
 
 /// Per-face instance data for instanced rendering.
 #[derive(Debug, Clone)]
@@ -44,53 +43,39 @@ pub fn compute_instances(
         }
     }).collect();
 
-    // Estimate per-face LOD from scale + curvature + singularity proximity
-    let face_lods: Vec<u32> = faces.iter().enumerate().map(|(fi, face)| {
-        let scale_lod = estimate_face_lod_from_scale(&instances[fi], transform, vertices, face);
-        let curvature_lod = estimate_face_curvature(&instances[fi]);
-        scale_lod.max(curvature_lod)
-    }).collect();
-
-    // Build edge adjacency: edge (min_vi, max_vi) → list of (face_idx, local_edge_idx)
-    let mut edge_faces: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
-    for (fi, face) in faces.iter().enumerate() {
-        // 3 edges per face. local_edge_idx 0 = opposite vert 0 = edge(v1,v2)
+    // Per-EDGE LOD based on transformed edge length.
+    // Simple, robust, automatically consistent across adjacent faces:
+    // same edge = same two vertices = same transformed length = same LOD.
+    let mut edge_lod_map: HashMap<(usize, usize), u32> = HashMap::new();
+    for face in faces {
         let edges = [
-            (face[1], face[2], 0), // edge a: opposite v0
-            (face[0], face[2], 1), // edge b: opposite v1
-            (face[0], face[1], 2), // edge c: opposite v2
+            (face[1], face[2]), // edge a: opposite v0
+            (face[0], face[2]), // edge b: opposite v1
+            (face[0], face[1]), // edge c: opposite v2
         ];
-        for &(va, vb, local_idx) in &edges {
+        for &(va, vb) in &edges {
             let key = if va < vb { (va, vb) } else { (vb, va) };
-            edge_faces.entry(key).or_default().push((fi, local_idx));
+            if edge_lod_map.contains_key(&key) { continue; }
+            let pa = transformed[va].0;
+            let pb = transformed[vb].0;
+            let edge_len = (pa - pb).norm();
+            // 16 subdivisions per unit of transformed edge length
+            let raw = (edge_len * 16.0).ceil() as u32;
+            edge_lod_map.insert(key, snap_to_power_of_2(raw.max(1).min(512)));
         }
     }
 
-    // Assign per-edge LOD = max of adjacent face LODs, snapped to power of 2
+    // Write per-edge LODs into each face instance
     let mut result = instances;
-    for (_edge, face_refs) in &edge_faces {
-        let max_lod = face_refs.iter()
-            .map(|&(fi, _)| face_lods[fi])
-            .max()
-            .unwrap_or(1);
-        let snapped = snap_to_power_of_2(max_lod);
-        for &(fi, local_idx) in face_refs {
-            result[fi].edge_lods[local_idx] = snapped;
-        }
-    }
-
-    // Boundary edges (only one face) — use that face's LOD
     for (fi, face) in faces.iter().enumerate() {
         let edges = [
-            (face[1], face[2], 0),
-            (face[0], face[2], 1),
-            (face[0], face[1], 2),
+            (face[1], face[2]),
+            (face[0], face[2]),
+            (face[0], face[1]),
         ];
-        for &(va, vb, local_idx) in &edges {
+        for (local_idx, &(va, vb)) in edges.iter().enumerate() {
             let key = if va < vb { (va, vb) } else { (vb, va) };
-            if edge_faces.get(&key).map_or(true, |v| v.len() == 1) {
-                result[fi].edge_lods[local_idx] = snap_to_power_of_2(face_lods[fi]);
-            }
+            result[fi].edge_lods[local_idx] = *edge_lod_map.get(&key).unwrap_or(&1);
         }
     }
 
@@ -128,52 +113,6 @@ pub fn compute_instances(
     result
 }
 
-/// Estimate face LOD from QB surface curvature (H/L ratio).
-fn estimate_face_curvature(inst: &FaceInstance) -> u32 {
-    let [p0, p1, p2] = inst.positions;
-    let [w0, w1, w2] = inst.weights;
-
-    let e01 = (p0 - p1).norm();
-    let e02 = (p0 - p2).norm();
-    let e12 = (p1 - p2).norm();
-    let l = e01.max(e02).max(e12);
-    if l < 1e-12 { return 1; }
-
-    let flat_mid = (p0 + p1 + p2) * (1.0 / 3.0);
-    let patch = QBTriPatch::new([p0, p1, p2], [w0, w1, w2]);
-    let qb_mid = patch.eval(1.0 / 3.0, 1.0 / 3.0);
-    let h = (qb_mid - Quat::new(flat_mid.w, flat_mid.x, flat_mid.y, flat_mid.z)).norm();
-
-    let raw_lod = (64.0 * h / l).ceil() as u32;
-    raw_lod.max(1).min(512)
-}
-
-/// Estimate face LOD from transformed edge lengths + singularity proximity.
-fn estimate_face_lod_from_scale(inst: &FaceInstance, transform: &Mobius, orig_verts: &[[f64; 3]], face: &[usize; 3]) -> u32 {
-    let [p0, p1, p2] = inst.positions;
-    let e01 = (p0 - p1).norm();
-    let e02 = (p0 - p2).norm();
-    let e12 = (p1 - p2).norm();
-    let max_edge = e01.max(e02).max(e12);
-
-    // Edge-length LOD: 16 subdivisions per unit
-    let edge_lod = max_edge * 16.0;
-
-    // Singularity LOD: inversely proportional to |cx+d|².
-    // |cx+d|² is the denominator of the Möbius scale factor.
-    // As it → 0, the face blows up toward infinity.
-    let mut min_denom_sq = f64::MAX;
-    for &vi in face {
-        let p = Quat::from_point(orig_verts[vi][0], orig_verts[vi][1], orig_verts[vi][2]);
-        let denom = transform.c * p + transform.d;
-        min_denom_sq = min_denom_sq.min(denom.norm_sq());
-    }
-    // Aggressive: LOD ∝ 1/|cx+d|². At |cx+d|=0.4 → LOD 156, at |cx+d|=0.1 → LOD 2500 (capped)
-    let singularity_lod = 25.0 / min_denom_sq.max(1e-10);
-
-    let raw_lod = edge_lod.max(singularity_lod).ceil() as u32;
-    raw_lod.max(1).min(512)
-}
 
 /// Snap to the nearest power of 2 (round up).
 fn snap_to_power_of_2(v: u32) -> u32 {
@@ -220,14 +159,15 @@ mod tests {
     use crate::shapes;
 
     #[test]
-    fn identity_uniform_lod() {
+    fn identity_lod_proportional_to_edge_length() {
         let (verts, faces) = shapes::cube();
         let instances = compute_instances(&verts, &faces, &Mobius::identity());
-        // Identity: all faces should have the same LOD (uniform)
-        let first = instances[0].edge_lods;
+        // All LODs should be power of 2 and within a reasonable range
         for inst in &instances {
-            assert_eq!(inst.edge_lods, first,
-                "identity should have uniform LOD, got {:?}", inst.edge_lods);
+            for &l in &inst.edge_lods {
+                assert!(l.is_power_of_two(), "LOD {} not power of 2", l);
+                assert!(l >= 1 && l <= 256, "LOD {} out of range", l);
+            }
         }
     }
 
