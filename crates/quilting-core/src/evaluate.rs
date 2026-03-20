@@ -75,13 +75,21 @@ pub fn compute_instances(
         let qb = 2.0 * (d0 * diff.conj()).re();
         let qc = d0.norm_sq();
 
-        let delta = (4.0 * qa * qc - qb * qb).max(1e-30);
-        let sqrt_delta = delta.sqrt();
-
-        let integral = if sqrt_delta > 1e-15 {
+        // ∫₀¹ 1/(qa·t²+qb·t+qc) dt
+        // When Q passes near zero (singularity on segment), the integral
+        // naturally produces a very large value — no special cases needed.
+        let delta = 4.0 * qa * qc - qb * qb;
+        let integral = if delta > 1e-20 {
+            let sqrt_delta = delta.sqrt();
             (2.0 / sqrt_delta) * (((2.0 * qa + qb) / sqrt_delta).atan() - (qb / sqrt_delta).atan())
+        } else if delta > -1e-10 {
+            // Near-degenerate: Q barely touches zero. Use midpoint rule as fallback.
+            let q_mid = qa * 0.25 + qb * 0.5 + qc;
+            1.0 / q_mid.max(1e-20)
         } else {
-            1.0 / qc.max(1e-20)
+            // Q has real roots (segment crosses singularity).
+            // The integral diverges — return a very large value.
+            1e8
         };
 
         let dx = p1[0] - p0[0];
