@@ -190,13 +190,11 @@ void main(){
   n *= u_permParity;
   v_normal_vs = normalize(mat3(u_mv) * n);
 
-  // Density heatmap: interpolate per-vertex LODs for smooth cross-patch colors.
-  // Vertex LODs are the max of all edges meeting at each mesh vertex,
-  // so adjacent faces sharing a vertex compute the same value there.
-  float vertDensity = a_bary.x * log2(max(a_vertLod.x, 1.0))
-                    + a_bary.y * log2(max(a_vertLod.y, 1.0))
-                    + a_bary.z * log2(max(a_vertLod.z, 1.0));
-  v_density = vertDensity / max(u_globalMaxLogLod, 1.0);
+  // Density heatmap: edge-based interpolation using per-instance LODs.
+  // At shared edges (bary coord = 0), the product-of-bary formula gives
+  // 100% weight to the shared edge's LOD, so colors match exactly there.
+  float density = edgeDensity(a_bary, a_lodInfo.xyz);
+  v_density = log2(max(density, 1.0)) / max(u_globalMaxLogLod, 1.0);
 
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
