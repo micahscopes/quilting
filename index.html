@@ -113,9 +113,21 @@ uniform mat4 u_mvp;
 uniform mat4 u_mv;
 uniform int u_useQB;
 uniform float u_permParity; // +1 or -1: flip normal for odd permutations
+uniform int u_permIndex;    // S3 permutation index (0-5) for bary remapping
 
 out vec3 v_normal_vs;
 out float v_density;  // interpolated density from edge-based formula
+
+// S3 permutations: remap bary coords in the vertex shader
+// so we can share one tess buffer across all permutations of a canonical LOD triple.
+vec3 permBary(vec3 b, int p) {
+  if (p <= 0) return b;
+  if (p == 1) return b.xzy;
+  if (p == 2) return b.yxz;
+  if (p == 3) return b.yzx;
+  if (p == 4) return b.zxy;
+  return b.zyx; // p == 5
+}
 
 vec4 qm(vec4 a, vec4 b) {
   return vec4(
@@ -178,11 +190,12 @@ float edgeDensity(vec3 bary, vec3 res) {
 }
 
 void main(){
+  vec3 bary = permBary(a_bary, u_permIndex);
   vec3 p, n;
   if (u_useQB == 1) {
-    evalQBWithNormal(a_bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2, p, n);
+    evalQBWithNormal(bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2, p, n);
   } else {
-    p = evalFlat(a_bary, a_p0,a_p1,a_p2);
+    p = evalFlat(bary, a_p0,a_p1,a_p2);
     n = normalize(cross(a_p1.yzw - a_p0.yzw, a_p2.yzw - a_p0.yzw));
   }
   // Flip normal for odd permutations (reflections in S3)
@@ -191,7 +204,7 @@ void main(){
 
   // Density heatmap: edge-based interpolation, fixed range.
   // log2(1)=0 → t=0, log2(1024)=10 → t=1. Full gradient always visible.
-  float density = edgeDensity(a_bary, a_lodInfo.xyz);
+  float density = edgeDensity(bary, a_lodInfo.xyz);
   v_density = log2(max(density, 1.0)) / 10.0;
 
   gl_Position = u_mvp * vec4(p, 1.0);
@@ -349,7 +362,9 @@ const ORIG_LINES = new Uint32Array([0,1, 1,2, 2,0]);
 const tessCache = new Map();
 
 function getTessBuffers(batch) {
-  const key = batch.lod.join(',') + '/' + batch.perm_parity;
+  // Key by canonical LOD only — shared across all S3 permutations.
+  // Permutation is applied in the vertex shader via u_permIndex.
+  const key = batch.wanted_lod.join(',');
   if (tessCache.has(key)) return tessCache.get(key);
 
   // WASM skips sending tess data for already-sent keys
@@ -465,12 +480,13 @@ function uploadBatches(data) {
   }
 
   for (const batch of data.batches) {
-    const tessKey = batch.lod.join(',') + '/' + batch.perm_parity;
     const tess = getTessBuffers(batch);
-    if (!tess) continue; // shouldn't happen — WASM sends data on first encounter
-    usedKeys.add(tessKey);
+    if (!tess) continue;
+    // VAO key includes perm since instance data differs per perm
+    const vaoKey = batch.wanted_lod.join(',') + '/' + batch.perm_index;
+    usedKeys.add(vaoKey);
 
-    const cached = getOrCreateBatchVAOs(tessKey, tess, batch.instances_xform, batch.num_faces);
+    const cached = getOrCreateBatchVAOs(vaoKey, tess, batch.instances_xform, batch.num_faces);
 
     drawBatches.push({
       vaoXform: cached.lineVao,
@@ -481,6 +497,7 @@ function uploadBatches(data) {
       lod: batch.lod,
       color: lodColor(batch.lod),
       parity: batch.perm_parity || 1,
+      permIndex: batch.perm_index || 0,
     });
   }
 }
@@ -517,6 +534,7 @@ function render() {
     gl.uniform1i(gl.getUniformLocation(progWire,'u_showDensity'), 0);
     gl.uniform3f(gl.getUniformLocation(progWire,'u_lodColor'), 0.25, 0.25, 0.35);
     gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), 1.0);
+    gl.uniform1i(gl.getUniformLocation(progWire,'u_permIndex'), 0);
     gl.bindVertexArray(vaoOrigMesh);
     gl.drawElementsInstanced(gl.LINES, 6, gl.UNSIGNED_INT, 0, numOrigInst);
   }
@@ -531,6 +549,7 @@ function render() {
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), useHeatmap ? b.color : [0.85, 0.75, 0.65]);
       gl.uniform1f(gl.getUniformLocation(progMatcap,'u_permParity'), b.parity);
+      gl.uniform1i(gl.getUniformLocation(progMatcap,'u_permIndex'), b.permIndex);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -547,6 +566,7 @@ function render() {
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progWire,'u_lodColor'), b.color);
       gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), b.parity);
+      gl.uniform1i(gl.getUniformLocation(progWire,'u_permIndex'), b.permIndex);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -561,6 +581,7 @@ function render() {
     gl.uniform1f(gl.getUniformLocation(progNormals,'u_globalMaxLogLod'), 1);
     for (const b of drawBatches) {
       gl.uniform1f(gl.getUniformLocation(progNormals,'u_permParity'), b.parity);
+      gl.uniform1i(gl.getUniformLocation(progNormals,'u_permIndex'), b.permIndex);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }

@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, ScreenInfo};
 use quilting_core::mesh::TessellationMesh;
-use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
+use quilting_core::permutation::{canonical_form, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
 use quilting_core::shapes;
@@ -310,23 +310,25 @@ pub fn compute_mesh_batches(
             let is_fallback = used_lod != canonical_lod;
             let parity = perm_sign(perm_index);
 
-            // Cache key matches the JS tessCache key format
             let actual_lod = if override_res > 0 {
                 [override_res, override_res, override_res]
             } else {
                 instances_xform[face_indices[0]].edge_lods
             };
-            let tess_key = format!("{},{},{}/{}", actual_lod[0], actual_lod[1], actual_lod[2], parity);
 
-            // Only compute and send tessellation geometry for new keys
+            // Tess cache key: canonical LOD only (shared across all permutations).
+            // Permutation is applied in the vertex shader, not by duplicating bary data.
+            let tess_key = format!("{},{},{}", canonical_lod[0], canonical_lod[1], canonical_lod[2]);
+
             let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
 
             let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
                 (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
             } else {
+                // Send canonical (identity permutation) bary coords.
+                // The vertex shader applies the S3 permutation via u_permIndex.
                 let bary: Vec<f64> = mesh.positions.iter().map(|p| {
-                    let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
-                    triangle::cartesian_to_bary(remapped[0], remapped[1])
+                    triangle::cartesian_to_bary(p[0], p[1])
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect();
 
                 let tris: Vec<u32> = mesh.triangles.iter()
@@ -349,6 +351,7 @@ pub fn compute_mesh_batches(
                 used_lod: [used_lod[0], used_lod[1], used_lod[2]],
                 is_fallback,
                 perm_parity: parity,
+                perm_index,
                 instances_orig: orig_data,
                 instances_xform: xform_data,
                 tess_bary: bary_data,
@@ -374,6 +377,7 @@ struct BatchData {
     used_lod: [u32; 3],
     is_fallback: bool,
     perm_parity: i32,  // +1 for even permutations, -1 for odd (normal flip)
+    perm_index: usize, // S3 permutation index (0-5) for vertex shader bary remapping
     instances_orig: Vec<f32>,
     instances_xform: Vec<f32>,
     tess_bary: Vec<f64>,
