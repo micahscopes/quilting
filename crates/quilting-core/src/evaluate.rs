@@ -43,24 +43,47 @@ pub fn compute_instances(
         }
     }).collect();
 
-    // Per-EDGE LOD based on transformed edge length.
-    // Simple, robust, automatically consistent across adjacent faces:
-    // same edge = same two vertices = same transformed length = same LOD.
+    // Pre-compute conformal scale at each vertex: |F'(v)|² = C / |cv+d|⁴
+    // C = |ad-bc|² is constant for the transformation.
+    let c_sq = (transform.a * transform.d - transform.b * transform.c).norm_sq();
+    let vertex_scales: Vec<f64> = vertices.iter().map(|v| {
+        let p = Quat::from_point(v[0], v[1], v[2]);
+        let denom = transform.c * p + transform.d;
+        let denom_sq = denom.norm_sq();
+        if denom_sq < 1e-20 { return 1e10; }
+        c_sq / (denom_sq * denom_sq)
+    }).collect();
+
+    // Per-EDGE LOD from the conformal scale at both endpoints.
+    // The edge stretches by sqrt(scale) at each end. Use the max.
+    // LOD = sqrt(max_scale) × original_edge_length × density_factor
     let mut edge_lod_map: HashMap<(usize, usize), u32> = HashMap::new();
     for face in faces {
         let edges = [
-            (face[1], face[2]), // edge a: opposite v0
-            (face[0], face[2]), // edge b: opposite v1
-            (face[0], face[1]), // edge c: opposite v2
+            (face[1], face[2]),
+            (face[0], face[2]),
+            (face[0], face[1]),
         ];
         for &(va, vb) in &edges {
             let key = if va < vb { (va, vb) } else { (vb, va) };
             if edge_lod_map.contains_key(&key) { continue; }
-            let pa = transformed[va].0;
-            let pb = transformed[vb].0;
-            let edge_len = (pa - pb).norm();
-            // 16 subdivisions per unit of transformed edge length
-            let raw = (edge_len * 16.0).ceil() as u32;
+
+            // Original edge length
+            let dx = vertices[va][0] - vertices[vb][0];
+            let dy = vertices[va][1] - vertices[vb][1];
+            let dz = vertices[va][2] - vertices[vb][2];
+            let orig_len = (dx*dx + dy*dy + dz*dz).sqrt();
+
+            // Max linear scale factor along this edge
+            let scale_a = vertex_scales[va].sqrt();
+            let scale_b = vertex_scales[vb].sqrt();
+            let max_scale = scale_a.max(scale_b);
+
+            // Estimated transformed edge length ≈ orig_len × max_scale
+            let est_len = orig_len * max_scale;
+
+            // 16 subdivisions per unit of transformed length
+            let raw = (est_len * 16.0).ceil() as u32;
             edge_lod_map.insert(key, snap_to_power_of_2(raw.max(1).min(512)));
         }
     }
