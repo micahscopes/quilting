@@ -362,9 +362,9 @@ const ORIG_LINES = new Uint32Array([0,1, 1,2, 2,0]);
 const tessCache = new Map();
 
 function getTessBuffers(batch) {
-  // Key by canonical LOD only — shared across all S3 permutations.
-  // Permutation is applied in the vertex shader via u_permIndex.
-  const key = batch.wanted_lod.join(',');
+  // Key includes perm_index — each permutation gets its own pre-remapped bary buffer
+  // for exact edge stitching (CPU-side remapping, not shader-side).
+  const key = batch.wanted_lod.join(',') + '/' + (batch.perm_index || 0);
   if (tessCache.has(key)) return tessCache.get(key);
 
   // WASM skips sending tess data for already-sent keys

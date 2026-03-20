@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, ScreenInfo};
 use quilting_core::mesh::TessellationMesh;
-use quilting_core::permutation::{canonical_form, perm_sign};
+use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
 use quilting_core::shapes;
@@ -321,19 +321,20 @@ pub fn compute_mesh_batches(
                 instances_xform[face_indices[0]].edge_lods
             };
 
-            // Tess cache key: canonical LOD only (shared across all permutations).
-            // Permutation is applied in the vertex shader, not by duplicating bary data.
-            let tess_key = format!("{},{},{}", canonical_lod[0], canonical_lod[1], canonical_lod[2]);
+            // Tess cache key includes perm_index — each permutation gets its own
+            // pre-remapped bary buffer for exact edge stitching.
+            let tess_key = format!("{},{},{}/{}", canonical_lod[0], canonical_lod[1], canonical_lod[2], perm_index);
 
             let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
 
             let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
                 (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
             } else {
-                // Send canonical (identity permutation) bary coords.
-                // The vertex shader applies the S3 permutation via u_permIndex.
+                // CPU-side permutation remapping ensures shared edge vertices
+                // have bit-identical bary coords across adjacent faces.
                 let bary: Vec<f64> = mesh.positions.iter().map(|p| {
-                    triangle::cartesian_to_bary(p[0], p[1])
+                    let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
+                    triangle::cartesian_to_bary(remapped[0], remapped[1])
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect();
 
                 let tris: Vec<u32> = mesh.triangles.iter()
@@ -433,4 +434,101 @@ pub fn compile_fragment_shader(mode: &str) -> String {
         Ok(glsl) => glsl,
         Err(e) => format!("// ERROR: {}", e),
     }
+}
+
+// --- Spacetime slicing ---
+
+thread_local! {
+    static HYPER_MESH: RefCell<Option<quilting_spacetime::HyperMesh>> = RefCell::new(None);
+}
+
+#[derive(serde::Serialize)]
+struct SpacetimeLayerData {
+    positions: Vec<f64>,
+    faces: Vec<u32>,
+    times: Vec<f64>,
+}
+
+#[derive(serde::Serialize)]
+struct SpacetimeSliceData {
+    layers: Vec<SpacetimeLayerData>,
+}
+
+#[derive(serde::Serialize)]
+struct HyperMeshInfo {
+    time_min: f64,
+    time_max: f64,
+    num_vertices: u32,
+    num_faces: usize,
+}
+
+/// Initialize a hypermesh by name. Stores it in a thread-local.
+/// Names: "rotating_cube", "breathing_sphere", "colliding_spheres", "twisting_torus"
+#[wasm_bindgen]
+pub fn create_hypermesh(name: &str) -> JsValue {
+    use quilting_spacetime::synthesize;
+
+    let mesh = match name {
+        "rotating_cube" => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 16),
+        "breathing_sphere" => synthesize::breathing_sphere(2.0, 1.0, 0.3, 2),
+        "colliding_spheres" => synthesize::colliding_spheres(2.0, 1.5, 4.0, 2),
+        "twisting_torus" => synthesize::twisting_torus(2.0, 2.0, 2.0, 0.5, 12, 8),
+        _ => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 16),
+    };
+
+    let (time_min, time_max) = mesh.time_range();
+    let info = HyperMeshInfo {
+        time_min,
+        time_max,
+        num_vertices: mesh.num_vertices,
+        num_faces: mesh.faces.len(),
+    };
+
+    HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(mesh));
+
+    serde_wasm_bindgen::to_value(&info).unwrap()
+}
+
+/// Slice the current hypermesh with a hyperplane.
+/// normal: [nx, ny, nz, nt] (4 floats)
+/// offset: f64
+/// Returns { layers: [{ positions: [f64], faces: [u32], times: [f64] }] }
+#[wasm_bindgen]
+pub fn slice_hypermesh(normal: &[f64], offset: f64) -> JsValue {
+    use quilting_spacetime::HyperplaneSlicer;
+
+    let n = if normal.len() >= 4 {
+        [normal[0], normal[1], normal[2], normal[3]]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    };
+
+    let result = HYPER_MESH.with(|hm| {
+        let mesh_opt = hm.borrow();
+        let mesh = match mesh_opt.as_ref() {
+            Some(m) => m,
+            None => return SpacetimeSliceData { layers: vec![] },
+        };
+
+        let slicer = HyperplaneSlicer::new(n, offset);
+        let slice = slicer.slice(mesh);
+
+        let layers = slice.layers.into_iter().map(|layer| {
+            let positions: Vec<f64> = layer.positions.iter()
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
+            let faces: Vec<u32> = layer.faces.iter()
+                .flat_map(|f| [f[0], f[1], f[2]])
+                .collect();
+            SpacetimeLayerData {
+                positions,
+                faces,
+                times: layer.times,
+            }
+        }).collect();
+
+        SpacetimeSliceData { layers }
+    });
+
+    serde_wasm_bindgen::to_value(&result).unwrap()
 }
