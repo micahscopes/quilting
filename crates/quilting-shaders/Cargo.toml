@@ -1,0 +1,9 @@
+[package]
+name = "quilting-shaders"
+version = "0.1.0"
+edition = "2021"
+description = "Modular WGSL shader library for QB surface rendering"
+
+[dependencies]
+naga = { version = "28", features = ["wgsl-in", "glsl-out", "spv-out"] }
+naga_oil = "0.21"
