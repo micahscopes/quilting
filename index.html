@@ -129,6 +129,33 @@ vec3 evalQB(vec3 bary, vec4 p0,vec4 p1,vec4 p2, vec4 w0,vec4 w1,vec4 w2) {
   return qm(top, qinv(bot)).yzw;
 }
 
+// QB evaluation returning both position and normal via analytic derivatives.
+// Uses the quotient rule: d(top/bot) = (dtop*bot - top*dbot) / bot²
+// Derivatives are along bary directions u (x→y) and v (x→z).
+void evalQBWithNormal(vec3 bary, vec4 p0,vec4 p1,vec4 p2, vec4 w0,vec4 w1,vec4 w2,
+                      out vec3 pos, out vec3 nrm) {
+  vec4 pw0 = qm(p0,w0), pw1 = qm(p1,w1), pw2 = qm(p2,w2);
+  vec4 top = bary.x*pw0 + bary.y*pw1 + bary.z*pw2;
+  vec4 bot = bary.x*w0  + bary.y*w1  + bary.z*w2;
+  vec4 bi = qinv(bot);
+  vec4 X = qm(top, bi);
+  pos = X.yzw;
+
+  // d/du: derivative along bary direction (x decreases, y increases)
+  vec4 dtop_u = pw1 - pw0;  // d(top)/d(lambda_y) - d(top)/d(lambda_x)
+  vec4 dbot_u = w1 - w0;
+  // d/dv: derivative along bary direction (x decreases, z increases)
+  vec4 dtop_v = pw2 - pw0;
+  vec4 dbot_v = w2 - w0;
+
+  // Quotient rule: dX/du = (dtop_u * bot - top * dbot_u) / bot²
+  // = (dtop_u - X * dbot_u) * bot_inv
+  vec4 dXu = qm(dtop_u - qm(X, dbot_u), bi);
+  vec4 dXv = qm(dtop_v - qm(X, dbot_v), bi);
+
+  nrm = normalize(cross(dXu.yzw, dXv.yzw));
+}
+
 vec3 evalFlat(vec3 bary, vec4 p0,vec4 p1,vec4 p2) {
   return bary.x*p0.yzw + bary.y*p1.yzw + bary.z*p2.yzw;
 }
@@ -148,24 +175,13 @@ float edgeDensity(vec3 bary, vec3 res) {
 }
 
 void main(){
-  vec3 p;
+  vec3 p, n;
   if (u_useQB == 1) {
-    p = evalQB(a_bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
+    evalQBWithNormal(a_bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2, p, n);
   } else {
     p = evalFlat(a_bary, a_p0,a_p1,a_p2);
+    n = normalize(cross(a_p1.yzw - a_p0.yzw, a_p2.yzw - a_p0.yzw));
   }
-
-  // Flat shading: face normal from the three QB-evaluated corners.
-  // Consistent across all vertices of the same instance — no seams.
-  vec3 c0, c1, c2;
-  if (u_useQB == 1) {
-    c0 = evalQB(vec3(1,0,0), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
-    c1 = evalQB(vec3(0,1,0), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
-    c2 = evalQB(vec3(0,0,1), a_p0,a_p1,a_p2, a_w0,a_w1,a_w2);
-  } else {
-    c0 = a_p0.yzw; c1 = a_p1.yzw; c2 = a_p2.yzw;
-  }
-  vec3 n = normalize(cross(c1 - c0, c2 - c0));
   v_normal_vs = normalize(mat3(u_mv) * n);
 
   // Density heatmap: normalize to 0..1 using global max
