@@ -205,14 +205,14 @@ in float v_density;
 uniform vec3 u_lodColor;
 out vec4 o;
 
-// Neon aurora gradient — deep to bright with good spread
+// Classic blue → cyan → green → yellow → red heatmap
 vec3 heatmap(float t) {
   t = clamp(t, 0.0, 1.0);
-  vec3 c0 = vec3(0.08, 0.05, 0.20);  // deep midnight
-  vec3 c1 = vec3(0.20, 0.15, 0.80);  // neon indigo
-  vec3 c2 = vec3(0.10, 0.70, 0.90);  // electric cyan
-  vec3 c3 = vec3(0.40, 0.95, 0.50);  // neon green
-  vec3 c4 = vec3(1.00, 0.60, 0.90);  // pastel pink
+  vec3 c0 = vec3(0.0, 0.0, 0.5);
+  vec3 c1 = vec3(0.0, 0.5, 1.0);
+  vec3 c2 = vec3(0.0, 1.0, 0.5);
+  vec3 c3 = vec3(1.0, 1.0, 0.0);
+  vec3 c4 = vec3(1.0, 0.0, 0.0);
   if (t < 0.25) return mix(c0, c1, t*4.0);
   if (t < 0.5)  return mix(c1, c2, (t-0.25)*4.0);
   if (t < 0.75) return mix(c2, c3, (t-0.5)*4.0);
@@ -255,7 +255,7 @@ out vec4 o;
 
 vec3 heatmap(float t) {
   t = clamp(t, 0.0, 1.0);
-  vec3 c0=vec3(.08,.05,.2), c1=vec3(.2,.15,.8), c2=vec3(.1,.7,.9), c3=vec3(.4,.95,.5), c4=vec3(1.,.6,.9);
+  vec3 c0=vec3(0.,.0,.5), c1=vec3(0.,.5,1.), c2=vec3(0.,1.,.5), c3=vec3(1.,1.,0.), c4=vec3(1.,0.,0.);
   if(t<.25) return mix(c0,c1,t*4.);
   if(t<.5)  return mix(c1,c2,(t-.25)*4.);
   if(t<.75) return mix(c2,c3,(t-.5)*4.);
