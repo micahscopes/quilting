@@ -1,6 +1,6 @@
 use quilting_core::atlas::{BuildMode, TessellationAtlas};
 use quilting_core::delaunay::triangulate_2d_clipped;
-use quilting_core::evaluate::compute_instances;
+use quilting_core::evaluate::{compute_instances, compute_instances_no_lod};
 use quilting_core::mesh::TessellationMesh;
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::{tri_patch, tri_patch_jittered, PatchConfig};
@@ -232,8 +232,8 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         };
 
         let t0 = Instant::now();
-        let instances_orig = compute_instances(&verts, &faces, &Mobius::identity(), None);
-        let instances_xform = compute_instances(&verts, &faces, &transform, None);
+        let instances_orig = compute_instances_no_lod(&verts, &faces);
+        let instances_xform = compute_instances(&verts, &faces, &transform, None, None);
 
         use quilting_core::permutation::{canonical_form, remap_position};
 

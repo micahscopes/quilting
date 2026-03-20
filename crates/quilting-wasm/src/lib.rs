@@ -1,12 +1,13 @@
 use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
-use quilting_core::evaluate::{compute_instances, ScreenInfo};
+use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, ScreenInfo};
 use quilting_core::mesh::TessellationMesh;
 use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
 use quilting_core::shapes;
 use quilting_core::triangle;
+use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -18,6 +19,17 @@ pub fn init() {
 
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
+    /// Cached half-edge mesh — built once per shape, reused across frames.
+    static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
+    /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
+    /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
+    static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+}
+
+struct CachedMesh {
+    half_edge: HalfEdgeMesh,
+    verts: Vec<[f64; 3]>,
+    tris: Vec<[usize; 3]>,
 }
 
 /// Build the tessellation atlas client-side. Call once at init.
@@ -37,6 +49,8 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     let elapsed = js_sys::Date::now() - start;
 
     ATLAS.with(|a| *a.borrow_mut() = Some(atlas));
+    // New atlas means new tessellation data — clear the sent cache
+    SENT_TESS.with(|s| s.borrow_mut().clear());
 
     elapsed
 }
@@ -191,6 +205,25 @@ pub fn compute_mesh_batches(
     let tris: Vec<[usize; 3]> = faces.chunks(3)
         .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize]).collect();
 
+    // Build or reuse cached half-edge mesh. Rebuild only when topology changes.
+    MESH_CACHE.with(|cache_cell| {
+        let mut cache = cache_cell.borrow_mut();
+        let needs_rebuild = match cache.as_ref() {
+            Some(c) => c.tris.len() != tris.len() || c.verts.len() != verts.len(),
+            None => true,
+        };
+        if needs_rebuild {
+            let faces_u32: Vec<[u32; 3]> = tris.iter()
+                .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+                .collect();
+            *cache = Some(CachedMesh {
+                half_edge: HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32),
+                verts: verts.clone(),
+                tris: tris.clone(),
+            });
+        }
+    });
+
     let transform = match transform_type {
         "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
             Mobius::sphere_reflection(
@@ -215,8 +248,12 @@ pub fn compute_mesh_batches(
         None
     };
 
-    let instances_orig = compute_instances(&verts, &tris, &Mobius::identity(), None);
-    let instances_xform = compute_instances(&verts, &tris, &transform, screen.as_ref());
+    let instances_orig = compute_instances_no_lod(&verts, &tris);
+    let instances_xform = MESH_CACHE.with(|cache_cell| {
+        let cache = cache_cell.borrow();
+        let mesh_ref = cache.as_ref().map(|c| &c.half_edge);
+        compute_instances(&verts, &tris, &transform, screen.as_ref(), mesh_ref)
+    });
 
     // Group by (canonical LOD, perm_index)
     let mut groups: HashMap<([u32; 3], usize), Vec<usize>> = HashMap::new();
@@ -271,8 +308,22 @@ pub fn compute_mesh_batches(
             };
 
             let is_fallback = used_lod != canonical_lod;
+            let parity = perm_sign(perm_index);
 
-            let (bary_data, tess_tris) = {
+            // Cache key matches the JS tessCache key format
+            let actual_lod = if override_res > 0 {
+                [override_res, override_res, override_res]
+            } else {
+                instances_xform[face_indices[0]].edge_lods
+            };
+            let tess_key = format!("{},{},{}/{}", actual_lod[0], actual_lod[1], actual_lod[2], parity);
+
+            // Only compute and send tessellation geometry for new keys
+            let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
+
+            let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
+                (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
+            } else {
                 let bary: Vec<f64> = mesh.positions.iter().map(|p| {
                     let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
                     triangle::cartesian_to_bary(remapped[0], remapped[1])
@@ -281,29 +332,23 @@ pub fn compute_mesh_batches(
                 let tris: Vec<u32> = mesh.triangles.iter()
                     .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
 
-                (bary, tris)
+                let nv = bary.len() / 3;
+                let nt = tris.len() / 3;
+                SENT_TESS.with(|s| s.borrow_mut().insert(tess_key));
+                (bary, tris, nv, nt)
             };
-
-            let n_verts = bary_data.len() / 3;
-            let n_tris = tess_tris.len() / 3;
 
             let orig_data: Vec<f32> = face_indices.iter()
                 .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
             let xform_data: Vec<f32> = face_indices.iter()
                 .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
 
-            let actual_lod = if override_res > 0 {
-                [override_res, override_res, override_res]
-            } else {
-                instances_xform[face_indices[0]].edge_lods
-            };
-
             batches.push(BatchData {
                 lod: actual_lod,
                 wanted_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
                 used_lod: [used_lod[0], used_lod[1], used_lod[2]],
                 is_fallback,
-                perm_parity: perm_sign(perm_index),
+                perm_parity: parity,
                 instances_orig: orig_data,
                 instances_xform: xform_data,
                 tess_bary: bary_data,

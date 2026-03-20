@@ -352,6 +352,9 @@ function getTessBuffers(batch) {
   const key = batch.lod.join(',') + '/' + batch.perm_parity;
   if (tessCache.has(key)) return tessCache.get(key);
 
+  // WASM skips sending tess data for already-sent keys
+  if (!batch.tess_bary.length) return null;
+
   const bary = new Float32Array(batch.tess_bary);
   const tris = batch.tess_triangles;
   const lines = [];
@@ -374,42 +377,86 @@ function getTessBuffers(batch) {
   return entry;
 }
 
-function makeInstanceVAO(tessBufs, idxBuf, instanceData) {
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, tessBufs.baryBuf);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+// VAO cache: keyed by tess key, stores {lineVao, triVao, instanceBuf} per key.
+// Instance data is re-uploaded via bufferSubData; VAOs and tess buffers are reused.
+const vaoCache = new Map();
 
-  const ib = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, ib);
-  gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.DYNAMIC_DRAW);
-  for (let i = 0; i < 8; i++) {
-    gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 128, i*16);
-    gl.vertexAttribDivisor(1+i, 1);
+function getOrCreateBatchVAOs(tessKey, tessBufs, instanceData, numInstances) {
+  let entry = vaoCache.get(tessKey);
+  const dataF32 = new Float32Array(instanceData);
+
+  if (entry) {
+    // Reuse VAOs, just re-upload instance data
+    gl.bindBuffer(gl.ARRAY_BUFFER, entry.instanceBuf);
+    if (dataF32.byteLength <= entry.instanceBufSize) {
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, dataF32);
+    } else {
+      gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
+      entry.instanceBufSize = dataF32.byteLength;
+    }
+    entry.numInst = numInstances;
+    return entry;
   }
 
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-  gl.bindVertexArray(null);
-  return vao;
+  // Create new VAOs + instance buffer
+  const instanceBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
+
+  function makeVAOWithIdx(idxBuf) {
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, tessBufs.baryBuf);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+    for (let i = 0; i < 8; i++) {
+      gl.enableVertexAttribArray(1+i);
+      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 128, i*16);
+      gl.vertexAttribDivisor(1+i, 1);
+    }
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+    gl.bindVertexArray(null);
+    return vao;
+  }
+
+  entry = {
+    lineVao: makeVAOWithIdx(tessBufs.lineIdxBuf),
+    triVao: makeVAOWithIdx(tessBufs.triIdxBuf),
+    instanceBuf,
+    instanceBufSize: dataF32.byteLength,
+    numInst: numInstances,
+  };
+  vaoCache.set(tessKey, entry);
+  return entry;
 }
 
 function uploadBatches(data) {
-  for (const b of drawBatches) {
-    gl.deleteVertexArray(b.vaoXform);
-    if (b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri);
-  }
-  if (vaoOrigMesh) gl.deleteVertexArray(vaoOrigMesh);
+  // Mark all cached VAO entries as unused this frame
+  const usedKeys = new Set();
   drawBatches = [];
 
-  // Original mesh: simple 3-vertex wireframe
+  // Original mesh
   const allOrig = [];
   for (const batch of data.batches) {
     for (let i = 0; i < batch.instances_orig.length; i++) allOrig.push(batch.instances_orig[i]);
   }
   numOrigInst = data.total_faces;
-  vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, new Float32Array(allOrig));
+  if (!vaoOrigMesh) {
+    vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, new Float32Array(allOrig));
+  } else {
+    // Re-upload instance data to existing orig mesh VAO
+    gl.bindVertexArray(vaoOrigMesh);
+    const origBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, origBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(allOrig), gl.DYNAMIC_DRAW);
+    for (let i = 0; i < 8; i++) {
+      gl.enableVertexAttribArray(1+i);
+      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 128, i*16);
+      gl.vertexAttribDivisor(1+i, 1);
+    }
+    gl.bindVertexArray(null);
+  }
 
   globalMaxLogLod = 1;
   for (const batch of data.batches) {
@@ -418,12 +465,16 @@ function uploadBatches(data) {
   }
 
   for (const batch of data.batches) {
-    const tess = getTessBuffers(batch); // cached
-    const xformData = new Float32Array(batch.instances_xform);
+    const tessKey = batch.lod.join(',') + '/' + batch.perm_parity;
+    const tess = getTessBuffers(batch);
+    if (!tess) continue; // shouldn't happen — WASM sends data on first encounter
+    usedKeys.add(tessKey);
+
+    const cached = getOrCreateBatchVAOs(tessKey, tess, batch.instances_xform, batch.num_faces);
 
     drawBatches.push({
-      vaoXform: makeInstanceVAO(tess, tess.lineIdxBuf, xformData),
-      vaoXformTri: makeInstanceVAO(tess, tess.triIdxBuf, xformData),
+      vaoXform: cached.lineVao,
+      vaoXformTri: cached.triVao,
       numLineIdx: tess.numLineIdx,
       numTriIdx: tess.numTriIdx,
       numInst: batch.num_faces,

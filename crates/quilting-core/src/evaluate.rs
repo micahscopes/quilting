@@ -53,11 +53,31 @@ impl ScreenInfo {
     }
 }
 
+/// Compute instance data without LOD — just copy vertex positions/weights.
+/// Used for the untransformed original mesh display.
+pub fn compute_instances_no_lod(
+    vertices: &[[f64; 3]],
+    faces: &[[usize; 3]],
+) -> Vec<FaceInstance> {
+    faces.iter().map(|face| {
+        let p0 = Quat::from_point(vertices[face[0]][0], vertices[face[0]][1], vertices[face[0]][2]);
+        let p1 = Quat::from_point(vertices[face[1]][0], vertices[face[1]][1], vertices[face[1]][2]);
+        let p2 = Quat::from_point(vertices[face[2]][0], vertices[face[2]][1], vertices[face[2]][2]);
+        FaceInstance {
+            positions: [p0, p1, p2],
+            weights: [Quat::ONE, Quat::ONE, Quat::ONE],
+            edge_lods: [1, 1, 1],
+            vertex_lods: [1, 1, 1],
+        }
+    }).collect()
+}
+
 pub fn compute_instances(
     vertices: &[[f64; 3]],
     faces: &[[usize; 3]],
     transform: &Mobius,
     screen: Option<&ScreenInfo>,
+    mesh: Option<&HalfEdgeMesh>,
 ) -> Vec<FaceInstance> {
     // Pre-transform all vertices
     let transformed: Vec<(Quat, Quat)> = vertices.iter().map(|v| {
@@ -147,12 +167,18 @@ pub fn compute_instances(
         }
     };
 
-    // Build half-edge mesh for O(1) adjacency lookups.
-    // Convert face indices to u32 for the mesh builder.
-    let faces_u32: Vec<[u32; 3]> = faces.iter()
-        .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
-        .collect();
-    let mesh = HalfEdgeMesh::from_triangles(vertices.len() as u32, &faces_u32);
+    // Use pre-built half-edge mesh or build one.
+    let owned_mesh;
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let faces_u32: Vec<[u32; 3]> = faces.iter()
+                .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+                .collect();
+            owned_mesh = HalfEdgeMesh::from_triangles(vertices.len() as u32, &faces_u32);
+            &owned_mesh
+        }
+    };
     let num_half_edges = mesh.half_edges.len();
 
     // Edge LOD stored per half-edge, indexed by canonical edge ID:
@@ -353,7 +379,7 @@ mod tests {
     #[test]
     fn identity_lod_proportional_to_edge_length() {
         let (verts, faces) = shapes::cube();
-        let instances = compute_instances(&verts, &faces, &Mobius::identity(), None);
+        let instances = compute_instances(&verts, &faces, &Mobius::identity(), None, None);
         // All LODs should be power of 2 and within a reasonable range
         for inst in &instances {
             for &l in &inst.edge_lods {
@@ -367,7 +393,7 @@ mod tests {
     fn sphere_reflection_higher_lod() {
         let (verts, faces) = shapes::cube();
         let m = Mobius::sphere_reflection(Quat::from_point(0.5, 0.0, 0.0), 2.0);
-        let instances = compute_instances(&verts, &faces, &m, None);
+        let instances = compute_instances(&verts, &faces, &m, None, None);
         // Sphere reflection should produce higher LOD on some faces
         let max_lod = instances.iter()
             .flat_map(|i| i.edge_lods.iter())
@@ -382,7 +408,7 @@ mod tests {
         use std::collections::HashMap;
         let (verts, faces) = shapes::icosahedron();
         let m = Mobius::sphere_reflection(Quat::from_point(0.3, 0.0, 0.0), 1.5);
-        let instances = compute_instances(&verts, &faces, &m, None);
+        let instances = compute_instances(&verts, &faces, &m, None, None);
 
         // Build edge → LOD map and verify consistency
         let mut edge_lods: HashMap<(usize, usize), Vec<u32>> = HashMap::new();
@@ -410,7 +436,7 @@ mod tests {
     fn lods_are_powers_of_2() {
         let (verts, faces) = shapes::octahedron();
         let m = Mobius::sphere_reflection(Quat::from_point(0.2, 0.3, 0.0), 1.8);
-        let instances = compute_instances(&verts, &faces, &m, None);
+        let instances = compute_instances(&verts, &faces, &m, None, None);
         for inst in &instances {
             for &l in &inst.edge_lods {
                 assert!(l.is_power_of_two(), "LOD {} is not a power of 2", l);

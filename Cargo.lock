@@ -637,6 +637,7 @@ dependencies = [
  "getrandom",
  "js-sys",
  "quilting-core",
+ "quilting-mesh",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
