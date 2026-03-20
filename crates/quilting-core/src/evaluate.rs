@@ -109,10 +109,10 @@ pub fn compute_instances(
             edge_lod_map.insert(key, snap_to_power_of_2(raw.max(1).min(512)));
         }
 
-        // Also check the three medians (vertex → opposite edge midpoint).
-        // These cross the face interior and catch singularities between edges.
+        // Check the three medians (vertex → opposite edge midpoint).
+        // These cross the face interior — if any blows up, the interior
+        // has a singularity and ALL edges of this face need high LOD.
         let midpoints = [
-            // median from v0 to midpoint of edge(v1,v2)
             (face[0], [(vertices[face[1]][0]+vertices[face[2]][0])/2.0,
                        (vertices[face[1]][1]+vertices[face[2]][1])/2.0,
                        (vertices[face[1]][2]+vertices[face[2]][2])/2.0]),
@@ -123,26 +123,18 @@ pub fn compute_instances(
                        (vertices[face[0]][1]+vertices[face[1]][1])/2.0,
                        (vertices[face[0]][2]+vertices[face[1]][2])/2.0]),
         ];
+        let mut max_median_lod = 0u32;
         for (vi, mid) in &midpoints {
             let al = arc_length(vertices[*vi], *mid);
-            // Median arc length contributes to the two edges adjacent to the vertex.
-            // The median LOD should boost those edges if the interior is more stretched.
-            let median_lod = snap_to_power_of_2((al * 16.0).ceil() as u32).min(512);
-            // Boost the edges opposite to the vertex (the edge the median crosses)
-            let edges_to_boost = match *vi {
-                v if v == face[0] => [0usize], // edge_a (opposite v0)
-                v if v == face[1] => [1],       // edge_b
-                _ => [2],                        // edge_c
-            };
-            for &local_idx in &edges_to_boost {
-                let (va, vb) = match local_idx {
-                    0 => (face[1], face[2]),
-                    1 => (face[0], face[2]),
-                    _ => (face[0], face[1]),
-                };
+            let lod = snap_to_power_of_2((al * 16.0).ceil() as u32).min(512);
+            max_median_lod = max_median_lod.max(lod);
+        }
+        // Use max median LOD as a floor for ALL three edges of this face
+        if max_median_lod > 1 {
+            for &(va, vb) in &edges {
                 let key = if va < vb { (va, vb) } else { (vb, va) };
                 let current = edge_lod_map.get(&key).copied().unwrap_or(1);
-                edge_lod_map.insert(key, current.max(median_lod));
+                edge_lod_map.insert(key, current.max(max_median_lod));
             }
         }
     }
