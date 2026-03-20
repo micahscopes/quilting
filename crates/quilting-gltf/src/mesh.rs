@@ -1,0 +1,162 @@
+//! Mesh extraction from glTF primitives.
+//!
+//! Converts glTF mesh data into the format quilting-core expects:
+//! `Vec<[f64; 3]>` for positions and `Vec<[usize; 3]>` for triangle faces.
+
+use gltf::buffer;
+use gltf::mesh::Mode;
+use crate::GltfError;
+
+/// A single primitive within a mesh (one draw call's worth of geometry).
+#[derive(Debug, Clone)]
+pub struct Primitive {
+    /// Vertex positions as f64 triples.
+    pub positions: Vec<[f64; 3]>,
+    /// Vertex normals, if present.
+    pub normals: Option<Vec<[f64; 3]>>,
+    /// Texture coordinates (first set), if present.
+    pub uvs: Option<Vec<[f64; 2]>>,
+    /// Triangle indices into the positions array.
+    pub triangles: Vec<[usize; 3]>,
+    /// Index of the material in GltfScene::materials, if assigned.
+    pub material_index: Option<usize>,
+}
+
+/// A mesh is a collection of primitives.
+#[derive(Debug, Clone)]
+pub struct Mesh {
+    pub name: Option<String>,
+    pub primitives: Vec<Primitive>,
+}
+
+/// Extract all primitives from a glTF mesh.
+pub fn extract_mesh(
+    mesh: &gltf::Mesh<'_>,
+    buffers: &[buffer::Data],
+) -> Result<Mesh, GltfError> {
+    let mut primitives = Vec::new();
+
+    for prim in mesh.primitives() {
+        if prim.mode() != Mode::Triangles {
+            // Skip non-triangle primitives (lines, points, strips, fans).
+            continue;
+        }
+
+        let reader = prim.reader(|buf| Some(&buffers[buf.index()]));
+
+        // Positions (required by glTF spec for rendered primitives).
+        let positions: Vec<[f64; 3]> = reader
+            .read_positions()
+            .ok_or_else(|| GltfError::MissingData("primitive has no POSITION attribute".into()))?
+            .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
+            .collect();
+
+        // Normals (optional).
+        let normals: Option<Vec<[f64; 3]>> = reader
+            .read_normals()
+            .map(|iter| iter.map(|n| [n[0] as f64, n[1] as f64, n[2] as f64]).collect());
+
+        // Texture coordinates (first set, optional).
+        let uvs: Option<Vec<[f64; 2]>> = reader
+            .read_tex_coords(0)
+            .map(|iter| {
+                iter.into_f32()
+                    .map(|uv| [uv[0] as f64, uv[1] as f64])
+                    .collect()
+            });
+
+        // Indices — handle both indexed and non-indexed meshes.
+        let triangles = if let Some(indices_reader) = reader.read_indices() {
+            let indices: Vec<usize> = indices_reader.into_u32().map(|i| i as usize).collect();
+            if indices.len() % 3 != 0 {
+                return Err(GltfError::MissingData(format!(
+                    "index count {} not divisible by 3",
+                    indices.len()
+                )));
+            }
+            indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+        } else {
+            // Non-indexed: every 3 vertices form a triangle.
+            if positions.len() % 3 != 0 {
+                return Err(GltfError::MissingData(format!(
+                    "non-indexed vertex count {} not divisible by 3",
+                    positions.len()
+                )));
+            }
+            (0..positions.len())
+                .step_by(3)
+                .map(|i| [i, i + 1, i + 2])
+                .collect()
+        };
+
+        let material_index = prim.material().index();
+
+        primitives.push(Primitive {
+            positions,
+            normals,
+            uvs,
+            triangles,
+            material_index,
+        });
+    }
+
+    Ok(Mesh {
+        name: mesh.name().map(|s| s.to_string()),
+        primitives,
+    })
+}
+
+/// Flatten a mesh into a single (positions, triangles) pair by merging all primitives.
+///
+/// This is the format `quilting_core::evaluate::compute_instances` expects.
+/// Primitives are concatenated with index offsets adjusted accordingly.
+pub fn flatten_mesh(mesh: &Mesh) -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
+    let mut positions = Vec::new();
+    let mut triangles = Vec::new();
+
+    for prim in &mesh.primitives {
+        let offset = positions.len();
+        positions.extend_from_slice(&prim.positions);
+        triangles.extend(
+            prim.triangles
+                .iter()
+                .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset]),
+        );
+    }
+
+    (positions, triangles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flatten_merges_primitives() {
+        let mesh = Mesh {
+            name: Some("test".into()),
+            primitives: vec![
+                Primitive {
+                    positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    normals: None,
+                    uvs: None,
+                    triangles: vec![[0, 1, 2]],
+                    material_index: None,
+                },
+                Primitive {
+                    positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
+                    normals: None,
+                    uvs: None,
+                    triangles: vec![[0, 1, 2]],
+                    material_index: None,
+                },
+            ],
+        };
+
+        let (pos, tris) = flatten_mesh(&mesh);
+        assert_eq!(pos.len(), 6);
+        assert_eq!(tris.len(), 2);
+        // Second primitive's indices should be offset by 3.
+        assert_eq!(tris[1], [3, 4, 5]);
+    }
+}

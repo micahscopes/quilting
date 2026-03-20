@@ -1,0 +1,13 @@
+[package]
+name = "quilting-gltf"
+version = "0.1.0"
+edition = "2021"
+description = "glTF 2.0 loader for quilting — extracts meshes, materials, animations, and scene graphs"
+
+[dependencies]
+quilting-core = { path = "../quilting-core" }
+quilting-mesh = { path = "../quilting-mesh" }
+gltf = "1.4"
+
+[dev-dependencies]
+serde_json = "1"
