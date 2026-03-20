@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::evaluate::compute_instances;
 use quilting_core::mesh::TessellationMesh;
-use quilting_core::permutation::{canonical_form, remap_position};
+use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
 use quilting_core::shapes;
@@ -292,6 +292,7 @@ pub fn compute_mesh_batches(
                 wanted_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
                 used_lod: [used_lod[0], used_lod[1], used_lod[2]],
                 is_fallback,
+                perm_parity: perm_sign(perm_index),
                 instances_orig: orig_data,
                 instances_xform: xform_data,
                 tess_bary: bary_data,
@@ -316,6 +317,7 @@ struct BatchData {
     wanted_lod: [u32; 3],
     used_lod: [u32; 3],
     is_fallback: bool,
+    perm_parity: i32,  // +1 for even permutations, -1 for odd (normal flip)
     instances_orig: Vec<f32>,
     instances_xform: Vec<f32>,
     tess_bary: Vec<f64>,

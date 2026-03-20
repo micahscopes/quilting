@@ -64,6 +64,17 @@ pub fn inverse_perm(perm_index: usize) -> usize {
     0
 }
 
+/// Returns +1 for even permutations (rotations), -1 for odd (reflections).
+pub fn perm_sign(perm_index: usize) -> i32 {
+    // Even: identity [0,1,2], cycles [1,2,0] [2,0,1]
+    // Odd: transpositions [0,2,1] [1,0,2] [2,1,0]
+    let perm = S3_PERMUTATIONS[perm_index];
+    let inversions = (0..3).flat_map(|i| (i+1..3).map(move |j| (i, j)))
+        .filter(|&(i, j)| perm[i] > perm[j])
+        .count();
+    if inversions % 2 == 0 { 1 } else { -1 }
+}
+
 /// Remap positions under a triangle vertex permutation.
 ///
 /// Converts to barycentric, permutes the bary coords, converts back.

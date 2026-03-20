@@ -111,6 +111,7 @@ uniform mat4 u_mv;
 uniform int u_useQB;
 uniform vec3 u_edgeLod; // edge resolutions for this batch (a, b, c)
 uniform float u_globalMaxLogLod; // log2 of the global max LOD across all batches
+uniform float u_permParity; // +1 or -1: flip normal for odd permutations
 
 out vec3 v_normal_vs;
 out float v_density;  // interpolated density from edge-based formula
@@ -183,6 +184,8 @@ void main(){
     p = evalFlat(a_bary, a_p0,a_p1,a_p2);
     n = normalize(cross(a_p1.yzw - a_p0.yzw, a_p2.yzw - a_p0.yzw));
   }
+  // Flip normal for odd permutations (reflections in S3)
+  n *= u_permParity;
   v_normal_vs = normalize(mat3(u_mv) * n);
 
   // Density heatmap: normalize to 0..1 using global max
@@ -362,6 +365,7 @@ function uploadBatches(data) {
       numInst: batch.num_faces,
       lod: batch.lod,
       color: lodColor(batch.lod),
+      parity: batch.perm_parity || 1,
     });
   }
 }
@@ -398,6 +402,7 @@ function render() {
     gl.uniform3f(gl.getUniformLocation(progWire,'u_lodColor'), 0.25, 0.25, 0.35);
     gl.uniform3f(gl.getUniformLocation(progWire,'u_edgeLod'), 1, 1, 1);
     gl.uniform1f(gl.getUniformLocation(progWire,'u_globalMaxLogLod'), globalMaxLogLod);
+    gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), 1.0);
     for (const b of drawBatches) {
       gl.bindVertexArray(b.vaoOrig);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
@@ -414,6 +419,7 @@ function render() {
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), b.color);
       gl.uniform3f(gl.getUniformLocation(progMatcap,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
+      gl.uniform1f(gl.getUniformLocation(progMatcap,'u_permParity'), b.parity);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -430,6 +436,7 @@ function render() {
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progWire,'u_lodColor'), b.color);
       gl.uniform3f(gl.getUniformLocation(progWire,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
+      gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), b.parity);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -444,6 +451,7 @@ function render() {
     gl.uniform3f(gl.getUniformLocation(progNormals,'u_edgeLod'), 1, 1, 1);
     gl.uniform1f(gl.getUniformLocation(progNormals,'u_globalMaxLogLod'), 1);
     for (const b of drawBatches) {
+      gl.uniform1f(gl.getUniformLocation(progNormals,'u_permParity'), b.parity);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
