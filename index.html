@@ -578,8 +578,9 @@ for (const id of ['res','sx','sy','sz','sr'])
 let drag=false, lx=0, ly=0;
 canvas.onmousedown = e => { drag=true; lx=e.clientX; ly=e.clientY; };
 onmouseup = () => drag=false;
-onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.clientY-ly)*0.01; lx=e.clientX; ly=e.clientY; render(); };
-canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); e.preventDefault(); };
+let camDebounce = null;
+onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.clientY-ly)*0.01; lx=e.clientX; ly=e.clientY; render(); clearTimeout(camDebounce); camDebounce=setTimeout(update, 150); };
+canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); update(); e.preventDefault(); };
 onresize = render;
 
 // Init: build atlas, then start rendering
