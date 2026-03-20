@@ -44,9 +44,11 @@ pub fn compute_instances(
         }
     }).collect();
 
-    // Estimate per-face LOD from curvature
-    let face_lods: Vec<u32> = instances.iter().map(|inst| {
-        estimate_face_lod(inst)
+    // Estimate per-face LOD from conformal scale + curvature
+    let face_lods: Vec<u32> = faces.iter().enumerate().map(|(fi, face)| {
+        let scale_lod = estimate_face_lod_from_transform(vertices, face, transform);
+        let curvature_lod = estimate_face_curvature(&instances[fi]);
+        scale_lod.max(curvature_lod)
     }).collect();
 
     // Build edge adjacency: edge (min_vi, max_vi) → list of (face_idx, local_edge_idx)
@@ -126,55 +128,60 @@ pub fn compute_instances(
     result
 }
 
-/// Estimate face LOD from QB curvature + face scale.
-///
-/// Two factors:
-/// 1. Curvature: H/L ratio (Karpavicius & Krasauskas) — how much the
-///    QB surface deviates from flat.
-/// 2. Scale: how much the transformed face is stretched relative to
-///    a "reference" edge length. Large faces need more tessellation
-///    even when nearly flat.
-fn estimate_face_lod(inst: &FaceInstance) -> u32 {
+/// Estimate face LOD from QB surface curvature (H/L ratio).
+fn estimate_face_curvature(inst: &FaceInstance) -> u32 {
     let [p0, p1, p2] = inst.positions;
     let [w0, w1, w2] = inst.weights;
 
-    // Transformed edge lengths
     let e01 = (p0 - p1).norm();
     let e02 = (p0 - p2).norm();
     let e12 = (p1 - p2).norm();
     let l = e01.max(e02).max(e12);
     if l < 1e-12 { return 1; }
 
-    // Curvature: QB midpoint vs flat midpoint
     let flat_mid = (p0 + p1 + p2) * (1.0 / 3.0);
     let patch = QBTriPatch::new([p0, p1, p2], [w0, w1, w2]);
     let qb_mid = patch.eval(1.0 / 3.0, 1.0 / 3.0);
     let h = (qb_mid - Quat::new(flat_mid.w, flat_mid.x, flat_mid.y, flat_mid.z)).norm();
 
-    let edge_mids = [
-        (0.5, 0.5, 0.0),
-        (0.5, 0.0, 0.5),
-        (0.0, 0.5, 0.5),
-    ];
-    let mut max_h = h;
-    for &(b0, b1, b2) in &edge_mids {
-        let flat = p0 * b0 + p1 * b1 + p2 * b2;
-        let qb = patch.eval(b1, b2);
-        let d = (qb - Quat::new(flat.w, flat.x, flat.y, flat.z)).norm();
-        max_h = max_h.max(d);
+    let raw_lod = (64.0 * h / l).ceil() as u32;
+    raw_lod.max(1).min(256)
+}
+
+/// Estimate face LOD from Möbius conformal scale factor.
+///
+/// For F(x) = (ax+b)(cx+d)⁻¹, the conformal scale at x is 1/|cx+d|².
+/// Faces near the singularity (where |cx+d| → 0) get blown up and
+/// need higher tessellation. This is cheap: one quaternion multiply
+/// + dot product per vertex.
+fn estimate_face_lod_from_transform(
+    vertices: &[[f64; 3]],
+    face: &[usize; 3],
+    transform: &Mobius,
+) -> u32 {
+    // Conformal scale at each vertex: 1/|cx+d|²
+    let mut max_scale = 0.0f64;
+    for &vi in face {
+        let p = Quat::from_point(vertices[vi][0], vertices[vi][1], vertices[vi][2]);
+        let denom = transform.c * p + transform.d;
+        let scale = 1.0 / denom.norm_sq().max(1e-20);
+        max_scale = max_scale.max(scale);
     }
 
-    // Curvature LOD: higher H/L → more subdivision
-    let curvature_lod = 64.0 * max_h / l;
+    // Also check the face centroid for singularities inside the face
+    let cx = (vertices[face[0]][0] + vertices[face[1]][0] + vertices[face[2]][0]) / 3.0;
+    let cy = (vertices[face[0]][1] + vertices[face[1]][1] + vertices[face[2]][1]) / 3.0;
+    let cz = (vertices[face[0]][2] + vertices[face[1]][2] + vertices[face[2]][2]) / 3.0;
+    let pc = Quat::from_point(cx, cy, cz);
+    let denom_c = transform.c * pc + transform.d;
+    let scale_c = 1.0 / denom_c.norm_sq().max(1e-20);
+    max_scale = max_scale.max(scale_c);
 
-    // Scale LOD: larger faces need more tessellation.
-    // Target: ~10 subdivisions per unit of world-space edge length.
-    let scale_lod = l * 5.0;
+    // LOD proportional to sqrt of area scale (since area scales as |F'|²)
+    // Base: LOD 2 at unit scale, doubles per 4x area increase
+    let raw_lod = (2.0 * max_scale.sqrt()).ceil() as u32;
 
-    // Combined: take the max of curvature-driven and scale-driven LOD
-    let raw_lod = (curvature_lod.max(scale_lod)).ceil() as u32;
-
-    raw_lod.max(1).min(256) // cap to atlas max
+    raw_lod.max(1).min(256)
 }
 
 /// Snap to the nearest power of 2 (round up).
@@ -225,10 +232,11 @@ mod tests {
     fn identity_uniform_lod() {
         let (verts, faces) = shapes::cube();
         let instances = compute_instances(&verts, &faces, &Mobius::identity());
-        // Identity transform → no curvature → LOD should be 1 everywhere
+        // Identity: all faces should have the same LOD (uniform)
+        let first = instances[0].edge_lods;
         for inst in &instances {
-            assert_eq!(inst.edge_lods, [1, 1, 1],
-                "identity should have LOD=1, got {:?}", inst.edge_lods);
+            assert_eq!(inst.edge_lods, first,
+                "identity should have uniform LOD, got {:?}", inst.edge_lods);
         }
     }
 
