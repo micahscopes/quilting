@@ -44,10 +44,10 @@ pub fn compute_instances(
         }
     }).collect();
 
-    // Estimate per-face LOD from scale + curvature
-    let face_lods: Vec<u32> = instances.iter().map(|inst| {
-        let scale_lod = estimate_face_lod_from_scale(inst);
-        let curvature_lod = estimate_face_curvature(inst);
+    // Estimate per-face LOD from scale + curvature + singularity proximity
+    let face_lods: Vec<u32> = faces.iter().enumerate().map(|(fi, face)| {
+        let scale_lod = estimate_face_lod_from_scale(&instances[fi], transform, vertices, face);
+        let curvature_lod = estimate_face_curvature(&instances[fi]);
         scale_lod.max(curvature_lod)
     }).collect();
 
@@ -148,18 +148,30 @@ fn estimate_face_curvature(inst: &FaceInstance) -> u32 {
     raw_lod.max(1).min(512)
 }
 
-/// Estimate face LOD from transformed edge lengths.
-///
-/// Simple and direct: longer edges need more subdivisions.
-/// Target ~8 subdivisions per unit of transformed edge length.
-fn estimate_face_lod_from_scale(inst: &FaceInstance) -> u32 {
+/// Estimate face LOD from transformed edge lengths + singularity proximity.
+fn estimate_face_lod_from_scale(inst: &FaceInstance, transform: &Mobius, orig_verts: &[[f64; 3]], face: &[usize; 3]) -> u32 {
     let [p0, p1, p2] = inst.positions;
     let e01 = (p0 - p1).norm();
     let e02 = (p0 - p2).norm();
     let e12 = (p1 - p2).norm();
     let max_edge = e01.max(e02).max(e12);
 
-    let raw_lod = (max_edge * 16.0).ceil() as u32;
+    // Edge-length LOD: 16 subdivisions per unit
+    let edge_lod = max_edge * 16.0;
+
+    // Singularity LOD: 1/|cx+d|² blows up near the singularity.
+    // Use the min |cx+d|² across all face vertices + centroid.
+    let mut min_denom_sq = f64::MAX;
+    for &vi in face {
+        let p = Quat::from_point(orig_verts[vi][0], orig_verts[vi][1], orig_verts[vi][2]);
+        let denom = transform.c * p + transform.d;
+        min_denom_sq = min_denom_sq.min(denom.norm_sq());
+    }
+    // Singularity LOD: inversely proportional to min |cx+d|
+    // At |cx+d|=1 → LOD 4, at |cx+d|=0.1 → LOD 40, at |cx+d|=0.01 → LOD 400
+    let singularity_lod = 4.0 / min_denom_sq.sqrt().max(1e-10);
+
+    let raw_lod = edge_lod.max(singularity_lod).ceil() as u32;
     raw_lod.max(1).min(512)
 }
 
