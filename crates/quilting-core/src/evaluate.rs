@@ -159,7 +159,7 @@ fn estimate_face_lod_from_scale(inst: &FaceInstance) -> u32 {
     let e12 = (p1 - p2).norm();
     let max_edge = e01.max(e02).max(e12);
 
-    let raw_lod = (max_edge * 8.0).ceil() as u32;
+    let raw_lod = (max_edge * 16.0).ceil() as u32;
     raw_lod.max(1).min(256)
 }
 
