@@ -1,0 +1,7 @@
+[package]
+name = "quilting-mesh"
+version = "0.1.0"
+edition = "2021"
+description = "Half-edge mesh data structure for quilting"
+
+[dependencies]
