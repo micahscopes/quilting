@@ -231,6 +231,34 @@ pub fn compute_instances(
         }
     }
 
+    // Propagation pass: ensure adjacent faces agree on shared edge LODs.
+    // A face with a high median floor may have boosted an edge that its
+    // neighbor doesn't know about. Propagate max LODs across adjacency.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for face in faces {
+            let edges: Vec<(usize,usize)> = vec![
+                (face[1], face[2]), (face[0], face[2]), (face[0], face[1]),
+            ];
+            let face_max = edges.iter()
+                .map(|&(a,b)| { let k = if a<b {(a,b)} else {(b,a)}; *edge_lod_map.get(&k).unwrap_or(&1) })
+                .max().unwrap_or(1);
+            // If any edge of this face is much lower than the max, boost it
+            // (within one power-of-2 step to avoid over-propagation)
+            for &(va,vb) in &edges {
+                let key = if va < vb { (va, vb) } else { (vb, va) };
+                let current = *edge_lod_map.get(&key).unwrap_or(&1);
+                // Don't let adjacent edges differ by more than 2x
+                let floor = face_max / 2;
+                if current < floor {
+                    edge_lod_map.insert(key, snap_to_power_of_2(floor));
+                    changed = true;
+                }
+            }
+        }
+    }
+
     // Write per-edge LODs into each face instance
     let mut result = instances;
     for (fi, face) in faces.iter().enumerate() {
