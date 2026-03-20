@@ -168,9 +168,8 @@ fn estimate_face_lod(inst: &FaceInstance) -> u32 {
     let curvature_lod = 64.0 * max_h / l;
 
     // Scale LOD: larger faces need more tessellation.
-    // Reference: an "ideal" edge length where LOD 1 suffices.
-    // Use 2.0 (the original cube edge length) as reference.
-    let scale_lod = l / 2.0;
+    // Target: ~10 subdivisions per unit of world-space edge length.
+    let scale_lod = l * 5.0;
 
     // Combined: take the max of curvature-driven and scale-driven LOD
     let raw_lod = (curvature_lod.max(scale_lod)).ceil() as u32;
