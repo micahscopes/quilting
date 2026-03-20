@@ -2,39 +2,78 @@ use std::process::Command;
 use std::path::Path;
 
 fn main() {
-    // Auto-build WASM when examples are compiled.
-    // Only runs if wasm-pack is available and the source changed.
     let wasm_crate = Path::new("../quilting-wasm/src/lib.rs");
-    let pkg_dir = Path::new("../../pkg");
+    let pkg_wasm = Path::new("../../pkg/quilting_wasm_bg.wasm");
 
-    if wasm_crate.exists() {
-        println!("cargo:rerun-if-changed=../quilting-wasm/src/lib.rs");
-        println!("cargo:rerun-if-changed=../quilting-wasm/Cargo.toml");
+    if !wasm_crate.exists() {
+        return;
+    }
 
-        // Only rebuild if pkg doesn't exist or WASM source is newer
-        let needs_build = !pkg_dir.join("quilting_wasm_bg.wasm").exists()
-            || is_newer(wasm_crate, &pkg_dir.join("quilting_wasm_bg.wasm"));
-
-        if needs_build {
-            eprintln!("Building WASM...");
-            let status = Command::new("wasm-pack")
-                .args(["build", "../quilting-wasm", "--target", "web", "--dev", "--out-dir", "../../pkg"])
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .status();
-
-            match status {
-                Ok(s) if s.success() => eprintln!("WASM build complete."),
-                Ok(s) => eprintln!("wasm-pack exited with: {}", s),
-                Err(e) => eprintln!("wasm-pack not found or failed: {} (WASM won't be rebuilt)", e),
-            }
+    // Track all WASM source files so we rebuild when any of them change.
+    // But DON'T rebuild if the binary is already up to date.
+    for dir in &["../quilting-wasm/src", "../quilting-mesh/src", "../quilting-spacetime/src"] {
+        if Path::new(dir).exists() {
+            println!("cargo:rerun-if-changed={}", dir);
         }
+    }
+    println!("cargo:rerun-if-changed=../quilting-wasm/Cargo.toml");
+
+    // Skip if pkg already exists and is newer than all sources
+    if pkg_wasm.exists() && !any_source_newer(pkg_wasm) {
+        return;
+    }
+
+    eprintln!("Building WASM (--dev)...");
+    let status = Command::new("wasm-pack")
+        .args(["build", "../quilting-wasm", "--target", "web", "--dev", "--out-dir", "../../pkg"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .status();
+
+    match status {
+        Ok(s) if s.success() => eprintln!("WASM build complete."),
+        Ok(s) => eprintln!("wasm-pack exited with: {}", s),
+        Err(e) => eprintln!("wasm-pack not found: {} (skip WASM build)", e),
     }
 }
 
-fn is_newer(a: &Path, b: &Path) -> bool {
-    let Ok(ma) = a.metadata() else { return false };
-    let Ok(mb) = b.metadata() else { return true };
-    let Ok(ta) = ma.modified() else { return false };
-    let Ok(tb) = mb.modified() else { return true };
-    ta > tb
+fn any_source_newer(target: &Path) -> bool {
+    let Ok(target_meta) = target.metadata() else { return true };
+    let Ok(target_time) = target_meta.modified() else { return true };
+
+    let source_dirs = [
+        "../quilting-wasm/src",
+        "../quilting-mesh/src",
+        "../quilting-spacetime/src",
+        "../quilting-core/src",
+    ];
+
+    for dir in &source_dirs {
+        let dir_path = Path::new(dir);
+        if !dir_path.exists() { continue; }
+        if let Ok(entries) = std::fs::read_dir(dir_path) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(mtime) = meta.modified() {
+                        if mtime > target_time {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check Cargo.toml files
+    for toml in &["../quilting-wasm/Cargo.toml", "../quilting-mesh/Cargo.toml"] {
+        let p = Path::new(toml);
+        if let Ok(meta) = p.metadata() {
+            if let Ok(mtime) = meta.modified() {
+                if mtime > target_time {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
