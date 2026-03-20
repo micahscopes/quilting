@@ -341,43 +341,91 @@ function makeVAO(baryData, idxData, instanceData) {
 let globalMaxLogLod = 1;
 let vaoOrigMesh = null, numOrigInst = 0;
 
-// Simple 3-vertex bary grid for rendering the original mesh without tessellation
 const ORIG_BARY = new Float32Array([1,0,0, 0,1,0, 0,0,1]);
 const ORIG_LINES = new Uint32Array([0,1, 1,2, 2,0]);
 
+// Cache tessellation geometry (bary + indices) by LOD triple key.
+// These never change — only instance data changes per frame.
+const tessCache = new Map();
+
+function getTessBuffers(batch) {
+  const key = batch.lod.join(',') + '/' + batch.perm_parity;
+  if (tessCache.has(key)) return tessCache.get(key);
+
+  const bary = new Float32Array(batch.tess_bary);
+  const tris = batch.tess_triangles;
+  const lines = [];
+  for (let i = 0; i < tris.length; i += 3) lines.push(tris[i],tris[i+1], tris[i+1],tris[i+2], tris[i+2],tris[i]);
+
+  const baryBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, baryBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, bary, gl.STATIC_DRAW);
+
+  const lineIdxBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lineIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(lines), gl.STATIC_DRAW);
+
+  const triIdxBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(tris), gl.STATIC_DRAW);
+
+  const entry = { baryBuf, lineIdxBuf, triIdxBuf, numLineIdx: lines.length, numTriIdx: tris.length };
+  tessCache.set(key, entry);
+  return entry;
+}
+
+function makeInstanceVAO(tessBufs, idxBuf, instanceData) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, tessBufs.baryBuf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.DYNAMIC_DRAW);
+  for (let i = 0; i < 8; i++) {
+    gl.enableVertexAttribArray(1+i);
+    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 128, i*16);
+    gl.vertexAttribDivisor(1+i, 1);
+  }
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+  gl.bindVertexArray(null);
+  return vao;
+}
+
 function uploadBatches(data) {
-  for (const b of drawBatches) { gl.deleteVertexArray(b.vaoOrig); gl.deleteVertexArray(b.vaoXform); if(b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri); }
+  for (const b of drawBatches) {
+    gl.deleteVertexArray(b.vaoXform);
+    if (b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri);
+  }
   if (vaoOrigMesh) gl.deleteVertexArray(vaoOrigMesh);
   drawBatches = [];
 
-  // Build original mesh VAO: all faces, trivial tessellation (just the 3 corners)
+  // Original mesh: simple 3-vertex wireframe
   const allOrig = [];
   for (const batch of data.batches) {
     for (let i = 0; i < batch.instances_orig.length; i++) allOrig.push(batch.instances_orig[i]);
   }
   numOrigInst = data.total_faces;
   vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, new Float32Array(allOrig));
-  // Compute global max LOD across all batches
+
   globalMaxLogLod = 1;
   for (const batch of data.batches) {
     const m = Math.max(...batch.lod);
     globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(m, 1)));
   }
+
   for (const batch of data.batches) {
-    const bary = new Float32Array(batch.tess_bary);
-    const tris = batch.tess_triangles;
-    // Line indices for wireframe
-    const lines = [];
-    for (let i=0;i<tris.length;i+=3) lines.push(tris[i],tris[i+1],tris[i+1],tris[i+2],tris[i+2],tris[i]);
-    const lineIdx = new Uint32Array(lines);
-    const triIdx = new Uint32Array(tris);
+    const tess = getTessBuffers(batch); // cached
+    const xformData = new Float32Array(batch.instances_xform);
 
     drawBatches.push({
-      vaoOrig: makeVAO(bary, lineIdx, new Float32Array(batch.instances_orig)),
-      vaoXform: makeVAO(bary, lineIdx, new Float32Array(batch.instances_xform)),
-      vaoXformTri: makeVAO(bary, triIdx, new Float32Array(batch.instances_xform)),
-      numLineIdx: lines.length,
-      numTriIdx: tris.length,
+      vaoXform: makeInstanceVAO(tess, tess.lineIdxBuf, xformData),
+      vaoXformTri: makeInstanceVAO(tess, tess.triIdxBuf, xformData),
+      numLineIdx: tess.numLineIdx,
+      numTriIdx: tess.numTriIdx,
       numInst: batch.num_faces,
       lod: batch.lod,
       color: lodColor(batch.lod),
