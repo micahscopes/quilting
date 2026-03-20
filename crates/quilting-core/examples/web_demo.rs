@@ -133,6 +133,7 @@ const HTML_3D: &str = include_str!("mesh_demo.html");
 const HTML_WASM: &str = include_str!("../../../index.html");
 const WASM_JS: &str = include_str!("../../../pkg/quilting_wasm.js");
 const WORKER_JS: &str = include_str!("../../../worker.js");
+const HTML_SNAP: &str = include_str!("../../../snap_demo.html");
 const WASM_BIN: &[u8] = include_bytes!("../../../pkg/quilting_wasm_bg.wasm");
 
 fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, String) {
@@ -313,6 +314,11 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         (
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n".to_string(),
             json,
+        )
+    } else if request.starts_with("GET /snap") {
+        (
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n".to_string(),
+            HTML_SNAP.to_string(),
         )
     } else if request.starts_with("GET /3d") {
         (

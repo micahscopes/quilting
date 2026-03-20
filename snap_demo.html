@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quilting — Snap-to-Grid Demo</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Consolas',monospace;background:#1a1a2e;color:#e0e0e0;display:flex;height:100vh;overflow:hidden}
+#sidebar{width:240px;padding:16px;background:#16213e;border-right:1px solid #0f3460;display:flex;flex-direction:column;gap:12px;flex-shrink:0;overflow-y:auto}
+h1{font-size:16px;color:#e94560;letter-spacing:2px}
+label{font-size:11px;color:#8899aa;text-transform:uppercase;letter-spacing:1px}
+.sr{display:flex;align-items:center;gap:6px}
+input[type=range]{flex:1;accent-color:#e94560}
+.v{font-size:13px;min-width:36px;text-align:right;color:#e94560;font-weight:bold}
+.btns{display:flex;gap:3px}
+.btns button{flex:1;padding:5px;font-size:10px;font-family:inherit;border:1px solid #0f3460;background:transparent;color:#8899aa;cursor:pointer;border-radius:3px}
+.btns button.a{background:#e94560;color:#fff;border-color:#e94560}
+.stats{font-size:10px;color:#556677;line-height:1.5;margin-top:auto;padding-top:12px;border-top:1px solid #0f3460}
+#wrap{flex:1;position:relative}
+#cv{position:absolute;top:0;left:0;width:100%;height:100%}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1>SNAP-TO-GRID</h1>
+  <p style="font-size:10px;color:#556677">No atlas. One tessellation. Vertex shader snaps to local LOD.</p>
+  <div><label>Shape</label>
+    <div class="btns" id="shape-btns">
+      <button class="a" data-v="cube">Cube</button>
+      <button data-v="tetrahedron">Tet</button>
+      <button data-v="octahedron">Oct</button>
+      <button data-v="icosahedron">Ico</button>
+    </div>
+  </div>
+  <div><label>Render</label>
+    <div class="btns" id="render-btns">
+      <button class="a" data-v="matcap">Matcap</button>
+      <button data-v="solid">Solid</button>
+      <button data-v="wire">Wire</button>
+      <button data-v="normals">Normals</button>
+    </div>
+  </div>
+  <div><label>Grid LOD (2<sup>n</sup>)</label>
+    <div class="sr"><input type="range" id="grid" min="2" max="10" value="8"><span class="v" id="grid-v">256</span></div>
+  </div>
+  <div><label>Sphere X</label>
+    <div class="sr"><input type="range" id="sx" min="-30" max="30" value="5"><span class="v" id="sx-v">0.5</span></div>
+  </div>
+  <div><label>Sphere Y</label>
+    <div class="sr"><input type="range" id="sy" min="-30" max="30" value="0"><span class="v" id="sy-v">0.0</span></div>
+  </div>
+  <div><label>Sphere Z</label>
+    <div class="sr"><input type="range" id="sz" min="-30" max="30" value="0"><span class="v" id="sz-v">0.0</span></div>
+  </div>
+  <div><label>Sphere radius</label>
+    <div class="sr"><input type="range" id="sr" min="0" max="50" value="20"><span class="v" id="sr-v">2.0</span></div>
+  </div>
+  <div class="stats" id="stats">Generating grid...</div>
+</div>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<script type="module">
+import init, { get_shape, compute_mesh_batches } from './pkg/quilting_wasm.js';
+
+const $=s=>document.getElementById(s);
+const canvas=$('cv');
+const gl=canvas.getContext('webgl2',{antialias:true});
+
+let shape='cube', rotX=0.3, rotY=0.5, zoom=5, renderMode='matcap';
+let shapeData=null, wasmReady=false;
+
+// --- Generate a regular triangular grid at LOD N ---
+function generateTriGrid(N) {
+  const verts = []; // flat bary coords [u,v,w, u,v,w, ...]
+  const indices = []; // triangle indices
+  const vertMap = new Map(); // "i,j" → index
+
+  // Vertices: all (i/N, j/N, k/N) where i+j+k=N
+  let idx = 0;
+  for (let i = 0; i <= N; i++) {
+    for (let j = 0; j <= N - i; j++) {
+      const k = N - i - j;
+      verts.push(i/N, j/N, k/N);
+      vertMap.set(`${i},${j}`, idx++);
+    }
+  }
+
+  // Triangles: for each cell (i,j), two triangles
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N - i; j++) {
+      const a = vertMap.get(`${i},${j}`);
+      const b = vertMap.get(`${i+1},${j}`);
+      const c = vertMap.get(`${i},${j+1}`);
+      indices.push(a, b, c);
+      if (j < N - i - 1) {
+        const d = vertMap.get(`${i+1},${j+1}`);
+        indices.push(b, d, c);
+      }
+    }
+  }
+
+  return {
+    bary: new Float32Array(verts),
+    triangles: new Uint32Array(indices),
+    numVerts: idx,
+    numTris: indices.length / 3,
+  };
+}
+
+// --- Shaders ---
+const VS = `#version 300 es
+layout(location=0) in vec3 a_bary;
+layout(location=1) in vec4 a_p0;
+layout(location=2) in vec4 a_p1;
+layout(location=3) in vec4 a_p2;
+layout(location=4) in vec4 a_w0;
+layout(location=5) in vec4 a_w1;
+layout(location=6) in vec4 a_w2;
+layout(location=7) in vec4 a_lodInfo;
+uniform mat4 u_mvp;
+uniform mat4 u_mv;
+uniform int u_useQB;
+uniform float u_globalMaxLogLod;
+uniform float u_permParity;
+
+out vec3 v_normal_vs;
+out float v_density;
+
+vec4 qm(vec4 a, vec4 b) {
+  return vec4(
+    a.x*b.x-a.y*b.y-a.z*b.z-a.w*b.w,
+    a.x*b.y+a.y*b.x+a.z*b.w-a.w*b.z,
+    a.x*b.z-a.y*b.w+a.z*b.x+a.w*b.y,
+    a.x*b.w+a.y*b.z-a.z*b.y+a.w*b.x);
+}
+vec4 qinv(vec4 q) { float d=dot(q,q); return d<1e-20 ? vec4(1e10,0,0,0) : vec4(q.x,-q.yzw)/d; }
+
+float edgeDensity(vec3 bary, vec3 res) {
+  float e0=bary.y*bary.z, e1=bary.x*bary.z, e2=bary.x*bary.y;
+  float sum=e0+e1+e2;
+  if(sum<1e-10) return max(res.x,max(res.y,res.z));
+  float lr=(e0*log(max(res.x,1.))+e1*log(max(res.y,1.))+e2*log(max(res.z,1.)))/sum;
+  return exp(lr);
+}
+
+// Snap bary coords to the local LOD grid
+vec3 snapBary(vec3 bary, vec3 faceLod) {
+  // Local density at this point
+  float localRes = edgeDensity(bary, faceLod);
+  // Snap to nearest power-of-2 grid
+  float snapRes = exp2(floor(log2(max(localRes, 1.0))));
+  float step = 1.0 / snapRes;
+
+  // Snap each bary coord independently
+  vec3 s = floor(bary / step + 0.5) * step;
+  // Renormalize to sum to 1
+  float total = s.x + s.y + s.z;
+  if (total > 1e-10) s /= total;
+  return s;
+}
+
+void evalQBWithNormal(vec3 bary, vec4 p0,vec4 p1,vec4 p2, vec4 w0,vec4 w1,vec4 w2, out vec3 pos, out vec3 nrm) {
+  vec4 pw0=qm(p0,w0), pw1=qm(p1,w1), pw2=qm(p2,w2);
+  vec4 top=bary.x*pw0+bary.y*pw1+bary.z*pw2;
+  vec4 bot=bary.x*w0+bary.y*w1+bary.z*w2;
+  vec4 bi=qinv(bot);
+  vec4 X=qm(top,bi);
+  pos=X.yzw;
+  vec4 dXu=qm(pw1-pw0-qm(X,w1-w0),bi);
+  vec4 dXv=qm(pw2-pw0-qm(X,w2-w0),bi);
+  nrm=normalize(cross(dXu.yzw,dXv.yzw));
+}
+
+void main(){
+  vec3 bary = a_bary;
+
+  if (u_useQB == 1) {
+    // Snap to local LOD grid
+    bary = snapBary(bary, a_lodInfo.xyz);
+  }
+
+  vec3 p, n;
+  if (u_useQB == 1) {
+    evalQBWithNormal(bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2, p, n);
+    n *= u_permParity;
+  } else {
+    p = bary.x*a_p0.yzw + bary.y*a_p1.yzw + bary.z*a_p2.yzw;
+    n = normalize(cross(a_p1.yzw-a_p0.yzw, a_p2.yzw-a_p0.yzw));
+  }
+  v_normal_vs = normalize(mat3(u_mv)*n);
+
+  float density = edgeDensity(bary, a_lodInfo.xyz);
+  v_density = log2(max(density,1.0)) / max(u_globalMaxLogLod,1.0);
+
+  gl_Position = u_mvp * vec4(p, 1.0);
+}`;
+
+const FS_MATCAP = `#version 300 es
+precision mediump float;
+in vec3 v_normal_vs;
+in float v_density;
+out vec4 o;
+vec3 heatmap(float t){t=clamp(t,0.,1.);vec3 c0=vec3(.27,.0,.33),c1=vec3(.13,.37,.73),c2=vec3(.12,.68,.55),c3=vec3(.56,.85,.27),c4=vec3(.99,.91,.15);if(t<.25)return mix(c0,c1,t*4.);if(t<.5)return mix(c1,c2,(t-.25)*4.);if(t<.75)return mix(c2,c3,(t-.5)*4.);return mix(c3,c4,(t-.75)*4.);}
+void main(){
+  vec3 n=normalize(v_normal_vs);
+  n=gl_FrontFacing?n:-n;
+  float NdV=max(n.z,0.);
+  vec3 ld=normalize(vec3(.4,.7,.9));
+  float diff=dot(n,ld)*.5+.5;
+  vec3 H=normalize(ld+vec3(0,0,1));
+  float spec=pow(max(dot(n,H),0.),40.);
+  float rim=pow(1.-NdV,3.);
+  vec3 base=heatmap(v_density);
+  vec3 shadow=base*.15+vec3(.02,.02,.06);
+  vec3 lit=base*1.2;
+  vec3 col=mix(shadow,lit,diff);
+  col+=vec3(1.,.97,.92)*spec*.6;
+  col+=base*rim*.3;
+  col+=vec3(.04,.03,.08);
+  o=vec4(col,1);
+}`;
+
+const FS_SOLID = `#version 300 es
+precision mediump float;
+in vec3 v_normal_vs;
+in float v_density;
+out vec4 o;
+void main(){
+  vec3 n=normalize(v_normal_vs);
+  n=gl_FrontFacing?n:-n;
+  vec3 ld=normalize(vec3(.4,.7,.9));
+  float diff=dot(n,ld)*.5+.5;
+  vec3 H=normalize(ld+vec3(0,0,1));
+  float spec=pow(max(dot(n,H),0.),40.);
+  vec3 base=vec3(.85,.75,.65);
+  vec3 col=mix(base*.15,base*1.2,diff);
+  col+=vec3(1.,.97,.92)*spec*.6;
+  o=vec4(col,1);
+}`;
+
+const FS_WIRE = `#version 300 es
+precision mediump float;
+in vec3 v_normal_vs;
+in float v_density;
+out vec4 o;
+vec3 heatmap(float t){t=clamp(t,0.,1.);vec3 c0=vec3(.27,.0,.33),c1=vec3(.13,.37,.73),c2=vec3(.12,.68,.55),c3=vec3(.56,.85,.27),c4=vec3(.99,.91,.15);if(t<.25)return mix(c0,c1,t*4.);if(t<.5)return mix(c1,c2,(t-.25)*4.);if(t<.75)return mix(c2,c3,(t-.5)*4.);return mix(c3,c4,(t-.75)*4.);}
+void main(){ o=vec4(heatmap(v_density),1.); }`;
+
+const FS_NORMALS = `#version 300 es
+precision mediump float;
+in vec3 v_normal_vs;
+in float v_density;
+out vec4 o;
+void main(){
+  vec3 n=normalize(v_normal_vs);
+  n=gl_FrontFacing?n:-n;
+  o=vec4(n*.5+.5,1.);
+}`;
+
+function mkS(s,t){const sh=gl.createShader(t);gl.shaderSource(sh,s);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(sh));return sh;}
+function mkP(v,f){const p=gl.createProgram();gl.attachShader(p,mkS(v,gl.VERTEX_SHADER));gl.attachShader(p,mkS(f,gl.FRAGMENT_SHADER));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(p));return p;}
+
+const progs = {
+  matcap: mkP(VS, FS_MATCAP),
+  solid: mkP(VS, FS_SOLID),
+  wire: mkP(VS, FS_WIRE),
+  normals: mkP(VS, FS_NORMALS),
+};
+
+// State
+let gridN = 256;
+let vaoOrig = null, vaoXform = null;
+let numGridIdx = 0, numLineIdx = 0, numInst = 0;
+let globalMaxLogLod = 1;
+
+function makeVAO(baryBuf, idxBuf, instanceData, numFaces, isLines) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, baryBuf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
+  for (let i=0;i<7;i++) {
+    gl.enableVertexAttribArray(1+i);
+    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 112, i*16);
+    gl.vertexAttribDivisor(1+i, 1);
+  }
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+  gl.bindVertexArray(null);
+  return vao;
+}
+
+function uploadMesh(data) {
+  const grid = generateTriGrid(gridN);
+  $('stats').innerHTML = `Grid: ${grid.numVerts} verts, ${grid.numTris} tris<br>Generating...`;
+
+  // Bary buffer (shared)
+  const baryBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, baryBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, grid.bary, gl.STATIC_DRAW);
+
+  // Triangle index buffer
+  const triIdxBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, grid.triangles, gl.STATIC_DRAW);
+  numGridIdx = grid.triangles.length;
+
+  // Line index buffer
+  const lines = [];
+  for (let i=0; i<grid.triangles.length; i+=3) {
+    const a=grid.triangles[i], b=grid.triangles[i+1], c=grid.triangles[i+2];
+    lines.push(a,b, b,c, c,a);
+  }
+  const lineIdxBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lineIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(lines), gl.STATIC_DRAW);
+  numLineIdx = lines.length;
+
+  // Compute max LOD
+  globalMaxLogLod = 1;
+  for (const b of data.batches) {
+    const m = Math.max(...b.lod);
+    globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(m, 1)));
+  }
+
+  // Merge ALL instances from all batches into one flat array
+  const allOrig = [], allXform = [];
+  for (const b of data.batches) {
+    for (let i=0; i<b.instances_orig.length; i++) allOrig.push(b.instances_orig[i]);
+    for (let i=0; i<b.instances_xform.length; i++) allXform.push(b.instances_xform[i]);
+  }
+  numInst = data.total_faces;
+
+  if (vaoOrig) gl.deleteVertexArray(vaoOrig);
+  if (vaoXform) gl.deleteVertexArray(vaoXform);
+  vaoOrig = makeVAO(baryBuf, renderMode==='wire' ? lineIdxBuf : triIdxBuf, new Float32Array(allOrig), numInst);
+  // Store both index buffers for mode switching
+  vaoXform = makeVAO(baryBuf, triIdxBuf, new Float32Array(allXform), numInst);
+
+  // Also make line VAOs
+  window._baryBuf = baryBuf;
+  window._triIdxBuf = triIdxBuf;
+  window._lineIdxBuf = lineIdxBuf;
+  window._origData = new Float32Array(allOrig);
+  window._xformData = new Float32Array(allXform);
+
+  $('stats').innerHTML = `Grid: ${grid.numVerts} verts<br>Faces: ${numInst}<br>Total tris: ${grid.numTris * numInst}`;
+}
+
+function rebuildVAOs() {
+  if (!window._baryBuf) return;
+  const isWire = renderMode === 'wire';
+  if (vaoOrig) gl.deleteVertexArray(vaoOrig);
+  if (vaoXform) gl.deleteVertexArray(vaoXform);
+  vaoOrig = makeVAO(window._baryBuf, isWire ? window._lineIdxBuf : window._triIdxBuf, window._origData, numInst);
+  vaoXform = makeVAO(window._baryBuf, isWire ? window._lineIdxBuf : window._triIdxBuf, window._xformData, numInst);
+}
+
+function perspective(fov,a,n,f){const t=1/Math.tan(fov*.5),r=1/(n-f);return new Float32Array([t/a,0,0,0,0,t,0,0,0,0,(n+f)*r,-1,0,0,n*f*r*2,0]);}
+function lookAt(ex,ey,ez,tx,ty,tz,ux,uy,uz){let fx=tx-ex,fy=ty-ey,fz=tz-ez,fl=Math.hypot(fx,fy,fz);fx/=fl;fy/=fl;fz/=fl;let sx=fy*uz-fz*uy,sy=fz*ux-fx*uz,sz=fx*uy-fy*ux,sl=Math.hypot(sx,sy,sz);sx/=sl;sy/=sl;sz/=sl;let ux2=sy*fz-sz*fy,uy2=sz*fx-sx*fz,uz2=sx*fy-sy*fx;return new Float32Array([sx,ux2,-fx,0,sy,uy2,-fy,0,sz,uz2,-fz,0,-(sx*ex+sy*ey+sz*ez),-(ux2*ex+uy2*ey+uz2*ez),fx*ex+fy*ey+fz*ez,1]);}
+function mulM4(a,b){const o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++)o[c*4+r]=a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];return o;}
+
+function render() {
+  const w=$('wrap');
+  canvas.width=w.clientWidth; canvas.height=w.clientHeight;
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.clearColor(0.06,0.06,0.14,1);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+  if (!vaoXform || !numInst) return;
+
+  const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
+  const view=lookAt(ex,ey,ez,0,0,0,0,1,0);
+  const proj=perspective(Math.PI/3,canvas.width/canvas.height,0.1,100);
+  const mvp=mulM4(proj,view);
+
+  const isWire = renderMode === 'wire';
+  const prog = progs[renderMode] || progs.matcap;
+  const drawMode = isWire ? gl.LINES : gl.TRIANGLES;
+  const idxCount = isWire ? numLineIdx : numGridIdx;
+
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog,'u_mvp'), false, mvp);
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog,'u_mv'), false, view);
+  gl.uniform1f(gl.getUniformLocation(prog,'u_globalMaxLogLod'), globalMaxLogLod);
+
+  // Original (dim wireframe)
+  if (!isWire) {
+    const wp = progs.wire;
+    gl.useProgram(wp);
+    gl.uniformMatrix4fv(gl.getUniformLocation(wp,'u_mvp'), false, mvp);
+    gl.uniformMatrix4fv(gl.getUniformLocation(wp,'u_mv'), false, view);
+    gl.uniform1i(gl.getUniformLocation(wp,'u_useQB'), 0);
+    gl.uniform1f(gl.getUniformLocation(wp,'u_permParity'), 1.0);
+    gl.uniform1f(gl.getUniformLocation(wp,'u_globalMaxLogLod'), 1);
+    // Need line VAO for original
+  }
+
+  // Transformed
+  gl.useProgram(prog);
+  gl.uniform1i(gl.getUniformLocation(prog,'u_useQB'), 1);
+  gl.uniform1f(gl.getUniformLocation(prog,'u_permParity'), 1.0); // TODO: per-batch
+  gl.bindVertexArray(vaoXform);
+  gl.drawElementsInstanced(drawMode, idxCount, gl.UNSIGNED_INT, 0, numInst);
+  gl.bindVertexArray(null);
+}
+
+// --- WASM + Controls ---
+const shapes = {
+  cube:{positions:[-1,-1,-1,1,-1,-1,1,1,-1,-1,1,-1,-1,-1,1,1,-1,1,1,1,1,-1,1,1],faces:[0,1,2,0,2,3,5,4,7,5,7,6,4,0,3,4,3,7,1,5,6,1,6,2,3,2,6,3,6,7,4,5,1,4,1,0]},
+  tetrahedron:{positions:[1,1,1,1,-1,-1,-1,1,-1,-1,-1,1],faces:[0,1,2,0,2,3,0,3,1,1,3,2]},
+  octahedron:{positions:[1,0,0,-1,0,0,0,1,0,0,-1,0,0,0,1,0,0,-1],faces:[0,2,4,2,1,4,1,3,4,3,0,4,2,0,5,1,2,5,3,1,5,0,3,5]},
+  icosahedron:(()=>{const p=(1+Math.sqrt(5))/2,a=1,b=a/p;return{positions:[-b,a,0,b,a,0,-b,-a,0,b,-a,0,0,-b,a,0,b,a,0,-b,-a,0,b,-a,a,0,-b,a,0,b,-a,0,-b,-a,0,b],faces:[0,11,5,0,5,1,0,1,7,0,7,10,0,10,11,1,5,9,5,11,4,11,10,2,10,7,6,7,1,8,3,9,4,3,4,2,3,2,6,3,6,8,3,8,9,4,9,5,2,4,11,6,2,10,8,6,7,9,8,1]};})(),
+};
+
+async function update() {
+  if (!wasmReady) return;
+  const sx=parseInt($('sx').value)/10;
+  const sy=parseInt($('sy').value)/10;
+  const sz=parseInt($('sz').value)/10;
+  const sr=parseInt($('sr').value)/10;
+  $('sx-v').textContent=sx.toFixed(1);
+  $('sy-v').textContent=sy.toFixed(1);
+  $('sz-v').textContent=sz.toFixed(1);
+  $('sr-v').textContent=sr.toFixed(1);
+
+  const tType = sr > 0.01 ? 'sphere_reflection' : 'identity';
+  const t0 = performance.now();
+  const data = compute_mesh_batches(
+    new Float64Array(shapeData.positions),
+    new Uint32Array(shapeData.faces),
+    tType, new Float64Array([sx,sy,sz,sr]), 0
+  );
+  const ms = performance.now() - t0;
+  uploadMesh(data);
+  render();
+  $('stats').innerHTML += `<br>WASM: ${ms.toFixed(0)}ms`;
+}
+
+function loadShape(name) {
+  shape = name;
+  shapeData = shapes[name] || shapes.cube;
+  update();
+}
+
+function updateGrid() {
+  gridN = 1 << parseInt($('grid').value);
+  $('grid-v').textContent = gridN;
+  if (shapeData) update();
+}
+
+for (const b of document.querySelectorAll('#shape-btns button'))
+  b.onclick=()=>{document.querySelectorAll('#shape-btns button').forEach(x=>x.classList.remove('a'));b.classList.add('a');loadShape(b.dataset.v);};
+for (const b of document.querySelectorAll('#render-btns button'))
+  b.onclick=()=>{renderMode=b.dataset.v;document.querySelectorAll('#render-btns button').forEach(x=>x.classList.remove('a'));b.classList.add('a');rebuildVAOs();render();};
+for (const id of ['sx','sy','sz','sr']) $(id).addEventListener('input', update);
+$('grid').addEventListener('input', updateGrid);
+
+let drag=false,lx=0,ly=0;
+canvas.onmousedown=e=>{drag=true;lx=e.clientX;ly=e.clientY;};
+onmouseup=()=>drag=false;
+onmousemove=e=>{if(!drag)return;rotY+=(e.clientX-lx)*.01;rotX+=(e.clientY-ly)*.01;lx=e.clientX;ly=e.clientY;render();};
+canvas.onwheel=e=>{zoom*=e.deltaY>0?1.1:0.9;zoom=Math.max(1,Math.min(100,zoom));render();e.preventDefault();};
+onresize=render;
+
+await init();
+wasmReady = true;
+loadShape('cube');
+</script>
+</body>
+</html>
