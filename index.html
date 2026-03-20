@@ -41,6 +41,7 @@ input[type=range]{flex:1;accent-color:#e94560}
   <div><label>Render</label>
     <div class="btns" id="render-btns">
       <button class="a" data-v="matcap">Matcap</button>
+      <button data-v="solid">Solid</button>
       <button data-v="wire">Wire</button>
       <button data-v="both">Both</button>
       <button data-v="normals">Normals</button>
@@ -231,8 +232,8 @@ void main(){
   float spec = pow(max(dot(n, H), 0.0), 40.0);
   float rim = pow(1.0 - NdV, 3.0);
 
-  // Density heatmap dominates, LOD batch color as subtle tint
-  vec3 base = mix(u_lodColor, heatmap(v_density), 0.85);
+  // Blend density heatmap with LOD batch color
+  vec3 base = mix(u_lodColor, heatmap(v_density), 0.7);
 
   vec3 shadow = base * 0.15 + vec3(0.02, 0.02, 0.06);
   vec3 lit = base * 1.2;
@@ -389,8 +390,9 @@ function render() {
   const mvp = mulM4(proj, view);
 
   const drawWire = renderMode === 'wire' || renderMode === 'both';
-  const drawSolid = renderMode === 'matcap' || renderMode === 'both';
+  const drawSolid = renderMode === 'matcap' || renderMode === 'both' || renderMode === 'solid';
   const drawNormals = renderMode === 'normals';
+  const useHeatmap = renderMode === 'matcap' || renderMode === 'both';
 
   // Original wireframe (always dim)
   if (drawWire) {
@@ -417,8 +419,13 @@ function render() {
     gl.uniform1i(gl.getUniformLocation(progMatcap,'u_useQB'), 1);
     gl.uniform1f(gl.getUniformLocation(progMatcap,'u_globalMaxLogLod'), globalMaxLogLod);
     for (const b of drawBatches) {
-      gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), b.color);
-      gl.uniform3f(gl.getUniformLocation(progMatcap,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
+      if (useHeatmap) {
+        gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), b.color);
+        gl.uniform3f(gl.getUniformLocation(progMatcap,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
+      } else {
+        gl.uniform3f(gl.getUniformLocation(progMatcap,'u_lodColor'), 0.85, 0.75, 0.65);
+        gl.uniform3f(gl.getUniformLocation(progMatcap,'u_edgeLod'), 1, 1, 1); // uniform → no density variation
+      }
       gl.uniform1f(gl.getUniformLocation(progMatcap,'u_permParity'), b.parity);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
