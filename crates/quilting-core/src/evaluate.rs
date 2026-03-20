@@ -126,37 +126,35 @@ pub fn compute_instances(
     result
 }
 
-/// Estimate face LOD from QB surface curvature.
+/// Estimate face LOD from QB curvature + face scale.
 ///
-/// From Karpavicius & Krasauskas: LOD = s * (H/L)^p where
-/// L = patch size (longest edge), H = distance from QB midpoint
-/// to flat midpoint (the "bulge").
+/// Two factors:
+/// 1. Curvature: H/L ratio (Karpavicius & Krasauskas) — how much the
+///    QB surface deviates from flat.
+/// 2. Scale: how much the transformed face is stretched relative to
+///    a "reference" edge length. Large faces need more tessellation
+///    even when nearly flat.
 fn estimate_face_lod(inst: &FaceInstance) -> u32 {
     let [p0, p1, p2] = inst.positions;
     let [w0, w1, w2] = inst.weights;
 
-    // L: longest edge of the transformed triangle
+    // Transformed edge lengths
     let e01 = (p0 - p1).norm();
     let e02 = (p0 - p2).norm();
     let e12 = (p1 - p2).norm();
     let l = e01.max(e02).max(e12);
     if l < 1e-12 { return 1; }
 
-    // Flat midpoint: linear interpolation at centroid
+    // Curvature: QB midpoint vs flat midpoint
     let flat_mid = (p0 + p1 + p2) * (1.0 / 3.0);
-
-    // QB midpoint: evaluate the rational quaternion surface at centroid
     let patch = QBTriPatch::new([p0, p1, p2], [w0, w1, w2]);
     let qb_mid = patch.eval(1.0 / 3.0, 1.0 / 3.0);
-
-    // H: distance between flat and QB midpoints
     let h = (qb_mid - Quat::new(flat_mid.w, flat_mid.x, flat_mid.y, flat_mid.z)).norm();
 
-    // Also check edge midpoints for better sensitivity
     let edge_mids = [
-        (0.5, 0.5, 0.0), // midpoint of edge v0-v1
-        (0.5, 0.0, 0.5), // midpoint of edge v0-v2
-        (0.0, 0.5, 0.5), // midpoint of edge v1-v2
+        (0.5, 0.5, 0.0),
+        (0.5, 0.0, 0.5),
+        (0.0, 0.5, 0.5),
     ];
     let mut max_h = h;
     for &(b0, b1, b2) in &edge_mids {
@@ -166,13 +164,18 @@ fn estimate_face_lod(inst: &FaceInstance) -> u32 {
         max_h = max_h.max(d);
     }
 
-    // LOD formula: higher H/L ratio → more subdivision needed
-    let ratio = max_h / l;
-    let scale = 64.0;
-    let power = 1.0;
-    let raw_lod = (scale * ratio.powf(power)).ceil() as u32;
+    // Curvature LOD: higher H/L → more subdivision
+    let curvature_lod = 64.0 * max_h / l;
 
-    raw_lod.max(1).min(1024) // capped to atlas max
+    // Scale LOD: larger faces need more tessellation.
+    // Reference: an "ideal" edge length where LOD 1 suffices.
+    // Use 2.0 (the original cube edge length) as reference.
+    let scale_lod = l / 2.0;
+
+    // Combined: take the max of curvature-driven and scale-driven LOD
+    let raw_lod = (curvature_lod.max(scale_lod)).ceil() as u32;
+
+    raw_lod.max(1).min(1024)
 }
 
 /// Snap to the nearest power of 2 (round up).
