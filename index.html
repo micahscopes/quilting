@@ -112,7 +112,6 @@ layout(location=8) in vec4 a_vertLod;   // per-instance: (vtx_lod_0, vtx_lod_1, 
 uniform mat4 u_mvp;
 uniform mat4 u_mv;
 uniform int u_useQB;
-uniform float u_globalMaxLogLod; // log2 of the global max LOD across all batches
 uniform float u_permParity; // +1 or -1: flip normal for odd permutations
 
 out vec3 v_normal_vs;
@@ -190,11 +189,10 @@ void main(){
   n *= u_permParity;
   v_normal_vs = normalize(mat3(u_mv) * n);
 
-  // Density heatmap: edge-based interpolation using per-instance LODs.
-  // At shared edges (bary coord = 0), the product-of-bary formula gives
-  // 100% weight to the shared edge's LOD, so colors match exactly there.
+  // Density heatmap: edge-based interpolation, fixed range.
+  // log2(1)=0 → t=0, log2(1024)=10 → t=1. Full gradient always visible.
   float density = edgeDensity(a_bary, a_lodInfo.xyz);
-  v_density = log2(max(density, 1.0)) / max(u_globalMaxLogLod, 1.0);
+  v_density = log2(max(density, 1.0)) / 10.0;
 
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
@@ -207,15 +205,14 @@ in float v_density;
 uniform vec3 u_lodColor;
 out vec4 o;
 
-// Neon pastel gradient
+// Neon aurora gradient — deep to bright with good spread
 vec3 heatmap(float t) {
   t = clamp(t, 0.0, 1.0);
-  // Deep neon violet → neon blue → soft mint → pastel peach → hot pink
-  vec3 c0 = vec3(0.30, 0.05, 0.60);  // deep neon violet
-  vec3 c1 = vec3(0.10, 0.40, 0.95);  // neon blue
-  vec3 c2 = vec3(0.30, 0.90, 0.70);  // soft neon mint
-  vec3 c3 = vec3(0.95, 0.75, 0.55);  // warm pastel peach
-  vec3 c4 = vec3(1.00, 0.35, 0.65);  // hot neon pink
+  vec3 c0 = vec3(0.08, 0.05, 0.20);  // deep midnight
+  vec3 c1 = vec3(0.20, 0.15, 0.80);  // neon indigo
+  vec3 c2 = vec3(0.10, 0.70, 0.90);  // electric cyan
+  vec3 c3 = vec3(0.40, 0.95, 0.50);  // neon green
+  vec3 c4 = vec3(1.00, 0.60, 0.90);  // pastel pink
   if (t < 0.25) return mix(c0, c1, t*4.0);
   if (t < 0.5)  return mix(c1, c2, (t-0.25)*4.0);
   if (t < 0.75) return mix(c2, c3, (t-0.5)*4.0);
@@ -258,7 +255,7 @@ out vec4 o;
 
 vec3 heatmap(float t) {
   t = clamp(t, 0.0, 1.0);
-  vec3 c0=vec3(.3,.05,.6), c1=vec3(.1,.4,.95), c2=vec3(.3,.9,.7), c3=vec3(.95,.75,.55), c4=vec3(1.,.35,.65);
+  vec3 c0=vec3(.08,.05,.2), c1=vec3(.2,.15,.8), c2=vec3(.1,.7,.9), c3=vec3(.4,.95,.5), c4=vec3(1.,.6,.9);
   if(t<.25) return mix(c0,c1,t*4.);
   if(t<.5)  return mix(c1,c2,(t-.25)*4.);
   if(t<.75) return mix(c2,c3,(t-.5)*4.);
@@ -504,22 +501,21 @@ async function update() {
     `<br>LODs: ${lods}<br>Worker: ${ms.toFixed(0)}ms`;
 
   updating = false;
+  if (pendingUpdate) { pendingUpdate = false; update(); return; }
 
-  // If there are fallback batches, generate the missing patches then re-render
-  if (fallbacks.length > 0 && !pendingUpdate) {
+  // Fire off generation of missing patches in background — don't block UI.
+  // When each completes, trigger a re-render if no newer update is pending.
+  if (fallbacks.length > 0) {
     const missing = [...new Set(fallbacks.map(b => b.wanted_lod.join(',')))];
     for (const key of missing) {
       const [a,b,c] = key.split(',').map(Number);
-      await workerCall('generate_single', { a, b, c });
-    }
-    // Re-render with the now-available patches
-    if (!pendingUpdate) {
-      update();
-      return;
+      // Cap: don't generate patches with any edge > 256 (too slow for Bridson)
+      if (a > 256 || b > 256 || c > 256) continue;
+      workerCall('generate_single', { a, b, c }).then(() => {
+        if (!updating && !pendingUpdate) update();
+      });
     }
   }
-
-  if (pendingUpdate) { pendingUpdate = false; update(); }
 }
 
 async function loadShape(name) {
