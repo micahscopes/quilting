@@ -339,10 +339,24 @@ function makeVAO(baryData, idxData, instanceData) {
 }
 
 let globalMaxLogLod = 1;
+let vaoOrigMesh = null, numOrigInst = 0;
+
+// Simple 3-vertex bary grid for rendering the original mesh without tessellation
+const ORIG_BARY = new Float32Array([1,0,0, 0,1,0, 0,0,1]);
+const ORIG_LINES = new Uint32Array([0,1, 1,2, 2,0]);
 
 function uploadBatches(data) {
   for (const b of drawBatches) { gl.deleteVertexArray(b.vaoOrig); gl.deleteVertexArray(b.vaoXform); if(b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri); }
+  if (vaoOrigMesh) gl.deleteVertexArray(vaoOrigMesh);
   drawBatches = [];
+
+  // Build original mesh VAO: all faces, trivial tessellation (just the 3 corners)
+  const allOrig = [];
+  for (const batch of data.batches) {
+    for (let i = 0; i < batch.instances_orig.length; i++) allOrig.push(batch.instances_orig[i]);
+  }
+  numOrigInst = data.total_faces;
+  vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, new Float32Array(allOrig));
   // Compute global max LOD across all batches
   globalMaxLogLod = 1;
   for (const batch of data.batches) {
@@ -395,20 +409,17 @@ function render() {
   const drawNormals = renderMode === 'normals';
   const useHeatmap = renderMode === 'matcap' || renderMode === 'both';
 
-  // Original wireframe (always dim)
-  if (drawWire) {
+  // Original mesh wireframe (simple triangles, no tessellation)
+  if (drawWire && vaoOrigMesh) {
     gl.useProgram(progWire);
     gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progWire,'u_useQB'), 0);
     gl.uniform1i(gl.getUniformLocation(progWire,'u_showDensity'), 0);
     gl.uniform3f(gl.getUniformLocation(progWire,'u_lodColor'), 0.25, 0.25, 0.35);
-    gl.uniform1f(gl.getUniformLocation(progWire,'u_globalMaxLogLod'), globalMaxLogLod);
     gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), 1.0);
-    for (const b of drawBatches) {
-      gl.bindVertexArray(b.vaoOrig);
-      gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
-    }
+    gl.bindVertexArray(vaoOrigMesh);
+    gl.drawElementsInstanced(gl.LINES, 6, gl.UNSIGNED_INT, 0, numOrigInst);
   }
 
   // Transformed — matcap solid
