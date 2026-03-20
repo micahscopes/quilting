@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
-use quilting_core::evaluate::compute_instances;
+use quilting_core::evaluate::{compute_instances, ScreenInfo};
 use quilting_core::mesh::TessellationMesh;
 use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -182,6 +182,9 @@ pub fn compute_mesh_batches(
     transform_type: &str,
     params: &[f64],
     override_res: u32,
+    vp_matrix: &[f64],     // 16 doubles: column-major view-projection matrix
+    viewport_width: f64,
+    viewport_height: f64,
 ) -> JsValue {
     let verts: Vec<[f64; 3]> = positions.chunks(3)
         .map(|c| [c[0], c[1], c[2]]).collect();
@@ -204,8 +207,16 @@ pub fn compute_mesh_batches(
         _ => Mobius::identity(),
     };
 
-    let instances_orig = compute_instances(&verts, &tris, &Mobius::identity());
-    let instances_xform = compute_instances(&verts, &tris, &transform);
+    let screen = if vp_matrix.len() >= 16 && viewport_width > 0.0 {
+        let mut m = [0.0f64; 16];
+        m.copy_from_slice(&vp_matrix[..16]);
+        Some(ScreenInfo { vp_matrix: m, width: viewport_width, height: viewport_height })
+    } else {
+        None
+    };
+
+    let instances_orig = compute_instances(&verts, &tris, &Mobius::identity(), None);
+    let instances_xform = compute_instances(&verts, &tris, &transform, screen.as_ref());
 
     // Group by (canonical LOD, perm_index)
     let mut groups: HashMap<([u32; 3], usize), Vec<usize>> = HashMap::new();

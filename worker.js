@@ -31,13 +31,16 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'compute_batches') {
-    const { positions, faces, transformType, params, overrideRes } = data;
+    const { positions, faces, transformType, params, overrideRes, vpMatrix, vpWidth, vpHeight } = data;
     const result = wasm.compute_mesh_batches(
       new Float64Array(positions),
       new Uint32Array(faces),
       transformType,
       new Float64Array(params),
       overrideRes,
+      new Float64Array(vpMatrix || []),
+      vpWidth || 0,
+      vpHeight || 0,
     );
     self.postMessage({ type: 'batches', id, result });
     return;

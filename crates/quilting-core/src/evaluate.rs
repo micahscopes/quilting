@@ -17,10 +17,47 @@ pub struct FaceInstance {
 }
 
 /// Compute per-face instance data with adaptive LOD.
+/// Screen-space projection info for LOD computation.
+pub struct ScreenInfo {
+    pub vp_matrix: [f64; 16], // column-major view-projection
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ScreenInfo {
+    /// Project a 3D point to screen pixels. Returns None if behind camera.
+    pub fn project(&self, p: [f64; 3]) -> Option<[f64; 2]> {
+        let m = &self.vp_matrix;
+        let x = m[0]*p[0] + m[4]*p[1] + m[8]*p[2] + m[12];
+        let y = m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13];
+        let w = m[3]*p[0] + m[7]*p[1] + m[11]*p[2] + m[15];
+        if w.abs() < 1e-10 { return None; } // at infinity or behind camera
+        let ndc_x = x / w;
+        let ndc_y = y / w;
+        Some([
+            (ndc_x * 0.5 + 0.5) * self.width,
+            (ndc_y * 0.5 + 0.5) * self.height,
+        ])
+    }
+
+    /// Screen-space distance between two 3D points. Returns f64::MAX if either is behind camera.
+    pub fn screen_distance(&self, a: [f64; 3], b: [f64; 3]) -> f64 {
+        match (self.project(a), self.project(b)) {
+            (Some(pa), Some(pb)) => {
+                let dx = pa[0] - pb[0];
+                let dy = pa[1] - pb[1];
+                (dx*dx + dy*dy).sqrt()
+            }
+            _ => f64::MAX, // one or both behind camera → max LOD
+        }
+    }
+}
+
 pub fn compute_instances(
     vertices: &[[f64; 3]],
     faces: &[[usize; 3]],
     transform: &Mobius,
+    screen: Option<&ScreenInfo>,
 ) -> Vec<FaceInstance> {
     // Pre-transform all vertices
     let transformed: Vec<(Quat, Quat)> = vertices.iter().map(|v| {
@@ -43,64 +80,50 @@ pub fn compute_instances(
         }
     }).collect();
 
-    // Per-EDGE LOD from the exact transformed arc length under the Möbius map.
-    //
-    // The conformal scale factor |F'(x)| = sqrt(C)/|cx+d|² where C = |ad-bc|².
-    // The transformed arc length of edge (v0→v1) is:
-    //   L' = sqrt(C) × |v1-v0| × ∫₀¹ 1/|d0 + t(d1-d0)|² dt
-    // where di = c·vi + d.
-    //
-    // |d0+t(d1-d0)|² = Q(t) = a·t² + b·t + c (positive definite quadratic)
-    // ∫₀¹ 1/Q(t) dt = (2/√Δ)[arctan((2a+b)/√Δ) - arctan(b/√Δ)]
-    // where Δ = 4ac - b².
+    // Per-edge LOD from screen-space edge lengths.
+    // Target: ~1 tessellation subdivision per 8 pixels of screen edge.
+    let target_pixels_per_sub = 8.0;
 
-    let sqrt_c = (transform.a * transform.d - transform.b * transform.c).norm();
+    // Measure screen-space arc length between two mesh vertices.
+    // Samples the QB-transformed edge at multiple points to capture curvature.
+    let screen_arc_len = |va: usize, vb: usize| -> f64 {
+        let pa = transformed[va].0.to_point();
+        let pb = transformed[vb].0.to_point();
 
-    // Pre-compute di = c·vi + d for each vertex
-    let _denom_quats: Vec<Quat> = vertices.iter().map(|v| {
-        let p = Quat::from_point(v[0], v[1], v[2]);
-        transform.c * p + transform.d
-    }).collect();
-
-    // Compute exact Möbius arc length between two points in the original mesh.
-    // Uses the closed-form integral of the conformal scale along the line segment.
-    let arc_length = |p0: [f64; 3], p1: [f64; 3]| -> f64 {
-        let q0 = Quat::from_point(p0[0], p0[1], p0[2]);
-        let q1 = Quat::from_point(p1[0], p1[1], p1[2]);
-        let d0 = transform.c * q0 + transform.d;
-        let d1 = transform.c * q1 + transform.d;
-        let diff = d1 - d0;
-
-        let qa = diff.norm_sq();
-        let qb = 2.0 * (d0 * diff.conj()).re();
-        let qc = d0.norm_sq();
-
-        // ∫₀¹ 1/(qa·t²+qb·t+qc) dt
-        // When Q passes near zero (singularity on segment), the integral
-        // naturally produces a very large value — no special cases needed.
-        let delta = 4.0 * qa * qc - qb * qb;
-        let integral = if delta > 1e-20 {
-            let sqrt_delta = delta.sqrt();
-            (2.0 / sqrt_delta) * (((2.0 * qa + qb) / sqrt_delta).atan() - (qb / sqrt_delta).atan())
-        } else if delta > -1e-10 {
-            // Near-degenerate: Q barely touches zero. Use midpoint rule as fallback.
-            let q_mid = qa * 0.25 + qb * 0.5 + qc;
-            1.0 / q_mid.max(1e-20)
-        } else {
-            // Q has real roots (segment crosses singularity).
-            // The integral diverges — return a very large value.
-            1e8
-        };
-
-        let dx = p1[0] - p0[0];
-        let dy = p1[1] - p0[1];
-        let dz = p1[2] - p0[2];
-        let orig_len = (dx*dx + dy*dy + dz*dz).sqrt();
-
-        sqrt_c * orig_len * integral
+        match screen {
+            Some(s) => {
+                // Sample at 5 points along the edge for a decent polyline approximation
+                let n_samples = 5;
+                let mut total = 0.0;
+                let mut prev = s.project(pa);
+                for i in 1..=n_samples {
+                    let t = i as f64 / n_samples as f64;
+                    // Interpolate in original space, then transform
+                    let orig = [
+                        vertices[va][0]*(1.0-t) + vertices[vb][0]*t,
+                        vertices[va][1]*(1.0-t) + vertices[vb][1]*t,
+                        vertices[va][2]*(1.0-t) + vertices[vb][2]*t,
+                    ];
+                    let p = Quat::from_point(orig[0], orig[1], orig[2]);
+                    let tp = transform.apply(p).to_point();
+                    let curr = s.project(tp);
+                    if let (Some(p1), Some(p2)) = (prev, curr) {
+                        let dx = p2[0]-p1[0]; let dy = p2[1]-p1[1];
+                        total += (dx*dx+dy*dy).sqrt();
+                    } else {
+                        return f64::MAX; // behind camera → max LOD
+                    }
+                    prev = curr;
+                }
+                total
+            }
+            None => {
+                let dx = pa[0]-pb[0]; let dy = pa[1]-pb[1]; let dz = pa[2]-pb[2];
+                (dx*dx + dy*dy + dz*dz).sqrt() * 100.0
+            }
+        }
     };
 
-    // Per-edge LOD from exact transformed arc length.
     let mut edge_lod_map: HashMap<(usize, usize), u32> = HashMap::new();
     for face in faces {
         let edges = [
@@ -112,32 +135,61 @@ pub fn compute_instances(
             let key = if va < vb { (va, vb) } else { (vb, va) };
             if edge_lod_map.contains_key(&key) { continue; }
 
-            let al = arc_length(vertices[va], vertices[vb]);
-            let raw = (al * 16.0).ceil() as u32;
+            let pixels = screen_arc_len(va, vb);
+            let raw = (pixels / target_pixels_per_sub).ceil() as u32;
             edge_lod_map.insert(key, snap_to_power_of_2(raw.max(1).min(512)));
         }
 
-        // Check the three medians (vertex → opposite edge midpoint).
-        // These cross the face interior — if any blows up, the interior
-        // has a singularity and ALL edges of this face need high LOD.
-        let midpoints = [
-            (face[0], [(vertices[face[1]][0]+vertices[face[2]][0])/2.0,
-                       (vertices[face[1]][1]+vertices[face[2]][1])/2.0,
-                       (vertices[face[1]][2]+vertices[face[2]][2])/2.0]),
-            (face[1], [(vertices[face[0]][0]+vertices[face[2]][0])/2.0,
-                       (vertices[face[0]][1]+vertices[face[2]][1])/2.0,
-                       (vertices[face[0]][2]+vertices[face[2]][2])/2.0]),
-            (face[2], [(vertices[face[0]][0]+vertices[face[1]][0])/2.0,
-                       (vertices[face[0]][1]+vertices[face[1]][1])/2.0,
-                       (vertices[face[0]][2]+vertices[face[1]][2])/2.0]),
-        ];
+        // Check medians: screen-space arc from each vertex through center to opposite edge midpoint.
         let mut max_median_lod = 0u32;
-        for (vi, mid) in &midpoints {
-            let al = arc_length(vertices[*vi], *mid);
-            let lod = snap_to_power_of_2((al * 16.0).ceil() as u32).min(512);
+        for vi_idx in 0..3 {
+            let vi = face[vi_idx];
+            let vj = face[(vi_idx + 1) % 3];
+            let vk = face[(vi_idx + 2) % 3];
+            // Median: from vertex vi to midpoint of edge (vj,vk) in ORIGINAL space
+            let orig_vi = vertices[vi];
+            let orig_mid = [
+                (vertices[vj][0]+vertices[vk][0])/2.0,
+                (vertices[vj][1]+vertices[vk][1])/2.0,
+                (vertices[vj][2]+vertices[vk][2])/2.0,
+            ];
+            // Sample the median path through the Möbius transform
+            let pixels = match screen {
+                Some(s) => {
+                    let n = 5;
+                    let mut total = 0.0;
+                    let mut prev = s.project(transformed[vi].0.to_point());
+                    for i in 1..=n {
+                        let t = i as f64 / n as f64;
+                        let p = [
+                            orig_vi[0]*(1.0-t) + orig_mid[0]*t,
+                            orig_vi[1]*(1.0-t) + orig_mid[1]*t,
+                            orig_vi[2]*(1.0-t) + orig_mid[2]*t,
+                        ];
+                        let tp = transform.apply(Quat::from_point(p[0], p[1], p[2])).to_point();
+                        let curr = s.project(tp);
+                        if let (Some(a), Some(b)) = (prev, curr) {
+                            total += ((b[0]-a[0]).powi(2) + (b[1]-a[1]).powi(2)).sqrt();
+                        } else {
+                            total = f64::MAX; break;
+                        }
+                        prev = curr;
+                    }
+                    total
+                }
+                None => {
+                    let pi = transformed[vi].0.to_point();
+                    let pj = transformed[vj].0.to_point();
+                    let pk = transformed[vk].0.to_point();
+                    let mid = [(pj[0]+pk[0])/2.0, (pj[1]+pk[1])/2.0, (pj[2]+pk[2])/2.0];
+                    let dx = pi[0]-mid[0]; let dy = pi[1]-mid[1]; let dz = pi[2]-mid[2];
+                    (dx*dx + dy*dy + dz*dz).sqrt() * 100.0
+                }
+            };
+            let lod = snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(512);
             max_median_lod = max_median_lod.max(lod);
         }
-        // Use max median LOD as a floor for ALL three edges of this face
+        // Floor all edges of this face at the max median LOD
         if max_median_lod > 1 {
             for &(va, vb) in &edges {
                 let key = if va < vb { (va, vb) } else { (vb, va) };
@@ -243,7 +295,7 @@ mod tests {
     #[test]
     fn identity_lod_proportional_to_edge_length() {
         let (verts, faces) = shapes::cube();
-        let instances = compute_instances(&verts, &faces, &Mobius::identity());
+        let instances = compute_instances(&verts, &faces, &Mobius::identity(), None);
         // All LODs should be power of 2 and within a reasonable range
         for inst in &instances {
             for &l in &inst.edge_lods {
@@ -257,7 +309,7 @@ mod tests {
     fn sphere_reflection_higher_lod() {
         let (verts, faces) = shapes::cube();
         let m = Mobius::sphere_reflection(Quat::from_point(0.5, 0.0, 0.0), 2.0);
-        let instances = compute_instances(&verts, &faces, &m);
+        let instances = compute_instances(&verts, &faces, &m, None);
         // Sphere reflection should produce higher LOD on some faces
         let max_lod = instances.iter()
             .flat_map(|i| i.edge_lods.iter())
@@ -271,7 +323,7 @@ mod tests {
     fn adjacent_edges_match() {
         let (verts, faces) = shapes::icosahedron();
         let m = Mobius::sphere_reflection(Quat::from_point(0.3, 0.0, 0.0), 1.5);
-        let instances = compute_instances(&verts, &faces, &m);
+        let instances = compute_instances(&verts, &faces, &m, None);
 
         // Build edge → LOD map and verify consistency
         let mut edge_lods: HashMap<(usize, usize), Vec<u32>> = HashMap::new();
@@ -299,7 +351,7 @@ mod tests {
     fn lods_are_powers_of_2() {
         let (verts, faces) = shapes::octahedron();
         let m = Mobius::sphere_reflection(Quat::from_point(0.2, 0.3, 0.0), 1.8);
-        let instances = compute_instances(&verts, &faces, &m);
+        let instances = compute_instances(&verts, &faces, &m, None);
         for inst in &instances {
             for &l in &inst.edge_lods {
                 assert!(l.is_power_of_two(), "LOD {} is not a power of 2", l);

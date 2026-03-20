@@ -488,6 +488,12 @@ async function update() {
   $('sz-v').textContent = sz.toFixed(1);
   $('sr-v').textContent = sr.toFixed(1);
 
+  // Compute VP matrix for screen-space LOD
+  const w=$('wrap');
+  const vpW = w.clientWidth || 800, vpH = w.clientHeight || 600;
+  const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
+  const vpMatrix = mulM4(perspective(Math.PI/3, vpW/vpH, 0.1, 100), lookAt(ex,ey,ez,0,0,0,0,1,0));
+
   const t0 = performance.now();
   const tType = sr > 0.01 ? 'sphere_reflection' : 'identity';
   const resp = await workerCall('compute_batches', {
@@ -496,6 +502,9 @@ async function update() {
     transformType: tType,
     params: [sx, sy, sz, sr],
     overrideRes: res,
+    vpMatrix: Array.from(vpMatrix),
+    vpWidth: vpW,
+    vpHeight: vpH,
   });
   const ms = performance.now() - t0;
   const data = resp.result;

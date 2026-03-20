@@ -232,8 +232,8 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         };
 
         let t0 = Instant::now();
-        let instances_orig = compute_instances(&verts, &faces, &Mobius::identity());
-        let instances_xform = compute_instances(&verts, &faces, &transform);
+        let instances_orig = compute_instances(&verts, &faces, &Mobius::identity(), None);
+        let instances_xform = compute_instances(&verts, &faces, &transform, None);
 
         use quilting_core::permutation::{canonical_form, remap_position};
 
