@@ -57,11 +57,42 @@ pub fn compute_instances(
     let sqrt_c = (transform.a * transform.d - transform.b * transform.c).norm();
 
     // Pre-compute di = c·vi + d for each vertex
-    let denom_quats: Vec<Quat> = vertices.iter().map(|v| {
+    let _denom_quats: Vec<Quat> = vertices.iter().map(|v| {
         let p = Quat::from_point(v[0], v[1], v[2]);
         transform.c * p + transform.d
     }).collect();
 
+    // Compute exact Möbius arc length between two points in the original mesh.
+    // Uses the closed-form integral of the conformal scale along the line segment.
+    let arc_length = |p0: [f64; 3], p1: [f64; 3]| -> f64 {
+        let q0 = Quat::from_point(p0[0], p0[1], p0[2]);
+        let q1 = Quat::from_point(p1[0], p1[1], p1[2]);
+        let d0 = transform.c * q0 + transform.d;
+        let d1 = transform.c * q1 + transform.d;
+        let diff = d1 - d0;
+
+        let qa = diff.norm_sq();
+        let qb = 2.0 * (d0 * diff.conj()).re();
+        let qc = d0.norm_sq();
+
+        let delta = (4.0 * qa * qc - qb * qb).max(1e-30);
+        let sqrt_delta = delta.sqrt();
+
+        let integral = if sqrt_delta > 1e-15 {
+            (2.0 / sqrt_delta) * (((2.0 * qa + qb) / sqrt_delta).atan() - (qb / sqrt_delta).atan())
+        } else {
+            1.0 / qc.max(1e-20)
+        };
+
+        let dx = p1[0] - p0[0];
+        let dy = p1[1] - p0[1];
+        let dz = p1[2] - p0[2];
+        let orig_len = (dx*dx + dy*dy + dz*dz).sqrt();
+
+        sqrt_c * orig_len * integral
+    };
+
+    // Per-edge LOD from exact transformed arc length.
     let mut edge_lod_map: HashMap<(usize, usize), u32> = HashMap::new();
     for face in faces {
         let edges = [
@@ -73,40 +104,46 @@ pub fn compute_instances(
             let key = if va < vb { (va, vb) } else { (vb, va) };
             if edge_lod_map.contains_key(&key) { continue; }
 
-            let d0 = denom_quats[va];
-            let d1 = denom_quats[vb];
-            let diff = d1 - d0;
-
-            // Quadratic coefficients for |d0 + t·diff|²
-            let qa = diff.norm_sq();           // |d1-d0|²
-            let qb = 2.0 * (d0 * diff.conj()).re(); // 2·Re(d0·conj(diff))
-            let qc = d0.norm_sq();             // |d0|²
-
-            // Discriminant (always positive for |quaternion|²)
-            let delta = (4.0 * qa * qc - qb * qb).max(1e-30);
-            let sqrt_delta = delta.sqrt();
-
-            // ∫₀¹ 1/Q(t) dt
-            let integral = if sqrt_delta > 1e-15 {
-                let inv_sd = 2.0 / sqrt_delta;
-                inv_sd * (((2.0 * qa + qb) / sqrt_delta).atan() - (qb / sqrt_delta).atan())
-            } else {
-                // Degenerate: d0 ≈ d1, constant scale
-                1.0 / qc.max(1e-20)
-            };
-
-            // Original edge length
-            let dx = vertices[va][0] - vertices[vb][0];
-            let dy = vertices[va][1] - vertices[vb][1];
-            let dz = vertices[va][2] - vertices[vb][2];
-            let orig_len = (dx*dx + dy*dy + dz*dz).sqrt();
-
-            // Exact transformed arc length
-            let arc_len = sqrt_c * orig_len * integral;
-
-            // 16 subdivisions per unit of transformed arc length
-            let raw = (arc_len * 16.0).ceil() as u32;
+            let al = arc_length(vertices[va], vertices[vb]);
+            let raw = (al * 16.0).ceil() as u32;
             edge_lod_map.insert(key, snap_to_power_of_2(raw.max(1).min(512)));
+        }
+
+        // Also check the three medians (vertex → opposite edge midpoint).
+        // These cross the face interior and catch singularities between edges.
+        let midpoints = [
+            // median from v0 to midpoint of edge(v1,v2)
+            (face[0], [(vertices[face[1]][0]+vertices[face[2]][0])/2.0,
+                       (vertices[face[1]][1]+vertices[face[2]][1])/2.0,
+                       (vertices[face[1]][2]+vertices[face[2]][2])/2.0]),
+            (face[1], [(vertices[face[0]][0]+vertices[face[2]][0])/2.0,
+                       (vertices[face[0]][1]+vertices[face[2]][1])/2.0,
+                       (vertices[face[0]][2]+vertices[face[2]][2])/2.0]),
+            (face[2], [(vertices[face[0]][0]+vertices[face[1]][0])/2.0,
+                       (vertices[face[0]][1]+vertices[face[1]][1])/2.0,
+                       (vertices[face[0]][2]+vertices[face[1]][2])/2.0]),
+        ];
+        for (vi, mid) in &midpoints {
+            let al = arc_length(vertices[*vi], *mid);
+            // Median arc length contributes to the two edges adjacent to the vertex.
+            // The median LOD should boost those edges if the interior is more stretched.
+            let median_lod = snap_to_power_of_2((al * 16.0).ceil() as u32).min(512);
+            // Boost the edges opposite to the vertex (the edge the median crosses)
+            let edges_to_boost = match *vi {
+                v if v == face[0] => [0usize], // edge_a (opposite v0)
+                v if v == face[1] => [1],       // edge_b
+                _ => [2],                        // edge_c
+            };
+            for &local_idx in &edges_to_boost {
+                let (va, vb) = match local_idx {
+                    0 => (face[1], face[2]),
+                    1 => (face[0], face[2]),
+                    _ => (face[0], face[1]),
+                };
+                let key = if va < vb { (va, vb) } else { (vb, va) };
+                let current = edge_lod_map.get(&key).copied().unwrap_or(1);
+                edge_lod_map.insert(key, current.max(median_lod));
+            }
         }
     }
 
