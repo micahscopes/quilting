@@ -14,7 +14,8 @@ default = ["console_error_panic_hook"]
 quilting-core = { path = "../quilting-core" }
 quilting-mesh = { path = "../quilting-mesh" }
 quilting-shaders = { path = "../quilting-shaders" }
-wasm-bindgen = "0.2.92"
+quilting-spacetime = { path = "../quilting-spacetime" }
+wasm-bindgen = "=0.2.106"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = { version = "0.1.7", optional = true }

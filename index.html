@@ -558,7 +558,7 @@ function render() {
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), useHeatmap ? b.color : [0.85, 0.75, 0.65]);
       gl.uniform1f(gl.getUniformLocation(progMatcap,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progMatcap,'u_permIndex'), b.permIndex);
+      gl.uniform1i(gl.getUniformLocation(progMatcap,'u_permIndex'), 0);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -575,7 +575,7 @@ function render() {
     for (const b of drawBatches) {
       gl.uniform3fv(gl.getUniformLocation(progWire,'u_lodColor'), b.color);
       gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progWire,'u_permIndex'), b.permIndex);
+      gl.uniform1i(gl.getUniformLocation(progWire,'u_permIndex'), 0);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -590,7 +590,7 @@ function render() {
     gl.uniform1f(gl.getUniformLocation(progNormals,'u_globalMaxLogLod'), 1);
     for (const b of drawBatches) {
       gl.uniform1f(gl.getUniformLocation(progNormals,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progNormals,'u_permIndex'), b.permIndex);
+      gl.uniform1i(gl.getUniformLocation(progNormals,'u_permIndex'), 0);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }

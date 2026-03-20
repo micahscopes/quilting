@@ -18,7 +18,7 @@ fn main() {
         if needs_build {
             eprintln!("Building WASM...");
             let status = Command::new("wasm-pack")
-                .args(["build", "../quilting-wasm", "--target", "web", "--out-dir", "../../pkg"])
+                .args(["build", "../quilting-wasm", "--target", "web", "--dev", "--out-dir", "../../pkg"])
                 .current_dir(env!("CARGO_MANIFEST_DIR"))
                 .status();
 

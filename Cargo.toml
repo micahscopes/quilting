@@ -12,3 +12,10 @@ resolver = "2"
 
 [profile.release]
 opt-level = "s"
+
+# Fast release builds for iteration — use `cargo build --profile release-fast`
+[profile.release-fast]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 16
