@@ -145,7 +145,7 @@ fn estimate_face_curvature(inst: &FaceInstance) -> u32 {
     let h = (qb_mid - Quat::new(flat_mid.w, flat_mid.x, flat_mid.y, flat_mid.z)).norm();
 
     let raw_lod = (64.0 * h / l).ceil() as u32;
-    raw_lod.max(1).min(256)
+    raw_lod.max(1).min(512)
 }
 
 /// Estimate face LOD from transformed edge lengths.
@@ -160,7 +160,7 @@ fn estimate_face_lod_from_scale(inst: &FaceInstance) -> u32 {
     let max_edge = e01.max(e02).max(e12);
 
     let raw_lod = (max_edge * 16.0).ceil() as u32;
-    raw_lod.max(1).min(256)
+    raw_lod.max(1).min(512)
 }
 
 /// Snap to the nearest power of 2 (round up).

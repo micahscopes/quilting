@@ -521,7 +521,7 @@ async function update() {
     for (const key of missing) {
       const [a,b,c] = key.split(',').map(Number);
       // Cap: don't generate patches with any edge > 256 (too slow for Bridson)
-      if (a > 256 || b > 256 || c > 256) continue;
+      if (a > 512 || b > 512 || c > 512) continue;
       workerCall('generate_single', { a, b, c }).then(() => {
         if (!updating && !pendingUpdate) update();
       });
@@ -577,7 +577,7 @@ onresize = render;
 $('stats').textContent = 'Starting worker...';
 await workerCall('init', {});
 $('stats').textContent = 'Building atlas...';
-const r1 = await workerCall('build_atlas', { maxLodExp: 8, mode: 'hierarchical' });
+const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
 workerReady = true;
 $('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
 loadShape('cube');
