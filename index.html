@@ -107,7 +107,8 @@ layout(location=3) in vec4 a_p2;
 layout(location=4) in vec4 a_w0;
 layout(location=5) in vec4 a_w1;
 layout(location=6) in vec4 a_w2;
-layout(location=7) in vec4 a_lodInfo; // per-instance: (edge_lod_a, edge_lod_b, edge_lod_c, 0)
+layout(location=7) in vec4 a_lodInfo;   // per-instance: (edge_lod_a, edge_lod_b, edge_lod_c, 0)
+layout(location=8) in vec4 a_vertLod;   // per-instance: (vtx_lod_0, vtx_lod_1, vtx_lod_2, 0)
 uniform mat4 u_mvp;
 uniform mat4 u_mv;
 uniform int u_useQB;
@@ -189,10 +190,13 @@ void main(){
   n *= u_permParity;
   v_normal_vs = normalize(mat3(u_mv) * n);
 
-  // Density heatmap: use per-instance edge LODs for continuous cross-patch colors
-  vec3 faceLod = a_lodInfo.xyz;
-  float density = edgeDensity(a_bary, faceLod);
-  v_density = log2(max(density, 1.0)) / max(u_globalMaxLogLod, 1.0);
+  // Density heatmap: interpolate per-vertex LODs for smooth cross-patch colors.
+  // Vertex LODs are the max of all edges meeting at each mesh vertex,
+  // so adjacent faces sharing a vertex compute the same value there.
+  float vertDensity = a_bary.x * log2(max(a_vertLod.x, 1.0))
+                    + a_bary.y * log2(max(a_vertLod.y, 1.0))
+                    + a_bary.z * log2(max(a_vertLod.z, 1.0));
+  v_density = vertDensity / max(u_globalMaxLogLod, 1.0);
 
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
@@ -326,10 +330,10 @@ function makeVAO(baryData, idxData, instanceData) {
   const ib = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, ib);
   gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
-  // 7 vec4s per instance: p0,p1,p2,w0,w1,w2,lodInfo = 28 floats = 112 bytes
-  for (let i=0;i<7;i++) {
+  // 8 vec4s per instance: p0,p1,p2,w0,w1,w2,edgeLods,vertLods = 32 floats = 128 bytes
+  for (let i=0;i<8;i++) {
     gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,112,i*16);
+    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,128,i*16);
     gl.vertexAttribDivisor(1+i,1);
   }
   const eb = gl.createBuffer();

@@ -12,6 +12,9 @@ pub struct FaceInstance {
     /// edge_b = edge opposite vertex 1 (connecting verts 0,2)
     /// edge_c = edge opposite vertex 2 (connecting verts 0,1)
     pub edge_lods: [u32; 3],
+    /// Per-vertex LOD levels [v0, v1, v2] — max of all edges meeting at each vertex.
+    /// Used for smooth density visualization that's continuous across face boundaries.
+    pub vertex_lods: [u32; 3],
 }
 
 /// Compute per-face instance data with adaptive LOD.
@@ -36,7 +39,8 @@ pub fn compute_instances(
         FaceInstance {
             positions: [p0, p1, p2],
             weights: [w0, w1, w2],
-            edge_lods: [1, 1, 1], // placeholder, computed below
+            edge_lods: [1, 1, 1],
+            vertex_lods: [1, 1, 1],
         }
     }).collect();
 
@@ -86,6 +90,37 @@ pub fn compute_instances(
                 result[fi].edge_lods[local_idx] = snap_to_power_of_2(face_lods[fi]);
             }
         }
+    }
+
+    // Compute per-vertex LOD = max of all edges meeting at each mesh vertex.
+    // This gives a smooth density field that's continuous across face boundaries.
+    let mut vertex_max_lod: HashMap<usize, u32> = HashMap::new();
+    for (fi, face) in faces.iter().enumerate() {
+        // edge_a (opposite v0) connects v1,v2 → contributes to v1 and v2
+        // edge_b (opposite v1) connects v0,v2 → contributes to v0 and v2
+        // edge_c (opposite v2) connects v0,v1 → contributes to v0 and v1
+        let lods = result[fi].edge_lods;
+        for &vi in &[face[1], face[2]] {
+            let e = vertex_max_lod.entry(vi).or_insert(1);
+            *e = (*e).max(lods[0]);
+        }
+        for &vi in &[face[0], face[2]] {
+            let e = vertex_max_lod.entry(vi).or_insert(1);
+            *e = (*e).max(lods[1]);
+        }
+        for &vi in &[face[0], face[1]] {
+            let e = vertex_max_lod.entry(vi).or_insert(1);
+            *e = (*e).max(lods[2]);
+        }
+    }
+
+    // Write vertex LODs into each face instance
+    for (fi, face) in faces.iter().enumerate() {
+        result[fi].vertex_lods = [
+            *vertex_max_lod.get(&face[0]).unwrap_or(&1),
+            *vertex_max_lod.get(&face[1]).unwrap_or(&1),
+            *vertex_max_lod.get(&face[2]).unwrap_or(&1),
+        ];
     }
 
     result
@@ -149,11 +184,10 @@ fn snap_to_power_of_2(v: u32) -> u32 {
 }
 
 impl FaceInstance {
-    /// Pack as 28 f32s: [p0(4), p1(4), p2(4), w0(4), w1(4), w2(4), lod_a, lod_b, lod_c, pad]
-    /// The 7th vec4 carries per-face edge LODs so the vertex shader can compute
-    /// density from the correct face's LOD triple, not the batch uniform.
-    pub fn to_f32_array(&self) -> [f32; 28] {
-        let mut out = [0.0f32; 28];
+    /// Pack as 32 f32s (8 vec4s):
+    /// [p0(4), p1(4), p2(4), w0(4), w1(4), w2(4), edgeLods(3)+pad, vertexLods(3)+pad]
+    pub fn to_f32_array(&self) -> [f32; 32] {
+        let mut out = [0.0f32; 32];
         for (i, p) in self.positions.iter().enumerate() {
             out[i*4]   = p.w as f32;
             out[i*4+1] = p.x as f32;
@@ -166,10 +200,16 @@ impl FaceInstance {
             out[12+i*4+2] = w.y as f32;
             out[12+i*4+3] = w.z as f32;
         }
+        // vec4 #7: edge LODs
         out[24] = self.edge_lods[0] as f32;
         out[25] = self.edge_lods[1] as f32;
         out[26] = self.edge_lods[2] as f32;
-        out[27] = 0.0; // padding to vec4 alignment
+        out[27] = 0.0;
+        // vec4 #8: vertex LODs (for smooth density visualization)
+        out[28] = self.vertex_lods[0] as f32;
+        out[29] = self.vertex_lods[1] as f32;
+        out[30] = self.vertex_lods[2] as f32;
+        out[31] = 0.0;
         out
     }
 }
