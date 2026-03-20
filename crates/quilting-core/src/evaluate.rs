@@ -43,20 +43,25 @@ pub fn compute_instances(
         }
     }).collect();
 
-    // Pre-compute conformal scale at each vertex: |F'(v)|² = C / |cv+d|⁴
-    // C = |ad-bc|² is constant for the transformation.
-    let c_sq = (transform.a * transform.d - transform.b * transform.c).norm_sq();
-    let vertex_scales: Vec<f64> = vertices.iter().map(|v| {
+    // Per-EDGE LOD from the exact transformed arc length under the Möbius map.
+    //
+    // The conformal scale factor |F'(x)| = sqrt(C)/|cx+d|² where C = |ad-bc|².
+    // The transformed arc length of edge (v0→v1) is:
+    //   L' = sqrt(C) × |v1-v0| × ∫₀¹ 1/|d0 + t(d1-d0)|² dt
+    // where di = c·vi + d.
+    //
+    // |d0+t(d1-d0)|² = Q(t) = a·t² + b·t + c (positive definite quadratic)
+    // ∫₀¹ 1/Q(t) dt = (2/√Δ)[arctan((2a+b)/√Δ) - arctan(b/√Δ)]
+    // where Δ = 4ac - b².
+
+    let sqrt_c = (transform.a * transform.d - transform.b * transform.c).norm();
+
+    // Pre-compute di = c·vi + d for each vertex
+    let denom_quats: Vec<Quat> = vertices.iter().map(|v| {
         let p = Quat::from_point(v[0], v[1], v[2]);
-        let denom = transform.c * p + transform.d;
-        let denom_sq = denom.norm_sq();
-        if denom_sq < 1e-20 { return 1e10; }
-        c_sq / (denom_sq * denom_sq)
+        transform.c * p + transform.d
     }).collect();
 
-    // Per-EDGE LOD from the conformal scale at both endpoints.
-    // The edge stretches by sqrt(scale) at each end. Use the max.
-    // LOD = sqrt(max_scale) × original_edge_length × density_factor
     let mut edge_lod_map: HashMap<(usize, usize), u32> = HashMap::new();
     for face in faces {
         let edges = [
@@ -68,22 +73,39 @@ pub fn compute_instances(
             let key = if va < vb { (va, vb) } else { (vb, va) };
             if edge_lod_map.contains_key(&key) { continue; }
 
+            let d0 = denom_quats[va];
+            let d1 = denom_quats[vb];
+            let diff = d1 - d0;
+
+            // Quadratic coefficients for |d0 + t·diff|²
+            let qa = diff.norm_sq();           // |d1-d0|²
+            let qb = 2.0 * (d0 * diff.conj()).re(); // 2·Re(d0·conj(diff))
+            let qc = d0.norm_sq();             // |d0|²
+
+            // Discriminant (always positive for |quaternion|²)
+            let delta = (4.0 * qa * qc - qb * qb).max(1e-30);
+            let sqrt_delta = delta.sqrt();
+
+            // ∫₀¹ 1/Q(t) dt
+            let integral = if sqrt_delta > 1e-15 {
+                let inv_sd = 2.0 / sqrt_delta;
+                inv_sd * (((2.0 * qa + qb) / sqrt_delta).atan() - (qb / sqrt_delta).atan())
+            } else {
+                // Degenerate: d0 ≈ d1, constant scale
+                1.0 / qc.max(1e-20)
+            };
+
             // Original edge length
             let dx = vertices[va][0] - vertices[vb][0];
             let dy = vertices[va][1] - vertices[vb][1];
             let dz = vertices[va][2] - vertices[vb][2];
             let orig_len = (dx*dx + dy*dy + dz*dz).sqrt();
 
-            // Max linear scale factor along this edge
-            let scale_a = vertex_scales[va].sqrt();
-            let scale_b = vertex_scales[vb].sqrt();
-            let max_scale = scale_a.max(scale_b);
+            // Exact transformed arc length
+            let arc_len = sqrt_c * orig_len * integral;
 
-            // Estimated transformed edge length ≈ orig_len × max_scale
-            let est_len = orig_len * max_scale;
-
-            // 16 subdivisions per unit of transformed length
-            let raw = (est_len * 16.0).ceil() as u32;
+            // 16 subdivisions per unit of transformed arc length
+            let raw = (arc_len * 16.0).ceil() as u32;
             edge_lod_map.insert(key, snap_to_power_of_2(raw.max(1).min(512)));
         }
     }
