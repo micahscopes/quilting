@@ -81,8 +81,33 @@ pub fn compute_instances(
     }).collect();
 
     // Per-edge LOD from screen-space edge lengths.
-    // Target: ~1 tessellation subdivision per 8 pixels of screen edge.
     let target_pixels_per_sub = 4.0;
+
+    // Compute the Möbius pole: the point where the transform is singular.
+    // For F(x) = (ax+b)(cx+d)⁻¹, the pole is at x = -c⁻¹d.
+    let pole: Option<[f64; 3]> = if transform.c.norm_sq() > 1e-20 {
+        let p = -(transform.c.inv() * transform.d);
+        Some(p.to_point())
+    } else {
+        None // c≈0: affine transform, no pole
+    };
+
+    // Check if a line segment (p0→p1) passes within `threshold` of the pole.
+    let segment_near_pole = |p0: [f64; 3], p1: [f64; 3], threshold: f64| -> bool {
+        let Some(pole) = pole else { return false; };
+        let d = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+        let f = [p0[0]-pole[0], p0[1]-pole[1], p0[2]-pole[2]];
+        let a = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
+        if a < 1e-20 { // degenerate edge
+            return f[0]*f[0]+f[1]*f[1]+f[2]*f[2] < threshold*threshold;
+        }
+        // t of closest point on segment to pole
+        let t = -(f[0]*d[0]+f[1]*d[1]+f[2]*d[2]) / a;
+        let t = t.clamp(0.0, 1.0);
+        let closest = [p0[0]+t*d[0], p0[1]+t*d[1], p0[2]+t*d[2]];
+        let dist_sq = (closest[0]-pole[0]).powi(2)+(closest[1]-pole[1]).powi(2)+(closest[2]-pole[2]).powi(2);
+        dist_sq < threshold * threshold
+    };
 
     // Measure screen-space arc length between two mesh vertices.
     // Samples the QB-transformed edge at multiple points to capture curvature.
@@ -95,7 +120,6 @@ pub fn compute_instances(
                 let n_samples = 9;
                 let mut total = 0.0;
                 let mut prev = s.project(pa);
-                let mut near_singularity = false;
                 for i in 1..=n_samples {
                     let t = i as f64 / n_samples as f64;
                     let orig = [
@@ -104,9 +128,6 @@ pub fn compute_instances(
                         vertices[va][2]*(1.0-t) + vertices[vb][2]*t,
                     ];
                     let p = Quat::from_point(orig[0], orig[1], orig[2]);
-                    // Check singularity proximity: |cx+d|² small = near singularity
-                    let denom = transform.c * p + transform.d;
-                    if denom.norm_sq() < 0.01 { near_singularity = true; }
                     let tp = transform.apply(p).to_point();
                     let curr = s.project(tp);
                     if let (Some(p1), Some(p2)) = (prev, curr) {
@@ -117,7 +138,7 @@ pub fn compute_instances(
                     }
                     prev = curr;
                 }
-                if near_singularity { f64::MAX } else { total }
+                total
             }
             None => {
                 let dx = pa[0]-pb[0]; let dy = pa[1]-pb[1]; let dz = pa[2]-pb[2];
@@ -137,9 +158,14 @@ pub fn compute_instances(
             let key = if va < vb { (va, vb) } else { (vb, va) };
             if edge_lod_map.contains_key(&key) { continue; }
 
-            let pixels = screen_arc_len(va, vb);
-            let raw = (pixels / target_pixels_per_sub).ceil() as u32;
-            edge_lod_map.insert(key, snap_to_power_of_2(raw.max(1).min(512)));
+            // If the edge passes through the pole → max LOD
+            let lod = if segment_near_pole(vertices[va], vertices[vb], 0.5) {
+                512
+            } else {
+                let pixels = screen_arc_len(va, vb);
+                snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(512)
+            };
+            edge_lod_map.insert(key, lod.max(1));
         }
 
         // Check medians: screen-space arc from each vertex through center to opposite edge midpoint.
@@ -155,7 +181,11 @@ pub fn compute_instances(
                 (vertices[vj][1]+vertices[vk][1])/2.0,
                 (vertices[vj][2]+vertices[vk][2])/2.0,
             ];
-            // Sample the median path through the Möbius transform
+            // If median passes through the pole → max LOD
+            if segment_near_pole(orig_vi, orig_mid, 0.5) {
+                max_median_lod = 512;
+                continue;
+            }
             let pixels = match screen {
                 Some(s) => {
                     let n = 5;
