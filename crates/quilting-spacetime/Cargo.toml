@@ -1,0 +1,9 @@
+[package]
+name = "quilting-spacetime"
+version = "0.1.0"
+edition = "2021"
+description = "4D spacetime mesh data structures and hyperplane slicing"
+
+[dependencies]
+quilting-mesh = { path = "../quilting-mesh" }
+quilting-core = { path = "../quilting-core" }

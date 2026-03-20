@@ -411,3 +411,26 @@ struct MeshBatches {
     num_batches: usize,
     timings: [f64; 3], // [orig_ms, lod_ms, batch_ms]
 }
+
+// --- Shader compilation via quilting-shaders ---
+
+/// Compile the production vertex shader (WGSL -> GLSL ES 300).
+/// Returns the GLSL source string for use with WebGL2.
+#[wasm_bindgen]
+pub fn compile_vertex_shader() -> String {
+    match quilting_shaders::compile_vertex_glsl() {
+        Ok(glsl) => glsl,
+        Err(e) => format!("// ERROR: {}", e),
+    }
+}
+
+/// Compile a production fragment shader (WGSL -> GLSL ES 300).
+/// mode: "matcap", "wire", or "normals"
+/// Returns the GLSL source string for use with WebGL2.
+#[wasm_bindgen]
+pub fn compile_fragment_shader(mode: &str) -> String {
+    match quilting_shaders::compile_fragment_glsl(mode) {
+        Ok(glsl) => glsl,
+        Err(e) => format!("// ERROR: {}", e),
+    }
+}

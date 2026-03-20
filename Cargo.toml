@@ -6,6 +6,7 @@ members = [
     "crates/quilting-mesh",
     "crates/quilting-shaders",
     "crates/quilting-wasm",
+    "crates/quilting-spacetime",
 ]
 resolver = "2"
 

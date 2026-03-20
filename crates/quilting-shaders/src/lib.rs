@@ -5,11 +5,18 @@ use std::collections::HashMap;
 
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
+    // Library modules (imported by other shaders)
     pub const QUATERNION: &str = include_str!("../shaders/math/quaternion.wgsl");
     pub const QB_EVAL: &str = include_str!("../shaders/surface/qb_eval.wgsl");
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
+
+    // Entry-point shaders (compiled to GLSL for WebGL2)
+    pub const VERTEX_MAIN: &str = include_str!("../shaders/vertex/main.wgsl");
+    pub const FRAG_MATCAP: &str = include_str!("../shaders/fragment/matcap.wgsl");
+    pub const FRAG_WIRE: &str = include_str!("../shaders/fragment/wire.wgsl");
+    pub const FRAG_NORMALS: &str = include_str!("../shaders/fragment/normals.wgsl");
 }
 
 /// Build a naga-oil Composer preloaded with all quilting shader modules.
@@ -92,6 +99,25 @@ pub fn emit_glsl(
     Ok(output)
 }
 
+/// Compile the main vertex shader to GLSL ES 300.
+pub fn compile_vertex_glsl() -> Result<String, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::VERTEX_MAIN, HashMap::new())?;
+    emit_glsl(&module, naga::ShaderStage::Vertex, "vs_main")
+}
+
+/// Compile a fragment shader to GLSL ES 300 by render mode name.
+/// Supported modes: "matcap", "wire", "normals"
+pub fn compile_fragment_glsl(mode: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let (source, entry) = match mode {
+        "matcap" => (sources::FRAG_MATCAP, "fs_matcap"),
+        "wire" => (sources::FRAG_WIRE, "fs_wire"),
+        "normals" => (sources::FRAG_NORMALS, "fs_normals"),
+        _ => return Err(format!("unknown fragment mode: {}", mode).into()),
+    };
+    let module = compile_shader(source, HashMap::new())?;
+    emit_glsl(&module, naga::ShaderStage::Fragment, entry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +126,40 @@ mod tests {
     fn composer_loads_all_modules() {
         let composer = create_composer();
         assert!(composer.is_ok(), "Failed: {:?}", composer.err());
+    }
+
+    #[test]
+    fn compile_vertex_shader_to_glsl() {
+        let glsl = compile_vertex_glsl();
+        assert!(glsl.is_ok(), "vertex shader failed: {:?}", glsl.err());
+        let code = glsl.unwrap();
+        assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
+        assert!(code.contains("void main()"), "should have main()");
+    }
+
+    #[test]
+    fn compile_fragment_matcap_to_glsl() {
+        let glsl = compile_fragment_glsl("matcap");
+        assert!(glsl.is_ok(), "matcap fragment failed: {:?}", glsl.err());
+        let code = glsl.unwrap();
+        assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
+    }
+
+    #[test]
+    fn compile_fragment_wire_to_glsl() {
+        let glsl = compile_fragment_glsl("wire");
+        assert!(glsl.is_ok(), "wire fragment failed: {:?}", glsl.err());
+    }
+
+    #[test]
+    fn compile_fragment_normals_to_glsl() {
+        let glsl = compile_fragment_glsl("normals");
+        assert!(glsl.is_ok(), "normals fragment failed: {:?}", glsl.err());
+    }
+
+    #[test]
+    fn unknown_mode_returns_error() {
+        let result = compile_fragment_glsl("nonexistent");
+        assert!(result.is_err());
     }
 }

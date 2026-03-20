@@ -630,6 +630,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quilting-spacetime"
+version = "0.1.0"
+dependencies = [
+ "quilting-core",
+ "quilting-mesh",
+]
+
+[[package]]
 name = "quilting-wasm"
 version = "0.1.0"
 dependencies = [
@@ -638,6 +646,7 @@ dependencies = [
  "js-sys",
  "quilting-core",
  "quilting-mesh",
+ "quilting-shaders",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
