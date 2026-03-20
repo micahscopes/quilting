@@ -248,12 +248,17 @@ pub fn compute_mesh_batches(
         None
     };
 
+    let t0 = js_sys::Date::now();
+
     let instances_orig = compute_instances_no_lod(&verts, &tris);
+    let t1 = js_sys::Date::now();
+
     let instances_xform = MESH_CACHE.with(|cache_cell| {
         let cache = cache_cell.borrow();
         let mesh_ref = cache.as_ref().map(|c| &c.half_edge);
         compute_instances(&verts, &tris, &transform, screen.as_ref(), mesh_ref)
     });
+    let t2 = js_sys::Date::now();
 
     // Group by (canonical LOD, perm_index)
     let mut groups: HashMap<([u32; 3], usize), Vec<usize>> = HashMap::new();
@@ -363,11 +368,23 @@ pub fn compute_mesh_batches(
         }
     });
 
-    serde_wasm_bindgen::to_value(&MeshBatches {
+    let t3 = js_sys::Date::now();
+
+    let result = serde_wasm_bindgen::to_value(&MeshBatches {
         batches,
         total_faces: tris.len(),
         num_batches: groups.len(),
-    }).unwrap()
+        timings: [t1 - t0, t2 - t1, t3 - t2],
+    }).unwrap();
+
+    let t4 = js_sys::Date::now();
+    // Log timings: [orig_instances_ms, xform_lod_ms, batching_ms, serde_ms]
+    web_sys::console::log_1(&format!(
+        "compute_mesh_batches: orig={:.1}ms lod={:.1}ms batch={:.1}ms serde={:.1}ms total={:.1}ms",
+        t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0
+    ).into());
+
+    result
 }
 
 #[derive(serde::Serialize)]
@@ -392,4 +409,5 @@ struct MeshBatches {
     batches: Vec<BatchData>,
     total_faces: usize,
     num_batches: usize,
+    timings: [f64; 3], // [orig_ms, lod_ms, batch_ms]
 }
