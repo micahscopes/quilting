@@ -43,6 +43,7 @@ input[type=range]{flex:1;accent-color:#e94560}
       <button class="a" data-v="matcap">Matcap</button>
       <button data-v="wire">Wire</button>
       <button data-v="both">Both</button>
+      <button data-v="normals">Normals</button>
     </div>
   </div>
   <div><label>Resolution (0=auto)</label>
@@ -265,11 +266,24 @@ void main(){
   }
 }`;
 
+const FS_NORMALS = `#version 300 es
+precision mediump float;
+in vec3 v_normal_vs;
+in float v_density;
+out vec4 o;
+void main(){
+  // Map normal xyz from [-1,1] to [0,1] for visualization
+  vec3 n = normalize(v_normal_vs);
+  n = gl_FrontFacing ? n : -n;
+  o = vec4(n * 0.5 + 0.5, 1.0);
+}`;
+
 function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error('SHADER:',gl.getShaderInfoLog(s));return s;}
 function mkProg(vs,fs){const p=gl.createProgram();gl.attachShader(p,mkS(vs,gl.VERTEX_SHADER));gl.attachShader(p,mkS(fs,gl.FRAGMENT_SHADER));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error('LINK:',gl.getProgramInfoLog(p));return p;}
 
 const progMatcap = mkProg(VS, FS_MATCAP);
 const progWire = mkProg(VS, FS_WIRE);
+const progNormals = mkProg(VS, FS_NORMALS);
 
 // LOD → vivid color via HSL rainbow
 function lodColor(lod) {
@@ -372,6 +386,7 @@ function render() {
 
   const drawWire = renderMode === 'wire' || renderMode === 'both';
   const drawSolid = renderMode === 'matcap' || renderMode === 'both';
+  const drawNormals = renderMode === 'normals';
 
   // Original wireframe (always dim)
   if (drawWire) {
@@ -417,6 +432,20 @@ function render() {
       gl.uniform3f(gl.getUniformLocation(progWire,'u_edgeLod'), b.lod[0], b.lod[1], b.lod[2]);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
+    }
+  }
+
+  // Normals visualization
+  if (drawNormals) {
+    gl.useProgram(progNormals);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progNormals,'u_mvp'), false, mvp);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progNormals,'u_mv'), false, view);
+    gl.uniform1i(gl.getUniformLocation(progNormals,'u_useQB'), 1);
+    gl.uniform3f(gl.getUniformLocation(progNormals,'u_edgeLod'), 1, 1, 1);
+    gl.uniform1f(gl.getUniformLocation(progNormals,'u_globalMaxLogLod'), 1);
+    for (const b of drawBatches) {
+      gl.bindVertexArray(b.vaoXformTri);
+      gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
   }
 
