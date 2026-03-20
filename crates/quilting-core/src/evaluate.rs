@@ -149,8 +149,11 @@ fn snap_to_power_of_2(v: u32) -> u32 {
 }
 
 impl FaceInstance {
-    pub fn to_f32_array(&self) -> [f32; 24] {
-        let mut out = [0.0f32; 24];
+    /// Pack as 28 f32s: [p0(4), p1(4), p2(4), w0(4), w1(4), w2(4), lod_a, lod_b, lod_c, pad]
+    /// The 7th vec4 carries per-face edge LODs so the vertex shader can compute
+    /// density from the correct face's LOD triple, not the batch uniform.
+    pub fn to_f32_array(&self) -> [f32; 28] {
+        let mut out = [0.0f32; 28];
         for (i, p) in self.positions.iter().enumerate() {
             out[i*4]   = p.w as f32;
             out[i*4+1] = p.x as f32;
@@ -163,6 +166,10 @@ impl FaceInstance {
             out[12+i*4+2] = w.y as f32;
             out[12+i*4+3] = w.z as f32;
         }
+        out[24] = self.edge_lods[0] as f32;
+        out[25] = self.edge_lods[1] as f32;
+        out[26] = self.edge_lods[2] as f32;
+        out[27] = 0.0; // padding to vec4 alignment
         out
     }
 }
