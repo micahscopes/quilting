@@ -44,10 +44,10 @@ pub fn compute_instances(
         }
     }).collect();
 
-    // Estimate per-face LOD from conformal scale + curvature
-    let face_lods: Vec<u32> = faces.iter().enumerate().map(|(fi, face)| {
-        let scale_lod = estimate_face_lod_from_transform(vertices, face, transform);
-        let curvature_lod = estimate_face_curvature(&instances[fi]);
+    // Estimate per-face LOD from scale + curvature
+    let face_lods: Vec<u32> = instances.iter().map(|inst| {
+        let scale_lod = estimate_face_lod_from_scale(inst);
+        let curvature_lod = estimate_face_curvature(inst);
         scale_lod.max(curvature_lod)
     }).collect();
 
@@ -148,39 +148,18 @@ fn estimate_face_curvature(inst: &FaceInstance) -> u32 {
     raw_lod.max(1).min(256)
 }
 
-/// Estimate face LOD from Möbius conformal scale factor.
+/// Estimate face LOD from transformed edge lengths.
 ///
-/// For F(x) = (ax+b)(cx+d)⁻¹, the conformal scale at x is 1/|cx+d|².
-/// Faces near the singularity (where |cx+d| → 0) get blown up and
-/// need higher tessellation. This is cheap: one quaternion multiply
-/// + dot product per vertex.
-fn estimate_face_lod_from_transform(
-    vertices: &[[f64; 3]],
-    face: &[usize; 3],
-    transform: &Mobius,
-) -> u32 {
-    // Conformal scale at each vertex: 1/|cx+d|²
-    let mut max_scale = 0.0f64;
-    for &vi in face {
-        let p = Quat::from_point(vertices[vi][0], vertices[vi][1], vertices[vi][2]);
-        let denom = transform.c * p + transform.d;
-        let scale = 1.0 / denom.norm_sq().max(1e-20);
-        max_scale = max_scale.max(scale);
-    }
+/// Simple and direct: longer edges need more subdivisions.
+/// Target ~8 subdivisions per unit of transformed edge length.
+fn estimate_face_lod_from_scale(inst: &FaceInstance) -> u32 {
+    let [p0, p1, p2] = inst.positions;
+    let e01 = (p0 - p1).norm();
+    let e02 = (p0 - p2).norm();
+    let e12 = (p1 - p2).norm();
+    let max_edge = e01.max(e02).max(e12);
 
-    // Also check the face centroid for singularities inside the face
-    let cx = (vertices[face[0]][0] + vertices[face[1]][0] + vertices[face[2]][0]) / 3.0;
-    let cy = (vertices[face[0]][1] + vertices[face[1]][1] + vertices[face[2]][1]) / 3.0;
-    let cz = (vertices[face[0]][2] + vertices[face[1]][2] + vertices[face[2]][2]) / 3.0;
-    let pc = Quat::from_point(cx, cy, cz);
-    let denom_c = transform.c * pc + transform.d;
-    let scale_c = 1.0 / denom_c.norm_sq().max(1e-20);
-    max_scale = max_scale.max(scale_c);
-
-    // LOD proportional to sqrt of area scale (since area scales as |F'|²)
-    // Base: LOD 2 at unit scale, doubles per 4x area increase
-    let raw_lod = (2.0 * max_scale.sqrt()).ceil() as u32;
-
+    let raw_lod = (max_edge * 8.0).ceil() as u32;
     raw_lod.max(1).min(256)
 }
 
