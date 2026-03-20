@@ -159,17 +159,17 @@ fn estimate_face_lod_from_scale(inst: &FaceInstance, transform: &Mobius, orig_ve
     // Edge-length LOD: 16 subdivisions per unit
     let edge_lod = max_edge * 16.0;
 
-    // Singularity LOD: 1/|cx+d|² blows up near the singularity.
-    // Use the min |cx+d|² across all face vertices + centroid.
+    // Singularity LOD: inversely proportional to |cx+d|².
+    // |cx+d|² is the denominator of the Möbius scale factor.
+    // As it → 0, the face blows up toward infinity.
     let mut min_denom_sq = f64::MAX;
     for &vi in face {
         let p = Quat::from_point(orig_verts[vi][0], orig_verts[vi][1], orig_verts[vi][2]);
         let denom = transform.c * p + transform.d;
         min_denom_sq = min_denom_sq.min(denom.norm_sq());
     }
-    // Singularity LOD: inversely proportional to min |cx+d|
-    // At |cx+d|=1 → LOD 4, at |cx+d|=0.1 → LOD 40, at |cx+d|=0.01 → LOD 400
-    let singularity_lod = 4.0 / min_denom_sq.sqrt().max(1e-10);
+    // Aggressive: LOD ∝ 1/|cx+d|². At |cx+d|=0.4 → LOD 156, at |cx+d|=0.1 → LOD 2500 (capped)
+    let singularity_lod = 25.0 / min_denom_sq.max(1e-10);
 
     let raw_lod = edge_lod.max(singularity_lod).ceil() as u32;
     raw_lod.max(1).min(512)
