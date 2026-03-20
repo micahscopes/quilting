@@ -82,7 +82,7 @@ pub fn compute_instances(
 
     // Per-edge LOD from screen-space edge lengths.
     // Target: ~1 tessellation subdivision per 8 pixels of screen edge.
-    let target_pixels_per_sub = 8.0;
+    let target_pixels_per_sub = 4.0;
 
     // Measure screen-space arc length between two mesh vertices.
     // Samples the QB-transformed edge at multiple points to capture curvature.
