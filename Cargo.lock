@@ -437,11 +437,16 @@ dependencies = [
  "bincode",
  "delaunator",
  "distressed-blue-noise",
+ "quilting-mesh",
  "rand",
  "rand_pcg",
  "rayon",
  "serde",
 ]
+
+[[package]]
+name = "quilting-mesh"
+version = "0.1.0"
 
 [[package]]
 name = "quilting-shaders"

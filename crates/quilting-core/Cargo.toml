@@ -9,6 +9,7 @@ default = []
 parallel = ["rayon", "distressed-blue-noise/parallel"]
 
 [dependencies]
+quilting-mesh = { path = "../quilting-mesh" }
 distressed-blue-noise = { path = "../distressed-blue-noise" }
 delaunator = "1.0"
 serde = { version = "1", features = ["derive"] }

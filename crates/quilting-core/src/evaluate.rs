@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::quaternion::{Quat, Mobius};
+use quilting_mesh::HalfEdgeMesh;
 
 /// Per-face instance data for instanced rendering.
 #[derive(Debug, Clone)]
@@ -147,16 +147,43 @@ pub fn compute_instances(
         }
     };
 
-    let mut edge_lod_map: HashMap<(usize, usize), u32> = HashMap::new();
-    for face in faces {
-        let edges = [
-            (face[1], face[2]),
-            (face[0], face[2]),
-            (face[0], face[1]),
-        ];
-        for &(va, vb) in &edges {
-            let key = if va < vb { (va, vb) } else { (vb, va) };
-            if edge_lod_map.contains_key(&key) { continue; }
+    // Build half-edge mesh for O(1) adjacency lookups.
+    // Convert face indices to u32 for the mesh builder.
+    let faces_u32: Vec<[u32; 3]> = faces.iter()
+        .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+        .collect();
+    let mesh = HalfEdgeMesh::from_triangles(vertices.len() as u32, &faces_u32);
+    let num_half_edges = mesh.half_edges.len();
+
+    // Edge LOD stored per half-edge, indexed by canonical edge ID:
+    //   interior edge: min(he_idx, twin_idx)
+    //   boundary edge: he_idx
+    // Both half-edges of a shared edge map to the same canonical slot,
+    // so consistency is automatic — no HashMap needed.
+    let mut edge_lods: Vec<u32> = vec![0; num_half_edges];
+
+    // Helper: canonical edge index for a half-edge.
+    // Unpack Option<NonZeroU32> twin (stored as value+1 for niche optimization).
+    let canonical_edge = |he_idx: usize| -> usize {
+        match mesh.half_edges[he_idx].twin {
+            Some(nz) => he_idx.min((nz.get() - 1) as usize),
+            None => he_idx,
+        }
+    };
+
+    let nf = mesh.num_faces as usize;
+    for fi in 0..nf {
+        let face = faces[fi];
+        // Half-edges for this face: fi*3+0 (v0->v1), fi*3+1 (v1->v2), fi*3+2 (v2->v0)
+        let he_indices = [fi * 3, fi * 3 + 1, fi * 3 + 2];
+
+        for &he_idx in &he_indices {
+            let canon = canonical_edge(he_idx);
+            if edge_lods[canon] != 0 { continue; } // already computed by twin's face
+
+            let (va, vb) = mesh.edge_vertices(he_idx as u32);
+            let va = va as usize;
+            let vb = vb as usize;
 
             // If the edge passes through the pole → max LOD
             let lod = if segment_near_pole(vertices[va], vertices[vb], 0.5) {
@@ -165,7 +192,7 @@ pub fn compute_instances(
                 let pixels = screen_arc_len(va, vb);
                 snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(512)
             };
-            edge_lod_map.insert(key, lod.max(1));
+            edge_lods[canon] = lod.max(1);
         }
 
         // Check medians: screen-space arc from each vertex through center to opposite edge midpoint.
@@ -223,62 +250,55 @@ pub fn compute_instances(
         }
         // Floor all edges of this face at the max median LOD
         if max_median_lod > 1 {
-            for &(va, vb) in &edges {
-                let key = if va < vb { (va, vb) } else { (vb, va) };
-                let current = edge_lod_map.get(&key).copied().unwrap_or(1);
-                edge_lod_map.insert(key, current.max(max_median_lod));
+            for &he_idx in &he_indices {
+                let canon = canonical_edge(he_idx);
+                edge_lods[canon] = edge_lods[canon].max(max_median_lod);
             }
         }
     }
 
-    // The edge_lod_map is already shared across faces — a shared edge
-    // gets one value that both faces read. No propagation needed for
-    // edge consistency. The median floor may create within-face variation
-    // (e.g., [512, 4, 4]) but that's correct: the 512 edge is near the
-    // singularity and needs dense tessellation, the others don't.
-
-    // Write per-edge LODs into each face instance
+    // Write per-edge LODs into each face instance.
+    // Mapping from FaceInstance edge_lods index to half-edge:
+    //   edge_lods[0] (opposite v0) = he fi*3+1 (v1->v2)
+    //   edge_lods[1] (opposite v1) = he fi*3+2 (v2->v0)
+    //   edge_lods[2] (opposite v2) = he fi*3+0 (v0->v1)
     let mut result = instances;
-    for (fi, face) in faces.iter().enumerate() {
-        let edges = [
-            (face[1], face[2]),
-            (face[0], face[2]),
-            (face[0], face[1]),
+    for fi in 0..nf {
+        let he_base = fi * 3;
+        result[fi].edge_lods = [
+            edge_lods[canonical_edge(he_base + 1)],
+            edge_lods[canonical_edge(he_base + 2)],
+            edge_lods[canonical_edge(he_base)],
         ];
-        for (local_idx, &(va, vb)) in edges.iter().enumerate() {
-            let key = if va < vb { (va, vb) } else { (vb, va) };
-            result[fi].edge_lods[local_idx] = *edge_lod_map.get(&key).unwrap_or(&1);
-        }
     }
 
     // Compute per-vertex LOD = max of all edges meeting at each mesh vertex.
-    // This gives a smooth density field that's continuous across face boundaries.
-    let mut vertex_max_lod: HashMap<usize, u32> = HashMap::new();
-    for (fi, face) in faces.iter().enumerate() {
+    // Vec indexed by vertex ID instead of HashMap.
+    let mut vertex_max_lod: Vec<u32> = vec![1; vertices.len()];
+    for fi in 0..nf {
+        let face = faces[fi];
+        let lods = result[fi].edge_lods;
         // edge_a (opposite v0) connects v1,v2 → contributes to v1 and v2
         // edge_b (opposite v1) connects v0,v2 → contributes to v0 and v2
         // edge_c (opposite v2) connects v0,v1 → contributes to v0 and v1
-        let lods = result[fi].edge_lods;
         for &vi in &[face[1], face[2]] {
-            let e = vertex_max_lod.entry(vi).or_insert(1);
-            *e = (*e).max(lods[0]);
+            vertex_max_lod[vi] = vertex_max_lod[vi].max(lods[0]);
         }
         for &vi in &[face[0], face[2]] {
-            let e = vertex_max_lod.entry(vi).or_insert(1);
-            *e = (*e).max(lods[1]);
+            vertex_max_lod[vi] = vertex_max_lod[vi].max(lods[1]);
         }
         for &vi in &[face[0], face[1]] {
-            let e = vertex_max_lod.entry(vi).or_insert(1);
-            *e = (*e).max(lods[2]);
+            vertex_max_lod[vi] = vertex_max_lod[vi].max(lods[2]);
         }
     }
 
     // Write vertex LODs into each face instance
-    for (fi, face) in faces.iter().enumerate() {
+    for fi in 0..nf {
+        let face = faces[fi];
         result[fi].vertex_lods = [
-            *vertex_max_lod.get(&face[0]).unwrap_or(&1),
-            *vertex_max_lod.get(&face[1]).unwrap_or(&1),
-            *vertex_max_lod.get(&face[2]).unwrap_or(&1),
+            vertex_max_lod[face[0]],
+            vertex_max_lod[face[1]],
+            vertex_max_lod[face[2]],
         ];
     }
 
@@ -359,6 +379,7 @@ mod tests {
 
     #[test]
     fn adjacent_edges_match() {
+        use std::collections::HashMap;
         let (verts, faces) = shapes::icosahedron();
         let m = Mobius::sphere_reflection(Quat::from_point(0.3, 0.0, 0.0), 1.5);
         let instances = compute_instances(&verts, &faces, &m, None);

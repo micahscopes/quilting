@@ -2,6 +2,7 @@
 members = [
     "crates/distressed-blue-noise",
     "crates/quilting-core",
+    "crates/quilting-mesh",
     "crates/quilting-shaders",
     "crates/quilting-wasm",
 ]
