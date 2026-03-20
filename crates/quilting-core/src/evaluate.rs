@@ -92,30 +92,32 @@ pub fn compute_instances(
 
         match screen {
             Some(s) => {
-                // Sample at 5 points along the edge for a decent polyline approximation
-                let n_samples = 5;
+                let n_samples = 9;
                 let mut total = 0.0;
                 let mut prev = s.project(pa);
+                let mut near_singularity = false;
                 for i in 1..=n_samples {
                     let t = i as f64 / n_samples as f64;
-                    // Interpolate in original space, then transform
                     let orig = [
                         vertices[va][0]*(1.0-t) + vertices[vb][0]*t,
                         vertices[va][1]*(1.0-t) + vertices[vb][1]*t,
                         vertices[va][2]*(1.0-t) + vertices[vb][2]*t,
                     ];
                     let p = Quat::from_point(orig[0], orig[1], orig[2]);
+                    // Check singularity proximity: |cx+d|² small = near singularity
+                    let denom = transform.c * p + transform.d;
+                    if denom.norm_sq() < 0.01 { near_singularity = true; }
                     let tp = transform.apply(p).to_point();
                     let curr = s.project(tp);
                     if let (Some(p1), Some(p2)) = (prev, curr) {
                         let dx = p2[0]-p1[0]; let dy = p2[1]-p1[1];
                         total += (dx*dx+dy*dy).sqrt();
                     } else {
-                        return f64::MAX; // behind camera → max LOD
+                        return f64::MAX;
                     }
                     prev = curr;
                 }
-                total
+                if near_singularity { f64::MAX } else { total }
             }
             None => {
                 let dx = pa[0]-pb[0]; let dy = pa[1]-pb[1]; let dz = pa[2]-pb[2];
