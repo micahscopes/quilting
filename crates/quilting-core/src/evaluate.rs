@@ -174,7 +174,7 @@ fn estimate_face_lod(inst: &FaceInstance) -> u32 {
     // Combined: take the max of curvature-driven and scale-driven LOD
     let raw_lod = (curvature_lod.max(scale_lod)).ceil() as u32;
 
-    raw_lod.max(1).min(1024)
+    raw_lod.max(1).min(256) // cap to atlas max
 }
 
 /// Snap to the nearest power of 2 (round up).
