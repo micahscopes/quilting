@@ -479,9 +479,17 @@ function uploadBatches(data) {
     globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(m, 1)));
   }
 
+  let totalRendered = 0, totalSkipped = 0;
   for (const batch of data.batches) {
     const tess = getTessBuffers(batch);
-    if (!tess) continue;
+    if (!tess) {
+      totalSkipped += batch.num_faces;
+      console.warn('SKIP: tess miss for', batch.wanted_lod.join(','), 'perm', batch.perm_index,
+        'bary_len', batch.tess_bary.length, 'faces', batch.num_faces,
+        'cache_has', tessCache.has(batch.wanted_lod.join(',')));
+      continue;
+    }
+    totalRendered += batch.num_faces;
     // VAO key includes perm since instance data differs per perm
     const vaoKey = batch.wanted_lod.join(',') + '/' + batch.perm_index;
     usedKeys.add(vaoKey);
@@ -500,6 +508,7 @@ function uploadBatches(data) {
       permIndex: batch.perm_index || 0,
     });
   }
+  if (totalSkipped > 0) console.warn(`Rendered ${totalRendered}/${totalRendered+totalSkipped} faces (${totalSkipped} skipped)`);
 }
 
 function perspective(fov,a,n,f){const t=1/Math.tan(fov*.5),r=1/(n-f);return new Float32Array([t/a,0,0,0,0,t,0,0,0,0,(n+f)*r,-1,0,0,n*f*r*2,0]);}
