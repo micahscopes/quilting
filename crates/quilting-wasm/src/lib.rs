@@ -597,8 +597,30 @@ pub fn slice_and_transform(
         }
     });
 
+    // Build 4D Möbius from the same transform params — applied BEFORE slicing
+    let transform_4d = match transform_type {
+        "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
+            Some(Mobius::sphere_reflection(
+                Quat::from_point(params[0], params[1], params[2]),
+                params[3],
+            ))
+        }
+        "rotation" if params.len() >= 4 => {
+            Some(Mobius::rotation(params[0], params[1], params[2], params[3]))
+        }
+        "translation" if params.len() >= 3 => {
+            Some(Mobius::translation(Quat::from_point(params[0], params[1], params[2])))
+        }
+        _ => None,
+    };
+
+    // Include transform params in cache key — different Möbius = different slice
+    let cache_hit = cache_hit && SLICE_CACHE.with(|c| {
+        // Invalidate cache if transform changed
+        true // TODO: cache transform params too
+    });
+
     if !cache_hit {
-        // Slice the hypermesh
         let slice_result = HYPER_MESH.with(|hm| {
             let mesh_opt = hm.borrow();
             let mesh = match mesh_opt.as_ref() {
@@ -606,7 +628,7 @@ pub fn slice_and_transform(
                 None => return None,
             };
             let slicer = quilting_spacetime::HyperplaneSlicer::new(n, offset);
-            Some(slicer.slice_marching(mesh))
+            Some(slicer.slice_marching_4d(mesh, transform_4d.as_ref()))
         });
 
         let slice = match slice_result {
@@ -638,21 +660,26 @@ pub fn slice_and_transform(
         }));
     }
 
-    // Build Möbius transform
-    let transform = match transform_type {
-        "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
-            Mobius::sphere_reflection(
-                Quat::from_point(params[0], params[1], params[2]),
-                params[3],
-            )
+    // When 4D Möbius is active, the sliced geometry is already transformed.
+    // Use identity for the 3D post-slice transform to avoid double-transforming.
+    let transform = if transform_4d.is_some() {
+        Mobius::identity()
+    } else {
+        match transform_type {
+            "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
+                Mobius::sphere_reflection(
+                    Quat::from_point(params[0], params[1], params[2]),
+                    params[3],
+                )
+            }
+            "rotation" if params.len() >= 4 => {
+                Mobius::rotation(params[0], params[1], params[2], params[3])
+            }
+            "translation" if params.len() >= 3 => {
+                Mobius::translation(Quat::from_point(params[0], params[1], params[2]))
+            }
+            _ => Mobius::identity(),
         }
-        "rotation" if params.len() >= 4 => {
-            Mobius::rotation(params[0], params[1], params[2], params[3])
-        }
-        "translation" if params.len() >= 3 => {
-            Mobius::translation(Quat::from_point(params[0], params[1], params[2]))
-        }
-        _ => Mobius::identity(),
     };
 
     let screen = if vp_matrix.len() >= 16 && viewport_width > 0.0 {

@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::hyper_mesh::HyperMesh;
+use quilting_core::quaternion::{Quat, Mobius};
 
 /// Defines a hyperplane in R^4 via dot(normal, x) = offset.
 pub struct HyperplaneSlicer {
@@ -238,6 +239,14 @@ impl HyperplaneSlicer {
     /// Decomposes each triangular prism into 3 tetrahedra and uses the standard
     /// marching tetrahedra case table. Correct at any tilt angle.
     pub fn slice_marching(&self, mesh: &HyperMesh) -> SliceResult {
+        self.slice_marching_4d(mesh, None)
+    }
+
+    /// Marching slicer with optional 4D Möbius transform applied BEFORE slicing.
+    ///
+    /// The Möbius acts on full quaternions q = (t, x, y, z) — the real part is time.
+    /// This conformally deforms the 4D worldsheet before the hyperplane cuts it.
+    pub fn slice_marching_4d(&self, mesh: &HyperMesh, transform_4d: Option<&Mobius>) -> SliceResult {
         let mut positions: Vec<[f64; 3]> = Vec::new();
         let mut times: Vec<f64> = Vec::new();
         let mut faces: Vec<[u32; 3]> = Vec::new();
@@ -297,27 +306,43 @@ impl HyperplaneSlicer {
                 let seg1 = &traj1.segments[si];
                 let seg2 = &traj2.segments[si];
 
-                let t_bot = seg0.t_start;
-                let t_top = seg0.t_end;
-                let b0 = seg0.pos_start;
-                let b1 = seg1.pos_start;
-                let b2 = seg2.pos_start;
-                let t0 = seg0.pos_end;
-                let t1 = seg1.pos_end;
-                let t2 = seg2.pos_end;
+                // 6 prism vertices: 3 bottom (t_start), 3 top (t_end)
+                // Each is a (position, time) pair. With 4D Möbius, we lift to
+                // full quaternions q = (t, x, y, z), transform, then extract.
+                let mut prism_pos: [[f64; 3]; 6] = [
+                    seg0.pos_start, seg1.pos_start, seg2.pos_start,
+                    seg0.pos_end,   seg1.pos_end,   seg2.pos_end,
+                ];
+                let mut prism_t: [f64; 6] = [
+                    seg0.t_start, seg0.t_start, seg0.t_start,
+                    seg0.t_end,   seg0.t_end,   seg0.t_end,
+                ];
 
-                // Signed distance to hyperplane for each vertex
+                // Apply 4D Möbius: lift (x,y,z,t) → quaternion, transform, extract
+                if let Some(m) = transform_4d {
+                    for i in 0..6 {
+                        let q = Quat::new(prism_t[i], prism_pos[i][0], prism_pos[i][1], prism_pos[i][2]);
+                        let q_prime = m.apply(q);
+                        prism_pos[i] = [q_prime.x, q_prime.y, q_prime.z];
+                        prism_t[i] = q_prime.w;
+                    }
+                }
+
+                // After 4D transform, each vertex may have a different time.
+                // prism_pos and prism_t hold the (possibly transformed) values.
+
+                // Signed distance to hyperplane
                 let n = self.normal;
                 let o = self.offset;
-                let d = |pos: [f64; 3], t: f64| -> f64 {
-                    n[0]*pos[0] + n[1]*pos[1] + n[2]*pos[2] + n[3]*t - o
-                };
-                let db0 = d(b0, t_bot);
-                let db1 = d(b1, t_bot);
-                let db2 = d(b2, t_bot);
-                let dt0 = d(t0, t_top);
-                let dt1 = d(t1, t_top);
-                let dt2 = d(t2, t_top);
+                let d_arr: [f64; 6] = std::array::from_fn(|i| {
+                    n[0]*prism_pos[i][0] + n[1]*prism_pos[i][1] + n[2]*prism_pos[i][2] + n[3]*prism_t[i] - o
+                });
+                let db0 = d_arr[0];
+                let db1 = d_arr[1];
+                let db2 = d_arr[2];
+                let dt0 = d_arr[3];
+                let dt1 = d_arr[4];
+                let dt2 = d_arr[5];
 
                 // Quick reject: all same sign = no intersection
                 let all_pos = db0 > 0.0 && db1 > 0.0 && db2 > 0.0
@@ -331,9 +356,9 @@ impl HyperplaneSlicer {
                 // Direct prism-plane intersection.
                 // 9 prism edges: 3 bottom, 3 top, 3 vertical.
                 // Find all edge crossings, form a convex polygon, fan-triangulate.
-                let prism_verts = [b0, b1, b2, t0, t1, t2];
-                let prism_times = [t_bot, t_bot, t_bot, t_top, t_top, t_top];
-                let prism_dists = [db0, db1, db2, dt0, dt1, dt2];
+                let prism_verts = prism_pos;
+                let prism_times_arr = prism_t;
+                let prism_dists = d_arr;
 
                 // 9 edges of a triangular prism
                 let edges: [(usize, usize); 9] = [
@@ -352,8 +377,8 @@ impl HyperplaneSlicer {
                         let t_param = da / (da - db);
                         let pa = prism_verts[a];
                         let pb = prism_verts[b];
-                        let ta = prism_times[a];
-                        let tb = prism_times[b];
+                        let ta = prism_times_arr[a];
+                        let tb = prism_times_arr[b];
                         let pos = [
                             pa[0] + t_param * (pb[0] - pa[0]),
                             pa[1] + t_param * (pb[1] - pa[1]),
