@@ -593,12 +593,12 @@ function render() {
   const w=$('wrap');
   canvas.width=w.clientWidth; canvas.height=w.clientHeight;
   gl.viewport(0,0,canvas.width,canvas.height);
+  if (!drawBatches.length) return;  // don't clear if nothing to draw
   gl.clearColor(0.051,0.067,0.090,1);
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-  if (!drawBatches.length) return;
 
   const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
   const view = lookAt(ex,ey,ez,0,0,0,0,1,0);
@@ -1005,7 +1005,7 @@ timeSlider.step = (meshInfo.time_max - meshInfo.time_min) / 200;
 timeSlider.value = (meshInfo.time_min + meshInfo.time_max) / 2;
 $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
 
-update();
+await update();
 requestAnimationFrame(frame);
 </script>
 </body>
