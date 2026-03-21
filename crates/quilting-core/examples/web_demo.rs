@@ -397,8 +397,8 @@ fn main() {
 
         // Serve matcap PNGs from disk (any .png in matcaps/)
         if request.starts_with("GET /matcaps/") {
-            let filename = request.split(' ').next().unwrap_or("")
-                .trim_start_matches("GET /matcaps/");
+            let filename = request.split(' ').nth(1).unwrap_or("")
+                .trim_start_matches("/matcaps/");
             // Sanitize: only allow alphanumeric, dash, dot
             if filename.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.') && filename.ends_with(".png") {
                 let path = std::path::Path::new("matcaps").join(filename);

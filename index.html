@@ -129,7 +129,8 @@ uniform int u_permIndex;    // S3 permutation index (0-5) for bary remapping
 
 out vec3 v_normal_vs;
 out float v_density;
-out vec2 v_matcap_uv;  // matcap texture coordinates from view-space normal
+out vec2 v_matcap_uv;
+out float v_fade;  // 1.0 = normal, 0.0 = near pole (fade out)
 
 // S3 permutations: remap bary coords in the vertex shader
 // so we can share one tess buffer across all permutations of a canonical LOD triple.
@@ -220,32 +221,37 @@ void main(){
   float density = edgeDensity(bary, a_lodInfo.xyz);
   v_density = log2(max(density, 1.0)) / 10.0;
 
-  // Conformal scale cutoff: clip vertices where |bot|² is tiny
-  // (extreme stretching near the Möbius pole — surface wraps back on itself)
+  // Conformal scale: |bot|² measures how close we are to the Möbius pole.
+  // Small |bot|² = extreme stretching = surface wrapping back through origin.
+  // Smooth fade instead of hard clip to avoid flickering edges.
+  v_fade = 1.0;
   if (u_useQB == 1) {
     vec4 bot = a_bary.x*a_w0 + a_bary.y*a_w1 + a_bary.z*a_w2;
-    if (dot(bot, bot) < 1e-6) {
-      gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
-      return;
-    }
+    float bot_sq = dot(bot, bot);
+    // Smooth fade from 1.0 (bot_sq >= 0.01) to 0.0 (bot_sq <= 0.001)
+    v_fade = smoothstep(0.001, 0.01, bot_sq);
   }
 
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
 
-// Real matcap: sample texture using view-space normal
+// Real matcap: sample texture using view-space normal (per-fragment)
 const FS_MATCAP = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec3 v_normal_vs;
 in float v_density;
 in vec2 v_matcap_uv;
+in float v_fade;
 uniform sampler2D u_matcapTex;
 out vec4 o;
 void main(){
+  if (v_fade < 0.01) discard;
   vec3 n = normalize(v_normal_vs);
   n = gl_FrontFacing ? n : -n;
-  vec2 uv = n.xy * 0.5 + 0.5;
-  o = texture(u_matcapTex, uv);
+  vec2 uv = n.xy * 0.48 + 0.5;
+  vec4 col = texture(u_matcapTex, uv);
+  col.a *= v_fade;
+  o = col;
 }`;
 
 // LOD density heatmap (was "matcap")
@@ -254,6 +260,7 @@ precision mediump float;
 in vec3 v_normal_vs;
 in float v_density;
 in vec2 v_matcap_uv;
+in float v_fade;
 uniform vec3 u_lodColor;
 out vec4 o;
 
@@ -283,6 +290,7 @@ void main(){
   float spec = pow(max(dot(n, H), 0.0), 40.0);
   float rim = pow(1.0 - NdV, 3.0);
 
+  if (v_fade < 0.01) discard;
   vec3 base = heatmap(v_density);
   vec3 shadow = base * 0.12 + vec3(0.03, 0.01, 0.08);
   vec3 lit = base * 1.4;
@@ -290,7 +298,7 @@ void main(){
   col += vec3(1.0, 0.95, 0.90) * spec * 0.8;
   col += base * rim * 0.4;
   col += vec3(0.05, 0.02, 0.08);
-  o = vec4(col, 1.0);
+  o = vec4(col, v_fade);
 }`;
 
 const FS_WIRE = `#version 300 es
@@ -298,6 +306,7 @@ precision mediump float;
 in vec3 v_normal_vs;
 in float v_density;
 in vec2 v_matcap_uv;
+in float v_fade;
 uniform vec3 u_lodColor;
 uniform int u_showDensity;
 out vec4 o;
@@ -312,10 +321,11 @@ vec3 heatmap(float t) {
 }
 
 void main(){
+  if (v_fade < 0.01) discard;
   if (u_showDensity == 1) {
-    o = vec4(heatmap(v_density), 1.0);
+    o = vec4(heatmap(v_density), v_fade);
   } else {
-    o = vec4(u_lodColor, 1.0);
+    o = vec4(u_lodColor, v_fade);
   }
 }`;
 
@@ -324,12 +334,13 @@ precision mediump float;
 in vec3 v_normal_vs;
 in float v_density;
 in vec2 v_matcap_uv;
+in float v_fade;
 out vec4 o;
 void main(){
-  // Map normal xyz from [-1,1] to [0,1] for visualization
+  if (v_fade < 0.01) discard;
   vec3 n = normalize(v_normal_vs);
   n = gl_FrontFacing ? n : -n;
-  o = vec4(n * 0.5 + 0.5, 1.0);
+  o = vec4(n * 0.5 + 0.5, v_fade);
 }`;
 
 function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error('SHADER:',gl.getShaderInfoLog(s));return s;}
@@ -347,7 +358,8 @@ function loadMatcap(name) {
   img.onload = () => {
     gl.bindTexture(gl.TEXTURE_2D, matcapTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -576,6 +588,8 @@ function render() {
   gl.clearColor(0.06,0.06,0.14,1);
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   if (!drawBatches.length) return;
 
   const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
