@@ -15,16 +15,27 @@ pub struct HyperMesh {
     pub trajectories: Vec<VertexTrajectory>,
     /// Number of vertices.
     pub num_vertices: u32,
+    /// Original animation period (before loop padding).
+    pub period: f64,
 }
 
 impl HyperMesh {
     /// Build from triangle connectivity + per-vertex trajectories.
     pub fn new(faces: Vec<[u32; 3]>, trajectories: Vec<VertexTrajectory>) -> Self {
         let num_vertices = trajectories.len() as u32;
+        // Compute period from original trajectories before any padding
+        let mut t_min = f64::INFINITY;
+        let mut t_max = f64::NEG_INFINITY;
+        for traj in &trajectories {
+            if let Some(first) = traj.segments.first() { t_min = t_min.min(first.t_start); }
+            if let Some(last) = traj.segments.last() { t_max = t_max.max(last.t_end); }
+        }
+        let period = if t_min.is_finite() && t_max.is_finite() { t_max - t_min } else { 1.0 };
         Self {
             faces,
             trajectories,
             num_vertices,
+            period,
         }
     }
 

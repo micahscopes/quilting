@@ -120,8 +120,16 @@ impl HyperplaneSlicer {
                 continue;
             }
 
-            // Simple case: each vertex has exactly 1 hit -- emit one triangle.
+            // Simple case: each vertex has exactly 1 hit -- emit one triangle,
+            // but only if the intersection times are temporally coherent.
             if h0.len() == 1 && h1.len() == 1 && h2.len() == 1 {
+                let t_min_face = h0[0].0.min(h1[0].0).min(h2[0].0);
+                let t_max_face = h0[0].0.max(h1[0].0).max(h2[0].0);
+                // Skip if vertices span too much time — the triangle would
+                // stretch across multiple rotation periods
+                if t_max_face - t_min_face > mesh.period * 0.5 {
+                    continue;
+                }
                 let i0 = get_or_insert_vertex(
                     &mut vertex_map,
                     &mut positions,
