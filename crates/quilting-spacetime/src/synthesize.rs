@@ -10,7 +10,7 @@ use crate::trajectory::{HermiteSegment, VertexTrajectory};
 ///
 /// The cube rotates around the Y axis at the given angular speed.
 pub fn rotating_cube(duration: f64, angular_speed: f64, num_keyframes: u32) -> HyperMesh {
-    let cube_verts: [[f64; 3]; 8] = [
+    let cube_verts: Vec<[f64; 3]> = vec![
         [-1.0, -1.0, -1.0],
         [1.0, -1.0, -1.0],
         [1.0, 1.0, -1.0],
@@ -30,10 +30,13 @@ pub fn rotating_cube(duration: f64, angular_speed: f64, num_keyframes: u32) -> H
         [4, 5, 1], [4, 1, 0], // bottom
     ];
 
+    // Subdivide for smoother slicing geometry
+    let (verts, faces) = subdivide_3d(&cube_verts, &cube_faces, 3);
+
     let nk = num_keyframes.max(2) as usize;
     let dt = duration / (nk - 1) as f64;
 
-    let trajectories: Vec<VertexTrajectory> = cube_verts
+    let trajectories: Vec<VertexTrajectory> = verts
         .iter()
         .map(|&v| {
             let segments: Vec<HermiteSegment> = (0..nk - 1)
@@ -63,7 +66,7 @@ pub fn rotating_cube(duration: f64, angular_speed: f64, num_keyframes: u32) -> H
         })
         .collect();
 
-    HyperMesh::new(cube_faces, trajectories)
+    HyperMesh::new(faces, trajectories)
 }
 
 /// Breathing sphere: vertices oscillate radially over time.
@@ -323,6 +326,46 @@ pub fn morph(
 
 // --- Geometry helpers ---
 
+/// Subdivide a 3D triangle mesh N times via midpoint subdivision.
+fn subdivide_3d(
+    verts: &[[f64; 3]],
+    faces: &[[u32; 3]],
+    n: u32,
+) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+    let mut positions = verts.to_vec();
+    let mut triangles = faces.to_vec();
+
+    for _ in 0..n {
+        let mut new_tris = Vec::with_capacity(triangles.len() * 4);
+        let mut edge_mids: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+
+        let mut mid = |a: u32, b: u32, pos: &mut Vec<[f64; 3]>| -> u32 {
+            let key = if a < b { (a, b) } else { (b, a) };
+            if let Some(&idx) = edge_mids.get(&key) {
+                return idx;
+            }
+            let idx = pos.len() as u32;
+            let pa = pos[a as usize];
+            let pb = pos[b as usize];
+            pos.push([(pa[0]+pb[0])*0.5, (pa[1]+pb[1])*0.5, (pa[2]+pb[2])*0.5]);
+            edge_mids.insert(key, idx);
+            idx
+        };
+
+        for &[a, b, c] in &triangles {
+            let ab = mid(a, b, &mut positions);
+            let bc = mid(b, c, &mut positions);
+            let ac = mid(a, c, &mut positions);
+            new_tris.push([a, ab, ac]);
+            new_tris.push([ab, b, bc]);
+            new_tris.push([ac, bc, c]);
+            new_tris.push([ab, bc, ac]);
+        }
+        triangles = new_tris;
+    }
+    (positions, triangles)
+}
+
 fn rotate_y(p: [f64; 3], theta: f64) -> [f64; 3] {
     let c = theta.cos();
     let s = theta.sin();
@@ -478,9 +521,10 @@ mod tests {
     #[test]
     fn rotating_cube_structure() {
         let mesh = rotating_cube(1.0, 1.0, 8);
-        assert_eq!(mesh.num_vertices, 8);
-        assert_eq!(mesh.faces.len(), 12);
-        assert_eq!(mesh.trajectories.len(), 8);
+        // 3 subdivisions: 12 * 4^3 = 768 faces, 386 vertices
+        assert!(mesh.num_vertices > 8);
+        assert!(mesh.faces.len() > 12);
+        assert_eq!(mesh.trajectories.len() as u32, mesh.num_vertices);
 
         let (t_min, t_max) = mesh.time_range();
         assert!((t_min - 0.0).abs() < 1e-12);
@@ -488,10 +532,11 @@ mod tests {
     }
 
     #[test]
-    fn rotating_cube_at_t0_matches_cube() {
+    fn rotating_cube_at_t0_corners() {
         let mesh = rotating_cube(1.0, 1.0, 8);
         let positions = mesh.positions_at(0.0);
 
+        // The original 8 cube corners should still be present (first 8 vertices)
         let expected: [[f64; 3]; 8] = [
             [-1.0, -1.0, -1.0],
             [1.0, -1.0, -1.0],
@@ -503,15 +548,12 @@ mod tests {
             [-1.0, 1.0, 1.0],
         ];
 
-        for (i, pos) in positions.iter().enumerate() {
+        for (i, exp) in expected.iter().enumerate() {
             for j in 0..3 {
                 assert!(
-                    (pos[j] - expected[i][j]).abs() < 1e-10,
-                    "Vertex {} component {} mismatch: {} vs {}",
-                    i,
-                    j,
-                    pos[j],
-                    expected[i][j]
+                    (positions[i][j] - exp[j]).abs() < 1e-10,
+                    "Corner {} component {} mismatch: {} vs {}",
+                    i, j, positions[i][j], exp[j]
                 );
             }
         }

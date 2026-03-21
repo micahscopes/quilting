@@ -166,6 +166,26 @@ impl VertexTrajectory {
         for seg in &self.segments {
             results.extend(seg.intersect_hyperplane(normal, offset));
         }
+
+        // Check trajectory endpoints explicitly — the cubic solver can miss
+        // roots at the exact boundary (u=0 or u=1) due to floating point.
+        if !self.segments.is_empty() {
+            let eps = 1e-6;
+            let first = &self.segments[0];
+            let p = first.pos_start;
+            let val = normal[0]*p[0] + normal[1]*p[1] + normal[2]*p[2] + normal[3]*first.t_start;
+            if (val - offset).abs() < eps && !results.iter().any(|&(t,_)| (t - first.t_start).abs() < eps) {
+                results.push((first.t_start, p));
+            }
+
+            let last = &self.segments[self.segments.len() - 1];
+            let p = last.pos_end;
+            let val = normal[0]*p[0] + normal[1]*p[1] + normal[2]*p[2] + normal[3]*last.t_end;
+            if (val - offset).abs() < eps && !results.iter().any(|&(t,_)| (t - last.t_end).abs() < eps) {
+                results.push((last.t_end, p));
+            }
+        }
+
         results
     }
 }
