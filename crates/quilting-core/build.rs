@@ -33,13 +33,13 @@ fn main() {
         return;
     }
 
-    eprintln!("Building WASM (--dev)...");
+    eprintln!("Building WASM (release, opt-level 2)...");
     // Use a separate target dir to avoid cargo lock deadlock —
     // the parent cargo process holds the lock on the main target dir.
     let status = Command::new("wasm-pack")
         .args([
             "build", "../quilting-wasm",
-            "--target", "web", "--dev",
+            "--target", "web",
             "--out-dir", "../../pkg",
         ])
         .env("CARGO_TARGET_DIR", "/tmp/quilting-wasm-target")
