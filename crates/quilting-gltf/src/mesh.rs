@@ -24,6 +24,8 @@ pub struct Primitive {
     pub joint_indices: Option<Vec<[u16; 4]>>,
     /// Per-vertex joint weights (up to 4 weights per vertex). For skinning.
     pub joint_weights: Option<Vec<[f32; 4]>>,
+    /// Morph target position deltas. morph_targets[target_idx][vertex_idx] = [dx, dy, dz].
+    pub morph_targets: Vec<Vec<[f64; 3]>>,
 }
 
 /// A mesh is a collection of primitives.
@@ -103,6 +105,17 @@ pub fn extract_mesh(
             .read_weights(0)
             .map(|iter| iter.into_f32().collect());
 
+        // Morph targets — position deltas for each target.
+        let morph_targets: Vec<Vec<[f64; 3]>> = {
+            let morph_reader = prim.reader(|buf| Some(&buffers[buf.index()]));
+            morph_reader.read_morph_targets()
+                .map(|mt: (Option<gltf::mesh::util::ReadPositions<'_>>, _, _)| {
+                    mt.0.map(|iter| iter.map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect())
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
+
         let material_index = prim.material().index();
 
         primitives.push(Primitive {
@@ -113,6 +126,7 @@ pub fn extract_mesh(
             material_index,
             joint_indices,
             joint_weights,
+            morph_targets,
         });
     }
 
@@ -160,6 +174,7 @@ mod tests {
                     material_index: None,
                     joint_indices: None,
                     joint_weights: None,
+                    morph_targets: vec![],
                 },
                 Primitive {
                     positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
@@ -169,6 +184,7 @@ mod tests {
                     material_index: None,
                     joint_indices: None,
                     joint_weights: None,
+                    morph_targets: vec![],
                 },
             ],
         };

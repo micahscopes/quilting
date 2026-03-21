@@ -597,10 +597,17 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         // Check for morph target animation
         let has_morph = scene.animations[0].channels.iter()
             .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights);
-        if has_morph {
-            // TODO: extract morph deltas from glTF — for now treat as static
-            web_sys::console::log_1(&"load_gltf_data: morph targets detected but delta extraction not yet wired; using static mesh".into());
-            build_static_hypermesh(&combined)
+        if has_morph && !combined.morph_targets.is_empty() {
+            web_sys::console::log_1(&format!(
+                "load_gltf_data: baking morph animation ({} targets, 32 samples)",
+                combined.morph_targets.len()
+            ).into());
+            quilting_gltf::bake::bake_morph_animation(
+                &combined,
+                &scene.animations[0],
+                &combined.morph_targets,
+                32,
+            )
         } else {
             build_static_hypermesh(&combined)
         }
@@ -657,6 +664,13 @@ fn flatten_primitives_for_bake(mesh: &quilting_gltf::mesh::Mesh) -> quilting_glt
         }
     }
 
+    // Use morph targets from the first primitive (if any)
+    let morph_targets = if let Some(first) = mesh.primitives.first() {
+        first.morph_targets.clone()
+    } else {
+        vec![]
+    };
+
     quilting_gltf::mesh::Primitive {
         positions,
         normals: normals_all,
@@ -665,6 +679,7 @@ fn flatten_primitives_for_bake(mesh: &quilting_gltf::mesh::Mesh) -> quilting_glt
         material_index: None,
         joint_indices: joint_indices_all,
         joint_weights: joint_weights_all,
+        morph_targets,
     }
 }
 
