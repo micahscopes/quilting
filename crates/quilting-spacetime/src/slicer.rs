@@ -401,6 +401,23 @@ impl HyperplaneSlicer {
                     continue;
                 }
 
+                // For toroidal: only keep one side of the torus intersection.
+                // Check if the average torus angle at this prism is on the
+                // "near" side (within π/2 of the slice angle).
+                if let TimeEmbedding::Toroidal { period, .. } = self.time_embedding {
+                    let avg_t = (spatial_t[0] + spatial_t[3]) * 0.5;
+                    let theta = std::f64::consts::TAU * avg_t / period;
+                    // The slice normal rotates at angle φ in the (w,z) plane.
+                    // The prism is at angle θ on the torus.
+                    // Keep only the side where cos(θ - φ) > 0.
+                    let nw = self.normal[3];
+                    let nz = self.normal[2];
+                    let phi = nz.atan2(nw);
+                    if (theta - phi).cos() < 0.0 {
+                        continue;
+                    }
+                }
+
                 // Direct prism-plane intersection.
                 // 9 prism edges: 3 bottom, 3 top, 3 vertical.
                 // Find all edge crossings, form a convex polygon, fan-triangulate.
