@@ -2,12 +2,18 @@ use std::process::Command;
 use std::path::Path;
 
 fn main() {
+    // Don't run wasm-pack when we're being compiled FOR wasm — that causes infinite recursion.
+    if std::env::var("TARGET").map_or(false, |t| t.contains("wasm")) {
+        return;
+    }
+
     let pkg_wasm = Path::new("../../pkg/quilting_wasm_bg.wasm");
 
     let source_dirs = [
         "../quilting-wasm/src",
         "../quilting-mesh/src",
         "../quilting-spacetime/src",
+        "src",  // quilting-core's own source (atlas.rs, evaluate.rs, etc.)
     ];
     let cargo_tomls = [
         "../quilting-wasm/Cargo.toml",
