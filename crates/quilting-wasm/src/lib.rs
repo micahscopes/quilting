@@ -450,8 +450,17 @@ pub fn compile_fragment_shader(mode: &str) -> String {
 
 // --- Spacetime slicing ---
 
+struct CachedSlice {
+    normal: [f64; 4],
+    offset: f64,
+    verts: Vec<[f64; 3]>,
+    tris: Vec<[usize; 3]>,
+    half_edge: HalfEdgeMesh,
+}
+
 thread_local! {
     static HYPER_MESH: RefCell<Option<quilting_spacetime::HyperMesh>> = RefCell::new(None);
+    static SLICE_CACHE: RefCell<Option<CachedSlice>> = RefCell::new(None);
 }
 
 #[derive(serde::Serialize)]
@@ -567,66 +576,67 @@ pub fn slice_and_transform(
     viewport_width: f64,
     viewport_height: f64,
 ) -> JsValue {
-    use quilting_spacetime::HyperplaneSlicer;
-
     let n = if normal.len() >= 4 {
         [normal[0], normal[1], normal[2], normal[3]]
     } else {
         [0.0, 0.0, 0.0, 1.0]
     };
 
-    // Step 1: Slice the hypermesh
-    let slice_result = HYPER_MESH.with(|hm| {
-        let mesh_opt = hm.borrow();
-        let mesh = match mesh_opt.as_ref() {
-            Some(m) => m,
-            None => return None,
-        };
-        let slicer = HyperplaneSlicer::new(n, offset);
-        Some(slicer.slice_marching(mesh))
+    let empty = || serde_wasm_bindgen::to_value(&MeshBatches {
+        batches: vec![], total_faces: 0, num_batches: 0, timings: [0.0, 0.0, 0.0],
+    }).unwrap();
+
+    // Check if we can reuse the cached slice (same normal + offset)
+    let cache_hit = SLICE_CACHE.with(|c| {
+        let cache = c.borrow();
+        match cache.as_ref() {
+            Some(cs) => cs.normal == n && (cs.offset - offset).abs() < 1e-12,
+            None => false,
+        }
     });
 
-    let slice = match slice_result {
-        Some(s) => s,
-        None => {
-            return serde_wasm_bindgen::to_value(&MeshBatches {
-                batches: vec![],
-                total_faces: 0,
-                num_batches: 0,
-                timings: [0.0, 0.0, 0.0],
-            }).unwrap();
+    if !cache_hit {
+        // Slice the hypermesh
+        let slice_result = HYPER_MESH.with(|hm| {
+            let mesh_opt = hm.borrow();
+            let mesh = match mesh_opt.as_ref() {
+                Some(m) => m,
+                None => return None,
+            };
+            let slicer = quilting_spacetime::HyperplaneSlicer::new(n, offset);
+            Some(slicer.slice_marching(mesh))
+        });
+
+        let slice = match slice_result {
+            Some(s) if !s.layers.is_empty() => s,
+            _ => return empty(),
+        };
+
+        let layer = slice.layers.into_iter()
+            .max_by_key(|l| l.faces.len())
+            .unwrap();
+
+        let verts: Vec<[f64; 3]> = layer.positions;
+        let tris: Vec<[usize; 3]> = layer.faces.iter()
+            .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
+            .collect();
+
+        if tris.is_empty() || verts.is_empty() {
+            SLICE_CACHE.with(|c| *c.borrow_mut() = None);
+            return empty();
         }
-    };
 
-    if slice.layers.is_empty() {
-        return serde_wasm_bindgen::to_value(&MeshBatches {
-            batches: vec![],
-            total_faces: 0,
-            num_batches: 0,
-            timings: [0.0, 0.0, 0.0],
-        }).unwrap();
+        let faces_u32: Vec<[u32; 3]> = layer.faces.iter()
+            .map(|f| [f[0], f[1], f[2]])
+            .collect();
+        let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
+
+        SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
+            normal: n, offset, verts, tris, half_edge,
+        }));
     }
 
-    // Step 2: Use the largest layer
-    let layer = slice.layers.into_iter()
-        .max_by_key(|l| l.faces.len())
-        .unwrap();
-
-    let verts: Vec<[f64; 3]> = layer.positions;
-    let tris: Vec<[usize; 3]> = layer.faces.iter()
-        .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
-        .collect();
-
-    if tris.is_empty() || verts.is_empty() {
-        return serde_wasm_bindgen::to_value(&MeshBatches {
-            batches: vec![],
-            total_faces: 0,
-            num_batches: 0,
-            timings: [0.0, 0.0, 0.0],
-        }).unwrap();
-    }
-
-    // Step 3: Build Möbius transform
+    // Build Möbius transform
     let transform = match transform_type {
         "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
             Mobius::sphere_reflection(
@@ -653,17 +663,15 @@ pub fn slice_and_transform(
 
     let t0 = js_sys::Date::now();
 
-    // Step 4: Build half-edge mesh for this slice
-    let faces_u32: Vec<[u32; 3]> = layer.faces.iter()
-        .map(|f| [f[0], f[1], f[2]])
-        .collect();
-    let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
-
-    // Step 5: Compute instances with Möbius transform
-    let instances_orig = compute_instances_no_lod(&verts, &tris);
+    // Use cached slice for Möbius computation
+    let (instances_orig, instances_xform, num_tris) = SLICE_CACHE.with(|c| {
+        let cache = c.borrow();
+        let cs = cache.as_ref().unwrap();
+        let orig = compute_instances_no_lod(&cs.verts, &cs.tris);
+        let xform = compute_instances(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge));
+        (orig, xform, cs.tris.len())
+    });
     let t1 = js_sys::Date::now();
-
-    let instances_xform = compute_instances(&verts, &tris, &transform, screen.as_ref(), Some(&half_edge));
     let t2 = js_sys::Date::now();
 
     // Step 6: Group by (canonical LOD, perm_index)
@@ -771,7 +779,7 @@ pub fn slice_and_transform(
 
     let result = serde_wasm_bindgen::to_value(&MeshBatches {
         batches,
-        total_faces: tris.len(),
+        total_faces: num_tris,
         num_batches: groups.len(),
         timings: [t1 - t0, t2 - t1, t3 - t2],
     }).unwrap();
