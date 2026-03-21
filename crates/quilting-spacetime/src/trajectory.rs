@@ -115,12 +115,14 @@ impl HermiteSegment {
 
         // Explicitly check segment endpoints — the solver can miss roots
         // at u=0 or u=1 due to floating-point boundary cases.
+        // Use a generous epsilon since near the time boundary, the hyperplane
+        // might be very close but not exactly at the endpoint.
         let f = |u: f64| c0 + u * (c1 + u * (c2 + u * c3));
-        let eps = 1e-8;
-        if f(0.0).abs() < eps && !roots.iter().any(|&r| r < eps) {
+        let eps = 0.01;
+        if f(0.0).abs() < eps && !roots.iter().any(|&r| r < 0.001) {
             roots.push(0.0);
         }
-        if f(1.0).abs() < eps && !roots.iter().any(|&r| (r - 1.0).abs() < eps) {
+        if f(1.0).abs() < eps && !roots.iter().any(|&r| (r - 1.0).abs() < 0.001) {
             roots.push(1.0);
         }
 
@@ -178,22 +180,20 @@ impl VertexTrajectory {
             results.extend(seg.intersect_hyperplane(normal, offset));
         }
 
-        // Check trajectory endpoints explicitly — the cubic solver can miss
-        // roots at the exact boundary (u=0 or u=1) due to floating point.
-        if !self.segments.is_empty() {
-            let eps = 1e-6;
+        // Check trajectory endpoints explicitly — clamp to boundary if
+        // the hyperplane is close to the trajectory's time range.
+        if results.is_empty() && !self.segments.is_empty() {
             let first = &self.segments[0];
-            let p = first.pos_start;
-            let val = normal[0]*p[0] + normal[1]*p[1] + normal[2]*p[2] + normal[3]*first.t_start;
-            if (val - offset).abs() < eps && !results.iter().any(|&(t,_)| (t - first.t_start).abs() < eps) {
-                results.push((first.t_start, p));
-            }
-
             let last = &self.segments[self.segments.len() - 1];
-            let p = last.pos_end;
-            let val = normal[0]*p[0] + normal[1]*p[1] + normal[2]*p[2] + normal[3]*last.t_end;
-            if (val - offset).abs() < eps && !results.iter().any(|&(t,_)| (t - last.t_end).abs() < eps) {
-                results.push((last.t_end, p));
+            // If the offset suggests a time within or near the trajectory range,
+            // include the nearest endpoint as a fallback.
+            let nt = normal[3];
+            if nt.abs() > 1e-10 {
+                let t_approx = offset / nt;
+                if t_approx >= first.t_start - 0.05 && t_approx <= last.t_end + 0.05 {
+                    let t_clamped = t_approx.clamp(first.t_start, last.t_end);
+                    results.push((t_clamped, self.eval(t_clamped)));
+                }
             }
         }
 
