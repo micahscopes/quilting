@@ -480,7 +480,7 @@ struct HyperMeshInfo {
 pub fn create_hypermesh(name: &str) -> JsValue {
     use quilting_spacetime::synthesize;
 
-    let mesh = match name {
+    let mut mesh = match name {
         "rotating_cube" => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 32),
         "breathing_sphere" => synthesize::breathing_sphere(2.0, 1.0, 0.3, 6),
         "colliding_spheres" => synthesize::colliding_spheres(2.0, 1.5, 4.0, 4),
@@ -488,7 +488,14 @@ pub fn create_hypermesh(name: &str) -> JsValue {
         _ => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 32),
     };
 
+    // Capture animation range before padding
     let (time_min, time_max) = mesh.time_range();
+
+    // Pad trajectories so tilted slices can extend beyond the animation range
+    // without losing faces at the boundaries
+    for traj in &mut mesh.trajectories {
+        traj.pad(2.0);
+    }
     let info = HyperMeshInfo {
         time_min,
         time_max,

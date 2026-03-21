@@ -111,20 +111,7 @@ impl HermiteSegment {
         c0 -= offset;
 
         // Solve c0 + c1*u + c2*u^2 + c3*u^3 = 0 for u in [0,1]
-        let mut roots = solve_cubic_in_unit(c0, c1, c2, c3);
-
-        // Explicitly check segment endpoints — the solver can miss roots
-        // at u=0 or u=1 due to floating-point boundary cases.
-        // Use a generous epsilon since near the time boundary, the hyperplane
-        // might be very close but not exactly at the endpoint.
-        let f = |u: f64| c0 + u * (c1 + u * (c2 + u * c3));
-        let eps = 1e-4;
-        if f(0.0).abs() < eps && !roots.iter().any(|&r| r < eps) {
-            roots.push(0.0);
-        }
-        if f(1.0).abs() < eps && !roots.iter().any(|&r| (r - 1.0).abs() < eps) {
-            roots.push(1.0);
-        }
+        let roots = solve_cubic_in_unit(c0, c1, c2, c3);
 
         roots
             .into_iter()
@@ -138,6 +125,36 @@ impl HermiteSegment {
 }
 
 impl VertexTrajectory {
+    /// Add constant-position padding segments before and after the trajectory.
+    /// This allows tilted hyperplanes to intersect beyond the animation range
+    /// without losing faces at the boundaries.
+    pub fn pad(&mut self, padding: f64) {
+        if self.segments.is_empty() || padding <= 0.0 { return; }
+
+        let first = &self.segments[0];
+        let pre = HermiteSegment {
+            t_start: first.t_start - padding,
+            t_end: first.t_start,
+            pos_start: first.pos_start,
+            pos_end: first.pos_start,
+            vel_start: [0.0; 3],
+            vel_end: [0.0; 3],
+        };
+
+        let last = &self.segments[self.segments.len() - 1];
+        let post = HermiteSegment {
+            t_start: last.t_end,
+            t_end: last.t_end + padding,
+            pos_start: last.pos_end,
+            pos_end: last.pos_end,
+            vel_start: [0.0; 3],
+            vel_end: [0.0; 3],
+        };
+
+        self.segments.insert(0, pre);
+        self.segments.push(post);
+    }
+
     /// Evaluate position at time t.
     ///
     /// Finds the segment containing t and evaluates it. If t is outside the
@@ -178,23 +195,6 @@ impl VertexTrajectory {
         let mut results = Vec::new();
         for seg in &self.segments {
             results.extend(seg.intersect_hyperplane(normal, offset));
-        }
-
-        // Check trajectory endpoints explicitly — clamp to boundary if
-        // the hyperplane is close to the trajectory's time range.
-        if results.is_empty() && !self.segments.is_empty() {
-            let first = &self.segments[0];
-            let last = &self.segments[self.segments.len() - 1];
-            // If the offset suggests a time within or near the trajectory range,
-            // include the nearest endpoint as a fallback.
-            let nt = normal[3];
-            if nt.abs() > 1e-10 {
-                let t_approx = offset / nt;
-                if t_approx >= first.t_start - 0.05 && t_approx <= last.t_end + 0.05 {
-                    let t_clamped = t_approx.clamp(first.t_start, last.t_end);
-                    results.push((t_clamped, self.eval(t_clamped)));
-                }
-            }
         }
 
         results
