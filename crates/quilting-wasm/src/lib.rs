@@ -504,6 +504,10 @@ struct HyperMeshInfo {
     time_max: f64,
     num_vertices: u32,
     num_faces: usize,
+    // PBR material from glTF (if available)
+    base_color: [f32; 4],
+    metallic: f32,
+    roughness: f32,
 }
 
 /// Initialize a hypermesh by name. Stores it in a thread-local.
@@ -530,6 +534,9 @@ pub fn create_hypermesh(name: &str) -> JsValue {
         time_max,
         num_vertices: mesh.num_vertices,
         num_faces: mesh.faces.len(),
+        base_color: [0.9, 0.75, 0.6, 1.0], // default warm clay
+        metallic: 0.0,
+        roughness: 0.4,
     };
 
     HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(mesh));
@@ -641,11 +648,28 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     let hyper = normalize_hypermesh(hyper);
 
     let (time_min, time_max) = hyper.time_range();
+
+    // Extract PBR material from the first material in the scene
+    let (base_color, metallic, roughness) = if !scene.materials.is_empty() {
+        let mat = &scene.materials[0];
+        (
+            [mat.base_color_factor[0] as f32, mat.base_color_factor[1] as f32,
+             mat.base_color_factor[2] as f32, mat.base_color_factor[3] as f32],
+            mat.metallic_factor as f32,
+            mat.roughness_factor as f32,
+        )
+    } else {
+        ([0.9, 0.75, 0.6, 1.0], 0.0, 0.4)
+    };
+
     let info = HyperMeshInfo {
         time_min,
         time_max,
         num_vertices: hyper.num_vertices,
         num_faces: hyper.faces.len(),
+        base_color,
+        metallic,
+        roughness,
     };
 
     HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));

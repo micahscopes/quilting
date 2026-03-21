@@ -574,7 +574,11 @@ function render() {
   if (drawPbr && progPbr) {
     gl.useProgram(progPbr);
     gl.bindBufferBase(gl.UNIFORM_BUFFER, PBR_UBO_BINDING, pbrUbo);
-    uploadPbrUBO([0.9, 0.75, 0.6, 1.0], 0.0, 0.4); // warm clay
+    // Use material from loaded model (or default warm clay)
+    const bc = meshInfo.base_color || [0.9, 0.75, 0.6, 1.0];
+    const met = meshInfo.metallic ?? 0.0;
+    const rough = meshInfo.roughness ?? 0.4;
+    uploadPbrUBO(bc, met, rough);
     for (const b of drawBatches) {
       uploadVertexUBO(mvp, view, b.parity, 0, 1);
       gl.bindVertexArray(b.vaoXformTri);

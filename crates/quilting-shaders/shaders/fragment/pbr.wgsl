@@ -20,19 +20,15 @@ struct FragInput {
 
 @fragment
 fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
-    var n = normalize(in.normal_vs);
-
-    // Two-sided: flip normal for back faces
-    // (gl_FrontFacing not available in WGSL, use normal.z sign as proxy)
-    if n.z < 0.0 {
-        n = -n;
-    }
+    let n = normalize(in.normal_vs);
+    // Don't flip normals — the QB evaluation already handles winding via perm_parity.
+    // Flipping on n.z breaks normals for angled surfaces.
 
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera at +Z
 
-    // Key light
-    let light_dir = normalize(vec3<f32>(0.3, 0.6, 0.7));
-    let light_color = vec3<f32>(2.0, 1.95, 1.9);
+    // Key light — bright, from upper-right
+    let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.6));
+    let light_color = vec3<f32>(3.0, 2.9, 2.7);
 
     let input = PBRInput(
         pbr.base_color.rgb,
