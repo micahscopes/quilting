@@ -3,6 +3,7 @@
 /// Each function generates a 4D mesh (HyperMesh) with vertex trajectories
 /// that trace interesting paths through spacetime.
 
+use crate::horse_data;
 use crate::hyper_mesh::HyperMesh;
 use crate::trajectory::{HermiteSegment, VertexTrajectory};
 
@@ -80,7 +81,7 @@ pub fn breathing_sphere(
 ) -> HyperMesh {
     let (verts, faces) = uv_sphere(subdivisions);
 
-    let nk = (duration * frequency * 32.0).max(32.0) as usize;
+    let nk = (duration * frequency * 16.0).max(16.0) as usize;
     let dt = duration / (nk - 1) as f64;
 
     let trajectories = verts
@@ -311,6 +312,65 @@ pub fn morph(
                         t_end: t1,
                         pos_start: pos0,
                         pos_end: pos1,
+                        vel_start: vel0,
+                        vel_end: vel1,
+                    }
+                })
+                .collect();
+
+            VertexTrajectory { segments }
+        })
+        .collect();
+
+    HyperMesh::new(faces, trajectories)
+}
+
+/// Galloping horse from morph target animation (494 verts, 984 tris, 15 frames).
+pub fn galloping_horse(duration: f64) -> HyperMesh {
+    let n_verts = horse_data::NUM_VERTS;
+    let n_frames = horse_data::NUM_FRAMES;
+
+    let faces: Vec<[u32; 3]> = horse_data::FACES
+        .chunks(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+
+    let dt = duration / (n_frames - 1) as f64;
+
+    let trajectories: Vec<VertexTrajectory> = (0..n_verts)
+        .map(|vi| {
+            let segments: Vec<HermiteSegment> = (0..n_frames - 1)
+                .map(|fi| {
+                    let t0 = fi as f64 * dt;
+                    let t1 = (fi + 1) as f64 * dt;
+
+                    let base0 = fi * n_verts * 3 + vi * 3;
+                    let base1 = (fi + 1) * n_verts * 3 + vi * 3;
+
+                    let p0 = [
+                        horse_data::MORPH_FRAMES[base0],
+                        horse_data::MORPH_FRAMES[base0 + 1],
+                        horse_data::MORPH_FRAMES[base0 + 2],
+                    ];
+                    let p1 = [
+                        horse_data::MORPH_FRAMES[base1],
+                        horse_data::MORPH_FRAMES[base1 + 1],
+                        horse_data::MORPH_FRAMES[base1 + 2],
+                    ];
+
+                    // Approximate velocity from finite differences
+                    let vel0 = [
+                        (p1[0] - p0[0]) / dt,
+                        (p1[1] - p0[1]) / dt,
+                        (p1[2] - p0[2]) / dt,
+                    ];
+                    let vel1 = vel0; // linear interpolation for now
+
+                    HermiteSegment {
+                        t_start: t0,
+                        t_end: t1,
+                        pos_start: p0,
+                        pos_end: p1,
                         vel_start: vel0,
                         vel_end: vel1,
                     }

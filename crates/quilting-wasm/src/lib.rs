@@ -485,6 +485,7 @@ pub fn create_hypermesh(name: &str) -> JsValue {
         "breathing_sphere" => synthesize::breathing_sphere(2.0, 1.0, 0.3, 6),
         "colliding_spheres" => synthesize::colliding_spheres(2.0, 1.5, 4.0, 4),
         "twisting_torus" => synthesize::twisting_torus(2.0, 2.0, 2.0, 0.5, 32, 24),
+        "galloping_horse" => synthesize::galloping_horse(2.0),
         _ => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 128),
     };
 
