@@ -285,21 +285,25 @@ impl HyperplaneSlicer {
             // All trajectories should have the same segment count (after padding)
             let n_segs = traj0.segments.len().min(traj1.segments.len()).min(traj2.segments.len());
 
-            // Estimate the time window where the hyperplane could intersect.
-            let nt = self.normal[3];
-            let spatial_mag = (self.normal[0].powi(2) + self.normal[1].powi(2) + self.normal[2].powi(2)).sqrt();
-            // Maximum spatial extent of the mesh (rough estimate)
-            let (t_lo, t_hi) = if nt.abs() > 0.01 {
-                let t_center = self.offset / nt;
-                let t_radius = 4.0 * spatial_mag / nt.abs();
-                (t_center - t_radius, t_center + t_radius)
+            // Time-range culling: skip segments far from the hyperplane.
+            // Disabled when 4D transform is active — the transform remaps time
+            // so pre-transform segment times don't predict post-transform intersection.
+            let (seg_start, seg_end) = if transform_4d.is_some() {
+                (0, n_segs)
             } else {
-                (f64::NEG_INFINITY, f64::INFINITY)
+                let nt = self.normal[3];
+                let spatial_mag = (self.normal[0].powi(2) + self.normal[1].powi(2) + self.normal[2].powi(2)).sqrt();
+                let (t_lo, t_hi) = if nt.abs() > 0.01 {
+                    let t_center = self.offset / nt;
+                    let t_radius = 4.0 * spatial_mag / nt.abs();
+                    (t_center - t_radius, t_center + t_radius)
+                } else {
+                    (f64::NEG_INFINITY, f64::INFINITY)
+                };
+                let start = traj0.segments.partition_point(|s| s.t_end < t_lo);
+                let end = traj0.segments.partition_point(|s| s.t_start <= t_hi).min(n_segs);
+                (start, end)
             };
-
-            // Binary search for the first relevant segment
-            let seg_start = traj0.segments.partition_point(|s| s.t_end < t_lo);
-            let seg_end = traj0.segments.partition_point(|s| s.t_start <= t_hi).min(n_segs);
 
             for si in seg_start..seg_end {
                 let seg0 = &traj0.segments[si];
