@@ -10,6 +10,7 @@ pub struct Programs {
     pub matcap: glow::Program,
     pub wire: glow::Program,
     pub normals: glow::Program,
+    pub pbr: glow::Program,
 }
 
 impl Programs {
@@ -19,6 +20,7 @@ impl Programs {
             gl.delete_program(self.matcap);
             gl.delete_program(self.wire);
             gl.delete_program(self.normals);
+            gl.delete_program(self.pbr);
         }
     }
 }
@@ -28,6 +30,7 @@ impl Programs {
 /// We bind these to UBO binding points.
 pub const VERTEX_UNIFORMS_BINDING: u32 = 0;
 pub const WIRE_UNIFORMS_BINDING: u32 = 1;
+pub const PBR_UNIFORMS_BINDING: u32 = 2;
 
 /// Compiled GLSL source for a vertex/fragment pair.
 pub struct CompiledGlsl {
@@ -36,7 +39,7 @@ pub struct CompiledGlsl {
 }
 
 /// Fragment shader modes that quilting-shaders supports.
-const FRAGMENT_MODES: &[&str] = &["matcap", "wire", "normals"];
+const FRAGMENT_MODES: &[&str] = &["matcap", "wire", "normals", "pbr"];
 
 /// Compile all WGSL shaders to GLSL via quilting-shaders (naga).
 /// Uses the "native" emission path (no Y-flip / Z-remap).
@@ -130,6 +133,7 @@ pub fn create_program(
 /// Naga names uniform blocks like:
 ///   - `Uniforms_block_0Vertex` for @group(0) @binding(0) in vertex stage
 ///   - `WireUniforms_block_0Fragment` for @group(0) @binding(1) in fragment stage
+///   - `PbrUniforms_block_1Fragment` for @group(0) @binding(1) in PBR fragment stage
 pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
     unsafe {
         // Vertex uniform block: Uniforms at group(0) binding(0)
@@ -141,6 +145,11 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         if let Some(idx) = gl.get_uniform_block_index(program, "WireUniforms_block_0Fragment") {
             gl.uniform_block_binding(program, idx, WIRE_UNIFORMS_BINDING);
         }
+
+        // PBR fragment uniform block: PbrUniforms at group(0) binding(1)
+        if let Some(idx) = gl.get_uniform_block_index(program, "PbrUniforms_block_1Fragment") {
+            gl.uniform_block_binding(program, idx, PBR_UNIFORMS_BINDING);
+        }
     }
 }
 
@@ -151,6 +160,7 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
     let mut matcap = None;
     let mut wire = None;
     let mut normals = None;
+    let mut pbr = None;
 
     for (name, compiled) in &glsl_sources {
         let program = create_program(gl, &compiled.vertex, &compiled.fragment)
@@ -162,6 +172,7 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
             "matcap" => matcap = Some(program),
             "wire" => wire = Some(program),
             "normals" => normals = Some(program),
+            "pbr" => pbr = Some(program),
             _ => {}
         }
     }
@@ -170,5 +181,6 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
         matcap: matcap.ok_or("matcap program not compiled")?,
         wire: wire.ok_or("wire program not compiled")?,
         normals: normals.ok_or("normals program not compiled")?,
+        pbr: pbr.ok_or("pbr program not compiled")?,
     })
 }

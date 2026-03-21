@@ -148,7 +148,7 @@ mod tests {
     fn glsl_compilation_succeeds() {
         // Verify that WGSL -> GLSL compilation works without a GL context.
         let sources = compiled_glsl_sources().unwrap();
-        assert_eq!(sources.len(), 3, "should have 3 programs (matcap, wire, normals)");
+        assert_eq!(sources.len(), 4, "should have 4 programs (matcap, wire, normals, pbr)");
 
         for (name, vertex, fragment) in &sources {
             assert!(

@@ -376,17 +376,36 @@ impl FaceInstance {
         out[29] = self.vertex_lods[1] as f32;
         out[30] = self.vertex_lods[2] as f32;
         out[31] = 0.0;
+        self.pack_uvs(&mut out, &self.uvs);
+        out
+    }
+
+    /// Pack as 40 f32s with UVs reordered to match a permuted tessellation.
+    ///
+    /// When the tessellation bary coords are CPU-remapped by `remap_position(perm_index, ...)`,
+    /// the UV corners must be permuted to match so that `permuted_bary.x * uv[0] + ...`
+    /// gives the correct interpolation.
+    pub fn to_f32_array_permuted(&self, perm_index: usize) -> [f32; 40] {
+        let mut out = self.to_f32_array();
+        if perm_index != 0 {
+            let perm = crate::permutation::S3_PERMUTATIONS[perm_index];
+            let permuted_uvs = [self.uvs[perm[0]], self.uvs[perm[1]], self.uvs[perm[2]]];
+            self.pack_uvs(&mut out, &permuted_uvs);
+        }
+        out
+    }
+
+    fn pack_uvs(&self, out: &mut [f32; 40], uvs: &[[f32; 2]; 3]) {
         // vec4 #9: UVs for vertices 0 and 1 (u0, v0, u1, v1)
-        out[32] = self.uvs[0][0];
-        out[33] = self.uvs[0][1];
-        out[34] = self.uvs[1][0];
-        out[35] = self.uvs[1][1];
+        out[32] = uvs[0][0];
+        out[33] = uvs[0][1];
+        out[34] = uvs[1][0];
+        out[35] = uvs[1][1];
         // vec4 #10: UVs for vertex 2 + padding (u2, v2, 0, 0)
-        out[36] = self.uvs[2][0];
-        out[37] = self.uvs[2][1];
+        out[36] = uvs[2][0];
+        out[37] = uvs[2][1];
         out[38] = 0.0;
         out[39] = 0.0;
-        out
     }
 }
 

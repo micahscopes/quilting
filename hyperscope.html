@@ -247,17 +247,34 @@ function getMaterialParams(materialIndex) {
   if (materialIndex >= 0 && materialIndex < loadedMaterials.length) {
     const mat = loadedMaterials[materialIndex];
     const bc = materialColors[materialIndex] || mat.base_color || [0.9, 0.75, 0.6, 1.0];
+    const alphaStr = mat.alpha_mode || 'OPAQUE';
     return {
       baseColor: bc,
       metallic: mat.metallic ?? 0.0,
       roughness: mat.roughness ?? 0.4,
       baseColorTextureIndex: mat.base_color_texture_index ?? -1,
+      metallicRoughnessTextureIndex: mat.metallic_roughness_texture_index ?? -1,
+      normalTextureIndex: mat.normal_texture_index ?? -1,
+      normalScale: mat.normal_scale ?? 1.0,
+      emissiveFactor: mat.emissive_factor || [0, 0, 0],
+      emissiveTextureIndex: mat.emissive_texture_index ?? -1,
+      occlusionTextureIndex: mat.occlusion_texture_index ?? -1,
+      occlusionStrength: mat.occlusion_strength ?? 1.0,
+      alphaMode: alphaStr === 'MASK' ? 1 : (alphaStr === 'BLEND' ? 2 : 0),
+      alphaCutoff: mat.alpha_cutoff ?? 0.5,
     };
   }
   const bc = meshInfo ? (meshInfo.base_color || [0.9, 0.75, 0.6, 1.0]) : [0.9, 0.75, 0.6, 1.0];
   const met = meshInfo ? (meshInfo.metallic ?? 0.0) : 0.0;
   const rough = meshInfo ? (meshInfo.roughness ?? 0.4) : 0.4;
-  return { baseColor: bc, metallic: met, roughness: rough, baseColorTextureIndex: -1 };
+  return {
+    baseColor: bc, metallic: met, roughness: rough,
+    baseColorTextureIndex: -1, metallicRoughnessTextureIndex: -1,
+    normalTextureIndex: -1, normalScale: 1.0,
+    emissiveFactor: [0, 0, 0], emissiveTextureIndex: -1,
+    occlusionTextureIndex: -1, occlusionStrength: 1.0,
+    alphaMode: 0, alphaCutoff: 0.5,
+  };
 }
 
 // --- Worker ---
@@ -291,7 +308,8 @@ function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compile
 function mkProg(vs,fs){const p=gl.createProgram();gl.attachShader(p,mkS(vs,gl.VERTEX_SHADER));gl.attachShader(p,mkS(fs,gl.FRAGMENT_SHADER));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error('LINK:',gl.getProgramInfoLog(p));return p;}
 
 let progMatcap = null, progLod = null, progWire = null, progNormals = null, progPbr = null;
-let pbrTexSamplerLoc = null; // sampler2D uniform location for base color texture
+let pbrSamplerLocs = {}; // sampler2D uniform locations for PBR textures
+const placeholderTex = null; // 1x1 white texture for unbound slots
 
 // --- UBO management ---
 // Vertex UBO: Uniforms_block_0Vertex (std140, binding 0)
@@ -327,8 +345,22 @@ const wireUboF32 = new Float32Array(wireUboData);
 const wireUboI32 = new Int32Array(wireUboData);
 
 // PBR UBO: PbrUniforms (std140, binding 2)
-// Layout: base_color (vec4, 16 bytes), metallic (f32), roughness (f32), has_base_color_tex (f32), pad = 32 bytes
-const PBR_UBO_SIZE = 32;
+// Layout (80 bytes):
+//   base_color: vec4         (0-15)
+//   metallic: f32            (16)
+//   roughness: f32           (20)
+//   has_base_color_tex: f32  (24)
+//   has_mr_tex: f32          (28)
+//   emissive_factor: vec4    (32-47)
+//   normal_scale: f32        (48)
+//   has_normal_tex: f32      (52)
+//   has_emissive_tex: f32    (56)
+//   has_occlusion_tex: f32   (60)
+//   occlusion_strength: f32  (64)
+//   alpha_cutoff: f32        (68)
+//   alpha_mode: f32          (72)
+//   _pad: f32                (76)
+const PBR_UBO_SIZE = 80;
 const PBR_UBO_BINDING = 2;
 const pbrUbo = gl.createBuffer();
 gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
@@ -364,12 +396,31 @@ function uploadBaseColorTexture(rgba, width, height) {
   console.log(`Uploaded base color texture: ${width}x${height}`);
 }
 
-function uploadPbrUBO(baseColor, metallic, roughness, hasTexture) {
-  pbrUboF32[0] = baseColor[0]; pbrUboF32[1] = baseColor[1];
-  pbrUboF32[2] = baseColor[2]; pbrUboF32[3] = baseColor[3] || 1.0;
-  pbrUboF32[4] = metallic;
-  pbrUboF32[5] = roughness;
-  pbrUboF32[6] = hasTexture ? 1.0 : 0.0;
+function uploadPbrUBO(mat) {
+  pbrUboF32.fill(0);
+  // base_color: vec4 at offset 0
+  pbrUboF32[0] = mat.baseColor[0]; pbrUboF32[1] = mat.baseColor[1];
+  pbrUboF32[2] = mat.baseColor[2]; pbrUboF32[3] = mat.baseColor[3] || 1.0;
+  // metallic, roughness at offset 16, 20
+  pbrUboF32[4] = mat.metallic;
+  pbrUboF32[5] = mat.roughness;
+  // has_base_color_tex, has_mr_tex at offset 24, 28
+  pbrUboF32[6] = mat.hasBaseColorTex ? 1.0 : 0.0;
+  pbrUboF32[7] = mat.hasMetallicRoughnessTex ? 1.0 : 0.0;
+  // emissive_factor: vec4 at offset 32 (rgb, w=0)
+  const ef = mat.emissiveFactor || [0, 0, 0];
+  pbrUboF32[8] = ef[0]; pbrUboF32[9] = ef[1]; pbrUboF32[10] = ef[2]; pbrUboF32[11] = 0;
+  // normal_scale at offset 48
+  pbrUboF32[12] = mat.normalScale ?? 1.0;
+  // has_normal_tex, has_emissive_tex, has_occlusion_tex at offset 52, 56, 60
+  pbrUboF32[13] = mat.hasNormalTex ? 1.0 : 0.0;
+  pbrUboF32[14] = mat.hasEmissiveTex ? 1.0 : 0.0;
+  pbrUboF32[15] = mat.hasOcclusionTex ? 1.0 : 0.0;
+  // occlusion_strength, alpha_cutoff, alpha_mode at offset 64, 68, 72
+  pbrUboF32[16] = mat.occlusionStrength ?? 1.0;
+  pbrUboF32[17] = mat.alphaCutoff ?? 0.5;
+  pbrUboF32[18] = mat.alphaMode ?? 0;
+  // _pad at offset 76
   gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, pbrUboData);
 }
@@ -430,34 +481,38 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
       console.log('PBR program linked OK');
     }
     if (progPbr) bindUniformBlocks(progPbr);
-    // PBR has an additional UBO for material params
-    // Try both possible naga block names
+    // Bind PBR UBO block
     const numBlocks = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORM_BLOCKS);
-    console.log('PBR program has', numBlocks, 'uniform blocks:');
-    for (let i = 0; i < numBlocks; i++) {
-      const name = gl.getActiveUniformBlockName(progPbr, i);
-      const size = gl.getActiveUniformBlockParameter(progPbr, i, gl.UNIFORM_BLOCK_DATA_SIZE);
-      console.log(`  block ${i}: "${name}" (${size} bytes)`);
-    }
-    // Bind all non-vertex blocks to PBR_UBO_BINDING
     for (let i = 0; i < numBlocks; i++) {
       const name = gl.getActiveUniformBlockName(progPbr, i);
       if (name && name.includes('Pbr')) {
         gl.uniformBlockBinding(progPbr, i, PBR_UBO_BINDING);
-        console.log(`  → bound "${name}" to binding ${PBR_UBO_BINDING}`);
       }
     }
-    // Find the combined texture+sampler uniform for base color
-    // naga generates a combined sampler2D with various possible names
+    // Bind all sampler2D uniforms to texture units.
+    // naga generates combined sampler names like "_base_color_tex_base_color_sampler".
+    // Map them to texture units 0-4 based on which PBR map they represent.
+    const texUnitMap = [
+      { pattern: 'base_color', unit: 0 },
+      { pattern: 'metallic_roughness', unit: 1 },
+      { pattern: 'normal', unit: 2 },
+      { pattern: 'emissive', unit: 3 },
+      { pattern: 'occlusion', unit: 4 },
+    ];
+    gl.useProgram(progPbr);
     const numUniforms = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORMS);
     for (let i = 0; i < numUniforms; i++) {
       const info = gl.getActiveUniform(progPbr, i);
       if (info && info.type === gl.SAMPLER_2D) {
-        pbrTexSamplerLoc = gl.getUniformLocation(progPbr, info.name);
-        console.log(`PBR texture sampler: "${info.name}" → unit 0`);
-        gl.useProgram(progPbr);
-        gl.uniform1i(pbrTexSamplerLoc, 0);
-        break;
+        const loc = gl.getUniformLocation(progPbr, info.name);
+        const name = info.name.toLowerCase();
+        for (const entry of texUnitMap) {
+          if (name.includes(entry.pattern)) {
+            gl.uniform1i(loc, entry.unit);
+            pbrSamplerLocs[entry.pattern] = { loc, unit: entry.unit };
+            break;
+          }
+        }
       }
     }
   }
@@ -689,19 +744,37 @@ function render() {
   if (drawPbr && progPbr) {
     gl.useProgram(progPbr);
     gl.bindBufferBase(gl.UNIFORM_BUFFER, PBR_UBO_BINDING, pbrUbo);
-    let lastMaterialIndex = -999; // force first upload
+    if (!window._pbrPlaceholder) window._pbrPlaceholder = createPlaceholderTexture();
+    const placeholder = window._pbrPlaceholder;
+    let lastMaterialIndex = -999;
     for (const b of drawBatches) {
-      // Upload material params when material changes
       if (b.materialIndex !== lastMaterialIndex) {
         lastMaterialIndex = b.materialIndex;
         const mat = getMaterialParams(b.materialIndex);
-        const hasTexIdx = mat.baseColorTextureIndex;
-        const texObj = (hasTexIdx != null && hasTexIdx >= 0) ? loadedTextures[hasTexIdx] : null;
-        const hasTex = texObj && texObj.glTexture;
-        uploadPbrUBO(mat.baseColor, mat.metallic, mat.roughness, !!hasTex);
-        if (hasTex) {
-          gl.activeTexture(gl.TEXTURE0);
-          gl.bindTexture(gl.TEXTURE_2D, texObj.glTexture);
+
+        // Resolve texture objects for each PBR map
+        const resolve = (idx) => (idx != null && idx >= 0 && loadedTextures[idx]) ? loadedTextures[idx].glTexture : null;
+        const bcTex = resolve(mat.baseColorTextureIndex);
+        const mrTex = resolve(mat.metallicRoughnessTextureIndex);
+        const nmTex = resolve(mat.normalTextureIndex);
+        const emTex = resolve(mat.emissiveTextureIndex);
+        const aoTex = resolve(mat.occlusionTextureIndex);
+
+        // Upload expanded UBO
+        uploadPbrUBO({
+          baseColor: mat.baseColor, metallic: mat.metallic, roughness: mat.roughness,
+          hasBaseColorTex: !!bcTex, hasMetallicRoughnessTex: !!mrTex,
+          emissiveFactor: mat.emissiveFactor, normalScale: mat.normalScale,
+          hasNormalTex: !!nmTex, hasEmissiveTex: !!emTex, hasOcclusionTex: !!aoTex,
+          occlusionStrength: mat.occlusionStrength, alphaCutoff: mat.alphaCutoff,
+          alphaMode: mat.alphaMode,
+        });
+
+        // Bind textures to units 0-4 (placeholder for missing maps)
+        const texBindings = [bcTex, mrTex, nmTex, emTex, aoTex];
+        for (let ti = 0; ti < 5; ti++) {
+          gl.activeTexture(gl.TEXTURE0 + ti);
+          gl.bindTexture(gl.TEXTURE_2D, texBindings[ti] || placeholder);
         }
       }
       uploadVertexUBO(mvp, view, b.parity, 0, 1);

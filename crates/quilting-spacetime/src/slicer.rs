@@ -287,19 +287,24 @@ impl HyperplaneSlicer {
         let mut faces: Vec<[u32; 3]> = Vec::new();
         let mut source_face_indices: Vec<usize> = Vec::new();
 
-        let mut vert_map: HashMap<[i64; 4], u32> = HashMap::default();
+        let mut vert_map: HashMap<[i64; 6], u32> = HashMap::default();
 
         let add_vert = |pos: [f64; 3], t: f64, w: [f64; 4], uv: [f32; 2],
                         positions: &mut Vec<[f64; 3]>,
                         times: &mut Vec<f64>,
                         weights: &mut Vec<[f64; 4]>,
                         uvs: &mut Vec<[f32; 2]>,
-                        vert_map: &mut HashMap<[i64; 4], u32>| -> u32 {
+                        vert_map: &mut HashMap<[i64; 6], u32>| -> u32 {
+            // Include UVs in the dedup key so texture seam vertices stay separate.
+            // Without this, two vertices at the same position but different UVs
+            // (e.g., at a texture seam) get merged, destroying the seam.
             let key = [
                 (pos[0] * 1e8) as i64,
                 (pos[1] * 1e8) as i64,
                 (pos[2] * 1e8) as i64,
                 (t * 1e8) as i64,
+                (uv[0] as f64 * 1e6) as i64,
+                (uv[1] as f64 * 1e6) as i64,
             ];
             if let Some(&idx) = vert_map.get(&key) {
                 return idx;

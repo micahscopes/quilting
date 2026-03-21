@@ -71,7 +71,11 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
     let (document, buffers, raw_images) = match gltf::import_slice(data) {
         Ok(result) => result,
         Err(_) => {
-            let gltf_obj = gltf::Gltf::from_slice(data)?;
+            // Skip all validation (including extensionsRequired checks) so models
+            // with KHR_materials_unlit, KHR_texture_basisu, etc. can still load.
+            // Textures that need unsupported codecs will be empty — the avg_color
+            // fallback in the renderer handles this gracefully.
+            let gltf_obj = gltf::Gltf::from_slice_without_validation(data)?;
             let mut buffers = Vec::new();
             if let Some(blob) = gltf_obj.blob {
                 buffers.push(gltf::buffer::Data(blob));

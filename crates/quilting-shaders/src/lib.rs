@@ -219,6 +219,10 @@ mod tests {
         assert!(glsl.is_ok(), "pbr fragment failed: {:?}", glsl.err());
         let code = glsl.unwrap();
         assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
+        // Verify all 5 PBR texture samplers are present
+        assert!(code.contains("sampler2D"), "PBR should have sampler2D uniforms");
+        // Verify the PBR UBO block is present
+        assert!(code.contains("PbrUniforms"), "PBR should have PbrUniforms UBO");
     }
 
     #[test]

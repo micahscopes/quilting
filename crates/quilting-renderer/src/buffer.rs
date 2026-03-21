@@ -176,12 +176,12 @@ unsafe fn setup_vao(
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 0, 0);
 
-    // Attributes 1-8: instance data (8 x vec4, 128 bytes stride)
+    // Attributes 1-10: instance data (10 x vec4, 160 bytes stride)
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
-    for i in 0..8u32 {
+    for i in 0..10u32 {
         let loc = 1 + i;
         gl.enable_vertex_attrib_array(loc);
-        gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, 128, (i * 16) as i32);
+        gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, 160, (i * 16) as i32);
         gl.vertex_attrib_divisor(loc, 1);
     }
 

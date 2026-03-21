@@ -38,6 +38,7 @@ struct VertexOutput {
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
     @location(2) tex_uv: vec2<f32>,
+    @location(3) position_vs: vec3<f32>,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -94,6 +95,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let uv2 = in.uv2_pad.xy;
     out.tex_uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
 
+    out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
     return out;
 }

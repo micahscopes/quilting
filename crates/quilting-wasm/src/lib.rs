@@ -359,9 +359,9 @@ pub fn compute_mesh_batches(
             };
 
             let orig_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
+                .flat_map(|&fi| instances_orig[fi].to_f32_array_permuted(perm_index)).collect();
             let xform_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
+                .flat_map(|&fi| instances_xform[fi].to_f32_array_permuted(perm_index)).collect();
 
             batches.push(BatchData {
                 lod: actual_lod,
@@ -746,11 +746,61 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             js_sys::Reflect::set(&obj, &"base_color_texture_index".into(), &JsValue::NULL).unwrap();
         }
 
+        // Metallic-roughness texture
+        let mr_idx = mat.metallic_roughness_texture.as_ref().and_then(|tex_ref| {
+            scene.texture_to_image.get(tex_ref.index).copied()
+        });
+        if let Some(idx) = mr_idx {
+            js_sys::Reflect::set(&obj, &"metallic_roughness_texture_index".into(), &JsValue::from_f64(idx as f64)).unwrap();
+        } else {
+            js_sys::Reflect::set(&obj, &"metallic_roughness_texture_index".into(), &JsValue::NULL).unwrap();
+        }
+
+        // Normal texture + scale
+        let normal_idx = mat.normal_texture.as_ref().and_then(|tex_ref| {
+            scene.texture_to_image.get(tex_ref.index).copied()
+        });
+        if let Some(idx) = normal_idx {
+            js_sys::Reflect::set(&obj, &"normal_texture_index".into(), &JsValue::from_f64(idx as f64)).unwrap();
+        } else {
+            js_sys::Reflect::set(&obj, &"normal_texture_index".into(), &JsValue::NULL).unwrap();
+        }
+        js_sys::Reflect::set(&obj, &"normal_scale".into(), &JsValue::from_f64(mat.normal_scale)).unwrap();
+
+        // Emissive
         let emissive = js_sys::Array::new();
         for &c in &mat.emissive_factor {
             emissive.push(&JsValue::from_f64(c));
         }
         js_sys::Reflect::set(&obj, &"emissive_factor".into(), &emissive).unwrap();
+        let emissive_idx = mat.emissive_texture.as_ref().and_then(|tex_ref| {
+            scene.texture_to_image.get(tex_ref.index).copied()
+        });
+        if let Some(idx) = emissive_idx {
+            js_sys::Reflect::set(&obj, &"emissive_texture_index".into(), &JsValue::from_f64(idx as f64)).unwrap();
+        } else {
+            js_sys::Reflect::set(&obj, &"emissive_texture_index".into(), &JsValue::NULL).unwrap();
+        }
+
+        // Occlusion
+        let occ_idx = mat.occlusion_texture.as_ref().and_then(|tex_ref| {
+            scene.texture_to_image.get(tex_ref.index).copied()
+        });
+        if let Some(idx) = occ_idx {
+            js_sys::Reflect::set(&obj, &"occlusion_texture_index".into(), &JsValue::from_f64(idx as f64)).unwrap();
+        } else {
+            js_sys::Reflect::set(&obj, &"occlusion_texture_index".into(), &JsValue::NULL).unwrap();
+        }
+        js_sys::Reflect::set(&obj, &"occlusion_strength".into(), &JsValue::from_f64(mat.occlusion_strength)).unwrap();
+
+        // Alpha
+        let alpha_mode_str = match mat.alpha_mode {
+            quilting_gltf::material::AlphaMode::Opaque => "OPAQUE",
+            quilting_gltf::material::AlphaMode::Mask => "MASK",
+            quilting_gltf::material::AlphaMode::Blend => "BLEND",
+        };
+        js_sys::Reflect::set(&obj, &"alpha_mode".into(), &JsValue::from_str(alpha_mode_str)).unwrap();
+        js_sys::Reflect::set(&obj, &"alpha_cutoff".into(), &JsValue::from_f64(mat.alpha_cutoff)).unwrap();
         js_sys::Reflect::set(&obj, &"double_sided".into(), &JsValue::from_bool(mat.double_sided)).unwrap();
 
         js_materials.push(&obj);
@@ -1362,9 +1412,9 @@ pub fn slice_and_transform(
             };
 
             let orig_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
+                .flat_map(|&fi| instances_orig[fi].to_f32_array_permuted(perm_index)).collect();
             let xform_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
+                .flat_map(|&fi| instances_xform[fi].to_f32_array_permuted(perm_index)).collect();
 
             raw_batches.push(RawBatch {
                 actual_lod,
