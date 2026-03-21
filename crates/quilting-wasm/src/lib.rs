@@ -429,6 +429,7 @@ struct MeshBatches {
 
 /// Compile the production vertex shader (WGSL -> GLSL ES 300).
 /// Returns the GLSL source string for use with WebGL2.
+/// Uses the default naga emission path (with coordinate space adjustment).
 #[wasm_bindgen]
 pub fn compile_vertex_shader() -> String {
     match quilting_shaders::compile_vertex_glsl() {
@@ -440,9 +441,30 @@ pub fn compile_vertex_shader() -> String {
 /// Compile a production fragment shader (WGSL -> GLSL ES 300).
 /// mode: "matcap", "wire", or "normals"
 /// Returns the GLSL source string for use with WebGL2.
+/// Uses the default naga emission path (with coordinate space adjustment).
 #[wasm_bindgen]
 pub fn compile_fragment_shader(mode: &str) -> String {
     match quilting_shaders::compile_fragment_glsl(mode) {
+        Ok(glsl) => glsl,
+        Err(e) => format!("// ERROR: {}", e),
+    }
+}
+
+/// Compile the vertex shader for native OpenGL/WebGL rendering
+/// (no Y-flip or Z-remap -- suitable for direct use with WebGL2).
+#[wasm_bindgen]
+pub fn get_vertex_glsl() -> String {
+    match quilting_shaders::compile_vertex_glsl_native() {
+        Ok(glsl) => glsl,
+        Err(e) => format!("// ERROR: {}", e),
+    }
+}
+
+/// Compile a fragment shader for native OpenGL/WebGL rendering.
+/// mode: "matcap", "wire", or "normals"
+#[wasm_bindgen]
+pub fn get_fragment_glsl(mode: &str) -> String {
+    match quilting_shaders::compile_fragment_glsl_native(mode) {
         Ok(glsl) => glsl,
         Err(e) => format!("// ERROR: {}", e),
     }

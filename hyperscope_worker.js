@@ -13,6 +13,15 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'get_shaders') {
+    const vs = wasm.get_vertex_glsl();
+    const fs_matcap = wasm.get_fragment_glsl('matcap');
+    const fs_wire = wasm.get_fragment_glsl('wire');
+    const fs_normals = wasm.get_fragment_glsl('normals');
+    self.postMessage({ type: 'shaders', id, vs, fs_matcap, fs_wire, fs_normals });
+    return;
+  }
+
   if (type === 'set_sliver') {
     wasm.set_sliver_threshold(data.threshold);
     self.postMessage({ type: 'sliver_set', id });

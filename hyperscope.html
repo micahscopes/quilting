@@ -207,219 +207,118 @@ worker.onmessage = (e) => {
   if (resolve) { pending.delete(id); resolve(e.data); }
 };
 
-// --- Shaders (copied from index.html) ---
-const VS = `#version 300 es
-layout(location=0) in vec3 a_bary;
-layout(location=1) in vec4 a_p0;
-layout(location=2) in vec4 a_p1;
-layout(location=3) in vec4 a_p2;
-layout(location=4) in vec4 a_w0;
-layout(location=5) in vec4 a_w1;
-layout(location=6) in vec4 a_w2;
-layout(location=7) in vec4 a_lodInfo;
-layout(location=8) in vec4 a_vertLod;
-uniform mat4 u_mvp;
-uniform mat4 u_mv;
-uniform int u_useQB;
-uniform float u_permParity;
-uniform int u_permIndex;
+// --- Shaders loaded from WASM (compiled from WGSL via naga) ---
+// No inline GLSL -- shaders are compiled at runtime by quilting-shaders.
+// WGSL source is compiled to GLSL ES 300 via naga in the WASM module.
+// The naga-compiled shaders use UBOs instead of individual uniforms:
+//   Vertex:   layout(std140) uniform Uniforms_block_0Vertex { ... }
+//   Wire FS:  layout(std140) uniform WireUniforms_block_0Fragment { ... }
+let shadersLoaded = false;
 
-out vec3 v_normal_vs;
-out float v_density;
-out vec2 v_matcap_uv;
-out float v_fade;
-
-vec3 permBary(vec3 b, int p) {
-  if (p <= 0) return b;
-  if (p == 1) return b.xzy;
-  if (p == 2) return b.yxz;
-  if (p == 3) return b.yzx;
-  if (p == 4) return b.zxy;
-  return b.zyx;
-}
-
-vec4 qm(vec4 a, vec4 b) {
-  return vec4(
-    a.x*b.x-a.y*b.y-a.z*b.z-a.w*b.w,
-    a.x*b.y+a.y*b.x+a.z*b.w-a.w*b.z,
-    a.x*b.z-a.y*b.w+a.z*b.x+a.w*b.y,
-    a.x*b.w+a.y*b.z-a.z*b.y+a.w*b.x);
-}
-vec4 qinv(vec4 q) { float d=dot(q,q); return d<1e-20 ? vec4(1e10,0,0,0) : vec4(q.x,-q.yzw)/d; }
-
-void evalQBWithNormal(vec3 bary, vec4 p0,vec4 p1,vec4 p2, vec4 w0,vec4 w1,vec4 w2,
-                      out vec3 pos, out vec3 nrm) {
-  vec4 pw0 = qm(p0,w0), pw1 = qm(p1,w1), pw2 = qm(p2,w2);
-  vec4 top = bary.x*pw0 + bary.y*pw1 + bary.z*pw2;
-  vec4 bot = bary.x*w0  + bary.y*w1  + bary.z*w2;
-  vec4 bi = qinv(bot);
-  vec4 X = qm(top, bi);
-  pos = X.yzw;
-  vec4 dtop_u = pw1 - pw0;
-  vec4 dbot_u = w1 - w0;
-  vec4 dtop_v = pw2 - pw0;
-  vec4 dbot_v = w2 - w0;
-  vec4 dXu = qm(dtop_u - qm(X, dbot_u), bi);
-  vec4 dXv = qm(dtop_v - qm(X, dbot_v), bi);
-  nrm = normalize(cross(dXu.yzw, dXv.yzw));
-}
-
-vec3 evalFlat(vec3 bary, vec4 p0,vec4 p1,vec4 p2) {
-  return bary.x*p0.yzw + bary.y*p1.yzw + bary.z*p2.yzw;
-}
-
-float edgeDensity(vec3 bary, vec3 res) {
-  float x = bary.x, y = bary.y, z = bary.z;
-  float e0 = y * z, e1 = x * z, e2 = x * y;
-  float sum = e0 + e1 + e2;
-  if (sum < 1e-10) return max(res.x, max(res.y, res.z));
-  float logRes = (e0*log(max(res.x,1.0)) + e1*log(max(res.y,1.0)) + e2*log(max(res.z,1.0))) / sum;
-  return exp(logRes);
-}
-
-void main(){
-  vec3 bary = permBary(a_bary, u_permIndex);
-  vec3 p, n;
-  if (u_useQB == 1) {
-    evalQBWithNormal(bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2, p, n);
-  } else {
-    p = evalFlat(bary, a_p0,a_p1,a_p2);
-    n = normalize(cross(a_p1.yzw - a_p0.yzw, a_p2.yzw - a_p0.yzw));
-  }
-  n *= u_permParity;
-  vec3 n_vs = normalize(mat3(u_mv) * n);
-  v_normal_vs = n_vs;
-  v_matcap_uv = n_vs.xy * 0.5 + 0.5;
-  float density = edgeDensity(bary, a_lodInfo.xyz);
-  v_density = log2(max(density, 1.0)) / 10.0;
-  v_fade = 1.0;
-  if (u_useQB == 1) {
-    vec4 bot = a_bary.x*a_w0 + a_bary.y*a_w1 + a_bary.z*a_w2;
-    float bot_sq = dot(bot, bot);
-    v_fade = smoothstep(0.0001, 0.001, bot_sq);
-  }
-  gl_Position = u_mvp * vec4(p, 1.0);
-}`;
-
-const FS_MATCAP = `#version 300 es
-precision highp float;
-in vec3 v_normal_vs;
-in float v_density;
-in vec2 v_matcap_uv;
-in float v_fade;
-uniform sampler2D u_matcapTex;
-out vec4 o;
-void main(){
-  if (v_fade < 0.01) discard;
-  vec3 n = normalize(v_normal_vs);
-  n = gl_FrontFacing ? n : -n;
-  vec2 uv = n.xy * 0.48 + 0.5;
-  vec4 col = texture(u_matcapTex, uv);
-  col.a *= v_fade;
-  o = col;
-}`;
-
-const FS_LOD = `#version 300 es
-precision mediump float;
-in vec3 v_normal_vs;
-in float v_density;
-in vec2 v_matcap_uv;
-in float v_fade;
-uniform vec3 u_lodColor;
-out vec4 o;
-vec3 heatmap(float t) {
-  t = clamp(t, 0.0, 1.0);
-  vec3 c0=vec3(0.,.0,.5), c1=vec3(0.,.5,1.), c2=vec3(0.,1.,.5), c3=vec3(1.,1.,0.), c4=vec3(1.,0.,0.);
-  if(t<.25) return mix(c0,c1,t*4.);
-  if(t<.5)  return mix(c1,c2,(t-.25)*4.);
-  if(t<.75) return mix(c2,c3,(t-.5)*4.);
-  return mix(c3,c4,(t-.75)*4.);
-}
-void main(){
-  vec3 n = normalize(v_normal_vs);
-  n = gl_FrontFacing ? n : -n;
-  float NdV = max(n.z, 0.0);
-  vec3 lightDir = normalize(vec3(0.4, 0.7, 0.9));
-  float NdL = dot(n, lightDir);
-  float diff = NdL * 0.5 + 0.5;
-  vec3 H = normalize(lightDir + vec3(0,0,1));
-  float spec = pow(max(dot(n, H), 0.0), 40.0);
-  float rim = pow(1.0 - NdV, 3.0);
-  if (v_fade < 0.01) discard;
-  vec3 base = heatmap(v_density);
-  vec3 shadow = base * 0.12 + vec3(0.03, 0.01, 0.08);
-  vec3 lit = base * 1.4;
-  vec3 col = mix(shadow, lit, diff);
-  col += vec3(1.0, 0.95, 0.90) * spec * 0.8;
-  col += base * rim * 0.4;
-  col += vec3(0.05, 0.02, 0.08);
-  o = vec4(col, v_fade);
-}`;
-
-const FS_WIRE = `#version 300 es
-precision mediump float;
-in vec3 v_normal_vs;
-in float v_density;
-in vec2 v_matcap_uv;
-in float v_fade;
-uniform vec3 u_lodColor;
-uniform int u_showDensity;
-out vec4 o;
-vec3 heatmap(float t) {
-  t = clamp(t, 0.0, 1.0);
-  vec3 c0=vec3(0.,.0,.5), c1=vec3(0.,.5,1.), c2=vec3(0.,1.,.5), c3=vec3(1.,1.,0.), c4=vec3(1.,0.,0.);
-  if(t<.25) return mix(c0,c1,t*4.);
-  if(t<.5)  return mix(c1,c2,(t-.25)*4.);
-  if(t<.75) return mix(c2,c3,(t-.5)*4.);
-  return mix(c3,c4,(t-.75)*4.);
-}
-void main(){
-  if (v_fade < 0.01) discard;
-  if (u_showDensity == 1) {
-    o = vec4(heatmap(v_density), v_fade);
-  } else {
-    o = vec4(u_lodColor, v_fade);
-  }
-}`;
-
-const FS_NORMALS = `#version 300 es
-precision mediump float;
-in vec3 v_normal_vs;
-in float v_density;
-in vec2 v_matcap_uv;
-in float v_fade;
-out vec4 o;
-void main(){
-  if (v_fade < 0.01) discard;
-  vec3 n = normalize(v_normal_vs);
-  n = gl_FrontFacing ? n : -n;
-  o = vec4(n * 0.5 + 0.5, v_fade);
-}`;
-
-// --- Shader compilation ---
-function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error('SHADER:',gl.getShaderInfoLog(s));return s;}
+// --- Shader compilation (deferred until WASM provides GLSL) ---
+function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){console.error('SHADER:',gl.getShaderInfoLog(s),'\n\nSource:\n',src);}return s;}
 function mkProg(vs,fs){const p=gl.createProgram();gl.attachShader(p,mkS(vs,gl.VERTEX_SHADER));gl.attachShader(p,mkS(fs,gl.FRAGMENT_SHADER));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error('LINK:',gl.getProgramInfoLog(p));return p;}
 
-const progMatcap = mkProg(VS, FS_MATCAP);
-const progLod = mkProg(VS, FS_LOD);
-const progWire = mkProg(VS, FS_WIRE);
-const progNormals = mkProg(VS, FS_NORMALS);
+let progMatcap = null, progLod = null, progWire = null, progNormals = null;
 
-// --- Matcap texture ---
-let matcapTex = gl.createTexture();
+// --- UBO management ---
+// Vertex UBO: Uniforms_block_0Vertex (std140, binding 0)
+//   mat4x4 mvp       (offset 0,   64 bytes)
+//   mat4x4 mv        (offset 64,  64 bytes)
+//   float perm_parity (offset 128,  4 bytes)
+//   int perm_index    (offset 132,  4 bytes)
+//   int use_qb        (offset 136,  4 bytes)
+//   float _pad        (offset 140,  4 bytes)
+//   Total: 144 bytes
+const VTX_UBO_SIZE = 144;
+const VTX_UBO_BINDING = 0;
+const vtxUbo = gl.createBuffer();
+gl.bindBuffer(gl.UNIFORM_BUFFER, vtxUbo);
+gl.bufferData(gl.UNIFORM_BUFFER, VTX_UBO_SIZE, gl.DYNAMIC_DRAW);
+
+// Wire UBO: WireUniforms_block_0Fragment (std140, binding 1)
+//   vec3 color       (offset 0,  12 bytes)
+//   int show_density (offset 12,  4 bytes)
+//   Total: 16 bytes
+const WIRE_UBO_SIZE = 16;
+const WIRE_UBO_BINDING = 1;
+const wireUbo = gl.createBuffer();
+gl.bindBuffer(gl.UNIFORM_BUFFER, wireUbo);
+gl.bufferData(gl.UNIFORM_BUFFER, WIRE_UBO_SIZE, gl.DYNAMIC_DRAW);
+
+const vtxUboData = new ArrayBuffer(VTX_UBO_SIZE);
+const vtxUboF32 = new Float32Array(vtxUboData);
+const vtxUboI32 = new Int32Array(vtxUboData);
+
+const wireUboData = new ArrayBuffer(WIRE_UBO_SIZE);
+const wireUboF32 = new Float32Array(wireUboData);
+const wireUboI32 = new Int32Array(wireUboData);
+
+function uploadVertexUBO(mvp, mv, permParity, permIndex, useQB) {
+  // mvp: 16 floats at offset 0 (f32 index 0)
+  vtxUboF32.set(mvp, 0);
+  // mv: 16 floats at offset 64 (f32 index 16)
+  vtxUboF32.set(mv, 16);
+  // perm_parity: float at offset 128 (f32 index 32)
+  vtxUboF32[32] = permParity;
+  // perm_index: int at offset 132 (i32 index 33)
+  vtxUboI32[33] = permIndex;
+  // use_qb: int at offset 136 (i32 index 34)
+  vtxUboI32[34] = useQB;
+  // _pad at offset 140 (index 35) -- leave as 0
+
+  gl.bindBuffer(gl.UNIFORM_BUFFER, vtxUbo);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(vtxUboData));
+}
+
+function uploadWireUBO(color, showDensity) {
+  wireUboF32[0] = color[0];
+  wireUboF32[1] = color[1];
+  wireUboF32[2] = color[2];
+  wireUboI32[3] = showDensity ? 1 : 0;
+
+  gl.bindBuffer(gl.UNIFORM_BUFFER, wireUbo);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(wireUboData));
+}
+
+function bindUBOs() {
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, VTX_UBO_BINDING, vtxUbo);
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, WIRE_UBO_BINDING, wireUbo);
+}
+
+function bindUniformBlocks(program) {
+  const vtxIdx = gl.getUniformBlockIndex(program, 'Uniforms_block_0Vertex');
+  if (vtxIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, vtxIdx, VTX_UBO_BINDING);
+  const wireIdx = gl.getUniformBlockIndex(program, 'WireUniforms_block_0Fragment');
+  if (wireIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, wireIdx, WIRE_UBO_BINDING);
+}
+
+function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals) {
+  console.log('Compiled vertex shader length:', vs.length);
+  console.log('Compiled matcap fragment length:', fsMatcap.length);
+  console.log('Compiled wire fragment length:', fsWire.length);
+  console.log('Compiled normals fragment length:', fsNormals.length);
+
+  progMatcap = mkProg(vs, fsMatcap);
+  // LOD mode uses the same matcap shader (naga matcap does heatmap + procedural matcap)
+  progLod = progMatcap;
+  progWire = mkProg(vs, fsWire);
+  progNormals = mkProg(vs, fsNormals);
+
+  // Bind UBO blocks for all programs
+  bindUniformBlocks(progMatcap);
+  bindUniformBlocks(progWire);
+  bindUniformBlocks(progNormals);
+
+  shadersLoaded = true;
+  console.log('Shader programs compiled from WASM WGSL pipeline');
+}
+
+// Matcap texture -- naga matcap is procedural, but keep the selector wired
+// in case we re-add texture-based matcap later. For now it's a no-op.
 function loadMatcap(name) {
-  const img = new Image();
-  img.onload = () => {
-    gl.bindTexture(gl.TEXTURE_2D, matcapTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    render();
-  };
-  img.src = '/matcaps/' + name + '.png';
+  // Procedural matcap from WGSL -- no texture needed
+  render();
 }
 
 // --- LOD color ---
@@ -607,7 +506,7 @@ function render() {
   const w=$('wrap');
   canvas.width=w.clientWidth; canvas.height=w.clientHeight;
   gl.viewport(0,0,canvas.width,canvas.height);
-  if (!drawBatches.length) return;  // don't clear if nothing to draw
+  if (!shadersLoaded || !drawBatches.length) return;
   gl.clearColor(0.051,0.067,0.090,1);
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
@@ -619,6 +518,9 @@ function render() {
   const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.01,10000);
   const mvp = mulM4(proj, view);
 
+  // Bind UBOs to their binding points
+  bindUBOs();
+
   const drawWire = renderMode === 'wire' || renderMode === 'both';
   const drawLod = renderMode === 'lod' || renderMode === 'both';
   const drawMatcap = renderMode === 'matcap';
@@ -627,70 +529,48 @@ function render() {
   // Original mesh wireframe
   if (drawWire && vaoOrigMesh) {
     gl.useProgram(progWire);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mvp'), false, mvp);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mv'), false, view);
-    gl.uniform1i(gl.getUniformLocation(progWire,'u_useQB'), 0);
-    gl.uniform1i(gl.getUniformLocation(progWire,'u_showDensity'), 0);
-    gl.uniform3f(gl.getUniformLocation(progWire,'u_lodColor'), 0.25, 0.25, 0.35);
-    gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), 1.0);
-    gl.uniform1i(gl.getUniformLocation(progWire,'u_permIndex'), 0);
+    uploadVertexUBO(mvp, view, 1.0, 0, 0);
+    uploadWireUBO([0.25, 0.25, 0.35], false);
     gl.bindVertexArray(vaoOrigMesh);
     gl.drawElementsInstanced(gl.LINES, 6, gl.UNSIGNED_INT, 0, numOrigInst);
   }
 
+  // Matcap pass (naga matcap = procedural heatmap + matcap shading)
   if (drawMatcap) {
     gl.useProgram(progMatcap);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mvp'), false, mvp);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mv'), false, view);
-    gl.uniform1i(gl.getUniformLocation(progMatcap,'u_useQB'), 1);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, matcapTex);
-    gl.uniform1i(gl.getUniformLocation(progMatcap,'u_matcapTex'), 0);
     for (const b of drawBatches) {
-      gl.uniform1f(gl.getUniformLocation(progMatcap,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progMatcap,'u_permIndex'), 0);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
   }
 
+  // LOD pass (uses same matcap program -- naga matcap already does heatmap)
   if (drawLod) {
     gl.useProgram(progLod);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progLod,'u_mvp'), false, mvp);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progLod,'u_mv'), false, view);
-    gl.uniform1i(gl.getUniformLocation(progLod,'u_useQB'), 1);
     for (const b of drawBatches) {
-      gl.uniform3fv(gl.getUniformLocation(progLod,'u_lodColor'), b.color);
-      gl.uniform1f(gl.getUniformLocation(progLod,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progLod,'u_permIndex'), 0);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
   }
 
+  // Wire pass
   if (drawWire) {
     gl.useProgram(progWire);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mvp'), false, mvp);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mv'), false, view);
-    gl.uniform1i(gl.getUniformLocation(progWire,'u_useQB'), 1);
-    gl.uniform1i(gl.getUniformLocation(progWire,'u_showDensity'), 1);
     for (const b of drawBatches) {
-      gl.uniform3fv(gl.getUniformLocation(progWire,'u_lodColor'), b.color);
-      gl.uniform1f(gl.getUniformLocation(progWire,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progWire,'u_permIndex'), 0);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1);
+      uploadWireUBO(b.color, true);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
   }
 
+  // Normals pass
   if (drawNormals) {
     gl.useProgram(progNormals);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progNormals,'u_mvp'), false, mvp);
-    gl.uniformMatrix4fv(gl.getUniformLocation(progNormals,'u_mv'), false, view);
-    gl.uniform1i(gl.getUniformLocation(progNormals,'u_useQB'), 1);
     for (const b of drawBatches) {
-      gl.uniform1f(gl.getUniformLocation(progNormals,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progNormals,'u_permIndex'), 0);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -1077,12 +957,18 @@ wrapEl.addEventListener('drop', async (e) => {
 // --- Init ---
 $('stats').textContent = 'Starting worker...';
 await workerCall('init', {});
+
+// Compile shaders from WASM (WGSL -> naga -> GLSL ES 300)
+$('stats').textContent = 'Compiling shaders...';
+const shaderResp = await workerCall('get_shaders', {});
+initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals);
+
 $('stats').textContent = 'Building atlas...';
 const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
 workerReady = true;
 $('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
 
-// Load matcap
+// Load matcap (no-op with procedural matcap from WGSL)
 loadMatcap($('matcap-sel').value);
 
 // Load default shape (horse)
