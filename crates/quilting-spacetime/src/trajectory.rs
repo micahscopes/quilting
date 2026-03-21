@@ -118,11 +118,11 @@ impl HermiteSegment {
         // Use a generous epsilon since near the time boundary, the hyperplane
         // might be very close but not exactly at the endpoint.
         let f = |u: f64| c0 + u * (c1 + u * (c2 + u * c3));
-        let eps = 0.01;
-        if f(0.0).abs() < eps && !roots.iter().any(|&r| r < 0.001) {
+        let eps = 1e-4;
+        if f(0.0).abs() < eps && !roots.iter().any(|&r| r < eps) {
             roots.push(0.0);
         }
-        if f(1.0).abs() < eps && !roots.iter().any(|&r| (r - 1.0).abs() < 0.001) {
+        if f(1.0).abs() < eps && !roots.iter().any(|&r| (r - 1.0).abs() < eps) {
             roots.push(1.0);
         }
 
