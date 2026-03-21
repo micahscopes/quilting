@@ -743,8 +743,10 @@ async function update() {
   const spacetimeOn = $('spacetime-toggle').classList.contains('on');
   // Use rotate override if active, otherwise slider-derived normal
   const effectiveNormal = rotateNormalOverride || (spacetimeOn ? normal : [0, 0, 0, 1]);
-  const effectiveOffset = spacetimeOn ? (rotateNormalOverride ? timeOffset * effectiveNormal[3] : offset) : timeOffset;
-  // Clear override after use — it's set each animation frame
+  // Offset = dot(normal, center_point). The center point is (0,0,0,timeOffset),
+  // so offset = normal[3] * timeOffset. This ensures the hyperplane always
+  // passes through the worldtube at the slider time regardless of tilt.
+  const effectiveOffset = effectiveNormal[3] * timeOffset;
   rotateNormalOverride = null;
 
   const t0 = performance.now();
