@@ -183,7 +183,7 @@ if(!gl){document.body.innerHTML='<h1 style="color:#f85;padding:40px">WebGL2 not 
 let meshInfo = null, workerReady = false;
 let rotateNormalOverride = null;
 let animating = true;  // auto-animate on by default
-let renderMode = 'matcap';
+let renderMode = 'pbr';
 let rotX = 0.3, rotY = 0.5, zoom = 5;
 let animDir = 1;
 let pendingUpdate = false, updating = false;
@@ -304,6 +304,7 @@ function uploadWireUBO(color, showDensity) {
 function bindUBOs() {
   gl.bindBufferBase(gl.UNIFORM_BUFFER, VTX_UBO_BINDING, vtxUbo);
   gl.bindBufferBase(gl.UNIFORM_BUFFER, WIRE_UBO_BINDING, wireUbo);
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, PBR_UBO_BINDING, pbrUbo);
 }
 
 function bindUniformBlocks(program) {
