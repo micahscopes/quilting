@@ -103,32 +103,6 @@ pub fn compute_instances(
     // Per-edge LOD from screen-space edge lengths.
     let target_pixels_per_sub = 16.0;
 
-    // Compute the Möbius pole: the point where the transform is singular.
-    // For F(x) = (ax+b)(cx+d)⁻¹, the pole is at x = -c⁻¹d.
-    let pole: Option<[f64; 3]> = if transform.c.norm_sq() > 1e-20 {
-        let p = -(transform.c.inv() * transform.d);
-        Some(p.to_point())
-    } else {
-        None // c≈0: affine transform, no pole
-    };
-
-    // Check if a line segment (p0→p1) passes within `threshold` of the pole.
-    let segment_near_pole = |p0: [f64; 3], p1: [f64; 3], threshold: f64| -> bool {
-        let Some(pole) = pole else { return false; };
-        let d = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-        let f = [p0[0]-pole[0], p0[1]-pole[1], p0[2]-pole[2]];
-        let a = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
-        if a < 1e-20 { // degenerate edge
-            return f[0]*f[0]+f[1]*f[1]+f[2]*f[2] < threshold*threshold;
-        }
-        // t of closest point on segment to pole
-        let t = -(f[0]*d[0]+f[1]*d[1]+f[2]*d[2]) / a;
-        let t = t.clamp(0.0, 1.0);
-        let closest = [p0[0]+t*d[0], p0[1]+t*d[1], p0[2]+t*d[2]];
-        let dist_sq = (closest[0]-pole[0]).powi(2)+(closest[1]-pole[1]).powi(2)+(closest[2]-pole[2]).powi(2);
-        dist_sq < threshold * threshold
-    };
-
     // Measure screen-space arc length between two mesh vertices.
     // Samples the QB-transformed edge at multiple points to capture curvature.
     let screen_arc_len = |va: usize, vb: usize| -> f64 {
