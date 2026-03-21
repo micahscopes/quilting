@@ -300,25 +300,66 @@ impl HyperplaneSlicer {
             idx
         };
 
-        // When 4D Möbius is active, transform the hyperplane to track the
-        // deformed torus. Compute where the torus center goes under the Möbius
-        // and adjust the offset so the hyperplane passes through it.
-        let adjusted_offset = if let Some(m) = transform_4d {
-            if let TimeEmbedding::Toroidal { radius, period } = self.time_embedding {
-                // The torus center at the current slice angle
+        // When 4D Möbius is active, compute the transformed sweep plane.
+        // The sweep plane rotates around the torus. Under Möbius, the torus
+        // deforms — we need the sweep plane to follow it.
+        //
+        // Approach: transform the torus center at the current slice angle,
+        // compute the tangent of the transformed torus circle by finite
+        // difference, and derive the normal perpendicular to the tangent.
+        let (sweep_normal, sweep_offset) = if let Some(m) = transform_4d {
+            if let TimeEmbedding::Toroidal { radius, .. } = self.time_embedding {
                 let nw = self.normal[3];
                 let nz = self.normal[2];
-                let phi = nz.atan2(nw); // slice angle in (w,z) plane
-                let center_q = Quat::new(radius * phi.cos(), 0.0, 0.0, radius * phi.sin());
-                let center_prime = m.apply(center_q);
-                // Offset = dot(normal, transformed_center)
-                let n = self.normal;
-                n[0] * center_prime.x + n[1] * center_prime.y + n[2] * center_prime.z + n[3] * center_prime.w
+                let phi = nz.atan2(nw);
+
+                // Sample two nearby points on the torus circle
+                let eps = 0.01;
+                let q0 = Quat::new(radius * phi.cos(), 0.0, 0.0, radius * phi.sin());
+                let q1 = Quat::new(radius * (phi + eps).cos(), 0.0, 0.0, radius * (phi + eps).sin());
+
+                let q0_prime = m.apply(q0);
+                let q1_prime = m.apply(q1);
+
+                // Tangent of the transformed circle
+                let tangent = [
+                    q1_prime.x - q0_prime.x,
+                    q1_prime.y - q0_prime.y,
+                    q1_prime.z - q0_prime.z,
+                    q1_prime.w - q0_prime.w,
+                ];
+
+                // We need a normal perpendicular to the tangent AND to the
+                // two "tube" directions (x, y). Start with the original normal
+                // projected perpendicular to the tangent.
+                let n_orig = self.normal;
+                let dot_nt = n_orig[0]*tangent[0] + n_orig[1]*tangent[1]
+                           + n_orig[2]*tangent[2] + n_orig[3]*tangent[3];
+                let t_len2 = tangent[0]*tangent[0] + tangent[1]*tangent[1]
+                           + tangent[2]*tangent[2] + tangent[3]*tangent[3];
+                let mut n_new = [
+                    n_orig[0] - dot_nt * tangent[0] / t_len2.max(1e-20),
+                    n_orig[1] - dot_nt * tangent[1] / t_len2.max(1e-20),
+                    n_orig[2] - dot_nt * tangent[2] / t_len2.max(1e-20),
+                    n_orig[3] - dot_nt * tangent[3] / t_len2.max(1e-20),
+                ];
+                // Normalize
+                let n_len = (n_new[0]*n_new[0] + n_new[1]*n_new[1]
+                           + n_new[2]*n_new[2] + n_new[3]*n_new[3]).sqrt();
+                if n_len > 1e-10 {
+                    for c in &mut n_new { *c /= n_len; }
+                }
+
+                // Offset: pass through the transformed center
+                let off = n_new[0]*q0_prime.x + n_new[1]*q0_prime.y
+                        + n_new[2]*q0_prime.z + n_new[3]*q0_prime.w;
+
+                (n_new, off)
             } else {
-                self.offset
+                (self.normal, self.offset)
             }
         } else {
-            self.offset
+            (self.normal, self.offset)
         };
 
         // For each face, iterate over all keyframe segments
@@ -388,9 +429,7 @@ impl HyperplaneSlicer {
                     }
                 }
 
-                // Apply 4D Möbius: transform the embedded torus coordinates.
-                // The hyperplane offset is adjusted per-face to track the
-                // transformed torus center (computed outside this loop).
+                // Apply 4D Möbius to embedded coords
                 if let Some(m) = transform_4d {
                     for i in 0..6 {
                         let q = Quat::new(embed_t[i], embed_pos[i][0], embed_pos[i][1], embed_pos[i][2]);
@@ -402,9 +441,10 @@ impl HyperplaneSlicer {
                     }
                 }
 
-                // Distance uses EMBEDDED coordinates with adjusted offset
-                let n = self.normal;
-                let o = adjusted_offset;
+                // Distance uses EMBEDDED (Möbius-transformed) coordinates
+                // with the sweep plane that tracks the deformed torus
+                let n = sweep_normal;
+                let o = sweep_offset;
                 let d_arr: [f64; 6] = std::array::from_fn(|i| {
                     n[0]*embed_pos[i][0] + n[1]*embed_pos[i][1] + n[2]*embed_pos[i][2] + n[3]*embed_t[i] - o
                 });
@@ -433,7 +473,7 @@ impl HyperplaneSlicer {
                     let avg_z = (embed_pos[0][2] + embed_pos[3][2]) * 0.5;
                     // Perpendicular direction in (w,z) plane: rotate normal 90°
                     // normal (w,z) = (n[3], n[2]), perp = (n[2], -n[3])
-                    let perp_proj = self.normal[2] * avg_w - self.normal[3] * avg_z;
+                    let perp_proj = sweep_normal[2] * avg_w - sweep_normal[3] * avg_z;
                     if perp_proj < 0.0 {
                         continue;
                     }
