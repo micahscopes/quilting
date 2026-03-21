@@ -594,7 +594,7 @@ function render() {
 
   const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
   const view = lookAt(ex,ey,ez,0,0,0,0,1,0);
-  const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.1,100);
+  const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.01,10000);
   const mvp = mulM4(proj, view);
 
   const drawWire = renderMode === 'wire' || renderMode === 'both';
