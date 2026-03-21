@@ -87,7 +87,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   <div class="section">
     <label>Render</label>
     <div class="btns" id="render-btns">
-      <button data-v="matcap" class="a">Matcap</button>
+      <button data-v="pbr" class="a">PBR</button>
+      <button data-v="matcap">Matcap</button>
       <button data-v="lod">LOD</button>
       <button data-v="wire">Wire</button>
       <button data-v="both">Both</button>
@@ -219,7 +220,7 @@ let shadersLoaded = false;
 function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){console.error('SHADER:',gl.getShaderInfoLog(s),'\n\nSource:\n',src);}return s;}
 function mkProg(vs,fs){const p=gl.createProgram();gl.attachShader(p,mkS(vs,gl.VERTEX_SHADER));gl.attachShader(p,mkS(fs,gl.FRAGMENT_SHADER));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error('LINK:',gl.getProgramInfoLog(p));return p;}
 
-let progMatcap = null, progLod = null, progWire = null, progNormals = null;
+let progMatcap = null, progLod = null, progWire = null, progNormals = null, progPbr = null;
 
 // --- UBO management ---
 // Vertex UBO: Uniforms_block_0Vertex (std140, binding 0)
@@ -253,6 +254,25 @@ const vtxUboI32 = new Int32Array(vtxUboData);
 const wireUboData = new ArrayBuffer(WIRE_UBO_SIZE);
 const wireUboF32 = new Float32Array(wireUboData);
 const wireUboI32 = new Int32Array(wireUboData);
+
+// PBR UBO: PbrUniforms (std140, binding 2)
+// Layout: base_color (vec4, 16 bytes), metallic (f32), roughness (f32), pad, pad = 32 bytes
+const PBR_UBO_SIZE = 32;
+const PBR_UBO_BINDING = 2;
+const pbrUbo = gl.createBuffer();
+gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
+gl.bufferData(gl.UNIFORM_BUFFER, PBR_UBO_SIZE, gl.DYNAMIC_DRAW);
+const pbrUboData = new ArrayBuffer(PBR_UBO_SIZE);
+const pbrUboF32 = new Float32Array(pbrUboData);
+
+function uploadPbrUBO(baseColor, metallic, roughness) {
+  pbrUboF32[0] = baseColor[0]; pbrUboF32[1] = baseColor[1];
+  pbrUboF32[2] = baseColor[2]; pbrUboF32[3] = baseColor[3] || 1.0;
+  pbrUboF32[4] = metallic;
+  pbrUboF32[5] = roughness;
+  gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, pbrUboData);
+}
 
 function uploadVertexUBO(mvp, mv, permParity, permIndex, useQB) {
   // mvp: 16 floats at offset 0 (f32 index 0)
@@ -293,25 +313,27 @@ function bindUniformBlocks(program) {
   if (wireIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, wireIdx, WIRE_UBO_BINDING);
 }
 
-function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals) {
-  console.log('Compiled vertex shader length:', vs.length);
-  console.log('Compiled matcap fragment length:', fsMatcap.length);
-  console.log('Compiled wire fragment length:', fsWire.length);
-  console.log('Compiled normals fragment length:', fsNormals.length);
-
+function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
   progMatcap = mkProg(vs, fsMatcap);
-  // LOD mode uses the same matcap shader (naga matcap does heatmap + procedural matcap)
-  progLod = progMatcap;
+  progLod = progMatcap; // LOD uses matcap (heatmap + procedural lighting)
   progWire = mkProg(vs, fsWire);
   progNormals = mkProg(vs, fsNormals);
+  if (fsPbr) {
+    progPbr = mkProg(vs, fsPbr);
+    bindUniformBlocks(progPbr);
+    // PBR has an additional UBO for material params
+    const pbrBlockIdx = gl.getUniformBlockIndex(progPbr, 'PbrUniforms_block_1Fragment');
+    if (pbrBlockIdx !== gl.INVALID_INDEX) {
+      gl.uniformBlockBinding(progPbr, pbrBlockIdx, 2); // binding point 2
+    }
+  }
 
-  // Bind UBO blocks for all programs
   bindUniformBlocks(progMatcap);
   bindUniformBlocks(progWire);
   bindUniformBlocks(progNormals);
 
   shadersLoaded = true;
-  console.log('Shader programs compiled from WASM WGSL pipeline');
+  console.log('Shader programs compiled from WGSL pipeline (matcap + wire + normals + pbr)');
 }
 
 // Matcap texture -- naga matcap is procedural, but keep the selector wired
@@ -525,6 +547,19 @@ function render() {
   const drawLod = renderMode === 'lod' || renderMode === 'both';
   const drawMatcap = renderMode === 'matcap';
   const drawNormals = renderMode === 'normals';
+  const drawPbr = renderMode === 'pbr';
+
+  // PBR pass
+  if (drawPbr && progPbr) {
+    gl.useProgram(progPbr);
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, PBR_UBO_BINDING, pbrUbo);
+    uploadPbrUBO([0.8, 0.7, 0.6, 1.0], 0.0, 0.45); // warm dielectric, moderate roughness
+    for (const b of drawBatches) {
+      uploadVertexUBO(mvp, view, b.parity, 0, 1);
+      gl.bindVertexArray(b.vaoXformTri);
+      gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
+    }
+  }
 
   // Original mesh wireframe
   if (drawWire && vaoOrigMesh) {
@@ -961,7 +996,7 @@ await workerCall('init', {});
 // Compile shaders from WASM (WGSL -> naga -> GLSL ES 300)
 $('stats').textContent = 'Compiling shaders...';
 const shaderResp = await workerCall('get_shaders', {});
-initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals);
+initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals, shaderResp.fs_pbr);
 
 $('stats').textContent = 'Building atlas...';
 const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });

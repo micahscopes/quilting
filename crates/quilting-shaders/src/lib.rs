@@ -17,6 +17,7 @@ pub mod sources {
     pub const FRAG_MATCAP: &str = include_str!("../shaders/fragment/matcap.wgsl");
     pub const FRAG_WIRE: &str = include_str!("../shaders/fragment/wire.wgsl");
     pub const FRAG_NORMALS: &str = include_str!("../shaders/fragment/normals.wgsl");
+    pub const FRAG_PBR: &str = include_str!("../shaders/fragment/pbr.wgsl");
 }
 
 /// Build a naga-oil Composer preloaded with all quilting shader modules.
@@ -144,6 +145,7 @@ pub fn compile_fragment_glsl(mode: &str) -> Result<String, Box<dyn std::error::E
         "matcap" => (sources::FRAG_MATCAP, "fs_matcap"),
         "wire" => (sources::FRAG_WIRE, "fs_wire"),
         "normals" => (sources::FRAG_NORMALS, "fs_normals"),
+        "pbr" => (sources::FRAG_PBR, "fs_pbr"),
         _ => return Err(format!("unknown fragment mode: {}", mode).into()),
     };
     let module = compile_shader(source, HashMap::new())?;
@@ -165,6 +167,7 @@ pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::e
         "matcap" => (sources::FRAG_MATCAP, "fs_matcap"),
         "wire" => (sources::FRAG_WIRE, "fs_wire"),
         "normals" => (sources::FRAG_NORMALS, "fs_normals"),
+        "pbr" => (sources::FRAG_PBR, "fs_pbr"),
         _ => return Err(format!("unknown fragment mode: {}", mode).into()),
     };
     let module = compile_shader(source, HashMap::new())?;
@@ -208,6 +211,14 @@ mod tests {
     fn compile_fragment_normals_to_glsl() {
         let glsl = compile_fragment_glsl("normals");
         assert!(glsl.is_ok(), "normals fragment failed: {:?}", glsl.err());
+    }
+
+    #[test]
+    fn compile_fragment_pbr_to_glsl() {
+        let glsl = compile_fragment_glsl("pbr");
+        assert!(glsl.is_ok(), "pbr fragment failed: {:?}", glsl.err());
+        let code = glsl.unwrap();
+        assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
     }
 
     #[test]
