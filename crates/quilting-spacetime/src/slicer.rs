@@ -70,36 +70,14 @@ impl HyperplaneSlicer {
     /// 2. For each face, match vertex intersections into coherent triangles.
     /// 3. Group connected triangles into separate layers.
     pub fn slice(&self, mesh: &HyperMesh) -> SliceResult {
-        let (t_min, t_max) = mesh.time_range();
-
         // Step 1: per-vertex intersections.
         // If the solver finds no roots but the slice is within the trajectory's
         // time range, fall back to evaluating at the nearest time. This handles
         // boundary cases where the cubic solver misses roots at segment endpoints.
-        // Measure how "time-like" the slice is — if it's nearly a pure time slice,
-        // we can use a fallback for missed roots.
-        let spatial_mag = (self.normal[0].powi(2) + self.normal[1].powi(2) + self.normal[2].powi(2)).sqrt();
-        let is_near_time_slice = spatial_mag < 0.1;
-
         let vertex_hits: Vec<Vec<(f64, [f64; 3])>> = mesh
             .trajectories
             .iter()
-            .map(|traj| {
-                let mut hits = traj.intersect_hyperplane(self.normal, self.offset);
-                // Fallback only for near-pure-time slices — for tilted slices the
-                // eval-at-time fallback produces wrong positions (spikes).
-                if hits.is_empty() && is_near_time_slice {
-                    let nt = self.normal[3];
-                    if nt.abs() > 1e-10 {
-                        let t_slice = self.offset / nt;
-                        if t_slice >= t_min - 0.01 && t_slice <= t_max + 0.01 {
-                            let t_clamped = t_slice.clamp(t_min, t_max);
-                            hits.push((t_clamped, traj.eval(t_clamped)));
-                        }
-                    }
-                }
-                hits
-            })
+            .map(|traj| traj.intersect_hyperplane(self.normal, self.offset))
             .collect();
 
         // Step 2: for each face, assemble triangles from vertex intersections.

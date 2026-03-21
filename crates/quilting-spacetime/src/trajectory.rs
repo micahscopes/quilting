@@ -110,8 +110,19 @@ impl HermiteSegment {
         // Subtract offset
         c0 -= offset;
 
-        // Now solve c0 + c1*u + c2*u^2 + c3*u^3 = 0 for u in [0,1]
-        let roots = solve_cubic_in_unit(c0, c1, c2, c3);
+        // Solve c0 + c1*u + c2*u^2 + c3*u^3 = 0 for u in [0,1]
+        let mut roots = solve_cubic_in_unit(c0, c1, c2, c3);
+
+        // Explicitly check segment endpoints — the solver can miss roots
+        // at u=0 or u=1 due to floating-point boundary cases.
+        let f = |u: f64| c0 + u * (c1 + u * (c2 + u * c3));
+        let eps = 1e-8;
+        if f(0.0).abs() < eps && !roots.iter().any(|&r| r < eps) {
+            roots.push(0.0);
+        }
+        if f(1.0).abs() < eps && !roots.iter().any(|&r| (r - 1.0).abs() < eps) {
+            roots.push(1.0);
+        }
 
         roots
             .into_iter()
