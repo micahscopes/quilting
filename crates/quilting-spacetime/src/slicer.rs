@@ -335,62 +335,55 @@ impl HyperplaneSlicer {
                 let seg1 = &traj1.segments[si];
                 let seg2 = &traj2.segments[si];
 
-                // 6 prism vertices: 3 bottom (t_start), 3 top (t_end)
-                // Each is a (position, time) pair. With 4D Möbius, we lift to
-                // full quaternions q = (t, x, y, z), transform, then extract.
-                let mut prism_pos: [[f64; 3]; 6] = [
+                // Original spatial positions (for output — what gets rendered)
+                let spatial_pos: [[f64; 3]; 6] = [
                     seg0.pos_start, seg1.pos_start, seg2.pos_start,
                     seg0.pos_end,   seg1.pos_end,   seg2.pos_end,
                 ];
-                let mut prism_t: [f64; 6] = [
+                let spatial_t: [f64; 6] = [
                     seg0.t_start, seg0.t_start, seg0.t_start,
                     seg0.t_end,   seg0.t_end,   seg0.t_end,
                 ];
 
-                // Lift to 4D, optionally apply toroidal embedding + Möbius.
+                // Embedded coordinates (for hyperplane distance test).
+                // Toroidal: maps time to a circle in (w, z) plane.
+                // Linear: time goes straight into w.
+                let mut embed_pos: [[f64; 3]; 6] = spatial_pos;
+                let mut embed_t: [f64; 6] = spatial_t;
                 let mut prism_weights: [[f64; 4]; 6] = [[1.0, 0.0, 0.0, 0.0]; 6];
 
-                // Apply toroidal embedding if active (even without Möbius)
-                let use_4d = transform_4d.is_some() || matches!(self.time_embedding, TimeEmbedding::Toroidal { .. });
-                if use_4d {
-                    for i in 0..6 {
-                        let q = match self.time_embedding {
-                            TimeEmbedding::Linear => {
-                                Quat::new(prism_t[i], prism_pos[i][0], prism_pos[i][1], prism_pos[i][2])
-                            }
-                            TimeEmbedding::Toroidal { radius, period } => {
-                                let theta = std::f64::consts::TAU * prism_t[i] / period;
-                                Quat::new(
-                                    radius * theta.cos(),
-                                    prism_pos[i][0],
-                                    prism_pos[i][1],
-                                    radius * theta.sin() + prism_pos[i][2],
-                                )
-                            }
-                        };
-
-                        if let Some(m) = transform_4d {
-                            let w = m.transform_weight(q, Quat::ONE);
-                            prism_weights[i] = [w.w, w.x, w.y, w.z];
-                            let q_prime = m.apply(q);
-                            prism_pos[i] = [q_prime.x, q_prime.y, q_prime.z];
-                            prism_t[i] = q_prime.w;
-                        } else {
-                            // Toroidal without Möbius: just use the embedded coords
-                            prism_pos[i] = [q.x, q.y, q.z];
-                            prism_t[i] = q.w;
+                match self.time_embedding {
+                    TimeEmbedding::Linear => {}
+                    TimeEmbedding::Toroidal { radius, period } => {
+                        for i in 0..6 {
+                            let theta = std::f64::consts::TAU * spatial_t[i] / period;
+                            // Torus circle in (w, z) plane:
+                            // w = R·cos θ, z_embed = R·sin θ
+                            // Spatial x, y unchanged. Spatial z replaced by torus sin.
+                            embed_t[i] = radius * theta.cos();      // w component
+                            embed_pos[i][2] = radius * theta.sin(); // z component = torus sin
+                            // x, y stay as spatial
                         }
                     }
                 }
 
-                // After 4D transform, each vertex may have a different time.
-                // prism_pos and prism_t hold the (possibly transformed) values.
+                // Apply 4D Möbius if active
+                if let Some(m) = transform_4d {
+                    for i in 0..6 {
+                        let q = Quat::new(embed_t[i], embed_pos[i][0], embed_pos[i][1], embed_pos[i][2]);
+                        let w = m.transform_weight(q, Quat::ONE);
+                        prism_weights[i] = [w.w, w.x, w.y, w.z];
+                        let q_prime = m.apply(q);
+                        embed_pos[i] = [q_prime.x, q_prime.y, q_prime.z];
+                        embed_t[i] = q_prime.w;
+                    }
+                }
 
-                // Signed distance to hyperplane
+                // Distance uses EMBEDDED coordinates
                 let n = self.normal;
                 let o = self.offset;
                 let d_arr: [f64; 6] = std::array::from_fn(|i| {
-                    n[0]*prism_pos[i][0] + n[1]*prism_pos[i][1] + n[2]*prism_pos[i][2] + n[3]*prism_t[i] - o
+                    n[0]*embed_pos[i][0] + n[1]*embed_pos[i][1] + n[2]*embed_pos[i][2] + n[3]*embed_t[i] - o
                 });
                 let db0 = d_arr[0];
                 let db1 = d_arr[1];
@@ -411,8 +404,9 @@ impl HyperplaneSlicer {
                 // Direct prism-plane intersection.
                 // 9 prism edges: 3 bottom, 3 top, 3 vertical.
                 // Find all edge crossings, form a convex polygon, fan-triangulate.
-                let prism_verts = prism_pos;
-                let prism_times_arr = prism_t;
+                // Use SPATIAL positions for output, EMBEDDED distances for intersection
+                let prism_verts = spatial_pos;
+                let prism_times_arr = spatial_t;
                 let prism_dists = d_arr;
 
                 // 9 edges of a triangular prism
