@@ -9,7 +9,7 @@ use crate::sampling::{tri_patch, PatchConfig};
 use crate::subdivide;
 
 thread_local! {
-    static SLIVER_THRESHOLD: Cell<f64> = Cell::new(0.002);
+    static SLIVER_THRESHOLD: Cell<f64> = Cell::new(0.0);
 }
 
 /// Set the sliver filter threshold for atlas generation.
