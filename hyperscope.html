@@ -118,6 +118,31 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="toggle" id="rotate-mode-toggle"></div>
       <span class="toggle-label">Rotate slice</span>
     </div>
+    <div id="rotation-planes" style="margin-top:4px;display:none">
+      <span style="font-size:10px;color:#8b949e">Plane 1</span>
+      <div class="btns" id="plane1-btns" style="margin-top:2px">
+        <button class="btn active" data-v="xt">XT</button>
+        <button class="btn" data-v="yt">YT</button>
+        <button class="btn" data-v="zt">ZT</button>
+        <button class="btn" data-v="xy">XY</button>
+        <button class="btn" data-v="xz">XZ</button>
+        <button class="btn" data-v="yz">YZ</button>
+      </div>
+      <span style="font-size:10px;color:#8b949e;margin-top:3px;display:inline-block">Plane 2</span>
+      <div class="btns" id="plane2-btns" style="margin-top:2px">
+        <button class="btn" data-v="xt">XT</button>
+        <button class="btn active" data-v="yt">YT</button>
+        <button class="btn" data-v="zt">ZT</button>
+        <button class="btn" data-v="xy">XY</button>
+        <button class="btn" data-v="xz">XZ</button>
+        <button class="btn" data-v="yz">YZ</button>
+      </div>
+      <div class="sr" style="margin-top:4px">
+        <span style="font-size:10px;color:#8b949e;width:40px">Ratio</span>
+        <input type="range" id="rot-ratio" min="1" max="100" value="62">
+        <span class="v" id="rot-ratio-v">0.62</span>
+      </div>
+    </div>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -839,7 +864,13 @@ animToggle.addEventListener('click', () => {
 // Rotate slice mode toggle
 $('rotate-mode-toggle').addEventListener('click', () => {
   $('rotate-mode-toggle').classList.toggle('on');
+  $('rotation-planes').style.display = $('rotate-mode-toggle').classList.contains('on') ? 'block' : 'none';
 });
+for (const b of document.querySelectorAll('#plane1-btns .btn'))
+  b.onclick = () => { document.querySelectorAll('#plane1-btns .btn').forEach(x=>x.classList.remove('active')); b.classList.add('active'); };
+for (const b of document.querySelectorAll('#plane2-btns .btn'))
+  b.onclick = () => { document.querySelectorAll('#plane2-btns .btn').forEach(x=>x.classList.remove('active')); b.classList.add('active'); };
+$('rot-ratio').addEventListener('input', () => { $('rot-ratio-v').textContent = ($('rot-ratio').value / 100).toFixed(2); });
 
 // Animation loop — rotates the hyperplane tilt angle instead of sweeping time.
 // This keeps the slice centered in the periodic region for clean wrapping.
@@ -848,29 +879,37 @@ function frame() {
   if (animating && meshInfo) {
     const rotateMode = $('rotate-mode-toggle').classList.contains('on');
     if (rotateMode) {
-      // 4D double rotation of the hyperplane normal.
-      // Two independent rotation rates in orthogonal planes:
-      //   plane 1: (x, t) at rate φ₁
-      //   plane 2: (y, z) at rate φ₂
-      // With different rates, the normal traces a Lissajous on S³.
+      // 4D double rotation: apply two rotations in user-selected planes
       animPhase += 0.005;
-      const p1 = animPhase;        // (x, t) plane rotation
-      const p2 = animPhase * 0.618; // (y, z) plane — golden ratio for non-repeating
-      const c1 = Math.cos(p1), s1 = Math.sin(p1);
-      const c2 = Math.cos(p2), s2 = Math.sin(p2);
-      // Start with pure time normal (0,0,0,1).
-      // R1 in (x,t): (sin θ₁, 0, 0, cos θ₁)
-      // R2 in (y,z): rotates the y,z of that result
-      // But (0,0,0,1) has no y,z, so we tilt into x first, then rotate x,y
-      // to spread it across all spatial dimensions.
-      // Plane 1: (x, t), Plane 2: (x, y) — creates a filling pattern on S³
-      const nx = s1 * c2;
-      const ny = s1 * s2;
-      const nz = 0;
-      const nt = c1;
-      // Normalize (should already be unit but just in case)
-      const len = Math.sqrt(nx*nx + ny*ny + nz*nz + nt*nt);
-      rotateNormalOverride = [nx/len, ny/len, nz/len, nt/len];
+      const ratio = parseFloat($('rot-ratio').value) / 100;
+      const p1 = animPhase;
+      const p2 = animPhase * ratio;
+
+      // Get selected planes
+      let plane1 = 'xt', plane2 = 'yt';
+      document.querySelectorAll('#plane1-btns .active').forEach(b => { plane1 = b.dataset.v; });
+      document.querySelectorAll('#plane2-btns .active').forEach(b => { plane2 = b.dataset.v; });
+
+      // A 2-plane rotation matrix acts on a 4-vector.
+      // Start with (0,0,0,1) and apply both rotations.
+      function rot4(n, plane, angle) {
+        const c = Math.cos(angle), s = Math.sin(angle);
+        let [x,y,z,t] = n;
+        switch(plane) {
+          case 'xt': return [c*x+s*t, y, z, -s*x+c*t];
+          case 'yt': return [x, c*y+s*t, z, -s*y+c*t];
+          case 'zt': return [x, y, c*z+s*t, -s*z+c*t];
+          case 'xy': return [c*x+s*y, -s*x+c*y, z, t];
+          case 'xz': return [c*x+s*z, y, -s*x+c*z, t];
+          case 'yz': return [x, c*y+s*z, -s*y+c*z, t];
+          default: return n;
+        }
+      }
+
+      let n = [0, 0, 0, 1]; // start with pure time normal
+      n = rot4(n, plane1, p1);
+      n = rot4(n, plane2, p2);
+      rotateNormalOverride = n;
     } else {
       // Sweep time forward
       const slider = $('time');
