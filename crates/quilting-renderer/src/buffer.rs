@@ -2,8 +2,8 @@
 //!
 //! Mirrors the index.html buffer setup:
 //! - Vertex attribute 0: bary coords (vec3, per-vertex)
-//! - Attributes 1-8: instance data (8 x vec4 = 32 floats per instance)
-//!   [p0, p1, p2, w0, w1, w2, edge_lods, vertex_lods]
+//! - Attributes 1-13: instance data (13 x vec4 = 52 floats per instance)
+//!   [p0, p1, p2, w0, w1, w2, edge_lods, vertex_lods, uv01, uv2_pad, n0, n1, n2]
 
 use glow::HasContext;
 
@@ -85,7 +85,7 @@ impl MeshBuffers {
     ///
     /// Vertex layout matches index.html:
     /// - location 0: vec3 bary (per-vertex from tess buffer)
-    /// - locations 1-8: vec4 x 8 (per-instance, 128 bytes stride, divisor=1)
+    /// - locations 1-13: vec4 x 13 (per-instance, 208 bytes stride, divisor=1)
     pub fn new(
         gl: &glow::Context,
         tess: &TessBuffers,
@@ -176,12 +176,12 @@ unsafe fn setup_vao(
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 0, 0);
 
-    // Attributes 1-10: instance data (10 x vec4, 160 bytes stride)
+    // Attributes 1-13: instance data (13 x vec4, 208 bytes stride)
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
-    for i in 0..10u32 {
+    for i in 0..13u32 {
         let loc = 1 + i;
         gl.enable_vertex_attrib_array(loc);
-        gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, 160, (i * 16) as i32);
+        gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, 208, (i * 16) as i32);
         gl.vertex_attrib_divisor(loc, 1);
     }
 

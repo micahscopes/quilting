@@ -481,6 +481,7 @@ struct CachedSlice {
     tris: Vec<[usize; 3]>,
     weights: Vec<[f64; 4]>,  // per-vertex conformal weights from 4D Möbius
     uvs: Vec<[f32; 2]>,      // per-vertex texture coordinates
+    normals: Vec<[f32; 3]>,  // per-vertex smooth normals
     half_edge: HalfEdgeMesh,
     /// Maps sliced face index -> original HyperMesh face index.
     source_face_indices: Vec<usize>,
@@ -719,6 +720,11 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     // Set per-vertex UVs on the HyperMesh if the combined primitive has them
     if let Some(ref uvs) = combined.uvs {
         hyper.vertex_uvs = uvs.iter().map(|uv| [uv[0] as f32, uv[1] as f32]).collect();
+    }
+
+    // Set per-vertex normals on the HyperMesh if the combined primitive has them
+    if let Some(ref norms) = combined.normals {
+        hyper.vertex_normals = norms.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect();
     }
 
     let (time_min, time_max) = hyper.time_range();
@@ -1229,6 +1235,7 @@ pub fn slice_and_transform(
         let mut verts: Vec<[f64; 3]> = Vec::new();
         let mut vert_weights: Vec<[f64; 4]> = Vec::new();
         let mut vert_uvs: Vec<[f32; 2]> = Vec::new();
+        let mut vert_normals: Vec<[f32; 3]> = Vec::new();
         let mut tris: Vec<[usize; 3]> = Vec::new();
         let mut slice_source_faces: Vec<usize> = Vec::new();
         for layer in slice.layers {
@@ -1236,6 +1243,7 @@ pub fn slice_and_transform(
             verts.extend_from_slice(&layer.positions);
             vert_weights.extend_from_slice(&layer.weights);
             vert_uvs.extend_from_slice(&layer.uvs);
+            vert_normals.extend_from_slice(&layer.normals);
             for f in &layer.faces {
                 tris.push([f[0] as usize + base, f[1] as usize + base, f[2] as usize + base]);
             }
@@ -1254,7 +1262,7 @@ pub fn slice_and_transform(
 
         SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
             normal: n, offset, verts, tris, weights: vert_weights, uvs: vert_uvs,
-            half_edge, source_face_indices: slice_source_faces,
+            normals: vert_normals, half_edge, source_face_indices: slice_source_faces,
         }));
     }
 
@@ -1291,8 +1299,9 @@ pub fn slice_and_transform(
         let cache = c.borrow();
         let cs = cache.as_ref().unwrap();
         let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
-        let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref);
-        let xform = compute_instances_with_uvs(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge), uv_ref);
+        let normal_ref = if cs.normals.is_empty() { None } else { Some(cs.normals.as_slice()) };
+        let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref, normal_ref);
+        let xform = compute_instances_with_uvs(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge), uv_ref, normal_ref);
         let src = cs.source_face_indices.clone();
         (orig, xform, cs.tris.len(), src)
     });

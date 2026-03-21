@@ -17,6 +17,9 @@ pub struct FaceInstance {
     /// Per-vertex texture coordinates [uv0, uv1, uv2].
     /// Sourced from glTF TEXCOORD_0; defaults to (0,0) when absent.
     pub uvs: [[f32; 2]; 3],
+    /// Per-vertex smooth normals [n0, n1, n2].
+    /// Sourced from glTF NORMAL attribute; defaults to face normal when absent.
+    pub normals: [[f32; 3]; 3],
 }
 
 /// Compute per-face instance data with adaptive LOD.
@@ -62,22 +65,28 @@ pub fn compute_instances_no_lod(
     vertices: &[[f64; 3]],
     faces: &[[usize; 3]],
 ) -> Vec<FaceInstance> {
-    compute_instances_no_lod_with_uvs(vertices, faces, None)
+    compute_instances_no_lod_with_uvs(vertices, faces, None, None)
 }
 
-/// Compute instance data without LOD, with optional per-vertex UVs.
+/// Compute instance data without LOD, with optional per-vertex UVs and normals.
 pub fn compute_instances_no_lod_with_uvs(
     vertices: &[[f64; 3]],
     faces: &[[usize; 3]],
     vertex_uvs: Option<&[[f32; 2]]>,
+    vertex_normals: Option<&[[f32; 3]]>,
 ) -> Vec<FaceInstance> {
     faces.iter().map(|face| {
-        let p0 = Quat::from_point(vertices[face[0]][0], vertices[face[0]][1], vertices[face[0]][2]);
-        let p1 = Quat::from_point(vertices[face[1]][0], vertices[face[1]][1], vertices[face[1]][2]);
-        let p2 = Quat::from_point(vertices[face[2]][0], vertices[face[2]][1], vertices[face[2]][2]);
+        let v = [vertices[face[0]], vertices[face[1]], vertices[face[2]]];
+        let p0 = Quat::from_point(v[0][0], v[0][1], v[0][2]);
+        let p1 = Quat::from_point(v[1][0], v[1][1], v[1][2]);
+        let p2 = Quat::from_point(v[2][0], v[2][1], v[2][2]);
         let uvs = match vertex_uvs {
             Some(uvs) => [uvs[face[0]], uvs[face[1]], uvs[face[2]]],
             None => [[0.0, 0.0]; 3],
+        };
+        let normals = match vertex_normals {
+            Some(n) => [n[face[0]], n[face[1]], n[face[2]]],
+            None => face_normal_f32(&v),
         };
         FaceInstance {
             positions: [p0, p1, p2],
@@ -85,6 +94,7 @@ pub fn compute_instances_no_lod_with_uvs(
             edge_lods: [1, 1, 1],
             vertex_lods: [1, 1, 1],
             uvs,
+            normals,
         }
     }).collect()
 }
@@ -96,10 +106,10 @@ pub fn compute_instances(
     screen: Option<&ScreenInfo>,
     mesh: Option<&HalfEdgeMesh>,
 ) -> Vec<FaceInstance> {
-    compute_instances_with_uvs(vertices, faces, transform, screen, mesh, None)
+    compute_instances_with_uvs(vertices, faces, transform, screen, mesh, None, None)
 }
 
-/// Compute instances with optional per-vertex UVs propagated into each face.
+/// Compute instances with optional per-vertex UVs and normals.
 pub fn compute_instances_with_uvs(
     vertices: &[[f64; 3]],
     faces: &[[usize; 3]],
@@ -107,6 +117,7 @@ pub fn compute_instances_with_uvs(
     screen: Option<&ScreenInfo>,
     mesh: Option<&HalfEdgeMesh>,
     vertex_uvs: Option<&[[f32; 2]]>,
+    vertex_normals: Option<&[[f32; 3]]>,
 ) -> Vec<FaceInstance> {
     // Pre-transform all vertices
     let transformed: Vec<(Quat, Quat)> = vertices.iter().map(|v| {
@@ -118,6 +129,7 @@ pub fn compute_instances_with_uvs(
 
     // Build face instances
     let instances: Vec<FaceInstance> = faces.iter().map(|face| {
+        let v = [vertices[face[0]], vertices[face[1]], vertices[face[2]]];
         let (p0, w0) = transformed[face[0]];
         let (p1, w1) = transformed[face[1]];
         let (p2, w2) = transformed[face[2]];
@@ -125,12 +137,17 @@ pub fn compute_instances_with_uvs(
             Some(uvs) => [uvs[face[0]], uvs[face[1]], uvs[face[2]]],
             None => [[0.0, 0.0]; 3],
         };
+        let normals = match vertex_normals {
+            Some(n) => [n[face[0]], n[face[1]], n[face[2]]],
+            None => face_normal_f32(&v),
+        };
         FaceInstance {
             positions: [p0, p1, p2],
             weights: [w0, w1, w2],
             edge_lods: [1, 1, 1],
             vertex_lods: [1, 1, 1],
             uvs,
+            normals,
         }
     }).collect();
 
@@ -348,12 +365,28 @@ fn snap_to_power_of_2(v: u32) -> u32 {
     p
 }
 
+/// Compute a face normal from 3 vertex positions, returned as [f32; 3] for all 3 corners.
+fn face_normal_f32(v: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    let e1 = [v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]];
+    let e2 = [v[2][0] - v[0][0], v[2][1] - v[0][1], v[2][2] - v[0][2]];
+    let nx = e1[1] * e2[2] - e1[2] * e2[1];
+    let ny = e1[2] * e2[0] - e1[0] * e2[2];
+    let nz = e1[0] * e2[1] - e1[1] * e2[0];
+    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+    let n = if len > 1e-12 {
+        [(nx / len) as f32, (ny / len) as f32, (nz / len) as f32]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    [n, n, n]
+}
+
 impl FaceInstance {
-    /// Pack as 40 f32s (10 vec4s = 160 bytes per instance):
+    /// Pack as 52 f32s (13 vec4s = 208 bytes per instance):
     /// [p0(4), p1(4), p2(4), w0(4), w1(4), w2(4), edgeLods(3)+pad, vertexLods(3)+pad,
-    ///  uv01(u0,v0,u1,v1), uv2(u2,v2,pad,pad)]
-    pub fn to_f32_array(&self) -> [f32; 40] {
-        let mut out = [0.0f32; 40];
+    ///  uv01(u0,v0,u1,v1), uv2(u2,v2,pad,pad), n0(3)+pad, n1(3)+pad, n2(3)+pad]
+    pub fn to_f32_array(&self) -> [f32; 52] {
+        let mut out = [0.0f32; 52];
         for (i, p) in self.positions.iter().enumerate() {
             out[i*4]   = p.w as f32;
             out[i*4+1] = p.x as f32;
@@ -377,35 +410,38 @@ impl FaceInstance {
         out[30] = self.vertex_lods[2] as f32;
         out[31] = 0.0;
         self.pack_uvs(&mut out, &self.uvs);
+        self.pack_normals(&mut out, &self.normals);
         out
     }
 
-    /// Pack as 40 f32s with UVs reordered to match a permuted tessellation.
-    ///
-    /// When the tessellation bary coords are CPU-remapped by `remap_position(perm_index, ...)`,
-    /// the UV corners must be permuted to match so that `permuted_bary.x * uv[0] + ...`
-    /// gives the correct interpolation.
-    pub fn to_f32_array_permuted(&self, perm_index: usize) -> [f32; 40] {
+    /// Pack with UVs and normals reordered to match a permuted tessellation.
+    pub fn to_f32_array_permuted(&self, perm_index: usize) -> [f32; 52] {
         let mut out = self.to_f32_array();
         if perm_index != 0 {
             let perm = crate::permutation::S3_PERMUTATIONS[perm_index];
             let permuted_uvs = [self.uvs[perm[0]], self.uvs[perm[1]], self.uvs[perm[2]]];
+            let permuted_normals = [self.normals[perm[0]], self.normals[perm[1]], self.normals[perm[2]]];
             self.pack_uvs(&mut out, &permuted_uvs);
+            self.pack_normals(&mut out, &permuted_normals);
         }
         out
     }
 
-    fn pack_uvs(&self, out: &mut [f32; 40], uvs: &[[f32; 2]; 3]) {
-        // vec4 #9: UVs for vertices 0 and 1 (u0, v0, u1, v1)
-        out[32] = uvs[0][0];
-        out[33] = uvs[0][1];
-        out[34] = uvs[1][0];
-        out[35] = uvs[1][1];
-        // vec4 #10: UVs for vertex 2 + padding (u2, v2, 0, 0)
-        out[36] = uvs[2][0];
-        out[37] = uvs[2][1];
-        out[38] = 0.0;
-        out[39] = 0.0;
+    fn pack_uvs(&self, out: &mut [f32; 52], uvs: &[[f32; 2]; 3]) {
+        out[32] = uvs[0][0]; out[33] = uvs[0][1];
+        out[34] = uvs[1][0]; out[35] = uvs[1][1];
+        out[36] = uvs[2][0]; out[37] = uvs[2][1];
+        out[38] = 0.0; out[39] = 0.0;
+    }
+
+    fn pack_normals(&self, out: &mut [f32; 52], normals: &[[f32; 3]; 3]) {
+        // vec4 #11-13: per-vertex smooth normals
+        for i in 0..3 {
+            out[40 + i*4]     = normals[i][0];
+            out[40 + i*4 + 1] = normals[i][1];
+            out[40 + i*4 + 2] = normals[i][2];
+            out[40 + i*4 + 3] = 0.0;
+        }
     }
 }
 

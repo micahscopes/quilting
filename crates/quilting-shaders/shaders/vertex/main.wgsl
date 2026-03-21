@@ -20,7 +20,7 @@ var<uniform> u: Uniforms;
 
 struct VertexInput {
     @location(0) bary: vec3<f32>,
-    // Per-instance QB control points (10 vec4s = 40 floats per instance)
+    // Per-instance QB control points (13 vec4s = 52 floats per instance)
     @location(1) p0: vec4<f32>,
     @location(2) p1: vec4<f32>,
     @location(3) p2: vec4<f32>,
@@ -31,6 +31,9 @@ struct VertexInput {
     @location(8) vert_lod: vec4<f32>,
     @location(9) uv01: vec4<f32>,    // (u0, v0, u1, v1)
     @location(10) uv2_pad: vec4<f32>, // (u2, v2, 0, 0)
+    @location(11) smooth_n0: vec4<f32>,  // (nx0, ny0, nz0, 0)
+    @location(12) smooth_n1: vec4<f32>,  // (nx1, ny1, nz1, 0)
+    @location(13) smooth_n2: vec4<f32>,  // (nx2, ny2, nz2, 0)
 }
 
 struct VertexOutput {
@@ -81,6 +84,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         pos = eval_flat(bary, in.p0, in.p1, in.p2);
         nrm = normalize(cross(in.p1.yzw - in.p0.yzw, in.p2.yzw - in.p0.yzw));
         nrm = nrm * u.perm_parity;
+    }
+
+    // Override with smooth normals if available (any component non-zero)
+    let sn0 = in.smooth_n0.xyz;
+    let sn1 = in.smooth_n1.xyz;
+    let sn2 = in.smooth_n2.xyz;
+    let interp_nrm = bary.x * sn0 + bary.y * sn1 + bary.z * sn2;
+    if dot(interp_nrm, interp_nrm) > 0.01 {
+        nrm = normalize(interp_nrm);
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);

@@ -20,6 +20,8 @@ pub struct HyperMesh {
     /// Per-vertex texture coordinates (TEXCOORD_0). Empty if no UVs present.
     /// UVs don't change over time — they're a property of the mesh topology.
     pub vertex_uvs: Vec<[f32; 2]>,
+    /// Per-vertex smooth normals from glTF NORMAL attribute. Empty if none provided.
+    pub vertex_normals: Vec<[f32; 3]>,
 }
 
 impl HyperMesh {
@@ -40,6 +42,7 @@ impl HyperMesh {
             num_vertices,
             period,
             vertex_uvs: Vec::new(),
+            vertex_normals: Vec::new(),
         }
     }
 

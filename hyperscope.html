@@ -568,9 +568,9 @@ function makeVAO(baryData, idxData, instanceData) {
   const ib = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, ib);
   gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
-  for (let i=0;i<10;i++) {
+  for (let i=0;i<13;i++) {
     gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,160,i*16);
+    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,208,i*16);
     gl.vertexAttribDivisor(1+i,1);
   }
   const eb = gl.createBuffer();
@@ -632,9 +632,9 @@ function getOrCreateBatchVAOs(tessKey, tessBufs, instanceData, numInstances) {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 13; i++) {
       gl.enableVertexAttribArray(1+i);
-      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 160, i*16);
+      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
       gl.vertexAttribDivisor(1+i, 1);
     }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
@@ -670,9 +670,9 @@ function uploadBatches(data) {
     const origBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, origBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(allOrig), gl.DYNAMIC_DRAW);
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 13; i++) {
       gl.enableVertexAttribArray(1+i);
-      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 160, i*16);
+      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
       gl.vertexAttribDivisor(1+i, 1);
     }
     gl.bindVertexArray(null);

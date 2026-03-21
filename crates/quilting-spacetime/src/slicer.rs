@@ -42,6 +42,8 @@ pub struct SliceLayer {
     pub weights: Vec<[f64; 4]>,
     /// Per-vertex texture coordinates, interpolated from source mesh. Empty if no UVs.
     pub uvs: Vec<[f32; 2]>,
+    /// Per-vertex smooth normals, interpolated from source mesh. Empty if no normals.
+    pub normals: Vec<[f32; 3]>,
     /// Triangle indices.
     pub faces: Vec<[u32; 3]>,
     /// For each output face, the index of the source face in HyperMesh::faces.
@@ -262,7 +264,8 @@ impl HyperplaneSlicer {
         // Step 3: group connected triangles into layers via flood fill.
         let default_weights: Vec<[f64; 4]> = vec![[1.0, 0.0, 0.0, 0.0]; positions.len()];
         let empty_uvs: Vec<[f32; 2]> = Vec::new();
-        let layers = group_into_layers(&positions, &times, &default_weights, &empty_uvs, &faces, &source_face_indices);
+        let empty_normals: Vec<[f32; 3]> = Vec::new();
+        let layers = group_into_layers(&positions, &times, &default_weights, &empty_uvs, &empty_normals, &faces, &source_face_indices);
 
         SliceResult { layers }
     }
@@ -284,16 +287,18 @@ impl HyperplaneSlicer {
         let mut times: Vec<f64> = Vec::new();
         let mut weights: Vec<[f64; 4]> = Vec::new();
         let mut uvs: Vec<[f32; 2]> = Vec::new();
+        let mut normals: Vec<[f32; 3]> = Vec::new();
         let mut faces: Vec<[u32; 3]> = Vec::new();
         let mut source_face_indices: Vec<usize> = Vec::new();
 
         let mut vert_map: HashMap<[i64; 6], u32> = HashMap::default();
 
-        let add_vert = |pos: [f64; 3], t: f64, w: [f64; 4], uv: [f32; 2],
+        let add_vert = |pos: [f64; 3], t: f64, w: [f64; 4], uv: [f32; 2], normal: [f32; 3],
                         positions: &mut Vec<[f64; 3]>,
                         times: &mut Vec<f64>,
                         weights: &mut Vec<[f64; 4]>,
                         uvs: &mut Vec<[f32; 2]>,
+                        normals: &mut Vec<[f32; 3]>,
                         vert_map: &mut HashMap<[i64; 6], u32>| -> u32 {
             // Include UVs in the dedup key so texture seam vertices stay separate.
             // Without this, two vertices at the same position but different UVs
@@ -314,6 +319,7 @@ impl HyperplaneSlicer {
             times.push(t);
             weights.push(w);
             uvs.push(uv);
+            normals.push(normal);
             vert_map.insert(key, idx);
             idx
         };
@@ -381,6 +387,7 @@ impl HyperplaneSlicer {
         };
 
         let has_uvs = !mesh.vertex_uvs.is_empty();
+        let has_normals = !mesh.vertex_normals.is_empty();
 
         // For each face, iterate over all keyframe segments
         for (face_idx, face) in mesh.faces.iter().enumerate() {
@@ -550,8 +557,19 @@ impl HyperplaneSlicer {
                     [[0.0; 2]; 6]
                 };
 
-                // (time, position, weight, uv) per crossing
-                let mut crossings: Vec<(f64, [f64; 3], [f64; 4], [f32; 2])> = Vec::new();
+                // Per-prism normals: same for top and bottom (time-invariant)
+                let n_norms = mesh.vertex_normals.len();
+                let prism_normals: [[f32; 3]; 6] = if has_normals && (v0 as usize) < n_norms && (v1 as usize) < n_norms && (v2 as usize) < n_norms {
+                    let n0 = mesh.vertex_normals[v0 as usize];
+                    let n1 = mesh.vertex_normals[v1 as usize];
+                    let n2 = mesh.vertex_normals[v2 as usize];
+                    [n0, n1, n2, n0, n1, n2] // bottom and top share normals
+                } else {
+                    [[0.0; 3]; 6]
+                };
+
+                // (time, position, weight, uv, normal) per crossing
+                let mut crossings: Vec<(f64, [f64; 3], [f64; 4], [f32; 2], [f32; 3])> = Vec::new();
 
                 for &(a, b) in &edges {
                     let da = prism_dists[a];
@@ -567,6 +585,8 @@ impl HyperplaneSlicer {
                         let wb = prism_weights[b];
                         let ua = prism_uvs[a];
                         let ub = prism_uvs[b];
+                        let na = prism_normals[a];
+                        let nb = prism_normals[b];
                         let pos = [
                             pa[0] + t_param * (pb[0] - pa[0]),
                             pa[1] + t_param * (pb[1] - pa[1]),
@@ -583,7 +603,12 @@ impl HyperplaneSlicer {
                             ua[0] + t_f32 * (ub[0] - ua[0]),
                             ua[1] + t_f32 * (ub[1] - ua[1]),
                         ];
-                        crossings.push((time, pos, weight, uv));
+                        let normal = [
+                            na[0] + t_f32 * (nb[0] - na[0]),
+                            na[1] + t_f32 * (nb[1] - na[1]),
+                            na[2] + t_f32 * (nb[2] - na[2]),
+                        ];
+                        crossings.push((time, pos, weight, uv, normal));
                     }
                 }
 
@@ -633,13 +658,13 @@ impl HyperplaneSlicer {
                 });
 
                 // Fan triangulate
-                let i0 = add_vert(crossings[0].1, crossings[0].0, crossings[0].2, crossings[0].3,
-                    &mut positions, &mut times, &mut weights, &mut uvs, &mut vert_map);
+                let i0 = add_vert(crossings[0].1, crossings[0].0, crossings[0].2, crossings[0].3, crossings[0].4,
+                    &mut positions, &mut times, &mut weights, &mut uvs, &mut normals, &mut vert_map);
                 for j in 1..crossings.len() - 1 {
-                    let i1 = add_vert(crossings[j].1, crossings[j].0, crossings[j].2, crossings[j].3,
-                        &mut positions, &mut times, &mut weights, &mut uvs, &mut vert_map);
-                    let i2 = add_vert(crossings[j+1].1, crossings[j+1].0, crossings[j+1].2, crossings[j+1].3,
-                        &mut positions, &mut times, &mut weights, &mut uvs, &mut vert_map);
+                    let i1 = add_vert(crossings[j].1, crossings[j].0, crossings[j].2, crossings[j].3, crossings[j].4,
+                        &mut positions, &mut times, &mut weights, &mut uvs, &mut normals, &mut vert_map);
+                    let i2 = add_vert(crossings[j+1].1, crossings[j+1].0, crossings[j+1].2, crossings[j+1].3, crossings[j+1].4,
+                        &mut positions, &mut times, &mut weights, &mut uvs, &mut normals, &mut vert_map);
                     if i0 != i1 && i1 != i2 && i0 != i2 {
                         faces.push([i0, i1, i2]);
                         source_face_indices.push(face_idx);
@@ -652,7 +677,7 @@ impl HyperplaneSlicer {
             return SliceResult { layers: vec![] };
         }
 
-        let layers = group_into_layers(&positions, &times, &weights, &uvs, &faces, &source_face_indices);
+        let layers = group_into_layers(&positions, &times, &weights, &uvs, &normals, &faces, &source_face_indices);
         SliceResult { layers }
     }
 }
@@ -663,6 +688,7 @@ fn group_into_layers(
     times: &[f64],
     weights: &[[f64; 4]],
     uvs: &[[f32; 2]],
+    normals: &[[f32; 3]],
     faces: &[[u32; 3]],
     source_indices: &[usize],
 ) -> Vec<SliceLayer> {
@@ -715,6 +741,7 @@ fn group_into_layers(
         let mut layer_times = Vec::new();
         let mut layer_weights = Vec::new();
         let mut layer_uvs = Vec::new();
+        let mut layer_normals = Vec::new();
         let mut layer_faces = Vec::new();
         let mut layer_source_indices = Vec::new();
 
@@ -728,6 +755,7 @@ fn group_into_layers(
                     layer_positions.push(positions[v as usize]);
                     layer_times.push(times[v as usize]);
                     if !uvs.is_empty() { layer_uvs.push(uvs[v as usize]); }
+                    if !normals.is_empty() { layer_normals.push(normals[v as usize]); }
                     layer_weights.push(weights[v as usize]);
                     old_to_new.insert(v, nv);
                     nv
@@ -745,6 +773,7 @@ fn group_into_layers(
             times: layer_times,
             weights: layer_weights,
             uvs: layer_uvs,
+            normals: layer_normals,
             faces: layer_faces,
             source_face_indices: layer_source_indices,
         });
