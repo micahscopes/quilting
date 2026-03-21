@@ -492,10 +492,12 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     // Capture animation range before padding
     let (time_min, time_max) = mesh.time_range();
 
-    // Loop trajectories so tilted slices always have full coverage —
-    // the animation repeats cyclically, no boundary clipping
-    for traj in &mut mesh.trajectories {
-        traj.loop_pad(1);
+    // Loop trajectories for periodic animations (cube, sphere, torus).
+    // Don't loop the horse — it's not a perfect cycle.
+    if name != "galloping_horse" {
+        for traj in &mut mesh.trajectories {
+            traj.loop_pad(1);
+        }
     }
     let info = HyperMeshInfo {
         time_min,
