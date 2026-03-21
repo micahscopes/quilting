@@ -502,10 +502,7 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     // Capture animation range before padding
     let (time_min, time_max) = mesh.time_range();
 
-    // Loop trajectories so tilted slices have full coverage
-    for traj in &mut mesh.trajectories {
-        traj.loop_pad(2);
-    }
+    // Toroidal embedding handles periodicity — no loop padding needed
     let info = HyperMeshInfo {
         time_min,
         time_max,

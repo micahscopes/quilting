@@ -741,13 +741,45 @@ async function update() {
                 currentXform;
 
   const spacetimeOn = $('spacetime-toggle').classList.contains('on');
-  // Use rotate override if active, otherwise slider-derived normal
-  const effectiveNormal = rotateNormalOverride || (spacetimeOn ? normal : [0, 0, 0, 1]);
-  // Offset = dot(normal, center_point). The center point is (0,0,0,timeOffset),
-  // so offset = normal[3] * timeOffset. This ensures the hyperplane always
-  // passes through the worldtube at the slider time regardless of tilt.
-  const effectiveOffset = effectiveNormal[3] * timeOffset;
-  rotateNormalOverride = null;
+
+  // The worldsheet is a hypertorus. Time slider controls the angle of the
+  // hyperplane in the torus (w,z) plane — like rotating a knife through a donut.
+  // θ = 2π·t/period maps the time slider to the torus angle.
+  const period = meshInfo ? (meshInfo.time_max - meshInfo.time_min) : 2.0;
+  const theta = 2.0 * Math.PI * timeOffset / period;
+
+  let effectiveNormal, effectiveOffset;
+  if (rotateNormalOverride) {
+    effectiveNormal = rotateNormalOverride;
+    effectiveOffset = 0;
+    rotateNormalOverride = null;
+  } else if (spacetimeOn) {
+    // Tilt mixes the torus-plane rotation with a spatial direction
+    const tilt = parseFloat($('tilt').value);
+    let dir = 'x';
+    document.querySelectorAll('#dir-btns .a').forEach(b => { dir = b.dataset.v; });
+    const sinTilt = Math.sin(tilt), cosTilt = Math.cos(tilt);
+    // Base normal rotates in (w, z) plane at angle θ
+    const nw = Math.cos(theta) * cosTilt;
+    const nz = Math.sin(theta) * cosTilt;
+    const nx = dir === 'x' ? sinTilt : 0;
+    const ny = dir === 'y' ? sinTilt : 0;
+    const nz2 = dir === 'z' ? nz + sinTilt : nz;
+    effectiveNormal = [nx, ny, dir === 'z' ? nz2 : nz, nw];
+    effectiveOffset = 0; // through the center of the torus
+  } else {
+    // No spacetime: rotate the hyperplane in the torus (w,z) plane.
+    // n[2] = sin θ (z component), n[3] = cos θ (w component).
+    // This sweeps the radar through the donut = horse runs.
+    effectiveNormal = [0, 0, Math.sin(theta), Math.cos(theta)];
+    effectiveOffset = 0;
+  }
+
+  // Also apply the same rotation for the spacetime=off animation
+  if (!spacetimeOn && !rotateNormalOverride) {
+    effectiveNormal = [0, 0, Math.sin(theta), Math.cos(theta)];
+    effectiveOffset = 0;
+  }
 
   const t0 = performance.now();
   const resp = await workerCall('slice_and_transform', {
