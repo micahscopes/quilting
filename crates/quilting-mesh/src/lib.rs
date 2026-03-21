@@ -74,8 +74,8 @@ impl HalfEdgeMesh {
             }
         }
 
-        use std::collections::HashMap;
-        let mut edge_map: HashMap<(u32, u32), u32> = HashMap::new();
+        use rustc_hash::FxHashMap;
+        let mut edge_map: FxHashMap<(u32, u32), u32> = FxHashMap::default();
 
         for he_idx in 0..half_edges.len() {
             let face_idx = half_edges[he_idx].face;

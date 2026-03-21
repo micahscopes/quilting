@@ -4,7 +4,8 @@
 /// compute the intersection as a 3D triangle mesh. The hyperplane is
 /// defined by dot(normal, x) = offset where x = (x, y, z, t).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::hyper_mesh::HyperMesh;
 use quilting_core::quaternion::{Quat, Mobius};
@@ -117,7 +118,7 @@ impl HyperplaneSlicer {
         let mut source_face_indices: Vec<usize> = Vec::new();
 
         // Map from (original_vertex_idx, hit_idx) -> output vertex index
-        let mut vertex_map: HashMap<(u32, usize), u32> = HashMap::new();
+        let mut vertex_map: HashMap<(u32, usize), u32> = HashMap::default();
 
         let mut get_or_insert_vertex =
             |vertex_map: &mut HashMap<(u32, usize), u32>,
@@ -286,7 +287,7 @@ impl HyperplaneSlicer {
         let mut faces: Vec<[u32; 3]> = Vec::new();
         let mut source_face_indices: Vec<usize> = Vec::new();
 
-        let mut vert_map: HashMap<[i64; 4], u32> = HashMap::new();
+        let mut vert_map: HashMap<[i64; 4], u32> = HashMap::default();
 
         let add_vert = |pos: [f64; 3], t: f64, w: [f64; 4], uv: [f32; 2],
                         positions: &mut Vec<[f64; 3]>,
@@ -666,7 +667,7 @@ fn group_into_layers(
     }
 
     // Build vertex -> face adjacency
-    let mut vert_to_faces: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut vert_to_faces: HashMap<u32, Vec<usize>> = HashMap::default();
     for (fi, face) in faces.iter().enumerate() {
         for &v in face {
             vert_to_faces.entry(v).or_default().push(fi);
@@ -704,7 +705,7 @@ fn group_into_layers(
         }
 
         // Build the layer: remap vertices to a compact range
-        let mut old_to_new: HashMap<u32, u32> = HashMap::new();
+        let mut old_to_new: HashMap<u32, u32> = HashMap::default();
         let mut layer_positions = Vec::new();
         let mut layer_times = Vec::new();
         let mut layer_weights = Vec::new();

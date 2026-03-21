@@ -571,7 +571,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     let scene = match quilting_gltf::load_gltf(data) {
         Ok(s) => s,
         Err(e) => {
-            web_sys::console::error_1(&format!("load_gltf_data: parse error: {e}").into());
+            web_sys::console::warn_1(&format!("load_gltf_data: could not load: {e}").into());
             return JsValue::NULL;
         }
     };

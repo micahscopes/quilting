@@ -5,3 +5,4 @@ edition = "2021"
 description = "Half-edge mesh data structure for quilting"
 
 [dependencies]
+rustc-hash = "2"
