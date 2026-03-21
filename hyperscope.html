@@ -320,12 +320,23 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
   progWire = mkProg(vs, fsWire);
   progNormals = mkProg(vs, fsNormals);
   if (fsPbr) {
+    console.log('PBR fragment GLSL length:', fsPbr.length);
+    console.log('PBR fragment first 200 chars:', fsPbr.substring(0, 200));
     progPbr = mkProg(vs, fsPbr);
-    bindUniformBlocks(progPbr);
+    if (!gl.getProgramParameter(progPbr, gl.LINK_STATUS)) {
+      console.error('PBR program link failed:', gl.getProgramInfoLog(progPbr));
+      progPbr = null;
+    } else {
+      console.log('PBR program linked OK');
+    }
+    if (progPbr) bindUniformBlocks(progPbr);
     // PBR has an additional UBO for material params
-    const pbrBlockIdx = gl.getUniformBlockIndex(progPbr, 'PbrUniforms_block_1Fragment');
+    // naga names the block by fragment-stage block index (0), not binding number
+    const pbrBlockIdx = gl.getUniformBlockIndex(progPbr, 'PbrUniforms_block_0Fragment');
     if (pbrBlockIdx !== gl.INVALID_INDEX) {
-      gl.uniformBlockBinding(progPbr, pbrBlockIdx, 2); // binding point 2
+      gl.uniformBlockBinding(progPbr, pbrBlockIdx, PBR_UBO_BINDING);
+    } else {
+      console.warn('PBR UBO block not found — check naga block naming');
     }
   }
 
