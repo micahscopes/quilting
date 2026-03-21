@@ -401,20 +401,7 @@ impl HyperplaneSlicer {
                     continue;
                 }
 
-                // For toroidal: only keep one side of the torus intersection.
-                // Use the embedded w-coordinate (R·cos θ) at the prism center.
-                // Positive w = near side of torus, negative = far side.
-                if let TimeEmbedding::Toroidal { radius, period } = self.time_embedding {
-                    let avg_t = (spatial_t[0] + spatial_t[3]) * 0.5;
-                    let theta = std::f64::consts::TAU * avg_t / period;
-                    // Project the torus position onto the hyperplane normal's (w,z) direction
-                    let nw = self.normal[3];
-                    let nz = self.normal[2];
-                    let proj = radius * theta.cos() * nw + radius * theta.sin() * nz;
-                    if proj < -0.1 * radius {
-                        continue;
-                    }
-                }
+                // TODO: filter to show only one side of the torus
 
                 // Direct prism-plane intersection.
                 // 9 prism edges: 3 bottom, 3 top, 3 vertical.
