@@ -194,9 +194,14 @@ impl VertexTrajectory {
     pub fn intersect_hyperplane(&self, normal: [f64; 4], offset: f64) -> Vec<(f64, [f64; 3])> {
         let mut results = Vec::new();
         for seg in &self.segments {
-            results.extend(seg.intersect_hyperplane(normal, offset));
+            for hit in seg.intersect_hyperplane(normal, offset) {
+                // Deduplicate: skip if we already have a hit at nearly the same time
+                // (happens at segment boundaries where u=1 of one = u=0 of next)
+                if !results.iter().any(|&(t, _): &(f64, _)| (t - hit.0).abs() < 1e-8) {
+                    results.push(hit);
+                }
+            }
         }
-
         results
     }
 }
