@@ -128,27 +128,41 @@ impl VertexTrajectory {
     /// Add constant-position padding segments before and after the trajectory.
     /// This allows tilted hyperplanes to intersect beyond the animation range
     /// without losing faces at the boundaries.
+    /// Extend the trajectory with padding segments that extrapolate
+    /// the motion at constant velocity (matching the endpoint velocities).
     pub fn pad(&mut self, padding: f64) {
         if self.segments.is_empty() || padding <= 0.0 { return; }
 
         let first = &self.segments[0];
+        let vel = first.vel_start;
+        let pre_start = [
+            first.pos_start[0] - vel[0] * padding,
+            first.pos_start[1] - vel[1] * padding,
+            first.pos_start[2] - vel[2] * padding,
+        ];
         let pre = HermiteSegment {
             t_start: first.t_start - padding,
             t_end: first.t_start,
-            pos_start: first.pos_start,
+            pos_start: pre_start,
             pos_end: first.pos_start,
-            vel_start: [0.0; 3],
-            vel_end: [0.0; 3],
+            vel_start: vel,
+            vel_end: vel,
         };
 
         let last = &self.segments[self.segments.len() - 1];
+        let vel = last.vel_end;
+        let post_end = [
+            last.pos_end[0] + vel[0] * padding,
+            last.pos_end[1] + vel[1] * padding,
+            last.pos_end[2] + vel[2] * padding,
+        ];
         let post = HermiteSegment {
             t_start: last.t_end,
             t_end: last.t_end + padding,
             pos_start: last.pos_end,
-            pos_end: last.pos_end,
-            vel_start: [0.0; 3],
-            vel_end: [0.0; 3],
+            pos_end: post_end,
+            vel_start: vel,
+            vel_end: vel,
         };
 
         self.segments.insert(0, pre);
