@@ -300,6 +300,27 @@ impl HyperplaneSlicer {
             idx
         };
 
+        // When 4D Möbius is active, transform the hyperplane to track the
+        // deformed torus. Compute where the torus center goes under the Möbius
+        // and adjust the offset so the hyperplane passes through it.
+        let adjusted_offset = if let Some(m) = transform_4d {
+            if let TimeEmbedding::Toroidal { radius, period } = self.time_embedding {
+                // The torus center at the current slice angle
+                let nw = self.normal[3];
+                let nz = self.normal[2];
+                let phi = nz.atan2(nw); // slice angle in (w,z) plane
+                let center_q = Quat::new(radius * phi.cos(), 0.0, 0.0, radius * phi.sin());
+                let center_prime = m.apply(center_q);
+                // Offset = dot(normal, transformed_center)
+                let n = self.normal;
+                n[0] * center_prime.x + n[1] * center_prime.y + n[2] * center_prime.z + n[3] * center_prime.w
+            } else {
+                self.offset
+            }
+        } else {
+            self.offset
+        };
+
         // For each face, iterate over all keyframe segments
         for face in &mesh.faces {
             let [v0, v1, v2] = *face;
@@ -367,7 +388,9 @@ impl HyperplaneSlicer {
                     }
                 }
 
-                // Apply 4D Möbius if active
+                // Apply 4D Möbius: transform the embedded torus coordinates.
+                // The hyperplane offset is adjusted per-face to track the
+                // transformed torus center (computed outside this loop).
                 if let Some(m) = transform_4d {
                     for i in 0..6 {
                         let q = Quat::new(embed_t[i], embed_pos[i][0], embed_pos[i][1], embed_pos[i][2]);
@@ -379,9 +402,9 @@ impl HyperplaneSlicer {
                     }
                 }
 
-                // Distance uses EMBEDDED coordinates
+                // Distance uses EMBEDDED coordinates with adjusted offset
                 let n = self.normal;
-                let o = self.offset;
+                let o = adjusted_offset;
                 let d_arr: [f64; 6] = std::array::from_fn(|i| {
                     n[0]*embed_pos[i][0] + n[1]*embed_pos[i][1] + n[2]*embed_pos[i][2] + n[3]*embed_t[i] - o
                 });
