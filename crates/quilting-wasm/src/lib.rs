@@ -517,6 +517,217 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     serde_wasm_bindgen::to_value(&info).unwrap()
 }
 
+/// Load a glTF/GLB file from raw bytes, bake animation into a HyperMesh,
+/// and store it for slicing.  Accepts both GLB (binary) and glTF with
+/// embedded base64 buffers — `gltf::import_slice` handles both.
+///
+/// Returns { time_min, time_max, num_vertices, num_faces } or throws on error.
+#[wasm_bindgen]
+pub fn load_gltf_data(data: &[u8]) -> JsValue {
+    let t0 = js_sys::Date::now();
+
+    let scene = match quilting_gltf::load_gltf(data) {
+        Ok(s) => s,
+        Err(e) => {
+            web_sys::console::error_1(&format!("load_gltf_data: parse error: {e}").into());
+            return JsValue::NULL;
+        }
+    };
+
+    let t_parse = js_sys::Date::now();
+    web_sys::console::log_1(&format!(
+        "load_gltf_data: parsed in {:.0}ms — {} meshes, {} animations, {} skins, {} nodes",
+        t_parse - t0, scene.meshes.len(), scene.animations.len(), scene.skins.len(), scene.nodes.len()
+    ).into());
+
+    // Find the first mesh node (prefer one with a skin)
+    let (mesh_idx, skin_idx) = {
+        let mut found_skinned: Option<(usize, usize)> = None;
+        let mut found_static: Option<usize> = None;
+        for node in &scene.nodes {
+            if let Some(mi) = node.mesh {
+                if let Some(si) = node.skin {
+                    if found_skinned.is_none() {
+                        found_skinned = Some((mi, si));
+                    }
+                } else if found_static.is_none() {
+                    found_static = Some(mi);
+                }
+            }
+        }
+        if let Some((mi, si)) = found_skinned {
+            (mi, Some(si))
+        } else if let Some(mi) = found_static {
+            (mi, None)
+        } else if !scene.meshes.is_empty() {
+            (0, None)
+        } else {
+            web_sys::console::error_1(&"load_gltf_data: no meshes found".into());
+            return JsValue::NULL;
+        }
+    };
+
+    // Flatten all primitives of this mesh into one combined primitive
+    let mesh = &scene.meshes[mesh_idx];
+    let combined = flatten_primitives_for_bake(mesh);
+
+    let n_verts = combined.positions.len();
+    let n_tris = combined.triangles.len();
+    web_sys::console::log_1(&format!(
+        "load_gltf_data: mesh {mesh_idx} — {n_verts} vertices, {n_tris} triangles"
+    ).into());
+
+    let num_samples = 32usize;
+    let hyper = if let Some(si) = skin_idx {
+        // Skinned animation
+        if !scene.animations.is_empty() && !scene.skins.is_empty() && si < scene.skins.len() {
+            let skin = &scene.skins[si];
+            let anim = &scene.animations[0]; // use first animation
+            web_sys::console::log_1(&format!(
+                "load_gltf_data: baking skinned animation with {} samples ({} joints)",
+                num_samples, skin.joints.len()
+            ).into());
+            quilting_gltf::bake::bake_skinned_animation(
+                &combined, skin, anim, &scene.nodes, num_samples,
+            )
+        } else {
+            build_static_hypermesh(&combined)
+        }
+    } else if !scene.animations.is_empty() {
+        // Check for morph target animation
+        let has_morph = scene.animations[0].channels.iter()
+            .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights);
+        if has_morph {
+            // TODO: extract morph deltas from glTF — for now treat as static
+            web_sys::console::log_1(&"load_gltf_data: morph targets detected but delta extraction not yet wired; using static mesh".into());
+            build_static_hypermesh(&combined)
+        } else {
+            build_static_hypermesh(&combined)
+        }
+    } else {
+        build_static_hypermesh(&combined)
+    };
+
+    // Normalize to roughly [-1, 1] range
+    let hyper = normalize_hypermesh(hyper);
+
+    let (time_min, time_max) = hyper.time_range();
+    let info = HyperMeshInfo {
+        time_min,
+        time_max,
+        num_vertices: hyper.num_vertices,
+        num_faces: hyper.faces.len(),
+    };
+
+    HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));
+    SENT_TESS.with(|s| s.borrow_mut().clear());
+    SLICE_CACHE.with(|c| *c.borrow_mut() = None);
+
+    let t_end = js_sys::Date::now();
+    web_sys::console::log_1(&format!(
+        "load_gltf_data: total {:.0}ms — {} verts, {} faces, time [{:.3}, {:.3}]",
+        t_end - t0, info.num_vertices, info.num_faces, time_min, time_max
+    ).into());
+
+    serde_wasm_bindgen::to_value(&info).unwrap()
+}
+
+/// Flatten all primitives in a mesh into a single Primitive suitable for baking.
+/// Merges positions, triangles, joint data with proper index offsets.
+fn flatten_primitives_for_bake(mesh: &quilting_gltf::mesh::Mesh) -> quilting_gltf::mesh::Primitive {
+    let mut positions = Vec::new();
+    let mut normals_all: Option<Vec<[f64; 3]>> = None;
+    let mut triangles = Vec::new();
+    let mut joint_indices_all: Option<Vec<[u16; 4]>> = None;
+    let mut joint_weights_all: Option<Vec<[f32; 4]>> = None;
+
+    for prim in &mesh.primitives {
+        let offset = positions.len();
+        positions.extend_from_slice(&prim.positions);
+        triangles.extend(prim.triangles.iter().map(|t| [t[0] + offset, t[1] + offset, t[2] + offset]));
+
+        if let Some(ref n) = prim.normals {
+            normals_all.get_or_insert_with(Vec::new).extend_from_slice(n);
+        }
+        if let Some(ref ji) = prim.joint_indices {
+            joint_indices_all.get_or_insert_with(Vec::new).extend_from_slice(ji);
+        }
+        if let Some(ref jw) = prim.joint_weights {
+            joint_weights_all.get_or_insert_with(Vec::new).extend_from_slice(jw);
+        }
+    }
+
+    quilting_gltf::mesh::Primitive {
+        positions,
+        normals: normals_all,
+        uvs: None,
+        triangles,
+        material_index: None,
+        joint_indices: joint_indices_all,
+        joint_weights: joint_weights_all,
+    }
+}
+
+/// Build a static HyperMesh (no animation) from a primitive — 2 identical keyframes.
+fn build_static_hypermesh(prim: &quilting_gltf::mesh::Primitive) -> quilting_spacetime::HyperMesh {
+    use quilting_spacetime::trajectory::{HermiteSegment, VertexTrajectory};
+
+    let faces: Vec<[u32; 3]> = prim.triangles.iter()
+        .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
+        .collect();
+
+    let trajectories: Vec<VertexTrajectory> = prim.positions.iter().map(|&pos| {
+        VertexTrajectory {
+            segments: vec![HermiteSegment {
+                t_start: 0.0,
+                t_end: 2.0,
+                pos_start: pos,
+                pos_end: pos,
+                vel_start: [0.0, 0.0, 0.0],
+                vel_end: [0.0, 0.0, 0.0],
+            }],
+        }
+    }).collect();
+
+    quilting_spacetime::HyperMesh::new(faces, trajectories)
+}
+
+/// Normalize a HyperMesh so positions fit roughly in [-1, 1].
+/// Computes bounding box across all trajectory keyframes, then scales.
+fn normalize_hypermesh(mut mesh: quilting_spacetime::HyperMesh) -> quilting_spacetime::HyperMesh {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+
+    for traj in &mesh.trajectories {
+        for seg in &traj.segments {
+            for i in 0..3 {
+                min[i] = min[i].min(seg.pos_start[i]).min(seg.pos_end[i]);
+                max[i] = max[i].max(seg.pos_start[i]).max(seg.pos_end[i]);
+            }
+        }
+    }
+
+    let center = [(min[0]+max[0])*0.5, (min[1]+max[1])*0.5, (min[2]+max[2])*0.5];
+    let extent = ((max[0]-min[0]).max(max[1]-min[1]).max(max[2]-min[2])) * 0.5;
+    if extent < 1e-10 {
+        return mesh;
+    }
+    let scale = 1.0 / extent;
+
+    for traj in &mut mesh.trajectories {
+        for seg in &mut traj.segments {
+            for i in 0..3 {
+                seg.pos_start[i] = (seg.pos_start[i] - center[i]) * scale;
+                seg.pos_end[i] = (seg.pos_end[i] - center[i]) * scale;
+                seg.vel_start[i] *= scale;
+                seg.vel_end[i] *= scale;
+            }
+        }
+    }
+
+    mesh
+}
+
 /// Slice the current hypermesh with a hyperplane.
 /// normal: [nx, ny, nz, nt] (4 floats)
 /// offset: f64

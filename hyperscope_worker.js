@@ -49,6 +49,12 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'load_gltf_data') {
+    const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
+    self.postMessage({ type: 'gltf_loaded', id, result });
+    return;
+  }
+
   if (type === 'generate_single') {
     const { a, b, c } = data;
     wasm.generate_and_store_patch(a, b, c);

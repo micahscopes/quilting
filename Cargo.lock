@@ -622,6 +622,7 @@ dependencies = [
  "getrandom",
  "js-sys",
  "quilting-core",
+ "quilting-gltf",
  "quilting-mesh",
  "quilting-shaders",
  "quilting-spacetime",

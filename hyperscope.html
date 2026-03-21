@@ -31,6 +31,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 .toggle-label{font-size:12px}
 #wrap{flex:1;position:relative}
 #cv{position:absolute;top:0;left:0;width:100%;height:100%}
+#drop-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:10;border:3px dashed #58a6ff;background:rgba(31,111,235,0.08);align-items:center;justify-content:center}
+#drop-overlay.active{display:flex}
+#drop-overlay span{font-size:18px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase;pointer-events:none}
+.glb-btn{width:100%;padding:6px 8px;font-size:11px;font-family:inherit;border:1px solid #30363d;background:#21262d;color:#8b949e;cursor:pointer;border-radius:4px;transition:all 0.15s;text-align:center}
+.glb-btn:hover{background:#30363d;border-color:#58a6ff;color:#c9d1d9}
 </style>
 </head>
 <body>
@@ -154,9 +159,18 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     </div>
   </div>
 
+  <div class="section">
+    <label>Load Model</label>
+    <button class="glb-btn" id="glb-btn">Load glTF / GLB</button>
+    <input type="file" id="glb-file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" style="display:none">
+  </div>
+
   <div class="stats" id="stats">Loading WASM...</div>
 </div>
-<div id="wrap"><canvas id="cv"></canvas></div>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <div id="drop-overlay"><span>Drop .glb / .gltf file here</span></div>
+</div>
 
 <script type="module">
 const $=s=>document.getElementById(s);
@@ -982,6 +996,83 @@ function frame() {
   render();
   requestAnimationFrame(frame);
 }
+
+// --- glTF/GLB file loading ---
+async function loadGltfFromBuffer(buffer, filename) {
+  $('stats').innerHTML = `Loading <span class="val">${filename || 'glTF'}</span>...`;
+  // Deselect built-in shape buttons
+  document.querySelectorAll('#shape-btns button').forEach(b => b.classList.remove('a'));
+
+  const resp = await workerCall('load_gltf_data', { bytes: buffer });
+  const info = resp.result;
+  if (!info || info.num_faces === 0) {
+    $('stats').innerHTML = 'Failed to load glTF — check console';
+    return;
+  }
+  meshInfo = info;
+  currentShape = '__gltf__';
+  const timeSlider = $('time');
+  timeSlider.min = info.time_min;
+  timeSlider.max = info.time_max;
+  timeSlider.step = (info.time_max - info.time_min) / 200;
+  timeSlider.value = (info.time_min + info.time_max) / 2;
+  $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
+  // Clear GPU caches
+  tessCache.clear();
+  vaoCache.clear();
+  vaoOrigMesh = null;
+  animDir = 1;
+  $('stats').innerHTML =
+    `Loaded <span class="val">${filename || 'glTF'}</span><br>` +
+    `Verts: <span class="val">${info.num_vertices}</span> Faces: <span class="val">${info.num_faces}</span>`;
+  await update();
+}
+
+// File picker button
+$('glb-btn').addEventListener('click', () => $('glb-file').click());
+$('glb-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const buffer = await file.arrayBuffer();
+  await loadGltfFromBuffer(buffer, file.name);
+  $('glb-file').value = ''; // reset so same file can be re-selected
+});
+
+// Drag and drop on the canvas wrap
+const wrapEl = $('wrap');
+const dropOverlay = $('drop-overlay');
+let dragCounter = 0;
+
+wrapEl.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  dragCounter++;
+  dropOverlay.classList.add('active');
+});
+wrapEl.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+wrapEl.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+  }
+});
+wrapEl.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  dragCounter = 0;
+  dropOverlay.classList.remove('active');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  if (!file.name.match(/\.glb$/i) && !file.name.match(/\.gltf$/i)) {
+    $('stats').innerHTML = 'Drop a .glb or .gltf file';
+    return;
+  }
+  const buffer = await file.arrayBuffer();
+  await loadGltfFromBuffer(buffer, file.name);
+});
 
 // --- Init ---
 $('stats').textContent = 'Starting worker...';
