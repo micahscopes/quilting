@@ -490,27 +490,27 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
       }
     }
     // Bind all sampler2D uniforms to texture units.
-    // naga generates combined sampler names like "_base_color_tex_base_color_sampler".
-    // Map them to texture units 0-4 based on which PBR map they represent.
-    const texUnitMap = [
-      { pattern: 'base_color', unit: 0 },
-      { pattern: 'metallic_roughness', unit: 1 },
-      { pattern: 'normal', unit: 2 },
-      { pattern: 'emissive', unit: 3 },
-      { pattern: 'occlusion', unit: 4 },
-    ];
+    // naga generates combined sampler names like "_group_0_binding_N_fs"
+    // where N is the WGSL @binding index. Map binding → texture unit:
+    //   binding 2 → unit 0 (base_color)
+    //   binding 4 → unit 1 (metallic_roughness)
+    //   binding 6 → unit 2 (normal)
+    //   binding 8 → unit 3 (emissive)
+    //   binding 10 → unit 4 (occlusion)
+    const bindingToUnit = { 2: 0, 4: 1, 6: 2, 8: 3, 10: 4 };
     gl.useProgram(progPbr);
     const numUniforms = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORMS);
     for (let i = 0; i < numUniforms; i++) {
       const info = gl.getActiveUniform(progPbr, i);
       if (info && info.type === gl.SAMPLER_2D) {
         const loc = gl.getUniformLocation(progPbr, info.name);
-        const name = info.name.toLowerCase();
-        for (const entry of texUnitMap) {
-          if (name.includes(entry.pattern)) {
-            gl.uniform1i(loc, entry.unit);
-            pbrSamplerLocs[entry.pattern] = { loc, unit: entry.unit };
-            break;
+        // Extract binding number from naga name: "_group_0_binding_N_fs"
+        const m = info.name.match(/binding_(\d+)/);
+        if (m) {
+          const binding = parseInt(m[1]);
+          const unit = bindingToUnit[binding];
+          if (unit !== undefined) {
+            gl.uniform1i(loc, unit);
           }
         }
       }
