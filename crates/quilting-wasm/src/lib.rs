@@ -494,7 +494,7 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     // Loop trajectories so tilted slices always have full coverage —
     // the animation repeats cyclically, no boundary clipping
     for traj in &mut mesh.trajectories {
-        traj.loop_pad(2);
+        traj.loop_pad(1);
     }
     let info = HyperMeshInfo {
         time_min,

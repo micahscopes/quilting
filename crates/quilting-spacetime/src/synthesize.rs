@@ -80,7 +80,7 @@ pub fn breathing_sphere(
 ) -> HyperMesh {
     let (verts, faces) = uv_sphere(subdivisions);
 
-    let nk = (duration * frequency * 64.0).max(64.0) as usize;
+    let nk = (duration * frequency * 32.0).max(32.0) as usize;
     let dt = duration / (nk - 1) as f64;
 
     let trajectories = verts

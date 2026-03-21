@@ -276,26 +276,29 @@ impl HyperplaneSlicer {
             // All trajectories should have the same segment count (after padding)
             let n_segs = traj0.segments.len().min(traj1.segments.len()).min(traj2.segments.len());
 
-            // Estimate the time range where the hyperplane could intersect.
-            // For normal (nx,ny,nz,nt) and offset, the time range is approximately
-            // offset/nt ± spatial_extent/nt. Skip segments far outside this range.
+            // Estimate the time window where the hyperplane could intersect.
             let nt = self.normal[3];
-            let t_center = if nt.abs() > 0.01 { self.offset / nt } else { 0.0 };
             let spatial_mag = (self.normal[0].powi(2) + self.normal[1].powi(2) + self.normal[2].powi(2)).sqrt();
-            let t_radius = if nt.abs() > 0.01 { 10.0 * spatial_mag / nt.abs() } else { f64::INFINITY };
+            // Maximum spatial extent of the mesh (rough estimate)
+            let (t_lo, t_hi) = if nt.abs() > 0.01 {
+                let t_center = self.offset / nt;
+                let t_radius = 4.0 * spatial_mag / nt.abs();
+                (t_center - t_radius, t_center + t_radius)
+            } else {
+                (f64::NEG_INFINITY, f64::INFINITY)
+            };
 
-            for si in 0..n_segs {
+            // Binary search for the first relevant segment
+            let seg_start = traj0.segments.partition_point(|s| s.t_end < t_lo);
+            let seg_end = traj0.segments.partition_point(|s| s.t_start <= t_hi).min(n_segs);
+
+            for si in seg_start..seg_end {
                 let seg0 = &traj0.segments[si];
                 let seg1 = &traj1.segments[si];
                 let seg2 = &traj2.segments[si];
 
                 let t_bot = seg0.t_start;
                 let t_top = seg0.t_end;
-
-                // Skip segments far from the intersection time range
-                if t_top < t_center - t_radius || t_bot > t_center + t_radius {
-                    continue;
-                }
                 let b0 = seg0.pos_start;
                 let b1 = seg1.pos_start;
                 let b2 = seg2.pos_start;
