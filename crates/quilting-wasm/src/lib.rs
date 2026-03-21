@@ -587,6 +587,8 @@ pub fn slice_and_transform(
     }).unwrap();
 
     // Check if we can reuse the cached slice (same normal + offset)
+    let t_start = js_sys::Date::now();
+
     let cache_hit = SLICE_CACHE.with(|c| {
         let cache = c.borrow();
         match cache.as_ref() {
@@ -661,7 +663,8 @@ pub fn slice_and_transform(
         None
     };
 
-    let t0 = js_sys::Date::now();
+    let t_slice_end = js_sys::Date::now();
+    let t0 = t_slice_end;
 
     // Use cached slice for Möbius computation
     let (instances_orig, instances_xform, num_tris) = SLICE_CACHE.with(|c| {
@@ -686,7 +689,22 @@ pub fn slice_and_transform(
         groups.entry((key.res, key.perm_index)).or_default().push(fi);
     }
 
-    let mut batches = Vec::new();
+    struct RawBatch {
+        actual_lod: [u32; 3],
+        canonical_lod: [u32; 3],
+        used_lod: [u32; 3],
+        is_fallback: bool,
+        parity: i32,
+        perm_index: usize,
+        num_faces: usize,
+        n_verts: usize,
+        n_tris: usize,
+        orig_data: Vec<f32>,
+        xform_data: Vec<f32>,
+        bary_data: Vec<f64>,
+        tess_tris: Vec<u32>,
+    }
+    let mut raw_batches: Vec<RawBatch> = Vec::new();
 
     ATLAS.with(|atlas_cell| {
         let atlas_ref = atlas_cell.borrow();
@@ -757,32 +775,59 @@ pub fn slice_and_transform(
             let xform_data: Vec<f32> = face_indices.iter()
                 .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
 
-            batches.push(BatchData {
-                lod: actual_lod,
-                wanted_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
+            raw_batches.push(RawBatch {
+                actual_lod,
+                canonical_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
                 used_lod: [used_lod[0], used_lod[1], used_lod[2]],
                 is_fallback,
-                perm_parity: parity,
+                parity,
                 perm_index,
-                instances_orig: orig_data,
-                instances_xform: xform_data,
-                tess_bary: bary_data,
-                tess_triangles: tess_tris,
                 num_faces: face_indices.len(),
-                verts_per_face: n_verts,
-                tris_per_face: n_tris,
+                n_verts, n_tris,
+                orig_data, xform_data, bary_data, tess_tris,
             });
         }
     });
 
     let t3 = js_sys::Date::now();
 
-    let result = serde_wasm_bindgen::to_value(&MeshBatches {
-        batches,
-        total_faces: num_tris,
-        num_batches: groups.len(),
-        timings: [t1 - t0, t2 - t1, t3 - t2],
-    }).unwrap();
+    // Convert raw batches to JS objects with typed arrays (bypass serde for large data)
+    let js_batches = js_sys::Array::new();
+    for b in &raw_batches {
+        let obj = js_sys::Object::new();
+        let s = |k: &str, v: JsValue| { js_sys::Reflect::set(&obj, &k.into(), &v).ok(); };
+        s("lod", serde_wasm_bindgen::to_value(&b.actual_lod).unwrap());
+        s("wanted_lod", serde_wasm_bindgen::to_value(&b.canonical_lod).unwrap());
+        s("used_lod", serde_wasm_bindgen::to_value(&b.used_lod).unwrap());
+        s("is_fallback", JsValue::from(b.is_fallback));
+        s("perm_parity", JsValue::from(b.parity));
+        s("perm_index", JsValue::from(b.perm_index as u32));
+        s("num_faces", JsValue::from(b.num_faces as u32));
+        s("verts_per_face", JsValue::from(b.n_verts as u32));
+        s("tris_per_face", JsValue::from(b.n_tris as u32));
+        s("instances_orig", js_sys::Float32Array::from(&b.orig_data[..]).into());
+        s("instances_xform", js_sys::Float32Array::from(&b.xform_data[..]).into());
+        s("tess_bary", js_sys::Float64Array::from(&b.bary_data[..]).into());
+        s("tess_triangles", js_sys::Uint32Array::from(&b.tess_tris[..]).into());
+        js_batches.push(&obj);
+    }
 
-    result
+    let result = js_sys::Object::new();
+    js_sys::Reflect::set(&result, &"batches".into(), &js_batches).ok();
+    js_sys::Reflect::set(&result, &"total_faces".into(), &JsValue::from(num_tris as u32)).ok();
+    js_sys::Reflect::set(&result, &"num_batches".into(), &JsValue::from(raw_batches.len() as u32)).ok();
+    js_sys::Reflect::set(&result, &"timings".into(),
+        &serde_wasm_bindgen::to_value(&[t1 - t0, t2 - t1, t3 - t2]).unwrap()).ok();
+
+    let t_end = js_sys::Date::now();
+    web_sys::console::log_1(&format!(
+        "slice_and_transform: cache={} slice={:.1}ms lod={:.1}ms batch={:.1}ms js={:.1}ms total={:.1}ms faces={}",
+        if cache_hit { "HIT" } else { "MISS" },
+        t_slice_end - t_start,
+        t1 - t0, t2 - t1, t_end - t3,
+        t_end - t_start,
+        num_tris,
+    ).into());
+
+    result.into()
 }
