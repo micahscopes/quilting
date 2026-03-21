@@ -52,6 +52,8 @@ pub struct PbrMaterial {
     pub alpha_cutoff: f64,
     /// Whether to render both sides of faces.
     pub double_sided: bool,
+    /// KHR_materials_unlit: render with base color only, no lighting.
+    pub unlit: bool,
 }
 
 /// glTF alpha rendering mode.
@@ -134,6 +136,7 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         alpha_mode,
         alpha_cutoff,
         double_sided: mat.double_sided(),
+        unlit: mat.unlit(),
     }
 }
 
@@ -160,6 +163,7 @@ mod tests {
             alpha_mode: AlphaMode::Opaque,
             alpha_cutoff: 0.5,
             double_sided: false,
+            unlit: false,
         };
         assert_eq!(mat.alpha_mode, AlphaMode::Opaque);
         assert!((mat.metallic_factor - 1.0).abs() < 1e-10);

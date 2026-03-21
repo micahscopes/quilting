@@ -265,6 +265,8 @@ function getMaterialParams(materialIndex) {
       occlusionStrength: mat.occlusion_strength ?? 1.0,
       alphaMode: alphaStr === 'MASK' ? 1 : (alphaStr === 'BLEND' ? 2 : 0),
       alphaCutoff: mat.alpha_cutoff ?? 0.5,
+      doubleSided: mat.double_sided ?? false,
+      unlit: mat.unlit ?? false,
     };
   }
   const bc = meshInfo ? (meshInfo.base_color || [0.9, 0.75, 0.6, 1.0]) : [0.9, 0.75, 0.6, 1.0];
@@ -277,6 +279,7 @@ function getMaterialParams(materialIndex) {
     emissiveFactor: [0, 0, 0], emissiveTextureIndex: -1,
     occlusionTextureIndex: -1, occlusionStrength: 1.0,
     alphaMode: 0, alphaCutoff: 0.5,
+    doubleSided: false, unlit: false,
   };
 }
 
@@ -423,7 +426,8 @@ function uploadPbrUBO(mat) {
   pbrUboF32[16] = mat.occlusionStrength ?? 1.0;
   pbrUboF32[17] = mat.alphaCutoff ?? 0.5;
   pbrUboF32[18] = mat.alphaMode ?? 0;
-  // _pad at offset 76
+  // unlit at offset 76
+  pbrUboF32[19] = mat.unlit ? 1.0 : 0.0;
   gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, pbrUboData);
 }
@@ -710,6 +714,14 @@ function uploadBatches(data) {
       materialIndex: batch.material_index ?? -1,
     });
   }
+
+  // Sort batches: opaque first, then alpha-mask, then blend.
+  // This ensures transparent materials render after opaque ones.
+  drawBatches.sort((a, b) => {
+    const am = getMaterialParams(a.materialIndex).alphaMode;
+    const bm = getMaterialParams(b.materialIndex).alphaMode;
+    return am - bm;
+  });
 }
 
 // --- Matrix math ---
@@ -770,8 +782,16 @@ function render() {
           emissiveFactor: mat.emissiveFactor, normalScale: mat.normalScale,
           hasNormalTex: !!nmTex, hasEmissiveTex: !!emTex, hasOcclusionTex: !!aoTex,
           occlusionStrength: mat.occlusionStrength, alphaCutoff: mat.alphaCutoff,
-          alphaMode: mat.alphaMode,
+          alphaMode: mat.alphaMode, unlit: mat.unlit,
         });
+
+        // Double-sided: disable face culling for double-sided materials
+        if (mat.doubleSided) {
+          gl.disable(gl.CULL_FACE);
+        } else {
+          gl.enable(gl.CULL_FACE);
+          gl.cullFace(gl.BACK);
+        }
 
         // Bind textures to units 0-4 (placeholder for missing maps)
         const texBindings = [bcTex, mrTex, nmTex, emTex, aoTex];

@@ -16,7 +16,7 @@ struct PbrUniforms {
     occlusion_strength: f32,
     alpha_cutoff: f32,
     alpha_mode: f32,                     // 0=opaque, 1=mask, 2=blend
-    _pad: f32,
+    unlit: f32,                          // >0.5 = KHR_materials_unlit (base color only)
 }
 
 @group(0) @binding(1)
@@ -83,6 +83,14 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     if pbr.alpha_mode < 0.5 {
         // OPAQUE mode
         alpha = 1.0;
+    }
+
+    // --- Unlit: just output base color with gamma correction ---
+    if pbr.unlit > 0.5 {
+        var unlit_color = base.rgb;
+        // Gamma correction (base is already linear from sRGB conversion above)
+        unlit_color = pow(unlit_color, vec3<f32>(1.0 / 2.2));
+        return vec4<f32>(unlit_color, alpha);
     }
 
     // --- Metallic / Roughness ---
