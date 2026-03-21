@@ -52,6 +52,8 @@ struct FragInput {
     @location(1) density: f32,
     @location(2) tex_uv: vec2<f32>,
     @location(3) position_vs: vec3<f32>,
+    @location(4) tangent_vs: vec3<f32>,
+    @location(5) bitangent_vs: vec3<f32>,
 }
 
 @fragment
@@ -104,26 +106,17 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     }
     roughness = clamp(roughness, 0.04, 1.0);
 
-    // --- Normal mapping (screen-space derivative TBN) ---
+    // --- Normal mapping (vertex-computed tangent frame) ---
     if pbr.has_normal_tex > 0.5 {
-        let pos_dx = dpdx(in.position_vs);
-        let pos_dy = dpdy(in.position_vs);
-        let uv_dx = dpdx(in.tex_uv);
-        let uv_dy = dpdy(in.tex_uv);
+        let t = normalize(in.tangent_vs);
+        let b = normalize(in.bitangent_vs);
+        let tbn = mat3x3<f32>(t, b, n);
 
-        let det = uv_dx.x * uv_dy.y - uv_dx.y * uv_dy.x;
-        if abs(det) > 1e-6 {
-            let inv_det = 1.0 / det;
-            let t = normalize((pos_dx * uv_dy.y - pos_dy * uv_dx.y) * inv_det);
-            let b = normalize((pos_dy * uv_dx.x - pos_dx * uv_dy.x) * inv_det);
-            let tbn = mat3x3<f32>(t, b, n);
-
-            let nm = textureSample(normal_tex, normal_sampler, in.tex_uv).xyz;
-            var tangent_n = nm * 2.0 - vec3<f32>(1.0);
-            tangent_n.x = tangent_n.x * pbr.normal_scale;
-            tangent_n.y = tangent_n.y * pbr.normal_scale;
-            n = normalize(tbn * tangent_n);
-        }
+        let nm = textureSample(normal_tex, normal_sampler, in.tex_uv).xyz;
+        var tangent_n = nm * 2.0 - vec3<f32>(1.0);
+        tangent_n.x = tangent_n.x * pbr.normal_scale;
+        tangent_n.y = tangent_n.y * pbr.normal_scale;
+        n = normalize(tbn * tangent_n);
     }
 
     // --- Lighting ---

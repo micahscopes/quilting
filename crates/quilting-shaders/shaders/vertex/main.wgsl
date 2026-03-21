@@ -42,6 +42,8 @@ struct VertexOutput {
     @location(1) density: f32,
     @location(2) tex_uv: vec2<f32>,
     @location(3) position_vs: vec3<f32>,
+    @location(4) tangent_vs: vec3<f32>,
+    @location(5) bitangent_vs: vec3<f32>,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -106,6 +108,24 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let uv1 = in.uv01.zw;
     let uv2 = in.uv2_pad.xy;
     out.tex_uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
+
+    // Compute per-face tangent frame from position and UV edge vectors.
+    // This avoids needing tangent vertex attributes — works for all models.
+    let v0 = in.p0.yzw; let v1 = in.p1.yzw; let v2 = in.p2.yzw;
+    let edge01 = v1 - v0;
+    let edge02 = v2 - v0;
+    let duv01 = uv1 - uv0;
+    let duv02 = uv2 - uv0;
+    let det = duv01.x * duv02.y - duv01.y * duv02.x;
+    var tangent = vec3<f32>(1.0, 0.0, 0.0);
+    var bitangent = vec3<f32>(0.0, 1.0, 0.0);
+    if abs(det) > 1e-6 {
+        let inv_det = 1.0 / det;
+        tangent = normalize((edge01 * duv02.y - edge02 * duv01.y) * inv_det);
+        bitangent = normalize((edge02 * duv01.x - edge01 * duv02.x) * inv_det);
+    }
+    out.tangent_vs = normalize((u.mv * vec4<f32>(tangent, 0.0)).xyz);
+    out.bitangent_vs = normalize((u.mv * vec4<f32>(bitangent, 0.0)).xyz);
 
     out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
