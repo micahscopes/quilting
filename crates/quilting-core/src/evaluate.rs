@@ -134,6 +134,13 @@ pub fn compute_instances_with_uvs(
         }
     }).collect();
 
+    // For affine transforms (identity, translation, rotation), skip LOD computation
+    // entirely — the mesh is already tessellated, no QB curvature to capture.
+    // Only non-affine (conformal) transforms need per-edge LOD.
+    if transform.is_affine() {
+        return instances;
+    }
+
     // Per-edge LOD from screen-space edge lengths.
     let target_pixels_per_sub = 16.0;
 

@@ -534,7 +534,8 @@ impl HyperplaneSlicer {
                 ];
 
                 // Per-prism UVs: same for top and bottom (time-invariant)
-                let prism_uvs: [[f32; 2]; 6] = if has_uvs {
+                let n_uvs = mesh.vertex_uvs.len();
+                let prism_uvs: [[f32; 2]; 6] = if has_uvs && (v0 as usize) < n_uvs && (v1 as usize) < n_uvs && (v2 as usize) < n_uvs {
                     let uv0 = mesh.vertex_uvs[v0 as usize];
                     let uv1 = mesh.vertex_uvs[v1 as usize];
                     let uv2 = mesh.vertex_uvs[v2 as usize];

@@ -192,6 +192,12 @@ impl Mobius {
         Self::new(Quat::ONE, Quat::ZERO, Quat::ZERO, Quat::ONE)
     }
 
+    /// Check if this is an identity or near-identity transform.
+    /// Returns true if c ≈ 0 (no conformal curvature — affine transform).
+    pub fn is_affine(&self) -> bool {
+        self.c.norm_sq() < 1e-20
+    }
+
     /// Translation: x ↦ x + t
     pub fn translation(t: Quat) -> Self {
         Self::new(Quat::ONE, t, Quat::ZERO, Quat::ONE)
