@@ -530,7 +530,7 @@ pub fn slice_hypermesh(normal: &[f64], offset: f64) -> JsValue {
         };
 
         let slicer = HyperplaneSlicer::new(n, offset);
-        let slice = slicer.slice(mesh);
+        let slice = slicer.slice_marching(mesh);
 
         let layers = slice.layers.into_iter().map(|layer| {
             let positions: Vec<f64> = layer.positions.iter()

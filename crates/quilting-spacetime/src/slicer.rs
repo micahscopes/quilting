@@ -232,6 +232,184 @@ impl HyperplaneSlicer {
 
         SliceResult { layers }
     }
+
+    /// Marching slicer: intersect hyperplane with each (face × keyframe) prism.
+    ///
+    /// Decomposes each triangular prism into 3 tetrahedra and uses the standard
+    /// marching tetrahedra case table. Correct at any tilt angle.
+    pub fn slice_marching(&self, mesh: &HyperMesh) -> SliceResult {
+        let mut positions: Vec<[f64; 3]> = Vec::new();
+        let mut times: Vec<f64> = Vec::new();
+        let mut faces: Vec<[u32; 3]> = Vec::new();
+
+        // Deduplicate vertices by (position hash) to merge shared edges
+        let mut vert_map: HashMap<[i64; 4], u32> = HashMap::new();
+
+        let mut add_vert = |pos: [f64; 3], t: f64,
+                            positions: &mut Vec<[f64; 3]>,
+                            times: &mut Vec<f64>,
+                            vert_map: &mut HashMap<[i64; 4], u32>| -> u32 {
+            // Quantize to ~1e-8 resolution for dedup
+            let key = [
+                (pos[0] * 1e8) as i64,
+                (pos[1] * 1e8) as i64,
+                (pos[2] * 1e8) as i64,
+                (t * 1e8) as i64,
+            ];
+            if let Some(&idx) = vert_map.get(&key) {
+                return idx;
+            }
+            let idx = positions.len() as u32;
+            positions.push(pos);
+            times.push(t);
+            vert_map.insert(key, idx);
+            idx
+        };
+
+        // For each face, iterate over all keyframe segments
+        for face in &mesh.faces {
+            let [v0, v1, v2] = *face;
+            let traj0 = &mesh.trajectories[v0 as usize];
+            let traj1 = &mesh.trajectories[v1 as usize];
+            let traj2 = &mesh.trajectories[v2 as usize];
+
+            // All trajectories should have the same segment count (after padding)
+            let n_segs = traj0.segments.len().min(traj1.segments.len()).min(traj2.segments.len());
+
+            for si in 0..n_segs {
+                let seg0 = &traj0.segments[si];
+                let seg1 = &traj1.segments[si];
+                let seg2 = &traj2.segments[si];
+
+                // 6 prism vertices: bottom (t_start) and top (t_end)
+                let t_bot = seg0.t_start;
+                let t_top = seg0.t_end;
+                let b0 = seg0.pos_start;
+                let b1 = seg1.pos_start;
+                let b2 = seg2.pos_start;
+                let t0 = seg0.pos_end;
+                let t1 = seg1.pos_end;
+                let t2 = seg2.pos_end;
+
+                // Signed distance to hyperplane for each vertex
+                let n = self.normal;
+                let o = self.offset;
+                let d = |pos: [f64; 3], t: f64| -> f64 {
+                    n[0]*pos[0] + n[1]*pos[1] + n[2]*pos[2] + n[3]*t - o
+                };
+                let db0 = d(b0, t_bot);
+                let db1 = d(b1, t_bot);
+                let db2 = d(b2, t_bot);
+                let dt0 = d(t0, t_top);
+                let dt1 = d(t1, t_top);
+                let dt2 = d(t2, t_top);
+
+                // Quick reject: all same sign = no intersection
+                let all_pos = db0 > 0.0 && db1 > 0.0 && db2 > 0.0
+                           && dt0 > 0.0 && dt1 > 0.0 && dt2 > 0.0;
+                let all_neg = db0 < 0.0 && db1 < 0.0 && db2 < 0.0
+                           && dt0 < 0.0 && dt1 < 0.0 && dt2 < 0.0;
+                if all_pos || all_neg {
+                    continue;
+                }
+
+                // Decompose prism into 3 tetrahedra:
+                // Tet 0: b0, b1, b2, t0
+                // Tet 1: b1, b2, t0, t1
+                // Tet 2: b2, t0, t1, t2
+                let prism_verts = [b0, b1, b2, t0, t1, t2];
+                let prism_times = [t_bot, t_bot, t_bot, t_top, t_top, t_top];
+                let prism_dists = [db0, db1, db2, dt0, dt1, dt2];
+
+                let tets: [[usize; 4]; 3] = [
+                    [0, 1, 2, 3],
+                    [1, 2, 3, 4],
+                    [2, 3, 4, 5],
+                ];
+
+                for tet in &tets {
+                    let d0 = prism_dists[tet[0]];
+                    let d1 = prism_dists[tet[1]];
+                    let d2 = prism_dists[tet[2]];
+                    let d3 = prism_dists[tet[3]];
+
+                    // Classify vertices: 4-bit case index
+                    let case = ((d0 > 0.0) as u8)
+                             | (((d1 > 0.0) as u8) << 1)
+                             | (((d2 > 0.0) as u8) << 2)
+                             | (((d3 > 0.0) as u8) << 3);
+
+                    // Skip no-intersection cases
+                    if case == 0 || case == 15 {
+                        continue;
+                    }
+
+                    // Interpolate edge crossing point
+                    let lerp_edge = |a: usize, b: usize| -> (f64, [f64; 3]) {
+                        let da = prism_dists[tet[a]];
+                        let db = prism_dists[tet[b]];
+                        let t_param = da / (da - db);
+                        let pa = prism_verts[tet[a]];
+                        let pb = prism_verts[tet[b]];
+                        let ta = prism_times[tet[a]];
+                        let tb = prism_times[tet[b]];
+                        let pos = [
+                            pa[0] + t_param * (pb[0] - pa[0]),
+                            pa[1] + t_param * (pb[1] - pa[1]),
+                            pa[2] + t_param * (pb[2] - pa[2]),
+                        ];
+                        let time = ta + t_param * (tb - ta);
+                        (time, pos)
+                    };
+
+                    // Marching tet case table: edges are 01, 02, 03, 12, 13, 23
+                    // Each case produces 1 or 2 triangles from edge crossings
+                    let edge_tris: &[&[(usize, usize)]] = match case {
+                        // 1 vertex inside: 1 triangle
+                        1  => &[&[(0,1), (0,2), (0,3)]],
+                        2  => &[&[(0,1), (1,3), (1,2)]],
+                        4  => &[&[(0,2), (2,3), (1,2)]],  // fixed winding
+                        8  => &[&[(0,3), (1,3), (2,3)]],
+                        // 3 vertices inside (complement): 1 triangle, reversed
+                        14 => &[&[(0,1), (0,3), (0,2)]],
+                        13 => &[&[(0,1), (1,2), (1,3)]],
+                        11 => &[&[(0,2), (1,2), (2,3)]],
+                        7  => &[&[(0,3), (2,3), (1,3)]],
+                        // 2 vertices inside: 2 triangles (quad split)
+                        3  => &[&[(0,2), (0,3), (1,2)], &[(1,2), (0,3), (1,3)]],
+                        5  => &[&[(0,1), (0,3), (1,2)], &[(1,2), (0,3), (2,3)]],
+                        6  => &[&[(0,1), (0,2), (1,3)], &[(0,2), (2,3), (1,3)]],
+                        9  => &[&[(0,1), (1,3), (0,2)], &[(0,2), (1,3), (2,3)]],
+                        10 => &[&[(0,1), (0,3), (1,2)], &[(1,2), (0,3), (2,3)]],
+                        12 => &[&[(0,2), (0,3), (1,2)], &[(1,2), (0,3), (1,3)]],
+                        _ => continue,
+                    };
+
+                    for tri_edges in edge_tris {
+                        if tri_edges.len() < 3 { continue; }
+                        let (t_a, p_a) = lerp_edge(tri_edges[0].0, tri_edges[0].1);
+                        let (t_b, p_b) = lerp_edge(tri_edges[1].0, tri_edges[1].1);
+                        let (t_c, p_c) = lerp_edge(tri_edges[2].0, tri_edges[2].1);
+
+                        let ia = add_vert(p_a, t_a, &mut positions, &mut times, &mut vert_map);
+                        let ib = add_vert(p_b, t_b, &mut positions, &mut times, &mut vert_map);
+                        let ic = add_vert(p_c, t_c, &mut positions, &mut times, &mut vert_map);
+
+                        if ia != ib && ib != ic && ia != ic {
+                            faces.push([ia, ib, ic]);
+                        }
+                    }
+                }
+            }
+        }
+
+        if faces.is_empty() {
+            return SliceResult { layers: vec![] };
+        }
+
+        let layers = group_into_layers(&positions, &times, &faces);
+        SliceResult { layers }
+    }
 }
 
 /// Group triangles into connected components by shared vertices.
