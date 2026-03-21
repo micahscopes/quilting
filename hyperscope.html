@@ -111,7 +111,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <span class="toggle-label">Spacetime slicing</span>
     </div>
     <div class="toggle-row">
-      <div class="toggle" id="animate-toggle"></div>
+      <div class="toggle" id="toroidal-toggle"></div>
+      <span class="toggle-label">Toroidal time</span>
+    </div>
+    <div class="toggle-row">
+      <div class="toggle on" id="animate-toggle"></div>
       <span class="toggle-label">Auto-animate</span>
     </div>
     <div class="toggle-row">
@@ -162,10 +166,11 @@ if(!gl){document.body.innerHTML='<h1 style="color:#f85;padding:40px">WebGL2 not 
 
 // --- State ---
 let meshInfo = null, workerReady = false;
-let rotateNormalOverride = null;  // set by rotate-slice animation
+let rotateNormalOverride = null;
+let animating = true;  // auto-animate on by default
 let renderMode = 'matcap';
 let rotX = 0.3, rotY = 0.5, zoom = 5;
-let animating = false, animDir = 1;
+let animDir = 1;
 let pendingUpdate = false, updating = false;
 let currentShape = 'galloping_horse';
 let currentXform = 'identity';
@@ -786,7 +791,7 @@ async function update() {
     normal: Array.from(effectiveNormal),
     offset: effectiveOffset,
     transformType: tType,
-    toroidal: true,
+    toroidal: $('toroidal-toggle').classList.contains('on'),
     params: [mx, my, mz, mr],
     overrideRes: res,
     vpMatrix: Array.from(vpMatrix),
@@ -887,6 +892,12 @@ $('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat
 for (const id of ['mx','my','mz','mr'])
   $(id).addEventListener('input', updateFast);
 $('res').addEventListener('input', update);
+
+// Toroidal toggle
+$('toroidal-toggle').addEventListener('click', () => {
+  $('toroidal-toggle').classList.toggle('on');
+  update();
+});
 
 // Spacetime toggle
 $('spacetime-toggle').addEventListener('click', () => {
