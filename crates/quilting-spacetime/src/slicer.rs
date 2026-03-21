@@ -19,10 +19,13 @@ pub struct HyperplaneSlicer {
 
 /// One connected layer of the slice result.
 pub struct SliceLayer {
-    /// 3D vertex positions.
+    /// 3D vertex positions (F(q).xyz after Möbius, or just q.xyz without).
     pub positions: Vec<[f64; 3]>,
     /// Per-vertex time values (when each vertex was "sampled").
     pub times: Vec<f64>,
+    /// Per-vertex conformal weights from 4D Möbius: w = (c·q + d).
+    /// When no 4D transform, these are all [1,0,0,0] (identity weight).
+    pub weights: Vec<[f64; 4]>,
     /// Triangle indices.
     pub faces: Vec<[u32; 3]>,
 }
@@ -229,7 +232,8 @@ impl HyperplaneSlicer {
         }
 
         // Step 3: group connected triangles into layers via flood fill.
-        let layers = group_into_layers(&positions, &times, &faces);
+        let default_weights: Vec<[f64; 4]> = vec![[1.0, 0.0, 0.0, 0.0]; positions.len()];
+        let layers = group_into_layers(&positions, &times, &default_weights, &faces);
 
         SliceResult { layers }
     }
@@ -249,16 +253,16 @@ impl HyperplaneSlicer {
     pub fn slice_marching_4d(&self, mesh: &HyperMesh, transform_4d: Option<&Mobius>) -> SliceResult {
         let mut positions: Vec<[f64; 3]> = Vec::new();
         let mut times: Vec<f64> = Vec::new();
+        let mut weights: Vec<[f64; 4]> = Vec::new();
         let mut faces: Vec<[u32; 3]> = Vec::new();
 
-        // Deduplicate vertices by (position hash) to merge shared edges
         let mut vert_map: HashMap<[i64; 4], u32> = HashMap::new();
 
-        let mut add_vert = |pos: [f64; 3], t: f64,
-                            positions: &mut Vec<[f64; 3]>,
-                            times: &mut Vec<f64>,
-                            vert_map: &mut HashMap<[i64; 4], u32>| -> u32 {
-            // Quantize to ~1e-8 resolution for dedup
+        let add_vert = |pos: [f64; 3], t: f64, w: [f64; 4],
+                        positions: &mut Vec<[f64; 3]>,
+                        times: &mut Vec<f64>,
+                        weights: &mut Vec<[f64; 4]>,
+                        vert_map: &mut HashMap<[i64; 4], u32>| -> u32 {
             let key = [
                 (pos[0] * 1e8) as i64,
                 (pos[1] * 1e8) as i64,
@@ -271,6 +275,7 @@ impl HyperplaneSlicer {
             let idx = positions.len() as u32;
             positions.push(pos);
             times.push(t);
+            weights.push(w);
             vert_map.insert(key, idx);
             idx
         };
@@ -322,10 +327,17 @@ impl HyperplaneSlicer {
                     seg0.t_end,   seg0.t_end,   seg0.t_end,
                 ];
 
-                // Apply 4D Möbius: lift (x,y,z,t) → quaternion, transform, extract
+                // Compute per-vertex conformal weights from 4D Möbius.
+                // w_i = (c·q_i + d) — encodes how the transform stretches space at each vertex.
+                let mut prism_weights: [[f64; 4]; 6] = [[1.0, 0.0, 0.0, 0.0]; 6];
+
                 if let Some(m) = transform_4d {
                     for i in 0..6 {
                         let q = Quat::new(prism_t[i], prism_pos[i][0], prism_pos[i][1], prism_pos[i][2]);
+                        // Weight = (c·q + d)
+                        let w = m.transform_weight(q, Quat::ONE);
+                        prism_weights[i] = [w.w, w.x, w.y, w.z];
+                        // Position = F(q) = (a·q+b)·(c·q+d)⁻¹
                         let q_prime = m.apply(q);
                         prism_pos[i] = [q_prime.x, q_prime.y, q_prime.z];
                         prism_t[i] = q_prime.w;
@@ -371,25 +383,33 @@ impl HyperplaneSlicer {
                     (0,3), (1,4), (2,5),  // vertical edges
                 ];
 
-                let mut crossings: Vec<(f64, [f64; 3])> = Vec::new();
+                // (time, position, weight) per crossing
+                let mut crossings: Vec<(f64, [f64; 3], [f64; 4])> = Vec::new();
 
                 for &(a, b) in &edges {
                     let da = prism_dists[a];
                     let db = prism_dists[b];
-                    // Edge crosses if signs differ (and neither is exactly 0)
                     if (da > 0.0) != (db > 0.0) {
                         let t_param = da / (da - db);
                         let pa = prism_verts[a];
                         let pb = prism_verts[b];
                         let ta = prism_times_arr[a];
                         let tb = prism_times_arr[b];
+                        let wa = prism_weights[a];
+                        let wb = prism_weights[b];
                         let pos = [
                             pa[0] + t_param * (pb[0] - pa[0]),
                             pa[1] + t_param * (pb[1] - pa[1]),
                             pa[2] + t_param * (pb[2] - pa[2]),
                         ];
                         let time = ta + t_param * (tb - ta);
-                        crossings.push((time, pos));
+                        let weight = [
+                            wa[0] + t_param * (wb[0] - wa[0]),
+                            wa[1] + t_param * (wb[1] - wa[1]),
+                            wa[2] + t_param * (wb[2] - wa[2]),
+                            wa[3] + t_param * (wb[3] - wa[3]),
+                        ];
+                        crossings.push((time, pos, weight));
                     }
                 }
 
@@ -439,13 +459,13 @@ impl HyperplaneSlicer {
                 });
 
                 // Fan triangulate
-                let i0 = add_vert(crossings[0].1, crossings[0].0,
-                    &mut positions, &mut times, &mut vert_map);
+                let i0 = add_vert(crossings[0].1, crossings[0].0, crossings[0].2,
+                    &mut positions, &mut times, &mut weights, &mut vert_map);
                 for j in 1..crossings.len() - 1 {
-                    let i1 = add_vert(crossings[j].1, crossings[j].0,
-                        &mut positions, &mut times, &mut vert_map);
-                    let i2 = add_vert(crossings[j+1].1, crossings[j+1].0,
-                        &mut positions, &mut times, &mut vert_map);
+                    let i1 = add_vert(crossings[j].1, crossings[j].0, crossings[j].2,
+                        &mut positions, &mut times, &mut weights, &mut vert_map);
+                    let i2 = add_vert(crossings[j+1].1, crossings[j+1].0, crossings[j+1].2,
+                        &mut positions, &mut times, &mut weights, &mut vert_map);
                     if i0 != i1 && i1 != i2 && i0 != i2 {
                         faces.push([i0, i1, i2]);
                     }
@@ -457,7 +477,7 @@ impl HyperplaneSlicer {
             return SliceResult { layers: vec![] };
         }
 
-        let layers = group_into_layers(&positions, &times, &faces);
+        let layers = group_into_layers(&positions, &times, &weights, &faces);
         SliceResult { layers }
     }
 }
@@ -466,6 +486,7 @@ impl HyperplaneSlicer {
 fn group_into_layers(
     positions: &[[f64; 3]],
     times: &[f64],
+    weights: &[[f64; 4]],
     faces: &[[u32; 3]],
 ) -> Vec<SliceLayer> {
     let num_faces = faces.len();
@@ -515,6 +536,7 @@ fn group_into_layers(
         let mut old_to_new: HashMap<u32, u32> = HashMap::new();
         let mut layer_positions = Vec::new();
         let mut layer_times = Vec::new();
+        let mut layer_weights = Vec::new();
         let mut layer_faces = Vec::new();
 
         for &fi in &component_faces {
@@ -526,6 +548,7 @@ fn group_into_layers(
                     let nv = layer_positions.len() as u32;
                     layer_positions.push(positions[v as usize]);
                     layer_times.push(times[v as usize]);
+                    layer_weights.push(weights[v as usize]);
                     old_to_new.insert(v, nv);
                     nv
                 };
@@ -537,6 +560,7 @@ fn group_into_layers(
         layers.push(SliceLayer {
             positions: layer_positions,
             times: layer_times,
+            weights: layer_weights,
             faces: layer_faces,
         });
     }
