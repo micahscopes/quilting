@@ -313,7 +313,7 @@ impl HyperplaneSlicer {
             // Time-range culling: skip segments far from the hyperplane.
             // Disabled when 4D transform is active — the transform remaps time
             // so pre-transform segment times don't predict post-transform intersection.
-            let (seg_start, seg_end) = if transform_4d.is_some() {
+            let (seg_start, seg_end) = if transform_4d.is_some() || matches!(self.time_embedding, TimeEmbedding::Toroidal { .. }) {
                 (0, n_segs)
             } else {
                 let nt = self.normal[3];
