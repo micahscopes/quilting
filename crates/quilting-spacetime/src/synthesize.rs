@@ -80,7 +80,7 @@ pub fn breathing_sphere(
 ) -> HyperMesh {
     let (verts, faces) = uv_sphere(subdivisions);
 
-    let nk = (duration * frequency * 4.0).max(8.0) as usize;
+    let nk = (duration * frequency * 64.0).max(64.0) as usize;
     let dt = duration / (nk - 1) as f64;
 
     let trajectories = verts
@@ -151,7 +151,7 @@ pub fn colliding_spheres(
         all_faces.push([face[0] + offset, face[1] + offset, face[2] + offset]);
     }
 
-    let nk = 16usize;
+    let nk = 64usize;
     let dt = duration / (nk - 1) as f64;
 
     let mut trajectories = Vec::with_capacity(n * 2);
@@ -216,7 +216,7 @@ pub fn twisting_torus(
 ) -> HyperMesh {
     let (verts, faces, angles) = torus_mesh(major_r, minor_r, segments_major, segments_minor);
 
-    let nk = 16usize;
+    let nk = 64usize;
     let dt = duration / (nk - 1) as f64;
 
     let trajectories = verts

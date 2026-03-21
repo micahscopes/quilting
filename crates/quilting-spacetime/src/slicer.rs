@@ -276,14 +276,26 @@ impl HyperplaneSlicer {
             // All trajectories should have the same segment count (after padding)
             let n_segs = traj0.segments.len().min(traj1.segments.len()).min(traj2.segments.len());
 
+            // Estimate the time range where the hyperplane could intersect.
+            // For normal (nx,ny,nz,nt) and offset, the time range is approximately
+            // offset/nt ± spatial_extent/nt. Skip segments far outside this range.
+            let nt = self.normal[3];
+            let t_center = if nt.abs() > 0.01 { self.offset / nt } else { 0.0 };
+            let spatial_mag = (self.normal[0].powi(2) + self.normal[1].powi(2) + self.normal[2].powi(2)).sqrt();
+            let t_radius = if nt.abs() > 0.01 { 10.0 * spatial_mag / nt.abs() } else { f64::INFINITY };
+
             for si in 0..n_segs {
                 let seg0 = &traj0.segments[si];
                 let seg1 = &traj1.segments[si];
                 let seg2 = &traj2.segments[si];
 
-                // 6 prism vertices: bottom (t_start) and top (t_end)
                 let t_bot = seg0.t_start;
                 let t_top = seg0.t_end;
+
+                // Skip segments far from the intersection time range
+                if t_top < t_center - t_radius || t_bot > t_center + t_radius {
+                    continue;
+                }
                 let b0 = seg0.pos_start;
                 let b1 = seg1.pos_start;
                 let b2 = seg2.pos_start;
@@ -396,7 +408,16 @@ impl HyperplaneSlicer {
                         let ic = add_vert(p_c, t_c, &mut positions, &mut times, &mut vert_map);
 
                         if ia != ib && ib != ic && ia != ic {
-                            faces.push([ia, ib, ic]);
+                            // Skip degenerate triangles (near-zero area causes z-fighting)
+                            let e1 = [p_b[0]-p_a[0], p_b[1]-p_a[1], p_b[2]-p_a[2]];
+                            let e2 = [p_c[0]-p_a[0], p_c[1]-p_a[1], p_c[2]-p_a[2]];
+                            let cx = e1[1]*e2[2] - e1[2]*e2[1];
+                            let cy = e1[2]*e2[0] - e1[0]*e2[2];
+                            let cz = e1[0]*e2[1] - e1[1]*e2[0];
+                            let area2 = cx*cx + cy*cy + cz*cz;
+                            if area2 > 1e-12 {
+                                faces.push([ia, ib, ic]);
+                            }
                         }
                     }
                 }
