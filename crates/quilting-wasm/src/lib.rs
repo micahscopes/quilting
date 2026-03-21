@@ -491,10 +491,10 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     // Capture animation range before padding
     let (time_min, time_max) = mesh.time_range();
 
-    // Pad trajectories so tilted slices can extend beyond the animation range
-    // without losing faces at the boundaries
+    // Loop trajectories so tilted slices always have full coverage —
+    // the animation repeats cyclically, no boundary clipping
     for traj in &mut mesh.trajectories {
-        traj.pad(2.0);
+        traj.loop_pad(2);
     }
     let info = HyperMeshInfo {
         time_min,

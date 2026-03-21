@@ -128,45 +128,46 @@ impl VertexTrajectory {
     /// Add constant-position padding segments before and after the trajectory.
     /// This allows tilted hyperplanes to intersect beyond the animation range
     /// without losing faces at the boundaries.
-    /// Extend the trajectory with padding segments that extrapolate
-    /// the motion at constant velocity (matching the endpoint velocities).
-    pub fn pad(&mut self, padding: f64) {
-        if self.segments.is_empty() || padding <= 0.0 { return; }
+    /// Extend the trajectory by repeating the animation cyclically.
+    /// Adds `repeats` copies before and after, shifting in time.
+    pub fn loop_pad(&mut self, repeats: u32) {
+        if self.segments.is_empty() || repeats == 0 { return; }
 
-        let first = &self.segments[0];
-        let vel = first.vel_start;
-        let pre_start = [
-            first.pos_start[0] - vel[0] * padding,
-            first.pos_start[1] - vel[1] * padding,
-            first.pos_start[2] - vel[2] * padding,
-        ];
-        let pre = HermiteSegment {
-            t_start: first.t_start - padding,
-            t_end: first.t_start,
-            pos_start: pre_start,
-            pos_end: first.pos_start,
-            vel_start: vel,
-            vel_end: vel,
-        };
+        let orig_segments = self.segments.clone();
+        let first_t = orig_segments[0].t_start;
+        let last_t = orig_segments[orig_segments.len() - 1].t_end;
+        let period = last_t - first_t;
+        if period <= 0.0 { return; }
 
-        let last = &self.segments[self.segments.len() - 1];
-        let vel = last.vel_end;
-        let post_end = [
-            last.pos_end[0] + vel[0] * padding,
-            last.pos_end[1] + vel[1] * padding,
-            last.pos_end[2] + vel[2] * padding,
-        ];
-        let post = HermiteSegment {
-            t_start: last.t_end,
-            t_end: last.t_end + padding,
-            pos_start: last.pos_end,
-            pos_end: post_end,
-            vel_start: vel,
-            vel_end: vel,
-        };
+        // Prepend copies shifted backwards in time
+        for r in (1..=repeats).rev() {
+            let shift = -(r as f64) * period;
+            for seg in &orig_segments {
+                self.segments.insert(0, HermiteSegment {
+                    t_start: seg.t_start + shift,
+                    t_end: seg.t_end + shift,
+                    pos_start: seg.pos_start,
+                    pos_end: seg.pos_end,
+                    vel_start: seg.vel_start,
+                    vel_end: seg.vel_end,
+                });
+            }
+        }
 
-        self.segments.insert(0, pre);
-        self.segments.push(post);
+        // Append copies shifted forwards in time
+        for r in 1..=repeats {
+            let shift = r as f64 * period;
+            for seg in &orig_segments {
+                self.segments.push(HermiteSegment {
+                    t_start: seg.t_start + shift,
+                    t_end: seg.t_end + shift,
+                    pos_start: seg.pos_start,
+                    pos_end: seg.pos_end,
+                    vel_start: seg.vel_start,
+                    vel_end: seg.vel_end,
+                });
+            }
+        }
     }
 
     /// Evaluate position at time t.
