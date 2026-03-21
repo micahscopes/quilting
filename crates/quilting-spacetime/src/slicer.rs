@@ -368,7 +368,48 @@ impl HyperplaneSlicer {
                     continue;
                 }
 
-                // Fan triangulate from the first crossing point
+                // Sort crossings around the polygon centroid so fan
+                // triangulation produces correct non-overlapping triangles.
+                let cx = crossings.iter().map(|c| c.1[0]).sum::<f64>() / crossings.len() as f64;
+                let cy = crossings.iter().map(|c| c.1[1]).sum::<f64>() / crossings.len() as f64;
+                let cz = crossings.iter().map(|c| c.1[2]).sum::<f64>() / crossings.len() as f64;
+
+                // Compute polygon normal from first two edges
+                let e1 = [crossings[1].1[0]-crossings[0].1[0],
+                          crossings[1].1[1]-crossings[0].1[1],
+                          crossings[1].1[2]-crossings[0].1[2]];
+                let e2 = [crossings[2].1[0]-crossings[0].1[0],
+                          crossings[2].1[1]-crossings[0].1[1],
+                          crossings[2].1[2]-crossings[0].1[2]];
+                let pn = [e1[1]*e2[2]-e1[2]*e2[1],
+                          e1[2]*e2[0]-e1[0]*e2[2],
+                          e1[0]*e2[1]-e1[1]*e2[0]];
+
+                // Reference direction from centroid to first crossing
+                let ref_dir = [crossings[0].1[0]-cx, crossings[0].1[1]-cy, crossings[0].1[2]-cz];
+
+                // Sort by angle around the normal axis
+                crossings.sort_by(|a, b| {
+                    let da = [a.1[0]-cx, a.1[1]-cy, a.1[2]-cz];
+                    let db = [b.1[0]-cx, b.1[1]-cy, b.1[2]-cz];
+                    let angle_a = {
+                        let dot = da[0]*ref_dir[0]+da[1]*ref_dir[1]+da[2]*ref_dir[2];
+                        let cross = pn[0]*(da[1]*ref_dir[2]-da[2]*ref_dir[1])
+                                  + pn[1]*(da[2]*ref_dir[0]-da[0]*ref_dir[2])
+                                  + pn[2]*(da[0]*ref_dir[1]-da[1]*ref_dir[0]);
+                        cross.atan2(dot)
+                    };
+                    let angle_b = {
+                        let dot = db[0]*ref_dir[0]+db[1]*ref_dir[1]+db[2]*ref_dir[2];
+                        let cross = pn[0]*(db[1]*ref_dir[2]-db[2]*ref_dir[1])
+                                  + pn[1]*(db[2]*ref_dir[0]-db[0]*ref_dir[2])
+                                  + pn[2]*(db[0]*ref_dir[1]-db[1]*ref_dir[0]);
+                        cross.atan2(dot)
+                    };
+                    angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Fan triangulate
                 let i0 = add_vert(crossings[0].1, crossings[0].0,
                     &mut positions, &mut times, &mut vert_map);
                 for j in 1..crossings.len() - 1 {
