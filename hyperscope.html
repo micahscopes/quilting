@@ -107,6 +107,10 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="section">
     <div class="toggle-row">
+      <div class="toggle on" id="spacetime-toggle"></div>
+      <span class="toggle-label">Spacetime slicing</span>
+    </div>
+    <div class="toggle-row">
       <div class="toggle" id="animate-toggle"></div>
       <span class="toggle-label">Auto-animate</span>
     </div>
@@ -689,10 +693,14 @@ async function update() {
                 currentXform === 'sphere_reflection' ? (mr > 0.01 ? 'sphere_reflection' : 'identity') :
                 currentXform;
 
+  const spacetimeOn = $('spacetime-toggle').classList.contains('on');
+  const sliceNormal = spacetimeOn ? normal : [0, 0, 0, 1];
+  const sliceOffset = spacetimeOn ? offset : parseFloat($('time').value) * normal[3];
+
   const t0 = performance.now();
   const resp = await workerCall('slice_and_transform', {
-    normal: Array.from(normal),
-    offset,
+    normal: Array.from(sliceNormal),
+    offset: spacetimeOn ? offset : parseFloat($('time').value),
     transformType: tType,
     params: [mx, my, mz, mr],
     overrideRes: res,
@@ -793,6 +801,12 @@ $('time').addEventListener('input', () => { $('time-v').textContent = parseFloat
 $('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); update(); });
 for (const id of ['mx','my','mz','mr','res'])
   $(id).addEventListener('input', update);
+
+// Spacetime toggle
+$('spacetime-toggle').addEventListener('click', () => {
+  $('spacetime-toggle').classList.toggle('on');
+  update();
+});
 
 // Animate toggle
 const animToggle = $('animate-toggle');
