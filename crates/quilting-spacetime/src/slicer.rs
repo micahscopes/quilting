@@ -9,12 +9,25 @@ use std::collections::{HashMap, VecDeque};
 use crate::hyper_mesh::HyperMesh;
 use quilting_core::quaternion::{Quat, Mobius};
 
+/// How to embed the time dimension in 4D.
+#[derive(Clone, Copy)]
+pub enum TimeEmbedding {
+    /// Linear: q = (t, x, y, z). Time is the real part of the quaternion.
+    Linear,
+    /// Toroidal: time wraps in a circle of radius R in the (w, z) plane.
+    /// q = (R·cos(2πt/period), x, y, R·sin(2πt/period))
+    /// Produces closed surfaces when sliced — no boundary artifacts.
+    Toroidal { radius: f64, period: f64 },
+}
+
 /// Defines a hyperplane in R^4 via dot(normal, x) = offset.
 pub struct HyperplaneSlicer {
     /// Hyperplane normal in R^4 (nx, ny, nz, nt).
     pub normal: [f64; 4],
     /// Hyperplane offset: dot(normal, x) = offset.
     pub offset: f64,
+    /// How to embed time in 4D.
+    pub time_embedding: TimeEmbedding,
 }
 
 /// One connected layer of the slice result.
@@ -37,7 +50,12 @@ pub struct SliceResult {
 
 impl HyperplaneSlicer {
     pub fn new(normal: [f64; 4], offset: f64) -> Self {
-        Self { normal, offset }
+        Self { normal, offset, time_embedding: TimeEmbedding::Linear }
+    }
+
+    pub fn with_toroidal(mut self, radius: f64, period: f64) -> Self {
+        self.time_embedding = TimeEmbedding::Toroidal { radius, period };
+        self
     }
 
     /// Pure time slice: normal = (0,0,0,1), offset = t.
@@ -45,6 +63,7 @@ impl HyperplaneSlicer {
         Self {
             normal: [0.0, 0.0, 0.0, 1.0],
             offset: t,
+            time_embedding: TimeEmbedding::Linear,
         }
     }
 
@@ -64,6 +83,7 @@ impl HyperplaneSlicer {
         Self {
             normal,
             offset: time_offset * cos_t,
+            time_embedding: TimeEmbedding::Linear,
         }
     }
 
@@ -327,20 +347,39 @@ impl HyperplaneSlicer {
                     seg0.t_end,   seg0.t_end,   seg0.t_end,
                 ];
 
-                // Compute per-vertex conformal weights from 4D Möbius.
-                // w_i = (c·q_i + d) — encodes how the transform stretches space at each vertex.
+                // Lift to 4D, optionally apply toroidal embedding + Möbius.
                 let mut prism_weights: [[f64; 4]; 6] = [[1.0, 0.0, 0.0, 0.0]; 6];
 
-                if let Some(m) = transform_4d {
+                // Apply toroidal embedding if active (even without Möbius)
+                let use_4d = transform_4d.is_some() || matches!(self.time_embedding, TimeEmbedding::Toroidal { .. });
+                if use_4d {
                     for i in 0..6 {
-                        let q = Quat::new(prism_t[i], prism_pos[i][0], prism_pos[i][1], prism_pos[i][2]);
-                        // Weight = (c·q + d)
-                        let w = m.transform_weight(q, Quat::ONE);
-                        prism_weights[i] = [w.w, w.x, w.y, w.z];
-                        // Position = F(q) = (a·q+b)·(c·q+d)⁻¹
-                        let q_prime = m.apply(q);
-                        prism_pos[i] = [q_prime.x, q_prime.y, q_prime.z];
-                        prism_t[i] = q_prime.w;
+                        let q = match self.time_embedding {
+                            TimeEmbedding::Linear => {
+                                Quat::new(prism_t[i], prism_pos[i][0], prism_pos[i][1], prism_pos[i][2])
+                            }
+                            TimeEmbedding::Toroidal { radius, period } => {
+                                let theta = std::f64::consts::TAU * prism_t[i] / period;
+                                Quat::new(
+                                    radius * theta.cos(),
+                                    prism_pos[i][0],
+                                    prism_pos[i][1],
+                                    radius * theta.sin() + prism_pos[i][2],
+                                )
+                            }
+                        };
+
+                        if let Some(m) = transform_4d {
+                            let w = m.transform_weight(q, Quat::ONE);
+                            prism_weights[i] = [w.w, w.x, w.y, w.z];
+                            let q_prime = m.apply(q);
+                            prism_pos[i] = [q_prime.x, q_prime.y, q_prime.z];
+                            prism_t[i] = q_prime.w;
+                        } else {
+                            // Toroidal without Möbius: just use the embedded coords
+                            prism_pos[i] = [q.x, q.y, q.z];
+                            prism_t[i] = q.w;
+                        }
                     }
                 }
 

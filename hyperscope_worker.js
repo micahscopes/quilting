@@ -33,11 +33,12 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'slice_and_transform') {
-    const { normal, offset, transformType, params, overrideRes, vpMatrix, vpWidth, vpHeight } = data;
+    const { normal, offset, transformType, params, overrideRes, vpMatrix, vpWidth, vpHeight, toroidal } = data;
     const result = wasm.slice_and_transform(
       new Float64Array(normal),
       offset,
       transformType,
+      !!toroidal,
       new Float64Array(params),
       overrideRes,
       new Float64Array(vpMatrix || []),
