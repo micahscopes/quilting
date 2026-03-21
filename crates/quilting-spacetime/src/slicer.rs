@@ -401,7 +401,20 @@ impl HyperplaneSlicer {
                     continue;
                 }
 
-                // TODO: filter to show only one side of the torus
+                // Half-plane filter: only keep the "near" side of the torus.
+                // The perpendicular to the slice normal in the (w,z) plane
+                // divides the torus into two halves.
+                if matches!(self.time_embedding, TimeEmbedding::Toroidal { .. }) {
+                    // Average embedded (w, z) position of this prism
+                    let avg_w = (embed_t[0] + embed_t[3]) * 0.5;
+                    let avg_z = (embed_pos[0][2] + embed_pos[3][2]) * 0.5;
+                    // Perpendicular direction in (w,z) plane: rotate normal 90°
+                    // normal (w,z) = (n[3], n[2]), perp = (n[2], -n[3])
+                    let perp_proj = self.normal[2] * avg_w - self.normal[3] * avg_z;
+                    if perp_proj < 0.0 {
+                        continue;
+                    }
+                }
 
                 // Direct prism-plane intersection.
                 // 9 prism edges: 3 bottom, 3 top, 3 vertical.
