@@ -482,10 +482,34 @@ impl HyperplaneSlicer {
                 // Direct prism-plane intersection.
                 // 9 prism edges: 3 bottom, 3 top, 3 vertical.
                 // Find all edge crossings, form a convex polygon, fan-triangulate.
-                // Without Möbius: output SPATIAL positions (original horse shape).
-                // With Möbius: output TRANSFORMED positions (conformally deformed).
-                let prism_verts = if transform_4d.is_some() { embed_pos } else { spatial_pos };
-                let prism_times_arr = if transform_4d.is_some() { embed_t } else { spatial_t };
+                // Output positions: spatial coords + Möbius deformation.
+                // The Möbius acts on the embedded coords (which mix z with torus sin).
+                // To get the visible output, compute the DIFFERENCE between transformed
+                // and untransformed embedded coords, and apply as a deformation to spatial.
+                let prism_verts = if transform_4d.is_some() {
+                    let mut out = spatial_pos;
+                    if let TimeEmbedding::Toroidal { radius, period } = self.time_embedding {
+                        for i in 0..6 {
+                            let theta = std::f64::consts::TAU * spatial_t[i] / period;
+                            // Untransformed embed: (R·cos θ, x, y, R·sin θ)
+                            let orig_w = radius * theta.cos();
+                            let orig_z = radius * theta.sin();
+                            // Deformation = transformed - untransformed (for embed components)
+                            let delta_x = embed_pos[i][0] - spatial_pos[i][0];
+                            let delta_y = embed_pos[i][1] - spatial_pos[i][1];
+                            let delta_z = embed_pos[i][2] - orig_z; // subtract torus sin
+                            out[i] = [
+                                spatial_pos[i][0] + delta_x,
+                                spatial_pos[i][1] + delta_y,
+                                spatial_pos[i][2] + delta_z,
+                            ];
+                        }
+                    }
+                    out
+                } else {
+                    spatial_pos
+                };
+                let prism_times_arr = spatial_t;
                 let prism_dists = d_arr;
 
                 // 9 edges of a triangular prism
