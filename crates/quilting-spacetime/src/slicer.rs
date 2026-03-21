@@ -76,14 +76,19 @@ impl HyperplaneSlicer {
         // If the solver finds no roots but the slice is within the trajectory's
         // time range, fall back to evaluating at the nearest time. This handles
         // boundary cases where the cubic solver misses roots at segment endpoints.
+        // Measure how "time-like" the slice is — if it's nearly a pure time slice,
+        // we can use a fallback for missed roots.
+        let spatial_mag = (self.normal[0].powi(2) + self.normal[1].powi(2) + self.normal[2].powi(2)).sqrt();
+        let is_near_time_slice = spatial_mag < 0.1;
+
         let vertex_hits: Vec<Vec<(f64, [f64; 3])>> = mesh
             .trajectories
             .iter()
             .map(|traj| {
                 let mut hits = traj.intersect_hyperplane(self.normal, self.offset);
-                if hits.is_empty() {
-                    // For a pure time slice (normal ≈ [0,0,0,1]), compute the
-                    // equivalent time and check if it's in range
+                // Fallback only for near-pure-time slices — for tilted slices the
+                // eval-at-time fallback produces wrong positions (spikes).
+                if hits.is_empty() && is_near_time_slice {
                     let nt = self.normal[3];
                     if nt.abs() > 1e-10 {
                         let t_slice = self.offset / nt;
