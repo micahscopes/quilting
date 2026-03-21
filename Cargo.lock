@@ -590,6 +590,7 @@ dependencies = [
  "gltf",
  "quilting-core",
  "quilting-mesh",
+ "quilting-spacetime",
  "serde_json",
 ]
 

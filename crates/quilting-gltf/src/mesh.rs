@@ -20,6 +20,10 @@ pub struct Primitive {
     pub triangles: Vec<[usize; 3]>,
     /// Index of the material in GltfScene::materials, if assigned.
     pub material_index: Option<usize>,
+    /// Per-vertex joint indices (up to 4 joints per vertex). For skinning.
+    pub joint_indices: Option<Vec<[u16; 4]>>,
+    /// Per-vertex joint weights (up to 4 weights per vertex). For skinning.
+    pub joint_weights: Option<Vec<[f32; 4]>>,
 }
 
 /// A mesh is a collection of primitives.
@@ -89,6 +93,16 @@ pub fn extract_mesh(
                 .collect()
         };
 
+        // Joint indices (JOINTS_0) for skinning — up to 4 joints per vertex.
+        let joint_indices: Option<Vec<[u16; 4]>> = reader
+            .read_joints(0)
+            .map(|iter| iter.into_u16().collect());
+
+        // Joint weights (WEIGHTS_0) for skinning.
+        let joint_weights: Option<Vec<[f32; 4]>> = reader
+            .read_weights(0)
+            .map(|iter| iter.into_f32().collect());
+
         let material_index = prim.material().index();
 
         primitives.push(Primitive {
@@ -97,6 +111,8 @@ pub fn extract_mesh(
             uvs,
             triangles,
             material_index,
+            joint_indices,
+            joint_weights,
         });
     }
 
@@ -142,6 +158,8 @@ mod tests {
                     uvs: None,
                     triangles: vec![[0, 1, 2]],
                     material_index: None,
+                    joint_indices: None,
+                    joint_weights: None,
                 },
                 Primitive {
                     positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
@@ -149,6 +167,8 @@ mod tests {
                     uvs: None,
                     triangles: vec![[0, 1, 2]],
                     material_index: None,
+                    joint_indices: None,
+                    joint_weights: None,
                 },
             ],
         };
