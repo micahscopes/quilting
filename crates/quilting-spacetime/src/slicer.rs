@@ -282,15 +282,17 @@ impl HyperplaneSlicer {
         let mut positions: Vec<[f64; 3]> = Vec::new();
         let mut times: Vec<f64> = Vec::new();
         let mut weights: Vec<[f64; 4]> = Vec::new();
+        let mut uvs: Vec<[f32; 2]> = Vec::new();
         let mut faces: Vec<[u32; 3]> = Vec::new();
         let mut source_face_indices: Vec<usize> = Vec::new();
 
         let mut vert_map: HashMap<[i64; 4], u32> = HashMap::new();
 
-        let add_vert = |pos: [f64; 3], t: f64, w: [f64; 4],
+        let add_vert = |pos: [f64; 3], t: f64, w: [f64; 4], uv: [f32; 2],
                         positions: &mut Vec<[f64; 3]>,
                         times: &mut Vec<f64>,
                         weights: &mut Vec<[f64; 4]>,
+                        uvs: &mut Vec<[f32; 2]>,
                         vert_map: &mut HashMap<[i64; 4], u32>| -> u32 {
             let key = [
                 (pos[0] * 1e8) as i64,
@@ -305,6 +307,7 @@ impl HyperplaneSlicer {
             positions.push(pos);
             times.push(t);
             weights.push(w);
+            uvs.push(uv);
             vert_map.insert(key, idx);
             idx
         };
@@ -370,6 +373,8 @@ impl HyperplaneSlicer {
         } else {
             (self.normal, self.offset)
         };
+
+        let has_uvs = !mesh.vertex_uvs.is_empty();
 
         // For each face, iterate over all keyframe segments
         for (face_idx, face) in mesh.faces.iter().enumerate() {
@@ -528,20 +533,33 @@ impl HyperplaneSlicer {
                     (0,3), (1,4), (2,5),  // vertical edges
                 ];
 
-                // (time, position, weight) per crossing
-                let mut crossings: Vec<(f64, [f64; 3], [f64; 4])> = Vec::new();
+                // Per-prism UVs: same for top and bottom (time-invariant)
+                let prism_uvs: [[f32; 2]; 6] = if has_uvs {
+                    let uv0 = mesh.vertex_uvs[v0 as usize];
+                    let uv1 = mesh.vertex_uvs[v1 as usize];
+                    let uv2 = mesh.vertex_uvs[v2 as usize];
+                    [uv0, uv1, uv2, uv0, uv1, uv2] // bottom and top share UVs
+                } else {
+                    [[0.0; 2]; 6]
+                };
+
+                // (time, position, weight, uv) per crossing
+                let mut crossings: Vec<(f64, [f64; 3], [f64; 4], [f32; 2])> = Vec::new();
 
                 for &(a, b) in &edges {
                     let da = prism_dists[a];
                     let db = prism_dists[b];
                     if (da > 0.0) != (db > 0.0) {
                         let t_param = da / (da - db);
+                        let t_f32 = t_param as f32;
                         let pa = prism_verts[a];
                         let pb = prism_verts[b];
                         let ta = prism_times_arr[a];
                         let tb = prism_times_arr[b];
                         let wa = prism_weights[a];
                         let wb = prism_weights[b];
+                        let ua = prism_uvs[a];
+                        let ub = prism_uvs[b];
                         let pos = [
                             pa[0] + t_param * (pb[0] - pa[0]),
                             pa[1] + t_param * (pb[1] - pa[1]),
@@ -554,7 +572,11 @@ impl HyperplaneSlicer {
                             wa[2] + t_param * (wb[2] - wa[2]),
                             wa[3] + t_param * (wb[3] - wa[3]),
                         ];
-                        crossings.push((time, pos, weight));
+                        let uv = [
+                            ua[0] + t_f32 * (ub[0] - ua[0]),
+                            ua[1] + t_f32 * (ub[1] - ua[1]),
+                        ];
+                        crossings.push((time, pos, weight, uv));
                     }
                 }
 
@@ -604,13 +626,13 @@ impl HyperplaneSlicer {
                 });
 
                 // Fan triangulate
-                let i0 = add_vert(crossings[0].1, crossings[0].0, crossings[0].2,
-                    &mut positions, &mut times, &mut weights, &mut vert_map);
+                let i0 = add_vert(crossings[0].1, crossings[0].0, crossings[0].2, crossings[0].3,
+                    &mut positions, &mut times, &mut weights, &mut uvs, &mut vert_map);
                 for j in 1..crossings.len() - 1 {
-                    let i1 = add_vert(crossings[j].1, crossings[j].0, crossings[j].2,
-                        &mut positions, &mut times, &mut weights, &mut vert_map);
-                    let i2 = add_vert(crossings[j+1].1, crossings[j+1].0, crossings[j+1].2,
-                        &mut positions, &mut times, &mut weights, &mut vert_map);
+                    let i1 = add_vert(crossings[j].1, crossings[j].0, crossings[j].2, crossings[j].3,
+                        &mut positions, &mut times, &mut weights, &mut uvs, &mut vert_map);
+                    let i2 = add_vert(crossings[j+1].1, crossings[j+1].0, crossings[j+1].2, crossings[j+1].3,
+                        &mut positions, &mut times, &mut weights, &mut uvs, &mut vert_map);
                     if i0 != i1 && i1 != i2 && i0 != i2 {
                         faces.push([i0, i1, i2]);
                         source_face_indices.push(face_idx);
@@ -623,8 +645,7 @@ impl HyperplaneSlicer {
             return SliceResult { layers: vec![] };
         }
 
-        let no_uvs: &[[f32; 2]] = &[];
-        let layers = group_into_layers(&positions, &times, &weights, no_uvs, &faces, &source_face_indices);
+        let layers = group_into_layers(&positions, &times, &weights, &uvs, &faces, &source_face_indices);
         SliceResult { layers }
     }
 }
