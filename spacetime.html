@@ -238,8 +238,15 @@ uniform vec3 u_color;
 out vec4 fragColor;
 void main() {
     vec3 n = normalize(v_normal);
-    float light = 0.3 + 0.7 * max(dot(n, vec3(0.3, 0.6, 0.7)), 0.0);
-    fragColor = vec4(u_color * light, 1.0);
+    // Flip normal for back faces so both sides shade correctly
+    n = gl_FrontFacing ? n : -n;
+    vec3 lightDir = normalize(vec3(0.3, 0.6, 0.7));
+    float diff = dot(n, lightDir) * 0.5 + 0.5;
+    vec3 H = normalize(lightDir + vec3(0,0,1));
+    float spec = pow(max(dot(n, H), 0.0), 32.0);
+    float rim = pow(1.0 - max(n.z, 0.0), 2.0);
+    vec3 col = u_color * diff + vec3(1.0) * spec * 0.3 + u_color * rim * 0.15;
+    fragColor = vec4(col, 1.0);
 }
 `;
 
@@ -439,7 +446,7 @@ function doSlice() {
 // --- Render ---
 function render() {
     const aspect = canvas.width / canvas.height;
-    const proj = mat4_perspective(Math.PI / 4, aspect, 0.1, 100);
+    const proj = mat4_perspective(Math.PI / 4, aspect, 0.01, 10000);
 
     const eyeX = camDist * Math.cos(camPhi) * Math.sin(camTheta);
     const eyeY = camDist * Math.sin(camPhi);
@@ -450,8 +457,7 @@ function render() {
     gl.clearColor(0.051, 0.067, 0.090, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
+    gl.disable(gl.CULL_FACE);
 
     gl.useProgram(prog);
     gl.uniformMatrix4fv(loc_mvp, false, mvp);
@@ -472,7 +478,7 @@ function frame() {
     if (animating && meshInfo) {
         const slider = document.getElementById('time-slider');
         let val = parseFloat(slider.value);
-        const speed = 0.008 * (meshInfo.time_max - meshInfo.time_min);
+        const speed = 0.0008 * (meshInfo.time_max - meshInfo.time_min);
         val += speed * animDir;
         if (val >= meshInfo.time_max) { val = meshInfo.time_max; animDir = -1; }
         if (val <= meshInfo.time_min) { val = meshInfo.time_min; animDir = 1; }

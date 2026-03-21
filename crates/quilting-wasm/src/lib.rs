@@ -481,11 +481,11 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     use quilting_spacetime::synthesize;
 
     let mesh = match name {
-        "rotating_cube" => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 16),
-        "breathing_sphere" => synthesize::breathing_sphere(2.0, 1.0, 0.3, 2),
-        "colliding_spheres" => synthesize::colliding_spheres(2.0, 1.5, 4.0, 2),
-        "twisting_torus" => synthesize::twisting_torus(2.0, 2.0, 2.0, 0.5, 12, 8),
-        _ => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 16),
+        "rotating_cube" => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 32),
+        "breathing_sphere" => synthesize::breathing_sphere(2.0, 1.0, 0.3, 4),
+        "colliding_spheres" => synthesize::colliding_spheres(2.0, 1.5, 4.0, 3),
+        "twisting_torus" => synthesize::twisting_torus(2.0, 2.0, 2.0, 0.5, 24, 16),
+        _ => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 32),
     };
 
     let (time_min, time_max) = mesh.time_range();
