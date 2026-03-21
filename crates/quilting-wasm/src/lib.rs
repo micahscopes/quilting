@@ -1075,15 +1075,12 @@ pub fn slice_and_transform(
     js_sys::Reflect::set(&result, &"timings".into(),
         &serde_wasm_bindgen::to_value(&[t1 - t0, t2 - t1, t3 - t2]).unwrap()).ok();
 
-    let t_end = js_sys::Date::now();
-    web_sys::console::log_1(&format!(
-        "slice_and_transform: cache={} slice={:.1}ms lod={:.1}ms batch={:.1}ms js={:.1}ms total={:.1}ms faces={}",
-        if cache_hit { "HIT" } else { "MISS" },
-        t_slice_end - t_start,
-        t1 - t0, t2 - t1, t_end - t3,
-        t_end - t_start,
-        num_tris,
-    ).into());
+    let _t_end = js_sys::Date::now();
+    // Timing logs removed — uncomment for debugging:
+    // web_sys::console::log_1(&format!(
+    //     "slice_and_transform: slice={:.1}ms lod={:.1}ms total={:.1}ms faces={}",
+    //     t_slice_end - t_start, t1 - t0, _t_end - t_start, num_tris,
+    // ).into());
 
     result.into()
 }

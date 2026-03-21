@@ -53,7 +53,19 @@ impl From<gltf::Error> for GltfError {
 /// Uses `gltf::import_slice` to resolve embedded buffers and images.
 /// Returns the full scene contents: meshes, materials, animations, scene graph.
 pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
-    let (document, buffers, _images) = gltf::import_slice(data)?;
+    // Try standard import first, fall back to validation-free parsing
+    // to handle files with unsupported required extensions.
+    let (document, buffers, _images) = match gltf::import_slice(data) {
+        Ok(result) => result,
+        Err(_) => {
+            let gltf_obj = gltf::Gltf::from_slice(data)?;
+            let mut buffers = Vec::new();
+            if let Some(blob) = gltf_obj.blob {
+                buffers.push(gltf::buffer::Data(blob));
+            }
+            (gltf_obj.document, buffers, vec![])
+        }
+    };
 
     let meshes = document
         .meshes()
