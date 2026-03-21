@@ -132,6 +132,7 @@ if(!gl){document.body.innerHTML='<h1 style="color:#f85;padding:40px">WebGL2 not 
 
 // --- State ---
 let meshInfo = null, workerReady = false;
+let rotateNormalOverride = null;  // set by rotate-slice animation
 let renderMode = 'matcap';
 let rotX = 0.3, rotY = 0.5, zoom = 5;
 let animating = false, animDir = 1;
@@ -710,13 +711,16 @@ async function update() {
                 currentXform;
 
   const spacetimeOn = $('spacetime-toggle').classList.contains('on');
-  const sliceNormal = spacetimeOn ? normal : [0, 0, 0, 1];
-  const sliceOffset = spacetimeOn ? offset : parseFloat($('time').value) * normal[3];
+  // Use rotate override if active, otherwise slider-derived normal
+  const effectiveNormal = rotateNormalOverride || (spacetimeOn ? normal : [0, 0, 0, 1]);
+  const effectiveOffset = spacetimeOn ? (rotateNormalOverride ? timeOffset * effectiveNormal[3] : offset) : timeOffset;
+  // Clear override after use — it's set each animation frame
+  rotateNormalOverride = null;
 
   const t0 = performance.now();
   const resp = await workerCall('slice_and_transform', {
-    normal: Array.from(sliceNormal),
-    offset: spacetimeOn ? offset : parseFloat($('time').value),
+    normal: Array.from(effectiveNormal),
+    offset: effectiveOffset,
     transformType: tType,
     params: [mx, my, mz, mr],
     overrideRes: res,
@@ -844,13 +848,29 @@ function frame() {
   if (animating && meshInfo) {
     const rotateMode = $('rotate-mode-toggle').classList.contains('on');
     if (rotateMode) {
-      // Rotate the tilt angle continuously — clean wrapping
-      animPhase += 0.008;
-      const tiltSlider = $('tilt');
-      const maxTilt = parseFloat(tiltSlider.max);
-      const tilt = Math.abs(Math.sin(animPhase)) * maxTilt;
-      tiltSlider.value = tilt;
-      $('tilt-v').textContent = tilt.toFixed(2);
+      // 4D double rotation of the hyperplane normal.
+      // Two independent rotation rates in orthogonal planes:
+      //   plane 1: (x, t) at rate φ₁
+      //   plane 2: (y, z) at rate φ₂
+      // With different rates, the normal traces a Lissajous on S³.
+      animPhase += 0.005;
+      const p1 = animPhase;        // (x, t) plane rotation
+      const p2 = animPhase * 0.618; // (y, z) plane — golden ratio for non-repeating
+      const c1 = Math.cos(p1), s1 = Math.sin(p1);
+      const c2 = Math.cos(p2), s2 = Math.sin(p2);
+      // Start with pure time normal (0,0,0,1).
+      // R1 in (x,t): (sin θ₁, 0, 0, cos θ₁)
+      // R2 in (y,z): rotates the y,z of that result
+      // But (0,0,0,1) has no y,z, so we tilt into x first, then rotate x,y
+      // to spread it across all spatial dimensions.
+      // Plane 1: (x, t), Plane 2: (x, y) — creates a filling pattern on S³
+      const nx = s1 * c2;
+      const ny = s1 * s2;
+      const nz = 0;
+      const nt = c1;
+      // Normalize (should already be unit but just in case)
+      const len = Math.sqrt(nx*nx + ny*ny + nz*nz + nt*nt);
+      rotateNormalOverride = [nx/len, ny/len, nz/len, nt/len];
     } else {
       // Sweep time forward
       const slider = $('time');
