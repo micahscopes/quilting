@@ -115,10 +115,6 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <span class="toggle-label">Auto-animate</span>
     </div>
     <div class="toggle-row">
-      <div class="toggle" id="toroidal-toggle"></div>
-      <span class="toggle-label">Toroidal time</span>
-    </div>
-    <div class="toggle-row">
       <div class="toggle" id="rotate-mode-toggle"></div>
       <span class="toggle-label">Rotate slice</span>
     </div>
@@ -758,7 +754,7 @@ async function update() {
     normal: Array.from(effectiveNormal),
     offset: effectiveOffset,
     transformType: tType,
-    toroidal: $('toroidal-toggle').classList.contains('on'),
+    toroidal: true,
     params: [mx, my, mz, mr],
     overrideRes: res,
     vpMatrix: Array.from(vpMatrix),
@@ -859,12 +855,6 @@ $('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat
 for (const id of ['mx','my','mz','mr'])
   $(id).addEventListener('input', updateFast);
 $('res').addEventListener('input', update);
-
-// Toroidal toggle
-$('toroidal-toggle').addEventListener('click', () => {
-  $('toroidal-toggle').classList.toggle('on');
-  update();
-});
 
 // Spacetime toggle
 $('spacetime-toggle').addEventListener('click', () => {

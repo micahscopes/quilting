@@ -632,10 +632,8 @@ pub fn slice_and_transform(
                 Some(m) => m,
                 None => return None,
             };
-            let mut slicer = quilting_spacetime::HyperplaneSlicer::new(n, offset);
-            if toroidal {
-                slicer = slicer.with_toroidal(2.0, mesh.period);
-            }
+            let slicer = quilting_spacetime::HyperplaneSlicer::new(n, offset)
+                .with_toroidal(2.0, mesh.period);
             Some(slicer.slice_marching_4d(mesh, transform_4d.as_ref()))
         });
 
