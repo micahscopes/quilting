@@ -384,7 +384,7 @@ fn main() {
         };
         let request = String::from_utf8_lossy(&buf[..n]);
 
-        // Check for WASM binary request
+        // Serve binary files
         if request.starts_with("GET /pkg/quilting_wasm_bg.wasm") {
             let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/wasm\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -394,6 +394,26 @@ fn main() {
             let _ = stream.write_all(WASM_BIN);
             continue;
         }
+
+        // Serve matcap PNGs from disk (any .png in matcaps/)
+        if request.starts_with("GET /matcaps/") {
+            let filename = request.split(' ').next().unwrap_or("")
+                .trim_start_matches("GET /matcaps/");
+            // Sanitize: only allow alphanumeric, dash, dot
+            if filename.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.') && filename.ends_with(".png") {
+                let path = std::path::Path::new("matcaps").join(filename);
+                if let Ok(data) = std::fs::read(&path) {
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        data.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes());
+                    let _ = stream.write_all(&data);
+                    continue;
+                }
+            }
+        }
+
 
         let (headers, body) = handle_request(&request, &cache);
         let response = format!(

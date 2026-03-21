@@ -15,6 +15,7 @@ input[type=range]{flex:1;accent-color:#e94560}
 .btns{display:flex;gap:3px}
 .btns button{flex:1;padding:5px;font-size:10px;font-family:inherit;border:1px solid #0f3460;background:transparent;color:#8899aa;cursor:pointer;border-radius:3px}
 .btns button.a{background:#e94560;color:#fff;border-color:#e94560}
+select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#0f3460;color:#e0e0e0;border:1px solid #0f3460;border-radius:3px}
 .stats{font-size:10px;color:#556677;line-height:1.5;margin-top:auto;padding-top:12px;border-top:1px solid #0f3460}
 #wrap{flex:1;position:relative}
 #cv{position:absolute;top:0;left:0;width:100%;height:100%}
@@ -40,12 +41,20 @@ input[type=range]{flex:1;accent-color:#e94560}
   </div>
   <div><label>Render</label>
     <div class="btns" id="render-btns">
-      <button class="a" data-v="matcap">Matcap</button>
-      <button data-v="solid">Solid</button>
+      <button data-v="matcap" class="a">Matcap</button>
+      <button data-v="lod">LOD</button>
       <button data-v="wire">Wire</button>
       <button data-v="both">Both</button>
       <button data-v="normals">Normals</button>
     </div>
+  </div>
+  <div><label>Matcap</label>
+    <select id="matcap-sel">
+      <option value="aqua">Aqua</option>
+      <option value="citric-acid">Citric Acid</option>
+      <option value="golden-soft" selected>Golden Soft</option>
+      <option value="soft-studio">Soft Studio</option>
+    </select>
   </div>
   <div><label>Resolution (0=auto)</label>
     <div class="sr"><input type="range" id="res" min="0" max="6" value="0"><span class="v" id="res-v">auto</span></div>
@@ -119,7 +128,8 @@ uniform float u_permParity; // +1 or -1: flip normal for odd permutations
 uniform int u_permIndex;    // S3 permutation index (0-5) for bary remapping
 
 out vec3 v_normal_vs;
-out float v_density;  // interpolated density from edge-based formula
+out float v_density;
+out vec2 v_matcap_uv;  // matcap texture coordinates from view-space normal
 
 // S3 permutations: remap bary coords in the vertex shader
 // so we can share one tess buffer across all permutations of a canonical LOD triple.
@@ -203,25 +213,50 @@ void main(){
   }
   // Flip normal for odd permutations (reflections in S3)
   n *= u_permParity;
-  v_normal_vs = normalize(mat3(u_mv) * n);
+  vec3 n_vs = normalize(mat3(u_mv) * n);
+  v_normal_vs = n_vs;
+  v_matcap_uv = n_vs.xy * 0.5 + 0.5;
 
-  // Density heatmap: edge-based interpolation, fixed range.
-  // log2(1)=0 → t=0, log2(1024)=10 → t=1. Full gradient always visible.
   float density = edgeDensity(bary, a_lodInfo.xyz);
   v_density = log2(max(density, 1.0)) / 10.0;
+
+  // Conformal scale cutoff: clip vertices where |bot|² is tiny
+  // (extreme stretching near the Möbius pole — surface wraps back on itself)
+  if (u_useQB == 1) {
+    vec4 bot = a_bary.x*a_w0 + a_bary.y*a_w1 + a_bary.z*a_w2;
+    if (dot(bot, bot) < 1e-6) {
+      gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
+      return;
+    }
+  }
 
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
 
-// Matcap fragment shader — LOD color tint + matcap lighting from normal
+// Real matcap: sample texture using view-space normal
 const FS_MATCAP = `#version 300 es
 precision mediump float;
 in vec3 v_normal_vs;
 in float v_density;
+in vec2 v_matcap_uv;
+uniform sampler2D u_matcapTex;
+out vec4 o;
+void main(){
+  vec3 n = normalize(v_normal_vs);
+  n = gl_FrontFacing ? n : -n;
+  vec2 uv = n.xy * 0.5 + 0.5;
+  o = texture(u_matcapTex, uv);
+}`;
+
+// LOD density heatmap (was "matcap")
+const FS_LOD = `#version 300 es
+precision mediump float;
+in vec3 v_normal_vs;
+in float v_density;
+in vec2 v_matcap_uv;
 uniform vec3 u_lodColor;
 out vec4 o;
 
-// Classic blue → cyan → green → yellow → red heatmap
 vec3 heatmap(float t) {
   t = clamp(t, 0.0, 1.0);
   vec3 c0 = vec3(0.0, 0.0, 0.5);
@@ -248,16 +283,13 @@ void main(){
   float spec = pow(max(dot(n, H), 0.0), 40.0);
   float rim = pow(1.0 - NdV, 3.0);
 
-  // Pure density heatmap — no per-batch color tint (which causes seams)
   vec3 base = heatmap(v_density);
-
   vec3 shadow = base * 0.12 + vec3(0.03, 0.01, 0.08);
   vec3 lit = base * 1.4;
   vec3 col = mix(shadow, lit, diff);
-  col += vec3(1.0, 0.95, 0.90) * spec * 0.8;  // punchy specular
-  col += base * rim * 0.4;                       // glowy rim
-  col += vec3(0.05, 0.02, 0.08);                // deep ambient
-
+  col += vec3(1.0, 0.95, 0.90) * spec * 0.8;
+  col += base * rim * 0.4;
+  col += vec3(0.05, 0.02, 0.08);
   o = vec4(col, 1.0);
 }`;
 
@@ -265,6 +297,7 @@ const FS_WIRE = `#version 300 es
 precision mediump float;
 in vec3 v_normal_vs;
 in float v_density;
+in vec2 v_matcap_uv;
 uniform vec3 u_lodColor;
 uniform int u_showDensity;
 out vec4 o;
@@ -290,6 +323,7 @@ const FS_NORMALS = `#version 300 es
 precision mediump float;
 in vec3 v_normal_vs;
 in float v_density;
+in vec2 v_matcap_uv;
 out vec4 o;
 void main(){
   // Map normal xyz from [-1,1] to [0,1] for visualization
@@ -302,8 +336,25 @@ function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compile
 function mkProg(vs,fs){const p=gl.createProgram();gl.attachShader(p,mkS(vs,gl.VERTEX_SHADER));gl.attachShader(p,mkS(fs,gl.FRAGMENT_SHADER));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error('LINK:',gl.getProgramInfoLog(p));return p;}
 
 const progMatcap = mkProg(VS, FS_MATCAP);
+const progLod = mkProg(VS, FS_LOD);
 const progWire = mkProg(VS, FS_WIRE);
 const progNormals = mkProg(VS, FS_NORMALS);
+
+// Matcap texture
+let matcapTex = gl.createTexture();
+function loadMatcap(name) {
+  const img = new Image();
+  img.onload = () => {
+    gl.bindTexture(gl.TEXTURE_2D, matcapTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    render();
+  };
+  img.src = '/matcaps/' + name + '.png';
+}
 
 // LOD → vivid color via HSL rainbow
 function lodColor(lod) {
@@ -533,9 +584,9 @@ function render() {
   const mvp = mulM4(proj, view);
 
   const drawWire = renderMode === 'wire' || renderMode === 'both';
-  const drawSolid = renderMode === 'matcap' || renderMode === 'both' || renderMode === 'solid';
+  const drawLod = renderMode === 'lod' || renderMode === 'both';
+  const drawMatcap = renderMode === 'matcap';
   const drawNormals = renderMode === 'normals';
-  const useHeatmap = renderMode === 'matcap' || renderMode === 'both';
 
   // Original mesh wireframe (simple triangles, no tessellation)
   if (drawWire && vaoOrigMesh) {
@@ -551,17 +602,35 @@ function render() {
     gl.drawElementsInstanced(gl.LINES, 6, gl.UNSIGNED_INT, 0, numOrigInst);
   }
 
-  // Transformed — matcap solid
-  if (drawSolid) {
+  // Transformed — real matcap texture
+  if (drawMatcap) {
     gl.useProgram(progMatcap);
     gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progMatcap,'u_useQB'), 1);
-    gl.uniform1f(gl.getUniformLocation(progMatcap,'u_globalMaxLogLod'), globalMaxLogLod);
+    gl.uniform1f(gl.getUniformLocation(progMatcap,'u_permParity'), 1.0);
+    gl.uniform1i(gl.getUniformLocation(progMatcap,'u_permIndex'), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, matcapTex);
+    gl.uniform1i(gl.getUniformLocation(progMatcap,'u_matcapTex'), 0);
     for (const b of drawBatches) {
-      gl.uniform3fv(gl.getUniformLocation(progMatcap,'u_lodColor'), useHeatmap ? b.color : [0.85, 0.75, 0.65]);
       gl.uniform1f(gl.getUniformLocation(progMatcap,'u_permParity'), b.parity);
-      gl.uniform1i(gl.getUniformLocation(progMatcap,'u_permIndex'), 0);
+      gl.bindVertexArray(b.vaoXformTri);
+      gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
+    }
+  }
+
+  // Transformed — LOD density heatmap
+  if (drawLod) {
+    gl.useProgram(progLod);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progLod,'u_mvp'), false, mvp);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progLod,'u_mv'), false, view);
+    gl.uniform1i(gl.getUniformLocation(progLod,'u_useQB'), 1);
+    gl.uniform1f(gl.getUniformLocation(progLod,'u_globalMaxLogLod'), globalMaxLogLod);
+    for (const b of drawBatches) {
+      gl.uniform3fv(gl.getUniformLocation(progLod,'u_lodColor'), b.color);
+      gl.uniform1f(gl.getUniformLocation(progLod,'u_permParity'), b.parity);
+      gl.uniform1i(gl.getUniformLocation(progLod,'u_permIndex'), 0);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -704,6 +773,7 @@ for (const b of document.querySelectorAll('#atlas-btns button'))
     $('stats').textContent = `Atlas rebuilt in ${resp.ms.toFixed(0)}ms`;
     update();
   };
+$('matcap-sel').addEventListener('change', () => { loadMatcap($('matcap-sel').value); });
 for (const id of ['res','sx','sy','sz','sr'])
   $(id).addEventListener('input', update);
 let sliverDebounce = null, sliverRebuilding = false;
@@ -733,6 +803,9 @@ let camDebounce = null;
 onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.clientY-ly)*0.01; lx=e.clientX; ly=e.clientY; render(); clearTimeout(camDebounce); camDebounce=setTimeout(update, 150); };
 canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); update(); e.preventDefault(); };
 onresize = render;
+
+// Load initial matcap texture
+loadMatcap($('matcap-sel').value);
 
 // Init: build atlas, then start rendering
 $('stats').textContent = 'Starting worker...';
