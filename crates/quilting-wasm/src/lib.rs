@@ -504,6 +504,8 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     };
 
     HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(mesh));
+    // Clear sent-tess cache so JS gets fresh tessellation data after shape change
+    SENT_TESS.with(|s| s.borrow_mut().clear());
 
     serde_wasm_bindgen::to_value(&info).unwrap()
 }
@@ -550,4 +552,229 @@ pub fn slice_hypermesh(normal: &[f64], offset: f64) -> JsValue {
     });
 
     serde_wasm_bindgen::to_value(&result).unwrap()
+}
+
+/// Slice the current hypermesh, then apply a Möbius transform to the result.
+/// Returns the same BatchData format that index.html's rendering pipeline expects.
+#[wasm_bindgen]
+pub fn slice_and_transform(
+    normal: &[f64],
+    offset: f64,
+    transform_type: &str,
+    params: &[f64],
+    override_res: u32,
+    vp_matrix: &[f64],
+    viewport_width: f64,
+    viewport_height: f64,
+) -> JsValue {
+    use quilting_spacetime::HyperplaneSlicer;
+
+    let n = if normal.len() >= 4 {
+        [normal[0], normal[1], normal[2], normal[3]]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    };
+
+    // Step 1: Slice the hypermesh
+    let slice_result = HYPER_MESH.with(|hm| {
+        let mesh_opt = hm.borrow();
+        let mesh = match mesh_opt.as_ref() {
+            Some(m) => m,
+            None => return None,
+        };
+        let slicer = HyperplaneSlicer::new(n, offset);
+        Some(slicer.slice_marching(mesh))
+    });
+
+    let slice = match slice_result {
+        Some(s) => s,
+        None => {
+            return serde_wasm_bindgen::to_value(&MeshBatches {
+                batches: vec![],
+                total_faces: 0,
+                num_batches: 0,
+                timings: [0.0, 0.0, 0.0],
+            }).unwrap();
+        }
+    };
+
+    if slice.layers.is_empty() {
+        return serde_wasm_bindgen::to_value(&MeshBatches {
+            batches: vec![],
+            total_faces: 0,
+            num_batches: 0,
+            timings: [0.0, 0.0, 0.0],
+        }).unwrap();
+    }
+
+    // Step 2: Use the largest layer
+    let layer = slice.layers.into_iter()
+        .max_by_key(|l| l.faces.len())
+        .unwrap();
+
+    let verts: Vec<[f64; 3]> = layer.positions;
+    let tris: Vec<[usize; 3]> = layer.faces.iter()
+        .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
+        .collect();
+
+    if tris.is_empty() || verts.is_empty() {
+        return serde_wasm_bindgen::to_value(&MeshBatches {
+            batches: vec![],
+            total_faces: 0,
+            num_batches: 0,
+            timings: [0.0, 0.0, 0.0],
+        }).unwrap();
+    }
+
+    // Step 3: Build Möbius transform
+    let transform = match transform_type {
+        "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
+            Mobius::sphere_reflection(
+                Quat::from_point(params[0], params[1], params[2]),
+                params[3],
+            )
+        }
+        "rotation" if params.len() >= 4 => {
+            Mobius::rotation(params[0], params[1], params[2], params[3])
+        }
+        "translation" if params.len() >= 3 => {
+            Mobius::translation(Quat::from_point(params[0], params[1], params[2]))
+        }
+        _ => Mobius::identity(),
+    };
+
+    let screen = if vp_matrix.len() >= 16 && viewport_width > 0.0 {
+        let mut m = [0.0f64; 16];
+        m.copy_from_slice(&vp_matrix[..16]);
+        Some(ScreenInfo { vp_matrix: m, width: viewport_width, height: viewport_height })
+    } else {
+        None
+    };
+
+    let t0 = js_sys::Date::now();
+
+    // Step 4: Build half-edge mesh for this slice
+    let faces_u32: Vec<[u32; 3]> = layer.faces.iter()
+        .map(|f| [f[0], f[1], f[2]])
+        .collect();
+    let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
+
+    // Step 5: Compute instances with Möbius transform
+    let instances_orig = compute_instances_no_lod(&verts, &tris);
+    let t1 = js_sys::Date::now();
+
+    let instances_xform = compute_instances(&verts, &tris, &transform, screen.as_ref(), Some(&half_edge));
+    let t2 = js_sys::Date::now();
+
+    // Step 6: Group by (canonical LOD, perm_index)
+    let mut groups: HashMap<([u32; 3], usize), Vec<usize>> = HashMap::new();
+    for (fi, inst) in instances_xform.iter().enumerate() {
+        let lod = if override_res > 0 {
+            [override_res, override_res, override_res]
+        } else {
+            inst.edge_lods
+        };
+        let key = canonical_form(lod);
+        groups.entry((key.res, key.perm_index)).or_default().push(fi);
+    }
+
+    let mut batches = Vec::new();
+
+    ATLAS.with(|atlas_cell| {
+        let atlas_ref = atlas_cell.borrow();
+
+        for (&(canonical_lod, perm_index), face_indices) in &groups {
+            let (mesh, used_lod) = {
+                let mut found = None;
+                if let Some(atlas) = atlas_ref.as_ref() {
+                    if let Some(m) = atlas.get_patch(canonical_lod) {
+                        found = Some((m, canonical_lod));
+                    } else {
+                        let min_lod = canonical_lod[0];
+                        let mut try_res = min_lod;
+                        while try_res >= 1 {
+                            let uniform = [try_res, try_res, try_res];
+                            if let Some(m) = atlas.get_patch(uniform) {
+                                found = Some((m, uniform));
+                                break;
+                            }
+                            if try_res <= 1 { break; }
+                            try_res /= 2;
+                        }
+                    }
+                }
+                found.unwrap_or_else(|| {
+                    let config = PatchConfig { k_candidates: 30, seed: 42 };
+                    let sample = quilting_core::sampling::tri_patch([1.0, 1.0, 1.0], &config);
+                    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
+                    (quilting_core::mesh::TessellationMesh::from_2d(tri.positions, tri.triangles), [1, 1, 1])
+                })
+            };
+
+            let is_fallback = used_lod != canonical_lod;
+            let parity = perm_sign(perm_index);
+
+            let actual_lod = if override_res > 0 {
+                [override_res, override_res, override_res]
+            } else {
+                instances_xform[face_indices[0]].edge_lods
+            };
+
+            let tess_key = format!("{},{},{}/{}", canonical_lod[0], canonical_lod[1], canonical_lod[2], perm_index);
+            let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
+
+            let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
+                (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
+            } else {
+                let bary: Vec<f64> = mesh.positions.iter().map(|p| {
+                    let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
+                    let mut b = triangle::cartesian_to_bary(remapped[0], remapped[1]);
+                    for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
+                    let sum = b[0] + b[1] + b[2];
+                    if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
+                    b
+                }).flat_map(|b| [b[0], b[1], b[2]]).collect();
+
+                let tris_out: Vec<u32> = mesh.triangles.iter()
+                    .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+
+                let nv = bary.len() / 3;
+                let nt = tris_out.len() / 3;
+                SENT_TESS.with(|s| s.borrow_mut().insert(tess_key));
+                (bary, tris_out, nv, nt)
+            };
+
+            let orig_data: Vec<f32> = face_indices.iter()
+                .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
+            let xform_data: Vec<f32> = face_indices.iter()
+                .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
+
+            batches.push(BatchData {
+                lod: actual_lod,
+                wanted_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
+                used_lod: [used_lod[0], used_lod[1], used_lod[2]],
+                is_fallback,
+                perm_parity: parity,
+                perm_index,
+                instances_orig: orig_data,
+                instances_xform: xform_data,
+                tess_bary: bary_data,
+                tess_triangles: tess_tris,
+                num_faces: face_indices.len(),
+                verts_per_face: n_verts,
+                tris_per_face: n_tris,
+            });
+        }
+    });
+
+    let t3 = js_sys::Date::now();
+
+    let result = serde_wasm_bindgen::to_value(&MeshBatches {
+        batches,
+        total_faces: tris.len(),
+        num_batches: groups.len(),
+        timings: [t1 - t0, t2 - t1, t3 - t2],
+    }).unwrap();
+
+    result
 }
