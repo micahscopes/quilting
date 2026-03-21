@@ -331,12 +331,21 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
     }
     if (progPbr) bindUniformBlocks(progPbr);
     // PBR has an additional UBO for material params
-    // naga names the block by fragment-stage block index (0), not binding number
-    const pbrBlockIdx = gl.getUniformBlockIndex(progPbr, 'PbrUniforms_block_0Fragment');
-    if (pbrBlockIdx !== gl.INVALID_INDEX) {
-      gl.uniformBlockBinding(progPbr, pbrBlockIdx, PBR_UBO_BINDING);
-    } else {
-      console.warn('PBR UBO block not found — check naga block naming');
+    // Try both possible naga block names
+    const numBlocks = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORM_BLOCKS);
+    console.log('PBR program has', numBlocks, 'uniform blocks:');
+    for (let i = 0; i < numBlocks; i++) {
+      const name = gl.getActiveUniformBlockName(progPbr, i);
+      const size = gl.getActiveUniformBlockParameter(progPbr, i, gl.UNIFORM_BLOCK_DATA_SIZE);
+      console.log(`  block ${i}: "${name}" (${size} bytes)`);
+    }
+    // Bind all non-vertex blocks to PBR_UBO_BINDING
+    for (let i = 0; i < numBlocks; i++) {
+      const name = gl.getActiveUniformBlockName(progPbr, i);
+      if (name && name.includes('Pbr')) {
+        gl.uniformBlockBinding(progPbr, i, PBR_UBO_BINDING);
+        console.log(`  → bound "${name}" to binding ${PBR_UBO_BINDING}`);
+      }
     }
   }
 
@@ -565,7 +574,7 @@ function render() {
   if (drawPbr && progPbr) {
     gl.useProgram(progPbr);
     gl.bindBufferBase(gl.UNIFORM_BUFFER, PBR_UBO_BINDING, pbrUbo);
-    uploadPbrUBO([0.8, 0.7, 0.6, 1.0], 0.0, 0.45); // warm dielectric, moderate roughness
+    uploadPbrUBO([0.9, 0.75, 0.6, 1.0], 0.0, 0.4); // warm clay
     for (const b of drawBatches) {
       uploadVertexUBO(mvp, view, b.parity, 0, 1);
       gl.bindVertexArray(b.vaoXformTri);
