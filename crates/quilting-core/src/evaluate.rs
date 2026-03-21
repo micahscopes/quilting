@@ -283,6 +283,21 @@ pub fn compute_instances(
         }
     }
 
+    // Within-face LOD smoothing: ensure no face has edges differing by more
+    // than 4x. This keeps tessellation patches similar enough that the QB
+    // nonlinearity doesn't produce visible gaps at shared edges.
+    for fi in 0..nf {
+        let he_indices = [fi * 3, fi * 3 + 1, fi * 3 + 2];
+        let face_max = he_indices.iter()
+            .map(|&he| edge_lods[canonical_edge(he)])
+            .max().unwrap_or(1);
+        let floor = snap_to_power_of_2(face_max / 4).max(1);
+        for &he_idx in &he_indices {
+            let canon = canonical_edge(he_idx);
+            edge_lods[canon] = edge_lods[canon].max(floor);
+        }
+    }
+
     // Write per-edge LODs into each face instance.
     // Mapping from FaceInstance edge_lods index to half-edge:
     //   edge_lods[0] (opposite v0) = he fi*3+1 (v1->v2)
