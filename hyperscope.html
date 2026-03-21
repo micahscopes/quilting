@@ -668,6 +668,17 @@ function getSliceNormal() {
   return [0, 0, sinT, cosT];
 }
 
+let interactiveRes = 0; // 0 = use slider value, >0 = override during interaction
+let lodDebounce = null;
+
+function updateFast() {
+  // Quick update with fixed LOD during active interaction
+  interactiveRes = 4;
+  clearTimeout(lodDebounce);
+  lodDebounce = setTimeout(() => { interactiveRes = 0; update(); }, 200);
+  update();
+}
+
 async function update() {
   if (!workerReady || !meshInfo) return;
   if (updating) { pendingUpdate = true; return; }
@@ -680,8 +691,9 @@ async function update() {
 
   const { mx, my, mz, mr } = getTransformParams();
   const resVal = parseInt($('res').value);
-  const res = resVal === 0 ? 0 : (1 << resVal);
-  $('res-v').textContent = res === 0 ? 'auto' : res;
+  const baseRes = resVal === 0 ? 0 : (1 << resVal);
+  const res = interactiveRes > 0 ? interactiveRes : baseRes;
+  $('res-v').textContent = baseRes === 0 ? 'auto' : baseRes;
 
   // VP matrix for screen-space LOD
   const w=$('wrap');
@@ -797,10 +809,11 @@ setupBtnGroup('xform-btns', (v) => { currentXform = v; update(); });
 
 $('matcap-sel').addEventListener('change', () => loadMatcap($('matcap-sel').value));
 
-$('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); update(); });
-$('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); update(); });
-for (const id of ['mx','my','mz','mr','res'])
-  $(id).addEventListener('input', update);
+$('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateFast(); });
+$('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); updateFast(); });
+for (const id of ['mx','my','mz','mr'])
+  $(id).addEventListener('input', updateFast);
+$('res').addEventListener('input', update);
 
 // Spacetime toggle
 $('spacetime-toggle').addEventListener('click', () => {
