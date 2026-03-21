@@ -228,8 +228,8 @@ void main(){
   if (u_useQB == 1) {
     vec4 bot = a_bary.x*a_w0 + a_bary.y*a_w1 + a_bary.z*a_w2;
     float bot_sq = dot(bot, bot);
-    // Smooth fade from 1.0 (bot_sq >= 0.01) to 0.0 (bot_sq <= 0.001)
-    v_fade = smoothstep(0.001, 0.01, bot_sq);
+    // Smooth fade — lower thresholds = more visible geometry before fadeout
+    v_fade = smoothstep(0.0001, 0.001, bot_sq);
   }
 
   gl_Position = u_mvp * vec4(p, 1.0);
