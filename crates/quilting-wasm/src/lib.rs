@@ -640,23 +640,27 @@ pub fn slice_and_transform(
             _ => return empty(),
         };
 
-        let layer = slice.layers.into_iter()
-            .max_by_key(|l| l.faces.len())
-            .unwrap();
-
-        let verts: Vec<[f64; 3]> = layer.positions;
-        let vert_weights: Vec<[f64; 4]> = layer.weights;
-        let tris: Vec<[usize; 3]> = layer.faces.iter()
-            .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
-            .collect();
+        // Merge ALL layers — with looped trajectories, adjacent periods produce
+        // separate layers that should be rendered together for seamless wrapping.
+        let mut verts: Vec<[f64; 3]> = Vec::new();
+        let mut vert_weights: Vec<[f64; 4]> = Vec::new();
+        let mut tris: Vec<[usize; 3]> = Vec::new();
+        for layer in slice.layers {
+            let base = verts.len();
+            verts.extend_from_slice(&layer.positions);
+            vert_weights.extend_from_slice(&layer.weights);
+            for f in &layer.faces {
+                tris.push([f[0] as usize + base, f[1] as usize + base, f[2] as usize + base]);
+            }
+        }
 
         if tris.is_empty() || verts.is_empty() {
             SLICE_CACHE.with(|c| *c.borrow_mut() = None);
             return empty();
         }
 
-        let faces_u32: Vec<[u32; 3]> = layer.faces.iter()
-            .map(|f| [f[0], f[1], f[2]])
+        let faces_u32: Vec<[u32; 3]> = tris.iter()
+            .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
             .collect();
         let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
 
