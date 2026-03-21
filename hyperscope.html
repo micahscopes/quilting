@@ -247,13 +247,17 @@ function getMaterialParams(materialIndex) {
   if (materialIndex >= 0 && materialIndex < loadedMaterials.length) {
     const mat = loadedMaterials[materialIndex];
     const bc = materialColors[materialIndex] || mat.base_color || [0.9, 0.75, 0.6, 1.0];
-    return { baseColor: bc, metallic: mat.metallic ?? 0.0, roughness: mat.roughness ?? 0.4 };
+    return {
+      baseColor: bc,
+      metallic: mat.metallic ?? 0.0,
+      roughness: mat.roughness ?? 0.4,
+      baseColorTextureIndex: mat.base_color_texture_index ?? -1,
+    };
   }
-  // Default material
   const bc = meshInfo ? (meshInfo.base_color || [0.9, 0.75, 0.6, 1.0]) : [0.9, 0.75, 0.6, 1.0];
   const met = meshInfo ? (meshInfo.metallic ?? 0.0) : 0.0;
   const rough = meshInfo ? (meshInfo.roughness ?? 0.4) : 0.4;
-  return { baseColor: bc, metallic: met, roughness: rough };
+  return { baseColor: bc, metallic: met, roughness: rough, baseColorTextureIndex: -1 };
 }
 
 // --- Worker ---
@@ -691,7 +695,14 @@ function render() {
       if (b.materialIndex !== lastMaterialIndex) {
         lastMaterialIndex = b.materialIndex;
         const mat = getMaterialParams(b.materialIndex);
-        uploadPbrUBO(mat.baseColor, mat.metallic, mat.roughness, false);
+        const hasTexIdx = mat.baseColorTextureIndex;
+        const texObj = (hasTexIdx != null && hasTexIdx >= 0) ? loadedTextures[hasTexIdx] : null;
+        const hasTex = texObj && texObj.glTexture;
+        uploadPbrUBO(mat.baseColor, mat.metallic, mat.roughness, !!hasTex);
+        if (hasTex) {
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, texObj.glTexture);
+        }
       }
       uploadVertexUBO(mvp, view, b.parity, 0, 1);
       gl.bindVertexArray(b.vaoXformTri);
