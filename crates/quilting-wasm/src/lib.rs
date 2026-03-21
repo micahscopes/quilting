@@ -597,28 +597,31 @@ pub fn slice_and_transform(
         }
     });
 
-    // Build 4D Möbius from the same transform params — applied BEFORE slicing
-    let transform_4d = match transform_type {
-        "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
-            Some(Mobius::sphere_reflection(
-                Quat::from_point(params[0], params[1], params[2]),
-                params[3],
-            ))
+    // Use 4D Möbius only when the slice is tilted (spatial components nonzero).
+    // With no tilt, the standard 3D post-slice Möbius is simpler and correct.
+    let spatial_tilt = n[0].abs() + n[1].abs() + n[2].abs();
+    let transform_4d = if spatial_tilt > 0.01 {
+        match transform_type {
+            "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
+                Some(Mobius::sphere_reflection(
+                    Quat::from_point(params[0], params[1], params[2]),
+                    params[3],
+                ))
+            }
+            "rotation" if params.len() >= 4 => {
+                Some(Mobius::rotation(params[0], params[1], params[2], params[3]))
+            }
+            "translation" if params.len() >= 3 => {
+                Some(Mobius::translation(Quat::from_point(params[0], params[1], params[2])))
+            }
+            _ => None,
         }
-        "rotation" if params.len() >= 4 => {
-            Some(Mobius::rotation(params[0], params[1], params[2], params[3]))
-        }
-        "translation" if params.len() >= 3 => {
-            Some(Mobius::translation(Quat::from_point(params[0], params[1], params[2])))
-        }
-        _ => None,
+    } else {
+        None
     };
 
-    // Include transform params in cache key — different Möbius = different slice
-    let cache_hit = cache_hit && SLICE_CACHE.with(|c| {
-        // Invalidate cache if transform changed
-        true // TODO: cache transform params too
-    });
+    // 4D transform changes the slice geometry — invalidate cache when active
+    let cache_hit = cache_hit && transform_4d.is_none();
 
     if !cache_hit {
         let slice_result = HYPER_MESH.with(|hm| {
