@@ -328,100 +328,56 @@ impl HyperplaneSlicer {
                     continue;
                 }
 
-                // Decompose prism into 3 tetrahedra:
-                // Tet 0: b0, b1, b2, t0
-                // Tet 1: b1, b2, t0, t1
-                // Tet 2: b2, t0, t1, t2
+                // Direct prism-plane intersection.
+                // 9 prism edges: 3 bottom, 3 top, 3 vertical.
+                // Find all edge crossings, form a convex polygon, fan-triangulate.
                 let prism_verts = [b0, b1, b2, t0, t1, t2];
                 let prism_times = [t_bot, t_bot, t_bot, t_top, t_top, t_top];
                 let prism_dists = [db0, db1, db2, dt0, dt1, dt2];
 
-                let tets: [[usize; 4]; 3] = [
-                    [0, 1, 2, 3],
-                    [1, 2, 3, 4],
-                    [2, 3, 4, 5],
+                // 9 edges of a triangular prism
+                let edges: [(usize, usize); 9] = [
+                    (0,1), (1,2), (2,0),  // bottom triangle
+                    (3,4), (4,5), (5,3),  // top triangle
+                    (0,3), (1,4), (2,5),  // vertical edges
                 ];
 
-                for tet in &tets {
-                    let d0 = prism_dists[tet[0]];
-                    let d1 = prism_dists[tet[1]];
-                    let d2 = prism_dists[tet[2]];
-                    let d3 = prism_dists[tet[3]];
+                let mut crossings: Vec<(f64, [f64; 3])> = Vec::new();
 
-                    // Classify vertices: 4-bit case index
-                    let case = ((d0 > 0.0) as u8)
-                             | (((d1 > 0.0) as u8) << 1)
-                             | (((d2 > 0.0) as u8) << 2)
-                             | (((d3 > 0.0) as u8) << 3);
-
-                    // Skip no-intersection cases
-                    if case == 0 || case == 15 {
-                        continue;
-                    }
-
-                    // Interpolate edge crossing point
-                    let lerp_edge = |a: usize, b: usize| -> (f64, [f64; 3]) {
-                        let da = prism_dists[tet[a]];
-                        let db = prism_dists[tet[b]];
+                for &(a, b) in &edges {
+                    let da = prism_dists[a];
+                    let db = prism_dists[b];
+                    // Edge crosses if signs differ (and neither is exactly 0)
+                    if (da > 0.0) != (db > 0.0) {
                         let t_param = da / (da - db);
-                        let pa = prism_verts[tet[a]];
-                        let pb = prism_verts[tet[b]];
-                        let ta = prism_times[tet[a]];
-                        let tb = prism_times[tet[b]];
+                        let pa = prism_verts[a];
+                        let pb = prism_verts[b];
+                        let ta = prism_times[a];
+                        let tb = prism_times[b];
                         let pos = [
                             pa[0] + t_param * (pb[0] - pa[0]),
                             pa[1] + t_param * (pb[1] - pa[1]),
                             pa[2] + t_param * (pb[2] - pa[2]),
                         ];
                         let time = ta + t_param * (tb - ta);
-                        (time, pos)
-                    };
+                        crossings.push((time, pos));
+                    }
+                }
 
-                    // Marching tet case table: edges are 01, 02, 03, 12, 13, 23
-                    // Each case produces 1 or 2 triangles from edge crossings
-                    let edge_tris: &[&[(usize, usize)]] = match case {
-                        // 1 vertex inside: 1 triangle
-                        1  => &[&[(0,1), (0,2), (0,3)]],
-                        2  => &[&[(0,1), (1,3), (1,2)]],
-                        4  => &[&[(0,2), (2,3), (1,2)]],  // fixed winding
-                        8  => &[&[(0,3), (1,3), (2,3)]],
-                        // 3 vertices inside (complement): 1 triangle, reversed
-                        14 => &[&[(0,1), (0,3), (0,2)]],
-                        13 => &[&[(0,1), (1,2), (1,3)]],
-                        11 => &[&[(0,2), (1,2), (2,3)]],
-                        7  => &[&[(0,3), (2,3), (1,3)]],
-                        // 2 vertices inside: 2 triangles (quad split)
-                        3  => &[&[(0,2), (0,3), (1,2)], &[(1,2), (0,3), (1,3)]],
-                        5  => &[&[(0,1), (0,3), (1,2)], &[(1,2), (0,3), (2,3)]],
-                        6  => &[&[(0,1), (0,2), (1,3)], &[(0,2), (2,3), (1,3)]],
-                        9  => &[&[(0,1), (1,3), (0,2)], &[(0,2), (1,3), (2,3)]],
-                        10 => &[&[(0,1), (0,3), (1,2)], &[(1,2), (0,3), (2,3)]],
-                        12 => &[&[(0,2), (0,3), (1,2)], &[(1,2), (0,3), (1,3)]],
-                        _ => continue,
-                    };
+                if crossings.len() < 3 {
+                    continue;
+                }
 
-                    for tri_edges in edge_tris {
-                        if tri_edges.len() < 3 { continue; }
-                        let (t_a, p_a) = lerp_edge(tri_edges[0].0, tri_edges[0].1);
-                        let (t_b, p_b) = lerp_edge(tri_edges[1].0, tri_edges[1].1);
-                        let (t_c, p_c) = lerp_edge(tri_edges[2].0, tri_edges[2].1);
-
-                        let ia = add_vert(p_a, t_a, &mut positions, &mut times, &mut vert_map);
-                        let ib = add_vert(p_b, t_b, &mut positions, &mut times, &mut vert_map);
-                        let ic = add_vert(p_c, t_c, &mut positions, &mut times, &mut vert_map);
-
-                        if ia != ib && ib != ic && ia != ic {
-                            // Skip degenerate triangles (near-zero area causes z-fighting)
-                            let e1 = [p_b[0]-p_a[0], p_b[1]-p_a[1], p_b[2]-p_a[2]];
-                            let e2 = [p_c[0]-p_a[0], p_c[1]-p_a[1], p_c[2]-p_a[2]];
-                            let cx = e1[1]*e2[2] - e1[2]*e2[1];
-                            let cy = e1[2]*e2[0] - e1[0]*e2[2];
-                            let cz = e1[0]*e2[1] - e1[1]*e2[0];
-                            let area2 = cx*cx + cy*cy + cz*cz;
-                            if area2 > 1e-12 {
-                                faces.push([ia, ib, ic]);
-                            }
-                        }
+                // Fan triangulate from the first crossing point
+                let i0 = add_vert(crossings[0].1, crossings[0].0,
+                    &mut positions, &mut times, &mut vert_map);
+                for j in 1..crossings.len() - 1 {
+                    let i1 = add_vert(crossings[j].1, crossings[j].0,
+                        &mut positions, &mut times, &mut vert_map);
+                    let i2 = add_vert(crossings[j+1].1, crossings[j+1].0,
+                        &mut positions, &mut times, &mut vert_map);
+                    if i0 != i1 && i1 != i2 && i0 != i2 {
+                        faces.push([i0, i1, i2]);
                     }
                 }
             }
