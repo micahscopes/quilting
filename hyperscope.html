@@ -208,6 +208,8 @@ function createTexturesFromGltf(textures, materials) {
   materialColors = [];
 
   // Create WebGL textures from image data
+  const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+  const maxAniso = aniso ? gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) : 1;
   if (textures) {
     for (const img of textures) {
       const glTex = gl.createTexture();
@@ -218,6 +220,7 @@ function createTexturesFromGltf(textures, materials) {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
       gl.generateMipmap(gl.TEXTURE_2D);
       loadedTextures.push({ glTexture: glTex, width: img.width, height: img.height, avgColor: img.avg_color });
     }

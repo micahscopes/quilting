@@ -308,6 +308,30 @@ pub fn compute_instances_with_uvs(
         }
     }
 
+    // LOD budget cap: estimate total output triangles. If over budget,
+    // globally halve all LODs until under the cap. This prevents high-poly
+    // meshes from generating millions of tessellated triangles near Möbius poles.
+    const MAX_OUTPUT_TRIS: u64 = 500_000;
+    loop {
+        let total: u64 = (0..nf).map(|fi| {
+            let he_base = fi * 3;
+            let l0 = edge_lods[canonical_edge(he_base + 1)] as u64;
+            let l1 = edge_lods[canonical_edge(he_base + 2)] as u64;
+            let l2 = edge_lods[canonical_edge(he_base)] as u64;
+            // Rough estimate: max(l0,l1,l2)^2 triangles per face
+            let mx = l0.max(l1).max(l2);
+            mx * mx
+        }).sum();
+
+        if total <= MAX_OUTPUT_TRIS {
+            break;
+        }
+        // Halve all LODs
+        for lod in edge_lods.iter_mut() {
+            if *lod > 1 { *lod /= 2; }
+        }
+    }
+
     // Write per-edge LODs into each face instance.
     // Mapping from FaceInstance edge_lods index to half-edge:
     //   edge_lods[0] (opposite v0) = he fi*3+1 (v1->v2)
