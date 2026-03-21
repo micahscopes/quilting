@@ -101,7 +101,7 @@ pub fn compute_instances(
     }).collect();
 
     // Per-edge LOD from screen-space edge lengths.
-    let target_pixels_per_sub = 4.0;
+    let target_pixels_per_sub = 16.0;
 
     // Compute the Möbius pole: the point where the transform is singular.
     // For F(x) = (ax+b)(cx+d)⁻¹, the pole is at x = -c⁻¹d.
@@ -213,10 +213,10 @@ pub fn compute_instances(
 
             // If the edge passes through the pole → max LOD
             let lod = if segment_near_pole(vertices[va], vertices[vb], 0.5) {
-                512
+                128
             } else {
                 let pixels = screen_arc_len(va, vb);
-                snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(512)
+                snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(128)
             };
             edge_lods[canon] = lod.max(1);
         }
@@ -271,7 +271,7 @@ pub fn compute_instances(
                     (dx*dx + dy*dy + dz*dz).sqrt() * 100.0
                 }
             };
-            let lod = snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(512);
+            let lod = snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(128);
             max_median_lod = max_median_lod.max(lod);
         }
         // Floor all edges of this face at the max median LOD
