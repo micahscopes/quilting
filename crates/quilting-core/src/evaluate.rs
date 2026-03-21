@@ -414,17 +414,11 @@ impl FaceInstance {
         out
     }
 
-    /// Pack with UVs and normals reordered to match a permuted tessellation.
-    pub fn to_f32_array_permuted(&self, perm_index: usize) -> [f32; 52] {
-        let mut out = self.to_f32_array();
-        if perm_index != 0 {
-            let perm = crate::permutation::S3_PERMUTATIONS[perm_index];
-            let permuted_uvs = [self.uvs[perm[0]], self.uvs[perm[1]], self.uvs[perm[2]]];
-            let permuted_normals = [self.normals[perm[0]], self.normals[perm[1]], self.normals[perm[2]]];
-            self.pack_uvs(&mut out, &permuted_uvs);
-            self.pack_normals(&mut out, &permuted_normals);
-        }
-        out
+    /// Pack for a permuted tessellation. UVs and normals are NOT permuted —
+    /// both position and UV use the same (CPU-remapped) bary coords, so they
+    /// stay consistent without reordering. This is just an alias for to_f32_array.
+    pub fn to_f32_array_permuted(&self, _perm_index: usize) -> [f32; 52] {
+        self.to_f32_array()
     }
 
     fn pack_uvs(&self, out: &mut [f32; 52], uvs: &[[f32; 2]; 3]) {
