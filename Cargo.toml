@@ -4,6 +4,7 @@ members = [
     "crates/quilting-core",
     "crates/quilting-gltf",
     "crates/quilting-mesh",
+    "crates/quilting-renderer",
     "crates/quilting-shaders",
     "crates/quilting-wasm",
     "crates/quilting-spacetime",

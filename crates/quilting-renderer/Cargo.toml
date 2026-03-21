@@ -1,0 +1,9 @@
+[package]
+name = "quilting-renderer"
+version = "0.1.0"
+edition = "2021"
+description = "glow-based WebGL2/OpenGL renderer for quilting QB surfaces"
+
+[dependencies]
+glow = "0.16"
+quilting-shaders = { path = "../quilting-shaders" }

@@ -59,10 +59,36 @@ pub fn compile_shader(
 }
 
 /// Emit a naga Module as GLSL ES 300 (for WebGL2).
+///
+/// By default, naga emits a Y-flip + Z-remap for WebGPU coordinate conventions.
+/// Pass `adjust_coordinate_space: false` to disable this for native OpenGL/WebGL
+/// rendering where you manage coordinates yourself.
 pub fn emit_glsl(
     module: &naga::Module,
     stage: naga::ShaderStage,
     entry_point: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    emit_glsl_with_options(module, stage, entry_point, true)
+}
+
+/// Emit GLSL for direct OpenGL/WebGL use (no coordinate space adjustment).
+///
+/// Naga's default ADJUST_COORDINATE_SPACE flips Y and remaps Z for WebGPU conventions.
+/// This function disables that, producing GLSL suitable for glow-based rendering
+/// where gl_Position is already in standard OpenGL clip space.
+pub fn emit_glsl_native(
+    module: &naga::Module,
+    stage: naga::ShaderStage,
+    entry_point: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    emit_glsl_with_options(module, stage, entry_point, false)
+}
+
+fn emit_glsl_with_options(
+    module: &naga::Module,
+    stage: naga::ShaderStage,
+    entry_point: &str,
+    adjust_coordinate_space: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
@@ -70,11 +96,17 @@ pub fn emit_glsl(
     )
     .validate(module)?;
 
+    let mut writer_flags = naga::back::glsl::WriterFlags::empty();
+    if adjust_coordinate_space {
+        writer_flags |= naga::back::glsl::WriterFlags::ADJUST_COORDINATE_SPACE;
+    }
+
     let options = naga::back::glsl::Options {
         version: naga::back::glsl::Version::Embedded {
             version: 300,
             is_webgl: true,
         },
+        writer_flags,
         ..Default::default()
     };
 
@@ -116,6 +148,27 @@ pub fn compile_fragment_glsl(mode: &str) -> Result<String, Box<dyn std::error::E
     };
     let module = compile_shader(source, HashMap::new())?;
     emit_glsl(&module, naga::ShaderStage::Fragment, entry)
+}
+
+/// Compile the main vertex shader to GLSL ES 300 for native OpenGL/WebGL
+/// (no coordinate space adjustment -- no Y-flip or Z-remap).
+pub fn compile_vertex_glsl_native() -> Result<String, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::VERTEX_MAIN, HashMap::new())?;
+    emit_glsl_native(&module, naga::ShaderStage::Vertex, "vs_main")
+}
+
+/// Compile a fragment shader to GLSL ES 300 for native OpenGL/WebGL
+/// (no coordinate space adjustment).
+/// Supported modes: "matcap", "wire", "normals"
+pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let (source, entry) = match mode {
+        "matcap" => (sources::FRAG_MATCAP, "fs_matcap"),
+        "wire" => (sources::FRAG_WIRE, "fs_wire"),
+        "normals" => (sources::FRAG_NORMALS, "fs_normals"),
+        _ => return Err(format!("unknown fragment mode: {}", mode).into()),
+    };
+    let module = compile_shader(source, HashMap::new())?;
+    emit_glsl_native(&module, naga::ShaderStage::Fragment, entry)
 }
 
 #[cfg(test)]
