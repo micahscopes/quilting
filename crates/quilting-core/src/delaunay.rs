@@ -48,7 +48,14 @@ pub fn triangulate_2d_filtered(points: &[[f64; 2]], sliver_threshold: f64) -> Tr
             return false;
         }
 
-        if sliver_threshold <= 0.0 {
+        // Skip sliver filter for edge-adjacent triangles — they're needed for
+        // watertight seams. A triangle touches the boundary if any vertex has a
+        // bary component near zero.
+        let on_boundary = [p0, p1, p2].iter().any(|p| {
+            let [u, v, w] = triangle::cartesian_to_bary(p[0], p[1]);
+            u.abs() < 0.01 || v.abs() < 0.01 || w.abs() < 0.01
+        });
+        if on_boundary {
             return true;
         }
 
