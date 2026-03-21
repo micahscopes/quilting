@@ -211,13 +211,10 @@ pub fn compute_instances(
             let va = va as usize;
             let vb = vb as usize;
 
-            // If the edge passes through the pole → max LOD
-            let lod = if segment_near_pole(vertices[va], vertices[vb], 0.5) {
-                128
-            } else {
-                let pixels = screen_arc_len(va, vb);
-                snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(128)
-            };
+            // Screen-space LOD: the arc length naturally increases near the
+            // Möbius pole, giving higher LOD where needed. No special-casing.
+            let pixels = screen_arc_len(va, vb);
+            let lod = snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(128);
             edge_lods[canon] = lod.max(1);
         }
 
@@ -235,10 +232,6 @@ pub fn compute_instances(
                 (vertices[vj][2]+vertices[vk][2])/2.0,
             ];
             // If median passes through the pole → max LOD
-            if segment_near_pole(orig_vi, orig_mid, 0.5) {
-                max_median_lod = 512;
-                continue;
-            }
             let pixels = match screen {
                 Some(s) => {
                     let n = 5;
