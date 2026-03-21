@@ -411,7 +411,7 @@ impl HyperplaneSlicer {
                     let nw = self.normal[3];
                     let nz = self.normal[2];
                     let proj = radius * theta.cos() * nw + radius * theta.sin() * nz;
-                    if proj < 0.0 {
+                    if proj < -0.1 * radius {
                         continue;
                     }
                 }
