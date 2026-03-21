@@ -142,6 +142,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
         <input type="range" id="rot-ratio" min="1" max="100" value="62">
         <span class="v" id="rot-ratio-v">0.62</span>
       </div>
+      <div class="sr" style="margin-top:4px">
+        <span style="font-size:10px;color:#8b949e;width:40px">Speed</span>
+        <input type="range" id="rot-speed" min="1" max="100" value="10">
+        <span class="v" id="rot-speed-v">0.005</span>
+      </div>
     </div>
   </div>
 
@@ -871,6 +876,7 @@ for (const b of document.querySelectorAll('#plane1-btns .btn'))
 for (const b of document.querySelectorAll('#plane2-btns .btn'))
   b.onclick = () => { document.querySelectorAll('#plane2-btns .btn').forEach(x=>x.classList.remove('active')); b.classList.add('active'); };
 $('rot-ratio').addEventListener('input', () => { $('rot-ratio-v').textContent = ($('rot-ratio').value / 100).toFixed(2); });
+$('rot-speed').addEventListener('input', () => { $('rot-speed-v').textContent = ($('rot-speed').value / 2000).toFixed(4); });
 
 // Animation loop — rotates the hyperplane tilt angle instead of sweeping time.
 // This keeps the slice centered in the periodic region for clean wrapping.
@@ -880,7 +886,8 @@ function frame() {
     const rotateMode = $('rotate-mode-toggle').classList.contains('on');
     if (rotateMode) {
       // 4D double rotation: apply two rotations in user-selected planes
-      animPhase += 0.005;
+      const speed = parseFloat($('rot-speed').value) / 2000;
+      animPhase += speed;
       const ratio = parseFloat($('rot-ratio').value) / 100;
       const p1 = animPhase;
       const p2 = animPhase * ratio;
