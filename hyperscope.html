@@ -969,7 +969,7 @@ function frame() {
       let val = parseFloat(slider.value);
       const speed = 0.003 * (meshInfo.time_max - meshInfo.time_min);
       val += speed;
-      if (val >= meshInfo.time_max) { val = meshInfo.time_min + (val - meshInfo.time_max); }
+      if (val >= meshInfo.time_max) { val = meshInfo.time_min + (val - meshInfo.time_max) + 0.001; }
       slider.value = val;
       $('time-v').textContent = val.toFixed(2);
     }
