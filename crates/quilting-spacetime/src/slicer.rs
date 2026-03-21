@@ -406,9 +406,10 @@ impl HyperplaneSlicer {
                 // Direct prism-plane intersection.
                 // 9 prism edges: 3 bottom, 3 top, 3 vertical.
                 // Find all edge crossings, form a convex polygon, fan-triangulate.
-                // Use SPATIAL positions for output, EMBEDDED distances for intersection
-                let prism_verts = spatial_pos;
-                let prism_times_arr = spatial_t;
+                // Without Möbius: output SPATIAL positions (original horse shape).
+                // With Möbius: output TRANSFORMED positions (conformally deformed).
+                let prism_verts = if transform_4d.is_some() { embed_pos } else { spatial_pos };
+                let prism_times_arr = if transform_4d.is_some() { embed_t } else { spatial_t };
                 let prism_dists = d_arr;
 
                 // 9 edges of a triangular prism
