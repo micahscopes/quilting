@@ -503,7 +503,7 @@ pub fn create_hypermesh(name: &str) -> JsValue {
 
     // Loop trajectories so tilted slices have full coverage
     for traj in &mut mesh.trajectories {
-        traj.loop_pad(1);
+        traj.loop_pad(2);
     }
     let info = HyperMeshInfo {
         time_min,
