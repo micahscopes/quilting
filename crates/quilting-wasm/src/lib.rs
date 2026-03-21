@@ -455,6 +455,7 @@ struct CachedSlice {
     offset: f64,
     verts: Vec<[f64; 3]>,
     tris: Vec<[usize; 3]>,
+    weights: Vec<[f64; 4]>,  // per-vertex conformal weights from 4D Möbius
     half_edge: HalfEdgeMesh,
 }
 
@@ -644,6 +645,7 @@ pub fn slice_and_transform(
             .unwrap();
 
         let verts: Vec<[f64; 3]> = layer.positions;
+        let vert_weights: Vec<[f64; 4]> = layer.weights;
         let tris: Vec<[usize; 3]> = layer.faces.iter()
             .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
             .collect();
@@ -659,7 +661,7 @@ pub fn slice_and_transform(
         let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
 
         SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
-            normal: n, offset, verts, tris, half_edge,
+            normal: n, offset, verts, tris, weights: vert_weights, half_edge,
         }));
     }
 
@@ -700,8 +702,27 @@ pub fn slice_and_transform(
     let (instances_orig, instances_xform, num_tris) = SLICE_CACHE.with(|c| {
         let cache = c.borrow();
         let cs = cache.as_ref().unwrap();
-        let orig = compute_instances_no_lod(&cs.verts, &cs.tris);
-        let xform = compute_instances(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge));
+        let mut orig = compute_instances_no_lod(&cs.verts, &cs.tris);
+        let mut xform = compute_instances(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge));
+
+        // Inject per-vertex conformal weights from the 4D Möbius slicer.
+        // These make the QB tessellation curve the surface conformally.
+        let has_4d_weights = !cs.weights.is_empty() && cs.weights[0] != [1.0, 0.0, 0.0, 0.0];
+        if has_4d_weights {
+            for (fi, face) in cs.tris.iter().enumerate() {
+                let w0 = cs.weights[face[0]];
+                let w1 = cs.weights[face[1]];
+                let w2 = cs.weights[face[2]];
+                let qw0 = Quat::new(w0[0], w0[1], w0[2], w0[3]);
+                let qw1 = Quat::new(w1[0], w1[1], w1[2], w1[3]);
+                let qw2 = Quat::new(w2[0], w2[1], w2[2], w2[3]);
+                // Both orig and xform get the 4D weights — the QB shader
+                // uses these to curve the tessellated surface conformally
+                orig[fi].weights = [qw0, qw1, qw2];
+                xform[fi].weights = [qw0, qw1, qw2];
+            }
+        }
+
         (orig, xform, cs.tris.len())
     });
     let t1 = js_sys::Date::now();
