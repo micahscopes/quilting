@@ -329,34 +329,35 @@ pub fn morph(
 pub fn galloping_horse(duration: f64) -> HyperMesh {
     let n_verts = horse_data::NUM_VERTS;
     let n_frames = horse_data::NUM_FRAMES;
+    // Add one extra frame = copy of frame 0, so the animation loops seamlessly
+    let total_frames = n_frames + 1;
 
     let faces: Vec<[u32; 3]> = horse_data::FACES
         .chunks(3)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
 
-    let dt = duration / (n_frames - 1) as f64;
+    let dt = duration / (total_frames - 1) as f64;
+
+    let get_frame_pos = |fi: usize, vi: usize| -> [f64; 3] {
+        let frame = fi % n_frames; // wrap last frame back to frame 0
+        let base = frame * n_verts * 3 + vi * 3;
+        [
+            horse_data::MORPH_FRAMES[base],
+            horse_data::MORPH_FRAMES[base + 1],
+            horse_data::MORPH_FRAMES[base + 2],
+        ]
+    };
 
     let trajectories: Vec<VertexTrajectory> = (0..n_verts)
         .map(|vi| {
-            let segments: Vec<HermiteSegment> = (0..n_frames - 1)
+            let segments: Vec<HermiteSegment> = (0..total_frames - 1)
                 .map(|fi| {
                     let t0 = fi as f64 * dt;
                     let t1 = (fi + 1) as f64 * dt;
 
-                    let base0 = fi * n_verts * 3 + vi * 3;
-                    let base1 = (fi + 1) * n_verts * 3 + vi * 3;
-
-                    let p0 = [
-                        horse_data::MORPH_FRAMES[base0],
-                        horse_data::MORPH_FRAMES[base0 + 1],
-                        horse_data::MORPH_FRAMES[base0 + 2],
-                    ];
-                    let p1 = [
-                        horse_data::MORPH_FRAMES[base1],
-                        horse_data::MORPH_FRAMES[base1 + 1],
-                        horse_data::MORPH_FRAMES[base1 + 2],
-                    ];
+                    let p0 = get_frame_pos(fi, vi);
+                    let p1 = get_frame_pos(fi + 1, vi);
 
                     // Approximate velocity from finite differences
                     let vel0 = [
