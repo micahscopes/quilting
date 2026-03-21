@@ -789,11 +789,6 @@ async function update() {
     }
   }
 
-  // Also apply the same rotation for the spacetime=off animation
-  if (!spacetimeOn && !rotateNormalOverride) {
-    effectiveNormal = [0, 0, Math.sin(theta), Math.cos(theta)];
-    effectiveOffset = 0;
-  }
 
   const t0 = performance.now();
   const resp = await workerCall('slice_and_transform', {
