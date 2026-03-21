@@ -114,6 +114,10 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="toggle" id="animate-toggle"></div>
       <span class="toggle-label">Auto-animate</span>
     </div>
+    <div class="toggle-row">
+      <div class="toggle" id="rotate-mode-toggle"></div>
+      <span class="toggle-label">Rotate slice</span>
+    </div>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -828,19 +832,38 @@ animToggle.addEventListener('click', () => {
   animToggle.classList.toggle('on', animating);
 });
 
-// Animation loop
+// Rotate slice mode toggle
+$('rotate-mode-toggle').addEventListener('click', () => {
+  $('rotate-mode-toggle').classList.toggle('on');
+});
+
+// Animation loop — rotates the hyperplane tilt angle instead of sweeping time.
+// This keeps the slice centered in the periodic region for clean wrapping.
+let animPhase = 0;
 function frame() {
   if (animating && meshInfo) {
-    const slider = $('time');
-    let val = parseFloat(slider.value);
-    const speed = 0.003 * (meshInfo.time_max - meshInfo.time_min);
-    val += speed;
-    // Loop back to start when reaching end
-    if (val >= meshInfo.time_max) { val = meshInfo.time_min + (val - meshInfo.time_max); }
-    slider.value = val;
-    $('time-v').textContent = val.toFixed(2);
-    update();
+    const rotateMode = $('rotate-mode-toggle').classList.contains('on');
+    if (rotateMode) {
+      // Rotate the tilt angle continuously — clean wrapping
+      animPhase += 0.008;
+      const tiltSlider = $('tilt');
+      const maxTilt = parseFloat(tiltSlider.max);
+      const tilt = Math.abs(Math.sin(animPhase)) * maxTilt;
+      tiltSlider.value = tilt;
+      $('tilt-v').textContent = tilt.toFixed(2);
+    } else {
+      // Sweep time forward
+      const slider = $('time');
+      let val = parseFloat(slider.value);
+      const speed = 0.003 * (meshInfo.time_max - meshInfo.time_min);
+      val += speed;
+      if (val >= meshInfo.time_max) { val = meshInfo.time_min + (val - meshInfo.time_max); }
+      slider.value = val;
+      $('time-v').textContent = val.toFixed(2);
+    }
+    updateFast();
   }
+  render();
   requestAnimationFrame(frame);
 }
 
