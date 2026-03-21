@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
-use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, ScreenInfo};
+use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, compute_instances_no_lod_with_uvs, compute_instances_with_uvs, ScreenInfo};
 use quilting_core::mesh::TessellationMesh;
 use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -370,6 +370,7 @@ pub fn compute_mesh_batches(
                 is_fallback,
                 perm_parity: parity,
                 perm_index,
+                material_index: -1,
                 instances_orig: orig_data,
                 instances_xform: xform_data,
                 tess_bary: bary_data,
@@ -408,6 +409,7 @@ struct BatchData {
     is_fallback: bool,
     perm_parity: i32,  // +1 for even permutations, -1 for odd (normal flip)
     perm_index: usize, // S3 permutation index (0-5) for vertex shader bary remapping
+    material_index: i32, // material index (-1 = default)
     instances_orig: Vec<f32>,
     instances_xform: Vec<f32>,
     tess_bary: Vec<f64>,
@@ -478,12 +480,18 @@ struct CachedSlice {
     verts: Vec<[f64; 3]>,
     tris: Vec<[usize; 3]>,
     weights: Vec<[f64; 4]>,  // per-vertex conformal weights from 4D Möbius
+    uvs: Vec<[f32; 2]>,      // per-vertex texture coordinates
     half_edge: HalfEdgeMesh,
+    /// Maps sliced face index -> original HyperMesh face index.
+    source_face_indices: Vec<usize>,
 }
 
 thread_local! {
     static HYPER_MESH: RefCell<Option<quilting_spacetime::HyperMesh>> = RefCell::new(None);
     static SLICE_CACHE: RefCell<Option<CachedSlice>> = RefCell::new(None);
+    /// Per-face material indices for the current loaded model.
+    /// Index i -> material index for HyperMesh face i (None = default material).
+    static FACE_MATERIALS: RefCell<Vec<Option<usize>>> = RefCell::new(Vec::new());
 }
 
 #[derive(serde::Serialize)]
@@ -540,6 +548,7 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     };
 
     HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(mesh));
+    FACE_MATERIALS.with(|fm| *fm.borrow_mut() = Vec::new()); // built-in shapes have no materials
     // Clear sent-tess cache so JS gets fresh tessellation data after shape change
     SENT_TESS.with(|s| s.borrow_mut().clear());
 
@@ -550,7 +559,11 @@ pub fn create_hypermesh(name: &str) -> JsValue {
 /// and store it for slicing.  Accepts both GLB (binary) and glTF with
 /// embedded base64 buffers — `gltf::import_slice` handles both.
 ///
-/// Returns { time_min, time_max, num_vertices, num_faces } or throws on error.
+/// Walks ALL scene nodes, applies world transforms, merges all meshes.
+/// Returns a JS object with:
+///   { time_min, time_max, num_vertices, num_faces, materials, textures,
+///     base_color, metallic, roughness }
+/// Built with js_sys to avoid serde overhead on large data.
 #[wasm_bindgen]
 pub fn load_gltf_data(data: &[u8]) -> JsValue {
     let t0 = js_sys::Date::now();
@@ -565,53 +578,111 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
 
     let t_parse = js_sys::Date::now();
     web_sys::console::log_1(&format!(
-        "load_gltf_data: parsed in {:.0}ms — {} meshes, {} animations, {} skins, {} nodes",
-        t_parse - t0, scene.meshes.len(), scene.animations.len(), scene.skins.len(), scene.nodes.len()
+        "load_gltf_data: parsed in {:.0}ms — {} meshes, {} materials, {} animations, {} skins, {} nodes, {} images",
+        t_parse - t0, scene.meshes.len(), scene.materials.len(),
+        scene.animations.len(), scene.skins.len(), scene.nodes.len(), scene.images.len()
     ).into());
 
-    // Find the first mesh node (prefer one with a skin)
-    let (mesh_idx, skin_idx) = {
-        let mut found_skinned: Option<(usize, usize)> = None;
-        let mut found_static: Option<usize> = None;
-        for node in &scene.nodes {
-            if let Some(mi) = node.mesh {
-                if let Some(si) = node.skin {
-                    if found_skinned.is_none() {
-                        found_skinned = Some((mi, si));
-                    }
-                } else if found_static.is_none() {
-                    found_static = Some(mi);
-                }
-            }
-        }
-        if let Some((mi, si)) = found_skinned {
-            (mi, Some(si))
-        } else if let Some(mi) = found_static {
-            (mi, None)
-        } else if !scene.meshes.is_empty() {
-            (0, None)
-        } else {
-            web_sys::console::error_1(&"load_gltf_data: no meshes found".into());
-            return JsValue::NULL;
-        }
+    // Determine the active scene
+    let active_scene = if let Some(si) = scene.default_scene {
+        scene.scenes.get(si)
+    } else {
+        scene.scenes.first()
     };
 
-    // Flatten all primitives of this mesh into one combined primitive
-    let mesh = &scene.meshes[mesh_idx];
-    let combined = flatten_primitives_for_bake(mesh);
+    // Collect all (mesh_idx, skin_idx, world_transform) from the scene graph
+    let mut mesh_nodes: Vec<MeshNodeRef> = Vec::new();
+
+    if let Some(active) = active_scene {
+        let world_transforms = quilting_gltf::scene::compute_world_transforms(&scene.nodes, active);
+        for (node_idx, node) in scene.nodes.iter().enumerate() {
+            if let Some(mi) = node.mesh {
+                mesh_nodes.push(MeshNodeRef {
+                    mesh_idx: mi,
+                    skin_idx: node.skin,
+                    world_transform: world_transforms[node_idx],
+                });
+            }
+        }
+    } else {
+        // No scene graph — just use all meshes at identity
+        let identity = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        for (mi, _) in scene.meshes.iter().enumerate() {
+            mesh_nodes.push(MeshNodeRef {
+                mesh_idx: mi,
+                skin_idx: None,
+                world_transform: identity,
+            });
+        }
+    }
+
+    if mesh_nodes.is_empty() && !scene.meshes.is_empty() {
+        let identity = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        mesh_nodes.push(MeshNodeRef {
+            mesh_idx: 0,
+            skin_idx: None,
+            world_transform: identity,
+        });
+    }
+
+    if mesh_nodes.is_empty() {
+        web_sys::console::error_1(&"load_gltf_data: no meshes found".into());
+        return JsValue::NULL;
+    }
+
+    web_sys::console::log_1(&format!(
+        "load_gltf_data: {} mesh nodes in scene", mesh_nodes.len()
+    ).into());
+
+    // Find the primary skinned node for animation baking
+    let primary_skinned = mesh_nodes.iter()
+        .find(|mn| mn.skin_idx.is_some())
+        .or(mesh_nodes.first());
+
+    let primary_mesh_idx = primary_skinned.map(|mn| mn.mesh_idx).unwrap_or(0);
+    let primary_skin_idx = primary_skinned.and_then(|mn| mn.skin_idx);
+
+    // Merge all meshes with world transforms, tracking per-triangle material index.
+    // For animation baking we use the primary mesh; for static we merge all.
+    let has_animation = !scene.animations.is_empty() && (
+        primary_skin_idx.is_some() || scene.animations[0].channels.iter()
+            .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights)
+    );
+
+    // Track per-triangle material indices across the merged mesh
+    let mut face_material_indices: Vec<Option<usize>> = Vec::new();
+
+    let combined = if has_animation {
+        // For animated meshes, use just the primary mesh (skinning needs single mesh)
+        let mesh = &scene.meshes[primary_mesh_idx];
+        flatten_primitives_for_bake(mesh, &mut face_material_indices)
+    } else {
+        // For static models, merge ALL mesh nodes with world transforms
+        merge_all_mesh_nodes(&scene, &mesh_nodes, &mut face_material_indices)
+    };
 
     let n_verts = combined.positions.len();
     let n_tris = combined.triangles.len();
     web_sys::console::log_1(&format!(
-        "load_gltf_data: mesh {mesh_idx} — {n_verts} vertices, {n_tris} triangles"
+        "load_gltf_data: merged — {n_verts} vertices, {n_tris} triangles, {} materials",
+        scene.materials.len()
     ).into());
 
     let num_samples = 32usize;
-    let hyper = if let Some(si) = skin_idx {
-        // Skinned animation
+    let hyper = if let Some(si) = primary_skin_idx {
         if !scene.animations.is_empty() && !scene.skins.is_empty() && si < scene.skins.len() {
             let skin = &scene.skins[si];
-            let anim = &scene.animations[0]; // use first animation
+            let anim = &scene.animations[0];
             web_sys::console::log_1(&format!(
                 "load_gltf_data: baking skinned animation with {} samples ({} joints)",
                 num_samples, skin.joints.len()
@@ -622,8 +693,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         } else {
             build_static_hypermesh(&combined)
         }
-    } else if !scene.animations.is_empty() {
-        // Check for morph target animation
+    } else if has_animation {
         let has_morph = scene.animations[0].channels.iter()
             .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights);
         if has_morph && !combined.morph_targets.is_empty() {
@@ -644,52 +714,172 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         build_static_hypermesh(&combined)
     };
 
-    // Normalize to roughly [-1, 1] range
-    let hyper = normalize_hypermesh(hyper);
+    let mut hyper = normalize_hypermesh(hyper);
+
+    // Set per-vertex UVs on the HyperMesh if the combined primitive has them
+    if let Some(ref uvs) = combined.uvs {
+        hyper.vertex_uvs = uvs.iter().map(|uv| [uv[0] as f32, uv[1] as f32]).collect();
+    }
 
     let (time_min, time_max) = hyper.time_range();
 
-    // Extract PBR material from the first material in the scene
+    // Build materials array using js_sys
+    let js_materials = js_sys::Array::new();
+    for mat in &scene.materials {
+        let obj = js_sys::Object::new();
+
+        let bc = js_sys::Array::new();
+        for &c in &mat.base_color_factor {
+            bc.push(&JsValue::from_f64(c));
+        }
+        js_sys::Reflect::set(&obj, &"base_color".into(), &bc).unwrap();
+        js_sys::Reflect::set(&obj, &"metallic".into(), &JsValue::from_f64(mat.metallic_factor)).unwrap();
+        js_sys::Reflect::set(&obj, &"roughness".into(), &JsValue::from_f64(mat.roughness_factor)).unwrap();
+
+        // Texture index (resolved: texture -> image)
+        let tex_idx = mat.base_color_texture.as_ref().and_then(|tex_ref| {
+            scene.texture_to_image.get(tex_ref.index).copied()
+        });
+        if let Some(idx) = tex_idx {
+            js_sys::Reflect::set(&obj, &"base_color_texture_index".into(), &JsValue::from_f64(idx as f64)).unwrap();
+        } else {
+            js_sys::Reflect::set(&obj, &"base_color_texture_index".into(), &JsValue::NULL).unwrap();
+        }
+
+        let emissive = js_sys::Array::new();
+        for &c in &mat.emissive_factor {
+            emissive.push(&JsValue::from_f64(c));
+        }
+        js_sys::Reflect::set(&obj, &"emissive_factor".into(), &emissive).unwrap();
+        js_sys::Reflect::set(&obj, &"double_sided".into(), &JsValue::from_bool(mat.double_sided)).unwrap();
+
+        js_materials.push(&obj);
+    }
+
+    // Build textures array — send image data + average color for each image
+    let js_textures = js_sys::Array::new();
+    for img in &scene.images {
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &"width".into(), &JsValue::from_f64(img.width as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &"height".into(), &JsValue::from_f64(img.height as f64)).unwrap();
+
+        // Compute average color (for fallback when not sampling textures)
+        let pixel_count = (img.width * img.height) as f64;
+        if pixel_count > 0.0 {
+            let mut r_sum: f64 = 0.0;
+            let mut g_sum: f64 = 0.0;
+            let mut b_sum: f64 = 0.0;
+            let mut a_sum: f64 = 0.0;
+            for chunk in img.pixels.chunks(4) {
+                if chunk.len() == 4 {
+                    // sRGB to linear for averaging
+                    r_sum += (chunk[0] as f64 / 255.0).powf(2.2);
+                    g_sum += (chunk[1] as f64 / 255.0).powf(2.2);
+                    b_sum += (chunk[2] as f64 / 255.0).powf(2.2);
+                    a_sum += chunk[3] as f64 / 255.0;
+                }
+            }
+            let avg_color = js_sys::Array::new();
+            // Convert back from linear to sRGB for display
+            avg_color.push(&JsValue::from_f64((r_sum / pixel_count).powf(1.0 / 2.2)));
+            avg_color.push(&JsValue::from_f64((g_sum / pixel_count).powf(1.0 / 2.2)));
+            avg_color.push(&JsValue::from_f64((b_sum / pixel_count).powf(1.0 / 2.2)));
+            avg_color.push(&JsValue::from_f64(a_sum / pixel_count));
+            js_sys::Reflect::set(&obj, &"avg_color".into(), &avg_color).unwrap();
+        }
+
+        // Send pixel data as Uint8Array
+        let pixels = js_sys::Uint8Array::new_with_length(img.pixels.len() as u32);
+        pixels.copy_from(&img.pixels);
+        js_sys::Reflect::set(&obj, &"data".into(), &pixels).unwrap();
+
+        js_textures.push(&obj);
+    }
+
+    // Build per-face material index array (Int32Array, -1 for no material)
+    let js_face_materials = js_sys::Int32Array::new_with_length(face_material_indices.len() as u32);
+    let mat_indices: Vec<i32> = face_material_indices.iter()
+        .map(|mi| mi.map(|i| i as i32).unwrap_or(-1))
+        .collect();
+    js_face_materials.copy_from(&mat_indices);
+
+    // Extract first material as default (backward compat with existing HyperMeshInfo)
     let (base_color, metallic, roughness) = if !scene.materials.is_empty() {
         let mat = &scene.materials[0];
-        (
-            [mat.base_color_factor[0] as f32, mat.base_color_factor[1] as f32,
-             mat.base_color_factor[2] as f32, mat.base_color_factor[3] as f32],
-            mat.metallic_factor as f32,
-            mat.roughness_factor as f32,
-        )
+        let mut bc = [
+            mat.base_color_factor[0] as f32, mat.base_color_factor[1] as f32,
+            mat.base_color_factor[2] as f32, mat.base_color_factor[3] as f32,
+        ];
+        // If this material has a texture, use the average color instead of the factor
+        if let Some(tex_ref) = &mat.base_color_texture {
+            if let Some(&img_idx) = scene.texture_to_image.get(tex_ref.index) {
+                if let Some(img) = scene.images.get(img_idx) {
+                    let pixel_count = (img.width * img.height) as f64;
+                    if pixel_count > 0.0 {
+                        let mut r: f64 = 0.0;
+                        let mut g: f64 = 0.0;
+                        let mut b: f64 = 0.0;
+                        for chunk in img.pixels.chunks(4) {
+                            if chunk.len() == 4 {
+                                r += (chunk[0] as f64 / 255.0).powf(2.2);
+                                g += (chunk[1] as f64 / 255.0).powf(2.2);
+                                b += (chunk[2] as f64 / 255.0).powf(2.2);
+                            }
+                        }
+                        // Multiply texture average with base_color_factor
+                        bc[0] = (bc[0] as f64 * (r / pixel_count).powf(1.0 / 2.2)) as f32;
+                        bc[1] = (bc[1] as f64 * (g / pixel_count).powf(1.0 / 2.2)) as f32;
+                        bc[2] = (bc[2] as f64 * (b / pixel_count).powf(1.0 / 2.2)) as f32;
+                    }
+                }
+            }
+        }
+        (bc, mat.metallic_factor as f32, mat.roughness_factor as f32)
     } else {
         ([0.9, 0.75, 0.6, 1.0], 0.0, 0.4)
     };
 
-    let info = HyperMeshInfo {
-        time_min,
-        time_max,
-        num_vertices: hyper.num_vertices,
-        num_faces: hyper.faces.len(),
-        base_color,
-        metallic,
-        roughness,
-    };
-
     HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));
+    FACE_MATERIALS.with(|fm| *fm.borrow_mut() = face_material_indices);
     SENT_TESS.with(|s| s.borrow_mut().clear());
     SLICE_CACHE.with(|c| *c.borrow_mut() = None);
 
     let t_end = js_sys::Date::now();
     web_sys::console::log_1(&format!(
-        "load_gltf_data: total {:.0}ms — {} verts, {} faces, time [{:.3}, {:.3}]",
-        t_end - t0, info.num_vertices, info.num_faces, time_min, time_max
+        "load_gltf_data: total {:.0}ms — {} verts, {} faces, {} materials, {} textures, time [{:.3}, {:.3}]",
+        t_end - t0, n_verts, n_tris, scene.materials.len(), scene.images.len(), time_min, time_max
     ).into());
 
-    serde_wasm_bindgen::to_value(&info).unwrap()
+    // Build result object using js_sys (not serde) for speed
+    let result = js_sys::Object::new();
+    js_sys::Reflect::set(&result, &"time_min".into(), &JsValue::from_f64(time_min)).unwrap();
+    js_sys::Reflect::set(&result, &"time_max".into(), &JsValue::from_f64(time_max)).unwrap();
+    js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(n_verts as f64)).unwrap();
+    js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(n_tris as f64)).unwrap();
+    js_sys::Reflect::set(&result, &"materials".into(), &js_materials).unwrap();
+    js_sys::Reflect::set(&result, &"textures".into(), &js_textures).unwrap();
+    js_sys::Reflect::set(&result, &"face_material_indices".into(), &js_face_materials).unwrap();
+
+    // Backward-compat scalar fields
+    let bc_arr = js_sys::Array::new();
+    for &c in &base_color { bc_arr.push(&JsValue::from_f64(c as f64)); }
+    js_sys::Reflect::set(&result, &"base_color".into(), &bc_arr).unwrap();
+    js_sys::Reflect::set(&result, &"metallic".into(), &JsValue::from_f64(metallic as f64)).unwrap();
+    js_sys::Reflect::set(&result, &"roughness".into(), &JsValue::from_f64(roughness as f64)).unwrap();
+
+    result.into()
 }
 
 /// Flatten all primitives in a mesh into a single Primitive suitable for baking.
 /// Merges positions, triangles, joint data with proper index offsets.
-fn flatten_primitives_for_bake(mesh: &quilting_gltf::mesh::Mesh) -> quilting_gltf::mesh::Primitive {
+/// Tracks per-triangle material indices in the output vec.
+fn flatten_primitives_for_bake(
+    mesh: &quilting_gltf::mesh::Mesh,
+    face_materials: &mut Vec<Option<usize>>,
+) -> quilting_gltf::mesh::Primitive {
     let mut positions = Vec::new();
     let mut normals_all: Option<Vec<[f64; 3]>> = None;
+    let mut uvs_all: Option<Vec<[f64; 2]>> = None;
     let mut triangles = Vec::new();
     let mut joint_indices_all: Option<Vec<[u16; 4]>> = None;
     let mut joint_weights_all: Option<Vec<[f32; 4]>> = None;
@@ -697,10 +887,19 @@ fn flatten_primitives_for_bake(mesh: &quilting_gltf::mesh::Mesh) -> quilting_glt
     for prim in &mesh.primitives {
         let offset = positions.len();
         positions.extend_from_slice(&prim.positions);
-        triangles.extend(prim.triangles.iter().map(|t| [t[0] + offset, t[1] + offset, t[2] + offset]));
+        let new_tris: Vec<[usize; 3]> = prim.triangles.iter()
+            .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset])
+            .collect();
+        for _ in &new_tris {
+            face_materials.push(prim.material_index);
+        }
+        triangles.extend(new_tris);
 
         if let Some(ref n) = prim.normals {
             normals_all.get_or_insert_with(Vec::new).extend_from_slice(n);
+        }
+        if let Some(ref uv) = prim.uvs {
+            uvs_all.get_or_insert_with(Vec::new).extend_from_slice(uv);
         }
         if let Some(ref ji) = prim.joint_indices {
             joint_indices_all.get_or_insert_with(Vec::new).extend_from_slice(ji);
@@ -720,13 +919,99 @@ fn flatten_primitives_for_bake(mesh: &quilting_gltf::mesh::Mesh) -> quilting_glt
     quilting_gltf::mesh::Primitive {
         positions,
         normals: normals_all,
-        uvs: None,
+        uvs: uvs_all,
         triangles,
         material_index: None,
         joint_indices: joint_indices_all,
         joint_weights: joint_weights_all,
         morph_targets,
     }
+}
+
+/// Merge all mesh nodes in the scene into one combined Primitive,
+/// applying world transforms to positions and normals.
+fn merge_all_mesh_nodes(
+    scene: &quilting_gltf::GltfScene,
+    mesh_nodes: &[MeshNodeRef],
+    face_materials: &mut Vec<Option<usize>>,
+) -> quilting_gltf::mesh::Primitive {
+    let mut positions = Vec::new();
+    let mut normals_all: Option<Vec<[f64; 3]>> = None;
+    let mut uvs_all: Option<Vec<[f64; 2]>> = None;
+    let mut triangles = Vec::new();
+
+    for mn in mesh_nodes {
+        let mesh = &scene.meshes[mn.mesh_idx];
+        let m = &mn.world_transform;
+
+        // Extract 3x3 normal matrix (inverse transpose of upper-left 3x3)
+        // For uniform/no-shear transforms, the upper-left 3x3 works directly
+        let nm = [
+            m[0], m[1], m[2],
+            m[4], m[5], m[6],
+            m[8], m[9], m[10],
+        ];
+
+        for prim in &mesh.primitives {
+            let offset = positions.len();
+
+            // Transform positions by world matrix
+            for &pos in &prim.positions {
+                let x = m[0]*pos[0] + m[4]*pos[1] + m[8]*pos[2]  + m[12];
+                let y = m[1]*pos[0] + m[5]*pos[1] + m[9]*pos[2]  + m[13];
+                let z = m[2]*pos[0] + m[6]*pos[1] + m[10]*pos[2] + m[14];
+                positions.push([x, y, z]);
+            }
+
+            // Transform normals
+            if let Some(ref normals) = prim.normals {
+                let out = normals_all.get_or_insert_with(Vec::new);
+                for &n in normals {
+                    let nx = nm[0]*n[0] + nm[3]*n[1] + nm[6]*n[2];
+                    let ny = nm[1]*n[0] + nm[4]*n[1] + nm[7]*n[2];
+                    let nz = nm[2]*n[0] + nm[5]*n[1] + nm[8]*n[2];
+                    let len = (nx*nx + ny*ny + nz*nz).sqrt();
+                    if len > 1e-10 {
+                        out.push([nx/len, ny/len, nz/len]);
+                    } else {
+                        out.push([0.0, 1.0, 0.0]);
+                    }
+                }
+            }
+
+            // UVs pass through unchanged (not affected by world transform)
+            if let Some(ref uv) = prim.uvs {
+                uvs_all.get_or_insert_with(Vec::new).extend_from_slice(uv);
+            }
+
+            let new_tris: Vec<[usize; 3]> = prim.triangles.iter()
+                .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset])
+                .collect();
+            for _ in &new_tris {
+                face_materials.push(prim.material_index);
+            }
+            triangles.extend(new_tris);
+        }
+    }
+
+    quilting_gltf::mesh::Primitive {
+        positions,
+        normals: normals_all,
+        uvs: uvs_all,
+        triangles,
+        material_index: None,
+        joint_indices: None,
+        joint_weights: None,
+        morph_targets: vec![],
+    }
+}
+
+/// Helper struct to pass mesh node info to merge_all_mesh_nodes.
+struct MeshNodeRef {
+    mesh_idx: usize,
+    #[allow(dead_code)]
+    skin_idx: Option<usize>,
+    world_transform: [f64; 16],
 }
 
 /// Build a static HyperMesh (no animation) from a primitive — 2 identical keyframes.
@@ -893,14 +1178,18 @@ pub fn slice_and_transform(
         // separate layers that should be rendered together for seamless wrapping.
         let mut verts: Vec<[f64; 3]> = Vec::new();
         let mut vert_weights: Vec<[f64; 4]> = Vec::new();
+        let mut vert_uvs: Vec<[f32; 2]> = Vec::new();
         let mut tris: Vec<[usize; 3]> = Vec::new();
+        let mut slice_source_faces: Vec<usize> = Vec::new();
         for layer in slice.layers {
             let base = verts.len();
             verts.extend_from_slice(&layer.positions);
             vert_weights.extend_from_slice(&layer.weights);
+            vert_uvs.extend_from_slice(&layer.uvs);
             for f in &layer.faces {
                 tris.push([f[0] as usize + base, f[1] as usize + base, f[2] as usize + base]);
             }
+            slice_source_faces.extend_from_slice(&layer.source_face_indices);
         }
 
         if tris.is_empty() || verts.is_empty() {
@@ -914,7 +1203,8 @@ pub fn slice_and_transform(
         let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
 
         SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
-            normal: n, offset, verts, tris, weights: vert_weights, half_edge,
+            normal: n, offset, verts, tris, weights: vert_weights, uvs: vert_uvs,
+            half_edge, source_face_indices: slice_source_faces,
         }));
     }
 
@@ -947,18 +1237,37 @@ pub fn slice_and_transform(
     let t0 = t_slice_end;
 
     // Use cached slice for Möbius computation
-    let (instances_orig, instances_xform, num_tris) = SLICE_CACHE.with(|c| {
+    let (instances_orig, instances_xform, num_tris, source_faces) = SLICE_CACHE.with(|c| {
         let cache = c.borrow();
         let cs = cache.as_ref().unwrap();
-        let orig = compute_instances_no_lod(&cs.verts, &cs.tris);
-        let xform = compute_instances(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge));
-        (orig, xform, cs.tris.len())
+        let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
+        let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref);
+        let xform = compute_instances_with_uvs(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge), uv_ref);
+        let src = cs.source_face_indices.clone();
+        (orig, xform, cs.tris.len(), src)
     });
     let t1 = js_sys::Date::now();
     let t2 = js_sys::Date::now();
 
-    // Step 6: Group by (canonical LOD, perm_index)
-    let mut groups: HashMap<([u32; 3], usize), Vec<usize>> = HashMap::new();
+    // Resolve per-sliced-face material indices
+    let face_mat_indices: Vec<i32> = FACE_MATERIALS.with(|fm| {
+        let mats = fm.borrow();
+        (0..num_tris).map(|fi| {
+            if fi < source_faces.len() {
+                let orig_fi = source_faces[fi];
+                if orig_fi < mats.len() {
+                    mats[orig_fi].map(|m| m as i32).unwrap_or(-1)
+                } else {
+                    -1
+                }
+            } else {
+                -1
+            }
+        }).collect()
+    });
+
+    // Group by (canonical LOD, perm_index, material_index)
+    let mut groups: HashMap<([u32; 3], usize, i32), Vec<usize>> = HashMap::new();
     for (fi, inst) in instances_xform.iter().enumerate() {
         let lod = if override_res > 0 {
             [override_res, override_res, override_res]
@@ -966,7 +1275,8 @@ pub fn slice_and_transform(
             inst.edge_lods
         };
         let key = canonical_form(lod);
-        groups.entry((key.res, key.perm_index)).or_default().push(fi);
+        let mat_idx = if fi < face_mat_indices.len() { face_mat_indices[fi] } else { -1 };
+        groups.entry((key.res, key.perm_index, mat_idx)).or_default().push(fi);
     }
 
     struct RawBatch {
@@ -976,6 +1286,7 @@ pub fn slice_and_transform(
         is_fallback: bool,
         parity: i32,
         perm_index: usize,
+        material_index: i32,
         num_faces: usize,
         n_verts: usize,
         n_tris: usize,
@@ -989,7 +1300,7 @@ pub fn slice_and_transform(
     ATLAS.with(|atlas_cell| {
         let atlas_ref = atlas_cell.borrow();
 
-        for (&(canonical_lod, perm_index), face_indices) in &groups {
+        for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
             let (mesh, used_lod) = {
                 let mut found = None;
                 if let Some(atlas) = atlas_ref.as_ref() {
@@ -1062,6 +1373,7 @@ pub fn slice_and_transform(
                 is_fallback,
                 parity,
                 perm_index,
+                material_index: mat_idx,
                 num_faces: face_indices.len(),
                 n_verts, n_tris,
                 orig_data, xform_data, bary_data, tess_tris,
@@ -1082,6 +1394,7 @@ pub fn slice_and_transform(
         s("is_fallback", JsValue::from(b.is_fallback));
         s("perm_parity", JsValue::from(b.parity));
         s("perm_index", JsValue::from(b.perm_index as u32));
+        s("material_index", JsValue::from(b.material_index));
         s("num_faces", JsValue::from(b.num_faces as u32));
         s("verts_per_face", JsValue::from(b.n_verts as u32));
         s("tris_per_face", JsValue::from(b.n_tris as u32));

@@ -17,6 +17,9 @@ pub struct HyperMesh {
     pub num_vertices: u32,
     /// Original animation period (before loop padding).
     pub period: f64,
+    /// Per-vertex texture coordinates (TEXCOORD_0). Empty if no UVs present.
+    /// UVs don't change over time — they're a property of the mesh topology.
+    pub vertex_uvs: Vec<[f32; 2]>,
 }
 
 impl HyperMesh {
@@ -36,6 +39,7 @@ impl HyperMesh {
             trajectories,
             num_vertices,
             period,
+            vertex_uvs: Vec::new(),
         }
     }
 

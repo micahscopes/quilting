@@ -14,6 +14,9 @@ pub struct FaceInstance {
     /// Per-vertex LOD levels [v0, v1, v2] — max of all edges meeting at each vertex.
     /// Used for smooth density visualization that's continuous across face boundaries.
     pub vertex_lods: [u32; 3],
+    /// Per-vertex texture coordinates [uv0, uv1, uv2].
+    /// Sourced from glTF TEXCOORD_0; defaults to (0,0) when absent.
+    pub uvs: [[f32; 2]; 3],
 }
 
 /// Compute per-face instance data with adaptive LOD.
@@ -59,15 +62,29 @@ pub fn compute_instances_no_lod(
     vertices: &[[f64; 3]],
     faces: &[[usize; 3]],
 ) -> Vec<FaceInstance> {
+    compute_instances_no_lod_with_uvs(vertices, faces, None)
+}
+
+/// Compute instance data without LOD, with optional per-vertex UVs.
+pub fn compute_instances_no_lod_with_uvs(
+    vertices: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    vertex_uvs: Option<&[[f32; 2]]>,
+) -> Vec<FaceInstance> {
     faces.iter().map(|face| {
         let p0 = Quat::from_point(vertices[face[0]][0], vertices[face[0]][1], vertices[face[0]][2]);
         let p1 = Quat::from_point(vertices[face[1]][0], vertices[face[1]][1], vertices[face[1]][2]);
         let p2 = Quat::from_point(vertices[face[2]][0], vertices[face[2]][1], vertices[face[2]][2]);
+        let uvs = match vertex_uvs {
+            Some(uvs) => [uvs[face[0]], uvs[face[1]], uvs[face[2]]],
+            None => [[0.0, 0.0]; 3],
+        };
         FaceInstance {
             positions: [p0, p1, p2],
             weights: [Quat::ONE, Quat::ONE, Quat::ONE],
             edge_lods: [1, 1, 1],
             vertex_lods: [1, 1, 1],
+            uvs,
         }
     }).collect()
 }
@@ -78,6 +95,18 @@ pub fn compute_instances(
     transform: &Mobius,
     screen: Option<&ScreenInfo>,
     mesh: Option<&HalfEdgeMesh>,
+) -> Vec<FaceInstance> {
+    compute_instances_with_uvs(vertices, faces, transform, screen, mesh, None)
+}
+
+/// Compute instances with optional per-vertex UVs propagated into each face.
+pub fn compute_instances_with_uvs(
+    vertices: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    transform: &Mobius,
+    screen: Option<&ScreenInfo>,
+    mesh: Option<&HalfEdgeMesh>,
+    vertex_uvs: Option<&[[f32; 2]]>,
 ) -> Vec<FaceInstance> {
     // Pre-transform all vertices
     let transformed: Vec<(Quat, Quat)> = vertices.iter().map(|v| {
@@ -92,11 +121,16 @@ pub fn compute_instances(
         let (p0, w0) = transformed[face[0]];
         let (p1, w1) = transformed[face[1]];
         let (p2, w2) = transformed[face[2]];
+        let uvs = match vertex_uvs {
+            Some(uvs) => [uvs[face[0]], uvs[face[1]], uvs[face[2]]],
+            None => [[0.0, 0.0]; 3],
+        };
         FaceInstance {
             positions: [p0, p1, p2],
             weights: [w0, w1, w2],
             edge_lods: [1, 1, 1],
             vertex_lods: [1, 1, 1],
+            uvs,
         }
     }).collect();
 
@@ -308,10 +342,11 @@ fn snap_to_power_of_2(v: u32) -> u32 {
 }
 
 impl FaceInstance {
-    /// Pack as 32 f32s (8 vec4s):
-    /// [p0(4), p1(4), p2(4), w0(4), w1(4), w2(4), edgeLods(3)+pad, vertexLods(3)+pad]
-    pub fn to_f32_array(&self) -> [f32; 32] {
-        let mut out = [0.0f32; 32];
+    /// Pack as 40 f32s (10 vec4s = 160 bytes per instance):
+    /// [p0(4), p1(4), p2(4), w0(4), w1(4), w2(4), edgeLods(3)+pad, vertexLods(3)+pad,
+    ///  uv01(u0,v0,u1,v1), uv2(u2,v2,pad,pad)]
+    pub fn to_f32_array(&self) -> [f32; 40] {
+        let mut out = [0.0f32; 40];
         for (i, p) in self.positions.iter().enumerate() {
             out[i*4]   = p.w as f32;
             out[i*4+1] = p.x as f32;
@@ -334,6 +369,16 @@ impl FaceInstance {
         out[29] = self.vertex_lods[1] as f32;
         out[30] = self.vertex_lods[2] as f32;
         out[31] = 0.0;
+        // vec4 #9: UVs for vertices 0 and 1 (u0, v0, u1, v1)
+        out[32] = self.uvs[0][0];
+        out[33] = self.uvs[0][1];
+        out[34] = self.uvs[1][0];
+        out[35] = self.uvs[1][1];
+        // vec4 #10: UVs for vertex 2 + padding (u2, v2, 0, 0)
+        out[36] = self.uvs[2][0];
+        out[37] = self.uvs[2][1];
+        out[38] = 0.0;
+        out[39] = 0.0;
         out
     }
 }

@@ -39,8 +39,12 @@ pub struct SliceLayer {
     /// Per-vertex conformal weights from 4D Möbius: w = (c·q + d).
     /// When no 4D transform, these are all [1,0,0,0] (identity weight).
     pub weights: Vec<[f64; 4]>,
+    /// Per-vertex texture coordinates, interpolated from source mesh. Empty if no UVs.
+    pub uvs: Vec<[f32; 2]>,
     /// Triangle indices.
     pub faces: Vec<[u32; 3]>,
+    /// For each output face, the index of the source face in HyperMesh::faces.
+    pub source_face_indices: Vec<usize>,
 }
 
 /// Complete slice result -- possibly multiple disconnected layers.
@@ -110,6 +114,7 @@ impl HyperplaneSlicer {
         let mut positions: Vec<[f64; 3]> = Vec::new();
         let mut times: Vec<f64> = Vec::new();
         let mut faces: Vec<[u32; 3]> = Vec::new();
+        let mut source_face_indices: Vec<usize> = Vec::new();
 
         // Map from (original_vertex_idx, hit_idx) -> output vertex index
         let mut vertex_map: HashMap<(u32, usize), u32> = HashMap::new();
@@ -134,7 +139,7 @@ impl HyperplaneSlicer {
                 idx
             };
 
-        for face in &mesh.faces {
+        for (face_idx, face) in mesh.faces.iter().enumerate() {
             let [v0, v1, v2] = *face;
             let h0 = &vertex_hits[v0 as usize];
             let h1 = &vertex_hits[v1 as usize];
@@ -182,6 +187,7 @@ impl HyperplaneSlicer {
                     h2[0].1,
                 );
                 faces.push([i0, i1, i2]);
+                source_face_indices.push(face_idx);
                 continue;
             }
 
@@ -242,6 +248,7 @@ impl HyperplaneSlicer {
                             pos2,
                         );
                         faces.push([i0, i1, i2]);
+                        source_face_indices.push(face_idx);
                     }
                 }
             }
@@ -253,7 +260,8 @@ impl HyperplaneSlicer {
 
         // Step 3: group connected triangles into layers via flood fill.
         let default_weights: Vec<[f64; 4]> = vec![[1.0, 0.0, 0.0, 0.0]; positions.len()];
-        let layers = group_into_layers(&positions, &times, &default_weights, &faces);
+        let empty_uvs: Vec<[f32; 2]> = Vec::new();
+        let layers = group_into_layers(&positions, &times, &default_weights, &empty_uvs, &faces, &source_face_indices);
 
         SliceResult { layers }
     }
@@ -275,6 +283,7 @@ impl HyperplaneSlicer {
         let mut times: Vec<f64> = Vec::new();
         let mut weights: Vec<[f64; 4]> = Vec::new();
         let mut faces: Vec<[u32; 3]> = Vec::new();
+        let mut source_face_indices: Vec<usize> = Vec::new();
 
         let mut vert_map: HashMap<[i64; 4], u32> = HashMap::new();
 
@@ -363,7 +372,7 @@ impl HyperplaneSlicer {
         };
 
         // For each face, iterate over all keyframe segments
-        for face in &mesh.faces {
+        for (face_idx, face) in mesh.faces.iter().enumerate() {
             let [v0, v1, v2] = *face;
             let traj0 = &mesh.trajectories[v0 as usize];
             let traj1 = &mesh.trajectories[v1 as usize];
@@ -604,6 +613,7 @@ impl HyperplaneSlicer {
                         &mut positions, &mut times, &mut weights, &mut vert_map);
                     if i0 != i1 && i1 != i2 && i0 != i2 {
                         faces.push([i0, i1, i2]);
+                        source_face_indices.push(face_idx);
                     }
                 }
             }
@@ -613,7 +623,8 @@ impl HyperplaneSlicer {
             return SliceResult { layers: vec![] };
         }
 
-        let layers = group_into_layers(&positions, &times, &weights, &faces);
+        let no_uvs: &[[f32; 2]] = &[];
+        let layers = group_into_layers(&positions, &times, &weights, no_uvs, &faces, &source_face_indices);
         SliceResult { layers }
     }
 }
@@ -623,7 +634,9 @@ fn group_into_layers(
     positions: &[[f64; 3]],
     times: &[f64],
     weights: &[[f64; 4]],
+    uvs: &[[f32; 2]],
     faces: &[[u32; 3]],
+    source_indices: &[usize],
 ) -> Vec<SliceLayer> {
     let num_faces = faces.len();
     if num_faces == 0 {
@@ -673,7 +686,9 @@ fn group_into_layers(
         let mut layer_positions = Vec::new();
         let mut layer_times = Vec::new();
         let mut layer_weights = Vec::new();
+        let mut layer_uvs = Vec::new();
         let mut layer_faces = Vec::new();
+        let mut layer_source_indices = Vec::new();
 
         for &fi in &component_faces {
             let mut new_face = [0u32; 3];
@@ -684,6 +699,7 @@ fn group_into_layers(
                     let nv = layer_positions.len() as u32;
                     layer_positions.push(positions[v as usize]);
                     layer_times.push(times[v as usize]);
+                    if !uvs.is_empty() { layer_uvs.push(uvs[v as usize]); }
                     layer_weights.push(weights[v as usize]);
                     old_to_new.insert(v, nv);
                     nv
@@ -691,13 +707,18 @@ fn group_into_layers(
                 new_face[i] = new_v;
             }
             layer_faces.push(new_face);
+            if fi < source_indices.len() {
+                layer_source_indices.push(source_indices[fi]);
+            }
         }
 
         layers.push(SliceLayer {
             positions: layer_positions,
             times: layer_times,
             weights: layer_weights,
+            uvs: layer_uvs,
             faces: layer_faces,
+            source_face_indices: layer_source_indices,
         });
     }
 

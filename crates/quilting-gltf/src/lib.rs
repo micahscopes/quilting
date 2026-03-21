@@ -6,6 +6,15 @@ pub mod bake;
 
 use std::fmt;
 
+/// Decoded image data from a glTF file.
+#[derive(Debug, Clone)]
+pub struct ImageData {
+    /// RGBA pixel data (always converted to RGBA8).
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// All data extracted from a glTF/GLB file.
 #[derive(Debug)]
 pub struct GltfScene {
@@ -15,6 +24,10 @@ pub struct GltfScene {
     pub skins: Vec<animation::Skin>,
     pub scenes: Vec<scene::Scene>,
     pub nodes: Vec<scene::Node>,
+    /// Decoded images (RGBA8), indexed by glTF image index.
+    pub images: Vec<ImageData>,
+    /// Mapping from glTF texture index to image index.
+    pub texture_to_image: Vec<usize>,
     /// Index of the default scene, if specified in the glTF.
     pub default_scene: Option<usize>,
 }
@@ -55,7 +68,7 @@ impl From<gltf::Error> for GltfError {
 pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
     // Try standard import first, fall back to validation-free parsing
     // to handle files with unsupported required extensions.
-    let (document, buffers, _images) = match gltf::import_slice(data) {
+    let (document, buffers, raw_images) = match gltf::import_slice(data) {
         Ok(result) => result,
         Err(_) => {
             let gltf_obj = gltf::Gltf::from_slice(data)?;
@@ -99,6 +112,51 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
 
     let default_scene = document.default_scene().map(|s| s.index());
 
+    // Convert images to RGBA8
+    let images: Vec<ImageData> = raw_images.iter().map(|img| {
+        let pixels = match img.format {
+            gltf::image::Format::R8G8B8A8 => img.pixels.clone(),
+            gltf::image::Format::R8G8B8 => {
+                let mut rgba = Vec::with_capacity(img.pixels.len() / 3 * 4);
+                for chunk in img.pixels.chunks(3) {
+                    rgba.extend_from_slice(chunk);
+                    rgba.push(255);
+                }
+                rgba
+            }
+            gltf::image::Format::R8G8 => {
+                let mut rgba = Vec::with_capacity(img.pixels.len() / 2 * 4);
+                for chunk in img.pixels.chunks(2) {
+                    rgba.push(chunk[0]);
+                    rgba.push(chunk[1]);
+                    rgba.push(0);
+                    rgba.push(255);
+                }
+                rgba
+            }
+            gltf::image::Format::R8 => {
+                let mut rgba = Vec::with_capacity(img.pixels.len() * 4);
+                for &p in &img.pixels {
+                    rgba.push(p);
+                    rgba.push(p);
+                    rgba.push(p);
+                    rgba.push(255);
+                }
+                rgba
+            }
+            _ => {
+                // For 16-bit or float formats, create a white placeholder
+                vec![255u8; (img.width * img.height * 4) as usize]
+            }
+        };
+        ImageData { pixels, width: img.width, height: img.height }
+    }).collect();
+
+    // Build texture index -> image index mapping
+    let texture_to_image: Vec<usize> = document.textures().map(|tex| {
+        tex.source().index()
+    }).collect();
+
     Ok(GltfScene {
         meshes,
         materials,
@@ -106,6 +164,8 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
         skins,
         scenes,
         nodes,
+        images,
+        texture_to_image,
         default_scene,
     })
 }

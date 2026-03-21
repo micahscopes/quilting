@@ -20,7 +20,7 @@ var<uniform> u: Uniforms;
 
 struct VertexInput {
     @location(0) bary: vec3<f32>,
-    // Per-instance QB control points (8 vec4s = 32 floats per instance)
+    // Per-instance QB control points (10 vec4s = 40 floats per instance)
     @location(1) p0: vec4<f32>,
     @location(2) p1: vec4<f32>,
     @location(3) p2: vec4<f32>,
@@ -29,12 +29,15 @@ struct VertexInput {
     @location(6) w2: vec4<f32>,
     @location(7) lod_info: vec4<f32>,
     @location(8) vert_lod: vec4<f32>,
+    @location(9) uv01: vec4<f32>,    // (u0, v0, u1, v1)
+    @location(10) uv2_pad: vec4<f32>, // (u2, v2, 0, 0)
 }
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
+    @location(2) tex_uv: vec2<f32>,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -84,6 +87,12 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // Density: edge-based interpolation, log-mapped to [0,1]
     let d = edge_density(bary, in.lod_info.xyz);
     out.density = log2(max(d, 1.0)) / 10.0;
+
+    // Interpolate per-vertex UVs with barycentric coordinates
+    let uv0 = in.uv01.xy;
+    let uv1 = in.uv01.zw;
+    let uv2 = in.uv2_pad.xy;
+    out.tex_uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
 
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
     return out;
