@@ -67,7 +67,21 @@ pub fn tri_patch(res: [f64; 3], config: &PatchConfig) -> PatchSample {
     };
     let positions = sampler.sample(density_fn);
     let bary: Vec<[f64; 3]> = positions.iter()
-        .map(|&[x, y]| triangle::cartesian_to_bary(x, y))
+        .map(|&[x, y]| {
+            let mut b = triangle::cartesian_to_bary(x, y);
+            // Snap near-zero bary components to exactly 0.0.
+            // Edge tessellation vertices should have one component exactly zero,
+            // but cartesian_to_bary introduces float epsilon (~1e-16). Near a
+            // Möbius pole, the non-shared vertex's control point is near infinity,
+            // so epsilon * infinity = visible gap between adjacent faces.
+            for c in &mut b {
+                if c.abs() < 1e-10 { *c = 0.0; }
+            }
+            // Renormalize so components sum to exactly 1.0
+            let sum = b[0] + b[1] + b[2];
+            if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
+            b
+        })
         .collect();
 
     PatchSample { positions, bary }

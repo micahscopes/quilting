@@ -1,11 +1,22 @@
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::HashMap;
 
-use crate::delaunay::triangulate_2d_clipped;
+use crate::delaunay::triangulate_2d_filtered;
 use crate::mesh::TessellationMesh;
 use crate::permutation::{canonical_form, remap_position};
 use crate::sampling::{tri_patch, PatchConfig};
 use crate::subdivide;
+
+thread_local! {
+    static SLIVER_THRESHOLD: Cell<f64> = Cell::new(0.0);
+}
+
+/// Set the sliver filter threshold for atlas generation.
+/// 0.0 = no filtering, 0.01 = default, higher = more aggressive.
+pub fn set_sliver_threshold(threshold: f64) {
+    SLIVER_THRESHOLD.with(|t| t.set(threshold));
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatchEntry {
@@ -57,12 +68,15 @@ fn generate_patch(
     key: [u32; 3],
     config: &PatchConfig,
 ) -> Option<(Vec<[f64; 2]>, Vec<[usize; 3]>)> {
+    let threshold = SLIVER_THRESHOLD.with(|t| t.get());
+    // Default 0.0 — the centroid/vertex-outside checks handle bad triangles.
+    // The compactness filter was causing gaps by removing edge-adjacent slivers.
     let res = [key[0] as f64, key[1] as f64, key[2] as f64];
     let sample = tri_patch(res, config);
     if sample.positions.len() < 3 {
         return None;
     }
-    let tri = triangulate_2d_clipped(&sample.positions);
+    let tri = triangulate_2d_filtered(&sample.positions, threshold);
     Some((tri.positions, tri.triangles))
 }
 

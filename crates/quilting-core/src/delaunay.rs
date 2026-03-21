@@ -17,10 +17,15 @@ pub fn triangulate_2d(points: &[[f64; 2]]) -> Triangulation {
     Triangulation { positions: points.to_vec(), triangles }
 }
 
-/// Delaunay triangulation with exterior triangle removal.
-/// Filters out triangles whose centroid falls outside the equilateral
-/// reference triangle — eliminates convex-hull slivers.
+/// Delaunay triangulation with exterior + sliver removal (default threshold 0.01).
 pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
+    triangulate_2d_filtered(points, 0.01)
+}
+
+/// Delaunay triangulation with configurable sliver threshold.
+/// `sliver_threshold`: compactness ratio below which triangles are removed.
+/// 0.0 = keep all interior triangles, 0.01 = default, higher = more aggressive.
+pub fn triangulate_2d_filtered(points: &[[f64; 2]], sliver_threshold: f64) -> Triangulation {
     let mut tri = triangulate_2d(points);
     tri.triangles.retain(|t| {
         let p0 = points[t[0]];
@@ -43,23 +48,21 @@ pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
             return false;
         }
 
-        // Reject slivers using area/perimeter² ratio.
-        // For an equilateral triangle this is ~0.048. For a sliver it approaches 0.
-        // Threshold at 0.01 catches most slivers while keeping decent triangles.
+        if sliver_threshold <= 0.0 {
+            return true;
+        }
+
         let e0_sq = (p1[0]-p0[0]).powi(2) + (p1[1]-p0[1]).powi(2);
         let e1_sq = (p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2);
         let e2_sq = (p0[0]-p2[0]).powi(2) + (p0[1]-p2[1]).powi(2);
 
-        // Signed area × 2
         let area2 = ((p1[0]-p0[0]) * (p2[1]-p0[1]) - (p2[0]-p0[0]) * (p1[1]-p0[1])).abs();
         let perimeter = e0_sq.sqrt() + e1_sq.sqrt() + e2_sq.sqrt();
 
         if perimeter < 1e-15 { return false; }
 
         let compactness = area2 / (perimeter * perimeter);
-        // Equilateral: area2/(perim²) ≈ 0.096. Reject below 0.01.
-        compactness > 0.01
-
+        compactness > sliver_threshold
     });
     tri
 }

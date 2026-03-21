@@ -62,6 +62,9 @@ input[type=range]{flex:1;accent-color:#e94560}
   <div><label>Sphere radius</label>
     <div class="sr"><input type="range" id="sr" min="0" max="50" value="20"><span class="v" id="sr-v">2.0</span></div>
   </div>
+  <div><label>Sliver filter</label>
+    <div class="sr"><input type="range" id="sliver" min="0" max="100" value="10"><span class="v" id="sliver-v">0.010</span></div>
+  </div>
   <div class="stats" id="stats">Loading WASM...</div>
 </div>
 <div id="wrap"><canvas id="cv"></canvas></div>
@@ -703,6 +706,25 @@ for (const b of document.querySelectorAll('#atlas-btns button'))
   };
 for (const id of ['res','sx','sy','sz','sr'])
   $(id).addEventListener('input', update);
+let sliverDebounce = null, sliverRebuilding = false;
+$('sliver').addEventListener('input', () => {
+  $('sliver-v').textContent = ($('sliver').value / 1000).toFixed(3);
+  clearTimeout(sliverDebounce);
+  if (sliverRebuilding) return;
+  sliverDebounce = setTimeout(async () => {
+    sliverRebuilding = true;
+    const v = $('sliver').value / 1000;
+    await workerCall('set_sliver', { threshold: v });
+    $('stats').textContent = 'Rebuilding atlas...';
+    const mode = document.querySelector('#atlas-btns .a')?.dataset.v || 'hierarchical';
+    const maxExp = mode === 'direct' ? 8 : 10;
+    tessCache.clear(); vaoCache.clear();
+    await workerCall('build_atlas', { maxLodExp: maxExp, mode });
+    sliverRebuilding = false;
+    $('stats').textContent = 'Atlas rebuilt';
+    update();
+  }, 500);
+});
 
 let drag=false, lx=0, ly=0;
 canvas.onmousedown = e => { drag=true; lx=e.clientX; ly=e.clientY; };

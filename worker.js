@@ -15,6 +15,12 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'set_sliver') {
+    wasm.set_sliver_threshold(data.threshold);
+    self.postMessage({ type: 'sliver_set', id });
+    return;
+  }
+
   if (type === 'build_atlas') {
     // Build the full atlas for this worker's LOD range
     const { maxLodExp, mode } = data;

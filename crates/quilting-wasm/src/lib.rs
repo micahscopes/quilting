@@ -35,6 +35,13 @@ struct CachedMesh {
 /// Build the tessellation atlas client-side. Call once at init.
 /// max_lod_exp: build LODs from 2^0 to 2^max_lod_exp (e.g., 8 → up to 256)
 /// mode: "direct" or "hierarchical"
+/// Set the sliver filter threshold. 0.0 = no filtering, 0.01 = default.
+/// Must call build_atlas after changing to take effect.
+#[wasm_bindgen]
+pub fn set_sliver_threshold(threshold: f64) {
+    quilting_core::atlas::set_sliver_threshold(threshold);
+}
+
 #[wasm_bindgen]
 pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     let config = PatchConfig { k_candidates: 30, seed: 42 };
@@ -334,7 +341,12 @@ pub fn compute_mesh_batches(
                 // have bit-identical bary coords across adjacent faces.
                 let bary: Vec<f64> = mesh.positions.iter().map(|p| {
                     let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
-                    triangle::cartesian_to_bary(remapped[0], remapped[1])
+                    let mut b = triangle::cartesian_to_bary(remapped[0], remapped[1]);
+                    // Snap near-zero bary to exact 0.0 — prevents epsilon * infinity gaps at Möbius poles
+                    for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
+                    let sum = b[0] + b[1] + b[2];
+                    if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
+                    b
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect();
 
                 let tris: Vec<u32> = mesh.triangles.iter()
