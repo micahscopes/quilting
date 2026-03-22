@@ -317,6 +317,7 @@ pub fn compute_mesh_batches(
                 instances_xform: xform_data,
                 tess_bary: bary_data,
                 tess_triangles: tess_tris,
+                face_indices: face_indices.iter().map(|&i| i as u32).collect(),
                 num_faces: face_indices.len(),
                 verts_per_face: n_verts,
                 tris_per_face: n_tris,
@@ -356,6 +357,7 @@ struct BatchData {
     instances_xform: Vec<f32>,
     tess_bary: Vec<f64>,
     tess_triangles: Vec<u32>,
+    face_indices: Vec<u32>, // original mesh face indices for pick identification
     num_faces: usize,
     verts_per_face: usize,
     tris_per_face: usize,
@@ -1417,6 +1419,7 @@ pub fn slice_and_transform(
         parity: i32,
         perm_index: usize,
         material_index: i32,
+        face_indices: Vec<u32>,
         num_faces: usize,
         n_verts: usize,
         n_tris: usize,
@@ -1510,6 +1513,9 @@ pub fn slice_and_transform(
                 parity,
                 perm_index,
                 material_index: mat_idx,
+                face_indices: face_indices.iter().map(|&i| {
+                    if i < source_faces.len() { source_faces[i] as u32 } else { i as u32 }
+                }).collect(),
                 num_faces: face_indices.len(),
                 n_verts, n_tris,
                 orig_data, xform_data, bary_data, tess_tris,
@@ -1538,6 +1544,7 @@ pub fn slice_and_transform(
         s("instances_xform", js_sys::Float32Array::from(&b.xform_data[..]).into());
         s("tess_bary", js_sys::Float64Array::from(&b.bary_data[..]).into());
         s("tess_triangles", js_sys::Uint32Array::from(&b.tess_tris[..]).into());
+        s("face_indices", js_sys::Uint32Array::from(&b.face_indices[..]).into());
         js_batches.push(&obj);
     }
 

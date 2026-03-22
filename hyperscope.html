@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>Hyperscope — Spacetime + Conformal</title>
+<!-- trunk: build minimal stub so trunk has a Rust target (real WASM via wasm-pack hook) -->
+<link data-trunk rel="rust" href="crates/trunk-stub" data-wasm-opt="0" />
 <!-- trunk asset directives -->
 <link data-trunk rel="copy-dir" href="pkg" />
 <link data-trunk rel="copy-dir" href="envmaps" />
@@ -11,7 +13,9 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'SF Mono','Consolas',monospace;background:#0d1117;color:#c9d1d9;display:flex;height:100vh;overflow:hidden}
-#sidebar{width:260px;padding:14px;background:rgba(22,27,34,0.96);border-right:1px solid #30363d;display:flex;flex-direction:column;gap:10px;flex-shrink:0;overflow-y:auto}
+#sidebar{width:260px;padding:14px;background:rgba(22,27,34,0.96);border-left:1px solid #30363d;display:flex;flex-direction:column;gap:10px;flex-shrink:0;overflow-y:auto;order:1;transition:margin-right 0.2s}
+#sidebar.collapsed{margin-right:-260px}
+#sidebar-toggle{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:100;background:rgba(22,27,34,0.9);border:1px solid #30363d;border-right:none;color:#58a6ff;cursor:pointer;padding:8px 4px;font-size:14px;border-radius:4px 0 0 4px}
 h1{font-size:15px;color:#58a6ff;letter-spacing:2px}
 .sub{font-size:10px;color:#484f58;margin-top:2px}
 label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:3px}
@@ -188,6 +192,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="stats" id="stats">Loading WASM...</div>
 </div>
+<button id="sidebar-toggle" onclick="document.getElementById('sidebar').classList.toggle('collapsed');this.textContent=document.getElementById('sidebar').classList.contains('collapsed')?'◀':'▶'">▶</button>
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div id="drop-overlay"><span>Drop .glb / .gltf file here</span></div>
@@ -1312,6 +1317,71 @@ function buildFaceLookup() {
 }
 
 let pickInfoEl = null;
+let isolatedFace = null; // {batchIdx, localIdx, vao, numTriIdx, numLineIdx} when isolating a face
+let isolateVAO = null, isolateLinVAO = null;
+
+function isolateFace(batchIdx, localIdx) {
+  const b = drawBatches[batchIdx];
+  const faceData = b.instanceData.slice(localIdx * 52, (localIdx + 1) * 52);
+
+  // Get the tess buffers for this batch
+  const tessKey = b.lod.join(',') + '/' + (b.permIndex || 0);
+  const tess = tessCache.get(tessKey);
+  if (!tess) return;
+
+  // Create a single-instance VAO for triangles
+  if (isolateVAO) gl.deleteVertexArray(isolateVAO);
+  isolateVAO = gl.createVertexArray();
+  gl.bindVertexArray(isolateVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, tess.baryBuf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  const ibuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ibuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(faceData), gl.STATIC_DRAW);
+  for (let i = 0; i < 13; i++) {
+    gl.enableVertexAttribArray(1+i);
+    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
+    gl.vertexAttribDivisor(1+i, 1);
+  }
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tess.triIdxBuf);
+  gl.bindVertexArray(null);
+
+  // Create a single-instance VAO for wireframe
+  if (isolateLinVAO) gl.deleteVertexArray(isolateLinVAO);
+  isolateLinVAO = gl.createVertexArray();
+  gl.bindVertexArray(isolateLinVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, tess.baryBuf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, ibuf); // reuse same instance buffer
+  for (let i = 0; i < 13; i++) {
+    gl.enableVertexAttribArray(1+i);
+    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
+    gl.vertexAttribDivisor(1+i, 1);
+  }
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tess.lineIdxBuf);
+  gl.bindVertexArray(null);
+
+  isolatedFace = {
+    batchIdx, localIdx,
+    numTriIdx: tess.numTriIdx,
+    numLineIdx: tess.numLineIdx,
+    parity: b.parity,
+    permIndex: b.permIndex,
+  };
+  render();
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && isolatedFace) {
+    isolatedFace = null;
+    if (pickInfoEl) pickInfoEl.style.display = 'none';
+    const overlay = document.getElementById('tess-overlay');
+    if (overlay) overlay.style.display = 'none';
+    render();
+  }
+});
 function showPickInfo(x, y) {
   if (!pickFBO) return;
   gl.bindFramebuffer(gl.FRAMEBUFFER, pickFBO);
@@ -1384,8 +1454,10 @@ function showPickInfo(x, y) {
   const sLenB = screenLen(xp0, xp2);
   const sLenC = screenLen(xp0, xp1);
 
+  if (!b._logged) { console.log('Batch keys:', Object.keys(b), 'faceIndices:', b.faceIndices, 'length:', b.faceIndices?.length); b._logged = true; }
+  const origFaceIdx = b.faceIndices && b.faceIndices[face.localIdx];
   const info = [
-    `Face #${id} (batch ${face.batchIdx}, local ${face.localIdx})`,
+    `Instance #${id} → mesh face ${origFaceIdx ?? '?'} (batch ${face.batchIdx}, local ${face.localIdx})`,
     `Batch LOD: [${face.lod.join(', ')}]`,
     `Edge LODs: [${edgeLods.map(l=>l.toFixed(0)).join(', ')}]`,
     `Perm: idx=${face.permIndex} parity=${face.parity}`,
@@ -1396,22 +1468,184 @@ function showPickInfo(x, y) {
     `edge_b (v0→v2): LOD=${edgeLods[1].toFixed(0)} world=${lenB.toFixed(4)} screen=${sLenB}px`,
     `edge_c (v0→v1): LOD=${edgeLods[2].toFixed(0)} world=${lenC.toFixed(4)} screen=${sLenC}px`,
     ``,
-    `--- Control points (orig) ---`,
+    `--- Control points (pre-Möbius) ---`,
     `p0: (${p0.map(v=>v.toFixed(4)).join(', ')})`,
     `p1: (${p1.map(v=>v.toFixed(4)).join(', ')})`,
     `p2: (${p2.map(v=>v.toFixed(4)).join(', ')})`,
+    `--- Control points (post-Möbius) ---`,
+    `p0': (${xp0.map(v=>v.toFixed(4)).join(', ')})`,
+    `p1': (${xp1.map(v=>v.toFixed(4)).join(', ')})`,
+    `p2': (${xp2.map(v=>v.toFixed(4)).join(', ')})`,
+    `--- Screen positions (px) ---`,
+    `s0: (${(projectPt(xp0)||['?','?']).map(v=>typeof v==='number'?v.toFixed(1):v).join(', ')})`,
+    `s1: (${(projectPt(xp1)||['?','?']).map(v=>typeof v==='number'?v.toFixed(1):v).join(', ')})`,
+    `s2: (${(projectPt(xp2)||['?','?']).map(v=>typeof v==='number'?v.toFixed(1):v).join(', ')})`,
     ``,
     `Tess bary: (${baryX.toFixed(3)}, ${baryY.toFixed(3)}, ${baryZ.toFixed(3)})`,
   ].join('\n');
 
   if (!pickInfoEl) {
     pickInfoEl = document.createElement('pre');
-    pickInfoEl.style.cssText = 'position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.85);color:#0f0;padding:10px;font:12px monospace;z-index:9999;pointer-events:none;border:1px solid #0f0;border-radius:4px;';
+    pickInfoEl.style.cssText = 'position:fixed;top:10px;left:10px;background:rgba(0,0,0,0.85);color:#0f0;padding:10px;font:12px monospace;z-index:9999;pointer-events:none;border:1px solid #0f0;border-radius:4px;';
     document.body.appendChild(pickInfoEl);
   }
   pickInfoEl.style.display = 'block';
   pickInfoEl.textContent = info;
   console.log('Pick:', info.replace(/\n/g, ' | '));
+
+  // Isolate this face
+  isolateFace(face.batchIdx, face.localIdx);
+
+  // Dump full tessellation for this batch
+  const tessKey = b.lod.join(',') + '/' + (b.permIndex || 0);
+  const tess = tessCache.get(tessKey);
+  if (tess) {
+    // Draw tessellation overlay on a temporary canvas
+    let overlay = document.getElementById('tess-overlay');
+    if (!overlay) {
+      overlay = document.createElement('canvas');
+      overlay.id = 'tess-overlay';
+      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9998;';
+      document.body.appendChild(overlay);
+    }
+    overlay.width = canvas.width;
+    overlay.height = canvas.height;
+    overlay.style.display = 'block';
+    const ctx = overlay.getContext('2d');
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    const sp0 = projectPt(xp0), sp1 = projectPt(xp1), sp2 = projectPt(xp2);
+    if (sp0 && sp1 && sp2) {
+      // Quaternion math for QB Möbius evaluation (matches vertex shader)
+      const qm = (a,b) => [
+        a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3],
+        a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],
+        a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1],
+        a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0]];
+      const qa = (a,b) => [a[0]+b[0],a[1]+b[1],a[2]+b[2],a[3]+b[3]];
+      const qs = (a,s) => [a[0]*s,a[1]*s,a[2]*s,a[3]*s];
+      const qi = (q) => { const d=q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]; return [q[0]/d,-q[1]/d,-q[2]/d,-q[3]/d]; };
+
+      // Read original control points + weights as quaternions [w,x,y,z]
+      const q0 = [orig[off+0], orig[off+1], orig[off+2], orig[off+3]];
+      const q1 = [orig[off+4], orig[off+5], orig[off+6], orig[off+7]];
+      const q2 = [orig[off+8], orig[off+9], orig[off+10], orig[off+11]];
+      const wt0 = [orig[off+12], orig[off+13], orig[off+14], orig[off+15]];
+      const wt1 = [orig[off+16], orig[off+17], orig[off+18], orig[off+19]];
+      const wt2 = [orig[off+20], orig[off+21], orig[off+22], orig[off+23]];
+
+      // Möbius-fused QB evaluation (same as vertex shader eval_mobius_qb)
+      const ma = mob.a, mb = mob.b, mc = mob.c, md = mob.d;
+      const pw0 = qm(qa(qm(ma,q0),mb), wt0);
+      const pw1 = qm(qa(qm(ma,q1),mb), wt1);
+      const pw2 = qm(qa(qm(ma,q2),mb), wt2);
+      const bw0 = qm(qa(qm(mc,q0),md), wt0);
+      const bw1 = qm(qa(qm(mc,q1),md), wt1);
+      const bw2 = qm(qa(qm(mc,q2),md), wt2);
+
+      const evalQB = (bu, bv, bw) => {
+        const top = qa(qa(qs(pw0,bu), qs(pw1,bv)), qs(pw2,bw));
+        const bot = qa(qa(qs(bw0,bu), qs(bw1,bv)), qs(bw2,bw));
+        const X = qm(top, qi(bot));
+        return [X[1], X[2], X[3]];
+      };
+
+      const baryToScreen = (bu, bv, bw) => projectPt(evalQB(bu, bv, bw));
+
+      // Draw full tessellation mesh if we have the raw data
+      if (tess.rawBary && tess.rawTris) {
+        const nv = tess.rawBary.length / 3;
+        const screenVerts = [];
+        for (let i = 0; i < nv; i++) {
+          const bu = tess.rawBary[i*3], bv = tess.rawBary[i*3+1], bw = tess.rawBary[i*3+2];
+          screenVerts.push(baryToScreen(bu, bv, bw));
+        }
+        // Draw tess triangles
+        ctx.strokeStyle = 'rgba(0,255,255,0.4)';
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i < tess.rawTris.length; i += 3) {
+          const a = screenVerts[tess.rawTris[i]];
+          const b = screenVerts[tess.rawTris[i+1]];
+          const c = screenVerts[tess.rawTris[i+2]];
+          if (!a || !b || !c) continue;
+          ctx.beginPath();
+          ctx.moveTo(a[0], a[1]);
+          ctx.lineTo(b[0], b[1]);
+          ctx.lineTo(c[0], c[1]);
+          ctx.closePath();
+          ctx.stroke();
+        }
+        // Highlight corner-spanning triangles (two verts with any bary > 0.98)
+        for (let i = 0; i < tess.rawTris.length; i += 3) {
+          const idxs = [tess.rawTris[i], tess.rawTris[i+1], tess.rawTris[i+2]];
+          let corners = 0;
+          for (const vi of idxs) {
+            const bu = tess.rawBary[vi*3], bv = tess.rawBary[vi*3+1], bw = tess.rawBary[vi*3+2];
+            if (bu > 0.98 || bv > 0.98 || bw > 0.98) corners++;
+          }
+          if (corners >= 2) {
+            const a = screenVerts[idxs[0]], b = screenVerts[idxs[1]], c = screenVerts[idxs[2]];
+            if (!a || !b || !c) continue;
+            ctx.strokeStyle = '#f00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(a[0], a[1]);
+            ctx.lineTo(b[0], b[1]);
+            ctx.lineTo(c[0], c[1]);
+            ctx.closePath();
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(255,0,0,0.15)';
+            ctx.fill();
+          }
+        }
+        console.log(`Tess: ${nv} verts, ${tess.rawTris.length/3} tris`);
+      }
+
+      // QB-evaluated vertex positions (should match GPU exactly)
+      const qv0 = baryToScreen(1,0,0), qv1 = baryToScreen(0,1,0), qv2 = baryToScreen(0,0,1);
+
+      // Draw face outline with LOD colors using QB positions
+      const drawEdge = (a, b, lod, label) => {
+        if (!a || !b) return;
+        ctx.strokeStyle = lod <= 2 ? '#f00' : lod <= 8 ? '#fa0' : '#0f0';
+        ctx.lineWidth = lod <= 2 ? 3 : 1;
+        ctx.beginPath();
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+        ctx.stroke();
+        const mx = (a[0]+b[0])/2, my = (a[1]+b[1])/2;
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.font = '12px monospace';
+        ctx.fillText(`${label} LOD=${lod.toFixed(0)}`, mx+5, my);
+      };
+      drawEdge(qv1, qv2, edgeLods[0], 'e_a');
+      drawEdge(qv0, qv2, edgeLods[1], 'e_b');
+      drawEdge(qv0, qv1, edgeLods[2], 'e_c');
+
+      // Label vertices with QB positions
+      ctx.fillStyle = '#ff0';
+      ctx.font = '13px monospace';
+      if (qv0) ctx.fillText(`v0`, qv0[0]+5, qv0[1]-5);
+      if (qv1) ctx.fillText(`v1`, qv1[0]+5, qv1[1]-5);
+      if (qv2) ctx.fillText(`v2`, qv2[0]+5, qv2[1]-5);
+
+      // Mark clicked point
+      const clickScreen = baryToScreen(baryX, baryY, baryZ);
+      ctx.beginPath();
+      ctx.arc(clickScreen[0], clickScreen[1], 6, 0, Math.PI*2);
+      ctx.fillStyle = '#f0f';
+      ctx.fill();
+
+      // Log Möbius transform
+      console.log('Möbius:', JSON.stringify(mob));
+      console.log('Control points (pre):', {p0, p1, p2});
+      console.log('Control points (post):', {xp0, xp1, xp2});
+      console.log('Screen positions:', {sp0, sp1, sp2});
+    }
+
+    // Auto-hide after 10 seconds
+    setTimeout(() => { overlay.style.display = 'none'; }, 10000);
+  }
 }
 
 let matcapTex = null;
@@ -1507,7 +1741,10 @@ function getTessBuffers(batch) {
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triIdxBuf);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(tris), gl.STATIC_DRAW);
 
-  const entry = { baryBuf, lineIdxBuf, triIdxBuf, numLineIdx: lines.length, numTriIdx: tris.length };
+  const entry = { baryBuf, lineIdxBuf, triIdxBuf, numLineIdx: lines.length, numTriIdx: tris.length,
+    rawBary: new Float32Array(bary),  // keep JS copy for pick overlay
+    rawTris: new Uint32Array(tris),
+  };
   tessCache.set(key, entry);
   return entry;
 }
@@ -1622,6 +1859,7 @@ function uploadBatches(data) {
       materialIndex: batch.material_index ?? -1,
       instanceData: new Float32Array(gpuData),  // keep for picker
       xformData: new Float32Array(xf),          // keep xform for picker
+      faceIndices: batch.face_indices || batch.faceIndices || [],     // original mesh face indices
     });
   }
 
@@ -1651,9 +1889,9 @@ function render() {
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-  const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
+  const ex=zoom*Math.sin(rotY)*Math.cos(rotX)+panX, ey=zoom*Math.sin(rotX)+panY, ez=zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
   const camPos = [ex, ey, ez];
-  const view = lookAt(ex,ey,ez,0,0,0,0,1,0);
+  const view = lookAt(ex,ey,ez,panX,panY,panZ,0,1,0);
   const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.01,10000);
   const mvp = mulM4(proj, view);
 
@@ -1665,6 +1903,34 @@ function render() {
   const drawMatcap = renderMode === 'matcap';
   const drawNormals = renderMode === 'normals';
   const drawPbr = renderMode === 'pbr';
+
+  // --- Isolated face mode: draw only the picked face ---
+  if (isolatedFace && isolateVAO) {
+    const iso = isolatedFace;
+    // Draw all batches dimmed first
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(progNormals);
+    for (const b of drawBatches) {
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      gl.bindVertexArray(b.vaoXformTri);
+      gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
+    }
+    // Draw isolated face solid (PBR or matcap)
+    gl.clear(gl.DEPTH_BUFFER_BIT); // render on top
+    const prog = progPbr || progMatcap;
+    gl.useProgram(prog);
+    uploadVertexUBO(mvp, view, iso.parity, iso.permIndex, 1, camPos);
+    gl.bindVertexArray(isolateVAO);
+    gl.drawElementsInstanced(gl.TRIANGLES, iso.numTriIdx, gl.UNSIGNED_INT, 0, 1);
+    // Draw wireframe of isolated face
+    gl.useProgram(progWire);
+    uploadVertexUBO(mvp, view, iso.parity, iso.permIndex, 1, camPos);
+    uploadWireUBO([0, 1, 1], true);
+    gl.bindVertexArray(isolateLinVAO);
+    gl.drawElementsInstanced(gl.LINES, iso.numLineIdx, gl.UNSIGNED_INT, 0, 1);
+    return; // skip normal rendering
+  }
 
   // PBR pass — per-material draw calls
   if (drawPbr && progPbr) {
@@ -1834,12 +2100,16 @@ function updateDebounced() {
   lodDebounce = setTimeout(update, 150);
 }
 
-// Möbius-only update: just recompute uniforms + render. No worker.
+// Möbius update: recompute uniforms + render immediately, then debounce
+// a worker call to recompute LODs for the new Möbius transform.
+let mobiusDebounce = null;
 function updateMobius() {
   const { mx, my, mz, mr } = getTransformParams();
   const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
   mob = computeMobius(tType, mx, my, mz, mr);
   render();
+  clearTimeout(mobiusDebounce);
+  mobiusDebounce = setTimeout(update, 150);
 }
 
 async function update() {
@@ -1961,12 +2231,33 @@ async function update() {
   if (pendingUpdate) { pendingUpdate = false; update(); }
 }
 
-// --- Mouse orbit ---
-let drag=false, lx=0, ly=0;
+// --- Mouse orbit + pan ---
+let drag=false, lx=0, ly=0, panX=0, panY=0, panZ=0;
 canvas.onmousedown = e => { drag=true; lx=e.clientX; ly=e.clientY; };
 onmouseup = () => drag=false;
 let camDebounce = null;
-onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.clientY-ly)*0.01; lx=e.clientX; ly=e.clientY; render(); clearTimeout(camDebounce); camDebounce=setTimeout(update, 150); };
+onmousemove = e => {
+  if(!drag)return;
+  const dx=e.clientX-lx, dy=e.clientY-ly;
+  lx=e.clientX; ly=e.clientY;
+  if (e.shiftKey) {
+    // Pan in screen plane: compute right and up vectors from camera orientation
+    const right = [Math.cos(rotY), 0, -Math.sin(rotY)];
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+    const up = [-Math.sin(rotY)*sinX, cosX, -Math.cos(rotY)*sinX];
+    const s = 0.003 * zoom;
+    panX -= (dx * right[0] + dy * up[0]) * s;
+    panY -= (dx * right[1] + dy * up[1]) * s;
+    // panZ would need a 3rd component — fold into panX/panY for now
+    // Actually use full 3D pan target
+    if (typeof panZ === 'undefined') window.panZ = 0;
+    panZ -= (dx * right[2] + dy * up[2]) * s;
+  } else {
+    rotY+=dx*0.01; rotX+=dy*0.01;
+  }
+  render();
+  clearTimeout(camDebounce); camDebounce=setTimeout(update, 150);
+};
 canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); update(); e.preventDefault(); };
 // Pick: ctrl+click to inspect face under cursor
 canvas.onclick = e => {
@@ -1974,10 +2265,10 @@ canvas.onclick = e => {
   const rect = canvas.getBoundingClientRect();
   const x = (e.clientX - rect.left) * (canvas.width / rect.width) | 0;
   const y = (e.clientY - rect.top) * (canvas.height / rect.height) | 0;
-  // Render pick pass with current camera
-  const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
+  // Render pick pass with current camera (must match render's camera including pan)
+  const ex=zoom*Math.sin(rotY)*Math.cos(rotX)+panX, ey=zoom*Math.sin(rotX)+panY, ez=zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
   const camPos = [ex, ey, ez];
-  const view = lookAt(ex,ey,ez,0,0,0,0,1,0);
+  const view = lookAt(ex,ey,ez,panX,panY,panZ,0,1,0);
   const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.01,10000);
   const mvp = mulM4(proj, view);
   renderPickPass(mvp, view, camPos);
