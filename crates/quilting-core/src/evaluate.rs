@@ -438,23 +438,14 @@ impl FaceInstance {
         out
     }
 
-    /// Pack with UVs and normals reordered to match a permuted tessellation.
+    /// Pack for a permuted tessellation batch.
     ///
-    /// When the tessellation bary coords are CPU-remapped by `remap_position(perm_index, ...)`,
-    /// the UV and normal corners must be permuted to match. Empirically verified:
-    /// without this permutation, textures visibly break under conformal inversion
-    /// on faces with non-identity perm_index.
-    pub fn to_f32_array_permuted(&self, perm_index: usize) -> [f32; 52] {
-        if perm_index == 0 {
-            return self.to_f32_array();
-        }
-        let mut out = self.to_f32_array();
-        let perm = crate::permutation::S3_PERMUTATIONS[perm_index];
-        let permuted_uvs = [self.uvs[perm[0]], self.uvs[perm[1]], self.uvs[perm[2]]];
-        let permuted_normals = [self.normals[perm[0]], self.normals[perm[1]], self.normals[perm[2]]];
-        self.pack_uvs(&mut out, &permuted_uvs);
-        self.pack_normals(&mut out, &permuted_normals);
-        out
+    /// UVs and normals are NOT permuted — the CPU-remapped tessellation bary
+    /// coords already produce correct weights for the original UV/normal corners.
+    /// Permuting them causes visible orientation jumps when perm_index changes
+    /// (e.g., when adjusting Möbius parameters causes LOD redistribution).
+    pub fn to_f32_array_permuted(&self, _perm_index: usize) -> [f32; 52] {
+        self.to_f32_array()
     }
 
     fn pack_uvs(&self, out: &mut [f32; 52], uvs: &[[f32; 2]; 3]) {
