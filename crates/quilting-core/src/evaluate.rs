@@ -330,6 +330,7 @@ pub fn compute_instances_with_uvs(
 /// alternating between LOD 16 and LOD 32).
 fn snap_to_power_of_2(v: u32) -> u32 {
     if v <= 1 { return 1; }
+    if v >= (1 << 30) { return 1 << 30; } // prevent overflow
     let mut p = 1u32;
     while p < v { p *= 2; }
     // p is now the next power of 2 >= v. p/2 is the one below.
