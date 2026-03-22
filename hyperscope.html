@@ -562,6 +562,20 @@ function sampleEquirect(hdr, dx, dy, dz) {
   return [hdr.data[idx], hdr.data[idx+1], hdr.data[idx+2]];
 }
 
+// Float32 → Float16 conversion
+const f32 = new Float32Array(1);
+const u32 = new Uint32Array(f32.buffer);
+function toFloat16(val) {
+  f32[0] = val;
+  const bits = u32[0];
+  const sign = (bits >> 16) & 0x8000;
+  const exp = ((bits >> 23) & 0xff) - 127 + 15;
+  const frac = bits & 0x7fffff;
+  if (exp <= 0) return sign; // underflow to zero
+  if (exp >= 31) return sign | 0x7c00; // overflow to inf
+  return sign | (exp << 10) | (frac >> 13);
+}
+
 // Convert equirectangular HDR to a cubemap texture (RGBA16F for HDR values)
 function hdrToCubemap(hdr, faceSize) {
   const cubemap = gl.createTexture();
@@ -591,8 +605,19 @@ function hdrToCubemap(hdr, faceSize) {
         pixels[idx] = r; pixels[idx+1] = g; pixels[idx+2] = b; pixels[idx+3] = 1;
       }
     }
-    gl.texImage2D(faces[fi], 0, gl.RGBA16F, faceSize, faceSize, 0, gl.RGBA, gl.FLOAT, pixels);
+    // Tone-map to RGBA8 for maximum compatibility (Reinhard per channel)
+    const u8 = new Uint8Array(faceSize * faceSize * 4);
+    for (let j = 0; j < faceSize * faceSize; j++) {
+      for (let ch = 0; ch < 3; ch++) {
+        const v = pixels[j * 4 + ch];
+        const mapped = v / (v + 1.0); // Reinhard
+        u8[j * 4 + ch] = Math.min(Math.pow(mapped, 1/2.2) * 255, 255) | 0; // gamma
+      }
+      u8[j * 4 + 3] = 255;
+    }
+    gl.texImage2D(faces[fi], 0, gl.RGBA, faceSize, faceSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, u8);
   }
+  // Half-float linear filtering (widely supported in WebGL2)
   gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -608,7 +633,14 @@ async function loadEnvMap(url) {
   const resp = await fetch(url);
   const buffer = await resp.arrayBuffer();
   const hdr = parseHDR(buffer);
-  console.log(`HDR parsed: ${hdr.width}x${hdr.height}`);
+  // Check HDR data validity
+  let minV = Infinity, maxV = -Infinity, nonZero = 0;
+  for (let i = 0; i < Math.min(hdr.data.length, 10000); i++) {
+    const v = hdr.data[i];
+    if (v > 0) nonZero++;
+    minV = Math.min(minV, v); maxV = Math.max(maxV, v);
+  }
+  console.log(`HDR parsed: ${hdr.width}x${hdr.height}, range [${minV.toFixed(4)}, ${maxV.toFixed(4)}], ${nonZero}/10000 non-zero`);
 
   if (envCubemap) gl.deleteTexture(envCubemap);
   if (envIrradiance) gl.deleteTexture(envIrradiance);
