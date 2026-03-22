@@ -62,6 +62,12 @@ var occlusion_tex: texture_2d<f32>;
 @group(0) @binding(11)
 var occlusion_sampler: sampler;
 
+// Sheen E LUT (directional albedo of Charlie distribution)
+@group(0) @binding(16)
+var sheen_e_lut: texture_2d<f32>;
+@group(0) @binding(17)
+var sheen_e_sampler: sampler;
+
 // Environment cubemaps for IBL
 @group(0) @binding(12)
 var env_prefiltered: texture_cube<f32>;
@@ -261,10 +267,10 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
         let f_sheen = f_sheen_key + f_sheen_fill + f_sheen_env;
 
-        // Energy conservation: attenuate base layer by sheen albedo
-        // Approximate E_sheen ≈ 0.45 * sheen_roughness (no LUT)
+        // Energy conservation: attenuate base layer by sheen directional albedo (from LUT)
         let max_sheen = max(sheen_col.x, max(sheen_col.y, sheen_col.z));
-        let albedo_sheen_scaling = 1.0 - max_sheen * sheen_r * 0.45;
+        let e_sheen = textureSample(sheen_e_lut, sheen_e_sampler, vec2<f32>(n_dot_v, sheen_r)).r;
+        let albedo_sheen_scaling = 1.0 - max_sheen * e_sheen;
 
         color = f_sheen + color * albedo_sheen_scaling;
     }

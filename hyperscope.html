@@ -651,6 +651,61 @@ async function loadEnvMap(url) {
   render();
 }
 
+// Generate sheen E LUT — 2D texture indexed by (NdotV, sheenRoughness).
+// Stores the directional albedo of the Charlie sheen distribution.
+let sheenELut = null;
+function generateSheenELut() {
+  const size = 64;
+  const data = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const roughness = (y + 0.5) / size;
+    const alphaG = roughness * roughness;
+    const invAlpha = 1.0 / Math.max(alphaG, 0.0001);
+    for (let x = 0; x < size; x++) {
+      const NdotV = (x + 0.5) / size;
+      // Numerical integration of Charlie BRDF over hemisphere
+      // E(NdotV, roughness) = ∫ D_charlie * V_ashikhmin * NdotL dω
+      const nSamples = 32;
+      let sum = 0;
+      for (let i = 0; i < nSamples; i++) {
+        for (let j = 0; j < nSamples; j++) {
+          const phi = 2 * Math.PI * (i + 0.5) / nSamples;
+          const cosTheta = (j + 0.5) / nSamples;
+          const sinTheta = Math.sqrt(1 - cosTheta * cosTheta);
+          // NdotL for this sample
+          const NdotL = cosTheta;
+          if (NdotL <= 0) continue;
+          // Half vector NdotH (approximation for isotropic)
+          // For a given V and L, H = normalize(V+L)
+          // V = (sinV, 0, NdotV), L = (sinTheta*cos(phi), sinTheta*sin(phi), cosTheta)
+          const sinV = Math.sqrt(1 - NdotV * NdotV);
+          const Hx = sinV + sinTheta * Math.cos(phi);
+          const Hy = sinTheta * Math.sin(phi);
+          const Hz = NdotV + cosTheta;
+          const Hlen = Math.sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
+          const NdotH = Hz / Math.max(Hlen, 0.0001);
+          // Charlie D
+          const sin2H = 1 - NdotH * NdotH;
+          const D = (2 + invAlpha) / (2 * Math.PI) * Math.pow(Math.max(sin2H, 1e-6), 0.5 * invAlpha);
+          // Ashikhmin V
+          const V = 1 / (4 * (NdotL + NdotV - NdotL * NdotV) + 0.001);
+          sum += D * V * NdotL * sinTheta;
+        }
+      }
+      const E = sum * (2 * Math.PI / (nSamples * nSamples));
+      data[y * size + x] = Math.min(Math.max(E * 255, 0), 255) | 0;
+    }
+  }
+  sheenELut = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, sheenELut);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, size, size, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  console.log('Sheen E LUT generated');
+}
+
 function initEnvMaps() {
   // Start with procedural, load HDR async
   envCubemap = createProceduralEnvMap(64);
@@ -830,7 +885,8 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
     //   binding 10 → unit 4 (occlusion, 2D)
     //   binding 12 → unit 5 (env_prefiltered, cubemap)
     //   binding 14 → unit 6 (env_irradiance, cubemap)
-    const bindingToUnit = { 2: 0, 4: 1, 6: 2, 8: 3, 10: 4, 12: 5, 14: 6 };
+    //   binding 16 → unit 7 (sheen_e_lut, 2D)
+    const bindingToUnit = { 2: 0, 4: 1, 6: 2, 8: 3, 10: 4, 12: 5, 14: 6, 16: 7 };
     gl.useProgram(progPbr);
     const numUniforms = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORMS);
     console.log(`PBR active uniforms: ${numUniforms}`);
@@ -1175,12 +1231,16 @@ function render() {
           gl.activeTexture(gl.TEXTURE0 + ti);
           gl.bindTexture(gl.TEXTURE_2D, texBindings[ti] || placeholder);
         }
-        // Bind environment cubemaps to units 5-6
+        // Bind environment cubemaps to units 5-6, sheen LUT to unit 7
         if (envCubemap) {
           gl.activeTexture(gl.TEXTURE5);
           gl.bindTexture(gl.TEXTURE_CUBE_MAP, envCubemap);
           gl.activeTexture(gl.TEXTURE6);
           gl.bindTexture(gl.TEXTURE_CUBE_MAP, envIrradiance);
+        }
+        if (sheenELut) {
+          gl.activeTexture(gl.TEXTURE7);
+          gl.bindTexture(gl.TEXTURE_2D, sheenELut);
         }
       }
       uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
@@ -1745,6 +1805,7 @@ $('stats').textContent = 'Compiling shaders...';
 const shaderResp = await workerCall('get_shaders', {});
 initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals, shaderResp.fs_pbr);
 initEnvMaps();
+generateSheenELut();
 
 $('stats').textContent = 'Building atlas...';
 const r1 = await workerCall('build_atlas', { maxLodExp: 5, mode: 'hierarchical' });
