@@ -235,7 +235,7 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         let instances_orig = compute_instances_no_lod(&verts, &faces);
         let instances_xform = compute_instances(&verts, &faces, &transform, None, None);
 
-        use quilting_core::permutation::{canonical_form, remap_position};
+        use quilting_core::permutation::canonical_form;
 
         // Group by (canonical LOD, perm_index) for correct edge mapping
         let mut batches: std::collections::HashMap<([u32; 3], usize), Vec<usize>> =
@@ -267,9 +267,17 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
             let tess_bary: Vec<f64> = if perm_index == 0 {
                 bary_data.iter().flat_map(|b| [b[0], b[1], b[2]]).collect()
             } else {
-                pos_data.iter().map(|p| {
-                    let r = remap_position(perm_index, *p);
-                    quilting_core::triangle::cartesian_to_bary(r[0], r[1])
+                // Permute in bary space (exact component swap) instead of
+                // cartesian remapping which introduces float precision errors.
+                bary_data.iter().map(|b| {
+                    match perm_index {
+                        1 => [b[0], b[2], b[1]],
+                        2 => [b[1], b[0], b[2]],
+                        3 => [b[1], b[2], b[0]],
+                        4 => [b[2], b[0], b[1]],
+                        5 => [b[2], b[1], b[0]],
+                        _ => *b,
+                    }
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect()
             };
             let tess_tris: Vec<usize> = tri_data.iter()
