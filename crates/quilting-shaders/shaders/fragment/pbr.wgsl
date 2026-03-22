@@ -85,7 +85,7 @@ struct FragInput {
 
 @fragment
 fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
-    if in.fade < 0.01 { discard; }
+    if in.fade < 0.001 { discard; }
 
     var n = normalize(in.normal_vs);
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera at +Z
@@ -263,5 +263,5 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
 
-    return vec4<f32>(color, alpha);
+    return vec4<f32>(color, alpha * in.fade);
 }

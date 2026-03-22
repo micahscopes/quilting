@@ -29,9 +29,9 @@ fn heatmap(t_in: f32) -> vec3<f32> {
 
 @fragment
 fn fs_wire(in: FragInput) -> @location(0) vec4<f32> {
-    if in.fade < 0.01 { discard; }
+    if in.fade < 0.001 { discard; }
     if wire.show_density == 1 {
-        return vec4<f32>(heatmap(in.density), 1.0);
+        return vec4<f32>(heatmap(in.density), in.fade);
     }
-    return vec4<f32>(wire.color, 1.0);
+    return vec4<f32>(wire.color, in.fade);
 }

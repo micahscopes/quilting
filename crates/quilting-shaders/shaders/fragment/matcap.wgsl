@@ -40,7 +40,7 @@ fn heatmap(t_in: f32) -> vec3<f32> {
 
 @fragment
 fn fs_matcap(in: FragInput) -> @location(0) vec4<f32> {
-    if in.fade < 0.01 { discard; }
+    if in.fade < 0.001 { discard; }
     var n = normalize(in.normal_vs);
     if n.z < 0.0 { n = -n; }
 
@@ -49,10 +49,10 @@ fn fs_matcap(in: FragInput) -> @location(0) vec4<f32> {
 
     if matcap_u.has_matcap_tex > 0.5 {
         let col = textureSample(matcap_tex, matcap_sampler, uv);
-        return vec4<f32>(col.rgb, 1.0);
+        return vec4<f32>(col.rgb, in.fade);
     } else {
         let base = heatmap(in.density);
         let col = matcap_shade(n, base);
-        return vec4<f32>(col, 1.0);
+        return vec4<f32>(col, in.fade);
     }
 }
