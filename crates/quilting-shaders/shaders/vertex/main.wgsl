@@ -104,7 +104,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         // Rotate normal: n' = w * n * conj(w)
         let n_quat = vec4<f32>(0.0, smooth_n.x, smooth_n.y, smooth_n.z);
         let rotated = qmul(qmul(w, n_quat), qconj(w));
-        nrm = normalize(rotated.yzw) * u.perm_parity;
+        nrm = normalize(rotated.yzw);
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
