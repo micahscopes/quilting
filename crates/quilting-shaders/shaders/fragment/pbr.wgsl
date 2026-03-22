@@ -219,8 +219,6 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         ambient = ambient * mix(1.0, ao, pbr.occlusion_strength);
     }
 
-    // F0 already incorporates specularColorFactor, so direct/fill/ambient
-    // naturally have the correct specular contribution (zero for fabric).
     var color = direct.color + fill.color + ambient;
 
     // --- KHR_materials_sheen (velvet/fabric) ---
