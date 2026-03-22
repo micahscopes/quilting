@@ -111,8 +111,12 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
     // --- Normal mapping (vertex-computed tangent frame) ---
     if pbr.has_normal_tex > 0.5 {
-        let t = normalize(in.tangent_vs);
-        let b = normalize(in.bitangent_vs);
+        // Gram-Schmidt orthonormalize TBN relative to the smooth normal.
+        // Under Möbius, the tangent/bitangent from edge vectors may not
+        // be orthogonal to the post-transform smooth normal.
+        var t = normalize(in.tangent_vs);
+        t = normalize(t - n * dot(t, n));  // project out n component
+        let b = cross(n, t);               // derive bitangent from n × t
         let tbn = mat3x3<f32>(t, b, n);
 
         let nm = textureSample(normal_tex, normal_sampler, in.tex_uv).xyz;
