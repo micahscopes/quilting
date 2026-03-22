@@ -310,7 +310,7 @@ pub fn compute_instances_with_uvs(
 
     // Simple LOD cap: clamp all edge LODs to a fixed maximum.
     // This is deterministic and stable — no heuristic budget estimation.
-    const MAX_LOD: u32 = 64;
+    const MAX_LOD: u32 = 32; // must match atlas maxLodExp (2^5 = 32)
     for lod in edge_lods.iter_mut() {
         *lod = (*lod).min(MAX_LOD);
     }
@@ -369,90 +369,6 @@ pub fn compute_instances_with_uvs(
     }
 
     result
-}
-
-/// Compute area-weighted smooth vertex normals from transformed positions.
-fn compute_smooth_normals_from_positions(
-    instances: &mut [FaceInstance],
-    faces: &[[usize; 3]],
-    transformed: &[(Quat, Quat)],
-) {
-    let nv = transformed.len();
-    let nf = faces.len();
-    let mut vertex_normals = vec![[0.0f64; 3]; nv];
-
-    // Determine global orientation sign from the first non-degenerate face:
-    // compare transformed cross product with the original face normal.
-    // Under orientation-reversing Möbius, the cross product flips sign.
-    let mut orientation_sign = 1.0f64;
-    for fi in 0..nf {
-        let face = faces[fi];
-        // Original face normal (pre-transform)
-        let ov = [
-            [transformed[face[0]].0.x, transformed[face[0]].0.y, transformed[face[0]].0.z],
-            [transformed[face[1]].0.x, transformed[face[1]].0.y, transformed[face[1]].0.z],
-            [transformed[face[2]].0.x, transformed[face[2]].0.y, transformed[face[2]].0.z],
-        ];
-        // Wait — transformed[i].0 IS the transformed position, not original.
-        // We don't have original positions here. Use the instance normal instead.
-        // The instance was initialized with glTF normals (pre-transform).
-        let orig_n = instances[fi].normals[0]; // pre-transform normal at vertex 0
-
-        let p0 = instances[fi].positions[0].to_point();
-        let p1 = instances[fi].positions[1].to_point();
-        let p2 = instances[fi].positions[2].to_point();
-        let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-        let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-        let nx = e1[1]*e2[2] - e1[2]*e2[1];
-        let ny = e1[2]*e2[0] - e1[0]*e2[2];
-        let nz = e1[0]*e2[1] - e1[1]*e2[0];
-        let len = (nx*nx + ny*ny + nz*nz).sqrt();
-        if len > 1e-12 {
-            // Check if transformed normal agrees with pre-transform normal
-            let d = nx * orig_n[0] as f64 + ny * orig_n[1] as f64 + nz * orig_n[2] as f64;
-            orientation_sign = if d < 0.0 { -1.0 } else { 1.0 };
-            break;
-        }
-    }
-
-    for fi in 0..nf {
-        let face = faces[fi];
-        let p0 = instances[fi].positions[0].to_point();
-        let p1 = instances[fi].positions[1].to_point();
-        let p2 = instances[fi].positions[2].to_point();
-        let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-        let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-        let nx = (e1[1]*e2[2] - e1[2]*e2[1]) * orientation_sign;
-        let ny = (e1[2]*e2[0] - e1[0]*e2[2]) * orientation_sign;
-        let nz = (e1[0]*e2[1] - e1[1]*e2[0]) * orientation_sign;
-        let len = (nx*nx + ny*ny + nz*nz).sqrt();
-        if len > 1e-12 {
-            for &vi in &face {
-                vertex_normals[vi][0] += nx / len;
-                vertex_normals[vi][1] += ny / len;
-                vertex_normals[vi][2] += nz / len;
-            }
-        }
-    }
-
-    // Normalize and write into instances
-    for vn in vertex_normals.iter_mut() {
-        let len = (vn[0]*vn[0] + vn[1]*vn[1] + vn[2]*vn[2]).sqrt();
-        if len > 1e-12 {
-            vn[0] /= len; vn[1] /= len; vn[2] /= len;
-        } else {
-            *vn = [0.0, 1.0, 0.0];
-        }
-    }
-
-    for fi in 0..nf {
-        let face = faces[fi];
-        instances[fi].normals = [
-            [vertex_normals[face[0]][0] as f32, vertex_normals[face[0]][1] as f32, vertex_normals[face[0]][2] as f32],
-            [vertex_normals[face[1]][0] as f32, vertex_normals[face[1]][1] as f32, vertex_normals[face[1]][2] as f32],
-            [vertex_normals[face[2]][0] as f32, vertex_normals[face[2]][1] as f32, vertex_normals[face[2]][2] as f32],
-        ];
-    }
 }
 
 
@@ -521,16 +437,6 @@ impl FaceInstance {
         self.pack_uvs(&mut out, &self.uvs);
         self.pack_normals(&mut out, &self.normals);
         out
-    }
-
-    /// Pack for a permuted tessellation batch.
-    ///
-    /// UVs and normals are NOT permuted — the CPU-remapped tessellation bary
-    /// coords already produce correct weights for the original UV/normal corners.
-    /// Permuting them causes visible orientation jumps when perm_index changes
-    /// (e.g., when adjusting Möbius parameters causes LOD redistribution).
-    pub fn to_f32_array_permuted(&self, _perm_index: usize) -> [f32; 52] {
-        self.to_f32_array()
     }
 
     fn pack_uvs(&self, out: &mut [f32; 52], uvs: &[[f32; 2]; 3]) {

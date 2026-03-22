@@ -1,7 +1,6 @@
 use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, compute_instances_no_lod_with_uvs, compute_instances_with_uvs, ScreenInfo};
-use quilting_core::mesh::TessellationMesh;
 use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
@@ -93,81 +92,6 @@ pub fn generate_and_store_patch(res_a: u32, res_b: u32, res_c: u32) {
             });
         }
     });
-}
-
-/// Generate a single tessellation patch for a given LOD triple.
-/// Returns { bary, triangles, n_verts, n_tris }
-#[wasm_bindgen]
-pub fn generate_patch(res_a: u32, res_b: u32, res_c: u32) -> JsValue {
-    let config = PatchConfig { k_candidates: 30, seed: 42 };
-    let sample = quilting_core::sampling::tri_patch(
-        [res_a as f64, res_b as f64, res_c as f64], &config,
-    );
-    if sample.positions.len() < 3 {
-        return serde_wasm_bindgen::to_value(&PatchData {
-            bary: vec![], triangles: vec![], n_verts: 0, n_tris: 0,
-        }).unwrap();
-    }
-    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
-
-    let bary: Vec<f64> = sample.bary.iter().flat_map(|b| [b[0], b[1], b[2]]).collect();
-    let triangles: Vec<u32> = tri.triangles.iter()
-        .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
-
-    serde_wasm_bindgen::to_value(&PatchData {
-        bary,
-        triangles,
-        n_verts: sample.positions.len(),
-        n_tris: tri.triangles.len(),
-    }).unwrap()
-}
-
-/// Store a patch into the atlas from worker results.
-/// bary: flat [u0,v0,w0, u1,v1,w1, ...]
-/// triangles: flat [i0,j0,k0, ...]
-#[wasm_bindgen]
-pub fn store_patch(res_a: u32, res_b: u32, res_c: u32, positions_2d: &[f64], triangles: &[u32]) {
-    let pos: Vec<[f64; 2]> = positions_2d.chunks(2).map(|c| [c[0], c[1]]).collect();
-    let tris: Vec<[usize; 3]> = triangles.chunks(3).map(|c| [c[0] as usize, c[1] as usize, c[2] as usize]).collect();
-
-    ATLAS.with(|atlas_cell| {
-        let mut atlas_opt = atlas_cell.borrow_mut();
-        if atlas_opt.is_none() {
-            *atlas_opt = Some(TessellationAtlas {
-                positions: Vec::new(),
-                triangles: Vec::new(),
-                patches: HashMap::new(),
-                lod_levels: Vec::new(),
-            });
-        }
-        let atlas = atlas_opt.as_mut().unwrap();
-        let key = {
-            let mut k = [res_a, res_b, res_c];
-            k.sort();
-            k
-        };
-
-        let base_vertex = atlas.positions.len();
-        let base_triangle = atlas.triangles.len();
-        atlas.positions.extend_from_slice(&pos);
-        for t in &tris {
-            atlas.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
-        }
-        atlas.patches.insert(key, quilting_core::atlas::PatchEntry {
-            base_vertex,
-            vertex_count: pos.len(),
-            base_triangle,
-            triangle_count: tris.len(),
-        });
-    });
-}
-
-#[derive(serde::Serialize)]
-struct PatchData {
-    bary: Vec<f64>,
-    triangles: Vec<u32>,
-    n_verts: usize,
-    n_tris: usize,
 }
 
 /// Get a built-in shape.
@@ -359,9 +283,9 @@ pub fn compute_mesh_batches(
             };
 
             let orig_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_orig[fi].to_f32_array_permuted(perm_index)).collect();
+                .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
             let xform_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_xform[fi].to_f32_array_permuted(perm_index)).collect();
+                .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
 
             batches.push(BatchData {
                 lod: actual_lod,
@@ -428,29 +352,6 @@ struct MeshBatches {
 }
 
 // --- Shader compilation via quilting-shaders ---
-
-/// Compile the production vertex shader (WGSL -> GLSL ES 300).
-/// Returns the GLSL source string for use with WebGL2.
-/// Uses the default naga emission path (with coordinate space adjustment).
-#[wasm_bindgen]
-pub fn compile_vertex_shader() -> String {
-    match quilting_shaders::compile_vertex_glsl() {
-        Ok(glsl) => glsl,
-        Err(e) => format!("// ERROR: {}", e),
-    }
-}
-
-/// Compile a production fragment shader (WGSL -> GLSL ES 300).
-/// mode: "matcap", "wire", or "normals"
-/// Returns the GLSL source string for use with WebGL2.
-/// Uses the default naga emission path (with coordinate space adjustment).
-#[wasm_bindgen]
-pub fn compile_fragment_shader(mode: &str) -> String {
-    match quilting_shaders::compile_fragment_glsl(mode) {
-        Ok(glsl) => glsl,
-        Err(e) => format!("// ERROR: {}", e),
-    }
-}
 
 /// Compile the vertex shader for native OpenGL/WebGL rendering
 /// (no Y-flip or Z-remap -- suitable for direct use with WebGL2).
@@ -1466,9 +1367,9 @@ pub fn slice_and_transform(
             };
 
             let orig_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_orig[fi].to_f32_array_permuted(perm_index)).collect();
+                .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
             let xform_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_xform[fi].to_f32_array_permuted(perm_index)).collect();
+                .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
 
             raw_batches.push(RawBatch {
                 actual_lod,

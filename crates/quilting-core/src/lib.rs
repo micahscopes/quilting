@@ -1,6 +1,5 @@
 pub mod triangle;
 pub mod quaternion;
-pub mod cga3;
 pub mod interpolation;
 pub mod sampling;
 pub mod subdivide;
