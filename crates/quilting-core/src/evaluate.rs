@@ -308,25 +308,11 @@ pub fn compute_instances_with_uvs(
         }
     }
 
-    // LOD budget: if total estimated triangles exceeds budget, scale down
-    // proportionally rather than halving in a loop (which causes cliffs).
-    const MAX_OUTPUT_TRIS: u64 = 500_000;
-    let total: u64 = (0..nf).map(|fi| {
-        let he_base = fi * 3;
-        let l0 = edge_lods[canonical_edge(he_base + 1)] as u64;
-        let l1 = edge_lods[canonical_edge(he_base + 2)] as u64;
-        let l2 = edge_lods[canonical_edge(he_base)] as u64;
-        let mx = l0.max(l1).max(l2);
-        mx * mx
-    }).sum();
-
-    if total > MAX_OUTPUT_TRIS {
-        // Scale factor: sqrt because tri count ~ LOD^2
-        let scale = ((MAX_OUTPUT_TRIS as f64) / (total as f64)).sqrt();
-        for lod in edge_lods.iter_mut() {
-            let scaled = ((*lod as f64) * scale) as u32;
-            *lod = snap_to_power_of_2(scaled.max(1)).min(*lod);
-        }
+    // Simple LOD cap: clamp all edge LODs to a fixed maximum.
+    // This is deterministic and stable — no heuristic budget estimation.
+    const MAX_LOD: u32 = 64;
+    for lod in edge_lods.iter_mut() {
+        *lod = (*lod).min(MAX_LOD);
     }
 
     // Write per-edge LODs into each face instance.
