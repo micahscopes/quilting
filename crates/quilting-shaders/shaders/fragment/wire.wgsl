@@ -3,6 +3,7 @@
 struct FragInput {
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
+    @location(9) fade: f32,
 }
 
 struct WireUniforms {
@@ -28,6 +29,7 @@ fn heatmap(t_in: f32) -> vec3<f32> {
 
 @fragment
 fn fs_wire(in: FragInput) -> @location(0) vec4<f32> {
+    if in.fade < 0.01 { discard; }
     if wire.show_density == 1 {
         return vec4<f32>(heatmap(in.density), 1.0);
     }

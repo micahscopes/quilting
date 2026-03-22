@@ -53,6 +53,7 @@ struct VertexOutput {
     @location(6) normal_ws: vec3<f32>,
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
+    @location(9) fade: f32,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -105,7 +106,7 @@ fn eval_mobius_qb(
     let X = qmul(top, bi);
 
     // Conformal fade: |bot|² → 0 near Möbius pole
-    let fade = smoothstep(0.0001, 0.001, dot(bot, bot));
+    let fade = smoothstep(0.005, 0.05, dot(bot, bot));
 
     // Analytic normal via quotient rule
     let dtop_u = pw1 - pw0;
@@ -135,6 +136,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     var pos: vec3<f32>;
     var nrm: vec3<f32>;
+    out.fade = 1.0;
 
     if u.use_qb == 1 {
         let result = eval_mobius_qb(
@@ -145,9 +147,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         );
         pos = result.position;
         nrm = result.normal;
-        // Encode fade into density channel's w (reuse smooth_n2.w for fade)
-        // Actually pass fade via position_vs.w trick... no, use a cleaner approach.
-        // For now, store in the alpha of tangent_vs output (fragment shaders can check).
+        out.fade = result.fade;
     } else {
         // Flat path: apply Möbius to vertices directly
         let mp0 = qmul(qmul(u.mob_a, in.p0) + u.mob_b, qinv(qmul(u.mob_c, in.p0) + u.mob_d));

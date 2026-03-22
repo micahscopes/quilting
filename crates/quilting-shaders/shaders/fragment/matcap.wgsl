@@ -21,6 +21,7 @@ var matcap_sampler: sampler;
 struct FragInput {
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
+    @location(9) fade: f32,
 }
 
 // Heatmap colormap: blue -> cyan -> green -> yellow -> red
@@ -39,6 +40,7 @@ fn heatmap(t_in: f32) -> vec3<f32> {
 
 @fragment
 fn fs_matcap(in: FragInput) -> @location(0) vec4<f32> {
+    if in.fade < 0.01 { discard; }
     var n = normalize(in.normal_vs);
     if n.z < 0.0 { n = -n; }
 

@@ -80,10 +80,13 @@ struct FragInput {
     @location(6) normal_ws: vec3<f32>,
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
+    @location(9) fade: f32,
 }
 
 @fragment
 fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
+    if in.fade < 0.01 { discard; }
+
     var n = normalize(in.normal_vs);
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera at +Z
 
