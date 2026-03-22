@@ -1,22 +1,14 @@
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
 use std::collections::HashMap;
 
-use crate::delaunay::triangulate_2d_filtered;
+use crate::delaunay::triangulate_2d_constrained;
 use crate::mesh::TessellationMesh;
 use crate::permutation::{canonical_form, remap_position};
 use crate::sampling::{tri_patch, PatchConfig};
 use crate::subdivide;
 
-thread_local! {
-    static SLIVER_THRESHOLD: Cell<f64> = Cell::new(0.0);
-}
-
-/// Set the sliver filter threshold for atlas generation.
-/// 0.0 = no filtering, 0.01 = default, higher = more aggressive.
-pub fn set_sliver_threshold(threshold: f64) {
-    SLIVER_THRESHOLD.with(|t| t.set(threshold));
-}
+/// Legacy API — sliver filtering is no longer needed with constrained Delaunay.
+pub fn set_sliver_threshold(_threshold: f64) {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatchEntry {
@@ -68,15 +60,12 @@ fn generate_patch(
     key: [u32; 3],
     config: &PatchConfig,
 ) -> Option<(Vec<[f64; 2]>, Vec<[usize; 3]>)> {
-    let threshold = SLIVER_THRESHOLD.with(|t| t.get());
-    // Default 0.0 — the centroid/vertex-outside checks handle bad triangles.
-    // The compactness filter was causing gaps by removing edge-adjacent slivers.
     let res = [key[0] as f64, key[1] as f64, key[2] as f64];
     let sample = tri_patch(res, config);
     if sample.positions.len() < 3 {
         return None;
     }
-    let tri = triangulate_2d_filtered(&sample.positions, threshold);
+    let tri = triangulate_2d_constrained(&sample.positions, &sample.bary);
     Some((tri.positions, tri.triangles))
 }
 
@@ -341,6 +330,51 @@ mod tests {
             assert!(u >= -1e-10 && v >= -1e-10 && w >= -1e-10,
                 "[{}, {}] outside triangle", x, y);
         }
+    }
+
+    #[test]
+    fn no_corner_spanning_triangles_above_lod1() {
+        use crate::triangle;
+        let config = PatchConfig::default();
+        let lods = &[1, 2, 4, 8];
+        let atlas = TessellationAtlas::build(lods, &config);
+        let eps = 0.02;
+
+        fn corner_id(bary: [f64; 3], eps: f64) -> Option<usize> {
+            if bary[0] > 1.0 - eps && bary[1] < eps && bary[2] < eps { return Some(0); }
+            if bary[1] > 1.0 - eps && bary[0] < eps && bary[2] < eps { return Some(1); }
+            if bary[2] > 1.0 - eps && bary[0] < eps && bary[1] < eps { return Some(2); }
+            None
+        }
+
+        // Edge between corners i,j has resolution: the LOD component opposite the third corner
+        // Corners are A=0, B=1, C=2. Edge AB is opposite C → key[2]. Etc.
+        fn edge_res(c0: usize, c1: usize, key: [u32; 3]) -> u32 {
+            let opposite = 3 - c0 - c1; // the corner NOT on this edge
+            key[opposite]
+        }
+
+        let mut bad = 0;
+        for (&key, entry) in &atlas.patches {
+            for tri_idx in entry.base_triangle..entry.base_triangle + entry.triangle_count {
+                let t = atlas.triangles[tri_idx];
+                let barys: Vec<[f64; 3]> = t.iter().map(|&idx| {
+                    let p = atlas.positions[idx];
+                    triangle::cartesian_to_bary(p[0], p[1])
+                }).collect();
+                let corners: Vec<Option<usize>> = barys.iter().map(|b| corner_id(*b, eps)).collect();
+                let corner_verts: Vec<usize> = corners.iter().filter_map(|c| *c).collect();
+                if corner_verts.len() >= 2 {
+                    let res = edge_res(corner_verts[0], corner_verts[1], key);
+                    if res > 1 {
+                        bad += 1;
+                        eprintln!("BAD: patch {:?} has triangle spanning corners {:?} (edge res={})",
+                            key, corner_verts, res);
+                    }
+                }
+            }
+        }
+        assert_eq!(bad, 0, "found {} corner-spanning triangles on edges with res > 1", bad);
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod sources {
     pub const FRAG_WIRE: &str = include_str!("../shaders/fragment/wire.wgsl");
     pub const FRAG_NORMALS: &str = include_str!("../shaders/fragment/normals.wgsl");
     pub const FRAG_PBR: &str = include_str!("../shaders/fragment/pbr.wgsl");
+    pub const FRAG_PICK: &str = include_str!("../shaders/fragment/pick.wgsl");
 }
 
 /// Build a naga-oil Composer preloaded with all quilting shader modules.
@@ -146,6 +147,7 @@ pub fn compile_fragment_glsl(mode: &str) -> Result<String, Box<dyn std::error::E
         "wire" => (sources::FRAG_WIRE, "fs_wire"),
         "normals" => (sources::FRAG_NORMALS, "fs_normals"),
         "pbr" => (sources::FRAG_PBR, "fs_pbr"),
+        "pick" => (sources::FRAG_PICK, "fs_pick"),
         _ => return Err(format!("unknown fragment mode: {}", mode).into()),
     };
     let module = compile_shader(source, HashMap::new())?;
@@ -168,6 +170,7 @@ pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::e
         "wire" => (sources::FRAG_WIRE, "fs_wire"),
         "normals" => (sources::FRAG_NORMALS, "fs_normals"),
         "pbr" => (sources::FRAG_PBR, "fs_pbr"),
+        "pick" => (sources::FRAG_PICK, "fs_pick"),
         _ => return Err(format!("unknown fragment mode: {}", mode).into()),
     };
     let module = compile_shader(source, HashMap::new())?;

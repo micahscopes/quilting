@@ -1,0 +1,21 @@
+[build]
+target = "hyperscope.html"
+dist = "dist"
+
+[serve]
+port = 8093
+
+[watch]
+watch = [
+    "hyperscope.html",
+    "hyperscope_worker.js",
+    "crates/quilting-wasm/src/",
+    "crates/quilting-core/src/",
+    "crates/quilting-shaders/shaders/",
+]
+
+# Build WASM before trunk processes the HTML
+[[hooks]]
+stage = "pre_build"
+command = "wasm-pack"
+command_arguments = ["build", "--dev", "--target", "web", "--out-dir", "../../pkg", "crates/quilting-wasm"]

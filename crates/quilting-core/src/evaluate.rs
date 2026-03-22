@@ -251,7 +251,7 @@ pub fn compute_instances_with_uvs(
         }
     }
 
-    // Clamp: all edges at least LOD 1, at most MAX_LOD
+    // Clamp: at most MAX_LOD
     for lod in edge_lods.iter_mut() {
         if *lod == 0 { *lod = 1; }
         *lod = (*lod).min(MAX_LOD);

@@ -54,6 +54,8 @@ struct VertexOutput {
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
     @location(9) fade: f32,
+    @location(10) tess_bary: vec3<f32>,
+    @location(11) instance_id: f32,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -129,10 +131,12 @@ fn eval_mobius_qb(
 }
 
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
+fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let bary = perm_bary(in.bary, u.perm_index);
+    // Bary coords are already permuted by the WASM batch assembly.
+    // Do NOT re-permute here — that was a double-application bug.
+    let bary = in.bary;
 
     var pos: vec3<f32>;
     var nrm: vec3<f32>;
@@ -201,5 +205,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.camera_pos_ws = u.camera_pos.xyz;
     out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
+    out.tess_bary = bary;
+    out.instance_id = f32(instance_idx) + u._pad;  // _pad = batch offset for pick pass, 0 normally
     return out;
 }

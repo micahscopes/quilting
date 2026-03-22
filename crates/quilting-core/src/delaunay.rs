@@ -1,4 +1,3 @@
-use delaunator::{triangulate, Point};
 use crate::triangle;
 
 pub struct Triangulation {
@@ -6,72 +5,117 @@ pub struct Triangulation {
     pub triangles: Vec<[usize; 3]>,
 }
 
-/// General Delaunay triangulation (no filtering).
+/// Constrained Delaunay triangulation within the reference triangle.
+///
+/// Uses barycentric coordinates to identify boundary points, builds a
+/// contour around the reference triangle edges, and constrains the
+/// triangulation so no triangle can cross the boundary — eliminating fins.
+pub fn triangulate_2d_constrained(
+    points: &[[f64; 2]],
+    bary: &[[f64; 3]],
+) -> Triangulation {
+    if points.len() < 3 {
+        return Triangulation { positions: points.to_vec(), triangles: vec![] };
+    }
+
+    const EDGE_EPS: f64 = 1e-6;
+
+    // Classify each point: corner, edge interior, or interior.
+    // bary[0] ≈ 0 → on edge BC (opposite vertex A)
+    // bary[1] ≈ 0 → on edge AC (opposite vertex B)
+    // bary[2] ≈ 0 → on edge AB (opposite vertex C)
+    let mut idx_a = None; // bary ≈ (1,0,0)
+    let mut idx_b = None; // bary ≈ (0,1,0)
+    let mut idx_c = None; // bary ≈ (0,0,1)
+
+    let mut edge_ab = Vec::new(); // bary[2] ≈ 0
+    let mut edge_bc = Vec::new(); // bary[0] ≈ 0
+    let mut edge_ca = Vec::new(); // bary[1] ≈ 0
+
+    for (i, b) in bary.iter().enumerate() {
+        let on_bc = b[0].abs() < EDGE_EPS;
+        let on_ac = b[1].abs() < EDGE_EPS;
+        let on_ab = b[2].abs() < EDGE_EPS;
+
+        if on_ab && on_ac {
+            idx_a = Some(i);
+        } else if on_ab && on_bc {
+            idx_b = Some(i);
+        } else if on_bc && on_ac {
+            idx_c = Some(i);
+        } else if on_ab {
+            edge_ab.push(i);
+        } else if on_bc {
+            edge_bc.push(i);
+        } else if on_ac {
+            edge_ca.push(i);
+        }
+        // else: interior point, no action needed
+    }
+
+    let a = idx_a.expect("missing vertex A on boundary");
+    let b = idx_b.expect("missing vertex B on boundary");
+    let c = idx_c.expect("missing vertex C on boundary");
+
+    // Sort edge points by parameter along each edge.
+    // Edge AB: A(1,0,0) → B(0,1,0), parameter = bary[1]
+    edge_ab.sort_by(|&i, &j| bary[i][1].partial_cmp(&bary[j][1]).unwrap());
+    // Edge BC: B(0,1,0) → C(0,0,1), parameter = bary[2]
+    edge_bc.sort_by(|&i, &j| bary[i][2].partial_cmp(&bary[j][2]).unwrap());
+    // Edge CA: C(0,0,1) → A(1,0,0), parameter = bary[0]
+    edge_ca.sort_by(|&i, &j| bary[i][0].partial_cmp(&bary[j][0]).unwrap());
+
+    // Build closed contour: A → B → C → A
+    let mut contour = Vec::with_capacity(3 + edge_ab.len() + edge_bc.len() + edge_ca.len() + 1);
+    contour.push(a);
+    contour.extend_from_slice(&edge_ab);
+    contour.push(b);
+    contour.extend_from_slice(&edge_bc);
+    contour.push(c);
+    contour.extend_from_slice(&edge_ca);
+    contour.push(a); // close
+
+    let pts: Vec<(f64, f64)> = points.iter().map(|p| (p[0], p[1])).collect();
+
+    let result = cdt::triangulate_contours(&pts, &[contour])
+        .expect("CDT triangulation failed");
+
+    let triangles: Vec<[usize; 3]> = result.iter()
+        .map(|t| [t.0, t.1, t.2])
+        .collect();
+
+    Triangulation {
+        positions: points.to_vec(),
+        triangles,
+    }
+}
+
+/// Constrained triangulation from cartesian points alone (computes bary internally).
+/// Backward-compatible wrapper for callers that don't pass bary.
+pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
+    let bary: Vec<[f64; 3]> = points.iter()
+        .map(|&[x, y]| {
+            let mut b = triangle::cartesian_to_bary(x, y);
+            for c in &mut b {
+                if c.abs() < 1e-10 { *c = 0.0; }
+            }
+            let sum = b[0] + b[1] + b[2];
+            if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
+            b
+        })
+        .collect();
+    triangulate_2d_constrained(points, &bary)
+}
+
+/// Unconstrained Delaunay (for subdivision paths that don't need boundary constraints).
 pub fn triangulate_2d(points: &[[f64; 2]]) -> Triangulation {
-    let del_points: Vec<Point> = points.iter().map(|p| Point { x: p[0], y: p[1] }).collect();
-    let result = triangulate(&del_points);
-    let triangles: Vec<[usize; 3]> = result.triangles
-        .chunks(3)
-        .map(|t| [t[0], t[1], t[2]])
+    let pts: Vec<(f64, f64)> = points.iter().map(|p| (p[0], p[1])).collect();
+    let result = cdt::triangulate_points(&pts)
+        .expect("CDT triangulation failed");
+    let triangles: Vec<[usize; 3]> = result.iter()
+        .map(|t| [t.0, t.1, t.2])
         .collect();
     Triangulation { positions: points.to_vec(), triangles }
-}
-
-/// Delaunay triangulation with exterior + sliver removal (default threshold 0.01).
-pub fn triangulate_2d_clipped(points: &[[f64; 2]]) -> Triangulation {
-    triangulate_2d_filtered(points, 0.01)
-}
-
-/// Delaunay triangulation with configurable sliver threshold.
-/// `sliver_threshold`: compactness ratio below which triangles are removed.
-/// 0.0 = keep all interior triangles, 0.01 = default, higher = more aggressive.
-pub fn triangulate_2d_filtered(points: &[[f64; 2]], sliver_threshold: f64) -> Triangulation {
-    let mut tri = triangulate_2d(points);
-    tri.triangles.retain(|t| {
-        let p0 = points[t[0]];
-        let p1 = points[t[1]];
-        let p2 = points[t[2]];
-
-        // Reject triangles with ANY vertex outside the reference triangle
-        for p in &[p0, p1, p2] {
-            let [u, v, w] = triangle::cartesian_to_bary(p[0], p[1]);
-            if u < -0.02 || v < -0.02 || w < -0.02 {
-                return false;
-            }
-        }
-
-        // Reject triangles with centroid outside
-        let cx = (p0[0] + p1[0] + p2[0]) / 3.0;
-        let cy = (p0[1] + p1[1] + p2[1]) / 3.0;
-        let [u, v, w] = triangle::cartesian_to_bary(cx, cy);
-        if u < -0.01 || v < -0.01 || w < -0.01 {
-            return false;
-        }
-
-        // Skip sliver filter for edge-adjacent triangles — they're needed for
-        // watertight seams. A triangle touches the boundary if any vertex has a
-        // bary component near zero.
-        let on_boundary = [p0, p1, p2].iter().any(|p| {
-            let [u, v, w] = triangle::cartesian_to_bary(p[0], p[1]);
-            u.abs() < 0.01 || v.abs() < 0.01 || w.abs() < 0.01
-        });
-        if on_boundary {
-            return true;
-        }
-
-        let e0_sq = (p1[0]-p0[0]).powi(2) + (p1[1]-p0[1]).powi(2);
-        let e1_sq = (p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2);
-        let e2_sq = (p0[0]-p2[0]).powi(2) + (p0[1]-p2[1]).powi(2);
-
-        let area2 = ((p1[0]-p0[0]) * (p2[1]-p0[1]) - (p2[0]-p0[0]) * (p1[1]-p0[1])).abs();
-        let perimeter = e0_sq.sqrt() + e1_sq.sqrt() + e2_sq.sqrt();
-
-        if perimeter < 1e-15 { return false; }
-
-        let compactness = area2 / (perimeter * perimeter);
-        compactness > sliver_threshold
-    });
-    tri
 }
 
 #[cfg(test)]
@@ -82,7 +126,6 @@ mod tests {
     fn triangulate_square() {
         let points = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let tri = triangulate_2d(&points);
-        // 4 points in general position -> 2 triangles
         assert_eq!(tri.triangles.len(), 2, "expected 2 triangles for a quad");
         for t in &tri.triangles {
             for &idx in t {
@@ -100,24 +143,37 @@ mod tests {
     }
 
     #[test]
-    fn triangulate_many_points() {
-        // Grid of points inside unit triangle
-        let mut points = Vec::new();
-        for i in 0..=5 {
-            for j in 0..=(5 - i) {
-                let x = i as f64 / 5.0;
-                let y = j as f64 / 5.0;
-                points.push([x, y]);
-            }
-        }
-        let tri = triangulate_2d(&points);
-        assert!(tri.triangles.len() > 0, "should produce triangles");
-        // Euler: for n points with h on hull, triangles = 2n - h - 2
-        // Just verify all indices are valid
+    fn constrained_stays_inside() {
+        use crate::sampling::{tri_patch, PatchConfig};
+        let config = PatchConfig::default();
+        let sample = tri_patch([4.0, 4.0, 4.0], &config);
+        let tri = triangulate_2d_constrained(&sample.positions, &sample.bary);
+
+        // Every triangle vertex must be inside (or on boundary of) reference triangle
         for t in &tri.triangles {
             for &idx in t {
-                assert!(idx < points.len(), "index {} out of range", idx);
+                let [u, v, w] = triangle::cartesian_to_bary(
+                    tri.positions[idx][0],
+                    tri.positions[idx][1],
+                );
+                assert!(
+                    u >= -1e-10 && v >= -1e-10 && w >= -1e-10,
+                    "vertex {} outside triangle: bary=[{}, {}, {}]",
+                    idx, u, v, w
+                );
             }
+        }
+
+        // Every triangle centroid must be inside
+        for t in &tri.triangles {
+            let cx = (tri.positions[t[0]][0] + tri.positions[t[1]][0] + tri.positions[t[2]][0]) / 3.0;
+            let cy = (tri.positions[t[0]][1] + tri.positions[t[1]][1] + tri.positions[t[2]][1]) / 3.0;
+            let [u, v, w] = triangle::cartesian_to_bary(cx, cy);
+            assert!(
+                u >= -1e-10 && v >= -1e-10 && w >= -1e-10,
+                "centroid outside triangle: bary=[{}, {}, {}]",
+                u, v, w
+            );
         }
     }
 }

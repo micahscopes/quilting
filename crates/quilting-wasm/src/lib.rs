@@ -236,6 +236,10 @@ pub fn compute_mesh_batches(
                     }
                 }
                 found.unwrap_or_else(|| {
+                    web_sys::console::warn_1(&format!(
+                        "ATLAS FALLBACK: wanted {:?}, no match found — using [1,1,1]",
+                        canonical_lod
+                    ).into());
                     let config = PatchConfig { k_candidates: 30, seed: 42 };
                     let sample = quilting_core::sampling::tri_patch([1.0, 1.0, 1.0], &config);
                     let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
@@ -244,6 +248,12 @@ pub fn compute_mesh_batches(
             };
 
             let is_fallback = used_lod != canonical_lod;
+            if is_fallback {
+                web_sys::console::warn_1(&format!(
+                    "LOD MISMATCH: wanted {:?}, got {:?} ({} faces)",
+                    canonical_lod, used_lod, face_indices.len()
+                ).into());
+            }
             let parity = perm_sign(perm_index);
 
             let actual_lod = if override_res > 0 {

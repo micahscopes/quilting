@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8">
 <title>Hyperscope — Spacetime + Conformal</title>
+<!-- trunk asset directives -->
+<link data-trunk rel="copy-dir" href="pkg" />
+<link data-trunk rel="copy-dir" href="envmaps" />
+<link data-trunk rel="copy-dir" href="matcaps" />
+<link data-trunk rel="copy-file" href="hyperscope_worker.js" />
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'SF Mono','Consolas',monospace;background:#0d1117;color:#c9d1d9;display:flex;height:100vh;overflow:hidden}
@@ -340,7 +345,7 @@ let shadersLoaded = false;
 function mkS(src,t){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){console.error('SHADER:',gl.getShaderInfoLog(s),'\n\nSource:\n',src);}return s;}
 function mkProg(vs,fs){const p=gl.createProgram();gl.attachShader(p,mkS(vs,gl.VERTEX_SHADER));gl.attachShader(p,mkS(fs,gl.FRAGMENT_SHADER));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error('LINK:',gl.getProgramInfoLog(p));return p;}
 
-let progMatcap = null, progLod = null, progWire = null, progNormals = null, progPbr = null;
+let progMatcap = null, progLod = null, progWire = null, progNormals = null, progPbr = null, progPick = null;
 let pbrSamplerLocs = {}; // sampler2D uniform locations for PBR textures
 const placeholderTex = null; // 1x1 white texture for unbound slots
 
@@ -1148,7 +1153,7 @@ function bindUniformBlocks(program) {
   if (wireIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, wireIdx, WIRE_UBO_BINDING);
 }
 
-function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
+function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr, fsPick) {
   progMatcap = mkProg(vs, fsMatcap);
   progLod = progMatcap; // LOD uses matcap (heatmap + procedural lighting)
   progWire = mkProg(vs, fsWire);
@@ -1235,9 +1240,180 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
     }
   }
 
+  // Pick shader
+  if (fsPick) {
+    progPick = mkProg(vs, fsPick);
+    if (gl.getProgramParameter(progPick, gl.LINK_STATUS)) {
+      bindUniformBlocks(progPick);
+    } else {
+      console.error('Pick program link failed:', gl.getProgramInfoLog(progPick));
+      progPick = null;
+    }
+  }
+
   shadersLoaded = true;
-  console.log('Shader programs compiled from WGSL pipeline (matcap + wire + normals + pbr)');
+  console.log('Shader programs compiled from WGSL pipeline (matcap + wire + normals + pbr + pick)');
 }
+// --- Pick buffer for face inspection ---
+let pickFBO = null, pickTex = null, pickDepth = null, pickW = 0, pickH = 0;
+function ensurePickFBO() {
+  const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+  if (pickFBO && pickW === w && pickH === h) return;
+  if (pickFBO) { gl.deleteFramebuffer(pickFBO); gl.deleteTexture(pickTex); gl.deleteRenderbuffer(pickDepth); }
+  pickW = w; pickH = h;
+  pickFBO = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, pickFBO);
+  pickTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, pickTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickTex, 0);
+  pickDepth = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, pickDepth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, pickDepth);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function renderPickPass(mvp, view, camPos) {
+  if (!progPick || !drawBatches.length) return;
+  ensurePickFBO();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, pickFBO);
+  gl.viewport(0, 0, pickW, pickH);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(progPick);
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  let offset = 0;
+  for (const b of drawBatches) {
+    vtxUboF32[35] = offset; // _pad = batch offset for pick
+    uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+    gl.bindVertexArray(b.vaoXformTri);
+    gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
+    offset += b.numInst;
+  }
+  vtxUboF32[35] = 0; // reset _pad
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+}
+
+// Build a flat lookup: globalFaceIndex → {batchIdx, localIdx, lod, parity, permIndex, material}
+function buildFaceLookup() {
+  const lookup = [];
+  for (let bi = 0; bi < drawBatches.length; bi++) {
+    const b = drawBatches[bi];
+    for (let li = 0; li < b.numInst; li++) {
+      lookup.push({ batchIdx: bi, localIdx: li, lod: b.lod, parity: b.parity, permIndex: b.permIndex, materialIndex: b.materialIndex });
+    }
+  }
+  return lookup;
+}
+
+let pickInfoEl = null;
+function showPickInfo(x, y) {
+  if (!pickFBO) return;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, pickFBO);
+  const px = new Uint8Array(4);
+  // WebGL Y is flipped
+  gl.readPixels(x, pickH - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  const id = px[0] + (px[1] << 8);
+  const baryX = px[2] / 255.0;
+  const baryY = px[3] / 255.0;
+  const baryZ = Math.max(0, 1.0 - baryX - baryY);
+
+  if (px[0] === 0 && px[1] === 0 && px[2] === 0 && px[3] === 0) {
+    if (pickInfoEl) pickInfoEl.style.display = 'none';
+    return;
+  }
+
+  const lookup = buildFaceLookup();
+  const face = lookup[id];
+  if (!face) {
+    console.warn('Pick: face ID', id, 'out of range (max', lookup.length, ')');
+    if (pickInfoEl) pickInfoEl.style.display = 'none';
+    return;
+  }
+
+  // Extract per-face instance data (52 floats per face)
+  const b = drawBatches[face.batchIdx];
+  const off = face.localIdx * 52;
+  const orig = b.instanceData;  // original (pre-Möbius) control points
+  const xf = b.xformData;       // xformed data
+
+  // Control points (quaternions: w,x,y,z) — positions are in orig[off+0..12]
+  const p0 = [orig[off+1], orig[off+2], orig[off+3]];   // p0.xyz
+  const p1 = [orig[off+5], orig[off+6], orig[off+7]];   // p1.xyz
+  const p2 = [orig[off+9], orig[off+10], orig[off+11]]; // p2.xyz
+
+  // Edge LODs from xform data (offset 24-27 in instance)
+  const edgeLods = [xf[off+24], xf[off+25], xf[off+26]];
+
+  // World-space edge lengths (pre-Möbius)
+  const edgeLen = (a, b) => Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2);
+  const lenA = edgeLen(p1, p2);  // edge_a: opposite v0
+  const lenB = edgeLen(p0, p2);  // edge_b: opposite v1
+  const lenC = edgeLen(p0, p1);  // edge_c: opposite v2
+
+  // Approximate screen-space edge lengths using current camera MVP
+  const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
+  const view = lookAt(ex,ey,ez,0,0,0,0,1,0);
+  const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.01,10000);
+  const mvp = mulM4(proj, view);
+  function projectPt(p) {
+    const x = mvp[0]*p[0]+mvp[4]*p[1]+mvp[8]*p[2]+mvp[12];
+    const y = mvp[1]*p[0]+mvp[5]*p[1]+mvp[9]*p[2]+mvp[13];
+    const w = mvp[3]*p[0]+mvp[7]*p[1]+mvp[11]*p[2]+mvp[15];
+    if (Math.abs(w) < 1e-6) return null;
+    return [(x/w*0.5+0.5)*canvas.width, (y/w*0.5+0.5)*canvas.height];
+  }
+
+  // For Möbius-transformed screen lengths, use xform positions
+  const xp0 = [xf[off+1], xf[off+2], xf[off+3]];
+  const xp1 = [xf[off+5], xf[off+6], xf[off+7]];
+  const xp2 = [xf[off+9], xf[off+10], xf[off+11]];
+  function screenLen(a, b) {
+    const sa = projectPt(a), sb = projectPt(b);
+    if (!sa || !sb) return '∞';
+    return Math.sqrt((sa[0]-sb[0])**2 + (sa[1]-sb[1])**2).toFixed(1);
+  }
+  const sLenA = screenLen(xp1, xp2);
+  const sLenB = screenLen(xp0, xp2);
+  const sLenC = screenLen(xp0, xp1);
+
+  const info = [
+    `Face #${id} (batch ${face.batchIdx}, local ${face.localIdx})`,
+    `Batch LOD: [${face.lod.join(', ')}]`,
+    `Edge LODs: [${edgeLods.map(l=>l.toFixed(0)).join(', ')}]`,
+    `Perm: idx=${face.permIndex} parity=${face.parity}`,
+    `Material: ${face.materialIndex}`,
+    ``,
+    `--- Edge details ---`,
+    `edge_a (v1→v2): LOD=${edgeLods[0].toFixed(0)} world=${lenA.toFixed(4)} screen=${sLenA}px`,
+    `edge_b (v0→v2): LOD=${edgeLods[1].toFixed(0)} world=${lenB.toFixed(4)} screen=${sLenB}px`,
+    `edge_c (v0→v1): LOD=${edgeLods[2].toFixed(0)} world=${lenC.toFixed(4)} screen=${sLenC}px`,
+    ``,
+    `--- Control points (orig) ---`,
+    `p0: (${p0.map(v=>v.toFixed(4)).join(', ')})`,
+    `p1: (${p1.map(v=>v.toFixed(4)).join(', ')})`,
+    `p2: (${p2.map(v=>v.toFixed(4)).join(', ')})`,
+    ``,
+    `Tess bary: (${baryX.toFixed(3)}, ${baryY.toFixed(3)}, ${baryZ.toFixed(3)})`,
+  ].join('\n');
+
+  if (!pickInfoEl) {
+    pickInfoEl = document.createElement('pre');
+    pickInfoEl.style.cssText = 'position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.85);color:#0f0;padding:10px;font:12px monospace;z-index:9999;pointer-events:none;border:1px solid #0f0;border-radius:4px;';
+    document.body.appendChild(pickInfoEl);
+  }
+  pickInfoEl.style.display = 'block';
+  pickInfoEl.textContent = info;
+  console.log('Pick:', info.replace(/\n/g, ' | '));
+}
+
 let matcapTex = null;
 const MATCAP_UBO_BINDING = 3;
 const matcapUbo = gl.createBuffer();
@@ -1444,6 +1620,8 @@ function uploadBatches(data) {
       parity: batch.perm_parity || 1,
       permIndex: batch.perm_index || 0,
       materialIndex: batch.material_index ?? -1,
+      instanceData: new Float32Array(gpuData),  // keep for picker
+      xformData: new Float32Array(xf),          // keep xform for picker
     });
   }
 
@@ -1790,6 +1968,21 @@ onmouseup = () => drag=false;
 let camDebounce = null;
 onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.clientY-ly)*0.01; lx=e.clientX; ly=e.clientY; render(); clearTimeout(camDebounce); camDebounce=setTimeout(update, 150); };
 canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); update(); e.preventDefault(); };
+// Pick: ctrl+click to inspect face under cursor
+canvas.onclick = e => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width) | 0;
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height) | 0;
+  // Render pick pass with current camera
+  const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
+  const camPos = [ex, ey, ez];
+  const view = lookAt(ex,ey,ez,0,0,0,0,1,0);
+  const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.01,10000);
+  const mvp = mulM4(proj, view);
+  renderPickPass(mvp, view, camPos);
+  showPickInfo(x, y);
+};
 
 // Touch support
 let lastTouch = null;
@@ -2108,7 +2301,7 @@ await workerCall('init', {});
 // Compile shaders from WASM (WGSL -> naga -> GLSL ES 300)
 $('stats').textContent = 'Compiling shaders...';
 const shaderResp = await workerCall('get_shaders', {});
-initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals, shaderResp.fs_pbr);
+initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals, shaderResp.fs_pbr, shaderResp.fs_pick);
 initEnvMaps();
 generateSheenELut();
 

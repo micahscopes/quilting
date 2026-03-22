@@ -19,7 +19,8 @@ self.onmessage = async function(e) {
     const fs_wire = wasm.get_fragment_glsl('wire');
     const fs_normals = wasm.get_fragment_glsl('normals');
     const fs_pbr = wasm.get_fragment_glsl('pbr');
-    self.postMessage({ type: 'shaders', id, vs, fs_matcap, fs_wire, fs_normals, fs_pbr });
+    const fs_pick = wasm.get_fragment_glsl('pick');
+    self.postMessage({ type: 'shaders', id, vs, fs_matcap, fs_wire, fs_normals, fs_pbr, fs_pick });
     return;
   }
 
