@@ -605,17 +605,25 @@ function hdrToCubemap(hdr, faceSize) {
         pixels[idx] = r; pixels[idx+1] = g; pixels[idx+2] = b; pixels[idx+3] = 1;
       }
     }
-    // Tone-map to RGBA8 for maximum compatibility (Reinhard per channel)
-    const u8 = new Uint8Array(faceSize * faceSize * 4);
-    for (let j = 0; j < faceSize * faceSize; j++) {
-      for (let ch = 0; ch < 3; ch++) {
-        const v = pixels[j * 4 + ch];
-        const mapped = v / (v + 1.0); // Reinhard
-        u8[j * 4 + ch] = Math.min(Math.pow(mapped, 1/2.2) * 255, 255) | 0; // gamma
-      }
-      u8[j * 4 + 3] = 255;
+    // Upload as RGBA16F with HALF_FLOAT for true HDR.
+    // Use DataView to pack float32 → float16 correctly.
+    const f16buf = new ArrayBuffer(faceSize * faceSize * 4 * 2);
+    const f16view = new DataView(f16buf);
+    const f32tmp = new Float32Array(1);
+    const u32tmp = new Uint32Array(f32tmp.buffer);
+    for (let j = 0; j < faceSize * faceSize * 4; j++) {
+      f32tmp[0] = pixels[j];
+      const bits = u32tmp[0];
+      const sign = (bits >>> 16) & 0x8000;
+      const exponent = ((bits >>> 23) & 0xff) - 127 + 15;
+      const mantissa = bits & 0x7fffff;
+      let h;
+      if (exponent <= 0) h = sign; // underflow
+      else if (exponent >= 31) h = sign | 0x7c00; // overflow/inf
+      else h = sign | (exponent << 10) | (mantissa >>> 13);
+      f16view.setUint16(j * 2, h, true);
     }
-    gl.texImage2D(faces[fi], 0, gl.RGBA, faceSize, faceSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, u8);
+    gl.texImage2D(faces[fi], 0, gl.RGBA16F, faceSize, faceSize, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(f16buf));
   }
   // Half-float linear filtering (widely supported in WebGL2)
   gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
