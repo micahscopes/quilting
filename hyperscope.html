@@ -1423,12 +1423,13 @@ function uploadBatches(data) {
     const matSuffix = (batch.material_index != null && batch.material_index >= 0) ? '/m' + batch.material_index : '';
     const vaoKey = batch.wanted_lod.join(',') + '/' + batch.perm_index + matSuffix;
     usedKeys.add(vaoKey);
-    // GPU-ready: original positions (GPU applies Möbius), LODs from CPU xform pass
+    // GPU-ready: original positions (GPU applies Möbius), LODs + normals from CPU xform pass
     const gpuData = new Float32Array(batch.instances_orig);
     const xf = batch.instances_xform;
     for (let i = 0; i < batch.num_faces; i++) {
       const base = i * 52;
-      for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j];
+      for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j]; // LODs
+      for (let j = 40; j < 52; j++) gpuData[base+j] = xf[base+j]; // normals (zeroed under Möbius)
     }
     const cached = getOrCreateBatchVAOs(vaoKey, tess, gpuData, batch.num_faces);
 

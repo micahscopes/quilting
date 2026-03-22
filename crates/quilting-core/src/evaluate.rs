@@ -299,13 +299,46 @@ pub fn compute_instances_with_uvs(
         ];
     }
 
-    // Under conformal transforms, zero out smooth normals so the shader
-    // falls back to QB analytical normals. QB normals are flat per-face but
-    // geometrically correct for the deformed surface. The post-transform
-    // smooth normal computation has orientation issues that cause
-    // desaturation on metallic models.
-    for inst in result.iter_mut() {
-        inst.normals = [[0.0; 3]; 3];
+    // Compute smooth normals from Möbius-deformed geometry.
+    // Average face normals at each vertex using the deformed positions.
+    if !transform.is_affine() {
+        let nv = vertices.len();
+        let mut vertex_normals_acc = vec![[0.0f64; 3]; nv];
+        // Accumulate face normals at each vertex
+        for (fi, face) in faces.iter().enumerate() {
+            let p0 = transformed[face[0]].0.to_point();
+            let p1 = transformed[face[1]].0.to_point();
+            let p2 = transformed[face[2]].0.to_point();
+            let e01 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+            let e02 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+            let fn_ = [
+                e01[1]*e02[2] - e01[2]*e02[1],
+                e01[2]*e02[0] - e01[0]*e02[2],
+                e01[0]*e02[1] - e01[1]*e02[0],
+            ];
+            for &vi in face {
+                vertex_normals_acc[vi][0] += fn_[0];
+                vertex_normals_acc[vi][1] += fn_[1];
+                vertex_normals_acc[vi][2] += fn_[2];
+            }
+        }
+        // Normalize and assign to instances
+        for fi in 0..nf {
+            let face = faces[fi];
+            for vi in 0..3 {
+                let n = &vertex_normals_acc[face[vi]];
+                let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+                if len > 1e-10 {
+                    result[fi].normals[vi] = [
+                        (n[0] / len) as f32,
+                        (n[1] / len) as f32,
+                        (n[2] / len) as f32,
+                    ];
+                } else {
+                    result[fi].normals[vi] = [0.0; 3];
+                }
+            }
+        }
     }
 
     result

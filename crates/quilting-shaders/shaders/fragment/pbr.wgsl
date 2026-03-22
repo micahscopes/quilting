@@ -81,7 +81,6 @@ var env_irradiance: texture_cube<f32>;
 var env_irradiance_sampler: sampler;
 
 struct FragInput {
-    @builtin(front_facing) front_facing: bool,
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
     @location(2) tex_uv: vec2<f32>,
@@ -92,7 +91,6 @@ struct FragInput {
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
     @location(9) fade: f32,
-    @location(10) @interpolate(flat) perm_sign: f32,
 }
 
 @fragment
@@ -102,15 +100,9 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     var n = normalize(in.normal_vs);
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera looks down +Z
 
-    // Two-sided lighting: use face winding, corrected for permutation parity.
-    // Odd permutations reverse triangle winding, so front_facing flips.
-    var face_back = in.front_facing; // tessellation is CW, so front_facing=true means back-facing
-    if in.perm_sign < 0.0 {
-        face_back = !face_back;      // odd perms reverse winding again
-    }
-    if face_back {
-        n = -n;
-    }
+    // No two-sided normal flip — avoids all flip-boundary artifacts.
+    // Back-facing surfaces naturally darken (NdotV clamped to 0.001).
+    // IBL irradiance still provides ambient fill from all directions.
 
     // --- Base color ---
     // Apply KHR_texture_transform to base color UVs
@@ -237,11 +229,8 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
     // --- IBL ambient ---
     var n_ws = normalize(in.normal_ws);
-    // Flip world-space normal consistently with the view-space flip
-    if face_back {
-        n_ws = -n_ws;
-    }
     let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
+    // No world-space flip either — n_ws stays as-is
     let reflect_ws = reflect(-view_dir_ws, n_ws);
 
     let irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb;
