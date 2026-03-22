@@ -177,7 +177,7 @@ pub fn compute_instances_with_uvs(
     // the same slot → guaranteed matching. This is the v0.2.0 proven
     // approach that was working before the LOD refactors.
 
-    const MAX_LOD: u32 = 32;
+    const MAX_LOD: u32 = 128;
     let target_pixels_per_sub = 4.0;
 
     let owned_mesh;
