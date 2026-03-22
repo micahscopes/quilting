@@ -88,17 +88,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         nrm = nrm * u.perm_parity;
     }
 
-    // Override with smooth normals when available. For affine transforms
-    // (identity weights), QB normals are flat per-face — smooth normals
-    // give proper shading continuity. For conformal transforms, smooth
-    // normals are pre-transform but still preferable to faceted QB normals
-    // for visual quality (the two-sided normal flip handles winding).
+    // Use smooth normals when available. These are perm_parity-independent
+    // so they don't flicker when LOD changes cause perm_index redistribution.
+    // The fragment shader's two-sided flip handles winding.
     let sn0 = in.smooth_n0.xyz;
     let sn1 = in.smooth_n1.xyz;
     let sn2 = in.smooth_n2.xyz;
-    let interp_nrm = bary.x * sn0 + bary.y * sn1 + bary.z * sn2;
-    if dot(interp_nrm, interp_nrm) > 0.01 {
-        nrm = normalize(interp_nrm);
+    let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
+    if has_smooth {
+        nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);

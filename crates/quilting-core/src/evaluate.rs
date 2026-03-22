@@ -315,19 +315,20 @@ pub fn compute_instances_with_uvs(
         *lod = (*lod).min(MAX_LOD);
     }
 
-    // Write per-edge LODs into each face instance.
-    // Mapping from FaceInstance edge_lods index to half-edge:
-    //   edge_lods[0] (opposite v0) = he fi*3+1 (v1->v2)
-    //   edge_lods[1] (opposite v1) = he fi*3+2 (v2->v0)
-    //   edge_lods[2] (opposite v2) = he fi*3+0 (v0->v1)
+    // Use uniform LOD per face (max of all 3 edges). This ensures
+    // canonical_form always returns [n,n,n] with perm_index=0, eliminating
+    // the permutation system entirely. This prevents normal/specular
+    // flickering caused by perm_index changes between frames.
+    // The cost is slightly more tessellation on short edges, but the
+    // visual stability is worth it.
     let mut result = instances;
     for fi in 0..nf {
         let he_base = fi * 3;
-        result[fi].edge_lods = [
-            edge_lods[canonical_edge(he_base + 1)],
-            edge_lods[canonical_edge(he_base + 2)],
-            edge_lods[canonical_edge(he_base)],
-        ];
+        let l0 = edge_lods[canonical_edge(he_base + 1)];
+        let l1 = edge_lods[canonical_edge(he_base + 2)];
+        let l2 = edge_lods[canonical_edge(he_base)];
+        let uniform = l0.max(l1).max(l2);
+        result[fi].edge_lods = [uniform, uniform, uniform];
     }
 
     // Compute per-vertex LOD = max of all edges meeting at each mesh vertex.
@@ -492,31 +493,17 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_edges_match() {
-        use std::collections::HashMap;
+    fn uniform_lod_per_face() {
         let (verts, faces) = shapes::icosahedron();
         let m = Mobius::sphere_reflection(Quat::from_point(0.3, 0.0, 0.0), 1.5);
         let instances = compute_instances(&verts, &faces, &m, None, None);
 
-        // Build edge → LOD map and verify consistency
-        let mut edge_lods: HashMap<(usize, usize), Vec<u32>> = HashMap::new();
-        for (fi, face) in faces.iter().enumerate() {
-            let edges = [
-                (face[1], face[2], 0),
-                (face[0], face[2], 1),
-                (face[0], face[1], 2),
-            ];
-            for &(va, vb, local_idx) in &edges {
-                let key = if va < vb { (va, vb) } else { (vb, va) };
-                edge_lods.entry(key).or_default().push(instances[fi].edge_lods[local_idx]);
-            }
-        }
-        for (edge, lods) in &edge_lods {
-            let first = lods[0];
-            for &l in lods {
-                assert_eq!(l, first,
-                    "edge {:?} has inconsistent LODs: {:?}", edge, lods);
-            }
+        // All 3 edge LODs within a face should be equal (uniform LOD)
+        for (fi, inst) in instances.iter().enumerate() {
+            assert_eq!(inst.edge_lods[0], inst.edge_lods[1],
+                "face {} has non-uniform LODs: {:?}", fi, inst.edge_lods);
+            assert_eq!(inst.edge_lods[1], inst.edge_lods[2],
+                "face {} has non-uniform LODs: {:?}", fi, inst.edge_lods);
         }
     }
 
