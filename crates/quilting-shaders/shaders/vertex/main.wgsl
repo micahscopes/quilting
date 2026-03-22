@@ -106,7 +106,7 @@ fn eval_mobius_qb(
     let X = qmul(top, bi);
 
     // Conformal fade: |bot|² → 0 near Möbius pole
-    let fade = smoothstep(0.005, 0.05, dot(bot, bot));
+    let fade = smoothstep(0.0001, 0.001, dot(bot, bot));
 
     // Analytic normal via quotient rule
     let dtop_u = pw1 - pw0;
