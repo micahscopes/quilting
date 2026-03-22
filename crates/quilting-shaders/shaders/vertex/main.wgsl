@@ -88,22 +88,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         nrm = nrm * u.perm_parity;
     }
 
-    // Smooth normals: use glTF vertex normals when weights are identity
-    // (no conformal transform). Under Möbius, fall back to QB analytical
-    // normals which correctly capture the transformed surface geometry.
-    // TODO: implement conformal normal rotation for smooth Möbius shading.
+    // Smooth normals: computed from post-transform positions on the CPU,
+    // so they're correct for both identity and Möbius-deformed geometry.
     let sn0 = in.smooth_n0.xyz;
     let sn1 = in.smooth_n1.xyz;
     let sn2 = in.smooth_n2.xyz;
     let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
     if has_smooth {
-        // Check if weights are identity (no conformal distortion)
-        let w_dev = length(in.w0 - vec4<f32>(1.0, 0.0, 0.0, 0.0))
-                  + length(in.w1 - vec4<f32>(1.0, 0.0, 0.0, 0.0))
-                  + length(in.w2 - vec4<f32>(1.0, 0.0, 0.0, 0.0));
-        if w_dev < 0.01 {
-            nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
-        }
+        nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);

@@ -361,7 +361,61 @@ pub fn compute_instances_with_uvs(
         ];
     }
 
+    // Compute post-transform smooth normals from the transformed positions.
+    // For each vertex, average the normals of all adjacent faces (area-weighted).
+    // This gives smooth shading that's correct for the Möbius-deformed surface.
+    compute_smooth_normals_from_positions(&mut result, faces, &transformed);
+
     result
+}
+
+/// Compute area-weighted smooth vertex normals from transformed positions.
+fn compute_smooth_normals_from_positions(
+    instances: &mut [FaceInstance],
+    faces: &[[usize; 3]],
+    transformed: &[(Quat, Quat)],
+) {
+    let nv = transformed.len();
+    let nf = faces.len();
+    // Accumulate per-vertex normal (area-weighted by face normal * area)
+    let mut vertex_normals = vec![[0.0f64; 3]; nv];
+
+    for fi in 0..nf {
+        let face = faces[fi];
+        let p0 = instances[fi].positions[0].to_point();
+        let p1 = instances[fi].positions[1].to_point();
+        let p2 = instances[fi].positions[2].to_point();
+        let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+        let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+        // Cross product (not normalized — magnitude = 2x triangle area)
+        let nx = e1[1]*e2[2] - e1[2]*e2[1];
+        let ny = e1[2]*e2[0] - e1[0]*e2[2];
+        let nz = e1[0]*e2[1] - e1[1]*e2[0];
+        for &vi in &face {
+            vertex_normals[vi][0] += nx;
+            vertex_normals[vi][1] += ny;
+            vertex_normals[vi][2] += nz;
+        }
+    }
+
+    // Normalize and write into instances
+    for vn in vertex_normals.iter_mut() {
+        let len = (vn[0]*vn[0] + vn[1]*vn[1] + vn[2]*vn[2]).sqrt();
+        if len > 1e-12 {
+            vn[0] /= len; vn[1] /= len; vn[2] /= len;
+        } else {
+            *vn = [0.0, 1.0, 0.0];
+        }
+    }
+
+    for fi in 0..nf {
+        let face = faces[fi];
+        instances[fi].normals = [
+            [vertex_normals[face[0]][0] as f32, vertex_normals[face[0]][1] as f32, vertex_normals[face[0]][2] as f32],
+            [vertex_normals[face[1]][0] as f32, vertex_normals[face[1]][1] as f32, vertex_normals[face[1]][2] as f32],
+            [vertex_normals[face[2]][0] as f32, vertex_normals[face[2]][1] as f32, vertex_normals[face[2]][2] as f32],
+        ];
+    }
 }
 
 
