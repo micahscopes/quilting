@@ -126,6 +126,11 @@ uniform mat4 u_mv;
 uniform int u_useQB;
 uniform float u_permParity; // +1 or -1: flip normal for odd permutations
 uniform int u_permIndex;    // S3 permutation index (0-5) for bary remapping
+// Möbius transform: p' = (a*p + b) * (c*p + d)^{-1}
+uniform vec4 u_mob_a;
+uniform vec4 u_mob_b;
+uniform vec4 u_mob_c;
+uniform vec4 u_mob_d;
 
 out vec3 v_normal_vs;
 out float v_density;
@@ -203,34 +208,64 @@ float edgeDensity(vec3 bary, vec3 res) {
   return exp(logRes);
 }
 
+// Fused Möbius + QB evaluation.
+// Under Möbius [[a,b],[c,d]], the rational Bézier form absorbs the transform:
+//   top = Σ λᵢ (a*pᵢ+b)*wᵢ     (numerator — Möbius folds into weights)
+//   bot = Σ λᵢ (c*pᵢ+d)*wᵢ     (denominator — conformal weight)
+//   X = top * bot⁻¹              (only 1 inverse total, not 3)
+void evalMobiusQB(vec3 bary,
+    vec4 p0, vec4 p1, vec4 p2,
+    vec4 w0, vec4 w1, vec4 w2,
+    out vec3 pos, out vec3 nrm, out float fade) {
+  // Möbius-weighted control data — the transform folds into the rational form
+  vec4 pw0 = qm(qm(u_mob_a, p0) + u_mob_b, w0);
+  vec4 pw1 = qm(qm(u_mob_a, p1) + u_mob_b, w1);
+  vec4 pw2 = qm(qm(u_mob_a, p2) + u_mob_b, w2);
+  vec4 bw0 = qm(qm(u_mob_c, p0) + u_mob_d, w0);
+  vec4 bw1 = qm(qm(u_mob_c, p1) + u_mob_d, w1);
+  vec4 bw2 = qm(qm(u_mob_c, p2) + u_mob_d, w2);
+
+  vec4 top = bary.x*pw0 + bary.y*pw1 + bary.z*pw2;
+  vec4 bot = bary.x*bw0 + bary.y*bw1 + bary.z*bw2;
+  vec4 bi = qinv(bot);
+  vec4 X = qm(top, bi);
+  pos = X.yzw;
+
+  // Conformal fade: |bot|² → 0 near Möbius pole
+  fade = smoothstep(0.0001, 0.001, dot(bot, bot));
+
+  // Analytic normal via quotient rule on Möbius-fused form
+  vec4 dtop_u = pw1 - pw0;
+  vec4 dbot_u = bw1 - bw0;
+  vec4 dtop_v = pw2 - pw0;
+  vec4 dbot_v = bw2 - bw0;
+  vec4 dXu = qm(dtop_u - qm(X, dbot_u), bi);
+  vec4 dXv = qm(dtop_v - qm(X, dbot_v), bi);
+  nrm = normalize(cross(dXu.yzw, dXv.yzw));
+}
+
 void main(){
   vec3 bary = permBary(a_bary, u_permIndex);
+
   vec3 p, n;
-  if (u_useQB == 1) {
-    evalQBWithNormal(bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2, p, n);
-  } else {
-    p = evalFlat(bary, a_p0,a_p1,a_p2);
-    n = normalize(cross(a_p1.yzw - a_p0.yzw, a_p2.yzw - a_p0.yzw));
-  }
-  // Flip normal for odd permutations (reflections in S3)
-  n *= u_permParity;
-  vec3 n_vs = normalize(mat3(u_mv) * n);
-  v_normal_vs = n_vs;
-  v_matcap_uv = n_vs.xy * 0.5 + 0.5;
-
-  float density = edgeDensity(bary, a_lodInfo.xyz);
-  v_density = log2(max(density, 1.0)) / 10.0;
-
-  // Conformal scale: |bot|² measures how close we are to the Möbius pole.
-  // Small |bot|² = extreme stretching = surface wrapping back through origin.
-  // Smooth fade instead of hard clip to avoid flickering edges.
   v_fade = 1.0;
   if (u_useQB == 1) {
-    vec4 bot = a_bary.x*a_w0 + a_bary.y*a_w1 + a_bary.z*a_w2;
-    float bot_sq = dot(bot, bot);
-    // Smooth fade — lower thresholds = more visible geometry before fadeout
-    v_fade = smoothstep(0.0001, 0.001, bot_sq);
+    float fade;
+    evalMobiusQB(bary, a_p0,a_p1,a_p2, a_w0,a_w1,a_w2, p, n, fade);
+    v_fade = fade;
+  } else {
+    // Flat: apply Möbius to vertices directly (no QB, used for orig wireframe)
+    vec4 mp0 = qm(qm(u_mob_a, a_p0) + u_mob_b, qinv(qm(u_mob_c, a_p0) + u_mob_d));
+    vec4 mp1 = qm(qm(u_mob_a, a_p1) + u_mob_b, qinv(qm(u_mob_c, a_p1) + u_mob_d));
+    vec4 mp2 = qm(qm(u_mob_a, a_p2) + u_mob_b, qinv(qm(u_mob_c, a_p2) + u_mob_d));
+    p = evalFlat(bary, mp0,mp1,mp2);
+    n = normalize(cross(mp1.yzw - mp0.yzw, mp2.yzw - mp0.yzw));
   }
+  n *= u_permParity;
+  v_normal_vs = normalize(mat3(u_mv) * n);
+  v_matcap_uv = v_normal_vs.xy * 0.5 + 0.5;
+
+  v_density = log2(max(edgeDensity(bary, a_lodInfo.xyz), 1.0)) / 10.0;
 
   gl_Position = u_mvp * vec4(p, 1.0);
 }`;
@@ -350,6 +385,46 @@ const progMatcap = mkProg(VS, FS_MATCAP);
 const progLod = mkProg(VS, FS_LOD);
 const progWire = mkProg(VS, FS_WIRE);
 const progNormals = mkProg(VS, FS_NORMALS);
+const allProgs = [progMatcap, progLod, progWire, progNormals];
+
+// Cache Möbius uniform locations per program
+const mobLocs = new Map();
+for (const prog of allProgs) {
+  mobLocs.set(prog, {
+    a: gl.getUniformLocation(prog, 'u_mob_a'),
+    b: gl.getUniformLocation(prog, 'u_mob_b'),
+    c: gl.getUniformLocation(prog, 'u_mob_c'),
+    d: gl.getUniformLocation(prog, 'u_mob_d'),
+  });
+}
+
+// Current Möbius quaternions — updated from sliders, set as uniforms before draw.
+// Identity: a=1, b=0, c=0, d=1
+let mob = { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
+
+// Compute Möbius a,b,c,d quaternions from transform parameters.
+// sphere_reflection(cx,cy,cz,r): [[center, -(center²+r²)], [1, -center]]
+function computeMobius(type, cx, cy, cz, r) {
+  if (type === 'sphere_reflection' && r > 0.01) {
+    const csq = cx*cx + cy*cy + cz*cz;
+    return {
+      a: [0, cx, cy, cz],
+      b: [csq - r*r, 0, 0, 0],
+      c: [1, 0, 0, 0],
+      d: [0, -cx, -cy, -cz],
+    };
+  }
+  return { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
+}
+
+// Set Möbius uniforms on the currently active program
+function setMobiusUniforms(prog) {
+  const locs = mobLocs.get(prog);
+  gl.uniform4fv(locs.a, mob.a);
+  gl.uniform4fv(locs.b, mob.b);
+  gl.uniform4fv(locs.c, mob.c);
+  gl.uniform4fv(locs.d, mob.d);
+}
 
 // Matcap texture
 let matcapTex = gl.createTexture();
@@ -393,6 +468,69 @@ function lodColor(lod) {
 
 let drawBatches = [];
 
+// Build instance data for all faces directly in JS (no worker).
+// Used for immediate LOD-1 rendering before the worker refines LODs.
+function buildInstanceData(positions, faces) {
+  const numFaces = faces.length / 3;
+  const data = new Float32Array(numFaces * 52);
+  for (let fi = 0; fi < numFaces; fi++) {
+    const base = fi * 52;
+    for (let vi = 0; vi < 3; vi++) {
+      const vIdx = faces[fi*3 + vi];
+      // Position quaternion: (w=0, x, y, z) — pure imaginary
+      data[base + vi*4 + 1] = positions[vIdx*3];
+      data[base + vi*4 + 2] = positions[vIdx*3 + 1];
+      data[base + vi*4 + 3] = positions[vIdx*3 + 2];
+      // Weight quaternion: (w=1, x=0, y=0, z=0) — identity
+      data[base + 12 + vi*4] = 1;
+    }
+    // Edge LODs = 1, vertex LODs = 1
+    data[base+24] = 1; data[base+25] = 1; data[base+26] = 1;
+    data[base+28] = 1; data[base+29] = 1; data[base+30] = 1;
+  }
+  return data;
+}
+
+// LOD-1 tessellation: just the triangle itself
+const ORIG_TRIS = new Uint32Array([0, 1, 2]);
+
+function ensureLod1Tess() {
+  const key = '1,1,1/0';
+  if (tessCache.has(key)) return tessCache.get(key);
+  const baryBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, baryBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, ORIG_BARY, gl.STATIC_DRAW);
+  const triIdxBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ORIG_TRIS, gl.STATIC_DRAW);
+  const lineIdxBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lineIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ORIG_LINES, gl.STATIC_DRAW);
+  const entry = { baryBuf, lineIdxBuf, triIdxBuf, numLineIdx: 6, numTriIdx: 3 };
+  tessCache.set(key, entry);
+  return entry;
+}
+
+// Immediately set up LOD-1 draw batches from shape data (no worker needed).
+function immediateUpload() {
+  if (!shapeData) return;
+  const data = buildInstanceData(shapeData.positions, shapeData.faces);
+  const numFaces = shapeData.faces.length / 3;
+  const tess = ensureLod1Tess();
+  const cached = getOrCreateBatchVAOs('1,1,1/0', tess, data, numFaces);
+  numOrigInst = numFaces;
+  if (!vaoOrigMesh) {
+    vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, data);
+  }
+  drawBatches = [{
+    vaoXform: cached.lineVao, vaoXformTri: cached.triVao,
+    numLineIdx: 6, numTriIdx: 3,
+    numInst: numFaces, lod: [1,1,1],
+    color: lodColor([1,1,1]), parity: 1, permIndex: 0,
+  }];
+  globalMaxLogLod = 1;
+}
+
 function makeVAO(baryData, idxData, instanceData) {
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -404,10 +542,11 @@ function makeVAO(baryData, idxData, instanceData) {
   const ib = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, ib);
   gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
-  // 8 vec4s per instance: p0,p1,p2,w0,w1,w2,edgeLods,vertLods = 32 floats = 128 bytes
+  // 13 vec4s per instance (52 floats = 208 bytes), shader reads first 8
+  const INST_STRIDE = 208;
   for (let i=0;i<8;i++) {
     gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,128,i*16);
+    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,INST_STRIDE,i*16);
     gl.vertexAttribDivisor(1+i,1);
   }
   const eb = gl.createBuffer();
@@ -491,9 +630,10 @@ function getOrCreateBatchVAOs(tessKey, tessBufs, instanceData, numInstances) {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+    const INST_STRIDE = 208; // 52 floats = 13 vec4s per instance
     for (let i = 0; i < 8; i++) {
       gl.enableVertexAttribArray(1+i);
-      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 128, i*16);
+      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, INST_STRIDE, i*16);
       gl.vertexAttribDivisor(1+i, 1);
     }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
@@ -531,9 +671,10 @@ function uploadBatches(data) {
     const origBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, origBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(allOrig), gl.DYNAMIC_DRAW);
+    const INST_STRIDE = 208;
     for (let i = 0; i < 8; i++) {
       gl.enableVertexAttribArray(1+i);
-      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 128, i*16);
+      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, INST_STRIDE, i*16);
       gl.vertexAttribDivisor(1+i, 1);
     }
     gl.bindVertexArray(null);
@@ -560,7 +701,16 @@ function uploadBatches(data) {
     const vaoKey = batch.wanted_lod.join(',') + '/' + batch.perm_index;
     usedKeys.add(vaoKey);
 
-    const cached = getOrCreateBatchVAOs(vaoKey, tess, batch.instances_xform, batch.num_faces);
+    // GPU-ready instance data: original positions/weights (GPU applies Möbius)
+    // with LOD values from the CPU-computed xform pass.
+    const gpuData = new Float32Array(batch.instances_orig);
+    const xf = batch.instances_xform;
+    for (let i = 0; i < batch.num_faces; i++) {
+      const base = i * 52;
+      // Copy LOD info (edge LODs + vertex LODs, floats 24-31) from xform
+      for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j];
+    }
+    const cached = getOrCreateBatchVAOs(vaoKey, tess, gpuData, batch.num_faces);
 
     drawBatches.push({
       vaoXform: cached.lineVao,
@@ -581,9 +731,16 @@ function perspective(fov,a,n,f){const t=1/Math.tan(fov*.5),r=1/(n-f);return new 
 function lookAt(ex,ey,ez,tx,ty,tz,ux,uy,uz){let fx=tx-ex,fy=ty-ey,fz=tz-ez,fl=Math.hypot(fx,fy,fz);fx/=fl;fy/=fl;fz/=fl;let sx=fy*uz-fz*uy,sy=fz*ux-fx*uz,sz=fx*uy-fy*ux,sl=Math.hypot(sx,sy,sz);sx/=sl;sy/=sl;sz/=sl;let ux2=sy*fz-sz*fy,uy2=sz*fx-sx*fz,uz2=sx*fy-sy*fx;return new Float32Array([sx,ux2,-fx,0,sy,uy2,-fy,0,sz,uz2,-fz,0,-(sx*ex+sy*ey+sz*ez),-(ux2*ex+uy2*ey+uz2*ez),fx*ex+fy*ey+fz*ez,1]);}
 function mulM4(a,b){const o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++)o[c*4+r]=a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];return o;}
 
-function render() {
+function resizeCanvas() {
   const w=$('wrap');
-  canvas.width=w.clientWidth; canvas.height=w.clientHeight;
+  const dw = w.clientWidth, dh = w.clientHeight;
+  if (canvas.width !== dw || canvas.height !== dh) {
+    canvas.width = dw; canvas.height = dh;
+  }
+}
+
+function render() {
+  resizeCanvas();
   gl.viewport(0,0,canvas.width,canvas.height);
   gl.clearColor(0.06,0.06,0.14,1);
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
@@ -602,9 +759,13 @@ function render() {
   const drawMatcap = renderMode === 'matcap';
   const drawNormals = renderMode === 'normals';
 
-  // Original mesh wireframe (simple triangles, no tessellation)
+  // Original mesh wireframe (simple triangles, no tessellation) — identity Möbius
   if (drawWire && vaoOrigMesh) {
     gl.useProgram(progWire);
+    gl.uniform4fv(mobLocs.get(progWire).a, [1,0,0,0]);
+    gl.uniform4fv(mobLocs.get(progWire).b, [0,0,0,0]);
+    gl.uniform4fv(mobLocs.get(progWire).c, [0,0,0,0]);
+    gl.uniform4fv(mobLocs.get(progWire).d, [1,0,0,0]);
     gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progWire,'u_useQB'), 0);
@@ -619,6 +780,7 @@ function render() {
   // Transformed — real matcap texture
   if (drawMatcap) {
     gl.useProgram(progMatcap);
+    setMobiusUniforms(progMatcap);
     gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progMatcap,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progMatcap,'u_useQB'), 1);
@@ -637,6 +799,7 @@ function render() {
   // Transformed — LOD density heatmap
   if (drawLod) {
     gl.useProgram(progLod);
+    setMobiusUniforms(progLod);
     gl.uniformMatrix4fv(gl.getUniformLocation(progLod,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progLod,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progLod,'u_useQB'), 1);
@@ -653,6 +816,7 @@ function render() {
   // Transformed — wireframe overlay
   if (drawWire) {
     gl.useProgram(progWire);
+    setMobiusUniforms(progWire);
     gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progWire,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progWire,'u_useQB'), 1);
@@ -670,6 +834,7 @@ function render() {
   // Normals visualization
   if (drawNormals) {
     gl.useProgram(progNormals);
+    setMobiusUniforms(progNormals);
     gl.uniformMatrix4fv(gl.getUniformLocation(progNormals,'u_mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(progNormals,'u_mv'), false, view);
     gl.uniform1i(gl.getUniformLocation(progNormals,'u_useQB'), 1);
@@ -691,17 +856,7 @@ async function update() {
   if (updating) { pendingUpdate = true; return; }
   updating = true;
 
-  const resVal = parseInt($('res').value);
-  const res = resVal === 0 ? 0 : (1 << resVal);
-  const sx = parseInt($('sx').value)/10;
-  const sy = parseInt($('sy').value)/10;
-  const sz = parseInt($('sz').value)/10;
-  const sr = parseInt($('sr').value)/10;
-  $('res-v').textContent = res === 0 ? 'auto' : res;
-  $('sx-v').textContent = sx.toFixed(1);
-  $('sy-v').textContent = sy.toFixed(1);
-  $('sz-v').textContent = sz.toFixed(1);
-  $('sr-v').textContent = sr.toFixed(1);
+  const { sx, sy, sz, sr, res, tType } = readSliders();
 
   // Compute VP matrix for screen-space LOD
   const w=$('wrap');
@@ -710,7 +865,6 @@ async function update() {
   const vpMatrix = mulM4(perspective(Math.PI/3, vpW/vpH, 0.1, 100), lookAt(ex,ey,ez,0,0,0,0,1,0));
 
   const t0 = performance.now();
-  const tType = sr > 0.01 ? 'sphere_reflection' : 'identity';
   const resp = await workerCall('compute_batches', {
     positions: Array.from(shapeData.positions),
     faces: Array.from(shapeData.faces),
@@ -753,24 +907,28 @@ async function update() {
   }
 }
 
-async function loadShape(name) {
+const builtinShapes = {
+  cube: {positions:[-1,-1,-1,1,-1,-1,1,1,-1,-1,1,-1,-1,-1,1,1,-1,1,1,1,1,-1,1,1],faces:[0,1,2,0,2,3,5,4,7,5,7,6,4,0,3,4,3,7,1,5,6,1,6,2,3,2,6,3,6,7,4,5,1,4,1,0]},
+  tetrahedron: {positions:[1,1,1,1,-1,-1,-1,1,-1,-1,-1,1],faces:[0,1,2,0,2,3,0,3,1,1,3,2]},
+  octahedron: {positions:[1,0,0,-1,0,0,0,1,0,0,-1,0,0,0,1,0,0,-1],faces:[0,2,4,2,1,4,1,3,4,3,0,4,2,0,5,1,2,5,3,1,5,0,3,5]},
+  icosahedron: (() => {
+    const p=(1+Math.sqrt(5))/2, a=1, b=a/p;
+    return {
+      positions:[-b,a,0,b,a,0,-b,-a,0,b,-a,0,0,-b,a,0,b,a,0,-b,-a,0,b,-a,a,0,-b,a,0,b,-a,0,-b,-a,0,b],
+      faces:[0,11,5,0,5,1,0,1,7,0,7,10,0,10,11,1,5,9,5,11,4,11,10,2,10,7,6,7,1,8,3,9,4,3,4,2,3,2,6,3,6,8,3,8,9,4,9,5,2,4,11,6,2,10,8,6,7,9,8,1]
+    };
+  })(),
+};
+
+function loadShape(name) {
   shape = name;
-  // get_shape runs in main thread (tiny) — but we need it in the worker for compute_batches
-  // For now, get shapes from a hardcoded list and send positions/faces to worker
-  const shapes = {
-    cube: {positions:[-1,-1,-1,1,-1,-1,1,1,-1,-1,1,-1,-1,-1,1,1,-1,1,1,1,1,-1,1,1],faces:[0,1,2,0,2,3,5,4,7,5,7,6,4,0,3,4,3,7,1,5,6,1,6,2,3,2,6,3,6,7,4,5,1,4,1,0]},
-    tetrahedron: {positions:[1,1,1,1,-1,-1,-1,1,-1,-1,-1,1],faces:[0,1,2,0,2,3,0,3,1,1,3,2]},
-    octahedron: {positions:[1,0,0,-1,0,0,0,1,0,0,-1,0,0,0,1,0,0,-1],faces:[0,2,4,2,1,4,1,3,4,3,0,4,2,0,5,1,2,5,3,1,5,0,3,5]},
-    icosahedron: (() => {
-      const p=(1+Math.sqrt(5))/2, a=1, b=a/p;
-      return {
-        positions:[-b,a,0,b,a,0,-b,-a,0,b,-a,0,0,-b,a,0,b,a,0,-b,-a,0,b,-a,a,0,-b,a,0,b,-a,0,-b,-a,0,b],
-        faces:[0,11,5,0,5,1,0,1,7,0,7,10,0,10,11,1,5,9,5,11,4,11,10,2,10,7,6,7,1,8,3,9,4,3,4,2,3,2,6,3,6,8,3,8,9,4,9,5,2,4,11,6,2,10,8,6,7,9,8,1]
-      };
-    })(),
-  };
-  shapeData = shapes[name] || shapes.cube;
-  update();
+  shapeData = builtinShapes[name] || builtinShapes.cube;
+  // Draw immediately at LOD 1 — no worker needed
+  immediateUpload();
+  readSliders();
+  render();
+  // Refine LODs async in background
+  if (workerReady) update();
 }
 
 for (const b of document.querySelectorAll('#shape-btns button'))
@@ -788,8 +946,42 @@ for (const b of document.querySelectorAll('#atlas-btns button'))
     update();
   };
 $('matcap-sel').addEventListener('change', () => { loadMatcap($('matcap-sel').value); });
-for (const id of ['res','sx','sy','sz','sr'])
-  $(id).addEventListener('input', update);
+
+// Read slider values and update Möbius quaternions + display values.
+// Returns {sx, sy, sz, sr, res} for use by LOD update.
+function readSliders() {
+  const resVal = parseInt($('res').value);
+  const res = resVal === 0 ? 0 : (1 << resVal);
+  const sx = parseInt($('sx').value)/10;
+  const sy = parseInt($('sy').value)/10;
+  const sz = parseInt($('sz').value)/10;
+  const sr = parseInt($('sr').value)/10;
+  $('res-v').textContent = res === 0 ? 'auto' : res;
+  $('sx-v').textContent = sx.toFixed(1);
+  $('sy-v').textContent = sy.toFixed(1);
+  $('sz-v').textContent = sz.toFixed(1);
+  $('sr-v').textContent = sr.toFixed(1);
+  const tType = sr > 0.01 ? 'sphere_reflection' : 'identity';
+  mob = computeMobius(tType, sx, sy, sz, sr);
+  return { sx, sy, sz, sr, res, tType };
+}
+
+// Möbius sliders: just update uniforms and render. No worker call.
+// Throttled to one render per display frame via rAF.
+let renderQueued = false;
+function queueRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
+}
+for (const id of ['sx','sy','sz','sr']) {
+  $(id).addEventListener('input', () => {
+    readSliders();
+    queueRender();
+  });
+}
+// Resolution slider needs LOD recompute
+$('res').addEventListener('input', update);
 let sliverDebounce = null, sliverRebuilding = false;
 $('sliver').addEventListener('input', () => {
   $('sliver-v').textContent = ($('sliver').value / 1000).toFixed(3);
@@ -815,20 +1007,25 @@ canvas.onmousedown = e => { drag=true; lx=e.clientX; ly=e.clientY; };
 onmouseup = () => drag=false;
 let camDebounce = null;
 onmousemove = e => { if(!drag)return; rotY+=(e.clientX-lx)*0.01; rotX+=(e.clientY-ly)*0.01; lx=e.clientX; ly=e.clientY; render(); clearTimeout(camDebounce); camDebounce=setTimeout(update, 150); };
-canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); update(); e.preventDefault(); };
+canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); clearTimeout(camDebounce); camDebounce=setTimeout(update, 150); e.preventDefault(); };
 onresize = render;
 
 // Load initial matcap texture
 loadMatcap($('matcap-sel').value);
 
-// Init: build atlas, then start rendering
-$('stats').textContent = 'Starting worker...';
-await workerCall('init', {});
-$('stats').textContent = 'Building atlas...';
-const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
-workerReady = true;
-$('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
+// Draw immediately at LOD 1, then refine asynchronously
 loadShape('cube');
+
+// Build atlas + enable LOD refinement in background
+(async () => {
+  $('stats').textContent = 'Starting worker...';
+  await workerCall('init', {});
+  $('stats').textContent = 'Building atlas...';
+  const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
+  workerReady = true;
+  $('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
+  update(); // Refine LODs now that atlas is ready
+})();
 </script>
 </body>
 </html>

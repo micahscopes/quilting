@@ -325,8 +325,12 @@ const placeholderTex = null; // 1x1 white texture for unbound slots
 //   int perm_index    (offset 132,  4 bytes)
 //   int use_qb        (offset 136,  4 bytes)
 //   float _pad        (offset 140,  4 bytes)
-//   Total: 144 bytes
-const VTX_UBO_SIZE = 144;
+//   vec4 mob_a        (offset 144, 16 bytes)
+//   vec4 mob_b        (offset 160, 16 bytes)
+//   vec4 mob_c        (offset 176, 16 bytes)
+//   vec4 mob_d        (offset 192, 16 bytes)
+//   Total: 208 bytes
+const VTX_UBO_SIZE = 208;
 const VTX_UBO_BINDING = 0;
 const vtxUbo = gl.createBuffer();
 gl.bindBuffer(gl.UNIFORM_BUFFER, vtxUbo);
@@ -432,18 +436,31 @@ function uploadPbrUBO(mat) {
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, pbrUboData);
 }
 
+// Current Möbius quaternions — updated from sliders, written into UBO.
+// Identity: a=1, b=0, c=0, d=1
+let mob = { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
+
+// Compute Möbius a,b,c,d from transform type and parameters.
+function computeMobius(type, cx, cy, cz, r) {
+  if (type === 'sphere_reflection' && r > 0.01) {
+    const csq = cx*cx + cy*cy + cz*cz;
+    return { a: [0,cx,cy,cz], b: [csq-r*r,0,0,0], c: [1,0,0,0], d: [0,-cx,-cy,-cz] };
+  }
+  return { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
+}
+
 function uploadVertexUBO(mvp, mv, permParity, permIndex, useQB) {
-  // mvp: 16 floats at offset 0 (f32 index 0)
-  vtxUboF32.set(mvp, 0);
-  // mv: 16 floats at offset 64 (f32 index 16)
-  vtxUboF32.set(mv, 16);
-  // perm_parity: float at offset 128 (f32 index 32)
-  vtxUboF32[32] = permParity;
-  // perm_index: int at offset 132 (i32 index 33)
-  vtxUboI32[33] = permIndex;
-  // use_qb: int at offset 136 (i32 index 34)
-  vtxUboI32[34] = useQB;
-  // _pad at offset 140 (index 35) -- leave as 0
+  vtxUboF32.set(mvp, 0);        // offset 0
+  vtxUboF32.set(mv, 16);        // offset 64
+  vtxUboF32[32] = permParity;   // offset 128
+  vtxUboI32[33] = permIndex;    // offset 132
+  vtxUboI32[34] = useQB;        // offset 136
+  // _pad at offset 140 -- leave as 0
+  // Möbius quaternions at offset 144 (f32 index 36)
+  vtxUboF32.set(mob.a, 36);     // offset 144
+  vtxUboF32.set(mob.b, 40);     // offset 160
+  vtxUboF32.set(mob.c, 44);     // offset 176
+  vtxUboF32.set(mob.d, 48);     // offset 192
 
   gl.bindBuffer(gl.UNIFORM_BUFFER, vtxUbo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(vtxUboData));
@@ -699,7 +716,14 @@ function uploadBatches(data) {
     const matSuffix = (batch.material_index != null && batch.material_index >= 0) ? '/m' + batch.material_index : '';
     const vaoKey = batch.wanted_lod.join(',') + '/' + batch.perm_index + matSuffix;
     usedKeys.add(vaoKey);
-    const cached = getOrCreateBatchVAOs(vaoKey, tess, batch.instances_xform, batch.num_faces);
+    // GPU-ready: original positions (GPU applies Möbius), LODs from CPU xform pass
+    const gpuData = new Float32Array(batch.instances_orig);
+    const xf = batch.instances_xform;
+    for (let i = 0; i < batch.num_faces; i++) {
+      const base = i * 52;
+      for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j];
+    }
+    const cached = getOrCreateBatchVAOs(vaoKey, tess, gpuData, batch.num_faces);
 
     drawBatches.push({
       vaoXform: cached.lineVao,
@@ -880,15 +904,21 @@ function getSliceNormal() {
   return [0, 0, sinT, cosT];
 }
 
-let interactiveRes = 0; // 0 = use slider value, >0 = override during interaction
 let lodDebounce = null;
 
-function updateFast() {
-  // Quick update with fixed LOD during active interaction
-  interactiveRes = 4;
+// Debounced update: render immediately with current data, recompute async.
+function updateDebounced() {
+  render();
   clearTimeout(lodDebounce);
-  lodDebounce = setTimeout(() => { interactiveRes = 0; update(); }, 200);
-  update();
+  lodDebounce = setTimeout(update, 150);
+}
+
+// Möbius-only update: just recompute uniforms + render. No worker.
+function updateMobius() {
+  const { mx, my, mz, mr } = getTransformParams();
+  const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
+  mob = computeMobius(tType, mx, my, mz, mr);
+  render();
 }
 
 async function update() {
@@ -903,9 +933,8 @@ async function update() {
 
   const { mx, my, mz, mr } = getTransformParams();
   const resVal = parseInt($('res').value);
-  const baseRes = resVal === 0 ? 0 : (1 << resVal);
-  const res = interactiveRes > 0 ? interactiveRes : baseRes;
-  $('res-v').textContent = baseRes === 0 ? 'auto' : baseRes;
+  const res = resVal === 0 ? 0 : (1 << resVal);
+  $('res-v').textContent = res === 0 ? 'auto' : res;
 
   // VP matrix for screen-space LOD
   const w=$('wrap');
@@ -916,6 +945,7 @@ async function update() {
   const tType = currentXform === 'identity' ? 'identity' :
                 currentXform === 'sphere_reflection' ? (mr > 0.01 ? 'sphere_reflection' : 'identity') :
                 currentXform;
+  mob = computeMobius(tType, mx, my, mz, mr);
 
   const spacetimeOn = $('spacetime-toggle').classList.contains('on');
 
@@ -1067,10 +1097,14 @@ setupBtnGroup('xform-btns', (v) => { currentXform = v; update(); });
 
 $('matcap-sel').addEventListener('change', () => loadMatcap($('matcap-sel').value));
 
-$('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateFast(); });
-$('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); updateFast(); });
+$('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateDebounced(); });
+$('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); updateDebounced(); });
+// Möbius sliders: just update uniforms + render. No worker call.
 for (const id of ['mx','my','mz','mr'])
-  $(id).addEventListener('input', updateFast);
+  $(id).addEventListener('input', () => {
+    $(`${id}-v`).textContent = (parseInt($(id).value)/10).toFixed(1);
+    updateMobius();
+  });
 $('res').addEventListener('input', update);
 
 // Toroidal toggle
