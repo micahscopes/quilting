@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, compute_instances_no_lod_with_uvs, compute_instances_with_uvs, ScreenInfo};
-use quilting_core::permutation::{canonical_form, remap_position, perm_sign};
+use quilting_core::permutation::{canonical_form, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
 use quilting_core::shapes;
@@ -261,16 +261,24 @@ pub fn compute_mesh_batches(
             let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
                 (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
             } else {
-                // CPU-side permutation remapping ensures shared edge vertices
-                // have bit-identical bary coords across adjacent faces.
+                // Convert to bary first, then permute by swapping components.
+                // This is exact (no arithmetic error) unlike the old approach
+                // of remapping in 2D cartesian then converting to bary.
                 let bary: Vec<f64> = mesh.positions.iter().map(|p| {
-                    let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
-                    let mut b = triangle::cartesian_to_bary(remapped[0], remapped[1]);
-                    // Snap near-zero bary to exact 0.0 — prevents epsilon * infinity gaps at Möbius poles
+                    let mut b = triangle::cartesian_to_bary(p[0], p[1]);
+                    // Snap near-zero bary to exact 0.0
                     for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
                     let sum = b[0] + b[1] + b[2];
                     if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
-                    b
+                    // Permute in bary space — just component swap, bit-identical
+                    match perm_index {
+                        1 => [b[0], b[2], b[1]],
+                        2 => [b[1], b[0], b[2]],
+                        3 => [b[1], b[2], b[0]],
+                        4 => [b[2], b[0], b[1]],
+                        5 => [b[2], b[1], b[0]],
+                        _ => b,
+                    }
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect();
 
                 let tris: Vec<u32> = mesh.triangles.iter()
@@ -1355,12 +1363,18 @@ pub fn slice_and_transform(
                 (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
             } else {
                 let bary: Vec<f64> = mesh.positions.iter().map(|p| {
-                    let remapped = if perm_index == 0 { *p } else { remap_position(perm_index, *p) };
-                    let mut b = triangle::cartesian_to_bary(remapped[0], remapped[1]);
+                    let mut b = triangle::cartesian_to_bary(p[0], p[1]);
                     for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
                     let sum = b[0] + b[1] + b[2];
                     if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
-                    b
+                    match perm_index {
+                        1 => [b[0], b[2], b[1]],
+                        2 => [b[1], b[0], b[2]],
+                        3 => [b[1], b[2], b[0]],
+                        4 => [b[2], b[0], b[1]],
+                        5 => [b[2], b[1], b[0]],
+                        _ => b,
+                    }
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect();
 
                 let tris_out: Vec<u32> = mesh.triangles.iter()
