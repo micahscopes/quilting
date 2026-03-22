@@ -234,40 +234,53 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let alpha_g = sheen_r * sheen_r;
         let inv_alpha = 1.0 / alpha_g;
 
-        // Charlie sheen BRDF helper
-        // D_Charlie = (2 + 1/α²) / 2π * sin²(θ_h)^(1/2α²)
-        // V ≈ 1 / (4 * (NdotL + NdotV - NdotL*NdotV)) [Ashikhmin approx]
+        // lambdaSheen visibility function (Khronos reference numerical fit).
+        // Much more accurate than Ashikhmin approximation — prevents over-bright sheen.
+        let one_minus_alpha_sq = (1.0 - alpha_g) * (1.0 - alpha_g);
 
+        // V_Sheen = 1 / ((1 + lambda(NdotV) + lambda(NdotL)) * 4 * NdotV * NdotL)
+        // lambda(x) = exp(a/(1+b*x^c) + d*x + e) with coefficients interpolated by roughness
+        let ls_a = mix(21.5473, 25.3245, one_minus_alpha_sq);
+        let ls_b = mix(3.82987, 3.32435, one_minus_alpha_sq);
+        let ls_c = mix(0.19823, 0.16801, one_minus_alpha_sq);
+        let ls_d = mix(-1.97760, -1.27393, one_minus_alpha_sq);
+        let ls_e = mix(-4.32054, -4.85967, one_minus_alpha_sq);
+
+        // Charlie D function
         // Key light sheen
         let h_key = normalize(view_dir + light_dir);
         let n_dot_h_key = max(dot(n, h_key), 0.0);
-        let n_dot_l_key = max(dot(n, light_dir), 0.0);
+        let n_dot_l_key = max(dot(n, light_dir), 0.001);
         let sin2_key = 1.0 - n_dot_h_key * n_dot_h_key;
         let D_key = (2.0 + inv_alpha) / (2.0 * 3.14159) * pow(max(sin2_key, 1e-6), 0.5 * inv_alpha);
-        let V_key = clamp(1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.001), 0.0, 1.0);
+
+        // lambdaSheen for V and L
+        let lv = exp(ls_a / (1.0 + ls_b * pow(n_dot_v, ls_c)) + ls_d * n_dot_v + ls_e);
+        let ll_key = exp(ls_a / (1.0 + ls_b * pow(n_dot_l_key, ls_c)) + ls_d * n_dot_l_key + ls_e);
+        let V_key = clamp(1.0 / ((1.0 + lv + ll_key) * 4.0 * n_dot_v * n_dot_l_key), 0.0, 1.0);
         let f_sheen_key = sheen_col * D_key * V_key * n_dot_l_key * light_color;
 
         // Fill light sheen
         let l_fill = normalize(vec3<f32>(-0.4, -0.3, 0.5));
         let h_fill = normalize(view_dir + l_fill);
         let n_dot_h_fill = max(dot(n, h_fill), 0.0);
-        let n_dot_l_fill = max(dot(n, l_fill), 0.0);
+        let n_dot_l_fill = max(dot(n, l_fill), 0.001);
         let sin2_fill = 1.0 - n_dot_h_fill * n_dot_h_fill;
         let D_fill = (2.0 + inv_alpha) / (2.0 * 3.14159) * pow(max(sin2_fill, 1e-6), 0.5 * inv_alpha);
-        let V_fill = clamp(1.0 / (4.0 * (n_dot_l_fill + n_dot_v - n_dot_l_fill * n_dot_v) + 0.001), 0.0, 1.0);
+        let ll_fill = exp(ls_a / (1.0 + ls_b * pow(n_dot_l_fill, ls_c)) + ls_d * n_dot_l_fill + ls_e);
+        let V_fill = clamp(1.0 / ((1.0 + lv + ll_fill) * 4.0 * n_dot_v * n_dot_l_fill), 0.0, 1.0);
         let f_sheen_fill = sheen_col * D_fill * V_fill * n_dot_l_fill * vec3<f32>(0.3, 0.35, 0.5);
 
         // Environment sheen (approximate)
-        let f_sheen_env = sheen_col * irradiance * sheen_r;
+        let f_sheen_env = sheen_col * irradiance * sheen_r * 0.3;
 
         let f_sheen = f_sheen_key + f_sheen_fill + f_sheen_env;
 
-        // Energy conservation: the sheen layer absorbs energy from the base.
-        // Per the Khronos spec: scaling = 1 - max(sheenColor) * E_sheen.
-        // E_sheen for Charlie distribution is roughly 0.4-0.8 depending on
-        // roughness and view angle. Use a simple strong estimate.
+        // Energy conservation: base layer scaling per Khronos spec
         let max_sheen = max(sheen_col.x, max(sheen_col.y, sheen_col.z));
-        let albedo_sheen_scaling = 1.0 - max_sheen * 0.6;
+        // Approximate E_sheen from the lambdaSheen at the view angle
+        let e_v = 1.0 / (1.0 + lv);
+        let albedo_sheen_scaling = 1.0 - max_sheen * e_v;
 
         color = f_sheen + color * albedo_sheen_scaling;
     }
