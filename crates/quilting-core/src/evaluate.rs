@@ -387,7 +387,9 @@ fn compute_smooth_normals_from_positions(
         let p2 = instances[fi].positions[2].to_point();
         let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
         let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-        // Cross product (not normalized — magnitude = 2x triangle area)
+        // Cross product — magnitude = 2x area, direction = face normal.
+        // For orientation-reversing Möbius, all normals consistently point
+        // inward; front_facing in the fragment shader handles the flip.
         let nx = e1[1]*e2[2] - e1[2]*e2[1];
         let ny = e1[2]*e2[0] - e1[0]*e2[2];
         let nz = e1[0]*e2[1] - e1[1]*e2[0];
