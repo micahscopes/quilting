@@ -625,7 +625,9 @@ function hdrToCubemap(hdr, faceSize) {
     }
     gl.texImage2D(faces[fi], 0, gl.RGBA16F, faceSize, faceSize, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(f16buf));
   }
-  // Half-float linear filtering (widely supported in WebGL2)
+  // RGBA16F mipmap generation requires EXT_color_buffer_float
+  gl.getExtension('EXT_color_buffer_float');
+  gl.getExtension('OES_texture_float_linear');
   gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
