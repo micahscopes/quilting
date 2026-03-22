@@ -88,23 +88,22 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         nrm = nrm * u.perm_parity;
     }
 
-    // Smooth normals with conformal transform support.
-    // Interpolate glTF vertex normals, then rotate by the Möbius conformal
-    // factor. Since Möbius is conformal, the Jacobian is a pure rotation
-    // given by the weight quaternion q = w/|w| where w = c·p + d.
-    // For identity transforms, w = (1,0,0,0), rotation is identity.
+    // Smooth normals: use glTF vertex normals when weights are identity
+    // (no conformal transform). Under Möbius, fall back to QB analytical
+    // normals which correctly capture the transformed surface geometry.
+    // TODO: implement conformal normal rotation for smooth Möbius shading.
     let sn0 = in.smooth_n0.xyz;
     let sn1 = in.smooth_n1.xyz;
     let sn2 = in.smooth_n2.xyz;
     let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
     if has_smooth {
-        let smooth_n = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
-        // Interpolate weight quaternion and use as conformal rotation
-        let w = normalize(bary.x * in.w0 + bary.y * in.w1 + bary.z * in.w2);
-        // Rotate normal: n' = w * n * conj(w)
-        let n_quat = vec4<f32>(0.0, smooth_n.x, smooth_n.y, smooth_n.z);
-        let rotated = qmul(qmul(w, n_quat), qconj(w));
-        nrm = normalize(rotated.yzw);
+        // Check if weights are identity (no conformal distortion)
+        let w_dev = length(in.w0 - vec4<f32>(1.0, 0.0, 0.0, 0.0))
+                  + length(in.w1 - vec4<f32>(1.0, 0.0, 0.0, 0.0))
+                  + length(in.w2 - vec4<f32>(1.0, 0.0, 0.0, 0.0));
+        if w_dev < 0.01 {
+            nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
+        }
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
