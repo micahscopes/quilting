@@ -232,24 +232,12 @@ pub fn compute_instances_with_uvs(
         }
     };
 
-    // Conformal distortion per vertex for early skip.
-    let vertex_distortion: Vec<f64> = vertices.iter().map(|v| {
-        let p = Quat::from_point(v[0], v[1], v[2]);
-        let denom = transform.c * p + transform.d;
-        let denom_sq = denom.norm_sq();
-        if denom_sq > 1e-20 { 1.0 / denom_sq } else { 1e10 }
-    }).collect();
-
-    // Compute LOD per canonical edge.
+    // Compute LOD per canonical edge. No distortion-based skip —
+    // let the screen-space arc length metric naturally produce LOD 1
+    // for faces that don't need tessellation.
     let mut edge_lods: Vec<u32> = vec![0; num_half_edges];
 
     for fi in 0..nf {
-        let face = faces[fi];
-        let max_distortion = vertex_distortion[face[0]]
-            .max(vertex_distortion[face[1]])
-            .max(vertex_distortion[face[2]]);
-        if max_distortion < 1.5 { continue; }
-
         for ei in 0..3u32 {
             let he_idx = fi * 3 + ei as usize;
             let canon = canonical_edge(he_idx);
