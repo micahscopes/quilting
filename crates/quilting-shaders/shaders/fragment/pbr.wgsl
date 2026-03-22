@@ -28,10 +28,11 @@ struct PbrUniforms {
     specular_color: vec4<f32>,           // rgb in xyz, w = has_specular (>0.5)
     // KHR_texture_transform for normal map
     normal_uv_transform: vec4<f32>,     // xy = scale, zw = offset
-    normal_uv_rotation: f32,            // rotation in radians
-    _pbr_pad2: f32,
-    _pbr_pad3: f32,
-    _pbr_pad4: f32,
+    normal_uv_rotation: f32,
+    // KHR_texture_transform for base color
+    base_uv_scale_x: f32,
+    base_uv_scale_y: f32,
+    base_uv_rotation: f32,
 }
 
 @group(0) @binding(1)
