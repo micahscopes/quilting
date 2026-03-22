@@ -308,27 +308,24 @@ pub fn compute_instances_with_uvs(
         }
     }
 
-    // LOD budget cap: estimate total output triangles. If over budget,
-    // globally halve all LODs until under the cap. This prevents high-poly
-    // meshes from generating millions of tessellated triangles near Möbius poles.
+    // LOD budget: if total estimated triangles exceeds budget, scale down
+    // proportionally rather than halving in a loop (which causes cliffs).
     const MAX_OUTPUT_TRIS: u64 = 500_000;
-    loop {
-        let total: u64 = (0..nf).map(|fi| {
-            let he_base = fi * 3;
-            let l0 = edge_lods[canonical_edge(he_base + 1)] as u64;
-            let l1 = edge_lods[canonical_edge(he_base + 2)] as u64;
-            let l2 = edge_lods[canonical_edge(he_base)] as u64;
-            // Rough estimate: max(l0,l1,l2)^2 triangles per face
-            let mx = l0.max(l1).max(l2);
-            mx * mx
-        }).sum();
+    let total: u64 = (0..nf).map(|fi| {
+        let he_base = fi * 3;
+        let l0 = edge_lods[canonical_edge(he_base + 1)] as u64;
+        let l1 = edge_lods[canonical_edge(he_base + 2)] as u64;
+        let l2 = edge_lods[canonical_edge(he_base)] as u64;
+        let mx = l0.max(l1).max(l2);
+        mx * mx
+    }).sum();
 
-        if total <= MAX_OUTPUT_TRIS {
-            break;
-        }
-        // Halve all LODs
+    if total > MAX_OUTPUT_TRIS {
+        // Scale factor: sqrt because tri count ~ LOD^2
+        let scale = ((MAX_OUTPUT_TRIS as f64) / (total as f64)).sqrt();
         for lod in edge_lods.iter_mut() {
-            if *lod > 1 { *lod /= 2; }
+            let scaled = ((*lod as f64) * scale) as u32;
+            *lod = snap_to_power_of_2(scaled.max(1)).min(*lod);
         }
     }
 
