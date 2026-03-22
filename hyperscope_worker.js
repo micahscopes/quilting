@@ -65,6 +65,12 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'set_face_materials') {
+    wasm.set_face_materials(new Int32Array(data.materials));
+    self.postMessage({ type: 'face_materials_set', id });
+    return;
+  }
+
   if (type === 'generate_single') {
     const { a, b, c } = data;
     wasm.generate_and_store_patch(a, b, c);

@@ -467,6 +467,16 @@ pub fn create_hypermesh(name: &str) -> JsValue {
     serde_wasm_bindgen::to_value(&info).unwrap()
 }
 
+/// Set per-face material indices (for KHR_materials_variants switching).
+#[wasm_bindgen]
+pub fn set_face_materials(materials: &[i32]) {
+    FACE_MATERIALS.with(|fm| {
+        *fm.borrow_mut() = materials.iter().map(|&m| {
+            if m >= 0 { Some(m as usize) } else { None }
+        }).collect();
+    });
+}
+
 /// Load a glTF/GLB file from raw bytes, bake animation into a HyperMesh,
 /// and store it for slicing.  Accepts both GLB (binary) and glTF with
 /// embedded base64 buffers — `gltf::import_slice` handles both.
@@ -862,6 +872,64 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     js_sys::Reflect::set(&result, &"base_color".into(), &bc_arr).unwrap();
     js_sys::Reflect::set(&result, &"metallic".into(), &JsValue::from_f64(metallic as f64)).unwrap();
     js_sys::Reflect::set(&result, &"roughness".into(), &JsValue::from_f64(roughness as f64)).unwrap();
+
+    // KHR_materials_variants: extract from raw glTF JSON
+    // Parse the GLB header to get the JSON chunk and extract variant data.
+    let js_variants = js_sys::Array::new();
+    let js_variant_mappings = js_sys::Array::new();
+    if data.len() > 12 {
+        // Try to parse as GLB and extract variant info
+        if let Ok(gltf_json) = {
+            let mut pos = 12usize; // skip GLB header
+            if pos + 8 <= data.len() {
+                let chunk_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+                pos += 8; // skip chunk header
+                if pos + chunk_len <= data.len() {
+                    serde_json::from_slice::<serde_json::Value>(&data[pos..pos+chunk_len])
+                } else {
+                    Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::Other, "bad chunk")))
+                }
+            } else {
+                Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::Other, "bad glb")))
+            }
+        } {
+            // Extract variant names
+            if let Some(vars) = gltf_json.pointer("/extensions/KHR_materials_variants/variants")
+                .and_then(|v| v.as_array())
+            {
+                for v in vars {
+                    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("unnamed");
+                    js_variants.push(&JsValue::from_str(name));
+                }
+            }
+            // Extract per-primitive variant mappings
+            if let Some(meshes) = gltf_json.get("meshes").and_then(|v| v.as_array()) {
+                for mesh in meshes {
+                    if let Some(prims) = mesh.get("primitives").and_then(|v| v.as_array()) {
+                        for prim in prims {
+                            if let Some(mappings) = prim.pointer("/extensions/KHR_materials_variants/mappings")
+                                .and_then(|v| v.as_array())
+                            {
+                                for m in mappings {
+                                    let obj = js_sys::Object::new();
+                                    let mat = m.get("material").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    js_sys::Reflect::set(&obj, &"material".into(), &JsValue::from_f64(mat as f64)).unwrap();
+                                    let vi = js_sys::Array::new();
+                                    if let Some(vars) = m.get("variants").and_then(|v| v.as_array()) {
+                                        for v in vars { vi.push(&JsValue::from_f64(v.as_u64().unwrap_or(0) as f64)); }
+                                    }
+                                    js_sys::Reflect::set(&obj, &"variants".into(), &vi).unwrap();
+                                    js_variant_mappings.push(&obj);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    js_sys::Reflect::set(&result, &"variant_names".into(), &js_variants).unwrap();
+    js_sys::Reflect::set(&result, &"variant_mappings".into(), &js_variant_mappings).unwrap();
 
     result.into()
 }

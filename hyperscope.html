@@ -97,6 +97,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section">
+    <label>Variant</label>
+    <select id="variant-sel" style="display:none"><option value="-1">Default</option></select>
+  </div>
+
+  <div class="section">
     <label>Environment</label>
     <select id="envmap-sel">
       <option value="rosendal_plains_1_1k" selected>Rosendal Plains</option>
@@ -1481,6 +1486,53 @@ $('envmap-sel').addEventListener('change', () => {
     loadEnvMap(`/envmaps/${v}.hdr`);
   }
 });
+$('variant-sel').addEventListener('change', () => {
+  const vi = parseInt($('variant-sel').value);
+  if (!window._baseFaceMaterials || !window._variantMappings) return;
+  // Build new face material array: start from base, apply variant swaps
+  const faceMats = [...window._baseFaceMaterials];
+  if (vi >= 0) {
+    // Collect which default materials get swapped to what
+    const swapMap = new Map();
+    for (const m of window._variantMappings) {
+      if (m.variants && m.variants.includes(vi)) {
+        // This mapping says: for variant vi, use material m.material
+        // We need to know which faces to apply this to.
+        // The mapping applies to faces whose default material is any of the
+        // materials listed in OTHER variant mappings for the same primitive.
+        // Simplification: build a set of all materials involved in variant mappings
+        swapMap.set(m.material, true);
+      }
+    }
+    // For variant vi, find the target material
+    let targetMat = -1;
+    for (const m of window._variantMappings) {
+      if (m.variants && m.variants.includes(vi)) {
+        targetMat = m.material;
+        break;
+      }
+    }
+    if (targetMat >= 0) {
+      // Collect all materials that are variant alternatives (including the default)
+      const allVariantMats = new Set();
+      for (const m of window._variantMappings) {
+        allVariantMats.add(m.material);
+      }
+      // Also add the default material for the variant primitive
+      // (the one assigned when no variant is selected)
+      const defaultMat = window._baseFaceMaterials.find(m => allVariantMats.has(m));
+      if (defaultMat !== undefined) allVariantMats.add(defaultMat);
+      // Swap all faces using any variant material to the target
+      for (let fi = 0; fi < faceMats.length; fi++) {
+        if (allVariantMats.has(faceMats[fi])) {
+          faceMats[fi] = targetMat;
+        }
+      }
+    }
+  }
+  // Send updated face materials to worker
+  workerCall('set_face_materials', { materials: faceMats }).then(() => update());
+});
 
 $('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateDebounced(); });
 $('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); updateDebounced(); });
@@ -1605,6 +1657,26 @@ async function loadGltfFromBuffer(buffer, filename) {
   const numMats = info.materials ? info.materials.length : 0;
   const numTexs = info.textures ? info.textures.length : 0;
   console.log(`glTF loaded: ${numMats} materials, ${numTexs} textures`);
+
+  // KHR_materials_variants: populate variant selector
+  const variantSel = $('variant-sel');
+  variantSel.innerHTML = '<option value="-1">Default</option>';
+  const variantNames = info.variant_names || [];
+  const variantMappings = info.variant_mappings || [];
+  if (variantNames.length > 0) {
+    for (let i = 0; i < variantNames.length; i++) {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = variantNames[i];
+      variantSel.appendChild(opt);
+    }
+    variantSel.style.display = '';
+    // Store mappings + original face materials for variant switching
+    window._variantMappings = variantMappings;
+    window._baseFaceMaterials = info.face_material_indices ? Array.from(info.face_material_indices) : [];
+  } else {
+    variantSel.style.display = 'none';
+  }
 
   // Clear GPU caches
   tessCache.clear();
