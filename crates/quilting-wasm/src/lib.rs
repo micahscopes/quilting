@@ -732,6 +732,17 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         for &c in &mat.specular_color_factor { spec.push(&JsValue::from_f64(c)); }
         js_sys::Reflect::set(&obj, &"specular_color".into(), &spec).unwrap();
 
+        // KHR_texture_transform on normal map
+        let nuv_s = js_sys::Array::new();
+        nuv_s.push(&JsValue::from_f64(mat.normal_uv_scale[0]));
+        nuv_s.push(&JsValue::from_f64(mat.normal_uv_scale[1]));
+        js_sys::Reflect::set(&obj, &"normal_uv_scale".into(), &nuv_s).unwrap();
+        let nuv_o = js_sys::Array::new();
+        nuv_o.push(&JsValue::from_f64(mat.normal_uv_offset[0]));
+        nuv_o.push(&JsValue::from_f64(mat.normal_uv_offset[1]));
+        js_sys::Reflect::set(&obj, &"normal_uv_offset".into(), &nuv_o).unwrap();
+        js_sys::Reflect::set(&obj, &"normal_uv_rotation".into(), &JsValue::from_f64(mat.normal_uv_rotation)).unwrap();
+
         js_materials.push(&obj);
     }
 

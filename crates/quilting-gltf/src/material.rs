@@ -61,6 +61,11 @@ pub struct PbrMaterial {
 
     /// KHR_materials_specular: custom specular color (overrides dielectric F0).
     pub specular_color_factor: [f64; 3],
+
+    /// KHR_texture_transform on normal map: [scale_x, scale_y, offset_x, offset_y]
+    pub normal_uv_scale: [f64; 2],
+    pub normal_uv_offset: [f64; 2],
+    pub normal_uv_rotation: f64,
 }
 
 /// glTF alpha rendering mode.
@@ -99,6 +104,24 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         .normal_texture()
         .map(|info| info.scale() as f64)
         .unwrap_or(1.0);
+
+    // KHR_texture_transform on normal texture
+    let mut normal_uv_scale = [1.0f64; 2];
+    let mut normal_uv_offset = [0.0f64; 2];
+    let mut normal_uv_rotation = 0.0f64;
+    if let Some(info) = mat.normal_texture() {
+        if let Some(t) = info.extension_value("KHR_texture_transform") {
+            if let Some(s) = t.get("scale").and_then(|v| v.as_array()) {
+                normal_uv_scale[0] = s.get(0).and_then(|v| v.as_f64()).unwrap_or(1.0);
+                normal_uv_scale[1] = s.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0);
+            }
+            if let Some(o) = t.get("offset").and_then(|v| v.as_array()) {
+                normal_uv_offset[0] = o.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                normal_uv_offset[1] = o.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            }
+            normal_uv_rotation = t.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+    }
 
     let occlusion_texture = mat.occlusion_texture().map(|info| TextureRef {
         index: info.texture().index(),
@@ -179,6 +202,9 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         sheen_color_factor,
         sheen_roughness_factor,
         specular_color_factor,
+        normal_uv_scale: [1.0, 1.0],
+        normal_uv_offset: [0.0, 0.0],
+        normal_uv_rotation: 0.0,
     }
 }
 
@@ -209,6 +235,9 @@ mod tests {
             sheen_color_factor: [0.0; 3],
             sheen_roughness_factor: 0.0,
             specular_color_factor: [1.0; 3],
+            normal_uv_scale: [1.0; 2],
+            normal_uv_offset: [0.0; 2],
+            normal_uv_rotation: 0.0,
         };
         assert_eq!(mat.alpha_mode, AlphaMode::Opaque);
         assert!((mat.metallic_factor - 1.0).abs() < 1e-10);

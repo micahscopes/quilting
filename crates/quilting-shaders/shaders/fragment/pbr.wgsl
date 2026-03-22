@@ -26,6 +26,9 @@ struct PbrUniforms {
     sheen_roughness: f32,
     // KHR_materials_specular
     specular_color: vec4<f32>,           // rgb in xyz, w = has_specular (>0.5)
+    // KHR_texture_transform for normal map
+    normal_uv_transform: vec4<f32>,     // xy = scale, zw = offset
+    normal_uv_rotation: f32,            // rotation in radians
     _pbr_pad2: f32,
     _pbr_pad3: f32,
     _pbr_pad4: f32,
@@ -136,6 +139,20 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     roughness = clamp(roughness, 0.04, 1.0);
 
     // --- Normal mapping (vertex-computed tangent frame) ---
+    // Apply KHR_texture_transform to normal map UVs if present.
+    var normal_uv = in.tex_uv;
+    if pbr.normal_uv_transform.x > 0.0 {
+        let s = pbr.normal_uv_transform.xy; // scale
+        let o = pbr.normal_uv_transform.zw; // offset
+        let r = pbr.normal_uv_rotation;
+        let cr = cos(r); let sr = sin(r);
+        let uv = in.tex_uv;
+        // rotate then scale then offset (per KHR_texture_transform spec)
+        normal_uv = vec2<f32>(
+            (uv.x * cr - uv.y * sr) * s.x + o.x,
+            (uv.x * sr + uv.y * cr) * s.y + o.y,
+        );
+    }
     if pbr.has_normal_tex > 0.5 {
         let raw_t = in.tangent_vs;
         // Guard against degenerate tangents (NaN/zero from stretched Möbius faces)
@@ -146,7 +163,7 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
                 let b = cross(n, t);
                 let tbn = mat3x3<f32>(t, b, n);
 
-                let nm = textureSample(normal_tex, normal_sampler, in.tex_uv).xyz;
+                let nm = textureSample(normal_tex, normal_sampler, normal_uv).xyz;
                 var tangent_n = nm * 2.0 - vec3<f32>(1.0);
                 tangent_n.x = tangent_n.x * pbr.normal_scale;
                 tangent_n.y = tangent_n.y * pbr.normal_scale;

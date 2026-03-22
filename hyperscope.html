@@ -283,6 +283,9 @@ function getMaterialParams(materialIndex) {
       sheenColor: mat.sheen_color || [0, 0, 0],
       sheenRoughness: mat.sheen_roughness ?? 0.0,
       specularColor: mat.specular_color || [1, 1, 1],
+      normalUvScale: mat.normal_uv_scale || [1, 1],
+      normalUvOffset: mat.normal_uv_offset || [0, 0],
+      normalUvRotation: mat.normal_uv_rotation ?? 0,
     };
   }
   const bc = meshInfo ? (meshInfo.base_color || [0.9, 0.75, 0.6, 1.0]) : [0.9, 0.75, 0.6, 1.0];
@@ -391,7 +394,7 @@ const wireUboI32 = new Int32Array(wireUboData);
 //   env_mip_count: f32       (84)
 //   _pad0: f32               (88)
 //   _pad1: f32               (92)
-const PBR_UBO_SIZE = 160; // 96 base + 16 sheen_color + 16 (sheen_roughness+pads) + 16 specular_color + 16 pads
+const PBR_UBO_SIZE = 192; // + sheen + specular + normal UV transform
 const PBR_UBO_BINDING = 2;
 const pbrUbo = gl.createBuffer();
 gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
@@ -718,6 +721,13 @@ function uploadPbrUBO(mat) {
   const hasSpec = Math.abs(spc[0]-1) + Math.abs(spc[1]-1) + Math.abs(spc[2]-1) > 0.01;
   pbrUboF32[32] = spc[0]; pbrUboF32[33] = spc[1]; pbrUboF32[34] = spc[2];
   pbrUboF32[35] = hasSpec ? 1.0 : 0.0;
+  // normal_uv_transform: vec4 at offset 144 (f32 index 36)
+  const nuvs = mat.normalUvScale || [1, 1];
+  const nuvo = mat.normalUvOffset || [0, 0];
+  pbrUboF32[36] = nuvs[0]; pbrUboF32[37] = nuvs[1];
+  pbrUboF32[38] = nuvo[0]; pbrUboF32[39] = nuvo[1];
+  // normal_uv_rotation: f32 at offset 160 (f32 index 40)
+  pbrUboF32[40] = mat.normalUvRotation ?? 0;
   gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(pbrUboData));
 }
