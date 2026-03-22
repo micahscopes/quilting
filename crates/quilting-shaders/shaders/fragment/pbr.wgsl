@@ -221,6 +221,18 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
     var color = direct.color + fill.color + ambient;
 
+    // When sheen is active, suppress environment specular reflections entirely.
+    // Fabric/velvet doesn't reflect the environment — only the sheen BRDF
+    // and diffuse contribute.
+    if pbr.sheen_color.w > 0.5 {
+        let k_d_s = (1.0 - metallic);
+        let diffuse_only = k_d_s * base.rgb / 3.14159;
+        let diff_key = diffuse_only * max(dot(n, light_dir), 0.0) * light_color;
+        let diff_fill = diffuse_only * max(dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.5))), 0.0) * vec3<f32>(0.3, 0.35, 0.5);
+        let diff_ambient = k_d_s * base.rgb * irradiance;
+        color = diff_key + diff_fill + diff_ambient;
+    }
+
     // --- KHR_materials_sheen (velvet/fabric) ---
     // Charlie distribution, composited with energy conservation:
     // color = f_sheen + base_layer * (1 - max(sheenColor) * E_sheen)
