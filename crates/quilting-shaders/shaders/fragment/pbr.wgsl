@@ -71,6 +71,7 @@ struct FragInput {
     @location(5) bitangent_vs: vec3<f32>,
     @location(6) normal_ws: vec3<f32>,
     @location(7) position_ws: vec3<f32>,
+    @location(8) camera_pos_ws: vec3<f32>,
 }
 
 @fragment
@@ -174,21 +175,15 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     // --- IBL ambient ---
     // Use world-space normal for cubemap lookups
     let n_ws = normalize(in.normal_ws);
-    let view_dir_ws = normalize(-in.position_ws); // camera at origin in world space
+    let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
     let reflect_ws = reflect(-view_dir_ws, n_ws);
 
-    var irradiance: vec3<f32>;
-    var env_color: vec3<f32>;
-    if pbr.has_env_map > 0.5 {
-        // Cubemap IBL: sample irradiance + prefiltered specular
-        irradiance = textureSample(env_irradiance, env_irradiance_sampler, n_ws).rgb;
-        let lod = roughness * pbr.env_mip_count;
-        env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb;
-    } else {
-        // Analytical fallback
-        irradiance = sh_irradiance_fallback(n_ws);
-        env_color = env_specular_fallback(reflect_ws, roughness);
-    }
+    // Sample environment cubemaps. Values stored as LDR (0-1), scaled up for
+    // physically plausible lighting intensity.
+    let env_intensity = 4.0;
+    let irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb * env_intensity;
+    let lod = roughness * max(pbr.env_mip_count, 1.0);
+    let env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb * env_intensity;
 
     var ambient = pbr_ambient(
         base.rgb,

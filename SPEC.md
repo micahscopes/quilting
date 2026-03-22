@@ -1,0 +1,467 @@
+# Quilting: Posthoc Specification
+
+## 1. Vision
+
+Quilting renders triangle meshes under conformal (Mobius) transformations in real time on the web. It is, in short, a way to take any 3D model and warp it through sphere inversions, reflections, and other angle-preserving maps of 3-space — live, interactively, with full PBR materials.
+
+The name comes from the technique: each triangle face of the input mesh gets its own pre-tessellated "quilt patch," a small triangle sub-mesh whose density adapts to how much the conformal transform curves that region of space. These patches are stitched together at their edges (matching LODs guarantee no T-junction cracks) and rendered via instanced draw calls. The GPU evaluates quaternionic Bezier (QB) surfaces per-vertex — the rational Bezier weights encode the Mobius transform — so the CPU only needs to update a few uniform quaternions per frame.
+
+The project exists because WebGL2 has no geometry shaders and no tessellation shaders. You can't generate sub-triangle detail on the fly. Quilting works around this by pre-computing a tessellation atlas (a dictionary of patch geometries keyed by edge LOD triples) and stamping those patches onto each face at render time. The conformal math ensures the patches curve correctly through the Mobius warp.
+
+The long-term vision: **Hyperscope**, "an environment for cartoons" — a full glTF viewer where arbitrary 3D models can be loaded, animated via spacetime slicing (4D hyperplane intersection of animated meshes), and deformed through conformal transformations with production-quality PBR rendering.
+
+### History
+
+The original implementation was TypeScript/GLSL on the `main` branch. A cleaner rewrite was lost when Micah's laptop was left on BART in 2022. The current codebase is a Rust/WASM rewrite on the `rust` branch, using WGSL shaders compiled to GLSL ES 300 via naga.
+
+## 2. Core Math
+
+### Quaternions as 3D Points
+
+Following Krasauskas & Zube, R^3 is identified with the imaginary quaternions Im(H). A 3D point (x, y, z) is the pure quaternion `0 + xi + yj + zk`. The `Quat` type stores `(w, x, y, z)` with `w` as the scalar (real) part.
+
+Quaternion layout convention (critical — must be consistent everywhere):
+
+- Rust: `Quat { w, x, y, z }` where `w` is real, `(x, y, z)` is imaginary
+- WGSL/GLSL: `vec4(w, x, y, z)` — scalar in `.x`, vector in `.yzw`
+- Instance data packing: `[w, x, y, z]` per quaternion — 4 floats
+
+The `q_to_point` function extracts `.yzw` (the imaginary part) to get the 3D position.
+
+### Mobius Transforms
+
+A Mobius transformation in R^3 is:
+
+```
+F(x) = (a*x + b) * (c*x + d)^{-1}
+```
+
+where `a, b, c, d` are quaternions, `x` is a pure imaginary quaternion (3D point), and multiplication/inversion are quaternion operations.
+
+Represented as a 2x2 quaternion matrix `[[a,b],[c,d]]`. Composition is matrix multiplication. Key transforms:
+
+- **Identity**: `a=1, b=0, c=0, d=1`
+- **Translation by t**: `a=1, b=t, c=0, d=1`
+- **Rotation qxq-bar**: `a=q, b=0, c=0, d=q` (for unit q)
+- **Sphere reflection** (center c, radius r): `a=c, b=-(c^2+r^2), c=1, d=-c`
+- **Sphere inversion**: compose two sphere reflections (orientation-preserving)
+
+The `c` coefficient determines whether the transform is affine (`c=0`, no curvature) or truly conformal (`c!=0`, introduces curvature requiring tessellation). The `is_affine()` check tests `|c|^2 < 1e-20`.
+
+### Conformal Weight Transform
+
+Under a Mobius transformation, a QB weight at position `x` transforms as:
+
+```
+w' = (c*x + d) * w
+```
+
+This is equation 5 from Krasauskas & Zube 2014. The conformal weight encodes how much the transform stretches space at that point. Near the Mobius pole (where `c*x + d -> 0`), the weight goes to zero and space stretches to infinity.
+
+### Quaternionic Bezier (QB) Surface Evaluation
+
+A QB triangle surface evaluates a point at barycentric coordinates `(lambda_0, lambda_1, lambda_2)`:
+
+```
+X(bary) = (sum_i lambda_i * p_i * w_i) / (sum_i lambda_i * w_i)
+```
+
+where `p_i` are position quaternions and `w_i` are weight quaternions. This is a rational quaternion combination. When all weights are identity (`w = 1`), this reduces to linear interpolation of the positions. Under Mobius transforms, the weights encode the conformal curvature.
+
+Normals are computed analytically via the quotient rule:
+
+```
+dX/du = (dtop_u - X * dbot_u) * bot^{-1}
+dX/dv = (dtop_v - X * dbot_v) * bot^{-1}
+normal = cross(dX/du, dX/dv)
+```
+
+where `u` and `v` are the barycentric tangent directions (bary.x->bary.y and bary.x->bary.z).
+
+### Key Papers
+
+- Zube 2013: Quaternionic Bezier curves, surfaces and volume (foundational)
+- Krasauskas & Zube 2014: Rational Bezier Formulas with Quaternion and Clifford Algebra Weights (the core technique)
+- Krasauskas & Zube 2015: Representation of Dupin cyclides using quaternions
+- Zube 2018: Interpolation method for quaternionic-Bezier curves
+- Krasauskas & Zube 2024: Quaternionic Bezier parameterizations of bidegree (2,1)
+
+## 3. Architecture
+
+### Crate Structure
+
+```
+quilting/
+  crates/
+    quilting-core/       # Math, tessellation atlas, LOD, evaluation
+    quilting-mesh/       # Half-edge mesh data structure
+    quilting-shaders/    # WGSL shader modules, naga compilation to GLSL
+    quilting-renderer/   # glow-based WebGL2 renderer (UBOs, VAO cache, draw calls)
+    quilting-gltf/       # glTF/GLB loader (meshes, materials, animations, skins)
+    quilting-spacetime/  # 4D slicer (HyperMesh, marching prisms, toroidal embedding)
+    quilting-wasm/       # WASM entry point (wasm-pack, JS interop)
+  hyperscope.html        # Primary frontend (Hyperscope app)
+  hyperscope_worker.js   # Web worker for WASM computation
+```
+
+### Pipeline
+
+```
+glTF file
+  |
+  v
+quilting-gltf: parse meshes, materials, textures, animations, skins
+  |
+  v
+quilting-spacetime: bake animations -> HyperMesh (vertex trajectories)
+                    slice at time t -> 3D mesh + UVs + normals
+  |
+  v
+quilting-core: compute FaceInstance data
+               - apply Mobius transform to positions
+               - compute conformal weights: w' = (c*x + d) * w
+               - compute per-edge LOD from screen-space arc lengths
+               - pack 52 floats per instance (208 bytes)
+  |
+  v
+quilting-renderer: upload to GPU
+                   - tessellation atlas VBO (static, built once)
+                   - instance buffer (per face, updated on transform/slice change)
+                   - UBOs: vertex uniforms (binding 0), PBR uniforms (binding 1)
+                   - textures: 5 PBR maps (base color, metallic-roughness, normal, emissive, occlusion)
+  |
+  v
+GPU vertex shader: fused Mobius + QB evaluation
+                   - reads per-instance positions + weights
+                   - reads Mobius (a,b,c,d) from uniforms
+                   - evaluates rational Bezier surface at each bary coord
+                   - computes analytic normal via quotient rule
+                   - outputs view-space position, normal, UV, tangent frame
+  |
+  v
+GPU fragment shader: PBR Cook-Torrance
+                     - 5 texture maps (sRGB conversion, normal mapping)
+                     - SH diffuse irradiance + analytical specular environment
+                     - Reinhard tone mapping + gamma correction
+```
+
+### Shader Compilation
+
+Shaders are authored in WGSL as modular files with import paths (`#import quilting::math::quaternion`). The `quilting-shaders` crate uses naga to compile WGSL to GLSL ES 300 for WebGL2. Naga renames samplers to `_group_0_binding_N_fs` — the renderer matches these by binding number regex.
+
+## 4. Tessellation Atlas
+
+### Concept
+
+The tessellation atlas is a dictionary of pre-computed triangle sub-meshes, keyed by edge LOD triples `(p, q, r)` where each value is a power of 2. A face with edge LODs `(4, 8, 16)` looks up its tessellation pattern in the atlas, which provides the barycentric coordinates and triangle indices for a sub-mesh that has 4 subdivisions along one edge, 8 along another, and 16 along the third.
+
+### Power-of-2 LODs
+
+Edge LODs are always powers of 2, snapped with hysteresis to prevent oscillation:
+
+- Raw LOD computed from screen-space arc length / target pixels per subdivision (16 px)
+- Snapped to nearest power of 2 with 1.3x hysteresis bias toward lower LOD
+- Clamped to max LOD of 64
+
+This keeps the atlas size manageable (only need patches for power-of-2 triples) and provides natural 2x jumps that align well with hierarchical subdivision.
+
+### S3 Permutation Reuse
+
+A triple `(2, 4, 8)` needs the same tessellation pattern as `(4, 8, 2)` or `(8, 2, 4)` — just with the vertices permuted. The atlas stores only **canonical (sorted) triples** where `p <= q <= r`, and maps arbitrary triples to canonical form via S3 (symmetric group on 3 elements, 6 permutations).
+
+The 6 S3 permutations correspond to rotations and reflections of the equilateral reference triangle:
+- 3 even permutations (identity, 120 deg, 240 deg rotation)
+- 3 odd permutations (reflections across each altitude)
+
+`canonical_form([4, 8, 2])` returns `{ res: [2, 4, 8], perm_index: 4 }`. The permutation index tells the system how to remap barycentric coordinates when looking up the patch.
+
+For odd permutations (reflections), `perm_parity = -1` and the normal is flipped. The vertex shader's `perm_bary()` function applies the permutation.
+
+In practice, UV/normal permutation was found to cause visible orientation jumps when LOD redistribution changes the perm_index. The current approach does NOT permute UVs or normals — only the tessellation bary coords are remapped.
+
+### Build Modes
+
+- **Direct**: each canonical triple is independently generated via Bridson (Poisson disk) sampling + Delaunay triangulation. Produces high-quality patches but slow for large LOD ranges.
+- **Hierarchical** (current default): base patches at minimum LOD are generated directly. Higher LODs are derived by midpoint subdivision: `(2p, 2q, 2r)` from `(p, q, r)` by splitting every triangle into 4. This preserves boundary vertex positions exactly and is much faster.
+
+### Edge Stitching Guarantee
+
+Adjacent faces sharing an edge must have the same LOD on that edge. This is guaranteed by the half-edge mesh structure: both half-edges of a shared edge map to the same canonical edge index, so they always get the same LOD value. No HashMap needed — a flat Vec indexed by half-edge index suffices.
+
+Within a patch, boundary vertices (on the triangle edges) are placed at exactly `1/N` spacing along each edge, where N is the edge's LOD. Since both adjacent faces use the same N for the shared edge, their boundary vertices line up perfectly. No T-junction cracks.
+
+## 5. GPU Pipeline
+
+### Current Architecture: Fused Mobius-QB Evaluation
+
+The vertex shader performs a fused Mobius + QB evaluation that avoids separate transform and evaluation passes:
+
+```
+// Numerator: (a*p_i + b) * w_i
+pw_i = qmul(qmul(mob_a, p_i) + mob_b, w_i)
+
+// Denominator: (c*p_i + b) * w_i
+bw_i = qmul(qmul(mob_c, p_i) + mob_d, w_i)
+
+// Rational combination
+top = sum(lambda_i * pw_i)
+bot = sum(lambda_i * bw_i)
+X = top * bot^{-1}
+```
+
+This folds the Mobius transform directly into the rational Bezier form. Only one quaternion inverse is needed total (on `bot`), rather than one per control point. The math works because the per-vertex inverses `(c*p_i + d)^{-1}` cancel algebraically when the Mobius-transformed positions and weights are combined in the rational quotient.
+
+### Per-Frame Uniforms
+
+The vertex UBO (binding 0) contains:
+- `mvp`: 4x4 model-view-projection matrix
+- `mv`: 4x4 model-view matrix (for view-space normals/positions)
+- `perm_parity`: +1 or -1 (normal flip for odd permutations)
+- `perm_index`: which S3 permutation to apply to bary coords
+- `use_qb`: 1 for QB evaluation, 0 for flat (linear) interpolation
+- `mob_a, mob_b, mob_c, mob_d`: the four Mobius quaternions as vec4
+
+When the user drags a Mobius slider, only the uniform quaternions change — no CPU work, no buffer re-upload. The worker thread only runs when the time slice changes (new geometry needed).
+
+### Instance Data Layout
+
+Each face instance is 52 floats (208 bytes, 13 vec4s):
+
+| Offset | Content | Notes |
+|--------|---------|-------|
+| 0-11   | p0, p1, p2 (3 x vec4) | Position quaternions [w,x,y,z] |
+| 12-23  | w0, w1, w2 (3 x vec4) | Weight quaternions |
+| 24-27  | edge_lods + pad (vec4) | Per-edge LOD [a,b,c,0] |
+| 28-31  | vertex_lods + pad (vec4) | Per-vertex LOD (max of adjacent edges) |
+| 32-39  | uv01, uv2_pad (2 x vec4) | UVs: (u0,v0,u1,v1), (u2,v2,0,0) |
+| 40-51  | n0, n1, n2 (3 x vec4) | Smooth normals [nx,ny,nz,0] |
+
+### LOD Computation
+
+Currently done on the CPU (WASM), with the intent to move to GPU later:
+
+1. For each edge, compute screen-space arc length by sampling the Mobius-transformed edge at 9 points
+2. LOD = ceil(arc_length / 16 pixels), snapped to power of 2
+3. Additionally, check medians (vertex to opposite edge midpoint) to catch faces that are large in screen space even if individual edges aren't
+4. Cap all LODs at 64
+5. For affine transforms, skip LOD computation entirely (mesh is already tessellated)
+
+LOD budget: 500K total tessellated triangles max (enforced in the frontend).
+
+### Conformal Fade
+
+Near the Mobius pole, `|bot|^2 -> 0` and the surface stretches to infinity. A `smoothstep(0.0001, 0.001, dot(bot, bot))` fade factor allows the fragment shader to attenuate these regions.
+
+### What Becomes Static (Updated Only on Slice Change)
+
+- Instance buffer with original positions and identity weights
+- Tessellation atlas VBO
+- Texture uploads
+
+### What Updates Per Frame
+
+- Mobius a,b,c,d uniforms (64 bytes)
+- MVP/MV matrices
+- Camera info
+
+## 6. Spacetime
+
+### 4D Slicing
+
+Quilting treats animated meshes as 4D objects: a triangle mesh whose vertices trace trajectories through (x, y, z, t) spacetime. Each face sweeps out a triangular prism between consecutive keyframes.
+
+A hyperplane in R^4, defined by `dot(normal, x) = offset`, intersects this prism complex to produce a 3D triangle mesh — the "slice." A pure time slice (`normal = (0,0,0,1)`) gives the mesh at a specific time. A tilted slice mixes spatial and temporal directions, creating effects like motion blur or relativistic distortion.
+
+### HyperMesh
+
+Built from glTF animations (skinned meshes and morph targets) baked into per-vertex Hermite spline trajectories. Each `VertexTrajectory` has a list of `HermiteSegment`s with cubic Hermite interpolation between keyframes. UVs and smooth normals are carried through unchanged (they're properties of the mesh topology, not the animation).
+
+### Marching Prism Slicer
+
+The slicer computes hyperplane intersections along each vertex trajectory (cubic root solving), matches them per-face into coherent triangles (temporal proximity), and groups connected triangles into layers. Faces spanning more than half the animation period are discarded as temporally incoherent.
+
+### Time Embeddings
+
+- **Linear**: time is the real part of the quaternion, `q = (t, x, y, z)`. Simple but produces boundary artifacts at the animation endpoints.
+- **Toroidal**: time wraps around a circle in the (w, z) plane: `q = (R*cos(2*pi*t/period), x, y, R*sin(2*pi*t/period))`. Produces closed surfaces — no boundary artifacts. Radius R controls the "thickness" of the torus. A radar-sweep half-plane filter selects one period.
+
+### Spacetime Modes (in Hyperscope)
+
+- **Classic**: 3D Mobius applied post-slice, linear time, auto-animate
+- **Toroidal**: time wraps as hypertorus, radar sweep, half-plane filter
+
+### Status
+
+Spacetime functionality works but is on hold. The 4D Mobius pre-slice (applying a Mobius transform in R^4 before slicing) was attempted but parked — the hyperplane doesn't track the deformed torus correctly.
+
+## 7. glTF/PBR
+
+### glTF Loading
+
+The `quilting-gltf` crate parses glTF 2.0 and GLB files using the `gltf` crate. It extracts:
+
+- **Meshes**: positions, normals, UVs (TEXCOORD_0), indices, triangulated
+- **Materials**: full PBR metallic-roughness model
+- **Animations**: keyframe channels (translation, rotation, scale, morph weights)
+- **Skins**: joint hierarchies and inverse bind matrices
+- **Images**: decoded to RGBA8 from any source format
+- **Scene graph**: node hierarchy with transforms
+
+Lenient loading: files with unsupported required extensions (KHR_materials_unlit, KHR_texture_basisu) are loaded via validation-free parsing. Missing textures fall back to average color.
+
+### Animation Baking
+
+Skeletal (skinned) and morph target animations are baked into per-vertex position trajectories. This eliminates the need for runtime skinning — the slicer works directly with position trajectories.
+
+### PBR Material Model
+
+Cook-Torrance GGX microfacet BRDF with metallic-roughness workflow:
+
+- **Diffuse**: Lambertian, modulated by `(1 - F) * (1 - metallic)`
+- **Specular**: GGX normal distribution, Smith geometry, Schlick Fresnel
+- **F0**: `mix(0.04, base_color, metallic)` — dielectric vs metal reflectance
+
+### Texture Maps
+
+5 PBR texture units, all optional:
+
+| Binding | Map | Format | Notes |
+|---------|-----|--------|-------|
+| 0 | Base color | sRGB + alpha | Converted to linear in shader via `pow(rgb, 2.2)` |
+| 1 | Metallic-roughness | Linear | B=metallic, G=roughness (glTF convention) |
+| 2 | Normal | Linear | Tangent-space, scaled by `normal_scale` |
+| 3 | Emissive | sRGB | Multiplied by `emissive_factor` |
+| 4 | Occlusion | Linear (R) | Applied to ambient term only |
+
+### Alpha Modes
+
+- **OPAQUE**: alpha forced to 1.0
+- **MASK**: discard fragments below `alpha_cutoff`
+- **BLEND**: sorted back-to-front for correct transparency
+
+### IBL (Image-Based Lighting)
+
+No cubemap or SH probes from the scene. Instead, analytical approximations:
+
+- **Diffuse**: L0+L1 spherical harmonics simulating outdoor sky/ground gradient
+- **Specular**: analytical environment reflection (sky/horizon/ground gradient, roughness-based blur)
+- **DFG**: Narkowicz analytical approximation (replaces BRDF LUT texture)
+
+### Tangent Frame
+
+Computed in the vertex shader from UV edge vectors and original (pre-Mobius) vertex positions. Gram-Schmidt orthonormalized against the interpolated normal. NaN guards protect against degenerate tangents from stretched Mobius faces.
+
+### Unlit Mode
+
+`KHR_materials_unlit`: outputs base color directly with gamma correction, no lighting computation. Per-material face culling respects the `double_sided` flag.
+
+## 8. Key Invariants
+
+These must always hold. Violating any of them produces visible artifacts.
+
+1. **Edge LOD matching**: adjacent faces sharing an edge must have the same LOD on that edge. Enforced by canonical edge indexing via the half-edge mesh. Violation causes T-junction cracks.
+
+2. **Quaternion layout (w,x,y,z)**: the scalar part `w` is always first, in Rust, in WGSL, and in the instance data packing. Swapping components silently produces wrong geometry.
+
+3. **Power-of-2 LODs**: all edge LODs must be powers of 2. The tessellation atlas only contains patches for power-of-2 triples. A non-power-of-2 LOD will miss the atlas lookup.
+
+4. **Perm parity tracks normal orientation**: odd S3 permutations (reflections) flip the winding order. `perm_parity` must be -1 for these to maintain correct normals.
+
+5. **Mobius weight formula**: `w' = (c*x + d) * w`, NOT `w' = (c*x + d)^{-1} * w`. The inverse form is wrong and produces inside-out geometry.
+
+6. **Instance data alignment**: 52 floats per instance, 13 vec4s, 208 bytes. The vertex attribute divisor must be 1. Misalignment silently shifts all subsequent fields.
+
+7. **UVs and normals are NOT permuted**: only tessellation bary coords go through S3 permutation. Permuting UVs/normals causes visible orientation jumps when LOD redistribution changes the perm_index.
+
+8. **Smooth normals zeroed under conformal transforms**: the vertex shader checks `dot(sn0,sn0) + dot(sn1,sn1) + dot(sn2,sn2) > 0.01` to decide whether to use smooth normals or QB analytical normals. Under Mobius, the CPU zeroes out smooth normals so the shader falls back to QB normals (flat per-face but geometrically correct).
+
+9. **UBO std140 layout**: vertex uniforms at binding 0, PBR uniforms at binding 1. The PBR UBO is 80 bytes. std140 packing rules apply (vec4 alignment).
+
+10. **WASM built in release mode**: `wasm-pack build` without `--dev`. Debug builds are unacceptably slow for LOD computation and instance packing.
+
+## 9. Known Limitations
+
+### Smooth Normals Under Mobius
+
+Smooth normals from glTF don't transform correctly through conformal maps. Multiple approaches were tried and reverted:
+
+- Conformal rotation of normals via quaternion `(c*p+d)` conjugation
+- Post-transform smooth normals from Mobius-deformed positions (equal-weight averaging)
+- Gram-Schmidt orthonormalized TBN
+
+All produced artifacts: desaturation on metallic models, orientation issues, NaN cascades. Current solution: zero out smooth normals under conformal transforms, fall back to QB analytical normals. These are flat per-face but geometrically correct for the deformed surface.
+
+### Normal Map Artifacts on Coarse Tessellation
+
+The tangent frame is approximated from UV edge vectors of the original (pre-Mobius) mesh vertices. On coarsely tessellated faces, the screen-space derivative TBN can produce artifacts. Using glTF tangent attributes would improve this.
+
+### GC Pressure
+
+Instance data serialization creates ~100MB of ArrayBuffer churn per frame, causing 20ms GC stalls. The typed array view approach was attempted but reverted due to data corruption issues.
+
+### RefCell Panic Cascade
+
+After a WASM panic (e.g., from an unexpected glTF format), RefCell borrows in the JS-WASM interop layer can cascade, requiring a page reload.
+
+### LOD Flickering During Interaction
+
+LOD changes cause tessellation pattern changes, which can produce visual flickering. Mitigated by:
+- Power-of-2 snapping with 1.3x hysteresis
+- Fixed resolution during drag (debounced LOD recomputation)
+- Max LOD cap of 64
+
+### UV Permutation
+
+UV/normal permutation was removed because it causes visible orientation jumps when perm_index changes. This means the S3 permutation optimization only applies to the tessellation geometry, not to material coordinates.
+
+### IBL Quality
+
+No real environment maps — only analytical approximations (SH + gradient reflection). This is the biggest visual gap vs reference glTF viewers. Cubemap support would require texture loading infrastructure.
+
+### Missing glTF Features
+
+- KHR_materials_specular (F0/specular color control)
+- KHR_materials_transmission (transparent/refractive materials)
+- KHR_lights_punctual (point/spot/directional lights from glTF)
+- Draco mesh compression
+
+## 10. Future Direction
+
+### GPU LOD Compute (Phase 2)
+
+Move LOD computation from CPU WASM to GPU fragment shader GPGPU:
+
+- **Pass 0**: render one pixel per face to an `RGBA32F` offscreen texture. Fragment shader computes screen-space error from face positions + Mobius params + camera. Outputs LOD as float. Requires `EXT_color_buffer_float`.
+- **Pass 1**: vertex shader reads LOD from LOD texture via `texelFetch`. Single tessellation pattern at max LOD for ALL faces. Vertex shader snaps bary coords to coarser grid for low-LOD faces. Degenerate triangles auto-culled by rasterizer. Single instanced draw call for entire mesh.
+
+This eliminates the tessellation atlas entirely, the CPU LOD computation, batch grouping, and per-frame instance rebuild. Per-frame CPU cost drops to essentially zero.
+
+### Single Draw Call Architecture
+
+Using WebGL2 extensions:
+- `WEBGL_multi_draw` — batch draw calls
+- `WEBGL_draw_instanced_base_vertex_base_instance` — base vertex/instance offsets
+- `WEBGL_multi_draw_instanced_base_vertex_base_instance` — one call for everything
+
+Pack all tessellation + instance data into shared buffers. Zero VAO switches, zero uniform updates per batch.
+
+### Spacetime FX Roadmap
+
+Parked but planned:
+- Proper 4D Mobius with hyperplane tracking on deformed torus
+- GPU-side marching (vertex shader prism intersection)
+- Multi-layer rendering (OIT/depth peeling)
+- Lorentz boost as Mobius in the (x,t) plane
+- S^3 slicing (curved hyperplane = conformal bubble through spacetime)
+
+### WebGPU Migration
+
+Shaders are already in WGSL. The naga compilation step (WGSL -> GLSL ES 300) is for WebGL2 compatibility. When WebGPU is broadly available, the shaders can be used directly. WebGPU compute shaders would replace the fragment-shader-as-GPGPU hack for LOD computation.
+
+### Production Rendering Gaps
+
+1. Real IBL with cubemap/SH probes from the scene
+2. KHR_materials_specular, KHR_materials_transmission
+3. KHR_lights_punctual
+4. glTF tangent attributes for better normal mapping
+5. Draco mesh compression support

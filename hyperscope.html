@@ -329,8 +329,9 @@ const placeholderTex = null; // 1x1 white texture for unbound slots
 //   vec4 mob_b        (offset 160, 16 bytes)
 //   vec4 mob_c        (offset 176, 16 bytes)
 //   vec4 mob_d        (offset 192, 16 bytes)
-//   Total: 208 bytes
-const VTX_UBO_SIZE = 208;
+//   vec4 camera_pos   (offset 208, 16 bytes)
+//   Total: 224 bytes
+const VTX_UBO_SIZE = 224;
 const VTX_UBO_BINDING = 0;
 const vtxUbo = gl.createBuffer();
 gl.bindBuffer(gl.UNIFORM_BUFFER, vtxUbo);
@@ -421,28 +422,28 @@ function createProceduralEnvMap(size) {
         const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
         dy /= len;
 
-        // Sky model: warm sun from upper-right, cool blue sky, dark ground
         const skyT = Math.max(dy, 0);
         const groundT = Math.max(-dy, 0);
         const horizonT = 1.0 - Math.abs(dy);
 
-        // Sky gradient
-        let r = 0.05 + skyT * 0.35 + horizonT * 0.5;
-        let g = 0.08 + skyT * 0.45 + horizonT * 0.45;
-        let b = 0.15 + skyT * 0.65 + horizonT * 0.4;
+        // Sky gradient — kept in 0-1 for RGBA8, shader multiplies by env intensity
+        let r = 0.08 + skyT * 0.25 + horizonT * 0.35;
+        let g = 0.10 + skyT * 0.35 + horizonT * 0.30;
+        let b = 0.18 + skyT * 0.55 + horizonT * 0.25;
 
-        // Ground
-        r += groundT * 0.08;
-        g += groundT * 0.06;
-        b += groundT * 0.04;
+        // Ground (warm bounce)
+        r += groundT * 0.12;
+        g += groundT * 0.10;
+        b += groundT * 0.06;
 
-        // Sun glow (upper right area)
+        // Sun glow
         const sunDx = dx/len, sunDy = dy/len, sunDz = dz/len;
         const sunDot = Math.max(sunDx * 0.5 + sunDy * 0.7 + sunDz * 0.3, 0);
-        const sunGlow = Math.pow(sunDot, 32) * 3.0 + Math.pow(sunDot, 4) * 0.3;
-        r += sunGlow * 1.0;
-        g += sunGlow * 0.9;
-        b += sunGlow * 0.7;
+        const sunGlow = Math.pow(sunDot, 32) * 0.7 + Math.pow(sunDot, 4) * 0.2;
+        r += sunGlow * 0.9;
+        g += sunGlow * 0.8;
+        b += sunGlow * 0.6;
+
 
         const idx = (y * size + x) * 4;
         pixels[idx]   = Math.min(r * 255, 255)|0;
@@ -467,12 +468,11 @@ function createProceduralEnvMap(size) {
 
 function initEnvMaps() {
   envCubemap = createProceduralEnvMap(256);
-  // For irradiance, use a small heavily-blurred version
   envIrradiance = createProceduralEnvMap(32);
-  // Force max mip on irradiance for diffuse blur
   gl.bindTexture(gl.TEXTURE_CUBE_MAP, envIrradiance);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   gl.texParameterf(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_LOD, 3.0);
+  console.log('Environment maps created:', envCubemap, envIrradiance, 'mips:', envMipCount);
 }
 
 function createPlaceholderTexture() {
@@ -546,7 +546,8 @@ function computeMobius(type, cx, cy, cz, r) {
   return { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
 }
 
-function uploadVertexUBO(mvp, mv, permParity, permIndex, useQB) {
+function uploadVertexUBO(mvp, mv, permParity, permIndex, useQB, camPosWS) {
+  camPosWS = camPosWS || [0, 0, 5];
   vtxUboF32.set(mvp, 0);        // offset 0
   vtxUboF32.set(mv, 16);        // offset 64
   vtxUboF32[32] = permParity;   // offset 128
@@ -558,6 +559,10 @@ function uploadVertexUBO(mvp, mv, permParity, permIndex, useQB) {
   vtxUboF32.set(mob.b, 40);     // offset 160
   vtxUboF32.set(mob.c, 44);     // offset 176
   vtxUboF32.set(mob.d, 48);     // offset 192
+  // camera_pos: vec4 at offset 208 (f32 index 52)
+  vtxUboF32[52] = camPosWS[0];
+  vtxUboF32[53] = camPosWS[1];
+  vtxUboF32[54] = camPosWS[2];
 
   gl.bindBuffer(gl.UNIFORM_BUFFER, vtxUbo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(vtxUboData));
@@ -603,7 +608,8 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
     }
     if (progPbr) bindUniformBlocks(progPbr);
     // Bind PBR UBO block
-    const numBlocks = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORM_BLOCKS);
+    const numBlocks = progPbr ? gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORM_BLOCKS) : 0;
+    console.log(`PBR UBO blocks: ${numBlocks}`);
     for (let i = 0; i < numBlocks; i++) {
       const name = gl.getActiveUniformBlockName(progPbr, i);
       if (name && name.includes('Pbr')) {
@@ -623,6 +629,8 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
     const bindingToUnit = { 2: 0, 4: 1, 6: 2, 8: 3, 10: 4, 12: 5, 14: 6 };
     gl.useProgram(progPbr);
     const numUniforms = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORMS);
+    console.log(`PBR active uniforms: ${numUniforms}`);
+    let samplersBound = 0;
     for (let i = 0; i < numUniforms; i++) {
       const info = gl.getActiveUniform(progPbr, i);
       if (info && (info.type === gl.SAMPLER_2D || info.type === gl.SAMPLER_CUBE)) {
@@ -633,10 +641,15 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
           const unit = bindingToUnit[binding];
           if (unit !== undefined) {
             gl.uniform1i(loc, unit);
+            samplersBound++;
+            if (info.type === gl.SAMPLER_CUBE) {
+              console.log(`Bound cubemap sampler: ${info.name} → unit ${unit}`);
+            }
           }
         }
       }
     }
+    console.log(`PBR: ${samplersBound} samplers bound, ${numUniforms} total uniforms`);
   }
 
   bindUniformBlocks(progMatcap);
@@ -864,6 +877,7 @@ function render() {
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
   const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
+  const camPos = [ex, ey, ez];
   const view = lookAt(ex,ey,ez,0,0,0,0,1,0);
   const proj = perspective(Math.PI/3,canvas.width/canvas.height,0.01,10000);
   const mvp = mulM4(proj, view);
@@ -927,7 +941,7 @@ function render() {
           gl.bindTexture(gl.TEXTURE_CUBE_MAP, envIrradiance);
         }
       }
-      uploadVertexUBO(mvp, view, b.parity, 0, 1);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -936,7 +950,7 @@ function render() {
   // Original mesh wireframe
   if (drawWire && vaoOrigMesh) {
     gl.useProgram(progWire);
-    uploadVertexUBO(mvp, view, 1.0, 0, 0);
+    uploadVertexUBO(mvp, view, 1.0, 0, 0, camPos);
     uploadWireUBO([0.25, 0.25, 0.35], false);
     gl.bindVertexArray(vaoOrigMesh);
     gl.drawElementsInstanced(gl.LINES, 6, gl.UNSIGNED_INT, 0, numOrigInst);
@@ -946,7 +960,7 @@ function render() {
   if (drawMatcap) {
     gl.useProgram(progMatcap);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -956,7 +970,7 @@ function render() {
   if (drawLod) {
     gl.useProgram(progLod);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -966,7 +980,7 @@ function render() {
   if (drawWire) {
     gl.useProgram(progWire);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
       uploadWireUBO(b.color, true);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
@@ -977,7 +991,7 @@ function render() {
   if (drawNormals) {
     gl.useProgram(progNormals);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1);
+      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }

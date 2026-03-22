@@ -18,6 +18,7 @@ struct Uniforms {
     mob_b: vec4<f32>,
     mob_c: vec4<f32>,
     mob_d: vec4<f32>,
+    camera_pos: vec4<f32>,   // world-space camera position (xyz, w unused)
 }
 
 @group(0) @binding(0)
@@ -51,6 +52,7 @@ struct VertexOutput {
     @location(5) bitangent_vs: vec3<f32>,
     @location(6) normal_ws: vec3<f32>,
     @location(7) position_ws: vec3<f32>,
+    @location(8) camera_pos_ws: vec3<f32>,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -196,6 +198,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     out.normal_ws = nrm;
     out.position_ws = pos;
+    out.camera_pos_ws = u.camera_pos.xyz;
     out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
     return out;
