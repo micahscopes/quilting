@@ -172,112 +172,101 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         }
     }
 
+    // --- KHR_materials_specular: modify F0 before BRDF ---
+    // specularColorFactor multiplies the dielectric F0 (default 0.04).
+    // For [0,0,0] this suppresses all specular. For [0.1,0.34,1] it tints blue.
+    var specular_weight = 1.0;
+    var f0_mod = vec3<f32>(1.0);
+    if pbr.specular_color.w > 0.5 {
+        f0_mod = pbr.specular_color.rgb;
+        specular_weight = max(f0_mod.x, max(f0_mod.y, f0_mod.z));
+    }
+
+    // Compute F0 with specular modification
+    let f0_base = mix(vec3<f32>(0.04) * f0_mod, base.rgb, metallic);
+
     // --- Lighting ---
-    // Key light
     let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.6));
     let light_color = vec3<f32>(3.0, 2.9, 2.7);
+    let n_dot_v = max(dot(n, view_dir), 0.001);
 
-    let input = PBRInput(
-        base.rgb,
-        metallic,
-        roughness,
-        n,
-        view_dir,
-        light_dir,
-        light_color,
-    );
+    let input = PBRInput(base.rgb, metallic, roughness, n, view_dir, light_dir, light_color);
     let direct = pbr_direct(input);
 
-    // Fill light
-    let fill_input = PBRInput(
-        base.rgb,
-        metallic,
-        roughness,
-        n,
-        view_dir,
-        normalize(vec3<f32>(-0.4, -0.3, 0.5)),
-        vec3<f32>(0.3, 0.35, 0.5),
-    );
+    let fill_input = PBRInput(base.rgb, metallic, roughness, n, view_dir,
+        normalize(vec3<f32>(-0.4, -0.3, 0.5)), vec3<f32>(0.3, 0.35, 0.5));
     let fill = pbr_direct(fill_input);
 
     // --- IBL ambient ---
-    // Use world-space normal for cubemap lookups
     let n_ws = normalize(in.normal_ws);
     let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
     let reflect_ws = reflect(-view_dir_ws, n_ws);
 
-    // Sample environment cubemaps (HDR values when loaded from .hdr files)
     let irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb;
     let lod = roughness * max(pbr.env_mip_count, 1.0);
     let env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb;
 
-    var ambient = pbr_ambient(
-        base.rgb,
-        metallic,
-        roughness,
-        n,
-        view_dir,
-        irradiance,
-        env_color,
-    );
+    var ambient = pbr_ambient(base.rgb, metallic, roughness, n, view_dir, irradiance, env_color);
 
-    // --- Occlusion (ambient only) ---
     if pbr.has_occlusion_tex > 0.5 {
         let ao = textureSample(occlusion_tex, occlusion_sampler, in.tex_uv).r;
         ambient = ambient * mix(1.0, ao, pbr.occlusion_strength);
     }
 
-    var color = direct.color + fill.color + ambient;
+    // Scale specular by specular weight (reduces env reflections for fabric)
+    var base_color_result = direct.color * specular_weight + fill.color * specular_weight + ambient * specular_weight;
+    // Keep diffuse at full strength
+    let k_d = (1.0 - metallic);
+    let diffuse_direct = k_d * base.rgb / 3.14159 * max(dot(n, light_dir), 0.0) * light_color;
+    let diffuse_fill = k_d * base.rgb / 3.14159 * max(dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.5))), 0.0) * vec3<f32>(0.3, 0.35, 0.5);
+    let diffuse_ambient = k_d * base.rgb * irradiance;
+    let total_diffuse = diffuse_direct + diffuse_fill + diffuse_ambient;
+    // Blend: full diffuse + specular_weight * specular
+    var color = total_diffuse + (direct.color + fill.color + ambient - total_diffuse) * specular_weight;
 
     // --- KHR_materials_sheen (velvet/fabric) ---
-    // Charlie distribution BRDF: peaks at grazing angles (sin-based, not cos-based).
-    // Evaluated as a full BRDF lobe per light, not just a rim effect.
+    // Charlie distribution, composited with energy conservation:
+    // color = f_sheen + base_layer * (1 - max(sheenColor) * E_sheen)
     if pbr.sheen_color.w > 0.5 {
         let sheen_col = pbr.sheen_color.rgb;
-        let sheen_r = max(pbr.sheen_roughness, 0.07);
-        let n_dot_v_s = max(dot(n, view_dir), 0.001);
-        let inv_r = 1.0 / sheen_r;
+        let sheen_r = max(pbr.sheen_roughness, 0.000001);
+        let alpha_g = sheen_r * sheen_r;
+        let inv_alpha = 1.0 / alpha_g;
 
-        // Charlie D: (2 + 1/r) / (2π) * sin(θ_h)^(1/r)
-        // V: Ashikhmin visibility: 1 / (4 * (NdotL + NdotV - NdotL*NdotV))
-        // Sheen on key light
-        let l_key = normalize(vec3<f32>(0.5, 0.8, 0.6));
-        let h_key = normalize(view_dir + l_key);
+        // Charlie sheen BRDF helper
+        // D_Charlie = (2 + 1/α²) / 2π * sin²(θ_h)^(1/2α²)
+        // V ≈ 1 / (4 * (NdotL + NdotV - NdotL*NdotV)) [Ashikhmin approx]
+
+        // Key light sheen
+        let h_key = normalize(view_dir + light_dir);
         let n_dot_h_key = max(dot(n, h_key), 0.0);
-        let n_dot_l_key = max(dot(n, l_key), 0.0);
+        let n_dot_l_key = max(dot(n, light_dir), 0.0);
         let sin2_key = 1.0 - n_dot_h_key * n_dot_h_key;
-        let D_key = (2.0 + inv_r) / (2.0 * 3.14159) * pow(max(sin2_key, 1e-6), 0.5 * inv_r);
-        let V_key = 1.0 / (4.0 * (n_dot_l_key + n_dot_v_s - n_dot_l_key * n_dot_v_s) + 0.001);
-        color += sheen_col * D_key * V_key * n_dot_l_key * vec3<f32>(3.0, 2.9, 2.7);
+        let D_key = (2.0 + inv_alpha) / (2.0 * 3.14159) * pow(max(sin2_key, 1e-6), 0.5 * inv_alpha);
+        let V_key = clamp(1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.001), 0.0, 1.0);
+        let f_sheen_key = sheen_col * D_key * V_key * n_dot_l_key * light_color;
 
-        // Sheen on fill light
+        // Fill light sheen
         let l_fill = normalize(vec3<f32>(-0.4, -0.3, 0.5));
         let h_fill = normalize(view_dir + l_fill);
         let n_dot_h_fill = max(dot(n, h_fill), 0.0);
         let n_dot_l_fill = max(dot(n, l_fill), 0.0);
         let sin2_fill = 1.0 - n_dot_h_fill * n_dot_h_fill;
-        let D_fill = (2.0 + inv_r) / (2.0 * 3.14159) * pow(max(sin2_fill, 1e-6), 0.5 * inv_r);
-        let V_fill = 1.0 / (4.0 * (n_dot_l_fill + n_dot_v_s - n_dot_l_fill * n_dot_v_s) + 0.001);
-        color += sheen_col * D_fill * V_fill * n_dot_l_fill * vec3<f32>(0.3, 0.35, 0.5);
+        let D_fill = (2.0 + inv_alpha) / (2.0 * 3.14159) * pow(max(sin2_fill, 1e-6), 0.5 * inv_alpha);
+        let V_fill = clamp(1.0 / (4.0 * (n_dot_l_fill + n_dot_v - n_dot_l_fill * n_dot_v) + 0.001), 0.0, 1.0);
+        let f_sheen_fill = sheen_col * D_fill * V_fill * n_dot_l_fill * vec3<f32>(0.3, 0.35, 0.5);
 
-        // Sheen on environment: approximate with irradiance * sheen color
-        // Charlie distribution at high roughness converges to diffuse
-        color += sheen_col * irradiance * mix(0.3, 1.0, sheen_r);
-    }
+        // Environment sheen (approximate)
+        let f_sheen_env = sheen_col * irradiance * sheen_r;
 
-    // --- KHR_materials_specular (modulate F0) ---
-    // specularColorFactor modulates the dielectric F0. For [0,0,0] this
-    // completely suppresses specular (pure fabric). For [0.1,0.34,1] it
-    // tints specular blue. Applied as a post-multiplier on the specular
-    // components of both direct and ambient lighting.
-    if pbr.specular_color.w > 0.5 {
-        let spec_mod = pbr.specular_color.rgb;
-        // Scale down the direct + ambient specular by the specular color factor.
-        // The diffuse components are unaffected.
-        let total_before = direct.color + fill.color + ambient;
-        let diffuse_only = base.rgb * irradiance * (1.0 - metallic);
-        let specular_part = total_before - diffuse_only;
-        color = diffuse_only + specular_part * spec_mod;
+        let f_sheen = f_sheen_key + f_sheen_fill + f_sheen_env;
+
+        // Energy conservation: attenuate base layer by sheen albedo
+        // Approximate E_sheen ≈ 0.45 * sheen_roughness (no LUT)
+        let max_sheen = max(sheen_col.x, max(sheen_col.y, sheen_col.z));
+        let albedo_sheen_scaling = 1.0 - max_sheen * sheen_r * 0.45;
+
+        color = f_sheen + color * albedo_sheen_scaling;
     }
 
     // --- Emissive ---
