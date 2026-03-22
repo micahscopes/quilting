@@ -49,6 +49,8 @@ struct VertexOutput {
     @location(3) position_vs: vec3<f32>,
     @location(4) tangent_vs: vec3<f32>,
     @location(5) bitangent_vs: vec3<f32>,
+    @location(6) normal_ws: vec3<f32>,
+    @location(7) position_ws: vec3<f32>,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -192,6 +194,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.tangent_vs = normalize((u.mv * vec4<f32>(tangent, 0.0)).xyz);
     out.bitangent_vs = normalize((u.mv * vec4<f32>(bitangent, 0.0)).xyz);
 
+    out.normal_ws = nrm;
+    out.position_ws = pos;
     out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
     return out;

@@ -355,7 +355,7 @@ const wireUboF32 = new Float32Array(wireUboData);
 const wireUboI32 = new Int32Array(wireUboData);
 
 // PBR UBO: PbrUniforms (std140, binding 2)
-// Layout (80 bytes):
+// Layout (96 bytes):
 //   base_color: vec4         (0-15)
 //   metallic: f32            (16)
 //   roughness: f32           (20)
@@ -369,8 +369,12 @@ const wireUboI32 = new Int32Array(wireUboData);
 //   occlusion_strength: f32  (64)
 //   alpha_cutoff: f32        (68)
 //   alpha_mode: f32          (72)
-//   _pad: f32                (76)
-const PBR_UBO_SIZE = 80;
+//   unlit: f32               (76)
+//   has_env_map: f32         (80)
+//   env_mip_count: f32       (84)
+//   _pad0: f32               (88)
+//   _pad1: f32               (92)
+const PBR_UBO_SIZE = 96;
 const PBR_UBO_BINDING = 2;
 const pbrUbo = gl.createBuffer();
 gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
@@ -380,6 +384,96 @@ const pbrUboF32 = new Float32Array(pbrUboData);
 
 // Base color texture from glTF (null when no texture loaded)
 let baseColorTex = null;
+
+// --- Environment cubemap for IBL ---
+let envCubemap = null;       // prefiltered specular cubemap
+let envIrradiance = null;    // diffuse irradiance cubemap
+let envMipCount = 1;
+
+// Generate a procedural environment cubemap (sky/ground gradient).
+// Each face is rendered as pixel data with a simple sky model.
+function createProceduralEnvMap(size) {
+  const cubemap = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubemap);
+
+  const faces = [
+    gl.TEXTURE_CUBE_MAP_POSITIVE_X, gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Y, gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Z, gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+  ];
+
+  for (let fi = 0; fi < 6; fi++) {
+    const pixels = new Uint8Array(size * size * 4);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        // Map pixel to cubemap direction
+        const u = (x + 0.5) / size * 2.0 - 1.0;
+        const v = (y + 0.5) / size * 2.0 - 1.0;
+        let dx, dy, dz;
+        switch (fi) {
+          case 0: dx= 1; dy=-v; dz=-u; break; // +X
+          case 1: dx=-1; dy=-v; dz= u; break; // -X
+          case 2: dx= u; dy= 1; dz= v; break; // +Y
+          case 3: dx= u; dy=-1; dz=-v; break; // -Y
+          case 4: dx= u; dy=-v; dz= 1; break; // +Z
+          case 5: dx=-u; dy=-v; dz=-1; break; // -Z
+        }
+        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        dy /= len;
+
+        // Sky model: warm sun from upper-right, cool blue sky, dark ground
+        const skyT = Math.max(dy, 0);
+        const groundT = Math.max(-dy, 0);
+        const horizonT = 1.0 - Math.abs(dy);
+
+        // Sky gradient
+        let r = 0.05 + skyT * 0.35 + horizonT * 0.5;
+        let g = 0.08 + skyT * 0.45 + horizonT * 0.45;
+        let b = 0.15 + skyT * 0.65 + horizonT * 0.4;
+
+        // Ground
+        r += groundT * 0.08;
+        g += groundT * 0.06;
+        b += groundT * 0.04;
+
+        // Sun glow (upper right area)
+        const sunDx = dx/len, sunDy = dy/len, sunDz = dz/len;
+        const sunDot = Math.max(sunDx * 0.5 + sunDy * 0.7 + sunDz * 0.3, 0);
+        const sunGlow = Math.pow(sunDot, 32) * 3.0 + Math.pow(sunDot, 4) * 0.3;
+        r += sunGlow * 1.0;
+        g += sunGlow * 0.9;
+        b += sunGlow * 0.7;
+
+        const idx = (y * size + x) * 4;
+        pixels[idx]   = Math.min(r * 255, 255)|0;
+        pixels[idx+1] = Math.min(g * 255, 255)|0;
+        pixels[idx+2] = Math.min(b * 255, 255)|0;
+        pixels[idx+3] = 255;
+      }
+    }
+    gl.texImage2D(faces[fi], 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  }
+
+  gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+
+  envMipCount = Math.floor(Math.log2(size));
+  return cubemap;
+}
+
+function initEnvMaps() {
+  envCubemap = createProceduralEnvMap(256);
+  // For irradiance, use a small heavily-blurred version
+  envIrradiance = createProceduralEnvMap(32);
+  // Force max mip on irradiance for diffuse blur
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, envIrradiance);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameterf(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_LOD, 3.0);
+}
 
 function createPlaceholderTexture() {
   const tex = gl.createTexture();
@@ -432,6 +526,9 @@ function uploadPbrUBO(mat) {
   pbrUboF32[18] = mat.alphaMode ?? 0;
   // unlit at offset 76
   pbrUboF32[19] = mat.unlit ? 1.0 : 0.0;
+  // has_env_map at offset 80, env_mip_count at offset 84
+  pbrUboF32[20] = envCubemap ? 1.0 : 0.0;
+  pbrUboF32[21] = envMipCount;
   gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, pbrUboData);
 }
@@ -513,22 +610,23 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
         gl.uniformBlockBinding(progPbr, i, PBR_UBO_BINDING);
       }
     }
-    // Bind all sampler2D uniforms to texture units.
+    // Bind all sampler uniforms to texture units.
     // naga generates combined sampler names like "_group_0_binding_N_fs"
     // where N is the WGSL @binding index. Map binding → texture unit:
-    //   binding 2 → unit 0 (base_color)
-    //   binding 4 → unit 1 (metallic_roughness)
-    //   binding 6 → unit 2 (normal)
-    //   binding 8 → unit 3 (emissive)
-    //   binding 10 → unit 4 (occlusion)
-    const bindingToUnit = { 2: 0, 4: 1, 6: 2, 8: 3, 10: 4 };
+    //   binding 2 → unit 0 (base_color, 2D)
+    //   binding 4 → unit 1 (metallic_roughness, 2D)
+    //   binding 6 → unit 2 (normal, 2D)
+    //   binding 8 → unit 3 (emissive, 2D)
+    //   binding 10 → unit 4 (occlusion, 2D)
+    //   binding 12 → unit 5 (env_prefiltered, cubemap)
+    //   binding 14 → unit 6 (env_irradiance, cubemap)
+    const bindingToUnit = { 2: 0, 4: 1, 6: 2, 8: 3, 10: 4, 12: 5, 14: 6 };
     gl.useProgram(progPbr);
     const numUniforms = gl.getProgramParameter(progPbr, gl.ACTIVE_UNIFORMS);
     for (let i = 0; i < numUniforms; i++) {
       const info = gl.getActiveUniform(progPbr, i);
-      if (info && info.type === gl.SAMPLER_2D) {
+      if (info && (info.type === gl.SAMPLER_2D || info.type === gl.SAMPLER_CUBE)) {
         const loc = gl.getUniformLocation(progPbr, info.name);
-        // Extract binding number from naga name: "_group_0_binding_N_fs"
         const m = info.name.match(/binding_(\d+)/);
         if (m) {
           const binding = parseInt(m[1]);
@@ -815,11 +913,18 @@ function render() {
         // transform is active (would need to know current transform type).
         gl.disable(gl.CULL_FACE);
 
-        // Bind textures to units 0-4 (placeholder for missing maps)
+        // Bind material textures to units 0-4 (placeholder for missing maps)
         const texBindings = [bcTex, mrTex, nmTex, emTex, aoTex];
         for (let ti = 0; ti < 5; ti++) {
           gl.activeTexture(gl.TEXTURE0 + ti);
           gl.bindTexture(gl.TEXTURE_2D, texBindings[ti] || placeholder);
+        }
+        // Bind environment cubemaps to units 5-6
+        if (envCubemap) {
+          gl.activeTexture(gl.TEXTURE5);
+          gl.bindTexture(gl.TEXTURE_CUBE_MAP, envCubemap);
+          gl.activeTexture(gl.TEXTURE6);
+          gl.bindTexture(gl.TEXTURE_CUBE_MAP, envIrradiance);
         }
       }
       uploadVertexUBO(mvp, view, b.parity, 0, 1);
@@ -1287,6 +1392,7 @@ await workerCall('init', {});
 $('stats').textContent = 'Compiling shaders...';
 const shaderResp = await workerCall('get_shaders', {});
 initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals, shaderResp.fs_pbr);
+initEnvMaps();
 
 $('stats').textContent = 'Building atlas...';
 const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });

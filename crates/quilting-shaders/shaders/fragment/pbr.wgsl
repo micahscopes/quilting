@@ -1,6 +1,6 @@
 #define_import_path quilting::fragment::pbr
 
-#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, PBRInput}
+#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, PBRInput, env_dfg, fresnel_schlick_roughness, sh_irradiance_fallback, env_specular_fallback}
 
 struct PbrUniforms {
     base_color: vec4<f32>,
@@ -17,6 +17,10 @@ struct PbrUniforms {
     alpha_cutoff: f32,
     alpha_mode: f32,                     // 0=opaque, 1=mask, 2=blend
     unlit: f32,                          // >0.5 = KHR_materials_unlit (base color only)
+    has_env_map: f32,                    // >0.5 = cubemap IBL available
+    env_mip_count: f32,                  // number of mip levels in prefiltered env map
+    _pbr_pad0: f32,
+    _pbr_pad1: f32,
 }
 
 @group(0) @binding(1)
@@ -47,6 +51,17 @@ var occlusion_tex: texture_2d<f32>;
 @group(0) @binding(11)
 var occlusion_sampler: sampler;
 
+// Environment cubemaps for IBL
+@group(0) @binding(12)
+var env_prefiltered: texture_cube<f32>;
+@group(0) @binding(13)
+var env_prefiltered_sampler: sampler;
+
+@group(0) @binding(14)
+var env_irradiance: texture_cube<f32>;
+@group(0) @binding(15)
+var env_irradiance_sampler: sampler;
+
 struct FragInput {
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
@@ -54,6 +69,8 @@ struct FragInput {
     @location(3) position_vs: vec3<f32>,
     @location(4) tangent_vs: vec3<f32>,
     @location(5) bitangent_vs: vec3<f32>,
+    @location(6) normal_ws: vec3<f32>,
+    @location(7) position_ws: vec3<f32>,
 }
 
 @fragment
@@ -154,14 +171,33 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     );
     let fill = pbr_direct(fill_input);
 
-    // Ambient
+    // --- IBL ambient ---
+    // Use world-space normal for cubemap lookups
+    let n_ws = normalize(in.normal_ws);
+    let view_dir_ws = normalize(-in.position_ws); // camera at origin in world space
+    let reflect_ws = reflect(-view_dir_ws, n_ws);
+
+    var irradiance: vec3<f32>;
+    var env_color: vec3<f32>;
+    if pbr.has_env_map > 0.5 {
+        // Cubemap IBL: sample irradiance + prefiltered specular
+        irradiance = textureSample(env_irradiance, env_irradiance_sampler, n_ws).rgb;
+        let lod = roughness * pbr.env_mip_count;
+        env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb;
+    } else {
+        // Analytical fallback
+        irradiance = sh_irradiance_fallback(n_ws);
+        env_color = env_specular_fallback(reflect_ws, roughness);
+    }
+
     var ambient = pbr_ambient(
         base.rgb,
         metallic,
         roughness,
         n,
         view_dir,
-        vec3<f32>(0.15, 0.12, 0.18),
+        irradiance,
+        env_color,
     );
 
     // --- Occlusion (ambient only) ---

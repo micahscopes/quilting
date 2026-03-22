@@ -55,34 +55,26 @@ fn env_dfg(specular_color: vec3<f32>, gloss: f32, n_dot_v: f32) -> vec3<f32> {
     return specular_color * scale + adjusted_bias;
 }
 
-// --- Spherical Harmonics environment for diffuse IBL ---
-// Simple outdoor-like environment: bright sky above, darker ground below,
-// warm sun from upper-right, cool fill from left.
-// Uses L0 + L1 bands (4 coefficients) for view-independent irradiance.
-fn sh_irradiance(normal: vec3<f32>) -> vec3<f32> {
-    // L0 (constant ambient)
+// --- Cubemap IBL for diffuse + specular environment lighting ---
+// When cubemaps are bound, sample them directly.
+// Fallback to analytical SH + gradient when cubemaps are unavailable.
+
+// Analytical fallback: SH irradiance (L0 + L1)
+fn sh_irradiance_fallback(normal: vec3<f32>) -> vec3<f32> {
     let l0 = vec3<f32>(0.30, 0.28, 0.32);
-    // L1 (directional components: x, y, z)
-    let l1_x = vec3<f32>(0.05, 0.04, 0.02);   // warm from right
-    let l1_y = vec3<f32>(0.15, 0.18, 0.25);    // sky above, ground below
-    let l1_z = vec3<f32>(0.02, 0.02, 0.03);    // slight front bias
+    let l1_x = vec3<f32>(0.05, 0.04, 0.02);
+    let l1_y = vec3<f32>(0.15, 0.18, 0.25);
+    let l1_z = vec3<f32>(0.02, 0.02, 0.03);
     return max(l0 + l1_x * normal.x + l1_y * normal.y + l1_z * normal.z, vec3<f32>(0.0));
 }
 
-// --- Analytical specular environment ---
-// Approximate environment reflection: sky gradient with roughness-based blur.
-// The reflection vector samples a simple sky/ground gradient.
-fn env_specular(reflect_dir: vec3<f32>, roughness: f32) -> vec3<f32> {
-    // Sky/ground gradient based on reflection Y
+// Analytical fallback: sky/ground gradient specular
+fn env_specular_fallback(reflect_dir: vec3<f32>, roughness: f32) -> vec3<f32> {
     let sky = vec3<f32>(0.4, 0.45, 0.55);
     let horizon = vec3<f32>(0.35, 0.35, 0.38);
     let ground = vec3<f32>(0.12, 0.10, 0.08);
-
-    // Roughness blurs the reflection — rough surfaces see the average environment
     let blur = roughness * roughness;
     let y = reflect_dir.y;
-
-    // Sharp reflection uses the gradient; rough reflection converges to average
     let sharp = mix(ground, mix(horizon, sky, clamp(y * 2.0 + 0.5, 0.0, 1.0)), clamp(y + 0.5, 0.0, 1.0));
     let average = vec3<f32>(0.25, 0.25, 0.28);
     return mix(sharp, average, blur);
@@ -130,14 +122,16 @@ fn pbr_direct(input: PBRInput) -> PBROutput {
     return PBROutput(color);
 }
 
-// Ambient / IBL using spherical harmonics diffuse + analytical specular environment
+// Ambient / IBL: takes pre-sampled irradiance and specular environment colors.
+// The caller is responsible for sampling cubemaps (or using the analytical fallbacks).
 fn pbr_ambient(
     base_color: vec3<f32>,
     metallic: f32,
     roughness: f32,
     normal: vec3<f32>,
     view_dir: vec3<f32>,
-    ambient_color: vec3<f32>,  // unused now, kept for API compat
+    irradiance: vec3<f32>,     // diffuse irradiance (from cubemap or SH)
+    env_color: vec3<f32>,      // specular environment (from prefiltered cubemap or gradient)
 ) -> vec3<f32> {
     let n_dot_v = max(dot(normal, view_dir), 0.001);
     let f0 = mix(vec3<f32>(0.04), base_color, metallic);
@@ -145,13 +139,7 @@ fn pbr_ambient(
     let F = fresnel_schlick_roughness(n_dot_v, f0, roughness);
     let k_d = (1.0 - F) * (1.0 - metallic);
 
-    // Diffuse: SH irradiance
-    let irradiance = sh_irradiance(normal);
     let diffuse = k_d * base_color * irradiance;
-
-    // Specular: analytical environment reflection
-    let reflect_dir = reflect(-view_dir, normal);
-    let env_color = env_specular(reflect_dir, roughness);
     let specular = env_dfg(f0, 1.0 - roughness, n_dot_v) * env_color;
 
     return diffuse + specular;
