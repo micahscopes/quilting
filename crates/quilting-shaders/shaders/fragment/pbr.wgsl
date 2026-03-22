@@ -230,24 +230,39 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     var color = direct.color + fill.color + ambient;
 
     // --- KHR_materials_sheen (velvet/fabric) ---
-    // Sheen produces a soft, view-dependent color at grazing angles —
-    // the characteristic look of velvet, cloth, and fuzz.
+    // Charlie distribution BRDF: peaks at grazing angles (sin-based, not cos-based).
+    // Evaluated as a full BRDF lobe per light, not just a rim effect.
     if pbr.sheen_color.w > 0.5 {
         let sheen_col = pbr.sheen_color.rgb;
         let sheen_r = max(pbr.sheen_roughness, 0.07);
-        let n_dot_v_sheen = max(dot(n, view_dir), 0.0);
+        let n_dot_v_s = max(dot(n, view_dir), 0.001);
+        let inv_r = 1.0 / sheen_r;
 
-        // Sheen Fresnel: strongest at grazing angles (rim), fades at direct view.
-        // Roughness controls how quickly it fades — high roughness = more uniform.
-        let sheen_fresnel = pow(1.0 - n_dot_v_sheen, mix(5.0, 2.0, sheen_r));
+        // Charlie D: (2 + 1/r) / (2π) * sin(θ_h)^(1/r)
+        // V: Ashikhmin visibility: 1 / (4 * (NdotL + NdotV - NdotL*NdotV))
+        // Sheen on key light
+        let l_key = normalize(vec3<f32>(0.5, 0.8, 0.6));
+        let h_key = normalize(view_dir + l_key);
+        let n_dot_h_key = max(dot(n, h_key), 0.0);
+        let n_dot_l_key = max(dot(n, l_key), 0.0);
+        let sin2_key = 1.0 - n_dot_h_key * n_dot_h_key;
+        let D_key = (2.0 + inv_r) / (2.0 * 3.14159) * pow(max(sin2_key, 1e-6), 0.5 * inv_r);
+        let V_key = 1.0 / (4.0 * (n_dot_l_key + n_dot_v_s - n_dot_l_key * n_dot_v_s) + 0.001);
+        color += sheen_col * D_key * V_key * n_dot_l_key * vec3<f32>(3.0, 2.9, 2.7);
 
-        // Direct light sheen: soft wrap lighting (half-Lambert style)
-        let light_key = normalize(vec3<f32>(0.5, 0.8, 0.6));
-        let n_dot_l_key = dot(n, light_key) * 0.5 + 0.5; // half-Lambert wrap
-        color += sheen_col * sheen_fresnel * n_dot_l_key * vec3<f32>(2.0, 1.9, 1.8);
+        // Sheen on fill light
+        let l_fill = normalize(vec3<f32>(-0.4, -0.3, 0.5));
+        let h_fill = normalize(view_dir + l_fill);
+        let n_dot_h_fill = max(dot(n, h_fill), 0.0);
+        let n_dot_l_fill = max(dot(n, l_fill), 0.0);
+        let sin2_fill = 1.0 - n_dot_h_fill * n_dot_h_fill;
+        let D_fill = (2.0 + inv_r) / (2.0 * 3.14159) * pow(max(sin2_fill, 1e-6), 0.5 * inv_r);
+        let V_fill = 1.0 / (4.0 * (n_dot_l_fill + n_dot_v_s - n_dot_l_fill * n_dot_v_s) + 0.001);
+        color += sheen_col * D_fill * V_fill * n_dot_l_fill * vec3<f32>(0.3, 0.35, 0.5);
 
-        // Environment sheen: irradiance tinted by sheen color at grazing angles
-        color += sheen_col * sheen_fresnel * irradiance;
+        // Sheen on environment: approximate with irradiance * sheen color
+        // Charlie distribution at high roughness converges to diffuse
+        color += sheen_col * irradiance * mix(0.3, 1.0, sheen_r);
     }
 
     // --- KHR_materials_specular (modulate F0) ---
