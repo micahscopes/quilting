@@ -2,7 +2,7 @@
 // Imports quilting modules for quaternion math, surface evaluation, and density viz.
 // Compiles to GLSL ES 300 via naga for WebGL2.
 
-#import quilting::math::quaternion::{qmul, qinv, q_to_point}
+#import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
 #import quilting::surface::qb_eval::{eval_qb_with_normal, QBResult}
 #import quilting::viz::density::edge_density
 
@@ -88,22 +88,23 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         nrm = nrm * u.perm_parity;
     }
 
-    // Use smooth normals only for affine transforms (identity weights).
-    // Under conformal transforms, QB analytical normals correctly capture
-    // the Möbius-deformed surface — smooth normals are pre-transform and wrong.
-    // Detect affine: all weights ≈ (1,0,0,0) means no conformal distortion.
-    let w_identity = abs(in.w0.x - 1.0) + abs(in.w1.x - 1.0) + abs(in.w2.x - 1.0)
-                   + length(in.w0.yzw) + length(in.w1.yzw) + length(in.w2.yzw);
-    let is_affine = w_identity < 0.01;
-
-    if is_affine {
-        let sn0 = in.smooth_n0.xyz;
-        let sn1 = in.smooth_n1.xyz;
-        let sn2 = in.smooth_n2.xyz;
-        let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
-        if has_smooth {
-            nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
-        }
+    // Smooth normals with conformal transform support.
+    // Interpolate glTF vertex normals, then rotate by the Möbius conformal
+    // factor. Since Möbius is conformal, the Jacobian is a pure rotation
+    // given by the weight quaternion q = w/|w| where w = c·p + d.
+    // For identity transforms, w = (1,0,0,0), rotation is identity.
+    let sn0 = in.smooth_n0.xyz;
+    let sn1 = in.smooth_n1.xyz;
+    let sn2 = in.smooth_n2.xyz;
+    let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
+    if has_smooth {
+        let smooth_n = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
+        // Interpolate weight quaternion and use as conformal rotation
+        let w = normalize(bary.x * in.w0 + bary.y * in.w1 + bary.z * in.w2);
+        // Rotate normal: n' = w * n * conj(w)
+        let n_quat = vec4<f32>(0.0, smooth_n.x, smooth_n.y, smooth_n.z);
+        let rotated = qmul(qmul(w, n_quat), qconj(w));
+        nrm = normalize(rotated.yzw) * u.perm_parity;
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
