@@ -1574,7 +1574,7 @@ initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shad
 initEnvMaps();
 
 $('stats').textContent = 'Building atlas...';
-const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
+const r1 = await workerCall('build_atlas', { maxLodExp: 5, mode: 'hierarchical' });
 workerReady = true;
 $('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
 
