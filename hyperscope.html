@@ -217,19 +217,9 @@ function createTexturesFromGltf(textures, materials) {
   loadedMaterials = materials || [];
   materialColors = [];
 
-  // Determine which texture indices are sRGB (base color, emissive)
-  // vs linear (metallic-roughness, normal, occlusion)
-  const srgbIndices = new Set();
-  if (materials) {
-    for (const mat of materials) {
-      if (mat.base_color_texture_index != null && mat.base_color_texture_index >= 0)
-        srgbIndices.add(mat.base_color_texture_index);
-      if (mat.emissive_texture_index != null && mat.emissive_texture_index >= 0)
-        srgbIndices.add(mat.emissive_texture_index);
-    }
-  }
-
-  // Create WebGL textures from image data
+  // Create WebGL textures from image data.
+  // All textures loaded as RGBA — shader handles sRGB→linear conversion
+  // via pow(2.2) for base color and emissive textures.
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
   const maxAniso = aniso ? gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) : 1;
   if (textures) {
@@ -237,10 +227,7 @@ function createTexturesFromGltf(textures, materials) {
       const img = textures[ti];
       const glTex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, glTex);
-      // sRGB textures: hardware decodes gamma, no manual pow(2.2) needed in shader
-      const isSrgb = srgbIndices.has(ti);
-      const internalFmt = isSrgb ? gl.SRGB8_ALPHA8 : gl.RGBA;
-      gl.texImage2D(gl.TEXTURE_2D, 0, internalFmt, img.width, img.height, 0,
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, img.width, img.height, 0,
                     gl.RGBA, gl.UNSIGNED_BYTE, img.data);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
