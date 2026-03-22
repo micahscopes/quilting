@@ -485,6 +485,8 @@ struct CachedSlice {
     half_edge: HalfEdgeMesh,
     /// Maps sliced face index -> original HyperMesh face index.
     source_face_indices: Vec<usize>,
+    /// Cached original (untransformed) instances — recomputed only when slice changes.
+    orig_instances: Vec<quilting_core::evaluate::FaceInstance>,
 }
 
 thread_local! {
@@ -1210,61 +1212,101 @@ pub fn slice_and_transform(
         }
     });
 
-    // Slice: toroidal embedding wraps time into a circle,
-    // linear uses time directly. 3D Möbius applied post-slice.
-    {
-        let slice_result = HYPER_MESH.with(|hm| {
-            let mesh_opt = hm.borrow();
-            let mesh = match mesh_opt.as_ref() {
-                Some(m) => m,
-                None => return None,
+    if !cache_hit {
+        // Classic mode fast path: pure time slice (normal = [0,0,0,1]) without
+        // tilt or toroidal embedding. Just evaluate each vertex's trajectory at
+        // time t — no marching tetrahedra needed. O(V) instead of O(V*segs*F).
+        let is_classic = !toroidal
+            && n[0].abs() < 1e-10 && n[1].abs() < 1e-10 && n[2].abs() < 1e-10
+            && (n[3] - 1.0).abs() < 1e-10;
+
+        if is_classic {
+            let built = HYPER_MESH.with(|hm| {
+                let mesh_opt = hm.borrow();
+                let mesh = match mesh_opt.as_ref() {
+                    Some(m) => m,
+                    None => return false,
+                };
+                let verts = mesh.positions_at(offset);
+                let tris: Vec<[usize; 3]> = mesh.faces.iter()
+                    .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
+                    .collect();
+                let uvs = mesh.vertex_uvs.clone();
+                let normals = mesh.vertex_normals.clone();
+                let source_faces: Vec<usize> = (0..tris.len()).collect();
+
+                if verts.is_empty() || tris.is_empty() { return false; }
+
+                let faces_u32: Vec<[u32; 3]> = tris.iter()
+                    .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+                    .collect();
+                let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
+
+                SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
+                    normal: n, offset, verts, tris,
+                    weights: vec![[0.0; 4]; 0], // no 4D weights in classic mode
+                    uvs, normals, half_edge,
+                    source_face_indices: source_faces,
+                    orig_instances: Vec::new(),
+                }));
+                true
+            });
+            if !built { return empty(); }
+        } else {
+            // Full marching tetrahedra slice for tilted/toroidal hyperplanes
+            let slice_result = HYPER_MESH.with(|hm| {
+                let mesh_opt = hm.borrow();
+                let mesh = match mesh_opt.as_ref() {
+                    Some(m) => m,
+                    None => return None,
+                };
+                let mut slicer = quilting_spacetime::HyperplaneSlicer::new(n, offset);
+                if toroidal {
+                    slicer = slicer.with_toroidal(2.0, mesh.period);
+                }
+                Some(slicer.slice_marching(mesh))
+            });
+
+            let slice = match slice_result {
+                Some(s) if !s.layers.is_empty() => s,
+                _ => return empty(),
             };
-            let mut slicer = quilting_spacetime::HyperplaneSlicer::new(n, offset);
-            if toroidal {
-                slicer = slicer.with_toroidal(2.0, mesh.period);
+
+            // Merge ALL layers
+            let mut verts: Vec<[f64; 3]> = Vec::new();
+            let mut vert_weights: Vec<[f64; 4]> = Vec::new();
+            let mut vert_uvs: Vec<[f32; 2]> = Vec::new();
+            let mut vert_normals: Vec<[f32; 3]> = Vec::new();
+            let mut tris: Vec<[usize; 3]> = Vec::new();
+            let mut slice_source_faces: Vec<usize> = Vec::new();
+            for layer in slice.layers {
+                let base = verts.len();
+                verts.extend_from_slice(&layer.positions);
+                vert_weights.extend_from_slice(&layer.weights);
+                vert_uvs.extend_from_slice(&layer.uvs);
+                vert_normals.extend_from_slice(&layer.normals);
+                for f in &layer.faces {
+                    tris.push([f[0] as usize + base, f[1] as usize + base, f[2] as usize + base]);
+                }
+                slice_source_faces.extend_from_slice(&layer.source_face_indices);
             }
-            Some(slicer.slice_marching(mesh))
-        });
 
-        let slice = match slice_result {
-            Some(s) if !s.layers.is_empty() => s,
-            _ => return empty(),
-        };
-
-        // Merge ALL layers — with looped trajectories, adjacent periods produce
-        // separate layers that should be rendered together for seamless wrapping.
-        let mut verts: Vec<[f64; 3]> = Vec::new();
-        let mut vert_weights: Vec<[f64; 4]> = Vec::new();
-        let mut vert_uvs: Vec<[f32; 2]> = Vec::new();
-        let mut vert_normals: Vec<[f32; 3]> = Vec::new();
-        let mut tris: Vec<[usize; 3]> = Vec::new();
-        let mut slice_source_faces: Vec<usize> = Vec::new();
-        for layer in slice.layers {
-            let base = verts.len();
-            verts.extend_from_slice(&layer.positions);
-            vert_weights.extend_from_slice(&layer.weights);
-            vert_uvs.extend_from_slice(&layer.uvs);
-            vert_normals.extend_from_slice(&layer.normals);
-            for f in &layer.faces {
-                tris.push([f[0] as usize + base, f[1] as usize + base, f[2] as usize + base]);
+            if tris.is_empty() || verts.is_empty() {
+                SLICE_CACHE.with(|c| *c.borrow_mut() = None);
+                return empty();
             }
-            slice_source_faces.extend_from_slice(&layer.source_face_indices);
+
+            let faces_u32: Vec<[u32; 3]> = tris.iter()
+                .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+                .collect();
+            let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
+
+            SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
+                normal: n, offset, verts, tris, weights: vert_weights, uvs: vert_uvs,
+                normals: vert_normals, half_edge, source_face_indices: slice_source_faces,
+                orig_instances: Vec::new(),
+            }));
         }
-
-        if tris.is_empty() || verts.is_empty() {
-            SLICE_CACHE.with(|c| *c.borrow_mut() = None);
-            return empty();
-        }
-
-        let faces_u32: Vec<[u32; 3]> = tris.iter()
-            .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
-            .collect();
-        let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
-
-        SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
-            normal: n, offset, verts, tris, weights: vert_weights, uvs: vert_uvs,
-            normals: vert_normals, half_edge, source_face_indices: slice_source_faces,
-        }));
     }
 
     // Classic 3D Möbius — applied to each frame's spatial positions
