@@ -213,27 +213,24 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     var color = direct.color + fill.color + ambient;
 
     // --- KHR_materials_sheen (velvet/fabric) ---
-    // Charlie distribution: inverted Ashikhmin, produces soft rim highlights.
+    // Sheen produces a soft, view-dependent color at grazing angles —
+    // the characteristic look of velvet, cloth, and fuzz.
     if pbr.sheen_color.w > 0.5 {
         let sheen_col = pbr.sheen_color.rgb;
         let sheen_r = max(pbr.sheen_roughness, 0.07);
-        let n_dot_v = max(dot(n, view_dir), 0.001);
+        let n_dot_v_sheen = max(dot(n, view_dir), 0.0);
 
-        // Sheen on key light
-        let n_dot_l_key = max(dot(n, normalize(vec3<f32>(0.5, 0.8, 0.6))), 0.0);
-        let h_key = normalize(view_dir + normalize(vec3<f32>(0.5, 0.8, 0.6)));
-        let n_dot_h_key = max(dot(n, h_key), 0.0);
-        // Charlie D: (2 + 1/r) / (2*pi) * (1 - NdotH^2)^(0.5/r)
-        let inv_r = 1.0 / sheen_r;
-        let sin2 = 1.0 - n_dot_h_key * n_dot_h_key;
-        let D_key = (2.0 + inv_r) / (2.0 * 3.14159) * pow(max(sin2, 0.0), 0.5 * inv_r);
-        // Visibility approximation (Ashikhmin)
-        let V_key = 1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.001);
-        color += sheen_col * D_key * V_key * n_dot_l_key * vec3<f32>(3.0, 2.9, 2.7);
+        // Sheen Fresnel: strongest at grazing angles (rim), fades at direct view.
+        // Roughness controls how quickly it fades — high roughness = more uniform.
+        let sheen_fresnel = pow(1.0 - n_dot_v_sheen, mix(5.0, 2.0, sheen_r));
 
-        // Sheen on environment (diffuse-like wrap)
-        let sheen_env = sheen_col * irradiance * 0.5;
-        color += sheen_env;
+        // Direct light sheen: soft wrap lighting (half-Lambert style)
+        let light_key = normalize(vec3<f32>(0.5, 0.8, 0.6));
+        let n_dot_l_key = dot(n, light_key) * 0.5 + 0.5; // half-Lambert wrap
+        color += sheen_col * sheen_fresnel * n_dot_l_key * vec3<f32>(2.0, 1.9, 1.8);
+
+        // Environment sheen: irradiance tinted by sheen color at grazing angles
+        color += sheen_col * sheen_fresnel * irradiance;
     }
 
     // --- KHR_materials_specular (custom F0 color) ---
