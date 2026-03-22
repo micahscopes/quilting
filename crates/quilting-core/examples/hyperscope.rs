@@ -51,22 +51,30 @@ fn main() {
         };
         let request = String::from_utf8_lossy(&buf[..n]);
 
-        // Serve matcap PNGs from disk
-        if request.starts_with("GET /matcaps/") {
-            let filename = request.split(' ').nth(1).unwrap_or("")
-                .trim_start_matches("/matcaps/");
-            if filename.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.') && filename.ends_with(".png") {
-                let path = std::path::Path::new("matcaps").join(filename);
-                if let Ok(data) = std::fs::read(&path) {
-                    let headers = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        data.len()
-                    );
-                    let _ = stream.write_all(headers.as_bytes());
-                    let _ = stream.write_all(&data);
-                    continue;
-                }
+        // Serve static assets from disk (matcaps, env maps)
+        let serve_from_disk = |prefix: &str, dir: &str, mime: &str| -> Option<Vec<u8>> {
+            if !request.starts_with(&format!("GET /{}/", prefix)) { return None; }
+            let filename = request.split(' ').nth(1)?
+                .trim_start_matches(&format!("/{}/", prefix));
+            if !filename.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                return None;
             }
+            let path = std::path::Path::new(dir).join(filename);
+            let data = std::fs::read(&path).ok()?;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                mime, data.len()
+            );
+            let mut resp = headers.into_bytes();
+            resp.extend_from_slice(&data);
+            Some(resp)
+        };
+
+        if let Some(resp) = serve_from_disk("matcaps", "matcaps", "image/png")
+            .or_else(|| serve_from_disk("envmaps", "envmaps", "application/octet-stream"))
+        {
+            let _ = stream.write_all(&resp);
+            continue;
         }
 
         match handle_request(&request) {
