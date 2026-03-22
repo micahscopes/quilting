@@ -322,6 +322,9 @@ pub fn compute_instances_with_uvs(
                 vertex_normals_acc[vi][2] += fn_[2];
             }
         }
+        // Non-affine Möbius = sphere reflection = surface turns inside-out
+        let sign: f64 = -1.0;
+
         // Normalize and assign to instances
         for fi in 0..nf {
             let face = faces[fi];
@@ -330,9 +333,9 @@ pub fn compute_instances_with_uvs(
                 let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
                 if len > 1e-10 {
                     result[fi].normals[vi] = [
-                        (n[0] / len) as f32,
-                        (n[1] / len) as f32,
-                        (n[2] / len) as f32,
+                        (sign * n[0] / len) as f32,
+                        (sign * n[1] / len) as f32,
+                        (sign * n[2] / len) as f32,
                     ];
                 } else {
                     result[fi].normals[vi] = [0.0; 3];

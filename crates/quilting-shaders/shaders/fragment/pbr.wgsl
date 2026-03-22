@@ -100,10 +100,6 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     var n = normalize(in.normal_vs);
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera looks down +Z
 
-    // No two-sided normal flip — avoids all flip-boundary artifacts.
-    // Back-facing surfaces naturally darken (NdotV clamped to 0.001).
-    // IBL irradiance still provides ambient fill from all directions.
-
     // --- Base color ---
     // Apply KHR_texture_transform to base color UVs
     var base_uv = in.tex_uv;
@@ -230,7 +226,10 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     // --- IBL ambient ---
     var n_ws = normalize(in.normal_ws);
     let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
-    // No world-space flip either — n_ws stays as-is
+    // For IBL: ensure n_ws faces the camera so irradiance samples the right hemisphere
+    if dot(n_ws, view_dir_ws) < 0.0 {
+        n_ws = -n_ws;
+    }
     let reflect_ws = reflect(-view_dir_ws, n_ws);
 
     let irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb;

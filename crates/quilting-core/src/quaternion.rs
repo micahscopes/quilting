@@ -198,6 +198,7 @@ impl Mobius {
         self.c.norm_sq() < 1e-20
     }
 
+
     /// Translation: x ↦ x + t
     pub fn translation(t: Quat) -> Self {
         Self::new(Quat::ONE, t, Quat::ZERO, Quat::ONE)

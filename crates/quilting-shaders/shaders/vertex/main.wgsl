@@ -54,7 +54,6 @@ struct VertexOutput {
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
     @location(9) fade: f32,
-    @location(10) @interpolate(flat) face_back: f32,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -158,13 +157,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         nrm = normalize(cross(mp1.yzw - mp0.yzw, mp2.yzw - mp0.yzw));
         nrm = nrm * u.perm_parity;
     }
-
-    // Face orientation from geometric normal (before smooth override).
-    // Undo perm_parity: QB derivatives don't change with permutation, so the
-    // cross product always points outward. perm_parity incorrectly flips it.
-    let geo_nrm = nrm * u.perm_parity; // perm_parity² = 1, undoes the flip
-    let face_nrm_vs = normalize((u.mv * vec4<f32>(geo_nrm, 0.0)).xyz);
-    out.face_back = select(0.0, 1.0, face_nrm_vs.z < 0.0);
 
     // Smooth normals: zeroed under conformal transforms, so QB normals used
     let sn0 = in.smooth_n0.xyz;
