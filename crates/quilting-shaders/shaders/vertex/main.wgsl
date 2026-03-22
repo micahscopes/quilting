@@ -88,15 +88,22 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         nrm = nrm * u.perm_parity;
     }
 
-    // Use smooth normals when available. These are perm_parity-independent
-    // so they don't flicker when LOD changes cause perm_index redistribution.
-    // The fragment shader's two-sided flip handles winding.
-    let sn0 = in.smooth_n0.xyz;
-    let sn1 = in.smooth_n1.xyz;
-    let sn2 = in.smooth_n2.xyz;
-    let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
-    if has_smooth {
-        nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
+    // Use smooth normals only for affine transforms (identity weights).
+    // Under conformal transforms, QB analytical normals correctly capture
+    // the Möbius-deformed surface — smooth normals are pre-transform and wrong.
+    // Detect affine: all weights ≈ (1,0,0,0) means no conformal distortion.
+    let w_identity = abs(in.w0.x - 1.0) + abs(in.w1.x - 1.0) + abs(in.w2.x - 1.0)
+                   + length(in.w0.yzw) + length(in.w1.yzw) + length(in.w2.yzw);
+    let is_affine = w_identity < 0.01;
+
+    if is_affine {
+        let sn0 = in.smooth_n0.xyz;
+        let sn1 = in.smooth_n1.xyz;
+        let sn2 = in.smooth_n2.xyz;
+        let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
+        if has_smooth {
+            nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
+        }
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
