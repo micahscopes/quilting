@@ -385,16 +385,23 @@ fn compute_smooth_normals_from_positions(
         let p2 = instances[fi].positions[2].to_point();
         let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
         let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-        // Cross product — magnitude = 2x area, direction = face normal.
-        // For orientation-reversing Möbius, all normals consistently point
-        // inward; front_facing in the fragment shader handles the flip.
+        // Cross product, then normalize to unit length before accumulating.
+        // Equal-weight averaging prevents Möbius-stretched faces (huge area)
+        // from dominating the average, which would make all normals uniform
+        // near the pole → specular washout.
         let nx = e1[1]*e2[2] - e1[2]*e2[1];
         let ny = e1[2]*e2[0] - e1[0]*e2[2];
         let nz = e1[0]*e2[1] - e1[1]*e2[0];
-        for &vi in &face {
-            vertex_normals[vi][0] += nx;
-            vertex_normals[vi][1] += ny;
-            vertex_normals[vi][2] += nz;
+        let len = (nx*nx + ny*ny + nz*nz).sqrt();
+        if len > 1e-12 {
+            let fnx = nx / len;
+            let fny = ny / len;
+            let fnz = nz / len;
+            for &vi in &face {
+                vertex_normals[vi][0] += fnx;
+                vertex_normals[vi][1] += fny;
+                vertex_normals[vi][2] += fnz;
+            }
         }
     }
 
