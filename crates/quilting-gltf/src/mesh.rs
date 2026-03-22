@@ -26,6 +26,9 @@ pub struct Primitive {
     pub joint_weights: Option<Vec<[f32; 4]>>,
     /// Morph target position deltas. morph_targets[target_idx][vertex_idx] = [dx, dy, dz].
     pub morph_targets: Vec<Vec<[f64; 3]>>,
+    /// Per-vertex tangents from TANGENT attribute. [tx, ty, tz, sign] where
+    /// sign is +1/-1 for bitangent handedness: B = sign * cross(N, T).
+    pub tangents: Option<Vec<[f32; 4]>>,
 }
 
 /// A mesh is a collection of primitives.
@@ -70,6 +73,11 @@ pub fn extract_mesh(
                     .map(|uv| [uv[0] as f64, uv[1] as f64])
                     .collect()
             });
+
+        // Tangents (optional) — vec4: xyz = tangent direction, w = bitangent sign.
+        let tangents: Option<Vec<[f32; 4]>> = reader
+            .read_tangents()
+            .map(|iter| iter.collect());
 
         // Indices — handle both indexed and non-indexed meshes.
         let triangles = if let Some(indices_reader) = reader.read_indices() {
@@ -127,6 +135,7 @@ pub fn extract_mesh(
             joint_indices,
             joint_weights,
             morph_targets,
+            tangents,
         });
     }
 
@@ -175,6 +184,7 @@ mod tests {
                     joint_indices: None,
                     joint_weights: None,
                     morph_targets: vec![],
+                    tangents: None,
                 },
                 Primitive {
                     positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
@@ -185,6 +195,7 @@ mod tests {
                     joint_indices: None,
                     joint_weights: None,
                     morph_targets: vec![],
+                    tangents: None,
                 },
             ],
         };

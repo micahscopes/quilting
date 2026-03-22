@@ -87,9 +87,9 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     // --- Base color ---
     var base = pbr.base_color;
     if pbr.has_base_color_tex > 0.5 {
+        // sRGB → linear conversion is handled by hardware (SRGB8_ALPHA8 format)
         let tex_color = textureSample(base_color_tex, base_color_sampler, in.tex_uv);
-        let linear_rgb = pow(tex_color.rgb, vec3<f32>(2.2));
-        base = vec4<f32>(linear_rgb * pbr.base_color.rgb, tex_color.a * pbr.base_color.a);
+        base = vec4<f32>(tex_color.rgb * pbr.base_color.rgb, tex_color.a * pbr.base_color.a);
     }
 
     // --- Alpha ---
@@ -205,8 +205,7 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     var emissive = pbr.emissive_factor.rgb;
     if pbr.has_emissive_tex > 0.5 {
         let em_tex = textureSample(emissive_tex, emissive_sampler, in.tex_uv);
-        let em_linear = pow(em_tex.rgb, vec3<f32>(2.2));
-        emissive = emissive * em_linear;
+        emissive = emissive * em_tex.rgb; // sRGB decoded by hardware
     }
     color = color + emissive;
 

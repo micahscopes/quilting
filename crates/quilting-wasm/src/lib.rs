@@ -984,6 +984,7 @@ fn flatten_primitives_for_bake(
         joint_indices: joint_indices_all,
         joint_weights: joint_weights_all,
         morph_targets,
+        tangents: None,
     }
 }
 
@@ -1062,6 +1063,7 @@ fn merge_all_mesh_nodes(
         joint_indices: None,
         joint_weights: None,
         morph_targets: vec![],
+        tangents: None,
     }
 }
 

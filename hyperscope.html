@@ -217,14 +217,30 @@ function createTexturesFromGltf(textures, materials) {
   loadedMaterials = materials || [];
   materialColors = [];
 
+  // Determine which texture indices are sRGB (base color, emissive)
+  // vs linear (metallic-roughness, normal, occlusion)
+  const srgbIndices = new Set();
+  if (materials) {
+    for (const mat of materials) {
+      if (mat.base_color_texture_index != null && mat.base_color_texture_index >= 0)
+        srgbIndices.add(mat.base_color_texture_index);
+      if (mat.emissive_texture_index != null && mat.emissive_texture_index >= 0)
+        srgbIndices.add(mat.emissive_texture_index);
+    }
+  }
+
   // Create WebGL textures from image data
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
   const maxAniso = aniso ? gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) : 1;
   if (textures) {
-    for (const img of textures) {
+    for (let ti = 0; ti < textures.length; ti++) {
+      const img = textures[ti];
       const glTex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, glTex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, img.width, img.height, 0,
+      // sRGB textures: hardware decodes gamma, no manual pow(2.2) needed in shader
+      const isSrgb = srgbIndices.has(ti);
+      const internalFmt = isSrgb ? gl.SRGB8_ALPHA8 : gl.RGBA;
+      gl.texImage2D(gl.TEXTURE_2D, 0, internalFmt, img.width, img.height, 0,
                     gl.RGBA, gl.UNSIGNED_BYTE, img.data);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -562,21 +578,7 @@ function sampleEquirect(hdr, dx, dy, dz) {
   return [hdr.data[idx], hdr.data[idx+1], hdr.data[idx+2]];
 }
 
-// Float32 → Float16 conversion
-const f32 = new Float32Array(1);
-const u32 = new Uint32Array(f32.buffer);
-function toFloat16(val) {
-  f32[0] = val;
-  const bits = u32[0];
-  const sign = (bits >> 16) & 0x8000;
-  const exp = ((bits >> 23) & 0xff) - 127 + 15;
-  const frac = bits & 0x7fffff;
-  if (exp <= 0) return sign; // underflow to zero
-  if (exp >= 31) return sign | 0x7c00; // overflow to inf
-  return sign | (exp << 10) | (frac >> 13);
-}
-
-// Convert equirectangular HDR to a cubemap texture (RGBA16F for HDR values)
+// Convert equirectangular HDR to a cubemap texture
 function hdrToCubemap(hdr, faceSize) {
   const cubemap = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubemap);
