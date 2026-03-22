@@ -315,20 +315,18 @@ pub fn compute_instances_with_uvs(
         *lod = (*lod).min(MAX_LOD);
     }
 
-    // Use uniform LOD per face (max of all 3 edges). This ensures
-    // canonical_form always returns [n,n,n] with perm_index=0, eliminating
-    // the permutation system entirely. This prevents normal/specular
-    // flickering caused by perm_index changes between frames.
-    // The cost is slightly more tessellation on short edges, but the
-    // visual stability is worth it.
+    // Per-edge LODs: shared edges always get the same LOD because both
+    // half-edges map to the same canonical edge index. This guarantees
+    // edge-matching between adjacent faces (no T-junction cracks).
+    // The permutation system (perm_index) is no longer used — CPU-side
+    // bary remapping handles canonical LOD ordering, shader uses perm_index=0.
     let mut result = instances;
     for fi in 0..nf {
         let he_base = fi * 3;
-        let l0 = edge_lods[canonical_edge(he_base + 1)];
-        let l1 = edge_lods[canonical_edge(he_base + 2)];
-        let l2 = edge_lods[canonical_edge(he_base)];
-        let uniform = l0.max(l1).max(l2);
-        result[fi].edge_lods = [uniform, uniform, uniform];
+        let l0 = edge_lods[canonical_edge(he_base + 1)]; // edge_a: opposite v0
+        let l1 = edge_lods[canonical_edge(he_base + 2)]; // edge_b: opposite v1
+        let l2 = edge_lods[canonical_edge(he_base)];     // edge_c: opposite v2
+        result[fi].edge_lods = [l0, l1, l2];
     }
 
     // Compute per-vertex LOD = max of all edges meeting at each mesh vertex.
@@ -586,17 +584,32 @@ mod tests {
     }
 
     #[test]
-    fn uniform_lod_per_face() {
+    fn shared_edges_have_matching_lods() {
         let (verts, faces) = shapes::icosahedron();
         let m = Mobius::sphere_reflection(Quat::from_point(0.3, 0.0, 0.0), 1.5);
         let instances = compute_instances(&verts, &faces, &m, None, None);
 
-        // All 3 edge LODs within a face should be equal (uniform LOD)
-        for (fi, inst) in instances.iter().enumerate() {
-            assert_eq!(inst.edge_lods[0], inst.edge_lods[1],
-                "face {} has non-uniform LODs: {:?}", fi, inst.edge_lods);
-            assert_eq!(inst.edge_lods[1], inst.edge_lods[2],
-                "face {} has non-uniform LODs: {:?}", fi, inst.edge_lods);
+        // Build a map from undirected edges to the LODs seen from each adjacent face.
+        // Shared edges must have the same LOD from both sides (no T-junctions).
+        use std::collections::HashMap;
+        let mut edge_lod_map: HashMap<(usize, usize), Vec<(usize, u32)>> = HashMap::new();
+        for (fi, face) in faces.iter().enumerate() {
+            // edge_a (opposite v0) = v1-v2, edge_b (opposite v1) = v0-v2, edge_c (opposite v2) = v0-v1
+            let edges = [
+                (face[1].min(face[2]), face[1].max(face[2]), instances[fi].edge_lods[0]),
+                (face[0].min(face[2]), face[0].max(face[2]), instances[fi].edge_lods[1]),
+                (face[0].min(face[1]), face[0].max(face[1]), instances[fi].edge_lods[2]),
+            ];
+            for (va, vb, lod) in edges {
+                edge_lod_map.entry((va, vb)).or_default().push((fi, lod));
+            }
+        }
+        for ((va, vb), entries) in &edge_lod_map {
+            if entries.len() == 2 {
+                assert_eq!(entries[0].1, entries[1].1,
+                    "edge ({},{}) has mismatched LODs: face {} has {}, face {} has {}",
+                    va, vb, entries[0].0, entries[0].1, entries[1].0, entries[1].1);
+            }
         }
     }
 
