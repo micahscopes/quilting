@@ -271,8 +271,8 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let V_fill = clamp(1.0 / ((1.0 + lv + ll_fill) * 4.0 * n_dot_v * n_dot_l_fill), 0.0, 1.0);
         let f_sheen_fill = sheen_col * D_fill * V_fill * n_dot_l_fill * vec3<f32>(0.3, 0.35, 0.5);
 
-        // Environment sheen (approximate)
-        let f_sheen_env = sheen_col * irradiance * sheen_r * 0.3;
+        // Environment sheen: very subtle — fabric doesn't reflect much ambient
+        let f_sheen_env = sheen_col * irradiance * sheen_r * 0.1;
 
         let f_sheen = f_sheen_key + f_sheen_fill + f_sheen_env;
 
@@ -295,7 +295,7 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     color = color + emissive;
 
     // Tone mapping: ACES filmic with slight exposure boost for deeper contrast
-    let exposed = color * 1.2;
+    let exposed = color;
     let a = exposed * 2.51 + vec3<f32>(0.03);
     let b = exposed * 2.43 + vec3<f32>(0.59);
     color = clamp((exposed * a) / (exposed * b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
