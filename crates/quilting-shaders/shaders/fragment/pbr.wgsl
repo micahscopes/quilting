@@ -262,10 +262,12 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
         let f_sheen = f_sheen_key + f_sheen_fill + f_sheen_env;
 
-        // Energy conservation via LUT: attenuate base layer by sheen directional albedo
+        // Energy conservation: attenuate base layer by sheen.
+        // Analytical approximation of the Charlie directional albedo
+        // (the LUT generation has issues, so use an analytical fit).
         let max_sheen = max(sheen_col.x, max(sheen_col.y, sheen_col.z));
-        let e_sheen = textureSample(sheen_e_lut, sheen_e_sampler, vec2<f32>(n_dot_v, sheen_r)).r;
-        let albedo_sheen_scaling = 1.0 - max_sheen * e_sheen;
+        let e_sheen_approx = mix(0.2, 0.8, sheen_r) * (1.0 - pow(1.0 - n_dot_v, 3.0));
+        let albedo_sheen_scaling = 1.0 - max_sheen * e_sheen_approx;
 
         color = f_sheen + color * albedo_sheen_scaling;
     }
