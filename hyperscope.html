@@ -1204,9 +1204,13 @@ function render() {
     }
   }
 
-  // LOD pass (uses same matcap program -- naga matcap already does heatmap)
+  // LOD pass (density heatmap — force matcap texture off)
   if (drawLod) {
     gl.useProgram(progLod);
+    matcapUboData[0] = 0.0; // has_matcap_tex = false → use heatmap
+    gl.bindBuffer(gl.UNIFORM_BUFFER, matcapUbo);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 0, matcapUboData);
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, MATCAP_UBO_BINDING, matcapUbo);
     for (const b of drawBatches) {
       uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
