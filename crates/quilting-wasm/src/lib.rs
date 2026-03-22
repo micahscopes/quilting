@@ -802,7 +802,13 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));
     FACE_MATERIALS.with(|fm| *fm.borrow_mut() = face_material_indices);
     SENT_TESS.with(|s| s.borrow_mut().clear());
-    SLICE_CACHE.with(|c| *c.borrow_mut() = None);
+    // Clear slice cache — use try_borrow_mut to avoid panic if a previous
+    // WASM panic left the RefCell in a borrowed state.
+    SLICE_CACHE.with(|c| {
+        if let Ok(mut cache) = c.try_borrow_mut() {
+            *cache = None;
+        }
+    });
 
     let t_end = js_sys::Date::now();
     web_sys::console::log_1(&format!(

@@ -76,16 +76,29 @@ pub fn compute_instances_no_lod_with_uvs(
     vertex_normals: Option<&[[f32; 3]]>,
 ) -> Vec<FaceInstance> {
     faces.iter().map(|face| {
-        let v = [vertices[face[0]], vertices[face[1]], vertices[face[2]]];
+        let nv = vertices.len();
+        let v = [
+            vertices[face[0].min(nv - 1)],
+            vertices[face[1].min(nv - 1)],
+            vertices[face[2].min(nv - 1)],
+        ];
         let p0 = Quat::from_point(v[0][0], v[0][1], v[0][2]);
         let p1 = Quat::from_point(v[1][0], v[1][1], v[1][2]);
         let p2 = Quat::from_point(v[2][0], v[2][1], v[2][2]);
         let uvs = match vertex_uvs {
-            Some(uvs) => [uvs[face[0]], uvs[face[1]], uvs[face[2]]],
+            Some(uvs) => [
+                uvs.get(face[0]).copied().unwrap_or([0.0, 0.0]),
+                uvs.get(face[1]).copied().unwrap_or([0.0, 0.0]),
+                uvs.get(face[2]).copied().unwrap_or([0.0, 0.0]),
+            ],
             None => [[0.0, 0.0]; 3],
         };
         let normals = match vertex_normals {
-            Some(n) => [n[face[0]], n[face[1]], n[face[2]]],
+            Some(n) => [
+                n.get(face[0]).copied().unwrap_or([0.0, 1.0, 0.0]),
+                n.get(face[1]).copied().unwrap_or([0.0, 1.0, 0.0]),
+                n.get(face[2]).copied().unwrap_or([0.0, 1.0, 0.0]),
+            ],
             None => face_normal_f32(&v),
         };
         FaceInstance {
