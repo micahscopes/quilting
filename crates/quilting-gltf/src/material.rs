@@ -54,6 +54,13 @@ pub struct PbrMaterial {
     pub double_sided: bool,
     /// KHR_materials_unlit: render with base color only, no lighting.
     pub unlit: bool,
+
+    /// KHR_materials_sheen: fabric/velvet appearance.
+    pub sheen_color_factor: [f64; 3],
+    pub sheen_roughness_factor: f64,
+
+    /// KHR_materials_specular: custom specular color (overrides dielectric F0).
+    pub specular_color_factor: [f64; 3],
 }
 
 /// glTF alpha rendering mode.
@@ -120,6 +127,38 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
 
     let alpha_cutoff = mat.alpha_cutoff().unwrap_or(0.5) as f64;
 
+    // KHR_materials_sheen
+    let (sheen_color_factor, sheen_roughness_factor) = {
+        let mut sc = [0.0; 3];
+        let mut sr = 0.0;
+        if let Some(ext) = mat.extensions() {
+            if let Some(sheen) = ext.get("KHR_materials_sheen") {
+                if let Some(c) = sheen.get("sheenColorFactor").and_then(|v| v.as_array()) {
+                    for (i, v) in c.iter().take(3).enumerate() {
+                        sc[i] = v.as_f64().unwrap_or(0.0);
+                    }
+                }
+                sr = sheen.get("sheenRoughnessFactor").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            }
+        }
+        (sc, sr)
+    };
+
+    // KHR_materials_specular
+    let specular_color_factor = {
+        let mut sc = [1.0; 3]; // default white (no override)
+        if let Some(ext) = mat.extensions() {
+            if let Some(spec) = ext.get("KHR_materials_specular") {
+                if let Some(c) = spec.get("specularColorFactor").and_then(|v| v.as_array()) {
+                    for (i, v) in c.iter().take(3).enumerate() {
+                        sc[i] = v.as_f64().unwrap_or(1.0);
+                    }
+                }
+            }
+        }
+        sc
+    };
+
     PbrMaterial {
         name: mat.name().map(|s| s.to_string()),
         base_color_factor,
@@ -137,6 +176,9 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         alpha_cutoff,
         double_sided: mat.double_sided(),
         unlit: mat.unlit(),
+        sheen_color_factor,
+        sheen_roughness_factor,
+        specular_color_factor,
     }
 }
 
@@ -164,6 +206,9 @@ mod tests {
             alpha_cutoff: 0.5,
             double_sided: false,
             unlit: false,
+            sheen_color_factor: [0.0; 3],
+            sheen_roughness_factor: 0.0,
+            specular_color_factor: [1.0; 3],
         };
         assert_eq!(mat.alpha_mode, AlphaMode::Opaque);
         assert!((mat.metallic_factor - 1.0).abs() < 1e-10);

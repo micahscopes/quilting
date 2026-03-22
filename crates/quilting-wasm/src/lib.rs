@@ -721,6 +721,17 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         js_sys::Reflect::set(&obj, &"double_sided".into(), &JsValue::from_bool(mat.double_sided)).unwrap();
         js_sys::Reflect::set(&obj, &"unlit".into(), &JsValue::from_bool(mat.unlit)).unwrap();
 
+        // KHR_materials_sheen
+        let sheen = js_sys::Array::new();
+        for &c in &mat.sheen_color_factor { sheen.push(&JsValue::from_f64(c)); }
+        js_sys::Reflect::set(&obj, &"sheen_color".into(), &sheen).unwrap();
+        js_sys::Reflect::set(&obj, &"sheen_roughness".into(), &JsValue::from_f64(mat.sheen_roughness_factor)).unwrap();
+
+        // KHR_materials_specular
+        let spec = js_sys::Array::new();
+        for &c in &mat.specular_color_factor { spec.push(&JsValue::from_f64(c)); }
+        js_sys::Reflect::set(&obj, &"specular_color".into(), &spec).unwrap();
+
         js_materials.push(&obj);
     }
 

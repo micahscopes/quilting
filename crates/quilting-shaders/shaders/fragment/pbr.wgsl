@@ -21,6 +21,14 @@ struct PbrUniforms {
     env_mip_count: f32,                  // number of mip levels in prefiltered env map
     _pbr_pad0: f32,
     _pbr_pad1: f32,
+    // KHR_materials_sheen
+    sheen_color: vec4<f32>,              // rgb in xyz, w = has_sheen (>0.5)
+    sheen_roughness: f32,
+    // KHR_materials_specular
+    specular_color: vec4<f32>,           // rgb in xyz, w = has_specular (>0.5)
+    _pbr_pad2: f32,
+    _pbr_pad3: f32,
+    _pbr_pad4: f32,
 }
 
 @group(0) @binding(1)
@@ -200,6 +208,43 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     }
 
     var color = direct.color + fill.color + ambient;
+
+    // --- KHR_materials_sheen (velvet/fabric) ---
+    // Charlie distribution: inverted Ashikhmin, produces soft rim highlights.
+    if pbr.sheen_color.w > 0.5 {
+        let sheen_col = pbr.sheen_color.rgb;
+        let sheen_r = max(pbr.sheen_roughness, 0.07);
+        let n_dot_v = max(dot(n, view_dir), 0.001);
+
+        // Sheen on key light
+        let n_dot_l_key = max(dot(n, normalize(vec3<f32>(0.5, 0.8, 0.6))), 0.0);
+        let h_key = normalize(view_dir + normalize(vec3<f32>(0.5, 0.8, 0.6)));
+        let n_dot_h_key = max(dot(n, h_key), 0.0);
+        // Charlie D: (2 + 1/r) / (2*pi) * (1 - NdotH^2)^(0.5/r)
+        let inv_r = 1.0 / sheen_r;
+        let sin2 = 1.0 - n_dot_h_key * n_dot_h_key;
+        let D_key = (2.0 + inv_r) / (2.0 * 3.14159) * pow(max(sin2, 0.0), 0.5 * inv_r);
+        // Visibility approximation (Ashikhmin)
+        let V_key = 1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.001);
+        color += sheen_col * D_key * V_key * n_dot_l_key * vec3<f32>(3.0, 2.9, 2.7);
+
+        // Sheen on environment (diffuse-like wrap)
+        let sheen_env = sheen_col * irradiance * 0.5;
+        color += sheen_env;
+    }
+
+    // --- KHR_materials_specular (custom F0 color) ---
+    // Already partially handled by pbr_direct/pbr_ambient through f0.
+    // For non-metallic materials with specular color override, add the
+    // tinted specular contribution.
+    if pbr.specular_color.w > 0.5 {
+        let spec_col = pbr.specular_color.rgb;
+        let n_dot_v = max(dot(n, view_dir), 0.001);
+        let fresnel = spec_col + (1.0 - spec_col) * pow(1.0 - n_dot_v, 5.0);
+        let reflect_ws = reflect(-view_dir_ws, n_ws);
+        let spec_env = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, roughness * max(pbr.env_mip_count, 1.0)).rgb;
+        color += fresnel * spec_env * (1.0 - metallic);
+    }
 
     // --- Emissive ---
     var emissive = pbr.emissive_factor.rgb;

@@ -280,6 +280,9 @@ function getMaterialParams(materialIndex) {
       alphaCutoff: mat.alpha_cutoff ?? 0.5,
       doubleSided: mat.double_sided ?? false,
       unlit: mat.unlit ?? false,
+      sheenColor: mat.sheen_color || [0, 0, 0],
+      sheenRoughness: mat.sheen_roughness ?? 0.0,
+      specularColor: mat.specular_color || [1, 1, 1],
     };
   }
   const bc = meshInfo ? (meshInfo.base_color || [0.9, 0.75, 0.6, 1.0]) : [0.9, 0.75, 0.6, 1.0];
@@ -388,7 +391,7 @@ const wireUboI32 = new Int32Array(wireUboData);
 //   env_mip_count: f32       (84)
 //   _pad0: f32               (88)
 //   _pad1: f32               (92)
-const PBR_UBO_SIZE = 96;
+const PBR_UBO_SIZE = 160; // 96 base + 16 sheen_color + 16 (sheen_roughness+pads) + 16 specular_color + 16 pads
 const PBR_UBO_BINDING = 2;
 const pbrUbo = gl.createBuffer();
 gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
@@ -703,8 +706,20 @@ function uploadPbrUBO(mat) {
   // has_env_map at offset 80, env_mip_count at offset 84
   pbrUboF32[20] = envCubemap ? 1.0 : 0.0;
   pbrUboF32[21] = envMipCount;
+  // sheen_color: vec4 at offset 96 (f32 index 24), w = has_sheen flag
+  const sc = mat.sheenColor || [0,0,0];
+  const hasSheen = (sc[0] + sc[1] + sc[2]) > 0.001;
+  pbrUboF32[24] = sc[0]; pbrUboF32[25] = sc[1]; pbrUboF32[26] = sc[2];
+  pbrUboF32[27] = hasSheen ? 1.0 : 0.0;
+  // sheen_roughness at offset 112 (f32 index 28)
+  pbrUboF32[28] = mat.sheenRoughness ?? 0.0;
+  // specular_color: vec4 at offset 128 (f32 index 32), w = has_specular flag
+  const spc = mat.specularColor || [1,1,1];
+  const hasSpec = Math.abs(spc[0]-1) + Math.abs(spc[1]-1) + Math.abs(spc[2]-1) > 0.01;
+  pbrUboF32[32] = spc[0]; pbrUboF32[33] = spc[1]; pbrUboF32[34] = spc[2];
+  pbrUboF32[35] = hasSpec ? 1.0 : 0.0;
   gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
-  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, pbrUboData);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(pbrUboData));
 }
 
 // Current Möbius quaternions — updated from sliders, written into UBO.
