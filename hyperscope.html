@@ -97,6 +97,16 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section">
+    <label>Environment</label>
+    <select id="envmap-sel">
+      <option value="rosendal_plains_1_1k" selected>Rosendal Plains</option>
+      <option value="rogland_clear_night_2k">Rogland Night</option>
+      <option value="ticknock_04_1k">Ticknock</option>
+      <option value="procedural">Procedural Sky</option>
+    </select>
+  </div>
+
+  <div class="section">
     <label>Matcap</label>
     <select id="matcap-sel">
       <option value="aqua">Aqua</option>
@@ -466,13 +476,156 @@ function createProceduralEnvMap(size) {
   return cubemap;
 }
 
-function initEnvMaps() {
-  envCubemap = createProceduralEnvMap(256);
-  envIrradiance = createProceduralEnvMap(32);
-  gl.bindTexture(gl.TEXTURE_CUBE_MAP, envIrradiance);
+// --- HDR (Radiance RGBE) loader ---
+function parseHDR(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let pos = 0;
+  // Skip header lines until empty line
+  while (pos < bytes.length) {
+    let lineEnd = pos;
+    while (lineEnd < bytes.length && bytes[lineEnd] !== 10) lineEnd++;
+    const line = String.fromCharCode(...bytes.slice(pos, lineEnd));
+    pos = lineEnd + 1;
+    if (line.trim() === '') break;
+  }
+  // Resolution line: "-Y height +X width"
+  let resEnd = pos;
+  while (resEnd < bytes.length && bytes[resEnd] !== 10) resEnd++;
+  const resLine = String.fromCharCode(...bytes.slice(pos, resEnd));
+  pos = resEnd + 1;
+  const m = resLine.match(/-Y\s+(\d+)\s+\+X\s+(\d+)/);
+  if (!m) throw new Error('Invalid HDR resolution: ' + resLine);
+  const height = parseInt(m[1]), width = parseInt(m[2]);
+
+  const data = new Float32Array(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    let scanline;
+    // Check for new-style RLE
+    if (bytes[pos] === 2 && bytes[pos+1] === 2) {
+      const scanW = (bytes[pos+2] << 8) | bytes[pos+3];
+      pos += 4;
+      if (scanW !== width) throw new Error('RLE width mismatch');
+      // Decode 4 channels separately (RLE per channel)
+      const channels = new Uint8Array(width * 4);
+      for (let ch = 0; ch < 4; ch++) {
+        let x = 0;
+        while (x < width) {
+          const code = bytes[pos++];
+          if (code > 128) {
+            const count = code - 128;
+            const val = bytes[pos++];
+            for (let i = 0; i < count; i++) channels[(x + i) * 4 + ch] = val;
+            x += count;
+          } else {
+            for (let i = 0; i < code; i++) channels[(x + i) * 4 + ch] = bytes[pos++];
+            x += code;
+          }
+        }
+      }
+      // Convert RGBE to float
+      for (let x = 0; x < width; x++) {
+        const r = channels[x*4], g = channels[x*4+1], b = channels[x*4+2], e = channels[x*4+3];
+        const idx = (y * width + x) * 3;
+        if (e === 0) { data[idx] = data[idx+1] = data[idx+2] = 0; }
+        else {
+          const scale = Math.pow(2, e - 128 - 8);
+          data[idx] = r * scale; data[idx+1] = g * scale; data[idx+2] = b * scale;
+        }
+      }
+    } else {
+      // Old-style: 4 bytes per pixel (RGBE), no RLE
+      for (let x = 0; x < width; x++) {
+        const r = bytes[pos++], g = bytes[pos++], b = bytes[pos++], e = bytes[pos++];
+        const idx = (y * width + x) * 3;
+        if (e === 0) { data[idx] = data[idx+1] = data[idx+2] = 0; }
+        else {
+          const scale = Math.pow(2, e - 128 - 8);
+          data[idx] = r * scale; data[idx+1] = g * scale; data[idx+2] = b * scale;
+        }
+      }
+    }
+  }
+  return { data, width, height };
+}
+
+// Sample equirectangular HDR map at a direction vector
+function sampleEquirect(hdr, dx, dy, dz) {
+  const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  dx /= len; dy /= len; dz /= len;
+  const theta = Math.acos(Math.max(-1, Math.min(1, dy)));
+  const phi = Math.atan2(dz, dx);
+  const u = (phi + Math.PI) / (2 * Math.PI);
+  const v = theta / Math.PI;
+  const px = Math.min(Math.floor(u * hdr.width), hdr.width - 1);
+  const py = Math.min(Math.floor(v * hdr.height), hdr.height - 1);
+  const idx = (py * hdr.width + px) * 3;
+  return [hdr.data[idx], hdr.data[idx+1], hdr.data[idx+2]];
+}
+
+// Convert equirectangular HDR to a cubemap texture (RGBA16F for HDR values)
+function hdrToCubemap(hdr, faceSize) {
+  const cubemap = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubemap);
+  const faces = [
+    gl.TEXTURE_CUBE_MAP_POSITIVE_X, gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Y, gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Z, gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+  ];
+  for (let fi = 0; fi < 6; fi++) {
+    const pixels = new Float32Array(faceSize * faceSize * 4);
+    for (let y = 0; y < faceSize; y++) {
+      for (let x = 0; x < faceSize; x++) {
+        const u = (x + 0.5) / faceSize * 2.0 - 1.0;
+        const v = (y + 0.5) / faceSize * 2.0 - 1.0;
+        let dx, dy, dz;
+        switch (fi) {
+          case 0: dx= 1; dy=-v; dz=-u; break;
+          case 1: dx=-1; dy=-v; dz= u; break;
+          case 2: dx= u; dy= 1; dz= v; break;
+          case 3: dx= u; dy=-1; dz=-v; break;
+          case 4: dx= u; dy=-v; dz= 1; break;
+          case 5: dx=-u; dy=-v; dz=-1; break;
+        }
+        const [r, g, b] = sampleEquirect(hdr, dx, dy, dz);
+        const idx = (y * faceSize + x) * 4;
+        pixels[idx] = r; pixels[idx+1] = g; pixels[idx+2] = b; pixels[idx+3] = 1;
+      }
+    }
+    gl.texImage2D(faces[fi], 0, gl.RGBA16F, faceSize, faceSize, 0, gl.RGBA, gl.FLOAT, pixels);
+  }
+  gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-  gl.texParameterf(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_LOD, 3.0);
-  console.log('Environment maps created:', envCubemap, envIrradiance, 'mips:', envMipCount);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  envMipCount = Math.floor(Math.log2(faceSize));
+  return cubemap;
+}
+
+async function loadEnvMap(url) {
+  console.log('Loading environment map:', url);
+  const resp = await fetch(url);
+  const buffer = await resp.arrayBuffer();
+  const hdr = parseHDR(buffer);
+  console.log(`HDR parsed: ${hdr.width}x${hdr.height}`);
+
+  if (envCubemap) gl.deleteTexture(envCubemap);
+  if (envIrradiance) gl.deleteTexture(envIrradiance);
+
+  envCubemap = hdrToCubemap(hdr, 256);
+  envIrradiance = hdrToCubemap(hdr, 32); // low-res for diffuse
+  console.log('Environment cubemaps created, mips:', envMipCount);
+  render();
+}
+
+function initEnvMaps() {
+  // Start with procedural, load HDR async
+  envCubemap = createProceduralEnvMap(64);
+  envIrradiance = createProceduralEnvMap(16);
+  console.log('Procedural env maps created (placeholder)');
+  // Load default HDR env map
+  loadEnvMap('/envmaps/rosendal_plains_1_1k.hdr');
 }
 
 function createPlaceholderTexture() {
@@ -1215,6 +1368,18 @@ setupBtnGroup('render-btns', (v) => { renderMode = v; render(); });
 setupBtnGroup('xform-btns', (v) => { currentXform = v; update(); });
 
 $('matcap-sel').addEventListener('change', () => loadMatcap($('matcap-sel').value));
+$('envmap-sel').addEventListener('change', () => {
+  const v = $('envmap-sel').value;
+  if (v === 'procedural') {
+    if (envCubemap) gl.deleteTexture(envCubemap);
+    if (envIrradiance) gl.deleteTexture(envIrradiance);
+    envCubemap = createProceduralEnvMap(256);
+    envIrradiance = createProceduralEnvMap(32);
+    render();
+  } else {
+    loadEnvMap(`/envmaps/${v}.hdr`);
+  }
+});
 
 $('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateDebounced(); });
 $('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); updateDebounced(); });

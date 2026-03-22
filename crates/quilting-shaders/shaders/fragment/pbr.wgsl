@@ -178,12 +178,10 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
     let reflect_ws = reflect(-view_dir_ws, n_ws);
 
-    // Sample environment cubemaps. Values stored as LDR (0-1), scaled up for
-    // physically plausible lighting intensity.
-    let env_intensity = 4.0;
-    let irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb * env_intensity;
+    // Sample environment cubemaps (HDR values when loaded from .hdr files)
+    let irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb;
     let lod = roughness * max(pbr.env_mip_count, 1.0);
-    let env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb * env_intensity;
+    let env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb;
 
     var ambient = pbr_ambient(
         base.rgb,
