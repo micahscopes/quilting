@@ -265,7 +265,8 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         // Energy conservation: attenuate base layer by sheen directional albedo (from LUT)
         let max_sheen = max(sheen_col.x, max(sheen_col.y, sheen_col.z));
         let e_sheen = textureSample(sheen_e_lut, sheen_e_sampler, vec2<f32>(n_dot_v, sheen_r)).r;
-        let albedo_sheen_scaling = 1.0 - max_sheen * e_sheen;
+        // Stronger attenuation: sheen should dominate for fabric materials
+        let albedo_sheen_scaling = max(1.0 - max_sheen, 0.0);
 
         color = f_sheen + color * albedo_sheen_scaling;
     }
@@ -279,8 +280,11 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     }
     color = color + emissive;
 
-    // Tone mapping (Reinhard)
-    color = color / (color + vec3<f32>(1.0));
+    // Tone mapping: ACES filmic (preserves saturation better than Reinhard)
+    // Narkowicz 2015 ACES fitted curve
+    let a = color * 2.51 + vec3<f32>(0.03);
+    let b = color * 2.43 + vec3<f32>(0.59);
+    color = clamp((color * a) / (color * b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
 
