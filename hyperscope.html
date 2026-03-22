@@ -785,13 +785,11 @@ function render() {
           alphaMode: mat.alphaMode, unlit: mat.unlit,
         });
 
-        // Double-sided: disable face culling for double-sided materials
-        if (mat.doubleSided) {
-          gl.disable(gl.CULL_FACE);
-        } else {
-          gl.enable(gl.CULL_FACE);
-          gl.cullFace(gl.BACK);
-        }
+        // Face culling disabled globally — Möbius transforms can flip face
+        // winding, and the shader already handles two-sided normals.
+        // TODO: enable culling for single-sided materials when no conformal
+        // transform is active (would need to know current transform type).
+        gl.disable(gl.CULL_FACE);
 
         // Bind textures to units 0-4 (placeholder for missing maps)
         const texBindings = [bcTex, mrTex, nmTex, emTex, aoTex];

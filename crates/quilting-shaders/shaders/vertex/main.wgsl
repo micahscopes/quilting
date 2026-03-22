@@ -88,13 +88,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         nrm = nrm * u.perm_parity;
     }
 
-    // Override with smooth normals if available (any component non-zero)
-    let sn0 = in.smooth_n0.xyz;
-    let sn1 = in.smooth_n1.xyz;
-    let sn2 = in.smooth_n2.xyz;
-    let interp_nrm = bary.x * sn0 + bary.y * sn1 + bary.z * sn2;
-    if dot(interp_nrm, interp_nrm) > 0.01 {
-        nrm = normalize(interp_nrm);
+    // Use smooth normals only for flat/affine evaluation (use_qb == 0).
+    // Under conformal transforms (use_qb == 1), the QB analytical normal
+    // correctly accounts for the Möbius distortion — smooth normals from
+    // glTF are pre-transform and would be wrong.
+    if u.use_qb == 0 {
+        let sn0 = in.smooth_n0.xyz;
+        let sn1 = in.smooth_n1.xyz;
+        let sn2 = in.smooth_n2.xyz;
+        let interp_nrm = bary.x * sn0 + bary.y * sn1 + bary.z * sn2;
+        if dot(interp_nrm, interp_nrm) > 0.01 {
+            nrm = normalize(interp_nrm);
+        }
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
