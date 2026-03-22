@@ -158,48 +158,20 @@ pub fn compute_instances_with_uvs(
         return instances;
     }
 
-    // Per-edge LOD from screen-space edge lengths.
+    // --- Face-target LOD → edge negotiation ---
+    //
+    // Phase 1: Compute one target LOD per face (all tricks happen here).
+    // Phase 2: Negotiate edge LODs: edge = max(face_A, face_B).
+    //          Both faces see the same value because max is symmetric.
+    // Phase 3: Assign to FaceInstances. NO modifications after this.
+    //
+    // This guarantees watertight edge matching and allows S3 permutation
+    // reuse since each face gets anisotropic edge LODs from its neighbors.
+
+    const MAX_LOD: u32 = 32; // must match atlas maxLodExp
     let target_pixels_per_sub = 16.0;
 
-    // Measure screen-space arc length between two mesh vertices.
-    // Samples the QB-transformed edge at multiple points to capture curvature.
-    let screen_arc_len = |va: usize, vb: usize| -> f64 {
-        let pa = transformed[va].0.to_point();
-        let pb = transformed[vb].0.to_point();
-
-        match screen {
-            Some(s) => {
-                let n_samples = 9;
-                let mut total = 0.0;
-                let mut prev = s.project(pa);
-                for i in 1..=n_samples {
-                    let t = i as f64 / n_samples as f64;
-                    let orig = [
-                        vertices[va][0]*(1.0-t) + vertices[vb][0]*t,
-                        vertices[va][1]*(1.0-t) + vertices[vb][1]*t,
-                        vertices[va][2]*(1.0-t) + vertices[vb][2]*t,
-                    ];
-                    let p = Quat::from_point(orig[0], orig[1], orig[2]);
-                    let tp = transform.apply(p).to_point();
-                    let curr = s.project(tp);
-                    if let (Some(p1), Some(p2)) = (prev, curr) {
-                        let dx = p2[0]-p1[0]; let dy = p2[1]-p1[1];
-                        total += (dx*dx+dy*dy).sqrt();
-                    } else {
-                        return f64::MAX;
-                    }
-                    prev = curr;
-                }
-                total
-            }
-            None => {
-                let dx = pa[0]-pb[0]; let dy = pa[1]-pb[1]; let dz = pa[2]-pb[2];
-                (dx*dx + dy*dy + dz*dz).sqrt() * 100.0
-            }
-        }
-    };
-
-    // Use pre-built half-edge mesh or build one.
+    // Build or reuse half-edge mesh for adjacency queries.
     let owned_mesh;
     let mesh = match mesh {
         Some(m) => m,
@@ -211,122 +183,87 @@ pub fn compute_instances_with_uvs(
             &owned_mesh
         }
     };
-    let num_half_edges = mesh.half_edges.len();
+    let nf = mesh.num_faces as usize;
 
-    // Edge LOD stored per half-edge, indexed by canonical edge ID:
-    //   interior edge: min(he_idx, twin_idx)
-    //   boundary edge: he_idx
-    // Both half-edges of a shared edge map to the same canonical slot,
-    // so consistency is automatic — no HashMap needed.
-    let mut edge_lods: Vec<u32> = vec![0; num_half_edges];
-
-    // Helper: canonical edge index for a half-edge.
-    // Unpack Option<NonZeroU32> twin (stored as value+1 for niche optimization).
-    let canonical_edge = |he_idx: usize| -> usize {
-        match mesh.half_edges[he_idx].twin {
-            Some(nz) => he_idx.min((nz.get() - 1) as usize),
-            None => he_idx,
+    // Screen-space arc length between two transformed vertices.
+    let screen_arc_len = |va: usize, vb: usize| -> f64 {
+        match screen {
+            Some(s) => {
+                let n_samples = 3;
+                let mut total = 0.0;
+                let mut prev = s.project(transformed[va].0.to_point());
+                for i in 1..=n_samples {
+                    let t = i as f64 / n_samples as f64;
+                    let orig = [
+                        vertices[va][0]*(1.0-t) + vertices[vb][0]*t,
+                        vertices[va][1]*(1.0-t) + vertices[vb][1]*t,
+                        vertices[va][2]*(1.0-t) + vertices[vb][2]*t,
+                    ];
+                    let tp = transform.apply(Quat::from_point(orig[0], orig[1], orig[2])).to_point();
+                    let curr = s.project(tp);
+                    if let (Some(p1), Some(p2)) = (prev, curr) {
+                        total += ((p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2)).sqrt();
+                    } else { return f64::MAX; }
+                    prev = curr;
+                }
+                total
+            }
+            None => {
+                let pa = transformed[va].0.to_point();
+                let pb = transformed[vb].0.to_point();
+                let dx = pa[0]-pb[0]; let dy = pa[1]-pb[1]; let dz = pa[2]-pb[2];
+                (dx*dx + dy*dy + dz*dz).sqrt() * 100.0
+            }
         }
     };
 
-    let nf = mesh.num_faces as usize;
+    // Conformal distortion per vertex for early skip.
+    let vertex_distortion: Vec<f64> = vertices.iter().map(|v| {
+        let p = Quat::from_point(v[0], v[1], v[2]);
+        let denom = transform.c * p + transform.d;
+        let denom_sq = denom.norm_sq();
+        if denom_sq > 1e-20 { 1.0 / denom_sq } else { 1e10 }
+    }).collect();
+
+    // Phase 1: Per-face target LOD.
+    // Max screen-space edge length of the face → snap to power of 2.
+    let mut face_lod: Vec<u32> = vec![1; nf];
     for fi in 0..nf {
         let face = faces[fi];
-        // Half-edges for this face: fi*3+0 (v0->v1), fi*3+1 (v1->v2), fi*3+2 (v2->v0)
-        let he_indices = [fi * 3, fi * 3 + 1, fi * 3 + 2];
+        let max_dist = vertex_distortion[face[0]]
+            .max(vertex_distortion[face[1]])
+            .max(vertex_distortion[face[2]]);
+        if max_dist < 1.5 { continue; } // minimal distortion → LOD 1
 
-        for &he_idx in &he_indices {
-            let canon = canonical_edge(he_idx);
-            if edge_lods[canon] != 0 { continue; } // already computed by twin's face
-
-            let (va, vb) = mesh.edge_vertices(he_idx as u32);
-            let va = va as usize;
-            let vb = vb as usize;
-
-            // Screen-space LOD: the arc length naturally increases near the
-            // Möbius pole, giving higher LOD where needed. No special-casing.
-            let pixels = screen_arc_len(va, vb);
-            let lod = snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(128);
-            edge_lods[canon] = lod.max(1);
+        let mut max_pixels = 0.0f64;
+        for ei in 0..3 {
+            max_pixels = max_pixels.max(screen_arc_len(face[ei], face[(ei+1)%3]));
         }
-
-        // Check medians: screen-space arc from each vertex through center to opposite edge midpoint.
-        let mut max_median_lod = 0u32;
-        for vi_idx in 0..3 {
-            let vi = face[vi_idx];
-            let vj = face[(vi_idx + 1) % 3];
-            let vk = face[(vi_idx + 2) % 3];
-            // Median: from vertex vi to midpoint of edge (vj,vk) in ORIGINAL space
-            let orig_vi = vertices[vi];
-            let orig_mid = [
-                (vertices[vj][0]+vertices[vk][0])/2.0,
-                (vertices[vj][1]+vertices[vk][1])/2.0,
-                (vertices[vj][2]+vertices[vk][2])/2.0,
-            ];
-            // If median passes through the pole → max LOD
-            let pixels = match screen {
-                Some(s) => {
-                    let n = 5;
-                    let mut total = 0.0;
-                    let mut prev = s.project(transformed[vi].0.to_point());
-                    for i in 1..=n {
-                        let t = i as f64 / n as f64;
-                        let p = [
-                            orig_vi[0]*(1.0-t) + orig_mid[0]*t,
-                            orig_vi[1]*(1.0-t) + orig_mid[1]*t,
-                            orig_vi[2]*(1.0-t) + orig_mid[2]*t,
-                        ];
-                        let tp = transform.apply(Quat::from_point(p[0], p[1], p[2])).to_point();
-                        let curr = s.project(tp);
-                        if let (Some(a), Some(b)) = (prev, curr) {
-                            total += ((b[0]-a[0]).powi(2) + (b[1]-a[1]).powi(2)).sqrt();
-                        } else {
-                            total = f64::MAX; break;
-                        }
-                        prev = curr;
-                    }
-                    total
-                }
-                None => {
-                    let pi = transformed[vi].0.to_point();
-                    let pj = transformed[vj].0.to_point();
-                    let pk = transformed[vk].0.to_point();
-                    let mid = [(pj[0]+pk[0])/2.0, (pj[1]+pk[1])/2.0, (pj[2]+pk[2])/2.0];
-                    let dx = pi[0]-mid[0]; let dy = pi[1]-mid[1]; let dz = pi[2]-mid[2];
-                    (dx*dx + dy*dy + dz*dz).sqrt() * 100.0
-                }
-            };
-            let lod = snap_to_power_of_2((pixels / target_pixels_per_sub).ceil() as u32).min(128);
-            max_median_lod = max_median_lod.max(lod);
-        }
-        // Floor all edges of this face at the max median LOD
-        if max_median_lod > 1 {
-            for &he_idx in &he_indices {
-                let canon = canonical_edge(he_idx);
-                edge_lods[canon] = edge_lods[canon].max(max_median_lod);
-            }
-        }
+        face_lod[fi] = snap_to_power_of_2(
+            (max_pixels / target_pixels_per_sub).ceil() as u32
+        ).max(1).min(MAX_LOD);
     }
 
-    // Simple LOD cap: clamp all edge LODs to a fixed maximum.
-    // This is deterministic and stable — no heuristic budget estimation.
-    const MAX_LOD: u32 = 32; // must match atlas maxLodExp (2^5 = 32)
-    for lod in edge_lods.iter_mut() {
-        *lod = (*lod).min(MAX_LOD);
-    }
-
-    // Per-edge LODs: shared edges always get the same LOD because both
-    // half-edges map to the same canonical edge index. This guarantees
-    // edge-matching between adjacent faces (no T-junction cracks).
-    // The permutation system (perm_index) is no longer used — CPU-side
-    // bary remapping handles canonical LOD ordering, shader uses perm_index=0.
+    // Phase 2: Negotiate edge LODs from adjacent face targets.
+    // edge_lod = max(face_A_target, face_B_target) — symmetric, so both agree.
     let mut result = instances;
     for fi in 0..nf {
+        let my_lod = face_lod[fi];
         let he_base = fi * 3;
-        let l0 = edge_lods[canonical_edge(he_base + 1)]; // edge_a: opposite v0
-        let l1 = edge_lods[canonical_edge(he_base + 2)]; // edge_b: opposite v1
-        let l2 = edge_lods[canonical_edge(he_base)];     // edge_c: opposite v2
-        result[fi].edge_lods = [l0, l1, l2];
+        let mut elods = [my_lod; 3];
+
+        for ei in 0..3usize {
+            if let Some(twin_nz) = mesh.half_edges[he_base + ei].twin {
+                let neighbor = ((twin_nz.get() - 1) as usize) / 3;
+                elods[ei] = my_lod.max(face_lod[neighbor]);
+            }
+        }
+
+        // Map half-edge order → FaceInstance edge order:
+        //   he 0 (v0→v1) = edge_c (opposite v2)
+        //   he 1 (v1→v2) = edge_a (opposite v0)
+        //   he 2 (v2→v0) = edge_b (opposite v1)
+        result[fi].edge_lods = [elods[1], elods[2], elods[0]];
     }
 
     // Compute per-vertex LOD = max of all edges meeting at each mesh vertex.
@@ -477,10 +414,10 @@ mod tests {
 
     #[test]
     fn sphere_reflection_higher_lod() {
-        let (verts, faces) = shapes::cube();
-        let m = Mobius::sphere_reflection(Quat::from_point(0.5, 0.0, 0.0), 2.0);
+        let (verts, faces) = shapes::icosahedron();
+        // Place pole near a vertex to ensure high distortion on adjacent faces
+        let m = Mobius::sphere_reflection(Quat::from_point(0.85, 0.0, 0.0), 0.3);
         let instances = compute_instances(&verts, &faces, &m, None, None);
-        // Sphere reflection should produce higher LOD on some faces
         let max_lod = instances.iter()
             .flat_map(|i| i.edge_lods.iter())
             .copied()
