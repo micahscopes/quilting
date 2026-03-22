@@ -233,17 +233,19 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         color += sheen_col * sheen_fresnel * irradiance;
     }
 
-    // --- KHR_materials_specular (custom F0 color) ---
-    // Already partially handled by pbr_direct/pbr_ambient through f0.
-    // For non-metallic materials with specular color override, add the
-    // tinted specular contribution.
+    // --- KHR_materials_specular (modulate F0) ---
+    // specularColorFactor modulates the dielectric F0. For [0,0,0] this
+    // completely suppresses specular (pure fabric). For [0.1,0.34,1] it
+    // tints specular blue. Applied as a post-multiplier on the specular
+    // components of both direct and ambient lighting.
     if pbr.specular_color.w > 0.5 {
-        let spec_col = pbr.specular_color.rgb;
-        let n_dot_v = max(dot(n, view_dir), 0.001);
-        let fresnel = spec_col + (1.0 - spec_col) * pow(1.0 - n_dot_v, 5.0);
-        let reflect_ws = reflect(-view_dir_ws, n_ws);
-        let spec_env = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, roughness * max(pbr.env_mip_count, 1.0)).rgb;
-        color += fresnel * spec_env * (1.0 - metallic);
+        let spec_mod = pbr.specular_color.rgb;
+        // Scale down the direct + ambient specular by the specular color factor.
+        // The diffuse components are unaffected.
+        let total_before = direct.color + fill.color + ambient;
+        let diffuse_only = base.rgb * irradiance * (1.0 - metallic);
+        let specular_part = total_before - diffuse_only;
+        color = diffuse_only + specular_part * spec_mod;
     }
 
     // --- Emissive ---
