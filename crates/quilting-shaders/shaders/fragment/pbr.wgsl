@@ -262,11 +262,10 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
         let f_sheen = f_sheen_key + f_sheen_fill + f_sheen_env;
 
-        // Energy conservation: attenuate base layer by sheen directional albedo (from LUT)
+        // Energy conservation via LUT: attenuate base layer by sheen directional albedo
         let max_sheen = max(sheen_col.x, max(sheen_col.y, sheen_col.z));
         let e_sheen = textureSample(sheen_e_lut, sheen_e_sampler, vec2<f32>(n_dot_v, sheen_r)).r;
-        // Stronger attenuation: sheen should dominate for fabric materials
-        let albedo_sheen_scaling = max(1.0 - max_sheen, 0.0);
+        let albedo_sheen_scaling = 1.0 - max_sheen * e_sheen;
 
         color = f_sheen + color * albedo_sheen_scaling;
     }
