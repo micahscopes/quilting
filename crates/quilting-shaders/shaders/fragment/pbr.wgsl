@@ -280,11 +280,11 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     }
     color = color + emissive;
 
-    // Tone mapping: ACES filmic (preserves saturation better than Reinhard)
-    // Narkowicz 2015 ACES fitted curve
-    let a = color * 2.51 + vec3<f32>(0.03);
-    let b = color * 2.43 + vec3<f32>(0.59);
-    color = clamp((color * a) / (color * b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
+    // Tone mapping: ACES filmic with slight exposure boost for deeper contrast
+    let exposed = color * 1.2;
+    let a = exposed * 2.51 + vec3<f32>(0.03);
+    let b = exposed * 2.43 + vec3<f32>(0.59);
+    color = clamp((exposed * a) / (exposed * b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
 
