@@ -668,7 +668,10 @@ function prefilterCubemap(cubemap, hdr, faceSize) {
             ];
             const NdotL = N[0]*L[0] + N[1]*L[1] + N[2]*L[2];
             if (NdotL > 0) {
-              const [sr, sg, sb] = sampleEquirect(hdr, L[0], L[1], L[2]);
+              let [sr, sg, sb] = sampleEquirect(hdr, L[0], L[1], L[2]);
+              // Firefly clamp: prevent extreme HDR values (sun disk) from dominating
+              const lum = 0.2126*sr + 0.7152*sg + 0.0722*sb;
+              if (lum > 64.0) { const s = 64.0/lum; sr *= s; sg *= s; sb *= s; }
               r += sr * NdotL; g += sg * NdotL; b += sb * NdotL;
               totalWeight += NdotL;
             }
@@ -793,6 +796,132 @@ function hdrToCubemap(hdr, faceSize) {
   return cubemap;
 }
 
+// Cosine-weighted hemisphere convolution for diffuse irradiance cubemap.
+// Each texel stores the integral of incoming radiance weighted by cos(theta) over
+// the hemisphere, divided by PI (Lambertian radiosity). This replaces the old
+// approach of just using a low-res copy of the specular cubemap.
+function convolveDiffuseIrradiance(hdr, faceSize) {
+  const cubemap = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubemap);
+  const faces = [
+    gl.TEXTURE_CUBE_MAP_POSITIVE_X, gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Y, gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Z, gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+  ];
+  const numSamples = 256;
+
+  for (let fi = 0; fi < 6; fi++) {
+    const pixels = new Float32Array(faceSize * faceSize * 4);
+    for (let y = 0; y < faceSize; y++) {
+      for (let x = 0; x < faceSize; x++) {
+        const u = (x + 0.5) / faceSize * 2.0 - 1.0;
+        const v = (y + 0.5) / faceSize * 2.0 - 1.0;
+        let dx, dy, dz;
+        switch (fi) {
+          case 0: dx= 1; dy=-v; dz=-u; break;
+          case 1: dx=-1; dy=-v; dz= u; break;
+          case 2: dx= u; dy= 1; dz= v; break;
+          case 3: dx= u; dy=-1; dz=-v; break;
+          case 4: dx= u; dy=-v; dz= 1; break;
+          case 5: dx=-u; dy=-v; dz=-1; break;
+        }
+        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const N = [dx/len, dy/len, dz/len];
+
+        // Build tangent frame from N
+        const up = Math.abs(N[1]) < 0.999 ? [0,1,0] : [1,0,0];
+        const T = [
+          up[1]*N[2] - up[2]*N[1],
+          up[2]*N[0] - up[0]*N[2],
+          up[0]*N[1] - up[1]*N[0]
+        ];
+        const tl = Math.sqrt(T[0]*T[0]+T[1]*T[1]+T[2]*T[2]);
+        T[0]/=tl; T[1]/=tl; T[2]/=tl;
+        const B = [
+          N[1]*T[2]-N[2]*T[1],
+          N[2]*T[0]-N[0]*T[2],
+          N[0]*T[1]-N[1]*T[0]
+        ];
+
+        // Cosine-weighted importance sampling over hemisphere
+        let r = 0, g = 0, b = 0;
+        for (let s = 0; s < numSamples; s++) {
+          // Hammersley sequence
+          let bits = s; bits = (bits << 16) | (bits >>> 16);
+          bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >>> 1);
+          bits = ((bits & 0x33333333) << 2) | ((bits & 0xCCCCCCCC) >>> 2);
+          bits = ((bits & 0x0F0F0F0F) << 4) | ((bits & 0xF0F0F0F0) >>> 4);
+          bits = ((bits & 0x00FF00FF) << 8) | ((bits & 0xFF00FF00) >>> 8);
+          const xi1 = (s + 0.5) / numSamples;
+          const xi2 = (bits >>> 0) * 2.3283064365386963e-10;
+
+          // Cosine-weighted hemisphere: PDF = cos(theta)/PI
+          // cosTheta = sqrt(1 - xi2), sinTheta = sqrt(xi2)
+          const phi = 2 * Math.PI * xi1;
+          const cosTheta = Math.sqrt(1.0 - xi2);
+          const sinTheta = Math.sqrt(xi2);
+
+          // Sample direction in tangent space -> world space
+          const Lx = sinTheta * Math.cos(phi);
+          const Ly = sinTheta * Math.sin(phi);
+          const Lz = cosTheta;
+          const L = [
+            T[0]*Lx + B[0]*Ly + N[0]*Lz,
+            T[1]*Lx + B[1]*Ly + N[1]*Lz,
+            T[2]*Lx + B[2]*Ly + N[2]*Lz
+          ];
+
+          let [sr, sg, sb] = sampleEquirect(hdr, L[0], L[1], L[2]);
+          // Firefly clamp
+          const lum = 0.2126*sr + 0.7152*sg + 0.0722*sb;
+          if (lum > 64.0) { const c = 64.0/lum; sr *= c; sg *= c; sb *= c; }
+          // With cosine-weighted importance sampling, Monte Carlo estimator is
+          // E(n)/PI = (1/N) * sum(L_i). The PDF's 1/PI is already absorbed.
+          r += sr; g += sg; b += sb;
+        }
+        r /= numSamples; g /= numSamples; b /= numSamples;
+
+        const idx = (y * faceSize + x) * 4;
+        pixels[idx] = r; pixels[idx+1] = g; pixels[idx+2] = b; pixels[idx+3] = 1;
+      }
+    }
+    // Upload face
+    if (hdrCubemapSupported) {
+      const f16buf = new ArrayBuffer(faceSize * faceSize * 4 * 2);
+      const f16view = new DataView(f16buf);
+      const f32tmp = new Float32Array(1);
+      const u32tmp = new Uint32Array(f32tmp.buffer);
+      for (let j = 0; j < faceSize * faceSize * 4; j++) {
+        f32tmp[0] = pixels[j];
+        const b2 = u32tmp[0];
+        const sign = (b2 >>> 16) & 0x8000;
+        const exp = ((b2 >>> 23) & 0xff) - 127 + 15;
+        const man = b2 & 0x7fffff;
+        let h; if (exp <= 0) h = sign; else if (exp >= 31) h = sign | 0x7c00;
+        else h = sign | (exp << 10) | (man >>> 13);
+        f16view.setUint16(j * 2, h, true);
+      }
+      gl.texImage2D(faces[fi], 0, gl.RGBA16F, faceSize, faceSize, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(f16buf));
+    } else {
+      const u8 = new Uint8Array(faceSize * faceSize * 4);
+      for (let j = 0; j < faceSize * faceSize; j++) {
+        for (let ch = 0; ch < 3; ch++) {
+          const val = pixels[j*4+ch];
+          u8[j*4+ch] = Math.min(Math.pow(val/(val+1), 1/2.2) * 255, 255) | 0;
+        }
+        u8[j*4+3] = 255;
+      }
+      gl.texImage2D(faces[fi], 0, gl.RGBA, faceSize, faceSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, u8);
+    }
+  }
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  console.log(`Diffuse irradiance cubemap: ${faceSize}x${faceSize}, ${numSamples} samples/texel`);
+  return cubemap;
+}
+
 async function loadEnvMap(url) {
   console.log('Loading environment map:', url);
   const resp = await fetch(url);
@@ -811,7 +940,7 @@ async function loadEnvMap(url) {
   if (envIrradiance) gl.deleteTexture(envIrradiance);
 
   envCubemap = hdrToCubemap(hdr, 256);
-  envIrradiance = hdrToCubemap(hdr, 32); // low-res for diffuse
+  envIrradiance = convolveDiffuseIrradiance(hdr, 32);
   console.log('Environment cubemaps created, mips:', envMipCount);
   render();
 }
@@ -1418,7 +1547,7 @@ function render() {
           gl.bindTexture(gl.TEXTURE_2D, sheenELut);
         }
       }
-      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -1450,7 +1579,7 @@ function render() {
       gl.bindTexture(gl.TEXTURE_2D, matcapTex);
     }
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -1464,7 +1593,7 @@ function render() {
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, matcapUboData);
     gl.bindBufferBase(gl.UNIFORM_BUFFER, MATCAP_UBO_BINDING, matcapUbo);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -1474,7 +1603,7 @@ function render() {
   if (drawWire) {
     gl.useProgram(progWire);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
       uploadWireUBO(b.color, true);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
@@ -1485,7 +1614,7 @@ function render() {
   if (drawNormals) {
     gl.useProgram(progNormals);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }

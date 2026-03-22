@@ -54,6 +54,7 @@ struct VertexOutput {
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
     @location(9) fade: f32,
+    @location(10) @interpolate(flat) perm_sign: f32,
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -201,5 +202,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.camera_pos_ws = u.camera_pos.xyz;
     out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
+    out.perm_sign = u.perm_parity;
     return out;
 }

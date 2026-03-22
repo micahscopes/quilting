@@ -81,6 +81,7 @@ var env_irradiance: texture_cube<f32>;
 var env_irradiance_sampler: sampler;
 
 struct FragInput {
+    @builtin(front_facing) front_facing: bool,
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
     @location(2) tex_uv: vec2<f32>,
@@ -91,6 +92,7 @@ struct FragInput {
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
     @location(9) fade: f32,
+    @location(10) @interpolate(flat) perm_sign: f32,
 }
 
 @fragment
@@ -98,10 +100,15 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     if in.fade < 0.001 { discard; }
 
     var n = normalize(in.normal_vs);
-    let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera at +Z
+    let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera looks down +Z
 
-    // Two-sided lighting: flip normal if it points away from the camera.
-    if dot(n, view_dir) < 0.0 {
+    // Two-sided lighting: use face winding, corrected for permutation parity.
+    // Odd permutations reverse triangle winding, so front_facing flips.
+    var face_back = in.front_facing; // tessellation is CW, so front_facing=true means back-facing
+    if in.perm_sign < 0.0 {
+        face_back = !face_back;      // odd perms reverse winding again
+    }
+    if face_back {
         n = -n;
     }
 
@@ -173,12 +180,25 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     }
     if pbr.has_normal_tex > 0.5 {
         let raw_t = in.tangent_vs;
+        let raw_b = in.bitangent_vs;
         // Guard against degenerate tangents (NaN/zero from stretched Möbius faces)
         if dot(raw_t, raw_t) > 1e-6 {
             var t = normalize(raw_t);
-            t = normalize(t - n * dot(t, n));  // Gram-Schmidt
+            t = normalize(t - n * dot(t, n));  // Gram-Schmidt against N
             if dot(t, t) > 0.5 {               // guard post-projection
-                let b = cross(n, t);
+                // Use vertex-computed bitangent to preserve UV handedness.
+                // cross(n, t) always produces a right-handed frame, but UV mirroring
+                // (e.g. V-only flip) requires the bitangent to match the actual UV layout.
+                var b = cross(n, t); // fallback
+                if dot(raw_b, raw_b) > 1e-6 {
+                    // Project vertex bitangent onto plane perpendicular to N and T
+                    var bv = normalize(raw_b);
+                    bv = bv - n * dot(bv, n);
+                    bv = bv - t * dot(bv, t);
+                    if dot(bv, bv) > 0.01 {
+                        b = normalize(bv);
+                    }
+                }
                 let tbn = mat3x3<f32>(t, b, n);
 
                 let nm = textureSample(normal_tex, normal_sampler, normal_uv).xyz;
@@ -216,7 +236,11 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     let fill = pbr_direct(fill_input);
 
     // --- IBL ambient ---
-    let n_ws = normalize(in.normal_ws);
+    var n_ws = normalize(in.normal_ws);
+    // Flip world-space normal consistently with the view-space flip
+    if face_back {
+        n_ws = -n_ws;
+    }
     let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
     let reflect_ws = reflect(-view_dir_ws, n_ws);
 
