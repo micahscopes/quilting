@@ -1172,13 +1172,16 @@ function render() {
     }
   }
 
-  // Original mesh wireframe
+  // Original mesh wireframe (identity Möbius — shows untransformed mesh)
   if (drawWire && vaoOrigMesh) {
+    const savedMob = mob;
+    mob = { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
     gl.useProgram(progWire);
     uploadVertexUBO(mvp, view, 1.0, 0, 0, camPos);
     uploadWireUBO([0.25, 0.25, 0.35], false);
     gl.bindVertexArray(vaoOrigMesh);
     gl.drawElementsInstanced(gl.LINES, 6, gl.UNSIGNED_INT, 0, numOrigInst);
+    mob = savedMob;
   }
 
   // Matcap pass

@@ -177,8 +177,8 @@ pub fn compute_instances_with_uvs(
     // the same slot → guaranteed matching. This is the v0.2.0 proven
     // approach that was working before the LOD refactors.
 
-    const MAX_LOD: u32 = 32; // must match atlas maxLodExp
-    let target_pixels_per_sub = 16.0;
+    const MAX_LOD: u32 = 32;
+    let target_pixels_per_sub = 4.0;
 
     let owned_mesh;
     let mesh = match mesh {
@@ -204,7 +204,7 @@ pub fn compute_instances_with_uvs(
     let screen_arc_len = |va: usize, vb: usize| -> f64 {
         match screen {
             Some(s) => {
-                let n_samples = 3;
+                let n_samples = 9;
                 let mut total = 0.0;
                 let mut prev = s.project(transformed[va].0.to_point());
                 for i in 1..=n_samples {

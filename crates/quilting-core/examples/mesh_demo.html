@@ -122,7 +122,7 @@ function makeVAO(baryData, lineData, instanceData, numFaces) {
   gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
   for (let i = 0; i < 6; i++) {
     gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 96, i*16);
+    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
     gl.vertexAttribDivisor(1+i, 1);
   }
 
