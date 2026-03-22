@@ -753,6 +753,17 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         js_sys::Reflect::set(&obj, &"normal_uv_offset".into(), &nuv_o).unwrap();
         js_sys::Reflect::set(&obj, &"normal_uv_rotation".into(), &JsValue::from_f64(mat.normal_uv_rotation)).unwrap();
 
+        // KHR_texture_transform on base color texture
+        let buv_s = js_sys::Array::new();
+        buv_s.push(&JsValue::from_f64(mat.base_uv_scale[0]));
+        buv_s.push(&JsValue::from_f64(mat.base_uv_scale[1]));
+        js_sys::Reflect::set(&obj, &"base_uv_scale".into(), &buv_s).unwrap();
+        let buv_o = js_sys::Array::new();
+        buv_o.push(&JsValue::from_f64(mat.base_uv_offset[0]));
+        buv_o.push(&JsValue::from_f64(mat.base_uv_offset[1]));
+        js_sys::Reflect::set(&obj, &"base_uv_offset".into(), &buv_o).unwrap();
+        js_sys::Reflect::set(&obj, &"base_uv_rotation".into(), &JsValue::from_f64(mat.base_uv_rotation)).unwrap();
+
         js_materials.push(&obj);
     }
 

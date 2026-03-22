@@ -106,10 +106,21 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     }
 
     // --- Base color ---
+    // Apply KHR_texture_transform to base color UVs
+    var base_uv = in.tex_uv;
+    if pbr.base_uv_scale_x != 1.0 || pbr.base_uv_scale_y != 1.0 || pbr.base_uv_rotation != 0.0 {
+        let s = vec2<f32>(pbr.base_uv_scale_x, pbr.base_uv_scale_y);
+        let r = pbr.base_uv_rotation;
+        let cr = cos(r); let sr_val = sin(r);
+        base_uv = vec2<f32>(
+            (in.tex_uv.x * cr - in.tex_uv.y * sr_val) * s.x,
+            (in.tex_uv.x * sr_val + in.tex_uv.y * cr) * s.y,
+        );
+    }
     var base = pbr.base_color;
     if pbr.has_base_color_tex > 0.5 {
-        let tex_color = textureSample(base_color_tex, base_color_sampler, in.tex_uv);
-        let linear_rgb = pow(tex_color.rgb, vec3<f32>(2.2)); // sRGB → linear
+        let tex_color = textureSample(base_color_tex, base_color_sampler, base_uv);
+        let linear_rgb = pow(tex_color.rgb, vec3<f32>(2.2));
         base = vec4<f32>(linear_rgb * pbr.base_color.rgb, tex_color.a * pbr.base_color.a);
     }
 

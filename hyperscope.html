@@ -291,6 +291,9 @@ function getMaterialParams(materialIndex) {
       normalUvScale: mat.normal_uv_scale || [1, 1],
       normalUvOffset: mat.normal_uv_offset || [0, 0],
       normalUvRotation: mat.normal_uv_rotation ?? 0,
+      baseUvScale: mat.base_uv_scale || [1, 1],
+      baseUvOffset: mat.base_uv_offset || [0, 0],
+      baseUvRotation: mat.base_uv_rotation ?? 0,
     };
   }
   const bc = meshInfo ? (meshInfo.base_color || [0.9, 0.75, 0.6, 1.0]) : [0.9, 0.75, 0.6, 1.0];
@@ -950,6 +953,10 @@ function uploadPbrUBO(mat) {
   pbrUboF32[38] = nuvo[0]; pbrUboF32[39] = nuvo[1];
   // normal_uv_rotation: f32 at offset 160 (f32 index 40)
   pbrUboF32[40] = mat.normalUvRotation ?? 0;
+  // base color UV transform at offset 164 (f32 index 41)
+  pbrUboF32[41] = (mat.baseUvScale || [1,1])[0];
+  pbrUboF32[42] = (mat.baseUvScale || [1,1])[1];
+  pbrUboF32[43] = mat.baseUvRotation ?? 0;
   gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(pbrUboData));
 }
@@ -1383,6 +1390,8 @@ function render() {
           specularColor: mat.specularColor,
           normalUvScale: mat.normalUvScale, normalUvOffset: mat.normalUvOffset,
           normalUvRotation: mat.normalUvRotation,
+          baseUvScale: mat.baseUvScale, baseUvOffset: mat.baseUvOffset,
+          baseUvRotation: mat.baseUvRotation,
         });
 
         // Face culling disabled globally — Möbius transforms can flip face
