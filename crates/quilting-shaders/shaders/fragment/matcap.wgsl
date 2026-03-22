@@ -1,6 +1,22 @@
-// Matcap fragment shader: density heatmap + matcap-style lighting.
+// Matcap fragment shader: samples matcap texture using view-space normal.
+// Falls back to procedural matcap when no texture is bound.
 
 #import quilting::lighting::matcap::matcap_shade
+
+struct MatcapUniforms {
+    has_matcap_tex: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
+@group(0) @binding(1)
+var<uniform> matcap_u: MatcapUniforms;
+
+@group(0) @binding(2)
+var matcap_tex: texture_2d<f32>;
+@group(0) @binding(3)
+var matcap_sampler: sampler;
 
 struct FragInput {
     @location(0) normal_vs: vec3<f32>,
@@ -24,12 +40,17 @@ fn heatmap(t_in: f32) -> vec3<f32> {
 @fragment
 fn fs_matcap(in: FragInput) -> @location(0) vec4<f32> {
     var n = normalize(in.normal_vs);
-    // Two-sided lighting: flip if facing away from camera
-    if n.z < 0.0 {
-        n = -n;
-    }
+    if n.z < 0.0 { n = -n; }
 
-    let base = heatmap(in.density);
-    let col = matcap_shade(n, base);
-    return vec4<f32>(col, 1.0);
+    // Matcap UV: map view-space normal to texture coordinates
+    let uv = n.xy * 0.48 + 0.5;
+
+    if matcap_u.has_matcap_tex > 0.5 {
+        let col = textureSample(matcap_tex, matcap_sampler, uv);
+        return vec4<f32>(col.rgb, 1.0);
+    } else {
+        let base = heatmap(in.density);
+        let col = matcap_shade(n, base);
+        return vec4<f32>(col, 1.0);
+    }
 }

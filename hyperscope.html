@@ -809,15 +809,53 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr) {
   bindUniformBlocks(progWire);
   bindUniformBlocks(progNormals);
 
+  // Bind matcap UBO + sampler
+  if (progMatcap) {
+    const numBlocks = gl.getProgramParameter(progMatcap, gl.ACTIVE_UNIFORM_BLOCKS);
+    for (let i = 0; i < numBlocks; i++) {
+      const name = gl.getActiveUniformBlockName(progMatcap, i);
+      if (name && name.includes('Matcap')) {
+        gl.uniformBlockBinding(progMatcap, i, MATCAP_UBO_BINDING);
+      }
+    }
+    // Bind matcap sampler to texture unit 0
+    gl.useProgram(progMatcap);
+    const numU = gl.getProgramParameter(progMatcap, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < numU; i++) {
+      const info = gl.getActiveUniform(progMatcap, i);
+      if (info && info.type === gl.SAMPLER_2D) {
+        const loc = gl.getUniformLocation(progMatcap, info.name);
+        gl.uniform1i(loc, 0);
+      }
+    }
+  }
+
   shadersLoaded = true;
   console.log('Shader programs compiled from WGSL pipeline (matcap + wire + normals + pbr)');
 }
+let matcapTex = null;
+const MATCAP_UBO_BINDING = 3;
+const matcapUbo = gl.createBuffer();
+gl.bindBuffer(gl.UNIFORM_BUFFER, matcapUbo);
+gl.bufferData(gl.UNIFORM_BUFFER, 16, gl.DYNAMIC_DRAW);
+const matcapUboData = new Float32Array(4); // has_matcap_tex + 3 pads
 
-// Matcap texture -- naga matcap is procedural, but keep the selector wired
-// in case we re-add texture-based matcap later. For now it's a no-op.
 function loadMatcap(name) {
-  // Procedural matcap from WGSL -- no texture needed
-  render();
+  const img = new Image();
+  img.onload = () => {
+    if (matcapTex) gl.deleteTexture(matcapTex);
+    matcapTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, matcapTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    console.log('Matcap loaded:', name, img.width + 'x' + img.height);
+    render();
+  };
+  img.src = '/matcaps/' + name + '.png';
 }
 
 // --- LOD color ---
@@ -1109,9 +1147,19 @@ function render() {
     gl.drawElementsInstanced(gl.LINES, 6, gl.UNSIGNED_INT, 0, numOrigInst);
   }
 
-  // Matcap pass (naga matcap = procedural heatmap + matcap shading)
+  // Matcap pass
   if (drawMatcap) {
     gl.useProgram(progMatcap);
+    // Matcap UBO: has_matcap_tex flag
+    matcapUboData[0] = matcapTex ? 1.0 : 0.0;
+    gl.bindBuffer(gl.UNIFORM_BUFFER, matcapUbo);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 0, matcapUboData);
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, MATCAP_UBO_BINDING, matcapUbo);
+    // Bind matcap texture
+    if (matcapTex) {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, matcapTex);
+    }
     for (const b of drawBatches) {
       uploadVertexUBO(mvp, view, b.parity, 0, 1, camPos);
       gl.bindVertexArray(b.vaoXformTri);
