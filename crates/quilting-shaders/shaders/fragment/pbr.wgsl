@@ -242,7 +242,7 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let n_dot_l_key = max(dot(n, light_dir), 0.0);
         let sin2_key = 1.0 - n_dot_h_key * n_dot_h_key;
         let D_key = (2.0 + inv_alpha) / (2.0 * 3.14159) * pow(max(sin2_key, 1e-6), 0.5 * inv_alpha);
-        let V_key = clamp(1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.001), 0.0, 1.0);
+        let V_key = clamp(1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.01), 0.0, 0.25);
         let f_sheen_key = sheen_col * D_key * V_key * n_dot_l_key * light_color;
 
         // Fill light sheen

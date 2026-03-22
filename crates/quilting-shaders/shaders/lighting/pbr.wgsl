@@ -133,12 +133,15 @@ fn pbr_ambient(
     view_dir: vec3<f32>,
     irradiance: vec3<f32>,
     env_color: vec3<f32>,
-    f0_in: vec3<f32>,          // custom F0 (from KHR_materials_specular)
+    f0_in: vec3<f32>,
 ) -> vec3<f32> {
     let n_dot_v = max(dot(normal, view_dir), 0.001);
     let f0 = f0_in;
 
-    let F = fresnel_schlick_roughness(n_dot_v, f0, roughness);
+    // Use f0 magnitude as the f90 (specularWeight in the Khronos spec).
+    // When specularColorFactor=[0,0,0], f90=0 → no grazing reflections.
+    let f90 = vec3<f32>(max(f0.x, max(f0.y, f0.z)));
+    let F = f0 + (max(f90 * (1.0 - roughness), f0) - f0) * pow(clamp(1.0 - n_dot_v, 0.0, 1.0), 5.0);
     let k_d = (1.0 - F) * (1.0 - metallic);
 
     let diffuse = k_d * base_color * irradiance;
