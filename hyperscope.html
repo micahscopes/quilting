@@ -2597,7 +2597,7 @@ initEnvMaps();
 generateSheenELut();
 
 $('stats').textContent = 'Building atlas...';
-const r1 = await workerCall('build_atlas', { maxLodExp: 7, mode: 'hierarchical' });
+const r1 = await workerCall('build_atlas', { maxLodExp: 7, mode: 'direct' });
 workerReady = true;
 $('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
 
