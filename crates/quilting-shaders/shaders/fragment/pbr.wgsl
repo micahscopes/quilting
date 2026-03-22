@@ -221,13 +221,9 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
     var color = direct.color + fill.color + ambient;
 
-    // When sheen is active, suppress base layer specular (fabric doesn't reflect)
-    if pbr.sheen_color.w > 0.5 {
-        let k_d_s = (1.0 - metallic);
-        color = k_d_s * base.rgb / 3.14159 * max(dot(n, light_dir), 0.0) * light_color
-              + k_d_s * base.rgb / 3.14159 * max(dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.5))), 0.0) * vec3<f32>(0.3, 0.35, 0.5)
-              + k_d_s * base.rgb * irradiance;
-    }
+    // Sheen materials: the specular F0 is already modified by specularColorFactor
+    // (which is [0,0,0] for most fabric variants), so pbr_direct/ambient naturally
+    // produce near-zero specular. No additional suppression needed.
 
     // --- KHR_materials_sheen (velvet/fabric) ---
     // Charlie distribution, composited with energy conservation:
@@ -248,7 +244,7 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let n_dot_l_key = max(dot(n, light_dir), 0.0);
         let sin2_key = 1.0 - n_dot_h_key * n_dot_h_key;
         let D_key = (2.0 + inv_alpha) / (2.0 * 3.14159) * pow(max(sin2_key, 1e-6), 0.5 * inv_alpha);
-        let V_key = clamp(1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.01), 0.0, 0.25);
+        let V_key = clamp(1.0 / (4.0 * (n_dot_l_key + n_dot_v - n_dot_l_key * n_dot_v) + 0.001), 0.0, 1.0);
         let f_sheen_key = sheen_col * D_key * V_key * n_dot_l_key * light_color;
 
         // Fill light sheen
