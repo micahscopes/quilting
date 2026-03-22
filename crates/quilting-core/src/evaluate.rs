@@ -171,20 +171,15 @@ pub fn compute_instances_with_uvs(
         return instances;
     }
 
-    // --- Face-target LOD → edge negotiation ---
-    //
-    // Phase 1: Compute one target LOD per face (all tricks happen here).
-    // Phase 2: Negotiate edge LODs: edge = max(face_A, face_B).
-    //          Both faces see the same value because max is symmetric.
-    // Phase 3: Assign to FaceInstances. NO modifications after this.
-    //
-    // This guarantees watertight edge matching and allows S3 permutation
-    // reuse since each face gets anisotropic edge LODs from its neighbors.
+    // Per-edge LOD via canonical edge storage.
+    // Each edge LOD is stored once per canonical edge index (min of
+    // both half-edge indices). Both faces sharing an edge read from
+    // the same slot → guaranteed matching. This is the v0.2.0 proven
+    // approach that was working before the LOD refactors.
 
     const MAX_LOD: u32 = 32; // must match atlas maxLodExp
     let target_pixels_per_sub = 16.0;
 
-    // Build or reuse half-edge mesh for adjacency queries.
     let owned_mesh;
     let mesh = match mesh {
         Some(m) => m,
@@ -196,9 +191,16 @@ pub fn compute_instances_with_uvs(
             &owned_mesh
         }
     };
+    let num_half_edges = mesh.half_edges.len();
     let nf = mesh.num_faces as usize;
 
-    // Screen-space arc length between two transformed vertices.
+    let canonical_edge = |he_idx: usize| -> usize {
+        match mesh.half_edges[he_idx].twin {
+            Some(nz) => he_idx.min((nz.get() - 1) as usize),
+            None => he_idx,
+        }
+    };
+
     let screen_arc_len = |va: usize, vb: usize| -> f64 {
         match screen {
             Some(s) => {
@@ -238,45 +240,45 @@ pub fn compute_instances_with_uvs(
         if denom_sq > 1e-20 { 1.0 / denom_sq } else { 1e10 }
     }).collect();
 
-    // Phase 1: Per-face target LOD.
-    // Max screen-space edge length of the face → snap to power of 2.
-    let mut face_lod: Vec<u32> = vec![1; nf];
+    // Compute LOD per canonical edge.
+    let mut edge_lods: Vec<u32> = vec![0; num_half_edges];
+
     for fi in 0..nf {
         let face = faces[fi];
-        let max_dist = vertex_distortion[face[0]]
+        let max_distortion = vertex_distortion[face[0]]
             .max(vertex_distortion[face[1]])
             .max(vertex_distortion[face[2]]);
-        if max_dist < 1.5 { continue; } // minimal distortion → LOD 1
+        if max_distortion < 1.5 { continue; }
 
-        let mut max_pixels = 0.0f64;
-        for ei in 0..3 {
-            max_pixels = max_pixels.max(screen_arc_len(face[ei], face[(ei+1)%3]));
+        for ei in 0..3u32 {
+            let he_idx = fi * 3 + ei as usize;
+            let canon = canonical_edge(he_idx);
+            if edge_lods[canon] != 0 { continue; }
+
+            let (va, vb) = mesh.edge_vertices(he_idx as u32);
+            let pixels = screen_arc_len(va as usize, vb as usize);
+            edge_lods[canon] = snap_to_power_of_2(
+                (pixels / target_pixels_per_sub).ceil() as u32
+            ).max(1).min(MAX_LOD);
         }
-        face_lod[fi] = snap_to_power_of_2(
-            (max_pixels / target_pixels_per_sub).ceil() as u32
-        ).max(1).min(MAX_LOD);
     }
 
-    // Phase 2: Negotiate edge LODs from adjacent face targets.
-    // edge_lod = max(face_A_target, face_B_target) — symmetric, so both agree.
+    // Clamp: all edges at least LOD 1, at most MAX_LOD
+    for lod in edge_lods.iter_mut() {
+        if *lod == 0 { *lod = 1; }
+        *lod = (*lod).min(MAX_LOD);
+    }
+
+    // Assign to faces — read directly from canonical edge storage.
+    // Both faces sharing an edge read the same slot → matching guaranteed.
     let mut result = instances;
     for fi in 0..nf {
-        let my_lod = face_lod[fi];
         let he_base = fi * 3;
-        let mut elods = [my_lod; 3];
-
-        for ei in 0..3usize {
-            if let Some(twin_nz) = mesh.half_edges[he_base + ei].twin {
-                let neighbor = ((twin_nz.get() - 1) as usize) / 3;
-                elods[ei] = my_lod.max(face_lod[neighbor]);
-            }
-        }
-
-        // Map half-edge order → FaceInstance edge order:
-        //   he 0 (v0→v1) = edge_c (opposite v2)
-        //   he 1 (v1→v2) = edge_a (opposite v0)
-        //   he 2 (v2→v0) = edge_b (opposite v1)
-        result[fi].edge_lods = [elods[1], elods[2], elods[0]];
+        result[fi].edge_lods = [
+            edge_lods[canonical_edge(he_base + 1)], // edge_a: v1→v2, opposite v0
+            edge_lods[canonical_edge(he_base + 2)], // edge_b: v2→v0, opposite v1
+            edge_lods[canonical_edge(he_base)],     // edge_c: v0→v1, opposite v2
+        ];
     }
 
     // Compute per-vertex LOD = max of all edges meeting at each mesh vertex.
