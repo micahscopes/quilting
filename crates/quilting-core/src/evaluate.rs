@@ -381,12 +381,22 @@ pub fn compute_instances_with_uvs(
 }
 
 
-/// Snap to the nearest power of 2 (round up).
+/// Snap to the nearest power of 2 with hysteresis bias toward lower LOD.
+/// Only snaps UP when the value exceeds 1.3x the lower power of 2.
+/// This prevents oscillation at boundaries (e.g., 15.9 vs 16.1 pixels
+/// alternating between LOD 16 and LOD 32).
 fn snap_to_power_of_2(v: u32) -> u32 {
     if v <= 1 { return 1; }
     let mut p = 1u32;
     while p < v { p *= 2; }
-    p
+    // p is now the next power of 2 >= v. p/2 is the one below.
+    // Use the lower one unless v significantly exceeds it.
+    let lower = p / 2;
+    if lower > 0 && (v as f32) < (lower as f32) * 1.3 {
+        lower
+    } else {
+        p
+    }
 }
 
 /// Compute a face normal from 3 vertex positions, returned as [f32; 3] for all 3 corners.
