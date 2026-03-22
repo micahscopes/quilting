@@ -576,6 +576,138 @@ function sampleEquirect(hdr, dx, dy, dz) {
   return [hdr.data[idx], hdr.data[idx+1], hdr.data[idx+2]];
 }
 
+// GGX importance sampling for IBL prefiltering.
+// Generates cubemap mip levels where each level = roughness-filtered env.
+function prefilterCubemap(cubemap, hdr, faceSize) {
+  const numMips = Math.floor(Math.log2(faceSize)) + 1;
+  const faces = [
+    gl.TEXTURE_CUBE_MAP_POSITIVE_X, gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Y, gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+    gl.TEXTURE_CUBE_MAP_POSITIVE_Z, gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+  ];
+
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubemap);
+
+  // Mip 0 is already uploaded (full resolution). Generate mips 1..n.
+  for (let mip = 1; mip < numMips; mip++) {
+    const mipSize = Math.max(1, faceSize >> mip);
+    const roughness = mip / (numMips - 1);
+    const numSamples = Math.max(16, 64 - mip * 8); // fewer samples for lower mips
+
+    for (let fi = 0; fi < 6; fi++) {
+      const pixels = new Float32Array(mipSize * mipSize * 4);
+      for (let y = 0; y < mipSize; y++) {
+        for (let x = 0; x < mipSize; x++) {
+          const u = (x + 0.5) / mipSize * 2.0 - 1.0;
+          const v = (y + 0.5) / mipSize * 2.0 - 1.0;
+          let dx, dy, dz;
+          switch (fi) {
+            case 0: dx= 1; dy=-v; dz=-u; break;
+            case 1: dx=-1; dy=-v; dz= u; break;
+            case 2: dx= u; dy= 1; dz= v; break;
+            case 3: dx= u; dy=-1; dz=-v; break;
+            case 4: dx= u; dy=-v; dz= 1; break;
+            case 5: dx=-u; dy=-v; dz=-1; break;
+          }
+          const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          const N = [dx/len, dy/len, dz/len];
+
+          // GGX importance sampling around N
+          let r = 0, g = 0, b = 0, totalWeight = 0;
+          const a = roughness * roughness;
+          for (let s = 0; s < numSamples; s++) {
+            // Hammersley sequence
+            const i = s;
+            let bits = i; bits = (bits << 16) | (bits >>> 16);
+            bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >>> 1);
+            bits = ((bits & 0x33333333) << 2) | ((bits & 0xCCCCCCCC) >>> 2);
+            bits = ((bits & 0x0F0F0F0F) << 4) | ((bits & 0xF0F0F0F0) >>> 4);
+            bits = ((bits & 0x00FF00FF) << 8) | ((bits & 0xFF00FF00) >>> 8);
+            const xi1 = (i + 0.5) / numSamples;
+            const xi2 = (bits >>> 0) * 2.3283064365386963e-10;
+
+            // GGX sample direction in tangent space
+            const phi = 2 * Math.PI * xi1;
+            const cosTheta = Math.sqrt((1 - xi2) / (1 + (a*a - 1) * xi2));
+            const sinTheta = Math.sqrt(1 - cosTheta * cosTheta);
+            const Hx = sinTheta * Math.cos(phi);
+            const Hy = sinTheta * Math.sin(phi);
+            const Hz = cosTheta;
+
+            // Build tangent frame from N
+            const up = Math.abs(N[1]) < 0.999 ? [0,1,0] : [1,0,0];
+            const T = [
+              up[1]*N[2] - up[2]*N[1],
+              up[2]*N[0] - up[0]*N[2],
+              up[0]*N[1] - up[1]*N[0]
+            ];
+            const tl = Math.sqrt(T[0]*T[0]+T[1]*T[1]+T[2]*T[2]);
+            T[0]/=tl; T[1]/=tl; T[2]/=tl;
+            const B = [
+              N[1]*T[2]-N[2]*T[1],
+              N[2]*T[0]-N[0]*T[2],
+              N[0]*T[1]-N[1]*T[0]
+            ];
+
+            // H in world space
+            const Hw = [
+              T[0]*Hx + B[0]*Hy + N[0]*Hz,
+              T[1]*Hx + B[1]*Hy + N[1]*Hz,
+              T[2]*Hx + B[2]*Hy + N[2]*Hz
+            ];
+
+            // L = reflect(-V, H) where V = N (view = normal for prefiltering)
+            const VdotH = N[0]*Hw[0] + N[1]*Hw[1] + N[2]*Hw[2];
+            const L = [
+              2*VdotH*Hw[0] - N[0],
+              2*VdotH*Hw[1] - N[1],
+              2*VdotH*Hw[2] - N[2]
+            ];
+            const NdotL = N[0]*L[0] + N[1]*L[1] + N[2]*L[2];
+            if (NdotL > 0) {
+              const [sr, sg, sb] = sampleEquirect(hdr, L[0], L[1], L[2]);
+              r += sr * NdotL; g += sg * NdotL; b += sb * NdotL;
+              totalWeight += NdotL;
+            }
+          }
+          if (totalWeight > 0) { r /= totalWeight; g /= totalWeight; b /= totalWeight; }
+          const idx = (y * mipSize + x) * 4;
+          pixels[idx] = r; pixels[idx+1] = g; pixels[idx+2] = b; pixels[idx+3] = 1;
+        }
+      }
+      // Upload this mip level
+      if (hdrCubemapSupported) {
+        const f16buf = new ArrayBuffer(mipSize * mipSize * 4 * 2);
+        const f16view = new DataView(f16buf);
+        const f32tmp = new Float32Array(1);
+        const u32tmp = new Uint32Array(f32tmp.buffer);
+        for (let j = 0; j < mipSize * mipSize * 4; j++) {
+          f32tmp[0] = pixels[j];
+          const bits = u32tmp[0];
+          const sign = (bits >>> 16) & 0x8000;
+          const exp = ((bits >>> 23) & 0xff) - 127 + 15;
+          const man = bits & 0x7fffff;
+          let h; if (exp <= 0) h = sign; else if (exp >= 31) h = sign | 0x7c00;
+          else h = sign | (exp << 10) | (man >>> 13);
+          f16view.setUint16(j * 2, h, true);
+        }
+        gl.texImage2D(faces[fi], mip, gl.RGBA16F, mipSize, mipSize, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(f16buf));
+      } else {
+        const u8 = new Uint8Array(mipSize * mipSize * 4);
+        for (let j = 0; j < mipSize * mipSize; j++) {
+          for (let ch = 0; ch < 3; ch++) {
+            const val = pixels[j*4+ch];
+            u8[j*4+ch] = Math.min(Math.pow(val/(val+1), 1/2.2) * 255, 255) | 0;
+          }
+          u8[j*4+3] = 255;
+        }
+        gl.texImage2D(faces[fi], mip, gl.RGBA, mipSize, mipSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, u8);
+      }
+    }
+  }
+  console.log(`Prefiltered cubemap: ${numMips} mip levels`);
+}
+
 // Detect RGBA16F mipmap support
 const hdrCubemapSupported = !!gl.getExtension('EXT_color_buffer_float');
 if (hdrCubemapSupported) console.log('HDR cubemaps: RGBA16F supported');
@@ -641,10 +773,14 @@ function hdrToCubemap(hdr, faceSize) {
       gl.texImage2D(faces[fi], 0, gl.RGBA, faceSize, faceSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, u8);
     }
   }
-  // RGBA16F mipmap generation requires EXT_color_buffer_float
-  gl.getExtension('EXT_color_buffer_float');
-  gl.getExtension('OES_texture_float_linear');
-  gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
+  // GGX importance-sampled prefiltering instead of generateMipmap.
+  // Each mip level represents a different roughness for PBR specular IBL.
+  if (hdr) {
+    prefilterCubemap(cubemap, hdr, faceSize);
+  } else {
+    // Procedural cubemap — box-filtered mipmaps are fine
+    gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
+  }
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
