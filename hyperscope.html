@@ -1217,6 +1217,10 @@ function render() {
           hasNormalTex: !!nmTex, hasEmissiveTex: !!emTex, hasOcclusionTex: !!aoTex,
           occlusionStrength: mat.occlusionStrength, alphaCutoff: mat.alphaCutoff,
           alphaMode: mat.alphaMode, unlit: mat.unlit,
+          sheenColor: mat.sheenColor, sheenRoughness: mat.sheenRoughness,
+          specularColor: mat.specularColor,
+          normalUvScale: mat.normalUvScale, normalUvOffset: mat.normalUvOffset,
+          normalUvRotation: mat.normalUvRotation,
         });
 
         // Face culling disabled globally — Möbius transforms can flip face
