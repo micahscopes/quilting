@@ -262,12 +262,12 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
         let f_sheen = f_sheen_key + f_sheen_fill + f_sheen_env;
 
-        // Energy conservation: attenuate base layer by sheen.
-        // Analytical approximation of the Charlie directional albedo
-        // (the LUT generation has issues, so use an analytical fit).
+        // Energy conservation: the sheen layer absorbs energy from the base.
+        // Per the Khronos spec: scaling = 1 - max(sheenColor) * E_sheen.
+        // E_sheen for Charlie distribution is roughly 0.4-0.8 depending on
+        // roughness and view angle. Use a simple strong estimate.
         let max_sheen = max(sheen_col.x, max(sheen_col.y, sheen_col.z));
-        let e_sheen_approx = mix(0.2, 0.8, sheen_r) * (1.0 - pow(1.0 - n_dot_v, 3.0));
-        let albedo_sheen_scaling = 1.0 - max_sheen * e_sheen_approx;
+        let albedo_sheen_scaling = 1.0 - max_sheen * 0.6;
 
         color = f_sheen + color * albedo_sheen_scaling;
     }
