@@ -48,7 +48,6 @@ var occlusion_tex: texture_2d<f32>;
 var occlusion_sampler: sampler;
 
 struct FragInput {
-    @builtin(front_facing) front_facing: bool,
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
     @location(2) tex_uv: vec2<f32>,
@@ -62,10 +61,8 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     var n = normalize(in.normal_vs);
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera at +Z
 
-    // Two-sided lighting: use triangle winding (front_facing) for stable
-    // normal orientation. The dot-product method is unstable when normals
-    // are nearly perpendicular to the view (oscillates across zero).
-    if !in.front_facing {
+    // Two-sided lighting: flip normal if it points away from the camera.
+    if dot(n, view_dir) < 0.0 {
         n = -n;
     }
 
