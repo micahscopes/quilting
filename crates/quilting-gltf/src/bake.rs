@@ -5,7 +5,7 @@
 
 use crate::animation::{Animation, AnimationChannel, AnimationProperty, Interpolation, Skin};
 use crate::mesh::Primitive;
-use crate::scene::{Node, Transform};
+use crate::scene::{Node, Scene, Transform, compute_world_transforms};
 use quilting_spacetime::trajectory::{HermiteSegment, VertexTrajectory};
 use quilting_spacetime::HyperMesh;
 
@@ -259,41 +259,52 @@ fn animation_time_range(animation: &Animation) -> (f64, f64) {
 }
 
 /// Evaluate joint transforms at time t.
-/// Returns a world-space 4x4 matrix for each joint.
+/// Returns a WORLD-space 4x4 matrix for each joint by walking the full
+/// node hierarchy with animated local transforms applied.
 fn evaluate_joint_transforms(
     animation: &Animation,
     nodes: &[Node],
     joints: &[usize],
     t: f64,
 ) -> Vec<[f64; 16]> {
-    joints.iter().map(|&joint_node| {
-        // Start with the node's rest-pose TRS
-        let (mut translation, mut rotation, mut scale) = match &nodes[joint_node].transform {
+    // Build animated local transforms for all nodes
+    let mut animated_nodes = nodes.to_vec();
+    for ch in &animation.channels {
+        let ni = ch.target_node;
+        if ni >= animated_nodes.len() { continue; }
+        // Get the current TRS (or decompose from matrix)
+        let (mut translation, mut rotation, mut scale) = match &animated_nodes[ni].transform {
             Transform::Trs { translation, rotation, scale } => (*translation, *rotation, *scale),
             Transform::Matrix(_) => ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
         };
-
-        for ch in &animation.channels {
-            if ch.target_node != joint_node { continue; }
-            match ch.property {
-                AnimationProperty::Translation => {
-                    let v = interpolate_channel(ch, 3, t);
-                    translation = [v[0] as f64, v[1] as f64, v[2] as f64];
-                }
-                AnimationProperty::Rotation => {
-                    let v = interpolate_channel(ch, 4, t);
-                    rotation = [v[0] as f64, v[1] as f64, v[2] as f64, v[3] as f64];
-                }
-                AnimationProperty::Scale => {
-                    let v = interpolate_channel(ch, 3, t);
-                    scale = [v[0] as f64, v[1] as f64, v[2] as f64];
-                }
-                _ => {}
+        match ch.property {
+            AnimationProperty::Translation => {
+                let v = interpolate_channel(ch, 3, t);
+                translation = [v[0] as f64, v[1] as f64, v[2] as f64];
             }
+            AnimationProperty::Rotation => {
+                let v = interpolate_channel(ch, 4, t);
+                rotation = [v[0] as f64, v[1] as f64, v[2] as f64, v[3] as f64];
+            }
+            AnimationProperty::Scale => {
+                let v = interpolate_channel(ch, 3, t);
+                scale = [v[0] as f64, v[1] as f64, v[2] as f64];
+            }
+            _ => continue,
         }
+        animated_nodes[ni].transform = Transform::Trs { translation, rotation, scale };
+    }
 
-        trs_to_matrix(translation, rotation, scale)
-    }).collect()
+    // Compute world transforms by walking the parent hierarchy.
+    // We need to find which scene contains these joints — use all root nodes.
+    let root_nodes: Vec<usize> = (0..nodes.len())
+        .filter(|&i| !nodes.iter().any(|n| n.children.contains(&i)))
+        .collect();
+    let scene = Scene { name: None, root_nodes };
+    let world = compute_world_transforms(&animated_nodes, &scene);
+
+    // Return world-space matrix for each joint
+    joints.iter().map(|&ji| world[ji]).collect()
 }
 
 /// Interpolate an animation channel at time t.
@@ -379,24 +390,6 @@ fn slerp(a: &[f32], b: &[f32], t: f32) -> Vec<f32> {
     a.iter().zip(b.iter())
         .map(|(&va, &vb)| wa * va + wb * vb)
         .collect()
-}
-
-/// Build a 4x4 column-major matrix from TRS.
-fn trs_to_matrix(t: [f64; 3], r: [f64; 4], s: [f64; 3]) -> [f64; 16] {
-    // r = [x, y, z, w] quaternion
-    let (x, y, z, w) = (r[0], r[1], r[2], r[3]);
-    let x2 = x + x; let y2 = y + y; let z2 = z + z;
-    let xx = x * x2; let xy = x * y2; let xz = x * z2;
-    let yy = y * y2; let yz = y * z2; let zz = z * z2;
-    let wx = w * x2; let wy = w * y2; let wz = w * z2;
-
-    // Column-major
-    [
-        s[0] * (1.0 - (yy + zz)), s[0] * (xy + wz),         s[0] * (xz - wy),         0.0,
-        s[1] * (xy - wz),         s[1] * (1.0 - (xx + zz)), s[1] * (yz + wx),         0.0,
-        s[2] * (xz + wy),         s[2] * (yz - wx),         s[2] * (1.0 - (xx + yy)), 0.0,
-        t[0],                      t[1],                      t[2],                      1.0,
-    ]
 }
 
 /// Multiply two column-major 4x4 matrices.
