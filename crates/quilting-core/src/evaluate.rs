@@ -361,9 +361,7 @@ pub fn compute_instances_with_uvs(
         ];
     }
 
-    // Compute post-transform smooth normals from the transformed positions.
-    // For each vertex, average the normals of all adjacent faces (area-weighted).
-    // This gives smooth shading that's correct for the Möbius-deformed surface.
+    // Post-transform smooth normals from the Möbius-deformed positions.
     compute_smooth_normals_from_positions(&mut result, faces, &transformed);
 
     result

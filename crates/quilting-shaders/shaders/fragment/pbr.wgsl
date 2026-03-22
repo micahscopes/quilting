@@ -111,19 +111,22 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
 
     // --- Normal mapping (vertex-computed tangent frame) ---
     if pbr.has_normal_tex > 0.5 {
-        // Gram-Schmidt orthonormalize TBN relative to the smooth normal.
-        // Under Möbius, the tangent/bitangent from edge vectors may not
-        // be orthogonal to the post-transform smooth normal.
-        var t = normalize(in.tangent_vs);
-        t = normalize(t - n * dot(t, n));  // project out n component
-        let b = cross(n, t);               // derive bitangent from n × t
-        let tbn = mat3x3<f32>(t, b, n);
+        let raw_t = in.tangent_vs;
+        // Guard against degenerate tangents (NaN/zero from stretched Möbius faces)
+        if dot(raw_t, raw_t) > 1e-6 {
+            var t = normalize(raw_t);
+            t = normalize(t - n * dot(t, n));  // Gram-Schmidt
+            if dot(t, t) > 0.5 {               // guard post-projection
+                let b = cross(n, t);
+                let tbn = mat3x3<f32>(t, b, n);
 
-        let nm = textureSample(normal_tex, normal_sampler, in.tex_uv).xyz;
-        var tangent_n = nm * 2.0 - vec3<f32>(1.0);
-        tangent_n.x = tangent_n.x * pbr.normal_scale;
-        tangent_n.y = tangent_n.y * pbr.normal_scale;
-        n = normalize(tbn * tangent_n);
+                let nm = textureSample(normal_tex, normal_sampler, in.tex_uv).xyz;
+                var tangent_n = nm * 2.0 - vec3<f32>(1.0);
+                tangent_n.x = tangent_n.x * pbr.normal_scale;
+                tangent_n.y = tangent_n.y * pbr.normal_scale;
+                n = normalize(tbn * tangent_n);
+            }
+        }
     }
 
     // --- Lighting ---
