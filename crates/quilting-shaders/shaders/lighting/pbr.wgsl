@@ -84,10 +84,11 @@ struct PBRInput {
     base_color: vec3<f32>,
     metallic: f32,
     roughness: f32,
-    normal: vec3<f32>,       // world-space
-    view_dir: vec3<f32>,     // toward camera
-    light_dir: vec3<f32>,    // toward light
+    normal: vec3<f32>,
+    view_dir: vec3<f32>,
+    light_dir: vec3<f32>,
     light_color: vec3<f32>,
+    f0_override: vec3<f32>,  // custom F0 (from KHR_materials_specular)
 }
 
 struct PBROutput {
@@ -106,8 +107,8 @@ fn pbr_direct(input: PBRInput) -> PBROutput {
     let n_dot_h = max(dot(n, h), 0.0);
     let v_dot_h = max(dot(v, h), 0.0);
 
-    // Dielectric F0 = 0.04, metallic F0 = base_color
-    let f0 = mix(vec3<f32>(0.04), input.base_color, input.metallic);
+    // Use f0_override (already incorporates specularColorFactor)
+    let f0 = input.f0_override;
 
     let D = distribution_ggx(n_dot_h, input.roughness);
     let G = geometry_smith(n_dot_v, n_dot_l, input.roughness);
@@ -130,11 +131,12 @@ fn pbr_ambient(
     roughness: f32,
     normal: vec3<f32>,
     view_dir: vec3<f32>,
-    irradiance: vec3<f32>,     // diffuse irradiance (from cubemap or SH)
-    env_color: vec3<f32>,      // specular environment (from prefiltered cubemap or gradient)
+    irradiance: vec3<f32>,
+    env_color: vec3<f32>,
+    f0_in: vec3<f32>,          // custom F0 (from KHR_materials_specular)
 ) -> vec3<f32> {
     let n_dot_v = max(dot(normal, view_dir), 0.001);
-    let f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let f0 = f0_in;
 
     let F = fresnel_schlick_roughness(n_dot_v, f0, roughness);
     let k_d = (1.0 - F) * (1.0 - metallic);

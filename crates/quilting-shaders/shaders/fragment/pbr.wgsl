@@ -196,11 +196,11 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     let light_color = vec3<f32>(3.0, 2.9, 2.7);
     let n_dot_v = max(dot(n, view_dir), 0.001);
 
-    let input = PBRInput(base.rgb, metallic, roughness, n, view_dir, light_dir, light_color);
+    let input = PBRInput(base.rgb, metallic, roughness, n, view_dir, light_dir, light_color, f0_base);
     let direct = pbr_direct(input);
 
     let fill_input = PBRInput(base.rgb, metallic, roughness, n, view_dir,
-        normalize(vec3<f32>(-0.4, -0.3, 0.5)), vec3<f32>(0.3, 0.35, 0.5));
+        normalize(vec3<f32>(-0.4, -0.3, 0.5)), vec3<f32>(0.3, 0.35, 0.5), f0_base);
     let fill = pbr_direct(fill_input);
 
     // --- IBL ambient ---
@@ -212,23 +212,16 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     let lod = roughness * max(pbr.env_mip_count, 1.0);
     let env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb;
 
-    var ambient = pbr_ambient(base.rgb, metallic, roughness, n, view_dir, irradiance, env_color);
+    var ambient = pbr_ambient(base.rgb, metallic, roughness, n, view_dir, irradiance, env_color, f0_base);
 
     if pbr.has_occlusion_tex > 0.5 {
         let ao = textureSample(occlusion_tex, occlusion_sampler, in.tex_uv).r;
         ambient = ambient * mix(1.0, ao, pbr.occlusion_strength);
     }
 
-    // Scale specular by specular weight (reduces env reflections for fabric)
-    var base_color_result = direct.color * specular_weight + fill.color * specular_weight + ambient * specular_weight;
-    // Keep diffuse at full strength
-    let k_d = (1.0 - metallic);
-    let diffuse_direct = k_d * base.rgb / 3.14159 * max(dot(n, light_dir), 0.0) * light_color;
-    let diffuse_fill = k_d * base.rgb / 3.14159 * max(dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.5))), 0.0) * vec3<f32>(0.3, 0.35, 0.5);
-    let diffuse_ambient = k_d * base.rgb * irradiance;
-    let total_diffuse = diffuse_direct + diffuse_fill + diffuse_ambient;
-    // Blend: full diffuse + specular_weight * specular
-    var color = total_diffuse + (direct.color + fill.color + ambient - total_diffuse) * specular_weight;
+    // F0 already incorporates specularColorFactor, so direct/fill/ambient
+    // naturally have the correct specular contribution (zero for fabric).
+    var color = direct.color + fill.color + ambient;
 
     // --- KHR_materials_sheen (velvet/fabric) ---
     // Charlie distribution, composited with energy conservation:
