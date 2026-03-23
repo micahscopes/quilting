@@ -246,7 +246,7 @@ pub fn evaluate_skinned_at_time(
 
 // --- Helpers ---
 
-fn animation_time_range(animation: &Animation) -> (f64, f64) {
+pub(crate) fn animation_time_range(animation: &Animation) -> (f64, f64) {
     let mut t_min = f64::INFINITY;
     let mut t_max = f64::NEG_INFINITY;
     for ch in &animation.channels {
@@ -261,7 +261,7 @@ fn animation_time_range(animation: &Animation) -> (f64, f64) {
 /// Evaluate joint transforms at time t.
 /// Returns a WORLD-space 4x4 matrix for each joint by walking the full
 /// node hierarchy with animated local transforms applied.
-fn evaluate_joint_transforms(
+pub(crate) fn evaluate_joint_transforms(
     animation: &Animation,
     nodes: &[Node],
     joints: &[usize],
@@ -308,7 +308,7 @@ fn evaluate_joint_transforms(
 }
 
 /// Interpolate an animation channel at time t.
-fn interpolate_channel(ch: &AnimationChannel, stride: usize, t: f64) -> Vec<f32> {
+pub(crate) fn interpolate_channel(ch: &AnimationChannel, stride: usize, t: f64) -> Vec<f32> {
     if ch.times.is_empty() {
         return vec![0.0; stride];
     }
@@ -364,13 +364,13 @@ fn interpolate_channel(ch: &AnimationChannel, stride: usize, t: f64) -> Vec<f32>
     }
 }
 
-fn evaluate_morph_weights(ch: &AnimationChannel, num_targets: usize, t: f64) -> Vec<f64> {
+pub(crate) fn evaluate_morph_weights(ch: &AnimationChannel, num_targets: usize, t: f64) -> Vec<f64> {
     let values = interpolate_channel(ch, num_targets, t);
     values.iter().map(|&v| v as f64).collect()
 }
 
 /// Simple quaternion slerp.
-fn slerp(a: &[f32], b: &[f32], t: f32) -> Vec<f32> {
+pub(crate) fn slerp(a: &[f32], b: &[f32], t: f32) -> Vec<f32> {
     let mut dot: f32 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
     let mut b = b.to_vec();
     if dot < 0.0 {
@@ -393,7 +393,7 @@ fn slerp(a: &[f32], b: &[f32], t: f32) -> Vec<f32> {
 }
 
 /// Multiply two column-major 4x4 matrices.
-fn mat4_mul(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
+pub(crate) fn mat4_mul(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
     let mut out = [0.0f64; 16];
     for c in 0..4 {
         for r in 0..4 {

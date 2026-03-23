@@ -31,6 +31,22 @@ struct PrebakeInfo {
     positions: Vec<f32>, // num_frames * num_vertices * 3
 }
 
+/// Stored glTF data for animation switching without re-parsing.
+struct StoredGltfData {
+    animations: Vec<quilting_gltf::animation::Animation>,
+    skins: Vec<quilting_gltf::animation::Skin>,
+    nodes: Vec<quilting_gltf::scene::Node>,
+    combined: quilting_gltf::mesh::Primitive,
+    face_material_indices: Vec<Option<usize>>,
+    primary_skin_idx: Option<usize>,
+    active_animation: usize,
+    /// Per-frame evaluator for GPU skinning (replaces prebake).
+    evaluator: Option<quilting_gltf::evaluator::AnimationEvaluator>,
+    /// Normalization: center and 1/extent for rest-pose bounding box.
+    norm_center: [f64; 3],
+    norm_scale: f64,
+}
+
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
@@ -857,6 +873,8 @@ thread_local! {
     /// Per-face material indices for the current loaded model.
     /// Index i -> material index for HyperMesh face i (None = default material).
     static FACE_MATERIALS: RefCell<Vec<Option<usize>>> = RefCell::new(Vec::new());
+    /// Stored glTF data for animation switching without re-parsing.
+    static GLTF_DATA: RefCell<Option<StoredGltfData>> = RefCell::new(None);
 }
 
 #[derive(serde::Serialize)]
@@ -928,6 +946,428 @@ pub fn set_face_materials(materials: &[i32]) {
             if m >= 0 { Some(m as usize) } else { None }
         }).collect();
     });
+}
+
+/// List available animations for the current glTF model.
+/// Returns a JS array of { index, name, duration, t_min, t_max }.
+#[wasm_bindgen]
+pub fn list_animations() -> JsValue {
+    GLTF_DATA.with(|gd| {
+        let data = gd.borrow();
+        let data = match data.as_ref() {
+            Some(d) => d,
+            None => return JsValue::NULL,
+        };
+        let info = quilting_gltf::evaluator::list_animations(&data.animations);
+        let arr = js_sys::Array::new();
+        for i in &info {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"index".into(), &JsValue::from_f64(i.index as f64)).unwrap();
+            let fallback = format!("Animation {}", i.index);
+            let name = i.name.as_deref().unwrap_or(&fallback);
+            js_sys::Reflect::set(&obj, &"name".into(), &JsValue::from_str(name)).unwrap();
+            js_sys::Reflect::set(&obj, &"duration".into(), &JsValue::from_f64(i.duration)).unwrap();
+            js_sys::Reflect::set(&obj, &"t_min".into(), &JsValue::from_f64(i.t_min)).unwrap();
+            js_sys::Reflect::set(&obj, &"t_max".into(), &JsValue::from_f64(i.t_max)).unwrap();
+            arr.push(&obj);
+        }
+        arr.into()
+    })
+}
+
+/// Switch to a different animation by index. Rebakes the HyperMesh.
+/// Returns a JS object with { time_min, time_max, num_vertices, num_faces }
+/// or null on failure.
+#[wasm_bindgen]
+pub fn set_active_animation(index: u32) -> JsValue {
+    let index = index as usize;
+
+    GLTF_DATA.with(|gd| {
+        let mut data = gd.borrow_mut();
+        let data = match data.as_mut() {
+            Some(d) => d,
+            None => return JsValue::NULL,
+        };
+
+        if index >= data.animations.len() {
+            web_sys::console::warn_1(&format!(
+                "set_active_animation: index {} out of range ({})", index, data.animations.len()
+            ).into());
+            return JsValue::NULL;
+        }
+
+        data.active_animation = index;
+
+        // Rebuild evaluator for the new animation
+        if let Some(si) = data.primary_skin_idx {
+            if si < data.skins.len() {
+                let num_morph = data.combined.morph_targets.len();
+                data.evaluator = Some(quilting_gltf::evaluator::AnimationEvaluator::new(
+                    data.animations[index].clone(),
+                    Some(data.skins[si].clone()),
+                    data.nodes.clone(),
+                    num_morph,
+                ));
+            }
+        }
+
+        let anim = &data.animations[index];
+        let combined = &data.combined;
+        let num_samples = 32usize;
+
+        let has_morph = anim.channels.iter()
+            .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights);
+
+        let hyper = if let Some(si) = data.primary_skin_idx {
+            if si < data.skins.len() {
+                quilting_gltf::bake::bake_skinned_animation(
+                    combined, &data.skins[si], anim, &data.nodes, num_samples,
+                )
+            } else {
+                build_static_hypermesh(combined)
+            }
+        } else if has_morph && !combined.morph_targets.is_empty() {
+            quilting_gltf::bake::bake_morph_animation(
+                combined, anim, &combined.morph_targets, num_samples,
+            )
+        } else {
+            build_static_hypermesh(combined)
+        };
+
+        let mut hyper = normalize_hypermesh(hyper);
+
+        // Transfer UVs and normals from stored combined primitive
+        if let Some(ref uvs) = combined.uvs {
+            hyper.vertex_uvs = uvs.iter().map(|uv| [uv[0] as f32, uv[1] as f32]).collect();
+        }
+        if let Some(ref norms) = combined.normals {
+            hyper.vertex_normals = norms.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect();
+        }
+
+        let (time_min, time_max) = hyper.time_range();
+        let n_verts = hyper.num_vertices;
+        let n_faces = hyper.faces.len();
+
+        HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));
+        FACE_MATERIALS.with(|fm| *fm.borrow_mut() = data.face_material_indices.clone());
+        SENT_TESS.with(|s| s.borrow_mut().clear());
+        SLICE_CACHE.with(|c| {
+            if let Ok(mut cache) = c.try_borrow_mut() {
+                *cache = None;
+            }
+        });
+
+        web_sys::console::log_1(&format!(
+            "set_active_animation: switched to animation {} — {} verts, {} faces, time [{:.3}, {:.3}]",
+            index, n_verts, n_faces, time_min, time_max
+        ).into());
+
+        let result = js_sys::Object::new();
+        js_sys::Reflect::set(&result, &"time_min".into(), &JsValue::from_f64(time_min)).unwrap();
+        js_sys::Reflect::set(&result, &"time_max".into(), &JsValue::from_f64(time_max)).unwrap();
+        js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(n_verts as f64)).unwrap();
+        js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(n_faces as f64)).unwrap();
+        result.into()
+    })
+}
+
+/// Evaluate skeletal animation at time t and return joint matrices as a flat f32 array.
+/// Returns null if no evaluator is available.
+/// The matrices are skin matrices (joint_world × inverse_bind), column-major, ready for UBO upload.
+#[wasm_bindgen]
+pub fn evaluate_animation_frame(t: f64) -> JsValue {
+    GLTF_DATA.with(|gd| {
+        let data = gd.borrow();
+        let data = match data.as_ref() {
+            Some(d) => d,
+            None => return JsValue::NULL,
+        };
+        let evaluator = match data.evaluator.as_ref() {
+            Some(e) => e,
+            None => return JsValue::NULL,
+        };
+        let pose = evaluator.evaluate(t);
+        if pose.joint_matrices.is_empty() {
+            return JsValue::NULL;
+        }
+        // Sandwich each joint matrix with normalization:
+        //   norm_M = norm * M * unnorm
+        // where norm = S*T(-c), unnorm = T(c)*S^{-1}
+        // This lets the shader work in normalized [-1,1] space.
+        let c = data.norm_center;
+        let s = data.norm_scale;
+        let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
+        // Build column-major 4x4 matrices for norm and unnorm
+        let sf = s as f32;
+        let sif = si as f32;
+        let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
+        // norm = S * T(-c): first translate by -c, then scale by s
+        // col-major: [[s,0,0,0],[0,s,0,0],[0,0,s,0],[-cx*s,-cy*s,-cz*s,1]]
+        let norm: [f32; 16] = [
+            sf, 0.0, 0.0, 0.0,
+            0.0, sf, 0.0, 0.0,
+            0.0, 0.0, sf, 0.0,
+            -cx*sf, -cy*sf, -cz*sf, 1.0,
+        ];
+        // unnorm = T(c) * S^{-1}: first scale by 1/s, then translate by +c
+        // col-major: [[1/s,0,0,0],[0,1/s,0,0],[0,0,1/s,0],[cx,cy,cz,1]]
+        let unnorm: [f32; 16] = [
+            sif, 0.0, 0.0, 0.0,
+            0.0, sif, 0.0, 0.0,
+            0.0, 0.0, sif, 0.0,
+            cx, cy, cz, 1.0,
+        ];
+
+        fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+            let mut out = [0.0f32; 16];
+            for col in 0..4 {
+                for row in 0..4 {
+                    out[col * 4 + row] = a[row] * b[col * 4]
+                        + a[4 + row] * b[col * 4 + 1]
+                        + a[8 + row] * b[col * 4 + 2]
+                        + a[12 + row] * b[col * 4 + 3];
+                }
+            }
+            out
+        }
+
+        let num_joints = pose.joint_matrices.len() / 16;
+        let mut result_mats = Vec::with_capacity(pose.joint_matrices.len());
+        for ji in 0..num_joints {
+            let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
+            // norm_M = norm * M * unnorm
+            let mu = mat4_mul_f32(&m, &unnorm);       // M * unnorm
+            let nmu = mat4_mul_f32(&norm, &mu);        // norm * (M * unnorm)
+            result_mats.extend_from_slice(&nmu);
+        }
+
+        let arr = js_sys::Float32Array::new_with_length(result_mats.len() as u32);
+        arr.copy_from(&result_mats);
+        arr.into()
+    })
+}
+
+/// Get per-vertex skinning data (joint indices + weights) for the current model.
+/// Returns a JS object { joint_indices: Float32Array, joint_weights: Float32Array, num_vertices: number }
+/// or null if no skinned model is loaded.
+#[wasm_bindgen]
+pub fn get_skinning_data() -> JsValue {
+    GLTF_DATA.with(|gd| {
+        let data = gd.borrow();
+        let data = match data.as_ref() {
+            Some(d) => d,
+            None => return JsValue::NULL,
+        };
+        let ji = match data.combined.joint_indices.as_ref() {
+            Some(ji) => ji,
+            None => return JsValue::NULL,
+        };
+        let jw = match data.combined.joint_weights.as_ref() {
+            Some(jw) => jw,
+            None => return JsValue::NULL,
+        };
+        let nv = ji.len();
+
+        // Flatten joint indices to f32 (4 per vertex)
+        let mut indices_f32 = Vec::with_capacity(nv * 4);
+        for idx in ji {
+            indices_f32.push(idx[0] as f32);
+            indices_f32.push(idx[1] as f32);
+            indices_f32.push(idx[2] as f32);
+            indices_f32.push(idx[3] as f32);
+        }
+
+        // Flatten joint weights (4 per vertex)
+        let mut weights_f32 = Vec::with_capacity(nv * 4);
+        for w in jw {
+            weights_f32.push(w[0]);
+            weights_f32.push(w[1]);
+            weights_f32.push(w[2]);
+            weights_f32.push(w[3]);
+        }
+
+        let ji_arr = js_sys::Float32Array::new_with_length(indices_f32.len() as u32);
+        ji_arr.copy_from(&indices_f32);
+        let jw_arr = js_sys::Float32Array::new_with_length(weights_f32.len() as u32);
+        jw_arr.copy_from(&weights_f32);
+
+        let result = js_sys::Object::new();
+        js_sys::Reflect::set(&result, &"joint_indices".into(), &ji_arr).unwrap();
+        js_sys::Reflect::set(&result, &"joint_weights".into(), &jw_arr).unwrap();
+        js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(nv as f64)).unwrap();
+        // Include evaluator metadata
+        if let Some(ref eval) = data.evaluator {
+            let (t_min, t_max) = eval.time_range();
+            js_sys::Reflect::set(&result, &"num_joints".into(), &JsValue::from_f64(eval.num_joints() as f64)).unwrap();
+            js_sys::Reflect::set(&result, &"t_min".into(), &JsValue::from_f64(t_min)).unwrap();
+            js_sys::Reflect::set(&result, &"t_max".into(), &JsValue::from_f64(t_max)).unwrap();
+            js_sys::Reflect::set(&result, &"duration".into(), &JsValue::from_f64(eval.duration())).unwrap();
+        }
+        result.into()
+    })
+}
+
+/// Build rest-pose instance data for GPU skinning (static, uploaded once).
+/// LODs are computed from skinned positions at time `lod_time` for accuracy.
+/// Returns a Float32Array with 40 floats per face (compact stride).
+/// Vertex indices are packed in p0.x/p1.x/p2.x for skinning texture lookup.
+/// Returns null if no skinned model is loaded.
+#[wasm_bindgen]
+pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
+    GLTF_DATA.with(|gd| {
+        let data = gd.borrow();
+        let data = match data.as_ref() {
+            Some(d) if d.evaluator.is_some() => d,
+            _ => return JsValue::NULL,
+        };
+
+        let combined = &data.combined;
+        let nf = combined.triangles.len();
+        let has_uvs = combined.uvs.is_some();
+
+        const COMPACT_STRIDE: usize = 40;
+        let mut instances = vec![0.0f32; nf * COMPACT_STRIDE];
+
+        // Compute smooth normals from rest pose
+        let n_verts = combined.positions.len();
+        let mut vn = vec![[0.0f64; 3]; n_verts];
+        for face in &combined.triangles {
+            let v0 = combined.positions[face[0]];
+            let v1 = combined.positions[face[1]];
+            let v2 = combined.positions[face[2]];
+            let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
+            let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+            let fn_ = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+            for &vi in face { vn[vi][0] += fn_[0]; vn[vi][1] += fn_[1]; vn[vi][2] += fn_[2]; }
+        }
+        // Normalize
+        for n in &mut vn {
+            let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+            if len > 1e-10 { n[0] /= len; n[1] /= len; n[2] /= len; }
+        }
+        // Use glTF normals if available
+        let normals = combined.normals.as_ref();
+
+        // Evaluate skinned positions at lod_time for LOD computation
+        let lod_positions = if let Some(ref eval) = data.evaluator {
+            if let Some(si) = data.primary_skin_idx {
+                if si < data.skins.len() {
+                    Some(quilting_gltf::bake::evaluate_skinned_at_time(
+                        combined, &data.skins[si], &data.animations[data.active_animation],
+                        &data.nodes, lod_time,
+                    ))
+                } else { None }
+            } else { None }
+        } else { None };
+
+        // Normalize positions to [-1,1] — renderer expects this for zoom/Möbius/camera
+        // Use skinned positions for bounding box if available (better fit)
+        let ref_positions = lod_positions.as_ref().map_or(&combined.positions as &[_], |lp| lp.as_slice());
+        let mut bb_min = [f64::INFINITY; 3];
+        let mut bb_max = [f64::NEG_INFINITY; 3];
+        for pos in ref_positions {
+            for i in 0..3 { bb_min[i] = bb_min[i].min(pos[i]); bb_max[i] = bb_max[i].max(pos[i]); }
+        }
+        let center = [(bb_min[0]+bb_max[0])*0.5, (bb_min[1]+bb_max[1])*0.5, (bb_min[2]+bb_max[2])*0.5];
+        let extent = ((bb_max[0]-bb_min[0]).max(bb_max[1]-bb_min[1]).max(bb_max[2]-bb_min[2])) * 0.5;
+        let norm_scale = if extent > 1e-10 { 1.0 / extent } else { 1.0 };
+
+        for (fi, face) in combined.triangles.iter().enumerate() {
+            let b = fi * COMPACT_STRIDE;
+            // p0/p1/p2: vertex_index in .x, normalized rest-pose xyz in .yzw
+            for (vi, &vert_idx) in face.iter().enumerate() {
+                let v = combined.positions[vert_idx];
+                let v = [(v[0]-center[0])*norm_scale, (v[1]-center[1])*norm_scale, (v[2]-center[2])*norm_scale];
+                let off = b + vi * 4;
+                instances[off]   = vert_idx as f32; // vertex index for skinning lookup
+                instances[off+1] = v[0] as f32;
+                instances[off+2] = v[1] as f32;
+                instances[off+3] = v[2] as f32;
+            }
+            // Compute LODs from skinned edge lengths at lod_time
+            let lod_pos = lod_positions.as_ref().map_or(&combined.positions as &[_], |lp| lp.as_slice());
+            let p0 = lod_pos[face[0]];
+            let p1 = lod_pos[face[1]];
+            let p2 = lod_pos[face[2]];
+            let edge_len = |a: [f64;3], b: [f64;3]| -> f64 {
+                ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt()
+            };
+            // Edge 0 = v1-v2 (opposite v0), Edge 1 = v0-v2, Edge 2 = v0-v1
+            let e0 = edge_len(p1, p2) * norm_scale;
+            let e1 = edge_len(p0, p2) * norm_scale;
+            let e2 = edge_len(p0, p1) * norm_scale;
+            let density = 20.0; // base density matching tess-density slider default
+            let snap = |v: f64| -> u32 {
+                quilting_core::evaluate::snap_to_power_of_2((v * density) as u32).max(2).min(512)
+            };
+            let lod0 = snap(e0); let lod1 = snap(e1); let lod2 = snap(e2);
+            instances[b + 12] = lod0 as f32;
+            instances[b + 13] = lod1 as f32;
+            instances[b + 14] = lod2 as f32;
+            // UVs at offset 20
+            if has_uvs {
+                let uvs = combined.uvs.as_ref().unwrap();
+                instances[b+20] = uvs[face[0]][0] as f32; instances[b+21] = uvs[face[0]][1] as f32;
+                instances[b+22] = uvs[face[1]][0] as f32; instances[b+23] = uvs[face[1]][1] as f32;
+                instances[b+24] = uvs[face[2]][0] as f32; instances[b+25] = uvs[face[2]][1] as f32;
+            }
+            // Normals at offset 28
+            for vi in 0..3 {
+                let n = if let Some(norms) = normals {
+                    norms[face[vi]]
+                } else {
+                    vn[face[vi]]
+                };
+                let off = b + 28 + vi * 4;
+                instances[off] = n[0] as f32; instances[off+1] = n[1] as f32; instances[off+2] = n[2] as f32;
+            }
+        }
+
+        let arr = js_sys::Float32Array::new_with_length(instances.len() as u32);
+        arr.copy_from(&instances);
+
+        // Build per-face LOD classification for batch grouping
+        // Each face: [canonical_a, canonical_b, canonical_c, perm_index, parity]
+        let mut face_lods = Vec::with_capacity(nf * 5);
+        for fi in 0..nf {
+            let b = fi * COMPACT_STRIDE;
+            let l0 = instances[b + 12] as u32;
+            let l1 = instances[b + 13] as u32;
+            let l2 = instances[b + 14] as u32;
+            let lods = [l0, l1, l2];
+            let ck = quilting_core::permutation::canonical_form(lods);
+            let canonical = ck.res;
+            let perm_idx = ck.perm_index;
+            let parity = quilting_core::permutation::perm_sign(perm_idx);
+            face_lods.push(canonical[0] as f32);
+            face_lods.push(canonical[1] as f32);
+            face_lods.push(canonical[2] as f32);
+            face_lods.push(perm_idx as f32);
+            face_lods.push(parity as f32);
+        }
+        let lod_arr = js_sys::Float32Array::new_with_length(face_lods.len() as u32);
+        lod_arr.copy_from(&face_lods);
+
+        // Compute bounding box for camera framing
+        let mut bb_min = [f64::INFINITY; 3];
+        let mut bb_max = [f64::NEG_INFINITY; 3];
+        for pos in &combined.positions {
+            for i in 0..3 {
+                bb_min[i] = bb_min[i].min(pos[i]);
+                bb_max[i] = bb_max[i].max(pos[i]);
+            }
+        }
+        let extent = (bb_max[0]-bb_min[0]).max(bb_max[1]-bb_min[1]).max(bb_max[2]-bb_min[2]);
+
+        let result = js_sys::Object::new();
+        js_sys::Reflect::set(&result, &"instances".into(), &arr).unwrap();
+        js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(nf as f64)).unwrap();
+        js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(n_verts as f64)).unwrap();
+        js_sys::Reflect::set(&result, &"stride".into(), &JsValue::from_f64(COMPACT_STRIDE as f64)).unwrap();
+        js_sys::Reflect::set(&result, &"extent".into(), &JsValue::from_f64(extent)).unwrap();
+        js_sys::Reflect::set(&result, &"face_lods".into(), &lod_arr).unwrap();
+        result.into()
+    })
 }
 
 /// Load a glTF/GLB file from raw bytes, bake animation into a HyperMesh,
@@ -1312,9 +1752,57 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         ([0.9, 0.75, 0.6, 1.0], 0.0, 0.4)
     };
 
+    // Build AnimationEvaluator for GPU skinning (if model has skeleton + animation)
+    let evaluator = if let Some(si) = primary_skin_idx {
+        if !scene.animations.is_empty() && si < scene.skins.len() {
+            let num_morph = combined.morph_targets.len();
+            Some(quilting_gltf::evaluator::AnimationEvaluator::new(
+                scene.animations[0].clone(),
+                Some(scene.skins[si].clone()),
+                scene.nodes.clone(),
+                num_morph,
+            ))
+        } else { None }
+    } else { None };
+
+    // Compute rest-pose bounding box for normalization
+    let (norm_center, norm_scale) = {
+        let mut bb_min = [f64::INFINITY; 3];
+        let mut bb_max = [f64::NEG_INFINITY; 3];
+        for pos in &combined.positions {
+            for i in 0..3 {
+                bb_min[i] = bb_min[i].min(pos[i]);
+                bb_max[i] = bb_max[i].max(pos[i]);
+            }
+        }
+        let center = [(bb_min[0]+bb_max[0])*0.5, (bb_min[1]+bb_max[1])*0.5, (bb_min[2]+bb_max[2])*0.5];
+        let extent = ((bb_max[0]-bb_min[0]).max(bb_max[1]-bb_min[1]).max(bb_max[2]-bb_min[2])) * 0.5;
+        let scale = if extent > 1e-10 { 1.0 / extent } else { 1.0 };
+        (center, scale)
+    };
+
+    // Store glTF data for animation switching
+    GLTF_DATA.with(|gd| {
+        *gd.borrow_mut() = Some(StoredGltfData {
+            animations: scene.animations.clone(),
+            skins: scene.skins.clone(),
+            nodes: scene.nodes.clone(),
+            combined: combined.clone(),
+            face_material_indices: face_material_indices.clone(),
+            primary_skin_idx,
+            active_animation: 0,
+            evaluator,
+            norm_center,
+            norm_scale,
+        });
+    });
+
     HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));
     FACE_MATERIALS.with(|fm| *fm.borrow_mut() = face_material_indices);
     SENT_TESS.with(|s| s.borrow_mut().clear());
+    // Clear prebake info — prevents stale data from causing OOB panics
+    // when switching between models. GPU-skinned models skip prebake entirely.
+    PREBAKE_INFO.with(|pi| *pi.borrow_mut() = None);
     // Clear slice cache — use try_borrow_mut to avoid panic if a previous
     // WASM panic left the RefCell in a borrowed state.
     SLICE_CACHE.with(|c| {
@@ -1403,6 +1891,22 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     }
     js_sys::Reflect::set(&result, &"variant_names".into(), &js_variants).unwrap();
     js_sys::Reflect::set(&result, &"variant_mappings".into(), &js_variant_mappings).unwrap();
+
+    // Animation list for selector UI
+    let anim_info = quilting_gltf::evaluator::list_animations(&scene.animations);
+    let js_animations = js_sys::Array::new();
+    for info in &anim_info {
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &"index".into(), &JsValue::from_f64(info.index as f64)).unwrap();
+        let fallback = format!("Animation {}", info.index);
+        let name = info.name.as_deref().unwrap_or(&fallback);
+        js_sys::Reflect::set(&obj, &"name".into(), &JsValue::from_str(name)).unwrap();
+        js_sys::Reflect::set(&obj, &"duration".into(), &JsValue::from_f64(info.duration)).unwrap();
+        js_sys::Reflect::set(&obj, &"t_min".into(), &JsValue::from_f64(info.t_min)).unwrap();
+        js_sys::Reflect::set(&obj, &"t_max".into(), &JsValue::from_f64(info.t_max)).unwrap();
+        js_animations.push(&obj);
+    }
+    js_sys::Reflect::set(&result, &"animations".into(), &js_animations).unwrap();
 
     result.into()
 }

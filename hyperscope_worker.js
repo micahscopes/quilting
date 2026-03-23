@@ -147,8 +147,18 @@ self.onmessage = async function(e) {
 
   if (type === 'load_gltf_data') {
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
-    // Auto-prebake animation frames to GPU
-    if (result && result.time_min != null && result.time_max != null) {
+    // Check if model has GPU skinning data — skip prebake if so
+    const skinData = wasm.get_skinning_data();
+    const hasGpuSkinning = skinData && skinData.num_joints > 0;
+    if (hasGpuSkinning) {
+      console.log(`Skinned model: ${skinData.num_joints} joints, ${skinData.num_vertices} verts`);
+      // Prebake 1 frame at bind pose for GPU LOD computation
+      if (result && result.time_min != null) {
+        const t0 = result.time_min;
+        const baked = wasm.prebake_animation(1, t0, t0 + 0.001);
+        console.log(`Prebaked 1 rest-pose frame for LOD compute: ${baked}`);
+      }
+    } else if (result && result.time_min != null && result.time_max != null) {
       const nframes = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
       const baked = wasm.prebake_animation(nframes, result.time_min, result.time_max);
       console.log(`Prebaked ${baked} glTF animation frames`);
@@ -160,6 +170,47 @@ self.onmessage = async function(e) {
   if (type === 'set_face_materials') {
     wasm.set_face_materials(new Int32Array(data.materials));
     self.postMessage({ type: 'face_materials_set', id });
+    return;
+  }
+
+  if (type === 'list_animations') {
+    const animations = wasm.list_animations();
+    self.postMessage({ type: 'animations_listed', id, animations });
+    return;
+  }
+
+  if (type === 'set_active_animation') {
+    const result = wasm.set_active_animation(data.index);
+    // Re-prebake with the new animation's time range
+    if (result && result.time_min != null && result.time_max != null) {
+      const nframes = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
+      const baked = wasm.prebake_animation(nframes, result.time_min, result.time_max);
+      console.log(`Switched to animation ${data.index}, prebaked ${baked} frames`);
+    }
+    self.postMessage({ type: 'animation_switched', id, result });
+    return;
+  }
+
+  if (type === 'evaluate_animation_frame') {
+    const matrices = wasm.evaluate_animation_frame(data.t);
+    if (matrices) {
+      // Transfer the Float32Array buffer to main thread (zero-copy)
+      self.postMessage({ type: 'joint_matrices', id, matrices }, [matrices.buffer]);
+    } else {
+      self.postMessage({ type: 'joint_matrices', id, matrices: null });
+    }
+    return;
+  }
+
+  if (type === 'get_skinning_data') {
+    const skinData = wasm.get_skinning_data();
+    self.postMessage({ type: 'skinning_data', id, skinData });
+    return;
+  }
+
+  if (type === 'get_rest_pose_instances') {
+    const data = wasm.get_rest_pose_instances(data.lod_time || 0);
+    self.postMessage({ type: 'rest_pose_instances', id, data });
     return;
   }
 

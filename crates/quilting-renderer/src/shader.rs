@@ -31,6 +31,7 @@ impl Programs {
 pub const VERTEX_UNIFORMS_BINDING: u32 = 0;
 pub const WIRE_UNIFORMS_BINDING: u32 = 1;
 pub const PBR_UNIFORMS_BINDING: u32 = 2;
+pub const JOINT_MATRICES_BINDING: u32 = 4;
 
 /// Compiled GLSL source for a vertex/fragment pair.
 pub struct CompiledGlsl {
@@ -150,8 +151,23 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         if let Some(idx) = gl.get_uniform_block_index(program, "PbrUniforms_block_1Fragment") {
             gl.uniform_block_binding(program, idx, PBR_UNIFORMS_BINDING);
         }
+
+        // Joint matrices: JointMatrices at group(0) binding(1) in vertex stage
+        if let Some(idx) = gl.get_uniform_block_index(program, "JointMatrices_block_1Vertex") {
+            gl.uniform_block_binding(program, idx, JOINT_MATRICES_BINDING);
+        }
+
+        // Skinning texture: bind sampler to texture unit SKINNING_TEX_UNIT
+        gl.use_program(Some(program));
+        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_2_vs") {
+            gl.uniform_1_i32(Some(&loc), SKINNING_TEX_UNIT as i32);
+        }
+        gl.use_program(None);
     }
 }
+
+/// Texture unit for the per-vertex skinning data texture.
+pub const SKINNING_TEX_UNIT: u32 = 5;
 
 /// Compile all WGSL shaders to GLSL, create GL programs, and bind uniform blocks.
 pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {

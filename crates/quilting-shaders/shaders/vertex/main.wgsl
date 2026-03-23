@@ -24,6 +24,84 @@ struct Uniforms {
 @group(0) @binding(0)
 var<uniform> u: Uniforms;
 
+// Skeletal animation: skin matrices (joint_world * inverse_bind) uploaded per frame.
+// num_joints = 0 means no skinning active.
+const MAX_JOINTS: u32 = 128u;
+
+struct JointMatrices {
+    num_joints: i32,
+    skin_tex_width: i32,
+    _jpad1: i32,
+    _jpad2: i32,
+    matrices: array<mat4x4<f32>, 128>,
+}
+
+@group(0) @binding(1)
+var<uniform> joints: JointMatrices;
+
+// Per-vertex skinning data texture: width = num_verts, height = 2
+// Row 0: joint indices (as f32), Row 1: joint weights
+@group(0) @binding(2)
+var skinning_tex: texture_2d<f32>;
+
+// Apply skeletal skinning to a position.
+// vertex_idx indexes into the skinning texture.
+fn skin_tex_lookup(vertex_idx: i32) -> array<vec4<f32>, 2> {
+    // Tiled texture: width = skin_tex_width, rows = chunks * 2
+    // Row 2*chunk = joint indices, row 2*chunk+1 = joint weights
+    let w = joints.skin_tex_width;
+    let chunk = vertex_idx / w;
+    let col = vertex_idx % w;
+    var result: array<vec4<f32>, 2>;
+    result[0] = textureLoad(skinning_tex, vec2<i32>(col, chunk * 2), 0);
+    result[1] = textureLoad(skinning_tex, vec2<i32>(col, chunk * 2 + 1), 0);
+    return result;
+}
+
+fn skin_position(pos: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
+    if joints.num_joints <= 0 { return pos; }
+
+    let skin_data = skin_tex_lookup(vertex_idx);
+    let ji = skin_data[0];
+    let jw = skin_data[1];
+
+    var skinned = vec3<f32>(0.0);
+    let p4 = vec4<f32>(pos, 1.0);
+
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let w = jw[k];
+        if w < 1e-6 { continue; }
+        let idx = i32(ji[k]);
+        if idx >= joints.num_joints { continue; }
+        let m = joints.matrices[idx];
+        skinned = skinned + w * (m * p4).xyz;
+    }
+    return skinned;
+}
+
+// Apply skeletal skinning to a normal (mat3 upper-left of joint matrix).
+fn skin_normal(nrm: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
+    if joints.num_joints <= 0 { return nrm; }
+
+    let skin_data = skin_tex_lookup(vertex_idx);
+    let ji = skin_data[0];
+    let jw = skin_data[1];
+
+    var skinned = vec3<f32>(0.0);
+
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let w = jw[k];
+        if w < 1e-6 { continue; }
+        let idx = i32(ji[k]);
+        if idx >= joints.num_joints { continue; }
+        let m = joints.matrices[idx];
+        skinned = skinned + w * (mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz) * nrm);
+    }
+    let l = length(skinned);
+    if l > 1e-8 { return skinned / l; }
+    return nrm;
+}
+
 struct VertexInput {
     @location(0) bary: vec3<f32>,
     // Per-instance QB control points (13 vec4s = 52 floats per instance)
@@ -142,10 +220,29 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     var nrm: vec3<f32>;
     out.fade = 1.0;
 
+    // GPU skeletal skinning: vertex indices are packed in p.w (flat path only).
+    // When joints.num_joints > 0, skin rest-pose positions before Möbius eval.
+    var sp0 = in.p0;
+    var sp1 = in.p1;
+    var sp2 = in.p2;
+    if joints.num_joints > 0 && u.use_qb == 0 {
+        let vi0 = i32(in.p0.x);
+        let vi1 = i32(in.p1.x);
+        let vi2 = i32(in.p2.x);
+        // Skin positions (rest pose is in p.yzw)
+        let skinned0 = skin_position(in.p0.yzw, vi0);
+        let skinned1 = skin_position(in.p1.yzw, vi1);
+        let skinned2 = skin_position(in.p2.yzw, vi2);
+        // Rebuild quaternion format (w=0 for flat path)
+        sp0 = vec4<f32>(0.0, skinned0);
+        sp1 = vec4<f32>(0.0, skinned1);
+        sp2 = vec4<f32>(0.0, skinned2);
+    }
+
     if u.use_qb == 1 {
         let result = eval_mobius_qb(
             bary,
-            in.p0, in.p1, in.p2,
+            sp0, sp1, sp2,
             in.w0, in.w1, in.w2,
             u.perm_parity,
         );
@@ -154,36 +251,43 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         out.fade = result.fade;
     } else {
         // Flat path: apply Möbius to vertices directly
-        let mp0 = qmul(qmul(u.mob_a, in.p0) + u.mob_b, qinv(qmul(u.mob_c, in.p0) + u.mob_d));
-        let mp1 = qmul(qmul(u.mob_a, in.p1) + u.mob_b, qinv(qmul(u.mob_c, in.p1) + u.mob_d));
-        let mp2 = qmul(qmul(u.mob_a, in.p2) + u.mob_b, qinv(qmul(u.mob_c, in.p2) + u.mob_d));
+        let mp0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(qmul(u.mob_c, sp0) + u.mob_d));
+        let mp1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(qmul(u.mob_c, sp1) + u.mob_d));
+        let mp2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(qmul(u.mob_c, sp2) + u.mob_d));
         pos = eval_flat(bary, mp0, mp1, mp2);
         nrm = normalize(cross(mp1.yzw - mp0.yzw, mp2.yzw - mp0.yzw));
         nrm = nrm * u.perm_parity;
     }
 
-    // Smooth normals: transform through Möbius conformal differential.
-    // dM(v) = (a - M·c) · v · (c·p+d)^{-1} — preserves normal direction under conformal maps.
-    let sn0 = in.smooth_n0.xyz;
-    let sn1 = in.smooth_n1.xyz;
-    let sn2 = in.smooth_n2.xyz;
+    // Smooth normals: skin them if GPU skinning is active, then transform through Möbius.
+    var sn0 = in.smooth_n0.xyz;
+    var sn1 = in.smooth_n1.xyz;
+    var sn2 = in.smooth_n2.xyz;
+    if joints.num_joints > 0 && u.use_qb == 0 {
+        let vi0 = i32(in.p0.x);
+        let vi1 = i32(in.p1.x);
+        let vi2 = i32(in.p2.x);
+        sn0 = skin_normal(sn0, vi0);
+        sn1 = skin_normal(sn1, vi1);
+        sn2 = skin_normal(sn2, vi2);
+    }
     let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
     if has_smooth {
         let is_mobius = dot(u.mob_c, u.mob_c) > 0.001;
         if is_mobius {
             // Transform each vertex normal through the Möbius differential at that vertex
-            let bot0 = qmul(u.mob_c, in.p0) + u.mob_d;
-            let M0 = qmul(qmul(u.mob_a, in.p0) + u.mob_b, qinv(bot0));
+            let bot0 = qmul(u.mob_c, sp0) + u.mob_d;
+            let M0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(bot0));
             let a0 = u.mob_a - qmul(M0, u.mob_c);
             let rn0 = qmul(qmul(a0, vec4<f32>(0.0, sn0)), qinv(bot0)).yzw;
 
-            let bot1 = qmul(u.mob_c, in.p1) + u.mob_d;
-            let M1 = qmul(qmul(u.mob_a, in.p1) + u.mob_b, qinv(bot1));
+            let bot1 = qmul(u.mob_c, sp1) + u.mob_d;
+            let M1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(bot1));
             let a1 = u.mob_a - qmul(M1, u.mob_c);
             let rn1 = qmul(qmul(a1, vec4<f32>(0.0, sn1)), qinv(bot1)).yzw;
 
-            let bot2 = qmul(u.mob_c, in.p2) + u.mob_d;
-            let M2 = qmul(qmul(u.mob_a, in.p2) + u.mob_b, qinv(bot2));
+            let bot2 = qmul(u.mob_c, sp2) + u.mob_d;
+            let M2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(bot2));
             let a2 = u.mob_a - qmul(M2, u.mob_c);
             let rn2 = qmul(qmul(a2, vec4<f32>(0.0, sn2)), qinv(bot2)).yzw;
 
@@ -212,9 +316,9 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     var tangent = vec3<f32>(1.0, 0.0, 0.0);
     var bitangent = vec3<f32>(0.0, 1.0, 0.0);
     if abs(det) > 1e-6 {
-        // Use original vertex positions for edge vectors (tangent frame approximation)
-        let edge01 = in.p1.yzw - in.p0.yzw;
-        let edge02 = in.p2.yzw - in.p0.yzw;
+        // Use (possibly skinned) vertex positions for edge vectors
+        let edge01 = sp1.yzw - sp0.yzw;
+        let edge02 = sp2.yzw - sp0.yzw;
         let inv_det = 1.0 / det;
         tangent = normalize((edge01 * duv02.y - edge02 * duv01.y) * inv_det);
         bitangent = normalize((edge02 * duv01.x - edge01 * duv02.x) * inv_det);

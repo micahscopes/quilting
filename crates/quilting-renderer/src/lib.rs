@@ -193,6 +193,20 @@ mod tests {
     }
 
     #[test]
+    fn vertex_shader_has_joint_ubo() {
+        let sources = compiled_glsl_sources().unwrap();
+        let (_name, vertex, _frag) = &sources[0];
+        assert!(
+            vertex.contains("JointMatrices_block_1Vertex"),
+            "vertex shader should have the JointMatrices UBO block"
+        );
+        assert!(
+            vertex.contains("_group_0_binding_2_vs"),
+            "vertex shader should have the skinning texture sampler"
+        );
+    }
+
+    #[test]
     fn wire_fragment_has_ubo() {
         let sources = compiled_glsl_sources().unwrap();
         let wire = sources.iter().find(|(n, _, _)| *n == "wire").unwrap();

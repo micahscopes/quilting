@@ -315,6 +315,167 @@ impl WireUniformBuf {
     }
 }
 
+/// UBO for skeletal animation joint matrices.
+///
+/// Stores up to MAX_JOINTS skin matrices (world * inverse_bind), uploaded per frame
+/// from AnimationEvaluator. Each mat4 is 64 bytes (std140).
+///
+/// Layout (std140):
+///   i32  num_joints  (offset 0, 4 bytes)
+///   pad              (offset 4, 12 bytes — std140 alignment to vec4)
+///   mat4 joints[N]   (offset 16, 64 bytes each)
+pub struct JointMatricesBuf {
+    pub ubo: glow::Buffer,
+    /// Current allocation size in bytes.
+    capacity: usize,
+}
+
+/// Maximum joints supported. 128 × 64 bytes = 8KB, well within WebGL2's 16KB UBO limit.
+pub const MAX_JOINTS: usize = 128;
+
+/// Total UBO size: 16 bytes header + MAX_JOINTS × 64 bytes.
+const JOINT_UBO_SIZE: usize = 16 + MAX_JOINTS * 64;
+
+impl JointMatricesBuf {
+    pub fn new(gl: &glow::Context) -> Result<Self, String> {
+        unsafe {
+            let ubo = gl.create_buffer().map_err(|e| format!("joint ubo: {e}"))?;
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, JOINT_UBO_SIZE as i32, glow::DYNAMIC_DRAW);
+            // Zero-init: num_joints = 0
+            let zeros = vec![0u8; JOINT_UBO_SIZE];
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &zeros);
+            Ok(JointMatricesBuf { ubo, capacity: JOINT_UBO_SIZE })
+        }
+    }
+
+    /// Upload joint matrices from a flat f32 slice (num_joints × 16 floats).
+    /// The matrices are skin matrices (joint_world × inverse_bind), column-major.
+    pub fn upload(&self, gl: &glow::Context, matrices: &[f32]) {
+        let num_joints = matrices.len() / 16;
+        if num_joints == 0 { return; }
+        let clamped = num_joints.min(MAX_JOINTS);
+
+        // Pack header (16 bytes) + matrices
+        let data_size = 16 + clamped * 64;
+        let mut data = vec![0u8; data_size];
+        // num_joints at offset 0
+        data[0..4].copy_from_slice(&(clamped as i32).to_le_bytes());
+        // Matrices at offset 16 (std140: mat4 already 64-byte aligned)
+        let mat_bytes = &matrices[..clamped * 16];
+        data[16..16 + clamped * 64].copy_from_slice(bytemuck_cast_slice(mat_bytes));
+
+        unsafe {
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
+        }
+    }
+
+    /// Clear joint data (set num_joints = 0). Call when switching to a static model.
+    pub fn clear(&self, gl: &glow::Context) {
+        let zero = 0i32;
+        unsafe {
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &zero.to_le_bytes());
+        }
+    }
+
+    pub fn bind(&self, gl: &glow::Context) {
+        unsafe {
+            gl.bind_buffer_base(
+                glow::UNIFORM_BUFFER,
+                crate::shader::JOINT_MATRICES_BINDING,
+                Some(self.ubo),
+            );
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_buffer(self.ubo);
+        }
+    }
+}
+
+/// GPU texture storing per-vertex skinning data (joint indices + weights).
+///
+/// Layout: RGBA32F texture, width = num_vertices, height = 2.
+///   Row 0: joint indices as f32 (r=j0, g=j1, b=j2, a=j3)
+///   Row 1: joint weights (r=w0, g=w1, b=w2, a=w3)
+pub struct SkinningTexture {
+    pub texture: glow::Texture,
+    pub num_vertices: usize,
+}
+
+impl SkinningTexture {
+    /// Upload per-vertex skinning data.
+    ///
+    /// `joint_indices`: flat [j0,j1,j2,j3] × num_vertices (as f32)
+    /// `joint_weights`: flat [w0,w1,w2,w3] × num_vertices
+    pub fn new(
+        gl: &glow::Context,
+        joint_indices: &[[u16; 4]],
+        joint_weights: &[[f32; 4]],
+    ) -> Result<Self, String> {
+        let num_vertices = joint_indices.len();
+        assert_eq!(num_vertices, joint_weights.len());
+
+        unsafe {
+            let texture = gl.create_texture().map_err(|e| format!("skinning tex: {e}"))?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+
+            // Pack into RGBA32F: width = num_vertices, height = 2
+            // Row 0: indices, Row 1: weights
+            let mut data = vec![0.0f32; num_vertices * 4 * 2];
+            for (i, (ji, jw)) in joint_indices.iter().zip(joint_weights.iter()).enumerate() {
+                // Row 0: indices
+                data[i * 4 + 0] = ji[0] as f32;
+                data[i * 4 + 1] = ji[1] as f32;
+                data[i * 4 + 2] = ji[2] as f32;
+                data[i * 4 + 3] = ji[3] as f32;
+                // Row 1: weights
+                let row1 = num_vertices * 4;
+                data[row1 + i * 4 + 0] = jw[0];
+                data[row1 + i * 4 + 1] = jw[1];
+                data[row1 + i * 4 + 2] = jw[2];
+                data[row1 + i * 4 + 3] = jw[3];
+            }
+
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA32F as i32,
+                num_vertices as i32,
+                2,
+                0,
+                glow::RGBA,
+                glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&data))),
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+
+            Ok(SkinningTexture { texture, num_vertices })
+        }
+    }
+
+    /// Bind to a specific texture unit.
+    pub fn bind(&self, gl: &glow::Context, unit: u32) {
+        unsafe {
+            gl.active_texture(glow::TEXTURE0 + unit);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_texture(self.texture);
+        }
+    }
+}
+
 /// Safe cast from &[T] to &[u8] without pulling in the bytemuck dependency.
 fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe {

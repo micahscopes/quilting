@@ -111,6 +111,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section">
+    <label>Animation</label>
+    <select id="anim-sel" style="display:none"><option value="-1">None</option></select>
+  </div>
+
+  <div class="section">
     <label>Environment</label>
     <select id="envmap-sel">
       <option value="rosendal_plains_1_1k" selected>Rosendal Plains</option>
@@ -216,6 +221,8 @@ if(!gl){document.body.innerHTML='<h1 style="color:#f85;padding:40px">WebGL2 not 
 let meshInfo = null, workerReady = false;
 let rotateNormalOverride = null;
 let animating = true;  // auto-animate on by default
+let gpuSkinned = false; // true when using GPU skinning (no prebake)
+let skinningTexture = null; // WebGL texture for per-vertex joint indices + weights
 let renderMode = 'pbr';
 let rotX = 0.3, rotY = 0.5, zoom = 5;
 let animDir = 1;
@@ -503,6 +510,15 @@ gl.bindBuffer(gl.UNIFORM_BUFFER, pbrUbo);
 gl.bufferData(gl.UNIFORM_BUFFER, PBR_UBO_SIZE, gl.DYNAMIC_DRAW);
 const pbrUboData = new ArrayBuffer(PBR_UBO_SIZE);
 const pbrUboF32 = new Float32Array(pbrUboData);
+
+// Joint matrices UBO: JointMatrices_block_1Vertex (std140, binding 4)
+// 16 bytes header (num_joints + pad) + 128 * 64 bytes max matrices = 8208 bytes
+// Initialized to zeros (num_joints = 0 → no skinning)
+const JOINT_UBO_BINDING = 4;
+const JOINT_UBO_SIZE = 16 + 128 * 64; // header + MAX_JOINTS * sizeof(mat4)
+const jointUbo = gl.createBuffer();
+gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
+gl.bufferData(gl.UNIFORM_BUFFER, JOINT_UBO_SIZE, gl.DYNAMIC_DRAW);
 
 // Base color texture from glTF (null when no texture loaded)
 let baseColorTex = null;
@@ -1233,6 +1249,7 @@ function bindUBOs() {
   gl.bindBufferBase(gl.UNIFORM_BUFFER, VTX_UBO_BINDING, vtxUbo);
   gl.bindBufferBase(gl.UNIFORM_BUFFER, WIRE_UBO_BINDING, wireUbo);
   gl.bindBufferBase(gl.UNIFORM_BUFFER, PBR_UBO_BINDING, pbrUbo);
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, JOINT_UBO_BINDING, jointUbo);
 }
 
 function bindUniformBlocks(program) {
@@ -1240,6 +1257,13 @@ function bindUniformBlocks(program) {
   if (vtxIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, vtxIdx, VTX_UBO_BINDING);
   const wireIdx = gl.getUniformBlockIndex(program, 'WireUniforms_block_0Fragment');
   if (wireIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, wireIdx, WIRE_UBO_BINDING);
+  const jointIdx = gl.getUniformBlockIndex(program, 'JointMatrices_block_1Vertex');
+  if (jointIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, jointIdx, JOINT_UBO_BINDING);
+  // Skinning texture sampler → texture unit 15 (avoid conflicts with PBR textures on 0-10)
+  gl.useProgram(program);
+  const skinTexLoc = gl.getUniformLocation(program, '_group_0_binding_2_vs');
+  if (skinTexLoc) gl.uniform1i(skinTexLoc, 15);
+  gl.useProgram(null);
 }
 
 function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr, fsPick) {
@@ -1285,7 +1309,7 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr, fsPick) {
     let samplersBound = 0;
     for (let i = 0; i < numUniforms; i++) {
       const info = gl.getActiveUniform(progPbr, i);
-      if (info && (info.type === gl.SAMPLER_2D || info.type === gl.SAMPLER_CUBE)) {
+      if (info && (info.type === gl.SAMPLER_2D || info.type === gl.SAMPLER_CUBE) && !info.name.includes('_vs')) {
         const loc = gl.getUniformLocation(progPbr, info.name);
         const m = info.name.match(/binding_(\d+)/);
         if (m) {
@@ -1322,7 +1346,7 @@ function initShaderPrograms(vs, fsMatcap, fsWire, fsNormals, fsPbr, fsPick) {
     const numU = gl.getProgramParameter(progMatcap, gl.ACTIVE_UNIFORMS);
     for (let i = 0; i < numU; i++) {
       const info = gl.getActiveUniform(progMatcap, i);
-      if (info && info.type === gl.SAMPLER_2D) {
+      if (info && info.type === gl.SAMPLER_2D && !info.name.includes('_vs')) {
         const loc = gl.getUniformLocation(progMatcap, info.name);
         gl.uniform1i(loc, 0);
       }
@@ -1378,7 +1402,7 @@ function renderPickPass(mvp, view, camPos) {
   let offset = 0;
   for (const b of drawBatches) {
     vtxUboF32[35] = offset; // _pad = batch offset for pick
-    uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+    uploadVertexUBO(mvp, view, b.parity, b.permIndex, gpuSkinned ? 0 : 1, camPos);
     gl.bindVertexArray(b.vaoXformTri);
     gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     offset += b.numInst;
@@ -1787,6 +1811,459 @@ function lodColor(lod) {
   return [r+m, g+m, b+m];
 }
 
+// --- GPU LOD Compute (main context, with skinning) ---
+// Transform feedback compute pipeline for per-frame LOD computation.
+// Skins rest-pose vertices on GPU, applies Möbius, computes LODs.
+const LOD_COMPUTE_GLSL = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 face_indices;
+
+uniform highp sampler2D u_rest_pos;     // rest-pose positions (4096-wide RGBA32F)
+uniform highp sampler2D u_skinning;     // joint indices + weights (tiled)
+uniform highp sampler2D u_atlas_lut;    // exponent triple → atlas index
+uniform int u_num_verts;
+uniform int u_num_joints;
+uniform int u_skin_tex_w;
+uniform vec4 mob_a, mob_b, mob_c, mob_d;
+uniform float density, mesh_radius, min_px;
+uniform mat4 vp_matrix;
+uniform float vp_width, vp_height;
+
+// Joint matrices — same binding as render shader
+layout(std140) uniform JointMatricesBlock {
+    int num_joints;
+    int skin_tex_width;
+    int _pad1, _pad2;
+    mat4 matrices[128];
+};
+
+out float out_atlas_index;
+out float out_perm_index;
+
+vec4 qmul(vec4 a, vec4 b) {
+    return vec4(a.x*b.x-a.y*b.y-a.z*b.z-a.w*b.w, a.x*b.y+a.y*b.x+a.z*b.w-a.w*b.z,
+                a.x*b.z-a.y*b.w+a.z*b.x+a.w*b.y, a.x*b.w+a.y*b.z-a.z*b.y+a.w*b.x);
+}
+vec4 qinv(vec4 q) { float n=dot(q,q); return vec4(q.x,-q.yzw)/max(n,1e-20); }
+vec3 mobius(vec3 p) {
+    vec4 q=vec4(0,p); return qmul(qmul(mob_a,q)+mob_b, qinv(qmul(mob_c,q)+mob_d)).yzw;
+}
+float snap_pow2(float v) { return exp2(round(log2(max(v,1.0)))); }
+
+vec3 fetch_pos(int vi) {
+    int tx = vi % 4096, ty = vi / 4096;
+    return texelFetch(u_rest_pos, ivec2(tx, ty), 0).xyz;
+}
+
+vec3 skin_pos(vec3 pos, int vi) {
+    if (u_num_joints <= 0) return pos;
+    int w = u_skin_tex_w;
+    int chunk = vi / w, col = vi % w;
+    vec4 ji = texelFetch(u_skinning, ivec2(col, chunk*2), 0);
+    vec4 jw = texelFetch(u_skinning, ivec2(col, chunk*2+1), 0);
+    vec3 skinned = vec3(0);
+    vec4 p4 = vec4(pos, 1);
+    for (int k=0; k<4; k++) {
+        float wt = jw[k]; if (wt < 1e-6) continue;
+        int idx = int(ji[k]); if (idx >= u_num_joints) continue;
+        skinned += wt * (matrices[idx] * p4).xyz;
+    }
+    return skinned;
+}
+
+void main() {
+    int i0=int(face_indices.x), i1=int(face_indices.y), i2=int(face_indices.z);
+    vec3 sp0=skin_pos(fetch_pos(i0),i0), sp1=skin_pos(fetch_pos(i1),i1), sp2=skin_pos(fetch_pos(i2),i2);
+    vec3 d0=mobius(sp0), d1=mobius(sp1), d2=mobius(sp2);
+    vec3 dm_a=mobius((sp1+sp2)*.5), dm_b=mobius((sp0+sp2)*.5), dm_c=mobius((sp0+sp1)*.5);
+    float ma=distance(d0,dm_a), mb=distance(d1,dm_b), mc=distance(d2,dm_c);
+    float ts = mesh_radius/density;
+    float la=clamp(snap_pow2((mb+mc)*.5/ts),2.,512.), lb=clamp(snap_pow2((ma+mc)*.5/ts),2.,512.), lc=clamp(snap_pow2((ma+mb)*.5/ts),2.,512.);
+    if (min_px > 0.) {
+        vec4 c0=vp_matrix*vec4(d0,1), c1=vp_matrix*vec4(d1,1), c2=vp_matrix*vec4(d2,1);
+        vec2 s0=(c0.xy/max(abs(c0.w),.001))*vec2(vp_width,vp_height)*.5;
+        vec2 s1=(c1.xy/max(abs(c1.w),.001))*vec2(vp_width,vp_height)*.5;
+        vec2 s2=(c2.xy/max(abs(c2.w),.001))*vec2(vp_width,vp_height)*.5;
+        float pa=distance(s1,s2), pb=distance(s0,s2), pc=distance(s0,s1);
+        if(pa/la<min_px) la=clamp(snap_pow2(pa/min_px),2.,512.);
+        if(pb/lb<min_px) lb=clamp(snap_pow2(pb/min_px),2.,512.);
+        if(pc/lc<min_px) lc=clamp(snap_pow2(pc/min_px),2.,512.);
+    }
+    int ea=int(log2(la)), eb=int(log2(lb)), ec=int(log2(lc));
+    int sa,sb,sc,perm;
+    if(ea<=eb&&eb<=ec){sa=ea;sb=eb;sc=ec;perm=0;}
+    else if(ea<=ec&&ec<=eb){sa=ea;sb=ec;sc=eb;perm=1;}
+    else if(eb<=ea&&ea<=ec){sa=eb;sb=ea;sc=ec;perm=2;}
+    else if(eb<=ec&&ec<=ea){sa=eb;sb=ec;sc=ea;perm=4;}
+    else if(ec<=ea&&ea<=eb){sa=ec;sb=ea;sc=eb;perm=3;}
+    else{sa=ec;sb=eb;sc=ea;perm=5;}
+    int key=sa+sb*10+sc*100; int lx=key%40, ly=key/40;
+    out_atlas_index = texelFetch(u_atlas_lut, ivec2(lx,ly), 0).r * 255.0;
+    out_perm_index = float(perm);
+    gl_Position = vec4(0);
+}`;
+
+let gpuLodCompute = null; // initialized in setupGpuSkinning
+
+function initGpuLodCompute(numFaces, faceIndicesF32, restPositions, numVerts) {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, LOD_COMPUTE_GLSL);
+  gl.compileShader(vs);
+  if (!gl.getShaderCompileStatus(vs)) {
+    console.error('LOD compute shader error:', gl.getShaderInfoLog(vs));
+    return null;
+  }
+  // Dummy fragment shader (transform feedback doesn't need it, but WebGL2 requires one)
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, '#version 300 es\nprecision lowp float;\nvoid main(){}\n');
+  gl.compileShader(fs);
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+  gl.transformFeedbackVaryings(prog, ['out_atlas_index', 'out_perm_index'], gl.INTERLEAVED_ATTRIBS);
+  gl.linkProgram(prog);
+  if (!gl.getProgramLinkStatus(prog)) {
+    console.error('LOD compute link error:', gl.getProgramInfoLog(prog));
+    return null;
+  }
+  gl.deleteShader(vs); gl.deleteShader(fs);
+
+  // Bind joint matrices UBO block
+  const jbIdx = gl.getUniformBlockIndex(prog, 'JointMatricesBlock');
+  if (jbIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(prog, jbIdx, JOINT_UBO_BINDING);
+
+  // Upload face indices buffer (static)
+  const faceVao = gl.createVertexArray();
+  const faceBuf = gl.createBuffer();
+  gl.bindVertexArray(faceVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, faceBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, faceIndicesF32, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // Upload rest-pose positions as RGBA32F texture (4096-wide)
+  const restTex = gl.createTexture();
+  const texW = 4096;
+  const texH = Math.ceil(numVerts / texW);
+  const texBuf = new Float32Array(texW * texH * 4);
+  for (let i = 0; i < numVerts; i++) {
+    texBuf[i*4] = restPositions[i*3]; texBuf[i*4+1] = restPositions[i*3+1]; texBuf[i*4+2] = restPositions[i*3+2];
+  }
+  gl.bindTexture(gl.TEXTURE_2D, restTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, texW, texH, 0, gl.RGBA, gl.FLOAT, texBuf);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+  // Atlas LUT texture — copy from worker's atlas data
+  // We'll upload this separately when atlas is ready
+
+  // Transform feedback output buffer
+  const outBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, outBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, numFaces * 2 * 4, gl.DYNAMIC_READ);
+
+  const tf = gl.createTransformFeedback();
+
+  // Get uniform locations
+  gl.useProgram(prog);
+  const locs = {
+    restPos: gl.getUniformLocation(prog, 'u_rest_pos'),
+    skinning: gl.getUniformLocation(prog, 'u_skinning'),
+    atlasLut: gl.getUniformLocation(prog, 'u_atlas_lut'),
+    numVerts: gl.getUniformLocation(prog, 'u_num_verts'),
+    numJoints: gl.getUniformLocation(prog, 'u_num_joints'),
+    skinTexW: gl.getUniformLocation(prog, 'u_skin_tex_w'),
+    mobA: gl.getUniformLocation(prog, 'mob_a'),
+    mobB: gl.getUniformLocation(prog, 'mob_b'),
+    mobC: gl.getUniformLocation(prog, 'mob_c'),
+    mobD: gl.getUniformLocation(prog, 'mob_d'),
+    density: gl.getUniformLocation(prog, 'density'),
+    meshRadius: gl.getUniformLocation(prog, 'mesh_radius'),
+    minPx: gl.getUniformLocation(prog, 'min_px'),
+    vpMatrix: gl.getUniformLocation(prog, 'vp_matrix'),
+    vpWidth: gl.getUniformLocation(prog, 'vp_width'),
+    vpHeight: gl.getUniformLocation(prog, 'vp_height'),
+  };
+  // Bind samplers to texture units
+  if (locs.restPos) gl.uniform1i(locs.restPos, 13);   // unit 13
+  if (locs.skinning) gl.uniform1i(locs.skinning, 15);  // unit 15 (same as render)
+  if (locs.atlasLut) gl.uniform1i(locs.atlasLut, 14); // unit 14
+  gl.useProgram(null);
+
+  console.log(`GPU LOD compute initialized: ${numFaces} faces, ${numVerts} verts`);
+  return { prog, faceVao, outBuf, tf, restTex, locs, numFaces, numVerts, atlasLutTex: null };
+}
+
+// Upload atlas LUT to the GPU LOD compute (called once after atlas is built)
+function uploadLodAtlasLut(lodCompute, atlasKeys) {
+  const LUT_SIZE = 1200;
+  const lut = new Uint8Array(LUT_SIZE);
+  lut.fill(255);
+  const sortedKeys = [...atlasKeys].sort((a,b) => a[0]-b[0] || a[1]-b[1] || a[2]-b[2]);
+  for (let i = 0; i < sortedKeys.length && i < 255; i++) {
+    const [a,b,c] = sortedKeys[i];
+    const ea = Math.round(Math.log2(a)), eb = Math.round(Math.log2(b)), ec = Math.round(Math.log2(c));
+    const key = ea + eb*10 + ec*100;
+    if (key < LUT_SIZE) lut[key] = i;
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 40, 30, 0, gl.RED, gl.UNSIGNED_BYTE, lut);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  lodCompute.atlasLutTex = tex;
+  lodCompute.atlasKeys = sortedKeys;
+}
+
+// Run GPU LOD compute for current frame. Returns Float32Array of [atlas_idx, perm_idx] per face.
+function runGpuLodCompute(lodCompute, mobius, vpMatrix, vpW, vpH, density, meshRadius, minPx, numJoints, skinTexW) {
+  const lc = lodCompute;
+  gl.useProgram(lc.prog);
+
+  // Bind textures
+  gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, lc.restTex);
+  gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
+  if (lc.atlasLutTex) { gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, lc.atlasLutTex); }
+
+  // Bind joint UBO (already at binding 4)
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, JOINT_UBO_BINDING, jointUbo);
+
+  // Set uniforms
+  gl.uniform1i(lc.locs.numVerts, lc.numVerts);
+  gl.uniform1i(lc.locs.numJoints, numJoints);
+  gl.uniform1i(lc.locs.skinTexW, skinTexW);
+  gl.uniform4fv(lc.locs.mobA, mobius.a);
+  gl.uniform4fv(lc.locs.mobB, mobius.b);
+  gl.uniform4fv(lc.locs.mobC, mobius.c);
+  gl.uniform4fv(lc.locs.mobD, mobius.d);
+  gl.uniform1f(lc.locs.density, density);
+  gl.uniform1f(lc.locs.meshRadius, meshRadius);
+  gl.uniform1f(lc.locs.minPx, minPx);
+  gl.uniformMatrix4fv(lc.locs.vpMatrix, false, vpMatrix);
+  gl.uniform1f(lc.locs.vpWidth, vpW);
+  gl.uniform1f(lc.locs.vpHeight, vpH);
+
+  // Run transform feedback
+  gl.bindVertexArray(lc.faceVao);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, lc.tf);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, lc.outBuf);
+  gl.enable(gl.RASTERIZER_DISCARD);
+  gl.beginTransformFeedback(gl.POINTS);
+  gl.drawArrays(gl.POINTS, 0, lc.numFaces);
+  gl.endTransformFeedback();
+  gl.disable(gl.RASTERIZER_DISCARD);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+  gl.bindVertexArray(null);
+
+  // Read back results
+  const result = new Float32Array(lc.numFaces * 2);
+  gl.bindBuffer(gl.ARRAY_BUFFER, lc.outBuf);
+  gl.getBufferSubData(gl.ARRAY_BUFFER, 0, result);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  gl.useProgram(null);
+
+  return result;
+}
+
+// --- GPU Skinning ---
+// Set up GPU skinning for a skinned glTF model.
+// Uploads skinning texture, builds static rest-pose instance data, creates batch.
+async function setupGpuSkinning() {
+  // 1. Get skinning data from worker and upload as texture
+  const skinResp = await workerCall('get_skinning_data', {});
+  const sd = skinResp.skinData;
+  if (!sd || !sd.joint_indices) {
+    console.warn('No skinning data available');
+    gpuSkinned = false;
+    return false;
+  }
+
+  // Upload skinning texture: RGBA32F, width = num_vertices, height = 2
+  // Row 0: joint indices, Row 1: weights
+  if (skinningTexture) gl.deleteTexture(skinningTexture);
+  skinningTexture = gl.createTexture();
+  const nv = sd.num_vertices;
+  // Use safe texture width — check GPU limit
+  const maxTexSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  console.log(`MAX_TEXTURE_SIZE: ${maxTexSize}, vertices: ${nv}`);
+  const texW = Math.min(nv, 1024);
+  const texRows = Math.ceil(nv / texW);
+  const texH = texRows * 2; // 2 rows per chunk (indices + weights)
+  const texData = new Float32Array(texW * texH * 4);
+  // Pack: row 2*chunk = joint indices, row 2*chunk+1 = joint weights
+  for (let vi = 0; vi < nv; vi++) {
+    const chunk = Math.floor(vi / texW);
+    const col = vi % texW;
+    // Joint indices → row 2*chunk
+    const idxRow = chunk * 2;
+    const idxOff = (idxRow * texW + col) * 4;
+    texData[idxOff]   = sd.joint_indices[vi * 4];
+    texData[idxOff+1] = sd.joint_indices[vi * 4 + 1];
+    texData[idxOff+2] = sd.joint_indices[vi * 4 + 2];
+    texData[idxOff+3] = sd.joint_indices[vi * 4 + 3];
+    // Joint weights → row 2*chunk+1
+    const wtRow = chunk * 2 + 1;
+    const wtOff = (wtRow * texW + col) * 4;
+    texData[wtOff]   = sd.joint_weights[vi * 4];
+    texData[wtOff+1] = sd.joint_weights[vi * 4 + 1];
+    texData[wtOff+2] = sd.joint_weights[vi * 4 + 2];
+    texData[wtOff+3] = sd.joint_weights[vi * 4 + 3];
+  }
+  window._skinTexW = texW; // store for shader uniform
+  gl.activeTexture(gl.TEXTURE15);
+  gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, texW, texH, 0, gl.RGBA, gl.FLOAT, texData);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  console.log(`Skinning texture uploaded: ${nv} vertices, ${sd.num_joints} joints`);
+
+  // 2. Get rest-pose instance data
+  const rpResp = await workerCall('get_rest_pose_instances', { lod_time: sd.t_min || 0 });
+  const rp = rpResp.data;
+  if (!rp || !rp.instances) {
+    console.warn('No rest-pose instance data');
+    gpuSkinned = false;
+    return false;
+  }
+
+  // 3. Group faces by LOD triple and build batches
+  const STRIDE = 40; // compact stride in floats
+  const faceLods = rp.face_lods; // 5 floats per face: [canon_a, canon_b, canon_c, perm_idx, parity]
+  const nf = rp.num_faces;
+
+  // Group faces by tessellation key (canonical LOD + permutation)
+  const groups = new Map(); // key → { faceIndices: [], parity, permIndex, lod }
+  for (let fi = 0; fi < nf; fi++) {
+    const lo = fi * 5;
+    const ca = faceLods[lo], cb = faceLods[lo+1], cc = faceLods[lo+2];
+    const permIdx = faceLods[lo+3];
+    const parity = faceLods[lo+4];
+    const key = `${ca},${cb},${cc}/${permIdx}`;
+    if (!groups.has(key)) {
+      groups.set(key, { faces: [], parity, permIndex: permIdx, lod: [ca, cb, cc] });
+    }
+    groups.get(key).faces.push(fi);
+  }
+
+  // Clear old batches
+  for (const b of drawBatches) {
+    if (b.vaoXform) gl.deleteVertexArray(b.vaoXform);
+    if (b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri);
+  }
+  drawBatches = [];
+
+  for (const [key, group] of groups) {
+    const tess = atlasBuffers.get(key) || tessCache.get(key);
+    if (!tess) continue; // skip LODs not in atlas
+
+    // Pack instance data for this group's faces
+    const groupData = new Float32Array(group.faces.length * STRIDE);
+    for (let gi = 0; gi < group.faces.length; gi++) {
+      const fi = group.faces[gi];
+      groupData.set(rp.instances.subarray(fi * STRIDE, (fi + 1) * STRIDE), gi * STRIDE);
+    }
+
+    const instBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, groupData, gl.STATIC_DRAW);
+
+    const buildSkinVAO = (idxBuf) => {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, tess.baryBuf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+      const S = 160;
+      const compactMap = [
+        [1,0],[2,16],[3,32],[7,48],[8,64],
+        [9,80],[10,96],[11,112],[12,128],[13,144]
+      ];
+      for (const [loc, off] of compactMap) {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+        gl.vertexAttribDivisor(loc, 1);
+      }
+      gl.vertexAttrib4f(4, 1, 0, 0, 0);
+      gl.vertexAttrib4f(5, 1, 0, 0, 0);
+      gl.vertexAttrib4f(6, 1, 0, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+      gl.bindVertexArray(null);
+      return vao;
+    };
+
+    drawBatches.push({
+      vaoXform: buildSkinVAO(tess.lineIdxBuf),
+      vaoXformTri: buildSkinVAO(tess.triIdxBuf),
+      numLineIdx: tess.numLineIdx,
+      numTriIdx: tess.numTriIdx,
+      numInst: group.faces.length,
+      lod: group.lod, wantedLod: group.lod, usedLod: group.lod,
+      color: lodColor(group.lod),
+      parity: group.parity, permIndex: group.permIndex, materialIndex: 0,
+      instanceData: groupData, xformData: groupData,
+      faceIndices: new Uint32Array(group.faces),
+    });
+  }
+  numOrigInst = nf;
+  vaoOrigMesh = null;
+  // Initialize GPU LOD compute pipeline
+  // Extract rest-pose positions + face indices from instance data
+  const restPos = new Float32Array(rp.num_vertices * 3);
+  const faceIdxF32 = new Float32Array(nf * 3);
+  const vertSeen = new Uint8Array(rp.num_vertices);
+  for (let fi = 0; fi < nf; fi++) {
+    for (let vi = 0; vi < 3; vi++) {
+      const off = (fi * STRIDE) + vi * 4;
+      const vertIdx = rp.instances[off]; // vertex index in p.x
+      faceIdxF32[fi * 3 + vi] = vertIdx;
+      const idx = Math.round(vertIdx);
+      if (idx < rp.num_vertices && !vertSeen[idx]) {
+        vertSeen[idx] = 1;
+        restPos[idx*3]   = rp.instances[off+1]; // x
+        restPos[idx*3+1] = rp.instances[off+2]; // y
+        restPos[idx*3+2] = rp.instances[off+3]; // z
+      }
+    }
+  }
+  gpuLodCompute = initGpuLodCompute(nf, faceIdxF32, restPos, rp.num_vertices);
+  if (gpuLodCompute) {
+    // Build atlas LUT from existing atlas keys
+    const keys = [];
+    for (const [k] of atlasBuffers) {
+      const parts = k.split('/')[0].split(',').map(Number);
+      if (parts.length === 3) keys.push(parts);
+    }
+    uploadLodAtlasLut(gpuLodCompute, keys);
+  }
+
+  console.log(`GPU skinning: ${drawBatches.length} LOD batches from ${nf} faces`);
+
+  gpuSkinned = true;
+  zoom = 5; // reset to default — positions are in normalized [-1,1] space
+  console.log(`GPU skinning ready: ${rp.num_faces} faces, ${sd.num_joints} joints, tessellation [4,4,4], extent=${rp.extent}`);
+  return true;
+}
+
+// Upload joint matrices to the UBO for the current animation frame.
+async function uploadJointMatrices(t) {
+  const resp = await workerCall('evaluate_animation_frame', { t });
+  const matrices = resp.matrices;
+  if (!matrices) return;
+  // Build UBO data: 16 bytes header + matrices
+  const numJoints = matrices.length / 16;
+  const uboData = new ArrayBuffer(16 + matrices.byteLength);
+  const view = new DataView(uboData);
+  view.setInt32(0, numJoints, true);                    // num_joints at offset 0
+  view.setInt32(4, window._skinTexW || 2048, true);     // skin_tex_width at offset 4
+  new Float32Array(uboData, 16).set(matrices);
+  gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(uboData));
+}
+
 // --- Draw state ---
 let drawBatches = [];
 let globalMaxLogLod = 1;
@@ -1973,6 +2450,7 @@ function getOrCreateBatchVAOs(tessKey, tessBufs, instanceData, numInstances) {
 }
 
 function uploadBatches(data) {
+  if (gpuSkinned) return; // GPU skinning manages its own batches
   const usedKeys = new Set();
   drawBatches = [];
 
@@ -2144,6 +2622,14 @@ function render() {
 
   // Bind UBOs to their binding points
   bindUBOs();
+  // Bind skinning texture if GPU skinning is active
+  if (gpuSkinned && skinningTexture) {
+    gl.activeTexture(gl.TEXTURE15);
+    gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
+  }
+
+  // GPU-skinned models use flat path (use_qb = 0), regular models use QB (use_qb = 1)
+  const useQB = gpuSkinned ? 0 : 1;
 
   const drawWire = renderMode === 'wire' || renderMode === 'both';
   const drawLod = renderMode === 'lod' || renderMode === 'both';
@@ -2159,7 +2645,7 @@ function render() {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(progNormals);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, useQB, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -2167,12 +2653,12 @@ function render() {
     gl.clear(gl.DEPTH_BUFFER_BIT); // render on top
     const prog = progPbr || progMatcap;
     gl.useProgram(prog);
-    uploadVertexUBO(mvp, view, iso.parity, iso.permIndex, 1, camPos);
+    uploadVertexUBO(mvp, view, iso.parity, iso.permIndex, useQB, camPos);
     gl.bindVertexArray(isolateVAO);
     gl.drawElementsInstanced(gl.TRIANGLES, iso.numTriIdx, gl.UNSIGNED_INT, 0, 1);
     // Draw wireframe of isolated face
     gl.useProgram(progWire);
-    uploadVertexUBO(mvp, view, iso.parity, iso.permIndex, 1, camPos);
+    uploadVertexUBO(mvp, view, iso.parity, iso.permIndex, useQB, camPos);
     uploadWireUBO([0, 1, 1], true);
     gl.bindVertexArray(isolateLinVAO);
     gl.drawElementsInstanced(gl.LINES, iso.numLineIdx, gl.UNSIGNED_INT, 0, 1);
@@ -2242,7 +2728,7 @@ function render() {
       }
       if (b.parity !== lastParity || b.permIndex !== lastPermIndex) {
         lastParity = b.parity; lastPermIndex = b.permIndex;
-        uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+        uploadVertexUBO(mvp, view, b.parity, b.permIndex, useQB, camPos);
       }
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
@@ -2275,7 +2761,7 @@ function render() {
       gl.bindTexture(gl.TEXTURE_2D, matcapTex);
     }
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, useQB, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -2289,7 +2775,7 @@ function render() {
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, matcapUboData);
     gl.bindBufferBase(gl.UNIFORM_BUFFER, MATCAP_UBO_BINDING, matcapUbo);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, useQB, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -2299,7 +2785,7 @@ function render() {
   if (drawWire) {
     gl.useProgram(progWire);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, useQB, camPos);
       uploadWireUBO(b.color, true);
       gl.bindVertexArray(b.vaoXform);
       gl.drawElementsInstanced(gl.LINES, b.numLineIdx, gl.UNSIGNED_INT, 0, b.numInst);
@@ -2310,7 +2796,7 @@ function render() {
   if (drawNormals) {
     gl.useProgram(progNormals);
     for (const b of drawBatches) {
-      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      uploadVertexUBO(mvp, view, b.parity, b.permIndex, useQB, camPos);
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
@@ -2366,6 +2852,14 @@ function updateMobius() {
 let inflight = 0;
 async function update() {
   if (!workerReady || !meshInfo) return;
+  if (gpuSkinned) {
+    // Recompute Möbius from current UI state before rendering
+    const { mx, my, mz, mr } = getTransformParams();
+    const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
+    mob = computeMobius(tType, mx, my, mz, mr);
+    render();
+    return;
+  }
   if (inflight >= NUM_WORKERS) return;
   inflight++;
   const gen = ++updateGeneration;
@@ -2612,8 +3106,14 @@ setupBtnGroup('shape-btns', async (name) => {
   vaoCache.clear();
   vaoOrigMesh = null;
   animDir = 1;
-  // Built-in shapes have no materials/textures
+  // Built-in shapes have no materials/textures/animations
   createTexturesFromGltf([], []);
+  $('anim-sel').style.display = 'none';
+  $('variant-sel').style.display = 'none';
+  gpuSkinned = false;
+  // Clear joint UBO (num_joints = 0)
+  gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Int32Array([0]));
   workerReady = true;
   update();
 });
@@ -2681,6 +3181,32 @@ $('variant-sel').addEventListener('change', () => {
   }
   // Send updated face materials to worker
   broadcastCall('set_face_materials', { materials: faceMats }).then(() => update());
+});
+
+$('anim-sel').addEventListener('change', async () => {
+  const idx = parseInt($('anim-sel').value);
+  if (idx < 0) return;
+  $('stats').innerHTML = 'Switching animation...';
+  const resp = await broadcastCall('set_active_animation', { index: idx });
+  const result = resp.result;
+  if (!result) { $('stats').innerHTML = 'Animation switch failed'; return; }
+  meshInfo.time_min = result.time_min;
+  meshInfo.time_max = result.time_max;
+  meshInfo.num_vertices = result.num_vertices;
+  meshInfo.num_faces = result.num_faces;
+  frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
+  frame._frameIdx = 0;
+  const timeSlider = $('time');
+  timeSlider.min = result.time_min;
+  timeSlider.max = result.time_max;
+  timeSlider.step = (result.time_max - result.time_min) / 200;
+  timeSlider.value = (result.time_min + result.time_max) / 2;
+  $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
+  tessCache.clear();
+  vaoCache.clear();
+  vaoOrigMesh = null;
+  $('stats').innerHTML = `Animation: <span class="val">${$('anim-sel').selectedOptions[0].textContent}</span>`;
+  await update();
 });
 
 $('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateDebounced(); });
@@ -2769,6 +3295,20 @@ function frame() {
       n = rot4(n, plane1, p1);
       n = rot4(n, plane2, p2);
       rotateNormalOverride = n;
+    } else if (gpuSkinned) {
+      // GPU skinning: advance time at 1x playback speed
+      if (!frame._animTime) frame._animTime = meshInfo.time_min;
+      const period = meshInfo.time_max - meshInfo.time_min;
+      const dt = 1.0 / 60.0; // ~16ms per frame at 60fps
+      frame._animTime += dt;
+      // Wrap to animation range
+      if (frame._animTime > meshInfo.time_max) frame._animTime = meshInfo.time_min + (frame._animTime - meshInfo.time_min) % period;
+      const slider = $('time');
+      slider.value = frame._animTime;
+      $('time-v').textContent = frame._animTime.toFixed(2);
+      // Upload joint matrices — fire and render with whatever data is current.
+      // The UBO update happens async; next frame's render will use it.
+      uploadJointMatrices(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
     } else {
       // Step one prebaked frame per render frame
       if (!frame._frameIdx) frame._frameIdx = 0;
@@ -2780,7 +3320,7 @@ function frame() {
       slider.value = t;
       $('time-v').textContent = t.toFixed(2);
     }
-    update();
+    if (!gpuSkinned) update();
   }
   render();
   requestAnimationFrame(frame);
@@ -2837,17 +3377,59 @@ async function loadGltfFromBuffer(buffer, filename) {
     variantSel.style.display = 'none';
   }
 
+  // Animation selector
+  const animSel = $('anim-sel');
+  animSel.innerHTML = '';
+  const animations = info.animations || [];
+  if (animations.length > 0) {
+    for (const anim of animations) {
+      const opt = document.createElement('option');
+      opt.value = anim.index;
+      opt.textContent = anim.name || `Animation ${anim.index}`;
+      animSel.appendChild(opt);
+    }
+    animSel.style.display = '';
+  } else {
+    const opt = document.createElement('option');
+    opt.value = -1;
+    opt.textContent = 'None';
+    animSel.appendChild(opt);
+    animSel.style.display = 'none';
+  }
+
   // Clear GPU caches
   tessCache.clear();
   vaoCache.clear();
   vaoOrigMesh = null;
   animDir = 1;
+
+  // Check if this is a skinned model — use GPU skinning path
+  gpuSkinned = false;
+  const hasSkin = animations.length > 0 && info.num_vertices > 0;
+  if (hasSkin) {
+    $('stats').innerHTML = `Setting up GPU skinning...`;
+    const skinOk = await setupGpuSkinning();
+    if (skinOk) {
+      // Evaluate initial pose
+      const t0pose = (info.time_min + info.time_max) / 2;
+      await uploadJointMatrices(t0pose);
+      // Bind skinning texture to unit 15 for rendering
+      gl.activeTexture(gl.TEXTURE15);
+      gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
+    }
+  }
+
   $('stats').innerHTML =
     `Loaded <span class="val">${filename || 'glTF'}</span><br>` +
     `Verts: <span class="val">${info.num_vertices}</span> Faces: <span class="val">${info.num_faces}</span>` +
+    (gpuSkinned ? '<br><span class="val">GPU Skinned</span>' : '') +
     (numMats > 1 ? `<br>Materials: <span class="val">${numMats}</span>` : '');
   workerReady = true;
-  await update();
+  if (!gpuSkinned) {
+    await update();
+  } else {
+    render();
+  }
 }
 
 // File picker button
