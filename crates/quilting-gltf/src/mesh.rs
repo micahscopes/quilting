@@ -54,11 +54,10 @@ pub fn extract_mesh(
         let reader = prim.reader(|buf| Some(&buffers[buf.index()]));
 
         // Positions (required by glTF spec for rendered primitives).
-        let positions: Vec<[f64; 3]> = reader
-            .read_positions()
-            .ok_or_else(|| GltfError::MissingData("primitive has no POSITION attribute".into()))?
-            .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
-            .collect();
+        let positions: Vec<[f64; 3]> = match reader.read_positions() {
+            Some(iter) => iter.map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect(),
+            None => continue, // Skip primitives without positions
+        };
 
         // Normals (optional).
         let normals: Option<Vec<[f64; 3]>> = reader
