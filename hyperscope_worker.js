@@ -24,6 +24,12 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'set_tess_params') {
+    wasm.set_tess_params(data.density, data.screenAtten);
+    self.postMessage({ type: 'tess_params_set', id });
+    return;
+  }
+
   if (type === 'set_sliver') {
     wasm.set_sliver_threshold(data.threshold);
     self.postMessage({ type: 'sliver_set', id });
@@ -37,6 +43,12 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'extend_atlas') {
+    const ms = wasm.extend_atlas(data.newLod);
+    self.postMessage({ type: 'atlas_extended', id, ms });
+    return;
+  }
+
   if (type === 'create_hypermesh') {
     const result = wasm.create_hypermesh(data.name);
     self.postMessage({ type: 'hypermesh_created', id, result });
@@ -44,7 +56,11 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'slice_and_transform') {
-    const { normal, offset, transformType, params, overrideRes, vpMatrix, vpWidth, vpHeight, toroidal } = data;
+    const { normal, offset, transformType, params, overrideRes, vpMatrix, vpWidth, vpHeight, toroidal, tessDensity, screenAtten, minPxSub } = data;
+    if (tessDensity != null) {
+      wasm.set_tess_params(tessDensity, !!screenAtten);
+      if (minPxSub != null) wasm.set_min_px_per_sub(minPxSub);
+    }
     const result = wasm.slice_and_transform(
       new Float64Array(normal),
       offset,

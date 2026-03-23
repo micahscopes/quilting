@@ -1,5 +1,23 @@
 use crate::quaternion::{Quat, Mobius};
 use quilting_mesh::HalfEdgeMesh;
+use std::cell::RefCell;
+
+thread_local! {
+    static TESS_DENSITY: RefCell<f64> = RefCell::new(20.0);
+    static SCREEN_ATTEN: RefCell<bool> = RefCell::new(true);
+    static MIN_PX_PER_SUB: RefCell<f64> = RefCell::new(2.0);
+}
+
+/// Set tessellation parameters.
+pub fn set_tess_params(density: f64, screen_atten: bool) {
+    TESS_DENSITY.with(|d| *d.borrow_mut() = density.max(1.0));
+    SCREEN_ATTEN.with(|s| *s.borrow_mut() = screen_atten);
+}
+
+/// Set minimum pixels per subdivision for screen attenuation.
+pub fn set_min_px_per_sub(px: f64) {
+    MIN_PX_PER_SUB.with(|p| *p.borrow_mut() = px.max(0.1));
+}
 
 /// Per-face instance data for instanced rendering.
 #[derive(Debug, Clone)]
@@ -177,8 +195,10 @@ pub fn compute_instances_with_uvs(
     // the same slot → guaranteed matching. This is the v0.2.0 proven
     // approach that was working before the LOD refactors.
 
-    const MAX_LOD: u32 = 128;
-    let target_pixels_per_sub = 4.0;
+    const MAX_LOD: u32 = 1024;
+    let tess_density = TESS_DENSITY.with(|d| *d.borrow());
+    let screen_atten_enabled = SCREEN_ATTEN.with(|s| *s.borrow());
+    let min_px = MIN_PX_PER_SUB.with(|p| *p.borrow());
 
     let owned_mesh;
     let mesh = match mesh {
@@ -206,6 +226,7 @@ pub fn compute_instances_with_uvs(
             Some(s) => {
                 let n_samples = 9;
                 let mut total = 0.0;
+                let mut any_visible = false;
                 let mut prev = s.project(transformed[va].0.to_point());
                 for i in 1..=n_samples {
                     let t = i as f64 / n_samples as f64;
@@ -218,10 +239,13 @@ pub fn compute_instances_with_uvs(
                     let curr = s.project(tp);
                     if let (Some(p1), Some(p2)) = (prev, curr) {
                         total += ((p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2)).sqrt();
-                    } else { return f64::MAX; }
+                        any_visible = true;
+                    }
+                    // Skip unprojectable segments (behind camera) instead of
+                    // returning MAX — offscreen edges should get min LOD, not max.
                     prev = curr;
                 }
-                total
+                if any_visible { total } else { 0.0 }
             }
             None => {
                 let pa = transformed[va].0.to_point();
@@ -237,6 +261,81 @@ pub fn compute_instances_with_uvs(
     // for faces that don't need tessellation.
     let mut edge_lods: Vec<u32> = vec![0; num_half_edges];
 
+    // Compute mesh scale: bounding sphere radius (for edge length normalization)
+    let mesh_radius = {
+        let (mut cx, mut cy, mut cz) = (0.0, 0.0, 0.0);
+        for v in vertices { cx += v[0]; cy += v[1]; cz += v[2]; }
+        let n = vertices.len() as f64;
+        cx /= n; cy /= n; cz /= n;
+        vertices.iter()
+            .map(|v| ((v[0]-cx).powi(2) + (v[1]-cy).powi(2) + (v[2]-cz).powi(2)).sqrt())
+            .fold(0.0f64, f64::max)
+            .max(1e-6)
+    };
+
+    // Target triangle edge length in deformed world units.
+    let target_size = mesh_radius / tess_density;
+
+    let dist3 = |a: [f64;3], b: [f64;3]| -> f64 {
+        ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt()
+    };
+
+    // Per-face: transform edge midpoints through Möbius, compute deformed
+    // medians to determine per-edge LODs. 3 Möbius evals per face.
+    let mut edge_lods_world: Vec<u32> = vec![0; num_half_edges];
+
+    for fi in 0..nf {
+        let face = faces[fi];
+        let v0 = vertices[face[0]];
+        let v1 = vertices[face[1]];
+        let v2 = vertices[face[2]];
+
+        // Deformed vertex positions (already computed)
+        let d0 = transformed[face[0]].0.to_point();
+        let d1 = transformed[face[1]].0.to_point();
+        let d2 = transformed[face[2]].0.to_point();
+
+        // Transform edge midpoints through Möbius (3 evals per face).
+        // These sample the INTERIOR — catching inflation that vertex
+        // chord lengths miss when patches flip inside out.
+        let xm = |a: [f64;3], b: [f64;3]| -> [f64; 3] {
+            transform.apply(Quat::from_point(
+                (a[0]+b[0])*0.5, (a[1]+b[1])*0.5, (a[2]+b[2])*0.5
+            )).to_point()
+        };
+        let dm_a = xm(v1, v2); // deformed midpoint of edge BC
+        let dm_b = xm(v0, v2); // deformed midpoint of edge AC
+        let dm_c = xm(v0, v1); // deformed midpoint of edge AB
+
+        // Deformed medians: vertex → opposite edge's deformed midpoint.
+        // median_a (A → mid(BC)) captures scaling of edges AB and AC.
+        // median_b (B → mid(AC)) captures scaling of edges AB and BC.
+        // median_c (C → mid(AB)) captures scaling of edges AC and BC.
+        let median_a = dist3(d0, dm_a);
+        let median_b = dist3(d1, dm_b);
+        let median_c = dist3(d2, dm_c);
+
+        // Each edge's LOD is driven by the medians from its two endpoints.
+        // Edge AB: median_a (from A across BC) + median_b (from B across AC)
+        //   → both tell us how much AB's face extends, so average them.
+        // Edge BC: median_b + median_c
+        // Edge AC: median_a + median_c
+        let lod_ab = ((median_a + median_b) * 0.5 / target_size).ceil() as u32;
+        let lod_bc = ((median_b + median_c) * 0.5 / target_size).ceil() as u32;
+        let lod_ac = ((median_a + median_c) * 0.5 / target_size).ceil() as u32;
+
+        // Map to half-edge canonical edges, take max across adjacent faces
+        let he_base = fi * 3;
+        // edge_a (v1→v2 = BC), edge_b (v2→v0 = CA), edge_c (v0→v1 = AB)
+        edge_lods_world[canonical_edge(he_base + 1)] =
+            edge_lods_world[canonical_edge(he_base + 1)].max(lod_bc);
+        edge_lods_world[canonical_edge(he_base + 2)] =
+            edge_lods_world[canonical_edge(he_base + 2)].max(lod_ac);
+        edge_lods_world[canonical_edge(he_base)] =
+            edge_lods_world[canonical_edge(he_base)].max(lod_ab);
+    }
+
+    // Apply screen attenuation and snap to power of 2
     for fi in 0..nf {
         for ei in 0..3u32 {
             let he_idx = fi * 3 + ei as usize;
@@ -245,17 +344,50 @@ pub fn compute_instances_with_uvs(
 
             let (va, vb) = mesh.edge_vertices(he_idx as u32);
             let pixels = screen_arc_len(va as usize, vb as usize);
-            edge_lods[canon] = snap_to_power_of_2(
-                (pixels / target_pixels_per_sub).ceil() as u32
-            ).max(1).min(MAX_LOD);
+            // Screen attenuation: reduce LOD only when subdivisions would
+            // be sub-pixel (invisible). Each subdivision must span at least
+            // 1 pixel to be worth rendering. Below that, reduce proportionally.
+            let lod = if screen_atten_enabled && pixels > 0.0 {
+                let world = edge_lods_world[canon];
+                // How many pixels per subdivision at this world LOD?
+                let px_per_sub = pixels / world.max(1) as f64;
+                if px_per_sub < min_px {
+                    // Too dense: reduce LOD so each sub spans min_px
+                    let reduced = (pixels / min_px).ceil() as u32;
+                    world.min(reduced)
+                } else {
+                    world // subdivisions are visible, use full world LOD
+                }
+            } else {
+                edge_lods_world[canon]
+            };
+            edge_lods[canon] = snap_to_power_of_2(lod).max(2).min(MAX_LOD);
         }
     }
 
-    // Clamp: at most MAX_LOD
+    // Clamp: min 2 (keeps all LODs even → hierarchical subdivision always works,
+    // no Poisson needed at runtime), max MAX_LOD
     for lod in edge_lods.iter_mut() {
-        if *lod == 0 { *lod = 1; }
+        if *lod < 2 { *lod = 2; }
         *lod = (*lod).min(MAX_LOD);
     }
+
+    // Triangle budget (disabled for LOD tuning — re-enable once scaling is dialed in)
+    // const TRI_BUDGET: u64 = 1_000_000;
+    // let estimated_tris: u64 = (0..nf).map(|fi| {
+    //     let he_base = fi * 3;
+    //     let a = edge_lods[canonical_edge(he_base + 1)] as u64;
+    //     let b = edge_lods[canonical_edge(he_base + 2)] as u64;
+    //     let c = edge_lods[canonical_edge(he_base)] as u64;
+    //     a.max(b).max(c).pow(2) / 2
+    // }).sum();
+    // if estimated_tris > TRI_BUDGET {
+    //     let scale = (TRI_BUDGET as f64 / estimated_tris as f64).sqrt();
+    //     for lod in edge_lods.iter_mut() {
+    //         let scaled = (*lod as f64 * scale) as u32;
+    //         *lod = snap_down_pow2(scaled).max(2);
+    //     }
+    // }
 
     // Assign to faces — read directly from canonical edge storage.
     // Both faces sharing an edge read the same slot → matching guaranteed.
@@ -365,6 +497,14 @@ fn snap_to_power_of_2(v: u32) -> u32 {
     } else {
         p
     }
+}
+
+/// Snap DOWN to nearest power of 2 (for budget scaling — never exceed the budget).
+fn snap_down_pow2(v: u32) -> u32 {
+    if v <= 1 { return 1; }
+    let mut p = 1u32;
+    while p * 2 <= v { p *= 2; }
+    p
 }
 
 /// Compute a face normal from 3 vertex positions, returned as [f32; 3] for all 3 corners.

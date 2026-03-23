@@ -61,37 +61,123 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     elapsed
 }
 
-/// Generate a single tessellation patch and store it in the atlas.
-/// Used for progressive refinement — generates missing LODs on demand.
+/// Set tessellation parameters.
+/// density: target mesh_radius/density = triangle size in deformed world units (default 100)
+/// screen_atten: whether to attenuate LOD for distant/small screen faces
+#[wasm_bindgen]
+pub fn set_tess_params(density: f64, screen_atten: bool) {
+    quilting_core::evaluate::set_tess_params(density, screen_atten);
+}
+
+/// Set minimum pixels per subdivision for screen attenuation.
+#[wasm_bindgen]
+pub fn set_min_px_per_sub(px: f64) {
+    quilting_core::evaluate::set_min_px_per_sub(px);
+}
+
+/// Extend the atlas to include a new LOD level by subdividing from existing parents.
+/// Much faster than rebuilding — each new patch is one subdivision step.
+#[wasm_bindgen]
+pub fn extend_atlas(new_lod: u32) -> f64 {
+    let start = js_sys::Date::now();
+    ATLAS.with(|atlas_cell| {
+        let mut atlas_opt = atlas_cell.borrow_mut();
+        if let Some(atlas) = atlas_opt.as_mut() {
+            // Collect all LOD levels currently in the atlas + the new one
+            let mut levels: Vec<u32> = atlas.lod_levels.clone();
+            if !levels.contains(&new_lod) {
+                levels.push(new_lod);
+                levels.sort();
+            }
+
+            // Generate all canonical triples that include new_lod
+            let mut new_triples = Vec::new();
+            for &a in &levels {
+                for &b in &levels {
+                    for &c in &levels {
+                        if a > b || b > c { continue; }
+                        if a != new_lod && b != new_lod && c != new_lod { continue; }
+                        let key = [a, b, c];
+                        if !atlas.patches.contains_key(&key) {
+                            new_triples.push(key);
+                        }
+                    }
+                }
+            }
+
+            for key in &new_triples {
+                ensure_patch(atlas, *key);
+            }
+
+            atlas.lod_levels = levels;
+        }
+    });
+    SENT_TESS.with(|s| s.borrow_mut().clear());
+    js_sys::Date::now() - start
+}
+
+/// Generate a single tessellation patch via hierarchical subdivision and store
+/// it in the atlas. Recursively generates ancestor patches if needed (e.g.,
+/// [4,256,512] needs parent [2,128,256] which needs grandparent [1,64,128]).
+/// Falls back to direct Poisson generation for base triples that can't be halved.
 #[wasm_bindgen]
 pub fn generate_and_store_patch(res_a: u32, res_b: u32, res_c: u32) {
-    let config = PatchConfig { k_candidates: 30, seed: 42 };
-    let res = [res_a as f64, res_b as f64, res_c as f64];
-    let sample = quilting_core::sampling::tri_patch(res, &config);
-    if sample.positions.len() < 3 { return; }
-    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
-
     ATLAS.with(|atlas_cell| {
         let mut atlas_opt = atlas_cell.borrow_mut();
         if let Some(atlas) = atlas_opt.as_mut() {
             let mut key = [res_a, res_b, res_c];
             key.sort();
-            if atlas.patches.contains_key(&key) { return; }
-
-            let base_vertex = atlas.positions.len();
-            let base_triangle = atlas.triangles.len();
-            atlas.positions.extend_from_slice(&tri.positions);
-            for t in &tri.triangles {
-                atlas.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
-            }
-            atlas.patches.insert(key, quilting_core::atlas::PatchEntry {
-                base_vertex,
-                vertex_count: tri.positions.len(),
-                base_triangle,
-                triangle_count: tri.triangles.len(),
-            });
+            ensure_patch(atlas, key);
         }
     });
+}
+
+fn insert_patch(atlas: &mut TessellationAtlas, key: [u32; 3], positions: Vec<[f64; 2]>, triangles: Vec<[usize; 3]>) {
+    let base_vertex = atlas.positions.len();
+    let base_triangle = atlas.triangles.len();
+    atlas.positions.extend_from_slice(&positions);
+    for t in &triangles {
+        atlas.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
+    }
+    atlas.patches.insert(key, quilting_core::atlas::PatchEntry {
+        base_vertex,
+        vertex_count: positions.len(),
+        base_triangle,
+        triangle_count: triangles.len(),
+    });
+}
+
+fn get_patch_local(atlas: &TessellationAtlas, key: &[u32; 3]) -> Option<(Vec<[f64; 2]>, Vec<[usize; 3]>)> {
+    let entry = atlas.patches.get(key)?;
+    let positions = atlas.positions[entry.base_vertex..entry.base_vertex + entry.vertex_count].to_vec();
+    let triangles: Vec<[usize; 3]> = atlas.triangles
+        [entry.base_triangle..entry.base_triangle + entry.triangle_count]
+        .iter()
+        .map(|t| [t[0] - entry.base_vertex, t[1] - entry.base_vertex, t[2] - entry.base_vertex])
+        .collect();
+    Some((positions, triangles))
+}
+
+/// Generate a patch by hierarchical subdivision only. With min LOD = 2, all
+/// runtime LODs are even, so every patch can be derived by halving down to
+/// a parent in the initial atlas. No Poisson needed at runtime.
+fn ensure_patch(atlas: &mut TessellationAtlas, key: [u32; 3]) -> bool {
+    if atlas.patches.contains_key(&key) { return true; }
+
+    if key[0] % 2 != 0 || key[1] % 2 != 0 || key[2] % 2 != 0 || key[0] == 0 {
+        return false; // shouldn't happen with min LOD = 2
+    }
+
+    let parent = [key[0] / 2, key[1] / 2, key[2] / 2];
+    if !ensure_patch(atlas, parent) { return false; }
+
+    let (pos, tris) = match get_patch_local(atlas, &parent) {
+        Some(v) => v,
+        None => return false,
+    };
+    let (new_pos, new_tris) = quilting_core::subdivide::subdivide(&pos, &tris);
+    insert_patch(atlas, key, new_pos, new_tris);
+    true
 }
 
 /// Get a built-in shape.
@@ -264,7 +350,9 @@ pub fn compute_mesh_batches(
 
             // Tess cache key includes perm_index — each permutation gets its own
             // pre-remapped bary buffer for exact edge stitching.
-            let tess_key = format!("{},{},{}/{}", canonical_lod[0], canonical_lod[1], canonical_lod[2], perm_index);
+            // Key by used_lod (not canonical_lod) so fallback data and correct
+            // data get separate cache entries — no invalidation needed.
+            let tess_key = format!("{},{},{}/{}", used_lod[0], used_lod[1], used_lod[2], perm_index);
 
             let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
 

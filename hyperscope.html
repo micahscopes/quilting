@@ -133,6 +133,14 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   <div class="section">
     <label>Resolution (0=auto)</label>
     <div class="sr"><input type="range" id="res" min="0" max="6" value="0"><span class="v" id="res-v">auto</span></div>
+    <label>Tess density</label>
+    <div class="sr"><input type="range" id="tess-density" min="10" max="500" value="20"><span class="v" id="tess-density-v">20</span></div>
+    <div class="toggle-row">
+      <div class="toggle on" id="screen-atten-toggle"></div>
+      <span class="toggle-label">Screen-space attenuation</span>
+    </div>
+    <label>Min px/subdivision</label>
+    <div class="sr"><input type="range" id="min-px-sub" min="1" max="16" value="2" step="1"><span class="v" id="min-px-sub-v">2</span></div>
   </div>
 
   <div class="section">
@@ -212,6 +220,31 @@ let renderMode = 'pbr';
 let rotX = 0.3, rotY = 0.5, zoom = 5;
 let animDir = 1;
 let pendingUpdate = false, updating = false;
+
+// Patch streaming: deduplicating queue with single consumer
+const patchQueue = [];
+const patchQueued = new Set();
+let patchBusy = false;
+
+function queuePatch(a, b, c) {
+  const key = `${a},${b},${c}`;
+  if (patchQueued.has(key)) return;
+  patchQueued.add(key);
+  patchQueue.push([a, b, c]);
+  drainPatchQueue();
+}
+
+function drainPatchQueue() {
+  if (patchBusy || patchQueue.length === 0) return;
+  patchBusy = true;
+  const [a, b, c] = patchQueue.shift();
+  workerCall('generate_single', { a, b, c }).then(() => {
+    patchBusy = false;
+    // re-render picks up the new patch; may queue more missing ones
+    if (!updating && !pendingUpdate) update();
+    else drainPatchQueue(); // if update already in flight, keep draining
+  });
+}
 let currentShape = 'galloping_horse';
 let currentXform = 'identity';
 
@@ -1324,8 +1357,8 @@ function isolateFace(batchIdx, localIdx) {
   const b = drawBatches[batchIdx];
   const faceData = b.instanceData.slice(localIdx * 52, (localIdx + 1) * 52);
 
-  // Get the tess buffers for this batch
-  const tessKey = b.lod.join(',') + '/' + (b.permIndex || 0);
+  // Get the tess buffers for this batch (keyed by used LOD — matches tessCache keys)
+  const tessKey = (b.usedLod || b.lod).join(',') + '/' + (b.permIndex || 0);
   const tess = tessCache.get(tessKey);
   if (!tess) return;
 
@@ -1456,9 +1489,10 @@ function showPickInfo(x, y) {
 
   if (!b._logged) { console.log('Batch keys:', Object.keys(b), 'faceIndices:', b.faceIndices, 'length:', b.faceIndices?.length); b._logged = true; }
   const origFaceIdx = b.faceIndices && b.faceIndices[face.localIdx];
+  const isFallback = b.wantedLod && [...b.lod].sort((a,b)=>a-b).join(',') !== [...b.wantedLod].sort((a,b)=>a-b).join(',');
   const info = [
     `Instance #${id} → mesh face ${origFaceIdx ?? '?'} (batch ${face.batchIdx}, local ${face.localIdx})`,
-    `Batch LOD: [${face.lod.join(', ')}]`,
+    `Batch LOD: [${face.lod.join(', ')}]` + (isFallback ? ` ⚠ FALLBACK (wanted [${b.wantedLod.join(', ')}])` : ''),
     `Edge LODs: [${edgeLods.map(l=>l.toFixed(0)).join(', ')}]`,
     `Perm: idx=${face.permIndex} parity=${face.parity}`,
     `Material: ${face.materialIndex}`,
@@ -1497,8 +1531,8 @@ function showPickInfo(x, y) {
   isolateFace(face.batchIdx, face.localIdx);
 
   // Dump full tessellation for this batch
-  const tessKey = b.lod.join(',') + '/' + (b.permIndex || 0);
-  const tess = tessCache.get(tessKey);
+  const tessKey2 = (b.usedLod || b.lod).join(',') + '/' + (b.permIndex || 0);
+  const tess = tessCache.get(tessKey2);
   if (tess) {
     // Draw tessellation overlay on a temporary canvas
     let overlay = document.getElementById('tess-overlay');
@@ -1722,9 +1756,12 @@ function makeVAO(baryData, idxData, instanceData) {
 }
 
 function getTessBuffers(batch) {
-  const key = batch.wanted_lod.join(',') + '/' + (batch.perm_index || 0);
+  // Key by used_lod (the LOD actually found in the atlas), not wanted_lod.
+  // This way fallback data (e.g. "2,2,2/0") and correct data (e.g. "2,512,512/0")
+  // get separate cache entries — no invalidation or poisoning possible.
+  const key = (batch.used_lod || batch.wanted_lod).join(',') + '/' + (batch.perm_index || 0);
   if (tessCache.has(key)) return tessCache.get(key);
-  if (!batch.tess_bary.length) return null;
+  if (!batch.tess_bary || !batch.tess_bary.length) return null;
 
   const bary = new Float32Array(batch.tess_bary);
   const tris = batch.tess_triangles;
@@ -1831,10 +1868,14 @@ function uploadBatches(data) {
   let totalRendered = 0, totalSkipped = 0;
   for (const batch of data.batches) {
     const tess = getTessBuffers(batch);
-    if (!tess) { totalSkipped += batch.num_faces; continue; }
+    if (!tess) {
+      console.warn('SKIPPED batch:', batch.num_faces, 'faces, used_lod:', batch.used_lod, 'wanted:', batch.wanted_lod, 'perm:', batch.perm_index);
+      totalSkipped += batch.num_faces;
+      continue;
+    }
     totalRendered += batch.num_faces;
     const matSuffix = (batch.material_index != null && batch.material_index >= 0) ? '/m' + batch.material_index : '';
-    const vaoKey = batch.wanted_lod.join(',') + '/' + batch.perm_index + matSuffix;
+    const vaoKey = (batch.used_lod || batch.wanted_lod).join(',') + '/' + batch.perm_index + matSuffix;
     usedKeys.add(vaoKey);
     // GPU-ready: original positions (GPU applies Möbius), LODs + normals from CPU xform pass
     const gpuData = new Float32Array(batch.instances_orig);
@@ -1853,6 +1894,8 @@ function uploadBatches(data) {
       numTriIdx: tess.numTriIdx,
       numInst: batch.num_faces,
       lod: batch.lod,
+      wantedLod: batch.wanted_lod,
+      usedLod: batch.used_lod,
       color: lodColor(batch.lod),
       parity: batch.perm_parity || 1,
       permIndex: batch.perm_index || 0,
@@ -2127,6 +2170,10 @@ async function update() {
   const res = resVal === 0 ? 0 : (1 << resVal);
   $('res-v').textContent = res === 0 ? 'auto' : res;
 
+  // Update tess density from slider
+  const tessDensity = parseInt($('tess-density').value);
+  $('tess-density-v').textContent = tessDensity;
+
   // VP matrix for screen-space LOD
   const w=$('wrap');
   const vpW = w.clientWidth || 800, vpH = w.clientHeight || 600;
@@ -2184,6 +2231,9 @@ async function update() {
 
 
   const t0 = performance.now();
+  const screenAtten = $('screen-atten-toggle').classList.contains('on');
+  const minPxSub = parseInt($('min-px-sub').value);
+  $('min-px-sub-v').textContent = minPxSub;
   const resp = await workerCall('slice_and_transform', {
     normal: Array.from(effectiveNormal),
     offset: effectiveOffset,
@@ -2194,6 +2244,9 @@ async function update() {
     vpMatrix: Array.from(vpMatrix),
     vpWidth: vpW,
     vpHeight: vpH,
+    tessDensity,
+    screenAtten,
+    minPxSub,
   });
   const ms = performance.now() - t0;
   const data = resp.result;
@@ -2205,26 +2258,28 @@ async function update() {
     const totalTris = data.batches.reduce((s,b) => s + b.num_faces * b.tris_per_face, 0);
     const totalVerts = data.batches.reduce((s,b) => s + b.num_faces * b.verts_per_face, 0);
     const matCount = loadedMaterials.length;
+    const nFallback = data.batches.filter(b => b.is_fallback).length;
+    const queueInfo = patchQueue.length > 0 || patchBusy
+      ? `<br>Streaming: <span class="val">${patchQueued.size - patchQueue.length}/${patchQueued.size}</span>` +
+        (patchQueue.length > 0 ? ` (${patchQueue.length} queued)` : '') +
+        (nFallback > 0 ? ` · ${nFallback} fallback` : '')
+      : (nFallback > 0 ? `<br>Fallback: <span class="val">${nFallback}</span> batches` : '');
     $('stats').innerHTML =
       `Faces: <span class="val">${data.total_faces}</span><br>` +
       `Batches: <span class="val">${data.num_batches}</span>` +
       (matCount > 1 ? ` (${matCount} mats)` : '') + `<br>` +
       `Tris: <span class="val">${totalTris}</span><br>` +
       `Verts: <span class="val">${totalVerts}</span><br>` +
-      `Slice+Xform: <span class="val">${ms.toFixed(0)}ms</span>`;
+      `Slice+Xform: <span class="val">${ms.toFixed(0)}ms</span>` +
+      queueInfo;
 
-    // Background generation of missing patches
-    const fallbacks = data.batches.filter(b => b.is_fallback);
-    if (fallbacks.length > 0) {
-      const missing = [...new Set(fallbacks.map(b => b.wanted_lod.join(',')))];
-      for (const key of missing) {
-        const [a,b,c] = key.split(',').map(Number);
-        if (a > 512 || b > 512 || c > 512) continue;
-        workerCall('generate_single', { a, b, c }).then(() => {
-          if (!updating && !pendingUpdate) update();
-        });
-      }
+    // Queue missing patches for background streaming
+    for (const b of data.batches) {
+      if (!b.is_fallback) continue;
+      const [a, bb, c] = b.wanted_lod;
+      if (a <= 1024 && bb <= 1024 && c <= 1024) queuePatch(a, bb, c);
     }
+    drainPatchQueue(); // keep processing even if no NEW patches were queued
   }
 
   updating = false;
@@ -2261,7 +2316,11 @@ onmousemove = e => {
 canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); update(); e.preventDefault(); };
 // Pick: ctrl+click to inspect face under cursor
 canvas.onclick = e => {
-  if (!e.ctrlKey && !e.metaKey) return;
+  if (!e.ctrlKey && !e.metaKey) {
+    // Regular click exits isolation mode
+    if (isolatedFace) { isolatedFace = null; if (pickInfoEl) pickInfoEl.style.display = 'none'; const ov = document.getElementById('tess-overlay'); if (ov) ov.style.display = 'none'; render(); }
+    return;
+  }
   const rect = canvas.getBoundingClientRect();
   const x = (e.clientX - rect.left) * (canvas.width / rect.width) | 0;
   const y = (e.clientY - rect.top) * (canvas.height / rect.height) | 0;
@@ -2319,7 +2378,7 @@ setupBtnGroup('shape-btns', async (name) => {
 });
 
 setupBtnGroup('dir-btns', () => update());
-setupBtnGroup('render-btns', (v) => { renderMode = v; render(); });
+setupBtnGroup('render-btns', (v) => { renderMode = v; isolatedFace = null; render(); });
 setupBtnGroup('xform-btns', (v) => { currentXform = v; update(); });
 
 $('matcap-sel').addEventListener('change', () => loadMatcap($('matcap-sel').value));
@@ -2392,6 +2451,12 @@ for (const id of ['mx','my','mz','mr'])
     updateMobius();
   });
 $('res').addEventListener('input', update);
+$('tess-density').addEventListener('input', update);
+$('min-px-sub').addEventListener('input', update);
+$('screen-atten-toggle').addEventListener('click', () => {
+  $('screen-atten-toggle').classList.toggle('on');
+  update();
+});
 
 // Toroidal toggle
 $('toroidal-toggle').addEventListener('click', () => {
@@ -2596,10 +2661,13 @@ initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shad
 initEnvMaps();
 generateSheenELut();
 
-$('stats').textContent = 'Building atlas...';
-const r1 = await workerCall('build_atlas', { maxLodExp: 7, mode: 'direct' });
+$('stats').textContent = 'Building atlas (LODs 1–512)...';
+const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
+$('stats').textContent = 'Extending atlas to 1024...';
+await new Promise(r => setTimeout(r, 0));
+const r2 = await workerCall('extend_atlas', { newLod: 1024 });
 workerReady = true;
-$('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
+$('stats').textContent = `Atlas built in ${(r1.ms + r2.ms).toFixed(0)}ms (1024 max LOD)`;
 
 // Load matcap (no-op with procedural matcap from WGSL)
 loadMatcap($('matcap-sel').value);
