@@ -1038,9 +1038,18 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     let mut face_material_indices: Vec<Option<usize>> = Vec::new();
 
     let combined = if has_animation {
-        // For animated meshes, use just the primary mesh (skinning needs single mesh)
-        let mesh = &scene.meshes[primary_mesh_idx];
-        flatten_primitives_for_bake(mesh, &mut face_material_indices)
+        // For animated meshes, merge ALL mesh nodes sharing the primary skin.
+        // Many glTF models split a skinned character into multiple meshes
+        // (body, fur, wings, etc.) that all reference the same skeleton.
+        let target_skin = primary_skin_idx;
+        let skinned_meshes: Vec<usize> = mesh_nodes.iter()
+            .filter(|mn| mn.skin_idx == target_skin)
+            .map(|mn| mn.mesh_idx)
+            .collect();
+        web_sys::console::log_1(&format!(
+            "load_gltf_data: merging {} skinned meshes for bake", skinned_meshes.len()
+        ).into());
+        flatten_multi_mesh_for_bake(&scene.meshes, &skinned_meshes, &mut face_material_indices)
     } else {
         // For static models, merge ALL mesh nodes with world transforms
         merge_all_mesh_nodes(&scene, &mesh_nodes, &mut face_material_indices)
@@ -1401,8 +1410,11 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
 /// Flatten all primitives in a mesh into a single Primitive suitable for baking.
 /// Merges positions, triangles, joint data with proper index offsets.
 /// Tracks per-triangle material indices in the output vec.
-fn flatten_primitives_for_bake(
-    mesh: &quilting_gltf::mesh::Mesh,
+/// Merge multiple meshes (by index) into one Primitive for skinned animation baking.
+/// All meshes should share the same skin/skeleton.
+fn flatten_multi_mesh_for_bake(
+    meshes: &[quilting_gltf::mesh::Mesh],
+    mesh_indices: &[usize],
     face_materials: &mut Vec<Option<usize>>,
 ) -> quilting_gltf::mesh::Primitive {
     let mut positions = Vec::new();
@@ -1412,37 +1424,41 @@ fn flatten_primitives_for_bake(
     let mut joint_indices_all: Option<Vec<[u16; 4]>> = None;
     let mut joint_weights_all: Option<Vec<[f32; 4]>> = None;
 
-    for prim in &mesh.primitives {
-        let offset = positions.len();
-        positions.extend_from_slice(&prim.positions);
-        let new_tris: Vec<[usize; 3]> = prim.triangles.iter()
-            .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset])
-            .collect();
-        for _ in &new_tris {
-            face_materials.push(prim.material_index);
-        }
-        triangles.extend(new_tris);
+    for &mi in mesh_indices {
+        if mi >= meshes.len() { continue; }
+        let mesh = &meshes[mi];
+        for prim in &mesh.primitives {
+            let offset = positions.len();
+            positions.extend_from_slice(&prim.positions);
+            let new_tris: Vec<[usize; 3]> = prim.triangles.iter()
+                .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset])
+                .collect();
+            for _ in &new_tris {
+                face_materials.push(prim.material_index);
+            }
+            triangles.extend(new_tris);
 
-        if let Some(ref n) = prim.normals {
-            normals_all.get_or_insert_with(Vec::new).extend_from_slice(n);
-        }
-        if let Some(ref uv) = prim.uvs {
-            uvs_all.get_or_insert_with(Vec::new).extend_from_slice(uv);
-        }
-        if let Some(ref ji) = prim.joint_indices {
-            joint_indices_all.get_or_insert_with(Vec::new).extend_from_slice(ji);
-        }
-        if let Some(ref jw) = prim.joint_weights {
-            joint_weights_all.get_or_insert_with(Vec::new).extend_from_slice(jw);
+            if let Some(ref n) = prim.normals {
+                normals_all.get_or_insert_with(Vec::new).extend_from_slice(n);
+            }
+            if let Some(ref uv) = prim.uvs {
+                uvs_all.get_or_insert_with(Vec::new).extend_from_slice(uv);
+            }
+            if let Some(ref ji) = prim.joint_indices {
+                joint_indices_all.get_or_insert_with(Vec::new).extend_from_slice(ji);
+            }
+            if let Some(ref jw) = prim.joint_weights {
+                joint_weights_all.get_or_insert_with(Vec::new).extend_from_slice(jw);
+            }
         }
     }
 
-    // Use morph targets from the first primitive (if any)
-    let morph_targets = if let Some(first) = mesh.primitives.first() {
-        first.morph_targets.clone()
-    } else {
-        vec![]
-    };
+    // Use morph targets from the first mesh's first primitive (if any)
+    let morph_targets = mesh_indices.first()
+        .and_then(|&mi| meshes.get(mi))
+        .and_then(|m| m.primitives.first())
+        .map(|p| p.morph_targets.clone())
+        .unwrap_or_default();
 
     quilting_gltf::mesh::Primitive {
         positions,
