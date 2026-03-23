@@ -2277,7 +2277,7 @@ async function update() {
     for (const b of data.batches) {
       if (!b.is_fallback) continue;
       const [a, bb, c] = b.wanted_lod;
-      if (a <= 1024 && bb <= 1024 && c <= 1024) queuePatch(a, bb, c);
+      if (a <= 512 && bb <= 512 && c <= 512) queuePatch(a, bb, c);
     }
     drainPatchQueue(); // keep processing even if no NEW patches were queued
   }
@@ -2663,11 +2663,8 @@ generateSheenELut();
 
 $('stats').textContent = 'Building atlas (LODs 1–512)...';
 const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
-$('stats').textContent = 'Extending atlas to 1024...';
-await new Promise(r => setTimeout(r, 0));
-const r2 = await workerCall('extend_atlas', { newLod: 1024 });
 workerReady = true;
-$('stats').textContent = `Atlas built in ${(r1.ms + r2.ms).toFixed(0)}ms (1024 max LOD)`;
+$('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
 
 // Load matcap (no-op with procedural matcap from WGSL)
 loadMatcap($('matcap-sel').value);

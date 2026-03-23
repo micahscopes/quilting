@@ -195,7 +195,7 @@ pub fn compute_instances_with_uvs(
     // the same slot → guaranteed matching. This is the v0.2.0 proven
     // approach that was working before the LOD refactors.
 
-    const MAX_LOD: u32 = 1024;
+    const MAX_LOD: u32 = 512;
     let tess_density = TESS_DENSITY.with(|d| *d.borrow());
     let screen_atten_enabled = SCREEN_ATTEN.with(|s| *s.borrow());
     let min_px = MIN_PX_PER_SUB.with(|p| *p.borrow());
@@ -256,9 +256,6 @@ pub fn compute_instances_with_uvs(
         }
     };
 
-    // Compute LOD per canonical edge. No distortion-based skip —
-    // let the screen-space arc length metric naturally produce LOD 1
-    // for faces that don't need tessellation.
     let mut edge_lods: Vec<u32> = vec![0; num_half_edges];
 
     // Compute mesh scale: bounding sphere radius (for edge length normalization)
@@ -365,30 +362,6 @@ pub fn compute_instances_with_uvs(
         }
     }
 
-    // Clamp: min 2 (keeps all LODs even → hierarchical subdivision always works,
-    // no Poisson needed at runtime), max MAX_LOD
-    for lod in edge_lods.iter_mut() {
-        if *lod < 2 { *lod = 2; }
-        *lod = (*lod).min(MAX_LOD);
-    }
-
-    // Triangle budget (disabled for LOD tuning — re-enable once scaling is dialed in)
-    // const TRI_BUDGET: u64 = 1_000_000;
-    // let estimated_tris: u64 = (0..nf).map(|fi| {
-    //     let he_base = fi * 3;
-    //     let a = edge_lods[canonical_edge(he_base + 1)] as u64;
-    //     let b = edge_lods[canonical_edge(he_base + 2)] as u64;
-    //     let c = edge_lods[canonical_edge(he_base)] as u64;
-    //     a.max(b).max(c).pow(2) / 2
-    // }).sum();
-    // if estimated_tris > TRI_BUDGET {
-    //     let scale = (TRI_BUDGET as f64 / estimated_tris as f64).sqrt();
-    //     for lod in edge_lods.iter_mut() {
-    //         let scaled = (*lod as f64 * scale) as u32;
-    //         *lod = snap_down_pow2(scaled).max(2);
-    //     }
-    // }
-
     // Assign to faces — read directly from canonical edge storage.
     // Both faces sharing an edge read the same slot → matching guaranteed.
     let mut result = instances;
@@ -437,7 +410,7 @@ pub fn compute_instances_with_uvs(
         let nv = vertices.len();
         let mut vertex_normals_acc = vec![[0.0f64; 3]; nv];
         // Accumulate face normals at each vertex
-        for (fi, face) in faces.iter().enumerate() {
+        for face in faces.iter() {
             let p0 = transformed[face[0]].0.to_point();
             let p1 = transformed[face[1]].0.to_point();
             let p2 = transformed[face[2]].0.to_point();
@@ -499,13 +472,6 @@ fn snap_to_power_of_2(v: u32) -> u32 {
     }
 }
 
-/// Snap DOWN to nearest power of 2 (for budget scaling — never exceed the budget).
-fn snap_down_pow2(v: u32) -> u32 {
-    if v <= 1 { return 1; }
-    let mut p = 1u32;
-    while p * 2 <= v { p *= 2; }
-    p
-}
 
 /// Compute a face normal from 3 vertex positions, returned as [f32; 3] for all 3 corners.
 fn face_normal_f32(v: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
