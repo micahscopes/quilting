@@ -2545,6 +2545,8 @@ setupBtnGroup('shape-btns', async (name) => {
   $('stats').innerHTML = 'Loading shape...';
   const resp = await broadcastCall('create_hypermesh', { name });
   meshInfo = resp.result;
+  frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((meshInfo.time_max - meshInfo.time_min) * 30)));
+  frame._frameIdx = 0;
   const timeSlider = $('time');
   timeSlider.min = meshInfo.time_min;
   timeSlider.max = meshInfo.time_max;
@@ -2714,17 +2716,15 @@ function frame() {
       n = rot4(n, plane2, p2);
       rotateNormalOverride = n;
     } else {
-      // Sweep time forward
+      // Step one prebaked frame per render frame
+      if (!frame._frameIdx) frame._frameIdx = 0;
+      const nframes = frame._numPrebaked || 60;
+      frame._frameIdx = (frame._frameIdx + 1) % nframes;
+      const period = meshInfo.time_max - meshInfo.time_min;
+      const t = meshInfo.time_min + frame._frameIdx * period / nframes;
       const slider = $('time');
-      let val = parseFloat(slider.value);
-      const now = performance.now();
-      const dt = Math.min((now - (frame._lastTime || now)) / 1000, 0.05); // seconds, capped
-      frame._lastTime = now;
-      const speed = 0.15 * (meshInfo.time_max - meshInfo.time_min) * dt; // time-based
-      val += speed;
-      if (val >= meshInfo.time_max) { val = meshInfo.time_min + (val - meshInfo.time_max) + 0.001; }
-      slider.value = val;
-      $('time-v').textContent = val.toFixed(2);
+      slider.value = t;
+      $('time-v').textContent = t.toFixed(2);
     }
     update();
   }
@@ -2746,6 +2746,8 @@ async function loadGltfFromBuffer(buffer, filename) {
     return;
   }
   meshInfo = info;
+  frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((info.time_max - info.time_min) * 30)));
+  frame._frameIdx = 0;
   currentShape = '__gltf__';
   const timeSlider = $('time');
   timeSlider.min = info.time_min;
@@ -2937,6 +2939,8 @@ loadMatcap($('matcap-sel').value);
 $('stats').innerHTML = 'Loading horse...';
 const initResp = await broadcastCall('create_hypermesh', { name: 'galloping_horse' });
 meshInfo = initResp.result;
+frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((meshInfo.time_max - meshInfo.time_min) * 30)));
+frame._frameIdx = 0;
 const timeSlider = $('time');
 timeSlider.min = meshInfo.time_min;
 timeSlider.max = meshInfo.time_max;
