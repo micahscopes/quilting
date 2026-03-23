@@ -1960,11 +1960,12 @@ pub fn slice_and_transform(
             // from median × a global screen scale factor (no per-face projection).
             let screen_atten = quilting_core::evaluate::get_screen_atten();
             let min_px = quilting_core::evaluate::get_min_px_per_sub();
+            // VP matrix[0] = proj[0][0] = 1/(aspect*tan(fov/2))
+            // A world-space length L at the origin projects to roughly
+            // L * vp_matrix[0] * viewport_width / 2 pixels.
             let screen_scale = screen.as_ref().map(|s| {
-                // Approximate: viewport_width / (2 * zoom * tan(fov/2))
-                // The VP matrix encodes this — extract from the projection
-                s.width / (2.0 * s.vp_matrix[0] as f64).max(0.1)
-            }).unwrap_or(1.0);
+                s.vp_matrix[0].abs() * s.width * 0.5
+            }).unwrap_or(100.0);
 
             for fi in 0..nf {
                 let lod_base = fi * 6;
