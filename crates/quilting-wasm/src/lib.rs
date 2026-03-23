@@ -225,7 +225,8 @@ pub fn gpu_compute_lods(
         for (i, &v) in mobius.iter().take(16).enumerate() {
             mob[i] = v;
         }
-        let n = compute.compute(gl, num_faces, mob, density, mesh_radius, 0.0, 0.0);
+        let identity_vp = [0.0f32; 16];
+        let n = compute.compute(gl, num_faces, mob, density, mesh_radius, 0.0, &identity_vp, 0.0, 0.0);
         compute.read_back(gl, n)
     })
 }
@@ -1852,14 +1853,19 @@ pub fn slice_and_transform(
             GPU_COMPUTE.with(|gc| {
                 let gc = gc.borrow();
                 let (gl, compute) = gc.as_ref().unwrap();
-                let scr_scale = screen.as_ref().map(|s| (s.vp_matrix[0].abs() * s.width * 0.5) as f32).unwrap_or(0.0);
                 let min_px_val = if quilting_core::evaluate::get_screen_atten() {
                     quilting_core::evaluate::get_min_px_per_sub() as f32
                 } else { 0.0 };
+                let vp_f32: [f32; 16] = screen.as_ref().map(|s| {
+                    let mut m = [0.0f32; 16];
+                    for i in 0..16 { m[i] = s.vp_matrix[i] as f32; }
+                    m
+                }).unwrap_or([0.0; 16]);
+                let (vpw, vph) = screen.as_ref().map(|s| (s.width as f32, s.height as f32)).unwrap_or((0.0, 0.0));
                 compute.compute_with_texture(
                     gl, pb_faces, frame as u32, pb_nv as u32,
                     mob_f32, tess_density as f32, pb_radius as f32,
-                    scr_scale, min_px_val,
+                    min_px_val, &vp_f32, vpw, vph,
                 )
             })
         } else { 0 };
@@ -2078,7 +2084,8 @@ pub fn slice_and_transform(
                 let gc = gc.borrow();
                 let (gl, compute) = gc.as_ref().unwrap();
                 compute.upload_control_points(gl, &cp_data);
-                let n = compute.compute(gl, cs.tris.len(), mob_f32, tess_density as f32, mesh_radius as f32, 0.0, 0.0);
+                let identity_vp = [0.0f32; 16];
+                let n = compute.compute(gl, cs.tris.len(), mob_f32, tess_density as f32, mesh_radius as f32, 0.0, &identity_vp, 0.0, 0.0);
                 compute.read_back(gl, n)
             });
 

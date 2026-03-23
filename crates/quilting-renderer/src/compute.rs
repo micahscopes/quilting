@@ -43,8 +43,10 @@ pub struct LodCompute {
     mob_d_loc: glow::UniformLocation,
     density_loc: glow::UniformLocation,
     mesh_radius_loc: glow::UniformLocation,
-    screen_scale_loc: glow::UniformLocation,
     min_px_loc: glow::UniformLocation,
+    vp_matrix_loc: glow::UniformLocation,
+    vp_width_loc: glow::UniformLocation,
+    vp_height_loc: glow::UniformLocation,
     num_verts_loc: glow::UniformLocation,
     frame_loc: glow::UniformLocation,
     max_faces: usize,
@@ -71,8 +73,10 @@ uniform vec4 mob_d;
 
 uniform float density;
 uniform float mesh_radius;
-uniform float screen_scale; // pixels per deformed world unit
-uniform float min_px;       // minimum pixels per subdivision (0 = no attenuation)
+uniform float min_px;        // minimum pixels per subdivision (0 = no attenuation)
+uniform mat4 vp_matrix;      // view-projection matrix for screen-space projection
+uniform float vp_width;      // viewport width in pixels
+uniform float vp_height;     // viewport height in pixels
 
 // Transform feedback outputs
 out float out_lod_a;
@@ -155,11 +159,23 @@ void main() {
     out_lod_b = clamp(snap_pow2(raw_b), 2.0, 512.0);
     out_lod_c = clamp(snap_pow2(raw_c), 2.0, 512.0);
 
-    // Screen-space attenuation: reduce LOD when subdivisions would be sub-pixel
-    if (min_px > 0.0 && screen_scale > 0.0) {
-        float px_a = out_median_a * screen_scale;
-        float px_b = out_median_b * screen_scale;
-        float px_c = out_median_c * screen_scale;
+    // Screen-space attenuation: project deformed vertices to screen,
+    // measure per-edge pixel length, reduce LOD when sub-pixel.
+    if (min_px > 0.0) {
+        // Project deformed positions to screen pixels
+        vec4 c0 = vp_matrix * vec4(d0, 1.0);
+        vec4 c1 = vp_matrix * vec4(d1, 1.0);
+        vec4 c2 = vp_matrix * vec4(d2, 1.0);
+        vec2 s0 = (c0.xy / max(abs(c0.w), 0.001)) * vec2(vp_width, vp_height) * 0.5;
+        vec2 s1 = (c1.xy / max(abs(c1.w), 0.001)) * vec2(vp_width, vp_height) * 0.5;
+        vec2 s2 = (c2.xy / max(abs(c2.w), 0.001)) * vec2(vp_width, vp_height) * 0.5;
+
+        // Screen-space edge lengths
+        float px_a = distance(s1, s2); // edge BC
+        float px_b = distance(s0, s2); // edge AC
+        float px_c = distance(s0, s1); // edge AB
+
+        // Attenuate: if pixels/LOD < min_px, reduce LOD
         if (px_a / out_lod_a < min_px) out_lod_a = clamp(snap_pow2(px_a / min_px), 2.0, 512.0);
         if (px_b / out_lod_b < min_px) out_lod_b = clamp(snap_pow2(px_b / min_px), 2.0, 512.0);
         if (px_c / out_lod_c < min_px) out_lod_c = clamp(snap_pow2(px_c / min_px), 2.0, 512.0);
@@ -219,10 +235,14 @@ impl LodCompute {
                 .ok_or("density uniform not found")?;
             let mesh_radius_loc = gl.get_uniform_location(program, "mesh_radius")
                 .ok_or("mesh_radius uniform not found")?;
-            let screen_scale_loc = gl.get_uniform_location(program, "screen_scale")
-                .ok_or("screen_scale uniform not found")?;
             let min_px_loc = gl.get_uniform_location(program, "min_px")
                 .ok_or("min_px uniform not found")?;
+            let vp_matrix_loc = gl.get_uniform_location(program, "vp_matrix")
+                .ok_or("vp_matrix uniform not found")?;
+            let vp_width_loc = gl.get_uniform_location(program, "vp_width")
+                .ok_or("vp_width uniform not found")?;
+            let vp_height_loc = gl.get_uniform_location(program, "vp_height")
+                .ok_or("vp_height uniform not found")?;
             let num_verts_loc = gl.get_uniform_location(program, "u_num_vertices")
                 .ok_or("u_num_vertices uniform not found")?;
             let frame_loc = gl.get_uniform_location(program, "u_frame")
@@ -257,7 +277,7 @@ impl LodCompute {
                 pos_texture: None,
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
-                screen_scale_loc, min_px_loc,
+                min_px_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
                 num_verts_loc, frame_loc,
                 max_faces,
             })
@@ -323,9 +343,9 @@ impl LodCompute {
     pub fn compute(
         &self, gl: &glow::Context, num_faces: usize,
         mobius: [f32; 16], density: f32, mesh_radius: f32,
-        screen_scale: f32, min_px: f32,
+        min_px: f32, vp_matrix: &[f32; 16], vp_width: f32, vp_height: f32,
     ) -> usize {
-        self.compute_with_texture(gl, num_faces, 0, 0, mobius, density, mesh_radius, screen_scale, min_px)
+        self.compute_with_texture(gl, num_faces, 0, 0, mobius, density, mesh_radius, min_px, vp_matrix, vp_width, vp_height)
     }
 
     /// Run the compute pass with prebaked position texture.
@@ -340,14 +360,15 @@ impl LodCompute {
         mobius: [f32; 16],
         density: f32,
         mesh_radius: f32,
-        screen_scale: f32,
         min_px: f32,
+        vp_matrix: &[f32; 16],
+        vp_width: f32,
+        vp_height: f32,
     ) -> usize {
         let n = num_faces.min(self.max_faces);
         unsafe {
             gl.use_program(Some(self.program));
 
-            // Bind position texture
             if let Some(tex) = self.pos_texture {
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -362,8 +383,10 @@ impl LodCompute {
 
             gl.uniform_1_f32(Some(&self.density_loc), density);
             gl.uniform_1_f32(Some(&self.mesh_radius_loc), mesh_radius);
-            gl.uniform_1_f32(Some(&self.screen_scale_loc), screen_scale);
             gl.uniform_1_f32(Some(&self.min_px_loc), min_px);
+            gl.uniform_matrix_4_f32_slice(Some(&self.vp_matrix_loc), false, vp_matrix);
+            gl.uniform_1_f32(Some(&self.vp_width_loc), vp_width);
+            gl.uniform_1_f32(Some(&self.vp_height_loc), vp_height);
 
             gl.bind_vertex_array(Some(self.vao));
             gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf));
