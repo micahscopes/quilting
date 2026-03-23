@@ -162,6 +162,31 @@ pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
             compute.upload_positions_texture(gl, &all_positions, num_verts, nf);
             compute.upload_face_indices(gl, &face_indices_f32);
 
+            // Build and upload atlas LUT: exponent triple → atlas index
+            // key = exp_a + exp_b*10 + exp_c*100 where exp = log2(lod)
+            ATLAS.with(|atlas_cell| {
+                let atlas = atlas_cell.borrow();
+                if let Some(atlas) = atlas.as_ref() {
+                    let mut lut = vec![255u8; 1024]; // 255 = no entry
+                    let keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
+                    for (idx, key) in keys.iter().enumerate() {
+                        if idx >= 255 { break; } // u8 index limit
+                        // key is sorted canonical [a,b,c]
+                        let ea = (key[0] as f64).log2().round() as usize;
+                        let eb = (key[1] as f64).log2().round() as usize;
+                        let ec = (key[2] as f64).log2().round() as usize;
+                        let lut_key = ea + eb * 10 + ec * 100;
+                        if lut_key < 1024 {
+                            lut[lut_key] = idx as u8;
+                        }
+                    }
+                    compute.upload_atlas_lut(gl, &lut);
+                    web_sys::console::log_1(&format!(
+                        "Atlas LUT: {} entries mapped", keys.len()
+                    ).into());
+                }
+            });
+
             // Compute mesh radius from frame 0
             let mesh_radius = {
                 let (mut cx, mut cy, mut cz) = (0.0f64, 0.0, 0.0);
@@ -206,7 +231,7 @@ pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
 /// Run GPU LOD computation via transform feedback.
 /// control_points: flat f32 array, 12 floats per face (3 quaternions wxyz)
 /// mobius: 16 floats (a,b,c,d quaternions)
-/// Returns: flat f32 array, 6 floats per face (lod_a, lod_b, lod_c, med_a, med_b, med_c)
+/// Returns: flat f32 array, 2 floats per face (atlas_index, perm_index)
 #[wasm_bindgen]
 pub fn gpu_compute_lods(
     control_points: &[f32],
@@ -2103,17 +2128,22 @@ pub fn slice_and_transform(
                 compute.read_back(gl, n)
             });
 
-            // Write GPU LODs into instances (6 floats per face: lod_a, lod_b, lod_c, med_a, med_b, med_c)
-            for (fi, inst) in xf.iter_mut().enumerate() {
-                let base = fi * 6;
-                if base + 2 < gpu_lods.len() {
-                    inst.edge_lods = [
-                        gpu_lods[base] as u32,
-                        gpu_lods[base + 1] as u32,
-                        gpu_lods[base + 2] as u32,
-                    ];
+            // Write LODs from atlas index (GPU now outputs atlas_index + perm_index)
+            ATLAS.with(|atlas_cell| {
+                let atlas = atlas_cell.borrow();
+                let keys: Vec<[u32; 3]> = atlas.as_ref()
+                    .map(|a| a.patches.keys().copied().collect())
+                    .unwrap_or_default();
+                for (fi, inst) in xf.iter_mut().enumerate() {
+                    let rb = fi * 2;
+                    if rb + 1 < gpu_lods.len() {
+                        let idx = gpu_lods[rb] as usize;
+                        if idx < keys.len() {
+                            inst.edge_lods = [keys[idx][0], keys[idx][1], keys[idx][2]];
+                        }
+                    }
                 }
-            }
+            });
 
             xf
         } else {
