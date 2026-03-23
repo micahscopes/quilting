@@ -98,6 +98,78 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
     }
 }
 
+/// Pre-evaluate all animation frames and upload to GPU.
+/// Returns the number of frames baked, or 0 on failure.
+#[wasm_bindgen]
+pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
+    let nf = num_frames as usize;
+    let dt = if nf > 1 { (time_max - time_min) / (nf - 1) as f64 } else { 0.0 };
+
+    HYPER_MESH.with(|hm| {
+        let mesh_opt = hm.borrow();
+        let mesh = match mesh_opt.as_ref() {
+            Some(m) => m,
+            None => return 0,
+        };
+
+        let num_verts = mesh.num_vertices as usize;
+        let faces: Vec<[u32; 3]> = mesh.faces.iter()
+            .map(|f| [f[0], f[1], f[2]])
+            .collect();
+        let num_faces = faces.len();
+
+        // Pre-evaluate all frames
+        let mut all_positions = Vec::with_capacity(nf * num_verts * 3);
+        for fi in 0..nf {
+            let t = time_min + fi as f64 * dt;
+            let verts = mesh.positions_at(t);
+            for v in &verts {
+                all_positions.push(v[0] as f32);
+                all_positions.push(v[1] as f32);
+                all_positions.push(v[2] as f32);
+            }
+        }
+
+        // Pack face indices (same for all frames)
+        let face_indices: Vec<u32> = faces.iter()
+            .flat_map(|f| [f[0], f[1], f[2]])
+            .collect();
+
+        // Upload to GPU compute context
+        GPU_COMPUTE.with(|gc| {
+            let gc = gc.borrow();
+            let (gl, compute) = match gc.as_ref() {
+                Some(pair) => pair,
+                None => return 0,
+            };
+
+            // Store in a GPU buffer for the compute shader to read
+            unsafe {
+                use glow::HasContext;
+                let buf = gl.create_buffer().unwrap();
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(buf));
+                gl.buffer_data_u8_slice(
+                    glow::ARRAY_BUFFER,
+                    bytemuck_cast_f32(&all_positions),
+                    glow::STATIC_DRAW,
+                );
+            }
+
+            web_sys::console::log_1(&format!(
+                "Prebaked {} frames × {} verts = {:.1}MB on GPU",
+                nf, num_verts,
+                all_positions.len() as f64 * 4.0 / 1e6
+            ).into());
+
+            nf as u32
+        })
+    })
+}
+
+fn bytemuck_cast_f32(data: &[f32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
+}
+
 /// Run GPU LOD computation via transform feedback.
 /// control_points: flat f32 array, 12 floats per face (3 quaternions wxyz)
 /// mobius: 16 floats (a,b,c,d quaternions)
@@ -1664,6 +1736,15 @@ pub fn slice_and_transform(
 
     // Use cached slice for Möbius computation
     let gpu_available = GPU_COMPUTE.with(|gc| gc.borrow().is_some());
+    // Log once which path we're using
+    thread_local! { static LOGGED_PATH: RefCell<bool> = RefCell::new(false); }
+    LOGGED_PATH.with(|l| {
+        if !*l.borrow() {
+            *l.borrow_mut() = true;
+            let path = if gpu_available && !transform.is_affine() { "GPU" } else { "CPU" };
+            web_sys::console::log_1(&format!("LOD path: {path} (gpu={gpu_available}, affine={})", transform.is_affine()).into());
+        }
+    });
 
     let (instances_orig, instances_xform, num_tris, source_faces) = SLICE_CACHE.with(|c| {
         let cache = c.borrow();

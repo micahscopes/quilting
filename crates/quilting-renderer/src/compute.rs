@@ -11,6 +11,20 @@ use glow::HasContext;
 /// = 12 floats per face.
 pub const FLOATS_PER_FACE_INPUT: usize = 12;
 
+/// Pre-baked animation sequence stored on GPU.
+/// All frames' vertex positions packed into one buffer.
+/// GPU indexes by frame_index * num_vertices + vertex_index.
+pub struct AnimationSequence {
+    pub num_frames: usize,
+    pub num_vertices: usize,
+    pub num_faces: usize,
+    /// Flat f32 buffer: [frame0_vert0_x, y, z, frame0_vert1_x, ...]
+    /// Size: num_frames * num_vertices * 3
+    pub positions: Vec<f32>,
+    /// Face indices: [face0_v0, v1, v2, face1_v0, ...] — 3 ints per face
+    pub face_indices: Vec<u32>,
+}
+
 /// Per-face output: 3 edge LODs + 3 deformed median lengths
 /// = 6 floats per face.
 pub const FLOATS_PER_FACE_OUTPUT: usize = 6;

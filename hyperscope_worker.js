@@ -19,6 +19,7 @@ self.onmessage = async function(e) {
     wasm = mod;
     // Try to init GPU compute (OffscreenCanvas + WebGL2 for transform feedback)
     const gpuOk = wasm.init_gpu_compute(50000); // up to 50K faces
+    console.log(`Worker: GPU compute ${gpuOk ? 'OK' : 'UNAVAILABLE'}`);
     self.postMessage({ type: 'ready', id, gpuCompute: gpuOk });
     return;
   }

@@ -356,7 +356,7 @@ function getMaterialParams(materialIndex) {
 }
 
 // --- Worker Pool ---
-const NUM_WORKERS = navigator.hardwareConcurrency ? Math.min(navigator.hardwareConcurrency, 8) : 4;
+const NUM_WORKERS = 1; // GPU compute handles LOD — no need for worker parallelism
 const workers = [];
 let msgId = 0;
 const pending = new Map();
