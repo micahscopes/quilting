@@ -19,6 +19,16 @@ pub fn set_tess_params(density: f64, screen_atten: bool) {
     SCREEN_ATTEN.with(|s| *s.borrow_mut() = screen_atten);
 }
 
+/// Get screen attenuation enabled state.
+pub fn get_screen_atten() -> bool {
+    SCREEN_ATTEN.with(|s| *s.borrow())
+}
+
+/// Get minimum pixels per subdivision.
+pub fn get_min_px_per_sub() -> f64 {
+    MIN_PX_PER_SUB.with(|p| *p.borrow())
+}
+
 /// Set minimum pixels per subdivision for screen attenuation.
 pub fn set_min_px_per_sub(px: f64) {
     MIN_PX_PER_SUB.with(|p| *p.borrow_mut() = px.max(0.1));

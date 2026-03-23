@@ -1955,17 +1955,50 @@ pub fn slice_and_transform(
                 })
             } else { vec![] };
 
-            // Write GPU LODs into flat buffers
+            // Write GPU LODs into flat buffers, with screen attenuation
+            let screen_atten = quilting_core::evaluate::get_screen_atten();
+            let min_px = quilting_core::evaluate::get_min_px_per_sub();
             for fi in 0..nf {
                 let lod_base = fi * 6;
                 let base = fi * 52;
-                if lod_base + 2 < gpu_lods.len() {
-                    all_orig[base + 24] = gpu_lods[lod_base];
-                    all_orig[base + 25] = gpu_lods[lod_base + 1];
-                    all_orig[base + 26] = gpu_lods[lod_base + 2];
-                    all_orig[base + 28] = gpu_lods[lod_base];
-                    all_orig[base + 29] = gpu_lods[lod_base + 1];
-                    all_orig[base + 30] = gpu_lods[lod_base + 2];
+                if lod_base + 5 < gpu_lods.len() {
+                    let mut lods = [gpu_lods[lod_base], gpu_lods[lod_base+1], gpu_lods[lod_base+2]];
+
+                    // Screen attenuation: use screen_arc_len to cap LODs
+                    // when subdivisions would be sub-pixel
+                    if screen_atten {
+                        if let Some(ref s) = screen {
+                            for ei in 0..3 {
+                                let (va, vb) = match ei {
+                                    0 => (cs.tris[fi][1], cs.tris[fi][2]),
+                                    1 => (cs.tris[fi][0], cs.tris[fi][2]),
+                                    _ => (cs.tris[fi][0], cs.tris[fi][1]),
+                                };
+                                // Project deformed endpoints to estimate screen coverage
+                                let da = transform.apply(Quat::from_point(
+                                    frame_verts[va][0], frame_verts[va][1], frame_verts[va][2]
+                                )).to_point();
+                                let db = transform.apply(Quat::from_point(
+                                    frame_verts[vb][0], frame_verts[vb][1], frame_verts[vb][2]
+                                )).to_point();
+                                if let (Some(pa), Some(pb)) = (s.project(da), s.project(db)) {
+                                    let pixels = ((pa[0]-pb[0]).powi(2) + (pa[1]-pb[1]).powi(2)).sqrt();
+                                    let lod = lods[ei] as f64;
+                                    if lod > 0.0 && pixels / lod < min_px {
+                                        lods[ei] = (pixels / min_px).ceil() as f32;
+                                        // Snap to power of 2
+                                        let v = lods[ei].max(2.0) as u32;
+                                        let mut p = 1u32;
+                                        while p < v { p *= 2; }
+                                        lods[ei] = p as f32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    all_orig[base + 24] = lods[0]; all_orig[base + 25] = lods[1]; all_orig[base + 26] = lods[2];
+                    all_orig[base + 28] = lods[0]; all_orig[base + 29] = lods[1]; all_orig[base + 30] = lods[2];
                 }
             }
 
