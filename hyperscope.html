@@ -1909,7 +1909,7 @@ function initGpuLodCompute(numFaces, faceIndicesF32, restPositions, numVerts) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
   gl.shaderSource(vs, LOD_COMPUTE_GLSL);
   gl.compileShader(vs);
-  if (!gl.getShaderCompileStatus(vs)) {
+  if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
     console.error('LOD compute shader error:', gl.getShaderInfoLog(vs));
     return null;
   }
@@ -1922,7 +1922,7 @@ function initGpuLodCompute(numFaces, faceIndicesF32, restPositions, numVerts) {
   gl.attachShader(prog, vs); gl.attachShader(prog, fs);
   gl.transformFeedbackVaryings(prog, ['out_atlas_index', 'out_perm_index'], gl.INTERLEAVED_ATTRIBS);
   gl.linkProgram(prog);
-  if (!gl.getProgramLinkStatus(prog)) {
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
     console.error('LOD compute link error:', gl.getProgramInfoLog(prog));
     return null;
   }
@@ -2084,36 +2084,14 @@ async function setupGpuSkinning() {
   if (skinningTexture) gl.deleteTexture(skinningTexture);
   skinningTexture = gl.createTexture();
   const nv = sd.num_vertices;
-  // Use safe texture width — check GPU limit
-  const maxTexSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-  console.log(`MAX_TEXTURE_SIZE: ${maxTexSize}, vertices: ${nv}`);
-  const texW = Math.min(nv, 1024);
-  const texRows = Math.ceil(nv / texW);
-  const texH = texRows * 2; // 2 rows per chunk (indices + weights)
-  const texData = new Float32Array(texW * texH * 4);
-  // Pack: row 2*chunk = joint indices, row 2*chunk+1 = joint weights
-  for (let vi = 0; vi < nv; vi++) {
-    const chunk = Math.floor(vi / texW);
-    const col = vi % texW;
-    // Joint indices → row 2*chunk
-    const idxRow = chunk * 2;
-    const idxOff = (idxRow * texW + col) * 4;
-    texData[idxOff]   = sd.joint_indices[vi * 4];
-    texData[idxOff+1] = sd.joint_indices[vi * 4 + 1];
-    texData[idxOff+2] = sd.joint_indices[vi * 4 + 2];
-    texData[idxOff+3] = sd.joint_indices[vi * 4 + 3];
-    // Joint weights → row 2*chunk+1
-    const wtRow = chunk * 2 + 1;
-    const wtOff = (wtRow * texW + col) * 4;
-    texData[wtOff]   = sd.joint_weights[vi * 4];
-    texData[wtOff+1] = sd.joint_weights[vi * 4 + 1];
-    texData[wtOff+2] = sd.joint_weights[vi * 4 + 2];
-    texData[wtOff+3] = sd.joint_weights[vi * 4 + 3];
-  }
-  window._skinTexW = texW; // store for shader uniform
+  // Simple layout: width = nv, height = 2 (row 0 = indices, row 1 = weights)
+  const texData = new Float32Array(nv * 4 * 2);
+  texData.set(sd.joint_indices, 0);          // row 0
+  texData.set(sd.joint_weights, nv * 4);     // row 1
+  window._skinTexW = nv; // width = num_vertices (no tiling needed, MAX_TEXTURE_SIZE is large enough)
   gl.activeTexture(gl.TEXTURE15);
   gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, texW, texH, 0, gl.RGBA, gl.FLOAT, texData);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, nv, 2, 0, gl.RGBA, gl.FLOAT, texData);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);

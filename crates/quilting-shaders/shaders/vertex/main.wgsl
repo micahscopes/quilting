@@ -47,14 +47,10 @@ var skinning_tex: texture_2d<f32>;
 // Apply skeletal skinning to a position.
 // vertex_idx indexes into the skinning texture.
 fn skin_tex_lookup(vertex_idx: i32) -> array<vec4<f32>, 2> {
-    // Tiled texture: width = skin_tex_width, rows = chunks * 2
-    // Row 2*chunk = joint indices, row 2*chunk+1 = joint weights
-    let w = joints.skin_tex_width;
-    let chunk = vertex_idx / w;
-    let col = vertex_idx % w;
+    // Simple layout: width = num_vertices, row 0 = joint indices, row 1 = weights
     var result: array<vec4<f32>, 2>;
-    result[0] = textureLoad(skinning_tex, vec2<i32>(col, chunk * 2), 0);
-    result[1] = textureLoad(skinning_tex, vec2<i32>(col, chunk * 2 + 1), 0);
+    result[0] = textureLoad(skinning_tex, vec2<i32>(vertex_idx, 0), 0);
+    result[1] = textureLoad(skinning_tex, vec2<i32>(vertex_idx, 1), 0);
     return result;
 }
 

@@ -1260,17 +1260,10 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
             } else { None }
         } else { None };
 
-        // Normalize positions to [-1,1] — renderer expects this for zoom/Möbius/camera
-        // Use skinned positions for bounding box if available (better fit)
-        let ref_positions = lod_positions.as_ref().map_or(&combined.positions as &[_], |lp| lp.as_slice());
-        let mut bb_min = [f64::INFINITY; 3];
-        let mut bb_max = [f64::NEG_INFINITY; 3];
-        for pos in ref_positions {
-            for i in 0..3 { bb_min[i] = bb_min[i].min(pos[i]); bb_max[i] = bb_max[i].max(pos[i]); }
-        }
-        let center = [(bb_min[0]+bb_max[0])*0.5, (bb_min[1]+bb_max[1])*0.5, (bb_min[2]+bb_max[2])*0.5];
-        let extent = ((bb_max[0]-bb_min[0]).max(bb_max[1]-bb_min[1]).max(bb_max[2]-bb_min[2])) * 0.5;
-        let norm_scale = if extent > 1e-10 { 1.0 / extent } else { 1.0 };
+        // Use the SAME normalization as evaluate_animation_frame (stored in data.norm_center/norm_scale)
+        // This ensures positions and joint matrices are in the same normalized space.
+        let center = data.norm_center;
+        let norm_scale = data.norm_scale;
 
         for (fi, face) in combined.triangles.iter().enumerate() {
             let b = fi * COMPACT_STRIDE;
