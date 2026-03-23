@@ -2317,8 +2317,12 @@ function updateMobius() {
   mobiusDebounce = setTimeout(update, 150);
 }
 
+let inflight = 0;
 async function update() {
   if (!workerReady || !meshInfo) return;
+  // Dispatch up to NUM_WORKERS concurrently, but no more — avoids waste
+  if (inflight >= NUM_WORKERS) return;
+  inflight++;
   const gen = ++updateGeneration;
 
   const timeOffset = parseFloat($('time').value);
@@ -2414,7 +2418,8 @@ async function update() {
   if (data) data._workerIdx = resp._workerIdx;
 
   // Skip if a newer result was already rendered (out-of-order arrival)
-  if (gen <= renderedGeneration) return;
+  inflight--;
+  if (gen <= renderedGeneration) return; // stale — newer frame already rendered
   renderedGeneration = gen;
 
   if (data && data.batch_meta) {
