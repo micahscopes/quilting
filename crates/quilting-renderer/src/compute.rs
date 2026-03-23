@@ -468,9 +468,9 @@ impl LodCompute {
         unsafe {
             // Fence sync — wait for transform feedback to complete.
             // flush() in compute() kicked off the GPU work, this waits for it.
-            let fence = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).unwrap();
-            gl.client_wait_sync(fence, glow::SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000); // 1s timeout
-            gl.delete_sync(fence);
+            // WebGL2 MAX_CLIENT_WAIT_TIMEOUT_WEBGL = 0 (can't block).
+            // Just do the readback — getBufferSubData implicitly waits.
+            // The flush() in compute() ensures the GPU started the work.
 
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf));
             gl.get_buffer_sub_data(glow::TRANSFORM_FEEDBACK_BUFFER, 0,
