@@ -2254,26 +2254,21 @@ pub fn slice_and_transform(
     let total_faces: usize = raw_batches.iter().map(|b| b.num_faces).sum();
     let num_batches = raw_batches.len();
 
-    // Instance data: two flat f32 arrays
-    let mut all_orig = vec![0.0f32; total_faces * 52];
-    let mut all_xform = vec![0.0f32; total_faces * 52];
+    // Instance data: use the sorted flat buffers directly (already in batch order)
+    let (all_orig, all_xform) = FLAT_INSTANCE_DATA.with(|fid| {
+        let fid = fid.borrow();
+        match fid.as_ref() {
+            Some((orig, xform)) => (orig.clone(), xform.clone()),
+            None => (vec![0.0f32; total_faces * 52], vec![0.0f32; total_faces * 52]),
+        }
+    });
 
-    // Batch metadata: flat i32 array, 16 ints per batch
-    // [lod_a, lod_b, lod_c, wanted_a, wanted_b, wanted_c,
-    //  used_a, used_b, used_c, perm_parity, perm_index,
-    //  material_index, num_faces, n_verts, n_tris, offset]
     let mut batch_meta = vec![0i32; num_batches * 16];
-
-    // Face indices: flat u32 array, concatenated
     let mut all_face_indices: Vec<u32> = Vec::with_capacity(total_faces);
 
     let mut write_pos = 0usize;
     for (bi, b) in raw_batches.iter().enumerate() {
         let batch_offset = write_pos;
-        all_orig[write_pos*52..(write_pos + b.num_faces)*52]
-            .copy_from_slice(&b.orig_data);
-        all_xform[write_pos*52..(write_pos + b.num_faces)*52]
-            .copy_from_slice(&b.xform_data);
         write_pos += b.num_faces;
 
         let m = bi * 16;
