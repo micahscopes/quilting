@@ -91,7 +91,10 @@ self.onmessage = async function(e) {
     if (result && result.time_min != null && result.time_max != null) {
       const nframes = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
       const baked = wasm.prebake_animation(nframes, result.time_min, result.time_max);
-      console.log(`Prebaked ${baked} animation frames`);
+      console.log(`Prebaked ${baked} animation frames (t=${result.time_min}-${result.time_max}, nframes=${nframes})`);
+      if (baked === 0) console.warn('Prebake returned 0 — GPU compute may have failed');
+    } else {
+      console.warn('create_hypermesh: no time range, prebake skipped', result);
     }
     self.postMessage({ type: 'hypermesh_created', id, result });
     return;

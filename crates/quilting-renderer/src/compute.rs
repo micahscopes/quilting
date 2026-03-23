@@ -80,14 +80,9 @@ uniform float vp_width;      // viewport width in pixels
 uniform float vp_height;     // viewport height in pixels
 uniform highp sampler2D u_atlas_lut; // exponent triple → atlas index (32×32 R8)
 
-// Transform feedback outputs — just classification, no LODs
+// Transform feedback outputs — just classification
 out float out_atlas_index;
 out float out_perm_index;
-out float out_lod_b;
-out float out_lod_c;
-out float out_median_a;
-out float out_median_b;
-out float out_median_c;
 
 // Quaternion multiply
 vec4 qmul(vec4 a, vec4 b) {
@@ -128,6 +123,10 @@ vec3 fetch_pos(int vertex_id) {
 }
 
 void main() {
+    // Local variables for intermediate LOD/median computation
+    float out_lod_a, out_lod_b, out_lod_c;
+    float out_median_a, out_median_b, out_median_c;
+
     // Fetch vertex positions from prebaked texture
     vec3 p0 = fetch_pos(int(face_indices.x));
     vec3 p1 = fetch_pos(int(face_indices.y));
