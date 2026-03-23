@@ -1924,32 +1924,35 @@ pub fn slice_and_transform(
             let nf = cs.tris.len();
             let src_faces = cs.source_face_indices.clone();
 
-            // 2. SEQUENTIAL WRITE while GPU runs — cache-friendly face-order pass
-            let mut all_orig = vec![0.0f32; nf * 52];
+            // 2. SEQUENTIAL WRITE while GPU runs — compact 40-float layout
+            // [p0(4), p1(4), p2(4), lod(4), vlod(4), uv01(4), uv2(4), n0(4), n1(4), n2(4)]
+            // Weights stripped — shader gets identity via vertexAttrib4f
+            const COMPACT_STRIDE: usize = 40;
+            let mut all_orig = vec![0.0f32; nf * COMPACT_STRIDE];
             let has_uvs = !cs.uvs.is_empty();
 
             for (fi, face) in cs.tris.iter().enumerate() {
-                let base = fi * 52;
+                let b = fi * COMPACT_STRIDE;
+                // Positions (3 × vec4, w=0)
                 for (vi, &vert_idx) in face.iter().enumerate() {
                     let v = frame_verts[vert_idx];
-                    let off = base + vi * 4;
+                    let off = b + vi * 4;
                     all_orig[off+1] = v[0] as f32;
                     all_orig[off+2] = v[1] as f32;
                     all_orig[off+3] = v[2] as f32;
                 }
-                all_orig[base + 12] = 1.0;
-                all_orig[base + 16] = 1.0;
-                all_orig[base + 20] = 1.0;
+                // UVs at offset 20 (after 3 positions + 2 LOD vec4s = 5*4=20)
                 if has_uvs {
                     let uv0 = cs.uvs[face[0]]; let uv1 = cs.uvs[face[1]]; let uv2 = cs.uvs[face[2]];
-                    all_orig[base + 32] = uv0[0]; all_orig[base + 33] = uv0[1];
-                    all_orig[base + 34] = uv1[0]; all_orig[base + 35] = uv1[1];
-                    all_orig[base + 36] = uv2[0]; all_orig[base + 37] = uv2[1];
+                    all_orig[b + 20] = uv0[0]; all_orig[b + 21] = uv0[1];
+                    all_orig[b + 22] = uv1[0]; all_orig[b + 23] = uv1[1];
+                    all_orig[b + 24] = uv2[0]; all_orig[b + 25] = uv2[1];
                 }
+                // Normals at offset 28
                 if !cs.normals.is_empty() {
                     for vi in 0..3 {
                         let n = cs.normals[face[vi]];
-                        let off = base + 40 + vi * 4;
+                        let off = b + 28 + vi * 4;
                         all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
                     }
                 }
@@ -1967,11 +1970,11 @@ pub fn slice_and_transform(
                     for &vi in face { vn[vi][0] += fn_[0]; vn[vi][1] += fn_[1]; vn[vi][2] += fn_[2]; }
                 }
                 for (fi, face) in cs.tris.iter().enumerate() {
-                    let base = fi * 52;
+                    let b = fi * COMPACT_STRIDE;
                     for vi in 0..3 {
                         let n = &vn[face[vi]];
                         let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
-                        let off = base + 40 + vi * 4;
+                        let off = b + 28 + vi * 4;
                         if len > 1e-10 {
                             all_orig[off] = (n[0]/len) as f32;
                             all_orig[off+1] = (n[1]/len) as f32;
@@ -1994,6 +1997,7 @@ pub fn slice_and_transform(
             let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
 
             // 4. Overwrite LODs from GPU classification
+            // Compact layout: edge LODs at offset 12, vertex LODs at offset 16
             ATLAS_KEYS.with(|ak| {
                 let keys = ak.borrow();
                 for fi in 0..nf {
@@ -2002,13 +2006,13 @@ pub fn slice_and_transform(
                         let atlas_idx = gpu_class[rb] as usize;
                         if atlas_idx < keys.len() {
                             let lods = keys[atlas_idx];
-                            let base = fi * 52;
-                            all_orig[base + 24] = lods[0] as f32;
-                            all_orig[base + 25] = lods[1] as f32;
-                            all_orig[base + 26] = lods[2] as f32;
-                            all_orig[base + 28] = lods[0] as f32;
-                            all_orig[base + 29] = lods[1] as f32;
-                            all_orig[base + 30] = lods[2] as f32;
+                            let b = fi * COMPACT_STRIDE;
+                            all_orig[b + 12] = lods[0] as f32;
+                            all_orig[b + 13] = lods[1] as f32;
+                            all_orig[b + 14] = lods[2] as f32;
+                            all_orig[b + 16] = lods[0] as f32;
+                            all_orig[b + 17] = lods[1] as f32;
+                            all_orig[b + 18] = lods[2] as f32;
                         }
                     }
                 }
@@ -2073,7 +2077,7 @@ pub fn slice_and_transform(
     let mut raw_batches: Vec<RawBatch> = Vec::with_capacity(groups.len());
     let mut sorted_buf = SORTED_BUFS.with(|sb| {
         let mut sb = sb.borrow_mut();
-        let needed = num_tris * 52;
+        let needed = num_tris * 40;
         if sb.len() < needed { sb.resize(needed, 0.0); }
         std::mem::take(&mut *sb)
     });
@@ -2092,9 +2096,9 @@ pub fn slice_and_transform(
             let lods = canonical_lod;
 
             for &fi in face_indices {
-                let src = fi * 52;
-                let dst = write_pos * 52;
-                sorted_buf[dst..dst+52].copy_from_slice(&flat[src..src+52]);
+                let src = fi * 40;
+                let dst = write_pos * 40;
+                sorted_buf[dst..dst+40].copy_from_slice(&flat[src..src+40]);
                 write_pos += 1;
             }
 

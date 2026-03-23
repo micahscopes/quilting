@@ -1406,7 +1406,7 @@ let isolateVAO = null, isolateLinVAO = null;
 
 function isolateFace(batchIdx, localIdx) {
   const b = drawBatches[batchIdx];
-  const faceData = b.instanceData.slice(localIdx * 52, (localIdx + 1) * 52);
+  const faceData = b.instanceData.slice(localIdx * 40, (localIdx + 1) * 40);
 
   // Get the tess buffers for this batch (keyed by used LOD — matches tessCache keys)
   const tessKey = (b.usedLod || b.lod).join(',') + '/' + (b.permIndex || 0);
@@ -1423,10 +1423,17 @@ function isolateFace(batchIdx, localIdx) {
   const ibuf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, ibuf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(faceData), gl.STATIC_DRAW);
-  for (let i = 0; i < 13; i++) {
-    gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
-    gl.vertexAttribDivisor(1+i, 1);
+  {
+    const S = 160;
+    const cMap = [[1,0],[2,16],[3,32],[7,48],[8,64],[9,80],[10,96],[11,112],[12,128],[13,144]];
+    for (const [loc, off] of cMap) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+      gl.vertexAttribDivisor(loc, 1);
+    }
+    gl.vertexAttrib4f(4, 1, 0, 0, 0);
+    gl.vertexAttrib4f(5, 1, 0, 0, 0);
+    gl.vertexAttrib4f(6, 1, 0, 0, 0);
   }
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tess.triIdxBuf);
   gl.bindVertexArray(null);
@@ -1439,10 +1446,17 @@ function isolateFace(batchIdx, localIdx) {
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, ibuf); // reuse same instance buffer
-  for (let i = 0; i < 13; i++) {
-    gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
-    gl.vertexAttribDivisor(1+i, 1);
+  {
+    const S = 160;
+    const cMap = [[1,0],[2,16],[3,32],[7,48],[8,64],[9,80],[10,96],[11,112],[12,128],[13,144]];
+    for (const [loc, off] of cMap) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+      gl.vertexAttribDivisor(loc, 1);
+    }
+    gl.vertexAttrib4f(4, 1, 0, 0, 0);
+    gl.vertexAttrib4f(5, 1, 0, 0, 0);
+    gl.vertexAttrib4f(6, 1, 0, 0, 0);
   }
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tess.lineIdxBuf);
   gl.bindVertexArray(null);
@@ -1492,19 +1506,18 @@ function showPickInfo(x, y) {
     return;
   }
 
-  // Extract per-face instance data (52 floats per face)
+  // Extract per-face instance data (40 floats per face, compact layout)
   const b = drawBatches[face.batchIdx];
-  const off = face.localIdx * 52;
-  const orig = b.instanceData;  // original (pre-Möbius) control points
-  const xf = b.xformData;       // xformed data
+  const off = face.localIdx * 40;
+  const orig = b.instanceData;
 
-  // Control points (quaternions: w,x,y,z) — positions are in orig[off+0..12]
-  const p0 = [orig[off+1], orig[off+2], orig[off+3]];   // p0.xyz
-  const p1 = [orig[off+5], orig[off+6], orig[off+7]];   // p1.xyz
-  const p2 = [orig[off+9], orig[off+10], orig[off+11]]; // p2.xyz
+  // Control points (quaternions: w,x,y,z) — positions at offset 0-11
+  const p0 = [orig[off+1], orig[off+2], orig[off+3]];
+  const p1 = [orig[off+5], orig[off+6], orig[off+7]];
+  const p2 = [orig[off+9], orig[off+10], orig[off+11]];
 
-  // Edge LODs from xform data (offset 24-27 in instance)
-  const edgeLods = [xf[off+24], xf[off+25], xf[off+26]];
+  // Edge LODs at offset 12-14 in compact layout
+  const edgeLods = [orig[off+12], orig[off+13], orig[off+14]];
 
   // World-space edge lengths (pre-Möbius)
   const edgeLen = (a, b) => Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2);
@@ -1525,10 +1538,10 @@ function showPickInfo(x, y) {
     return [(x/w*0.5+0.5)*canvas.width, (y/w*0.5+0.5)*canvas.height];
   }
 
-  // For Möbius-transformed screen lengths, use xform positions
-  const xp0 = [xf[off+1], xf[off+2], xf[off+3]];
-  const xp1 = [xf[off+5], xf[off+6], xf[off+7]];
-  const xp2 = [xf[off+9], xf[off+10], xf[off+11]];
+  // For Möbius-transformed screen lengths, use same positions (Möbius in shader)
+  const xp0 = p0;
+  const xp1 = p1;
+  const xp2 = p2;
   function screenLen(a, b) {
     const sa = projectPt(a), sb = projectPt(b);
     if (!sa || !sb) return '∞';
@@ -1858,11 +1871,16 @@ function makeVAO(baryData, idxData, instanceData) {
   const ib = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, ib);
   gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
-  for (let i=0;i<13;i++) {
-    gl.enableVertexAttribArray(1+i);
-    gl.vertexAttribPointer(1+i,4,gl.FLOAT,false,208,i*16);
-    gl.vertexAttribDivisor(1+i,1);
+  const S = 160;
+  const cMap = [[1,0],[2,16],[3,32],[7,48],[8,64],[9,80],[10,96],[11,112],[12,128],[13,144]];
+  for (const [loc, off] of cMap) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+    gl.vertexAttribDivisor(loc, 1);
   }
+  gl.vertexAttrib4f(4, 1, 0, 0, 0);
+  gl.vertexAttrib4f(5, 1, 0, 0, 0);
+  gl.vertexAttrib4f(6, 1, 0, 0, 0);
   const eb = gl.createBuffer();
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxData, gl.STATIC_DRAW);
@@ -1928,11 +1946,16 @@ function getOrCreateBatchVAOs(tessKey, tessBufs, instanceData, numInstances) {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
-    for (let i = 0; i < 13; i++) {
-      gl.enableVertexAttribArray(1+i);
-      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
-      gl.vertexAttribDivisor(1+i, 1);
+    const S = 160;
+    const cMap = [[1,0],[2,16],[3,32],[7,48],[8,64],[9,80],[10,96],[11,112],[12,128],[13,144]];
+    for (const [loc, off] of cMap) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+      gl.vertexAttribDivisor(loc, 1);
     }
+    gl.vertexAttrib4f(4, 1, 0, 0, 0);
+    gl.vertexAttrib4f(5, 1, 0, 0, 0);
+    gl.vertexAttrib4f(6, 1, 0, 0, 0);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
     gl.bindVertexArray(null);
     return vao;
@@ -1967,11 +1990,19 @@ function uploadBatches(data) {
       gl.bindVertexArray(vaoOrigMesh);
       // Reuse a pooled buffer instead of creating a new one each frame
       const buf = getPooledInstanceBuf(allOrig);
-      for (let i = 0; i < 13; i++) {
-        gl.enableVertexAttribArray(1+i);
-        gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
-        gl.vertexAttribDivisor(1+i, 1);
+      const S = 160;
+      const compactMap = [
+        [1,0],[2,16],[3,32],[7,48],[8,64],
+        [9,80],[10,96],[11,112],[12,128],[13,144]
+      ];
+      for (const [loc, off] of compactMap) {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+        gl.vertexAttribDivisor(loc, 1);
       }
+      gl.vertexAttrib4f(4, 1, 0, 0, 0);
+      gl.vertexAttrib4f(5, 1, 0, 0, 0);
+      gl.vertexAttrib4f(6, 1, 0, 0, 0);
       gl.bindVertexArray(null);
     }
   }
@@ -2021,8 +2052,8 @@ function uploadBatches(data) {
     totalRendered += numFaces;
 
     // Slice instance data from flat transferred buffers
-    const off = offset * 52;
-    const len = numFaces * 52;
+    const off = offset * 40;
+    const len = numFaces * 40;
     const origBuf = data.shared ? sharedOrigViews[data._workerIdx || 0] : new Float32Array(data.all_orig.buffer);
     const gpuData = origBuf.subarray(off, off + len);
     // orig = xform (normals computed on main thread GPU), no copy needed
@@ -2036,11 +2067,28 @@ function uploadBatches(data) {
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-      for (let i = 0; i < 13; i++) {
-        gl.enableVertexAttribArray(1+i);
-        gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
-        gl.vertexAttribDivisor(1+i, 1);
+      // Compact layout: 10 vec4s (160 bytes), weights not in buffer
+      // Map compact buffer slots → shader attribute locations:
+      //   slot 0-2 (p0,p1,p2) → loc 1-3
+      //   slot 3-4 (lod,vlod) → loc 7-8
+      //   slot 5-6 (uv01,uv2) → loc 9-10
+      //   slot 7-9 (n0,n1,n2) → loc 11-13
+      const S = 160; // compact stride
+      const compactMap = [
+        [1,0],[2,16],[3,32],      // positions
+        [7,48],[8,64],            // LODs
+        [9,80],[10,96],           // UVs
+        [11,112],[12,128],[13,144] // normals
+      ];
+      for (const [loc, off] of compactMap) {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+        gl.vertexAttribDivisor(loc, 1);
       }
+      // Weights (loc 4-6): constant identity, not from buffer
+      gl.vertexAttrib4f(4, 1, 0, 0, 0);
+      gl.vertexAttrib4f(5, 1, 0, 0, 0);
+      gl.vertexAttrib4f(6, 1, 0, 0, 0);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
       gl.bindVertexArray(null);
       return vao;
