@@ -651,10 +651,12 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom",
+ "glow",
  "js-sys",
  "quilting-core",
  "quilting-gltf",
  "quilting-mesh",
+ "quilting-renderer",
  "quilting-shaders",
  "quilting-spacetime",
  "serde",

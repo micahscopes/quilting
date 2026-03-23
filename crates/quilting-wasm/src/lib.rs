@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
+use quilting_renderer::compute::LodCompute;
 use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, compute_instances_no_lod_with_uvs, compute_instances_with_uvs, ScreenInfo};
 use quilting_core::permutation::{canonical_form, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -19,6 +20,7 @@ pub fn init() {
 
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
+    static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
@@ -60,6 +62,40 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     SENT_TESS.with(|s| s.borrow_mut().clear());
 
     elapsed
+}
+
+/// Initialize GPU compute context using OffscreenCanvas.
+/// Call once per worker — creates a WebGL2 context for transform feedback LOD computation.
+#[wasm_bindgen]
+pub fn init_gpu_compute(max_faces: u32) -> bool {
+    let canvas = web_sys::OffscreenCanvas::new(1, 1);
+    let canvas = match canvas {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let gl_ctx = canvas.get_context("webgl2");
+    let gl_ctx = match gl_ctx {
+        Ok(Some(ctx)) => ctx.dyn_into::<web_sys::WebGl2RenderingContext>().ok(),
+        _ => None,
+    };
+    let gl_ctx = match gl_ctx {
+        Some(c) => c,
+        None => return false,
+    };
+
+    let gl = glow::Context::from_webgl2_context(gl_ctx);
+
+    match LodCompute::new(&gl, max_faces as usize) {
+        Ok(compute) => {
+            GPU_COMPUTE.with(|gc| *gc.borrow_mut() = Some((gl, compute)));
+            true
+        }
+        Err(e) => {
+            web_sys::console::warn_1(&format!("GPU compute init failed: {e}").into());
+            false
+        }
+    }
 }
 
 /// Set tessellation parameters.

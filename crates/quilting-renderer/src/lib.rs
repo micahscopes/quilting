@@ -9,6 +9,7 @@
 pub mod shader;
 pub mod buffer;
 pub mod pass;
+pub mod compute;
 
 use glow::HasContext;
 
