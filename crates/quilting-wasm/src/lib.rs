@@ -1495,41 +1495,10 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         scene.materials.len()
     ).into());
 
-    let num_samples = 32usize;
-    let hyper = if let Some(si) = primary_skin_idx {
-        if !scene.animations.is_empty() && !scene.skins.is_empty() && si < scene.skins.len() {
-            let skin = &scene.skins[si];
-            let anim = &scene.animations[0];
-            web_sys::console::log_1(&format!(
-                "load_gltf_data: baking skinned animation with {} samples ({} joints)",
-                num_samples, skin.joints.len()
-            ).into());
-            quilting_gltf::bake::bake_skinned_animation(
-                &combined, skin, anim, &scene.nodes, num_samples,
-            )
-        } else {
-            build_static_hypermesh(&combined)
-        }
-    } else if has_animation {
-        let has_morph = scene.animations[0].channels.iter()
-            .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights);
-        if has_morph && !combined.morph_targets.is_empty() {
-            web_sys::console::log_1(&format!(
-                "load_gltf_data: baking morph animation ({} targets, 32 samples)",
-                combined.morph_targets.len()
-            ).into());
-            quilting_gltf::bake::bake_morph_animation(
-                &combined,
-                &scene.animations[0],
-                &combined.morph_targets,
-                32,
-            )
-        } else {
-            build_static_hypermesh(&combined)
-        }
-    } else {
-        build_static_hypermesh(&combined)
-    };
+    // For animated models (skeletal or morph), skip the expensive Hermite bake.
+    // GPU skinning evaluates per-frame directly from keyframes — no prebake needed.
+    // Only build a HyperMesh for static models (needed for spacetime slicing).
+    let hyper = build_static_hypermesh(&combined);
 
     let mut hyper = normalize_hypermesh(hyper);
 
@@ -1543,7 +1512,13 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         hyper.vertex_normals = norms.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect();
     }
 
-    let (time_min, time_max) = hyper.time_range();
+    // Get time range from animation if available, otherwise from HyperMesh
+    let (time_min, time_max) = if !scene.animations.is_empty() {
+        let info = quilting_gltf::evaluator::list_animations(&scene.animations);
+        if let Some(a) = info.first() { (a.t_min, a.t_max) } else { hyper.time_range() }
+    } else {
+        hyper.time_range()
+    };
 
     // Build materials array using js_sys
     let js_materials = js_sys::Array::new();
@@ -1745,17 +1720,16 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         ([0.9, 0.75, 0.6, 1.0], 0.0, 0.4)
     };
 
-    // Build AnimationEvaluator for GPU skinning (if model has skeleton + animation)
-    let evaluator = if let Some(si) = primary_skin_idx {
-        if !scene.animations.is_empty() && si < scene.skins.len() {
-            let num_morph = combined.morph_targets.len();
-            Some(quilting_gltf::evaluator::AnimationEvaluator::new(
-                scene.animations[0].clone(),
-                Some(scene.skins[si].clone()),
-                scene.nodes.clone(),
-                num_morph,
-            ))
-        } else { None }
+    // Build AnimationEvaluator for GPU animation (skeletal and/or morph targets)
+    let evaluator = if !scene.animations.is_empty() {
+        let skin = primary_skin_idx.and_then(|si| scene.skins.get(si).cloned());
+        let num_morph = combined.morph_targets.len();
+        Some(quilting_gltf::evaluator::AnimationEvaluator::new(
+            scene.animations[0].clone(),
+            skin,
+            scene.nodes.clone(),
+            num_morph,
+        ))
     } else { None };
 
     // Compute rest-pose bounding box for normalization

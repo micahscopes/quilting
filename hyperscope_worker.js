@@ -149,15 +149,9 @@ self.onmessage = async function(e) {
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
     // Check if model has GPU skinning data — skip prebake if so
     const skinData = wasm.get_skinning_data();
-    const hasGpuSkinning = skinData && skinData.num_joints > 0;
-    if (hasGpuSkinning) {
-      console.log(`Skinned model: ${skinData.num_joints} joints, ${skinData.num_vertices} verts`);
-      // Prebake 1 frame at bind pose for GPU LOD computation
-      if (result && result.time_min != null) {
-        const t0 = result.time_min;
-        const baked = wasm.prebake_animation(1, t0, t0 + 0.001);
-        console.log(`Prebaked 1 rest-pose frame for LOD compute: ${baked}`);
-      }
+    const hasGpuAnimation = skinData && (skinData.num_joints > 0 || skinData.num_vertices > 0);
+    if (hasGpuAnimation) {
+      console.log(`GPU animated model: ${skinData.num_joints} joints, ${skinData.num_vertices} verts — no prebake`);
     } else if (result && result.time_min != null && result.time_max != null) {
       const nframes = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
       const baked = wasm.prebake_animation(nframes, result.time_min, result.time_max);
