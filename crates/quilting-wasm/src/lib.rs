@@ -1955,44 +1955,33 @@ pub fn slice_and_transform(
                 })
             } else { vec![] };
 
-            // Write GPU LODs into flat buffers, with screen attenuation
+            // Write GPU LODs into flat buffers, with cheap screen attenuation.
+            // GPU readback gives us medians (world-space). Estimate screen pixels
+            // from median × a global screen scale factor (no per-face projection).
             let screen_atten = quilting_core::evaluate::get_screen_atten();
             let min_px = quilting_core::evaluate::get_min_px_per_sub();
+            let screen_scale = screen.as_ref().map(|s| {
+                // Approximate: viewport_width / (2 * zoom * tan(fov/2))
+                // The VP matrix encodes this — extract from the projection
+                s.width / (2.0 * s.vp_matrix[0] as f64).max(0.1)
+            }).unwrap_or(1.0);
+
             for fi in 0..nf {
                 let lod_base = fi * 6;
                 let base = fi * 52;
                 if lod_base + 5 < gpu_lods.len() {
                     let mut lods = [gpu_lods[lod_base], gpu_lods[lod_base+1], gpu_lods[lod_base+2]];
+                    let medians = [gpu_lods[lod_base+3], gpu_lods[lod_base+4], gpu_lods[lod_base+5]];
 
-                    // Screen attenuation: use screen_arc_len to cap LODs
-                    // when subdivisions would be sub-pixel
                     if screen_atten {
-                        if let Some(ref s) = screen {
-                            for ei in 0..3 {
-                                let (va, vb) = match ei {
-                                    0 => (cs.tris[fi][1], cs.tris[fi][2]),
-                                    1 => (cs.tris[fi][0], cs.tris[fi][2]),
-                                    _ => (cs.tris[fi][0], cs.tris[fi][1]),
-                                };
-                                // Project deformed endpoints to estimate screen coverage
-                                let da = transform.apply(Quat::from_point(
-                                    frame_verts[va][0], frame_verts[va][1], frame_verts[va][2]
-                                )).to_point();
-                                let db = transform.apply(Quat::from_point(
-                                    frame_verts[vb][0], frame_verts[vb][1], frame_verts[vb][2]
-                                )).to_point();
-                                if let (Some(pa), Some(pb)) = (s.project(da), s.project(db)) {
-                                    let pixels = ((pa[0]-pb[0]).powi(2) + (pa[1]-pb[1]).powi(2)).sqrt();
-                                    let lod = lods[ei] as f64;
-                                    if lod > 0.0 && pixels / lod < min_px {
-                                        lods[ei] = (pixels / min_px).ceil() as f32;
-                                        // Snap to power of 2
-                                        let v = lods[ei].max(2.0) as u32;
-                                        let mut p = 1u32;
-                                        while p < v { p *= 2; }
-                                        lods[ei] = p as f32;
-                                    }
-                                }
+                        for ei in 0..3 {
+                            let screen_px = medians[ei] as f64 * screen_scale;
+                            let lod = lods[ei] as f64;
+                            if lod > 0.0 && screen_px / lod < min_px {
+                                let reduced = (screen_px / min_px).ceil().max(2.0) as u32;
+                                let mut p = 1u32;
+                                while p < reduced { p *= 2; }
+                                lods[ei] = p as f32;
                             }
                         }
                     }
