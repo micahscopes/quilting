@@ -36,8 +36,9 @@ thread_local! {
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     static PREBAKE_INFO: RefCell<Option<PrebakeInfo>> = RefCell::new(None);
     /// Pre-built flat f32 instance buffers from the prebake path.
-    /// Bypasses to_f32_array() in batch assembly.
     static FLAT_INSTANCE_DATA: RefCell<Option<(Vec<f32>, Vec<f32>)>> = RefCell::new(None);
+    /// GPU classification: [atlas_index, perm_index] per face (2 floats each).
+    static GPU_CLASSIFICATION: RefCell<Option<Vec<f32>>> = RefCell::new(None);
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
@@ -2030,10 +2031,13 @@ pub fn slice_and_transform(
                 }
             }
 
-            // Store flat buffers for batch assembly
+            // Store flat buffers + GPU classification for batch assembly
             FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((all_orig.clone(), all_xform.clone())));
 
-            // Build dummy FaceInstance vecs for grouping (only LODs matter)
+            // Store GPU classification for bucket sort
+            GPU_CLASSIFICATION.with(|gc| *gc.borrow_mut() = Some(gpu_class));
+
+            // Build minimal dummy instances (just LODs for the non-bucket path)
             let dummy_instances: Vec<quilting_core::evaluate::FaceInstance> = (0..nf).map(|fi| {
                 let base = fi * 52;
                 quilting_core::evaluate::FaceInstance {
@@ -2144,18 +2148,49 @@ pub fn slice_and_transform(
     pm("sat:group-end");
 
     pm("sat:batch-start");
-    // Group by (canonical LOD, perm_index, material_index)
-    let mut groups: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
-    for (fi, inst) in instances_xform.iter().enumerate() {
-        let lod = if override_res > 0 {
-            [override_res, override_res, override_res]
+
+    // Group faces by (canonical LOD, perm_index, material_index).
+    // Use GPU classification bucket sort when available, else FxHashMap.
+    let groups: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = GPU_CLASSIFICATION.with(|gc| {
+        let gc = gc.borrow();
+        if let Some(ref class) = *gc {
+            // BUCKET SORT from GPU classification: O(N) single pass
+            let mut map: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
+            ATLAS.with(|atlas_cell| {
+                let atlas = atlas_cell.borrow();
+                let keys: Vec<[u32; 3]> = atlas.as_ref()
+                    .map(|a| a.patches.keys().copied().collect())
+                    .unwrap_or_default();
+                for fi in 0..num_tris {
+                    let rb = fi * 2;
+                    if rb + 1 < class.len() {
+                        let atlas_idx = class[rb] as usize;
+                        let perm_idx = class[rb + 1] as usize;
+                        let mat_idx = if fi < face_mat_indices.len() { face_mat_indices[fi] } else { -1 };
+                        if atlas_idx < keys.len() {
+                            let canonical_lod = keys[atlas_idx];
+                            map.entry((canonical_lod, perm_idx, mat_idx)).or_default().push(fi);
+                        }
+                    }
+                }
+            });
+            map
         } else {
-            inst.edge_lods
-        };
-        let key = canonical_form(lod);
-        let mat_idx = if fi < face_mat_indices.len() { face_mat_indices[fi] } else { -1 };
-        groups.entry((key.res, key.perm_index, mat_idx)).or_default().push(fi);
-    }
+            // Fallback: FxHashMap grouping from LODs
+            let mut map: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
+            for (fi, inst) in instances_xform.iter().enumerate() {
+                let lod = if override_res > 0 {
+                    [override_res, override_res, override_res]
+                } else {
+                    inst.edge_lods
+                };
+                let key = canonical_form(lod);
+                let mat_idx = if fi < face_mat_indices.len() { face_mat_indices[fi] } else { -1 };
+                map.entry((key.res, key.perm_index, mat_idx)).or_default().push(fi);
+            }
+            map
+        }
+    });
 
     struct RawBatch {
         actual_lod: [u32; 3],
