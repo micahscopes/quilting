@@ -659,6 +659,7 @@ dependencies = [
  "quilting-renderer",
  "quilting-shaders",
  "quilting-spacetime",
+ "rustc-hash 2.1.1",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

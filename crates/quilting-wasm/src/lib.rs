@@ -10,6 +10,7 @@ use quilting_core::shapes;
 use quilting_core::triangle;
 use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 #[wasm_bindgen(start)]
@@ -412,7 +413,7 @@ pub fn generate_and_store_patch(res_a: u32, res_b: u32, res_c: u32) {
         let atlas = atlas_opt.get_or_insert_with(|| TessellationAtlas {
             positions: Vec::new(),
             triangles: Vec::new(),
-            patches: std::collections::HashMap::new(),
+            patches: HashMap::default(),
             lod_levels: Vec::new(),
         });
         let mut key = [res_a, res_b, res_c];
@@ -571,7 +572,7 @@ pub fn compute_mesh_batches(
     let t2 = js_sys::Date::now();
 
     // Group by (canonical LOD, perm_index)
-    let mut groups: HashMap<([u32; 3], usize), Vec<usize>> = HashMap::new();
+    let mut groups: FxHashMap<([u32; 3], usize), Vec<usize>> = FxHashMap::default();
     for (fi, inst) in instances_xform.iter().enumerate() {
         let lod = if override_res > 0 {
             [override_res, override_res, override_res]
@@ -2071,7 +2072,7 @@ pub fn slice_and_transform(
 
     pm("sat:batch-start");
     // Group by (canonical LOD, perm_index, material_index)
-    let mut groups: HashMap<([u32; 3], usize, i32), Vec<usize>> = HashMap::new();
+    let mut groups: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
     for (fi, inst) in instances_xform.iter().enumerate() {
         let lod = if override_res > 0 {
             [override_res, override_res, override_res]
