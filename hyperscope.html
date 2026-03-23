@@ -2024,14 +2024,8 @@ function uploadBatches(data) {
     const off = offset * 52;
     const len = numFaces * 52;
     const origBuf = data.shared ? sharedOrigViews[data._workerIdx || 0] : new Float32Array(data.all_orig.buffer);
-    const xfBuf = data.shared ? sharedXformViews[data._workerIdx || 0] : new Float32Array(data.all_xform.buffer);
     const gpuData = origBuf.subarray(off, off + len);
-    const xf = xfBuf.subarray(off, off + len);
-    for (let i = 0; i < numFaces; i++) {
-      const base = i * 52;
-      for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j];
-      for (let j = 40; j < 52; j++) gpuData[base+j] = xf[base+j];
-    }
+    // orig = xform (normals computed on main thread GPU), no copy needed
 
     const instBuf = getPooledInstanceBuf(gpuData);
 
@@ -2065,7 +2059,7 @@ function uploadBatches(data) {
       color: lodColor(lod),
       parity, permIndex, materialIndex,
       instanceData: gpuData,
-      xformData: xf,
+      xformData: gpuData,
       faceIndices: batchFaceIndices,
     });
   }

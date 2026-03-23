@@ -35,12 +35,12 @@ thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     static PREBAKE_INFO: RefCell<Option<PrebakeInfo>> = RefCell::new(None);
-    /// Pre-built flat f32 instance buffers from the prebake path.
-    static FLAT_INSTANCE_DATA: RefCell<Option<(Vec<f32>, Vec<f32>)>> = RefCell::new(None);
+    /// Pre-built flat f32 instance buffer from the prebake path (single buffer, no xform).
+    static FLAT_INSTANCE_DATA: RefCell<Option<Vec<f32>>> = RefCell::new(None);
     /// GPU classification: [atlas_index, perm_index] per face (2 floats each).
     static GPU_CLASSIFICATION: RefCell<Option<Vec<f32>>> = RefCell::new(None);
-    /// Reusable sorted buffers — grow but never shrink to avoid per-frame allocation.
-    static SORTED_BUFS: RefCell<(Vec<f32>, Vec<f32>)> = RefCell::new((Vec::new(), Vec::new()));
+    /// Reusable sorted buffer — grows but never shrinks to avoid per-frame allocation.
+    static SORTED_BUFS: RefCell<Vec<f32>> = RefCell::new(Vec::new());
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
     /// Sorted atlas patch keys — built once during LUT upload, reused for GPU readback.
@@ -724,12 +724,12 @@ pub fn compute_mesh_batches(
 
             let used_flat = FLAT_INSTANCE_DATA.with(|fid| {
                 let fid = fid.borrow();
-                if let Some((ref flat_orig, ref flat_xform)) = *fid {
+                if let Some(ref flat) = *fid {
                     for (i, &fi) in face_indices.iter().enumerate() {
                         let src = fi * 52;
-                        if src + 52 <= flat_orig.len() {
-                            orig_data[i*52..(i+1)*52].copy_from_slice(&flat_orig[src..src+52]);
-                            xform_data[i*52..(i+1)*52].copy_from_slice(&flat_xform[src..src+52]);
+                        if src + 52 <= flat.len() {
+                            orig_data[i*52..(i+1)*52].copy_from_slice(&flat[src..src+52]);
+                            xform_data[i*52..(i+1)*52].copy_from_slice(&flat[src..src+52]);
                         }
                     }
                     true
@@ -2014,12 +2014,8 @@ pub fn slice_and_transform(
                 }
             });
 
-            // 5. Build xform: copy orig (normals will be computed on main thread GPU)
-            let mut all_xform = vec![0.0f32; nf * 52];
-            all_xform.copy_from_slice(&all_orig);
-
-            // Store flat buffers + classification (move, not clone)
-            FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((all_orig, all_xform)));
+            // Single buffer — xform eliminated (normals on main thread GPU)
+            FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some(all_orig));
             GPU_CLASSIFICATION.with(|gc| *gc.borrow_mut() = Some(gpu_class));
 
             (nf, src_faces)
@@ -2075,24 +2071,22 @@ pub fn slice_and_transform(
 
     // Sorted copy — sequential writes, scattered reads from hot unsorted buffer
     let mut raw_batches: Vec<RawBatch> = Vec::with_capacity(groups.len());
-    let (mut sorted_orig, mut sorted_xform) = SORTED_BUFS.with(|sb| {
+    let mut sorted_buf = SORTED_BUFS.with(|sb| {
         let mut sb = sb.borrow_mut();
         let needed = num_tris * 52;
-        if sb.0.len() < needed { sb.0.resize(needed, 0.0); }
-        if sb.1.len() < needed { sb.1.resize(needed, 0.0); }
-        (std::mem::take(&mut sb.0), std::mem::take(&mut sb.1))
+        if sb.len() < needed { sb.resize(needed, 0.0); }
+        std::mem::take(&mut *sb)
     });
     let mut write_pos = 0usize;
 
     FLAT_INSTANCE_DATA.with(|fid| {
         let fid = fid.borrow();
-        let (flat_orig, flat_xform) = match fid.as_ref() {
-            Some(pair) => pair,
+        let flat = match fid.as_ref() {
+            Some(buf) => buf,
             None => return,
         };
 
         for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
-            let batch_offset = write_pos;
             let nf = face_indices.len();
             let parity = perm_sign(perm_index);
             let lods = canonical_lod;
@@ -2100,8 +2094,7 @@ pub fn slice_and_transform(
             for &fi in face_indices {
                 let src = fi * 52;
                 let dst = write_pos * 52;
-                sorted_orig[dst..dst+52].copy_from_slice(&flat_orig[src..src+52]);
-                sorted_xform[dst..dst+52].copy_from_slice(&flat_xform[src..src+52]);
+                sorted_buf[dst..dst+52].copy_from_slice(&flat[src..src+52]);
                 write_pos += 1;
             }
 
@@ -2165,16 +2158,12 @@ pub fn slice_and_transform(
     // Allocate + copy. new_with_length + copy_from is faster than
     // Float32Array::from() which goes through wasm-bindgen's JS shim.
     // Worker transfers these (zero-copy to main), then they're gone.
-    let js_orig = js_sys::Float32Array::new_with_length(sorted_orig.len() as u32);
-    js_orig.copy_from(&sorted_orig);
-    let js_xform = js_sys::Float32Array::new_with_length(sorted_xform.len() as u32);
-    js_xform.copy_from(&sorted_xform);
+    let js_orig = js_sys::Float32Array::new_with_length(sorted_buf.len() as u32);
+    js_orig.copy_from(&sorted_buf);
 
-    // Recycle buffers into SORTED_BUFS for next frame (avoids re-allocation)
+    // Recycle buffer for next frame (avoids re-allocation)
     SORTED_BUFS.with(|sb| {
-        let mut sb = sb.borrow_mut();
-        sb.0 = sorted_orig;
-        sb.1 = sorted_xform;
+        *sb.borrow_mut() = sorted_buf;
     });
     let js_meta = js_sys::Int32Array::new_with_length(batch_meta.len() as u32);
     js_meta.copy_from(&batch_meta);
@@ -2194,7 +2183,6 @@ pub fn slice_and_transform(
     js_sys::Reflect::set(&result, &"total_faces".into(), &JsValue::from(num_tris as u32)).ok();
     js_sys::Reflect::set(&result, &"num_batches".into(), &JsValue::from(num_batches as u32)).ok();
     js_sys::Reflect::set(&result, &"all_orig".into(), &js_orig).ok();
-    js_sys::Reflect::set(&result, &"all_xform".into(), &js_xform).ok();
     js_sys::Reflect::set(&result, &"batch_meta".into(), &js_meta).ok();
     js_sys::Reflect::set(&result, &"face_indices".into(), &js_face_idx).ok();
 
