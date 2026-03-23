@@ -1909,33 +1909,41 @@ pub fn slice_and_transform(
                 }
 
                 // Normals: use mesh normals for identity/affine transforms.
-                // For non-affine Möbius, leave as zero — the QB shader computes
-                // per-fragment normals from surface derivatives which are correct
-                // under conformal deformation. CPU smooth normals would need the
-                // full Möbius transform (~10ms) which we're skipping.
-                if transform.is_affine() {
-                    if !cs.normals.is_empty() {
-                        for vi in 0..3 {
-                            let n = cs.normals[face[vi]];
-                            let off = base + 40 + vi * 4;
-                            all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
-                        }
-                    } else {
-                        let v0 = frame_verts[face[0]]; let v1 = frame_verts[face[1]]; let v2 = frame_verts[face[2]];
-                        let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
-                        let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
-                        let nx = (e1[1]*e2[2] - e1[2]*e2[1]) as f32;
-                        let ny = (e1[2]*e2[0] - e1[0]*e2[2]) as f32;
-                        let nz = (e1[0]*e2[1] - e1[1]*e2[0]) as f32;
-                        let len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-10);
-                        let n = [nx/len, ny/len, nz/len];
-                        for vi in 0..3 {
-                            let off = base + 40 + vi * 4;
-                            all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
+                // Write smooth normals from glTF data if available
+                if !cs.normals.is_empty() {
+                    for vi in 0..3 {
+                        let n = cs.normals[face[vi]];
+                        let off = base + 40 + vi * 4;
+                        all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
+                    }
+                }
+                // If no glTF normals, smooth normals are written in a second pass below
+            }
+
+            // Compute smooth vertex normals when glTF normals absent (built-in shapes)
+            if cs.normals.is_empty() {
+                let num_verts = frame_verts.len();
+                let mut vnormals = vec![[0.0f64; 3]; num_verts];
+                for face in &cs.tris {
+                    let v0 = frame_verts[face[0]]; let v1 = frame_verts[face[1]]; let v2 = frame_verts[face[2]];
+                    let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
+                    let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+                    let fn_ = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+                    for &vi in face { vnormals[vi][0] += fn_[0]; vnormals[vi][1] += fn_[1]; vnormals[vi][2] += fn_[2]; }
+                }
+                for (fi, face) in cs.tris.iter().enumerate() {
+                    let base = fi * 52;
+                    for vi in 0..3 {
+                        let n = &vnormals[face[vi]];
+                        let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+                        let off = base + 40 + vi * 4;
+                        if len > 1e-10 {
+                            all_orig[off]   = (n[0] / len) as f32;
+                            all_orig[off+1] = (n[1] / len) as f32;
+                            all_orig[off+2] = (n[2] / len) as f32;
                         }
                     }
                 }
-                // Non-affine: normals stay zero, QB shader handles it
             }
 
             // 3. DEFERRED GPU READBACK — GPU has been computing while we packed buffers
