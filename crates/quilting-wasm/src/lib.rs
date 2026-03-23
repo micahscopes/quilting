@@ -1,4 +1,5 @@
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, compute_instances_no_lod_with_uvs, compute_instances_with_uvs, ScreenInfo};
 use quilting_core::permutation::{canonical_form, perm_sign};
@@ -1452,8 +1453,13 @@ pub fn slice_and_transform(
         None
     };
 
-    let t_slice_end = js_sys::Date::now();
-    let t0 = t_slice_end;
+    // Performance marks for DevTools User Timing
+    let perf: web_sys::Performance = js_sys::Reflect::get(
+        &js_sys::global(), &"performance".into()
+    ).ok().and_then(|p| p.dyn_into().ok()).unwrap();
+    let pm = |label: &str| { perf.mark(label).ok(); };
+
+    pm("sat:mobius-start");
 
     // Use cached slice for Möbius computation
     let (instances_orig, instances_xform, num_tris, source_faces) = SLICE_CACHE.with(|c| {
@@ -1466,9 +1472,9 @@ pub fn slice_and_transform(
         let src = cs.source_face_indices.clone();
         (orig, xform, cs.tris.len(), src)
     });
-    let t1 = js_sys::Date::now();
-    let t2 = js_sys::Date::now();
+    pm("sat:mobius-end");
 
+    pm("sat:group-start");
     // Resolve per-sliced-face material indices
     let face_mat_indices: Vec<i32> = FACE_MATERIALS.with(|fm| {
         let mats = fm.borrow();
@@ -1486,6 +1492,9 @@ pub fn slice_and_transform(
         }).collect()
     });
 
+    pm("sat:group-end");
+
+    pm("sat:batch-start");
     // Group by (canonical LOD, perm_index, material_index)
     let mut groups: HashMap<([u32; 3], usize, i32), Vec<usize>> = HashMap::new();
     for (fi, inst) in instances_xform.iter().enumerate() {
@@ -1558,7 +1567,8 @@ pub fn slice_and_transform(
                 instances_xform[face_indices[0]].edge_lods
             };
 
-            let tess_key = format!("{},{},{}/{}", canonical_lod[0], canonical_lod[1], canonical_lod[2], perm_index);
+            // Key by used_lod so fallback and correct data get separate entries
+            let tess_key = format!("{},{},{}/{}", used_lod[0], used_lod[1], used_lod[2], perm_index);
             let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
 
             let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
@@ -1610,9 +1620,9 @@ pub fn slice_and_transform(
             });
         }
     });
+    pm("sat:batch-end");
 
-    let t3 = js_sys::Date::now();
-
+    pm("sat:serialize-start");
     // Convert raw batches to JS objects with typed arrays (bypass serde for large data)
     let js_batches = js_sys::Array::new();
     for b in &raw_batches {
@@ -1636,19 +1646,19 @@ pub fn slice_and_transform(
         js_batches.push(&obj);
     }
 
+    pm("sat:serialize-end");
+
+    // Performance measures for DevTools User Timing
+    perf.measure_with_start_mark_and_end_mark("Möbius + LOD", "sat:mobius-start", "sat:mobius-end").ok();
+    perf.measure_with_start_mark_and_end_mark("Materials + Grouping", "sat:group-start", "sat:group-end").ok();
+    perf.measure_with_start_mark_and_end_mark("Batch Assembly", "sat:batch-start", "sat:batch-end").ok();
+    perf.measure_with_start_mark_and_end_mark("Serialize to JS", "sat:serialize-start", "sat:serialize-end").ok();
+    perf.measure_with_start_mark_and_end_mark("slice_and_transform total", "sat:mobius-start", "sat:serialize-end").ok();
+
     let result = js_sys::Object::new();
     js_sys::Reflect::set(&result, &"batches".into(), &js_batches).ok();
     js_sys::Reflect::set(&result, &"total_faces".into(), &JsValue::from(num_tris as u32)).ok();
     js_sys::Reflect::set(&result, &"num_batches".into(), &JsValue::from(raw_batches.len() as u32)).ok();
-    js_sys::Reflect::set(&result, &"timings".into(),
-        &serde_wasm_bindgen::to_value(&[t1 - t0, t2 - t1, t3 - t2]).unwrap()).ok();
-
-    let _t_end = js_sys::Date::now();
-    // Timing logs removed — uncomment for debugging:
-    // web_sys::console::log_1(&format!(
-    //     "slice_and_transform: slice={:.1}ms lod={:.1}ms total={:.1}ms faces={}",
-    //     t_slice_end - t_start, t1 - t0, _t_end - t_start, num_tris,
-    // ).into());
 
     result.into()
 }

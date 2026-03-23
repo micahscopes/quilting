@@ -332,28 +332,29 @@ pub fn compute_instances_with_uvs(
             edge_lods_world[canonical_edge(he_base)].max(lod_ab);
     }
 
-    // Apply screen attenuation and snap to power of 2
+    // Apply screen attenuation and snap to power of 2.
+    // Skip screen_arc_len entirely when attenuation is off — it's the
+    // most expensive part (9 Möbius evals per edge).
     for fi in 0..nf {
         for ei in 0..3u32 {
             let he_idx = fi * 3 + ei as usize;
             let canon = canonical_edge(he_idx);
             if edge_lods[canon] != 0 { continue; }
 
-            let (va, vb) = mesh.edge_vertices(he_idx as u32);
-            let pixels = screen_arc_len(va as usize, vb as usize);
-            // Screen attenuation: reduce LOD only when subdivisions would
-            // be sub-pixel (invisible). Each subdivision must span at least
-            // 1 pixel to be worth rendering. Below that, reduce proportionally.
-            let lod = if screen_atten_enabled && pixels > 0.0 {
-                let world = edge_lods_world[canon];
-                // How many pixels per subdivision at this world LOD?
-                let px_per_sub = pixels / world.max(1) as f64;
-                if px_per_sub < min_px {
-                    // Too dense: reduce LOD so each sub spans min_px
-                    let reduced = (pixels / min_px).ceil() as u32;
-                    world.min(reduced)
+            let lod = if screen_atten_enabled {
+                let (va, vb) = mesh.edge_vertices(he_idx as u32);
+                let pixels = screen_arc_len(va as usize, vb as usize);
+                if pixels > 0.0 {
+                    let world = edge_lods_world[canon];
+                    let px_per_sub = pixels / world.max(1) as f64;
+                    if px_per_sub < min_px {
+                        let reduced = (pixels / min_px).ceil() as u32;
+                        world.min(reduced)
+                    } else {
+                        world
+                    }
                 } else {
-                    world // subdivisions are visible, use full world LOD
+                    edge_lods_world[canon]
                 }
             } else {
                 edge_lods_world[canon]
