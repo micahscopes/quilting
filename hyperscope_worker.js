@@ -37,6 +37,12 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'export_patches') {
+    const patches = wasm.export_all_patches();
+    self.postMessage({ type: 'patches_exported', id, patches });
+    return;
+  }
+
   if (type === 'extend_atlas') {
     const ms = wasm.extend_atlas(data.newLod);
     self.postMessage({ type: 'atlas_extended', id, ms });

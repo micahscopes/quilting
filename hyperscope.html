@@ -1729,8 +1729,72 @@ let globalMaxLogLod = 1;
 let vaoOrigMesh = null, numOrigInst = 0;
 const ORIG_BARY = new Float32Array([1,0,0, 0,1,0, 0,0,1]);
 const ORIG_LINES = new Uint32Array([0,1, 1,2, 2,0]);
-const tessCache = new Map();
+const tessCache = new Map();  // fallback for patches not in atlasBuffers
 const vaoCache = new Map();
+const atlasBuffers = new Map(); // pre-uploaded atlas patches: "a,b,c/perm" → {baryBuf, triIdxBuf, lineIdxBuf, numTriIdx, numLineIdx, rawBary, rawTris}
+
+// Instance buffer pool — reuse GPU buffers across frames instead of creating new ones.
+// Each entry: { buf: WebGLBuffer, size: number (bytes) }
+const instanceBufPool = [];
+let instanceBufPoolIdx = 0;
+
+function getPooledInstanceBuf(dataF32) {
+  const needed = dataF32.byteLength;
+  if (instanceBufPoolIdx < instanceBufPool.length) {
+    const entry = instanceBufPool[instanceBufPoolIdx++];
+    gl.bindBuffer(gl.ARRAY_BUFFER, entry.buf);
+    if (needed <= entry.size) {
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, dataF32);
+    } else {
+      gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
+      entry.size = needed;
+    }
+    return entry.buf;
+  }
+  // Need a new buffer
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
+  instanceBufPool.push({ buf, size: needed });
+  instanceBufPoolIdx++;
+  return buf;
+}
+
+function uploadAtlasPatches(patches) {
+  const t0 = performance.now();
+  for (const old of atlasBuffers.values()) {
+    gl.deleteBuffer(old.baryBuf);
+    gl.deleteBuffer(old.triIdxBuf);
+    gl.deleteBuffer(old.lineIdxBuf);
+  }
+  atlasBuffers.clear();
+
+  for (const p of patches) {
+    const key = p.key.join(',') + '/' + p.perm;
+    const bary = new Float32Array(p.bary);
+    const tris = p.tris;
+    const lines = [];
+    for (let i = 0; i < tris.length; i += 3) lines.push(tris[i],tris[i+1], tris[i+1],tris[i+2], tris[i+2],tris[i]);
+
+    const baryBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, baryBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, bary, gl.STATIC_DRAW);
+    const triIdxBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triIdxBuf);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(tris), gl.STATIC_DRAW);
+    const lineIdxBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lineIdxBuf);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(lines), gl.STATIC_DRAW);
+
+    atlasBuffers.set(key, {
+      baryBuf, triIdxBuf, lineIdxBuf,
+      numTriIdx: tris.length, numLineIdx: lines.length,
+      rawBary: new Float32Array(bary),
+      rawTris: new Uint32Array(tris),
+    });
+  }
+  console.log(`Atlas patches uploaded: ${atlasBuffers.size} buffers in ${(performance.now()-t0).toFixed(0)}ms`);
+}
 
 function makeVAO(baryData, idxData, instanceData) {
   const vao = gl.createVertexArray();
@@ -1756,10 +1820,10 @@ function makeVAO(baryData, idxData, instanceData) {
 }
 
 function getTessBuffers(batch) {
-  // Key by used_lod (the LOD actually found in the atlas), not wanted_lod.
-  // This way fallback data (e.g. "2,2,2/0") and correct data (e.g. "2,512,512/0")
-  // get separate cache entries — no invalidation or poisoning possible.
+  // Try pre-uploaded atlas buffers first (keyed by used_lod/perm)
   const key = (batch.used_lod || batch.wanted_lod).join(',') + '/' + (batch.perm_index || 0);
+  if (atlasBuffers.has(key)) return atlasBuffers.get(key);
+  // Fall back to per-frame tessCache
   if (tessCache.has(key)) return tessCache.get(key);
   if (!batch.tess_bary || !batch.tess_bary.length) return null;
 
@@ -1838,25 +1902,30 @@ function uploadBatches(data) {
   const usedKeys = new Set();
   drawBatches = [];
 
-  // Original mesh wireframe
-  const allOrig = [];
-  for (const batch of data.batches) {
-    for (let i = 0; i < batch.instances_orig.length; i++) allOrig.push(batch.instances_orig[i]);
-  }
+  // Original mesh wireframe — concatenate typed arrays directly (no per-float push)
   numOrigInst = data.total_faces;
-  if (!vaoOrigMesh) {
-    vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, new Float32Array(allOrig));
-  } else {
-    gl.bindVertexArray(vaoOrigMesh);
-    const origBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, origBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(allOrig), gl.DYNAMIC_DRAW);
-    for (let i = 0; i < 13; i++) {
-      gl.enableVertexAttribArray(1+i);
-      gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
-      gl.vertexAttribDivisor(1+i, 1);
+  {
+    let totalLen = 0;
+    for (const batch of data.batches) totalLen += batch.instances_orig.length;
+    const allOrig = new Float32Array(totalLen);
+    let offset = 0;
+    for (const batch of data.batches) {
+      allOrig.set(batch.instances_orig, offset);
+      offset += batch.instances_orig.length;
     }
-    gl.bindVertexArray(null);
+    if (!vaoOrigMesh) {
+      vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, allOrig);
+    } else {
+      gl.bindVertexArray(vaoOrigMesh);
+      // Reuse a pooled buffer instead of creating a new one each frame
+      const buf = getPooledInstanceBuf(allOrig);
+      for (let i = 0; i < 13; i++) {
+        gl.enableVertexAttribArray(1+i);
+        gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
+        gl.vertexAttribDivisor(1+i, 1);
+      }
+      gl.bindVertexArray(null);
+    }
   }
 
   globalMaxLogLod = 1;
@@ -1865,18 +1934,23 @@ function uploadBatches(data) {
     globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(m, 1)));
   }
 
+  // Reset pools for this frame — reuse GL objects instead of create/delete
+  instanceBufPoolIdx = 0;
+  // Delete last frame's VAOs (cheap — just state objects, no data)
+  for (const b of drawBatches) {
+    if (b.vaoXform) gl.deleteVertexArray(b.vaoXform);
+    if (b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri);
+  }
+
   let totalRendered = 0, totalSkipped = 0;
   for (const batch of data.batches) {
     const tess = getTessBuffers(batch);
     if (!tess) {
-      console.warn('SKIPPED batch:', batch.num_faces, 'faces, used_lod:', batch.used_lod, 'wanted:', batch.wanted_lod, 'perm:', batch.perm_index);
       totalSkipped += batch.num_faces;
       continue;
     }
     totalRendered += batch.num_faces;
-    const matSuffix = (batch.material_index != null && batch.material_index >= 0) ? '/m' + batch.material_index : '';
-    const vaoKey = (batch.used_lod || batch.wanted_lod).join(',') + '/' + batch.perm_index + matSuffix;
-    usedKeys.add(vaoKey);
+
     // GPU-ready: original positions (GPU applies Möbius), LODs + normals from CPU xform pass
     const gpuData = new Float32Array(batch.instances_orig);
     const xf = batch.instances_xform;
@@ -1885,11 +1959,31 @@ function uploadBatches(data) {
       for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j]; // LODs
       for (let j = 40; j < 52; j++) gpuData[base+j] = xf[base+j]; // normals (zeroed under Möbius)
     }
-    const cached = getOrCreateBatchVAOs(vaoKey, tess, gpuData, batch.num_faces);
+
+    // Upload instance data to a pooled buffer (no new createBuffer calls)
+    const instBuf = getPooledInstanceBuf(gpuData);
+
+    // Build VAOs inline — tess buffers from atlas, instance buffer from pool
+    function buildVAO(idxBuf) {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, tess.baryBuf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+      for (let i = 0; i < 13; i++) {
+        gl.enableVertexAttribArray(1+i);
+        gl.vertexAttribPointer(1+i, 4, gl.FLOAT, false, 208, i*16);
+        gl.vertexAttribDivisor(1+i, 1);
+      }
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+      gl.bindVertexArray(null);
+      return vao;
+    }
 
     drawBatches.push({
-      vaoXform: cached.lineVao,
-      vaoXformTri: cached.triVao,
+      vaoXform: buildVAO(tess.lineIdxBuf),
+      vaoXformTri: buildVAO(tess.triIdxBuf),
       numLineIdx: tess.numLineIdx,
       numTriIdx: tess.numTriIdx,
       numInst: batch.num_faces,
@@ -1900,14 +1994,13 @@ function uploadBatches(data) {
       parity: batch.perm_parity || 1,
       permIndex: batch.perm_index || 0,
       materialIndex: batch.material_index ?? -1,
-      instanceData: new Float32Array(gpuData),  // keep for picker
-      xformData: new Float32Array(xf),          // keep xform for picker
-      faceIndices: batch.face_indices || batch.faceIndices || [],     // original mesh face indices
+      instanceData: gpuData,  // already a Float32Array, no copy needed
+      xformData: xf,
+      faceIndices: batch.face_indices || batch.faceIndices || [],
     });
   }
 
   // Sort batches: opaque first, then alpha-mask, then blend.
-  // This ensures transparent materials render after opaque ones.
   drawBatches.sort((a, b) => {
     const am = getMaterialParams(a.materialIndex).alphaMode;
     const bm = getMaterialParams(b.materialIndex).alphaMode;
@@ -2663,8 +2756,12 @@ generateSheenELut();
 
 $('stats').textContent = 'Building atlas (LODs 1–512)...';
 const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
+$('stats').textContent = 'Uploading atlas patches...';
+await new Promise(r => setTimeout(r, 0));
+const patchResp = await workerCall('export_patches', {});
+uploadAtlasPatches(patchResp.patches);
 workerReady = true;
-$('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms`;
+$('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms, ${atlasBuffers.size} patch buffers`;
 
 // Load matcap (no-op with procedural matcap from WGSL)
 loadMatcap($('matcap-sel').value);

@@ -76,6 +76,67 @@ pub fn set_min_px_per_sub(px: f64) {
     quilting_core::evaluate::set_min_px_per_sub(px);
 }
 
+/// Export all atlas patches as pre-computed bary data for GPU upload.
+/// Returns a JS array of { key: [a,b,c], perm: n, bary: Float64Array, tris: Uint32Array }.
+/// Call once after atlas build — JS creates GPU buffers from this, then
+/// slice_and_transform never needs to send tessellation data again.
+#[wasm_bindgen]
+pub fn export_all_patches() -> JsValue {
+    ATLAS.with(|atlas_cell| {
+        let atlas = atlas_cell.borrow();
+        let atlas = match atlas.as_ref() {
+            Some(a) => a,
+            None => return JsValue::NULL,
+        };
+
+        let result = js_sys::Array::new();
+        for &key in atlas.patches.keys() {
+            // get_patch with a sorted key returns canonical (unpermuted) mesh
+            let mesh = match atlas.get_patch(key) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Convert cartesian to bary once (canonical, perm 0)
+            let base_bary: Vec<[f64; 3]> = mesh.positions.iter().map(|p| {
+                let mut b = triangle::cartesian_to_bary(p[0], p[1]);
+                for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
+                let sum = b[0] + b[1] + b[2];
+                if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
+                b
+            }).collect();
+
+            let tris: Vec<u32> = mesh.triangles.iter()
+                .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+
+            // Emit all 6 permutations
+            for perm in 0u32..6 {
+                let bary: Vec<f64> = base_bary.iter().map(|b| {
+                    match perm {
+                        1 => [b[0], b[2], b[1]],
+                        2 => [b[1], b[0], b[2]],
+                        3 => [b[1], b[2], b[0]],
+                        4 => [b[2], b[0], b[1]],
+                        5 => [b[2], b[1], b[0]],
+                        _ => *b,
+                    }
+                }).flat_map(|b| [b[0], b[1], b[2]]).collect();
+
+                let obj = js_sys::Object::new();
+                let s = |k: &str, v: JsValue| { js_sys::Reflect::set(&obj, &k.into(), &v).ok(); };
+                s("key", serde_wasm_bindgen::to_value(&key).unwrap());
+                s("perm", JsValue::from(perm));
+                s("bary", js_sys::Float64Array::from(&bary[..]).into());
+                s("tris", js_sys::Uint32Array::from(&tris[..]).into());
+                s("n_verts", JsValue::from(base_bary.len() as u32));
+                s("n_tris", JsValue::from(mesh.triangles.len() as u32));
+                result.push(&obj);
+            }
+        }
+        result.into()
+    })
+}
+
 /// Extend the atlas to include a new LOD level by subdividing from existing parents.
 /// Much faster than rebuilding — each new patch is one subdivision step.
 #[wasm_bindgen]
@@ -389,10 +450,17 @@ pub fn compute_mesh_batches(
                 (bary, tris, nv, nt)
             };
 
-            let orig_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
-            let xform_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
+            // Pre-allocate and copy_from_slice — avoids the Vec reallocation
+            // storm from flat_map().collect() (was 28% of total CPU time).
+            let nf = face_indices.len();
+            let mut orig_data = vec![0.0f32; nf * 52];
+            let mut xform_data = vec![0.0f32; nf * 52];
+            for (i, &fi) in face_indices.iter().enumerate() {
+                let o = instances_orig[fi].to_f32_array();
+                let x = instances_xform[fi].to_f32_array();
+                orig_data[i*52..(i+1)*52].copy_from_slice(&o);
+                xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+            }
 
             batches.push(BatchData {
                 lod: actual_lod,
@@ -1598,10 +1666,17 @@ pub fn slice_and_transform(
                 (bary, tris_out, nv, nt)
             };
 
-            let orig_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_orig[fi].to_f32_array()).collect();
-            let xform_data: Vec<f32> = face_indices.iter()
-                .flat_map(|&fi| instances_xform[fi].to_f32_array()).collect();
+            // Pre-allocate and copy_from_slice — avoids the Vec reallocation
+            // storm from flat_map().collect() (was 28% of total CPU time).
+            let nf = face_indices.len();
+            let mut orig_data = vec![0.0f32; nf * 52];
+            let mut xform_data = vec![0.0f32; nf * 52];
+            for (i, &fi) in face_indices.iter().enumerate() {
+                let o = instances_orig[fi].to_f32_array();
+                let x = instances_xform[fi].to_f32_array();
+                orig_data[i*52..(i+1)*52].copy_from_slice(&o);
+                xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+            }
 
             raw_batches.push(RawBatch {
                 actual_lod,
