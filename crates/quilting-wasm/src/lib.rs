@@ -1508,25 +1508,35 @@ fn merge_all_mesh_nodes(
                 positions.push([x, y, z]);
             }
 
-            // Transform normals
-            if let Some(ref normals) = prim.normals {
+            // Transform normals — pad with defaults if primitive lacks them
+            {
                 let out = normals_all.get_or_insert_with(Vec::new);
-                for &n in normals {
-                    let nx = nm[0]*n[0] + nm[3]*n[1] + nm[6]*n[2];
-                    let ny = nm[1]*n[0] + nm[4]*n[1] + nm[7]*n[2];
-                    let nz = nm[2]*n[0] + nm[5]*n[1] + nm[8]*n[2];
-                    let len = (nx*nx + ny*ny + nz*nz).sqrt();
-                    if len > 1e-10 {
-                        out.push([nx/len, ny/len, nz/len]);
-                    } else {
-                        out.push([0.0, 1.0, 0.0]);
+                if let Some(ref normals) = prim.normals {
+                    for &n in normals {
+                        let nx = nm[0]*n[0] + nm[3]*n[1] + nm[6]*n[2];
+                        let ny = nm[1]*n[0] + nm[4]*n[1] + nm[7]*n[2];
+                        let nz = nm[2]*n[0] + nm[5]*n[1] + nm[8]*n[2];
+                        let len = (nx*nx + ny*ny + nz*nz).sqrt();
+                        if len > 1e-10 {
+                            out.push([nx/len, ny/len, nz/len]);
+                        } else {
+                            out.push([0.0, 1.0, 0.0]);
+                        }
                     }
+                } else {
+                    // Pad with up vector for vertices without normals
+                    out.resize(out.len() + prim.positions.len(), [0.0, 1.0, 0.0]);
                 }
             }
 
-            // UVs pass through unchanged (not affected by world transform)
-            if let Some(ref uv) = prim.uvs {
-                uvs_all.get_or_insert_with(Vec::new).extend_from_slice(uv);
+            // UVs — pad with zeros if primitive lacks them
+            {
+                let out = uvs_all.get_or_insert_with(Vec::new);
+                if let Some(ref uv) = prim.uvs {
+                    out.extend_from_slice(uv);
+                } else {
+                    out.resize(out.len() + prim.positions.len(), [0.0, 0.0]);
+                }
             }
 
             let new_tris: Vec<[usize; 3]> = prim.triangles.iter()
