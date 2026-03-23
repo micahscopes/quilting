@@ -354,17 +354,27 @@ impl LodCompute {
 
             gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
             gl.bind_vertex_array(None);
+
+            // Insert fence — GPU can work while CPU does other things.
+            // Call read_back() later (after instance packing) to minimize stall.
+            gl.flush();
         }
         n
     }
 
-    /// Read back the LOD results from GPU. Returns [lod_a, lod_b, lod_c, med_a, med_b, med_c] per face.
+    /// Wait for GPU compute to finish, then read back results.
+    /// Call this as LATE as possible — do CPU work between compute() and read_back().
     pub fn read_back(&self, gl: &glow::Context, num_faces: usize) -> Vec<f32> {
         let size = num_faces * FLOATS_PER_FACE_OUTPUT;
         let mut result = vec![0.0f32; size];
         unsafe {
+            // Fence sync — wait for transform feedback to complete.
+            // flush() in compute() kicked off the GPU work, this waits for it.
+            let fence = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).unwrap();
+            gl.client_wait_sync(fence, glow::SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000); // 1s timeout
+            gl.delete_sync(fence);
+
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf));
-            // WebGL2 doesn't support map_buffer_range — use get_buffer_sub_data
             gl.get_buffer_sub_data(glow::TRANSFORM_FEEDBACK_BUFFER, 0,
                 bytemuck_cast_slice_mut(&mut result));
         }

@@ -1842,26 +1842,23 @@ pub fn slice_and_transform(
               p.time_min, p.dt, p.mesh_radius, frame, verts))
     });
 
-    let (instances_orig, instances_xform, num_tris, source_faces) = if let Some((pb_nf, pb_nv, pb_faces, _pb_tmin, _pb_dt, pb_radius, frame, frame_verts)) = prebake_frame_data {
-        // PREBAKED GPU PATH: positions from prebake cache, LODs from GPU.
-        // Skips CPU trajectory eval entirely.
+    let (instances_orig, instances_xform, num_tris, source_faces) = if let Some((_pb_nf, pb_nv, pb_faces, _pb_tmin, _pb_dt, pb_radius, frame, frame_verts)) = prebake_frame_data {
+        // PREBAKED GPU PATH: fire GPU compute FIRST, do CPU work while GPU runs,
+        // then read back LODs as late as possible.
 
-        // GPU compute LODs from prebaked texture
-        let gpu_lods = if !transform.is_affine() {
+        // 1. FIRE GPU compute (non-blocking — flush starts the work)
+        let gpu_n = if !transform.is_affine() {
             GPU_COMPUTE.with(|gc| {
                 let gc = gc.borrow();
                 let (gl, compute) = gc.as_ref().unwrap();
-                let n = compute.compute_with_texture(
+                compute.compute_with_texture(
                     gl, pb_faces, frame as u32, pb_nv as u32,
                     mob_f32, tess_density as f32, pb_radius as f32,
-                );
-                compute.read_back(gl, n)
+                )
             })
-        } else {
-            vec![]
-        };
+        } else { 0 };
 
-        // DIRECT-TO-F32: skip FaceInstance structs entirely.
+        // 2. CPU WORK while GPU computes — build flat instance buffers
         // Write positions, weights, LODs, UVs, normals directly into flat f32 buffers.
         SLICE_CACHE.with(|c| {
             let cache = c.borrow();
@@ -1890,17 +1887,10 @@ pub fn slice_and_transform(
                     all_orig[base + 12 + vi*4] = 1.0;
                 }
 
-                // Edge LODs from GPU (or default 2)
-                let lod_base = fi * 6;
-                if lod_base + 2 < gpu_lods.len() {
-                    all_orig[base + 24] = gpu_lods[lod_base] as f32;
-                    all_orig[base + 25] = gpu_lods[lod_base + 1] as f32;
-                    all_orig[base + 26] = gpu_lods[lod_base + 2] as f32;
-                } else {
-                    all_orig[base + 24] = 2.0;
-                    all_orig[base + 25] = 2.0;
-                    all_orig[base + 26] = 2.0;
-                }
+                // Edge LODs — defaults for now, GPU readback overwrites later
+                all_orig[base + 24] = 2.0;
+                all_orig[base + 25] = 2.0;
+                all_orig[base + 26] = 2.0;
 
                 // Vertex LODs = edge LODs (simplified)
                 all_orig[base + 28] = all_orig[base + 24];
@@ -1941,14 +1931,36 @@ pub fn slice_and_transform(
                 }
             }
 
-            // xform = copy of orig (LODs are already written in)
+            // 3. DEFERRED GPU READBACK — GPU has been computing while we packed buffers
+            let gpu_lods = if gpu_n > 0 {
+                GPU_COMPUTE.with(|gc| {
+                    let gc = gc.borrow();
+                    let (gl, compute) = gc.as_ref().unwrap();
+                    compute.read_back(gl, gpu_n)
+                })
+            } else { vec![] };
+
+            // Write GPU LODs into flat buffers
+            for fi in 0..nf {
+                let lod_base = fi * 6;
+                let base = fi * 52;
+                if lod_base + 2 < gpu_lods.len() {
+                    all_orig[base + 24] = gpu_lods[lod_base];
+                    all_orig[base + 25] = gpu_lods[lod_base + 1];
+                    all_orig[base + 26] = gpu_lods[lod_base + 2];
+                    all_orig[base + 28] = gpu_lods[lod_base];
+                    all_orig[base + 29] = gpu_lods[lod_base + 1];
+                    all_orig[base + 30] = gpu_lods[lod_base + 2];
+                }
+            }
+
+            // xform = copy of orig (LODs now included)
             all_xform.copy_from_slice(&all_orig);
 
-            // Store flat buffers for batch assembly to use directly
+            // Store flat buffers for batch assembly
             FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((all_orig.clone(), all_xform.clone())));
 
-            // Build FaceInstance vecs from the flat data for grouping compatibility
-            // (the batch assembly still reads edge_lods from instances_xform)
+            // Build dummy FaceInstance vecs for grouping (only LODs matter)
             let dummy_instances: Vec<quilting_core::evaluate::FaceInstance> = (0..nf).map(|fi| {
                 let base = fi * 52;
                 quilting_core::evaluate::FaceInstance {
