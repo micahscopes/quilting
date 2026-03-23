@@ -98,6 +98,34 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
     }
 }
 
+/// Run GPU LOD computation via transform feedback.
+/// control_points: flat f32 array, 12 floats per face (3 quaternions wxyz)
+/// mobius: 16 floats (a,b,c,d quaternions)
+/// Returns: flat f32 array, 6 floats per face (lod_a, lod_b, lod_c, med_a, med_b, med_c)
+#[wasm_bindgen]
+pub fn gpu_compute_lods(
+    control_points: &[f32],
+    mobius: &[f32],
+    density: f32,
+    mesh_radius: f32,
+) -> Vec<f32> {
+    let num_faces = control_points.len() / 12;
+    GPU_COMPUTE.with(|gc| {
+        let gc = gc.borrow();
+        let (gl, compute) = match gc.as_ref() {
+            Some(pair) => pair,
+            None => return vec![],
+        };
+        compute.upload_control_points(gl, control_points);
+        let mut mob = [0.0f32; 16];
+        for (i, &v) in mobius.iter().take(16).enumerate() {
+            mob[i] = v;
+        }
+        let n = compute.compute(gl, num_faces, mob, density, mesh_radius);
+        compute.read_back(gl, n)
+    })
+}
+
 /// Set tessellation parameters.
 /// density: target mesh_radius/density = triangle size in deformed world units (default 100)
 /// screen_atten: whether to attenuate LOD for distant/small screen faces

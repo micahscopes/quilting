@@ -17,7 +17,9 @@ self.onmessage = async function(e) {
     const mod = await import('./pkg/quilting_wasm.js');
     await mod.default();
     wasm = mod;
-    self.postMessage({ type: 'ready', id });
+    // Try to init GPU compute (OffscreenCanvas + WebGL2 for transform feedback)
+    const gpuOk = wasm.init_gpu_compute(50000); // up to 50K faces
+    self.postMessage({ type: 'ready', id, gpuCompute: gpuOk });
     return;
   }
 

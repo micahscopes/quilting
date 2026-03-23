@@ -22,7 +22,10 @@ pub struct LodCompute {
     input_buf: glow::Buffer,
     output_buf: glow::Buffer,
     tf: glow::TransformFeedback,
-    mobius_loc: glow::UniformLocation,
+    mob_a_loc: glow::UniformLocation,
+    mob_b_loc: glow::UniformLocation,
+    mob_c_loc: glow::UniformLocation,
+    mob_d_loc: glow::UniformLocation,
     density_loc: glow::UniformLocation,
     mesh_radius_loc: glow::UniformLocation,
     max_faces: usize,
@@ -161,8 +164,14 @@ impl LodCompute {
             gl.delete_shader(fs);
 
             // Get uniform locations
-            let mobius_loc = gl.get_uniform_location(program, "mob_a")
+            let mob_a_loc = gl.get_uniform_location(program, "mob_a")
                 .ok_or("mob_a uniform not found")?;
+            let mob_b_loc = gl.get_uniform_location(program, "mob_b")
+                .ok_or("mob_b uniform not found")?;
+            let mob_c_loc = gl.get_uniform_location(program, "mob_c")
+                .ok_or("mob_c uniform not found")?;
+            let mob_d_loc = gl.get_uniform_location(program, "mob_d")
+                .ok_or("mob_d uniform not found")?;
             let density_loc = gl.get_uniform_location(program, "density")
                 .ok_or("density uniform not found")?;
             let mesh_radius_loc = gl.get_uniform_location(program, "mesh_radius")
@@ -197,7 +206,8 @@ impl LodCompute {
 
             Ok(Self {
                 program, vao, input_buf, output_buf, tf,
-                mobius_loc, density_loc, mesh_radius_loc,
+                mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
+                density_loc, mesh_radius_loc,
                 max_faces,
             })
         }
@@ -213,11 +223,12 @@ impl LodCompute {
     }
 
     /// Run the compute pass. Returns the number of faces processed.
+    /// `mobius`: [a_w,a_x,a_y,a_z, b_w,b_x,b_y,b_z, c_w,..., d_w,...] = 16 floats.
     pub fn compute(
         &self,
         gl: &glow::Context,
         num_faces: usize,
-        mobius: [f32; 16], // a, b, c, d quaternions packed
+        mobius: [f32; 16],
         density: f32,
         mesh_radius: f32,
     ) -> usize {
@@ -225,10 +236,10 @@ impl LodCompute {
         unsafe {
             gl.use_program(Some(self.program));
 
-            // Set Möbius uniforms
-            gl.uniform_4_f32(Some(&self.mobius_loc),
-                mobius[0], mobius[1], mobius[2], mobius[3]); // mob_a
-            // TODO: set mob_b, mob_c, mob_d uniforms
+            gl.uniform_4_f32(Some(&self.mob_a_loc), mobius[0], mobius[1], mobius[2], mobius[3]);
+            gl.uniform_4_f32(Some(&self.mob_b_loc), mobius[4], mobius[5], mobius[6], mobius[7]);
+            gl.uniform_4_f32(Some(&self.mob_c_loc), mobius[8], mobius[9], mobius[10], mobius[11]);
+            gl.uniform_4_f32(Some(&self.mob_d_loc), mobius[12], mobius[13], mobius[14], mobius[15]);
 
             gl.uniform_1_f32(Some(&self.density_loc), density);
             gl.uniform_1_f32(Some(&self.mesh_radius_loc), mesh_radius);
