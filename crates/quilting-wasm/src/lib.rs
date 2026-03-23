@@ -39,6 +39,8 @@ thread_local! {
     static FLAT_INSTANCE_DATA: RefCell<Option<(Vec<f32>, Vec<f32>)>> = RefCell::new(None);
     /// GPU classification: [atlas_index, perm_index] per face (2 floats each).
     static GPU_CLASSIFICATION: RefCell<Option<Vec<f32>>> = RefCell::new(None);
+    /// Reusable sorted buffers — grow but never shrink to avoid per-frame allocation.
+    static SORTED_BUFS: RefCell<(Vec<f32>, Vec<f32>)> = RefCell::new((Vec::new(), Vec::new()));
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
@@ -2248,8 +2250,14 @@ pub fn slice_and_transform(
     // PREBAKE FAST PATH: reorder flat buffers by batch in one pass.
     // No per-batch Vec allocation — single sorted buffer with offset/count per batch.
     if has_prebake {
-        let mut sorted_orig = vec![0.0f32; num_tris * 52];
-        let mut sorted_xform = vec![0.0f32; num_tris * 52];
+        // Reuse sorted buffers across frames — resize but don't reallocate if big enough
+        let (mut sorted_orig, mut sorted_xform) = SORTED_BUFS.with(|sb| {
+            let mut sb = sb.borrow_mut();
+            let needed = num_tris * 52;
+            if sb.0.len() < needed { sb.0.resize(needed, 0.0); }
+            if sb.1.len() < needed { sb.1.resize(needed, 0.0); }
+            (std::mem::take(&mut sb.0), std::mem::take(&mut sb.1))
+        });
         let mut write_pos = 0usize;
 
         FLAT_INSTANCE_DATA.with(|fid| {
@@ -2294,8 +2302,13 @@ pub fn slice_and_transform(
             }
         });
 
-        // Replace flat instance data with sorted version
-        FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((sorted_orig, sorted_xform)));
+        // Store sorted version for serialization, return buffers for reuse
+        FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((sorted_orig.clone(), sorted_xform.clone())));
+        SORTED_BUFS.with(|sb| {
+            let mut sb = sb.borrow_mut();
+            sb.0 = sorted_orig;
+            sb.1 = sorted_xform;
+        });
     }
 
     ATLAS.with(|atlas_cell| {
