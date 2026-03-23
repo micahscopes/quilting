@@ -2877,8 +2877,9 @@ generateSheenELut();
 
 // Parallel atlas build: all Poisson patches, work-queue across workers
 const t0atlas = performance.now();
+const ATLAS_EXP = parseInt(new URLSearchParams(location.search).get('atlas') || '9');
 const levels = [];
-for (let i = 0; i <= 9; i++) levels.push(1 << i);
+for (let i = 0; i <= ATLAS_EXP; i++) levels.push(1 << i);
 const allTriples = [];
 const seen = new Set();
 for (const a of levels)
