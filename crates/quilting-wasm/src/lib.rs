@@ -1957,8 +1957,8 @@ pub fn slice_and_transform(
                 }
             }
 
-            // 3. DEFERRED GPU READBACK — GPU has been computing while we packed buffers
-            let gpu_lods = if gpu_n > 0 {
+            // 3. DEFERRED GPU READBACK — compact: 2 floats per face (atlas_index, perm_index)
+            let gpu_class = if gpu_n > 0 {
                 GPU_COMPUTE.with(|gc| {
                     let gc = gc.borrow();
                     let (gl, compute) = gc.as_ref().unwrap();
@@ -1966,19 +1966,29 @@ pub fn slice_and_transform(
                 })
             } else { vec![] };
 
-            // Write GPU LODs (already attenuated by shader) into flat buffers
-            for fi in 0..nf {
-                let lod_base = fi * 6;
-                let base = fi * 52;
-                if lod_base + 2 < gpu_lods.len() {
-                    all_orig[base + 24] = gpu_lods[lod_base];
-                    all_orig[base + 25] = gpu_lods[lod_base + 1];
-                    all_orig[base + 26] = gpu_lods[lod_base + 2];
-                    all_orig[base + 28] = gpu_lods[lod_base];
-                    all_orig[base + 29] = gpu_lods[lod_base + 1];
-                    all_orig[base + 30] = gpu_lods[lod_base + 2];
+            // Write LODs from atlas index inverse LUT into flat buffers
+            ATLAS.with(|atlas_cell| {
+                let atlas = atlas_cell.borrow();
+                if let Some(atlas) = atlas.as_ref() {
+                    let keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
+                    for fi in 0..nf {
+                        let rb = fi * 2;
+                        if rb + 1 < gpu_class.len() {
+                            let atlas_idx = gpu_class[rb] as usize;
+                            if atlas_idx < keys.len() {
+                                let lods = keys[atlas_idx];
+                                let base = fi * 52;
+                                all_orig[base + 24] = lods[0] as f32;
+                                all_orig[base + 25] = lods[1] as f32;
+                                all_orig[base + 26] = lods[2] as f32;
+                                all_orig[base + 28] = lods[0] as f32;
+                                all_orig[base + 29] = lods[1] as f32;
+                                all_orig[base + 30] = lods[2] as f32;
+                            }
+                        }
+                    }
                 }
-            }
+            });
 
             // xform = copy of orig (positions, weights, LODs, UVs)
             all_xform.copy_from_slice(&all_orig);

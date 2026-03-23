@@ -25,9 +25,8 @@ pub struct AnimationSequence {
     pub face_indices: Vec<u32>,
 }
 
-/// Per-face output: 3 edge LODs + 3 deformed median lengths
-/// = 6 floats per face.
-pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
+/// Per-face output: atlas_index + perm_index = 2 floats.
+pub const FLOATS_PER_FACE_OUTPUT: usize = 2;
 
 /// Transform feedback compute pipeline for LOD calculation.
 pub struct LodCompute {
@@ -37,6 +36,8 @@ pub struct LodCompute {
     output_buf: glow::Buffer,
     tf: glow::TransformFeedback,
     pos_texture: Option<glow::Texture>, // prebaked positions
+    lut_texture: Option<glow::Texture>, // exponent triple → atlas index
+    lut_loc: Option<glow::UniformLocation>,
     mob_a_loc: glow::UniformLocation,
     mob_b_loc: glow::UniformLocation,
     mob_c_loc: glow::UniformLocation,
@@ -77,9 +78,11 @@ uniform float min_px;        // minimum pixels per subdivision (0 = no attenuati
 uniform mat4 vp_matrix;      // view-projection matrix for screen-space projection
 uniform float vp_width;      // viewport width in pixels
 uniform float vp_height;     // viewport height in pixels
+uniform highp sampler2D u_atlas_lut; // exponent triple → atlas index (32×32 R8)
 
-// Transform feedback outputs
-out float out_lod_a;
+// Transform feedback outputs — just classification, no LODs
+out float out_atlas_index;
+out float out_perm_index;
 out float out_lod_b;
 out float out_lod_c;
 out float out_median_a;
@@ -181,6 +184,28 @@ void main() {
         if (px_c / out_lod_c < min_px) out_lod_c = clamp(snap_pow2(px_c / min_px), 2.0, 512.0);
     }
 
+    // Compute atlas index from LOD exponents
+    int ea = int(log2(out_lod_a));
+    int eb = int(log2(out_lod_b));
+    int ec = int(log2(out_lod_c));
+
+    // Sort to canonical form + determine S3 permutation
+    int sa, sb, sc;
+    int perm;
+    if (ea <= eb && eb <= ec)      { sa=ea; sb=eb; sc=ec; perm=0; }
+    else if (ea <= ec && ec <= eb)  { sa=ea; sb=ec; sc=eb; perm=1; }
+    else if (eb <= ea && ea <= ec)  { sa=eb; sb=ea; sc=ec; perm=2; }
+    else if (eb <= ec && ec <= ea)  { sa=eb; sb=ec; sc=ea; perm=3; }
+    else if (ec <= ea && ea <= eb)  { sa=ec; sb=ea; sc=eb; perm=4; }
+    else                            { sa=ec; sb=eb; sc=ea; perm=5; }
+
+    // LUT lookup: key = sa + sb*10 + sc*100, stored in 32×32 texture
+    int key = sa + sb * 10 + sc * 100;
+    int lut_x = key % 32;
+    int lut_y = key / 32;
+    out_atlas_index = texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0;
+    out_perm_index = float(perm);
+
     gl_Position = vec4(0.0);
 }
 "#;
@@ -207,8 +232,7 @@ impl LodCompute {
             // Set transform feedback varyings BEFORE linking
             gl.transform_feedback_varyings(
                 program,
-                &["out_lod_a", "out_lod_b", "out_lod_c",
-                  "out_median_a", "out_median_b", "out_median_c"],
+                &["out_atlas_index", "out_perm_index"],
                 glow::INTERLEAVED_ATTRIBS,
             );
 
@@ -275,12 +299,34 @@ impl LodCompute {
             Ok(Self {
                 program, vao, input_buf, output_buf, tf,
                 pos_texture: None,
+                lut_texture: None,
+                lut_loc: gl.get_uniform_location(program, "u_atlas_lut"),
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
                 min_px_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
                 num_verts_loc, frame_loc,
                 max_faces,
             })
+        }
+    }
+
+    /// Upload atlas LUT: maps exponent triples to atlas indices.
+    /// `lut`: 1024 u8 values. key = exp_a + exp_b*10 + exp_c*100.
+    /// Stored as 32×32 R8 texture.
+    pub fn upload_atlas_lut(&mut self, gl: &glow::Context, lut: &[u8]) {
+        unsafe {
+            if let Some(old) = self.lut_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            // Pad to 32×32 = 1024
+            let mut data = vec![255u8; 1024];
+            for (i, &v) in lut.iter().take(1024).enumerate() { data[i] = v; }
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32,
+                32, 32, 0, glow::RED, glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&data)));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            self.lut_texture = Some(tex);
         }
     }
 
@@ -372,6 +418,13 @@ impl LodCompute {
             if let Some(tex) = self.pos_texture {
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+            if let Some(tex) = self.lut_texture {
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                if let Some(ref loc) = self.lut_loc {
+                    gl.uniform_1_i32(Some(loc), 1); // texture unit 1
+                }
             }
 
             gl.uniform_1_i32(Some(&self.frame_loc), frame as i32);
