@@ -97,10 +97,12 @@ self.onmessage = async function(e) {
       vpWidth || 0,
       vpHeight || 0,
     );
-    // Transfer flat instance buffers zero-copy (no structured clone)
+    // Transfer flat buffers zero-copy to main thread
     const transferList = [];
     if (result.all_orig) transferList.push(result.all_orig.buffer);
     if (result.all_xform) transferList.push(result.all_xform.buffer);
+    if (result.batch_meta) transferList.push(result.batch_meta.buffer);
+    if (result.face_indices) transferList.push(result.face_indices.buffer);
     self.postMessage({ type: 'batches', id, result }, transferList);
     return;
   }

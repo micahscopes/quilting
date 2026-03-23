@@ -1942,11 +1942,12 @@ function uploadBatches(data) {
     }
   }
 
+  // Unpack flat batch metadata
+  const meta = new Int32Array(data.batch_meta.buffer || data.batch_meta);
+  const nb = data.num_batches;
+  const faceIdx = new Uint32Array(data.face_indices.buffer || data.face_indices);
+
   globalMaxLogLod = 1;
-  for (const batch of data.batches) {
-    const m = Math.max(...batch.lod);
-    globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(m, 1)));
-  }
 
   // Reset pools for this frame — reuse GL objects instead of create/delete
   instanceBufPoolIdx = 0;
@@ -1957,31 +1958,48 @@ function uploadBatches(data) {
   }
 
   let totalRendered = 0, totalSkipped = 0;
-  for (const batch of data.batches) {
-    const tess = getTessBuffers(batch);
+  let faceIdxOffset = 0;
+
+  for (let bi = 0; bi < nb; bi++) {
+    const m = bi * 16;
+    const lod = [meta[m], meta[m+1], meta[m+2]];
+    const wantedLod = [meta[m+3], meta[m+4], meta[m+5]];
+    const usedLod = [meta[m+6], meta[m+7], meta[m+8]];
+    const parity = meta[m+9];
+    const permIndex = meta[m+10];
+    const materialIndex = meta[m+11];
+    const numFaces = meta[m+12];
+    const nVerts = meta[m+13];
+    const nTris = meta[m+14];
+    const offset = meta[m+15];
+
+    const maxLod = Math.max(lod[0], lod[1], lod[2]);
+    globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(maxLod, 1)));
+
+    // Look up pre-uploaded atlas tess buffers
+    const tessKey = usedLod.join(',') + '/' + permIndex;
+    const tess = atlasBuffers.get(tessKey) || tessCache.get(tessKey);
     if (!tess) {
-      totalSkipped += batch.num_faces;
+      totalSkipped += numFaces;
+      faceIdxOffset += numFaces;
       continue;
     }
-    totalRendered += batch.num_faces;
+    totalRendered += numFaces;
 
-    // Slice instance data from flat transferred buffers using batch offset
-    const off = (batch.offset || 0) * 52;
-    const len = batch.num_faces * 52;
+    // Slice instance data from flat transferred buffers
+    const off = offset * 52;
+    const len = numFaces * 52;
     const gpuData = new Float32Array(data.all_orig.buffer, off * 4, len);
     const xf = new Float32Array(data.all_xform.buffer, off * 4, len);
-    // Merge LODs + normals from xform into orig (GPU applies Möbius to orig positions)
-    for (let i = 0; i < batch.num_faces; i++) {
+    for (let i = 0; i < numFaces; i++) {
       const base = i * 52;
-      for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j]; // LODs
-      for (let j = 40; j < 52; j++) gpuData[base+j] = xf[base+j]; // normals
+      for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j];
+      for (let j = 40; j < 52; j++) gpuData[base+j] = xf[base+j];
     }
 
-    // Upload instance data to a pooled buffer (no new createBuffer calls)
     const instBuf = getPooledInstanceBuf(gpuData);
 
-    // Build VAOs inline — tess buffers from atlas, instance buffer from pool
-    function buildVAO(idxBuf) {
+    const buildVAO = (idxBuf) => {
       const vao = gl.createVertexArray();
       gl.bindVertexArray(vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, tess.baryBuf);
@@ -1996,28 +2014,26 @@ function uploadBatches(data) {
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
       gl.bindVertexArray(null);
       return vao;
-    }
+    };
+
+    const batchFaceIndices = faceIdx.subarray(faceIdxOffset, faceIdxOffset + numFaces);
+    faceIdxOffset += numFaces;
 
     drawBatches.push({
       vaoXform: buildVAO(tess.lineIdxBuf),
       vaoXformTri: buildVAO(tess.triIdxBuf),
       numLineIdx: tess.numLineIdx,
       numTriIdx: tess.numTriIdx,
-      numInst: batch.num_faces,
-      lod: batch.lod,
-      wantedLod: batch.wanted_lod,
-      usedLod: batch.used_lod,
-      color: lodColor(batch.lod),
-      parity: batch.perm_parity || 1,
-      permIndex: batch.perm_index || 0,
-      materialIndex: batch.material_index ?? -1,
-      instanceData: gpuData,  // already a Float32Array, no copy needed
+      numInst: numFaces,
+      lod, wantedLod, usedLod,
+      color: lodColor(lod),
+      parity, permIndex, materialIndex,
+      instanceData: gpuData,
       xformData: xf,
-      faceIndices: batch.face_indices || batch.faceIndices || [],
+      faceIndices: batchFaceIndices,
     });
   }
 
-  // Sort batches: opaque first, then alpha-mask, then blend.
   drawBatches.sort((a, b) => {
     const am = getMaterialParams(a.materialIndex).alphaMode;
     const bm = getMaterialParams(b.materialIndex).alphaMode;
@@ -2364,22 +2380,29 @@ async function update() {
   if (gen <= renderedGeneration) return;
   renderedGeneration = gen;
 
-  if (data && data.batches) {
+  if (data && data.batch_meta) {
     uploadBatches(data);
     render();
 
-    const totalTris = data.batches.reduce((s,b) => s + b.num_faces * b.tris_per_face, 0);
-    const totalVerts = data.batches.reduce((s,b) => s + b.num_faces * b.verts_per_face, 0);
+    // Compute stats from flat metadata
+    const meta = new Int32Array(data.batch_meta.buffer || data.batch_meta);
+    const nb = data.num_batches;
+    let totalTris = 0, totalVerts = 0, nFallback = 0;
+    for (let bi = 0; bi < nb; bi++) {
+      const m = bi * 16;
+      const nf = meta[m+12], nv = meta[m+13], nt = meta[m+14];
+      totalTris += nf * nt;
+      totalVerts += nf * nv;
+      // Check if fallback: used_lod != wanted_lod (canonical comparison)
+      const wSorted = [meta[m+3],meta[m+4],meta[m+5]].sort((a,b)=>a-b).join(',');
+      const uSorted = [meta[m+6],meta[m+7],meta[m+8]].sort((a,b)=>a-b).join(',');
+      if (wSorted !== uSorted) nFallback++;
+    }
     const matCount = loadedMaterials.length;
-    const nFallback = data.batches.filter(b => b.is_fallback).length;
-    const queueInfo = patchQueue.length > 0 || patchBusy
-      ? `<br>Streaming: <span class="val">${patchQueued.size - patchQueue.length}/${patchQueued.size}</span>` +
-        (patchQueue.length > 0 ? ` (${patchQueue.length} queued)` : '') +
-        (nFallback > 0 ? ` · ${nFallback} fallback` : '')
-      : (nFallback > 0 ? `<br>Fallback: <span class="val">${nFallback}</span> batches` : '');
+    const queueInfo = nFallback > 0 ? `<br>Fallback: <span class="val">${nFallback}</span>` : '';
     $('stats').innerHTML =
       `Faces: <span class="val">${data.total_faces}</span><br>` +
-      `Batches: <span class="val">${data.num_batches}</span>` +
+      `Batches: <span class="val">${nb}</span>` +
       (matCount > 1 ? ` (${matCount} mats)` : '') + `<br>` +
       `Tris: <span class="val">${totalTris}</span><br>` +
       `Verts: <span class="val">${totalVerts}</span><br>` +
@@ -2387,12 +2410,16 @@ async function update() {
       queueInfo;
 
     // Queue missing patches for background streaming
-    for (const b of data.batches) {
-      if (!b.is_fallback) continue;
-      const [a, bb, c] = b.wanted_lod;
-      if (a <= 512 && bb <= 512 && c <= 512) queuePatch(a, bb, c);
+    for (let bi = 0; bi < nb; bi++) {
+      const m = bi * 16;
+      const wSorted = [meta[m+3],meta[m+4],meta[m+5]].sort((a,b)=>a-b);
+      const uSorted = [meta[m+6],meta[m+7],meta[m+8]].sort((a,b)=>a-b);
+      if (wSorted.join(',') !== uSorted.join(',')) {
+        const [a, b, c] = wSorted;
+        if (a <= 512 && b <= 512 && c <= 512) queuePatch(a, b, c);
+      }
     }
-    drainPatchQueue(); // keep processing even if no NEW patches were queued
+    drainPatchQueue();
   }
 
 }
