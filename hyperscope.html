@@ -1902,17 +1902,10 @@ function uploadBatches(data) {
   const usedKeys = new Set();
   drawBatches = [];
 
-  // Original mesh wireframe — concatenate typed arrays directly (no per-float push)
+  // Original mesh wireframe — use the flat transferred buffer directly
   numOrigInst = data.total_faces;
   {
-    let totalLen = 0;
-    for (const batch of data.batches) totalLen += batch.instances_orig.length;
-    const allOrig = new Float32Array(totalLen);
-    let offset = 0;
-    for (const batch of data.batches) {
-      allOrig.set(batch.instances_orig, offset);
-      offset += batch.instances_orig.length;
-    }
+    const allOrig = data.all_orig; // already a flat Float32Array
     if (!vaoOrigMesh) {
       vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, allOrig);
     } else {
@@ -1951,13 +1944,16 @@ function uploadBatches(data) {
     }
     totalRendered += batch.num_faces;
 
-    // GPU-ready: original positions (GPU applies Möbius), LODs + normals from CPU xform pass
-    const gpuData = new Float32Array(batch.instances_orig);
-    const xf = batch.instances_xform;
+    // Slice instance data from flat transferred buffers using batch offset
+    const off = (batch.offset || 0) * 52;
+    const len = batch.num_faces * 52;
+    const gpuData = new Float32Array(data.all_orig.buffer, off * 4, len);
+    const xf = new Float32Array(data.all_xform.buffer, off * 4, len);
+    // Merge LODs + normals from xform into orig (GPU applies Möbius to orig positions)
     for (let i = 0; i < batch.num_faces; i++) {
       const base = i * 52;
       for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j]; // LODs
-      for (let j = 40; j < 52; j++) gpuData[base+j] = xf[base+j]; // normals (zeroed under Möbius)
+      for (let j = 40; j < 52; j++) gpuData[base+j] = xf[base+j]; // normals
     }
 
     // Upload instance data to a pooled buffer (no new createBuffer calls)

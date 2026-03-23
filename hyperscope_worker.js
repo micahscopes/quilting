@@ -72,7 +72,11 @@ self.onmessage = async function(e) {
       vpWidth || 0,
       vpHeight || 0,
     );
-    self.postMessage({ type: 'batches', id, result });
+    // Transfer flat instance buffers zero-copy (no structured clone)
+    const transferList = [];
+    if (result.all_orig) transferList.push(result.all_orig.buffer);
+    if (result.all_xform) transferList.push(result.all_xform.buffer);
+    self.postMessage({ type: 'batches', id, result }, transferList);
     return;
   }
 

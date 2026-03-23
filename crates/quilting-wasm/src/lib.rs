@@ -1698,9 +1698,24 @@ pub fn slice_and_transform(
     pm("sat:batch-end");
 
     pm("sat:serialize-start");
-    // Convert raw batches to JS objects with typed arrays (bypass serde for large data)
+
+    // Pack ALL instance data into two flat buffers for transfer (one copy
+    // from WASM memory, then zero-copy transfer through postMessage).
+    let total_faces: usize = raw_batches.iter().map(|b| b.num_faces).sum();
+    let mut all_orig = vec![0.0f32; total_faces * 52];
+    let mut all_xform = vec![0.0f32; total_faces * 52];
+    let mut write_pos = 0usize;
+
+    // Batch metadata (small, cheap to clone)
     let js_batches = js_sys::Array::new();
     for b in &raw_batches {
+        let batch_offset = write_pos;
+        all_orig[write_pos*52..(write_pos + b.num_faces)*52]
+            .copy_from_slice(&b.orig_data);
+        all_xform[write_pos*52..(write_pos + b.num_faces)*52]
+            .copy_from_slice(&b.xform_data);
+        write_pos += b.num_faces;
+
         let obj = js_sys::Object::new();
         let s = |k: &str, v: JsValue| { js_sys::Reflect::set(&obj, &k.into(), &v).ok(); };
         s("lod", serde_wasm_bindgen::to_value(&b.actual_lod).unwrap());
@@ -1713,17 +1728,22 @@ pub fn slice_and_transform(
         s("num_faces", JsValue::from(b.num_faces as u32));
         s("verts_per_face", JsValue::from(b.n_verts as u32));
         s("tris_per_face", JsValue::from(b.n_tris as u32));
-        s("instances_orig", js_sys::Float32Array::from(&b.orig_data[..]).into());
-        s("instances_xform", js_sys::Float32Array::from(&b.xform_data[..]).into());
-        s("tess_bary", js_sys::Float64Array::from(&b.bary_data[..]).into());
-        s("tess_triangles", js_sys::Uint32Array::from(&b.tess_tris[..]).into());
+        s("offset", JsValue::from(batch_offset as u32)); // index into flat buffers
+        // Tess data (only on first encounter, empty after SENT_TESS)
+        if !b.bary_data.is_empty() {
+            s("tess_bary", js_sys::Float64Array::from(&b.bary_data[..]).into());
+            s("tess_triangles", js_sys::Uint32Array::from(&b.tess_tris[..]).into());
+        }
         s("face_indices", js_sys::Uint32Array::from(&b.face_indices[..]).into());
         js_batches.push(&obj);
     }
 
+    // Single copy from WASM memory → JS typed arrays (for transfer)
+    let js_orig = js_sys::Float32Array::from(&all_orig[..]);
+    let js_xform = js_sys::Float32Array::from(&all_xform[..]);
+
     pm("sat:serialize-end");
 
-    // Performance measures for DevTools User Timing
     perf.measure_with_start_mark_and_end_mark("Möbius + LOD", "sat:mobius-start", "sat:mobius-end").ok();
     perf.measure_with_start_mark_and_end_mark("Materials + Grouping", "sat:group-start", "sat:group-end").ok();
     perf.measure_with_start_mark_and_end_mark("Batch Assembly", "sat:batch-start", "sat:batch-end").ok();
@@ -1734,6 +1754,9 @@ pub fn slice_and_transform(
     js_sys::Reflect::set(&result, &"batches".into(), &js_batches).ok();
     js_sys::Reflect::set(&result, &"total_faces".into(), &JsValue::from(num_tris as u32)).ok();
     js_sys::Reflect::set(&result, &"num_batches".into(), &JsValue::from(raw_batches.len() as u32)).ok();
+    // Flat buffers — worker.js will transfer these (zero-copy to main thread)
+    js_sys::Reflect::set(&result, &"all_orig".into(), &js_orig).ok();
+    js_sys::Reflect::set(&result, &"all_xform".into(), &js_xform).ok();
 
     result.into()
 }
