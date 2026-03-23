@@ -26,6 +26,8 @@ struct PrebakeInfo {
     time_max: f64,
     dt: f64,
     mesh_radius: f64,
+    /// CPU copy of all prebaked positions: [frame][vertex] = [x,y,z] as f32
+    positions: Vec<f32>, // num_frames * num_vertices * 3
 }
 
 thread_local! {
@@ -182,6 +184,7 @@ pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
                 num_faces,
                 time_min, time_max, dt,
                 mesh_radius,
+                positions: all_positions.clone(),
             }));
 
             web_sys::console::log_1(&format!(
@@ -1621,13 +1624,30 @@ pub fn slice_and_transform(
 
     let _t_start = js_sys::Date::now();
 
+    let has_prebake = PREBAKE_INFO.with(|pi| pi.borrow().is_some());
     let cache_hit = SLICE_CACHE.with(|c| {
         let cache = c.borrow();
         match cache.as_ref() {
-            Some(cs) => cs.normal == n && (cs.offset - offset).abs() < 1e-12,
+            Some(cs) => {
+                // With prebake, only check normal (time comes from GPU texture)
+                if has_prebake {
+                    cs.normal == n
+                } else {
+                    cs.normal == n && (cs.offset - offset).abs() < 1e-12
+                }
+            }
             None => false,
         }
     });
+
+    // With prebake, update the cached offset without rebuilding the slice
+    if has_prebake && cache_hit {
+        SLICE_CACHE.with(|c| {
+            if let Some(cs) = c.borrow_mut().as_mut() {
+                cs.offset = offset;
+            }
+        });
+    }
 
     if !cache_hit {
         // Classic mode fast path: pure time slice (normal = [0,0,0,1]) without
@@ -1781,22 +1801,31 @@ pub fn slice_and_transform(
     let tess_density = quilting_core::evaluate::get_tess_density();
 
     // Check if we have prebaked animation data on GPU
-    let prebake = PREBAKE_INFO.with(|pi| pi.borrow().as_ref().map(|p| (
-        p.num_frames, p.num_vertices, p.num_faces,
-        p.time_min, p.dt, p.mesh_radius,
-    )));
-
-    let (instances_orig, instances_xform, num_tris, source_faces) = if let Some((pb_nf, pb_nv, pb_faces, pb_tmin, pb_dt, pb_radius)) = prebake {
-        // PREBAKED GPU PATH: skip CPU trajectory eval entirely.
-        // GPU texture has all positions, compute shader does Möbius + LOD.
-        let time_offset = SLICE_CACHE.with(|c| {
-            c.borrow().as_ref().map(|cs| cs.offset).unwrap_or(0.0)
-        });
-
-        // Map time to frame index
-        let frame = if pb_dt > 0.0 {
-            (((time_offset - pb_tmin) / pb_dt).round() as usize).min(pb_nf - 1)
+    // Prebake info + frame positions for the current time
+    let prebake_frame_data = PREBAKE_INFO.with(|pi| {
+        let pi = pi.borrow();
+        let p = match pi.as_ref() {
+            Some(p) => p,
+            None => return None,
+        };
+        let frame = if p.dt > 0.0 {
+            (((offset - p.time_min) / p.dt).round() as usize).min(p.num_frames - 1)
         } else { 0 };
+
+        // Extract this frame's vertex positions as f64
+        let base = frame * p.num_vertices * 3;
+        let verts: Vec<[f64; 3]> = (0..p.num_vertices).map(|i| {
+            let off = base + i * 3;
+            [p.positions[off] as f64, p.positions[off+1] as f64, p.positions[off+2] as f64]
+        }).collect();
+
+        Some((p.num_frames, p.num_vertices, p.num_faces,
+              p.time_min, p.dt, p.mesh_radius, frame, verts))
+    });
+
+    let (instances_orig, instances_xform, num_tris, source_faces) = if let Some((pb_nf, pb_nv, pb_faces, _pb_tmin, _pb_dt, pb_radius, frame, frame_verts)) = prebake_frame_data {
+        // PREBAKED GPU PATH: positions from prebake cache, LODs from GPU.
+        // Skips CPU trajectory eval entirely.
 
         // GPU compute LODs from prebaked texture
         let gpu_lods = if !transform.is_affine() {
@@ -1813,17 +1842,18 @@ pub fn slice_and_transform(
             vec![]
         };
 
-        // Still need CPU for instance data (positions, weights, UVs, normals)
-        // because the vertex shader needs control points for QB evaluation.
+        // Use prebaked frame positions + slice cache for UVs/normals/topology
         SLICE_CACHE.with(|c| {
             let cache = c.borrow();
             let cs = cache.as_ref().unwrap();
             let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
             let normal_ref = if cs.normals.is_empty() { None } else { Some(cs.normals.as_slice()) };
-            let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref, normal_ref);
+
+            // Use PREBAKED positions (not slice cache positions)
+            let orig = compute_instances_no_lod_with_uvs(&frame_verts, &cs.tris, uv_ref, normal_ref);
 
             use quilting_core::evaluate::compute_instances_xform_only;
-            let mut xf = compute_instances_xform_only(&cs.verts, &cs.tris, &transform, uv_ref, normal_ref);
+            let mut xf = compute_instances_xform_only(&frame_verts, &cs.tris, &transform, uv_ref, normal_ref);
 
             // Write GPU LODs into instances
             for (fi, inst) in xf.iter_mut().enumerate() {
