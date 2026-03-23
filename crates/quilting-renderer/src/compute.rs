@@ -33,25 +33,32 @@ pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
 pub struct LodCompute {
     program: glow::Program,
     vao: glow::VertexArray,
-    input_buf: glow::Buffer,
+    input_buf: glow::Buffer,  // face indices (3 floats per face)
     output_buf: glow::Buffer,
     tf: glow::TransformFeedback,
+    pos_texture: Option<glow::Texture>, // prebaked positions
     mob_a_loc: glow::UniformLocation,
     mob_b_loc: glow::UniformLocation,
     mob_c_loc: glow::UniformLocation,
     mob_d_loc: glow::UniformLocation,
     density_loc: glow::UniformLocation,
     mesh_radius_loc: glow::UniformLocation,
+    num_verts_loc: glow::UniformLocation,
+    frame_loc: glow::UniformLocation,
     max_faces: usize,
 }
 
 const LOD_COMPUTE_VS: &str = r#"#version 300 es
 precision highp float;
 
-// Per-face input: 3 control points as quaternions (w,x,y,z)
-layout(location = 0) in vec4 cp0;
-layout(location = 1) in vec4 cp1;
-layout(location = 2) in vec4 cp2;
+// Per-face input: 3 vertex indices (packed as ivec3 via float attrib)
+layout(location = 0) in vec3 face_indices;
+
+// All vertex positions for all frames: sampled via texelFetch
+// Layout: texel (vertex_index + frame * num_vertices) = vec4(x, y, z, 0)
+uniform highp sampler2D u_positions;
+uniform int u_num_vertices;
+uniform int u_frame;
 
 // Möbius transform: M(q) = (a*q + b) * (c*q + d)^{-1}
 // Stored as 4 quaternions
@@ -101,11 +108,19 @@ float snap_pow2(float v) {
     return exp2(round(log2(max(v, 1.0))));
 }
 
+vec3 fetch_pos(int vertex_id) {
+    int idx = vertex_id + u_frame * u_num_vertices;
+    // 2D texture: pack linearly, width = 4096
+    int tx = idx % 4096;
+    int ty = idx / 4096;
+    return texelFetch(u_positions, ivec2(tx, ty), 0).xyz;
+}
+
 void main() {
-    // Control point positions (xyz from quaternion wxyz)
-    vec3 p0 = cp0.yzw;
-    vec3 p1 = cp1.yzw;
-    vec3 p2 = cp2.yzw;
+    // Fetch vertex positions from prebaked texture
+    vec3 p0 = fetch_pos(int(face_indices.x));
+    vec3 p1 = fetch_pos(int(face_indices.y));
+    vec3 p2 = fetch_pos(int(face_indices.z));
 
     // Edge midpoints in world space
     vec3 mid_a = (p1 + p2) * 0.5;  // midpoint of edge BC (opposite v0)
@@ -190,6 +205,10 @@ impl LodCompute {
                 .ok_or("density uniform not found")?;
             let mesh_radius_loc = gl.get_uniform_location(program, "mesh_radius")
                 .ok_or("mesh_radius uniform not found")?;
+            let num_verts_loc = gl.get_uniform_location(program, "u_num_vertices")
+                .ok_or("u_num_vertices uniform not found")?;
+            let frame_loc = gl.get_uniform_location(program, "u_frame")
+                .ok_or("u_frame uniform not found")?;
 
             // Create VAO + buffers
             let vao = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
@@ -198,15 +217,12 @@ impl LodCompute {
             let input_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(input_buf));
             gl.buffer_data_size(glow::ARRAY_BUFFER,
-                (max_faces * FLOATS_PER_FACE_INPUT * 4) as i32,
-                glow::DYNAMIC_DRAW);
+                (max_faces * 3 * 4) as i32, // 3 floats (face indices) per face
+                glow::STATIC_DRAW);
 
-            // 3 vec4 attributes: cp0, cp1, cp2
-            for i in 0..3u32 {
-                gl.enable_vertex_attrib_array(i);
-                gl.vertex_attrib_pointer_f32(i, 4, glow::FLOAT, false,
-                    (FLOATS_PER_FACE_INPUT * 4) as i32, (i * 16) as i32);
-            }
+            // 1 vec3 attribute: face_indices
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
 
             let output_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(output_buf));
@@ -220,14 +236,62 @@ impl LodCompute {
 
             Ok(Self {
                 program, vao, input_buf, output_buf, tf,
+                pos_texture: None,
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
+                num_verts_loc, frame_loc,
                 max_faces,
             })
         }
     }
 
+    /// Upload face indices (3 floats per face — vertex indices as floats for attrib).
+    pub fn upload_face_indices(&self, gl: &glow::Context, indices: &[f32]) {
+        unsafe {
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.input_buf));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER,
+                bytemuck_cast_slice(indices), glow::STATIC_DRAW);
+        }
+    }
+
+    /// Upload prebaked positions as a float texture.
+    /// `positions`: flat [x,y,z, x,y,z, ...] for all vertices × all frames.
+    /// Packed into a 4096-wide RGBA32F texture.
+    pub fn upload_positions_texture(&mut self, gl: &glow::Context, positions: &[f32], num_vertices: usize, num_frames: usize) {
+        unsafe {
+            // Pack xyz into RGBA (w=0) for texelFetch
+            let total = num_vertices * num_frames;
+            let mut rgba = vec![0.0f32; total * 4];
+            for i in 0..total {
+                rgba[i*4]   = positions[i*3];
+                rgba[i*4+1] = positions[i*3+1];
+                rgba[i*4+2] = positions[i*3+2];
+                rgba[i*4+3] = 0.0;
+            }
+
+            let width = 4096;
+            let height = (total + width - 1) / width;
+
+            // Pad to full texture size
+            rgba.resize(width * height * 4, 0.0);
+
+            if let Some(old) = self.pos_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                width as i32, height as i32, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            self.pos_texture = Some(tex);
+        }
+    }
+
     /// Upload per-face control points (3 quaternions × 4 floats = 12 floats per face).
+    /// DEPRECATED: use upload_face_indices + upload_positions_texture instead.
     pub fn upload_control_points(&self, gl: &glow::Context, data: &[f32]) {
         unsafe {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.input_buf));
@@ -236,12 +300,23 @@ impl LodCompute {
         }
     }
 
-    /// Run the compute pass. Returns the number of faces processed.
-    /// `mobius`: [a_w,a_x,a_y,a_z, b_w,b_x,b_y,b_z, c_w,..., d_w,...] = 16 floats.
+    /// Run the compute pass (legacy — uses uploaded control points directly).
     pub fn compute(
+        &self, gl: &glow::Context, num_faces: usize,
+        mobius: [f32; 16], density: f32, mesh_radius: f32,
+    ) -> usize {
+        self.compute_with_texture(gl, num_faces, 0, 0, mobius, density, mesh_radius)
+    }
+
+    /// Run the compute pass with prebaked position texture.
+    /// `frame`: which animation frame to read from the texture.
+    /// `num_vertices`: vertices per frame (for texture indexing).
+    pub fn compute_with_texture(
         &self,
         gl: &glow::Context,
         num_faces: usize,
+        frame: u32,
+        num_vertices: u32,
         mobius: [f32; 16],
         density: f32,
         mesh_radius: f32,
@@ -250,6 +325,14 @@ impl LodCompute {
         unsafe {
             gl.use_program(Some(self.program));
 
+            // Bind position texture
+            if let Some(tex) = self.pos_texture {
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+
+            gl.uniform_1_i32(Some(&self.frame_loc), frame as i32);
+            gl.uniform_1_i32(Some(&self.num_verts_loc), num_vertices as i32);
             gl.uniform_4_f32(Some(&self.mob_a_loc), mobius[0], mobius[1], mobius[2], mobius[3]);
             gl.uniform_4_f32(Some(&self.mob_b_loc), mobius[4], mobius[5], mobius[6], mobius[7]);
             gl.uniform_4_f32(Some(&self.mob_c_loc), mobius[8], mobius[9], mobius[10], mobius[11]);
