@@ -1663,13 +1663,81 @@ pub fn slice_and_transform(
     pm("sat:mobius-start");
 
     // Use cached slice for Möbius computation
+    let gpu_available = GPU_COMPUTE.with(|gc| gc.borrow().is_some());
+
     let (instances_orig, instances_xform, num_tris, source_faces) = SLICE_CACHE.with(|c| {
         let cache = c.borrow();
         let cs = cache.as_ref().unwrap();
         let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
         let normal_ref = if cs.normals.is_empty() { None } else { Some(cs.normals.as_slice()) };
         let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref, normal_ref);
-        let xform = compute_instances_with_uvs(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge), uv_ref, normal_ref);
+
+        let xform = if gpu_available && !transform.is_affine() {
+            // GPU path: Möbius transform only (no LOD), GPU fills LODs
+            use quilting_core::evaluate::compute_instances_xform_only;
+            let mut xf = compute_instances_xform_only(&cs.verts, &cs.tris, &transform, uv_ref, normal_ref);
+
+            // Pack control points for GPU (3 quaternions per face = 12 floats)
+            let mut cp_data: Vec<f32> = Vec::with_capacity(cs.tris.len() * 12);
+            for face in &cs.tris {
+                for &vi in face {
+                    let v = cs.verts[vi];
+                    let q = Quat::from_point(v[0], v[1], v[2]);
+                    cp_data.push(q.w as f32);
+                    cp_data.push(q.x as f32);
+                    cp_data.push(q.y as f32);
+                    cp_data.push(q.z as f32);
+                }
+            }
+
+            // Pack Möbius as 16 floats [a, b, c, d] quaternions
+            let mob_f32: [f32; 16] = [
+                transform.a.w as f32, transform.a.x as f32, transform.a.y as f32, transform.a.z as f32,
+                transform.b.w as f32, transform.b.x as f32, transform.b.y as f32, transform.b.z as f32,
+                transform.c.w as f32, transform.c.x as f32, transform.c.y as f32, transform.c.z as f32,
+                transform.d.w as f32, transform.d.x as f32, transform.d.y as f32, transform.d.z as f32,
+            ];
+
+            let tess_density = quilting_core::evaluate::get_tess_density();
+            // Compute mesh radius
+            let mesh_radius = {
+                let (mut cx, mut cy, mut cz) = (0.0, 0.0, 0.0);
+                for v in &cs.verts { cx += v[0]; cy += v[1]; cz += v[2]; }
+                let n = cs.verts.len() as f64;
+                cx /= n; cy /= n; cz /= n;
+                cs.verts.iter()
+                    .map(|v| ((v[0]-cx).powi(2) + (v[1]-cy).powi(2) + (v[2]-cz).powi(2)).sqrt())
+                    .fold(0.0f64, f64::max)
+                    .max(1e-6)
+            };
+
+            // GPU compute LODs
+            let gpu_lods = GPU_COMPUTE.with(|gc| {
+                let gc = gc.borrow();
+                let (gl, compute) = gc.as_ref().unwrap();
+                compute.upload_control_points(gl, &cp_data);
+                let n = compute.compute(gl, cs.tris.len(), mob_f32, tess_density as f32, mesh_radius as f32);
+                compute.read_back(gl, n)
+            });
+
+            // Write GPU LODs into instances (6 floats per face: lod_a, lod_b, lod_c, med_a, med_b, med_c)
+            for (fi, inst) in xf.iter_mut().enumerate() {
+                let base = fi * 6;
+                if base + 2 < gpu_lods.len() {
+                    inst.edge_lods = [
+                        gpu_lods[base] as u32,
+                        gpu_lods[base + 1] as u32,
+                        gpu_lods[base + 2] as u32,
+                    ];
+                }
+            }
+
+            xf
+        } else {
+            // CPU fallback: full Möbius + LOD computation
+            compute_instances_with_uvs(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge), uv_ref, normal_ref)
+        };
+
         let src = cs.source_face_indices.clone();
         (orig, xform, cs.tris.len(), src)
     });

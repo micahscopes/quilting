@@ -8,6 +8,11 @@ thread_local! {
     static MIN_PX_PER_SUB: RefCell<f64> = RefCell::new(2.0);
 }
 
+/// Get current tessellation density.
+pub fn get_tess_density() -> f64 {
+    TESS_DENSITY.with(|d| *d.borrow())
+}
+
 /// Set tessellation parameters.
 pub fn set_tess_params(density: f64, screen_atten: bool) {
     TESS_DENSITY.with(|d| *d.borrow_mut() = density.max(1.0));
@@ -138,6 +143,83 @@ pub fn compute_instances(
     mesh: Option<&HalfEdgeMesh>,
 ) -> Vec<FaceInstance> {
     compute_instances_with_uvs(vertices, faces, transform, screen, mesh, None, None)
+}
+
+/// Compute Möbius-transformed instances WITHOUT LOD computation.
+/// LODs will be filled in by GPU compute.
+pub fn compute_instances_xform_only(
+    vertices: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    transform: &Mobius,
+    vertex_uvs: Option<&[[f32; 2]]>,
+    vertex_normals: Option<&[[f32; 3]]>,
+) -> Vec<FaceInstance> {
+    let transformed: Vec<(Quat, Quat)> = vertices.iter().map(|v| {
+        let p = Quat::from_point(v[0], v[1], v[2]);
+        (transform.apply(p), transform.transform_weight(p, Quat::ONE))
+    }).collect();
+
+    let mut instances: Vec<FaceInstance> = faces.iter().map(|face| {
+        let v = [vertices[face[0]], vertices[face[1]], vertices[face[2]]];
+        let (p0, w0) = transformed[face[0]];
+        let (p1, w1) = transformed[face[1]];
+        let (p2, w2) = transformed[face[2]];
+        let uvs = match vertex_uvs {
+            Some(uvs) => [uvs[face[0]], uvs[face[1]], uvs[face[2]]],
+            None => [[0.0, 0.0]; 3],
+        };
+        let normals = match vertex_normals {
+            Some(n) => [n[face[0]], n[face[1]], n[face[2]]],
+            None => face_normal_f32(&v),
+        };
+        FaceInstance {
+            positions: [p0, p1, p2],
+            weights: [w0, w1, w2],
+            edge_lods: [2, 2, 2], // placeholder, GPU fills in
+            vertex_lods: [2, 2, 2],
+            uvs,
+            normals,
+        }
+    }).collect();
+
+    // Vertex normals for non-affine transforms
+    if !transform.is_affine() {
+        let nv = vertices.len();
+        let mut vertex_normals_acc = vec![[0.0f64; 3]; nv];
+        for face in faces.iter() {
+            let p0 = transformed[face[0]].0.to_point();
+            let p1 = transformed[face[1]].0.to_point();
+            let p2 = transformed[face[2]].0.to_point();
+            let e01 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+            let e02 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+            let fn_ = [
+                e01[1]*e02[2] - e01[2]*e02[1],
+                e01[2]*e02[0] - e01[0]*e02[2],
+                e01[0]*e02[1] - e01[1]*e02[0],
+            ];
+            for &vi in face {
+                vertex_normals_acc[vi][0] += fn_[0];
+                vertex_normals_acc[vi][1] += fn_[1];
+                vertex_normals_acc[vi][2] += fn_[2];
+            }
+        }
+        let sign: f64 = -1.0;
+        for (fi, face) in faces.iter().enumerate() {
+            for vi in 0..3 {
+                let n = &vertex_normals_acc[face[vi]];
+                let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+                if len > 1e-10 {
+                    instances[fi].normals[vi] = [
+                        (sign * n[0] / len) as f32,
+                        (sign * n[1] / len) as f32,
+                        (sign * n[2] / len) as f32,
+                    ];
+                }
+            }
+        }
+    }
+
+    instances
 }
 
 /// Compute instances with optional per-vertex UVs and normals.
