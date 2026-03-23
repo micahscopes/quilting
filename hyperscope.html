@@ -2435,7 +2435,19 @@ async function update() {
     let totalTris = 0, totalVerts = 0, nFallback = 0;
     for (let bi = 0; bi < nb; bi++) {
       const m = bi * 16;
-      const nf = meta[m+12], nv = meta[m+13], nt = meta[m+14];
+      const nf = meta[m+12];
+      let nv = meta[m+13], nt = meta[m+14];
+      // If n_verts/n_tris are 0 (prebake path), look up from atlas buffers
+      if ((nv === 0 || nt === 0) && nf > 0) {
+        const usedLod = [meta[m+6], meta[m+7], meta[m+8]];
+        const permIndex = meta[m+10];
+        const tessKey = usedLod.join(',') + '/' + permIndex;
+        const tess = atlasBuffers.get(tessKey);
+        if (tess) {
+          nt = tess.numTriIdx / 3;
+          nv = tess.rawBary ? tess.rawBary.length / 3 : 0;
+        }
+      }
       totalTris += nf * nt;
       totalVerts += nf * nv;
       // Check if fallback: used_lod != wanted_lod (canonical comparison)
