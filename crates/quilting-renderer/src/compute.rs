@@ -364,20 +364,9 @@ impl LodCompute {
         let mut result = vec![0.0f32; size];
         unsafe {
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf));
-            let data = gl.map_buffer_range(
-                glow::TRANSFORM_FEEDBACK_BUFFER,
-                0,
-                (size * 4) as i32,
-                glow::MAP_READ_BIT,
-            );
-            if !data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    data as *const f32,
-                    result.as_mut_ptr(),
-                    size,
-                );
-                gl.unmap_buffer(glow::TRANSFORM_FEEDBACK_BUFFER);
-            }
+            // WebGL2 doesn't support map_buffer_range — use get_buffer_sub_data
+            gl.get_buffer_sub_data(glow::TRANSFORM_FEEDBACK_BUFFER, 0,
+                bytemuck_cast_slice_mut(&mut result));
         }
         result
     }
@@ -407,9 +396,10 @@ fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<
     }
 }
 
-// Safe cast for &[f32] → &[u8]
 fn bytemuck_cast_slice(data: &[f32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
+}
+
+fn bytemuck_cast_slice_mut(data: &mut [f32]) -> &mut [u8] {
+    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, data.len() * 4) }
 }
