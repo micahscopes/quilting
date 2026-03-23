@@ -2325,7 +2325,6 @@ let inflight = 0;
 async function update() {
   if (!workerReady || !meshInfo) return;
   // Dispatch up to NUM_WORKERS concurrently, but no more — avoids waste
-  if (inflight >= NUM_WORKERS) return;
   inflight++;
   const gen = ++updateGeneration;
 
