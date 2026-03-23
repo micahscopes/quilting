@@ -25,8 +25,9 @@ pub struct AnimationSequence {
     pub face_indices: Vec<u32>,
 }
 
-/// Per-face output: atlas_index + perm_index + face_normal (3 floats) = 5 floats.
-pub const FLOATS_PER_FACE_OUTPUT: usize = 5;
+/// Per-face output: atlas_index + perm_index = 2 floats.
+/// Face normals computed on main thread GPU (no worker readback needed).
+pub const FLOATS_PER_FACE_OUTPUT: usize = 2;
 
 /// Transform feedback compute pipeline for LOD calculation.
 pub struct LodCompute {
@@ -84,10 +85,9 @@ uniform float vp_width;      // viewport width in pixels
 uniform float vp_height;     // viewport height in pixels
 uniform highp sampler2D u_atlas_lut; // exponent triple → atlas index (32×32 R8)
 
-// Transform feedback outputs: classification + deformed face normal
+// Transform feedback outputs: classification only
 out float out_atlas_index;
 out float out_perm_index;
-out vec3 out_face_normal;  // cross(d1-d0, d2-d0) in Möbius-deformed space
 
 // Quaternion multiply
 vec4 qmul(vec4 a, vec4 b) {
@@ -210,11 +210,6 @@ void main() {
     out_atlas_index = texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0;
     out_perm_index = float(perm);
 
-    // Deformed face normal: cross(d1-d0, d2-d0)
-    vec3 e1 = d1 - d0;
-    vec3 e2 = d2 - d0;
-    out_face_normal = cross(e1, e2);
-
     gl_Position = vec4(0.0);
 }
 "#;
@@ -241,7 +236,7 @@ impl LodCompute {
             // Set transform feedback varyings BEFORE linking
             gl.transform_feedback_varyings(
                 program,
-                &["out_atlas_index", "out_perm_index", "out_face_normal"],
+                &["out_atlas_index", "out_perm_index"],
                 glow::INTERLEAVED_ATTRIBS,
             );
 
