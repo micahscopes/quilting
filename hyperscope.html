@@ -353,23 +353,42 @@ function getMaterialParams(materialIndex) {
   };
 }
 
-// --- Worker ---
-const worker = new Worker('./hyperscope_worker.js', { type: 'module' });
+// --- Worker Pool ---
+const NUM_WORKERS = navigator.hardwareConcurrency ? Math.min(navigator.hardwareConcurrency, 8) : 4;
+const workers = [];
 let msgId = 0;
 const pending = new Map();
 
-function workerCall(type, data) {
+for (let i = 0; i < NUM_WORKERS; i++) {
+  const w = new Worker('./hyperscope_worker.js', { type: 'module' });
+  w.onmessage = (e) => {
+    const { id } = e.data;
+    const resolve = pending.get(id);
+    if (resolve) { pending.delete(id); resolve(e.data); }
+  };
+  workers.push({ worker: w, busy: false });
+}
+// Primary worker for init, shape loading, atlas build, etc.
+const worker = workers[0].worker;
+
+// Round-robin index for slice_and_transform calls
+let nextWorkerIdx = 0;
+
+function workerCall(type, data, transferList) {
   return new Promise((resolve) => {
     const id = ++msgId;
     pending.set(id, resolve);
-    worker.postMessage({ type, data, id });
+    // Use primary worker for everything except slice_and_transform
+    const target = type === 'slice_and_transform'
+      ? workers[nextWorkerIdx++ % NUM_WORKERS].worker
+      : worker;
+    if (transferList) {
+      target.postMessage({ type, data, id }, transferList);
+    } else {
+      target.postMessage({ type, data, id });
+    }
   });
 }
-worker.onmessage = (e) => {
-  const { id } = e.data;
-  const resolve = pending.get(id);
-  if (resolve) { pending.delete(id); resolve(e.data); }
-};
 
 // --- Shaders loaded from WASM (compiled from WGSL via naga) ---
 // No inline GLSL -- shaders are compiled at runtime by quilting-shaders.
@@ -2448,7 +2467,7 @@ function setupBtnGroup(id, cb) {
 setupBtnGroup('shape-btns', async (name) => {
   currentShape = name;
   $('stats').innerHTML = 'Loading shape...';
-  const resp = await workerCall('create_hypermesh', { name });
+  const resp = await broadcastCall('create_hypermesh', { name });
   meshInfo = resp.result;
   const timeSlider = $('time');
   timeSlider.min = meshInfo.time_min;
@@ -2528,7 +2547,7 @@ $('variant-sel').addEventListener('change', () => {
     }
   }
   // Send updated face materials to worker
-  workerCall('set_face_materials', { materials: faceMats }).then(() => update());
+  broadcastCall('set_face_materials', { materials: faceMats }).then(() => update());
 });
 
 $('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateDebounced(); });
@@ -2639,7 +2658,7 @@ async function loadGltfFromBuffer(buffer, filename) {
   // Deselect built-in shape buttons
   document.querySelectorAll('#shape-btns button').forEach(b => b.classList.remove('a'));
 
-  const resp = await workerCall('load_gltf_data', { bytes: buffer });
+  const resp = await broadcastCall('load_gltf_data', { bytes: buffer });
   const info = resp.result;
   if (!info || info.num_faces === 0) {
     $('stats').innerHTML = 'Failed to load glTF — check console';
@@ -2740,31 +2759,60 @@ wrapEl.addEventListener('drop', async (e) => {
 });
 
 // --- Init ---
-$('stats').textContent = 'Starting worker...';
-await workerCall('init', {});
+// Helper to call a specific worker by index
+function workerCallN(idx, type, data) {
+  return new Promise((resolve) => {
+    const id = ++msgId;
+    pending.set(id, resolve);
+    workers[idx].worker.postMessage({ type, data, id });
+  });
+}
 
-// Compile shaders from WASM (WGSL -> naga -> GLSL ES 300)
+// Broadcast to all workers, return primary worker's result
+async function broadcastCall(type, data) {
+  const results = await Promise.all(
+    workers.map((_, i) => workerCallN(i, type, data))
+  );
+  return results[0]; // return primary worker's result
+}
+
+$('stats').textContent = `Starting ${NUM_WORKERS} workers...`;
+// Init all workers in parallel
+await Promise.all(workers.map((_, i) => workerCallN(i, 'init', {})));
+
+// Compile shaders from primary worker
 $('stats').textContent = 'Compiling shaders...';
 const shaderResp = await workerCall('get_shaders', {});
 initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shaderResp.fs_normals, shaderResp.fs_pbr, shaderResp.fs_pick);
 initEnvMaps();
 generateSheenELut();
 
-$('stats').textContent = 'Building atlas (LODs 1–512)...';
-const r1 = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
+// Build atlas on primary worker, share to others via bytes
+$('stats').textContent = `Building atlas (LODs 1–512)...`;
+const r1build = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
+const atlasMs = r1build.ms;
+if (NUM_WORKERS > 1) {
+  $('stats').textContent = `Sharing atlas with ${NUM_WORKERS - 1} workers...`;
+  const exportResp = await workerCall('export_atlas_bytes', {});
+  // Import into all other workers in parallel (transferring copies of the bytes)
+  await Promise.all(workers.slice(1).map((_, i) => {
+    const copy = exportResp.bytes.slice(0); // copy since transfer detaches
+    return workerCallN(i + 1, 'import_atlas_bytes', { bytes: copy }, [copy]);
+  }));
+}
 $('stats').textContent = 'Uploading atlas patches...';
 await new Promise(r => setTimeout(r, 0));
 const patchResp = await workerCall('export_patches', {});
 uploadAtlasPatches(patchResp.patches);
 workerReady = true;
-$('stats').textContent = `Atlas built in ${r1.ms.toFixed(0)}ms, ${atlasBuffers.size} patch buffers`;
+$('stats').textContent = `Atlas built in ${atlasMs.toFixed(0)}ms on ${NUM_WORKERS} workers, ${atlasBuffers.size} patch buffers`;
 
 // Load matcap (no-op with procedural matcap from WGSL)
 loadMatcap($('matcap-sel').value);
 
 // Load default shape (horse)
 $('stats').innerHTML = 'Loading horse...';
-const initResp = await workerCall('create_hypermesh', { name: 'galloping_horse' });
+const initResp = await broadcastCall('create_hypermesh', { name: 'galloping_horse' });
 meshInfo = initResp.result;
 const timeSlider = $('time');
 timeSlider.min = meshInfo.time_min;

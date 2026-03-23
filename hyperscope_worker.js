@@ -37,6 +37,18 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'export_atlas_bytes') {
+    const bytes = wasm.export_atlas_bytes();
+    self.postMessage({ type: 'atlas_bytes', id, bytes: bytes.buffer }, [bytes.buffer]);
+    return;
+  }
+
+  if (type === 'import_atlas_bytes') {
+    const ok = wasm.import_atlas_bytes(new Uint8Array(data.bytes));
+    self.postMessage({ type: 'atlas_imported', id, ok });
+    return;
+  }
+
   if (type === 'export_patches') {
     const patches = wasm.export_all_patches();
     self.postMessage({ type: 'patches_exported', id, patches });

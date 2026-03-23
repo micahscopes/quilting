@@ -137,6 +137,27 @@ pub fn export_all_patches() -> JsValue {
     })
 }
 
+/// Export the atlas as bytes for sharing with other workers.
+#[wasm_bindgen]
+pub fn export_atlas_bytes() -> Vec<u8> {
+    ATLAS.with(|a| {
+        a.borrow().as_ref().map(|atlas| atlas.to_bytes()).unwrap_or_default()
+    })
+}
+
+/// Import an atlas from bytes (built by another worker).
+#[wasm_bindgen]
+pub fn import_atlas_bytes(bytes: &[u8]) -> bool {
+    match TessellationAtlas::from_bytes(bytes) {
+        Ok(atlas) => {
+            ATLAS.with(|a| *a.borrow_mut() = Some(atlas));
+            SENT_TESS.with(|s| s.borrow_mut().clear());
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Extend the atlas to include a new LOD level by subdividing from existing parents.
 /// Much faster than rebuilding — each new patch is one subdivision step.
 #[wasm_bindgen]
