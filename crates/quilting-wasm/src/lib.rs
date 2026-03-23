@@ -2241,10 +2241,66 @@ pub fn slice_and_transform(
     }
     let mut raw_batches: Vec<RawBatch> = Vec::new();
 
+    // When atlas patches are pre-uploaded to JS (atlasBuffers), skip the
+    // entire atlas lookup + bary conversion. Just emit batch metadata.
+    let has_prebake = PREBAKE_INFO.with(|pi| pi.borrow().is_some());
+
     ATLAS.with(|atlas_cell| {
         let atlas_ref = atlas_cell.borrow();
 
         for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
+            if has_prebake {
+                // FAST PATH: no atlas lookup, no bary conversion.
+                // JS has all tess buffers pre-uploaded.
+                let parity = perm_sign(perm_index);
+                let actual_lod = if override_res > 0 {
+                    [override_res; 3]
+                } else {
+                    instances_xform[face_indices[0]].edge_lods
+                };
+
+                let nf = face_indices.len();
+                let mut orig_data = vec![0.0f32; nf * 52];
+                let mut xform_data = vec![0.0f32; nf * 52];
+                let used_flat = FLAT_INSTANCE_DATA.with(|fid| {
+                    let fid = fid.borrow();
+                    if let Some((ref flat_orig, ref flat_xform)) = *fid {
+                        for (i, &fi) in face_indices.iter().enumerate() {
+                            let src = fi * 52;
+                            if src + 52 <= flat_orig.len() {
+                                orig_data[i*52..(i+1)*52].copy_from_slice(&flat_orig[src..src+52]);
+                                xform_data[i*52..(i+1)*52].copy_from_slice(&flat_xform[src..src+52]);
+                            }
+                        }
+                        true
+                    } else { false }
+                });
+                if !used_flat {
+                    for (i, &fi) in face_indices.iter().enumerate() {
+                        let o = instances_orig[fi].to_f32_array();
+                        let x = instances_xform[fi].to_f32_array();
+                        orig_data[i*52..(i+1)*52].copy_from_slice(&o);
+                        xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+                    }
+                }
+
+                raw_batches.push(RawBatch {
+                    actual_lod,
+                    canonical_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
+                    used_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
+                    is_fallback: false,
+                    parity, perm_index, material_index: mat_idx,
+                    face_indices: face_indices.iter().map(|&i| {
+                        if i < source_faces.len() { source_faces[i] as u32 } else { i as u32 }
+                    }).collect(),
+                    num_faces: nf,
+                    n_verts: 0, n_tris: 0, // JS uses atlasBuffers, doesn't need these
+                    orig_data, xform_data,
+                    bary_data: vec![], tess_tris: vec![],
+                });
+                continue;
+            }
+
             let (mesh, used_lod) = {
                 let mut found = None;
                 if let Some(atlas) = atlas_ref.as_ref() {
