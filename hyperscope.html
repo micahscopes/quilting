@@ -1204,7 +1204,7 @@ function uploadVertexUBO(mvp, mv, permParity, permIndex, useQB, camPosWS) {
   vtxUboF32[32] = permParity;   // offset 128
   vtxUboI32[33] = permIndex;    // offset 132
   vtxUboI32[34] = useQB;        // offset 136
-  // _pad at offset 140 -- leave as 0
+  // _pad at offset 140 — used as batch offset for pick pass, 0 normally
   // Möbius quaternions at offset 144 (f32 index 36)
   vtxUboF32.set(mob.a, 36);     // offset 144
   vtxUboF32.set(mob.b, 40);     // offset 160

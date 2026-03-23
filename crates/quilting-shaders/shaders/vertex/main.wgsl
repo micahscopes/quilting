@@ -162,13 +162,35 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         nrm = nrm * u.perm_parity;
     }
 
-    // Smooth normals: zeroed under conformal transforms, so QB normals used
+    // Smooth normals: transform through Möbius conformal differential.
+    // dM(v) = (a - M·c) · v · (c·p+d)^{-1} — preserves normal direction under conformal maps.
     let sn0 = in.smooth_n0.xyz;
     let sn1 = in.smooth_n1.xyz;
     let sn2 = in.smooth_n2.xyz;
     let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
     if has_smooth {
-        nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
+        let is_mobius = dot(u.mob_c, u.mob_c) > 0.001;
+        if is_mobius {
+            // Transform each vertex normal through the Möbius differential at that vertex
+            let bot0 = qmul(u.mob_c, in.p0) + u.mob_d;
+            let M0 = qmul(qmul(u.mob_a, in.p0) + u.mob_b, qinv(bot0));
+            let a0 = u.mob_a - qmul(M0, u.mob_c);
+            let rn0 = qmul(qmul(a0, vec4<f32>(0.0, sn0)), qinv(bot0)).yzw;
+
+            let bot1 = qmul(u.mob_c, in.p1) + u.mob_d;
+            let M1 = qmul(qmul(u.mob_a, in.p1) + u.mob_b, qinv(bot1));
+            let a1 = u.mob_a - qmul(M1, u.mob_c);
+            let rn1 = qmul(qmul(a1, vec4<f32>(0.0, sn1)), qinv(bot1)).yzw;
+
+            let bot2 = qmul(u.mob_c, in.p2) + u.mob_d;
+            let M2 = qmul(qmul(u.mob_a, in.p2) + u.mob_b, qinv(bot2));
+            let a2 = u.mob_a - qmul(M2, u.mob_c);
+            let rn2 = qmul(qmul(a2, vec4<f32>(0.0, sn2)), qinv(bot2)).yzw;
+
+            nrm = normalize(bary.x * rn0 + bary.y * rn1 + bary.z * rn2);
+        } else {
+            nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
+        }
     }
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
