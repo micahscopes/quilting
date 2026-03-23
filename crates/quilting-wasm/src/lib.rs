@@ -1908,28 +1908,34 @@ pub fn slice_and_transform(
                     all_orig[base + 36] = uv2[0]; all_orig[base + 37] = uv2[1];
                 }
 
-                // Normals (from mesh or face normal)
-                if !cs.normals.is_empty() {
-                    for vi in 0..3 {
-                        let n = cs.normals[face[vi]];
-                        let off = base + 40 + vi * 4;
-                        all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
-                    }
-                } else {
-                    // Compute face normal
-                    let v0 = frame_verts[face[0]]; let v1 = frame_verts[face[1]]; let v2 = frame_verts[face[2]];
-                    let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
-                    let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
-                    let nx = (e1[1]*e2[2] - e1[2]*e2[1]) as f32;
-                    let ny = (e1[2]*e2[0] - e1[0]*e2[2]) as f32;
-                    let nz = (e1[0]*e2[1] - e1[1]*e2[0]) as f32;
-                    let len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-10);
-                    let n = [nx/len, ny/len, nz/len];
-                    for vi in 0..3 {
-                        let off = base + 40 + vi * 4;
-                        all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
+                // Normals: use mesh normals for identity/affine transforms.
+                // For non-affine Möbius, leave as zero — the QB shader computes
+                // per-fragment normals from surface derivatives which are correct
+                // under conformal deformation. CPU smooth normals would need the
+                // full Möbius transform (~10ms) which we're skipping.
+                if transform.is_affine() {
+                    if !cs.normals.is_empty() {
+                        for vi in 0..3 {
+                            let n = cs.normals[face[vi]];
+                            let off = base + 40 + vi * 4;
+                            all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
+                        }
+                    } else {
+                        let v0 = frame_verts[face[0]]; let v1 = frame_verts[face[1]]; let v2 = frame_verts[face[2]];
+                        let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
+                        let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+                        let nx = (e1[1]*e2[2] - e1[2]*e2[1]) as f32;
+                        let ny = (e1[2]*e2[0] - e1[0]*e2[2]) as f32;
+                        let nz = (e1[0]*e2[1] - e1[1]*e2[0]) as f32;
+                        let len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-10);
+                        let n = [nx/len, ny/len, nz/len];
+                        for vi in 0..3 {
+                            let off = base + 40 + vi * 4;
+                            all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
+                        }
                     }
                 }
+                // Non-affine: normals stay zero, QB shader handles it
             }
 
             // 3. DEFERRED GPU READBACK — GPU has been computing while we packed buffers
@@ -1955,8 +1961,45 @@ pub fn slice_and_transform(
                 }
             }
 
-            // xform = copy of orig (LODs now included)
+            // xform = copy of orig (positions, weights, LODs, UVs)
             all_xform.copy_from_slice(&all_orig);
+
+            // Compute smooth deformed normals for xform buffer.
+            // Transform vertices through Möbius, accumulate face normals per vertex,
+            // then write normalized smooth normals into xform normal slots.
+            if !transform.is_affine() {
+                // Transform all vertices
+                let deformed: Vec<[f64; 3]> = frame_verts.iter().map(|v| {
+                    transform.apply(Quat::from_point(v[0], v[1], v[2])).to_point()
+                }).collect();
+
+                // Accumulate face normals per vertex
+                let num_verts = frame_verts.len();
+                let mut vnormals = vec![[0.0f64; 3]; num_verts];
+                for face in &cs.tris {
+                    let p0 = deformed[face[0]]; let p1 = deformed[face[1]]; let p2 = deformed[face[2]];
+                    let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+                    let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+                    let fn_ = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+                    for &vi in face { vnormals[vi][0] += fn_[0]; vnormals[vi][1] += fn_[1]; vnormals[vi][2] += fn_[2]; }
+                }
+
+                // Normalize and write into xform (sphere reflection flips normals)
+                let sign: f32 = -1.0;
+                for (fi, face) in cs.tris.iter().enumerate() {
+                    let base = fi * 52;
+                    for vi in 0..3 {
+                        let n = &vnormals[face[vi]];
+                        let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+                        let off = base + 40 + vi * 4;
+                        if len > 1e-10 {
+                            all_xform[off]   = sign * (n[0] / len) as f32;
+                            all_xform[off+1] = sign * (n[1] / len) as f32;
+                            all_xform[off+2] = sign * (n[2] / len) as f32;
+                        }
+                    }
+                }
+            }
 
             // Store flat buffers for batch assembly
             FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((all_orig.clone(), all_xform.clone())));
