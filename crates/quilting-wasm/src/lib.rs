@@ -1087,115 +1087,129 @@ pub fn evaluate_animation_frame(t: f64) -> JsValue {
             None => return JsValue::NULL,
         };
         let pose = evaluator.evaluate(t);
-        if pose.joint_matrices.is_empty() {
-            return JsValue::NULL;
-        }
-        // Sandwich each joint matrix with normalization:
-        //   norm_M = norm * M * unnorm
-        // where norm = S*T(-c), unnorm = T(c)*S^{-1}
-        // This lets the shader work in normalized [-1,1] space.
-        let c = data.norm_center;
-        let s = data.norm_scale;
-        let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
-        // Build column-major 4x4 matrices for norm and unnorm
-        let sf = s as f32;
-        let sif = si as f32;
-        let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
-        // norm = S * T(-c): first translate by -c, then scale by s
-        // col-major: [[s,0,0,0],[0,s,0,0],[0,0,s,0],[-cx*s,-cy*s,-cz*s,1]]
-        let norm: [f32; 16] = [
-            sf, 0.0, 0.0, 0.0,
-            0.0, sf, 0.0, 0.0,
-            0.0, 0.0, sf, 0.0,
-            -cx*sf, -cy*sf, -cz*sf, 1.0,
-        ];
-        // unnorm = T(c) * S^{-1}: first scale by 1/s, then translate by +c
-        // col-major: [[1/s,0,0,0],[0,1/s,0,0],[0,0,1/s,0],[cx,cy,cz,1]]
-        let unnorm: [f32; 16] = [
-            sif, 0.0, 0.0, 0.0,
-            0.0, sif, 0.0, 0.0,
-            0.0, 0.0, sif, 0.0,
-            cx, cy, cz, 1.0,
-        ];
 
-        fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-            let mut out = [0.0f32; 16];
-            for col in 0..4 {
-                for row in 0..4 {
-                    out[col * 4 + row] = a[row] * b[col * 4]
-                        + a[4 + row] * b[col * 4 + 1]
-                        + a[8 + row] * b[col * 4 + 2]
-                        + a[12 + row] * b[col * 4 + 3];
+        let result = js_sys::Object::new();
+
+        // Joint matrices (skeletal skinning)
+        if !pose.joint_matrices.is_empty() {
+            // Sandwich each joint matrix with normalization:
+            //   norm_M = norm * M * unnorm
+            let c = data.norm_center;
+            let s = data.norm_scale;
+            let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
+            let sf = s as f32;
+            let sif = si as f32;
+            let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
+            let norm: [f32; 16] = [
+                sf, 0.0, 0.0, 0.0, 0.0, sf, 0.0, 0.0,
+                0.0, 0.0, sf, 0.0, -cx*sf, -cy*sf, -cz*sf, 1.0,
+            ];
+            let unnorm: [f32; 16] = [
+                sif, 0.0, 0.0, 0.0, 0.0, sif, 0.0, 0.0,
+                0.0, 0.0, sif, 0.0, cx, cy, cz, 1.0,
+            ];
+
+            fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+                let mut out = [0.0f32; 16];
+                for col in 0..4 {
+                    for row in 0..4 {
+                        out[col * 4 + row] = a[row] * b[col * 4]
+                            + a[4 + row] * b[col * 4 + 1]
+                            + a[8 + row] * b[col * 4 + 2]
+                            + a[12 + row] * b[col * 4 + 3];
+                    }
                 }
+                out
             }
-            out
+
+            let num_joints = pose.joint_matrices.len() / 16;
+            let mut result_mats = Vec::with_capacity(pose.joint_matrices.len());
+            for ji in 0..num_joints {
+                let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
+                let mu = mat4_mul_f32(&m, &unnorm);
+                let nmu = mat4_mul_f32(&norm, &mu);
+                result_mats.extend_from_slice(&nmu);
+            }
+            let arr = js_sys::Float32Array::new_with_length(result_mats.len() as u32);
+            arr.copy_from(&result_mats);
+            js_sys::Reflect::set(&result, &"matrices".into(), &arr).unwrap();
         }
 
-        let num_joints = pose.joint_matrices.len() / 16;
-        let mut result_mats = Vec::with_capacity(pose.joint_matrices.len());
-        for ji in 0..num_joints {
-            let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
-            // norm_M = norm * M * unnorm
-            let mu = mat4_mul_f32(&m, &unnorm);       // M * unnorm
-            let nmu = mat4_mul_f32(&norm, &mu);        // norm * (M * unnorm)
-            result_mats.extend_from_slice(&nmu);
+        // Morph weights (morph target animation)
+        if !pose.morph_weights.is_empty() {
+            let arr = js_sys::Float32Array::new_with_length(pose.morph_weights.len() as u32);
+            arr.copy_from(&pose.morph_weights);
+            js_sys::Reflect::set(&result, &"morph_weights".into(), &arr).unwrap();
         }
 
-        let arr = js_sys::Float32Array::new_with_length(result_mats.len() as u32);
-        arr.copy_from(&result_mats);
-        arr.into()
+        result.into()
     })
 }
 
-/// Get per-vertex skinning data (joint indices + weights) for the current model.
-/// Returns a JS object { joint_indices: Float32Array, joint_weights: Float32Array, num_vertices: number }
-/// or null if no skinned model is loaded.
+/// Get per-vertex animation data (skinning + morph targets) for the current model.
+/// Returns a JS object with:
+///   { joint_indices?, joint_weights?, num_vertices, num_joints, num_morph_targets,
+///     morph_deltas?, t_min, t_max, duration }
+/// Returns null if no animated model is loaded.
 #[wasm_bindgen]
 pub fn get_skinning_data() -> JsValue {
     GLTF_DATA.with(|gd| {
         let data = gd.borrow();
         let data = match data.as_ref() {
-            Some(d) => d,
-            None => return JsValue::NULL,
+            Some(d) if d.evaluator.is_some() => d,
+            _ => return JsValue::NULL,
         };
-        let ji = match data.combined.joint_indices.as_ref() {
-            Some(ji) => ji,
-            None => return JsValue::NULL,
-        };
-        let jw = match data.combined.joint_weights.as_ref() {
-            Some(jw) => jw,
-            None => return JsValue::NULL,
-        };
-        let nv = ji.len();
 
-        // Flatten joint indices to f32 (4 per vertex)
-        let mut indices_f32 = Vec::with_capacity(nv * 4);
-        for idx in ji {
-            indices_f32.push(idx[0] as f32);
-            indices_f32.push(idx[1] as f32);
-            indices_f32.push(idx[2] as f32);
-            indices_f32.push(idx[3] as f32);
-        }
-
-        // Flatten joint weights (4 per vertex)
-        let mut weights_f32 = Vec::with_capacity(nv * 4);
-        for w in jw {
-            weights_f32.push(w[0]);
-            weights_f32.push(w[1]);
-            weights_f32.push(w[2]);
-            weights_f32.push(w[3]);
-        }
-
-        let ji_arr = js_sys::Float32Array::new_with_length(indices_f32.len() as u32);
-        ji_arr.copy_from(&indices_f32);
-        let jw_arr = js_sys::Float32Array::new_with_length(weights_f32.len() as u32);
-        jw_arr.copy_from(&weights_f32);
+        let nv = data.combined.positions.len();
+        let has_skin = data.combined.joint_indices.is_some();
+        let num_morph = data.combined.morph_targets.len();
 
         let result = js_sys::Object::new();
-        js_sys::Reflect::set(&result, &"joint_indices".into(), &ji_arr).unwrap();
-        js_sys::Reflect::set(&result, &"joint_weights".into(), &jw_arr).unwrap();
         js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(nv as f64)).unwrap();
-        // Include evaluator metadata
+        js_sys::Reflect::set(&result, &"num_morph_targets".into(), &JsValue::from_f64(num_morph as f64)).unwrap();
+
+        // Joint data (optional — only for skeletal skinning)
+        if has_skin {
+            let ji = data.combined.joint_indices.as_ref().unwrap();
+            let jw = data.combined.joint_weights.as_ref().unwrap();
+            let mut indices_f32 = Vec::with_capacity(nv * 4);
+            for idx in ji {
+                indices_f32.extend_from_slice(&[idx[0] as f32, idx[1] as f32, idx[2] as f32, idx[3] as f32]);
+            }
+            let mut weights_f32 = Vec::with_capacity(nv * 4);
+            for w in jw {
+                weights_f32.extend_from_slice(&[w[0], w[1], w[2], w[3]]);
+            }
+            let ji_arr = js_sys::Float32Array::new_with_length(indices_f32.len() as u32);
+            ji_arr.copy_from(&indices_f32);
+            let jw_arr = js_sys::Float32Array::new_with_length(weights_f32.len() as u32);
+            jw_arr.copy_from(&weights_f32);
+            js_sys::Reflect::set(&result, &"joint_indices".into(), &ji_arr).unwrap();
+            js_sys::Reflect::set(&result, &"joint_weights".into(), &jw_arr).unwrap();
+        }
+
+        // Morph target deltas (optional — only for morph target animation)
+        // Deltas are scaled by norm_scale to match normalized position space.
+        if num_morph > 0 {
+            let ns = data.norm_scale as f32;
+            let mut deltas = Vec::with_capacity(num_morph * nv * 3);
+            for target in &data.combined.morph_targets {
+                for vi in 0..nv {
+                    if vi < target.len() {
+                        deltas.push(target[vi][0] as f32 * ns);
+                        deltas.push(target[vi][1] as f32 * ns);
+                        deltas.push(target[vi][2] as f32 * ns);
+                    } else {
+                        deltas.extend_from_slice(&[0.0, 0.0, 0.0]);
+                    }
+                }
+            }
+            let delta_arr = js_sys::Float32Array::new_with_length(deltas.len() as u32);
+            delta_arr.copy_from(&deltas);
+            js_sys::Reflect::set(&result, &"morph_deltas".into(), &delta_arr).unwrap();
+        }
+
+        // Evaluator metadata
         if let Some(ref eval) = data.evaluator {
             let (t_min, t_max) = eval.time_range();
             js_sys::Reflect::set(&result, &"num_joints".into(), &JsValue::from_f64(eval.num_joints() as f64)).unwrap();

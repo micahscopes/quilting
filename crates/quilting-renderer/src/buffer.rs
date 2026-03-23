@@ -333,8 +333,8 @@ pub struct JointMatricesBuf {
 /// Maximum joints supported. 128 × 64 bytes = 8KB, well within WebGL2's 16KB UBO limit.
 pub const MAX_JOINTS: usize = 128;
 
-/// Total UBO size: 16 bytes header + MAX_JOINTS × 64 bytes.
-const JOINT_UBO_SIZE: usize = 16 + MAX_JOINTS * 64;
+/// Total UBO size: 16 bytes header + MAX_JOINTS × 64 bytes + 16 × morph weight vec4s.
+const JOINT_UBO_SIZE: usize = 16 + MAX_JOINTS * 64 + 16 * 16;
 
 impl JointMatricesBuf {
     pub fn new(gl: &glow::Context) -> Result<Self, String> {

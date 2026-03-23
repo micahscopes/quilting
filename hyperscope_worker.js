@@ -186,13 +186,8 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'evaluate_animation_frame') {
-    const matrices = wasm.evaluate_animation_frame(data.t);
-    if (matrices) {
-      // Transfer the Float32Array buffer to main thread (zero-copy)
-      self.postMessage({ type: 'joint_matrices', id, matrices }, [matrices.buffer]);
-    } else {
-      self.postMessage({ type: 'joint_matrices', id, matrices: null });
-    }
+    const pose = wasm.evaluate_animation_frame(data.t);
+    self.postMessage({ type: 'animation_pose', id, pose });
     return;
   }
 

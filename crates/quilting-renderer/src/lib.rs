@@ -204,6 +204,10 @@ mod tests {
             vertex.contains("_group_0_binding_2_vs"),
             "vertex shader should have the skinning texture sampler"
         );
+        assert!(
+            vertex.contains("_group_0_binding_3_vs"),
+            "vertex shader should have the morph texture sampler"
+        );
     }
 
     #[test]

@@ -31,9 +31,13 @@ const MAX_JOINTS: u32 = 128u;
 struct JointMatrices {
     num_joints: i32,
     skin_tex_width: i32,
-    _jpad1: i32,
+    num_morph_targets: i32,
     _jpad2: i32,
     matrices: array<mat4x4<f32>, 128>,
+    // Morph weights packed as vec4s after the matrices.
+    // morph_weights[i/4][i%4] = weight for target i
+    // Max 64 morph targets (16 vec4s)
+    morph_weights: array<vec4<f32>, 16>,
 }
 
 @group(0) @binding(1)
@@ -44,8 +48,28 @@ var<uniform> joints: JointMatrices;
 @group(0) @binding(2)
 var skinning_tex: texture_2d<f32>;
 
+// Morph target deltas texture: width = num_verts, height = num_targets
+// Each texel = (dx, dy, dz, 0) position delta for that vertex+target
+@group(0) @binding(3)
+var morph_tex: texture_2d<f32>;
+
 // Apply skeletal skinning to a position.
 // vertex_idx indexes into the skinning texture.
+// Apply morph target deltas to a position.
+fn apply_morph(pos: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
+    if joints.num_morph_targets <= 0 { return pos; }
+    var result = pos;
+    let nt = joints.num_morph_targets;
+    for (var t = 0; t < 64; t = t + 1) {
+        if t >= nt { break; }
+        let w = joints.morph_weights[t / 4][t % 4];
+        if abs(w) < 1e-6 { continue; }
+        let delta = textureLoad(morph_tex, vec2<i32>(vertex_idx, t), 0).xyz;
+        result = result + w * delta;
+    }
+    return result;
+}
+
 fn skin_tex_lookup(vertex_idx: i32) -> array<vec4<f32>, 2> {
     // Simple layout: width = num_vertices, row 0 = joint indices, row 1 = weights
     var result: array<vec4<f32>, 2>;
@@ -216,23 +240,28 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     var nrm: vec3<f32>;
     out.fade = 1.0;
 
-    // GPU skeletal skinning: vertex indices are packed in p.w (flat path only).
-    // When joints.num_joints > 0, skin rest-pose positions before Möbius eval.
+    // GPU animation: vertex indices packed in p.x, positions in p.yzw (flat path only).
+    // Apply morph targets first, then skeletal skinning, before Möbius eval.
     var sp0 = in.p0;
     var sp1 = in.p1;
     var sp2 = in.p2;
-    if joints.num_joints > 0 && u.use_qb == 0 {
+    let has_gpu_anim = (joints.num_joints > 0 || joints.num_morph_targets > 0) && u.use_qb == 0;
+    if has_gpu_anim {
         let vi0 = i32(in.p0.x);
         let vi1 = i32(in.p1.x);
         let vi2 = i32(in.p2.x);
-        // Skin positions (rest pose is in p.yzw)
-        let skinned0 = skin_position(in.p0.yzw, vi0);
-        let skinned1 = skin_position(in.p1.yzw, vi1);
-        let skinned2 = skin_position(in.p2.yzw, vi2);
+        // Apply morph targets to rest-pose positions
+        var pos0 = apply_morph(in.p0.yzw, vi0);
+        var pos1 = apply_morph(in.p1.yzw, vi1);
+        var pos2 = apply_morph(in.p2.yzw, vi2);
+        // Apply skeletal skinning (if present)
+        pos0 = skin_position(pos0, vi0);
+        pos1 = skin_position(pos1, vi1);
+        pos2 = skin_position(pos2, vi2);
         // Rebuild quaternion format (w=0 for flat path)
-        sp0 = vec4<f32>(0.0, skinned0);
-        sp1 = vec4<f32>(0.0, skinned1);
-        sp2 = vec4<f32>(0.0, skinned2);
+        sp0 = vec4<f32>(0.0, pos0);
+        sp1 = vec4<f32>(0.0, pos1);
+        sp2 = vec4<f32>(0.0, pos2);
     }
 
     if u.use_qb == 1 {

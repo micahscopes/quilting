@@ -515,7 +515,7 @@ const pbrUboF32 = new Float32Array(pbrUboData);
 // 16 bytes header (num_joints + pad) + 128 * 64 bytes max matrices = 8208 bytes
 // Initialized to zeros (num_joints = 0 → no skinning)
 const JOINT_UBO_BINDING = 4;
-const JOINT_UBO_SIZE = 16 + 128 * 64; // header + MAX_JOINTS * sizeof(mat4)
+const JOINT_UBO_SIZE = 16 + 128 * 64 + 16 * 16; // header + matrices + morph weights (16 vec4s)
 const jointUbo = gl.createBuffer();
 gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
 gl.bufferData(gl.UNIFORM_BUFFER, JOINT_UBO_SIZE, gl.DYNAMIC_DRAW);
@@ -1259,10 +1259,12 @@ function bindUniformBlocks(program) {
   if (wireIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, wireIdx, WIRE_UBO_BINDING);
   const jointIdx = gl.getUniformBlockIndex(program, 'JointMatrices_block_1Vertex');
   if (jointIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(program, jointIdx, JOINT_UBO_BINDING);
-  // Skinning texture sampler → texture unit 15 (avoid conflicts with PBR textures on 0-10)
+  // Vertex shader texture samplers (avoid conflicts with PBR fragment textures on 0-10)
   gl.useProgram(program);
   const skinTexLoc = gl.getUniformLocation(program, '_group_0_binding_2_vs');
-  if (skinTexLoc) gl.uniform1i(skinTexLoc, 15);
+  if (skinTexLoc) gl.uniform1i(skinTexLoc, 15);  // skinning data
+  const morphTexLoc = gl.getUniformLocation(program, '_group_0_binding_3_vs');
+  if (morphTexLoc) gl.uniform1i(morphTexLoc, 14); // morph deltas
   gl.useProgram(null);
 }
 
@@ -2073,30 +2075,65 @@ async function setupGpuSkinning() {
   // 1. Get skinning data from worker and upload as texture
   const skinResp = await workerCall('get_skinning_data', {});
   const sd = skinResp.skinData;
-  if (!sd || !sd.joint_indices) {
-    console.warn('No skinning data available');
+  if (!sd) {
+    console.warn('No animation data available');
     gpuSkinned = false;
     return false;
   }
+  const hasJoints = sd.joint_indices && sd.num_joints > 0;
+  const hasMorph = sd.num_morph_targets > 0;
 
   // Upload skinning texture: RGBA32F, width = num_vertices, height = 2
   // Row 0: joint indices, Row 1: weights
-  if (skinningTexture) gl.deleteTexture(skinningTexture);
-  skinningTexture = gl.createTexture();
   const nv = sd.num_vertices;
-  // Simple layout: width = nv, height = 2 (row 0 = indices, row 1 = weights)
-  const texData = new Float32Array(nv * 4 * 2);
-  texData.set(sd.joint_indices, 0);          // row 0
-  texData.set(sd.joint_weights, nv * 4);     // row 1
-  window._skinTexW = nv; // width = num_vertices (no tiling needed, MAX_TEXTURE_SIZE is large enough)
-  gl.activeTexture(gl.TEXTURE15);
-  gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, nv, 2, 0, gl.RGBA, gl.FLOAT, texData);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  console.log(`Skinning texture uploaded: ${nv} vertices, ${sd.num_joints} joints`);
+  window._skinTexW = nv;
+
+  // 1. Skinning texture (joint indices + weights) — only for skeletal models
+  if (skinningTexture) gl.deleteTexture(skinningTexture);
+  if (hasJoints) {
+    skinningTexture = gl.createTexture();
+    const texData = new Float32Array(nv * 4 * 2);
+    texData.set(sd.joint_indices, 0);
+    texData.set(sd.joint_weights, nv * 4);
+    gl.activeTexture(gl.TEXTURE15);
+    gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, nv, 2, 0, gl.RGBA, gl.FLOAT, texData);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    console.log(`Skinning texture uploaded: ${nv} vertices, ${sd.num_joints} joints`);
+  } else {
+    skinningTexture = null;
+  }
+
+  // 2. Morph delta texture — width = nv, height = num_targets
+  if (window._morphTex) gl.deleteTexture(window._morphTex);
+  if (hasMorph && sd.morph_deltas) {
+    const nt = sd.num_morph_targets;
+    window._morphTex = gl.createTexture();
+    // Pack deltas as RGBA32F: (dx, dy, dz, 0) per texel
+    const morphData = new Float32Array(nv * nt * 4);
+    for (let t = 0; t < nt; t++) {
+      for (let v = 0; v < nv; v++) {
+        const srcOff = (t * nv + v) * 3;
+        const dstOff = (t * nv + v) * 4;
+        morphData[dstOff]   = sd.morph_deltas[srcOff];
+        morphData[dstOff+1] = sd.morph_deltas[srcOff+1];
+        morphData[dstOff+2] = sd.morph_deltas[srcOff+2];
+      }
+    }
+    gl.activeTexture(gl.TEXTURE14);
+    gl.bindTexture(gl.TEXTURE_2D, window._morphTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, nv, nt, 0, gl.RGBA, gl.FLOAT, morphData);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    console.log(`Morph texture uploaded: ${nv} vertices, ${nt} targets`);
+  } else {
+    window._morphTex = null;
+  }
 
   // 2. Get rest-pose instance data
   const rpResp = await workerCall('get_rest_pose_instances', { lod_time: sd.t_min || 0 });
@@ -2226,20 +2263,40 @@ async function setupGpuSkinning() {
   return true;
 }
 
-// Upload joint matrices to the UBO for the current animation frame.
-async function uploadJointMatrices(t) {
+// Upload animation pose data (joint matrices + morph weights) for the current frame.
+async function uploadAnimationPose(t) {
   const resp = await workerCall('evaluate_animation_frame', { t });
-  const matrices = resp.matrices;
-  if (!matrices) return;
-  // Build UBO data: 16 bytes header + matrices
-  const numJoints = matrices.length / 16;
-  const uboData = new ArrayBuffer(16 + matrices.byteLength);
-  const view = new DataView(uboData);
-  view.setInt32(0, numJoints, true);                    // num_joints at offset 0
-  view.setInt32(4, window._skinTexW || 2048, true);     // skin_tex_width at offset 4
-  new Float32Array(uboData, 16).set(matrices);
-  gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
-  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(uboData));
+  const pose = resp.pose;
+  if (!pose) return;
+
+  // Joint matrices → UBO
+  const matrices = pose.matrices;
+  if (matrices && matrices.length > 0) {
+    const numJoints = matrices.length / 16;
+    const uboData = new ArrayBuffer(16 + matrices.byteLength);
+    const view = new DataView(uboData);
+    view.setInt32(0, numJoints, true);
+    view.setInt32(4, window._skinTexW || 2048, true);
+    new Float32Array(uboData, 16).set(matrices);
+    gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(uboData));
+  }
+
+  // Morph weights → packed into joint UBO after the matrices
+  // UBO layout: 16 bytes header + 128*64 matrices + 16*16 morph weight vec4s
+  const morphWeights = pose.morph_weights;
+  if (morphWeights && morphWeights.length > 0) {
+    const numMorph = Math.min(morphWeights.length, 64);
+    // Update num_morph_targets in header (offset 8)
+    const headerPatch = new ArrayBuffer(4);
+    new DataView(headerPatch).setInt32(0, numMorph, true);
+    gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 8, new Uint8Array(headerPatch));
+    // Write morph weights at offset 16 + 128*64 = 8208
+    const morphData = new Float32Array(64); // 16 vec4s = 64 floats
+    morphData.set(morphWeights.subarray(0, numMorph));
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 16 + 128 * 64, new Uint8Array(morphData.buffer));
+  }
 }
 
 // --- Draw state ---
@@ -2600,10 +2657,16 @@ function render() {
 
   // Bind UBOs to their binding points
   bindUBOs();
-  // Bind skinning texture if GPU skinning is active
-  if (gpuSkinned && skinningTexture) {
-    gl.activeTexture(gl.TEXTURE15);
-    gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
+  // Bind animation textures if GPU animation is active
+  if (gpuSkinned) {
+    if (skinningTexture) {
+      gl.activeTexture(gl.TEXTURE15);
+      gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
+    }
+    if (window._morphTex) {
+      gl.activeTexture(gl.TEXTURE14);
+      gl.bindTexture(gl.TEXTURE_2D, window._morphTex);
+    }
   }
 
   // GPU-skinned models use flat path (use_qb = 0), regular models use QB (use_qb = 1)
@@ -3286,7 +3349,7 @@ function frame() {
       $('time-v').textContent = frame._animTime.toFixed(2);
       // Upload joint matrices — fire and render with whatever data is current.
       // The UBO update happens async; next frame's render will use it.
-      uploadJointMatrices(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
+      uploadAnimationPose(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
     } else {
       // Step one prebaked frame per render frame
       if (!frame._frameIdx) frame._frameIdx = 0;
@@ -3390,7 +3453,7 @@ async function loadGltfFromBuffer(buffer, filename) {
     if (skinOk) {
       // Evaluate initial pose
       const t0pose = (info.time_min + info.time_max) / 2;
-      await uploadJointMatrices(t0pose);
+      await uploadAnimationPose(t0pose);
       // Bind skinning texture to unit 15 for rendering
       gl.activeTexture(gl.TEXTURE15);
       gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
