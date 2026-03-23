@@ -256,6 +256,96 @@ impl TessellationAtlas {
         Some(TessellationMesh::from_2d(positions, triangles))
     }
 
+    /// Build only a subset of canonical triples (for parallel atlas construction).
+    /// `worker_index` and `num_workers` partition the triples round-robin.
+    pub fn build_subset(
+        lod_levels: &[u32],
+        config: &PatchConfig,
+        mode: BuildMode,
+        worker_index: usize,
+        num_workers: usize,
+    ) -> Self {
+        let all_triples = canonical_triples(lod_levels);
+        let my_triples: Vec<[u32; 3]> = all_triples.into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % num_workers == worker_index)
+            .map(|(_, t)| t)
+            .collect();
+
+        // For hierarchical mode, we need base patches available to subdivide.
+        // Build a minimal atlas with just the base triples first, then
+        // generate our assigned triples.
+        match mode {
+            BuildMode::Hierarchical => {
+                // Build full hierarchical (fast for bases, subdivides the rest)
+                let full = Self::build_hierarchical(lod_levels, config);
+                // Extract only our assigned triples
+                let mut atlas = TessellationAtlas {
+                    positions: Vec::new(),
+                    triangles: Vec::new(),
+                    patches: HashMap::new(),
+                    lod_levels: lod_levels.to_vec(),
+                };
+                for key in &my_triples {
+                    if let Some(entry) = full.patches.get(key) {
+                        let positions = full.positions
+                            [entry.base_vertex..entry.base_vertex + entry.vertex_count].to_vec();
+                        let triangles: Vec<[usize; 3]> = full.triangles
+                            [entry.base_triangle..entry.base_triangle + entry.triangle_count]
+                            .iter()
+                            .map(|t| [t[0] - entry.base_vertex, t[1] - entry.base_vertex, t[2] - entry.base_vertex])
+                            .collect();
+                        let base_vertex = atlas.positions.len();
+                        let base_triangle = atlas.triangles.len();
+                        atlas.positions.extend_from_slice(&positions);
+                        for t in &triangles {
+                            atlas.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
+                        }
+                        atlas.patches.insert(*key, PatchEntry {
+                            base_vertex,
+                            vertex_count: positions.len(),
+                            base_triangle,
+                            triangle_count: triangles.len(),
+                        });
+                    }
+                }
+                atlas
+            }
+            BuildMode::Direct => {
+                let results: Vec<_> = my_triples.iter()
+                    .filter_map(|&key| generate_patch(key, config).map(|(p, t)| (key, p, t)))
+                    .collect();
+                merge_patches(lod_levels, results)
+            }
+        }
+    }
+
+    /// Merge another atlas into this one (for combining parallel build results).
+    pub fn merge_from(&mut self, other: &TessellationAtlas) {
+        for (key, entry) in &other.patches {
+            if self.patches.contains_key(key) { continue; }
+            let positions = other.positions
+                [entry.base_vertex..entry.base_vertex + entry.vertex_count].to_vec();
+            let triangles: Vec<[usize; 3]> = other.triangles
+                [entry.base_triangle..entry.base_triangle + entry.triangle_count]
+                .iter()
+                .map(|t| [t[0] - entry.base_vertex, t[1] - entry.base_vertex, t[2] - entry.base_vertex])
+                .collect();
+            let base_vertex = self.positions.len();
+            let base_triangle = self.triangles.len();
+            self.positions.extend_from_slice(&positions);
+            for t in &triangles {
+                self.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
+            }
+            self.patches.insert(*key, PatchEntry {
+                base_vertex,
+                vertex_count: positions.len(),
+                base_triangle,
+                triangle_count: triangles.len(),
+            });
+        }
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         bincode::serialize(self).expect("atlas serialization failed")
     }

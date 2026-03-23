@@ -37,6 +37,19 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'build_atlas_subset') {
+    const { maxLodExp, mode, workerIndex, numWorkers } = data;
+    const ms = wasm.build_atlas_subset(maxLodExp, mode, workerIndex, numWorkers);
+    self.postMessage({ type: 'atlas_subset_built', id, ms });
+    return;
+  }
+
+  if (type === 'merge_atlas_bytes') {
+    const ok = wasm.merge_atlas_bytes(new Uint8Array(data.bytes));
+    self.postMessage({ type: 'atlas_merged', id, ok });
+    return;
+  }
+
   if (type === 'export_atlas_bytes') {
     const bytes = wasm.export_atlas_bytes();
     self.postMessage({ type: 'atlas_bytes', id, bytes: bytes.buffer }, [bytes.buffer]);

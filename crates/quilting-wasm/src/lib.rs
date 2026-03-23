@@ -137,6 +137,40 @@ pub fn export_all_patches() -> JsValue {
     })
 }
 
+/// Build a subset of the atlas (for parallel construction).
+#[wasm_bindgen]
+pub fn build_atlas_subset(max_lod_exp: u32, mode: &str, worker_index: u32, num_workers: u32) -> f64 {
+    let config = PatchConfig { k_candidates: 30, seed: 42 };
+    let lods: Vec<u32> = (0..=max_lod_exp).map(|n| 1u32 << n).collect();
+    let build_mode = match mode {
+        "hierarchical" => BuildMode::Hierarchical,
+        _ => BuildMode::Direct,
+    };
+    let start = js_sys::Date::now();
+    let atlas = TessellationAtlas::build_subset(&lods, &config, build_mode, worker_index as usize, num_workers as usize);
+    let elapsed = js_sys::Date::now() - start;
+    ATLAS.with(|a| *a.borrow_mut() = Some(atlas));
+    SENT_TESS.with(|s| s.borrow_mut().clear());
+    elapsed
+}
+
+/// Merge another atlas (from bytes) into the current one.
+#[wasm_bindgen]
+pub fn merge_atlas_bytes(bytes: &[u8]) -> bool {
+    match TessellationAtlas::from_bytes(bytes) {
+        Ok(other) => {
+            ATLAS.with(|a| {
+                if let Some(atlas) = a.borrow_mut().as_mut() {
+                    atlas.merge_from(&other);
+                }
+            });
+            SENT_TESS.with(|s| s.borrow_mut().clear());
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Export the atlas as bytes for sharing with other workers.
 #[wasm_bindgen]
 pub fn export_atlas_bytes() -> Vec<u8> {
@@ -207,11 +241,16 @@ pub fn extend_atlas(new_lod: u32) -> f64 {
 pub fn generate_and_store_patch(res_a: u32, res_b: u32, res_c: u32) {
     ATLAS.with(|atlas_cell| {
         let mut atlas_opt = atlas_cell.borrow_mut();
-        if let Some(atlas) = atlas_opt.as_mut() {
-            let mut key = [res_a, res_b, res_c];
-            key.sort();
-            ensure_patch(atlas, key);
-        }
+        // Initialize empty atlas if none exists
+        let atlas = atlas_opt.get_or_insert_with(|| TessellationAtlas {
+            positions: Vec::new(),
+            triangles: Vec::new(),
+            patches: std::collections::HashMap::new(),
+            lod_levels: Vec::new(),
+        });
+        let mut key = [res_a, res_b, res_c];
+        key.sort();
+        ensure_patch(atlas, key);
     });
 }
 
@@ -241,25 +280,29 @@ fn get_patch_local(atlas: &TessellationAtlas, key: &[u32; 3]) -> Option<(Vec<[f6
     Some((positions, triangles))
 }
 
-/// Generate a patch by hierarchical subdivision only. With min LOD = 2, all
-/// runtime LODs are even, so every patch can be derived by halving down to
-/// a parent in the initial atlas. No Poisson needed at runtime.
+/// Generate a patch: try hierarchical subdivision, fall back to Poisson.
 fn ensure_patch(atlas: &mut TessellationAtlas, key: [u32; 3]) -> bool {
     if atlas.patches.contains_key(&key) { return true; }
 
-    if key[0] % 2 != 0 || key[1] % 2 != 0 || key[2] % 2 != 0 || key[0] == 0 {
-        return false; // shouldn't happen with min LOD = 2
+    // Try subdivision if all components are even
+    if key[0] % 2 == 0 && key[1] % 2 == 0 && key[2] % 2 == 0 && key[0] > 0 {
+        let parent = [key[0] / 2, key[1] / 2, key[2] / 2];
+        if ensure_patch(atlas, parent) {
+            if let Some((pos, tris)) = get_patch_local(atlas, &parent) {
+                let (new_pos, new_tris) = quilting_core::subdivide::subdivide(&pos, &tris);
+                insert_patch(atlas, key, new_pos, new_tris);
+                return true;
+            }
+        }
     }
 
-    let parent = [key[0] / 2, key[1] / 2, key[2] / 2];
-    if !ensure_patch(atlas, parent) { return false; }
-
-    let (pos, tris) = match get_patch_local(atlas, &parent) {
-        Some(v) => v,
-        None => return false,
-    };
-    let (new_pos, new_tris) = quilting_core::subdivide::subdivide(&pos, &tris);
-    insert_patch(atlas, key, new_pos, new_tris);
+    // Poisson fallback
+    let config = PatchConfig { k_candidates: 30, seed: 42 };
+    let res = [key[0] as f64, key[1] as f64, key[2] as f64];
+    let sample = quilting_core::sampling::tri_patch(res, &config);
+    if sample.positions.len() < 3 { return false; }
+    let tri = quilting_core::delaunay::triangulate_2d_constrained(&sample.positions, &sample.bary);
+    insert_patch(atlas, key, tri.positions, tri.triangles);
     true
 }
 
@@ -1409,8 +1452,13 @@ pub fn slice_and_transform(
         batches: vec![], total_faces: 0, num_batches: 0, timings: [0.0, 0.0, 0.0],
     }).unwrap();
 
-    // Check if we can reuse the cached slice (same normal + offset)
-    let t_start = js_sys::Date::now();
+    // Performance marks
+    let perf_early: web_sys::Performance = js_sys::Reflect::get(
+        &js_sys::global(), &"performance".into()
+    ).ok().and_then(|p| p.dyn_into().ok()).unwrap();
+    perf_early.mark("sat:fn-start").ok();
+
+    let _t_start = js_sys::Date::now();
 
     let cache_hit = SLICE_CACHE.with(|c| {
         let cache = c.borrow();
@@ -1765,11 +1813,12 @@ pub fn slice_and_transform(
 
     pm("sat:serialize-end");
 
+    perf.measure_with_start_mark_and_end_mark("Slice + Cache", "sat:fn-start", "sat:mobius-start").ok();
     perf.measure_with_start_mark_and_end_mark("Möbius + LOD", "sat:mobius-start", "sat:mobius-end").ok();
     perf.measure_with_start_mark_and_end_mark("Materials + Grouping", "sat:group-start", "sat:group-end").ok();
     perf.measure_with_start_mark_and_end_mark("Batch Assembly", "sat:batch-start", "sat:batch-end").ok();
     perf.measure_with_start_mark_and_end_mark("Serialize to JS", "sat:serialize-start", "sat:serialize-end").ok();
-    perf.measure_with_start_mark_and_end_mark("slice_and_transform total", "sat:mobius-start", "sat:serialize-end").ok();
+    perf.measure_with_start_mark_and_end_mark("Total (WASM)", "sat:fn-start", "sat:serialize-end").ok();
 
     let result = js_sys::Object::new();
     js_sys::Reflect::set(&result, &"batches".into(), &js_batches).ok();

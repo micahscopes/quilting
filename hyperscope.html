@@ -220,6 +220,8 @@ let renderMode = 'pbr';
 let rotX = 0.3, rotY = 0.5, zoom = 5;
 let animDir = 1;
 let pendingUpdate = false, updating = false;
+let updateGeneration = 0; // increments on each update request
+let renderedGeneration = 0; // latest generation that was actually rendered
 
 // Patch streaming: deduplicating queue with single consumer
 const patchQueue = [];
@@ -2265,8 +2267,7 @@ function updateMobius() {
 
 async function update() {
   if (!workerReady || !meshInfo) return;
-  if (updating) { pendingUpdate = true; return; }
-  updating = true;
+  const gen = ++updateGeneration;
 
   const timeOffset = parseFloat($('time').value);
   const normal = getSliceNormal();
@@ -2359,6 +2360,10 @@ async function update() {
   const ms = performance.now() - t0;
   const data = resp.result;
 
+  // Skip if a newer result was already rendered (out-of-order arrival)
+  if (gen <= renderedGeneration) return;
+  renderedGeneration = gen;
+
   if (data && data.batches) {
     uploadBatches(data);
     render();
@@ -2390,8 +2395,6 @@ async function update() {
     drainPatchQueue(); // keep processing even if no NEW patches were queued
   }
 
-  updating = false;
-  if (pendingUpdate) { pendingUpdate = false; update(); }
 }
 
 // --- Mouse orbit + pan ---
@@ -2466,6 +2469,7 @@ function setupBtnGroup(id, cb) {
 
 setupBtnGroup('shape-btns', async (name) => {
   currentShape = name;
+  workerReady = false;
   $('stats').innerHTML = 'Loading shape...';
   const resp = await broadcastCall('create_hypermesh', { name });
   meshInfo = resp.result;
@@ -2482,6 +2486,7 @@ setupBtnGroup('shape-btns', async (name) => {
   animDir = 1;
   // Built-in shapes have no materials/textures
   createTexturesFromGltf([], []);
+  workerReady = true;
   update();
 });
 
@@ -2654,6 +2659,7 @@ function frame() {
 
 // --- glTF/GLB file loading ---
 async function loadGltfFromBuffer(buffer, filename) {
+  workerReady = false; // pause updates while loading
   $('stats').innerHTML = `Loading <span class="val">${filename || 'glTF'}</span>...`;
   // Deselect built-in shape buttons
   document.querySelectorAll('#shape-btns button').forEach(b => b.classList.remove('a'));
@@ -2709,6 +2715,7 @@ async function loadGltfFromBuffer(buffer, filename) {
     `Loaded <span class="val">${filename || 'glTF'}</span><br>` +
     `Verts: <span class="val">${info.num_vertices}</span> Faces: <span class="val">${info.num_faces}</span>` +
     (numMats > 1 ? `<br>Materials: <span class="val">${numMats}</span>` : '');
+  workerReady = true;
   await update();
 }
 
@@ -2760,11 +2767,15 @@ wrapEl.addEventListener('drop', async (e) => {
 
 // --- Init ---
 // Helper to call a specific worker by index
-function workerCallN(idx, type, data) {
+function workerCallN(idx, type, data, transferList) {
   return new Promise((resolve) => {
     const id = ++msgId;
     pending.set(id, resolve);
-    workers[idx].worker.postMessage({ type, data, id });
+    if (transferList) {
+      workers[idx].worker.postMessage({ type, data, id }, transferList);
+    } else {
+      workers[idx].worker.postMessage({ type, data, id });
+    }
   });
 }
 
@@ -2787,19 +2798,56 @@ initShaderPrograms(shaderResp.vs, shaderResp.fs_matcap, shaderResp.fs_wire, shad
 initEnvMaps();
 generateSheenELut();
 
-// Build atlas on primary worker, share to others via bytes
-$('stats').textContent = `Building atlas (LODs 1–512)...`;
-const r1build = await workerCall('build_atlas', { maxLodExp: 9, mode: 'hierarchical' });
-const atlasMs = r1build.ms;
+// Parallel atlas build: all Poisson patches, work-queue across workers
+const t0atlas = performance.now();
+const levels = [];
+for (let i = 0; i <= 9; i++) levels.push(1 << i);
+const allTriples = [];
+const seen = new Set();
+for (const a of levels)
+  for (const b of levels)
+    for (const c of levels) {
+      const s = [a,b,c].sort((x,y)=>x-y);
+      const k = s.join(',');
+      if (!seen.has(k)) { seen.add(k); allTriples.push(s); }
+    }
+// Expensive first — keeps workers saturated while big patches compute
+allTriples.sort((a,b) => (b[2]+b[1]+b[0]) - (a[2]+a[1]+a[0]));
+
+$('stats').textContent = `Building ${allTriples.length} patches across ${NUM_WORKERS} workers...`;
+{
+  let qi = 0;
+  const total = allTriples.length;
+  function dispatchNext(wi) {
+    if (qi >= total) return Promise.resolve();
+    const [a, b, c] = allTriples[qi++];
+    const done = qi;
+    if (done % 5 === 0) $('stats').textContent = `Building patches... ${done}/${total}`;
+    return workerCallN(wi, 'generate_single', { a, b, c }).then(() => dispatchNext(wi));
+  }
+  await Promise.all(workers.map((_, i) => dispatchNext(i)));
+}
+
+// Merge all subsets into primary worker, then share the full atlas
+$('stats').textContent = 'Merging atlas...';
 if (NUM_WORKERS > 1) {
-  $('stats').textContent = `Sharing atlas with ${NUM_WORKERS - 1} workers...`;
-  const exportResp = await workerCall('export_atlas_bytes', {});
-  // Import into all other workers in parallel (transferring copies of the bytes)
+  // Each non-primary worker exports its subset
+  const subExports = await Promise.all(
+    workers.slice(1).map((_, i) => workerCallN(i + 1, 'export_atlas_bytes', {}))
+  );
+  // Primary merges all subsets (sequential WASM calls, fast)
+  for (const exp of subExports) {
+    await workerCallN(0, 'merge_atlas_bytes', { bytes: exp.bytes });
+  }
+  // Primary now has the full atlas — share to all others via transfer
+  const fullExport = await workerCallN(0, 'export_atlas_bytes', {});
+  const fullBytes = new Uint8Array(fullExport.bytes);
   await Promise.all(workers.slice(1).map((_, i) => {
-    const copy = exportResp.bytes.slice(0); // copy since transfer detaches
-    return workerCallN(i + 1, 'import_atlas_bytes', { bytes: copy }, [copy]);
+    const copy = fullBytes.slice(0); // each worker needs its own copy
+    return workerCallN(i + 1, 'import_atlas_bytes', { bytes: copy.buffer }, [copy.buffer]);
   }));
 }
+const atlasMs = performance.now() - t0atlas;
 $('stats').textContent = 'Uploading atlas patches...';
 await new Promise(r => setTimeout(r, 0));
 const patchResp = await workerCall('export_patches', {});
