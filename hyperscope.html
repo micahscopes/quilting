@@ -376,14 +376,44 @@ const worker = workers[0].worker;
 // Round-robin index for slice_and_transform calls
 let nextWorkerIdx = 0;
 
+// SharedArrayBuffer for zero-copy worker→main data transfer.
+// Each worker gets a slot to write instance data into.
+// Main thread reads directly — no postMessage data, no copies.
+const SAB_SLOT_SIZE = 200000 * 52 * 4; // 200K faces × 52 floats × 4 bytes = ~40MB per slot
+const SAB_ENABLED = typeof SharedArrayBuffer !== 'undefined';
+let sharedBuf = null, sharedOrigViews = [], sharedXformViews = [];
+if (SAB_ENABLED) {
+  try {
+    sharedBuf = new SharedArrayBuffer(SAB_SLOT_SIZE * 2 * NUM_WORKERS); // orig+xform per worker
+    for (let i = 0; i < NUM_WORKERS; i++) {
+      const origOff = i * 2 * SAB_SLOT_SIZE;
+      const xformOff = origOff + SAB_SLOT_SIZE;
+      sharedOrigViews.push(new Float32Array(sharedBuf, origOff, SAB_SLOT_SIZE / 4));
+      sharedXformViews.push(new Float32Array(sharedBuf, xformOff, SAB_SLOT_SIZE / 4));
+    }
+    // Send shared buffer to all workers
+    for (let i = 0; i < NUM_WORKERS; i++) {
+      workers[i].worker.postMessage({
+        type: 'set_shared_buffer', sharedBuf,
+        origOffset: i * 2 * SAB_SLOT_SIZE,
+        xformOffset: i * 2 * SAB_SLOT_SIZE + SAB_SLOT_SIZE,
+        slotSize: SAB_SLOT_SIZE,
+      });
+    }
+    console.log(`SharedArrayBuffer: ${(sharedBuf.byteLength / 1e6).toFixed(0)}MB for ${NUM_WORKERS} workers`);
+  } catch (e) {
+    console.warn('SharedArrayBuffer not available:', e);
+  }
+}
+
 function workerCall(type, data, transferList) {
   return new Promise((resolve) => {
     const id = ++msgId;
-    pending.set(id, resolve);
-    // Use primary worker for everything except slice_and_transform
+    const wIdx = type === 'slice_and_transform'
+      ? nextWorkerIdx++ % NUM_WORKERS : 0;
+    pending.set(id, (resp) => { resp._workerIdx = wIdx; resolve(resp); });
     const target = type === 'slice_and_transform'
-      ? workers[nextWorkerIdx++ % NUM_WORKERS].worker
-      : worker;
+      ? workers[wIdx].worker : worker;
     if (transferList) {
       target.postMessage({ type, data, id }, transferList);
     } else {
@@ -1926,7 +1956,11 @@ function uploadBatches(data) {
   // Original mesh wireframe — use the flat transferred buffer directly
   numOrigInst = data.total_faces;
   {
-    const allOrig = data.all_orig; // already a flat Float32Array
+    // Read from SharedArrayBuffer or transferred buffer
+    const workerIdx = data._workerIdx || 0;
+    const allOrig = data.shared
+      ? sharedOrigViews[workerIdx].subarray(0, data.data_len)
+      : data.all_orig;
     if (!vaoOrigMesh) {
       vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, allOrig);
     } else {
@@ -1989,8 +2023,10 @@ function uploadBatches(data) {
     // Slice instance data from flat transferred buffers
     const off = offset * 52;
     const len = numFaces * 52;
-    const gpuData = new Float32Array(data.all_orig.buffer, off * 4, len);
-    const xf = new Float32Array(data.all_xform.buffer, off * 4, len);
+    const origBuf = data.shared ? sharedOrigViews[data._workerIdx || 0] : new Float32Array(data.all_orig.buffer);
+    const xfBuf = data.shared ? sharedXformViews[data._workerIdx || 0] : new Float32Array(data.all_xform.buffer);
+    const gpuData = origBuf.subarray(off, off + len);
+    const xf = xfBuf.subarray(off, off + len);
     for (let i = 0; i < numFaces; i++) {
       const base = i * 52;
       for (let j = 24; j < 32; j++) gpuData[base+j] = xf[base+j];
@@ -2375,6 +2411,7 @@ async function update() {
   });
   const ms = performance.now() - t0;
   const data = resp.result;
+  if (data) data._workerIdx = resp._workerIdx;
 
   // Skip if a newer result was already rendered (out-of-order arrival)
   if (gen <= renderedGeneration) return;

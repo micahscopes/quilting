@@ -1,9 +1,17 @@
 // Hyperscope Worker: loads WASM, handles spacetime slicing + Mobius transforms.
 
 let wasm = null;
+let sharedOrigView = null, sharedXformView = null;
 
 self.onmessage = async function(e) {
   const { type, data, id } = e.data;
+
+  if (type === 'set_shared_buffer') {
+    const { sharedBuf, origOffset, xformOffset, slotSize } = e.data;
+    sharedOrigView = new Float32Array(sharedBuf, origOffset, slotSize / 4);
+    sharedXformView = new Float32Array(sharedBuf, xformOffset, slotSize / 4);
+    return;
+  }
 
   if (type === 'init') {
     const mod = await import('./pkg/quilting_wasm.js');
@@ -97,13 +105,31 @@ self.onmessage = async function(e) {
       vpWidth || 0,
       vpHeight || 0,
     );
-    // Transfer flat buffers zero-copy to main thread
-    const transferList = [];
-    if (result.all_orig) transferList.push(result.all_orig.buffer);
-    if (result.all_xform) transferList.push(result.all_xform.buffer);
-    if (result.batch_meta) transferList.push(result.batch_meta.buffer);
-    if (result.face_indices) transferList.push(result.face_indices.buffer);
-    self.postMessage({ type: 'batches', id, result }, transferList);
+    if (sharedOrigView && result.all_orig && result.all_xform) {
+      // Write into SharedArrayBuffer — main thread reads directly, zero copy
+      sharedOrigView.set(result.all_orig);
+      sharedXformView.set(result.all_xform);
+      // Send only metadata (tiny) — instance data is in shared memory
+      const metaTransfer = [];
+      if (result.batch_meta) metaTransfer.push(result.batch_meta.buffer);
+      if (result.face_indices) metaTransfer.push(result.face_indices.buffer);
+      self.postMessage({ type: 'batches', id, result: {
+        total_faces: result.total_faces,
+        num_batches: result.num_batches,
+        batch_meta: result.batch_meta,
+        face_indices: result.face_indices,
+        shared: true,
+        data_len: result.all_orig.length,
+      }}, metaTransfer);
+    } else {
+      // Fallback: transfer flat buffers
+      const transferList = [];
+      if (result.all_orig) transferList.push(result.all_orig.buffer);
+      if (result.all_xform) transferList.push(result.all_xform.buffer);
+      if (result.batch_meta) transferList.push(result.batch_meta.buffer);
+      if (result.face_indices) transferList.push(result.face_indices.buffer);
+      self.postMessage({ type: 'batches', id, result }, transferList);
+    }
     return;
   }
 

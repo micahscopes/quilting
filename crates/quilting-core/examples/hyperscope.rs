@@ -62,7 +62,7 @@ fn main() {
             let path = std::path::Path::new(dir).join(filename);
             let data = std::fs::read(&path).ok()?;
             let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nConnection: close\r\n\r\n",
                 mime, data.len()
             );
             let mut resp = headers.into_bytes();
@@ -81,14 +81,14 @@ fn main() {
             Some((content_type, text_body, binary_body)) => {
                 if let Some(bin) = binary_body {
                     let headers = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nConnection: close\r\n\r\n",
                         content_type, bin.len()
                     );
                     let _ = stream.write_all(headers.as_bytes());
                     let _ = stream.write_all(bin);
                 } else {
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nConnection: close\r\n\r\n{}",
                         content_type, text_body.len(), text_body
                     );
                     let _ = stream.write_all(response.as_bytes());
@@ -97,7 +97,7 @@ fn main() {
             None => {
                 let body = "not found";
                 let response = format!(
-                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nConnection: close\r\n\r\n{}",
                     body.len(), body
                 );
                 let _ = stream.write_all(response.as_bytes());
