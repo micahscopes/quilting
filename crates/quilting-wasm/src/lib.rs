@@ -2245,61 +2245,65 @@ pub fn slice_and_transform(
     // entire atlas lookup + bary conversion. Just emit batch metadata.
     let has_prebake = PREBAKE_INFO.with(|pi| pi.borrow().is_some());
 
-    ATLAS.with(|atlas_cell| {
-        let atlas_ref = atlas_cell.borrow();
+    // PREBAKE FAST PATH: reorder flat buffers by batch in one pass.
+    // No per-batch Vec allocation — single sorted buffer with offset/count per batch.
+    if has_prebake {
+        let mut sorted_orig = vec![0.0f32; num_tris * 52];
+        let mut sorted_xform = vec![0.0f32; num_tris * 52];
+        let mut write_pos = 0usize;
 
-        for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
-            if has_prebake {
-                // FAST PATH: no atlas lookup, no bary conversion.
-                // JS has all tess buffers pre-uploaded.
+        FLAT_INSTANCE_DATA.with(|fid| {
+            let fid = fid.borrow();
+            let (flat_orig, flat_xform) = match fid.as_ref() {
+                Some(pair) => pair,
+                None => return,
+            };
+
+            for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
+                let batch_offset = write_pos;
+                let nf = face_indices.len();
                 let parity = perm_sign(perm_index);
                 let actual_lod = if override_res > 0 {
                     [override_res; 3]
-                } else {
+                } else if !face_indices.is_empty() {
                     instances_xform[face_indices[0]].edge_lods
-                };
+                } else { [2; 3] };
 
-                let nf = face_indices.len();
-                let mut orig_data = vec![0.0f32; nf * 52];
-                let mut xform_data = vec![0.0f32; nf * 52];
-                let used_flat = FLAT_INSTANCE_DATA.with(|fid| {
-                    let fid = fid.borrow();
-                    if let Some((ref flat_orig, ref flat_xform)) = *fid {
-                        for (i, &fi) in face_indices.iter().enumerate() {
-                            let src = fi * 52;
-                            if src + 52 <= flat_orig.len() {
-                                orig_data[i*52..(i+1)*52].copy_from_slice(&flat_orig[src..src+52]);
-                                xform_data[i*52..(i+1)*52].copy_from_slice(&flat_xform[src..src+52]);
-                            }
-                        }
-                        true
-                    } else { false }
-                });
-                if !used_flat {
-                    for (i, &fi) in face_indices.iter().enumerate() {
-                        let o = instances_orig[fi].to_f32_array();
-                        let x = instances_xform[fi].to_f32_array();
-                        orig_data[i*52..(i+1)*52].copy_from_slice(&o);
-                        xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+                for &fi in face_indices {
+                    let src = fi * 52;
+                    let dst = write_pos * 52;
+                    if src + 52 <= flat_orig.len() && dst + 52 <= sorted_orig.len() {
+                        sorted_orig[dst..dst+52].copy_from_slice(&flat_orig[src..src+52]);
+                        sorted_xform[dst..dst+52].copy_from_slice(&flat_xform[src..src+52]);
                     }
+                    write_pos += 1;
                 }
 
                 raw_batches.push(RawBatch {
                     actual_lod,
                     canonical_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
                     used_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
-                    is_fallback: false,
-                    parity, perm_index, material_index: mat_idx,
+                    is_fallback: false, parity, perm_index, material_index: mat_idx,
                     face_indices: face_indices.iter().map(|&i| {
                         if i < source_faces.len() { source_faces[i] as u32 } else { i as u32 }
                     }).collect(),
-                    num_faces: nf,
-                    n_verts: 0, n_tris: 0, // JS uses atlasBuffers, doesn't need these
-                    orig_data, xform_data,
+                    num_faces: nf, n_verts: 0, n_tris: 0,
+                    orig_data: vec![], xform_data: vec![],
                     bary_data: vec![], tess_tris: vec![],
                 });
-                continue;
             }
+        });
+
+        // Replace flat instance data with sorted version
+        FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((sorted_orig, sorted_xform)));
+    }
+
+    ATLAS.with(|atlas_cell| {
+        let atlas_ref = atlas_cell.borrow();
+
+        for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
+            // Skip if already handled by prebake fast path
+            if has_prebake { continue; }
 
             let (mesh, used_lod) = {
                 let mut found = None;
