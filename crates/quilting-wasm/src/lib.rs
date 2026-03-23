@@ -1877,7 +1877,7 @@ pub fn slice_and_transform(
         // then read back LODs as late as possible.
 
         // 1. FIRE GPU compute (non-blocking — flush starts the work)
-        let gpu_n = if !transform.is_affine() {
+        let gpu_n = {
             GPU_COMPUTE.with(|gc| {
                 let gc = gc.borrow();
                 let (gl, compute) = gc.as_ref().unwrap();
@@ -1896,7 +1896,7 @@ pub fn slice_and_transform(
                     min_px_val, &vp_f32, vpw, vph,
                 )
             })
-        } else { 0 };
+        };
 
         // 2. CPU WORK while GPU computes — build flat instance buffers
         // Write positions, weights, LODs, UVs, normals directly into flat f32 buffers.
@@ -2085,78 +2085,11 @@ pub fn slice_and_transform(
             (dummy_instances.clone(), dummy_instances, nf, src)
         })
     } else {
-    // NON-PREBAKED PATH (original)
-    SLICE_CACHE.with(|c| {
-        let cache = c.borrow();
-        let cs = cache.as_ref().unwrap();
-        let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
-        let normal_ref = if cs.normals.is_empty() { None } else { Some(cs.normals.as_slice()) };
-        let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref, normal_ref);
-
-        let xform = if gpu_available && !transform.is_affine() {
-            use quilting_core::evaluate::compute_instances_xform_only;
-            let mut xf = compute_instances_xform_only(&cs.verts, &cs.tris, &transform, uv_ref, normal_ref);
-
-            let mut cp_data: Vec<f32> = Vec::with_capacity(cs.tris.len() * 12);
-            for face in &cs.tris {
-                for &vi in face {
-                    let v = cs.verts[vi];
-                    let q = Quat::from_point(v[0], v[1], v[2]);
-                    cp_data.push(q.w as f32);
-                    cp_data.push(q.x as f32);
-                    cp_data.push(q.y as f32);
-                    cp_data.push(q.z as f32);
-                }
-            }
-            // Compute mesh radius
-            let mesh_radius = {
-                let (mut cx, mut cy, mut cz) = (0.0, 0.0, 0.0);
-                for v in &cs.verts { cx += v[0]; cy += v[1]; cz += v[2]; }
-                let n = cs.verts.len() as f64;
-                cx /= n; cy /= n; cz /= n;
-                cs.verts.iter()
-                    .map(|v| ((v[0]-cx).powi(2) + (v[1]-cy).powi(2) + (v[2]-cz).powi(2)).sqrt())
-                    .fold(0.0f64, f64::max)
-                    .max(1e-6)
-            };
-
-            // GPU compute LODs
-            let gpu_lods = GPU_COMPUTE.with(|gc| {
-                let gc = gc.borrow();
-                let (gl, compute) = gc.as_ref().unwrap();
-                compute.upload_control_points(gl, &cp_data);
-                let identity_vp = [0.0f32; 16];
-                let n = compute.compute(gl, cs.tris.len(), mob_f32, tess_density as f32, mesh_radius as f32, 0.0, &identity_vp, 0.0, 0.0);
-                compute.read_back(gl, n)
-            });
-
-            // Write LODs from atlas index (GPU now outputs atlas_index + perm_index)
-            ATLAS.with(|atlas_cell| {
-                let atlas = atlas_cell.borrow();
-                let keys: Vec<[u32; 3]> = atlas.as_ref()
-                    .map(|a| a.patches.keys().copied().collect())
-                    .unwrap_or_default();
-                for (fi, inst) in xf.iter_mut().enumerate() {
-                    let rb = fi * 2;
-                    if rb + 1 < gpu_lods.len() {
-                        let idx = gpu_lods[rb] as usize;
-                        if idx < keys.len() {
-                            inst.edge_lods = [keys[idx][0], keys[idx][1], keys[idx][2]];
-                        }
-                    }
-                }
-            });
-
-            xf
-        } else {
-            // CPU fallback: full Möbius + LOD computation
-            compute_instances_with_uvs(&cs.verts, &cs.tris, &transform, screen.as_ref(), Some(&cs.half_edge), uv_ref, normal_ref)
-        };
-
-        let src = cs.source_face_indices.clone();
-        (orig, xform, cs.tris.len(), src)
-    })
-    }; // end if prebake / else
+        // Prebake should always be active — models always call prebake_animation
+        web_sys::console::warn_1(&"slice_and_transform: no prebake data! Using empty result.".into());
+        let empty: Vec<quilting_core::evaluate::FaceInstance> = vec![];
+        (empty.clone(), empty, 0, vec![])
+    };
     pm("sat:mobius-end");
 
     pm("sat:group-start");
@@ -2311,125 +2244,8 @@ pub fn slice_and_transform(
         });
     }
 
-    ATLAS.with(|atlas_cell| {
-        let atlas_ref = atlas_cell.borrow();
-
-        for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
-            // Skip if already handled by prebake fast path
-            if has_prebake { continue; }
-
-            let (mesh, used_lod) = {
-                let mut found = None;
-                if let Some(atlas) = atlas_ref.as_ref() {
-                    if let Some(m) = atlas.get_patch(canonical_lod) {
-                        found = Some((m, canonical_lod));
-                    } else {
-                        let min_lod = canonical_lod[0];
-                        let mut try_res = min_lod;
-                        while try_res >= 1 {
-                            let uniform = [try_res, try_res, try_res];
-                            if let Some(m) = atlas.get_patch(uniform) {
-                                found = Some((m, uniform));
-                                break;
-                            }
-                            if try_res <= 1 { break; }
-                            try_res /= 2;
-                        }
-                    }
-                }
-                found.unwrap_or_else(|| {
-                    let config = PatchConfig { k_candidates: 30, seed: 42 };
-                    let sample = quilting_core::sampling::tri_patch([1.0, 1.0, 1.0], &config);
-                    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
-                    (quilting_core::mesh::TessellationMesh::from_2d(tri.positions, tri.triangles), [1, 1, 1])
-                })
-            };
-
-            let is_fallback = used_lod != canonical_lod;
-            let parity = perm_sign(perm_index);
-
-            let actual_lod = if override_res > 0 {
-                [override_res, override_res, override_res]
-            } else {
-                instances_xform[face_indices[0]].edge_lods
-            };
-
-            // Key by used_lod so fallback and correct data get separate entries
-            let tess_key = format!("{},{},{}/{}", used_lod[0], used_lod[1], used_lod[2], perm_index);
-            let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
-
-            let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
-                (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
-            } else {
-                let bary: Vec<f64> = mesh.positions.iter().map(|p| {
-                    let mut b = triangle::cartesian_to_bary(p[0], p[1]);
-                    for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
-                    let sum = b[0] + b[1] + b[2];
-                    if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
-                    match perm_index {
-                        1 => [b[0], b[2], b[1]],
-                        2 => [b[1], b[0], b[2]],
-                        3 => [b[1], b[2], b[0]],
-                        4 => [b[2], b[0], b[1]],
-                        5 => [b[2], b[1], b[0]],
-                        _ => b,
-                    }
-                }).flat_map(|b| [b[0], b[1], b[2]]).collect();
-
-                let tris_out: Vec<u32> = mesh.triangles.iter()
-                    .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
-
-                let nv = bary.len() / 3;
-                let nt = tris_out.len() / 3;
-                SENT_TESS.with(|s| s.borrow_mut().insert(tess_key));
-                (bary, tris_out, nv, nt)
-            };
-
-            let nf = face_indices.len();
-            let mut orig_data = vec![0.0f32; nf * 52];
-            let mut xform_data = vec![0.0f32; nf * 52];
-
-            let used_flat = FLAT_INSTANCE_DATA.with(|fid| {
-                let fid = fid.borrow();
-                if let Some((ref flat_orig, ref flat_xform)) = *fid {
-                    for (i, &fi) in face_indices.iter().enumerate() {
-                        let src = fi * 52;
-                        if src + 52 <= flat_orig.len() {
-                            orig_data[i*52..(i+1)*52].copy_from_slice(&flat_orig[src..src+52]);
-                            xform_data[i*52..(i+1)*52].copy_from_slice(&flat_xform[src..src+52]);
-                        }
-                    }
-                    true
-                } else {
-                    false
-                }
-            });
-            if !used_flat {
-                for (i, &fi) in face_indices.iter().enumerate() {
-                    let o = instances_orig[fi].to_f32_array();
-                    let x = instances_xform[fi].to_f32_array();
-                    orig_data[i*52..(i+1)*52].copy_from_slice(&o);
-                    xform_data[i*52..(i+1)*52].copy_from_slice(&x);
-                }
-            }
-
-            raw_batches.push(RawBatch {
-                actual_lod,
-                canonical_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
-                used_lod: [used_lod[0], used_lod[1], used_lod[2]],
-                is_fallback,
-                parity,
-                perm_index,
-                material_index: mat_idx,
-                face_indices: face_indices.iter().map(|&i| {
-                    if i < source_faces.len() { source_faces[i] as u32 } else { i as u32 }
-                }).collect(),
-                num_faces: face_indices.len(),
-                n_verts, n_tris,
-                orig_data, xform_data, bary_data, tess_tris,
-            });
-        }
-    });
+    // Old atlas lookup + bary conversion path removed.
+    // All batch assembly handled by prebake fast path above.
     pm("sat:batch-end");
 
     pm("sat:serialize-start");
