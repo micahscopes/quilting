@@ -43,6 +43,9 @@ thread_local! {
     static SORTED_BUFS: RefCell<(Vec<f32>, Vec<f32>)> = RefCell::new((Vec::new(), Vec::new()));
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
+    /// Sorted atlas patch keys — built once during LUT upload, reused for GPU readback.
+    /// Guarantees stable index↔key mapping regardless of HashMap iteration order.
+    static ATLAS_KEYS: RefCell<Vec<[u32; 3]>> = RefCell::new(Vec::new());
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
@@ -166,11 +169,14 @@ pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
 
             // Build and upload atlas LUT: exponent triple → atlas index
             // key = exp_a + exp_b*10 + exp_c*100 where exp = log2(lod)
+            // LUT size 1200 handles exponents up to 10 (key up to 1110).
             ATLAS.with(|atlas_cell| {
                 let atlas = atlas_cell.borrow();
                 if let Some(atlas) = atlas.as_ref() {
-                    let mut lut = vec![255u8; 1024]; // 255 = no entry
-                    let keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
+                    const LUT_SIZE: usize = 1200;
+                    let mut lut = vec![255u8; LUT_SIZE]; // 255 = no entry
+                    let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
+                    keys.sort();
                     for (idx, key) in keys.iter().enumerate() {
                         if idx >= 255 { break; } // u8 index limit
                         // key is sorted canonical [a,b,c]
@@ -178,11 +184,12 @@ pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
                         let eb = (key[1] as f64).log2().round() as usize;
                         let ec = (key[2] as f64).log2().round() as usize;
                         let lut_key = ea + eb * 10 + ec * 100;
-                        if lut_key < 1024 {
+                        if lut_key < LUT_SIZE {
                             lut[lut_key] = idx as u8;
                         }
                     }
                     compute.upload_atlas_lut(gl, &lut);
+                    ATLAS_KEYS.with(|ak| *ak.borrow_mut() = keys.clone());
                     web_sys::console::log_1(&format!(
                         "Atlas LUT: {} entries mapped", keys.len()
                     ).into());
@@ -1995,24 +2002,21 @@ pub fn slice_and_transform(
             } else { vec![] };
 
             // Write LODs from atlas index inverse LUT into flat buffers
-            ATLAS.with(|atlas_cell| {
-                let atlas = atlas_cell.borrow();
-                if let Some(atlas) = atlas.as_ref() {
-                    let keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
-                    for fi in 0..nf {
-                        let rb = fi * 2;
-                        if rb + 1 < gpu_class.len() {
-                            let atlas_idx = gpu_class[rb] as usize;
-                            if atlas_idx < keys.len() {
-                                let lods = keys[atlas_idx];
-                                let base = fi * 52;
-                                all_orig[base + 24] = lods[0] as f32;
-                                all_orig[base + 25] = lods[1] as f32;
-                                all_orig[base + 26] = lods[2] as f32;
-                                all_orig[base + 28] = lods[0] as f32;
-                                all_orig[base + 29] = lods[1] as f32;
-                                all_orig[base + 30] = lods[2] as f32;
-                            }
+            ATLAS_KEYS.with(|ak| {
+                let keys = ak.borrow();
+                for fi in 0..nf {
+                    let rb = fi * 2;
+                    if rb + 1 < gpu_class.len() {
+                        let atlas_idx = gpu_class[rb] as usize;
+                        if atlas_idx < keys.len() {
+                            let lods = keys[atlas_idx];
+                            let base = fi * 52;
+                            all_orig[base + 24] = lods[0] as f32;
+                            all_orig[base + 25] = lods[1] as f32;
+                            all_orig[base + 26] = lods[2] as f32;
+                            all_orig[base + 28] = lods[0] as f32;
+                            all_orig[base + 29] = lods[1] as f32;
+                            all_orig[base + 30] = lods[2] as f32;
                         }
                     }
                 }
@@ -2121,11 +2125,8 @@ pub fn slice_and_transform(
         if let Some(ref class) = *gc {
             // BUCKET SORT from GPU classification: O(N) single pass
             let mut map: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
-            ATLAS.with(|atlas_cell| {
-                let atlas = atlas_cell.borrow();
-                let keys: Vec<[u32; 3]> = atlas.as_ref()
-                    .map(|a| a.patches.keys().copied().collect())
-                    .unwrap_or_default();
+            ATLAS_KEYS.with(|ak| {
+                let keys = ak.borrow();
                 for fi in 0..num_tris {
                     let rb = fi * 2;
                     if rb + 1 < class.len() {
@@ -2220,6 +2221,17 @@ pub fn slice_and_transform(
                     write_pos += 1;
                 }
 
+                // Look up actual vertex/triangle counts from atlas patch entry
+                let (n_verts, n_tris) = ATLAS.with(|atlas_cell| {
+                    let atlas = atlas_cell.borrow();
+                    if let Some(atlas) = atlas.as_ref() {
+                        if let Some(entry) = atlas.patches.get(&canonical_lod) {
+                            return (entry.vertex_count, entry.triangle_count);
+                        }
+                    }
+                    (0, 0)
+                });
+
                 raw_batches.push(RawBatch {
                     actual_lod,
                     canonical_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
@@ -2228,7 +2240,7 @@ pub fn slice_and_transform(
                     face_indices: face_indices.iter().map(|&i| {
                         if i < source_faces.len() { source_faces[i] as u32 } else { i as u32 }
                     }).collect(),
-                    num_faces: nf, n_verts: 0, n_tris: 0,
+                    num_faces: nf, n_verts, n_tris,
                     orig_data: vec![], xform_data: vec![],
                     bary_data: vec![], tess_tris: vec![],
                 });

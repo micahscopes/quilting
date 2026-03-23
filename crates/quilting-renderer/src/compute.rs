@@ -37,6 +37,7 @@ pub struct LodCompute {
     tf: glow::TransformFeedback,
     pos_texture: Option<glow::Texture>, // prebaked positions
     lut_texture: Option<glow::Texture>, // exponent triple → atlas index
+    pos_loc: Option<glow::UniformLocation>,
     lut_loc: Option<glow::UniformLocation>,
     mob_a_loc: glow::UniformLocation,
     mob_b_loc: glow::UniformLocation,
@@ -103,7 +104,7 @@ vec4 qinv(vec4 q) {
 // Möbius transform of a pure quaternion point
 vec3 mobius(vec3 p) {
     vec4 q = vec4(0.0, p);
-    vec4 top = qmul(mob_a, q) + mob_b;  // a*q + b  (but a,b are quat not vec4... need proper encoding)
+    vec4 top = qmul(mob_a, q) + mob_b;  // a*q + b
     vec4 bot = qmul(mob_c, q) + mob_d;  // c*q + d
     vec4 result = qmul(top, qinv(bot));
     return result.yzw;
@@ -194,14 +195,14 @@ void main() {
     if (ea <= eb && eb <= ec)      { sa=ea; sb=eb; sc=ec; perm=0; }
     else if (ea <= ec && ec <= eb)  { sa=ea; sb=ec; sc=eb; perm=1; }
     else if (eb <= ea && ea <= ec)  { sa=eb; sb=ea; sc=ec; perm=2; }
-    else if (eb <= ec && ec <= ea)  { sa=eb; sb=ec; sc=ea; perm=3; }
-    else if (ec <= ea && ea <= eb)  { sa=ec; sb=ea; sc=eb; perm=4; }
+    else if (eb <= ec && ec <= ea)  { sa=eb; sb=ec; sc=ea; perm=4; }
+    else if (ec <= ea && ea <= eb)  { sa=ec; sb=ea; sc=eb; perm=3; }
     else                            { sa=ec; sb=eb; sc=ea; perm=5; }
 
-    // LUT lookup: key = sa + sb*10 + sc*100, stored in 32×32 texture
+    // LUT lookup: key = sa + sb*10 + sc*100, stored in 40×30 texture
     int key = sa + sb * 10 + sc * 100;
-    int lut_x = key % 32;
-    int lut_y = key / 32;
+    int lut_x = key % 40;
+    int lut_y = key / 40;
     out_atlas_index = texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0;
     out_perm_index = float(perm);
 
@@ -299,6 +300,7 @@ impl LodCompute {
                 program, vao, input_buf, output_buf, tf,
                 pos_texture: None,
                 lut_texture: None,
+                pos_loc: gl.get_uniform_location(program, "u_positions"),
                 lut_loc: gl.get_uniform_location(program, "u_atlas_lut"),
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
@@ -310,21 +312,23 @@ impl LodCompute {
     }
 
     /// Upload atlas LUT: maps exponent triples to atlas indices.
-    /// `lut`: 1024 u8 values. key = exp_a + exp_b*10 + exp_c*100.
-    /// Stored as 32×32 R8 texture.
+    /// `lut`: up to 1200 u8 values. key = exp_a + exp_b*10 + exp_c*100.
+    /// Stored as 40×30 R8 texture (handles exponents up to 10).
     pub fn upload_atlas_lut(&mut self, gl: &glow::Context, lut: &[u8]) {
         unsafe {
             if let Some(old) = self.lut_texture { gl.delete_texture(old); }
             let tex = gl.create_texture().unwrap();
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            // Pad to 32×32 = 1024
-            let mut data = vec![255u8; 1024];
-            for (i, &v) in lut.iter().take(1024).enumerate() { data[i] = v; }
+            // Pad to 40×30 = 1200
+            let mut data = vec![255u8; 1200];
+            for (i, &v) in lut.iter().take(1200).enumerate() { data[i] = v; }
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32,
-                32, 32, 0, glow::RED, glow::UNSIGNED_BYTE,
+                40, 30, 0, glow::RED, glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(Some(&data)));
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
             self.lut_texture = Some(tex);
         }
     }
@@ -417,6 +421,9 @@ impl LodCompute {
             if let Some(tex) = self.pos_texture {
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                if let Some(ref loc) = self.pos_loc {
+                    gl.uniform_1_i32(Some(loc), 0); // texture unit 0
+                }
             }
             if let Some(tex) = self.lut_texture {
                 gl.active_texture(glow::TEXTURE1);
