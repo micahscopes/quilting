@@ -342,16 +342,15 @@ impl LodCompute {
             gl.uniform_1_f32(Some(&self.mesh_radius_loc), mesh_radius);
 
             gl.bind_vertex_array(Some(self.vao));
-
             gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf));
             gl.bind_buffer_base(glow::TRANSFORM_FEEDBACK_BUFFER, 0, Some(self.output_buf));
+            gl.enable(glow::RASTERIZER_DISCARD);
 
-            gl.enable(glow::RASTERIZER_DISCARD); // no rendering, just compute
             gl.begin_transform_feedback(glow::POINTS);
             gl.draw_arrays(glow::POINTS, 0, n as i32);
             gl.end_transform_feedback();
-            gl.disable(glow::RASTERIZER_DISCARD);
 
+            gl.disable(glow::RASTERIZER_DISCARD);
             gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
             gl.bind_vertex_array(None);
 

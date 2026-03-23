@@ -2144,6 +2144,7 @@ function render() {
     if (!window._pbrPlaceholder) window._pbrPlaceholder = createPlaceholderTexture();
     const placeholder = window._pbrPlaceholder;
     let lastMaterialIndex = -999;
+    let lastParity = -999, lastPermIndex = -999;
     for (const b of drawBatches) {
       if (b.materialIndex !== lastMaterialIndex) {
         lastMaterialIndex = b.materialIndex;
@@ -2197,7 +2198,10 @@ function render() {
           gl.bindTexture(gl.TEXTURE_2D, sheenELut);
         }
       }
-      uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      if (b.parity !== lastParity || b.permIndex !== lastPermIndex) {
+        lastParity = b.parity; lastPermIndex = b.permIndex;
+        uploadVertexUBO(mvp, view, b.parity, b.permIndex, 1, camPos);
+      }
       gl.bindVertexArray(b.vaoXformTri);
       gl.drawElementsInstanced(gl.TRIANGLES, b.numTriIdx, gl.UNSIGNED_INT, 0, b.numInst);
     }
