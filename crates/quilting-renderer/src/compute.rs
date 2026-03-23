@@ -25,8 +25,8 @@ pub struct AnimationSequence {
     pub face_indices: Vec<u32>,
 }
 
-/// Per-face output: atlas_index + perm_index = 2 floats.
-pub const FLOATS_PER_FACE_OUTPUT: usize = 2;
+/// Per-face output: atlas_index + perm_index + face_normal (3 floats) = 5 floats.
+pub const FLOATS_PER_FACE_OUTPUT: usize = 5;
 
 /// Transform feedback compute pipeline for LOD calculation.
 pub struct LodCompute {
@@ -52,6 +52,9 @@ pub struct LodCompute {
     num_verts_loc: glow::UniformLocation,
     frame_loc: glow::UniformLocation,
     max_faces: usize,
+    /// True once persistent GL state (program, VAO, TF, textures) is bound.
+    /// After first bind, only uniforms need updating per frame.
+    bound: bool,
 }
 
 const LOD_COMPUTE_VS: &str = r#"#version 300 es
@@ -81,9 +84,10 @@ uniform float vp_width;      // viewport width in pixels
 uniform float vp_height;     // viewport height in pixels
 uniform highp sampler2D u_atlas_lut; // exponent triple → atlas index (32×32 R8)
 
-// Transform feedback outputs — just classification
+// Transform feedback outputs: classification + deformed face normal
 out float out_atlas_index;
 out float out_perm_index;
+out vec3 out_face_normal;  // cross(d1-d0, d2-d0) in Möbius-deformed space
 
 // Quaternion multiply
 vec4 qmul(vec4 a, vec4 b) {
@@ -206,6 +210,11 @@ void main() {
     out_atlas_index = texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0;
     out_perm_index = float(perm);
 
+    // Deformed face normal: cross(d1-d0, d2-d0)
+    vec3 e1 = d1 - d0;
+    vec3 e2 = d2 - d0;
+    out_face_normal = cross(e1, e2);
+
     gl_Position = vec4(0.0);
 }
 "#;
@@ -232,7 +241,7 @@ impl LodCompute {
             // Set transform feedback varyings BEFORE linking
             gl.transform_feedback_varyings(
                 program,
-                &["out_atlas_index", "out_perm_index"],
+                &["out_atlas_index", "out_perm_index", "out_face_normal"],
                 glow::INTERLEAVED_ATTRIBS,
             );
 
@@ -307,6 +316,7 @@ impl LodCompute {
                 min_px_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
                 num_verts_loc, frame_loc,
                 max_faces,
+                bound: false,
             })
         }
     }
@@ -330,6 +340,7 @@ impl LodCompute {
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
             self.lut_texture = Some(tex);
+            self.bound = false; // new texture, rebind next frame
         }
     }
 
@@ -375,6 +386,7 @@ impl LodCompute {
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
             self.pos_texture = Some(tex);
+            self.bound = false; // new texture, rebind next frame
         }
     }
 
@@ -390,7 +402,7 @@ impl LodCompute {
 
     /// Run the compute pass (legacy — uses uploaded control points directly).
     pub fn compute(
-        &self, gl: &glow::Context, num_faces: usize,
+        &mut self, gl: &glow::Context, num_faces: usize,
         mobius: [f32; 16], density: f32, mesh_radius: f32,
         min_px: f32, vp_matrix: &[f32; 16], vp_width: f32, vp_height: f32,
     ) -> usize {
@@ -400,8 +412,10 @@ impl LodCompute {
     /// Run the compute pass with prebaked position texture.
     /// `frame`: which animation frame to read from the texture.
     /// `num_vertices`: vertices per frame (for texture indexing).
+    /// Persistent GL state (program, textures, VAO, TF) is bound once; only
+    /// uniforms are updated per frame.
     pub fn compute_with_texture(
-        &self,
+        &mut self,
         gl: &glow::Context,
         num_faces: usize,
         frame: u32,
@@ -416,30 +430,40 @@ impl LodCompute {
     ) -> usize {
         let n = num_faces.min(self.max_faces);
         unsafe {
-            gl.use_program(Some(self.program));
+            // Bind persistent state once — this context only does LOD compute
+            if !self.bound {
+                gl.use_program(Some(self.program));
 
-            if let Some(tex) = self.pos_texture {
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                if let Some(ref loc) = self.pos_loc {
-                    gl.uniform_1_i32(Some(loc), 0); // texture unit 0
+                if let Some(tex) = self.pos_texture {
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    if let Some(ref loc) = self.pos_loc {
+                        gl.uniform_1_i32(Some(loc), 0);
+                    }
                 }
-            }
-            if let Some(tex) = self.lut_texture {
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                if let Some(ref loc) = self.lut_loc {
-                    gl.uniform_1_i32(Some(loc), 1); // texture unit 1
+                if let Some(tex) = self.lut_texture {
+                    gl.active_texture(glow::TEXTURE1);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    if let Some(ref loc) = self.lut_loc {
+                        gl.uniform_1_i32(Some(loc), 1);
+                    }
                 }
+
+                gl.bind_vertex_array(Some(self.vao));
+                gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf));
+                gl.bind_buffer_base(glow::TRANSFORM_FEEDBACK_BUFFER, 0, Some(self.output_buf));
+                gl.enable(glow::RASTERIZER_DISCARD);
+
+                self.bound = true;
             }
 
+            // Per-frame: only update uniforms + draw
             gl.uniform_1_i32(Some(&self.frame_loc), frame as i32);
             gl.uniform_1_i32(Some(&self.num_verts_loc), num_vertices as i32);
             gl.uniform_4_f32(Some(&self.mob_a_loc), mobius[0], mobius[1], mobius[2], mobius[3]);
             gl.uniform_4_f32(Some(&self.mob_b_loc), mobius[4], mobius[5], mobius[6], mobius[7]);
             gl.uniform_4_f32(Some(&self.mob_c_loc), mobius[8], mobius[9], mobius[10], mobius[11]);
             gl.uniform_4_f32(Some(&self.mob_d_loc), mobius[12], mobius[13], mobius[14], mobius[15]);
-
             gl.uniform_1_f32(Some(&self.density_loc), density);
             gl.uniform_1_f32(Some(&self.mesh_radius_loc), mesh_radius);
             gl.uniform_1_f32(Some(&self.min_px_loc), min_px);
@@ -447,21 +471,10 @@ impl LodCompute {
             gl.uniform_1_f32(Some(&self.vp_width_loc), vp_width);
             gl.uniform_1_f32(Some(&self.vp_height_loc), vp_height);
 
-            gl.bind_vertex_array(Some(self.vao));
-            gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf));
-            gl.bind_buffer_base(glow::TRANSFORM_FEEDBACK_BUFFER, 0, Some(self.output_buf));
-            gl.enable(glow::RASTERIZER_DISCARD);
-
             gl.begin_transform_feedback(glow::POINTS);
             gl.draw_arrays(glow::POINTS, 0, n as i32);
             gl.end_transform_feedback();
 
-            gl.disable(glow::RASTERIZER_DISCARD);
-            gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
-            gl.bind_vertex_array(None);
-
-            // Insert fence — GPU can work while CPU does other things.
-            // Call read_back() later (after instance packing) to minimize stall.
             gl.flush();
         }
         n

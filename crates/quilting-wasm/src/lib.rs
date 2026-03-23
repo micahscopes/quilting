@@ -250,8 +250,8 @@ pub fn gpu_compute_lods(
 ) -> Vec<f32> {
     let num_faces = control_points.len() / 12;
     GPU_COMPUTE.with(|gc| {
-        let gc = gc.borrow();
-        let (gl, compute) = match gc.as_ref() {
+        let mut gc = gc.borrow_mut();
+        let (gl, compute) = match gc.as_mut() {
             Some(pair) => pair,
             None => return vec![],
         };
@@ -1879,15 +1879,28 @@ pub fn slice_and_transform(
               p.time_min, p.dt, p.mesh_radius, frame, verts))
     });
 
-    let (instances_orig, instances_xform, num_tris, source_faces) = if let Some((_pb_nf, pb_nv, pb_faces, _pb_tmin, _pb_dt, pb_radius, frame, frame_verts)) = prebake_frame_data {
-        // PREBAKED GPU PATH: fire GPU compute FIRST, do CPU work while GPU runs,
-        // then read back LODs as late as possible.
+    struct RawBatch {
+        actual_lod: [u32; 3],
+        canonical_lod: [u32; 3],
+        used_lod: [u32; 3],
+        parity: i32,
+        perm_index: usize,
+        material_index: i32,
+        face_indices: Vec<u32>,
+        num_faces: usize,
+        n_verts: usize,
+        n_tris: usize,
+    }
+
+    let (num_tris, source_faces, raw_batches, all_orig, all_xform) = if let Some((_pb_nf, pb_nv, pb_faces, _pb_tmin, _pb_dt, pb_radius, frame, frame_verts)) = prebake_frame_data {
+        // MERGED GPU+BATCH PATH: GPU compute → readback → group → single-pass sorted write.
+        // Eliminates intermediate unsorted buffers entirely.
 
         // 1. FIRE GPU compute (non-blocking — flush starts the work)
         let gpu_n = {
             GPU_COMPUTE.with(|gc| {
-                let gc = gc.borrow();
-                let (gl, compute) = gc.as_ref().unwrap();
+                let mut gc = gc.borrow_mut();
+                let (gl, compute) = gc.as_mut().unwrap();
                 let min_px_val = if quilting_core::evaluate::get_screen_atten() {
                     quilting_core::evaluate::get_min_px_per_sub() as f32
                 } else { 0.0 };
@@ -1905,94 +1918,35 @@ pub fn slice_and_transform(
             })
         };
 
-        // 2. CPU WORK while GPU computes — build flat instance buffers
-        // Write positions, weights, LODs, UVs, normals directly into flat f32 buffers.
         SLICE_CACHE.with(|c| {
             let cache = c.borrow();
             let cs = cache.as_ref().unwrap();
             let nf = cs.tris.len();
+            let src_faces = cs.source_face_indices.clone();
 
-            // One allocation each, write in one pass
-            let mut all_orig = vec![0.0f32; nf * 52];
-            let mut all_xform = vec![0.0f32; nf * 52];
-
-            for (fi, face) in cs.tris.iter().enumerate() {
-                let base = fi * 52;
-
-                // Positions as quaternions (w=0, x,y,z from vertex)
-                for (vi, &vert_idx) in face.iter().enumerate() {
-                    let v = frame_verts[vert_idx];
-                    let off = base + vi * 4;
-                    all_orig[off]   = 0.0; // w
-                    all_orig[off+1] = v[0] as f32; // x
-                    all_orig[off+2] = v[1] as f32; // y
-                    all_orig[off+3] = v[2] as f32; // z
-                }
-
-                // Weights = identity (w=1, x=0, y=0, z=0)
-                for vi in 0..3 {
-                    all_orig[base + 12 + vi*4] = 1.0;
-                }
-
-                // Edge LODs — defaults for now, GPU readback overwrites later
-                all_orig[base + 24] = 2.0;
-                all_orig[base + 25] = 2.0;
-                all_orig[base + 26] = 2.0;
-
-                // Vertex LODs = edge LODs (simplified)
-                all_orig[base + 28] = all_orig[base + 24];
-                all_orig[base + 29] = all_orig[base + 25];
-                all_orig[base + 30] = all_orig[base + 26];
-
-                // UVs
-                if !cs.uvs.is_empty() {
-                    let uv0 = cs.uvs[face[0]];
-                    let uv1 = cs.uvs[face[1]];
-                    let uv2 = cs.uvs[face[2]];
-                    all_orig[base + 32] = uv0[0]; all_orig[base + 33] = uv0[1];
-                    all_orig[base + 34] = uv1[0]; all_orig[base + 35] = uv1[1];
-                    all_orig[base + 36] = uv2[0]; all_orig[base + 37] = uv2[1];
-                }
-
-                // Normals: use mesh normals for identity/affine transforms.
-                // Write smooth normals from glTF data if available
-                if !cs.normals.is_empty() {
-                    for vi in 0..3 {
-                        let n = cs.normals[face[vi]];
-                        let off = base + 40 + vi * 4;
-                        all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
-                    }
-                }
-                // If no glTF normals, smooth normals are written in a second pass below
-            }
-
-            // Compute smooth vertex normals when glTF normals absent (built-in shapes)
-            if cs.normals.is_empty() {
+            // 2. CPU WORK while GPU runs: pre-compute orig smooth normals
+            let orig_vnormals: Vec<[f32; 3]> = if !cs.normals.is_empty() {
+                // glTF normals — already per-vertex
+                cs.normals.clone()
+            } else {
+                // Compute smooth vertex normals from geometry
                 let num_verts = frame_verts.len();
-                let mut vnormals = vec![[0.0f64; 3]; num_verts];
+                let mut vn = vec![[0.0f64; 3]; num_verts];
                 for face in &cs.tris {
                     let v0 = frame_verts[face[0]]; let v1 = frame_verts[face[1]]; let v2 = frame_verts[face[2]];
                     let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
                     let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
                     let fn_ = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
-                    for &vi in face { vnormals[vi][0] += fn_[0]; vnormals[vi][1] += fn_[1]; vnormals[vi][2] += fn_[2]; }
+                    for &vi in face { vn[vi][0] += fn_[0]; vn[vi][1] += fn_[1]; vn[vi][2] += fn_[2]; }
                 }
-                for (fi, face) in cs.tris.iter().enumerate() {
-                    let base = fi * 52;
-                    for vi in 0..3 {
-                        let n = &vnormals[face[vi]];
-                        let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
-                        let off = base + 40 + vi * 4;
-                        if len > 1e-10 {
-                            all_orig[off]   = (n[0] / len) as f32;
-                            all_orig[off+1] = (n[1] / len) as f32;
-                            all_orig[off+2] = (n[2] / len) as f32;
-                        }
-                    }
-                }
-            }
+                vn.iter().map(|n| {
+                    let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+                    if len > 1e-10 { [(n[0]/len) as f32, (n[1]/len) as f32, (n[2]/len) as f32] }
+                    else { [0.0, 0.0, 1.0] }
+                }).collect()
+            };
 
-            // 3. DEFERRED GPU READBACK — compact: 2 floats per face (atlas_index, perm_index)
+            // 3. GPU READBACK — 5 floats per face: [atlas_index, perm_index, nx, ny, nz]
             let gpu_class = if gpu_n > 0 {
                 GPU_COMPUTE.with(|gc| {
                     let gc = gc.borrow();
@@ -2001,227 +1955,139 @@ pub fn slice_and_transform(
                 })
             } else { vec![] };
 
-            // Write LODs from atlas index inverse LUT into flat buffers
-            ATLAS_KEYS.with(|ak| {
-                let keys = ak.borrow();
-                for fi in 0..nf {
-                    let rb = fi * 2;
-                    if rb + 1 < gpu_class.len() {
-                        let atlas_idx = gpu_class[rb] as usize;
-                        if atlas_idx < keys.len() {
-                            let lods = keys[atlas_idx];
-                            let base = fi * 52;
-                            all_orig[base + 24] = lods[0] as f32;
-                            all_orig[base + 25] = lods[1] as f32;
-                            all_orig[base + 26] = lods[2] as f32;
-                            all_orig[base + 28] = lods[0] as f32;
-                            all_orig[base + 29] = lods[1] as f32;
-                            all_orig[base + 30] = lods[2] as f32;
-                        }
-                    }
+            let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
+
+            // 4. Accumulate deformed smooth normals from GPU face normals
+            let xform_vnormals: Vec<[f32; 3]> = if !transform.is_affine() && gpu_class.len() >= nf * stride {
+                let num_verts = frame_verts.len();
+                let mut vn = vec![[0.0f32; 3]; num_verts];
+                for (fi, face) in cs.tris.iter().enumerate() {
+                    let rb = fi * stride + 2;
+                    let fn_ = [gpu_class[rb], gpu_class[rb+1], gpu_class[rb+2]];
+                    for &vi in face { vn[vi][0] += fn_[0]; vn[vi][1] += fn_[1]; vn[vi][2] += fn_[2]; }
                 }
+                let sign: f32 = -1.0;
+                vn.iter().map(|n| {
+                    let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+                    if len > 1e-10 { [sign*n[0]/len, sign*n[1]/len, sign*n[2]/len] }
+                    else { [0.0, 0.0, sign] }
+                }).collect()
+            } else {
+                orig_vnormals.clone()
+            };
+
+            // 5. Group faces by (canonical_lod, perm_index, material) from GPU classification
+            let face_mat_indices: Vec<i32> = FACE_MATERIALS.with(|fm| {
+                let mats = fm.borrow();
+                (0..nf).map(|fi| {
+                    if fi < src_faces.len() {
+                        let orig_fi = src_faces[fi];
+                        if orig_fi < mats.len() { mats[orig_fi].map(|m| m as i32).unwrap_or(-1) }
+                        else { -1 }
+                    } else { -1 }
+                }).collect()
             });
 
-            // xform = copy of orig (positions, weights, LODs, UVs)
-            all_xform.copy_from_slice(&all_orig);
-
-            // Compute smooth deformed normals for xform buffer.
-            // Transform vertices through Möbius, accumulate face normals per vertex,
-            // then write normalized smooth normals into xform normal slots.
-            if !transform.is_affine() {
-                // Transform all vertices
-                let deformed: Vec<[f64; 3]> = frame_verts.iter().map(|v| {
-                    transform.apply(Quat::from_point(v[0], v[1], v[2])).to_point()
-                }).collect();
-
-                // Accumulate face normals per vertex
-                let num_verts = frame_verts.len();
-                let mut vnormals = vec![[0.0f64; 3]; num_verts];
-                for face in &cs.tris {
-                    let p0 = deformed[face[0]]; let p1 = deformed[face[1]]; let p2 = deformed[face[2]];
-                    let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-                    let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-                    let fn_ = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
-                    for &vi in face { vnormals[vi][0] += fn_[0]; vnormals[vi][1] += fn_[1]; vnormals[vi][2] += fn_[2]; }
-                }
-
-                // Normalize and write into xform (sphere reflection flips normals)
-                let sign: f32 = -1.0;
-                for (fi, face) in cs.tris.iter().enumerate() {
-                    let base = fi * 52;
-                    for vi in 0..3 {
-                        let n = &vnormals[face[vi]];
-                        let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
-                        let off = base + 40 + vi * 4;
-                        if len > 1e-10 {
-                            all_xform[off]   = sign * (n[0] / len) as f32;
-                            all_xform[off+1] = sign * (n[1] / len) as f32;
-                            all_xform[off+2] = sign * (n[2] / len) as f32;
-                        }
-                    }
-                }
-            }
-
-            // Store flat buffers + GPU classification for batch assembly
-            FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((all_orig.clone(), all_xform.clone())));
-
-            // Store GPU classification for bucket sort
-            GPU_CLASSIFICATION.with(|gc| *gc.borrow_mut() = Some(gpu_class));
-
-            // Build minimal dummy instances (just LODs for the non-bucket path)
-            let dummy_instances: Vec<quilting_core::evaluate::FaceInstance> = (0..nf).map(|fi| {
-                let base = fi * 52;
-                quilting_core::evaluate::FaceInstance {
-                    positions: [Quat::ZERO; 3],
-                    weights: [Quat::ONE; 3],
-                    edge_lods: [
-                        all_orig[base + 24] as u32,
-                        all_orig[base + 25] as u32,
-                        all_orig[base + 26] as u32,
-                    ],
-                    vertex_lods: [2, 2, 2],
-                    uvs: [[0.0; 2]; 3],
-                    normals: [[0.0; 3]; 3],
-                }
-            }).collect();
-
-            let src = cs.source_face_indices.clone();
-            (dummy_instances.clone(), dummy_instances, nf, src)
-        })
-    } else {
-        // Prebake should always be active — models always call prebake_animation
-        web_sys::console::warn_1(&"slice_and_transform: no prebake data! Using empty result.".into());
-        let empty: Vec<quilting_core::evaluate::FaceInstance> = vec![];
-        (empty.clone(), empty, 0, vec![])
-    };
-    pm("sat:mobius-end");
-
-    pm("sat:group-start");
-    // Resolve per-sliced-face material indices
-    let face_mat_indices: Vec<i32> = FACE_MATERIALS.with(|fm| {
-        let mats = fm.borrow();
-        (0..num_tris).map(|fi| {
-            if fi < source_faces.len() {
-                let orig_fi = source_faces[fi];
-                if orig_fi < mats.len() {
-                    mats[orig_fi].map(|m| m as i32).unwrap_or(-1)
-                } else {
-                    -1
-                }
-            } else {
-                -1
-            }
-        }).collect()
-    });
-
-    pm("sat:group-end");
-
-    pm("sat:batch-start");
-
-    // Group faces by (canonical LOD, perm_index, material_index).
-    // Use GPU classification bucket sort when available, else FxHashMap.
-    let groups: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = GPU_CLASSIFICATION.with(|gc| {
-        let gc = gc.borrow();
-        if let Some(ref class) = *gc {
-            // BUCKET SORT from GPU classification: O(N) single pass
-            let mut map: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
-            ATLAS_KEYS.with(|ak| {
+            let groups: Vec<(([u32; 3], usize, i32), Vec<usize>)> = ATLAS_KEYS.with(|ak| {
                 let keys = ak.borrow();
-                for fi in 0..num_tris {
-                    let rb = fi * 2;
-                    if rb + 1 < class.len() {
-                        let atlas_idx = class[rb] as usize;
-                        let perm_idx = class[rb + 1] as usize;
-                        let mat_idx = if fi < face_mat_indices.len() { face_mat_indices[fi] } else { -1 };
+                let mut map: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
+                for fi in 0..nf {
+                    let rb = fi * stride;
+                    if rb + 1 < gpu_class.len() {
+                        let atlas_idx = gpu_class[rb] as usize;
+                        let perm_idx = gpu_class[rb + 1] as usize;
+                        let mat_idx = face_mat_indices[fi];
                         if atlas_idx < keys.len() {
                             let canonical_lod = keys[atlas_idx];
                             map.entry((canonical_lod, perm_idx, mat_idx)).or_default().push(fi);
                         }
                     }
                 }
+                map.into_iter().collect()
             });
-            map
-        } else {
-            // Fallback: FxHashMap grouping from LODs
-            let mut map: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
-            for (fi, inst) in instances_xform.iter().enumerate() {
-                let lod = if override_res > 0 {
-                    [override_res, override_res, override_res]
-                } else {
-                    inst.edge_lods
-                };
-                let key = canonical_form(lod);
-                let mat_idx = if fi < face_mat_indices.len() { face_mat_indices[fi] } else { -1 };
-                map.entry((key.res, key.perm_index, mat_idx)).or_default().push(fi);
-            }
-            map
-        }
-    });
 
-    struct RawBatch {
-        actual_lod: [u32; 3],
-        canonical_lod: [u32; 3],
-        used_lod: [u32; 3],
-        is_fallback: bool,
-        parity: i32,
-        perm_index: usize,
-        material_index: i32,
-        face_indices: Vec<u32>,
-        num_faces: usize,
-        n_verts: usize,
-        n_tris: usize,
-        orig_data: Vec<f32>,
-        xform_data: Vec<f32>,
-        bary_data: Vec<f64>,
-        tess_tris: Vec<u32>,
-    }
-    let mut raw_batches: Vec<RawBatch> = Vec::new();
+            // 6. SINGLE-PASS SORTED WRITE — write flat buffers directly in batch order.
+            // Reuse preallocated buffers from previous frame.
+            let (mut sorted_orig, mut sorted_xform) = SORTED_BUFS.with(|sb| {
+                let mut sb = sb.borrow_mut();
+                let needed = nf * 52;
+                if sb.0.len() < needed { sb.0.resize(needed, 0.0); }
+                if sb.1.len() < needed { sb.1.resize(needed, 0.0); }
+                (std::mem::take(&mut sb.0), std::mem::take(&mut sb.1))
+            });
 
-    // When atlas patches are pre-uploaded to JS (atlasBuffers), skip the
-    // entire atlas lookup + bary conversion. Just emit batch metadata.
-    let has_prebake = PREBAKE_INFO.with(|pi| pi.borrow().is_some());
+            let mut write_pos = 0usize;
+            let mut raw_batches: Vec<RawBatch> = Vec::with_capacity(groups.len());
+            let has_uvs = !cs.uvs.is_empty();
 
-    // PREBAKE FAST PATH: reorder flat buffers by batch in one pass.
-    // No per-batch Vec allocation — single sorted buffer with offset/count per batch.
-    if has_prebake {
-        // Reuse sorted buffers across frames — resize but don't reallocate if big enough
-        let (mut sorted_orig, mut sorted_xform) = SORTED_BUFS.with(|sb| {
-            let mut sb = sb.borrow_mut();
-            let needed = num_tris * 52;
-            if sb.0.len() < needed { sb.0.resize(needed, 0.0); }
-            if sb.1.len() < needed { sb.1.resize(needed, 0.0); }
-            (std::mem::take(&mut sb.0), std::mem::take(&mut sb.1))
-        });
-        let mut write_pos = 0usize;
-
-        FLAT_INSTANCE_DATA.with(|fid| {
-            let fid = fid.borrow();
-            let (flat_orig, flat_xform) = match fid.as_ref() {
-                Some(pair) => pair,
-                None => return,
-            };
-
-            for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
+            for &((canonical_lod, perm_index, mat_idx), ref face_indices) in &groups {
                 let batch_offset = write_pos;
-                let nf = face_indices.len();
+                let batch_nf = face_indices.len();
                 let parity = perm_sign(perm_index);
-                let actual_lod = if override_res > 0 {
-                    [override_res; 3]
-                } else if !face_indices.is_empty() {
-                    instances_xform[face_indices[0]].edge_lods
-                } else { [2; 3] };
+
+                // Look up LODs for this batch from atlas keys
+                let lods = ATLAS_KEYS.with(|ak| {
+                    let keys = ak.borrow();
+                    let rb = face_indices[0] * stride;
+                    let atlas_idx = gpu_class[rb] as usize;
+                    if atlas_idx < keys.len() { keys[atlas_idx] } else { canonical_lod }
+                });
 
                 for &fi in face_indices {
-                    let src = fi * 52;
+                    let face = &cs.tris[fi];
                     let dst = write_pos * 52;
-                    if src + 52 <= flat_orig.len() && dst + 52 <= sorted_orig.len() {
-                        sorted_orig[dst..dst+52].copy_from_slice(&flat_orig[src..src+52]);
-                        sorted_xform[dst..dst+52].copy_from_slice(&flat_xform[src..src+52]);
+
+                    // Positions as quaternions (w=0, x,y,z)
+                    for (vi, &vert_idx) in face.iter().enumerate() {
+                        let v = frame_verts[vert_idx];
+                        let off = dst + vi * 4;
+                        sorted_orig[off]   = 0.0;
+                        sorted_orig[off+1] = v[0] as f32;
+                        sorted_orig[off+2] = v[1] as f32;
+                        sorted_orig[off+3] = v[2] as f32;
                     }
+
+                    // Weights = identity (w=1, x=0, y=0, z=0)
+                    sorted_orig[dst + 12] = 1.0;
+                    sorted_orig[dst + 16] = 1.0;
+                    sorted_orig[dst + 20] = 1.0;
+
+                    // Edge LODs + vertex LODs
+                    sorted_orig[dst + 24] = lods[0] as f32;
+                    sorted_orig[dst + 25] = lods[1] as f32;
+                    sorted_orig[dst + 26] = lods[2] as f32;
+                    sorted_orig[dst + 28] = lods[0] as f32;
+                    sorted_orig[dst + 29] = lods[1] as f32;
+                    sorted_orig[dst + 30] = lods[2] as f32;
+
+                    // UVs
+                    if has_uvs {
+                        let uv0 = cs.uvs[face[0]]; let uv1 = cs.uvs[face[1]]; let uv2 = cs.uvs[face[2]];
+                        sorted_orig[dst + 32] = uv0[0]; sorted_orig[dst + 33] = uv0[1];
+                        sorted_orig[dst + 34] = uv1[0]; sorted_orig[dst + 35] = uv1[1];
+                        sorted_orig[dst + 36] = uv2[0]; sorted_orig[dst + 37] = uv2[1];
+                    }
+
+                    // Orig normals
+                    for vi in 0..3 {
+                        let n = orig_vnormals[face[vi]];
+                        let off = dst + 40 + vi * 4;
+                        sorted_orig[off] = n[0]; sorted_orig[off+1] = n[1]; sorted_orig[off+2] = n[2];
+                    }
+
+                    // xform: copy everything from orig, then overwrite normals
+                    sorted_xform[dst..dst+52].copy_from_slice(&sorted_orig[dst..dst+52]);
+
+                    // Xform deformed normals
+                    for vi in 0..3 {
+                        let n = xform_vnormals[face[vi]];
+                        let off = dst + 40 + vi * 4;
+                        sorted_xform[off] = n[0]; sorted_xform[off+1] = n[1]; sorted_xform[off+2] = n[2];
+                    }
+
                     write_pos += 1;
                 }
 
-                // Look up actual vertex/triangle counts from atlas patch entry
                 let (n_verts, n_tris) = ATLAS.with(|atlas_cell| {
                     let atlas = atlas_cell.borrow();
                     if let Some(atlas) = atlas.as_ref() {
@@ -2233,50 +2099,35 @@ pub fn slice_and_transform(
                 });
 
                 raw_batches.push(RawBatch {
-                    actual_lod,
+                    actual_lod: [lods[0], lods[1], lods[2]],
                     canonical_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
                     used_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
-                    is_fallback: false, parity, perm_index, material_index: mat_idx,
+                    parity, perm_index, material_index: mat_idx,
                     face_indices: face_indices.iter().map(|&i| {
-                        if i < source_faces.len() { source_faces[i] as u32 } else { i as u32 }
+                        if i < src_faces.len() { src_faces[i] as u32 } else { i as u32 }
                     }).collect(),
-                    num_faces: nf, n_verts, n_tris,
-                    orig_data: vec![], xform_data: vec![],
-                    bary_data: vec![], tess_tris: vec![],
+                    num_faces: batch_nf, n_verts, n_tris,
                 });
             }
-        });
 
-        // Store sorted version for serialization, return buffers for reuse
-        FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((sorted_orig.clone(), sorted_xform.clone())));
-        SORTED_BUFS.with(|sb| {
-            let mut sb = sb.borrow_mut();
-            sb.0 = sorted_orig;
-            sb.1 = sorted_xform;
-        });
-    }
+            (nf, src_faces, raw_batches, sorted_orig, sorted_xform)
+        })
+    } else {
+        web_sys::console::warn_1(&"slice_and_transform: no prebake data! Using empty result.".into());
+        (0, vec![], vec![], vec![], vec![])
+    };
+    pm("sat:mobius-end");
 
-    // Old atlas lookup + bary conversion path removed.
-    // All batch assembly handled by prebake fast path above.
+    pm("sat:group-start");
+    pm("sat:group-end");
+    pm("sat:batch-start");
     pm("sat:batch-end");
 
     pm("sat:serialize-start");
 
-    // Pack ALL data into flat buffers — no per-batch JS objects.
-    let total_faces: usize = raw_batches.iter().map(|b| b.num_faces).sum();
     let num_batches = raw_batches.len();
-
-    // Instance data: use the sorted flat buffers directly (already in batch order)
-    let (all_orig, all_xform) = FLAT_INSTANCE_DATA.with(|fid| {
-        let fid = fid.borrow();
-        match fid.as_ref() {
-            Some((orig, xform)) => (orig.clone(), xform.clone()),
-            None => (vec![0.0f32; total_faces * 52], vec![0.0f32; total_faces * 52]),
-        }
-    });
-
     let mut batch_meta = vec![0i32; num_batches * 16];
-    let mut all_face_indices: Vec<u32> = Vec::with_capacity(total_faces);
+    let mut all_face_indices: Vec<u32> = Vec::with_capacity(num_tris);
 
     let mut write_pos = 0usize;
     for (bi, b) in raw_batches.iter().enumerate() {
@@ -2311,6 +2162,13 @@ pub fn slice_and_transform(
     js_orig.copy_from(&all_orig);
     let js_xform = js_sys::Float32Array::new_with_length(all_xform.len() as u32);
     js_xform.copy_from(&all_xform);
+
+    // Recycle buffers into SORTED_BUFS for next frame (avoids re-allocation)
+    SORTED_BUFS.with(|sb| {
+        let mut sb = sb.borrow_mut();
+        sb.0 = all_orig;
+        sb.1 = all_xform;
+    });
     let js_meta = js_sys::Int32Array::new_with_length(batch_meta.len() as u32);
     js_meta.copy_from(&batch_meta);
     let js_face_idx = js_sys::Uint32Array::new_with_length(all_face_indices.len() as u32);

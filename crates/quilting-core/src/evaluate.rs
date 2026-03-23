@@ -550,7 +550,7 @@ pub fn compute_instances_with_uvs(
 /// Only snaps UP when the value exceeds 1.3x the lower power of 2.
 /// This prevents oscillation at boundaries (e.g., 15.9 vs 16.1 pixels
 /// alternating between LOD 16 and LOD 32).
-fn snap_to_power_of_2(v: u32) -> u32 {
+pub fn snap_to_power_of_2(v: u32) -> u32 {
     if v <= 1 { return 1; }
     if v >= (1 << 30) { return 1 << 30; } // prevent overflow
     let mut p = 1u32;
