@@ -19,7 +19,7 @@ fn pack_twin(idx: u32) -> Option<NonZeroU32> {
     Some(NonZeroU32::new(idx + 1).unwrap())
 }
 
-fn unpack_twin(val: Option<NonZeroU32>) -> Option<u32> {
+pub fn unpack_twin(val: Option<NonZeroU32>) -> Option<u32> {
     val.map(|v| v.get() - 1)
 }
 

@@ -1996,27 +1996,99 @@ pub fn slice_and_transform(
 
             let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
 
-            // 4. Overwrite LODs from GPU classification
-            // Compact layout: edge LODs at offset 12, vertex LODs at offset 16
+            // 4. Reconstruct per-face unsorted LODs from GPU classification
+            let mut face_lods = vec![[2u32; 3]; nf];
             ATLAS_KEYS.with(|ak| {
                 let keys = ak.borrow();
                 for fi in 0..nf {
                     let rb = fi * stride;
                     if rb + 1 < gpu_class.len() {
                         let atlas_idx = gpu_class[rb] as usize;
-                        if atlas_idx < keys.len() {
-                            let lods = keys[atlas_idx];
-                            let b = fi * COMPACT_STRIDE;
-                            all_orig[b + 12] = lods[0] as f32;
-                            all_orig[b + 13] = lods[1] as f32;
-                            all_orig[b + 14] = lods[2] as f32;
-                            all_orig[b + 16] = lods[0] as f32;
-                            all_orig[b + 17] = lods[1] as f32;
-                            all_orig[b + 18] = lods[2] as f32;
+                        let perm_idx = gpu_class[rb + 1] as usize;
+                        if atlas_idx < keys.len() && perm_idx < 6 {
+                            let canonical = keys[atlas_idx];
+                            let perm = quilting_core::permutation::S3_PERMUTATIONS[perm_idx];
+                            // Recover original (unsorted) LODs
+                            face_lods[fi] = [canonical[perm[0]], canonical[perm[1]], canonical[perm[2]]];
                         }
                     }
                 }
             });
+
+            // 5. EDGE COHERENCE: shared edges must have matching LODs.
+            // For each half-edge pair, take max of both faces' LODs for that edge.
+            // Half-edge position i in face → LOD index (i+2)%3.
+            let he = &cs.half_edge;
+            let mut fixes = 0u32;
+            for fi in 0..nf {
+                let hes = he.face_half_edges(fi as u32);
+                for (hi, &he_id) in hes.iter().enumerate() {
+                    let lod_idx = (hi + 2) % 3; // which LOD slot this half-edge maps to
+                    if let Some(twin_id) = quilting_mesh::unpack_twin(he.half_edges[he_id as usize].twin) {
+                        let twin_he = &he.half_edges[twin_id as usize];
+                        let adj_fi = twin_he.face as usize;
+                        if adj_fi < nf {
+                            // Find which position the twin is in its face
+                            let adj_hes = he.face_half_edges(adj_fi as u32);
+                            for (adj_hi, &adj_he_id) in adj_hes.iter().enumerate() {
+                                if adj_he_id == twin_id {
+                                    let adj_lod_idx = (adj_hi + 2) % 3;
+                                    let my_lod = face_lods[fi][lod_idx];
+                                    let their_lod = face_lods[adj_fi][adj_lod_idx];
+                                    if my_lod != their_lod {
+                                        let max_lod = my_lod.max(their_lod);
+                                        face_lods[fi][lod_idx] = max_lod;
+                                        face_lods[adj_fi][adj_lod_idx] = max_lod;
+                                        fixes += 1;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Log coherence stats (once)
+            thread_local! { static LOGGED_COHERENCE: RefCell<bool> = RefCell::new(false); }
+            LOGGED_COHERENCE.with(|l| {
+                if !*l.borrow() {
+                    *l.borrow_mut() = true;
+                    web_sys::console::log_1(&format!(
+                        "Edge coherence: {} edge LOD fixes across {} faces, {} half-edges",
+                        fixes, nf, he.half_edges.len()
+                    ).into());
+                }
+            });
+
+            // 6. Write coherent LODs into flat buffer
+            for fi in 0..nf {
+                let b = fi * COMPACT_STRIDE;
+                let lods = face_lods[fi];
+                all_orig[b + 12] = lods[0] as f32;
+                all_orig[b + 13] = lods[1] as f32;
+                all_orig[b + 14] = lods[2] as f32;
+                all_orig[b + 16] = lods[0] as f32;
+                all_orig[b + 17] = lods[1] as f32;
+                all_orig[b + 18] = lods[2] as f32;
+            }
+
+            // Update GPU classification to match coherent LODs
+            // (grouping phase reads from GPU_CLASSIFICATION)
+            let mut coherent_class = gpu_class.clone();
+            ATLAS_KEYS.with(|ak| {
+                let keys = ak.borrow();
+                for fi in 0..nf {
+                    let key = canonical_form(face_lods[fi]);
+                    // Find atlas index for this canonical LOD
+                    if let Some(idx) = keys.iter().position(|k| *k == key.res) {
+                        let rb = fi * stride;
+                        coherent_class[rb] = idx as f32;
+                        coherent_class[rb + 1] = key.perm_index as f32;
+                    }
+                }
+            });
+            let gpu_class = coherent_class;
 
             // Single buffer — xform eliminated (normals on main thread GPU)
             FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some(all_orig));
