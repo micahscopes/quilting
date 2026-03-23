@@ -1849,13 +1849,13 @@ pub fn slice_and_transform(
             let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
             let normal_ref = if cs.normals.is_empty() { None } else { Some(cs.normals.as_slice()) };
 
-            // Use PREBAKED positions (not slice cache positions)
+            // Use PREBAKED positions — skip CPU Möbius transform entirely.
+            // The vertex shader computes Möbius + QB normals per-fragment.
+            // We only need orig instances + GPU-computed LODs.
             let orig = compute_instances_no_lod_with_uvs(&frame_verts, &cs.tris, uv_ref, normal_ref);
 
-            use quilting_core::evaluate::compute_instances_xform_only;
-            let mut xf = compute_instances_xform_only(&frame_verts, &cs.tris, &transform, uv_ref, normal_ref);
-
-            // Write GPU LODs into instances
+            // Clone orig as xform base — same positions, just add LODs
+            let mut xf = orig.clone();
             for (fi, inst) in xf.iter_mut().enumerate() {
                 let base = fi * 6;
                 if base + 2 < gpu_lods.len() {
