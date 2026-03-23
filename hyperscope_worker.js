@@ -87,6 +87,12 @@ self.onmessage = async function(e) {
 
   if (type === 'create_hypermesh') {
     const result = wasm.create_hypermesh(data.name);
+    // Auto-prebake animation frames to GPU
+    if (result && result.time_min != null && result.time_max != null) {
+      const nframes = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
+      const baked = wasm.prebake_animation(nframes, result.time_min, result.time_max);
+      console.log(`Prebaked ${baked} animation frames`);
+    }
     self.postMessage({ type: 'hypermesh_created', id, result });
     return;
   }
@@ -138,6 +144,12 @@ self.onmessage = async function(e) {
 
   if (type === 'load_gltf_data') {
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
+    // Auto-prebake animation frames to GPU
+    if (result && result.time_min != null && result.time_max != null) {
+      const nframes = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
+      const baked = wasm.prebake_animation(nframes, result.time_min, result.time_max);
+      console.log(`Prebaked ${baked} glTF animation frames`);
+    }
     self.postMessage({ type: 'gltf_loaded', id, result });
     return;
   }

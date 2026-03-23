@@ -18,9 +18,20 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
+struct PrebakeInfo {
+    num_frames: usize,
+    num_vertices: usize,
+    num_faces: usize,
+    time_min: f64,
+    time_max: f64,
+    dt: f64,
+    mesh_radius: f64,
+}
+
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
+    static PREBAKE_INFO: RefCell<Option<PrebakeInfo>> = RefCell::new(None);
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
@@ -98,8 +109,9 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
     }
 }
 
-/// Pre-evaluate all animation frames and upload to GPU.
+/// Pre-evaluate all animation frames and upload to GPU texture.
 /// Returns the number of frames baked, or 0 on failure.
+/// After this, slice_and_transform uses GPU texture lookup instead of CPU trajectory eval.
 #[wasm_bindgen]
 pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
     let nf = num_frames as usize;
@@ -113,10 +125,6 @@ pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
         };
 
         let num_verts = mesh.num_vertices as usize;
-        let faces: Vec<[u32; 3]> = mesh.faces.iter()
-            .map(|f| [f[0], f[1], f[2]])
-            .collect();
-        let num_faces = faces.len();
 
         // Pre-evaluate all frames
         let mut all_positions = Vec::with_capacity(nf * num_verts * 3);
@@ -130,44 +138,61 @@ pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
             }
         }
 
-        // Pack face indices (same for all frames)
-        let face_indices: Vec<u32> = faces.iter()
-            .flat_map(|f| [f[0], f[1], f[2]])
+        // Face indices as floats (for vertex attrib)
+        let face_indices_f32: Vec<f32> = mesh.faces.iter()
+            .flat_map(|f| [f[0] as f32, f[1] as f32, f[2] as f32])
             .collect();
+        let num_faces = mesh.faces.len();
 
-        // Upload to GPU compute context
+        // Upload to GPU
         GPU_COMPUTE.with(|gc| {
-            let gc = gc.borrow();
-            let (gl, compute) = match gc.as_ref() {
+            let mut gc = gc.borrow_mut();
+            let (gl, compute) = match gc.as_mut() {
                 Some(pair) => pair,
                 None => return 0,
             };
 
-            // Store in a GPU buffer for the compute shader to read
-            unsafe {
-                use glow::HasContext;
-                let buf = gl.create_buffer().unwrap();
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(buf));
-                gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    bytemuck_cast_f32(&all_positions),
-                    glow::STATIC_DRAW,
-                );
-            }
+            compute.upload_positions_texture(gl, &all_positions, num_verts, nf);
+            compute.upload_face_indices(gl, &face_indices_f32);
+
+            // Compute mesh radius from frame 0
+            let mesh_radius = {
+                let (mut cx, mut cy, mut cz) = (0.0f64, 0.0, 0.0);
+                let n = num_verts as f64;
+                for i in 0..num_verts {
+                    cx += all_positions[i*3] as f64;
+                    cy += all_positions[i*3+1] as f64;
+                    cz += all_positions[i*3+2] as f64;
+                }
+                cx /= n; cy /= n; cz /= n;
+                let mut max_r = 0.0f64;
+                for i in 0..num_verts {
+                    let dx = all_positions[i*3] as f64 - cx;
+                    let dy = all_positions[i*3+1] as f64 - cy;
+                    let dz = all_positions[i*3+2] as f64 - cz;
+                    max_r = max_r.max((dx*dx + dy*dy + dz*dz).sqrt());
+                }
+                max_r.max(1e-6)
+            };
+
+            // Store prebake info
+            PREBAKE_INFO.with(|pi| *pi.borrow_mut() = Some(PrebakeInfo {
+                num_frames: nf,
+                num_vertices: num_verts,
+                num_faces,
+                time_min, time_max, dt,
+                mesh_radius,
+            }));
 
             web_sys::console::log_1(&format!(
-                "Prebaked {} frames × {} verts = {:.1}MB on GPU",
-                nf, num_verts,
+                "Prebaked {} frames × {} verts × {} faces = {:.1}MB on GPU",
+                nf, num_verts, num_faces,
                 all_positions.len() as f64 * 4.0 / 1e6
             ).into());
 
             nf as u32
         })
     })
-}
-
-fn bytemuck_cast_f32(data: &[f32]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
 }
 
 /// Run GPU LOD computation via transform feedback.
@@ -1746,7 +1771,78 @@ pub fn slice_and_transform(
         }
     });
 
-    let (instances_orig, instances_xform, num_tris, source_faces) = SLICE_CACHE.with(|c| {
+    // Pack Möbius as 16 floats (shared by both paths)
+    let mob_f32: [f32; 16] = [
+        transform.a.w as f32, transform.a.x as f32, transform.a.y as f32, transform.a.z as f32,
+        transform.b.w as f32, transform.b.x as f32, transform.b.y as f32, transform.b.z as f32,
+        transform.c.w as f32, transform.c.x as f32, transform.c.y as f32, transform.c.z as f32,
+        transform.d.w as f32, transform.d.x as f32, transform.d.y as f32, transform.d.z as f32,
+    ];
+    let tess_density = quilting_core::evaluate::get_tess_density();
+
+    // Check if we have prebaked animation data on GPU
+    let prebake = PREBAKE_INFO.with(|pi| pi.borrow().as_ref().map(|p| (
+        p.num_frames, p.num_vertices, p.num_faces,
+        p.time_min, p.dt, p.mesh_radius,
+    )));
+
+    let (instances_orig, instances_xform, num_tris, source_faces) = if let Some((pb_nf, pb_nv, pb_faces, pb_tmin, pb_dt, pb_radius)) = prebake {
+        // PREBAKED GPU PATH: skip CPU trajectory eval entirely.
+        // GPU texture has all positions, compute shader does Möbius + LOD.
+        let time_offset = SLICE_CACHE.with(|c| {
+            c.borrow().as_ref().map(|cs| cs.offset).unwrap_or(0.0)
+        });
+
+        // Map time to frame index
+        let frame = if pb_dt > 0.0 {
+            (((time_offset - pb_tmin) / pb_dt).round() as usize).min(pb_nf - 1)
+        } else { 0 };
+
+        // GPU compute LODs from prebaked texture
+        let gpu_lods = if !transform.is_affine() {
+            GPU_COMPUTE.with(|gc| {
+                let gc = gc.borrow();
+                let (gl, compute) = gc.as_ref().unwrap();
+                let n = compute.compute_with_texture(
+                    gl, pb_faces, frame as u32, pb_nv as u32,
+                    mob_f32, tess_density as f32, pb_radius as f32,
+                );
+                compute.read_back(gl, n)
+            })
+        } else {
+            vec![]
+        };
+
+        // Still need CPU for instance data (positions, weights, UVs, normals)
+        // because the vertex shader needs control points for QB evaluation.
+        SLICE_CACHE.with(|c| {
+            let cache = c.borrow();
+            let cs = cache.as_ref().unwrap();
+            let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
+            let normal_ref = if cs.normals.is_empty() { None } else { Some(cs.normals.as_slice()) };
+            let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref, normal_ref);
+
+            use quilting_core::evaluate::compute_instances_xform_only;
+            let mut xf = compute_instances_xform_only(&cs.verts, &cs.tris, &transform, uv_ref, normal_ref);
+
+            // Write GPU LODs into instances
+            for (fi, inst) in xf.iter_mut().enumerate() {
+                let base = fi * 6;
+                if base + 2 < gpu_lods.len() {
+                    inst.edge_lods = [
+                        gpu_lods[base] as u32,
+                        gpu_lods[base + 1] as u32,
+                        gpu_lods[base + 2] as u32,
+                    ];
+                }
+            }
+
+            let src = cs.source_face_indices.clone();
+            (orig, xf, cs.tris.len(), src)
+        })
+    } else {
+    // NON-PREBAKED PATH (original)
+    SLICE_CACHE.with(|c| {
         let cache = c.borrow();
         let cs = cache.as_ref().unwrap();
         let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
@@ -1754,11 +1850,9 @@ pub fn slice_and_transform(
         let orig = compute_instances_no_lod_with_uvs(&cs.verts, &cs.tris, uv_ref, normal_ref);
 
         let xform = if gpu_available && !transform.is_affine() {
-            // GPU path: Möbius transform only (no LOD), GPU fills LODs
             use quilting_core::evaluate::compute_instances_xform_only;
             let mut xf = compute_instances_xform_only(&cs.verts, &cs.tris, &transform, uv_ref, normal_ref);
 
-            // Pack control points for GPU (3 quaternions per face = 12 floats)
             let mut cp_data: Vec<f32> = Vec::with_capacity(cs.tris.len() * 12);
             for face in &cs.tris {
                 for &vi in face {
@@ -1770,16 +1864,6 @@ pub fn slice_and_transform(
                     cp_data.push(q.z as f32);
                 }
             }
-
-            // Pack Möbius as 16 floats [a, b, c, d] quaternions
-            let mob_f32: [f32; 16] = [
-                transform.a.w as f32, transform.a.x as f32, transform.a.y as f32, transform.a.z as f32,
-                transform.b.w as f32, transform.b.x as f32, transform.b.y as f32, transform.b.z as f32,
-                transform.c.w as f32, transform.c.x as f32, transform.c.y as f32, transform.c.z as f32,
-                transform.d.w as f32, transform.d.x as f32, transform.d.y as f32, transform.d.z as f32,
-            ];
-
-            let tess_density = quilting_core::evaluate::get_tess_density();
             // Compute mesh radius
             let mesh_radius = {
                 let (mut cx, mut cy, mut cz) = (0.0, 0.0, 0.0);
@@ -1821,7 +1905,8 @@ pub fn slice_and_transform(
 
         let src = cs.source_face_indices.clone();
         (orig, xform, cs.tris.len(), src)
-    });
+    })
+    }; // end if prebake / else
     pm("sat:mobius-end");
 
     pm("sat:group-start");
