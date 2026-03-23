@@ -2718,7 +2718,10 @@ function frame() {
       // Sweep time forward
       const slider = $('time');
       let val = parseFloat(slider.value);
-      const speed = 0.003 * (meshInfo.time_max - meshInfo.time_min);
+      const now = performance.now();
+      const dt = Math.min((now - (frame._lastTime || now)) / 1000, 0.05); // seconds, capped
+      frame._lastTime = now;
+      const speed = 0.15 * (meshInfo.time_max - meshInfo.time_min) * dt; // time-based
       val += speed;
       if (val >= meshInfo.time_max) { val = meshInfo.time_min + (val - meshInfo.time_max) + 0.001; }
       slider.value = val;
