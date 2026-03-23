@@ -43,6 +43,8 @@ pub struct LodCompute {
     mob_d_loc: glow::UniformLocation,
     density_loc: glow::UniformLocation,
     mesh_radius_loc: glow::UniformLocation,
+    screen_scale_loc: glow::UniformLocation,
+    min_px_loc: glow::UniformLocation,
     num_verts_loc: glow::UniformLocation,
     frame_loc: glow::UniformLocation,
     max_faces: usize,
@@ -69,6 +71,8 @@ uniform vec4 mob_d;
 
 uniform float density;
 uniform float mesh_radius;
+uniform float screen_scale; // pixels per deformed world unit
+uniform float min_px;       // minimum pixels per subdivision (0 = no attenuation)
 
 // Transform feedback outputs
 out float out_lod_a;
@@ -151,7 +155,17 @@ void main() {
     out_lod_b = clamp(snap_pow2(raw_b), 2.0, 512.0);
     out_lod_c = clamp(snap_pow2(raw_c), 2.0, 512.0);
 
-    gl_Position = vec4(0.0); // not rendering, just computing
+    // Screen-space attenuation: reduce LOD when subdivisions would be sub-pixel
+    if (min_px > 0.0 && screen_scale > 0.0) {
+        float px_a = out_median_a * screen_scale;
+        float px_b = out_median_b * screen_scale;
+        float px_c = out_median_c * screen_scale;
+        if (px_a / out_lod_a < min_px) out_lod_a = clamp(snap_pow2(px_a / min_px), 2.0, 512.0);
+        if (px_b / out_lod_b < min_px) out_lod_b = clamp(snap_pow2(px_b / min_px), 2.0, 512.0);
+        if (px_c / out_lod_c < min_px) out_lod_c = clamp(snap_pow2(px_c / min_px), 2.0, 512.0);
+    }
+
+    gl_Position = vec4(0.0);
 }
 "#;
 
@@ -205,6 +219,10 @@ impl LodCompute {
                 .ok_or("density uniform not found")?;
             let mesh_radius_loc = gl.get_uniform_location(program, "mesh_radius")
                 .ok_or("mesh_radius uniform not found")?;
+            let screen_scale_loc = gl.get_uniform_location(program, "screen_scale")
+                .ok_or("screen_scale uniform not found")?;
+            let min_px_loc = gl.get_uniform_location(program, "min_px")
+                .ok_or("min_px uniform not found")?;
             let num_verts_loc = gl.get_uniform_location(program, "u_num_vertices")
                 .ok_or("u_num_vertices uniform not found")?;
             let frame_loc = gl.get_uniform_location(program, "u_frame")
@@ -239,6 +257,7 @@ impl LodCompute {
                 pos_texture: None,
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
+                screen_scale_loc, min_px_loc,
                 num_verts_loc, frame_loc,
                 max_faces,
             })
@@ -304,8 +323,9 @@ impl LodCompute {
     pub fn compute(
         &self, gl: &glow::Context, num_faces: usize,
         mobius: [f32; 16], density: f32, mesh_radius: f32,
+        screen_scale: f32, min_px: f32,
     ) -> usize {
-        self.compute_with_texture(gl, num_faces, 0, 0, mobius, density, mesh_radius)
+        self.compute_with_texture(gl, num_faces, 0, 0, mobius, density, mesh_radius, screen_scale, min_px)
     }
 
     /// Run the compute pass with prebaked position texture.
@@ -320,6 +340,8 @@ impl LodCompute {
         mobius: [f32; 16],
         density: f32,
         mesh_radius: f32,
+        screen_scale: f32,
+        min_px: f32,
     ) -> usize {
         let n = num_faces.min(self.max_faces);
         unsafe {
@@ -340,6 +362,8 @@ impl LodCompute {
 
             gl.uniform_1_f32(Some(&self.density_loc), density);
             gl.uniform_1_f32(Some(&self.mesh_radius_loc), mesh_radius);
+            gl.uniform_1_f32(Some(&self.screen_scale_loc), screen_scale);
+            gl.uniform_1_f32(Some(&self.min_px_loc), min_px);
 
             gl.bind_vertex_array(Some(self.vao));
             gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf));

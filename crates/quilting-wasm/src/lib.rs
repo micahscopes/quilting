@@ -225,7 +225,7 @@ pub fn gpu_compute_lods(
         for (i, &v) in mobius.iter().take(16).enumerate() {
             mob[i] = v;
         }
-        let n = compute.compute(gl, num_faces, mob, density, mesh_radius);
+        let n = compute.compute(gl, num_faces, mob, density, mesh_radius, 0.0, 0.0);
         compute.read_back(gl, n)
     })
 }
@@ -1852,9 +1852,14 @@ pub fn slice_and_transform(
             GPU_COMPUTE.with(|gc| {
                 let gc = gc.borrow();
                 let (gl, compute) = gc.as_ref().unwrap();
+                let scr_scale = screen.as_ref().map(|s| (s.vp_matrix[0].abs() * s.width * 0.5) as f32).unwrap_or(0.0);
+                let min_px_val = if quilting_core::evaluate::get_screen_atten() {
+                    quilting_core::evaluate::get_min_px_per_sub() as f32
+                } else { 0.0 };
                 compute.compute_with_texture(
                     gl, pb_faces, frame as u32, pb_nv as u32,
                     mob_f32, tess_density as f32, pb_radius as f32,
+                    scr_scale, min_px_val,
                 )
             })
         } else { 0 };
@@ -1955,40 +1960,17 @@ pub fn slice_and_transform(
                 })
             } else { vec![] };
 
-            // Write GPU LODs into flat buffers, with cheap screen attenuation.
-            // GPU readback gives us medians (world-space). Estimate screen pixels
-            // from median × a global screen scale factor (no per-face projection).
-            let screen_atten = quilting_core::evaluate::get_screen_atten();
-            let min_px = quilting_core::evaluate::get_min_px_per_sub();
-            // VP matrix[0] = proj[0][0] = 1/(aspect*tan(fov/2))
-            // A world-space length L at the origin projects to roughly
-            // L * vp_matrix[0] * viewport_width / 2 pixels.
-            let screen_scale = screen.as_ref().map(|s| {
-                s.vp_matrix[0].abs() * s.width * 0.5
-            }).unwrap_or(100.0);
-
+            // Write GPU LODs (already attenuated by shader) into flat buffers
             for fi in 0..nf {
                 let lod_base = fi * 6;
                 let base = fi * 52;
-                if lod_base + 5 < gpu_lods.len() {
-                    let mut lods = [gpu_lods[lod_base], gpu_lods[lod_base+1], gpu_lods[lod_base+2]];
-                    let medians = [gpu_lods[lod_base+3], gpu_lods[lod_base+4], gpu_lods[lod_base+5]];
-
-                    if screen_atten {
-                        for ei in 0..3 {
-                            let screen_px = medians[ei] as f64 * screen_scale;
-                            let lod = lods[ei] as f64;
-                            if lod > 0.0 && screen_px / lod < min_px {
-                                let reduced = (screen_px / min_px).ceil().max(2.0) as u32;
-                                let mut p = 1u32;
-                                while p < reduced { p *= 2; }
-                                lods[ei] = p as f32;
-                            }
-                        }
-                    }
-
-                    all_orig[base + 24] = lods[0]; all_orig[base + 25] = lods[1]; all_orig[base + 26] = lods[2];
-                    all_orig[base + 28] = lods[0]; all_orig[base + 29] = lods[1]; all_orig[base + 30] = lods[2];
+                if lod_base + 2 < gpu_lods.len() {
+                    all_orig[base + 24] = gpu_lods[lod_base];
+                    all_orig[base + 25] = gpu_lods[lod_base + 1];
+                    all_orig[base + 26] = gpu_lods[lod_base + 2];
+                    all_orig[base + 28] = gpu_lods[lod_base];
+                    all_orig[base + 29] = gpu_lods[lod_base + 1];
+                    all_orig[base + 30] = gpu_lods[lod_base + 2];
                 }
             }
 
@@ -2096,7 +2078,7 @@ pub fn slice_and_transform(
                 let gc = gc.borrow();
                 let (gl, compute) = gc.as_ref().unwrap();
                 compute.upload_control_points(gl, &cp_data);
-                let n = compute.compute(gl, cs.tris.len(), mob_f32, tess_density as f32, mesh_radius as f32);
+                let n = compute.compute(gl, cs.tris.len(), mob_f32, tess_density as f32, mesh_radius as f32, 0.0, 0.0);
                 compute.read_back(gl, n)
             });
 
