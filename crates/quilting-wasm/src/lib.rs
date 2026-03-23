@@ -2091,12 +2091,13 @@ pub fn slice_and_transform(
 
             // Update GPU classification to match coherent LODs
             // (grouping phase reads from GPU_CLASSIFICATION)
+            // Resize to nf * stride in case GPU processed fewer faces than the slice has
             let mut coherent_class = gpu_class.clone();
+            coherent_class.resize(nf * stride, 0.0);
             ATLAS_KEYS.with(|ak| {
                 let keys = ak.borrow();
                 for fi in 0..nf {
                     let key = canonical_form(face_lods[fi]);
-                    // Find atlas index for this canonical LOD
                     if let Some(idx) = keys.iter().position(|k| *k == key.res) {
                         let rb = fi * stride;
                         coherent_class[rb] = idx as f32;
