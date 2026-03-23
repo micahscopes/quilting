@@ -34,6 +34,9 @@ thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     static PREBAKE_INFO: RefCell<Option<PrebakeInfo>> = RefCell::new(None);
+    /// Pre-built flat f32 instance buffers from the prebake path.
+    /// Bypasses to_f32_array() in batch assembly.
+    static FLAT_INSTANCE_DATA: RefCell<Option<(Vec<f32>, Vec<f32>)>> = RefCell::new(None);
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
@@ -678,16 +681,32 @@ pub fn compute_mesh_batches(
                 (bary, tris, nv, nt)
             };
 
-            // Pre-allocate and copy_from_slice — avoids the Vec reallocation
-            // storm from flat_map().collect() (was 28% of total CPU time).
             let nf = face_indices.len();
             let mut orig_data = vec![0.0f32; nf * 52];
             let mut xform_data = vec![0.0f32; nf * 52];
-            for (i, &fi) in face_indices.iter().enumerate() {
-                let o = instances_orig[fi].to_f32_array();
-                let x = instances_xform[fi].to_f32_array();
-                orig_data[i*52..(i+1)*52].copy_from_slice(&o);
-                xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+
+            let used_flat = FLAT_INSTANCE_DATA.with(|fid| {
+                let fid = fid.borrow();
+                if let Some((ref flat_orig, ref flat_xform)) = *fid {
+                    for (i, &fi) in face_indices.iter().enumerate() {
+                        let src = fi * 52;
+                        if src + 52 <= flat_orig.len() {
+                            orig_data[i*52..(i+1)*52].copy_from_slice(&flat_orig[src..src+52]);
+                            xform_data[i*52..(i+1)*52].copy_from_slice(&flat_xform[src..src+52]);
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            });
+            if !used_flat {
+                for (i, &fi) in face_indices.iter().enumerate() {
+                    let o = instances_orig[fi].to_f32_array();
+                    let x = instances_xform[fi].to_f32_array();
+                    orig_data[i*52..(i+1)*52].copy_from_slice(&o);
+                    xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+                }
             }
 
             batches.push(BatchData {
@@ -1842,33 +1861,112 @@ pub fn slice_and_transform(
             vec![]
         };
 
-        // Use prebaked frame positions + slice cache for UVs/normals/topology
+        // DIRECT-TO-F32: skip FaceInstance structs entirely.
+        // Write positions, weights, LODs, UVs, normals directly into flat f32 buffers.
         SLICE_CACHE.with(|c| {
             let cache = c.borrow();
             let cs = cache.as_ref().unwrap();
-            let uv_ref = if cs.uvs.is_empty() { None } else { Some(cs.uvs.as_slice()) };
-            let normal_ref = if cs.normals.is_empty() { None } else { Some(cs.normals.as_slice()) };
+            let nf = cs.tris.len();
 
-            // Use PREBAKED positions — skip CPU Möbius transform entirely.
-            // The vertex shader computes Möbius + QB normals per-fragment.
-            // We only need orig instances + GPU-computed LODs.
-            let orig = compute_instances_no_lod_with_uvs(&frame_verts, &cs.tris, uv_ref, normal_ref);
+            // One allocation each, write in one pass
+            let mut all_orig = vec![0.0f32; nf * 52];
+            let mut all_xform = vec![0.0f32; nf * 52];
 
-            // Clone orig as xform base — same positions, just add LODs
-            let mut xf = orig.clone();
-            for (fi, inst) in xf.iter_mut().enumerate() {
-                let base = fi * 6;
-                if base + 2 < gpu_lods.len() {
-                    inst.edge_lods = [
-                        gpu_lods[base] as u32,
-                        gpu_lods[base + 1] as u32,
-                        gpu_lods[base + 2] as u32,
-                    ];
+            for (fi, face) in cs.tris.iter().enumerate() {
+                let base = fi * 52;
+
+                // Positions as quaternions (w=0, x,y,z from vertex)
+                for (vi, &vert_idx) in face.iter().enumerate() {
+                    let v = frame_verts[vert_idx];
+                    let off = base + vi * 4;
+                    all_orig[off]   = 0.0; // w
+                    all_orig[off+1] = v[0] as f32; // x
+                    all_orig[off+2] = v[1] as f32; // y
+                    all_orig[off+3] = v[2] as f32; // z
+                }
+
+                // Weights = identity (w=1, x=0, y=0, z=0)
+                for vi in 0..3 {
+                    all_orig[base + 12 + vi*4] = 1.0;
+                }
+
+                // Edge LODs from GPU (or default 2)
+                let lod_base = fi * 6;
+                if lod_base + 2 < gpu_lods.len() {
+                    all_orig[base + 24] = gpu_lods[lod_base] as f32;
+                    all_orig[base + 25] = gpu_lods[lod_base + 1] as f32;
+                    all_orig[base + 26] = gpu_lods[lod_base + 2] as f32;
+                } else {
+                    all_orig[base + 24] = 2.0;
+                    all_orig[base + 25] = 2.0;
+                    all_orig[base + 26] = 2.0;
+                }
+
+                // Vertex LODs = edge LODs (simplified)
+                all_orig[base + 28] = all_orig[base + 24];
+                all_orig[base + 29] = all_orig[base + 25];
+                all_orig[base + 30] = all_orig[base + 26];
+
+                // UVs
+                if !cs.uvs.is_empty() {
+                    let uv0 = cs.uvs[face[0]];
+                    let uv1 = cs.uvs[face[1]];
+                    let uv2 = cs.uvs[face[2]];
+                    all_orig[base + 32] = uv0[0]; all_orig[base + 33] = uv0[1];
+                    all_orig[base + 34] = uv1[0]; all_orig[base + 35] = uv1[1];
+                    all_orig[base + 36] = uv2[0]; all_orig[base + 37] = uv2[1];
+                }
+
+                // Normals (from mesh or face normal)
+                if !cs.normals.is_empty() {
+                    for vi in 0..3 {
+                        let n = cs.normals[face[vi]];
+                        let off = base + 40 + vi * 4;
+                        all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
+                    }
+                } else {
+                    // Compute face normal
+                    let v0 = frame_verts[face[0]]; let v1 = frame_verts[face[1]]; let v2 = frame_verts[face[2]];
+                    let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
+                    let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+                    let nx = (e1[1]*e2[2] - e1[2]*e2[1]) as f32;
+                    let ny = (e1[2]*e2[0] - e1[0]*e2[2]) as f32;
+                    let nz = (e1[0]*e2[1] - e1[1]*e2[0]) as f32;
+                    let len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-10);
+                    let n = [nx/len, ny/len, nz/len];
+                    for vi in 0..3 {
+                        let off = base + 40 + vi * 4;
+                        all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
+                    }
                 }
             }
 
+            // xform = copy of orig (LODs are already written in)
+            all_xform.copy_from_slice(&all_orig);
+
+            // Store flat buffers for batch assembly to use directly
+            FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some((all_orig.clone(), all_xform.clone())));
+
+            // Build FaceInstance vecs from the flat data for grouping compatibility
+            // (the batch assembly still reads edge_lods from instances_xform)
+            let dummy_instances: Vec<quilting_core::evaluate::FaceInstance> = (0..nf).map(|fi| {
+                let base = fi * 52;
+                quilting_core::evaluate::FaceInstance {
+                    positions: [Quat::ZERO; 3],
+                    weights: [Quat::ONE; 3],
+                    edge_lods: [
+                        all_orig[base + 24] as u32,
+                        all_orig[base + 25] as u32,
+                        all_orig[base + 26] as u32,
+                    ],
+                    vertex_lods: [2, 2, 2],
+                    uvs: [[0.0; 2]; 3],
+                    normals: [[0.0; 3]; 3],
+                }
+            }).collect();
+
             let src = cs.source_face_indices.clone();
-            (orig, xf, cs.tris.len(), src)
+            (dummy_instances.clone(), dummy_instances, nf, src)
         })
     } else {
     // NON-PREBAKED PATH (original)
@@ -2063,16 +2161,32 @@ pub fn slice_and_transform(
                 (bary, tris_out, nv, nt)
             };
 
-            // Pre-allocate and copy_from_slice — avoids the Vec reallocation
-            // storm from flat_map().collect() (was 28% of total CPU time).
             let nf = face_indices.len();
             let mut orig_data = vec![0.0f32; nf * 52];
             let mut xform_data = vec![0.0f32; nf * 52];
-            for (i, &fi) in face_indices.iter().enumerate() {
-                let o = instances_orig[fi].to_f32_array();
-                let x = instances_xform[fi].to_f32_array();
-                orig_data[i*52..(i+1)*52].copy_from_slice(&o);
-                xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+
+            let used_flat = FLAT_INSTANCE_DATA.with(|fid| {
+                let fid = fid.borrow();
+                if let Some((ref flat_orig, ref flat_xform)) = *fid {
+                    for (i, &fi) in face_indices.iter().enumerate() {
+                        let src = fi * 52;
+                        if src + 52 <= flat_orig.len() {
+                            orig_data[i*52..(i+1)*52].copy_from_slice(&flat_orig[src..src+52]);
+                            xform_data[i*52..(i+1)*52].copy_from_slice(&flat_xform[src..src+52]);
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            });
+            if !used_flat {
+                for (i, &fi) in face_indices.iter().enumerate() {
+                    let o = instances_orig[fi].to_f32_array();
+                    let x = instances_xform[fi].to_f32_array();
+                    orig_data[i*52..(i+1)*52].copy_from_slice(&o);
+                    xform_data[i*52..(i+1)*52].copy_from_slice(&x);
+                }
             }
 
             raw_batches.push(RawBatch {
