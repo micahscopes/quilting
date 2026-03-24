@@ -103,7 +103,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             face_materials: Vec::new(),
             materials: Vec::new(),
             num_faces: 0,
-            render_mode: RenderMode::Matcap,
+            render_mode: RenderMode::Pbr,
             mobius: IDENTITY_MOBIUS,
         });
     });
@@ -356,7 +356,9 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 built += 1;
             }
         });
-        debug!("Built {} GPU batches ({} logical, {} missing tess)", built, logical.len(), missing);
+        if missing > 0 {
+            info!("Built {} GPU batches, {} missing tess patches", built, missing);
+        }
     });
 }
 

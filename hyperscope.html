@@ -26,8 +26,8 @@ canvas{width:100%;height:100%;display:block}
 <div id="stats">Loading...</div>
 <div id="controls">
   <select id="mode-sel">
-    <option value="matcap">Matcap</option>
     <option value="pbr">PBR</option>
+    <option value="matcap">Matcap</option>
     <option value="wire">Wire</option>
     <option value="normals">Normals</option>
     <option value="both">Both</option>
@@ -264,22 +264,28 @@ async function loadModel(buffer, filename) {
 
   // Upload glTF images to main-thread GL
   if (info.textures && info.textures.length > 0) {
-    let totalSize = 0;
-    const widths = new Uint32Array(info.textures.length);
-    const heights = new Uint32Array(info.textures.length);
-    for (let i = 0; i < info.textures.length; i++) {
-      widths[i] = info.textures[i].width;
-      heights[i] = info.textures[i].height;
-      totalSize += widths[i] * heights[i] * 4;
-    }
-    const allPixels = new Uint8Array(totalSize);
-    let off = 0;
-    for (let i = 0; i < info.textures.length; i++) {
-      const pixels = new Uint8Array(info.textures[i].pixels.buffer || info.textures[i].pixels);
-      allPixels.set(pixels, off);
-      off += pixels.length;
-    }
-    mr_uploadImages(allPixels, widths, heights);
+    try {
+      let totalSize = 0;
+      const widths = new Uint32Array(info.textures.length);
+      const heights = new Uint32Array(info.textures.length);
+      for (let i = 0; i < info.textures.length; i++) {
+        const t = info.textures[i];
+        widths[i] = t.width || 0;
+        heights[i] = t.height || 0;
+        totalSize += widths[i] * heights[i] * 4;
+      }
+      if (totalSize > 0) {
+        const allPixels = new Uint8Array(totalSize);
+        let off = 0;
+        for (let i = 0; i < info.textures.length; i++) {
+          const t = info.textures[i];
+          const pixels = t.pixels ? new Uint8Array(t.pixels.buffer || t.pixels) : new Uint8Array(0);
+          allPixels.set(pixels, off);
+          off += widths[i] * heights[i] * 4;
+        }
+        mr_uploadImages(allPixels, widths, heights);
+      }
+    } catch (e) { console.warn('Texture upload error:', e); }
   }
 
   // Get skinning data and upload textures to main-thread GL

@@ -156,11 +156,14 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
             gl.uniform_block_binding(program, idx, WIRE_UNIFORMS_BINDING);
         }
 
-        // PBR fragment uniform block: PbrUniforms at group(0) binding(1)
-        for name in &["PbrUniforms_block_0Fragment", "PbrUniforms_block_1Fragment"] {
-            if let Some(idx) = gl.get_uniform_block_index(program, name) {
-                gl.uniform_block_binding(program, idx, PBR_UNIFORMS_BINDING);
-                break;
+        // PBR fragment uniform block: enumerate all blocks and bind any with "Pbr"/"pbr".
+        {
+            let num_blocks = gl.get_program_parameter_i32(program, glow::ACTIVE_UNIFORM_BLOCKS);
+            for i in 0..(num_blocks as u32) {
+                let name = gl.get_active_uniform_block_name(program, i);
+                if name.contains("Pbr") || name.contains("pbr") {
+                    gl.uniform_block_binding(program, i, PBR_UNIFORMS_BINDING);
+                }
             }
         }
 
