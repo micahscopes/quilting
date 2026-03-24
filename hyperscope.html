@@ -126,10 +126,8 @@ canvas.addEventListener('drop', async e => {
   const buf = await file.arrayBuffer();
   // Store in sessionStorage so refresh can reload
   try {
-    // Can't store ArrayBuffer in URL, but we can store the filename
-    // and serve it from disk if the server supports it
     const url = new URL(location);
-    url.searchParams.set('glb', '/' + file.name);
+    url.searchParams.set('glb', file.name);
     history.replaceState(null, '', url);
   } catch (e) {}
   await loadModel(buf, file.name);
@@ -445,7 +443,7 @@ requestAnimationFrame(frame);
 
 // Auto-load from URL param or default to horse.glb
 const glbParam = new URLSearchParams(location.search).get('glb');
-const defaultModel = glbParam || '/horse.glb';
+const defaultModel = glbParam ? (glbParam.startsWith('/') || glbParam.startsWith('http') ? glbParam : '/' + glbParam) : '/horse.glb';
 try {
   const resp = await fetch(defaultModel);
   if (resp.ok) {
