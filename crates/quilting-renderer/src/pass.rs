@@ -81,7 +81,8 @@ pub fn render_frame(
 ) {
     vtx_ubo.bind(gl);
 
-    let draw_matcap = matches!(mode, RenderMode::Matcap | RenderMode::Both | RenderMode::Lod);
+    // PBR falls back to matcap until PBR pass is fully wired
+    let draw_matcap = matches!(mode, RenderMode::Matcap | RenderMode::Both | RenderMode::Lod | RenderMode::Pbr);
     let draw_wire = matches!(mode, RenderMode::Wire | RenderMode::Both);
     let draw_normals = mode == RenderMode::Normals;
 

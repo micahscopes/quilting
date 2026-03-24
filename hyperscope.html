@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8">
 <title>Hyperscope — Conformal Mesh Rendering</title>
+<!-- trunk: build minimal stub so trunk has a Rust target (real WASM via wasm-pack hook) -->
+<link data-trunk rel="rust" href="crates/trunk-stub" data-wasm-opt="0" />
+<!-- trunk asset directives -->
+<link data-trunk rel="copy-dir" href="pkg" />
+<link data-trunk rel="copy-dir" href="envmaps" />
+<link data-trunk rel="copy-dir" href="matcaps" />
+<link data-trunk rel="copy-file" href="hyperscope-prototype_worker.js" />
+<link data-trunk rel="copy-file" href="horse.glb" />
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#e6edf3;font-family:system-ui;overflow:hidden}
@@ -18,8 +26,8 @@ canvas{width:100%;height:100%;display:block}
 <div id="stats">Loading...</div>
 <div id="controls">
   <select id="mode-sel">
-    <option value="pbr">PBR</option>
     <option value="matcap">Matcap</option>
+    <option value="pbr">PBR</option>
     <option value="wire">Wire</option>
     <option value="normals">Normals</option>
     <option value="both">Both</option>
@@ -31,6 +39,7 @@ import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
   mr_setInstanceData, mr_setFaceMaterials, mr_buildBatches,
   mr_uploadTessPatch, mr_uploadAnimationPose,
+  mr_uploadSkinningTexture, mr_uploadMorphTexture,
 } from './pkg/quilting_wasm.js';
 
 const $ = id => document.getElementById(id);
@@ -149,7 +158,20 @@ async function recomputeLods() {
   if (lodInFlight || !gpuSkinned) return;
   lodInFlight = true;
   try {
-    const resp = await workerCall('run_gpu_lod_compute', {});
+    // Identity Möbius, no screen attenuation for now
+    const mob = [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0];
+    const canvas = $('cv');
+    const w = canvas.width, h = canvas.height;
+    const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
+    const ey = zoom*Math.sin(rotX)+panY;
+    const ez = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
+    const view = lookAt(ex,ey,ez, panX,panY,panZ, 0,1,0);
+    const proj = perspective(Math.PI/3, w/h, 0.01, 10000);
+    const vp = mulM4(proj, view);
+    const resp = await workerCall('compute_animated_lods', {
+      t: animTime, mobius: Array.from(mob), density: 100, minPx: 0,
+      vpMatrix: Array.from(vp), vpWidth: w, vpHeight: h,
+    });
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       mr_buildBatches(faceLods);
@@ -199,11 +221,28 @@ async function loadModel(buffer, filename) {
     mr_setFaceMaterials(new Int32Array(info.face_materials));
   }
 
-  // Get skinning data + rest-pose instances from worker
-  gpuSkinned = true;
+  // Get skinning data and upload textures to main-thread GL
+  gpuSkinned = !!(info.animations && info.animations.length > 0);
   const skinResp = await workerCall('get_skinning_data', {});
   const skinData = skinResp.skinData;
   skinTexW = skinData ? (skinData.skin_tex_w || skinData.num_vertices || 0) : 0;
+
+  // Upload skinning texture (joint indices + weights) if skeletal
+  if (skinData && skinData.joint_indices) {
+    mr_uploadSkinningTexture(
+      new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
+      new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights),
+      skinData.num_vertices,
+    );
+  }
+  // Upload morph delta texture if morph targets present
+  if (skinData && skinData.morph_deltas) {
+    mr_uploadMorphTexture(
+      new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
+      skinData.num_vertices,
+      skinData.num_morph_targets,
+    );
+  }
 
   // Set tess params on worker
   await workerCall('set_tess_params', { density: 100, screen_atten: false });
@@ -211,6 +250,12 @@ async function loadModel(buffer, filename) {
   // Get rest-pose instances (CPU LOD for initial load — GPU LOD used for subsequent)
   const rpResp = await workerCall('get_rest_pose_instances', { lod_time: 0 });
   const rp = rpResp.data || rpResp;
+
+  if (!rp || !rp.instances) {
+    // Static model without animation evaluator — use compute_mesh_batches fallback
+    $('stats').textContent = `${filename}: static model (no animation data path yet)`;
+    return;
+  }
 
   // Transfer instance data + face LODs to main-thread renderer
   const instances = new Float32Array(rp.instances.buffer || rp.instances);
@@ -220,13 +265,22 @@ async function loadModel(buffer, filename) {
   mr_setInstanceData(instances, numFaces);
   mr_buildBatches(faceLods);
 
+  // Frame camera to fit model (positions are normalized to ~[-1,1])
+  const extent = rp.extent || 2.0;
+  zoom = extent * 1.5;
+  rotX = 0.2; rotY = Math.PI + 0.5; // face front of model
+  panX = 0; panY = 0; panZ = 0;
+
   // Upload model to worker GPU compute for subsequent LOD updates
   await workerCall('upload_model_to_compute', {});
 
   // Set up animation
+  animTime = 0;
   if (info.animations && info.animations.length > 0) {
     await workerCall('set_active_animation', { index: 0 });
     meshInfo.duration = info.animations[0].duration || 0;
+  } else {
+    meshInfo.duration = 0;
   }
 
   $('stats').textContent = `${filename}: ${numFaces} faces`;

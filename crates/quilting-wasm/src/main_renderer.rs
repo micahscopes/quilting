@@ -6,8 +6,9 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use std::cell::RefCell;
-use tracing::{info, warn, error};
+use tracing::info;
 
+use glow::HasContext;
 use quilting_renderer::buffer::{
     MeshBuffers, TessBuffers, PbrParams, EnvironmentMaps,
 };
@@ -15,6 +16,12 @@ use quilting_renderer::pass::{Camera, RenderBatch, RenderMode};
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
+
+fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * std::mem::size_of::<T>())
+    }
+}
 
 struct MainState {
     renderer: Renderer,
@@ -96,7 +103,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             face_materials: Vec::new(),
             materials: Vec::new(),
             num_faces: 0,
-            render_mode: RenderMode::Pbr,
+            render_mode: RenderMode::Matcap,
             mobius: IDENTITY_MOBIUS,
         });
     });
@@ -164,6 +171,79 @@ pub fn mr_upload_tess_patch(key: &str, bary: &[f32], tri_idx: &[u32], line_idx: 
     });
 }
 
+/// Upload skinning texture (joint indices + weights) to main-thread GL.
+/// `joint_indices`: flat f32 array [j0,j1,j2,j3] × num_vertices
+/// `joint_weights`: flat f32 array [w0,w1,w2,w3] × num_vertices
+#[wasm_bindgen(js_name = "mr_uploadSkinningTexture")]
+pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], num_vertices: u32) {
+    STATE.with(|s| {
+        let state = s.borrow();
+        let state = match state.as_ref() { Some(s) => s, None => return };
+        let gl = state.renderer.gl();
+        let nv = num_vertices as usize;
+        // Convert flat f32 arrays to the format SkinningTexture expects
+        let ji: Vec<[u16; 4]> = (0..nv).map(|i| {
+            [joint_indices[i*4] as u16, joint_indices[i*4+1] as u16,
+             joint_indices[i*4+2] as u16, joint_indices[i*4+3] as u16]
+        }).collect();
+        let jw: Vec<[f32; 4]> = (0..nv).map(|i| {
+            [joint_weights[i*4], joint_weights[i*4+1], joint_weights[i*4+2], joint_weights[i*4+3]]
+        }).collect();
+        if let Ok(tex) = quilting_renderer::buffer::SkinningTexture::new(gl, &ji, &jw) {
+            // Bind to texture unit 15 (matches prototype)
+            tex.bind(gl, 15);
+            info!("Skinning texture uploaded: {} vertices", nv);
+        }
+    });
+}
+
+/// Upload morph target delta texture to main-thread GL.
+/// `deltas`: flat f32 array [dx,dy,dz] × num_vertices × num_targets
+#[wasm_bindgen(js_name = "mr_uploadMorphTexture")]
+pub fn mr_upload_morph_texture(deltas: &[f32], num_vertices: u32, num_targets: u32) {
+    STATE.with(|s| {
+        let state = s.borrow();
+        let state = match state.as_ref() { Some(s) => s, None => return };
+        let gl = state.renderer.gl();
+        let nv = num_vertices as usize;
+        let nt = num_targets as usize;
+        // Pack into RGBA32F texture: width=num_vertices, height=num_targets
+        let mut rgba = vec![0.0f32; nv * nt * 4];
+        for t in 0..nt {
+            for v in 0..nv {
+                let src = (t * nv + v) * 3;
+                let dst = (t * nv + v) * 4;
+                if src + 2 < deltas.len() {
+                    rgba[dst] = deltas[src];
+                    rgba[dst+1] = deltas[src+1];
+                    rgba[dst+2] = deltas[src+2];
+                }
+            }
+        }
+        unsafe {
+            let tex = match gl.create_texture() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                nv as i32, nt as i32, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))),
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            // Bind to texture unit 14 (matches prototype)
+            gl.active_texture(glow::TEXTURE0 + 14);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            info!("Morph texture uploaded: {} vertices × {} targets", nv, nt);
+        }
+    });
+}
+
 #[wasm_bindgen(js_name = "mr_buildBatches")]
 pub fn mr_build_batches(face_lods: &[f32]) {
     STATE.with(|s| {
@@ -177,10 +257,16 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             face_lods, &state.cached_instances, &state.face_materials, state.num_faces,
         );
 
+        let mut built = 0;
+        let mut missing = 0;
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
             for lb in &logical {
-                let tess = match tc.get(&lb.tess_key.as_string()) { Some(t) => t, None => continue };
+                let key = lb.tess_key.as_string();
+                let tess = match tc.get(&key) {
+                    Some(t) => t,
+                    None => { missing += 1; continue; }
+                };
                 let mesh = match MeshBuffers::new(gl, tess, &lb.instance_data, lb.face_indices.len() as i32) {
                     Ok(m) => m, Err(_) => continue,
                 };
@@ -188,8 +274,10 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                     mesh, perm_parity: lb.parity, perm_index: lb.perm_index as i32,
                     material_index: lb.material_index, lod: lb.lod,
                 });
+                built += 1;
             }
         });
+        info!("Built {} GPU batches ({} logical, {} missing tess)", built, logical.len(), missing);
     });
 }
 
@@ -227,8 +315,11 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }).collect();
 
+        let gl = state.renderer.gl();
         state.renderer.begin_frame();
-        state.renderer.joint_ubo().bind(state.renderer.gl());
+        state.renderer.joint_ubo().bind(gl);
+        state.renderer.matcap_ubo().upload(gl, false); // no matcap texture → use heatmap
+        state.renderer.matcap_ubo().bind(gl);
         state.renderer.render(state.render_mode, &camera, &render_batches);
         state.renderer.end_frame();
     });

@@ -441,7 +441,7 @@ impl JointMatricesBuf {
     }
 }
 
-/// UBO for matcap fragment uniforms (binding 3).
+/// UBO for matcap fragment uniforms (binding 1, shared with wire UBO).
 ///
 /// Layout (std140, 16 bytes):
 ///   float has_matcap_tex  (offset 0)
@@ -472,7 +472,8 @@ impl MatcapUniformBuf {
 
     pub fn bind(&self, gl: &glow::Context) {
         unsafe {
-            gl.bind_buffer_base(glow::UNIFORM_BUFFER, 3, Some(self.ubo));
+            // Binding 1: shared with wire UBO — each fragment shader uses only one
+            gl.bind_buffer_base(glow::UNIFORM_BUFFER, 1, Some(self.ubo));
         }
     }
 
