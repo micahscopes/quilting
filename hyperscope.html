@@ -2235,15 +2235,18 @@ function rebuildBatchesFromFaceLods(faceLods) {
   if (!cachedInstances) return;
   const nf = cachedNumFaces;
 
+  const faceMats = window._baseFaceMaterials || [];
   const groups = new Map();
   for (let fi = 0; fi < nf; fi++) {
     const lo = fi * 5;
     const ca = faceLods[lo], cb = faceLods[lo+1], cc = faceLods[lo+2];
     const permIdx = faceLods[lo+3];
     const parity = faceLods[lo+4];
-    const key = `${ca},${cb},${cc}/${permIdx}`;
+    const matIdx = (fi < faceMats.length && faceMats[fi] >= 0) ? faceMats[fi] : 0;
+    const key = `${ca},${cb},${cc}/${permIdx}/m${matIdx}`;
+    const tessKey = `${ca},${cb},${cc}/${permIdx}`;
     if (!groups.has(key)) {
-      groups.set(key, { faces: [], parity, permIndex: permIdx, lod: [ca, cb, cc] });
+      groups.set(key, { faces: [], parity, permIndex: permIdx, lod: [ca, cb, cc], materialIndex: matIdx, tessKey });
     }
     groups.get(key).faces.push(fi);
   }
@@ -2256,7 +2259,7 @@ function rebuildBatchesFromFaceLods(faceLods) {
   drawBatches = [];
 
   for (const [key, group] of groups) {
-    const tess = atlasBuffers.get(key) || tessCache.get(key);
+    const tess = atlasBuffers.get(group.tessKey) || tessCache.get(group.tessKey);
     if (!tess) continue;
 
     const groupData = new Float32Array(group.faces.length * STRIDE);
