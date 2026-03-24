@@ -202,13 +202,15 @@ pub fn recompute_lods(
             } else { None }
         } else { None };
 
-        // Use raw positions (rest or animated) for LOD computation — don't normalize.
-        // compute_instances computes its own mesh_radius, so the ratio of
-        // edge medians to target_size is scale-invariant. Normalizing with
-        // rest-pose params corrupts animated positions (skeleton transforms
-        // move vertices far from the rest-pose bounding box).
+        // Use raw positions (rest or animated) for LOD computation.
         let positions = animated_positions.as_ref().unwrap_or(&combined.positions);
         let tris: Vec<[usize; 3]> = combined.triangles.clone();
+
+        let tess_d = quilting_core::evaluate::get_tess_density();
+        web_sys::console::log_1(&format!(
+            "recompute_lods: {} verts, {} faces, density={}, xform={}, animated={}",
+            positions.len(), tris.len(), tess_d, transform_type, animated_positions.is_some()
+        ).into());
 
         let transform = match transform_type {
             "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
