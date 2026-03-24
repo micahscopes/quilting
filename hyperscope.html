@@ -2315,17 +2315,13 @@ async function recomputeAndRebuildLods() {
   const resOverride = parseInt($('res').value) || 0;
   if (resOverride > 0) {
     const lod = 1 << resOverride;
-    // Build fake LOD result: all faces get the same atlas entry
-    const atlasKeys = gpuLodCompute && gpuLodCompute.atlasKeys;
-    if (!atlasKeys) return;
-    // Find atlas index for [lod, lod, lod]
-    let aidx = 0;
-    for (let i = 0; i < atlasKeys.length; i++) {
-      if (atlasKeys[i][0] === lod && atlasKeys[i][1] === lod && atlasKeys[i][2] === lod) { aidx = i; break; }
+    // Uniform LOD override: all faces get [lod, lod, lod] with perm 0, parity 1
+    const faceLods = new Float32Array(nf * 5);
+    for (let i = 0; i < nf; i++) {
+      faceLods[i*5] = lod; faceLods[i*5+1] = lod; faceLods[i*5+2] = lod;
+      faceLods[i*5+3] = 0; faceLods[i*5+4] = 1;
     }
-    const lodResult = new Float32Array(nf * 2);
-    for (let i = 0; i < nf; i++) { lodResult[i*2] = aidx; lodResult[i*2+1] = 0; }
-    rebuildBatchesFromLods(lodResult);
+    rebuildBatchesFromFaceLods(faceLods);
     return;
   }
 
@@ -2872,11 +2868,12 @@ function frame() {
     $('time-v').textContent = frame._animTime.toFixed(2);
     uploadAnimationPose(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
 
-    // Per-frame LOD recompute for animated models (throttled)
-    if (!lodRecomputeInFlight && cachedInstances && meshInfo &&
-        meshInfo.time_max > meshInfo.time_min) {
+    // Per-frame LOD recompute for animated models (throttled, error-safe)
+    if (!lodRecomputeInFlight && cachedInstances) {
       lodRecomputeInFlight = true;
-      recomputeAndRebuildLods().then(() => { lodRecomputeInFlight = false; });
+      recomputeAndRebuildLods()
+        .then(() => { lodRecomputeInFlight = false; })
+        .catch(e => { console.warn('LOD recompute failed:', e); lodRecomputeInFlight = false; });
     }
   }
   render();
