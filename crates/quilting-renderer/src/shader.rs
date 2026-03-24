@@ -181,11 +181,20 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
 
         // Texture samplers: bind to matching units
         gl.use_program(Some(program));
+        // Vertex shader textures
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_2_vs") {
             gl.uniform_1_i32(Some(&loc), SKINNING_TEX_UNIT as i32);
         }
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_3_vs") {
             gl.uniform_1_i32(Some(&loc), MORPH_TEX_UNIT as i32);
+        }
+        // Fragment shader textures — matcap texture at binding 2 → unit 0
+        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_2_fs") {
+            gl.uniform_1_i32(Some(&loc), 0);
+        }
+        // Matcap sampler at binding 3 (naga may merge texture+sampler)
+        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_3_fs") {
+            gl.uniform_1_i32(Some(&loc), 0); // same unit as texture
         }
         gl.use_program(None);
 
