@@ -2360,7 +2360,6 @@ async function recomputeAndRebuildLods() {
   // Map back to face LODs using atlas keys
   const atlasKeys = gpuLodCompute && gpuLodCompute.atlasKeys;
   if (!atlasKeys) return;
-  const nf = cachedNumFaces;
   const faceLods = new Float32Array(nf * 5);
   for (let fi = 0; fi < nf; fi++) {
     const atlasIdx = Math.round(lodResult[fi * 2]);
