@@ -157,17 +157,28 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
             gl.uniform_block_binding(program, idx, JOINT_MATRICES_BINDING);
         }
 
-        // Skinning texture: bind sampler to texture unit SKINNING_TEX_UNIT
+        // Matcap fragment uniform block: MatcapUniforms at group(0) binding(1)
+        if let Some(idx) = gl.get_uniform_block_index(program, "MatcapUniforms_block_0Fragment") {
+            gl.uniform_block_binding(program, idx, WIRE_UNIFORMS_BINDING); // shared binding 1
+        }
+
+        // Texture samplers: bind to matching units
         gl.use_program(Some(program));
+        // Skinning texture (vertex shader): group(0) binding(2) → unit 15
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_2_vs") {
             gl.uniform_1_i32(Some(&loc), SKINNING_TEX_UNIT as i32);
+        }
+        // Morph delta texture (vertex shader): group(0) binding(3) → unit 14
+        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_3_vs") {
+            gl.uniform_1_i32(Some(&loc), MORPH_TEX_UNIT as i32);
         }
         gl.use_program(None);
     }
 }
 
-/// Texture unit for the per-vertex skinning data texture.
-pub const SKINNING_TEX_UNIT: u32 = 5;
+/// Texture units matching the prototype's GL texture binding.
+pub const SKINNING_TEX_UNIT: u32 = 15;
+pub const MORPH_TEX_UNIT: u32 = 14;
 
 /// Compile all WGSL shaders to GLSL, create GL programs, and bind uniform blocks.
 pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
