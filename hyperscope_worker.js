@@ -133,12 +133,13 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'recompute_lods') {
-    const { transformType, params, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub } = data;
+    const { animTime, transformType, params, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub } = data;
     if (tessDensity != null) {
       wasm.set_tess_params(tessDensity, !!screenAtten);
       if (minPxSub != null) wasm.set_min_px_per_sub(minPxSub);
     }
     const result = wasm.recompute_lods(
+      animTime != null ? animTime : -1.0,
       transformType || 'identity',
       new Float64Array(params || []),
       new Float64Array(vpMatrix || new Array(16).fill(0)),

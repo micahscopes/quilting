@@ -145,11 +145,13 @@ pub fn gpu_compute_lods(
 }
 
 /// Recompute LODs using the proven CPU path (half-edge coherent, Möbius-deformed medians).
-/// Called from the worker when Möbius/density/camera changes.
+/// Called from the worker when Möbius/density/camera/animation changes.
+/// When `anim_time` >= 0, evaluates animated positions (morph + skeletal) at that time.
+/// When `anim_time` < 0, uses rest-pose positions.
 /// Returns a Float32Array with 5 floats per face: [canonical_a, canonical_b, canonical_c, perm_index, parity]
-/// This uses the exact same `compute_instances` logic that the old rendering pipeline used.
 #[wasm_bindgen]
 pub fn recompute_lods(
+    anim_time: f64,
     transform_type: &str,
     params: &[f64],
     vp_matrix: &[f64],
@@ -167,7 +169,43 @@ pub fn recompute_lods(
         let center = data.norm_center;
         let s = data.norm_scale;
 
-        let norm_positions: Vec<[f64; 3]> = combined.positions.iter().map(|v| {
+        // Evaluate animated positions if requested and animation is available
+        let animated_positions = if anim_time >= 0.0 {
+            if let Some(ref eval) = data.evaluator {
+                let pose = eval.evaluate(anim_time);
+                // For skeletal: skin rest-pose positions with joint matrices
+                if !pose.joint_matrices.is_empty() {
+                    if let Some(si) = data.primary_skin_idx {
+                        if si < data.skins.len() {
+                            Some(quilting_gltf::animation::evaluate_skinned_at_time(
+                                combined, &data.skins[si],
+                                &data.animations[data.active_animation],
+                                &data.nodes, anim_time,
+                            ))
+                        } else { None }
+                    } else { None }
+                }
+                // For morph targets: apply morph deltas to rest-pose
+                else if !pose.morph_weights.is_empty() && !combined.morph_targets.is_empty() {
+                    let mut positions = combined.positions.clone();
+                    for (ti, weight) in pose.morph_weights.iter().enumerate() {
+                        if (*weight).abs() < 1e-6 || ti >= combined.morph_targets.len() { continue; }
+                        let deltas = &combined.morph_targets[ti];
+                        for (vi, pos) in positions.iter_mut().enumerate() {
+                            if vi < deltas.len() {
+                                pos[0] += *weight as f64 * deltas[vi][0];
+                                pos[1] += *weight as f64 * deltas[vi][1];
+                                pos[2] += *weight as f64 * deltas[vi][2];
+                            }
+                        }
+                    }
+                    Some(positions)
+                } else { None }
+            } else { None }
+        } else { None };
+
+        let base_positions = animated_positions.as_ref().unwrap_or(&combined.positions);
+        let norm_positions: Vec<[f64; 3]> = base_positions.iter().map(|v| {
             [(v[0]-center[0])*s, (v[1]-center[1])*s, (v[2]-center[2])*s]
         }).collect();
         let tris: Vec<[usize; 3]> = combined.triangles.clone();

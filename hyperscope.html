@@ -1962,14 +1962,9 @@ function runGpuLodCompute(lodCompute, mobius, vpMatrix, vpW, vpH, density, meshR
 // Set up GPU skinning for a skinned glTF model.
 // Uploads skinning texture, builds static rest-pose instance data, creates batch.
 async function setupGpuSkinning() {
-  // 1. Get skinning data from worker and upload as texture
+  // 1. Get skinning data from worker (null for static models — that's fine)
   const skinResp = await workerCall('get_skinning_data', {});
-  const sd = skinResp.skinData;
-  if (!sd) {
-    console.warn('No animation data available');
-    gpuSkinned = false;
-    return false;
-  }
+  const sd = skinResp.skinData || { num_vertices: 0, num_joints: 0, num_morph_targets: 0 };
   const hasJoints = sd.joint_indices && sd.num_joints > 0;
   const hasMorph = sd.num_morph_targets > 0;
 
@@ -2344,6 +2339,7 @@ async function recomputeAndRebuildLods() {
   const { mx, my, mz, mr } = getTransformParams();
   const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
   const resp = await workerCall('recompute_lods', {
+    animTime: frame._animTime != null ? frame._animTime : -1,
     transformType: tType,
     params: [mx, my, mz, mr],
     vpMatrix: Array.from(vpMatrix),
@@ -2848,21 +2844,25 @@ animToggle.addEventListener('click', () => {
 });
 
 // Animation loop — advance time for GPU skinned models.
+let lodRecomputeInFlight = false;
 function frame() {
   if (animating && meshInfo && gpuSkinned) {
-    // GPU skinning: advance time at 1x playback speed
+    // GPU animation: advance time at 1x playback speed
     if (!frame._animTime) frame._animTime = meshInfo.time_min;
     const period = meshInfo.time_max - meshInfo.time_min;
-    const dt = 1.0 / 60.0; // ~16ms per frame at 60fps
+    const dt = 1.0 / 60.0;
     frame._animTime += dt;
-    // Wrap to animation range
     if (frame._animTime > meshInfo.time_max) frame._animTime = meshInfo.time_min + (frame._animTime - meshInfo.time_min) % period;
     const slider = $('time');
     slider.value = frame._animTime;
     $('time-v').textContent = frame._animTime.toFixed(2);
-    // Upload joint matrices — fire and render with whatever data is current.
-    // The UBO update happens async; next frame's render will use it.
     uploadAnimationPose(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
+
+    // Per-frame LOD recompute (throttled — skip if a previous one is still in flight)
+    if (!lodRecomputeInFlight && cachedInstances) {
+      lodRecomputeInFlight = true;
+      recomputeAndRebuildLods().then(() => { lodRecomputeInFlight = false; });
+    }
   }
   render();
   requestAnimationFrame(frame);
