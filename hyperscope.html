@@ -277,7 +277,8 @@ async function loadModel(buffer, filename) {
         let off = 0;
         for (let i = 0; i < info.textures.length; i++) {
           const t = info.textures[i];
-          const pixels = t.pixels ? new Uint8Array(t.pixels.buffer || t.pixels) : new Uint8Array(0);
+          const raw = t.data || t.pixels;
+        const pixels = raw ? new Uint8Array(raw.buffer || raw) : new Uint8Array(0);
           allPixels.set(pixels, off);
           off += widths[i] * heights[i] * 4;
         }
