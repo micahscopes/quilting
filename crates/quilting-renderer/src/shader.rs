@@ -157,8 +157,11 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         }
 
         // PBR fragment uniform block: PbrUniforms at group(0) binding(1)
-        if let Some(idx) = gl.get_uniform_block_index(program, "PbrUniforms_block_1Fragment") {
-            gl.uniform_block_binding(program, idx, PBR_UNIFORMS_BINDING);
+        for name in &["PbrUniforms_block_0Fragment", "PbrUniforms_block_1Fragment"] {
+            if let Some(idx) = gl.get_uniform_block_index(program, name) {
+                gl.uniform_block_binding(program, idx, PBR_UNIFORMS_BINDING);
+                break;
+            }
         }
 
         // Joint matrices: JointMatrices at group(0) binding(1) in vertex stage
@@ -188,13 +191,32 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_3_vs") {
             gl.uniform_1_i32(Some(&loc), MORPH_TEX_UNIT as i32);
         }
-        // Fragment shader textures — matcap texture at binding 2 → unit 0
-        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_2_fs") {
-            gl.uniform_1_i32(Some(&loc), 0);
-        }
-        // Matcap sampler at binding 3 (naga may merge texture+sampler)
-        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_3_fs") {
-            gl.uniform_1_i32(Some(&loc), 0); // same unit as texture
+        // Fragment shader textures — bind to texture units matching prototype layout
+        // Matcap: binding 2/3 → unit 0
+        // PBR: bindings 2-17 → units 0-7 (base_color, mr, normal, emissive, occlusion, env, irrad, sheen)
+        let fs_sampler_bindings: &[(u32, i32)] = &[
+            (2, 0),   // base_color_tex / matcap_tex
+            (3, 0),   // base_color_sampler / matcap_sampler
+            (4, 1),   // metallic_roughness_tex
+            (5, 1),   // metallic_roughness_sampler
+            (6, 2),   // normal_tex
+            (7, 2),   // normal_sampler
+            (8, 3),   // emissive_tex
+            (9, 3),   // emissive_sampler
+            (10, 4),  // occlusion_tex
+            (11, 4),  // occlusion_sampler
+            (12, 5),  // env_prefiltered
+            (13, 5),  // env_prefiltered_sampler
+            (14, 6),  // env_irradiance
+            (15, 6),  // env_irradiance_sampler
+            (16, 7),  // sheen_e_lut
+            (17, 7),  // sheen_e_sampler
+        ];
+        for &(binding, unit) in fs_sampler_bindings {
+            let name = format!("_group_0_binding_{}_fs", binding);
+            if let Some(loc) = gl.get_uniform_location(program, &name) {
+                gl.uniform_1_i32(Some(&loc), unit);
+            }
         }
         gl.use_program(None);
 

@@ -81,10 +81,30 @@ pub fn render_frame(
 ) {
     vtx_ubo.bind(gl);
 
-    // PBR falls back to matcap until PBR pass is fully wired
-    let draw_matcap = matches!(mode, RenderMode::Matcap | RenderMode::Both | RenderMode::Lod | RenderMode::Pbr);
+    let draw_pbr = mode == RenderMode::Pbr;
+    let draw_matcap = matches!(mode, RenderMode::Matcap | RenderMode::Both | RenderMode::Lod);
     let draw_wire = matches!(mode, RenderMode::Wire | RenderMode::Both);
     let draw_normals = mode == RenderMode::Normals;
+
+    // PBR pass (filled triangles with PBR shader)
+    if draw_pbr {
+        unsafe { gl.use_program(Some(programs.pbr)); }
+
+        for batch in batches {
+            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
+
+            unsafe {
+                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
+                gl.draw_elements_instanced(
+                    glow::TRIANGLES,
+                    batch.mesh.num_tri_indices,
+                    glow::UNSIGNED_INT,
+                    0,
+                    batch.mesh.num_instances,
+                );
+            }
+        }
+    }
 
     // Matcap/LOD pass (filled triangles)
     if draw_matcap {

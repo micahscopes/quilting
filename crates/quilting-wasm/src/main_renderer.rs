@@ -319,13 +319,27 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.renderer.begin_frame();
         state.renderer.joint_ubo().bind(gl);
 
-        // Matcap UBO mode: 0=LOD heatmap, 1=texture matcap, 2=procedural matcap
-        let matcap_mode = match state.render_mode {
-            RenderMode::Lod => 0.0,
-            _ => 2.0, // procedural matcap for all other modes (until PBR is wired)
-        };
-        state.renderer.matcap_ubo().upload(gl, matcap_mode);
-        state.renderer.matcap_ubo().bind(gl);
+        // Mode-specific UBO setup
+        match state.render_mode {
+            RenderMode::Pbr => {
+                // PBR UBO: default white material
+                let pbr_params = if !state.materials.is_empty() {
+                    state.materials[0].clone()
+                } else {
+                    PbrParams::default()
+                };
+                state.renderer.pbr_ubo().upload(gl, &pbr_params);
+                state.renderer.pbr_ubo().bind(gl);
+            }
+            RenderMode::Lod => {
+                state.renderer.matcap_ubo().upload(gl, 0.0); // heatmap
+                state.renderer.matcap_ubo().bind(gl);
+            }
+            _ => {
+                state.renderer.matcap_ubo().upload(gl, 2.0); // procedural matcap
+                state.renderer.matcap_ubo().bind(gl);
+            }
+        }
 
         state.renderer.render(state.render_mode, &camera, &render_batches);
         state.renderer.end_frame();
