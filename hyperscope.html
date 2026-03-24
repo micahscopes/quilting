@@ -129,6 +129,7 @@ canvas.addEventListener('drop', async e => {
 // --- Animation + LOD ---
 let animTime = 0;
 let lodInFlight = false;
+let lodDebounceTimer = null;
 let skinTexW = 0;
 
 // Non-blocking: fire animation pose upload, don't await in frame loop
@@ -191,9 +192,12 @@ function frame(ts) {
   if (animating && gpuSkinned && meshInfo) {
     animTime += 1/60;
     if (meshInfo.duration > 0) animTime = animTime % meshInfo.duration;
-    // Fire animation + LOD async (non-blocking, render uses last known state)
+    // Animation pose: every frame (lightweight, just uploads UBO)
     tickAnimation(animTime);
-    recomputeLods();
+    // LOD recompute: debounced (expensive, involves GPU readback on worker)
+    if (!lodDebounceTimer) {
+      lodDebounceTimer = setTimeout(() => { lodDebounceTimer = null; recomputeLods(); }, 200);
+    }
   }
 
   const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
@@ -267,9 +271,8 @@ async function loadModel(buffer, filename) {
   mr_setInstanceData(instances, numFaces);
   mr_buildBatches(faceLods);
 
-  // Frame camera to fit model (positions are normalized to ~[-1,1])
-  const extent = rp.extent || 2.0;
-  zoom = extent * 1.5;
+  // Frame camera: positions are normalized to ~[-1,1], so zoom 3 fits well
+  zoom = 3.0;
   rotX = 0.2; rotY = Math.PI + 0.5; // face front of model
   panX = 0; panY = 0; panZ = 0;
 

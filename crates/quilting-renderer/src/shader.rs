@@ -219,6 +219,9 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
     let mut pbr = None;
 
     for (name, compiled) in &glsl_sources {
+        log_info(&format!("Compiling program '{}': VS {} chars, FS {} chars",
+            name, compiled.vertex.len(), compiled.fragment.len()));
+
         let program = create_program(gl, &compiled.vertex, &compiled.fragment)
             .map_err(|e| format!("program '{name}': {e}"))?;
 
@@ -232,6 +235,7 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
             _ => {}
         }
     }
+    log_info(&format!("All {} shader programs compiled and linked", glsl_sources.len()));
 
     Ok(Programs {
         matcap: matcap.ok_or("matcap program not compiled")?,
