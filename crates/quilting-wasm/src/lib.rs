@@ -144,6 +144,15 @@ pub fn gpu_compute_lods(
     })
 }
 
+thread_local! {
+    /// Cached half-edge mesh for edge coherence reconciliation after GPU LOD readback.
+    static LOD_HALF_EDGE: RefCell<Option<HalfEdgeMesh>> = RefCell::new(None);
+    /// Sorted atlas keys — maps atlas_index back to canonical LOD triples.
+    static LOD_ATLAS_KEYS: RefCell<Vec<[u32; 3]>> = RefCell::new(Vec::new());
+    /// Mesh bounding sphere radius (from rest-pose positions, for GPU density scaling).
+    static LOD_MESH_RADIUS: RefCell<f64> = RefCell::new(1.0);
+}
+
 /// Upload static animation data to the GPU compute context for per-frame LOD.
 /// Call once after loading a model. Uploads:
 /// - Rest-pose positions as a texture
@@ -212,7 +221,7 @@ pub fn upload_model_to_compute() -> bool {
                 compute.upload_morph_deltas(gl, &deltas, nv, num_targets);
             }
 
-            // Upload atlas LUT
+            // Upload atlas LUT and cache keys for readback mapping
             ATLAS.with(|atlas_cell| {
                 let atlas = atlas_cell.borrow();
                 if let Some(atlas) = atlas.as_ref() {
@@ -229,25 +238,56 @@ pub fn upload_model_to_compute() -> bool {
                         if lut_key < LUT_SIZE { lut[lut_key] = idx as u8; }
                     }
                     compute.upload_atlas_lut(gl, &lut);
+                    LOD_ATLAS_KEYS.with(|ak| *ak.borrow_mut() = keys);
                 }
             });
+
+            // Build half-edge mesh for edge coherence (once)
+            let faces_u32: Vec<[u32; 3]> = combined.triangles.iter()
+                .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+                .collect();
+            LOD_HALF_EDGE.with(|he| {
+                *he.borrow_mut() = Some(HalfEdgeMesh::from_triangles(nv as u32, &faces_u32));
+            });
+
+            // Compute mesh_radius from normalized positions
+            let (mut cx, mut cy, mut cz) = (0.0f64, 0.0, 0.0);
+            let n = nv as f64;
+            for i in 0..nv {
+                cx += pos_f32[i*3] as f64; cy += pos_f32[i*3+1] as f64; cz += pos_f32[i*3+2] as f64;
+            }
+            cx /= n; cy /= n; cz /= n;
+            let mut max_r = 0.0f64;
+            for i in 0..nv {
+                let dx = pos_f32[i*3] as f64 - cx;
+                let dy = pos_f32[i*3+1] as f64 - cy;
+                let dz = pos_f32[i*3+2] as f64 - cz;
+                max_r = max_r.max((dx*dx + dy*dy + dz*dz).sqrt());
+            }
+            LOD_MESH_RADIUS.with(|r| *r.borrow_mut() = max_r.max(1e-6));
 
             true
         })
     })
 }
 
-/// Evaluate animation at time t and run GPU LOD computation.
-/// Returns a Float32Array with 2 floats per face: [atlas_index, perm_index, ...].
-/// The animation evaluator produces joint matrices and/or morph weights,
-/// uploads them to the GPU compute context, and runs the transform feedback pass.
-/// Returns null if no model or GPU compute context is available.
+/// Per-frame GPU LOD computation with edge coherence reconciliation.
+///
+/// 1. Evaluates animation (morph + skeletal) at time t
+/// 2. Uploads joint matrices + morph weights to worker GPU
+/// 3. Runs transform feedback LOD compute (Möbius + medians + snap)
+/// 4. Reads back raw (atlas_index, perm_index) per face
+/// 5. Inverts permutation to recover unsorted per-edge LODs
+/// 6. Enforces edge coherence via half-edge mesh (max across shared edges)
+/// 7. Re-canonicalizes to (canonical_lod, perm_index, parity) per face
+///
+/// Returns Float32Array with 5 floats per face: [canon_a, canon_b, canon_c, perm_index, parity]
+/// Uses mesh_radius computed at upload time (not hardcoded).
 #[wasm_bindgen]
 pub fn compute_animated_lods(
     t: f64,
     mobius: &[f32],
     density: f32,
-    mesh_radius: f32,
     min_px: f32,
     vp_matrix: &[f32],
     vp_width: f32,
@@ -262,13 +302,13 @@ pub fn compute_animated_lods(
 
         let num_faces = data.combined.triangles.len();
         let num_vertices = data.combined.positions.len() as u32;
+        let mesh_radius = LOD_MESH_RADIUS.with(|r| *r.borrow()) as f32;
 
-        // Evaluate animation pose at time t
+        // 1. Evaluate animation pose at time t
         let (joint_matrices, morph_weights, num_joints, num_morph) =
             if let Some(ref eval) = data.evaluator {
                 let pose = eval.evaluate(t);
 
-                // Apply normalization to joint matrices (same as evaluate_animation_frame)
                 let c = data.norm_center;
                 let s = data.norm_scale;
                 let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
@@ -309,14 +349,14 @@ pub fn compute_animated_lods(
                 (vec![], vec![], 0u32, 0u32)
             };
 
-        GPU_COMPUTE.with(|gc| {
+        // 2-3. GPU compute
+        let gpu_class = GPU_COMPUTE.with(|gc| {
             let mut gc = gc.borrow_mut();
             let (gl, compute) = match gc.as_mut() {
                 Some(pair) => pair,
-                None => return JsValue::NULL,
+                None => return vec![],
             };
 
-            // Upload per-frame animation data
             if !joint_matrices.is_empty() {
                 compute.upload_joint_matrices(gl, &joint_matrices);
             }
@@ -335,12 +375,75 @@ pub fn compute_animated_lods(
                 mob, density, mesh_radius, min_px,
                 &vp, vp_width, vp_height,
             );
-            let result = compute.read_back(gl, n);
+            compute.read_back(gl, n)
+        });
 
-            let arr = js_sys::Float32Array::new_with_length(result.len() as u32);
-            arr.copy_from(&result);
-            arr.into()
-        })
+        if gpu_class.is_empty() { return JsValue::NULL; }
+
+        // 4-5. Invert permutation to recover unsorted per-face LODs
+        let nf = num_faces;
+        let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
+        let mut face_lods = vec![[2u32; 3]; nf];
+
+        LOD_ATLAS_KEYS.with(|ak| {
+            let keys = ak.borrow();
+            for fi in 0..nf {
+                let rb = fi * stride;
+                if rb + 1 < gpu_class.len() {
+                    let atlas_idx = gpu_class[rb] as usize;
+                    let perm_idx = gpu_class[rb + 1] as usize;
+                    if atlas_idx < keys.len() && perm_idx < 6 {
+                        let canonical = keys[atlas_idx];
+                        let perm = quilting_core::permutation::S3_PERMUTATIONS[perm_idx];
+                        face_lods[fi] = [canonical[perm[0]], canonical[perm[1]], canonical[perm[2]]];
+                    }
+                }
+            }
+        });
+
+        // 6. Edge coherence: shared edges must have matching LODs
+        LOD_HALF_EDGE.with(|he_cell| {
+            let he_opt = he_cell.borrow();
+            if let Some(he) = he_opt.as_ref() {
+                for fi in 0..nf {
+                    let hes = he.face_half_edges(fi as u32);
+                    for (hi, &he_id) in hes.iter().enumerate() {
+                        let lod_idx = (hi + 2) % 3;
+                        if let Some(twin_id) = quilting_mesh::unpack_twin(he.half_edges[he_id as usize].twin) {
+                            let adj_fi = he.half_edges[twin_id as usize].face as usize;
+                            if adj_fi < nf {
+                                let adj_hes = he.face_half_edges(adj_fi as u32);
+                                for (adj_hi, &adj_he_id) in adj_hes.iter().enumerate() {
+                                    if adj_he_id == twin_id {
+                                        let adj_lod_idx = (adj_hi + 2) % 3;
+                                        let max_lod = face_lods[fi][lod_idx].max(face_lods[adj_fi][adj_lod_idx]);
+                                        face_lods[fi][lod_idx] = max_lod;
+                                        face_lods[adj_fi][adj_lod_idx] = max_lod;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 7. Re-canonicalize to (canonical_lod, perm_index, parity)
+        let mut result = Vec::with_capacity(nf * 5);
+        for fi in 0..nf {
+            let ck = canonical_form(face_lods[fi]);
+            let parity = perm_sign(ck.perm_index);
+            result.push(ck.res[0] as f32);
+            result.push(ck.res[1] as f32);
+            result.push(ck.res[2] as f32);
+            result.push(ck.perm_index as f32);
+            result.push(parity as f32);
+        }
+
+        let arr = js_sys::Float32Array::new_with_length(result.len() as u32);
+        arr.copy_from(&result);
+        arr.into()
     })
 }
 

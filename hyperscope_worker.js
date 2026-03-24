@@ -133,12 +133,16 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'compute_animated_lods') {
-    const { t, mobius, density, meshRadius, minPx, vpMatrix, vpWidth, vpHeight } = data;
+    const { t, mobius, density, minPx, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub } = data;
+    // Set tess params before compute
+    if (tessDensity != null) {
+      wasm.set_tess_params(tessDensity, !!screenAtten);
+      if (minPxSub != null) wasm.set_min_px_per_sub(minPxSub);
+    }
     const result = wasm.compute_animated_lods(
       t,
       new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
       density || 20.0,
-      meshRadius || 1.0,
       minPx || 0.0,
       new Float32Array(vpMatrix || new Array(16).fill(0)),
       vpWidth || 0,

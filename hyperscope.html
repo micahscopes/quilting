@@ -2344,38 +2344,25 @@ async function recomputeAndRebuildLods() {
       vpMatrix[j * 4 + i] = s;
     }
 
-  // GPU LOD recompute on worker via transform feedback (~3ms vs ~250ms CPU)
+  // GPU LOD compute + edge coherence on worker
   const t0 = performance.now();
   const mobArr = [...mob.a, ...mob.b, ...mob.c, ...mob.d];
   const resp = await workerCall('compute_animated_lods', {
     t: frame._animTime != null ? frame._animTime : -1,
     mobius: mobArr,
-    density, meshRadius: 1.0, minPx,
+    density, minPx,
     vpMatrix: Array.from(vpMatrix),
     vpWidth: canvas.width, vpHeight: canvas.height,
+    tessDensity: density,
+    screenAtten: $('screen-atten-toggle').classList.contains('on'),
+    minPxSub: minPx,
   });
-  const lodResult = resp.lods;
-  if (!lodResult) { console.warn('LOD compute returned null'); return; }
-  // lodResult: 2 floats per face [atlas_index, perm_index]
-  // Map back to face LODs using atlas keys
-  const atlasKeys = gpuLodCompute && gpuLodCompute.atlasKeys;
-  if (!atlasKeys) return;
-  const faceLods = new Float32Array(nf * 5);
-  for (let fi = 0; fi < nf; fi++) {
-    const atlasIdx = Math.round(lodResult[fi * 2]);
-    const permIdx = Math.round(lodResult[fi * 2 + 1]);
-    if (atlasIdx >= 0 && atlasIdx < atlasKeys.length && atlasIdx !== 255) {
-      const canon = atlasKeys[atlasIdx];
-      const parity = (permIdx === 1 || permIdx === 3 || permIdx === 4) ? -1.0 : 1.0;
-      faceLods[fi*5] = canon[0]; faceLods[fi*5+1] = canon[1]; faceLods[fi*5+2] = canon[2];
-      faceLods[fi*5+3] = permIdx; faceLods[fi*5+4] = parity;
-    } else {
-      faceLods[fi*5] = 2; faceLods[fi*5+1] = 2; faceLods[fi*5+2] = 2;
-      faceLods[fi*5+3] = 0; faceLods[fi*5+4] = 1;
-    }
-  }
+  // Result is already 5 floats per face [canon_a, canon_b, canon_c, perm_index, parity]
+  // with edge coherence applied on the worker
+  const faceLods = resp.lods;
+  if (!faceLods) { console.warn('LOD compute returned null'); return; }
   rebuildBatchesFromFaceLods(faceLods);
-  console.log(`LOD recompute: ${(performance.now()-t0).toFixed(1)}ms GPU, ${nf} faces → ${drawBatches.length} batches`);
+  console.log(`LOD recompute: ${(performance.now()-t0).toFixed(1)}ms, ${nf} faces → ${drawBatches.length} batches`);
 } // pre-uploaded atlas patches: "a,b,c/perm" → {baryBuf, triIdxBuf, lineIdxBuf, numTriIdx, numLineIdx, rawBary, rawTris}
 
 function uploadAtlasPatches(patches) {
