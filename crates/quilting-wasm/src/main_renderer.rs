@@ -174,6 +174,85 @@ pub fn mr_upload_tess_patch(key: &str, bary: &[f32], tri_idx: &[u32], line_idx: 
 /// Upload skinning texture (joint indices + weights) to main-thread GL.
 /// `joint_indices`: flat f32 array [j0,j1,j2,j3] × num_vertices
 /// `joint_weights`: flat f32 array [w0,w1,w2,w3] × num_vertices
+/// Set PBR material parameters from JS material objects.
+/// Each material is a flat f32 array packed as:
+/// [base_r, base_g, base_b, base_a, metallic, roughness, normal_scale,
+///  occlusion_strength, alpha_cutoff, alpha_mode, unlit,
+///  emissive_r, emissive_g, emissive_b,
+///  has_base_color_tex, has_mr_tex, has_normal_tex, has_emissive_tex, has_occlusion_tex,
+///  sheen_r, sheen_g, sheen_b, has_sheen, sheen_roughness,
+///  specular_r, specular_g, specular_b, has_specular,
+///  normal_uv_scale_x, normal_uv_scale_y, normal_uv_offset_x, normal_uv_offset_y, normal_uv_rotation,
+///  base_uv_scale_x, base_uv_scale_y, base_uv_rotation]
+/// 36 floats per material.
+#[wasm_bindgen(js_name = "mr_setMaterials")]
+pub fn mr_set_materials(data: &[f32], num_materials: u32) {
+    STATE.with(|s| {
+        if let Some(ref mut st) = *s.borrow_mut() {
+            st.materials.clear();
+            let stride = 36;
+            for i in 0..num_materials as usize {
+                let o = i * stride;
+                if o + stride > data.len() { break; }
+                let d = &data[o..o + stride];
+                st.materials.push(PbrParams {
+                    base_color: [d[0], d[1], d[2], d[3]],
+                    metallic: d[4],
+                    roughness: d[5],
+                    normal_scale: d[6],
+                    occlusion_strength: d[7],
+                    alpha_cutoff: d[8],
+                    alpha_mode: d[9],
+                    unlit: d[10] > 0.5,
+                    emissive_factor: [d[11], d[12], d[13]],
+                    has_base_color_tex: d[14] > 0.5,
+                    has_metallic_roughness_tex: d[15] > 0.5,
+                    has_normal_tex: d[16] > 0.5,
+                    has_emissive_tex: d[17] > 0.5,
+                    has_occlusion_tex: d[18] > 0.5,
+                    sheen_color: [d[19], d[20], d[21]],
+                    has_sheen: d[22] > 0.5,
+                    sheen_roughness: d[23],
+                    specular_color: [d[24], d[25], d[26]],
+                    has_specular: d[27] > 0.5,
+                    normal_uv_scale: [d[28], d[29]],
+                    normal_uv_offset: [d[30], d[31]],
+                    normal_uv_rotation: d[32],
+                    base_uv_scale: [d[33], d[34]],
+                    base_uv_rotation: d[35],
+                    ..PbrParams::default()
+                });
+            }
+            info!("Set {} PBR materials", st.materials.len());
+        }
+    });
+}
+
+/// Upload glTF images to main-thread GL texture cache.
+/// `pixels`: flat RGBA8 data for all images concatenated
+/// `widths`/`heights`: per-image dimensions
+#[wasm_bindgen(js_name = "mr_uploadImages")]
+pub fn mr_upload_images(pixels: &[u8], widths: &[u32], heights: &[u32]) {
+    STATE.with(|s| {
+        if let Some(ref mut st) = *s.borrow_mut() {
+            let gl = st.renderer.gl();
+            let mut images = Vec::new();
+            let mut offset = 0usize;
+            for i in 0..widths.len() {
+                let w = widths[i];
+                let h = heights[i];
+                let size = (w * h * 4) as usize;
+                if offset + size <= pixels.len() {
+                    images.push((w, h, &pixels[offset..offset + size]));
+                }
+                offset += size;
+            }
+            st.texture_cache.upload_images(gl, &images);
+            info!("Uploaded {} textures to main-thread GL", widths.len());
+        }
+    });
+}
+
 #[wasm_bindgen(js_name = "mr_uploadSkinningTexture")]
 pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], num_vertices: u32) {
     STATE.with(|s| {
@@ -322,14 +401,36 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         // Mode-specific UBO setup
         match state.render_mode {
             RenderMode::Pbr => {
-                // PBR UBO: default white material
-                let pbr_params = if !state.materials.is_empty() {
+                // Bind PBR UBO — will be updated per-batch by material_index
+                // Upload first material as default, per-batch override happens in render loop
+                let default_mat = if !state.materials.is_empty() {
                     state.materials[0].clone()
                 } else {
                     PbrParams::default()
                 };
-                state.renderer.pbr_ubo().upload(gl, &pbr_params);
+                state.renderer.pbr_ubo().upload(gl, &default_mat);
                 state.renderer.pbr_ubo().bind(gl);
+
+                // Bind placeholder textures for PBR (units 0-4)
+                let placeholder = state.texture_cache.placeholder();
+                for unit in 0..5u32 {
+                    unsafe {
+                        gl.active_texture(glow::TEXTURE0 + unit);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(placeholder));
+                    }
+                }
+
+                // Bind actual textures if available — use first material's textures
+                // TODO: per-batch material switching
+                if !state.materials.is_empty() && default_mat.has_base_color_tex {
+                    // Texture index would come from material → texture_to_image mapping
+                    // For now, bind image 0 to unit 0 if it exists
+                    let tex = state.texture_cache.get(Some(0));
+                    unsafe {
+                        gl.active_texture(glow::TEXTURE0);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    }
+                }
             }
             RenderMode::Lod => {
                 state.renderer.matcap_ubo().upload(gl, 0.0); // heatmap

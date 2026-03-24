@@ -40,6 +40,7 @@ import init, {
   mr_setInstanceData, mr_setFaceMaterials, mr_buildBatches,
   mr_uploadTessPatch, mr_uploadAnimationPose,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
+  mr_setMaterials, mr_uploadImages,
 } from './pkg/quilting_wasm.js';
 
 const $ = id => document.getElementById(id);
@@ -223,6 +224,62 @@ async function loadModel(buffer, filename) {
   // Set face materials on main thread
   if (info.face_materials) {
     mr_setFaceMaterials(new Int32Array(info.face_materials));
+  }
+
+  // Upload PBR materials to main-thread renderer
+  if (info.materials && info.materials.length > 0) {
+    const stride = 36;
+    const matData = new Float32Array(info.materials.length * stride);
+    for (let i = 0; i < info.materials.length; i++) {
+      const m = info.materials[i];
+      const o = i * stride;
+      const bc = m.base_color || [1,1,1,1];
+      const em = m.emissive_factor || [0,0,0];
+      const sc = m.sheen_color || [0,0,0];
+      const sp = m.specular_color || [1,1,1];
+      const nus = m.normal_uv_scale || [1,1];
+      const nuo = m.normal_uv_offset || [0,0];
+      const bus = m.base_uv_scale || [1,1];
+      const am = m.alpha_mode === 'MASK' ? 1 : (m.alpha_mode === 'BLEND' ? 2 : 0);
+      matData[o+0] = bc[0]; matData[o+1] = bc[1]; matData[o+2] = bc[2]; matData[o+3] = bc[3];
+      matData[o+4] = m.metallic || 0; matData[o+5] = m.roughness || 1;
+      matData[o+6] = m.normal_scale || 1; matData[o+7] = m.occlusion_strength || 1;
+      matData[o+8] = m.alpha_cutoff || 0.5; matData[o+9] = am; matData[o+10] = m.unlit ? 1 : 0;
+      matData[o+11] = em[0]; matData[o+12] = em[1]; matData[o+13] = em[2];
+      matData[o+14] = m.base_color_texture_index != null ? 1 : 0;
+      matData[o+15] = m.metallic_roughness_texture_index != null ? 1 : 0;
+      matData[o+16] = m.normal_texture_index != null ? 1 : 0;
+      matData[o+17] = m.emissive_texture_index != null ? 1 : 0;
+      matData[o+18] = m.occlusion_texture_index != null ? 1 : 0;
+      matData[o+19] = sc[0]; matData[o+20] = sc[1]; matData[o+21] = sc[2];
+      matData[o+22] = (sc[0]+sc[1]+sc[2]) > 0 ? 1 : 0; matData[o+23] = m.sheen_roughness || 0;
+      matData[o+24] = sp[0]; matData[o+25] = sp[1]; matData[o+26] = sp[2];
+      matData[o+27] = (sp[0]+sp[1]+sp[2]) < 3 ? 1 : 0;
+      matData[o+28] = nus[0]; matData[o+29] = nus[1]; matData[o+30] = nuo[0]; matData[o+31] = nuo[1];
+      matData[o+32] = m.normal_uv_rotation || 0;
+      matData[o+33] = bus[0]; matData[o+34] = bus[1]; matData[o+35] = m.base_uv_rotation || 0;
+    }
+    mr_setMaterials(matData, info.materials.length);
+  }
+
+  // Upload glTF images to main-thread GL
+  if (info.textures && info.textures.length > 0) {
+    let totalSize = 0;
+    const widths = new Uint32Array(info.textures.length);
+    const heights = new Uint32Array(info.textures.length);
+    for (let i = 0; i < info.textures.length; i++) {
+      widths[i] = info.textures[i].width;
+      heights[i] = info.textures[i].height;
+      totalSize += widths[i] * heights[i] * 4;
+    }
+    const allPixels = new Uint8Array(totalSize);
+    let off = 0;
+    for (let i = 0; i < info.textures.length; i++) {
+      const pixels = new Uint8Array(info.textures[i].pixels.buffer || info.textures[i].pixels);
+      allPixels.set(pixels, off);
+      off += pixels.length;
+    }
+    mr_uploadImages(allPixels, widths, heights);
   }
 
   // Get skinning data and upload textures to main-thread GL
