@@ -1,3 +1,5 @@
+pub mod main_renderer;
+
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
@@ -17,6 +19,7 @@ use std::collections::HashMap;
 pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
+    wasm_tracing::set_as_global_default();
 }
 
 /// Stored glTF data for animation switching without re-parsing.

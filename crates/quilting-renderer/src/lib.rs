@@ -10,20 +10,24 @@ pub mod shader;
 pub mod buffer;
 pub mod pass;
 pub mod compute;
+pub mod texture;
 
 use glow::HasContext;
 
-use buffer::{VertexUniformBuf, WireUniformBuf};
+use buffer::{VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf};
 use shader::Programs;
 
 /// High-level renderer for the quilting pipeline.
 ///
-/// Owns the glow context, compiled shader programs, and shared uniform buffers.
+/// Owns the glow context, compiled shader programs, and all shared uniform buffers.
 pub struct Renderer {
     gl: glow::Context,
     programs: Programs,
     vtx_ubo: VertexUniformBuf,
     wire_ubo: WireUniformBuf,
+    pbr_ubo: PbrUniformBuf,
+    matcap_ubo: MatcapUniformBuf,
+    joint_ubo: JointMatricesBuf,
     width: i32,
     height: i32,
 }
@@ -37,12 +41,18 @@ impl Renderer {
         let programs = shader::compile_programs(&gl)?;
         let vtx_ubo = VertexUniformBuf::new(&gl)?;
         let wire_ubo = WireUniformBuf::new(&gl)?;
+        let pbr_ubo = PbrUniformBuf::new(&gl)?;
+        let matcap_ubo = MatcapUniformBuf::new(&gl)?;
+        let joint_ubo = JointMatricesBuf::new(&gl)?;
 
         Ok(Renderer {
             gl,
             programs,
             vtx_ubo,
             wire_ubo,
+            pbr_ubo,
+            matcap_ubo,
+            joint_ubo,
             width: 0,
             height: 0,
         })
@@ -121,6 +131,21 @@ impl Renderer {
     pub fn viewport_size(&self) -> (i32, i32) {
         (self.width, self.height)
     }
+
+    /// Access the PBR uniform buffer (for external PBR pass management).
+    pub fn pbr_ubo(&self) -> &PbrUniformBuf {
+        &self.pbr_ubo
+    }
+
+    /// Access the matcap uniform buffer.
+    pub fn matcap_ubo(&self) -> &MatcapUniformBuf {
+        &self.matcap_ubo
+    }
+
+    /// Access the joint matrices uniform buffer.
+    pub fn joint_ubo(&self) -> &JointMatricesBuf {
+        &self.joint_ubo
+    }
 }
 
 impl Drop for Renderer {
@@ -128,6 +153,9 @@ impl Drop for Renderer {
         self.programs.destroy(&self.gl);
         self.vtx_ubo.destroy(&self.gl);
         self.wire_ubo.destroy(&self.gl);
+        self.pbr_ubo.destroy(&self.gl);
+        self.matcap_ubo.destroy(&self.gl);
+        self.joint_ubo.destroy(&self.gl);
     }
 }
 

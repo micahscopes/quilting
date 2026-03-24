@@ -1,5 +1,5 @@
 [build]
-target = "hyperscope.html"
+target = "hyperscope-prototype.html"
 dist = "dist"
 
 [serve]
@@ -7,8 +7,8 @@ port = 8093
 
 [watch]
 watch = [
-    "hyperscope.html",
-    "hyperscope_worker.js",
+    "hyperscope-prototype.html",
+    "hyperscope-prototype_worker.js",
     "crates/quilting-wasm/src/",
     "crates/quilting-core/src/",
     "crates/quilting-shaders/shaders/",

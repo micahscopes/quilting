@@ -2,15 +2,18 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 const HTML: &str = include_str!("../../../hyperscope.html");
-const WORKER_JS: &str = include_str!("../../../hyperscope_worker.js");
+const PROTOTYPE_HTML: &str = include_str!("../../../hyperscope-prototype.html");
+const PROTOTYPE_WORKER_JS: &str = include_str!("../../../hyperscope-prototype_worker.js");
 const WASM_JS: &str = include_str!("../../../pkg/quilting_wasm.js");
 const WASM_BIN: &[u8] = include_bytes!("../../../pkg/quilting_wasm_bg.wasm");
 
 fn handle_request(request: &str) -> Option<(&'static str, &'static str, Option<&'static [u8]>)> {
     if request.starts_with("GET / ") || request.starts_with("GET /index.html") || request.starts_with("GET /hyperscope.html") {
         Some(("text/html", HTML, None))
-    } else if request.starts_with("GET /hyperscope_worker.js") {
-        Some(("application/javascript", WORKER_JS, None))
+    } else if request.starts_with("GET /prototype") || request.starts_with("GET /hyperscope-prototype.html") {
+        Some(("text/html", PROTOTYPE_HTML, None))
+    } else if request.starts_with("GET /hyperscope-prototype_worker.js") {
+        Some(("application/javascript", PROTOTYPE_WORKER_JS, None))
     } else if request.starts_with("GET /pkg/quilting_wasm.js") {
         Some(("application/javascript", WASM_JS, None))
     } else if request.starts_with("GET /pkg/quilting_wasm_bg.wasm") {
@@ -70,7 +73,24 @@ fn main() {
             Some(resp)
         };
 
-        if let Some(resp) = serve_from_disk("matcaps", "matcaps", "image/png")
+        // Serve .glb files from current directory
+        let serve_glb = || -> Option<Vec<u8>> {
+            let path = request.split(' ').nth(1)?;
+            let path = path.trim_start_matches('/');
+            if !path.ends_with(".glb") && !path.ends_with(".gltf") { return None; }
+            if !path.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') { return None; }
+            let data = std::fs::read(path).ok()?;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: model/gltf-binary\r\nContent-Length: {}\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nConnection: close\r\n\r\n",
+                data.len()
+            );
+            let mut resp = headers.into_bytes();
+            resp.extend_from_slice(&data);
+            Some(resp)
+        };
+
+        if let Some(resp) = serve_glb()
+            .or_else(|| serve_from_disk("matcaps", "matcaps", "image/png"))
             .or_else(|| serve_from_disk("envmaps", "envmaps", "application/octet-stream"))
         {
             let _ = stream.write_all(&resp);

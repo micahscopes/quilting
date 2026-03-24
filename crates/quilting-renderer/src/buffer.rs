@@ -83,9 +83,10 @@ pub struct MeshBuffers {
 impl MeshBuffers {
     /// Create VAOs for triangle and line rendering, sharing tessellation + instance buffers.
     ///
-    /// Vertex layout matches index.html:
+    /// Compact vertex layout:
     /// - location 0: vec3 bary (per-vertex from tess buffer)
-    /// - locations 1-13: vec4 x 13 (per-instance, 208 bytes stride, divisor=1)
+    /// - locations 1-3, 7-13: vec4 (per-instance, 160-byte stride, divisor=1)
+    /// - locations 4-6: constant [1,0,0,0] (unused weight slots)
     pub fn new(
         gl: &glow::Context,
         tess: &TessBuffers,
@@ -161,7 +162,15 @@ impl MeshBuffers {
     }
 }
 
-/// Configure a VAO with the quilting vertex layout.
+/// Instance data stride: 40 floats = 160 bytes per face.
+pub const INSTANCE_STRIDE: usize = 40;
+const INSTANCE_STRIDE_BYTES: i32 = (INSTANCE_STRIDE * 4) as i32;
+
+/// Configure a VAO with the quilting compact vertex layout.
+///
+/// Attribute 0: vec3 bary coords (per-vertex from tess buffer)
+/// Attributes 1-3, 7-13: vec4 (per-instance from compact 160-byte stride)
+/// Attributes 4-6: constant [1,0,0,0] (unused weight slots)
 unsafe fn setup_vao(
     gl: &glow::Context,
     vao: glow::VertexArray,
@@ -176,14 +185,23 @@ unsafe fn setup_vao(
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 0, 0);
 
-    // Attributes 1-13: instance data (13 x vec4, 208 bytes stride)
+    // Instanced attributes from compact 160-byte stride.
+    // Maps (location, byte_offset) matching JS compactMap.
+    const COMPACT_MAP: [(u32, i32); 10] = [
+        (1, 0), (2, 16), (3, 32), (7, 48), (8, 64),
+        (9, 80), (10, 96), (11, 112), (12, 128), (13, 144),
+    ];
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
-    for i in 0..13u32 {
-        let loc = 1 + i;
+    for &(loc, offset) in &COMPACT_MAP {
         gl.enable_vertex_attrib_array(loc);
-        gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, 208, (i * 16) as i32);
+        gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, INSTANCE_STRIDE_BYTES, offset);
         gl.vertex_attrib_divisor(loc, 1);
     }
+
+    // Constant attributes for unused weight slots (locations 4, 5, 6)
+    gl.vertex_attrib_4_f32(4, 1.0, 0.0, 0.0, 0.0);
+    gl.vertex_attrib_4_f32(5, 1.0, 0.0, 0.0, 0.0);
+    gl.vertex_attrib_4_f32(6, 1.0, 0.0, 0.0, 0.0);
 
     // Index buffer
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
@@ -191,16 +209,20 @@ unsafe fn setup_vao(
     gl.bind_vertex_array(None);
 }
 
-/// UBO for vertex shader uniforms (matches naga's Uniforms struct).
+/// UBO for vertex shader uniforms (matches WGSL Uniforms struct).
 ///
-/// Layout (std140):
-///   mat4x4 mvp       (offset 0, 64 bytes)
-///   mat4x4 mv        (offset 64, 64 bytes)
-///   float perm_parity (offset 128, 4 bytes)
-///   int perm_index    (offset 132, 4 bytes)
-///   int use_qb        (offset 136, 4 bytes)
-///   float _pad        (offset 140, 4 bytes)
-///   Total: 144 bytes
+/// Layout (std140, 224 bytes):
+///   mat4x4 mvp        (offset 0, 64 bytes)
+///   mat4x4 mv         (offset 64, 64 bytes)
+///   float perm_parity  (offset 128, 4 bytes)
+///   int perm_index     (offset 132, 4 bytes)
+///   int use_qb         (offset 136, 4 bytes)
+///   float _pad         (offset 140, 4 bytes)
+///   vec4 mob_a         (offset 144, 16 bytes)
+///   vec4 mob_b         (offset 160, 16 bytes)
+///   vec4 mob_c         (offset 176, 16 bytes)
+///   vec4 mob_d         (offset 192, 16 bytes)
+///   vec4 camera_pos    (offset 208, 16 bytes)
 pub struct VertexUniformBuf {
     pub ubo: glow::Buffer,
 }
@@ -210,13 +232,16 @@ impl VertexUniformBuf {
         unsafe {
             let ubo = gl.create_buffer().map_err(|e| format!("vtx ubo: {e}"))?;
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
-            // Allocate 144 bytes
-            gl.buffer_data_size(glow::UNIFORM_BUFFER, 144, glow::DYNAMIC_DRAW);
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, 224, glow::DYNAMIC_DRAW);
             Ok(VertexUniformBuf { ubo })
         }
     }
 
-    /// Upload uniform data. `mvp` and `mv` are column-major 4x4 matrices.
+    /// Upload uniform data.
+    ///
+    /// `mvp` and `mv` are column-major 4x4 matrices.
+    /// `mobius` is [a.w,a.x,a.y,a.z, b.w,b.x,b.y,b.z, c.w,..., d.w,...] (16 floats).
+    /// `camera_pos` is world-space camera position (3 floats, w unused).
     pub fn upload(
         &self,
         gl: &glow::Context,
@@ -225,20 +250,27 @@ impl VertexUniformBuf {
         perm_parity: f32,
         perm_index: i32,
         use_qb: i32,
+        mobius: &[f32; 16],
+        camera_pos: &[f32; 3],
     ) {
-        // Pack into 144 bytes (36 f32s)
-        let mut data = [0u8; 144];
-        // mvp: 64 bytes at offset 0
+        let mut data = [0u8; 224];
+        // mvp: offset 0
         data[0..64].copy_from_slice(bytemuck_cast_slice(mvp));
-        // mv: 64 bytes at offset 64
+        // mv: offset 64
         data[64..128].copy_from_slice(bytemuck_cast_slice(mv));
-        // perm_parity: f32 at offset 128
+        // perm_parity: offset 128
         data[128..132].copy_from_slice(&perm_parity.to_le_bytes());
-        // perm_index: i32 at offset 132
+        // perm_index: offset 132
         data[132..136].copy_from_slice(&perm_index.to_le_bytes());
-        // use_qb: i32 at offset 136
+        // use_qb: offset 136
         data[136..140].copy_from_slice(&use_qb.to_le_bytes());
-        // _pad: f32 at offset 140 (already zeroed)
+        // _pad: offset 140 (zeroed)
+        // mob_a/b/c/d: offset 144-207
+        data[144..208].copy_from_slice(bytemuck_cast_slice(mobius));
+        // camera_pos: offset 208 (vec4, w=0)
+        data[208..212].copy_from_slice(&camera_pos[0].to_le_bytes());
+        data[212..216].copy_from_slice(&camera_pos[1].to_le_bytes());
+        data[216..220].copy_from_slice(&camera_pos[2].to_le_bytes());
 
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
@@ -315,26 +347,23 @@ impl WireUniformBuf {
     }
 }
 
-/// UBO for skeletal animation joint matrices.
+/// UBO for skeletal animation joint matrices + morph weights.
 ///
-/// Stores up to MAX_JOINTS skin matrices (world * inverse_bind), uploaded per frame
-/// from AnimationEvaluator. Each mat4 is 64 bytes (std140).
-///
-/// Layout (std140):
-///   i32  num_joints  (offset 0, 4 bytes)
-///   pad              (offset 4, 12 bytes — std140 alignment to vec4)
-///   mat4 joints[N]   (offset 16, 64 bytes each)
+/// Layout (std140, 8448 bytes):
+///   i32  num_joints       (offset 0)
+///   i32  skin_tex_w       (offset 4)
+///   i32  num_morph_targets (offset 8)
+///   i32  _pad             (offset 12)
+///   mat4 joints[128]      (offset 16, 64 bytes each = 8192 bytes)
+///   vec4 morph_weights[16] (offset 8208, 256 bytes)
 pub struct JointMatricesBuf {
     pub ubo: glow::Buffer,
-    /// Current allocation size in bytes.
-    capacity: usize,
 }
 
-/// Maximum joints supported. 128 × 64 bytes = 8KB, well within WebGL2's 16KB UBO limit.
 pub const MAX_JOINTS: usize = 128;
-
-/// Total UBO size: 16 bytes header + MAX_JOINTS × 64 bytes + 16 × morph weight vec4s.
-const JOINT_UBO_SIZE: usize = 16 + MAX_JOINTS * 64 + 16 * 16;
+const MORPH_WEIGHTS_OFFSET: usize = 16 + MAX_JOINTS * 64; // 8208
+const MAX_MORPH_VEC4S: usize = 16;
+const JOINT_UBO_SIZE: usize = MORPH_WEIGHTS_OFFSET + MAX_MORPH_VEC4S * 16; // 8464
 
 impl JointMatricesBuf {
     pub fn new(gl: &glow::Context) -> Result<Self, String> {
@@ -342,41 +371,56 @@ impl JointMatricesBuf {
             let ubo = gl.create_buffer().map_err(|e| format!("joint ubo: {e}"))?;
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
             gl.buffer_data_size(glow::UNIFORM_BUFFER, JOINT_UBO_SIZE as i32, glow::DYNAMIC_DRAW);
-            // Zero-init: num_joints = 0
             let zeros = vec![0u8; JOINT_UBO_SIZE];
             gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &zeros);
-            Ok(JointMatricesBuf { ubo, capacity: JOINT_UBO_SIZE })
+            Ok(JointMatricesBuf { ubo })
         }
     }
 
-    /// Upload joint matrices from a flat f32 slice (num_joints × 16 floats).
-    /// The matrices are skin matrices (joint_world × inverse_bind), column-major.
-    pub fn upload(&self, gl: &glow::Context, matrices: &[f32]) {
-        let num_joints = matrices.len() / 16;
-        if num_joints == 0 { return; }
-        let clamped = num_joints.min(MAX_JOINTS);
+    /// Upload joint matrices, morph weights, and header fields.
+    pub fn upload(
+        &self,
+        gl: &glow::Context,
+        matrices: &[f32],
+        morph_weights: &[f32],
+        skin_tex_w: i32,
+    ) {
+        let num_joints = (matrices.len() / 16).min(MAX_JOINTS);
+        let num_morph = morph_weights.len().min(MAX_MORPH_VEC4S * 4);
 
-        // Pack header (16 bytes) + matrices
-        let data_size = 16 + clamped * 64;
-        let mut data = vec![0u8; data_size];
-        // num_joints at offset 0
-        data[0..4].copy_from_slice(&(clamped as i32).to_le_bytes());
-        // Matrices at offset 16 (std140: mat4 already 64-byte aligned)
-        let mat_bytes = &matrices[..clamped * 16];
-        data[16..16 + clamped * 64].copy_from_slice(bytemuck_cast_slice(mat_bytes));
+        // Header (16 bytes)
+        let mut header = [0u8; 16];
+        header[0..4].copy_from_slice(&(num_joints as i32).to_le_bytes());
+        header[4..8].copy_from_slice(&skin_tex_w.to_le_bytes());
+        header[8..12].copy_from_slice(&(num_morph as i32).to_le_bytes());
 
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
-            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &header);
+
+            // Matrices at offset 16
+            if num_joints > 0 {
+                let mat_bytes = bytemuck_cast_slice(&matrices[..num_joints * 16]);
+                gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 16, mat_bytes);
+            }
+
+            // Morph weights at offset 8208
+            if num_morph > 0 {
+                let morph_bytes = bytemuck_cast_slice(&morph_weights[..num_morph]);
+                gl.buffer_sub_data_u8_slice(
+                    glow::UNIFORM_BUFFER,
+                    MORPH_WEIGHTS_OFFSET as i32,
+                    morph_bytes,
+                );
+            }
         }
     }
 
-    /// Clear joint data (set num_joints = 0). Call when switching to a static model.
+    /// Clear joint data (set num_joints = 0).
     pub fn clear(&self, gl: &glow::Context) {
-        let zero = 0i32;
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
-            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &zero.to_le_bytes());
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &0i32.to_le_bytes());
         }
     }
 
@@ -393,6 +437,210 @@ impl JointMatricesBuf {
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
             gl.delete_buffer(self.ubo);
+        }
+    }
+}
+
+/// UBO for matcap fragment uniforms (binding 3).
+///
+/// Layout (std140, 16 bytes):
+///   float has_matcap_tex  (offset 0)
+///   pad                   (offset 4, 12 bytes)
+pub struct MatcapUniformBuf {
+    pub ubo: glow::Buffer,
+}
+
+impl MatcapUniformBuf {
+    pub fn new(gl: &glow::Context) -> Result<Self, String> {
+        unsafe {
+            let ubo = gl.create_buffer().map_err(|e| format!("matcap ubo: {e}"))?;
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, 16, glow::DYNAMIC_DRAW);
+            Ok(MatcapUniformBuf { ubo })
+        }
+    }
+
+    pub fn upload(&self, gl: &glow::Context, has_matcap_tex: bool) {
+        let mut data = [0u8; 16];
+        let val: f32 = if has_matcap_tex { 1.0 } else { 0.0 };
+        data[0..4].copy_from_slice(&val.to_le_bytes());
+        unsafe {
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
+        }
+    }
+
+    pub fn bind(&self, gl: &glow::Context) {
+        unsafe {
+            gl.bind_buffer_base(glow::UNIFORM_BUFFER, 3, Some(self.ubo));
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_buffer(self.ubo);
+        }
+    }
+}
+
+/// CPU-side PBR material parameters matching the WGSL PbrUniforms layout.
+/// Used to upload per-material data to the PBR UBO.
+#[derive(Debug, Clone)]
+pub struct PbrParams {
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub has_base_color_tex: bool,
+    pub has_metallic_roughness_tex: bool,
+    pub emissive_factor: [f32; 3],
+    pub normal_scale: f32,
+    pub has_normal_tex: bool,
+    pub has_emissive_tex: bool,
+    pub has_occlusion_tex: bool,
+    pub occlusion_strength: f32,
+    pub alpha_cutoff: f32,
+    pub alpha_mode: f32, // 0=opaque, 1=mask, 2=blend
+    pub unlit: bool,
+    pub has_env_map: bool,
+    pub env_mip_count: f32,
+    pub sheen_color: [f32; 3],
+    pub has_sheen: bool,
+    pub sheen_roughness: f32,
+    pub specular_color: [f32; 3],
+    pub has_specular: bool,
+    pub normal_uv_scale: [f32; 2],
+    pub normal_uv_offset: [f32; 2],
+    pub normal_uv_rotation: f32,
+    pub base_uv_scale: [f32; 2],
+    pub base_uv_rotation: f32,
+}
+
+impl Default for PbrParams {
+    fn default() -> Self {
+        PbrParams {
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 1.0,
+            has_base_color_tex: false,
+            has_metallic_roughness_tex: false,
+            emissive_factor: [0.0; 3],
+            normal_scale: 1.0,
+            has_normal_tex: false,
+            has_emissive_tex: false,
+            has_occlusion_tex: false,
+            occlusion_strength: 1.0,
+            alpha_cutoff: 0.5,
+            alpha_mode: 0.0,
+            unlit: false,
+            has_env_map: false,
+            env_mip_count: 1.0,
+            sheen_color: [0.0; 3],
+            has_sheen: false,
+            sheen_roughness: 0.0,
+            specular_color: [1.0; 3],
+            has_specular: false,
+            normal_uv_scale: [1.0, 1.0],
+            normal_uv_offset: [0.0, 0.0],
+            normal_uv_rotation: 0.0,
+            base_uv_scale: [1.0, 1.0],
+            base_uv_rotation: 0.0,
+        }
+    }
+}
+
+/// UBO for PBR material uniforms (binding 2, 192 bytes).
+///
+/// Matches WGSL PbrUniforms struct in fragment/pbr.wgsl.
+pub struct PbrUniformBuf {
+    pub ubo: glow::Buffer,
+}
+
+impl PbrUniformBuf {
+    pub fn new(gl: &glow::Context) -> Result<Self, String> {
+        unsafe {
+            let ubo = gl.create_buffer().map_err(|e| format!("pbr ubo: {e}"))?;
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, 192, glow::DYNAMIC_DRAW);
+            Ok(PbrUniformBuf { ubo })
+        }
+    }
+
+    pub fn upload(&self, gl: &glow::Context, p: &PbrParams) {
+        let b = |v: bool| -> f32 { if v { 1.0 } else { 0.0 } };
+        let mut d = [0u8; 192];
+        let mut f = |off: usize, v: f32| { d[off..off+4].copy_from_slice(&v.to_le_bytes()); };
+
+        // base_color vec4 at offset 0
+        f(0, p.base_color[0]); f(4, p.base_color[1]); f(8, p.base_color[2]); f(12, p.base_color[3]);
+        // metallic, roughness, has_base_color_tex, has_mr_tex at offset 16
+        f(16, p.metallic); f(20, p.roughness); f(24, b(p.has_base_color_tex)); f(28, b(p.has_metallic_roughness_tex));
+        // emissive_factor vec4 at offset 32
+        f(32, p.emissive_factor[0]); f(36, p.emissive_factor[1]); f(40, p.emissive_factor[2]);
+        // normal_scale, has_normal_tex, has_emissive_tex, has_occlusion_tex at offset 48
+        f(48, p.normal_scale); f(52, b(p.has_normal_tex)); f(56, b(p.has_emissive_tex)); f(60, b(p.has_occlusion_tex));
+        // occlusion_strength, alpha_cutoff, alpha_mode, unlit at offset 64
+        f(64, p.occlusion_strength); f(68, p.alpha_cutoff); f(72, p.alpha_mode); f(76, b(p.unlit));
+        // has_env_map, env_mip_count, pad, pad at offset 80
+        f(80, b(p.has_env_map)); f(84, p.env_mip_count);
+        // sheen_color vec4 at offset 96 (w = has_sheen)
+        f(96, p.sheen_color[0]); f(100, p.sheen_color[1]); f(104, p.sheen_color[2]); f(108, b(p.has_sheen));
+        // sheen_roughness at offset 112
+        f(112, p.sheen_roughness);
+        // specular_color vec4 at offset 128 (w = has_specular)
+        f(128, p.specular_color[0]); f(132, p.specular_color[1]); f(136, p.specular_color[2]); f(140, b(p.has_specular));
+        // normal_uv_transform vec4 at offset 144 (xy=scale, zw=offset)
+        f(144, p.normal_uv_scale[0]); f(148, p.normal_uv_scale[1]); f(152, p.normal_uv_offset[0]); f(156, p.normal_uv_offset[1]);
+        // normal_uv_rotation at offset 160
+        f(160, p.normal_uv_rotation);
+        // base_uv_scale, base_uv_rotation at offset 164
+        f(164, p.base_uv_scale[0]); f(168, p.base_uv_scale[1]); f(172, p.base_uv_rotation);
+
+        unsafe {
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &d);
+        }
+    }
+
+    pub fn bind(&self, gl: &glow::Context) {
+        unsafe {
+            gl.bind_buffer_base(
+                glow::UNIFORM_BUFFER,
+                crate::shader::PBR_UNIFORMS_BINDING,
+                Some(self.ubo),
+            );
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe { gl.delete_buffer(self.ubo); }
+    }
+}
+
+/// Material texture handles for a single PBR material.
+#[derive(Debug, Clone, Default)]
+pub struct MaterialTextures {
+    pub base_color: Option<glow::Texture>,
+    pub metallic_roughness: Option<glow::Texture>,
+    pub normal: Option<glow::Texture>,
+    pub emissive: Option<glow::Texture>,
+    pub occlusion: Option<glow::Texture>,
+}
+
+/// Environment map textures (shared across all materials).
+pub struct EnvironmentMaps {
+    pub prefiltered: Option<glow::Texture>,
+    pub irradiance: Option<glow::Texture>,
+    pub sheen_lut: Option<glow::Texture>,
+    pub mip_count: f32,
+}
+
+impl Default for EnvironmentMaps {
+    fn default() -> Self {
+        EnvironmentMaps {
+            prefiltered: None,
+            irradiance: None,
+            sheen_lut: None,
+            mip_count: 1.0,
         }
     }
 }

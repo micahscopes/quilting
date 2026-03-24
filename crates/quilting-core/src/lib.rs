@@ -10,3 +10,4 @@ pub mod atlas;
 pub mod patch;
 pub mod shapes;
 pub mod evaluate;
+pub mod batch;

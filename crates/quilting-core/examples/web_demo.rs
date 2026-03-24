@@ -132,7 +132,7 @@ const HTML: &str = include_str!("web_demo.html");
 const HTML_3D: &str = include_str!("mesh_demo.html");
 const HTML_WASM: &str = include_str!("../../../index.html");
 const WASM_JS: &str = include_str!("../../../pkg/quilting_wasm.js");
-const WORKER_JS: &str = include_str!("../../../hyperscope_worker.js");
+const WORKER_JS: &str = include_str!("../../../hyperscope-prototype_worker.js");
 const WASM_BIN: &[u8] = include_bytes!("../../../pkg/quilting_wasm_bg.wasm");
 
 fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, String) {

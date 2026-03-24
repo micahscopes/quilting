@@ -16,14 +16,22 @@ pub enum RenderMode {
     Normals,
     /// Combined: solid matcap + wireframe overlay.
     Both,
+    /// Full PBR rendering (per-material texture binding).
+    Pbr,
+    /// LOD heatmap visualization.
+    Lod,
 }
 
-/// Camera and projection state needed for rendering.
+/// Camera, projection, and scene-level state needed for rendering.
 pub struct Camera {
     /// Model-view-projection matrix (column-major).
     pub mvp: [f32; 16],
     /// Model-view matrix (column-major).
     pub mv: [f32; 16],
+    /// Möbius transform quaternions [a.w,a.x,a.y,a.z, b..., c..., d...].
+    pub mobius: [f32; 16],
+    /// World-space camera position.
+    pub camera_pos: [f32; 3],
 }
 
 /// A single draw batch with per-batch state.
@@ -35,6 +43,30 @@ pub struct RenderBatch<'a> {
     pub perm_index: i32,
     /// Wire color for this batch [r, g, b].
     pub wire_color: [f32; 3],
+    /// Material index (for PBR rendering).
+    pub material_index: usize,
+}
+
+/// Upload vertex UBO for a batch and bind it.
+fn upload_batch_ubo(
+    gl: &glow::Context,
+    vtx_ubo: &VertexUniformBuf,
+    camera: &Camera,
+    perm_parity: f32,
+    perm_index: i32,
+    use_qb: i32,
+) {
+    vtx_ubo.upload(
+        gl,
+        &camera.mvp,
+        &camera.mv,
+        perm_parity,
+        perm_index,
+        use_qb,
+        &camera.mobius,
+        &camera.camera_pos,
+    );
+    vtx_ubo.bind(gl);
 }
 
 /// Render a frame with the given mode, camera, and batches.
@@ -47,27 +79,18 @@ pub fn render_frame(
     vtx_ubo: &VertexUniformBuf,
     wire_ubo: &WireUniformBuf,
 ) {
-    // Bind vertex UBO -- shared across all programs
     vtx_ubo.bind(gl);
 
-    let draw_matcap = mode == RenderMode::Matcap || mode == RenderMode::Both;
-    let draw_wire = mode == RenderMode::Wire || mode == RenderMode::Both;
+    let draw_matcap = matches!(mode, RenderMode::Matcap | RenderMode::Both | RenderMode::Lod);
+    let draw_wire = matches!(mode, RenderMode::Wire | RenderMode::Both);
     let draw_normals = mode == RenderMode::Normals;
 
-    // Matcap pass (filled triangles)
+    // Matcap/LOD pass (filled triangles)
     if draw_matcap {
         unsafe { gl.use_program(Some(programs.matcap)); }
 
         for batch in batches {
-            vtx_ubo.upload(
-                gl,
-                &camera.mvp,
-                &camera.mv,
-                batch.perm_parity,
-                batch.perm_index,
-                1, // use_qb
-            );
-            vtx_ubo.bind(gl);
+            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -88,15 +111,7 @@ pub fn render_frame(
         wire_ubo.bind(gl);
 
         for batch in batches {
-            vtx_ubo.upload(
-                gl,
-                &camera.mvp,
-                &camera.mv,
-                batch.perm_parity,
-                batch.perm_index,
-                1, // use_qb
-            );
-            vtx_ubo.bind(gl);
+            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
 
             wire_ubo.upload(gl, batch.wire_color, true);
             wire_ubo.bind(gl);
@@ -119,15 +134,7 @@ pub fn render_frame(
         unsafe { gl.use_program(Some(programs.normals)); }
 
         for batch in batches {
-            vtx_ubo.upload(
-                gl,
-                &camera.mvp,
-                &camera.mv,
-                batch.perm_parity,
-                batch.perm_index,
-                1, // use_qb
-            );
-            vtx_ubo.bind(gl);
+            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -142,11 +149,22 @@ pub fn render_frame(
         }
     }
 
+    // PBR pass placeholder — will be implemented in Phase 3
+    // For now, falls through to matcap if PBR mode is selected
+
     unsafe { gl.bind_vertex_array(None); }
 }
 
+/// Identity Möbius transform: a=1, b=0, c=0, d=1 (as quaternions).
+const IDENTITY_MOBIUS: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,  // a
+    0.0, 0.0, 0.0, 0.0,  // b
+    0.0, 0.0, 0.0, 0.0,  // c
+    1.0, 0.0, 0.0, 0.0,  // d
+];
+
 /// Render the original (untransformed) mesh wireframe.
-/// Uses the wire program with use_qb=0.
+/// Uses the wire program with use_qb=0 and identity Möbius.
 pub fn render_original_wireframe(
     gl: &glow::Context,
     programs: &Programs,
@@ -157,7 +175,16 @@ pub fn render_original_wireframe(
 ) {
     unsafe { gl.use_program(Some(programs.wire)); }
 
-    vtx_ubo.upload(gl, &camera.mvp, &camera.mv, 1.0, 0, 0);
+    vtx_ubo.upload(
+        gl,
+        &camera.mvp,
+        &camera.mv,
+        1.0,
+        0,
+        0, // use_qb=0 for original mesh
+        &IDENTITY_MOBIUS,
+        &camera.camera_pos,
+    );
     vtx_ubo.bind(gl);
 
     wire_ubo.upload(gl, [0.25, 0.25, 0.35], false);

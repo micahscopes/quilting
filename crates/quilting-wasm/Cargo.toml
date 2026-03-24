@@ -24,9 +24,14 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 getrandom = { version = "0.2", features = ["js"] }
 js-sys = "0.3"
 rustc-hash = "2"
-web-sys = { version = "0.3", features = ["console", "Performance", "OffscreenCanvas", "WebGl2RenderingContext"] }
+web-sys = { version = "0.3", features = [
+    "console", "Performance", "OffscreenCanvas", "WebGl2RenderingContext",
+    "Window", "Document", "Element", "HtmlCanvasElement",
+] }
 glow = "0.16"
 quilting-renderer = { path = "../quilting-renderer" }
+tracing = "0.1"
+wasm-tracing = "2.1"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
