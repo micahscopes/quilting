@@ -294,7 +294,10 @@ pub fn compute_animated_lods(
     vp_height: f32,
 ) -> JsValue {
     GLTF_DATA.with(|gd| {
-        let data = gd.borrow();
+        let data = match gd.try_borrow() {
+            Ok(d) => d,
+            Err(_) => return JsValue::NULL, // concurrent borrow during model load
+        };
         let data = match data.as_ref() {
             Some(d) => d,
             None => return JsValue::NULL,
@@ -402,9 +405,11 @@ pub fn compute_animated_lods(
         });
 
         // 6. Edge coherence: shared edges must have matching LODs
+        // Guard: skip if half-edge mesh doesn't match current model (stale from previous load)
         LOD_HALF_EDGE.with(|he_cell| {
             let he_opt = he_cell.borrow();
             if let Some(he) = he_opt.as_ref() {
+                if he.num_faces as usize != nf { return; } // stale mesh
                 for fi in 0..nf {
                     let hes = he.face_half_edges(fi as u32);
                     for (hi, &he_id) in hes.iter().enumerate() {

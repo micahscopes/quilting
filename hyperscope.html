@@ -2881,6 +2881,8 @@ function frame() {
 // --- glTF/GLB file loading ---
 async function loadGltfFromBuffer(buffer, filename) {
   workerReady = false; // pause updates while loading
+  cachedInstances = null; // clear stale LOD data
+  cachedNumFaces = 0;
   $('stats').innerHTML = `Loading <span class="val">${filename || 'glTF'}</span>...`;
 
   const resp = await broadcastCall('load_gltf_data', { bytes: buffer });
