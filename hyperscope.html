@@ -2662,13 +2662,54 @@ function update() {
   mob = computeMobius(tType, mx, my, mz, mr);
   render();
 }
-// Separate function for updates that should trigger LOD recompute
-// (density, resolution, Möbius, screen attenuation changes)
+// CPU LOD recompute — authoritative, edge-coherent via compute_instances.
+// Called on Möbius/density/attenuation changes (debounced, infrequent).
+async function recomputeLodsCpu() {
+  if (!cachedInstances) return;
+  const nf = cachedNumFaces;
+  const density = parseFloat($('tess-density').value) || 10;
+  const minPx = $('screen-atten-toggle').classList.contains('on') ? parseFloat($('min-px-sub').value) : 0;
+  const { mx, my, mz, mr } = getTransformParams();
+  const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
+
+  const aspect = canvas.width / canvas.height;
+  const cx = panX || 0, cy = panY || 0, cz = panZ || 0;
+  const ex = zoom * Math.cos(rotX) * Math.sin(rotY) + cx;
+  const ey = zoom * Math.sin(rotX) + cy;
+  const ez = zoom * Math.cos(rotX) * Math.cos(rotY) + cz;
+  const view = lookAt(ex, ey, ez, cx, cy, cz, 0, 1, 0);
+  const proj = perspective(Math.PI / 3, canvas.width / canvas.height, 0.01, 10000);
+  const vpMatrix = new Float32Array(16);
+  for (let i = 0; i < 4; i++)
+    for (let j = 0; j < 4; j++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += proj[k * 4 + i] * view[j * 4 + k];
+      vpMatrix[j * 4 + i] = s;
+    }
+
+  const t0 = performance.now();
+  const resp = await workerCall('recompute_lods', {
+    animTime: frame._animTime != null ? frame._animTime : -1,
+    transformType: tType,
+    params: [mx, my, mz, mr],
+    vpMatrix: Array.from(vpMatrix),
+    vpWidth: canvas.width, vpHeight: canvas.height,
+    tessDensity: density,
+    screenAtten: $('screen-atten-toggle').classList.contains('on'),
+    minPxSub: minPx,
+  });
+  const faceLods = resp.lods;
+  if (!faceLods) return;
+  rebuildBatchesFromFaceLods(faceLods);
+  console.log(`CPU LOD: ${(performance.now()-t0).toFixed(1)}ms, ${nf} faces → ${drawBatches.length} batches`);
+}
+
+// Parameter changes → debounced CPU LOD recompute (authoritative, edge-coherent)
 function updateWithLod() {
   update();
   clearTimeout(lodDebounce);
-  lodDebounce = setTimeout(() => {
-    recomputeAndRebuildLods();
+  lodDebounce = setTimeout(async () => {
+    await recomputeLodsCpu();
     render();
   }, 200);
 }
