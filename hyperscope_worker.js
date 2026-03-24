@@ -132,27 +132,6 @@ self.onmessage = async function(e) {
     return;
   }
 
-  if (type === 'recompute_lods') {
-    const { animTime, transformType, params, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub } = data;
-    if (tessDensity != null) {
-      wasm.set_tess_params(tessDensity, !!screenAtten);
-      if (minPxSub != null) wasm.set_min_px_per_sub(minPxSub);
-    }
-    const result = wasm.recompute_lods(
-      animTime != null ? animTime : -1.0,
-      transformType || 'identity',
-      new Float64Array(params || []),
-      new Float64Array(vpMatrix || new Array(16).fill(0)),
-      vpWidth || 0, vpHeight || 0,
-    );
-    if (result) {
-      self.postMessage({ type: 'lods_recomputed', id, lods: result }, [result.buffer]);
-    } else {
-      self.postMessage({ type: 'lods_recomputed', id, lods: null });
-    }
-    return;
-  }
-
   if (type === 'compute_animated_lods') {
     const { t, mobius, density, meshRadius, minPx, vpMatrix, vpWidth, vpHeight } = data;
     const result = wasm.compute_animated_lods(
