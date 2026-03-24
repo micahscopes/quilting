@@ -2912,6 +2912,9 @@ async function loadGltfFromBuffer(buffer, filename) {
   const numTexs = info.textures ? info.textures.length : 0;
   console.log(`glTF loaded: ${numMats} materials, ${numTexs} textures`);
 
+  // Store per-face material indices BEFORE setupGpuSkinning (which reads them for batch grouping)
+  window._baseFaceMaterials = info.face_material_indices ? Array.from(info.face_material_indices) : [];
+
   // KHR_materials_variants: populate variant selector
   const variantSel = $('variant-sel');
   variantSel.innerHTML = '<option value="-1">Default</option>';
@@ -2925,9 +2928,7 @@ async function loadGltfFromBuffer(buffer, filename) {
       variantSel.appendChild(opt);
     }
     variantSel.style.display = '';
-    // Store mappings + original face materials for variant switching
     window._variantMappings = variantMappings;
-    window._baseFaceMaterials = info.face_material_indices ? Array.from(info.face_material_indices) : [];
   } else {
     variantSel.style.display = 'none';
   }
