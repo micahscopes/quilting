@@ -19,7 +19,9 @@ use std::collections::HashMap;
 pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
-    wasm_tracing::set_as_global_default();
+    let mut config = wasm_tracing::WasmLayerConfig::new();
+    config.set_max_level(tracing::Level::INFO);
+    wasm_tracing::set_as_global_default_with_config(config);
 }
 
 /// Stored glTF data for animation switching without re-parsing.

@@ -6,7 +6,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use std::cell::RefCell;
-use tracing::info;
+use tracing::{info, debug};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
@@ -192,7 +192,7 @@ pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], 
         if let Ok(tex) = quilting_renderer::buffer::SkinningTexture::new(gl, &ji, &jw) {
             // Bind to texture unit 15 (matches prototype)
             tex.bind(gl, 15);
-            info!("Skinning texture uploaded: {} vertices", nv);
+            debug!("Skinning texture uploaded: {} vertices", nv);
         }
     });
 }
@@ -239,7 +239,7 @@ pub fn mr_upload_morph_texture(deltas: &[f32], num_vertices: u32, num_targets: u
             // Bind to texture unit 14 (matches prototype)
             gl.active_texture(glow::TEXTURE0 + 14);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            info!("Morph texture uploaded: {} vertices × {} targets", nv, nt);
+            debug!("Morph texture uploaded: {} vertices × {} targets", nv, nt);
         }
     });
 }
@@ -277,7 +277,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 built += 1;
             }
         });
-        info!("Built {} GPU batches ({} logical, {} missing tess)", built, logical.len(), missing);
+        debug!("Built {} GPU batches ({} logical, {} missing tess)", built, logical.len(), missing);
     });
 }
 

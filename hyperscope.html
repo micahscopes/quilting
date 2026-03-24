@@ -225,7 +225,9 @@ async function loadModel(buffer, filename) {
   gpuSkinned = !!(info.animations && info.animations.length > 0);
   const skinResp = await workerCall('get_skinning_data', {});
   const skinData = skinResp.skinData;
-  skinTexW = skinData ? (skinData.skin_tex_w || skinData.num_vertices || 0) : 0;
+  // Texture width matches SkinningTexture::new: min(num_vertices, 4096)
+  const nv = skinData ? (skinData.num_vertices || 0) : 0;
+  skinTexW = Math.min(nv, 4096);
 
   // Upload skinning texture (joint indices + weights) if skeletal
   if (skinData && skinData.joint_indices) {

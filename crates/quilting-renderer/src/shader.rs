@@ -5,6 +5,15 @@
 
 use glow::HasContext;
 
+#[cfg(target_arch = "wasm32")]
+fn log_info(msg: &str) {
+    web_sys::console::info_1(&msg.into());
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn log_info(msg: &str) {
+    eprintln!("{}", msg);
+}
+
 /// All compiled shader programs for the quilting rendering pipeline.
 pub struct Programs {
     pub matcap: glow::Program,
@@ -158,21 +167,41 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         }
 
         // Matcap fragment uniform block: MatcapUniforms at group(0) binding(1)
-        if let Some(idx) = gl.get_uniform_block_index(program, "MatcapUniforms_block_0Fragment") {
-            gl.uniform_block_binding(program, idx, WIRE_UNIFORMS_BINDING); // shared binding 1
+        // Try multiple possible naga-generated block names
+        for name in &[
+            "MatcapUniforms_block_0Fragment",
+            "matcap_u_block_0Fragment",
+            "MatcapUniforms_block_1Fragment",
+        ] {
+            if let Some(idx) = gl.get_uniform_block_index(program, name) {
+                gl.uniform_block_binding(program, idx, WIRE_UNIFORMS_BINDING);
+                break;
+            }
         }
 
         // Texture samplers: bind to matching units
         gl.use_program(Some(program));
-        // Skinning texture (vertex shader): group(0) binding(2) → unit 15
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_2_vs") {
             gl.uniform_1_i32(Some(&loc), SKINNING_TEX_UNIT as i32);
         }
-        // Morph delta texture (vertex shader): group(0) binding(3) → unit 14
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_3_vs") {
             gl.uniform_1_i32(Some(&loc), MORPH_TEX_UNIT as i32);
         }
         gl.use_program(None);
+
+        // Log which blocks were found (for debugging binding issues)
+        let mut found = Vec::new();
+        for name in &[
+            "Uniforms_block_0Vertex", "JointMatrices_block_1Vertex",
+            "WireUniforms_block_0Fragment", "PbrUniforms_block_1Fragment",
+            "MatcapUniforms_block_0Fragment", "matcap_u_block_0Fragment",
+            "MatcapUniforms_block_1Fragment",
+        ] {
+            if gl.get_uniform_block_index(program, name).is_some() {
+                found.push(*name);
+            }
+        }
+        log_info(&format!("UBO blocks bound for program: {:?}", found));
     }
 }
 

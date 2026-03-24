@@ -625,6 +625,7 @@ version = "0.1.0"
 dependencies = [
  "glow",
  "quilting-shaders",
+ "web-sys",
 ]
 
 [[package]]
