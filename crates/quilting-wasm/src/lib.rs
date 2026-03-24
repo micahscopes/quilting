@@ -166,8 +166,6 @@ pub fn recompute_lods(
         };
 
         let combined = &data.combined;
-        let center = data.norm_center;
-        let s = data.norm_scale;
 
         // Evaluate animated positions if requested and animation is available
         let animated_positions = if anim_time >= 0.0 {
@@ -204,10 +202,12 @@ pub fn recompute_lods(
             } else { None }
         } else { None };
 
-        let base_positions = animated_positions.as_ref().unwrap_or(&combined.positions);
-        let norm_positions: Vec<[f64; 3]> = base_positions.iter().map(|v| {
-            [(v[0]-center[0])*s, (v[1]-center[1])*s, (v[2]-center[2])*s]
-        }).collect();
+        // Use raw positions (rest or animated) for LOD computation — don't normalize.
+        // compute_instances computes its own mesh_radius, so the ratio of
+        // edge medians to target_size is scale-invariant. Normalizing with
+        // rest-pose params corrupts animated positions (skeleton transforms
+        // move vertices far from the rest-pose bounding box).
+        let positions = animated_positions.as_ref().unwrap_or(&combined.positions);
         let tris: Vec<[usize; 3]> = combined.triangles.clone();
 
         let transform = match transform_type {
@@ -235,7 +235,7 @@ pub fn recompute_lods(
         };
 
         let instances = quilting_core::evaluate::compute_instances(
-            &norm_positions, &tris, &transform, screen.as_ref(), None,
+            positions, &tris, &transform, screen.as_ref(), None,
         );
 
         let nf = tris.len();
