@@ -1977,17 +1977,30 @@ async function setupGpuSkinning() {
   if (skinningTexture) gl.deleteTexture(skinningTexture);
   if (hasJoints) {
     skinningTexture = gl.createTexture();
-    const texData = new Float32Array(nv * 4 * 2);
-    texData.set(sd.joint_indices, 0);
-    texData.set(sd.joint_weights, nv * 4);
+    // Tile into rows if num_vertices exceeds max texture width
+    const maxW = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const skinW = Math.min(nv, maxW);
+    const skinH = Math.ceil(nv / skinW) * 2; // 2 rows per chunk (indices + weights)
+    const texData = new Float32Array(skinW * skinH * 4);
+    // Pack: for vertex vi, chunk = floor(vi/skinW), col = vi%skinW
+    // Row chunk*2+0 = joint indices, Row chunk*2+1 = joint weights
+    for (let vi = 0; vi < nv; vi++) {
+      const chunk = Math.floor(vi / skinW), col = vi % skinW;
+      const idxRow = chunk * 2, wtRow = chunk * 2 + 1;
+      for (let k = 0; k < 4; k++) {
+        texData[(idxRow * skinW + col) * 4 + k] = sd.joint_indices[vi * 4 + k];
+        texData[(wtRow * skinW + col) * 4 + k] = sd.joint_weights[vi * 4 + k];
+      }
+    }
     gl.activeTexture(gl.TEXTURE15);
     gl.bindTexture(gl.TEXTURE_2D, skinningTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, nv, 2, 0, gl.RGBA, gl.FLOAT, texData);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, skinW, skinH, 0, gl.RGBA, gl.FLOAT, texData);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    console.log(`Skinning texture uploaded: ${nv} vertices, ${sd.num_joints} joints`);
+    window._skinTexW = skinW;
+    console.log(`Skinning texture uploaded: ${nv} vertices (${skinW}x${skinH}), ${sd.num_joints} joints`);
   } else {
     skinningTexture = null;
   }
@@ -2880,12 +2893,14 @@ async function loadGltfFromBuffer(buffer, filename) {
     return;
   }
   meshInfo = info;
-  frame._animTime = info.time_min;
+  const tMin = info.time_min != null ? info.time_min : 0;
+  const tMax = info.time_max != null ? info.time_max : 0;
+  frame._animTime = tMin;
   const timeSlider = $('time');
-  timeSlider.min = info.time_min;
-  timeSlider.max = info.time_max;
-  timeSlider.step = (info.time_max - info.time_min) / 200;
-  timeSlider.value = (info.time_min + info.time_max) / 2;
+  timeSlider.min = tMin;
+  timeSlider.max = tMax;
+  timeSlider.step = tMax > tMin ? (tMax - tMin) / 200 : 1;
+  timeSlider.value = (tMin + tMax) / 2;
   $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
 
   // Create WebGL textures and resolve materials

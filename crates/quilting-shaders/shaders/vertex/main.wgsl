@@ -71,10 +71,13 @@ fn apply_morph(pos: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
 }
 
 fn skin_tex_lookup(vertex_idx: i32) -> array<vec4<f32>, 2> {
-    // Simple layout: width = num_vertices, row 0 = joint indices, row 1 = weights
+    // Tiled layout: width = skin_tex_width, rows alternate (indices, weights) per chunk
+    let w = joints.skin_tex_width;
+    let chunk = vertex_idx / w;
+    let col = vertex_idx % w;
     var result: array<vec4<f32>, 2>;
-    result[0] = textureLoad(skinning_tex, vec2<i32>(vertex_idx, 0), 0);
-    result[1] = textureLoad(skinning_tex, vec2<i32>(vertex_idx, 1), 0);
+    result[0] = textureLoad(skinning_tex, vec2<i32>(col, chunk * 2), 0);
+    result[1] = textureLoad(skinning_tex, vec2<i32>(col, chunk * 2 + 1), 0);
     return result;
 }
 

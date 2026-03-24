@@ -209,31 +209,38 @@ impl LodCompute {
     }
 
     /// Upload per-vertex skinning data (joint indices + weights).
-    /// Same layout as the rendering path: RGBA32F, width = num_vertices, height = 2.
-    /// Row 0: joint indices (as f32), Row 1: joint weights.
+    /// Tiled layout: RGBA32F, width = min(num_vertices, 4096), rows alternate
+    /// (indices, weights) per chunk. Matches the rendering vertex shader's tiled lookup.
     pub fn upload_skinning_texture(
         &mut self, gl: &glow::Context,
         joint_indices: &[[u16; 4]], joint_weights: &[[f32; 4]],
     ) {
         let nv = joint_indices.len();
-        let mut data = vec![0.0f32; nv * 4 * 2];
+        let width = nv.min(4096);
+        let height = ((nv + width - 1) / width) * 2; // 2 rows per chunk
+        let mut data = vec![0.0f32; width * height * 4];
         for (i, (ji, jw)) in joint_indices.iter().zip(joint_weights.iter()).enumerate() {
-            data[i*4]     = ji[0] as f32;
-            data[i*4 + 1] = ji[1] as f32;
-            data[i*4 + 2] = ji[2] as f32;
-            data[i*4 + 3] = ji[3] as f32;
-            let row1 = nv * 4;
-            data[row1 + i*4]     = jw[0];
-            data[row1 + i*4 + 1] = jw[1];
-            data[row1 + i*4 + 2] = jw[2];
-            data[row1 + i*4 + 3] = jw[3];
+            let chunk = i / width;
+            let col = i % width;
+            let idx_row = chunk * 2;
+            let wt_row = chunk * 2 + 1;
+            let idx_off = (idx_row * width + col) * 4;
+            data[idx_off]     = ji[0] as f32;
+            data[idx_off + 1] = ji[1] as f32;
+            data[idx_off + 2] = ji[2] as f32;
+            data[idx_off + 3] = ji[3] as f32;
+            let wt_off = (wt_row * width + col) * 4;
+            data[wt_off]     = jw[0];
+            data[wt_off + 1] = jw[1];
+            data[wt_off + 2] = jw[2];
+            data[wt_off + 3] = jw[3];
         }
         unsafe {
             if let Some(old) = self.skinning_texture { gl.delete_texture(old); }
             let tex = gl.create_texture().unwrap();
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
-                nv as i32, 2, 0, glow::RGBA, glow::FLOAT,
+                width as i32, height as i32, 0, glow::RGBA, glow::FLOAT,
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&data))));
             set_nearest(gl);
             self.skinning_texture = Some(tex);

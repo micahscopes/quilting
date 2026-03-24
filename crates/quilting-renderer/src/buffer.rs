@@ -424,29 +424,31 @@ impl SkinningTexture {
             let texture = gl.create_texture().map_err(|e| format!("skinning tex: {e}"))?;
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
 
-            // Pack into RGBA32F: width = num_vertices, height = 2
-            // Row 0: indices, Row 1: weights
-            let mut data = vec![0.0f32; num_vertices * 4 * 2];
+            // Tiled layout: width = min(num_vertices, 4096), rows alternate per chunk
+            let width = num_vertices.min(4096);
+            let height = ((num_vertices + width - 1) / width) * 2;
+            let mut data = vec![0.0f32; width * height * 4];
             for (i, (ji, jw)) in joint_indices.iter().zip(joint_weights.iter()).enumerate() {
-                // Row 0: indices
-                data[i * 4 + 0] = ji[0] as f32;
-                data[i * 4 + 1] = ji[1] as f32;
-                data[i * 4 + 2] = ji[2] as f32;
-                data[i * 4 + 3] = ji[3] as f32;
-                // Row 1: weights
-                let row1 = num_vertices * 4;
-                data[row1 + i * 4 + 0] = jw[0];
-                data[row1 + i * 4 + 1] = jw[1];
-                data[row1 + i * 4 + 2] = jw[2];
-                data[row1 + i * 4 + 3] = jw[3];
+                let chunk = i / width;
+                let col = i % width;
+                let idx_off = (chunk * 2 * width + col) * 4;
+                data[idx_off]     = ji[0] as f32;
+                data[idx_off + 1] = ji[1] as f32;
+                data[idx_off + 2] = ji[2] as f32;
+                data[idx_off + 3] = ji[3] as f32;
+                let wt_off = ((chunk * 2 + 1) * width + col) * 4;
+                data[wt_off]     = jw[0];
+                data[wt_off + 1] = jw[1];
+                data[wt_off + 2] = jw[2];
+                data[wt_off + 3] = jw[3];
             }
 
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
                 glow::RGBA32F as i32,
-                num_vertices as i32,
-                2,
+                width as i32,
+                height as i32,
                 0,
                 glow::RGBA,
                 glow::FLOAT,
