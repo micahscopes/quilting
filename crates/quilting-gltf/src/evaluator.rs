@@ -3,8 +3,7 @@
 //! Replaces the prebake path for animated models. Evaluates joint matrices
 //! and morph weights at arbitrary time t, returning data ready for GPU upload.
 
-use crate::animation::{Animation, AnimationProperty, Skin};
-use crate::bake::{animation_time_range, evaluate_joint_transforms, evaluate_morph_weights, mat4_mul};
+use crate::animation::{Animation, AnimationProperty, Skin, animation_time_range, evaluate_joint_transforms, evaluate_morph_weights, mat4_mul};
 use crate::scene::Node;
 
 /// Metadata about a single animation clip.

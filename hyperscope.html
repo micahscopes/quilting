@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Hyperscope — Spacetime + Conformal</title>
+<title>Hyperscope — Conformal Mesh Rendering</title>
 <!-- trunk: build minimal stub so trunk has a Rust target (real WASM via wasm-pack hook) -->
 <link data-trunk rel="rust" href="crates/trunk-stub" data-wasm-opt="0" />
 <!-- trunk asset directives -->
@@ -10,6 +10,7 @@
 <link data-trunk rel="copy-dir" href="envmaps" />
 <link data-trunk rel="copy-dir" href="matcaps" />
 <link data-trunk rel="copy-file" href="hyperscope_worker.js" />
+<link data-trunk rel="copy-file" href="horse.glb" />
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'SF Mono','Consolas',monospace;background:#0d1117;color:#c9d1d9;display:flex;height:100vh;overflow:hidden}
@@ -50,31 +51,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 <body>
 <div id="sidebar">
   <h1>HYPERSCOPE</h1>
-  <div class="sub">Spacetime slicing + Mobius conformal transforms</div>
+  <div class="sub">Conformal mesh rendering</div>
 
   <div class="section">
-    <label>Shape</label>
-    <div class="btns" id="shape-btns">
-      <button data-v="galloping_horse" class="a">Horse</button>
-      <button data-v="rotating_cube">Cube</button>
-      <button data-v="breathing_sphere">Sphere</button>
-      <button data-v="colliding_spheres">Collide</button>
-      <button data-v="twisting_torus">Torus</button>
-    </div>
-  </div>
-
-  <div class="section">
-    <label>Spacetime</label>
+    <label>Animation Time</label>
     <div class="sr"><span style="font-size:10px;color:#8b949e;width:50px">Time</span><input type="range" id="time" min="0" max="2" step="any" value="1"><span class="v" id="time-v">1.00</span></div>
-    <div class="sr"><span style="font-size:10px;color:#8b949e;width:50px">Tilt</span><input type="range" id="tilt" min="0" max="0.5" step="0.005" value="0"><span class="v" id="tilt-v">0.00</span></div>
-    <div style="margin-top:4px">
-      <span style="font-size:10px;color:#8b949e">Tilt Dir</span>
-      <div class="btns" id="dir-btns" style="margin-top:3px">
-        <button class="a" data-v="x">X</button>
-        <button data-v="y">Y</button>
-        <button data-v="z">Z</button>
-      </div>
-    </div>
   </div>
 
   <div class="section">
@@ -139,7 +120,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <label>Resolution (0=auto)</label>
     <div class="sr"><input type="range" id="res" min="0" max="6" value="0"><span class="v" id="res-v">auto</span></div>
     <label>Tess density</label>
-    <div class="sr"><input type="range" id="tess-density" min="10" max="500" value="20"><span class="v" id="tess-density-v">20</span></div>
+    <div class="sr"><input type="range" id="tess-density" min="1" max="500" value="10"><span class="v" id="tess-density-v">10</span></div>
     <div class="toggle-row">
       <div class="toggle on" id="screen-atten-toggle"></div>
       <span class="toggle-label">Screen-space attenuation</span>
@@ -150,50 +131,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="section">
     <div class="toggle-row">
-      <div class="toggle" id="spacetime-toggle"></div>
-      <span class="toggle-label">Spacetime slicing</span>
-    </div>
-    <div class="toggle-row">
-      <div class="toggle" id="toroidal-toggle"></div>
-      <span class="toggle-label">Toroidal time</span>
-    </div>
-    <div class="toggle-row">
       <div class="toggle on" id="animate-toggle"></div>
       <span class="toggle-label">Auto-animate</span>
-    </div>
-    <div class="toggle-row">
-      <div class="toggle" id="rotate-mode-toggle"></div>
-      <span class="toggle-label">Rotate slice</span>
-    </div>
-    <div id="rotation-planes" style="margin-top:4px;display:none">
-      <span style="font-size:10px;color:#8b949e">Plane 1</span>
-      <div class="btns" id="plane1-btns" style="margin-top:2px">
-        <button class="btn active" data-v="xt">XT</button>
-        <button class="btn" data-v="yt">YT</button>
-        <button class="btn" data-v="zt">ZT</button>
-        <button class="btn" data-v="xy">XY</button>
-        <button class="btn" data-v="xz">XZ</button>
-        <button class="btn" data-v="yz">YZ</button>
-      </div>
-      <span style="font-size:10px;color:#8b949e;margin-top:3px;display:inline-block">Plane 2</span>
-      <div class="btns" id="plane2-btns" style="margin-top:2px">
-        <button class="btn" data-v="xt">XT</button>
-        <button class="btn active" data-v="yt">YT</button>
-        <button class="btn" data-v="zt">ZT</button>
-        <button class="btn" data-v="xy">XY</button>
-        <button class="btn" data-v="xz">XZ</button>
-        <button class="btn" data-v="yz">YZ</button>
-      </div>
-      <div class="sr" style="margin-top:4px">
-        <span style="font-size:10px;color:#8b949e;width:40px">Ratio</span>
-        <input type="range" id="rot-ratio" min="1" max="100" value="62">
-        <span class="v" id="rot-ratio-v">0.62</span>
-      </div>
-      <div class="sr" style="margin-top:4px">
-        <span style="font-size:10px;color:#8b949e;width:40px">Speed</span>
-        <input type="range" id="rot-speed" min="1" max="100" value="10">
-        <span class="v" id="rot-speed-v">0.005</span>
-      </div>
     </div>
   </div>
 
@@ -219,42 +158,12 @@ if(!gl){document.body.innerHTML='<h1 style="color:#f85;padding:40px">WebGL2 not 
 
 // --- State ---
 let meshInfo = null, workerReady = false;
-let rotateNormalOverride = null;
 let animating = true;  // auto-animate on by default
 let gpuSkinned = false; // true when using GPU skinning (no prebake)
 let skinningTexture = null; // WebGL texture for per-vertex joint indices + weights
 let renderMode = 'pbr';
 let rotX = 0.3, rotY = 0.5, zoom = 5;
-let animDir = 1;
-let pendingUpdate = false, updating = false;
-let updateGeneration = 0; // increments on each update request
-let renderedGeneration = 0; // latest generation that was actually rendered
 
-// Patch streaming: deduplicating queue with single consumer
-const patchQueue = [];
-const patchQueued = new Set();
-let patchBusy = false;
-
-function queuePatch(a, b, c) {
-  const key = `${a},${b},${c}`;
-  if (patchQueued.has(key)) return;
-  patchQueued.add(key);
-  patchQueue.push([a, b, c]);
-  drainPatchQueue();
-}
-
-function drainPatchQueue() {
-  if (patchBusy || patchQueue.length === 0) return;
-  patchBusy = true;
-  const [a, b, c] = patchQueue.shift();
-  workerCall('generate_single', { a, b, c }).then(() => {
-    patchBusy = false;
-    // re-render picks up the new patch; may queue more missing ones
-    if (!updating && !pendingUpdate) update();
-    else drainPatchQueue(); // if update already in flight, keep draining
-  });
-}
-let currentShape = 'galloping_horse';
 let currentXform = 'identity';
 
 // --- Material & texture state ---
@@ -380,51 +289,14 @@ for (let i = 0; i < NUM_WORKERS; i++) {
 // Primary worker for init, shape loading, atlas build, etc.
 const worker = workers[0].worker;
 
-// Round-robin index for slice_and_transform calls
-let nextWorkerIdx = 0;
-
-// SharedArrayBuffer for zero-copy worker→main data transfer.
-// Each worker gets a slot to write instance data into.
-// Main thread reads directly — no postMessage data, no copies.
-const SAB_SLOT_SIZE = 200000 * 52 * 4; // 200K faces × 52 floats × 4 bytes = ~40MB per slot
-const SAB_ENABLED = typeof SharedArrayBuffer !== 'undefined';
-let sharedBuf = null, sharedOrigViews = [], sharedXformViews = [];
-if (SAB_ENABLED) {
-  try {
-    sharedBuf = new SharedArrayBuffer(SAB_SLOT_SIZE * 2 * NUM_WORKERS); // orig+xform per worker
-    for (let i = 0; i < NUM_WORKERS; i++) {
-      const origOff = i * 2 * SAB_SLOT_SIZE;
-      const xformOff = origOff + SAB_SLOT_SIZE;
-      sharedOrigViews.push(new Float32Array(sharedBuf, origOff, SAB_SLOT_SIZE / 4));
-      sharedXformViews.push(new Float32Array(sharedBuf, xformOff, SAB_SLOT_SIZE / 4));
-    }
-    // Send shared buffer to all workers
-    for (let i = 0; i < NUM_WORKERS; i++) {
-      workers[i].worker.postMessage({
-        type: 'set_shared_buffer', sharedBuf,
-        origOffset: i * 2 * SAB_SLOT_SIZE,
-        xformOffset: i * 2 * SAB_SLOT_SIZE + SAB_SLOT_SIZE,
-        slotSize: SAB_SLOT_SIZE,
-      });
-    }
-    console.log(`SharedArrayBuffer: ${(sharedBuf.byteLength / 1e6).toFixed(0)}MB for ${NUM_WORKERS} workers`);
-  } catch (e) {
-    console.warn('SharedArrayBuffer not available:', e);
-  }
-}
-
 function workerCall(type, data, transferList) {
   return new Promise((resolve) => {
     const id = ++msgId;
-    const wIdx = type === 'slice_and_transform'
-      ? nextWorkerIdx++ % NUM_WORKERS : 0;
-    pending.set(id, (resp) => { resp._workerIdx = wIdx; resolve(resp); });
-    const target = type === 'slice_and_transform'
-      ? workers[wIdx].worker : worker;
+    pending.set(id, resolve);
     if (transferList) {
-      target.postMessage({ type, data, id }, transferList);
+      worker.postMessage({ type, data, id }, transferList);
     } else {
-      target.postMessage({ type, data, id });
+      worker.postMessage({ type, data, id });
     }
   });
 }
@@ -1962,8 +1834,13 @@ function initGpuLodCompute(numFaces, faceIndicesF32, restPositions, numVerts) {
 
   // Transform feedback output buffer
   const outBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, outBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, numFaces * 2 * 4, gl.DYNAMIC_READ);
+  gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, outBuf);
+  gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, numFaces * 2 * 4, gl.STREAM_READ);
+
+  // Separate readback buffer — avoids "bound to both indexed TF and another target"
+  const readBuf = gl.createBuffer();
+  gl.bindBuffer(gl.COPY_READ_BUFFER, readBuf);
+  gl.bufferData(gl.COPY_READ_BUFFER, numFaces * 2 * 4, gl.STREAM_READ);
 
   const tf = gl.createTransformFeedback();
 
@@ -1994,7 +1871,7 @@ function initGpuLodCompute(numFaces, faceIndicesF32, restPositions, numVerts) {
   gl.useProgram(null);
 
   console.log(`GPU LOD compute initialized: ${numFaces} faces, ${numVerts} verts`);
-  return { prog, faceVao, outBuf, tf, restTex, locs, numFaces, numVerts, atlasLutTex: null };
+  return { prog, faceVao, outBuf, readBuf, tf, restTex, locs, numFaces, numVerts, atlasLutTex: null, numJoints: 0, atlasKeys: null };
 }
 
 // Upload atlas LUT to the GPU LOD compute (called once after atlas is built)
@@ -2055,14 +1932,27 @@ function runGpuLodCompute(lodCompute, mobius, vpMatrix, vpW, vpH, density, meshR
   gl.drawArrays(gl.POINTS, 0, lc.numFaces);
   gl.endTransformFeedback();
   gl.disable(gl.RASTERIZER_DISCARD);
+
+  // Unbind TF state
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
   gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
   gl.bindVertexArray(null);
 
-  // Read back results
+  // Copy TF output → readback buffer, then read from there.
+  const bytes = lc.numFaces * 2 * 4;
+  gl.bindBuffer(gl.COPY_READ_BUFFER, lc.outBuf);
+  gl.bindBuffer(gl.COPY_WRITE_BUFFER, lc.readBuf);
+  gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, 0, 0, bytes);
+  gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+
+  // Insert fence so Chrome doesn't warn about reading without waiting
+  const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  gl.flush();
+  if (sync) { gl.clientWaitSync(sync, gl.SYNC_FLUSH_COMMANDS_BIT, 0); gl.deleteSync(sync); }
+
   const result = new Float32Array(lc.numFaces * 2);
-  gl.bindBuffer(gl.ARRAY_BUFFER, lc.outBuf);
-  gl.getBufferSubData(gl.ARRAY_BUFFER, 0, result);
-  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  gl.getBufferSubData(gl.COPY_WRITE_BUFFER, 0, result);
+  gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
   gl.useProgram(null);
 
   return result;
@@ -2135,7 +2025,13 @@ async function setupGpuSkinning() {
     window._morphTex = null;
   }
 
-  // 2. Get rest-pose instance data
+  // 2. Set tess params from current UI state before computing LODs
+  const initDensity = parseFloat($('tess-density').value) || 20;
+  const initScreenAtten = $('screen-atten-toggle').classList.contains('on');
+  const initMinPx = parseFloat($('min-px-sub').value) || 2;
+  await workerCall('set_tess_params', { density: initDensity, screenAtten: initScreenAtten, minPx: initMinPx });
+
+  // 3. Get instance data with proper LODs
   const rpResp = await workerCall('get_rest_pose_instances', { lod_time: sd.t_min || 0 });
   const rp = rpResp.data;
   if (!rp || !rp.instances) {
@@ -2144,10 +2040,13 @@ async function setupGpuSkinning() {
     return false;
   }
 
-  // 3. Group faces by LOD triple and build batches
-  const STRIDE = 40; // compact stride in floats
-  const faceLods = rp.face_lods; // 5 floats per face: [canon_a, canon_b, canon_c, perm_idx, parity]
+  // 3. Cache instance data for LOD rebuild
   const nf = rp.num_faces;
+  cachedInstances = new Float32Array(rp.instances);
+  cachedNumFaces = nf;
+  cachedNumVerts = rp.num_vertices;
+
+  const faceLods = rp.face_lods; // 5 floats per face: [canon_a, canon_b, canon_c, perm_idx, parity]
 
   // Group faces by tessellation key (canonical LOD + permutation)
   const groups = new Map(); // key → { faceIndices: [], parity, permIndex, lod }
@@ -2246,6 +2145,7 @@ async function setupGpuSkinning() {
   }
   gpuLodCompute = initGpuLodCompute(nf, faceIdxF32, restPos, rp.num_vertices);
   if (gpuLodCompute) {
+    gpuLodCompute.numJoints = sd.num_joints || 0;
     // Build atlas LUT from existing atlas keys
     const keys = [];
     for (const [k] of atlasBuffers) {
@@ -2255,7 +2155,10 @@ async function setupGpuSkinning() {
     uploadLodAtlasLut(gpuLodCompute, keys);
   }
 
-  console.log(`GPU skinning: ${drawBatches.length} LOD batches from ${nf} faces`);
+  // Upload model data to worker's GPU compute context for async LOD
+  await workerCall('upload_model_to_compute', {});
+
+  console.log(`GPU animation: ${drawBatches.length} LOD batches from ${nf} faces`);
 
   gpuSkinned = true;
   zoom = 5; // reset to default — positions are in normalized [-1,1] space
@@ -2303,38 +2206,159 @@ async function uploadAnimationPose(t) {
 let drawBatches = [];
 let globalMaxLogLod = 1;
 let vaoOrigMesh = null, numOrigInst = 0;
-const ORIG_BARY = new Float32Array([1,0,0, 0,1,0, 0,0,1]);
-const ORIG_LINES = new Uint32Array([0,1, 1,2, 2,0]);
 const tessCache = new Map();  // fallback for patches not in atlasBuffers
-const vaoCache = new Map();
-const atlasBuffers = new Map(); // pre-uploaded atlas patches: "a,b,c/perm" → {baryBuf, triIdxBuf, lineIdxBuf, numTriIdx, numLineIdx, rawBary, rawTris}
+const atlasBuffers = new Map();
 
-// Instance buffer pool — reuse GPU buffers across frames instead of creating new ones.
-// Each entry: { buf: WebGLBuffer, size: number (bytes) }
-const instanceBufPool = [];
-let instanceBufPoolIdx = 0;
+// Cached instance data for LOD rebuild (set during setupGpuSkinning)
+let cachedInstances = null; // Float32Array, STRIDE floats per face
+let cachedNumFaces = 0;
+let cachedNumVerts = 0;
+const STRIDE = 40;
 
-function getPooledInstanceBuf(dataF32) {
-  const needed = dataF32.byteLength;
-  if (instanceBufPoolIdx < instanceBufPool.length) {
-    const entry = instanceBufPool[instanceBufPoolIdx++];
-    gl.bindBuffer(gl.ARRAY_BUFFER, entry.buf);
-    if (needed <= entry.size) {
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, dataF32);
-    } else {
-      gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
-      entry.size = needed;
+// Rebuild draw batches from GPU LOD classification results.
+// `lodResult`: Float32Array with 2 floats per face [atlas_index, perm_index]
+// Rebuild batches from face LOD classification (5 floats per face).
+// Same format as setupGpuSkinning uses from get_rest_pose_instances.
+function rebuildBatchesFromFaceLods(faceLods) {
+  if (!cachedInstances) return;
+  const nf = cachedNumFaces;
+
+  const groups = new Map();
+  for (let fi = 0; fi < nf; fi++) {
+    const lo = fi * 5;
+    const ca = faceLods[lo], cb = faceLods[lo+1], cc = faceLods[lo+2];
+    const permIdx = faceLods[lo+3];
+    const parity = faceLods[lo+4];
+    const key = `${ca},${cb},${cc}/${permIdx}`;
+    if (!groups.has(key)) {
+      groups.set(key, { faces: [], parity, permIndex: permIdx, lod: [ca, cb, cc] });
     }
-    return entry.buf;
+    groups.get(key).faces.push(fi);
   }
-  // Need a new buffer
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
-  instanceBufPool.push({ buf, size: needed });
-  instanceBufPoolIdx++;
-  return buf;
+
+  // Clear old batches
+  for (const b of drawBatches) {
+    if (b.vaoXform) gl.deleteVertexArray(b.vaoXform);
+    if (b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri);
+  }
+  drawBatches = [];
+
+  for (const [key, group] of groups) {
+    const tess = atlasBuffers.get(key) || tessCache.get(key);
+    if (!tess) continue;
+
+    const groupData = new Float32Array(group.faces.length * STRIDE);
+    for (let gi = 0; gi < group.faces.length; gi++) {
+      const fi = group.faces[gi];
+      groupData.set(cachedInstances.subarray(fi * STRIDE, (fi + 1) * STRIDE), gi * STRIDE);
+    }
+
+    const instBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, groupData, gl.STATIC_DRAW);
+
+    const buildSkinVAO = (idxBuf) => {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, tess.baryBuf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+      const S = 160;
+      const compactMap = [
+        [1,0],[2,16],[3,32],[7,48],[8,64],
+        [9,80],[10,96],[11,112],[12,128],[13,144]
+      ];
+      for (const [loc, off] of compactMap) {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
+        gl.vertexAttribDivisor(loc, 1);
+      }
+      gl.vertexAttrib4f(4, 1, 0, 0, 0);
+      gl.vertexAttrib4f(5, 1, 0, 0, 0);
+      gl.vertexAttrib4f(6, 1, 0, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+      gl.bindVertexArray(null);
+      return vao;
+    };
+
+    drawBatches.push({
+      vaoXform: buildSkinVAO(tess.lineIdxBuf),
+      vaoXformTri: buildSkinVAO(tess.triIdxBuf),
+      numLineIdx: tess.numLineIdx,
+      numTriIdx: tess.numTriIdx,
+      numInst: group.faces.length,
+      lod: group.lod, wantedLod: group.lod, usedLod: group.lod,
+      color: lodColor(group.lod),
+      parity: group.parity, permIndex: group.permIndex, materialIndex: 0,
+      instanceData: groupData, xformData: groupData,
+      faceIndices: new Uint32Array(group.faces),
+    });
+  }
 }
+
+// Run LOD compute asynchronously on the worker (avoids main-thread GL stall).
+async function recomputeAndRebuildLods() {
+  if (!cachedInstances) return;
+  const nf = cachedNumFaces;
+
+  // Resolution override: force uniform LOD
+  const resOverride = parseInt($('res').value) || 0;
+  if (resOverride > 0) {
+    const lod = 1 << resOverride;
+    // Build fake LOD result: all faces get the same atlas entry
+    const atlasKeys = gpuLodCompute && gpuLodCompute.atlasKeys;
+    if (!atlasKeys) return;
+    // Find atlas index for [lod, lod, lod]
+    let aidx = 0;
+    for (let i = 0; i < atlasKeys.length; i++) {
+      if (atlasKeys[i][0] === lod && atlasKeys[i][1] === lod && atlasKeys[i][2] === lod) { aidx = i; break; }
+    }
+    const lodResult = new Float32Array(nf * 2);
+    for (let i = 0; i < nf; i++) { lodResult[i*2] = aidx; lodResult[i*2+1] = 0; }
+    rebuildBatchesFromLods(lodResult);
+    return;
+  }
+
+  const density = parseFloat($('tess-density').value) || 20;
+  const minPx = $('screen-atten-toggle').classList.contains('on') ? parseFloat($('min-px-sub').value) : 0;
+  const meshRadius = 1.0;
+
+  // Build VP matrix
+  const cx = panX || 0, cy = panY || 0, cz = panZ || 0;
+  const ex = zoom * Math.cos(rotX) * Math.sin(rotY) + cx;
+  const ey = zoom * Math.sin(rotX) + cy;
+  const ez = zoom * Math.cos(rotX) * Math.cos(rotY) + cz;
+  const view = lookAt(ex, ey, ez, cx, cy, cz, 0, 1, 0);
+  const proj = perspective(Math.PI / 3, canvas.width / canvas.height, 0.01, 10000);
+  const vpMatrix = new Float32Array(16);
+  for (let i = 0; i < 4; i++)
+    for (let j = 0; j < 4; j++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += proj[k * 4 + i] * view[j * 4 + k];
+      vpMatrix[j * 4 + i] = s;
+    }
+
+  // CPU LOD recompute on worker — uses proven half-edge coherent compute_instances
+  const t0 = performance.now();
+  const { mx, my, mz, mr } = getTransformParams();
+  const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
+  const resp = await workerCall('recompute_lods', {
+    transformType: tType,
+    params: [mx, my, mz, mr],
+    vpMatrix: Array.from(vpMatrix),
+    vpWidth: canvas.width, vpHeight: canvas.height,
+    tessDensity: density,
+    screenAtten: $('screen-atten-toggle').classList.contains('on'),
+    minPxSub: minPx,
+  });
+  const faceLods = resp.lods;
+  if (!faceLods) { console.warn('LOD recompute returned null'); return; }
+  // faceLods: 5 floats per face [canonical_a, canonical_b, canonical_c, perm_index, parity]
+  // Rebuild batches using the same grouping logic as setupGpuSkinning
+  rebuildBatchesFromFaceLods(faceLods);
+  console.log(`LOD recompute: ${(performance.now()-t0).toFixed(1)}ms, ${cachedNumFaces} faces → ${drawBatches.length} batches`);
+} // pre-uploaded atlas patches: "a,b,c/perm" → {baryBuf, triIdxBuf, lineIdxBuf, numTriIdx, numLineIdx, rawBary, rawTris}
 
 function uploadAtlasPatches(patches) {
   const t0 = performance.now();
@@ -2370,266 +2394,6 @@ function uploadAtlasPatches(patches) {
     });
   }
   console.log(`Atlas patches uploaded: ${atlasBuffers.size} buffers in ${(performance.now()-t0).toFixed(0)}ms`);
-}
-
-function makeVAO(baryData, idxData, instanceData) {
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  const bb = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, bb);
-  gl.bufferData(gl.ARRAY_BUFFER, baryData, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-  const ib = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, ib);
-  gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
-  const S = 160;
-  const cMap = [[1,0],[2,16],[3,32],[7,48],[8,64],[9,80],[10,96],[11,112],[12,128],[13,144]];
-  for (const [loc, off] of cMap) {
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
-    gl.vertexAttribDivisor(loc, 1);
-  }
-  gl.vertexAttrib4f(4, 1, 0, 0, 0);
-  gl.vertexAttrib4f(5, 1, 0, 0, 0);
-  gl.vertexAttrib4f(6, 1, 0, 0, 0);
-  const eb = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxData, gl.STATIC_DRAW);
-  gl.bindVertexArray(null);
-  return vao;
-}
-
-function getTessBuffers(batch) {
-  // Try pre-uploaded atlas buffers first (keyed by used_lod/perm)
-  const key = (batch.used_lod || batch.wanted_lod).join(',') + '/' + (batch.perm_index || 0);
-  if (atlasBuffers.has(key)) return atlasBuffers.get(key);
-  // Fall back to per-frame tessCache
-  if (tessCache.has(key)) return tessCache.get(key);
-  if (!batch.tess_bary || !batch.tess_bary.length) return null;
-
-  const bary = new Float32Array(batch.tess_bary);
-  const tris = batch.tess_triangles;
-  const lines = [];
-  for (let i = 0; i < tris.length; i += 3) lines.push(tris[i],tris[i+1], tris[i+1],tris[i+2], tris[i+2],tris[i]);
-
-  const baryBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, baryBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, bary, gl.STATIC_DRAW);
-  const lineIdxBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lineIdxBuf);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(lines), gl.STATIC_DRAW);
-  const triIdxBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triIdxBuf);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(tris), gl.STATIC_DRAW);
-
-  const entry = { baryBuf, lineIdxBuf, triIdxBuf, numLineIdx: lines.length, numTriIdx: tris.length,
-    rawBary: new Float32Array(bary),  // keep JS copy for pick overlay
-    rawTris: new Uint32Array(tris),
-  };
-  tessCache.set(key, entry);
-  return entry;
-}
-
-function getOrCreateBatchVAOs(tessKey, tessBufs, instanceData, numInstances) {
-  let entry = vaoCache.get(tessKey);
-  const dataF32 = new Float32Array(instanceData);
-
-  if (entry) {
-    gl.bindBuffer(gl.ARRAY_BUFFER, entry.instanceBuf);
-    if (dataF32.byteLength <= entry.instanceBufSize) {
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, dataF32);
-    } else {
-      gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
-      entry.instanceBufSize = dataF32.byteLength;
-    }
-    entry.numInst = numInstances;
-    return entry;
-  }
-
-  const instanceBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, dataF32, gl.DYNAMIC_DRAW);
-
-  function makeVAOWithIdx(idxBuf) {
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, tessBufs.baryBuf);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
-    const S = 160;
-    const cMap = [[1,0],[2,16],[3,32],[7,48],[8,64],[9,80],[10,96],[11,112],[12,128],[13,144]];
-    for (const [loc, off] of cMap) {
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
-      gl.vertexAttribDivisor(loc, 1);
-    }
-    gl.vertexAttrib4f(4, 1, 0, 0, 0);
-    gl.vertexAttrib4f(5, 1, 0, 0, 0);
-    gl.vertexAttrib4f(6, 1, 0, 0, 0);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-    gl.bindVertexArray(null);
-    return vao;
-  }
-
-  entry = {
-    lineVao: makeVAOWithIdx(tessBufs.lineIdxBuf),
-    triVao: makeVAOWithIdx(tessBufs.triIdxBuf),
-    instanceBuf,
-    instanceBufSize: dataF32.byteLength,
-    numInst: numInstances,
-  };
-  vaoCache.set(tessKey, entry);
-  return entry;
-}
-
-function uploadBatches(data) {
-  if (gpuSkinned) return; // GPU skinning manages its own batches
-  const usedKeys = new Set();
-  drawBatches = [];
-
-  // Original mesh wireframe — use the flat transferred buffer directly
-  numOrigInst = data.total_faces;
-  {
-    // Read from SharedArrayBuffer or transferred buffer
-    const workerIdx = data._workerIdx || 0;
-    const allOrig = data.shared
-      ? sharedOrigViews[workerIdx].subarray(0, data.data_len)
-      : data.all_orig;
-    if (!vaoOrigMesh) {
-      vaoOrigMesh = makeVAO(ORIG_BARY, ORIG_LINES, allOrig);
-    } else {
-      gl.bindVertexArray(vaoOrigMesh);
-      // Reuse a pooled buffer instead of creating a new one each frame
-      const buf = getPooledInstanceBuf(allOrig);
-      const S = 160;
-      const compactMap = [
-        [1,0],[2,16],[3,32],[7,48],[8,64],
-        [9,80],[10,96],[11,112],[12,128],[13,144]
-      ];
-      for (const [loc, off] of compactMap) {
-        gl.enableVertexAttribArray(loc);
-        gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
-        gl.vertexAttribDivisor(loc, 1);
-      }
-      gl.vertexAttrib4f(4, 1, 0, 0, 0);
-      gl.vertexAttrib4f(5, 1, 0, 0, 0);
-      gl.vertexAttrib4f(6, 1, 0, 0, 0);
-      gl.bindVertexArray(null);
-    }
-  }
-
-  // Unpack flat batch metadata
-  const meta = new Int32Array(data.batch_meta.buffer || data.batch_meta);
-  const nb = data.num_batches;
-  const faceIdx = new Uint32Array(data.face_indices.buffer || data.face_indices);
-
-  globalMaxLogLod = 1;
-
-  // Reset pools for this frame — reuse GL objects instead of create/delete
-  instanceBufPoolIdx = 0;
-  // Delete last frame's VAOs (cheap — just state objects, no data)
-  for (const b of drawBatches) {
-    if (b.vaoXform) gl.deleteVertexArray(b.vaoXform);
-    if (b.vaoXformTri) gl.deleteVertexArray(b.vaoXformTri);
-  }
-
-  let totalRendered = 0, totalSkipped = 0;
-  let faceIdxOffset = 0;
-
-  for (let bi = 0; bi < nb; bi++) {
-    const m = bi * 16;
-    const lod = [meta[m], meta[m+1], meta[m+2]];
-    const wantedLod = [meta[m+3], meta[m+4], meta[m+5]];
-    const usedLod = [meta[m+6], meta[m+7], meta[m+8]];
-    const parity = meta[m+9];
-    const permIndex = meta[m+10];
-    const materialIndex = meta[m+11];
-    const numFaces = meta[m+12];
-    const nVerts = meta[m+13];
-    const nTris = meta[m+14];
-    const offset = meta[m+15];
-
-    const maxLod = Math.max(lod[0], lod[1], lod[2]);
-    globalMaxLogLod = Math.max(globalMaxLogLod, Math.log2(Math.max(maxLod, 1)));
-
-    // Look up pre-uploaded atlas tess buffers
-    const tessKey = usedLod.join(',') + '/' + permIndex;
-    const tess = atlasBuffers.get(tessKey) || tessCache.get(tessKey);
-    if (!tess) {
-      totalSkipped += numFaces;
-      faceIdxOffset += numFaces;
-      continue;
-    }
-    totalRendered += numFaces;
-
-    // Slice instance data from flat transferred buffers
-    const off = offset * 40;
-    const len = numFaces * 40;
-    const origBuf = data.shared ? sharedOrigViews[data._workerIdx || 0] : new Float32Array(data.all_orig.buffer);
-    const gpuData = origBuf.subarray(off, off + len);
-    // orig = xform (normals computed on main thread GPU), no copy needed
-
-    const instBuf = getPooledInstanceBuf(gpuData);
-
-    const buildVAO = (idxBuf) => {
-      const vao = gl.createVertexArray();
-      gl.bindVertexArray(vao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, tess.baryBuf);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-      // Compact layout: 10 vec4s (160 bytes), weights not in buffer
-      // Map compact buffer slots → shader attribute locations:
-      //   slot 0-2 (p0,p1,p2) → loc 1-3
-      //   slot 3-4 (lod,vlod) → loc 7-8
-      //   slot 5-6 (uv01,uv2) → loc 9-10
-      //   slot 7-9 (n0,n1,n2) → loc 11-13
-      const S = 160; // compact stride
-      const compactMap = [
-        [1,0],[2,16],[3,32],      // positions
-        [7,48],[8,64],            // LODs
-        [9,80],[10,96],           // UVs
-        [11,112],[12,128],[13,144] // normals
-      ];
-      for (const [loc, off] of compactMap) {
-        gl.enableVertexAttribArray(loc);
-        gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, S, off);
-        gl.vertexAttribDivisor(loc, 1);
-      }
-      // Weights (loc 4-6): constant identity, not from buffer
-      gl.vertexAttrib4f(4, 1, 0, 0, 0);
-      gl.vertexAttrib4f(5, 1, 0, 0, 0);
-      gl.vertexAttrib4f(6, 1, 0, 0, 0);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-      gl.bindVertexArray(null);
-      return vao;
-    };
-
-    const batchFaceIndices = faceIdx.subarray(faceIdxOffset, faceIdxOffset + numFaces);
-    faceIdxOffset += numFaces;
-
-    drawBatches.push({
-      vaoXform: buildVAO(tess.lineIdxBuf),
-      vaoXformTri: buildVAO(tess.triIdxBuf),
-      numLineIdx: tess.numLineIdx,
-      numTriIdx: tess.numTriIdx,
-      numInst: numFaces,
-      lod, wantedLod, usedLod,
-      color: lodColor(lod),
-      parity, permIndex, materialIndex,
-      instanceData: gpuData,
-      xformData: gpuData,
-      faceIndices: batchFaceIndices,
-    });
-  }
-
-  drawBatches.sort((a, b) => {
-    const am = getMaterialParams(a.materialIndex).alphaMode;
-    const bm = getMaterialParams(b.materialIndex).alphaMode;
-    return am - bm;
-  });
 }
 
 // --- Matrix math ---
@@ -2669,8 +2433,8 @@ function render() {
     }
   }
 
-  // GPU-skinned models use flat path (use_qb = 0), regular models use QB (use_qb = 1)
-  const useQB = gpuSkinned ? 0 : 1;
+  // Always use QB evaluation — fused Möbius-QB produces smooth conformal surfaces
+  const useQB = 1;
 
   const drawWire = renderMode === 'wire' || renderMode === 'both';
   const drawLod = renderMode === 'lod' || renderMode === 'both';
@@ -2846,7 +2610,7 @@ function render() {
   gl.bindVertexArray(null);
 }
 
-// --- Slice + transform ---
+// --- Transform params ---
 function getTransformParams() {
   const mx = parseInt($('mx').value)/10;
   const my = parseInt($('my').value)/10;
@@ -2859,25 +2623,6 @@ function getTransformParams() {
   return { mx, my, mz, mr };
 }
 
-function getSliceNormal() {
-  const tilt = parseFloat($('tilt').value);
-  let dir = 'x';
-  document.querySelectorAll('#dir-btns .a').forEach(b => { dir = b.dataset.v; });
-  const sinT = Math.sin(tilt), cosT = Math.cos(tilt);
-  if (dir === 'x') return [sinT, 0, 0, cosT];
-  if (dir === 'y') return [0, sinT, 0, cosT];
-  return [0, 0, sinT, cosT];
-}
-
-let lodDebounce = null;
-
-// Debounced update: render immediately with current data, recompute async.
-function updateDebounced() {
-  render();
-  clearTimeout(lodDebounce);
-  lodDebounce = setTimeout(update, 150);
-}
-
 // Möbius update: recompute uniforms + render immediately, then debounce
 // a worker call to recompute LODs for the new Möbius transform.
 let mobiusDebounce = null;
@@ -2887,175 +2632,26 @@ function updateMobius() {
   mob = computeMobius(tType, mx, my, mz, mr);
   render();
   clearTimeout(mobiusDebounce);
-  mobiusDebounce = setTimeout(update, 150);
+  mobiusDebounce = setTimeout(updateWithLod, 150);
 }
 
-let inflight = 0;
-async function update() {
+let lodDebounce = null;
+function update() {
   if (!workerReady || !meshInfo) return;
-  if (gpuSkinned) {
-    // Recompute Möbius from current UI state before rendering
-    const { mx, my, mz, mr } = getTransformParams();
-    const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
-    mob = computeMobius(tType, mx, my, mz, mr);
-    render();
-    return;
-  }
-  if (inflight >= NUM_WORKERS) return;
-  inflight++;
-  const gen = ++updateGeneration;
-
-  const timeOffset = parseFloat($('time').value);
-  const normal = getSliceNormal();
-  const cosT = normal[3];
-  const offset = timeOffset * cosT;
-
   const { mx, my, mz, mr } = getTransformParams();
-  const resVal = parseInt($('res').value);
-  const res = resVal === 0 ? 0 : (1 << resVal);
-  $('res-v').textContent = res === 0 ? 'auto' : res;
-
-  // Update tess density from slider
-  const tessDensity = parseInt($('tess-density').value);
-  $('tess-density-v').textContent = tessDensity;
-
-  // VP matrix for screen-space LOD
-  const w=$('wrap');
-  const vpW = w.clientWidth || 800, vpH = w.clientHeight || 600;
-  const ex=zoom*Math.sin(rotY)*Math.cos(rotX), ey=zoom*Math.sin(rotX), ez=zoom*Math.cos(rotY)*Math.cos(rotX);
-  const vpMatrix = mulM4(perspective(Math.PI/3, vpW/vpH, 0.1, 100), lookAt(ex,ey,ez,0,0,0,0,1,0));
-
-  const tType = currentXform === 'identity' ? 'identity' :
-                currentXform === 'sphere_reflection' ? (mr > 0.01 ? 'sphere_reflection' : 'identity') :
-                currentXform;
+  const tType = currentXform === 'sphere_reflection' ? 'sphere_reflection' : 'identity';
   mob = computeMobius(tType, mx, my, mz, mr);
-
-  const spacetimeOn = $('spacetime-toggle').classList.contains('on');
-
-  // The worldsheet is a hypertorus. Time slider controls the angle of the
-  // hyperplane in the torus (w,z) plane — like rotating a knife through a donut.
-  // θ = 2π·t/period maps the time slider to the torus angle.
-  const period = meshInfo ? (meshInfo.time_max - meshInfo.time_min) : 2.0;
-  const theta = 2.0 * Math.PI * timeOffset / period;
-
-  const toroidalOn = $('toroidal-toggle').classList.contains('on');
-  let effectiveNormal, effectiveOffset;
-
-  if (rotateNormalOverride) {
-    effectiveNormal = rotateNormalOverride;
-    effectiveOffset = 0;
-    rotateNormalOverride = null;
-  } else if (toroidalOn) {
-    // Toroidal: rotate the hyperplane in the torus (w,z) plane
-    if (spacetimeOn) {
-      const tilt = parseFloat($('tilt').value);
-      let dir = 'x';
-      document.querySelectorAll('#dir-btns .a').forEach(b => { dir = b.dataset.v; });
-      const sinTilt = Math.sin(tilt), cosTilt = Math.cos(tilt);
-      const nw = Math.cos(theta) * cosTilt;
-      const nz = Math.sin(theta) * cosTilt;
-      const nx = dir === 'x' ? sinTilt : 0;
-      const ny = dir === 'y' ? sinTilt : 0;
-      effectiveNormal = [nx, ny, nz, nw];
-      effectiveOffset = 0;
-    } else {
-      effectiveNormal = [0, 0, Math.sin(theta), Math.cos(theta)];
-      effectiveOffset = 0;
-    }
-  } else {
-    // Linear time: simple time slice or tilted slice
-    if (spacetimeOn) {
-      effectiveNormal = normal;
-      effectiveOffset = offset;
-    } else {
-      // Classic: pure time slice at the slider value
-      effectiveNormal = [0, 0, 0, 1];
-      effectiveOffset = timeOffset;
-    }
-  }
-
-
-  const t0 = performance.now();
-  const screenAtten = $('screen-atten-toggle').classList.contains('on');
-  const minPxSub = parseInt($('min-px-sub').value);
-  $('min-px-sub-v').textContent = minPxSub;
-  const resp = await workerCall('slice_and_transform', {
-    normal: Array.from(effectiveNormal),
-    offset: effectiveOffset,
-    transformType: tType,
-    toroidal: $('toroidal-toggle').classList.contains('on'),
-    params: [mx, my, mz, mr],
-    overrideRes: res,
-    vpMatrix: Array.from(vpMatrix),
-    vpWidth: vpW,
-    vpHeight: vpH,
-    tessDensity,
-    screenAtten,
-    minPxSub,
-  });
-  const ms = performance.now() - t0;
-  const data = resp.result;
-  if (data) data._workerIdx = resp._workerIdx;
-
-  // Skip if a newer result was already rendered (out-of-order arrival)
-  inflight--;
-  if (gen <= renderedGeneration) return; // stale — newer frame already rendered
-  renderedGeneration = gen;
-
-  if (data && data.batch_meta) {
-    uploadBatches(data);
+  render();
+}
+// Separate function for updates that should trigger LOD recompute
+// (density, resolution, Möbius, screen attenuation changes)
+function updateWithLod() {
+  update();
+  clearTimeout(lodDebounce);
+  lodDebounce = setTimeout(() => {
+    recomputeAndRebuildLods();
     render();
-
-    // Compute stats from flat metadata
-    const meta = new Int32Array(data.batch_meta.buffer || data.batch_meta);
-    const nb = data.num_batches;
-    let totalTris = 0, totalVerts = 0, nFallback = 0;
-    for (let bi = 0; bi < nb; bi++) {
-      const m = bi * 16;
-      const nf = meta[m+12];
-      let nv = meta[m+13], nt = meta[m+14];
-      // If n_verts/n_tris are 0 (prebake path), look up from atlas buffers
-      if ((nv === 0 || nt === 0) && nf > 0) {
-        const usedLod = [meta[m+6], meta[m+7], meta[m+8]];
-        const permIndex = meta[m+10];
-        const tessKey = usedLod.join(',') + '/' + permIndex;
-        const tess = atlasBuffers.get(tessKey);
-        if (tess) {
-          nt = tess.numTriIdx / 3;
-          nv = tess.rawBary ? tess.rawBary.length / 3 : 0;
-        }
-      }
-      totalTris += nf * nt;
-      totalVerts += nf * nv;
-      // Check if fallback: used_lod != wanted_lod (canonical comparison)
-      const wSorted = [meta[m+3],meta[m+4],meta[m+5]].sort((a,b)=>a-b).join(',');
-      const uSorted = [meta[m+6],meta[m+7],meta[m+8]].sort((a,b)=>a-b).join(',');
-      if (wSorted !== uSorted) nFallback++;
-    }
-    const matCount = loadedMaterials.length;
-    const queueInfo = nFallback > 0 ? `<br>Fallback: <span class="val">${nFallback}</span>` : '';
-    $('stats').innerHTML =
-      `Faces: <span class="val">${data.total_faces}</span><br>` +
-      `Batches: <span class="val">${nb}</span>` +
-      (matCount > 1 ? ` (${matCount} mats)` : '') + `<br>` +
-      `Tris: <span class="val">${totalTris}</span><br>` +
-      `Verts: <span class="val">${totalVerts}</span><br>` +
-      `Slice+Xform: <span class="val">${ms.toFixed(0)}ms</span>` +
-      queueInfo;
-
-    // Queue missing patches for background streaming
-    for (let bi = 0; bi < nb; bi++) {
-      const m = bi * 16;
-      const wSorted = [meta[m+3],meta[m+4],meta[m+5]].sort((a,b)=>a-b);
-      const uSorted = [meta[m+6],meta[m+7],meta[m+8]].sort((a,b)=>a-b);
-      if (wSorted.join(',') !== uSorted.join(',')) {
-        const [a, b, c] = wSorted;
-        if (a <= 512 && b <= 512 && c <= 512) queuePatch(a, b, c);
-      }
-    }
-    drainPatchQueue();
-  }
-
+  }, 200);
 }
 
 // --- Mouse orbit + pan ---
@@ -3085,7 +2681,7 @@ onmousemove = e => {
   render();
   clearTimeout(camDebounce); camDebounce=setTimeout(update, 150);
 };
-canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); update(); e.preventDefault(); };
+canvas.onwheel = e => { zoom *= e.deltaY>0 ? 1.1 : 0.9; zoom=Math.max(1,Math.min(100,zoom)); render(); clearTimeout(camDebounce); camDebounce=setTimeout(update, 150); e.preventDefault(); };
 // Pick: ctrl+click to inspect face under cursor
 canvas.onclick = e => {
   if (!e.ctrlKey && !e.metaKey) {
@@ -3128,40 +2724,8 @@ function setupBtnGroup(id, cb) {
     b.onclick = () => { document.querySelectorAll(`#${id} button`).forEach(x=>x.classList.remove('a')); b.classList.add('a'); cb(b.dataset.v); };
 }
 
-setupBtnGroup('shape-btns', async (name) => {
-  currentShape = name;
-  workerReady = false;
-  $('stats').innerHTML = 'Loading shape...';
-  const resp = await broadcastCall('create_hypermesh', { name });
-  meshInfo = resp.result;
-  frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((meshInfo.time_max - meshInfo.time_min) * 30)));
-  frame._frameIdx = 0;
-  const timeSlider = $('time');
-  timeSlider.min = meshInfo.time_min;
-  timeSlider.max = meshInfo.time_max;
-  timeSlider.step = (meshInfo.time_max - meshInfo.time_min) / 200;
-  timeSlider.value = (meshInfo.time_min + meshInfo.time_max) / 2;
-  $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
-  // Clear tess cache on shape change since topology changes
-  tessCache.clear();
-  vaoCache.clear();
-  vaoOrigMesh = null;
-  animDir = 1;
-  // Built-in shapes have no materials/textures/animations
-  createTexturesFromGltf([], []);
-  $('anim-sel').style.display = 'none';
-  $('variant-sel').style.display = 'none';
-  gpuSkinned = false;
-  // Clear joint UBO (num_joints = 0)
-  gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
-  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Int32Array([0]));
-  workerReady = true;
-  update();
-});
-
-setupBtnGroup('dir-btns', () => update());
 setupBtnGroup('render-btns', (v) => { renderMode = v; isolatedFace = null; render(); });
-setupBtnGroup('xform-btns', (v) => { currentXform = v; update(); });
+setupBtnGroup('xform-btns', (v) => { currentXform = v; updateWithLod(); });
 
 $('matcap-sel').addEventListener('change', () => loadMatcap($('matcap-sel').value));
 $('envmap-sel').addEventListener('change', () => {
@@ -3235,8 +2799,7 @@ $('anim-sel').addEventListener('change', async () => {
   meshInfo.time_max = result.time_max;
   meshInfo.num_vertices = result.num_vertices;
   meshInfo.num_faces = result.num_faces;
-  frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((result.time_max - result.time_min) * 30)));
-  frame._frameIdx = 0;
+  frame._animTime = result.time_min;
   const timeSlider = $('time');
   timeSlider.min = result.time_min;
   timeSlider.max = result.time_max;
@@ -3244,38 +2807,37 @@ $('anim-sel').addEventListener('change', async () => {
   timeSlider.value = (result.time_min + result.time_max) / 2;
   $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
   tessCache.clear();
-  vaoCache.clear();
+
   vaoOrigMesh = null;
   $('stats').innerHTML = `Animation: <span class="val">${$('anim-sel').selectedOptions[0].textContent}</span>`;
-  await update();
+  // Re-setup GPU skinning for the new animation
+  await setupGpuSkinning();
+  render();
 });
 
-$('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); updateDebounced(); });
-$('tilt').addEventListener('input', () => { $('tilt-v').textContent = parseFloat($('tilt').value).toFixed(2); updateDebounced(); });
+$('time').addEventListener('input', () => { $('time-v').textContent = parseFloat($('time').value).toFixed(2); });
 // Möbius sliders: just update uniforms + render. No worker call.
 for (const id of ['mx','my','mz','mr'])
   $(id).addEventListener('input', () => {
     $(`${id}-v`).textContent = (parseInt($(id).value)/10).toFixed(1);
     updateMobius();
   });
-$('res').addEventListener('input', update);
-$('tess-density').addEventListener('input', update);
-$('min-px-sub').addEventListener('input', update);
+$('res').addEventListener('input', () => {
+  const v = parseInt($('res').value);
+  $('res-v').textContent = v === 0 ? 'auto' : (1 << v);
+  updateWithLod();
+});
+$('tess-density').addEventListener('input', () => {
+  $('tess-density-v').textContent = $('tess-density').value;
+  updateWithLod();
+});
+$('min-px-sub').addEventListener('input', () => {
+  $('min-px-sub-v').textContent = $('min-px-sub').value;
+  updateWithLod();
+});
 $('screen-atten-toggle').addEventListener('click', () => {
   $('screen-atten-toggle').classList.toggle('on');
-  update();
-});
-
-// Toroidal toggle
-$('toroidal-toggle').addEventListener('click', () => {
-  $('toroidal-toggle').classList.toggle('on');
-  update();
-});
-
-// Spacetime toggle
-$('spacetime-toggle').addEventListener('click', () => {
-  $('spacetime-toggle').classList.toggle('on');
-  update();
+  updateWithLod();
 });
 
 // Animate toggle
@@ -3285,83 +2847,22 @@ animToggle.addEventListener('click', () => {
   animToggle.classList.toggle('on', animating);
 });
 
-// Rotate slice mode toggle
-$('rotate-mode-toggle').addEventListener('click', () => {
-  $('rotate-mode-toggle').classList.toggle('on');
-  $('rotation-planes').style.display = $('rotate-mode-toggle').classList.contains('on') ? 'block' : 'none';
-});
-for (const b of document.querySelectorAll('#plane1-btns .btn'))
-  b.onclick = () => { document.querySelectorAll('#plane1-btns .btn').forEach(x=>x.classList.remove('active')); b.classList.add('active'); };
-for (const b of document.querySelectorAll('#plane2-btns .btn'))
-  b.onclick = () => { document.querySelectorAll('#plane2-btns .btn').forEach(x=>x.classList.remove('active')); b.classList.add('active'); };
-$('rot-ratio').addEventListener('input', () => { $('rot-ratio-v').textContent = ($('rot-ratio').value / 100).toFixed(2); });
-$('rot-speed').addEventListener('input', () => { $('rot-speed-v').textContent = ($('rot-speed').value / 2000).toFixed(4); });
-
-// Animation loop — rotates the hyperplane tilt angle instead of sweeping time.
-// This keeps the slice centered in the periodic region for clean wrapping.
-let animPhase = 0;
+// Animation loop — advance time for GPU skinned models.
 function frame() {
-  if (animating && meshInfo) {
-    const rotateMode = $('rotate-mode-toggle').classList.contains('on');
-    if (rotateMode) {
-      // 4D double rotation: apply two rotations in user-selected planes
-      const speed = parseFloat($('rot-speed').value) / 2000;
-      animPhase += speed;
-      const ratio = parseFloat($('rot-ratio').value) / 100;
-      const p1 = animPhase;
-      const p2 = animPhase * ratio;
-
-      // Get selected planes
-      let plane1 = 'xt', plane2 = 'yt';
-      document.querySelectorAll('#plane1-btns .active').forEach(b => { plane1 = b.dataset.v; });
-      document.querySelectorAll('#plane2-btns .active').forEach(b => { plane2 = b.dataset.v; });
-
-      // A 2-plane rotation matrix acts on a 4-vector.
-      // Start with (0,0,0,1) and apply both rotations.
-      function rot4(n, plane, angle) {
-        const c = Math.cos(angle), s = Math.sin(angle);
-        let [x,y,z,t] = n;
-        switch(plane) {
-          case 'xt': return [c*x+s*t, y, z, -s*x+c*t];
-          case 'yt': return [x, c*y+s*t, z, -s*y+c*t];
-          case 'zt': return [x, y, c*z+s*t, -s*z+c*t];
-          case 'xy': return [c*x+s*y, -s*x+c*y, z, t];
-          case 'xz': return [c*x+s*z, y, -s*x+c*z, t];
-          case 'yz': return [x, c*y+s*z, -s*y+c*z, t];
-          default: return n;
-        }
-      }
-
-      let n = [0, 0, 0, 1]; // start with pure time normal
-      n = rot4(n, plane1, p1);
-      n = rot4(n, plane2, p2);
-      rotateNormalOverride = n;
-    } else if (gpuSkinned) {
-      // GPU skinning: advance time at 1x playback speed
-      if (!frame._animTime) frame._animTime = meshInfo.time_min;
-      const period = meshInfo.time_max - meshInfo.time_min;
-      const dt = 1.0 / 60.0; // ~16ms per frame at 60fps
-      frame._animTime += dt;
-      // Wrap to animation range
-      if (frame._animTime > meshInfo.time_max) frame._animTime = meshInfo.time_min + (frame._animTime - meshInfo.time_min) % period;
-      const slider = $('time');
-      slider.value = frame._animTime;
-      $('time-v').textContent = frame._animTime.toFixed(2);
-      // Upload joint matrices — fire and render with whatever data is current.
-      // The UBO update happens async; next frame's render will use it.
-      uploadAnimationPose(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
-    } else {
-      // Step one prebaked frame per render frame
-      if (!frame._frameIdx) frame._frameIdx = 0;
-      const nframes = frame._numPrebaked || 60;
-      frame._frameIdx = (frame._frameIdx + 1) % nframes;
-      const period = meshInfo.time_max - meshInfo.time_min;
-      const t = meshInfo.time_min + frame._frameIdx * period / nframes;
-      const slider = $('time');
-      slider.value = t;
-      $('time-v').textContent = t.toFixed(2);
-    }
-    if (!gpuSkinned) update();
+  if (animating && meshInfo && gpuSkinned) {
+    // GPU skinning: advance time at 1x playback speed
+    if (!frame._animTime) frame._animTime = meshInfo.time_min;
+    const period = meshInfo.time_max - meshInfo.time_min;
+    const dt = 1.0 / 60.0; // ~16ms per frame at 60fps
+    frame._animTime += dt;
+    // Wrap to animation range
+    if (frame._animTime > meshInfo.time_max) frame._animTime = meshInfo.time_min + (frame._animTime - meshInfo.time_min) % period;
+    const slider = $('time');
+    slider.value = frame._animTime;
+    $('time-v').textContent = frame._animTime.toFixed(2);
+    // Upload joint matrices — fire and render with whatever data is current.
+    // The UBO update happens async; next frame's render will use it.
+    uploadAnimationPose(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
   }
   render();
   requestAnimationFrame(frame);
@@ -3371,8 +2872,6 @@ function frame() {
 async function loadGltfFromBuffer(buffer, filename) {
   workerReady = false; // pause updates while loading
   $('stats').innerHTML = `Loading <span class="val">${filename || 'glTF'}</span>...`;
-  // Deselect built-in shape buttons
-  document.querySelectorAll('#shape-btns button').forEach(b => b.classList.remove('a'));
 
   const resp = await broadcastCall('load_gltf_data', { bytes: buffer });
   const info = resp.result;
@@ -3381,9 +2880,7 @@ async function loadGltfFromBuffer(buffer, filename) {
     return;
   }
   meshInfo = info;
-  frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((info.time_max - info.time_min) * 30)));
-  frame._frameIdx = 0;
-  currentShape = '__gltf__';
+  frame._animTime = info.time_min;
   const timeSlider = $('time');
   timeSlider.min = info.time_min;
   timeSlider.max = info.time_max;
@@ -3440,13 +2937,12 @@ async function loadGltfFromBuffer(buffer, filename) {
 
   // Clear GPU caches
   tessCache.clear();
-  vaoCache.clear();
-  vaoOrigMesh = null;
-  animDir = 1;
 
-  // Check if this is a skinned model — use GPU skinning path
+  vaoOrigMesh = null;
+
+  // All models go through GPU skinning path
   gpuSkinned = false;
-  const hasSkin = animations.length > 0 && info.num_vertices > 0;
+  const hasSkin = info.num_vertices > 0;
   if (hasSkin) {
     $('stats').innerHTML = `Setting up GPU skinning...`;
     const skinOk = await setupGpuSkinning();
@@ -3466,11 +2962,7 @@ async function loadGltfFromBuffer(buffer, filename) {
     (gpuSkinned ? '<br><span class="val">GPU Skinned</span>' : '') +
     (numMats > 1 ? `<br>Materials: <span class="val">${numMats}</span>` : '');
   workerReady = true;
-  if (!gpuSkinned) {
-    await update();
-  } else {
-    render();
-  }
+  render();
 }
 
 // File picker button
@@ -3613,21 +3105,21 @@ $('stats').textContent = `Atlas built in ${atlasMs.toFixed(0)}ms on ${NUM_WORKER
 // Load matcap (no-op with procedural matcap from WGSL)
 loadMatcap($('matcap-sel').value);
 
-// Load default shape (horse)
-$('stats').innerHTML = 'Loading horse...';
-const initResp = await broadcastCall('create_hypermesh', { name: 'galloping_horse' });
-meshInfo = initResp.result;
-frame._numPrebaked = Math.min(240, Math.max(60, Math.ceil((meshInfo.time_max - meshInfo.time_min) * 30)));
-frame._frameIdx = 0;
-const timeSlider = $('time');
-timeSlider.min = meshInfo.time_min;
-timeSlider.max = meshInfo.time_max;
-timeSlider.step = (meshInfo.time_max - meshInfo.time_min) / 200;
-timeSlider.value = (meshInfo.time_min + meshInfo.time_max) / 2;
-$('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
-
-await update();
 requestAnimationFrame(frame);
+
+// Auto-load default model (horse.glb)
+try {
+  const resp = await fetch('/horse.glb');
+  if (resp.ok) {
+    const buf = await resp.arrayBuffer();
+    await loadGltfFromBuffer(buf, 'horse.glb');
+  } else {
+    $('stats').innerHTML = 'Ready — drop a .glb / .gltf file to load';
+  }
+} catch (e) {
+  console.warn('Could not auto-load horse.glb:', e);
+  $('stats').innerHTML = 'Ready — drop a .glb / .gltf file to load';
+}
 </script>
 </body>
 </html>

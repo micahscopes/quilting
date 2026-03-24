@@ -240,25 +240,24 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     var nrm: vec3<f32>;
     out.fade = 1.0;
 
-    // GPU animation: vertex indices packed in p.x, positions in p.yzw (flat path only).
-    // Apply morph targets first, then skeletal skinning, before Möbius eval.
+    // GPU animation: vertex indices packed in p.x, positions in p.yzw.
+    // Apply morph targets first, then skeletal skinning, before Möbius/QB eval.
+    // Animated positions become pure quaternion control points (w=0, xyz=position)
+    // for the fused Möbius-QB surface evaluation.
     var sp0 = in.p0;
     var sp1 = in.p1;
     var sp2 = in.p2;
-    let has_gpu_anim = (joints.num_joints > 0 || joints.num_morph_targets > 0) && u.use_qb == 0;
+    let has_gpu_anim = joints.num_joints > 0 || joints.num_morph_targets > 0;
     if has_gpu_anim {
         let vi0 = i32(in.p0.x);
         let vi1 = i32(in.p1.x);
         let vi2 = i32(in.p2.x);
-        // Apply morph targets to rest-pose positions
         var pos0 = apply_morph(in.p0.yzw, vi0);
         var pos1 = apply_morph(in.p1.yzw, vi1);
         var pos2 = apply_morph(in.p2.yzw, vi2);
-        // Apply skeletal skinning (if present)
         pos0 = skin_position(pos0, vi0);
         pos1 = skin_position(pos1, vi1);
         pos2 = skin_position(pos2, vi2);
-        // Rebuild quaternion format (w=0 for flat path)
         sp0 = vec4<f32>(0.0, pos0);
         sp1 = vec4<f32>(0.0, pos1);
         sp2 = vec4<f32>(0.0, pos2);
@@ -288,7 +287,7 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     var sn0 = in.smooth_n0.xyz;
     var sn1 = in.smooth_n1.xyz;
     var sn2 = in.smooth_n2.xyz;
-    if joints.num_joints > 0 && u.use_qb == 0 {
+    if joints.num_joints > 0 {
         let vi0 = i32(in.p0.x);
         let vi1 = i32(in.p1.x);
         let vi2 = i32(in.p2.x);

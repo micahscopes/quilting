@@ -609,7 +609,6 @@ dependencies = [
  "gltf",
  "quilting-core",
  "quilting-mesh",
- "quilting-spacetime",
  "serde_json",
 ]
 
@@ -637,15 +636,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quilting-spacetime"
-version = "0.1.0"
-dependencies = [
- "quilting-core",
- "quilting-mesh",
- "rustc-hash 2.1.1",
-]
-
-[[package]]
 name = "quilting-wasm"
 version = "0.1.0"
 dependencies = [
@@ -658,7 +648,6 @@ dependencies = [
  "quilting-mesh",
  "quilting-renderer",
  "quilting-shaders",
- "quilting-spacetime",
  "rustc-hash 2.1.1",
  "serde",
  "serde-wasm-bindgen",

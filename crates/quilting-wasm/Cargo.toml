@@ -14,7 +14,7 @@ default = ["console_error_panic_hook"]
 quilting-core = { path = "../quilting-core" }
 quilting-mesh = { path = "../quilting-mesh" }
 quilting-shaders = { path = "../quilting-shaders" }
-quilting-spacetime = { path = "../quilting-spacetime" }
+
 quilting-gltf = { path = "../quilting-gltf" }
 wasm-bindgen = "=0.2.106"
 serde = { version = "1", features = ["derive"] }

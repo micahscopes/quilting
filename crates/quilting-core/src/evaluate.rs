@@ -274,12 +274,9 @@ pub fn compute_instances_with_uvs(
         }
     }).collect();
 
-    // For affine transforms (identity, translation, rotation), skip LOD computation
-    // entirely — the mesh is already tessellated, no QB curvature to capture.
-    // Only non-affine (conformal) transforms need per-edge LOD.
-    if transform.is_affine() {
-        return instances;
-    }
+    // Always compute LOD — even for identity Möbius, the tessellation atlas
+    // provides sub-triangle sampling for QB evaluation. The LOD is driven by
+    // edge lengths and density regardless of whether Möbius is active.
 
     // Per-edge LOD via canonical edge storage.
     // Each edge LOD is stored once per canonical edge index (min of

@@ -51,34 +51,7 @@ pub enum Interpolation {
     CubicSpline,
 }
 
-/// A single keyframe: time + value.
-#[derive(Debug, Clone)]
-pub struct Keyframe {
-    pub time: f32,
-    pub value: Vec<f32>,
-}
 
-/// Per-joint transform trajectory for spacetime effects.
-#[derive(Debug, Clone)]
-pub struct JointTrajectory {
-    /// Index of the joint node in GltfScene::nodes.
-    pub node_index: usize,
-    /// Keyframes for translation (if animated).
-    pub translations: Option<Vec<Keyframe>>,
-    /// Keyframes for rotation as [x,y,z,w] quaternions (if animated).
-    pub rotations: Option<Vec<Keyframe>>,
-    /// Keyframes for scale (if animated).
-    pub scales: Option<Vec<Keyframe>>,
-}
-
-/// Per-vertex position trajectory for morph target playback.
-#[derive(Debug, Clone)]
-pub struct VertexTrajectory {
-    /// Blend weight keyframes — each value is a Vec of weights, one per morph target.
-    pub weight_keyframes: Vec<Keyframe>,
-    /// Morph target position deltas. morph_deltas[target_index][vertex_index] = position delta.
-    pub morph_deltas: Vec<Vec<[f64; 3]>>,
-}
 
 /// Skinning data (joint hierarchy + inverse bind matrices).
 #[derive(Debug, Clone)]
@@ -202,62 +175,6 @@ fn read_outputs_to_f32(outputs: gltf::animation::util::ReadOutputs<'_>) -> Vec<f
     }
 }
 
-/// Build per-joint trajectories from an animation, for spacetime FX.
-///
-/// Groups the animation channels by target node and separates TRS channels
-/// into a per-joint structure.
-pub fn build_joint_trajectories(animation: &Animation) -> Vec<JointTrajectory> {
-    // Collect all unique target nodes.
-    let mut node_set: Vec<usize> = animation
-        .channels
-        .iter()
-        .filter(|c| c.property != AnimationProperty::MorphTargetWeights)
-        .map(|c| c.target_node)
-        .collect();
-    node_set.sort_unstable();
-    node_set.dedup();
-
-    node_set
-        .iter()
-        .map(|&node_index| {
-            let mut traj = JointTrajectory {
-                node_index,
-                translations: None,
-                rotations: None,
-                scales: None,
-            };
-
-            for ch in &animation.channels {
-                if ch.target_node != node_index {
-                    continue;
-                }
-                let stride = property_stride(ch.property);
-                let keyframes: Vec<Keyframe> = ch
-                    .times
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &t)| {
-                        let start = i * stride;
-                        let end = start + stride;
-                        Keyframe {
-                            time: t,
-                            value: ch.values[start..end].to_vec(),
-                        }
-                    })
-                    .collect();
-
-                match ch.property {
-                    AnimationProperty::Translation => traj.translations = Some(keyframes),
-                    AnimationProperty::Rotation => traj.rotations = Some(keyframes),
-                    AnimationProperty::Scale => traj.scales = Some(keyframes),
-                    AnimationProperty::MorphTargetWeights => {}
-                }
-            }
-
-            traj
-        })
-        .collect()
-}
 
 /// Number of f32 values per keyframe for a given property.
 fn property_stride(prop: AnimationProperty) -> usize {
@@ -270,55 +187,245 @@ fn property_stride(prop: AnimationProperty) -> usize {
     }
 }
 
+// --- Animation evaluation helpers ---
+// These were previously in bake.rs but are needed by evaluator.rs and wasm bindings.
+
+/// Get the time range of an animation clip.
+pub fn animation_time_range(animation: &Animation) -> (f64, f64) {
+    let mut t_min = f64::INFINITY;
+    let mut t_max = f64::NEG_INFINITY;
+    for ch in &animation.channels {
+        for &t in &ch.times {
+            t_min = t_min.min(t as f64);
+            t_max = t_max.max(t as f64);
+        }
+    }
+    if t_min.is_infinite() { (0.0, 1.0) } else { (t_min, t_max) }
+}
+
+/// Evaluate joint transforms at time t.
+/// Returns a WORLD-space 4x4 matrix for each joint by walking the full
+/// node hierarchy with animated local transforms applied.
+pub fn evaluate_joint_transforms(
+    animation: &Animation,
+    nodes: &[crate::scene::Node],
+    joints: &[usize],
+    t: f64,
+) -> Vec<[f64; 16]> {
+    use crate::scene::{Transform, Scene, compute_world_transforms};
+
+    // Build animated local transforms for all nodes
+    let mut animated_nodes = nodes.to_vec();
+    for ch in &animation.channels {
+        let ni = ch.target_node;
+        if ni >= animated_nodes.len() { continue; }
+        let (mut translation, mut rotation, mut scale) = match &animated_nodes[ni].transform {
+            Transform::Trs { translation, rotation, scale } => (*translation, *rotation, *scale),
+            Transform::Matrix(_) => ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+        };
+        match ch.property {
+            AnimationProperty::Translation => {
+                let v = interpolate_channel(ch, 3, t);
+                translation = [v[0] as f64, v[1] as f64, v[2] as f64];
+            }
+            AnimationProperty::Rotation => {
+                let v = interpolate_channel(ch, 4, t);
+                rotation = [v[0] as f64, v[1] as f64, v[2] as f64, v[3] as f64];
+            }
+            AnimationProperty::Scale => {
+                let v = interpolate_channel(ch, 3, t);
+                scale = [v[0] as f64, v[1] as f64, v[2] as f64];
+            }
+            _ => continue,
+        }
+        animated_nodes[ni].transform = Transform::Trs { translation, rotation, scale };
+    }
+
+    let root_nodes: Vec<usize> = (0..nodes.len())
+        .filter(|&i| !nodes.iter().any(|n| n.children.contains(&i)))
+        .collect();
+    let scene = Scene { name: None, root_nodes };
+    let world = compute_world_transforms(&animated_nodes, &scene);
+
+    joints.iter().map(|&ji| world[ji]).collect()
+}
+
+/// Interpolate an animation channel at time t.
+pub fn interpolate_channel(ch: &AnimationChannel, stride: usize, t: f64) -> Vec<f32> {
+    if ch.times.is_empty() {
+        return vec![0.0; stride];
+    }
+
+    let t = t as f32;
+
+    if t <= ch.times[0] {
+        return ch.values[..stride].to_vec();
+    }
+    if t >= *ch.times.last().unwrap() {
+        let n = ch.values.len();
+        return ch.values[n - stride..].to_vec();
+    }
+
+    let mut idx = 0;
+    for (i, &kt) in ch.times.iter().enumerate() {
+        if kt > t { break; }
+        idx = i;
+    }
+    let next = (idx + 1).min(ch.times.len() - 1);
+
+    let t0 = ch.times[idx];
+    let t1 = ch.times[next];
+    let frac = if (t1 - t0).abs() > 1e-8 { (t - t0) / (t1 - t0) } else { 0.0 };
+
+    match ch.interpolation {
+        Interpolation::Step => {
+            ch.values[idx * stride..(idx + 1) * stride].to_vec()
+        }
+        Interpolation::Linear => {
+            let a = &ch.values[idx * stride..(idx + 1) * stride];
+            let b = &ch.values[next * stride..(next + 1) * stride];
+            if stride == 4 {
+                slerp(a, b, frac)
+            } else {
+                a.iter().zip(b.iter())
+                    .map(|(&va, &vb)| va + frac * (vb - va))
+                    .collect()
+            }
+        }
+        Interpolation::CubicSpline => {
+            let a_val = &ch.values[idx * stride * 3 + stride..idx * stride * 3 + 2 * stride];
+            let b_val = &ch.values[next * stride * 3 + stride..next * stride * 3 + 2 * stride];
+            a_val.iter().zip(b_val.iter())
+                .map(|(&va, &vb)| va + frac * (vb - va))
+                .collect()
+        }
+    }
+}
+
+/// Evaluate morph target weights at time t.
+pub fn evaluate_morph_weights(ch: &AnimationChannel, num_targets: usize, t: f64) -> Vec<f64> {
+    let values = interpolate_channel(ch, num_targets, t);
+    values.iter().map(|&v| v as f64).collect()
+}
+
+/// Quaternion slerp.
+pub fn slerp(a: &[f32], b: &[f32], t: f32) -> Vec<f32> {
+    let mut dot: f32 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
+    let mut b = b.to_vec();
+    if dot < 0.0 {
+        dot = -dot;
+        for v in &mut b { *v = -*v; }
+    }
+    if dot > 0.9995 {
+        return a.iter().zip(b.iter())
+            .map(|(&va, &vb)| va + t * (vb - va))
+            .collect();
+    }
+    let theta = dot.acos();
+    let sin_theta = theta.sin();
+    let wa = ((1.0 - t) * theta).sin() / sin_theta;
+    let wb = (t * theta).sin() / sin_theta;
+    a.iter().zip(b.iter())
+        .map(|(&va, &vb)| wa * va + wb * vb)
+        .collect()
+}
+
+/// Multiply two column-major 4x4 matrices.
+pub fn mat4_mul(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
+    let mut out = [0.0f64; 16];
+    for c in 0..4 {
+        for r in 0..4 {
+            out[c * 4 + r] = a[r] * b[c * 4]
+                + a[4 + r] * b[c * 4 + 1]
+                + a[8 + r] * b[c * 4 + 2]
+                + a[12 + r] * b[c * 4 + 3];
+        }
+    }
+    out
+}
+
+/// Evaluate a skinned mesh at a single time — no baking, just one frame.
+/// Returns the skinned vertex positions at time t.
+pub fn evaluate_skinned_at_time(
+    primitive: &crate::mesh::Primitive,
+    skin: &Skin,
+    animation: &Animation,
+    nodes: &[crate::scene::Node],
+    t: f64,
+) -> Vec<[f64; 3]> {
+    let joints = &skin.joints;
+    let ibms = &skin.inverse_bind_matrices;
+    let joint_matrices = evaluate_joint_transforms(animation, nodes, joints, t);
+
+    let skin_matrices: Vec<[f64; 16]> = joint_matrices
+        .iter()
+        .zip(ibms.iter())
+        .map(|(jm, ibm)| {
+            let ibm_f64: [f64; 16] = std::array::from_fn(|i| ibm[i] as f64);
+            mat4_mul(jm, &ibm_f64)
+        })
+        .collect();
+
+    let joint_indices = primitive.joint_indices.as_ref();
+    let joint_weights = primitive.joint_weights.as_ref();
+
+    primitive.positions.iter().enumerate().map(|(vi, &rest_pos)| {
+        if let (Some(ji), Some(jw)) = (joint_indices, joint_weights) {
+            let indices = ji[vi];
+            let weights = jw[vi];
+            let mut skinned = [0.0f64; 3];
+            for k in 0..4 {
+                let w = weights[k] as f64;
+                if w < 1e-8 { continue; }
+                let joint_idx = indices[k] as usize;
+                if joint_idx >= skin_matrices.len() { continue; }
+                let m = &skin_matrices[joint_idx];
+                skinned[0] += w * (m[0]*rest_pos[0] + m[4]*rest_pos[1] + m[8]*rest_pos[2] + m[12]);
+                skinned[1] += w * (m[1]*rest_pos[0] + m[5]*rest_pos[1] + m[9]*rest_pos[2] + m[13]);
+                skinned[2] += w * (m[2]*rest_pos[0] + m[6]*rest_pos[1] + m[10]*rest_pos[2] + m[14]);
+            }
+            skinned
+        } else {
+            rest_pos
+        }
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn build_trajectories_groups_by_node() {
+    fn animation_time_range_basic() {
         let anim = Animation {
-            name: Some("walk".into()),
+            name: Some("test".into()),
             channels: vec![
                 AnimationChannel {
                     target_node: 0,
                     property: AnimationProperty::Translation,
                     interpolation: Interpolation::Linear,
-                    times: vec![0.0, 1.0],
+                    times: vec![0.5, 2.0],
                     values: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-                },
-                AnimationChannel {
-                    target_node: 0,
-                    property: AnimationProperty::Rotation,
-                    interpolation: Interpolation::Linear,
-                    times: vec![0.0, 1.0],
-                    values: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.707, 0.0, 0.707],
-                },
-                AnimationChannel {
-                    target_node: 1,
-                    property: AnimationProperty::Scale,
-                    interpolation: Interpolation::Step,
-                    times: vec![0.0],
-                    values: vec![1.0, 1.0, 1.0],
                 },
             ],
         };
+        let (t_min, t_max) = animation_time_range(&anim);
+        assert!((t_min - 0.5).abs() < 1e-6);
+        assert!((t_max - 2.0).abs() < 1e-6);
+    }
 
-        let trajectories = build_joint_trajectories(&anim);
-        assert_eq!(trajectories.len(), 2);
-
-        // Node 0 should have translation + rotation.
-        let t0 = &trajectories[0];
-        assert_eq!(t0.node_index, 0);
-        assert!(t0.translations.is_some());
-        assert!(t0.rotations.is_some());
-        assert!(t0.scales.is_none());
-        assert_eq!(t0.translations.as_ref().unwrap().len(), 2);
-
-        // Node 1 should have scale only.
-        let t1 = &trajectories[1];
-        assert_eq!(t1.node_index, 1);
-        assert!(t1.translations.is_none());
-        assert!(t1.scales.is_some());
-        assert_eq!(t1.scales.as_ref().unwrap().len(), 1);
+    #[test]
+    fn interpolate_linear_translation() {
+        let ch = AnimationChannel {
+            target_node: 0,
+            property: AnimationProperty::Translation,
+            interpolation: Interpolation::Linear,
+            times: vec![0.0, 1.0],
+            values: vec![0.0, 0.0, 0.0, 2.0, 4.0, 6.0],
+        };
+        let v = interpolate_channel(&ch, 3, 0.5);
+        assert!((v[0] - 1.0).abs() < 1e-4);
+        assert!((v[1] - 2.0).abs() < 1e-4);
+        assert!((v[2] - 3.0).abs() < 1e-4);
     }
 }

@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_renderer::compute::LodCompute;
-use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, compute_instances_no_lod_with_uvs, compute_instances_with_uvs, ScreenInfo};
+use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, ScreenInfo};
 use quilting_core::permutation::{canonical_form, perm_sign};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
@@ -17,18 +17,6 @@ use std::collections::HashMap;
 pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
-}
-
-struct PrebakeInfo {
-    num_frames: usize,
-    num_vertices: usize,
-    num_faces: usize,
-    time_min: f64,
-    time_max: f64,
-    dt: f64,
-    mesh_radius: f64,
-    /// CPU copy of all prebaked positions: [frame][vertex] = [x,y,z] as f32
-    positions: Vec<f32>, // num_frames * num_vertices * 3
 }
 
 /// Stored glTF data for animation switching without re-parsing.
@@ -50,18 +38,8 @@ struct StoredGltfData {
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
-    static PREBAKE_INFO: RefCell<Option<PrebakeInfo>> = RefCell::new(None);
-    /// Pre-built flat f32 instance buffer from the prebake path (single buffer, no xform).
-    static FLAT_INSTANCE_DATA: RefCell<Option<Vec<f32>>> = RefCell::new(None);
-    /// GPU classification: [atlas_index, perm_index] per face (2 floats each).
-    static GPU_CLASSIFICATION: RefCell<Option<Vec<f32>>> = RefCell::new(None);
-    /// Reusable sorted buffer — grows but never shrinks to avoid per-frame allocation.
-    static SORTED_BUFS: RefCell<Vec<f32>> = RefCell::new(Vec::new());
     /// Cached half-edge mesh — built once per shape, reused across frames.
     static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
-    /// Sorted atlas patch keys — built once during LUT upload, reused for GPU readback.
-    /// Guarantees stable index↔key mapping regardless of HashMap iteration order.
-    static ATLAS_KEYS: RefCell<Vec<[u32; 3]>> = RefCell::new(Vec::new());
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
@@ -137,148 +115,306 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
     }
 }
 
-/// Pre-evaluate all animation frames and upload to GPU texture.
-/// Returns the number of frames baked, or 0 on failure.
-/// After this, slice_and_transform uses GPU texture lookup instead of CPU trajectory eval.
-#[wasm_bindgen]
-pub fn prebake_animation(num_frames: u32, time_min: f64, time_max: f64) -> u32 {
-    let nf = num_frames as usize;
-    let dt = if nf > 1 { (time_max - time_min) / (nf - 1) as f64 } else { 0.0 };
-
-    HYPER_MESH.with(|hm| {
-        let mesh_opt = hm.borrow();
-        let mesh = match mesh_opt.as_ref() {
-            Some(m) => m,
-            None => return 0,
-        };
-
-        let num_verts = mesh.num_vertices as usize;
-
-        // Pre-evaluate all frames
-        let mut all_positions = Vec::with_capacity(nf * num_verts * 3);
-        for fi in 0..nf {
-            let t = time_min + fi as f64 * dt;
-            let verts = mesh.positions_at(t);
-            for v in &verts {
-                all_positions.push(v[0] as f32);
-                all_positions.push(v[1] as f32);
-                all_positions.push(v[2] as f32);
-            }
-        }
-
-        // Face indices as floats (for vertex attrib)
-        let face_indices_f32: Vec<f32> = mesh.faces.iter()
-            .flat_map(|f| [f[0] as f32, f[1] as f32, f[2] as f32])
-            .collect();
-        let num_faces = mesh.faces.len();
-
-        // Upload to GPU
-        GPU_COMPUTE.with(|gc| {
-            let mut gc = gc.borrow_mut();
-            let (gl, compute) = match gc.as_mut() {
-                Some(pair) => pair,
-                None => return 0,
-            };
-
-            compute.upload_positions_texture(gl, &all_positions, num_verts, nf);
-            compute.upload_face_indices(gl, &face_indices_f32);
-
-            // Build and upload atlas LUT: exponent triple → atlas index
-            // key = exp_a + exp_b*10 + exp_c*100 where exp = log2(lod)
-            // LUT size 1200 handles exponents up to 10 (key up to 1110).
-            ATLAS.with(|atlas_cell| {
-                let atlas = atlas_cell.borrow();
-                if let Some(atlas) = atlas.as_ref() {
-                    const LUT_SIZE: usize = 1200;
-                    let mut lut = vec![255u8; LUT_SIZE]; // 255 = no entry
-                    let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
-                    keys.sort();
-                    for (idx, key) in keys.iter().enumerate() {
-                        if idx >= 255 { break; } // u8 index limit
-                        // key is sorted canonical [a,b,c]
-                        let ea = (key[0] as f64).log2().round() as usize;
-                        let eb = (key[1] as f64).log2().round() as usize;
-                        let ec = (key[2] as f64).log2().round() as usize;
-                        let lut_key = ea + eb * 10 + ec * 100;
-                        if lut_key < LUT_SIZE {
-                            lut[lut_key] = idx as u8;
-                        }
-                    }
-                    compute.upload_atlas_lut(gl, &lut);
-                    ATLAS_KEYS.with(|ak| *ak.borrow_mut() = keys.clone());
-                    web_sys::console::log_1(&format!(
-                        "Atlas LUT: {} entries mapped", keys.len()
-                    ).into());
-                }
-            });
-
-            // Compute mesh radius from frame 0
-            let mesh_radius = {
-                let (mut cx, mut cy, mut cz) = (0.0f64, 0.0, 0.0);
-                let n = num_verts as f64;
-                for i in 0..num_verts {
-                    cx += all_positions[i*3] as f64;
-                    cy += all_positions[i*3+1] as f64;
-                    cz += all_positions[i*3+2] as f64;
-                }
-                cx /= n; cy /= n; cz /= n;
-                let mut max_r = 0.0f64;
-                for i in 0..num_verts {
-                    let dx = all_positions[i*3] as f64 - cx;
-                    let dy = all_positions[i*3+1] as f64 - cy;
-                    let dz = all_positions[i*3+2] as f64 - cz;
-                    max_r = max_r.max((dx*dx + dy*dy + dz*dz).sqrt());
-                }
-                max_r.max(1e-6)
-            };
-
-            // Store prebake info
-            PREBAKE_INFO.with(|pi| *pi.borrow_mut() = Some(PrebakeInfo {
-                num_frames: nf,
-                num_vertices: num_verts,
-                num_faces,
-                time_min, time_max, dt,
-                mesh_radius,
-                positions: all_positions.clone(),
-            }));
-
-            web_sys::console::log_1(&format!(
-                "Prebaked {} frames × {} verts × {} faces = {:.1}MB on GPU",
-                nf, num_verts, num_faces,
-                all_positions.len() as f64 * 4.0 / 1e6
-            ).into());
-
-            nf as u32
-        })
-    })
-}
-
 /// Run GPU LOD computation via transform feedback.
-/// control_points: flat f32 array, 12 floats per face (3 quaternions wxyz)
+/// Positions must have been uploaded via upload_positions_to_compute() first.
 /// mobius: 16 floats (a,b,c,d quaternions)
 /// Returns: flat f32 array, 2 floats per face (atlas_index, perm_index)
 #[wasm_bindgen]
 pub fn gpu_compute_lods(
-    control_points: &[f32],
+    num_faces: u32,
+    num_vertices: u32,
     mobius: &[f32],
     density: f32,
     mesh_radius: f32,
 ) -> Vec<f32> {
-    let num_faces = control_points.len() / 12;
     GPU_COMPUTE.with(|gc| {
         let mut gc = gc.borrow_mut();
         let (gl, compute) = match gc.as_mut() {
             Some(pair) => pair,
             None => return vec![],
         };
-        compute.upload_control_points(gl, control_points);
         let mut mob = [0.0f32; 16];
         for (i, &v) in mobius.iter().take(16).enumerate() {
             mob[i] = v;
         }
         let identity_vp = [0.0f32; 16];
-        let n = compute.compute(gl, num_faces, mob, density, mesh_radius, 0.0, &identity_vp, 0.0, 0.0);
+        let n = compute.compute_lods(gl, num_faces as usize, num_vertices, 0, 0,
+            mob, density, mesh_radius, 0.0, &identity_vp, 0.0, 0.0);
         compute.read_back(gl, n)
+    })
+}
+
+/// Recompute LODs using the proven CPU path (half-edge coherent, Möbius-deformed medians).
+/// Called from the worker when Möbius/density/camera changes.
+/// Returns a Float32Array with 5 floats per face: [canonical_a, canonical_b, canonical_c, perm_index, parity]
+/// This uses the exact same `compute_instances` logic that the old rendering pipeline used.
+#[wasm_bindgen]
+pub fn recompute_lods(
+    transform_type: &str,
+    params: &[f64],
+    vp_matrix: &[f64],
+    viewport_width: f64,
+    viewport_height: f64,
+) -> JsValue {
+    GLTF_DATA.with(|gd| {
+        let data = gd.borrow();
+        let data = match data.as_ref() {
+            Some(d) => d,
+            None => return JsValue::NULL,
+        };
+
+        let combined = &data.combined;
+        let center = data.norm_center;
+        let s = data.norm_scale;
+
+        let norm_positions: Vec<[f64; 3]> = combined.positions.iter().map(|v| {
+            [(v[0]-center[0])*s, (v[1]-center[1])*s, (v[2]-center[2])*s]
+        }).collect();
+        let tris: Vec<[usize; 3]> = combined.triangles.clone();
+
+        let transform = match transform_type {
+            "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
+                Mobius::sphere_reflection(
+                    Quat::from_point(params[0], params[1], params[2]),
+                    params[3],
+                )
+            }
+            "rotation" if params.len() >= 4 => {
+                Mobius::rotation(params[0], params[1], params[2], params[3])
+            }
+            "translation" if params.len() >= 3 => {
+                Mobius::translation(Quat::from_point(params[0], params[1], params[2]))
+            }
+            _ => Mobius::identity(),
+        };
+
+        let screen = if vp_matrix.len() >= 16 && viewport_width > 0.0 {
+            let mut m = [0.0f64; 16];
+            m.copy_from_slice(&vp_matrix[..16]);
+            Some(ScreenInfo { vp_matrix: m, width: viewport_width, height: viewport_height })
+        } else {
+            None
+        };
+
+        let instances = quilting_core::evaluate::compute_instances(
+            &norm_positions, &tris, &transform, screen.as_ref(), None,
+        );
+
+        let nf = tris.len();
+        let mut face_lods = Vec::with_capacity(nf * 5);
+        for inst in &instances {
+            let ck = quilting_core::permutation::canonical_form(inst.edge_lods);
+            let parity = quilting_core::permutation::perm_sign(ck.perm_index);
+            face_lods.push(ck.res[0] as f32);
+            face_lods.push(ck.res[1] as f32);
+            face_lods.push(ck.res[2] as f32);
+            face_lods.push(ck.perm_index as f32);
+            face_lods.push(parity as f32);
+        }
+
+        let arr = js_sys::Float32Array::new_with_length(face_lods.len() as u32);
+        arr.copy_from(&face_lods);
+        arr.into()
+    })
+}
+
+/// Upload static animation data to the GPU compute context for per-frame LOD.
+/// Call once after loading a model. Uploads:
+/// - Rest-pose positions as a texture
+/// - Face indices for the LOD compute shader
+/// - Skinning texture (joint indices + weights) if skeletal animation
+/// - Morph delta texture if morph target animation
+/// - Atlas LUT for LOD → atlas index mapping
+/// Returns true if upload succeeded (GPU compute context available).
+#[wasm_bindgen]
+pub fn upload_model_to_compute() -> bool {
+    GLTF_DATA.with(|gd| {
+        let data = gd.borrow();
+        let data = match data.as_ref() {
+            Some(d) => d,
+            None => return false,
+        };
+
+        GPU_COMPUTE.with(|gc| {
+            let mut gc = gc.borrow_mut();
+            let (gl, compute) = match gc.as_mut() {
+                Some(pair) => pair,
+                None => return false,
+            };
+
+            let combined = &data.combined;
+            let nv = combined.positions.len();
+
+            // Upload rest-pose positions (normalized)
+            let center = data.norm_center;
+            let s = data.norm_scale;
+            let mut pos_f32 = Vec::with_capacity(nv * 3);
+            for pos in &combined.positions {
+                pos_f32.push(((pos[0] - center[0]) * s) as f32);
+                pos_f32.push(((pos[1] - center[1]) * s) as f32);
+                pos_f32.push(((pos[2] - center[2]) * s) as f32);
+            }
+            compute.upload_positions_texture(gl, &pos_f32, nv);
+
+            // Upload face indices
+            let face_indices_f32: Vec<f32> = combined.triangles.iter()
+                .flat_map(|f| [f[0] as f32, f[1] as f32, f[2] as f32])
+                .collect();
+            compute.upload_face_indices(gl, &face_indices_f32);
+
+            // Upload skinning data if present
+            if let (Some(ji), Some(jw)) = (&combined.joint_indices, &combined.joint_weights) {
+                compute.upload_skinning_texture(gl, ji, jw);
+            }
+
+            // Upload morph deltas if present
+            if !combined.morph_targets.is_empty() {
+                let num_targets = combined.morph_targets.len();
+                let ns = data.norm_scale as f32;
+                let mut deltas = Vec::with_capacity(num_targets * nv * 3);
+                for target in &combined.morph_targets {
+                    for vi in 0..nv {
+                        if vi < target.len() {
+                            deltas.push(target[vi][0] as f32 * ns);
+                            deltas.push(target[vi][1] as f32 * ns);
+                            deltas.push(target[vi][2] as f32 * ns);
+                        } else {
+                            deltas.extend_from_slice(&[0.0, 0.0, 0.0]);
+                        }
+                    }
+                }
+                compute.upload_morph_deltas(gl, &deltas, nv, num_targets);
+            }
+
+            // Upload atlas LUT
+            ATLAS.with(|atlas_cell| {
+                let atlas = atlas_cell.borrow();
+                if let Some(atlas) = atlas.as_ref() {
+                    const LUT_SIZE: usize = 1200;
+                    let mut lut = vec![255u8; LUT_SIZE];
+                    let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
+                    keys.sort();
+                    for (idx, key) in keys.iter().enumerate() {
+                        if idx >= 255 { break; }
+                        let ea = (key[0] as f64).log2().round() as usize;
+                        let eb = (key[1] as f64).log2().round() as usize;
+                        let ec = (key[2] as f64).log2().round() as usize;
+                        let lut_key = ea + eb * 10 + ec * 100;
+                        if lut_key < LUT_SIZE { lut[lut_key] = idx as u8; }
+                    }
+                    compute.upload_atlas_lut(gl, &lut);
+                }
+            });
+
+            true
+        })
+    })
+}
+
+/// Evaluate animation at time t and run GPU LOD computation.
+/// Returns a Float32Array with 2 floats per face: [atlas_index, perm_index, ...].
+/// The animation evaluator produces joint matrices and/or morph weights,
+/// uploads them to the GPU compute context, and runs the transform feedback pass.
+/// Returns null if no model or GPU compute context is available.
+#[wasm_bindgen]
+pub fn compute_animated_lods(
+    t: f64,
+    mobius: &[f32],
+    density: f32,
+    mesh_radius: f32,
+    min_px: f32,
+    vp_matrix: &[f32],
+    vp_width: f32,
+    vp_height: f32,
+) -> JsValue {
+    GLTF_DATA.with(|gd| {
+        let data = gd.borrow();
+        let data = match data.as_ref() {
+            Some(d) => d,
+            None => return JsValue::NULL,
+        };
+
+        let num_faces = data.combined.triangles.len();
+        let num_vertices = data.combined.positions.len() as u32;
+
+        // Evaluate animation pose at time t
+        let (joint_matrices, morph_weights, num_joints, num_morph) =
+            if let Some(ref eval) = data.evaluator {
+                let pose = eval.evaluate(t);
+
+                // Apply normalization to joint matrices (same as evaluate_animation_frame)
+                let c = data.norm_center;
+                let s = data.norm_scale;
+                let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
+                let sf = s as f32; let sif = si as f32;
+                let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
+                let norm: [f32; 16] = [
+                    sf, 0.0, 0.0, 0.0, 0.0, sf, 0.0, 0.0,
+                    0.0, 0.0, sf, 0.0, -cx*sf, -cy*sf, -cz*sf, 1.0,
+                ];
+                let unnorm: [f32; 16] = [
+                    sif, 0.0, 0.0, 0.0, 0.0, sif, 0.0, 0.0,
+                    0.0, 0.0, sif, 0.0, cx, cy, cz, 1.0,
+                ];
+                fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+                    let mut out = [0.0f32; 16];
+                    for col in 0..4 {
+                        for row in 0..4 {
+                            out[col * 4 + row] = a[row] * b[col * 4]
+                                + a[4 + row] * b[col * 4 + 1]
+                                + a[8 + row] * b[col * 4 + 2]
+                                + a[12 + row] * b[col * 4 + 3];
+                        }
+                    }
+                    out
+                }
+
+                let mut normalized_mats = Vec::with_capacity(pose.joint_matrices.len());
+                let nj = pose.joint_matrices.len() / 16;
+                for ji in 0..nj {
+                    let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
+                    let nmu = mat4_mul_f32(&norm, &mat4_mul_f32(&m, &unnorm));
+                    normalized_mats.extend_from_slice(&nmu);
+                }
+
+                let nm = pose.morph_weights.len() as u32;
+                (normalized_mats, pose.morph_weights, nj as u32, nm)
+            } else {
+                (vec![], vec![], 0u32, 0u32)
+            };
+
+        GPU_COMPUTE.with(|gc| {
+            let mut gc = gc.borrow_mut();
+            let (gl, compute) = match gc.as_mut() {
+                Some(pair) => pair,
+                None => return JsValue::NULL,
+            };
+
+            // Upload per-frame animation data
+            if !joint_matrices.is_empty() {
+                compute.upload_joint_matrices(gl, &joint_matrices);
+            }
+            if !morph_weights.is_empty() {
+                compute.upload_morph_weights(gl, &morph_weights);
+            }
+
+            let mut mob = [0.0f32; 16];
+            for (i, &v) in mobius.iter().take(16).enumerate() { mob[i] = v; }
+            let mut vp = [0.0f32; 16];
+            for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
+
+            let n = compute.compute_lods(
+                gl, num_faces, num_vertices,
+                num_joints, num_morph,
+                mob, density, mesh_radius, min_px,
+                &vp, vp_width, vp_height,
+            );
+            let result = compute.read_back(gl, n);
+
+            let arr = js_sys::Float32Array::new_with_length(result.len() as u32);
+            arr.copy_from(&result);
+            arr.into()
+        })
     })
 }
 
@@ -299,7 +435,7 @@ pub fn set_min_px_per_sub(px: f64) {
 /// Export all atlas patches as pre-computed bary data for GPU upload.
 /// Returns a JS array of { key: [a,b,c], perm: n, bary: Float64Array, tris: Uint32Array }.
 /// Call once after atlas build — JS creates GPU buffers from this, then
-/// slice_and_transform never needs to send tessellation data again.
+/// the rendering pipeline never needs to send tessellation data again.
 #[wasm_bindgen]
 pub fn export_all_patches() -> JsValue {
     ATLAS.with(|atlas_cell| {
@@ -738,28 +874,11 @@ pub fn compute_mesh_batches(
             let mut orig_data = vec![0.0f32; nf * 52];
             let mut xform_data = vec![0.0f32; nf * 52];
 
-            let used_flat = FLAT_INSTANCE_DATA.with(|fid| {
-                let fid = fid.borrow();
-                if let Some(ref flat) = *fid {
-                    for (i, &fi) in face_indices.iter().enumerate() {
-                        let src = fi * 52;
-                        if src + 52 <= flat.len() {
-                            orig_data[i*52..(i+1)*52].copy_from_slice(&flat[src..src+52]);
-                            xform_data[i*52..(i+1)*52].copy_from_slice(&flat[src..src+52]);
-                        }
-                    }
-                    true
-                } else {
-                    false
-                }
-            });
-            if !used_flat {
-                for (i, &fi) in face_indices.iter().enumerate() {
-                    let o = instances_orig[fi].to_f32_array();
-                    let x = instances_xform[fi].to_f32_array();
-                    orig_data[i*52..(i+1)*52].copy_from_slice(&o);
-                    xform_data[i*52..(i+1)*52].copy_from_slice(&x);
-                }
+            for (i, &fi) in face_indices.iter().enumerate() {
+                let o = instances_orig[fi].to_f32_array();
+                let x = instances_xform[fi].to_f32_array();
+                orig_data[i*52..(i+1)*52].copy_from_slice(&o);
+                xform_data[i*52..(i+1)*52].copy_from_slice(&x);
             }
 
             batches.push(BatchData {
@@ -850,92 +969,12 @@ pub fn get_fragment_glsl(mode: &str) -> String {
     }
 }
 
-// --- Spacetime slicing ---
-
-struct CachedSlice {
-    normal: [f64; 4],
-    offset: f64,
-    verts: Vec<[f64; 3]>,
-    tris: Vec<[usize; 3]>,
-    weights: Vec<[f64; 4]>,  // per-vertex conformal weights from 4D Möbius
-    uvs: Vec<[f32; 2]>,      // per-vertex texture coordinates
-    normals: Vec<[f32; 3]>,  // per-vertex smooth normals
-    half_edge: HalfEdgeMesh,
-    /// Maps sliced face index -> original HyperMesh face index.
-    source_face_indices: Vec<usize>,
-    /// Cached original (untransformed) instances — recomputed only when slice changes.
-    orig_instances: Vec<quilting_core::evaluate::FaceInstance>,
-}
-
 thread_local! {
-    static HYPER_MESH: RefCell<Option<quilting_spacetime::HyperMesh>> = RefCell::new(None);
-    static SLICE_CACHE: RefCell<Option<CachedSlice>> = RefCell::new(None);
     /// Per-face material indices for the current loaded model.
-    /// Index i -> material index for HyperMesh face i (None = default material).
+    /// Index i -> material index for face i (None = default material).
     static FACE_MATERIALS: RefCell<Vec<Option<usize>>> = RefCell::new(Vec::new());
     /// Stored glTF data for animation switching without re-parsing.
     static GLTF_DATA: RefCell<Option<StoredGltfData>> = RefCell::new(None);
-}
-
-#[derive(serde::Serialize)]
-struct SpacetimeLayerData {
-    positions: Vec<f64>,
-    faces: Vec<u32>,
-    times: Vec<f64>,
-}
-
-#[derive(serde::Serialize)]
-struct SpacetimeSliceData {
-    layers: Vec<SpacetimeLayerData>,
-}
-
-#[derive(serde::Serialize)]
-struct HyperMeshInfo {
-    time_min: f64,
-    time_max: f64,
-    num_vertices: u32,
-    num_faces: usize,
-    // PBR material from glTF (if available)
-    base_color: [f32; 4],
-    metallic: f32,
-    roughness: f32,
-}
-
-/// Initialize a hypermesh by name. Stores it in a thread-local.
-/// Names: "rotating_cube", "breathing_sphere", "colliding_spheres", "twisting_torus"
-#[wasm_bindgen]
-pub fn create_hypermesh(name: &str) -> JsValue {
-    use quilting_spacetime::synthesize;
-
-    let mut mesh = match name {
-        "rotating_cube" => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 128),
-        "breathing_sphere" => synthesize::breathing_sphere(2.0, 1.0, 0.3, 6),
-        "colliding_spheres" => synthesize::colliding_spheres(2.0, 1.5, 4.0, 4),
-        "twisting_torus" => synthesize::twisting_torus(2.0, 2.0, 2.0, 0.5, 32, 24),
-        "galloping_horse" => synthesize::galloping_horse(2.0),
-        _ => synthesize::rotating_cube(2.0, std::f64::consts::TAU, 128),
-    };
-
-    // Capture animation range before padding
-    let (time_min, time_max) = mesh.time_range();
-
-    // Toroidal embedding handles periodicity — no loop padding needed
-    let info = HyperMeshInfo {
-        time_min,
-        time_max,
-        num_vertices: mesh.num_vertices,
-        num_faces: mesh.faces.len(),
-        base_color: [0.9, 0.75, 0.6, 1.0], // default warm clay
-        metallic: 0.0,
-        roughness: 0.4,
-    };
-
-    HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(mesh));
-    FACE_MATERIALS.with(|fm| *fm.borrow_mut() = Vec::new()); // built-in shapes have no materials
-    // Clear sent-tess cache so JS gets fresh tessellation data after shape change
-    SENT_TESS.with(|s| s.borrow_mut().clear());
-
-    serde_wasm_bindgen::to_value(&info).unwrap()
 }
 
 /// Set per-face material indices (for KHR_materials_variants switching).
@@ -1011,51 +1050,16 @@ pub fn set_active_animation(index: u32) -> JsValue {
             }
         }
 
-        let anim = &data.animations[index];
-        let combined = &data.combined;
-        let num_samples = 32usize;
+        // Get animation time range from evaluator
+        let anim_info = quilting_gltf::evaluator::list_animations(&data.animations);
+        let (time_min, time_max) = anim_info.get(index)
+            .map(|a| (a.t_min, a.t_max))
+            .unwrap_or((0.0, 0.0));
+        let n_verts = data.combined.positions.len();
+        let n_faces = data.combined.triangles.len();
 
-        let has_morph = anim.channels.iter()
-            .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights);
-
-        let hyper = if let Some(si) = data.primary_skin_idx {
-            if si < data.skins.len() {
-                quilting_gltf::bake::bake_skinned_animation(
-                    combined, &data.skins[si], anim, &data.nodes, num_samples,
-                )
-            } else {
-                build_static_hypermesh(combined)
-            }
-        } else if has_morph && !combined.morph_targets.is_empty() {
-            quilting_gltf::bake::bake_morph_animation(
-                combined, anim, &combined.morph_targets, num_samples,
-            )
-        } else {
-            build_static_hypermesh(combined)
-        };
-
-        let mut hyper = normalize_hypermesh(hyper);
-
-        // Transfer UVs and normals from stored combined primitive
-        if let Some(ref uvs) = combined.uvs {
-            hyper.vertex_uvs = uvs.iter().map(|uv| [uv[0] as f32, uv[1] as f32]).collect();
-        }
-        if let Some(ref norms) = combined.normals {
-            hyper.vertex_normals = norms.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect();
-        }
-
-        let (time_min, time_max) = hyper.time_range();
-        let n_verts = hyper.num_vertices;
-        let n_faces = hyper.faces.len();
-
-        HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));
         FACE_MATERIALS.with(|fm| *fm.borrow_mut() = data.face_material_indices.clone());
         SENT_TESS.with(|s| s.borrow_mut().clear());
-        SLICE_CACHE.with(|c| {
-            if let Ok(mut cache) = c.try_borrow_mut() {
-                *cache = None;
-            }
-        });
 
         web_sys::console::log_1(&format!(
             "set_active_animation: switched to animation {} — {} verts, {} faces, time [{:.3}, {:.3}]",
@@ -1231,7 +1235,7 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
     GLTF_DATA.with(|gd| {
         let data = gd.borrow();
         let data = match data.as_ref() {
-            Some(d) if d.evaluator.is_some() => d,
+            Some(d) => d,
             _ => return JsValue::NULL,
         };
 
@@ -1262,71 +1266,70 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
         // Use glTF normals if available
         let normals = combined.normals.as_ref();
 
-        // Evaluate skinned positions at lod_time for LOD computation
-        let lod_positions = if let Some(ref eval) = data.evaluator {
-            if let Some(si) = data.primary_skin_idx {
-                if si < data.skins.len() {
-                    Some(quilting_gltf::bake::evaluate_skinned_at_time(
-                        combined, &data.skins[si], &data.animations[data.active_animation],
-                        &data.nodes, lod_time,
-                    ))
-                } else { None }
-            } else { None }
-        } else { None };
-
-        // Use the SAME normalization as evaluate_animation_frame (stored in data.norm_center/norm_scale)
-        // This ensures positions and joint matrices are in the same normalized space.
+        // Normalize positions
         let center = data.norm_center;
         let norm_scale = data.norm_scale;
 
+        let norm_positions: Vec<[f64; 3]> = combined.positions.iter().map(|v| {
+            [(v[0]-center[0])*norm_scale, (v[1]-center[1])*norm_scale, (v[2]-center[2])*norm_scale]
+        }).collect();
+
+        let tris_usize: Vec<[usize; 3]> = combined.triangles.clone();
+
+        // Use the REAL LOD computation from evaluate.rs — half-edge coherent,
+        // Möbius-deformed medians, screen attenuation, proper snap to power of 2.
+        // Identity Möbius for initial load; async recompute handles Möbius-dependent LOD.
+        let vertex_uvs_f32: Option<Vec<[f32; 2]>> = combined.uvs.as_ref().map(|uvs| {
+            uvs.iter().map(|uv| [uv[0] as f32, uv[1] as f32]).collect()
+        });
+        let vertex_normals_f32: Option<Vec<[f32; 3]>> = normals.map(|ns| {
+            ns.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect()
+        }).or_else(|| {
+            // Compute smooth normals if glTF doesn't provide them
+            Some(vn.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect())
+        });
+
+        let lod_instances = quilting_core::evaluate::compute_instances_with_uvs(
+            &norm_positions,
+            &tris_usize,
+            &Mobius::identity(),
+            None, // no screen info for initial load
+            None, // will build half-edge mesh internally
+            vertex_uvs_f32.as_deref(),
+            vertex_normals_f32.as_deref(),
+        );
+
+        // Pack into compact 40-float format for GPU animation path
         for (fi, face) in combined.triangles.iter().enumerate() {
             let b = fi * COMPACT_STRIDE;
+            let inst = &lod_instances[fi];
+
             // p0/p1/p2: vertex_index in .x, normalized rest-pose xyz in .yzw
             for (vi, &vert_idx) in face.iter().enumerate() {
-                let v = combined.positions[vert_idx];
-                let v = [(v[0]-center[0])*norm_scale, (v[1]-center[1])*norm_scale, (v[2]-center[2])*norm_scale];
                 let off = b + vi * 4;
-                instances[off]   = vert_idx as f32; // vertex index for skinning lookup
-                instances[off+1] = v[0] as f32;
-                instances[off+2] = v[1] as f32;
-                instances[off+3] = v[2] as f32;
+                instances[off]   = vert_idx as f32;
+                instances[off+1] = norm_positions[vert_idx][0] as f32;
+                instances[off+2] = norm_positions[vert_idx][1] as f32;
+                instances[off+3] = norm_positions[vert_idx][2] as f32;
             }
-            // Compute LODs from skinned edge lengths at lod_time
-            let lod_pos = lod_positions.as_ref().map_or(&combined.positions as &[_], |lp| lp.as_slice());
-            let p0 = lod_pos[face[0]];
-            let p1 = lod_pos[face[1]];
-            let p2 = lod_pos[face[2]];
-            let edge_len = |a: [f64;3], b: [f64;3]| -> f64 {
-                ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt()
-            };
-            // Edge 0 = v1-v2 (opposite v0), Edge 1 = v0-v2, Edge 2 = v0-v1
-            let e0 = edge_len(p1, p2) * norm_scale;
-            let e1 = edge_len(p0, p2) * norm_scale;
-            let e2 = edge_len(p0, p1) * norm_scale;
-            let density = 20.0; // base density matching tess-density slider default
-            let snap = |v: f64| -> u32 {
-                quilting_core::evaluate::snap_to_power_of_2((v * density) as u32).max(2).min(512)
-            };
-            let lod0 = snap(e0); let lod1 = snap(e1); let lod2 = snap(e2);
-            instances[b + 12] = lod0 as f32;
-            instances[b + 13] = lod1 as f32;
-            instances[b + 14] = lod2 as f32;
+            // Edge LODs from compute_instances (half-edge coherent)
+            instances[b + 12] = inst.edge_lods[0] as f32;
+            instances[b + 13] = inst.edge_lods[1] as f32;
+            instances[b + 14] = inst.edge_lods[2] as f32;
+            // Vertex LODs
+            instances[b + 16] = inst.vertex_lods[0] as f32;
+            instances[b + 17] = inst.vertex_lods[1] as f32;
+            instances[b + 18] = inst.vertex_lods[2] as f32;
             // UVs at offset 20
-            if has_uvs {
-                let uvs = combined.uvs.as_ref().unwrap();
-                instances[b+20] = uvs[face[0]][0] as f32; instances[b+21] = uvs[face[0]][1] as f32;
-                instances[b+22] = uvs[face[1]][0] as f32; instances[b+23] = uvs[face[1]][1] as f32;
-                instances[b+24] = uvs[face[2]][0] as f32; instances[b+25] = uvs[face[2]][1] as f32;
-            }
+            instances[b+20] = inst.uvs[0][0]; instances[b+21] = inst.uvs[0][1];
+            instances[b+22] = inst.uvs[1][0]; instances[b+23] = inst.uvs[1][1];
+            instances[b+24] = inst.uvs[2][0]; instances[b+25] = inst.uvs[2][1];
             // Normals at offset 28
             for vi in 0..3 {
-                let n = if let Some(norms) = normals {
-                    norms[face[vi]]
-                } else {
-                    vn[face[vi]]
-                };
                 let off = b + 28 + vi * 4;
-                instances[off] = n[0] as f32; instances[off+1] = n[1] as f32; instances[off+2] = n[2] as f32;
+                instances[off]   = inst.normals[vi][0];
+                instances[off+1] = inst.normals[vi][1];
+                instances[off+2] = inst.normals[vi][2];
             }
         }
 
@@ -1471,7 +1474,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         .find(|mn| mn.skin_idx.is_some())
         .or(mesh_nodes.first());
 
-    let primary_mesh_idx = primary_skinned.map(|mn| mn.mesh_idx).unwrap_or(0);
+    let _primary_mesh_idx = primary_skinned.map(|mn| mn.mesh_idx).unwrap_or(0);
     let primary_skin_idx = primary_skinned.and_then(|mn| mn.skin_idx);
 
     // Merge all meshes with world transforms, tracking per-triangle material index.
@@ -1509,29 +1512,12 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         scene.materials.len()
     ).into());
 
-    // For animated models (skeletal or morph), skip the expensive Hermite bake.
-    // GPU skinning evaluates per-frame directly from keyframes — no prebake needed.
-    // Only build a HyperMesh for static models (needed for spacetime slicing).
-    let hyper = build_static_hypermesh(&combined);
-
-    let mut hyper = normalize_hypermesh(hyper);
-
-    // Set per-vertex UVs on the HyperMesh if the combined primitive has them
-    if let Some(ref uvs) = combined.uvs {
-        hyper.vertex_uvs = uvs.iter().map(|uv| [uv[0] as f32, uv[1] as f32]).collect();
-    }
-
-    // Set per-vertex normals on the HyperMesh if the combined primitive has them
-    if let Some(ref norms) = combined.normals {
-        hyper.vertex_normals = norms.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect();
-    }
-
-    // Get time range from animation if available, otherwise from HyperMesh
+    // Get time range from animation if available, otherwise default
     let (time_min, time_max) = if !scene.animations.is_empty() {
         let info = quilting_gltf::evaluator::list_animations(&scene.animations);
-        if let Some(a) = info.first() { (a.t_min, a.t_max) } else { hyper.time_range() }
+        if let Some(a) = info.first() { (a.t_min, a.t_max) } else { (0.0, 0.0) }
     } else {
-        hyper.time_range()
+        (0.0, 0.0)
     };
 
     // Build materials array using js_sys
@@ -1698,7 +1684,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         .collect();
     js_face_materials.copy_from(&mat_indices);
 
-    // Extract first material as default (backward compat with existing HyperMeshInfo)
+    // Extract first material as default (backward compat)
     let (base_color, metallic, roughness) = if !scene.materials.is_empty() {
         let mat = &scene.materials[0];
         let mut bc = [
@@ -1778,19 +1764,8 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         });
     });
 
-    HYPER_MESH.with(|hm| *hm.borrow_mut() = Some(hyper));
     FACE_MATERIALS.with(|fm| *fm.borrow_mut() = face_material_indices);
     SENT_TESS.with(|s| s.borrow_mut().clear());
-    // Clear prebake info — prevents stale data from causing OOB panics
-    // when switching between models. GPU-skinned models skip prebake entirely.
-    PREBAKE_INFO.with(|pi| *pi.borrow_mut() = None);
-    // Clear slice cache — use try_borrow_mut to avoid panic if a previous
-    // WASM panic left the RefCell in a borrowed state.
-    SLICE_CACHE.with(|c| {
-        if let Ok(mut cache) = c.try_borrow_mut() {
-            *cache = None;
-        }
-    });
 
     let t_end = js_sys::Date::now();
     web_sys::console::log_1(&format!(
@@ -2055,724 +2030,4 @@ struct MeshNodeRef {
     world_transform: [f64; 16],
 }
 
-/// Build a static HyperMesh (no animation) from a primitive — 2 identical keyframes.
-fn build_static_hypermesh(prim: &quilting_gltf::mesh::Primitive) -> quilting_spacetime::HyperMesh {
-    use quilting_spacetime::trajectory::{HermiteSegment, VertexTrajectory};
 
-    let faces: Vec<[u32; 3]> = prim.triangles.iter()
-        .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
-        .collect();
-
-    let trajectories: Vec<VertexTrajectory> = prim.positions.iter().map(|&pos| {
-        VertexTrajectory {
-            segments: vec![HermiteSegment {
-                t_start: 0.0,
-                t_end: 2.0,
-                pos_start: pos,
-                pos_end: pos,
-                vel_start: [0.0, 0.0, 0.0],
-                vel_end: [0.0, 0.0, 0.0],
-            }],
-        }
-    }).collect();
-
-    quilting_spacetime::HyperMesh::new(faces, trajectories)
-}
-
-/// Normalize a HyperMesh so positions fit roughly in [-1, 1].
-/// Computes bounding box across all trajectory keyframes, then scales.
-fn normalize_hypermesh(mut mesh: quilting_spacetime::HyperMesh) -> quilting_spacetime::HyperMesh {
-    let mut min = [f64::INFINITY; 3];
-    let mut max = [f64::NEG_INFINITY; 3];
-
-    for traj in &mesh.trajectories {
-        for seg in &traj.segments {
-            for i in 0..3 {
-                min[i] = min[i].min(seg.pos_start[i]).min(seg.pos_end[i]);
-                max[i] = max[i].max(seg.pos_start[i]).max(seg.pos_end[i]);
-            }
-        }
-    }
-
-    let center = [(min[0]+max[0])*0.5, (min[1]+max[1])*0.5, (min[2]+max[2])*0.5];
-    let extent = ((max[0]-min[0]).max(max[1]-min[1]).max(max[2]-min[2])) * 0.5;
-    if extent < 1e-10 {
-        return mesh;
-    }
-    let scale = 1.0 / extent;
-
-    for traj in &mut mesh.trajectories {
-        for seg in &mut traj.segments {
-            for i in 0..3 {
-                seg.pos_start[i] = (seg.pos_start[i] - center[i]) * scale;
-                seg.pos_end[i] = (seg.pos_end[i] - center[i]) * scale;
-                seg.vel_start[i] *= scale;
-                seg.vel_end[i] *= scale;
-            }
-        }
-    }
-
-    mesh
-}
-
-/// Slice the current hypermesh with a hyperplane.
-/// normal: [nx, ny, nz, nt] (4 floats)
-/// offset: f64
-/// Returns { layers: [{ positions: [f64], faces: [u32], times: [f64] }] }
-#[wasm_bindgen]
-pub fn slice_hypermesh(normal: &[f64], offset: f64) -> JsValue {
-    use quilting_spacetime::HyperplaneSlicer;
-
-    let n = if normal.len() >= 4 {
-        [normal[0], normal[1], normal[2], normal[3]]
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    };
-
-    let result = HYPER_MESH.with(|hm| {
-        let mesh_opt = hm.borrow();
-        let mesh = match mesh_opt.as_ref() {
-            Some(m) => m,
-            None => return SpacetimeSliceData { layers: vec![] },
-        };
-
-        let slicer = HyperplaneSlicer::new(n, offset);
-        let slice = slicer.slice_marching(mesh);
-
-        let layers = slice.layers.into_iter().map(|layer| {
-            let positions: Vec<f64> = layer.positions.iter()
-                .flat_map(|p| [p[0], p[1], p[2]])
-                .collect();
-            let faces: Vec<u32> = layer.faces.iter()
-                .flat_map(|f| [f[0], f[1], f[2]])
-                .collect();
-            SpacetimeLayerData {
-                positions,
-                faces,
-                times: layer.times,
-            }
-        }).collect();
-
-        SpacetimeSliceData { layers }
-    });
-
-    serde_wasm_bindgen::to_value(&result).unwrap()
-}
-
-/// Slice the current hypermesh, then apply a Möbius transform to the result.
-/// Returns the same BatchData format that index.html's rendering pipeline expects.
-#[wasm_bindgen]
-pub fn slice_and_transform(
-    normal: &[f64],
-    offset: f64,
-    transform_type: &str,
-    toroidal: bool,
-    params: &[f64],
-    override_res: u32,
-    vp_matrix: &[f64],
-    viewport_width: f64,
-    viewport_height: f64,
-) -> JsValue {
-    let n = if normal.len() >= 4 {
-        [normal[0], normal[1], normal[2], normal[3]]
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    };
-
-    let empty = || serde_wasm_bindgen::to_value(&MeshBatches {
-        batches: vec![], total_faces: 0, num_batches: 0, timings: [0.0, 0.0, 0.0],
-    }).unwrap();
-
-    // Performance marks
-    let perf_early: web_sys::Performance = js_sys::Reflect::get(
-        &js_sys::global(), &"performance".into()
-    ).ok().and_then(|p| p.dyn_into().ok()).unwrap();
-    perf_early.mark("sat:fn-start").ok();
-
-    let _t_start = js_sys::Date::now();
-
-    let has_prebake = PREBAKE_INFO.with(|pi| pi.borrow().is_some());
-    let cache_hit = SLICE_CACHE.with(|c| {
-        let cache = c.borrow();
-        match cache.as_ref() {
-            Some(cs) => {
-                // With prebake, only check normal (time comes from GPU texture)
-                if has_prebake {
-                    cs.normal == n
-                } else {
-                    cs.normal == n && (cs.offset - offset).abs() < 1e-12
-                }
-            }
-            None => false,
-        }
-    });
-
-    // With prebake, update the cached offset without rebuilding the slice
-    if has_prebake && cache_hit {
-        SLICE_CACHE.with(|c| {
-            if let Some(cs) = c.borrow_mut().as_mut() {
-                cs.offset = offset;
-            }
-        });
-    }
-
-    if !cache_hit {
-        // Classic mode fast path: pure time slice (normal = [0,0,0,1]) without
-        // tilt or toroidal embedding. Just evaluate each vertex's trajectory at
-        // time t — no marching tetrahedra needed. O(V) instead of O(V*segs*F).
-        let is_classic = !toroidal
-            && n[0].abs() < 1e-10 && n[1].abs() < 1e-10 && n[2].abs() < 1e-10
-            && (n[3] - 1.0).abs() < 1e-10;
-
-        if is_classic {
-            let built = HYPER_MESH.with(|hm| {
-                let mesh_opt = hm.borrow();
-                let mesh = match mesh_opt.as_ref() {
-                    Some(m) => m,
-                    None => return false,
-                };
-                let verts = mesh.positions_at(offset);
-                let tris: Vec<[usize; 3]> = mesh.faces.iter()
-                    .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
-                    .collect();
-                let uvs = mesh.vertex_uvs.clone();
-                let normals = mesh.vertex_normals.clone();
-                let source_faces: Vec<usize> = (0..tris.len()).collect();
-
-                if verts.is_empty() || tris.is_empty() { return false; }
-
-                let faces_u32: Vec<[u32; 3]> = tris.iter()
-                    .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
-                    .collect();
-                let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
-
-                SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
-                    normal: n, offset, verts, tris,
-                    weights: vec![[0.0; 4]; 0], // no 4D weights in classic mode
-                    uvs, normals, half_edge,
-                    source_face_indices: source_faces,
-                    orig_instances: Vec::new(),
-                }));
-                true
-            });
-            if !built { return empty(); }
-        } else {
-            // Full marching tetrahedra slice for tilted/toroidal hyperplanes
-            let slice_result = HYPER_MESH.with(|hm| {
-                let mesh_opt = hm.borrow();
-                let mesh = match mesh_opt.as_ref() {
-                    Some(m) => m,
-                    None => return None,
-                };
-                let mut slicer = quilting_spacetime::HyperplaneSlicer::new(n, offset);
-                if toroidal {
-                    slicer = slicer.with_toroidal(2.0, mesh.period);
-                }
-                Some(slicer.slice_marching(mesh))
-            });
-
-            let slice = match slice_result {
-                Some(s) if !s.layers.is_empty() => s,
-                _ => return empty(),
-            };
-
-            // Merge ALL layers
-            let mut verts: Vec<[f64; 3]> = Vec::new();
-            let mut vert_weights: Vec<[f64; 4]> = Vec::new();
-            let mut vert_uvs: Vec<[f32; 2]> = Vec::new();
-            let mut vert_normals: Vec<[f32; 3]> = Vec::new();
-            let mut tris: Vec<[usize; 3]> = Vec::new();
-            let mut slice_source_faces: Vec<usize> = Vec::new();
-            for layer in slice.layers {
-                let base = verts.len();
-                verts.extend_from_slice(&layer.positions);
-                vert_weights.extend_from_slice(&layer.weights);
-                vert_uvs.extend_from_slice(&layer.uvs);
-                vert_normals.extend_from_slice(&layer.normals);
-                for f in &layer.faces {
-                    tris.push([f[0] as usize + base, f[1] as usize + base, f[2] as usize + base]);
-                }
-                slice_source_faces.extend_from_slice(&layer.source_face_indices);
-            }
-
-            if tris.is_empty() || verts.is_empty() {
-                SLICE_CACHE.with(|c| *c.borrow_mut() = None);
-                return empty();
-            }
-
-            let faces_u32: Vec<[u32; 3]> = tris.iter()
-                .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
-                .collect();
-            let half_edge = HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32);
-
-            SLICE_CACHE.with(|c| *c.borrow_mut() = Some(CachedSlice {
-                normal: n, offset, verts, tris, weights: vert_weights, uvs: vert_uvs,
-                normals: vert_normals, half_edge, source_face_indices: slice_source_faces,
-                orig_instances: Vec::new(),
-            }));
-        }
-    }
-
-    // Classic 3D Möbius — applied to each frame's spatial positions
-    let transform = match transform_type {
-        "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
-            Mobius::sphere_reflection(
-                Quat::from_point(params[0], params[1], params[2]),
-                params[3],
-            )
-        }
-        "rotation" if params.len() >= 4 => {
-            Mobius::rotation(params[0], params[1], params[2], params[3])
-        }
-        "translation" if params.len() >= 3 => {
-            Mobius::translation(Quat::from_point(params[0], params[1], params[2]))
-        }
-        _ => Mobius::identity(),
-    };
-
-    let screen = if vp_matrix.len() >= 16 && viewport_width > 0.0 {
-        let mut m = [0.0f64; 16];
-        m.copy_from_slice(&vp_matrix[..16]);
-        Some(ScreenInfo { vp_matrix: m, width: viewport_width, height: viewport_height })
-    } else {
-        None
-    };
-
-    // Performance marks for DevTools User Timing
-    let perf: web_sys::Performance = js_sys::Reflect::get(
-        &js_sys::global(), &"performance".into()
-    ).ok().and_then(|p| p.dyn_into().ok()).unwrap();
-    let pm = |label: &str| { perf.mark(label).ok(); };
-
-    pm("sat:mobius-start");
-
-    // Use cached slice for Möbius computation
-    let gpu_available = GPU_COMPUTE.with(|gc| gc.borrow().is_some());
-    // Log once which path we're using
-    thread_local! { static LOGGED_PATH: RefCell<bool> = RefCell::new(false); }
-    LOGGED_PATH.with(|l| {
-        if !*l.borrow() {
-            *l.borrow_mut() = true;
-            let path = if gpu_available && !transform.is_affine() { "GPU" } else { "CPU" };
-            web_sys::console::log_1(&format!("LOD path: {path} (gpu={gpu_available}, affine={})", transform.is_affine()).into());
-        }
-    });
-
-    // Pack Möbius as 16 floats (shared by both paths)
-    let mob_f32: [f32; 16] = [
-        transform.a.w as f32, transform.a.x as f32, transform.a.y as f32, transform.a.z as f32,
-        transform.b.w as f32, transform.b.x as f32, transform.b.y as f32, transform.b.z as f32,
-        transform.c.w as f32, transform.c.x as f32, transform.c.y as f32, transform.c.z as f32,
-        transform.d.w as f32, transform.d.x as f32, transform.d.y as f32, transform.d.z as f32,
-    ];
-    let tess_density = quilting_core::evaluate::get_tess_density();
-
-    // Check if we have prebaked animation data on GPU
-    // Prebake info + frame positions for the current time
-    let prebake_frame_data = PREBAKE_INFO.with(|pi| {
-        let pi = pi.borrow();
-        let p = match pi.as_ref() {
-            Some(p) => p,
-            None => return None,
-        };
-        let frame = if p.dt > 0.0 {
-            (((offset - p.time_min) / p.dt).round() as usize).min(p.num_frames - 1)
-        } else { 0 };
-
-        // Extract this frame's vertex positions as f64
-        let base = frame * p.num_vertices * 3;
-        let verts: Vec<[f64; 3]> = (0..p.num_vertices).map(|i| {
-            let off = base + i * 3;
-            [p.positions[off] as f64, p.positions[off+1] as f64, p.positions[off+2] as f64]
-        }).collect();
-
-        Some((p.num_frames, p.num_vertices, p.num_faces,
-              p.time_min, p.dt, p.mesh_radius, frame, verts))
-    });
-
-    struct RawBatch {
-        actual_lod: [u32; 3],
-        canonical_lod: [u32; 3],
-        used_lod: [u32; 3],
-        parity: i32,
-        perm_index: usize,
-        material_index: i32,
-        face_indices: Vec<u32>,
-        num_faces: usize,
-        n_verts: usize,
-        n_tris: usize,
-    }
-
-    let (num_tris, source_faces) = if let Some((_pb_nf, pb_nv, pb_faces, _pb_tmin, _pb_dt, pb_radius, frame, frame_verts)) = prebake_frame_data {
-        // TWO-PASS PATH: sequential write (cache-friendly) → sorted copy.
-        // Sequential face-order writes are critical for cache performance on 29K+ faces.
-
-        // 1. FIRE GPU compute (non-blocking — flush starts the work)
-        let gpu_n = {
-            GPU_COMPUTE.with(|gc| {
-                let mut gc = gc.borrow_mut();
-                let (gl, compute) = gc.as_mut().unwrap();
-                let min_px_val = if quilting_core::evaluate::get_screen_atten() {
-                    quilting_core::evaluate::get_min_px_per_sub() as f32
-                } else { 0.0 };
-                let vp_f32: [f32; 16] = screen.as_ref().map(|s| {
-                    let mut m = [0.0f32; 16];
-                    for i in 0..16 { m[i] = s.vp_matrix[i] as f32; }
-                    m
-                }).unwrap_or([0.0; 16]);
-                let (vpw, vph) = screen.as_ref().map(|s| (s.width as f32, s.height as f32)).unwrap_or((0.0, 0.0));
-                compute.compute_with_texture(
-                    gl, pb_faces, frame as u32, pb_nv as u32,
-                    mob_f32, tess_density as f32, pb_radius as f32,
-                    min_px_val, &vp_f32, vpw, vph,
-                )
-            })
-        };
-
-        SLICE_CACHE.with(|c| {
-            let cache = c.borrow();
-            let cs = cache.as_ref().unwrap();
-            let nf = cs.tris.len();
-            let src_faces = cs.source_face_indices.clone();
-
-            // 2. SEQUENTIAL WRITE while GPU runs — compact 40-float layout
-            // [p0(4), p1(4), p2(4), lod(4), vlod(4), uv01(4), uv2(4), n0(4), n1(4), n2(4)]
-            // Weights stripped — shader gets identity via vertexAttrib4f
-            const COMPACT_STRIDE: usize = 40;
-            let mut all_orig = vec![0.0f32; nf * COMPACT_STRIDE];
-            let has_uvs = !cs.uvs.is_empty();
-
-            for (fi, face) in cs.tris.iter().enumerate() {
-                let b = fi * COMPACT_STRIDE;
-                // Positions (3 × vec4, w=0)
-                for (vi, &vert_idx) in face.iter().enumerate() {
-                    let v = frame_verts[vert_idx];
-                    let off = b + vi * 4;
-                    all_orig[off+1] = v[0] as f32;
-                    all_orig[off+2] = v[1] as f32;
-                    all_orig[off+3] = v[2] as f32;
-                }
-                // UVs at offset 20 (after 3 positions + 2 LOD vec4s = 5*4=20)
-                if has_uvs {
-                    let uv0 = cs.uvs[face[0]]; let uv1 = cs.uvs[face[1]]; let uv2 = cs.uvs[face[2]];
-                    all_orig[b + 20] = uv0[0]; all_orig[b + 21] = uv0[1];
-                    all_orig[b + 22] = uv1[0]; all_orig[b + 23] = uv1[1];
-                    all_orig[b + 24] = uv2[0]; all_orig[b + 25] = uv2[1];
-                }
-                // Normals at offset 28
-                if !cs.normals.is_empty() {
-                    for vi in 0..3 {
-                        let n = cs.normals[face[vi]];
-                        let off = b + 28 + vi * 4;
-                        all_orig[off] = n[0]; all_orig[off+1] = n[1]; all_orig[off+2] = n[2];
-                    }
-                }
-            }
-
-            // Smooth vertex normals for built-in shapes (no glTF normals)
-            if cs.normals.is_empty() {
-                let num_verts = frame_verts.len();
-                let mut vn = vec![[0.0f64; 3]; num_verts];
-                for face in &cs.tris {
-                    let v0 = frame_verts[face[0]]; let v1 = frame_verts[face[1]]; let v2 = frame_verts[face[2]];
-                    let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
-                    let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
-                    let fn_ = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
-                    for &vi in face { vn[vi][0] += fn_[0]; vn[vi][1] += fn_[1]; vn[vi][2] += fn_[2]; }
-                }
-                for (fi, face) in cs.tris.iter().enumerate() {
-                    let b = fi * COMPACT_STRIDE;
-                    for vi in 0..3 {
-                        let n = &vn[face[vi]];
-                        let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
-                        let off = b + 28 + vi * 4;
-                        if len > 1e-10 {
-                            all_orig[off] = (n[0]/len) as f32;
-                            all_orig[off+1] = (n[1]/len) as f32;
-                            all_orig[off+2] = (n[2]/len) as f32;
-                        }
-                    }
-                }
-            }
-
-            // 3. GPU READBACK — 2 floats per face: [atlas_index, perm_index]
-            // Normals computed on main thread GPU (no worker readback needed).
-            let gpu_class = if gpu_n > 0 {
-                GPU_COMPUTE.with(|gc| {
-                    let gc = gc.borrow();
-                    let (gl, compute) = gc.as_ref().unwrap();
-                    compute.read_back(gl, gpu_n)
-                })
-            } else { vec![] };
-
-            let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
-
-            // 4. Reconstruct per-face unsorted LODs from GPU classification
-            let mut face_lods = vec![[2u32; 3]; nf];
-            ATLAS_KEYS.with(|ak| {
-                let keys = ak.borrow();
-                for fi in 0..nf {
-                    let rb = fi * stride;
-                    if rb + 1 < gpu_class.len() {
-                        let atlas_idx = gpu_class[rb] as usize;
-                        let perm_idx = gpu_class[rb + 1] as usize;
-                        if atlas_idx < keys.len() && perm_idx < 6 {
-                            let canonical = keys[atlas_idx];
-                            let perm = quilting_core::permutation::S3_PERMUTATIONS[perm_idx];
-                            // Recover original (unsorted) LODs
-                            face_lods[fi] = [canonical[perm[0]], canonical[perm[1]], canonical[perm[2]]];
-                        }
-                    }
-                }
-            });
-
-            // 5. EDGE COHERENCE: shared edges must have matching LODs.
-            // For each half-edge pair, take max of both faces' LODs for that edge.
-            // Half-edge position i in face → LOD index (i+2)%3.
-            let he = &cs.half_edge;
-            let mut fixes = 0u32;
-            for fi in 0..nf {
-                let hes = he.face_half_edges(fi as u32);
-                for (hi, &he_id) in hes.iter().enumerate() {
-                    let lod_idx = (hi + 2) % 3; // which LOD slot this half-edge maps to
-                    if let Some(twin_id) = quilting_mesh::unpack_twin(he.half_edges[he_id as usize].twin) {
-                        let twin_he = &he.half_edges[twin_id as usize];
-                        let adj_fi = twin_he.face as usize;
-                        if adj_fi < nf {
-                            // Find which position the twin is in its face
-                            let adj_hes = he.face_half_edges(adj_fi as u32);
-                            for (adj_hi, &adj_he_id) in adj_hes.iter().enumerate() {
-                                if adj_he_id == twin_id {
-                                    let adj_lod_idx = (adj_hi + 2) % 3;
-                                    let my_lod = face_lods[fi][lod_idx];
-                                    let their_lod = face_lods[adj_fi][adj_lod_idx];
-                                    if my_lod != their_lod {
-                                        let max_lod = my_lod.max(their_lod);
-                                        face_lods[fi][lod_idx] = max_lod;
-                                        face_lods[adj_fi][adj_lod_idx] = max_lod;
-                                        fixes += 1;
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Log coherence stats (once)
-            thread_local! { static LOGGED_COHERENCE: RefCell<bool> = RefCell::new(false); }
-            LOGGED_COHERENCE.with(|l| {
-                if !*l.borrow() {
-                    *l.borrow_mut() = true;
-                    web_sys::console::log_1(&format!(
-                        "Edge coherence: {} edge LOD fixes across {} faces, {} half-edges",
-                        fixes, nf, he.half_edges.len()
-                    ).into());
-                }
-            });
-
-            // 6. Write coherent LODs into flat buffer
-            for fi in 0..nf {
-                let b = fi * COMPACT_STRIDE;
-                let lods = face_lods[fi];
-                all_orig[b + 12] = lods[0] as f32;
-                all_orig[b + 13] = lods[1] as f32;
-                all_orig[b + 14] = lods[2] as f32;
-                all_orig[b + 16] = lods[0] as f32;
-                all_orig[b + 17] = lods[1] as f32;
-                all_orig[b + 18] = lods[2] as f32;
-            }
-
-            // Update GPU classification to match coherent LODs
-            // (grouping phase reads from GPU_CLASSIFICATION)
-            // Resize to nf * stride in case GPU processed fewer faces than the slice has
-            let mut coherent_class = gpu_class.clone();
-            coherent_class.resize(nf * stride, 0.0);
-            ATLAS_KEYS.with(|ak| {
-                let keys = ak.borrow();
-                for fi in 0..nf {
-                    let key = canonical_form(face_lods[fi]);
-                    if let Some(idx) = keys.iter().position(|k| *k == key.res) {
-                        let rb = fi * stride;
-                        coherent_class[rb] = idx as f32;
-                        coherent_class[rb + 1] = key.perm_index as f32;
-                    }
-                }
-            });
-            let gpu_class = coherent_class;
-
-            // Single buffer — xform eliminated (normals on main thread GPU)
-            FLAT_INSTANCE_DATA.with(|fid| *fid.borrow_mut() = Some(all_orig));
-            GPU_CLASSIFICATION.with(|gc| *gc.borrow_mut() = Some(gpu_class));
-
-            (nf, src_faces)
-        })
-    } else {
-        web_sys::console::warn_1(&"slice_and_transform: no prebake data! Using empty result.".into());
-        (0, vec![])
-    };
-    pm("sat:mobius-end");
-
-    pm("sat:group-start");
-    // Material indices
-    let face_mat_indices: Vec<i32> = FACE_MATERIALS.with(|fm| {
-        let mats = fm.borrow();
-        (0..num_tris).map(|fi| {
-            if fi < source_faces.len() {
-                let orig_fi = source_faces[fi];
-                if orig_fi < mats.len() { mats[orig_fi].map(|m| m as i32).unwrap_or(-1) }
-                else { -1 }
-            } else { -1 }
-        }).collect()
-    });
-    pm("sat:group-end");
-
-    pm("sat:batch-start");
-
-    // Group faces from GPU classification
-    let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
-    let groups: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = GPU_CLASSIFICATION.with(|gc| {
-        let gc = gc.borrow();
-        if let Some(ref class) = *gc {
-            let mut map: FxHashMap<([u32; 3], usize, i32), Vec<usize>> = FxHashMap::default();
-            ATLAS_KEYS.with(|ak| {
-                let keys = ak.borrow();
-                for fi in 0..num_tris {
-                    let rb = fi * stride;
-                    if rb + 1 < class.len() {
-                        let atlas_idx = class[rb] as usize;
-                        let perm_idx = class[rb + 1] as usize;
-                        let mat_idx = face_mat_indices[fi];
-                        if atlas_idx < keys.len() {
-                            let canonical_lod = keys[atlas_idx];
-                            map.entry((canonical_lod, perm_idx, mat_idx)).or_default().push(fi);
-                        }
-                    }
-                }
-            });
-            map
-        } else {
-            FxHashMap::default()
-        }
-    });
-
-    // Sorted copy — sequential writes, scattered reads from hot unsorted buffer
-    let mut raw_batches: Vec<RawBatch> = Vec::with_capacity(groups.len());
-    let mut sorted_buf = SORTED_BUFS.with(|sb| {
-        let mut sb = sb.borrow_mut();
-        let needed = num_tris * 40;
-        if sb.len() < needed { sb.resize(needed, 0.0); }
-        std::mem::take(&mut *sb)
-    });
-    let mut write_pos = 0usize;
-
-    FLAT_INSTANCE_DATA.with(|fid| {
-        let fid = fid.borrow();
-        let flat = match fid.as_ref() {
-            Some(buf) => buf,
-            None => return,
-        };
-
-        for (&(canonical_lod, perm_index, mat_idx), face_indices) in &groups {
-            let nf = face_indices.len();
-            let parity = perm_sign(perm_index);
-            let lods = canonical_lod;
-
-            for &fi in face_indices {
-                let src = fi * 40;
-                let dst = write_pos * 40;
-                sorted_buf[dst..dst+40].copy_from_slice(&flat[src..src+40]);
-                write_pos += 1;
-            }
-
-            let (n_verts, n_tris) = ATLAS.with(|atlas_cell| {
-                let atlas = atlas_cell.borrow();
-                if let Some(atlas) = atlas.as_ref() {
-                    if let Some(entry) = atlas.patches.get(&canonical_lod) {
-                        return (entry.vertex_count, entry.triangle_count);
-                    }
-                }
-                (0, 0)
-            });
-
-            raw_batches.push(RawBatch {
-                actual_lod: lods,
-                canonical_lod,
-                used_lod: lods,
-                parity, perm_index, material_index: mat_idx,
-                face_indices: face_indices.iter().map(|&i| {
-                    if i < source_faces.len() { source_faces[i] as u32 } else { i as u32 }
-                }).collect(),
-                num_faces: nf, n_verts, n_tris,
-            });
-        }
-    });
-
-    pm("sat:batch-end");
-
-    pm("sat:serialize-start");
-
-    let num_batches = raw_batches.len();
-    let mut batch_meta = vec![0i32; num_batches * 16];
-    let mut all_face_indices: Vec<u32> = Vec::with_capacity(num_tris);
-
-    let mut write_pos = 0usize;
-    for (bi, b) in raw_batches.iter().enumerate() {
-        let batch_offset = write_pos;
-        write_pos += b.num_faces;
-
-        let m = bi * 16;
-        batch_meta[m]    = b.actual_lod[0] as i32;
-        batch_meta[m+1]  = b.actual_lod[1] as i32;
-        batch_meta[m+2]  = b.actual_lod[2] as i32;
-        batch_meta[m+3]  = b.canonical_lod[0] as i32;
-        batch_meta[m+4]  = b.canonical_lod[1] as i32;
-        batch_meta[m+5]  = b.canonical_lod[2] as i32;
-        batch_meta[m+6]  = b.used_lod[0] as i32;
-        batch_meta[m+7]  = b.used_lod[1] as i32;
-        batch_meta[m+8]  = b.used_lod[2] as i32;
-        batch_meta[m+9]  = b.parity;
-        batch_meta[m+10] = b.perm_index as i32;
-        batch_meta[m+11] = b.material_index;
-        batch_meta[m+12] = b.num_faces as i32;
-        batch_meta[m+13] = b.n_verts as i32;
-        batch_meta[m+14] = b.n_tris as i32;
-        batch_meta[m+15] = batch_offset as i32;
-
-        all_face_indices.extend_from_slice(&b.face_indices);
-    }
-
-    // Allocate + copy. new_with_length + copy_from is faster than
-    // Float32Array::from() which goes through wasm-bindgen's JS shim.
-    // Worker transfers these (zero-copy to main), then they're gone.
-    let js_orig = js_sys::Float32Array::new_with_length(sorted_buf.len() as u32);
-    js_orig.copy_from(&sorted_buf);
-
-    // Recycle buffer for next frame (avoids re-allocation)
-    SORTED_BUFS.with(|sb| {
-        *sb.borrow_mut() = sorted_buf;
-    });
-    let js_meta = js_sys::Int32Array::new_with_length(batch_meta.len() as u32);
-    js_meta.copy_from(&batch_meta);
-    let js_face_idx = js_sys::Uint32Array::new_with_length(all_face_indices.len() as u32);
-    js_face_idx.copy_from(&all_face_indices);
-
-    pm("sat:serialize-end");
-
-    perf.measure_with_start_mark_and_end_mark("Slice + Cache", "sat:fn-start", "sat:mobius-start").ok();
-    perf.measure_with_start_mark_and_end_mark("Möbius + LOD", "sat:mobius-start", "sat:mobius-end").ok();
-    perf.measure_with_start_mark_and_end_mark("Materials + Grouping", "sat:group-start", "sat:group-end").ok();
-    perf.measure_with_start_mark_and_end_mark("Batch Assembly", "sat:batch-start", "sat:batch-end").ok();
-    perf.measure_with_start_mark_and_end_mark("Serialize to JS", "sat:serialize-start", "sat:serialize-end").ok();
-    perf.measure_with_start_mark_and_end_mark("Total (WASM)", "sat:fn-start", "sat:serialize-end").ok();
-
-    let result = js_sys::Object::new();
-    js_sys::Reflect::set(&result, &"total_faces".into(), &JsValue::from(num_tris as u32)).ok();
-    js_sys::Reflect::set(&result, &"num_batches".into(), &JsValue::from(num_batches as u32)).ok();
-    js_sys::Reflect::set(&result, &"all_orig".into(), &js_orig).ok();
-    js_sys::Reflect::set(&result, &"batch_meta".into(), &js_meta).ok();
-    js_sys::Reflect::set(&result, &"face_indices".into(), &js_face_idx).ok();
-
-    result.into()
-}

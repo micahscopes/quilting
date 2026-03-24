@@ -2,44 +2,48 @@
 //!
 //! Runs a vertex shader as a compute kernel — one "vertex" per face.
 //! Transform feedback captures the output into a GPU buffer.
-//! Used for LOD computation: Möbius-transform edge midpoints → deformed
-//! medians → LOD per edge. Result stays on GPU or is read back (~20KB).
+//! Used for per-frame LOD computation: fetch rest-pose positions, apply
+//! morph targets + skeletal animation on the GPU, then Möbius-transform
+//! edge midpoints → deformed medians → LOD per edge.
 
 use glow::HasContext;
 
-/// Per-face input: 3 control point positions (quaternions w,x,y,z)
-/// = 12 floats per face.
-pub const FLOATS_PER_FACE_INPUT: usize = 12;
-
-/// Pre-baked animation sequence stored on GPU.
-/// All frames' vertex positions packed into one buffer.
-/// GPU indexes by frame_index * num_vertices + vertex_index.
-pub struct AnimationSequence {
-    pub num_frames: usize,
-    pub num_vertices: usize,
-    pub num_faces: usize,
-    /// Flat f32 buffer: [frame0_vert0_x, y, z, frame0_vert1_x, ...]
-    /// Size: num_frames * num_vertices * 3
-    pub positions: Vec<f32>,
-    /// Face indices: [face0_v0, v1, v2, face1_v0, ...] — 3 ints per face
-    pub face_indices: Vec<u32>,
-}
-
 /// Per-face output: atlas_index + perm_index = 2 floats.
-/// Face normals computed on main thread GPU (no worker readback needed).
 pub const FLOATS_PER_FACE_OUTPUT: usize = 2;
 
-/// Transform feedback compute pipeline for LOD calculation.
+/// Transform feedback compute pipeline for per-frame LOD calculation.
+///
+/// Supports three animation modes (all on the GPU):
+/// - **Static**: reads rest-pose positions directly
+/// - **Morph targets**: applies weighted morph deltas to rest-pose
+/// - **Skeletal**: applies joint matrix skinning after morph
+///
+/// The shader mirrors the rendering vertex shader's animation pipeline:
+/// rest-pose → morph → skin → Möbius → LOD.
 pub struct LodCompute {
     program: glow::Program,
     vao: glow::VertexArray,
-    input_buf: glow::Buffer,  // face indices (3 floats per face)
+    input_buf: glow::Buffer,
     output_buf: glow::Buffer,
     tf: glow::TransformFeedback,
-    pos_texture: Option<glow::Texture>, // prebaked positions
-    lut_texture: Option<glow::Texture>, // exponent triple → atlas index
+
+    // Textures — all RGBA32F unless noted
+    pos_texture: Option<glow::Texture>,      // rest-pose positions (static)
+    lut_texture: Option<glow::Texture>,      // atlas LUT (R8, static)
+    skinning_texture: Option<glow::Texture>, // joint indices + weights (static)
+    joints_texture: Option<glow::Texture>,   // joint matrices (per-frame)
+    morph_texture: Option<glow::Texture>,    // morph deltas (static)
+    morph_wt_texture: Option<glow::Texture>, // morph weights (per-frame)
+
+    // Sampler uniform locations
     pos_loc: Option<glow::UniformLocation>,
     lut_loc: Option<glow::UniformLocation>,
+    skinning_loc: Option<glow::UniformLocation>,
+    joints_loc: Option<glow::UniformLocation>,
+    morph_deltas_loc: Option<glow::UniformLocation>,
+    morph_wt_loc: Option<glow::UniformLocation>,
+
+    // Scalar uniforms
     mob_a_loc: glow::UniformLocation,
     mob_b_loc: glow::UniformLocation,
     mob_c_loc: glow::UniformLocation,
@@ -50,182 +54,20 @@ pub struct LodCompute {
     vp_matrix_loc: glow::UniformLocation,
     vp_width_loc: glow::UniformLocation,
     vp_height_loc: glow::UniformLocation,
-    num_verts_loc: glow::UniformLocation,
-    frame_loc: glow::UniformLocation,
+    num_verts_loc: Option<glow::UniformLocation>,
+    num_joints_loc: Option<glow::UniformLocation>,
+    num_morph_loc: Option<glow::UniformLocation>,
+
     max_faces: usize,
-    /// True once persistent GL state (program, VAO, TF, textures) is bound.
-    /// After first bind, only uniforms need updating per frame.
     bound: bool,
 }
 
-const LOD_COMPUTE_VS: &str = r#"#version 300 es
-precision highp float;
-
-// Per-face input: 3 vertex indices (packed as ivec3 via float attrib)
-layout(location = 0) in vec3 face_indices;
-
-// All vertex positions for all frames: sampled via texelFetch
-// Layout: texel (vertex_index + frame * num_vertices) = vec4(x, y, z, 0)
-uniform highp sampler2D u_positions;
-uniform int u_num_vertices;
-uniform int u_frame;
-
-// Möbius transform: M(q) = (a*q + b) * (c*q + d)^{-1}
-// Stored as 4 quaternions
-uniform vec4 mob_a;
-uniform vec4 mob_b;
-uniform vec4 mob_c;
-uniform vec4 mob_d;
-
-uniform float density;
-uniform float mesh_radius;
-uniform float min_px;        // minimum pixels per subdivision (0 = no attenuation)
-uniform mat4 vp_matrix;      // view-projection matrix for screen-space projection
-uniform float vp_width;      // viewport width in pixels
-uniform float vp_height;     // viewport height in pixels
-uniform highp sampler2D u_atlas_lut; // exponent triple → atlas index (32×32 R8)
-
-// Transform feedback outputs: classification only
-out float out_atlas_index;
-out float out_perm_index;
-
-// Quaternion multiply
-vec4 qmul(vec4 a, vec4 b) {
-    return vec4(
-        a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
-        a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
-        a.x*b.z - a.y*b.w + a.z*b.x + a.w*b.y,
-        a.x*b.w + a.y*b.z - a.z*b.y + a.w*b.x
-    );
-}
-
-// Quaternion inverse: conj(q) / |q|^2
-vec4 qinv(vec4 q) {
-    float n = dot(q, q);
-    return vec4(q.x, -q.yzw) / max(n, 1e-20);
-}
-
-// Möbius transform of a pure quaternion point
-vec3 mobius(vec3 p) {
-    vec4 q = vec4(0.0, p);
-    vec4 top = qmul(mob_a, q) + mob_b;  // a*q + b
-    vec4 bot = qmul(mob_c, q) + mob_d;  // c*q + d
-    vec4 result = qmul(top, qinv(bot));
-    return result.yzw;
-}
-
-// Snap to nearest power of 2 (simplified — no hysteresis)
-float snap_pow2(float v) {
-    return exp2(round(log2(max(v, 1.0))));
-}
-
-vec3 fetch_pos(int vertex_id) {
-    int idx = vertex_id + u_frame * u_num_vertices;
-    // 2D texture: pack linearly, width = 4096
-    int tx = idx % 4096;
-    int ty = idx / 4096;
-    return texelFetch(u_positions, ivec2(tx, ty), 0).xyz;
-}
-
-void main() {
-    // Local variables for intermediate LOD/median computation
-    float out_lod_a, out_lod_b, out_lod_c;
-    float out_median_a, out_median_b, out_median_c;
-
-    // Fetch vertex positions from prebaked texture
-    vec3 p0 = fetch_pos(int(face_indices.x));
-    vec3 p1 = fetch_pos(int(face_indices.y));
-    vec3 p2 = fetch_pos(int(face_indices.z));
-
-    // Edge midpoints in world space
-    vec3 mid_a = (p1 + p2) * 0.5;  // midpoint of edge BC (opposite v0)
-    vec3 mid_b = (p0 + p2) * 0.5;  // midpoint of edge AC (opposite v1)
-    vec3 mid_c = (p0 + p1) * 0.5;  // midpoint of edge AB (opposite v2)
-
-    // Deformed positions
-    vec3 d0 = mobius(p0);
-    vec3 d1 = mobius(p1);
-    vec3 d2 = mobius(p2);
-    vec3 dm_a = mobius(mid_a);
-    vec3 dm_b = mobius(mid_b);
-    vec3 dm_c = mobius(mid_c);
-
-    // Deformed medians
-    out_median_a = distance(d0, dm_a);
-    out_median_b = distance(d1, dm_b);
-    out_median_c = distance(d2, dm_c);
-
-    float target_size = mesh_radius / density;
-
-    // LODs from medians (average of two adjacent medians per edge)
-    float raw_a = (out_median_b + out_median_c) * 0.5 / target_size;
-    float raw_b = (out_median_a + out_median_c) * 0.5 / target_size;
-    float raw_c = (out_median_a + out_median_b) * 0.5 / target_size;
-
-    out_lod_a = clamp(snap_pow2(raw_a), 2.0, 512.0);
-    out_lod_b = clamp(snap_pow2(raw_b), 2.0, 512.0);
-    out_lod_c = clamp(snap_pow2(raw_c), 2.0, 512.0);
-
-    // Screen-space attenuation: project deformed vertices to screen,
-    // measure per-edge pixel length, reduce LOD when sub-pixel.
-    if (min_px > 0.0) {
-        // Project deformed positions to screen pixels
-        vec4 c0 = vp_matrix * vec4(d0, 1.0);
-        vec4 c1 = vp_matrix * vec4(d1, 1.0);
-        vec4 c2 = vp_matrix * vec4(d2, 1.0);
-        vec2 s0 = (c0.xy / max(abs(c0.w), 0.001)) * vec2(vp_width, vp_height) * 0.5;
-        vec2 s1 = (c1.xy / max(abs(c1.w), 0.001)) * vec2(vp_width, vp_height) * 0.5;
-        vec2 s2 = (c2.xy / max(abs(c2.w), 0.001)) * vec2(vp_width, vp_height) * 0.5;
-
-        // Screen-space edge lengths
-        float px_a = distance(s1, s2); // edge BC
-        float px_b = distance(s0, s2); // edge AC
-        float px_c = distance(s0, s1); // edge AB
-
-        // Attenuate: if pixels/LOD < min_px, reduce LOD
-        if (px_a / out_lod_a < min_px) out_lod_a = clamp(snap_pow2(px_a / min_px), 2.0, 512.0);
-        if (px_b / out_lod_b < min_px) out_lod_b = clamp(snap_pow2(px_b / min_px), 2.0, 512.0);
-        if (px_c / out_lod_c < min_px) out_lod_c = clamp(snap_pow2(px_c / min_px), 2.0, 512.0);
-    }
-
-    // Compute atlas index from LOD exponents
-    int ea = int(log2(out_lod_a));
-    int eb = int(log2(out_lod_b));
-    int ec = int(log2(out_lod_c));
-
-    // Sort to canonical form + determine S3 permutation
-    int sa, sb, sc;
-    int perm;
-    if (ea <= eb && eb <= ec)      { sa=ea; sb=eb; sc=ec; perm=0; }
-    else if (ea <= ec && ec <= eb)  { sa=ea; sb=ec; sc=eb; perm=1; }
-    else if (eb <= ea && ea <= ec)  { sa=eb; sb=ea; sc=ec; perm=2; }
-    else if (eb <= ec && ec <= ea)  { sa=eb; sb=ec; sc=ea; perm=4; }
-    else if (ec <= ea && ea <= eb)  { sa=ec; sb=ea; sc=eb; perm=3; }
-    else                            { sa=ec; sb=eb; sc=ea; perm=5; }
-
-    // LUT lookup: key = sa + sb*10 + sc*100, stored in 40×30 texture
-    int key = sa + sb * 10 + sc * 100;
-    int lut_x = key % 40;
-    int lut_y = key / 40;
-    out_atlas_index = texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0;
-    out_perm_index = float(perm);
-
-    gl_Position = vec4(0.0);
-}
-"#;
-
-// Minimal fragment shader (required by WebGL2 even with transform feedback)
-const LOD_COMPUTE_FS: &str = r#"#version 300 es
-precision lowp float;
-out vec4 dummy;
-void main() { dummy = vec4(0.0); }
-"#;
+const LOD_COMPUTE_VS: &str = include_str!("../shaders/lod_compute.vert.glsl");
+const LOD_COMPUTE_FS: &str = include_str!("../shaders/lod_compute.frag.glsl");
 
 impl LodCompute {
-    /// Create the LOD compute pipeline.
     pub fn new(gl: &glow::Context, max_faces: usize) -> Result<Self, String> {
         unsafe {
-            // Compile shaders
             let vs = compile_shader(gl, glow::VERTEX_SHADER, LOD_COMPUTE_VS)?;
             let fs = compile_shader(gl, glow::FRAGMENT_SHADER, LOD_COMPUTE_FS)?;
 
@@ -233,7 +75,6 @@ impl LodCompute {
             gl.attach_shader(program, vs);
             gl.attach_shader(program, fs);
 
-            // Set transform feedback varyings BEFORE linking
             gl.transform_feedback_varyings(
                 program,
                 &["out_atlas_index", "out_perm_index"],
@@ -250,43 +91,33 @@ impl LodCompute {
             gl.delete_shader(vs);
             gl.delete_shader(fs);
 
-            // Get uniform locations
-            let mob_a_loc = gl.get_uniform_location(program, "mob_a")
-                .ok_or("mob_a uniform not found")?;
-            let mob_b_loc = gl.get_uniform_location(program, "mob_b")
-                .ok_or("mob_b uniform not found")?;
-            let mob_c_loc = gl.get_uniform_location(program, "mob_c")
-                .ok_or("mob_c uniform not found")?;
-            let mob_d_loc = gl.get_uniform_location(program, "mob_d")
-                .ok_or("mob_d uniform not found")?;
-            let density_loc = gl.get_uniform_location(program, "density")
-                .ok_or("density uniform not found")?;
-            let mesh_radius_loc = gl.get_uniform_location(program, "mesh_radius")
-                .ok_or("mesh_radius uniform not found")?;
-            let min_px_loc = gl.get_uniform_location(program, "min_px")
-                .ok_or("min_px uniform not found")?;
-            let vp_matrix_loc = gl.get_uniform_location(program, "vp_matrix")
-                .ok_or("vp_matrix uniform not found")?;
-            let vp_width_loc = gl.get_uniform_location(program, "vp_width")
-                .ok_or("vp_width uniform not found")?;
-            let vp_height_loc = gl.get_uniform_location(program, "vp_height")
-                .ok_or("vp_height uniform not found")?;
-            let num_verts_loc = gl.get_uniform_location(program, "u_num_vertices")
-                .ok_or("u_num_vertices uniform not found")?;
-            let frame_loc = gl.get_uniform_location(program, "u_frame")
-                .ok_or("u_frame uniform not found")?;
+            let req = |name: &str| -> Result<glow::UniformLocation, String> {
+                gl.get_uniform_location(program, name)
+                    .ok_or_else(|| format!("{name} uniform not found"))
+            };
 
-            // Create VAO + buffers
+            let mob_a_loc = req("mob_a")?;
+            let mob_b_loc = req("mob_b")?;
+            let mob_c_loc = req("mob_c")?;
+            let mob_d_loc = req("mob_d")?;
+            let density_loc = req("density")?;
+            let mesh_radius_loc = req("mesh_radius")?;
+            let min_px_loc = req("min_px")?;
+            let vp_matrix_loc = req("vp_matrix")?;
+            let vp_width_loc = req("vp_width")?;
+            let vp_height_loc = req("vp_height")?;
+            // These may be optimized out by the GLSL compiler when unused
+            let num_verts_loc = gl.get_uniform_location(program, "u_num_vertices");
+            let num_joints_loc = gl.get_uniform_location(program, "u_num_joints");
+            let num_morph_loc = gl.get_uniform_location(program, "u_num_morph_targets");
+
             let vao = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
             gl.bind_vertex_array(Some(vao));
 
             let input_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(input_buf));
             gl.buffer_data_size(glow::ARRAY_BUFFER,
-                (max_faces * 3 * 4) as i32, // 3 floats (face indices) per face
-                glow::STATIC_DRAW);
-
-            // 1 vec3 attribute: face_indices
+                (max_faces * 3 * 4) as i32, glow::STATIC_DRAW);
             gl.enable_vertex_attrib_array(0);
             gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
 
@@ -297,49 +128,49 @@ impl LodCompute {
                 glow::DYNAMIC_READ);
 
             let tf = gl.create_transform_feedback().map_err(|e| format!("{e}"))?;
-
             gl.bind_vertex_array(None);
 
             Ok(Self {
                 program, vao, input_buf, output_buf, tf,
-                pos_texture: None,
-                lut_texture: None,
+                pos_texture: None, lut_texture: None,
+                skinning_texture: None, joints_texture: None,
+                morph_texture: None, morph_wt_texture: None,
                 pos_loc: gl.get_uniform_location(program, "u_positions"),
                 lut_loc: gl.get_uniform_location(program, "u_atlas_lut"),
+                skinning_loc: gl.get_uniform_location(program, "u_skinning"),
+                joints_loc: gl.get_uniform_location(program, "u_joints"),
+                morph_deltas_loc: gl.get_uniform_location(program, "u_morph_deltas"),
+                morph_wt_loc: gl.get_uniform_location(program, "u_morph_wt"),
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
                 min_px_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
-                num_verts_loc, frame_loc,
+                num_verts_loc, num_joints_loc, num_morph_loc,
                 max_faces,
                 bound: false,
             })
         }
     }
 
-    /// Upload atlas LUT: maps exponent triples to atlas indices.
-    /// `lut`: up to 1200 u8 values. key = exp_a + exp_b*10 + exp_c*100.
-    /// Stored as 40×30 R8 texture (handles exponents up to 10).
+    // --- Static data uploads (called once on model load) ---
+
+    /// Upload atlas LUT: exponent triples → atlas indices.
     pub fn upload_atlas_lut(&mut self, gl: &glow::Context, lut: &[u8]) {
         unsafe {
             if let Some(old) = self.lut_texture { gl.delete_texture(old); }
             let tex = gl.create_texture().unwrap();
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            // Pad to 40×30 = 1200
             let mut data = vec![255u8; 1200];
             for (i, &v) in lut.iter().take(1200).enumerate() { data[i] = v; }
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32,
                 40, 30, 0, glow::RED, glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(Some(&data)));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            set_nearest(gl);
             self.lut_texture = Some(tex);
-            self.bound = false; // new texture, rebind next frame
+            self.bound = false;
         }
     }
 
-    /// Upload face indices (3 floats per face — vertex indices as floats for attrib).
+    /// Upload face indices (3 floats per face — vertex indices as floats).
     pub fn upload_face_indices(&self, gl: &glow::Context, indices: &[f32]) {
         unsafe {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.input_buf));
@@ -348,25 +179,20 @@ impl LodCompute {
         }
     }
 
-    /// Upload prebaked positions as a float texture.
-    /// `positions`: flat [x,y,z, x,y,z, ...] for all vertices × all frames.
+    /// Upload rest-pose positions as a float texture.
+    /// `positions`: flat [x,y,z, ...] for all vertices (single frame).
     /// Packed into a 4096-wide RGBA32F texture.
-    pub fn upload_positions_texture(&mut self, gl: &glow::Context, positions: &[f32], num_vertices: usize, num_frames: usize) {
+    pub fn upload_positions_texture(&mut self, gl: &glow::Context, positions: &[f32], num_vertices: usize) {
         unsafe {
-            // Pack xyz into RGBA (w=0) for texelFetch
-            let total = num_vertices * num_frames;
-            let mut rgba = vec![0.0f32; total * 4];
-            for i in 0..total {
+            let mut rgba = vec![0.0f32; num_vertices * 4];
+            for i in 0..num_vertices {
                 rgba[i*4]   = positions[i*3];
                 rgba[i*4+1] = positions[i*3+1];
                 rgba[i*4+2] = positions[i*3+2];
-                rgba[i*4+3] = 0.0;
             }
 
             let width = 4096;
-            let height = (total + width - 1) / width;
-
-            // Pad to full texture size
+            let height = (num_vertices + width - 1) / width;
             rgba.resize(width * height * 4, 0.0);
 
             if let Some(old) = self.pos_texture { gl.delete_texture(old); }
@@ -376,45 +202,144 @@ impl LodCompute {
                 width as i32, height as i32, 0,
                 glow::RGBA, glow::FLOAT,
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            set_nearest(gl);
             self.pos_texture = Some(tex);
-            self.bound = false; // new texture, rebind next frame
+            self.bound = false;
         }
     }
 
-    /// Upload per-face control points (3 quaternions × 4 floats = 12 floats per face).
-    /// DEPRECATED: use upload_face_indices + upload_positions_texture instead.
-    pub fn upload_control_points(&self, gl: &glow::Context, data: &[f32]) {
+    /// Upload per-vertex skinning data (joint indices + weights).
+    /// Same layout as the rendering path: RGBA32F, width = num_vertices, height = 2.
+    /// Row 0: joint indices (as f32), Row 1: joint weights.
+    pub fn upload_skinning_texture(
+        &mut self, gl: &glow::Context,
+        joint_indices: &[[u16; 4]], joint_weights: &[[f32; 4]],
+    ) {
+        let nv = joint_indices.len();
+        let mut data = vec![0.0f32; nv * 4 * 2];
+        for (i, (ji, jw)) in joint_indices.iter().zip(joint_weights.iter()).enumerate() {
+            data[i*4]     = ji[0] as f32;
+            data[i*4 + 1] = ji[1] as f32;
+            data[i*4 + 2] = ji[2] as f32;
+            data[i*4 + 3] = ji[3] as f32;
+            let row1 = nv * 4;
+            data[row1 + i*4]     = jw[0];
+            data[row1 + i*4 + 1] = jw[1];
+            data[row1 + i*4 + 2] = jw[2];
+            data[row1 + i*4 + 3] = jw[3];
+        }
         unsafe {
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.input_buf));
-            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0,
-                bytemuck_cast_slice(data));
+            if let Some(old) = self.skinning_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                nv as i32, 2, 0, glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&data))));
+            set_nearest(gl);
+            self.skinning_texture = Some(tex);
+            self.bound = false;
         }
     }
 
-    /// Run the compute pass (legacy — uses uploaded control points directly).
-    pub fn compute(
-        &mut self, gl: &glow::Context, num_faces: usize,
-        mobius: [f32; 16], density: f32, mesh_radius: f32,
-        min_px: f32, vp_matrix: &[f32; 16], vp_width: f32, vp_height: f32,
-    ) -> usize {
-        self.compute_with_texture(gl, num_faces, 0, 0, mobius, density, mesh_radius, min_px, vp_matrix, vp_width, vp_height)
+    /// Upload morph target delta texture (static — deltas don't change).
+    /// `deltas`: flat [dx, dy, dz, ...] for all vertices × all targets.
+    /// Layout: RGBA32F, width = num_vertices, height = num_targets.
+    pub fn upload_morph_deltas(
+        &mut self, gl: &glow::Context,
+        deltas: &[f32], num_vertices: usize, num_targets: usize,
+    ) {
+        let mut rgba = vec![0.0f32; num_vertices * num_targets * 4];
+        for t in 0..num_targets {
+            for v in 0..num_vertices {
+                let src = (t * num_vertices + v) * 3;
+                let dst = (t * num_vertices + v) * 4;
+                if src + 2 < deltas.len() {
+                    rgba[dst]     = deltas[src];
+                    rgba[dst + 1] = deltas[src + 1];
+                    rgba[dst + 2] = deltas[src + 2];
+                }
+            }
+        }
+        unsafe {
+            if let Some(old) = self.morph_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                num_vertices as i32, num_targets as i32, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
+            set_nearest(gl);
+            self.morph_texture = Some(tex);
+            self.bound = false;
+        }
     }
 
-    /// Run the compute pass with prebaked position texture.
-    /// `frame`: which animation frame to read from the texture.
-    /// `num_vertices`: vertices per frame (for texture indexing).
-    /// Persistent GL state (program, textures, VAO, TF) is bound once; only
-    /// uniforms are updated per frame.
-    pub fn compute_with_texture(
+    // --- Per-frame animation uploads ---
+
+    /// Upload joint matrices for the current frame.
+    /// `matrices`: flat column-major f32, num_joints × 16 floats.
+    /// Stored as RGBA32F texture: width = 4, height = num_joints.
+    /// Each row = one joint, 4 texels = 4 matrix columns.
+    pub fn upload_joint_matrices(&mut self, gl: &glow::Context, matrices: &[f32]) {
+        let num_joints = matrices.len() / 16;
+        if num_joints == 0 { return; }
+
+        // Already in the right layout: 4 vec4s per joint = width 4, height num_joints
+        unsafe {
+            if let Some(old) = self.joints_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                4, num_joints as i32, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(matrices))));
+            set_nearest(gl);
+            self.joints_texture = Some(tex);
+            self.bound = false;
+        }
+    }
+
+    /// Upload morph weights for the current frame.
+    /// `weights`: one f32 per morph target.
+    /// Stored as RGBA32F texture: width = num_targets, height = 1.
+    pub fn upload_morph_weights(&mut self, gl: &glow::Context, weights: &[f32]) {
+        if weights.is_empty() { return; }
+
+        // Pack as RGBA (only .r used per texel, but RGBA32F is the reliable format)
+        let mut rgba = vec![0.0f32; weights.len() * 4];
+        for (i, &w) in weights.iter().enumerate() {
+            rgba[i * 4] = w;
+        }
+        unsafe {
+            if let Some(old) = self.morph_wt_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                weights.len() as i32, 1, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
+            set_nearest(gl);
+            self.morph_wt_texture = Some(tex);
+            self.bound = false;
+        }
+    }
+
+    // --- Compute pass ---
+
+    /// Run the LOD compute pass.
+    ///
+    /// Reads rest-pose positions, applies animation (morph + skeletal) on the GPU,
+    /// then Möbius-transforms and computes per-face LOD classification.
+    ///
+    /// `num_joints` / `num_morph_targets`: set to 0 to disable that animation type.
+    /// Animation textures must have been uploaded before calling this.
+    pub fn compute_lods(
         &mut self,
         gl: &glow::Context,
         num_faces: usize,
-        frame: u32,
         num_vertices: u32,
+        num_joints: u32,
+        num_morph_targets: u32,
         mobius: [f32; 16],
         density: f32,
         mesh_radius: f32,
@@ -425,24 +350,28 @@ impl LodCompute {
     ) -> usize {
         let n = num_faces.min(self.max_faces);
         unsafe {
-            // Bind persistent state once — this context only does LOD compute
             if !self.bound {
                 gl.use_program(Some(self.program));
 
-                if let Some(tex) = self.pos_texture {
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    if let Some(ref loc) = self.pos_loc {
-                        gl.uniform_1_i32(Some(loc), 0);
+                // Bind all textures to fixed texture units
+                let mut unit = 0u32;
+                let bind_tex = |gl: &glow::Context, unit: &mut u32, tex: Option<glow::Texture>, loc: &Option<glow::UniformLocation>| {
+                    gl.active_texture(glow::TEXTURE0 + *unit);
+                    if let Some(t) = tex {
+                        gl.bind_texture(glow::TEXTURE_2D, Some(t));
                     }
-                }
-                if let Some(tex) = self.lut_texture {
-                    gl.active_texture(glow::TEXTURE1);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    if let Some(ref loc) = self.lut_loc {
-                        gl.uniform_1_i32(Some(loc), 1);
+                    if let Some(ref l) = loc {
+                        gl.uniform_1_i32(Some(l), *unit as i32);
                     }
-                }
+                    *unit += 1;
+                };
+
+                bind_tex(gl, &mut unit, self.pos_texture, &self.pos_loc);       // unit 0
+                bind_tex(gl, &mut unit, self.lut_texture, &self.lut_loc);        // unit 1
+                bind_tex(gl, &mut unit, self.skinning_texture, &self.skinning_loc); // unit 2
+                bind_tex(gl, &mut unit, self.joints_texture, &self.joints_loc);  // unit 3
+                bind_tex(gl, &mut unit, self.morph_texture, &self.morph_deltas_loc); // unit 4
+                bind_tex(gl, &mut unit, self.morph_wt_texture, &self.morph_wt_loc); // unit 5
 
                 gl.bind_vertex_array(Some(self.vao));
                 gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf));
@@ -452,9 +381,27 @@ impl LodCompute {
                 self.bound = true;
             }
 
-            // Per-frame: only update uniforms + draw
-            gl.uniform_1_i32(Some(&self.frame_loc), frame as i32);
-            gl.uniform_1_i32(Some(&self.num_verts_loc), num_vertices as i32);
+            // Per-frame uniforms
+            if let Some(ref loc) = self.num_verts_loc {
+                gl.uniform_1_i32(Some(loc), num_vertices as i32);
+            }
+            if let Some(ref loc) = self.num_joints_loc {
+                gl.uniform_1_i32(Some(loc), num_joints as i32);
+            }
+            if let Some(ref loc) = self.num_morph_loc {
+                gl.uniform_1_i32(Some(loc), num_morph_targets as i32);
+            }
+
+            // Re-bind per-frame textures (joints + morph weights change each frame)
+            if let Some(tex) = self.joints_texture {
+                gl.active_texture(glow::TEXTURE3);
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+            if let Some(tex) = self.morph_wt_texture {
+                gl.active_texture(glow::TEXTURE5);
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+
             gl.uniform_4_f32(Some(&self.mob_a_loc), mobius[0], mobius[1], mobius[2], mobius[3]);
             gl.uniform_4_f32(Some(&self.mob_b_loc), mobius[4], mobius[5], mobius[6], mobius[7]);
             gl.uniform_4_f32(Some(&self.mob_c_loc), mobius[8], mobius[9], mobius[10], mobius[11]);
@@ -475,18 +422,11 @@ impl LodCompute {
         n
     }
 
-    /// Wait for GPU compute to finish, then read back results.
-    /// Call this as LATE as possible — do CPU work between compute() and read_back().
+    /// Read back LOD results after compute.
     pub fn read_back(&self, gl: &glow::Context, num_faces: usize) -> Vec<f32> {
         let size = num_faces * FLOATS_PER_FACE_OUTPUT;
         let mut result = vec![0.0f32; size];
         unsafe {
-            // Fence sync — wait for transform feedback to complete.
-            // flush() in compute() kicked off the GPU work, this waits for it.
-            // WebGL2 MAX_CLIENT_WAIT_TIMEOUT_WEBGL = 0 (can't block).
-            // Just do the readback — getBufferSubData implicitly waits.
-            // The flush() in compute() ensures the GPU started the work.
-
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf));
             gl.get_buffer_sub_data(glow::TRANSFORM_FEEDBACK_BUFFER, 0,
                 bytemuck_cast_slice_mut(&mut result));
@@ -501,8 +441,21 @@ impl LodCompute {
             gl.delete_buffer(self.input_buf);
             gl.delete_buffer(self.output_buf);
             gl.delete_transform_feedback(self.tf);
+            if let Some(t) = self.pos_texture { gl.delete_texture(t); }
+            if let Some(t) = self.lut_texture { gl.delete_texture(t); }
+            if let Some(t) = self.skinning_texture { gl.delete_texture(t); }
+            if let Some(t) = self.joints_texture { gl.delete_texture(t); }
+            if let Some(t) = self.morph_texture { gl.delete_texture(t); }
+            if let Some(t) = self.morph_wt_texture { gl.delete_texture(t); }
         }
     }
+}
+
+unsafe fn set_nearest(gl: &glow::Context) {
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
 }
 
 fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<glow::Shader, String> {
@@ -519,8 +472,8 @@ fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<
     }
 }
 
-fn bytemuck_cast_slice(data: &[f32]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
+fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * std::mem::size_of::<T>()) }
 }
 
 fn bytemuck_cast_slice_mut(data: &mut [f32]) -> &mut [u8] {

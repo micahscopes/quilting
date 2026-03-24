@@ -7,7 +7,7 @@ members = [
     "crates/quilting-renderer",
     "crates/quilting-shaders",
     "crates/quilting-wasm",
-    "crates/quilting-spacetime",
+
     "crates/trunk-stub",
 ]
 resolver = "2"
