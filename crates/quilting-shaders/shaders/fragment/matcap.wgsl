@@ -4,7 +4,8 @@
 #import quilting::lighting::matcap::matcap_shade
 
 struct MatcapUniforms {
-    has_matcap_tex: f32,
+    // 0.0 = LOD heatmap, 1.0 = texture matcap, 2.0 = procedural matcap (neutral)
+    mode: f32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
@@ -47,10 +48,17 @@ fn fs_matcap(in: FragInput) -> @location(0) vec4<f32> {
     // Matcap UV: map view-space normal to texture coordinates
     let uv = n.xy * 0.48 + 0.5;
 
-    if matcap_u.has_matcap_tex > 0.5 {
+    if matcap_u.mode > 1.5 {
+        // Procedural matcap: neutral gray-blue base
+        let base = vec3<f32>(0.55, 0.55, 0.65);
+        let col = matcap_shade(n, base);
+        return vec4<f32>(col, in.fade);
+    } else if matcap_u.mode > 0.5 {
+        // Texture matcap
         let col = textureSample(matcap_tex, matcap_sampler, uv);
         return vec4<f32>(col.rgb, in.fade);
     } else {
+        // LOD heatmap
         let base = heatmap(in.density);
         let col = matcap_shade(n, base);
         return vec4<f32>(col, in.fade);

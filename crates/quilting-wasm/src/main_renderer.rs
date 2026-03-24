@@ -319,19 +319,13 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.renderer.begin_frame();
         state.renderer.joint_ubo().bind(gl);
 
-        // For matcap mode: bind placeholder white texture as matcap (unit 0 for the sampler)
-        // and set has_matcap_tex=1 so the shader samples from it → neutral white matcap shading.
-        // For LOD mode: use heatmap (has_matcap_tex=0).
-        let use_matcap_tex = !matches!(state.render_mode, RenderMode::Lod);
-        state.renderer.matcap_ubo().upload(gl, use_matcap_tex);
+        // Matcap UBO mode: 0=LOD heatmap, 1=texture matcap, 2=procedural matcap
+        let matcap_mode = match state.render_mode {
+            RenderMode::Lod => 0.0,
+            _ => 2.0, // procedural matcap for all other modes (until PBR is wired)
+        };
+        state.renderer.matcap_ubo().upload(gl, matcap_mode);
         state.renderer.matcap_ubo().bind(gl);
-        if use_matcap_tex {
-            // Bind placeholder 1x1 white texture to matcap sampler (unit 0 for fragment binding 2/3)
-            unsafe {
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(state.texture_cache.placeholder()));
-            }
-        }
 
         state.renderer.render(state.render_mode, &camera, &render_batches);
         state.renderer.end_frame();

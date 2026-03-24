@@ -460,9 +460,10 @@ impl MatcapUniformBuf {
         }
     }
 
-    pub fn upload(&self, gl: &glow::Context, has_matcap_tex: bool) {
+    /// mode: 0.0 = LOD heatmap, 1.0 = texture matcap, 2.0 = procedural matcap
+    pub fn upload(&self, gl: &glow::Context, mode: f32) {
         let mut data = [0u8; 16];
-        let val: f32 = if has_matcap_tex { 1.0 } else { 0.0 };
+        let val: f32 = mode;
         data[0..4].copy_from_slice(&val.to_le_bytes());
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
