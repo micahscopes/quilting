@@ -195,10 +195,8 @@ function frame(ts) {
     if (meshInfo.duration > 0) animTime = animTime % meshInfo.duration;
     // Animation pose: every frame (lightweight, just uploads UBO)
     tickAnimation(animTime);
-    // LOD recompute: debounced (expensive, involves GPU readback on worker)
-    if (!lodDebounceTimer) {
-      lodDebounceTimer = setTimeout(() => { lodDebounceTimer = null; recomputeLods(); }, 200);
-    }
+    // LOD recompute: disabled during animation (GPU readback stalls pipeline)
+    // TODO: re-enable with proper async readback or compute-only LOD
   }
 
   const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;

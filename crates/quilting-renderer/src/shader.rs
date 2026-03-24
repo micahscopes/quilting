@@ -156,14 +156,20 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
             gl.uniform_block_binding(program, idx, WIRE_UNIFORMS_BINDING);
         }
 
-        // PBR fragment uniform block: enumerate all blocks and bind any with "Pbr"/"pbr".
+        // Enumerate ALL uniform blocks and bind appropriately.
         {
             let num_blocks = gl.get_program_parameter_i32(program, glow::ACTIVE_UNIFORM_BLOCKS);
+            let mut all_names = Vec::new();
             for i in 0..(num_blocks as u32) {
                 let name = gl.get_active_uniform_block_name(program, i);
+                all_names.push(name.clone());
+                // Auto-bind by name pattern
                 if name.contains("Pbr") || name.contains("pbr") {
                     gl.uniform_block_binding(program, i, PBR_UNIFORMS_BINDING);
                 }
+            }
+            if num_blocks > 2 {
+                log_info(&format!("All {} UBO blocks: {:?}", num_blocks, all_names));
             }
         }
 
