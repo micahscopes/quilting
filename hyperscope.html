@@ -2180,15 +2180,16 @@ async function uploadAnimationPose(t) {
   const pose = resp.pose;
   if (!pose) return;
 
-  // Joint matrices → UBO
+  // Joint matrices → UBO (clamp to 128 joints max — shader/UBO limit)
   const matrices = pose.matrices;
   if (matrices && matrices.length > 0) {
-    const numJoints = matrices.length / 16;
-    const uboData = new ArrayBuffer(16 + matrices.byteLength);
+    const numJoints = Math.min(matrices.length / 16, 128);
+    const clampedBytes = numJoints * 16 * 4; // 16 floats * 4 bytes per joint
+    const uboData = new ArrayBuffer(16 + clampedBytes);
     const view = new DataView(uboData);
     view.setInt32(0, numJoints, true);
     view.setInt32(4, window._skinTexW || 2048, true);
-    new Float32Array(uboData, 16).set(matrices);
+    new Float32Array(uboData, 16).set(matrices.subarray(0, numJoints * 16));
     gl.bindBuffer(gl.UNIFORM_BUFFER, jointUbo);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, new Uint8Array(uboData));
   }
@@ -2871,8 +2872,9 @@ function frame() {
     $('time-v').textContent = frame._animTime.toFixed(2);
     uploadAnimationPose(frame._animTime).catch(e => console.warn('Joint eval failed:', e));
 
-    // Per-frame LOD recompute (throttled — skip if a previous one is still in flight)
-    if (!lodRecomputeInFlight && cachedInstances) {
+    // Per-frame LOD recompute for animated models (throttled)
+    if (!lodRecomputeInFlight && cachedInstances && meshInfo &&
+        meshInfo.time_max > meshInfo.time_min) {
       lodRecomputeInFlight = true;
       recomputeAndRebuildLods().then(() => { lodRecomputeInFlight = false; });
     }
