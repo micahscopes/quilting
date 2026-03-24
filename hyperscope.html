@@ -2057,15 +2057,18 @@ async function setupGpuSkinning() {
   const faceLods = rp.face_lods; // 5 floats per face: [canon_a, canon_b, canon_c, perm_idx, parity]
 
   // Group faces by tessellation key (canonical LOD + permutation)
-  const groups = new Map(); // key → { faceIndices: [], parity, permIndex, lod }
+  const faceMats = window._baseFaceMaterials || [];
+  const groups = new Map();
   for (let fi = 0; fi < nf; fi++) {
     const lo = fi * 5;
     const ca = faceLods[lo], cb = faceLods[lo+1], cc = faceLods[lo+2];
     const permIdx = faceLods[lo+3];
     const parity = faceLods[lo+4];
-    const key = `${ca},${cb},${cc}/${permIdx}`;
+    const matIdx = (fi < faceMats.length && faceMats[fi] >= 0) ? faceMats[fi] : 0;
+    const key = `${ca},${cb},${cc}/${permIdx}/m${matIdx}`;
+    const tessKey = `${ca},${cb},${cc}/${permIdx}`;
     if (!groups.has(key)) {
-      groups.set(key, { faces: [], parity, permIndex: permIdx, lod: [ca, cb, cc] });
+      groups.set(key, { faces: [], parity, permIndex: permIdx, lod: [ca, cb, cc], materialIndex: matIdx, tessKey });
     }
     groups.get(key).faces.push(fi);
   }
@@ -2078,7 +2081,7 @@ async function setupGpuSkinning() {
   drawBatches = [];
 
   for (const [key, group] of groups) {
-    const tess = atlasBuffers.get(key) || tessCache.get(key);
+    const tess = atlasBuffers.get(group.tessKey) || tessCache.get(group.tessKey);
     if (!tess) continue; // skip LODs not in atlas
 
     // Pack instance data for this group's faces
@@ -2125,7 +2128,7 @@ async function setupGpuSkinning() {
       numInst: group.faces.length,
       lod: group.lod, wantedLod: group.lod, usedLod: group.lod,
       color: lodColor(group.lod),
-      parity: group.parity, permIndex: group.permIndex, materialIndex: 0,
+      parity: group.parity, permIndex: group.permIndex, materialIndex: group.materialIndex,
       instanceData: groupData, xformData: groupData,
       faceIndices: new Uint32Array(group.faces),
     });
@@ -2299,7 +2302,7 @@ function rebuildBatchesFromFaceLods(faceLods) {
       numInst: group.faces.length,
       lod: group.lod, wantedLod: group.lod, usedLod: group.lod,
       color: lodColor(group.lod),
-      parity: group.parity, permIndex: group.permIndex, materialIndex: 0,
+      parity: group.parity, permIndex: group.permIndex, materialIndex: group.materialIndex,
       instanceData: groupData, xformData: groupData,
       faceIndices: new Uint32Array(group.faces),
     });
