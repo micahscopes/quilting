@@ -124,6 +124,14 @@ canvas.addEventListener('drop', async e => {
   const file = e.dataTransfer.files[0];
   if (!file) return;
   const buf = await file.arrayBuffer();
+  // Store in sessionStorage so refresh can reload
+  try {
+    // Can't store ArrayBuffer in URL, but we can store the filename
+    // and serve it from disk if the server supports it
+    const url = new URL(location);
+    url.searchParams.set('glb', '/' + file.name);
+    history.replaceState(null, '', url);
+  } catch (e) {}
   await loadModel(buf, file.name);
 });
 
@@ -258,6 +266,15 @@ async function loadModel(buffer, filename) {
       matData[o+33] = bus[0]; matData[o+34] = bus[1]; matData[o+35] = m.base_uv_rotation || 0;
     }
     mr_setMaterials(matData, info.materials.length);
+    // Log first material for debugging
+    const m0 = info.materials[0];
+    console.info('PBR material 0:', {
+      base_color: m0.base_color, metallic: m0.metallic, roughness: m0.roughness,
+      has_bc_tex: m0.base_color_texture_index != null,
+      has_mr_tex: m0.metallic_roughness_texture_index != null,
+      has_normal_tex: m0.normal_texture_index != null,
+      unlit: m0.unlit,
+    });
   }
 
   // Upload glTF images to main-thread GL
@@ -426,16 +443,19 @@ for (const p of patchResp.patches) {
 $('stats').textContent = 'Atlas ready. Loading model...';
 requestAnimationFrame(frame);
 
-// Auto-load horse.glb
+// Auto-load from URL param or default to horse.glb
+const glbParam = new URLSearchParams(location.search).get('glb');
+const defaultModel = glbParam || '/horse.glb';
 try {
-  const resp = await fetch('/horse.glb');
+  const resp = await fetch(defaultModel);
   if (resp.ok) {
-    await loadModel(await resp.arrayBuffer(), 'horse.glb');
+    const name = defaultModel.split('/').pop();
+    await loadModel(await resp.arrayBuffer(), name);
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
   }
 } catch (e) {
-  console.warn('Could not auto-load horse.glb:', e);
+  console.warn(`Could not auto-load ${defaultModel}:`, e);
   $('stats').textContent = 'Drop a .glb file to load';
 }
 </script>
