@@ -403,13 +403,14 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         // Mode-specific UBO setup
         match state.render_mode {
             RenderMode::Pbr => {
-                // Bind PBR UBO — will be updated per-batch by material_index
-                // Upload first material as default, per-batch override happens in render loop
                 let default_mat = if !state.materials.is_empty() {
                     state.materials[0].clone()
                 } else {
                     PbrParams::default()
                 };
+                info!("PBR UBO: base_color={:?} metallic={} roughness={} has_bc_tex={} has_mr_tex={}",
+                    default_mat.base_color, default_mat.metallic, default_mat.roughness,
+                    default_mat.has_base_color_tex, default_mat.has_metallic_roughness_tex);
                 state.renderer.pbr_ubo().upload(gl, &default_mat);
                 state.renderer.pbr_ubo().bind(gl);
 
