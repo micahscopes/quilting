@@ -408,9 +408,14 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 } else {
                     PbrParams::default()
                 };
-                info!("PBR UBO: base_color={:?} metallic={} roughness={} has_bc_tex={} has_mr_tex={}",
-                    default_mat.base_color, default_mat.metallic, default_mat.roughness,
-                    default_mat.has_base_color_tex, default_mat.has_metallic_roughness_tex);
+                // Log PBR params once (use a static flag)
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    info!("PBR UBO: base_color={:?} metallic={} roughness={} has_bc_tex={} has_mr_tex={}",
+                        default_mat.base_color, default_mat.metallic, default_mat.roughness,
+                        default_mat.has_base_color_tex, default_mat.has_metallic_roughness_tex);
+                }
                 state.renderer.pbr_ubo().upload(gl, &default_mat);
                 state.renderer.pbr_ubo().bind(gl);
 

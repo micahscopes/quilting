@@ -118,6 +118,35 @@ canvas.addEventListener('wheel', e => {
 
 $('mode-sel').addEventListener('change', e => mr_setRenderMode(e.target.value));
 
+// IndexedDB for persisting dropped GLB files across refresh
+const IDB_NAME = 'hyperscope', IDB_STORE = 'glb';
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbPut(name, buf) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(buf, name);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGet(name) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(name);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 // File drop
 canvas.addEventListener('dragover', e => e.preventDefault());
 canvas.addEventListener('drop', async e => {
@@ -125,12 +154,10 @@ canvas.addEventListener('drop', async e => {
   const file = e.dataTransfer.files[0];
   if (!file) return;
   const buf = await file.arrayBuffer();
-  // Store in sessionStorage so refresh can reload
-  try {
-    const url = new URL(location);
-    url.searchParams.set('glb', file.name);
-    history.replaceState(null, '', url);
-  } catch (e) {}
+  await idbPut(file.name, buf);
+  const url = new URL(location);
+  url.searchParams.set('glb', file.name);
+  history.replaceState(null, '', url);
   await loadModel(buf, file.name);
 });
 
@@ -444,17 +471,22 @@ requestAnimationFrame(frame);
 
 // Auto-load from URL param or default to horse.glb
 const glbParam = new URLSearchParams(location.search).get('glb');
-const defaultModel = glbParam ? (glbParam.startsWith('/') || glbParam.startsWith('http') ? glbParam : '/' + glbParam) : '/horse.glb';
+const defaultName = glbParam || 'horse.glb';
 try {
-  const resp = await fetch(defaultModel);
-  if (resp.ok) {
-    const name = defaultModel.split('/').pop();
-    await loadModel(await resp.arrayBuffer(), name);
+  // Try IndexedDB first (for drag-dropped files), then fetch from server
+  let buf = await idbGet(defaultName);
+  if (!buf) {
+    const url = defaultName.startsWith('/') || defaultName.startsWith('http') ? defaultName : '/' + defaultName;
+    const resp = await fetch(url);
+    if (resp.ok) buf = await resp.arrayBuffer();
+  }
+  if (buf) {
+    await loadModel(buf, defaultName);
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
   }
 } catch (e) {
-  console.warn(`Could not auto-load ${defaultModel}:`, e);
+  console.warn(`Could not auto-load ${defaultName}:`, e);
   $('stats').textContent = 'Drop a .glb file to load';
 }
 </script>
