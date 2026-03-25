@@ -38,6 +38,13 @@ struct MainState {
     scene_color_fbo: Option<glow::Framebuffer>,
     scene_color_tex: Option<glow::Texture>,
     scene_color_size: (i32, i32),
+    // Gaussian-blurred scene color for rough transmission
+    blur_fbo: Option<glow::Framebuffer>,
+    blur_tex: Option<glow::Texture>,
+    blur_fbo2: Option<glow::Framebuffer>,
+    blur_tex2: Option<glow::Texture>,
+    blur_program: Option<glow::Program>,
+    blur_vao: Option<glow::VertexArray>,
 }
 
 struct GpuBatch {
@@ -46,6 +53,70 @@ struct GpuBatch {
     perm_index: i32,
     material_index: usize,
     lod: [u32; 3],
+}
+
+/// Create a separable Gaussian blur program (GLSL ES 300, not WGSL).
+fn create_blur_program(gl: &glow::Context) -> Result<(glow::Program, glow::VertexArray), String> {
+    unsafe {
+        let vs_src = "#version 300 es\n\
+            out vec2 v_uv;\n\
+            void main() {\n\
+                float x = float((gl_VertexID & 1) << 2) - 1.0;\n\
+                float y = float((gl_VertexID & 2) << 1) - 1.0;\n\
+                v_uv = vec2(x, y) * 0.5 + 0.5;\n\
+                gl_Position = vec4(x, y, 0.0, 1.0);\n\
+            }";
+        let fs_src = "#version 300 es\n\
+            precision highp float;\n\
+            uniform sampler2D u_tex;\n\
+            uniform vec2 u_dir;\n\
+            in vec2 v_uv;\n\
+            out vec4 o_color;\n\
+            void main() {\n\
+                vec3 c = texture(u_tex, v_uv).rgb * 0.227027;\n\
+                c += texture(u_tex, v_uv + u_dir * 1.384615).rgb * 0.316216;\n\
+                c += texture(u_tex, v_uv - u_dir * 1.384615).rgb * 0.316216;\n\
+                c += texture(u_tex, v_uv + u_dir * 3.230769).rgb * 0.070270;\n\
+                c += texture(u_tex, v_uv - u_dir * 3.230769).rgb * 0.070270;\n\
+                o_color = vec4(c, 1.0);\n\
+            }";
+
+        let vs = gl.create_shader(glow::VERTEX_SHADER).map_err(|e| format!("{e}"))?;
+        gl.shader_source(vs, vs_src);
+        gl.compile_shader(vs);
+        if !gl.get_shader_compile_status(vs) {
+            let log = gl.get_shader_info_log(vs);
+            return Err(format!("blur VS: {log}"));
+        }
+        let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| format!("{e}"))?;
+        gl.shader_source(fs, fs_src);
+        gl.compile_shader(fs);
+        if !gl.get_shader_compile_status(fs) {
+            let log = gl.get_shader_info_log(fs);
+            return Err(format!("blur FS: {log}"));
+        }
+        let prog = gl.create_program().map_err(|e| format!("{e}"))?;
+        gl.attach_shader(prog, vs);
+        gl.attach_shader(prog, fs);
+        gl.link_program(prog);
+        if !gl.get_program_link_status(prog) {
+            let log = gl.get_program_info_log(prog);
+            return Err(format!("blur link: {log}"));
+        }
+        gl.detach_shader(prog, vs); gl.delete_shader(vs);
+        gl.detach_shader(prog, fs); gl.delete_shader(fs);
+
+        // Set texture unit
+        gl.use_program(Some(prog));
+        if let Some(loc) = gl.get_uniform_location(prog, "u_tex") {
+            gl.uniform_1_i32(Some(&loc), 0);
+        }
+        gl.use_program(None);
+
+        let vao = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
+
+        Ok((prog, vao))
+    }
 }
 
 thread_local! {
@@ -112,6 +183,12 @@ pub fn mr_init(canvas_id: &str) -> bool {
             scene_color_fbo: None,
             scene_color_tex: None,
             scene_color_size: (0, 0),
+            blur_fbo: None,
+            blur_tex: None,
+            blur_fbo2: None,
+            blur_tex2: None,
+            blur_program: None,
+            blur_vao: None,
         });
     });
     info!("Renderer initialized on canvas '{}'", canvas_id);
@@ -649,11 +726,83 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
                         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
 
-                        // Bind scene color and generate mipmaps for roughness blur
+                        // --- Gaussian blur for rough transmission ---
+                        // Create blur resources if needed
+                        if state.blur_program.is_none() {
+                            if let Ok((prog, vao)) = create_blur_program(gl) {
+                                state.blur_program = Some(prog);
+                                state.blur_vao = Some(vao);
+                            }
+                        }
+                        let hw = vw / 2; let hh = vh / 2;
+                        // Create/resize half-res blur textures
+                        if state.blur_tex.is_none() || state.scene_color_size != (vw, vh) {
+                            // Cleanup old
+                            if let Some(f) = state.blur_fbo { gl.delete_framebuffer(f); }
+                            if let Some(t) = state.blur_tex { gl.delete_texture(t); }
+                            if let Some(f) = state.blur_fbo2 { gl.delete_framebuffer(f); }
+                            if let Some(t) = state.blur_tex2 { gl.delete_texture(t); }
+
+                            let make_rt = |w: i32, h: i32| -> (glow::Framebuffer, glow::Texture) {
+                                let t = gl.create_texture().unwrap();
+                                gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0,
+                                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                                let f = gl.create_framebuffer().unwrap();
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
+                                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(t), 0);
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                                (f, t)
+                            };
+                            let (f1, t1) = make_rt(hw, hh);
+                            let (f2, t2) = make_rt(hw, hh);
+                            state.blur_fbo = Some(f1); state.blur_tex = Some(t1);
+                            state.blur_fbo2 = Some(f2); state.blur_tex2 = Some(t2);
+                        }
+
+                        // Run 2-pass separable Gaussian blur (scene_color → blur_tex)
+                        if let (Some(prog), Some(vao)) = (state.blur_program, state.blur_vao) {
+                            gl.use_program(Some(prog));
+                            gl.bind_vertex_array(Some(vao));
+                            gl.disable(glow::DEPTH_TEST);
+
+                            let dir_loc = gl.get_uniform_location(prog, "u_dir");
+
+                            // Pass 1: horizontal (scene_color → blur_fbo)
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo);
+                            gl.viewport(0, 0, hw, hh);
+                            gl.active_texture(glow::TEXTURE0);
+                            gl.bind_texture(glow::TEXTURE_2D, Some(state.scene_color_tex.unwrap()));
+                            if let Some(ref loc) = dir_loc {
+                                gl.uniform_2_f32(Some(loc), 1.0 / hw as f32, 0.0);
+                            }
+                            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                            // Pass 2: vertical (blur_fbo → blur_fbo2)
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo2);
+                            gl.active_texture(glow::TEXTURE0);
+                            gl.bind_texture(glow::TEXTURE_2D, state.blur_tex);
+                            if let Some(ref loc) = dir_loc {
+                                gl.uniform_2_f32(Some(loc), 0.0, 1.0 / hh as f32);
+                            }
+                            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                            // Restore state
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                            gl.viewport(0, 0, vw, vh);
+                            gl.enable(glow::DEPTH_TEST);
+                            gl.use_program(Some(state.renderer.programs().pbr));
+                        }
+
+                        // Bind sharp (unit 8) and blurred (unit 9)
                         gl.active_texture(glow::TEXTURE0 + 8);
                         gl.bind_texture(glow::TEXTURE_2D, Some(state.scene_color_tex.unwrap()));
-                        // Note: generateMipmap removed — was causing blur on LOD 0.
-                        // Rough transmission blur will need a separate approach.
+                        gl.active_texture(glow::TEXTURE0 + 9);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(state.blur_tex2.unwrap_or(state.scene_color_tex.unwrap())));
                     }
                 }
 

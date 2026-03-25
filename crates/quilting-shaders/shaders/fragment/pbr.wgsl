@@ -93,6 +93,12 @@ var scene_color_tex: texture_2d<f32>;
 @group(0) @binding(19)
 var scene_color_sampler: sampler;
 
+// Gaussian-blurred scene color for rough transmission
+@group(0) @binding(20)
+var scene_color_blurred: texture_2d<f32>;
+@group(0) @binding(21)
+var scene_color_blurred_sampler: sampler;
+
 struct FragInput {
     @builtin(position) frag_coord: vec4<f32>,
     @location(0) normal_vs: vec3<f32>,
@@ -363,8 +369,11 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
             refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
         }
 
-        // Sample scene at exact position (rough blur TODO: separate blur pass)
-        let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
+        // Lerp between sharp and Gaussian-blurred scene based on roughness
+        let sharp = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
+        let blurred = textureSampleLevel(scene_color_blurred, scene_color_blurred_sampler, refract_uv, 0.0).rgb;
+        let blur_t = clamp(roughness * roughness * 4.0, 0.0, 1.0);
+        let scene_behind = mix(sharp, blurred, blur_t);
 
         // Tint by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
