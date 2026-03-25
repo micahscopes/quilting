@@ -361,23 +361,22 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let ior_offset = (pbr.ior - 1.0) * 0.02 * pbr.thickness_factor;
         let refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
 
-        // Rough transmission blur radius — needs to be perceptible
-        let blur_radius = roughness * roughness * 0.12;
-        var scene_behind: vec3<f32>;
-        if blur_radius > 0.002 {
-            let br = blur_radius;
-            scene_behind = (
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, 0.0), 0.0).rgb +
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, 0.0), 0.0).rgb +
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, br), 0.0).rgb +
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, -br), 0.0).rgb +
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, br) * 0.707, 0.0).rgb +
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, br) * 0.707, 0.0).rgb +
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, -br) * 0.707, 0.0).rgb +
-                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, -br) * 0.707, 0.0).rgb
-            ) / 8.0;
-        } else {
-            scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
+        // Rough transmission: only blur when roughness is significant (>0.25)
+        // Use Gaussian-weighted taps to avoid ghost copies
+        var scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
+        if roughness > 0.25 {
+            let br = (roughness - 0.25) * 0.15; // ramp from 0 at r=0.25 to 0.11 at r=1.0
+            // Gaussian-weighted: center=4, ring=1 each (total weight=12)
+            let s0 = scene_behind * 4.0;
+            let s1 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, 0.0), 0.0).rgb;
+            let s2 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, 0.0), 0.0).rgb;
+            let s3 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, br), 0.0).rgb;
+            let s4 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, -br), 0.0).rgb;
+            let s5 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, br) * 0.707, 0.0).rgb;
+            let s6 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, br) * 0.707, 0.0).rgb;
+            let s7 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, -br) * 0.707, 0.0).rgb;
+            let s8 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, -br) * 0.707, 0.0).rgb;
+            scene_behind = (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8) / 12.0;
         }
 
         // Tint by base color + volume absorption
