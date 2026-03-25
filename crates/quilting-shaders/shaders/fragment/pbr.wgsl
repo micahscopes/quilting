@@ -344,6 +344,9 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     color = color + emissive;
 
     // --- KHR_materials_transmission + volume ---
+    // Discard back-facing fragments for transmission to prevent ghosting
+    // (QB tessellation can create overlapping geometry with wrong winding)
+    if pbr.transmission_factor > 0.0 && dot(n, view_dir) < 0.0 { discard; }
     if pbr.transmission_factor > 0.0 {
         // Volume absorption (Beer-Lambert law)
         var volume_atten = vec3<f32>(1.0);
