@@ -532,9 +532,12 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 built += 1;
             }
         });
-        if missing > 0 {
-            info!("Built {} GPU batches, {} missing tess patches", built, missing);
+        // Log batch material distribution
+        let mut mat_counts = std::collections::BTreeMap::new();
+        for b in &state.batches {
+            *mat_counts.entry(b.material_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
+        info!("Built {} GPU batches ({} missing), material→faces: {:?}", built, missing, mat_counts);
     });
 }
 

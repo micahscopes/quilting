@@ -1003,7 +1003,16 @@ async function loadModel(buffer, filename) {
   }
 
   if (info.face_material_indices) {
-    mr_setFaceMaterials(new Int32Array(info.face_material_indices));
+    const fmi = new Int32Array(info.face_material_indices);
+    // Log material distribution
+    const counts = {};
+    for (let i = 0; i < fmi.length; i++) counts[fmi[i]] = (counts[fmi[i]] || 0) + 1;
+    console.log('face_material_indices:', fmi.length, 'faces, distribution:', JSON.stringify(counts));
+    // Log first/last few to check ordering
+    const first20 = Array.from(fmi.slice(0, 20));
+    const last20 = Array.from(fmi.slice(-20));
+    console.log('first 20 materials:', first20.join(','), 'last 20:', last20.join(','));
+    mr_setFaceMaterials(fmi);
   }
 
   // Upload PBR materials
@@ -1023,9 +1032,9 @@ async function loadModel(buffer, filename) {
       const bus = m.base_uv_scale || [1,1];
       const am = m.alpha_mode === 'MASK' ? 1 : (m.alpha_mode === 'BLEND' ? 2 : 0);
       matData[o+0] = bc[0]; matData[o+1] = bc[1]; matData[o+2] = bc[2]; matData[o+3] = bc[3];
-      matData[o+4] = m.metallic || 0; matData[o+5] = m.roughness || 1;
-      matData[o+6] = m.normal_scale || 1; matData[o+7] = m.occlusion_strength || 1;
-      matData[o+8] = m.alpha_cutoff || 0.5; matData[o+9] = am; matData[o+10] = m.unlit ? 1 : 0;
+      matData[o+4] = m.metallic ?? 0; matData[o+5] = m.roughness ?? 1;
+      matData[o+6] = m.normal_scale ?? 1; matData[o+7] = m.occlusion_strength ?? 1;
+      matData[o+8] = m.alpha_cutoff ?? 0.5; matData[o+9] = am; matData[o+10] = m.unlit ? 1 : 0;
       matData[o+11] = em[0]; matData[o+12] = em[1]; matData[o+13] = em[2];
       matData[o+14] = m.base_color_texture_index != null ? 1 : 0;
       matData[o+15] = m.metallic_roughness_texture_index != null ? 1 : 0;
@@ -1033,12 +1042,12 @@ async function loadModel(buffer, filename) {
       matData[o+17] = m.emissive_texture_index != null ? 1 : 0;
       matData[o+18] = m.occlusion_texture_index != null ? 1 : 0;
       matData[o+19] = sc[0]; matData[o+20] = sc[1]; matData[o+21] = sc[2];
-      matData[o+22] = (sc[0]+sc[1]+sc[2]) > 0 ? 1 : 0; matData[o+23] = m.sheen_roughness || 0;
+      matData[o+22] = (sc[0]+sc[1]+sc[2]) > 0 ? 1 : 0; matData[o+23] = m.sheen_roughness ?? 0;
       matData[o+24] = sp[0]; matData[o+25] = sp[1]; matData[o+26] = sp[2];
       matData[o+27] = (sp[0]+sp[1]+sp[2]) < 3 ? 1 : 0;
       matData[o+28] = nus[0]; matData[o+29] = nus[1]; matData[o+30] = nuo[0]; matData[o+31] = nuo[1];
-      matData[o+32] = m.normal_uv_rotation || 0;
-      matData[o+33] = bus[0]; matData[o+34] = bus[1]; matData[o+35] = m.base_uv_rotation || 0;
+      matData[o+32] = m.normal_uv_rotation ?? 0;
+      matData[o+33] = bus[0]; matData[o+34] = bus[1]; matData[o+35] = m.base_uv_rotation ?? 0;
       // Texture image indices (float-encoded, -1 = none)
       matData[o+36] = m.base_color_texture_index != null ? m.base_color_texture_index : -1;
       matData[o+37] = m.metallic_roughness_texture_index != null ? m.metallic_roughness_texture_index : -1;
@@ -1046,9 +1055,9 @@ async function loadModel(buffer, filename) {
       matData[o+39] = m.emissive_texture_index != null ? m.emissive_texture_index : -1;
       matData[o+40] = m.occlusion_texture_index != null ? m.occlusion_texture_index : -1;
       // IOR / transmission / volume
-      matData[o+41] = m.ior || 1.5;
-      matData[o+42] = m.transmission_factor || 0;
-      matData[o+43] = m.thickness_factor || 0;
+      matData[o+41] = m.ior ?? 1.5;
+      matData[o+42] = m.transmission_factor ?? 0;
+      matData[o+43] = m.thickness_factor ?? 0;
       const ac = m.attenuation_color || [1,1,1];
       matData[o+44] = ac[0]; matData[o+45] = ac[1]; matData[o+46] = ac[2];
       matData[o+47] = m.attenuation_distance || 1e10;
