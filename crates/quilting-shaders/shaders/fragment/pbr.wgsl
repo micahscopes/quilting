@@ -368,14 +368,18 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         // Tint transmitted light by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
 
-        // Fresnel: more reflection at edges, more transmission head-on
+        // Fresnel: edges reflect, center transmits
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
         let ior_f0_t = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
         let fresnel_t = ior_f0_t + (1.0 - ior_f0_t) * pow(1.0 - n_dot_v_t, 5.0);
-        let effective_transmission = pbr.transmission_factor * (1.0 - fresnel_t) * (1.0 - metallic);
+        let t_factor = pbr.transmission_factor * (1.0 - metallic);
 
-        // Replace surface lighting with transmitted scene
-        color = mix(color, transmitted, effective_transmission);
+        // Transmission replaces diffuse; specular reflection stays on top
+        // Approximate: transmitted scene replaces base diffuse contribution,
+        // then add back the specular reflection (Fresnel-weighted)
+        let specular_reflection = color * fresnel_t;
+        let diffuse_surface = color * (1.0 - fresnel_t);
+        color = mix(diffuse_surface, transmitted, t_factor) + specular_reflection;
     }
 
     // Tone mapping: ACES filmic with slight exposure boost for deeper contrast
