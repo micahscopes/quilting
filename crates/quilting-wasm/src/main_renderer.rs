@@ -793,8 +793,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), 0.0, py); }
                             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-                            // Extra passes for wider blur (2x, 4x radius)
-                            for scale in [2.0f32, 4.0] {
+                            // Extra passes for wider blur (2x, 4x, 8x radius)
+                            for scale in [2.0f32, 4.0, 8.0] {
                                 gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo);
                                 gl.active_texture(glow::TEXTURE0);
                                 gl.bind_texture(glow::TEXTURE_2D, Some(state.blur_tex2.unwrap()));
