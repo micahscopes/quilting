@@ -619,7 +619,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 vw, vh, 0, glow::RGBA, glow::UNSIGNED_BYTE,
                                 glow::PixelUnpackData::Slice(None),
                             );
-                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
@@ -649,9 +649,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
                         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
 
-                        // Bind scene color to texture unit 8 for transmission sampling
+                        // Bind scene color and generate mipmaps for roughness blur
                         gl.active_texture(glow::TEXTURE0 + 8);
                         gl.bind_texture(glow::TEXTURE_2D, Some(state.scene_color_tex.unwrap()));
+                        gl.generate_mipmap(glow::TEXTURE_2D);
                     }
                 }
 

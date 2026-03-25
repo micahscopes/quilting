@@ -352,15 +352,18 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
             volume_atten = exp(vec3<f32>(optical_depth) * log(max(pbr.attenuation_color, vec3<f32>(0.001))));
         }
 
-        // Screen-space transmission: sample opaque scene behind this surface
+        // Screen-space transmission: frag_coord and texture share bottom-left origin
         let screen_size = vec2<f32>(textureDimensions(scene_color_tex));
-        let screen_uv = vec2<f32>(in.frag_coord.x / screen_size.x, 1.0 - in.frag_coord.y / screen_size.y);
-        // Refraction offset: normal distortion scaled by IOR departure from 1.0
+        let screen_uv = in.frag_coord.xy / screen_size;
+        // Refraction offset from view-space normal
         let ior_offset = (pbr.ior - 1.0) * 0.15;
         let offset = n.xy * ior_offset;
         let refract_uv = clamp(screen_uv + offset, vec2<f32>(0.001), vec2<f32>(0.999));
 
-        let scene_behind = textureSample(scene_color_tex, scene_color_sampler, refract_uv).rgb;
+        // Rough transmission: sample higher mip for blur (frosted glass)
+        let max_mip = log2(max(screen_size.x, screen_size.y));
+        let blur_lod = roughness * roughness * max_mip;
+        let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, blur_lod).rgb;
         // Tint by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
 
@@ -368,9 +371,9 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
         let ior_f0_t = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
         let fresnel_t = ior_f0_t + (1.0 - ior_f0_t) * pow(1.0 - n_dot_v_t, 5.0);
-        let effective_transmission = pbr.transmission_factor * (1.0 - fresnel_t);
+        // Metals don't transmit; only dielectric fraction transmits
+        let effective_transmission = pbr.transmission_factor * (1.0 - fresnel_t) * (1.0 - metallic);
 
-        // Replace surface color with transmitted scene (not additive)
         color = mix(color, transmitted, effective_transmission);
     }
 
