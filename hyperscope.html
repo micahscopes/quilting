@@ -1002,8 +1002,8 @@ async function loadModel(buffer, filename) {
     $('time').value = a.time_min || 0;
   }
 
-  if (info.face_materials) {
-    mr_setFaceMaterials(new Int32Array(info.face_materials));
+  if (info.face_material_indices) {
+    mr_setFaceMaterials(new Int32Array(info.face_material_indices));
   }
 
   // Upload PBR materials
