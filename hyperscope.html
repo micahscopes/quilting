@@ -1014,7 +1014,7 @@ async function loadModel(buffer, filename) {
       const m = info.materials[i];
       const o = i * stride;
       const bc = m.base_color || [1,1,1,1];
-      console.log(`Material ${i} base_color:`, m.base_color, 'type:', typeof m.base_color, 'isArray:', Array.isArray(m.base_color), 'resolved bc:', bc, 'keys:', Object.keys(m));
+      console.log(`Mat${i}: rough=${m.roughness} trans=${m.transmission_factor} thick=${m.thickness_factor} ior=${m.ior} mr_tex=${m.metallic_roughness_texture_index} alpha=${m.alpha_mode}`);
       const em = m.emissive_factor || [0,0,0];
       const sc = m.sheen_color || [0,0,0];
       const sp = m.specular_color || [1,1,1];
