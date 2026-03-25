@@ -688,23 +688,31 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         let vw = vp_buf[2].max(1);
                         let vh = vp_buf[3].max(1);
 
-                        // Create/resize scene color texture if needed
+                        // Create/resize scene color texture with mip chain
                         if state.scene_color_size != (vw, vh) {
                             if let Some(fbo) = state.scene_color_fbo { gl.delete_framebuffer(fbo); }
                             if let Some(tex) = state.scene_color_tex { gl.delete_texture(tex); }
 
+                            let num_mips = ((vw.max(vh) as f32).log2().floor() as i32 + 1).min(8);
                             let tex = gl.create_texture().unwrap();
                             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                            gl.tex_image_2d(
-                                glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
-                                vw, vh, 0, glow::RGBA, glow::UNSIGNED_BYTE,
-                                glow::PixelUnpackData::Slice(None),
-                            );
-                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                            // Allocate all mip levels
+                            for mip in 0..num_mips {
+                                let mw = (vw >> mip).max(1);
+                                let mh = (vh >> mip).max(1);
+                                gl.tex_image_2d(
+                                    glow::TEXTURE_2D, mip, glow::RGBA8 as i32,
+                                    mw, mh, 0, glow::RGBA, glow::UNSIGNED_BYTE,
+                                    glow::PixelUnpackData::Slice(None),
+                                );
+                            }
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, num_mips - 1);
 
+                            // FBO for blitting into mip 0
                             let fbo = gl.create_framebuffer().unwrap();
                             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                             gl.framebuffer_texture_2d(
@@ -730,97 +738,95 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
                         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
 
-                        // --- Gaussian blur for rough transmission ---
-                        // Create blur resources if needed
+                        // --- Gaussian blur pyramid: blur each mip level from the previous ---
                         if state.blur_program.is_none() {
                             if let Ok((prog, vao)) = create_blur_program(gl) {
                                 state.blur_program = Some(prog);
                                 state.blur_vao = Some(vao);
                             }
                         }
-                        let hw = vw / 2; let hh = vh / 2;
-                        // Create/resize half-res blur textures
+                        // One temp texture for ping-pong during H/V separable blur
                         if state.blur_tex.is_none() || state.scene_color_size != (vw, vh) {
-                            // Cleanup old
                             if let Some(f) = state.blur_fbo { gl.delete_framebuffer(f); }
                             if let Some(t) = state.blur_tex { gl.delete_texture(t); }
-                            if let Some(f) = state.blur_fbo2 { gl.delete_framebuffer(f); }
-                            if let Some(t) = state.blur_tex2 { gl.delete_texture(t); }
-
-                            let make_rt = |w: i32, h: i32| -> (glow::Framebuffer, glow::Texture) {
-                                let t = gl.create_texture().unwrap();
-                                gl.bind_texture(glow::TEXTURE_2D, Some(t));
-                                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0,
-                                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-                                let f = gl.create_framebuffer().unwrap();
-                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
-                                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(t), 0);
-                                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                                (f, t)
-                            };
-                            let (f1, t1) = make_rt(hw, hh);
-                            let (f2, t2) = make_rt(hw, hh);
-                            state.blur_fbo = Some(f1); state.blur_tex = Some(t1);
-                            state.blur_fbo2 = Some(f2); state.blur_tex2 = Some(t2);
+                            let t = gl.create_texture().unwrap();
+                            gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
+                                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                            let f = gl.create_framebuffer().unwrap();
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
+                            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(t), 0);
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                            state.blur_fbo = Some(f);
+                            state.blur_tex = Some(t);
                         }
 
-                        // Multi-pass separable Gaussian blur (ping-pong for wide kernel)
-                        if let (Some(prog), Some(vao)) = (state.blur_program, state.blur_vao) {
+                        if let (Some(prog), Some(vao), Some(blur_fbo), Some(blur_tex), Some(sc_fbo)) =
+                            (state.blur_program, state.blur_vao, state.blur_fbo, state.blur_tex, state.scene_color_fbo)
+                        {
+                            let sc_tex = state.scene_color_tex.unwrap();
                             gl.use_program(Some(prog));
                             gl.bind_vertex_array(Some(vao));
                             gl.disable(glow::DEPTH_TEST);
                             gl.disable(glow::BLEND);
-
                             let dir_loc = gl.get_uniform_location(prog, "u_dir");
-                            let px = 1.0 / hw as f32;
-                            let py = 1.0 / hh as f32;
 
-                            // Initial H pass: scene_color → blur_fbo
-                            gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo);
-                            gl.viewport(0, 0, hw, hh);
-                            gl.active_texture(glow::TEXTURE0);
-                            gl.bind_texture(glow::TEXTURE_2D, Some(state.scene_color_tex.unwrap()));
-                            if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), px, 0.0); }
-                            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                            // For each mip level 1..N: Gaussian blur from mip (level-1)
+                            let num_mips = ((vw.max(vh) as f32).log2().floor() as i32 + 1).min(8);
+                            for mip in 1..num_mips {
+                                let mw = (vw >> mip).max(1);
+                                let mh = (vh >> mip).max(1);
+                                let px = 1.0 / mw as f32;
+                                let py = 1.0 / mh as f32;
 
-                            // Initial V pass: blur_tex → blur_fbo2
-                            gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo2);
-                            gl.active_texture(glow::TEXTURE0);
-                            gl.bind_texture(glow::TEXTURE_2D, state.blur_tex);
-                            if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), 0.0, py); }
-                            gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-                            // Extra passes for wider blur (2x, 4x, 8x radius)
-                            for scale in [2.0f32, 4.0, 8.0] {
-                                gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo);
+                                // H pass: read mip (level-1) from scene_color → write to blur_tex
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(blur_fbo));
+                                // Resize blur_tex for this mip size
                                 gl.active_texture(glow::TEXTURE0);
-                                gl.bind_texture(glow::TEXTURE_2D, Some(state.blur_tex2.unwrap()));
-                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), px * scale, 0.0); }
+                                gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
+                                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, mw, mh, 0,
+                                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                                    glow::TEXTURE_2D, Some(blur_tex), 0);
+                                gl.viewport(0, 0, mw, mh);
+                                // Read from scene_color mip (level-1)
+                                gl.active_texture(glow::TEXTURE0);
+                                gl.bind_texture(glow::TEXTURE_2D, Some(sc_tex));
+                                // Force sampling from specific mip level
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, mip - 1);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, mip - 1);
+                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), px, 0.0); }
                                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                                // Restore mip range
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, num_mips - 1);
 
-                                gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo2);
+                                // V pass: read blur_tex → write to scene_color mip (level)
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(sc_fbo));
+                                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                                    glow::TEXTURE_2D, Some(sc_tex), mip);
                                 gl.active_texture(glow::TEXTURE0);
-                                gl.bind_texture(glow::TEXTURE_2D, state.blur_tex);
-                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), 0.0, py * scale); }
+                                gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
+                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), 0.0, py); }
                                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
                             }
 
-                            // Restore state
+                            // Restore FBO to mip 0 for future blits
+                            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                                glow::TEXTURE_2D, Some(sc_tex), 0);
                             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                             gl.viewport(0, 0, vw, vh);
                             gl.enable(glow::DEPTH_TEST);
                             gl.use_program(Some(state.renderer.programs().pbr));
                         }
 
-                        // Bind sharp (unit 8) and Gaussian blurred (unit 9)
+                        // Bind scene_color with mip chain to unit 8
                         gl.active_texture(glow::TEXTURE0 + 8);
                         gl.bind_texture(glow::TEXTURE_2D, Some(state.scene_color_tex.unwrap()));
-                        gl.active_texture(glow::TEXTURE0 + 9);
-                        gl.bind_texture(glow::TEXTURE_2D, Some(state.blur_tex2.unwrap_or(state.scene_color_tex.unwrap())));
                     }
                 }
 

@@ -375,11 +375,10 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
             refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
         }
 
-        // Lerp between sharp (scene_color) and Gaussian-blurred (scene_color_blurred)
-        let sharp = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
-        let blurred = textureSampleLevel(scene_color_blurred, scene_color_blurred_sampler, refract_uv, 0.0).rgb;
-        let blur_t = clamp(roughness * 2.0, 0.0, 1.0);
-        let scene_behind = mix(sharp, blurred, blur_t);
+        // Variable blur via Gaussian mip pyramid: each mip = blurrier
+        let max_lod = 7.0; // max mip levels in the blur pyramid
+        let blur_lod = roughness * roughness * max_lod;
+        let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, blur_lod).rgb;
 
         // Convert scene from sRGB (tone-mapped output) back to linear for correct blending
         let scene_linear = pow(max(scene_behind, vec3<f32>(0.0)), vec3<f32>(2.2));
