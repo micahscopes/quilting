@@ -1008,12 +1008,13 @@ async function loadModel(buffer, filename) {
 
   // Upload PBR materials
   if (info.materials && info.materials.length > 0) {
-    const stride = 36;
+    const stride = 41; // 36 params + 5 texture indices
     const matData = new Float32Array(info.materials.length * stride);
     for (let i = 0; i < info.materials.length; i++) {
       const m = info.materials[i];
       const o = i * stride;
       const bc = m.base_color || [1,1,1,1];
+      console.log(`Material ${i} base_color:`, m.base_color, 'type:', typeof m.base_color, 'isArray:', Array.isArray(m.base_color), 'resolved bc:', bc, 'keys:', Object.keys(m));
       const em = m.emissive_factor || [0,0,0];
       const sc = m.sheen_color || [0,0,0];
       const sp = m.specular_color || [1,1,1];
@@ -1038,6 +1039,12 @@ async function loadModel(buffer, filename) {
       matData[o+28] = nus[0]; matData[o+29] = nus[1]; matData[o+30] = nuo[0]; matData[o+31] = nuo[1];
       matData[o+32] = m.normal_uv_rotation || 0;
       matData[o+33] = bus[0]; matData[o+34] = bus[1]; matData[o+35] = m.base_uv_rotation || 0;
+      // Texture image indices (float-encoded, -1 = none)
+      matData[o+36] = m.base_color_texture_index != null ? m.base_color_texture_index : -1;
+      matData[o+37] = m.metallic_roughness_texture_index != null ? m.metallic_roughness_texture_index : -1;
+      matData[o+38] = m.normal_texture_index != null ? m.normal_texture_index : -1;
+      matData[o+39] = m.emissive_texture_index != null ? m.emissive_texture_index : -1;
+      matData[o+40] = m.occlusion_texture_index != null ? m.occlusion_texture_index : -1;
     }
     mr_setMaterials(matData, info.materials.length);
     console.info('PBR material 0:', {

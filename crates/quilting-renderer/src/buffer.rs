@@ -515,6 +515,12 @@ pub struct PbrParams {
     pub normal_uv_rotation: f32,
     pub base_uv_scale: [f32; 2],
     pub base_uv_rotation: f32,
+    // Image indices for texture binding (-1 = none)
+    pub base_color_tex_idx: i32,
+    pub metallic_roughness_tex_idx: i32,
+    pub normal_tex_idx: i32,
+    pub emissive_tex_idx: i32,
+    pub occlusion_tex_idx: i32,
 }
 
 impl Default for PbrParams {
@@ -546,6 +552,11 @@ impl Default for PbrParams {
             normal_uv_rotation: 0.0,
             base_uv_scale: [1.0, 1.0],
             base_uv_rotation: 0.0,
+            base_color_tex_idx: -1,
+            metallic_roughness_tex_idx: -1,
+            normal_tex_idx: -1,
+            emissive_tex_idx: -1,
+            occlusion_tex_idx: -1,
         }
     }
 }

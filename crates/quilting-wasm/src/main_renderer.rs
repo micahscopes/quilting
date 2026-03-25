@@ -190,7 +190,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.materials.clear();
-            let stride = 36;
+            let stride = 41;
             for i in 0..num_materials as usize {
                 let o = i * stride;
                 if o + stride > data.len() { break; }
@@ -220,6 +220,11 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
                     normal_uv_rotation: d[32],
                     base_uv_scale: [d[33], d[34]],
                     base_uv_rotation: d[35],
+                    base_color_tex_idx: d[36] as i32,
+                    metallic_roughness_tex_idx: d[37] as i32,
+                    normal_tex_idx: d[38] as i32,
+                    emissive_tex_idx: d[39] as i32,
+                    occlusion_tex_idx: d[40] as i32,
                     ..PbrParams::default()
                 });
             }
@@ -529,14 +534,23 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     ));
                 }
 
-                // Bind actual textures from the uploaded image cache
-                // TODO: proper material→image index mapping, per-batch switching
-                if !state.materials.is_empty() && default_mat.has_base_color_tex {
-                    let tex = state.texture_cache.get(Some(0));
-                    unsafe {
-                        gl.active_texture(glow::TEXTURE0);
-                        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    }
+                // Bind actual textures per material slot using image indices
+                if !state.materials.is_empty() {
+                    let m = &mat;
+                    let bind_tex = |unit: u32, idx: i32| {
+                        if idx >= 0 {
+                            let tex = state.texture_cache.get(Some(idx as usize));
+                            unsafe {
+                                gl.active_texture(glow::TEXTURE0 + unit);
+                                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                            }
+                        }
+                    };
+                    bind_tex(0, m.base_color_tex_idx);
+                    bind_tex(1, m.metallic_roughness_tex_idx);
+                    bind_tex(2, m.normal_tex_idx);
+                    bind_tex(3, m.emissive_tex_idx);
+                    bind_tex(4, m.occlusion_tex_idx);
                 }
             }
             RenderMode::Lod => {
