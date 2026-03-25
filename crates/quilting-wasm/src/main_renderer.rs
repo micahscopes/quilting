@@ -323,6 +323,88 @@ pub fn mr_upload_morph_texture(deltas: &[f32], num_vertices: u32, num_targets: u
     });
 }
 
+/// Upload environment cubemaps for IBL as float data (RGBA16F).
+/// `prefiltered`: ALL mip levels concatenated. Each mip = 6 faces × mipSize×mipSize × 4 floats.
+///   Mip 0 = full size, mip 1 = size/2, etc. Total mips = floor(log2(pf_size)) + 1.
+/// `irradiance`: 6 faces × ir_size×ir_size × 4 floats (single level).
+#[wasm_bindgen(js_name = "mr_uploadEnvMaps")]
+pub fn mr_upload_env_maps(
+    prefiltered: &[f32], pf_size: u32,
+    irradiance: &[f32], ir_size: u32,
+) {
+    STATE.with(|s| {
+        if let Some(ref mut st) = *s.borrow_mut() {
+            let gl = st.renderer.gl();
+            unsafe {
+                if let Some(t) = st.env_maps.prefiltered { gl.delete_texture(t); }
+                if let Some(t) = st.env_maps.irradiance { gl.delete_texture(t); }
+
+                let num_mips = (pf_size as f32).log2().floor() as i32 + 1;
+
+                // Prefiltered specular cubemap with per-mip GGX-filtered data
+                let pf_tex = gl.create_texture().unwrap();
+                gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(pf_tex));
+                // Allocate storage for all mip levels
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_MAX_LEVEL, num_mips - 1);
+
+                let mut offset = 0usize;
+                for mip in 0..num_mips {
+                    let mip_size = (pf_size >> mip as u32).max(1);
+                    let face_floats = (mip_size * mip_size * 4) as usize;
+                    for face in 0..6u32 {
+                        let end = offset + face_floats;
+                        if end <= prefiltered.len() {
+                            let bytes = bytemuck_cast_slice(&prefiltered[offset..end]);
+                            gl.tex_image_2d(
+                                glow::TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                                mip, glow::RGBA16F as i32,
+                                mip_size as i32, mip_size as i32, 0,
+                                glow::RGBA, glow::FLOAT,
+                                glow::PixelUnpackData::Slice(Some(bytes)),
+                            );
+                        }
+                        offset = end;
+                    }
+                }
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+
+                // Irradiance cubemap (single level)
+                let ir_tex = gl.create_texture().unwrap();
+                gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(ir_tex));
+                let ir_face_floats = (ir_size * ir_size * 4) as usize;
+                for face in 0..6u32 {
+                    let off = face as usize * ir_face_floats;
+                    let end = off + ir_face_floats;
+                    if end <= irradiance.len() {
+                        let bytes = bytemuck_cast_slice(&irradiance[off..end]);
+                        gl.tex_image_2d(
+                            glow::TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                            0, glow::RGBA16F as i32,
+                            ir_size as i32, ir_size as i32, 0,
+                            glow::RGBA, glow::FLOAT,
+                            glow::PixelUnpackData::Slice(Some(bytes)),
+                        );
+                    }
+                }
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+
+                st.env_maps.prefiltered = Some(pf_tex);
+                st.env_maps.irradiance = Some(ir_tex);
+                st.env_maps.mip_count = (num_mips - 1) as f32;
+
+                info!("Uploaded env maps: prefiltered {}x{} ({} mips), irradiance {}x{}",
+                    pf_size, pf_size, st.env_maps.mip_count as u32, ir_size, ir_size);
+            }
+        }
+    });
+}
+
 #[wasm_bindgen(js_name = "mr_buildBatches")]
 pub fn mr_build_batches(face_lods: &[f32]) {
     STATE.with(|s| {
@@ -416,23 +498,40 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         default_mat.base_color, default_mat.metallic, default_mat.roughness,
                         default_mat.has_base_color_tex, default_mat.has_metallic_roughness_tex);
                 }
-                state.renderer.pbr_ubo().upload(gl, &default_mat);
+                // Set env map flags from actual state
+                let mut mat = default_mat.clone();
+                mat.has_env_map = state.env_maps.prefiltered.is_some();
+                mat.env_mip_count = state.env_maps.mip_count;
+                state.renderer.pbr_ubo().upload(gl, &mat);
                 state.renderer.pbr_ubo().bind(gl);
 
-                // Bind placeholder textures for PBR (units 0-4)
-                let placeholder = state.texture_cache.placeholder();
-                for unit in 0..5u32 {
+                // Bind PBR texture placeholders per unit:
+                // 0=base_color(white), 1=mr(black), 2=normal(black), 3=emissive(black), 4=occlusion(white)
+                let white = state.texture_cache.placeholder();
+                let black = state.texture_cache.placeholder_black();
+                let cube = state.texture_cache.placeholder_cube();
+                let defaults = [white, black, black, black, white];
+                for (unit, &tex) in defaults.iter().enumerate() {
                     unsafe {
-                        gl.active_texture(glow::TEXTURE0 + unit);
-                        gl.bind_texture(glow::TEXTURE_2D, Some(placeholder));
+                        gl.active_texture(glow::TEXTURE0 + unit as u32);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                     }
                 }
+                // Env cubemaps: use real if uploaded, placeholder otherwise
+                unsafe {
+                    gl.active_texture(glow::TEXTURE0 + 5);
+                    gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(
+                        state.env_maps.prefiltered.unwrap_or(cube)
+                    ));
+                    gl.active_texture(glow::TEXTURE0 + 6);
+                    gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(
+                        state.env_maps.irradiance.unwrap_or(cube)
+                    ));
+                }
 
-                // Bind actual textures if available — use first material's textures
-                // TODO: per-batch material switching
+                // Bind actual textures from the uploaded image cache
+                // TODO: proper material→image index mapping, per-batch switching
                 if !state.materials.is_empty() && default_mat.has_base_color_tex {
-                    // Texture index would come from material → texture_to_image mapping
-                    // For now, bind image 0 to unit 0 if it exists
                     let tex = state.texture_cache.get(Some(0));
                     unsafe {
                         gl.active_texture(glow::TEXTURE0);

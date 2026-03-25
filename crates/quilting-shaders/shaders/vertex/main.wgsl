@@ -247,14 +247,16 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     // Apply morph targets first, then skeletal skinning, before Möbius/QB eval.
     // Animated positions become pure quaternion control points (w=0, xyz=position)
     // for the fused Möbius-QB surface evaluation.
-    var sp0 = in.p0;
-    var sp1 = in.p1;
-    var sp2 = in.p2;
+    // Instance data: p.x = vertex_index, p.yzw = position.
+    // Always construct pure imaginary quaternions (w=0) for Möbius math.
+    let vi0 = i32(in.p0.x);
+    let vi1 = i32(in.p1.x);
+    let vi2 = i32(in.p2.x);
+    var sp0: vec4<f32>;
+    var sp1: vec4<f32>;
+    var sp2: vec4<f32>;
     let has_gpu_anim = joints.num_joints > 0 || joints.num_morph_targets > 0;
     if has_gpu_anim {
-        let vi0 = i32(in.p0.x);
-        let vi1 = i32(in.p1.x);
-        let vi2 = i32(in.p2.x);
         var pos0 = apply_morph(in.p0.yzw, vi0);
         var pos1 = apply_morph(in.p1.yzw, vi1);
         var pos2 = apply_morph(in.p2.yzw, vi2);
@@ -264,6 +266,10 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         sp0 = vec4<f32>(0.0, pos0);
         sp1 = vec4<f32>(0.0, pos1);
         sp2 = vec4<f32>(0.0, pos2);
+    } else {
+        sp0 = vec4<f32>(0.0, in.p0.yzw);
+        sp1 = vec4<f32>(0.0, in.p1.yzw);
+        sp2 = vec4<f32>(0.0, in.p2.yzw);
     }
 
     if u.use_qb == 1 {

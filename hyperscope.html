@@ -14,37 +14,262 @@
 <link data-trunk rel="copy-file" href="ant.glb" />
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#e6edf3;font-family:system-ui;overflow:hidden}
-#wrap{width:100vw;height:100vh;position:relative}
+body{background:#0d1117;color:#e6edf3;font-family:system-ui;overflow:hidden;display:flex}
+#wrap{flex:1;position:relative}
 canvas{width:100%;height:100%;display:block}
-#stats{position:fixed;top:8px;left:12px;font-size:13px;color:#8b949e;pointer-events:none;z-index:10}
-#controls{position:fixed;bottom:12px;left:12px;display:flex;gap:8px;z-index:10}
-#controls select,#controls button{background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer}
+#sidebar{width:260px;padding:14px;background:rgba(22,27,34,0.96);border-left:1px solid #30363d;display:flex;flex-direction:column;gap:10px;flex-shrink:0;overflow-y:auto;order:1;transition:margin-right 0.2s}
+#sidebar.collapsed{margin-right:-260px}
+#sidebar-toggle{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:100;background:rgba(22,27,34,0.9);border:1px solid #30363d;border-right:none;color:#58a6ff;cursor:pointer;padding:8px 4px;font-size:14px;border-radius:4px 0 0 4px}
+h1{font-size:15px;color:#58a6ff;letter-spacing:2px}
+.sub{font-size:10px;color:#484f58;margin-top:2px}
+label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:3px}
+.sr{display:flex;align-items:center;gap:6px}
+input[type=range]{flex:1;height:4px;-webkit-appearance:none;background:#30363d;border-radius:2px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#58a6ff;cursor:pointer}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#58a6ff;cursor:pointer;border:none}
+.v{font-size:12px;min-width:36px;text-align:right;color:#58a6ff;font-weight:bold}
+.btns{display:flex;gap:3px;flex-wrap:wrap}
+.btns button{flex:1;padding:4px 6px;font-size:10px;font-family:inherit;border:1px solid #30363d;background:#21262d;color:#8b949e;cursor:pointer;border-radius:4px;transition:all 0.15s;min-width:40px}
+.btns button:hover{background:#30363d;border-color:#58a6ff}
+.btns button.a{background:#1f6feb;color:#fff;border-color:#58a6ff}
+select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px}
+.section{border-bottom:1px solid #21262d;padding-bottom:8px}
+.toggle-row{display:flex;align-items:center;gap:8px}
+.toggle{position:relative;width:36px;height:20px;background:#30363d;border-radius:10px;cursor:pointer;transition:background 0.2s}
+.toggle.on{background:#1f6feb}
+.toggle::after{content:'';position:absolute;width:16px;height:16px;border-radius:50%;background:#c9d1d9;top:2px;left:2px;transition:left 0.2s}
+.toggle.on::after{left:18px}
+.toggle-label{font-size:12px}
+.stats{font-size:10px;color:#484f58;line-height:1.6;margin-top:auto;padding-top:10px;border-top:1px solid #30363d}
+.stats .val{color:#58a6ff}
+#drop-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:10;border:3px dashed #58a6ff;background:rgba(31,111,235,0.08);align-items:center;justify-content:center}
+#drop-overlay.active{display:flex}
+#drop-overlay span{font-size:18px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase;pointer-events:none}
 </style>
 </head>
 <body>
-<div id="wrap"><canvas id="cv"></canvas></div>
-<div id="stats">Loading...</div>
-<div id="controls">
-  <select id="mode-sel">
-    <option value="pbr">PBR</option>
-    <option value="matcap">Matcap</option>
-    <option value="wire">Wire</option>
-    <option value="normals">Normals</option>
-    <option value="both">Both</option>
-    <option value="lod">LOD</option>
-  </select>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <div id="drop-overlay"><span>Drop .glb / .gltf file here</span></div>
 </div>
+<div id="sidebar">
+  <h1>HYPERSCOPE</h1>
+  <div class="sub">Conformal mesh rendering</div>
+
+  <div class="section">
+    <label>Animation Time</label>
+    <div class="sr"><span style="font-size:10px;color:#8b949e;width:50px">Time</span><input type="range" id="time" min="0" max="2" step="any" value="0"><span class="v" id="time-v">0.00</span></div>
+  </div>
+
+  <div class="section">
+    <label>Mobius Transform</label>
+    <div class="btns" id="xform-btns">
+      <button class="a" data-v="identity">None</button>
+      <button data-v="sphere_reflection">Inversion</button>
+      <button data-v="rotation">Rotation</button>
+      <button data-v="translation">Translate</button>
+    </div>
+    <div style="margin-top:6px">
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">X</span><input type="range" id="mx" min="-30" max="30" value="5"><span class="v" id="mx-v">0.5</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Y</span><input type="range" id="my" min="-30" max="30" value="0"><span class="v" id="my-v">0.0</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Z</span><input type="range" id="mz" min="-30" max="30" value="0"><span class="v" id="mz-v">0.0</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0" max="50" value="20"><span class="v" id="mr-v">2.0</span></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <label>Render</label>
+    <div class="btns" id="render-btns">
+      <button data-v="pbr" class="a">PBR</button>
+      <button data-v="matcap">Matcap</button>
+      <button data-v="lod">LOD</button>
+      <button data-v="wire">Wire</button>
+      <button data-v="both">Both</button>
+      <button data-v="normals">Normals</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <label>Animation</label>
+    <select id="anim-sel"><option value="-1">None</option></select>
+  </div>
+
+  <div class="section">
+    <label>Environment</label>
+    <select id="envmap-sel">
+      <option value="rosendal_plains_1_1k" selected>Rosendal Plains</option>
+      <option value="rogland_clear_night_2k">Rogland Night</option>
+      <option value="ticknock_04_1k">Ticknock</option>
+      <option value="procedural">Procedural Sky</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label>Matcap</label>
+    <select id="matcap-sel">
+      <option value="aqua">Aqua</option>
+      <option value="citric-acid" selected>Citric Acid</option>
+      <option value="golden-soft">Golden Soft</option>
+      <option value="soft-studio">Soft Studio</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label>Resolution (0=auto)</label>
+    <div class="sr"><input type="range" id="res" min="0" max="6" value="0"><span class="v" id="res-v">auto</span></div>
+    <label>Tess density</label>
+    <div class="sr"><input type="range" id="tess-density" min="1" max="500" value="100"><span class="v" id="tess-density-v">100</span></div>
+    <div class="toggle-row">
+      <div class="toggle on" id="screen-atten-toggle"></div>
+      <span class="toggle-label">Screen-space attenuation</span>
+    </div>
+    <label>Min px/subdivision</label>
+    <div class="sr"><input type="range" id="min-px-sub" min="1" max="16" value="2" step="1"><span class="v" id="min-px-sub-v">2</span></div>
+  </div>
+
+  <div class="section">
+    <div class="toggle-row">
+      <div class="toggle on" id="animate-toggle"></div>
+      <span class="toggle-label">Auto-animate</span>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">Loading WASM...</div>
+</div>
+<button id="sidebar-toggle">▶</button>
 <script type="module">
 import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
   mr_setInstanceData, mr_setFaceMaterials, mr_buildBatches,
   mr_uploadTessPatch, mr_uploadAnimationPose,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
-  mr_setMaterials, mr_uploadImages,
+  mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
 } from './pkg/quilting_wasm.js';
 
 const $ = id => document.getElementById(id);
+
+// ============================================================
+// URL Router — bidirectional sync between controls and URL params.
+// Reads on load, writes on change (debounced replaceState).
+// ============================================================
+const PARAM_DEFAULTS = {
+  glb: 'horse.glb', mode: 'pbr', xform: 'identity',
+  mx: '5', my: '0', mz: '0', mr: '20',
+  env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
+  res: '0', density: '100', atten: '1', minpx: '2',
+  animate: '1', anim: '-1', atlas: '7',
+  zoom: '3', rx: '0.3', ry: '0.5',
+};
+
+function readParams() {
+  const p = new URLSearchParams(location.search);
+  const get = (k) => p.get(k) ?? PARAM_DEFAULTS[k];
+  return {
+    glb: get('glb'),
+    mode: get('mode'),
+    xform: get('xform'),
+    mx: get('mx'), my: get('my'), mz: get('mz'), mr: get('mr'),
+    env: get('env'),
+    matcap: get('matcap'),
+    res: get('res'),
+    density: get('density'),
+    atten: get('atten'),
+    minpx: get('minpx'),
+    animate: get('animate'),
+    anim: get('anim'),
+    atlas: get('atlas'),
+    zoom: get('zoom'),
+    rx: get('rx'),
+    ry: get('ry'),
+  };
+}
+
+let syncTimer = null;
+function syncURL() {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    const p = new URLSearchParams();
+    const set = (k, v, def) => { if (v !== def) p.set(k, v); };
+    set('glb', currentGlb, PARAM_DEFAULTS.glb);
+    // Render mode
+    const activeMode = document.querySelector('#render-btns button.a');
+    set('mode', activeMode ? activeMode.dataset.v : 'pbr', PARAM_DEFAULTS.mode);
+    // Möbius
+    set('xform', currentXform, PARAM_DEFAULTS.xform);
+    set('mx', $('mx').value, PARAM_DEFAULTS.mx);
+    set('my', $('my').value, PARAM_DEFAULTS.my);
+    set('mz', $('mz').value, PARAM_DEFAULTS.mz);
+    set('mr', $('mr').value, PARAM_DEFAULTS.mr);
+    // Selectors
+    set('env', $('envmap-sel').value, PARAM_DEFAULTS.env);
+    set('matcap', $('matcap-sel').value, PARAM_DEFAULTS.matcap);
+    // LOD
+    set('res', $('res').value, PARAM_DEFAULTS.res);
+    set('density', $('tess-density').value, PARAM_DEFAULTS.density);
+    set('atten', $('screen-atten-toggle').classList.contains('on') ? '1' : '0', PARAM_DEFAULTS.atten);
+    set('minpx', $('min-px-sub').value, PARAM_DEFAULTS.minpx);
+    // Animation
+    set('animate', animating ? '1' : '0', PARAM_DEFAULTS.animate);
+    set('anim', $('anim-sel').value, PARAM_DEFAULTS.anim);
+    // Camera
+    set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
+    set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
+    set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
+
+    const qs = p.toString();
+    const url = qs ? `${location.pathname}?${qs}` : location.pathname;
+    history.replaceState(null, '', url);
+  }, 300);
+}
+
+// Apply URL params to controls on load
+function applyParams(params) {
+  // Render mode
+  const modeBtn = document.querySelector(`#render-btns button[data-v="${params.mode}"]`);
+  if (modeBtn) {
+    document.querySelectorAll('#render-btns button').forEach(b => b.classList.remove('a'));
+    modeBtn.classList.add('a');
+  }
+  // Möbius
+  currentXform = params.xform;
+  const xBtn = document.querySelector(`#xform-btns button[data-v="${params.xform}"]`);
+  if (xBtn) {
+    document.querySelectorAll('#xform-btns button').forEach(b => b.classList.remove('a'));
+    xBtn.classList.add('a');
+  }
+  $('mx').value = params.mx; $('mx-v').textContent = (parseInt(params.mx)/10).toFixed(1);
+  $('my').value = params.my; $('my-v').textContent = (parseInt(params.my)/10).toFixed(1);
+  $('mz').value = params.mz; $('mz-v').textContent = (parseInt(params.mz)/10).toFixed(1);
+  $('mr').value = params.mr; $('mr-v').textContent = (parseInt(params.mr)/10).toFixed(1);
+  // Selectors
+  $('envmap-sel').value = params.env;
+  $('matcap-sel').value = params.matcap;
+  // LOD
+  $('res').value = params.res;
+  $('res-v').textContent = params.res === '0' ? 'auto' : (1 << parseInt(params.res));
+  $('tess-density').value = params.density;
+  $('tess-density-v').textContent = params.density;
+  $('min-px-sub').value = params.minpx;
+  $('min-px-sub-v').textContent = params.minpx;
+  if (params.atten === '1') $('screen-atten-toggle').classList.add('on');
+  else $('screen-atten-toggle').classList.remove('on');
+  // Animation
+  animating = params.animate !== '0';
+  $('animate-toggle').classList.toggle('on', animating);
+  // Camera
+  zoom = parseFloat(params.zoom) || 3;
+  rotX = parseFloat(params.rx) || 0.3;
+  rotY = parseFloat(params.ry) || 0.5;
+}
+
+let currentGlb = PARAM_DEFAULTS.glb;
+let currentXform = 'identity';
+
+// --- Sidebar toggle ---
+$('sidebar-toggle').onclick = () => {
+  $('sidebar').classList.toggle('collapsed');
+  $('sidebar-toggle').textContent = $('sidebar').classList.contains('collapsed') ? '◀' : '▶';
+};
 
 // --- Camera ---
 let rotX = 0.3, rotY = 0.5, zoom = 3.0;
@@ -56,10 +281,8 @@ function lookAt(ex,ey,ez,tx,ty,tz,ux,uy,uz){let fx=tx-ex,fy=ty-ey,fz=tz-ez,fl=Ma
 function mulM4(a,b){const o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++)o[c*4+r]=a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];return o;}
 
 // --- Worker pool ---
-// Use many workers for atlas build (CPU-bound, embarrassingly parallel),
-// then drop to fewer for runtime LOD compute.
 const ATLAS_WORKERS = navigator.hardwareConcurrency || 8;
-const RUNTIME_WORKERS = 1; // Only primary worker needed for LOD compute
+const RUNTIME_WORKERS = 1;
 const workers = [];
 const pending = new Map();
 let msgId = 0;
@@ -85,8 +308,6 @@ const workerCall = (type, data, transfer) => workerCallN(0, type, data, transfer
 async function broadcastCall(type, data) {
   return (await Promise.all(workers.map((_, i) => workerCallN(i, type, data))))[0];
 }
-
-/// Terminate excess workers after atlas build, keep only RUNTIME_WORKERS.
 function dropExtraWorkers() {
   while (workers.length > RUNTIME_WORKERS) {
     const w = workers.pop();
@@ -99,26 +320,213 @@ let gpuSkinned = false;
 let animating = true;
 let meshInfo = null;
 
-// --- Events ---
+// --- Mouse: orbit + shift-pan + wheel zoom ---
 const canvas = $('cv');
 canvas.addEventListener('mousedown', e => { drag = true; lx = e.clientX; ly = e.clientY; });
 window.addEventListener('mouseup', () => drag = false);
+let camDebounce = null;
 window.addEventListener('mousemove', e => {
   if (!drag) return;
-  rotY += (e.clientX - lx) * 0.005;
-  rotX += (e.clientY - ly) * 0.005;
-  rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
+  const dx = e.clientX - lx, dy = e.clientY - ly;
   lx = e.clientX; ly = e.clientY;
+  if (e.shiftKey) {
+    // Pan in screen plane
+    const right = [Math.cos(rotY), 0, -Math.sin(rotY)];
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+    const up = [-Math.sin(rotY)*sinX, cosX, -Math.cos(rotY)*sinX];
+    const s = 0.003 * zoom;
+    panX -= (dx * right[0] + dy * up[0]) * s;
+    panY -= (dx * right[1] + dy * up[1]) * s;
+    panZ -= (dx * right[2] + dy * up[2]) * s;
+  } else {
+    rotY += dx * 0.005;
+    rotX += dy * 0.005;
+    rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
+  }
+  clearTimeout(camDebounce);
+  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 150);
 });
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
   zoom *= e.deltaY > 0 ? 1.1 : 0.9;
   zoom = Math.max(0.1, Math.min(100, zoom));
+  clearTimeout(camDebounce);
+  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 150);
 }, { passive: false });
 
-$('mode-sel').addEventListener('change', e => mr_setRenderMode(e.target.value));
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) { drag = true; lx = e.touches[0].clientX; ly = e.touches[0].clientY; }
+}, { passive: true });
+canvas.addEventListener('touchend', () => drag = false);
+canvas.addEventListener('touchmove', e => {
+  if (!drag || e.touches.length !== 1) return;
+  const dx = e.touches[0].clientX - lx, dy = e.touches[0].clientY - ly;
+  lx = e.touches[0].clientX; ly = e.touches[0].clientY;
+  rotY += dx * 0.005; rotX += dy * 0.005;
+  rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
+}, { passive: true });
 
-// IndexedDB for persisting dropped GLB files across refresh
+// --- Button group helper ---
+function setupBtnGroup(id, cb) {
+  for (const b of document.querySelectorAll(`#${id} button`))
+    b.onclick = () => {
+      document.querySelectorAll(`#${id} button`).forEach(x => x.classList.remove('a'));
+      b.classList.add('a');
+      cb(b.dataset.v);
+    };
+}
+
+// --- Render mode ---
+setupBtnGroup('render-btns', v => { mr_setRenderMode(v); syncURL(); });
+
+// --- Mobius transform ---
+function getMobiusParams() {
+  const x = parseInt($('mx').value) / 10;
+  const y = parseInt($('my').value) / 10;
+  const z = parseInt($('mz').value) / 10;
+  const r = parseInt($('mr').value) / 10;
+  return { type: currentXform, x, y, z, r };
+}
+
+// Compute Möbius quaternion coefficients matching the prototype.
+// Quaternion layout: [w, x, y, z]. Möbius: f(q) = (a*q + b) / (c*q + d)
+function computeMobius(type, cx, cy, cz, r) {
+  if (type === 'sphere_reflection' && r > 0.01) {
+    const csq = cx*cx + cy*cy + cz*cz;
+    return { a: [0,cx,cy,cz], b: [csq-r*r,0,0,0], c: [1,0,0,0], d: [0,-cx,-cy,-cz] };
+  }
+  // Identity for all other types (rotation/translation not yet implemented)
+  return { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
+}
+
+function updateMobius() {
+  const p = getMobiusParams();
+  const m = computeMobius(p.type, p.x, p.y, p.z, p.r);
+  const mob = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
+  mr_setMobius(mob);
+  debouncedLodRecompute();
+}
+
+setupBtnGroup('xform-btns', v => { currentXform = v; updateMobius(); syncURL(); });
+for (const id of ['mx','my','mz','mr']) {
+  $(id).addEventListener('input', () => {
+    $(`${id}-v`).textContent = (parseInt($(id).value)/10).toFixed(1);
+    updateMobius();
+    syncURL();
+  });
+}
+
+// --- Animation controls ---
+$('anim-sel').addEventListener('change', async () => {
+  const idx = parseInt($('anim-sel').value);
+  if (idx < 0 || !meshInfo) return;
+  $('stats').textContent = 'Switching animation...';
+  const resp = await broadcastCall('set_active_animation', { index: idx });
+  const result = resp.result;
+  if (!result) { $('stats').textContent = 'Animation switch failed'; return; }
+  meshInfo.time_min = result.time_min;
+  meshInfo.time_max = result.time_max;
+  meshInfo.num_vertices = result.num_vertices;
+  meshInfo.num_faces = result.num_faces;
+  meshInfo.duration = result.time_max - result.time_min;
+  animTime = result.time_min;
+  const timeSlider = $('time');
+  timeSlider.min = result.time_min;
+  timeSlider.max = result.time_max;
+  timeSlider.step = (result.time_max - result.time_min) / 200;
+  timeSlider.value = result.time_min;
+  $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
+
+  // Re-fetch skinning data and instances for new animation
+  const skinResp = await workerCall('get_skinning_data', {});
+  const skinData = skinResp.skinData;
+  const nv = skinData ? (skinData.num_vertices || 0) : 0;
+  skinTexW = Math.min(nv, 4096);
+  if (skinData && skinData.joint_indices) {
+    mr_uploadSkinningTexture(
+      new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
+      new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights),
+      skinData.num_vertices,
+    );
+  }
+  if (skinData && skinData.morph_deltas) {
+    mr_uploadMorphTexture(
+      new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
+      skinData.num_vertices,
+      skinData.num_morph_targets,
+    );
+  }
+
+  const rpResp = await workerCall('get_rest_pose_instances', { lod_time: 0 });
+  const rp = rpResp.data || rpResp;
+  if (rp && rp.instances) {
+    mr_setInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
+    mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
+  }
+  await workerCall('upload_model_to_compute', {});
+  $('stats').textContent = `Animation: ${$('anim-sel').selectedOptions[0].textContent}`;
+  syncURL();
+});
+
+$('time').addEventListener('input', () => {
+  $('time-v').textContent = parseFloat($('time').value).toFixed(2);
+  if (!animating) animTime = parseFloat($('time').value);
+});
+
+// Auto-animate toggle
+$('animate-toggle').addEventListener('click', () => {
+  animating = !animating;
+  $('animate-toggle').classList.toggle('on', animating);
+  syncURL();
+});
+
+// --- LOD controls ---
+function getTessParams() {
+  return {
+    density: parseInt($('tess-density').value),
+    screen_atten: $('screen-atten-toggle').classList.contains('on'),
+    minPx: parseInt($('min-px-sub').value),
+  };
+}
+
+$('res').addEventListener('input', () => {
+  const v = parseInt($('res').value);
+  $('res-v').textContent = v === 0 ? 'auto' : (1 << v);
+  debouncedLodRecompute(); syncURL();
+});
+$('tess-density').addEventListener('input', () => {
+  $('tess-density-v').textContent = $('tess-density').value;
+  debouncedLodRecompute(); syncURL();
+});
+$('min-px-sub').addEventListener('input', () => {
+  $('min-px-sub-v').textContent = $('min-px-sub').value;
+  debouncedLodRecompute(); syncURL();
+});
+$('screen-atten-toggle').addEventListener('click', () => {
+  $('screen-atten-toggle').classList.toggle('on');
+  debouncedLodRecompute(); syncURL();
+});
+
+// --- Environment/Matcap selectors (stubs — textures loaded in prototype, not yet in Rust) ---
+$('envmap-sel').addEventListener('change', () => {
+  const v = $('envmap-sel').value;
+  if (v === 'procedural') {
+    const pf = generateProceduralEnvFaces(64);
+    const ir = generateProceduralEnvFaces(16);
+    mr_uploadEnvMaps(pf, 64, ir, 16);
+  } else {
+    loadEnvMap(`/envmaps/${v}.hdr`);
+  }
+  syncURL();
+});
+$('matcap-sel').addEventListener('change', () => {
+  // TODO: load matcap texture in Rust renderer
+  console.log('Matcap selected:', $('matcap-sel').value);
+  syncURL();
+});
+
+// --- IndexedDB for persisting dropped GLB files ---
 const IDB_NAME = 'hyperscope', IDB_STORE = 'glb';
 function idbOpen() {
   return new Promise((resolve, reject) => {
@@ -147,28 +555,344 @@ async function idbGet(name) {
   });
 }
 
-// File drop
-canvas.addEventListener('dragover', e => e.preventDefault());
-canvas.addEventListener('drop', async e => {
+// --- File drop with overlay ---
+const wrapEl = $('wrap');
+const dropOverlay = $('drop-overlay');
+let dragCounter = 0;
+wrapEl.addEventListener('dragenter', e => { e.preventDefault(); dragCounter++; dropOverlay.classList.add('active'); });
+wrapEl.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+wrapEl.addEventListener('dragleave', e => { e.preventDefault(); dragCounter--; if (dragCounter <= 0) { dragCounter = 0; dropOverlay.classList.remove('active'); } });
+wrapEl.addEventListener('drop', async e => {
   e.preventDefault();
+  dragCounter = 0;
+  dropOverlay.classList.remove('active');
   const file = e.dataTransfer.files[0];
   if (!file) return;
+  if (!file.name.match(/\.glb$/i) && !file.name.match(/\.gltf$/i)) {
+    $('stats').textContent = 'Drop a .glb or .gltf file';
+    return;
+  }
   const buf = await file.arrayBuffer();
   await idbPut(file.name, buf);
-  const url = new URL(location);
-  url.searchParams.set('glb', file.name);
-  history.replaceState(null, '', url);
+  currentGlb = file.name;
   await loadModel(buf, file.name);
+  syncURL();
 });
+
+// --- Environment maps (IBL) ---
+// Generate procedural sky/ground gradient cubemap faces as Float32 RGBA.
+function generateProceduralEnvFaces(size) {
+  const allFaces = new Float32Array(6 * size * size * 4);
+  for (let fi = 0; fi < 6; fi++) {
+    const offset = fi * size * size * 4;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = (x + 0.5) / size * 2.0 - 1.0;
+        const v = (y + 0.5) / size * 2.0 - 1.0;
+        let dx, dy, dz;
+        switch (fi) {
+          case 0: dx= 1; dy=-v; dz=-u; break;
+          case 1: dx=-1; dy=-v; dz= u; break;
+          case 2: dx= u; dy= 1; dz= v; break;
+          case 3: dx= u; dy=-1; dz=-v; break;
+          case 4: dx= u; dy=-v; dz= 1; break;
+          case 5: dx=-u; dy=-v; dz=-1; break;
+        }
+        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const ndx = dx/len, ndy = dy/len, ndz = dz/len;
+        const skyT = Math.max(ndy, 0), groundT = Math.max(-ndy, 0);
+        const horizonT = 1.0 - Math.abs(ndy);
+        let r = 0.08 + skyT * 0.25 + horizonT * 0.35;
+        let g = 0.10 + skyT * 0.35 + horizonT * 0.30;
+        let b = 0.18 + skyT * 0.55 + horizonT * 0.25;
+        r += groundT * 0.12; g += groundT * 0.10; b += groundT * 0.06;
+        const sunDot = Math.max(ndx * 0.5 + ndy * 0.7 + ndz * 0.3, 0);
+        const sunGlow = Math.pow(sunDot, 32) * 0.7 + Math.pow(sunDot, 4) * 0.2;
+        r += sunGlow * 0.9; g += sunGlow * 0.8; b += sunGlow * 0.6;
+        const idx = offset + (y * size + x) * 4;
+        allFaces[idx] = r; allFaces[idx+1] = g; allFaces[idx+2] = b; allFaces[idx+3] = 1.0;
+      }
+    }
+  }
+  return allFaces;
+}
+
+// HDR (Radiance RGBE) loader — ported from prototype
+function parseHDR(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let pos = 0;
+  while (pos < bytes.length) {
+    let lineEnd = pos;
+    while (lineEnd < bytes.length && bytes[lineEnd] !== 10) lineEnd++;
+    const line = String.fromCharCode(...bytes.slice(pos, lineEnd));
+    pos = lineEnd + 1;
+    if (line.trim() === '') break;
+  }
+  let resEnd = pos;
+  while (resEnd < bytes.length && bytes[resEnd] !== 10) resEnd++;
+  const resLine = String.fromCharCode(...bytes.slice(pos, resEnd));
+  pos = resEnd + 1;
+  const m = resLine.match(/-Y\s+(\d+)\s+\+X\s+(\d+)/);
+  if (!m) throw new Error('Invalid HDR: ' + resLine);
+  const height = parseInt(m[1]), width = parseInt(m[2]);
+  const data = new Float32Array(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    if (bytes[pos] === 2 && bytes[pos+1] === 2) {
+      const scanW = (bytes[pos+2] << 8) | bytes[pos+3]; pos += 4;
+      const channels = new Uint8Array(width * 4);
+      for (let ch = 0; ch < 4; ch++) {
+        let x = 0;
+        while (x < width) {
+          const code = bytes[pos++];
+          if (code > 128) { const count = code-128, val = bytes[pos++]; for (let i = 0; i < count; i++) channels[(x+i)*4+ch] = val; x += count; }
+          else { for (let i = 0; i < code; i++) channels[(x+i)*4+ch] = bytes[pos++]; x += code; }
+        }
+      }
+      for (let x = 0; x < width; x++) {
+        const r = channels[x*4], g = channels[x*4+1], b = channels[x*4+2], e = channels[x*4+3];
+        const idx = (y * width + x) * 3;
+        if (e === 0) { data[idx] = data[idx+1] = data[idx+2] = 0; }
+        else { const s = Math.pow(2, e - 128 - 8); data[idx] = r*s; data[idx+1] = g*s; data[idx+2] = b*s; }
+      }
+    } else {
+      for (let x = 0; x < width; x++) {
+        const r = bytes[pos++], g = bytes[pos++], b = bytes[pos++], e = bytes[pos++];
+        const idx = (y * width + x) * 3;
+        if (e === 0) { data[idx] = data[idx+1] = data[idx+2] = 0; }
+        else { const s = Math.pow(2, e - 128 - 8); data[idx] = r*s; data[idx+1] = g*s; data[idx+2] = b*s; }
+      }
+    }
+  }
+  return { data, width, height };
+}
+
+function sampleEquirect(hdr, dx, dy, dz) {
+  const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  dx /= len; dy /= len; dz /= len;
+  const theta = Math.acos(Math.max(-1, Math.min(1, dy)));
+  const phi = Math.atan2(dz, dx);
+  const u = (phi + Math.PI) / (2 * Math.PI);
+  const v = theta / Math.PI;
+  const px = Math.min(Math.floor(u * hdr.width), hdr.width - 1);
+  const py = Math.min(Math.floor(v * hdr.height), hdr.height - 1);
+  const idx = (py * hdr.width + px) * 3;
+  return [hdr.data[idx], hdr.data[idx+1], hdr.data[idx+2]];
+}
+
+// Convert equirectangular HDR → cubemap faces as Float32 RGBA (linear HDR)
+function hdrToCubemapFaces(hdr, size) {
+  const allFaces = new Float32Array(6 * size * size * 4);
+  for (let fi = 0; fi < 6; fi++) {
+    const offset = fi * size * size * 4;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = (x + 0.5) / size * 2.0 - 1.0, v = (y + 0.5) / size * 2.0 - 1.0;
+        let dx, dy, dz;
+        switch (fi) {
+          case 0: dx= 1; dy=-v; dz=-u; break; case 1: dx=-1; dy=-v; dz= u; break;
+          case 2: dx= u; dy= 1; dz= v; break; case 3: dx= u; dy=-1; dz=-v; break;
+          case 4: dx= u; dy=-v; dz= 1; break; case 5: dx=-u; dy=-v; dz=-1; break;
+        }
+        let [r, g, b] = sampleEquirect(hdr, dx, dy, dz);
+        // Firefly clamp only
+        const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+        if (lum > 64) { const c = 64/lum; r *= c; g *= c; b *= c; }
+        const idx = offset + (y * size + x) * 4;
+        allFaces[idx] = r; allFaces[idx+1] = g; allFaces[idx+2] = b; allFaces[idx+3] = 1.0;
+      }
+    }
+  }
+  return allFaces;
+}
+
+// Diffuse irradiance convolution: cosine-weighted hemisphere sampling
+function convolveIrradianceFaces(hdr, size) {
+  const allFaces = new Float32Array(6 * size * size * 4);
+  const numSamples = 64;
+  for (let fi = 0; fi < 6; fi++) {
+    const offset = fi * size * size * 4;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = (x + 0.5) / size * 2.0 - 1.0, v = (y + 0.5) / size * 2.0 - 1.0;
+        let dx, dy, dz;
+        switch (fi) {
+          case 0: dx= 1; dy=-v; dz=-u; break; case 1: dx=-1; dy=-v; dz= u; break;
+          case 2: dx= u; dy= 1; dz= v; break; case 3: dx= u; dy=-1; dz=-v; break;
+          case 4: dx= u; dy=-v; dz= 1; break; case 5: dx=-u; dy=-v; dz=-1; break;
+        }
+        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const N = [dx/len, dy/len, dz/len];
+        // Build tangent frame
+        const up = Math.abs(N[1]) < 0.999 ? [0,1,0] : [1,0,0];
+        const T = [up[1]*N[2]-up[2]*N[1], up[2]*N[0]-up[0]*N[2], up[0]*N[1]-up[1]*N[0]];
+        const tl = Math.sqrt(T[0]*T[0]+T[1]*T[1]+T[2]*T[2]);
+        T[0]/=tl; T[1]/=tl; T[2]/=tl;
+        const B = [N[1]*T[2]-N[2]*T[1], N[2]*T[0]-N[0]*T[2], N[0]*T[1]-N[1]*T[0]];
+        let r = 0, g = 0, b = 0;
+        for (let s = 0; s < numSamples; s++) {
+          let bits = s; bits = (bits << 16) | (bits >>> 16);
+          bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >>> 1);
+          bits = ((bits & 0x33333333) << 2) | ((bits & 0xCCCCCCCC) >>> 2);
+          bits = ((bits & 0x0F0F0F0F) << 4) | ((bits & 0xF0F0F0F0) >>> 4);
+          bits = ((bits & 0x00FF00FF) << 8) | ((bits & 0xFF00FF00) >>> 8);
+          const xi1 = (s + 0.5) / numSamples;
+          const xi2 = (bits >>> 0) * 2.3283064365386963e-10;
+          const phi = 2 * Math.PI * xi1;
+          const cosTheta = Math.sqrt(1.0 - xi2), sinTheta = Math.sqrt(xi2);
+          const L = [
+            T[0]*sinTheta*Math.cos(phi) + B[0]*sinTheta*Math.sin(phi) + N[0]*cosTheta,
+            T[1]*sinTheta*Math.cos(phi) + B[1]*sinTheta*Math.sin(phi) + N[1]*cosTheta,
+            T[2]*sinTheta*Math.cos(phi) + B[2]*sinTheta*Math.sin(phi) + N[2]*cosTheta,
+          ];
+          let [sr, sg, sb] = sampleEquirect(hdr, L[0], L[1], L[2]);
+          const lum = 0.2126*sr + 0.7152*sg + 0.0722*sb;
+          if (lum > 64) { const c = 64/lum; sr *= c; sg *= c; sb *= c; }
+          r += sr; g += sg; b += sb;
+        }
+        r /= numSamples; g /= numSamples; b /= numSamples;
+        const idx = offset + (y * size + x) * 4;
+        allFaces[idx] = r; allFaces[idx+1] = g; allFaces[idx+2] = b; allFaces[idx+3] = 1.0;
+      }
+    }
+  }
+  return allFaces;
+}
+
+// GGX importance-sampled prefiltering: generate all mip levels for specular IBL.
+// Returns Float32Array with all mips concatenated (mip0 full size, mip1 half, etc.)
+function prefilterEnvMips(sourceSampler, faceSize) {
+  const numMips = Math.floor(Math.log2(faceSize)) + 1;
+  // Calculate total size
+  let totalFloats = 0;
+  for (let m = 0; m < numMips; m++) {
+    const ms = Math.max(1, faceSize >> m);
+    totalFloats += 6 * ms * ms * 4;
+  }
+  const allData = new Float32Array(totalFloats);
+  let offset = 0;
+
+  for (let mip = 0; mip < numMips; mip++) {
+    const mipSize = Math.max(1, faceSize >> mip);
+    const roughness = mip / Math.max(numMips - 1, 1);
+    const numSamples = mip === 0 ? 1 : Math.max(16, 64 - mip * 8);
+
+    for (let fi = 0; fi < 6; fi++) {
+      for (let y = 0; y < mipSize; y++) {
+        for (let x = 0; x < mipSize; x++) {
+          const u = (x + 0.5) / mipSize * 2.0 - 1.0;
+          const v = (y + 0.5) / mipSize * 2.0 - 1.0;
+          let dx, dy, dz;
+          switch (fi) {
+            case 0: dx= 1; dy=-v; dz=-u; break; case 1: dx=-1; dy=-v; dz= u; break;
+            case 2: dx= u; dy= 1; dz= v; break; case 3: dx= u; dy=-1; dz=-v; break;
+            case 4: dx= u; dy=-v; dz= 1; break; case 5: dx=-u; dy=-v; dz=-1; break;
+          }
+          const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          const N = [dx/len, dy/len, dz/len];
+
+          if (mip === 0) {
+            // Mip 0: direct sample
+            let [r, g, b] = sourceSampler(N[0], N[1], N[2]);
+            const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+            if (lum > 64) { const c = 64/lum; r *= c; g *= c; b *= c; }
+            allData[offset++] = r; allData[offset++] = g; allData[offset++] = b; allData[offset++] = 1;
+          } else {
+            // GGX importance sampling
+            const up = Math.abs(N[1]) < 0.999 ? [0,1,0] : [1,0,0];
+            const T = [up[1]*N[2]-up[2]*N[1], up[2]*N[0]-up[0]*N[2], up[0]*N[1]-up[1]*N[0]];
+            const tl = Math.sqrt(T[0]*T[0]+T[1]*T[1]+T[2]*T[2]);
+            T[0]/=tl; T[1]/=tl; T[2]/=tl;
+            const B = [N[1]*T[2]-N[2]*T[1], N[2]*T[0]-N[0]*T[2], N[0]*T[1]-N[1]*T[0]];
+            const a = roughness * roughness;
+            let r = 0, g = 0, b = 0, tw = 0;
+            for (let s = 0; s < numSamples; s++) {
+              let bits = s; bits=(bits<<16)|(bits>>>16);
+              bits=((bits&0x55555555)<<1)|((bits&0xAAAAAAAA)>>>1);
+              bits=((bits&0x33333333)<<2)|((bits&0xCCCCCCCC)>>>2);
+              bits=((bits&0x0F0F0F0F)<<4)|((bits&0xF0F0F0F0)>>>4);
+              bits=((bits&0x00FF00FF)<<8)|((bits&0xFF00FF00)>>>8);
+              const xi1 = (s+0.5)/numSamples;
+              const xi2 = (bits>>>0)*2.3283064365386963e-10;
+              const cosT = Math.sqrt((1-xi2)/(1+(a*a-1)*xi2));
+              const sinT = Math.sqrt(1-cosT*cosT);
+              const phi = 2*Math.PI*xi1;
+              const Hw = [
+                T[0]*sinT*Math.cos(phi)+B[0]*sinT*Math.sin(phi)+N[0]*cosT,
+                T[1]*sinT*Math.cos(phi)+B[1]*sinT*Math.sin(phi)+N[1]*cosT,
+                T[2]*sinT*Math.cos(phi)+B[2]*sinT*Math.sin(phi)+N[2]*cosT,
+              ];
+              const VdH = N[0]*Hw[0]+N[1]*Hw[1]+N[2]*Hw[2];
+              const L = [2*VdH*Hw[0]-N[0], 2*VdH*Hw[1]-N[1], 2*VdH*Hw[2]-N[2]];
+              const NdL = N[0]*L[0]+N[1]*L[1]+N[2]*L[2];
+              if (NdL > 0) {
+                let [sr,sg,sb] = sourceSampler(L[0], L[1], L[2]);
+                const lum = 0.2126*sr+0.7152*sg+0.0722*sb;
+                if (lum > 64) { const c = 64/lum; sr*=c; sg*=c; sb*=c; }
+                r += sr*NdL; g += sg*NdL; b += sb*NdL; tw += NdL;
+              }
+            }
+            if (tw > 0) { r/=tw; g/=tw; b/=tw; }
+            allData[offset++] = r; allData[offset++] = g; allData[offset++] = b; allData[offset++] = 1;
+          }
+        }
+      }
+    }
+  }
+  return allData;
+}
+
+async function loadEnvMap(url) {
+  console.log('Loading environment map:', url);
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) { console.warn('Env map fetch failed:', url); return; }
+    const buffer = await resp.arrayBuffer();
+    const hdr = parseHDR(buffer);
+    console.log(`HDR parsed: ${hdr.width}x${hdr.height}`);
+    const sampler = (dx, dy, dz) => sampleEquirect(hdr, dx, dy, dz);
+    const pf = prefilterEnvMips(sampler, 256);
+    const ir = convolveIrradianceFaces(hdr, 32);
+    mr_uploadEnvMaps(pf, 256, ir, 32);
+    console.log('HDR env maps uploaded (prefiltered)');
+  } catch (e) { console.warn('Env map load error:', e); }
+}
+
+// Procedural sky sampler for prefiltering
+function proceduralSkySample(dx, dy, dz) {
+  const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  const ndx = dx/len, ndy = dy/len, ndz = dz/len;
+  const skyT = Math.max(ndy, 0), groundT = Math.max(-ndy, 0);
+  const horizonT = 1.0 - Math.abs(ndy);
+  let r = 0.08 + skyT * 0.25 + horizonT * 0.35;
+  let g = 0.10 + skyT * 0.35 + horizonT * 0.30;
+  let b = 0.18 + skyT * 0.55 + horizonT * 0.25;
+  r += groundT * 0.12; g += groundT * 0.10; b += groundT * 0.06;
+  const sunDot = Math.max(ndx * 0.5 + ndy * 0.7 + ndz * 0.3, 0);
+  const sunGlow = Math.pow(sunDot, 32) * 0.7 + Math.pow(sunDot, 4) * 0.2;
+  r += sunGlow * 0.9; g += sunGlow * 0.8; b += sunGlow * 0.6;
+  return [r, g, b];
+}
+
+function initEnvMaps() {
+  // Procedural placeholder with proper GGX prefiltering
+  const pf = prefilterEnvMips(proceduralSkySample, 64);
+  const ir = generateProceduralEnvFaces(16); // irradiance doesn't need prefiltering
+  mr_uploadEnvMaps(pf, 64, ir, 16);
+  console.log('Procedural env maps uploaded (prefiltered)');
+  // Load HDR async
+  const envName = $('envmap-sel').value;
+  if (envName !== 'procedural') {
+    loadEnvMap(`/envmaps/${envName}.hdr`);
+  }
+}
 
 // --- Animation + LOD ---
 let animTime = 0;
 let lodInFlight = false;
 let lodDebounceTimer = null;
 let skinTexW = 0;
-
-// Non-blocking: fire animation pose upload, don't await in frame loop
 let animInFlight = false;
+
 async function tickAnimation(t) {
   if (!gpuSkinned || !meshInfo || animInFlight) return;
   animInFlight = true;
@@ -189,14 +913,17 @@ async function tickAnimation(t) {
   animInFlight = false;
 }
 
-// Non-blocking: fire LOD recompute, rebuild batches when done
+function debouncedLodRecompute() {
+  clearTimeout(lodDebounceTimer);
+  lodDebounceTimer = setTimeout(recomputeLods, 200);
+}
+
 async function recomputeLods() {
-  if (lodInFlight || !gpuSkinned) return;
+  if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
   try {
-    // Identity Möbius, no screen attenuation for now
-    const mob = [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0];
-    const canvas = $('cv');
+    const m = computeMobius(currentXform, ...['mx','my','mz','mr'].map(id => parseInt($(id).value)/10));
+    const mob = [...m.a, ...m.b, ...m.c, ...m.d];
     const w = canvas.width, h = canvas.height;
     const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
     const ey = zoom*Math.sin(rotX)+panY;
@@ -204,9 +931,11 @@ async function recomputeLods() {
     const view = lookAt(ex,ey,ez, panX,panY,panZ, 0,1,0);
     const proj = perspective(Math.PI/3, w/h, 0.01, 10000);
     const vp = mulM4(proj, view);
+    const tp = getTessParams();
     const resp = await workerCall('compute_animated_lods', {
-      t: animTime, mobius: Array.from(mob), density: 100, minPx: 0,
+      t: animTime, mobius: Array.from(mob), density: tp.density, minPx: tp.minPx,
       vpMatrix: Array.from(vp), vpWidth: w, vpHeight: h,
+      tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
     });
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
@@ -217,7 +946,6 @@ async function recomputeLods() {
 }
 
 // --- Render loop ---
-let lastAnimTick = 0;
 function frame(ts) {
   requestAnimationFrame(frame);
   const w = $('wrap');
@@ -227,10 +955,10 @@ function frame(ts) {
   if (animating && gpuSkinned && meshInfo) {
     animTime += 1/60;
     if (meshInfo.duration > 0) animTime = animTime % meshInfo.duration;
-    // Animation pose: every frame (lightweight, just uploads UBO)
+    // Update time slider
+    $('time').value = animTime;
+    $('time-v').textContent = animTime.toFixed(2);
     tickAnimation(animTime);
-    // LOD recompute: disabled during animation (GPU readback stalls pipeline)
-    // TODO: re-enable with proper async readback or compute-only LOD
   }
 
   const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
@@ -247,18 +975,38 @@ function frame(ts) {
 async function loadModel(buffer, filename) {
   $('stats').textContent = `Loading ${filename}...`;
 
-  // Load on all workers (worker expects data.bytes)
   const resp = await broadcastCall('load_gltf_data', { bytes: buffer });
   const info = resp.result;
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   meshInfo = info;
 
-  // Set face materials on main thread
+  // Populate animation selector
+  const animSel = $('anim-sel');
+  animSel.innerHTML = '<option value="-1">None</option>';
+  if (info.animations && info.animations.length > 0) {
+    for (let i = 0; i < info.animations.length; i++) {
+      const a = info.animations[i];
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = a.name || `Animation ${i}`;
+      animSel.appendChild(opt);
+    }
+    animSel.value = '0';
+  }
+
+  // Set up time slider range
+  if (info.animations && info.animations.length > 0) {
+    const a = info.animations[0];
+    $('time').min = a.time_min || 0;
+    $('time').max = a.time_max || a.duration || 2;
+    $('time').value = a.time_min || 0;
+  }
+
   if (info.face_materials) {
     mr_setFaceMaterials(new Int32Array(info.face_materials));
   }
 
-  // Upload PBR materials to main-thread renderer
+  // Upload PBR materials
   if (info.materials && info.materials.length > 0) {
     const stride = 36;
     const matData = new Float32Array(info.materials.length * stride);
@@ -292,18 +1040,14 @@ async function loadModel(buffer, filename) {
       matData[o+33] = bus[0]; matData[o+34] = bus[1]; matData[o+35] = m.base_uv_rotation || 0;
     }
     mr_setMaterials(matData, info.materials.length);
-    // Log first material for debugging
-    const m0 = info.materials[0];
     console.info('PBR material 0:', {
-      base_color: m0.base_color, metallic: m0.metallic, roughness: m0.roughness,
-      has_bc_tex: m0.base_color_texture_index != null,
-      has_mr_tex: m0.metallic_roughness_texture_index != null,
-      has_normal_tex: m0.normal_texture_index != null,
-      unlit: m0.unlit,
+      base_color: info.materials[0].base_color, metallic: info.materials[0].metallic,
+      roughness: info.materials[0].roughness,
+      has_bc_tex: info.materials[0].base_color_texture_index != null,
     });
   }
 
-  // Upload glTF images to main-thread GL
+  // Upload glTF images
   if (info.textures && info.textures.length > 0) {
     try {
       let totalSize = 0;
@@ -321,7 +1065,7 @@ async function loadModel(buffer, filename) {
         for (let i = 0; i < info.textures.length; i++) {
           const t = info.textures[i];
           const raw = t.data || t.pixels;
-        const pixels = raw ? new Uint8Array(raw.buffer || raw) : new Uint8Array(0);
+          const pixels = raw ? new Uint8Array(raw.buffer || raw) : new Uint8Array(0);
           allPixels.set(pixels, off);
           off += widths[i] * heights[i] * 4;
         }
@@ -330,15 +1074,13 @@ async function loadModel(buffer, filename) {
     } catch (e) { console.warn('Texture upload error:', e); }
   }
 
-  // Get skinning data and upload textures to main-thread GL
+  // Skinning data
   gpuSkinned = !!(info.animations && info.animations.length > 0);
   const skinResp = await workerCall('get_skinning_data', {});
   const skinData = skinResp.skinData;
-  // Texture width matches SkinningTexture::new: min(num_vertices, 4096)
   const nv = skinData ? (skinData.num_vertices || 0) : 0;
   skinTexW = Math.min(nv, 4096);
 
-  // Upload skinning texture (joint indices + weights) if skeletal
   if (skinData && skinData.joint_indices) {
     mr_uploadSkinningTexture(
       new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
@@ -346,7 +1088,6 @@ async function loadModel(buffer, filename) {
       skinData.num_vertices,
     );
   }
-  // Upload morph delta texture if morph targets present
   if (skinData && skinData.morph_deltas) {
     mr_uploadMorphTexture(
       new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
@@ -355,20 +1096,17 @@ async function loadModel(buffer, filename) {
     );
   }
 
-  // Set tess params on worker
-  await workerCall('set_tess_params', { density: 100, screen_atten: false });
+  const tp = getTessParams();
+  await workerCall('set_tess_params', { density: tp.density, screenAtten: tp.screen_atten, minPx: tp.minPx });
 
-  // Get rest-pose instances (CPU LOD for initial load — GPU LOD used for subsequent)
   const rpResp = await workerCall('get_rest_pose_instances', { lod_time: 0 });
   const rp = rpResp.data || rpResp;
 
   if (!rp || !rp.instances) {
-    // Static model without animation evaluator — use compute_mesh_batches fallback
     $('stats').textContent = `${filename}: static model (no animation data path yet)`;
     return;
   }
 
-  // Transfer instance data + face LODs to main-thread renderer
   const instances = new Float32Array(rp.instances.buffer || rp.instances);
   const faceLods = new Float32Array(rp.face_lods.buffer || rp.face_lods);
   const numFaces = rp.num_faces;
@@ -376,15 +1114,12 @@ async function loadModel(buffer, filename) {
   mr_setInstanceData(instances, numFaces);
   mr_buildBatches(faceLods);
 
-  // Frame camera: positions are normalized to ~[-1,1], so zoom 3 fits well
   zoom = 3.0;
-  rotX = 0.2; rotY = Math.PI + 0.5; // face front of model
+  rotX = 0.2; rotY = Math.PI + 0.5;
   panX = 0; panY = 0; panZ = 0;
 
-  // Upload model to worker GPU compute for subsequent LOD updates
   await workerCall('upload_model_to_compute', {});
 
-  // Set up animation
   animTime = 0;
   if (info.animations && info.animations.length > 0) {
     await workerCall('set_active_animation', { index: 0 });
@@ -393,10 +1128,18 @@ async function loadModel(buffer, filename) {
     meshInfo.duration = 0;
   }
 
-  $('stats').textContent = `${filename}: ${numFaces} faces`;
+  $('stats').innerHTML = `<span class="val">${filename}</span>: ${numFaces} faces`;
+
+  // Trigger GPU LOD recompute with current tess params (screen attenuation, density)
+  debouncedLodRecompute();
 }
 
 // --- Init ---
+// Read URL params and apply to all controls before anything else
+const initParams = readParams();
+applyParams(initParams);
+currentGlb = initParams.glb;
+
 await init();
 
 $('stats').textContent = 'Initializing renderer...';
@@ -405,12 +1148,15 @@ if (!mr_init('cv')) {
   throw 'renderer init failed';
 }
 
-// Init workers
+// Apply render mode, Möbius, and env maps from URL params
+mr_setRenderMode(initParams.mode);
+updateMobius();
+initEnvMaps();
+
 $('stats').textContent = `Starting ${ATLAS_WORKERS} workers for atlas build...`;
 await Promise.all(workers.map((_, i) => workerCallN(i, 'init', {})));
 
-// Build atlas (reuse prototype's parallel build pattern)
-const ATLAS_EXP = parseInt(new URLSearchParams(location.search).get('atlas') || '7');
+const ATLAS_EXP = parseInt(initParams.atlas);
 const levels = [];
 for (let i = 0; i <= ATLAS_EXP; i++) levels.push(1 << i);
 const allTriples = [];
@@ -424,7 +1170,7 @@ for (const a of levels)
     }
 allTriples.sort((a,b) => (b[2]+b[1]+b[0]) - (a[2]+a[1]+a[0]));
 
-$('stats').textContent = `Building ${allTriples.length} patches...`;
+$('stats').textContent = `Building ${allTriples.length} patches across ${ATLAS_WORKERS} workers...`;
 {
   let qi = 0;
   function dispatchNext(wi) {
@@ -435,7 +1181,6 @@ $('stats').textContent = `Building ${allTriples.length} patches...`;
   await Promise.all(workers.map((_, i) => dispatchNext(i)));
 }
 
-// Merge atlas across workers
 if (ATLAS_WORKERS > 1) {
   const subExports = await Promise.all(
     workers.slice(1).map((_, i) => workerCallN(i + 1, 'export_atlas_bytes', {}))
@@ -449,16 +1194,13 @@ if (ATLAS_WORKERS > 1) {
   }));
 }
 
-// Done with parallel atlas build — drop extra workers
 dropExtraWorkers();
 
-// Export patches and upload to main-thread renderer
 const patchResp = await workerCall('export_patches', {});
 for (const p of patchResp.patches) {
   const key = p.key.join(',') + '/' + p.perm;
-  const bary = new Float32Array(p.bary); // Float64 → Float32
+  const bary = new Float32Array(p.bary);
   const tris = new Uint32Array(p.tris);
-  // Generate line indices from triangles
   const lines = [];
   for (let i = 0; i < tris.length; i += 3) {
     lines.push(tris[i], tris[i+1], tris[i+1], tris[i+2], tris[i+2], tris[i]);
@@ -469,24 +1211,27 @@ for (const p of patchResp.patches) {
 $('stats').textContent = 'Atlas ready. Loading model...';
 requestAnimationFrame(frame);
 
-// Auto-load from URL param or default to horse.glb
-const glbParam = new URLSearchParams(location.search).get('glb');
-const defaultName = glbParam || 'horse.glb';
+// Load model from URL param, IndexedDB, or server
 try {
-  // Try IndexedDB first (for drag-dropped files), then fetch from server
-  let buf = await idbGet(defaultName);
+  let buf = await idbGet(currentGlb);
   if (!buf) {
-    const url = defaultName.startsWith('/') || defaultName.startsWith('http') ? defaultName : '/' + defaultName;
+    const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
     const resp = await fetch(url);
     if (resp.ok) buf = await resp.arrayBuffer();
   }
   if (buf) {
-    await loadModel(buf, defaultName);
+    await loadModel(buf, currentGlb);
+    // After model loads, select the animation from URL params if specified
+    const animIdx = parseInt(initParams.anim);
+    if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
+      $('anim-sel').value = animIdx;
+      $('anim-sel').dispatchEvent(new Event('change'));
+    }
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
   }
 } catch (e) {
-  console.warn(`Could not auto-load ${defaultName}:`, e);
+  console.warn(`Could not auto-load ${currentGlb}:`, e);
   $('stats').textContent = 'Drop a .glb file to load';
 }
 </script>

@@ -202,9 +202,14 @@ pub fn upload_model_to_compute() -> bool {
                 .collect();
             compute.upload_face_indices(gl, &face_indices_f32);
 
-            // Upload skinning data if present
+            // Upload skinning data — real or identity fallback for static models
             if let (Some(ji), Some(jw)) = (&combined.joint_indices, &combined.joint_weights) {
                 compute.upload_skinning_texture(gl, ji, jw);
+            } else {
+                // Static model: all vertices → joint 0, weight 1.0
+                let ji_default: Vec<[u16; 4]> = vec![[0, 0, 0, 0]; nv];
+                let jw_default: Vec<[f32; 4]> = vec![[1.0, 0.0, 0.0, 0.0]; nv];
+                compute.upload_skinning_texture(gl, &ji_default, &jw_default);
             }
 
             // Upload morph deltas if present
@@ -367,6 +372,17 @@ pub fn compute_animated_lods(
 
             if !joint_matrices.is_empty() {
                 compute.upload_joint_matrices(gl, &joint_matrices);
+            } else {
+                // Static model: upload single identity joint so compute shader
+                // passes positions through without skinning
+                #[rustfmt::skip]
+                let identity: [f32; 16] = [
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ];
+                compute.upload_joint_matrices(gl, &identity);
             }
             if !morph_weights.is_empty() {
                 compute.upload_morph_weights(gl, &morph_weights);
@@ -377,9 +393,11 @@ pub fn compute_animated_lods(
             let mut vp = [0.0f32; 16];
             for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
 
+            // For static models, we uploaded 1 identity joint above
+            let effective_joints = if num_joints == 0 { 1 } else { num_joints };
             let n = compute.compute_lods(
                 gl, num_faces, num_vertices,
-                num_joints, num_morph,
+                effective_joints, num_morph,
                 mob, density, mesh_radius, min_px,
                 &vp, vp_width, vp_height,
             );

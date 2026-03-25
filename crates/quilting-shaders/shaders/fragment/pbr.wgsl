@@ -98,7 +98,7 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     if in.fade < 0.001 { discard; }
 
     var n = normalize(in.normal_vs);
-    let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera looks down +Z
+    let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera looks along +Z axis
 
     // --- Base color ---
     // Apply KHR_texture_transform to base color UVs
@@ -224,23 +224,33 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     let fill = pbr_direct(fill_input);
 
     // --- IBL ambient ---
-    var n_ws = normalize(in.normal_ws);
-    let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
-    // For IBL: ensure n_ws faces the camera so irradiance samples the right hemisphere
-    if dot(n_ws, view_dir_ws) < 0.0 {
-        n_ws = -n_ws;
-    }
-    let reflect_ws = reflect(-view_dir_ws, n_ws);
+    var ambient = vec3<f32>(0.0);
+    var irradiance = vec3<f32>(0.0);
+    if pbr.has_env_map > 0.5 {
+        var n_ws = normalize(in.normal_ws);
+        let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
+        if dot(n_ws, view_dir_ws) < 0.0 {
+            n_ws = -n_ws;
+        }
+        let reflect_ws = reflect(-view_dir_ws, n_ws);
 
-    let irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb;
-    let lod = roughness * max(pbr.env_mip_count, 1.0);
-    let env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb;
+        irradiance = textureSampleLevel(env_irradiance, env_irradiance_sampler, n_ws, 0.0).rgb;
+        let lod = roughness * max(pbr.env_mip_count, 1.0);
+        let env_color = textureSampleLevel(env_prefiltered, env_prefiltered_sampler, reflect_ws, lod).rgb;
 
-    var ambient = pbr_ambient(base.rgb, metallic, roughness, n, view_dir, irradiance, env_color, f0_base);
+        ambient = pbr_ambient(base.rgb, metallic, roughness, n, view_dir, irradiance, env_color, f0_base);
 
-    if pbr.has_occlusion_tex > 0.5 {
-        let ao = textureSample(occlusion_tex, occlusion_sampler, in.tex_uv).r;
-        ambient = ambient * mix(1.0, ao, pbr.occlusion_strength);
+        if pbr.has_occlusion_tex > 0.5 {
+            let ao = textureSample(occlusion_tex, occlusion_sampler, in.tex_uv).r;
+            ambient = ambient * mix(1.0, ao, pbr.occlusion_strength);
+        }
+    } else {
+        // Analytical ambient fallback (no IBL) — hemisphere light
+        let sky = vec3<f32>(0.25, 0.28, 0.40);
+        let ground = vec3<f32>(0.10, 0.08, 0.06);
+        let hemisphere = mix(ground, sky, dot(n, vec3<f32>(0.0, 1.0, 0.0)) * 0.5 + 0.5);
+        ambient = base.rgb * hemisphere * (1.0 - metallic);
+        irradiance = hemisphere;
     }
 
     var color = direct.color + fill.color + ambient;

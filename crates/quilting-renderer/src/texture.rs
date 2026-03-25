@@ -6,15 +6,20 @@ use glow::HasContext;
 pub struct TextureCache {
     textures: Vec<Option<glow::Texture>>,
     placeholder: glow::Texture,
+    placeholder_black: glow::Texture,
+    placeholder_cube: glow::Texture,
 }
 
 impl TextureCache {
-    /// Create a new cache with a 1x1 white placeholder texture.
     pub fn new(gl: &glow::Context) -> Result<Self, String> {
         let placeholder = create_placeholder(gl)?;
+        let placeholder_black = create_placeholder_black(gl)?;
+        let placeholder_cube = create_placeholder_cube(gl)?;
         Ok(TextureCache {
             textures: Vec::new(),
             placeholder,
+            placeholder_black,
+            placeholder_cube,
         })
     }
 
@@ -44,9 +49,19 @@ impl TextureCache {
             .unwrap_or(self.placeholder)
     }
 
-    /// The 1x1 white placeholder.
+    /// The 1x1 white placeholder (2D) — for base_color, occlusion.
     pub fn placeholder(&self) -> glow::Texture {
         self.placeholder
+    }
+
+    /// The 1x1 black placeholder (2D) — for emissive, normal, metallic_roughness.
+    pub fn placeholder_black(&self) -> glow::Texture {
+        self.placeholder_black
+    }
+
+    /// The 1x1 black placeholder (cube map).
+    pub fn placeholder_cube(&self) -> glow::Texture {
+        self.placeholder_cube
     }
 
     pub fn destroy(&mut self, gl: &glow::Context) {
@@ -55,7 +70,11 @@ impl TextureCache {
                 unsafe { gl.delete_texture(t); }
             }
         }
-        unsafe { gl.delete_texture(self.placeholder); }
+        unsafe {
+            gl.delete_texture(self.placeholder);
+            gl.delete_texture(self.placeholder_black);
+            gl.delete_texture(self.placeholder_cube);
+        }
     }
 }
 
@@ -77,6 +96,46 @@ fn create_placeholder(gl: &glow::Context) -> Result<glow::Texture, String> {
         );
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        Ok(tex)
+    }
+}
+
+fn create_placeholder_black(gl: &glow::Context) -> Result<glow::Texture, String> {
+    unsafe {
+        let tex = gl.create_texture().map_err(|e| format!("black placeholder: {e}"))?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        let black = [0u8, 0, 0, 255];
+        gl.tex_image_2d(
+            glow::TEXTURE_2D, 0, glow::RGBA as i32, 1, 1, 0,
+            glow::RGBA, glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&black)),
+        );
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        Ok(tex)
+    }
+}
+
+fn create_placeholder_cube(gl: &glow::Context) -> Result<glow::Texture, String> {
+    unsafe {
+        let tex = gl.create_texture().map_err(|e| format!("placeholder cube: {e}"))?;
+        gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(tex));
+        let black = [0u8, 0, 0, 255];
+        for face in 0..6u32 {
+            gl.tex_image_2d(
+                glow::TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                0,
+                glow::RGBA as i32,
+                1,
+                1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&black)),
+            );
+        }
+        gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
         Ok(tex)
     }
 }
@@ -135,6 +194,7 @@ pub fn bind_material_textures(
     mat_textures: &super::buffer::MaterialTextures,
     env: &super::buffer::EnvironmentMaps,
     placeholder: glow::Texture,
+    placeholder_cube: glow::Texture,
 ) {
     let bind = |unit: u32, tex: Option<glow::Texture>| {
         unsafe {
@@ -145,9 +205,7 @@ pub fn bind_material_textures(
     let bind_cube = |unit: u32, tex: Option<glow::Texture>| {
         unsafe {
             gl.active_texture(glow::TEXTURE0 + unit);
-            if let Some(t) = tex {
-                gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(t));
-            }
+            gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(tex.unwrap_or(placeholder_cube)));
         }
     };
 
