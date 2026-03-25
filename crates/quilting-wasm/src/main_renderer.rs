@@ -538,10 +538,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     m
                 };
 
-                // Pass 1: opaque (alpha_mode == 0 or 1)
+                // Pass 1: opaque non-transmission
                 for batch in &render_batches {
                     let mat = get_mat(batch);
-                    if mat.alpha_mode > 1.5 { continue; } // skip BLEND
+                    if mat.alpha_mode > 1.5 || mat.transmission_factor > 0.0 { continue; }
                     // Get this batch's material
                     let base_mat = if batch.material_index < state.materials.len() {
                         &state.materials[batch.material_index]
@@ -597,7 +597,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 // --- Blit opaque framebuffer to scene_color texture for refraction ---
                 let has_transmission = render_batches.iter().any(|b| {
                     let m = get_mat(b);
-                    m.alpha_mode > 1.5 && m.transmission_factor > 0.0
+                    m.transmission_factor > 0.0
                 });
                 if has_transmission {
                     unsafe {
@@ -655,9 +655,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     }
                 }
 
-                // Pass 2: transparent (alpha_mode == BLEND)
+                // Pass 2: transmission + transparent
+                // Transmission materials need scene_color; blend materials need no depth write.
                 unsafe {
-                    gl.depth_mask(false);
                     gl.enable(glow::BLEND);
                     gl.blend_func_separate(
                         glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA,
@@ -666,7 +666,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
                 for batch in &render_batches {
                     let mat = get_mat(batch);
-                    if mat.alpha_mode < 1.5 { continue; } // skip opaque/mask
+                    // Skip batches already rendered in pass 1
+                    if mat.alpha_mode < 1.5 && mat.transmission_factor <= 0.0 { continue; }
+                    // Transmission with opaque alpha: write depth. Blend: no depth write.
+                    unsafe {
+                        gl.depth_mask(mat.alpha_mode < 1.5);
+                    }
 
                     state.renderer.pbr_ubo().upload(gl, &mat);
                     state.renderer.pbr_ubo().bind(gl);

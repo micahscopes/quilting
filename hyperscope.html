@@ -1129,7 +1129,7 @@ async function loadModel(buffer, filename) {
   mr_buildBatches(faceLods);
 
   zoom = 3.0;
-  rotX = 0.2; rotY = Math.PI + 0.5;
+  rotX = 0.15; rotY = Math.PI;
   panX = 0; panY = 0; panZ = 0;
 
   await workerCall('upload_model_to_compute', {});
