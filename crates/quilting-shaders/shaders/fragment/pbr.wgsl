@@ -356,12 +356,13 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let screen_size = vec2<f32>(textureDimensions(scene_color_tex));
         let screen_uv = in.frag_coord.xy / screen_size;
 
-        // Refraction offset from view-space normal and IOR
-        let ior_offset = (pbr.ior - 1.0) * 0.1;
+        // Refraction offset: subtle distortion based on normal curvature and IOR
+        // Real glass has very little screen-space offset — mostly just at edges
+        let ior_offset = (pbr.ior - 1.0) * 0.02 * pbr.thickness_factor;
         let refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
 
-        // Sample scene behind with optional blur for rough transmission
-        let blur_radius = roughness * roughness * 0.04;
+        // Rough transmission blur radius — needs to be perceptible
+        let blur_radius = roughness * roughness * 0.12;
         var scene_behind: vec3<f32>;
         if blur_radius > 0.002 {
             let br = blur_radius;
