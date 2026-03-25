@@ -363,10 +363,8 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
             refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
         }
 
-        // Rough transmission: use mipmap LOD for blur (no multi-tap ghosting)
-        let max_mip = log2(max(screen_size.x, screen_size.y));
-        let blur_lod = roughness * roughness * max_mip * 0.5;
-        let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, blur_lod).rgb;
+        // Sample scene at exact position (rough blur TODO: separate blur pass)
+        let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
 
         // Tint by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
