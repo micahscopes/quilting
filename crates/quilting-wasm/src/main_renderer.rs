@@ -73,11 +73,11 @@ fn create_blur_program(gl: &glow::Context) -> Result<(glow::Program, glow::Verte
             in vec2 v_uv;\n\
             out vec4 o_color;\n\
             void main() {\n\
-                vec3 c = texture(u_tex, v_uv).rgb * 0.227027;\n\
-                c += texture(u_tex, v_uv + u_dir * 1.384615).rgb * 0.316216;\n\
-                c += texture(u_tex, v_uv - u_dir * 1.384615).rgb * 0.316216;\n\
-                c += texture(u_tex, v_uv + u_dir * 3.230769).rgb * 0.070270;\n\
-                c += texture(u_tex, v_uv - u_dir * 3.230769).rgb * 0.070270;\n\
+                vec3 c = textureLod(u_tex, v_uv, 0.0).rgb * 0.227027;\n\
+                c += textureLod(u_tex, v_uv + u_dir * 1.384615, 0.0).rgb * 0.316216;\n\
+                c += textureLod(u_tex, v_uv - u_dir * 1.384615, 0.0).rgb * 0.316216;\n\
+                c += textureLod(u_tex, v_uv + u_dir * 3.230769, 0.0).rgb * 0.070270;\n\
+                c += textureLod(u_tex, v_uv - u_dir * 3.230769, 0.0).rgb * 0.070270;\n\
                 o_color = vec4(c, 1.0);\n\
             }";
 
