@@ -488,41 +488,15 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.renderer.joint_ubo().bind(gl);
 
         // Mode-specific UBO setup
+        let has_env = state.env_maps.prefiltered.is_some();
+        let env_mips = state.env_maps.mip_count;
+        let white = state.texture_cache.placeholder();
+        let black = state.texture_cache.placeholder_black();
+        let cube = state.texture_cache.placeholder_cube();
+
         match state.render_mode {
             RenderMode::Pbr => {
-                let default_mat = if !state.materials.is_empty() {
-                    state.materials[0].clone()
-                } else {
-                    PbrParams::default()
-                };
-                // Log PBR params once (use a static flag)
-                use std::sync::atomic::{AtomicBool, Ordering};
-                static LOGGED: AtomicBool = AtomicBool::new(false);
-                if !LOGGED.swap(true, Ordering::Relaxed) {
-                    info!("PBR UBO: base_color={:?} metallic={} roughness={} has_bc_tex={} has_mr_tex={}",
-                        default_mat.base_color, default_mat.metallic, default_mat.roughness,
-                        default_mat.has_base_color_tex, default_mat.has_metallic_roughness_tex);
-                }
-                // Set env map flags from actual state
-                let mut mat = default_mat.clone();
-                mat.has_env_map = state.env_maps.prefiltered.is_some();
-                mat.env_mip_count = state.env_maps.mip_count;
-                state.renderer.pbr_ubo().upload(gl, &mat);
-                state.renderer.pbr_ubo().bind(gl);
-
-                // Bind PBR texture placeholders per unit:
-                // 0=base_color(white), 1=mr(black), 2=normal(black), 3=emissive(black), 4=occlusion(white)
-                let white = state.texture_cache.placeholder();
-                let black = state.texture_cache.placeholder_black();
-                let cube = state.texture_cache.placeholder_cube();
-                let defaults = [white, black, black, black, white];
-                for (unit, &tex) in defaults.iter().enumerate() {
-                    unsafe {
-                        gl.active_texture(glow::TEXTURE0 + unit as u32);
-                        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    }
-                }
-                // Env cubemaps: use real if uploaded, placeholder otherwise
+                // Env cubemaps: bind once (shared across all batches)
                 unsafe {
                     gl.active_texture(glow::TEXTURE0 + 5);
                     gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(
@@ -534,9 +508,35 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     ));
                 }
 
-                // Bind actual textures per material slot using image indices
-                if !state.materials.is_empty() {
-                    let m = &mat;
+                // PBR: render per-batch with per-material UBO + textures
+                unsafe { gl.use_program(Some(state.renderer.programs().pbr)); }
+                let default_mat = PbrParams::default();
+
+                for batch in &render_batches {
+                    // Get this batch's material
+                    let base_mat = if batch.material_index < state.materials.len() {
+                        &state.materials[batch.material_index]
+                    } else if !state.materials.is_empty() {
+                        &state.materials[0]
+                    } else {
+                        &default_mat
+                    };
+                    let mut mat = base_mat.clone();
+                    mat.has_env_map = has_env;
+                    mat.env_mip_count = env_mips;
+
+                    // Upload per-material PBR UBO
+                    state.renderer.pbr_ubo().upload(gl, &mat);
+                    state.renderer.pbr_ubo().bind(gl);
+
+                    // Bind placeholders first, then override with actual textures
+                    let tex_defaults = [white, black, black, black, white];
+                    for (unit, &tex) in tex_defaults.iter().enumerate() {
+                        unsafe {
+                            gl.active_texture(glow::TEXTURE0 + unit as u32);
+                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                        }
+                    }
                     let bind_tex = |unit: u32, idx: i32| {
                         if idx >= 0 {
                             let tex = state.texture_cache.get(Some(idx as usize));
@@ -546,12 +546,28 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             }
                         }
                     };
-                    bind_tex(0, m.base_color_tex_idx);
-                    bind_tex(1, m.metallic_roughness_tex_idx);
-                    bind_tex(2, m.normal_tex_idx);
-                    bind_tex(3, m.emissive_tex_idx);
-                    bind_tex(4, m.occlusion_tex_idx);
+                    bind_tex(0, mat.base_color_tex_idx);
+                    bind_tex(1, mat.metallic_roughness_tex_idx);
+                    bind_tex(2, mat.normal_tex_idx);
+                    bind_tex(3, mat.emissive_tex_idx);
+                    bind_tex(4, mat.occlusion_tex_idx);
+
+                    // Upload vertex UBO and draw this batch
+                    quilting_renderer::pass::upload_batch_ubo(
+                        gl, state.renderer.vtx_ubo(), &camera,
+                        batch.perm_parity, batch.perm_index, 1,
+                    );
+                    unsafe {
+                        gl.bind_vertex_array(Some(batch.mesh.tri_vao));
+                        gl.draw_elements_instanced(
+                            glow::TRIANGLES, batch.mesh.num_tri_indices,
+                            glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
+                        );
+                    }
                 }
+                // Skip the generic render call for PBR — we handled it above
+                state.renderer.end_frame();
+                return;
             }
             RenderMode::Lod => {
                 state.renderer.matcap_ubo().upload(gl, 0.0); // heatmap

@@ -48,7 +48,7 @@ pub struct RenderBatch<'a> {
 }
 
 /// Upload vertex UBO for a batch and bind it.
-fn upload_batch_ubo(
+pub fn upload_batch_ubo(
     gl: &glow::Context,
     vtx_ubo: &VertexUniformBuf,
     camera: &Camera,

@@ -132,6 +132,11 @@ impl Renderer {
         (self.width, self.height)
     }
 
+    /// Access the vertex uniform buffer (for per-batch uploads).
+    pub fn vtx_ubo(&self) -> &VertexUniformBuf {
+        &self.vtx_ubo
+    }
+
     /// Access the PBR uniform buffer (for external PBR pass management).
     pub fn pbr_ubo(&self) -> &PbrUniformBuf {
         &self.pbr_ubo
