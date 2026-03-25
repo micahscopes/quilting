@@ -372,7 +372,8 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         // Lerp between sharp and Gaussian-blurred scene based on roughness
         let sharp = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
         let blurred = textureSampleLevel(scene_color_blurred, scene_color_blurred_sampler, refract_uv, 0.0).rgb;
-        let blur_t = clamp(roughness * roughness * 4.0, 0.0, 1.0);
+        // Linear ramp: even low roughness gets visible blur
+        let blur_t = clamp(roughness * 2.0, 0.0, 1.0);
         let scene_behind = mix(sharp, blurred, blur_t);
 
         // Tint by base color + volume absorption
