@@ -33,6 +33,13 @@ struct PbrUniforms {
     base_uv_scale_x: f32,
     base_uv_scale_y: f32,
     base_uv_rotation: f32,
+    // KHR_materials_ior + transmission + volume
+    ior: f32,
+    transmission_factor: f32,
+    thickness_factor: f32,
+    _pbr_pad2: f32,
+    attenuation_color: vec3<f32>,
+    attenuation_distance: f32,
 }
 
 @group(0) @binding(1)
@@ -208,8 +215,9 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         specular_weight = max(f0_mod.x, max(f0_mod.y, f0_mod.z));
     }
 
-    // Compute F0 with specular modification
-    let f0_base = mix(vec3<f32>(0.04) * f0_mod, base.rgb, metallic);
+    // Compute F0: IOR-based for dielectrics, albedo for metals
+    let ior_f0 = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
+    let f0_base = mix(vec3<f32>(ior_f0) * f0_mod, base.rgb, metallic);
 
     // --- Lighting ---
     let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.6));
@@ -327,6 +335,25 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         emissive = emissive * em_linear;
     }
     color = color + emissive;
+
+    // --- KHR_materials_transmission + volume ---
+    if pbr.transmission_factor > 0.0 {
+        // Volume absorption (Beer-Lambert law)
+        var volume_atten = vec3<f32>(1.0);
+        if pbr.thickness_factor > 0.0 && pbr.attenuation_distance > 0.0 {
+            let optical_depth = -pbr.thickness_factor / pbr.attenuation_distance;
+            volume_atten = exp(vec3<f32>(optical_depth) * log(max(pbr.attenuation_color, vec3<f32>(0.001))));
+        }
+        // Transmission: blend between PBR surface color and transmitted background
+        // Without screen-space texture, approximate as base_color attenuated by volume
+        let transmitted = base.rgb * volume_atten * irradiance;
+        // Fresnel: less transmission at grazing angles (more reflection)
+        let n_dot_v_t = max(dot(n, view_dir), 0.001);
+        let fresnel_t = pow(1.0 - n_dot_v_t, 5.0);
+        let effective_transmission = pbr.transmission_factor * (1.0 - fresnel_t);
+        color = mix(color, transmitted, effective_transmission);
+        alpha = mix(alpha, 1.0, effective_transmission * 0.5); // partial opacity for transmitted
+    }
 
     // Tone mapping: ACES filmic with slight exposure boost for deeper contrast
     let exposed = color;

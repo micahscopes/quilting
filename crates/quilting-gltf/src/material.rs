@@ -62,6 +62,17 @@ pub struct PbrMaterial {
     /// KHR_materials_specular: custom specular color (overrides dielectric F0).
     pub specular_color_factor: [f64; 3],
 
+    /// KHR_materials_ior: index of refraction (default 1.5).
+    pub ior: f64,
+
+    /// KHR_materials_transmission: fraction of light transmitted [0..1].
+    pub transmission_factor: f64,
+
+    /// KHR_materials_volume: thickness and absorption.
+    pub thickness_factor: f64,
+    pub attenuation_color: [f64; 3],
+    pub attenuation_distance: f64,
+
     /// KHR_texture_transform on normal map
     pub normal_uv_scale: [f64; 2],
     pub normal_uv_offset: [f64; 2],
@@ -205,6 +216,47 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         sc
     };
 
+    // KHR_materials_ior
+    let ior = {
+        let mut val = 1.5;
+        if let Some(ext) = mat.extensions() {
+            if let Some(ior_ext) = ext.get("KHR_materials_ior") {
+                val = ior_ext.get("ior").and_then(|v| v.as_f64()).unwrap_or(1.5);
+            }
+        }
+        val
+    };
+
+    // KHR_materials_transmission
+    let transmission_factor = {
+        let mut tf = 0.0;
+        if let Some(ext) = mat.extensions() {
+            if let Some(trans) = ext.get("KHR_materials_transmission") {
+                tf = trans.get("transmissionFactor").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            }
+        }
+        tf
+    };
+
+    // KHR_materials_volume
+    let (thickness_factor, attenuation_color, attenuation_distance) = {
+        let mut tf = 0.0;
+        let mut ac = [1.0; 3];
+        let mut ad = f64::INFINITY;
+        if let Some(ext) = mat.extensions() {
+            if let Some(vol) = ext.get("KHR_materials_volume") {
+                tf = vol.get("thicknessFactor").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if let Some(col) = vol.get("attenuationColor").and_then(|v| v.as_array()) {
+                    for (i, v) in col.iter().take(3).enumerate() {
+                        ac[i] = v.as_f64().unwrap_or(1.0);
+                    }
+                }
+                ad = vol.get("attenuationDistance").and_then(|v| v.as_f64()).unwrap_or(f64::INFINITY);
+            }
+        }
+        (tf, ac, ad)
+    };
+
     PbrMaterial {
         name: mat.name().map(|s| s.to_string()),
         base_color_factor,
@@ -225,6 +277,11 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         sheen_color_factor,
         sheen_roughness_factor,
         specular_color_factor,
+        ior,
+        transmission_factor,
+        thickness_factor,
+        attenuation_color,
+        attenuation_distance,
         normal_uv_scale,
         normal_uv_offset,
         normal_uv_rotation,
@@ -261,6 +318,11 @@ mod tests {
             sheen_color_factor: [0.0; 3],
             sheen_roughness_factor: 0.0,
             specular_color_factor: [1.0; 3],
+            ior: 1.5,
+            transmission_factor: 0.0,
+            thickness_factor: 0.0,
+            attenuation_color: [1.0; 3],
+            attenuation_distance: f64::INFINITY,
             normal_uv_scale: [1.0; 2],
             normal_uv_offset: [0.0; 2],
             normal_uv_rotation: 0.0,

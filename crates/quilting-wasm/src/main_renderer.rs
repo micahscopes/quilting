@@ -190,7 +190,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.materials.clear();
-            let stride = 41;
+            let stride = 48;
             for i in 0..num_materials as usize {
                 let o = i * stride;
                 if o + stride > data.len() { break; }
@@ -225,6 +225,11 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
                     normal_tex_idx: d[38] as i32,
                     emissive_tex_idx: d[39] as i32,
                     occlusion_tex_idx: d[40] as i32,
+                    ior: d[41],
+                    transmission_factor: d[42],
+                    thickness_factor: d[43],
+                    attenuation_color: [d[44], d[45], d[46]],
+                    attenuation_distance: d[47],
                     ..PbrParams::default()
                 });
             }

@@ -1008,7 +1008,7 @@ async function loadModel(buffer, filename) {
 
   // Upload PBR materials
   if (info.materials && info.materials.length > 0) {
-    const stride = 41; // 36 params + 5 texture indices
+    const stride = 48; // 36 base + 5 tex indices + 7 ior/transmission/volume
     const matData = new Float32Array(info.materials.length * stride);
     for (let i = 0; i < info.materials.length; i++) {
       const m = info.materials[i];
@@ -1045,6 +1045,13 @@ async function loadModel(buffer, filename) {
       matData[o+38] = m.normal_texture_index != null ? m.normal_texture_index : -1;
       matData[o+39] = m.emissive_texture_index != null ? m.emissive_texture_index : -1;
       matData[o+40] = m.occlusion_texture_index != null ? m.occlusion_texture_index : -1;
+      // IOR / transmission / volume
+      matData[o+41] = m.ior || 1.5;
+      matData[o+42] = m.transmission_factor || 0;
+      matData[o+43] = m.thickness_factor || 0;
+      const ac = m.attenuation_color || [1,1,1];
+      matData[o+44] = ac[0]; matData[o+45] = ac[1]; matData[o+46] = ac[2];
+      matData[o+47] = m.attenuation_distance || 1e10;
     }
     mr_setMaterials(matData, info.materials.length);
     console.info('PBR material 0:', {

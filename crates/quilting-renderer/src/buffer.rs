@@ -515,6 +515,12 @@ pub struct PbrParams {
     pub normal_uv_rotation: f32,
     pub base_uv_scale: [f32; 2],
     pub base_uv_rotation: f32,
+    // KHR_materials_ior / transmission / volume
+    pub ior: f32,
+    pub transmission_factor: f32,
+    pub thickness_factor: f32,
+    pub attenuation_color: [f32; 3],
+    pub attenuation_distance: f32,
     // Image indices for texture binding (-1 = none)
     pub base_color_tex_idx: i32,
     pub metallic_roughness_tex_idx: i32,
@@ -552,6 +558,11 @@ impl Default for PbrParams {
             normal_uv_rotation: 0.0,
             base_uv_scale: [1.0, 1.0],
             base_uv_rotation: 0.0,
+            ior: 1.5,
+            transmission_factor: 0.0,
+            thickness_factor: 0.0,
+            attenuation_color: [1.0; 3],
+            attenuation_distance: f32::INFINITY,
             base_color_tex_idx: -1,
             metallic_roughness_tex_idx: -1,
             normal_tex_idx: -1,
@@ -561,7 +572,7 @@ impl Default for PbrParams {
     }
 }
 
-/// UBO for PBR material uniforms (binding 2, 192 bytes).
+/// UBO for PBR material uniforms (binding 2, 224 bytes).
 ///
 /// Matches WGSL PbrUniforms struct in fragment/pbr.wgsl.
 pub struct PbrUniformBuf {
@@ -573,14 +584,14 @@ impl PbrUniformBuf {
         unsafe {
             let ubo = gl.create_buffer().map_err(|e| format!("pbr ubo: {e}"))?;
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
-            gl.buffer_data_size(glow::UNIFORM_BUFFER, 192, glow::DYNAMIC_DRAW);
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, 224, glow::DYNAMIC_DRAW);
             Ok(PbrUniformBuf { ubo })
         }
     }
 
     pub fn upload(&self, gl: &glow::Context, p: &PbrParams) {
         let b = |v: bool| -> f32 { if v { 1.0 } else { 0.0 } };
-        let mut d = [0u8; 192];
+        let mut d = [0u8; 224];
         let mut f = |off: usize, v: f32| { d[off..off+4].copy_from_slice(&v.to_le_bytes()); };
 
         // base_color vec4 at offset 0
@@ -607,6 +618,11 @@ impl PbrUniformBuf {
         f(160, p.normal_uv_rotation);
         // base_uv_scale, base_uv_rotation at offset 164
         f(164, p.base_uv_scale[0]); f(168, p.base_uv_scale[1]); f(172, p.base_uv_rotation);
+        // ior, transmission_factor, thickness_factor, pad at offset 176
+        f(176, p.ior); f(180, p.transmission_factor); f(184, p.thickness_factor);
+        // attenuation_color vec4 at offset 192 (w = attenuation_distance)
+        f(192, p.attenuation_color[0]); f(196, p.attenuation_color[1]); f(200, p.attenuation_color[2]);
+        f(204, p.attenuation_distance);
 
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));

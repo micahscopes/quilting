@@ -1669,6 +1669,15 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         for &c in &mat.specular_color_factor { spec.push(&JsValue::from_f64(c)); }
         js_sys::Reflect::set(&obj, &"specular_color".into(), &spec).unwrap();
 
+        // KHR_materials_ior / transmission / volume
+        js_sys::Reflect::set(&obj, &"ior".into(), &JsValue::from_f64(mat.ior)).unwrap();
+        js_sys::Reflect::set(&obj, &"transmission_factor".into(), &JsValue::from_f64(mat.transmission_factor)).unwrap();
+        js_sys::Reflect::set(&obj, &"thickness_factor".into(), &JsValue::from_f64(mat.thickness_factor)).unwrap();
+        let attn = js_sys::Array::new();
+        for &c in &mat.attenuation_color { attn.push(&JsValue::from_f64(c)); }
+        js_sys::Reflect::set(&obj, &"attenuation_color".into(), &attn).unwrap();
+        js_sys::Reflect::set(&obj, &"attenuation_distance".into(), &JsValue::from_f64(mat.attenuation_distance)).unwrap();
+
         // KHR_texture_transform on normal map
         let nuv_s = js_sys::Array::new();
         nuv_s.push(&JsValue::from_f64(mat.normal_uv_scale[0]));
