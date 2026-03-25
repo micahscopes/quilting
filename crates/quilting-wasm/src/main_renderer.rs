@@ -657,21 +657,25 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
 
                 // Pass 2: transmission + transparent
-                // Transmission materials need scene_color; blend materials need no depth write.
-                unsafe {
-                    gl.enable(glow::BLEND);
-                    gl.blend_func_separate(
-                        glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA,
-                        glow::ONE, glow::ONE_MINUS_SRC_ALPHA,
-                    );
-                }
                 for batch in &render_batches {
                     let mat = get_mat(batch);
-                    // Skip batches already rendered in pass 1
                     if mat.alpha_mode < 1.5 && mat.transmission_factor <= 0.0 { continue; }
-                    // Transmission with opaque alpha: write depth. Blend: no depth write.
+
+                    // Opaque-transmission: no blend, write depth (solid glass)
+                    // Alpha-blend: blend on, no depth write (transparent overlay)
+                    let is_blend = mat.alpha_mode > 1.5;
                     unsafe {
-                        gl.depth_mask(mat.alpha_mode < 1.5);
+                        if is_blend {
+                            gl.enable(glow::BLEND);
+                            gl.blend_func_separate(
+                                glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA,
+                                glow::ONE, glow::ONE_MINUS_SRC_ALPHA,
+                            );
+                            gl.depth_mask(false);
+                        } else {
+                            gl.disable(glow::BLEND);
+                            gl.depth_mask(true);
+                        }
                     }
 
                     state.renderer.pbr_ubo().upload(gl, &mat);
