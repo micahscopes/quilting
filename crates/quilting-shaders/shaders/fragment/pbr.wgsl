@@ -352,23 +352,25 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
             volume_atten = exp(vec3<f32>(optical_depth) * log(max(pbr.attenuation_color, vec3<f32>(0.001))));
         }
 
-        // Screen-space refraction: frag_coord gives pixel position
+        // Screen-space transmission: sample opaque scene behind this surface
         let screen_size = vec2<f32>(textureDimensions(scene_color_tex));
-        let screen_uv = in.frag_coord.xy / screen_size;
-        // Refraction offset from view-space normal and IOR
-        let refract_strength = pbr.thickness_factor * (1.0 / max(pbr.ior, 1.0)) * 0.05;
-        let offset = n.xy * refract_strength;
-        let refract_uv = clamp(screen_uv + offset, vec2<f32>(0.0), vec2<f32>(1.0));
+        let screen_uv = vec2<f32>(in.frag_coord.x / screen_size.x, 1.0 - in.frag_coord.y / screen_size.y);
+        // Refraction offset: normal distortion scaled by IOR departure from 1.0
+        let ior_offset = (pbr.ior - 1.0) * 0.15;
+        let offset = n.xy * ior_offset;
+        let refract_uv = clamp(screen_uv + offset, vec2<f32>(0.001), vec2<f32>(0.999));
 
-        // Sample the opaque scene through the refracting surface
         let scene_behind = textureSample(scene_color_tex, scene_color_sampler, refract_uv).rgb;
-        let transmitted = scene_behind * volume_atten * base.rgb;
+        // Tint by base color + volume absorption
+        let transmitted = scene_behind * base.rgb * volume_atten;
 
-        // Fresnel: less transmission at grazing angles (more reflection)
+        // Fresnel: edges reflect more, center transmits more
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
         let ior_f0_t = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
         let fresnel_t = ior_f0_t + (1.0 - ior_f0_t) * pow(1.0 - n_dot_v_t, 5.0);
         let effective_transmission = pbr.transmission_factor * (1.0 - fresnel_t);
+
+        // Replace surface color with transmitted scene (not additive)
         color = mix(color, transmitted, effective_transmission);
     }
 
