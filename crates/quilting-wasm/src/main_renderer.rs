@@ -508,11 +508,28 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     ));
                 }
 
-                // PBR: render per-batch with per-material UBO + textures
+                // PBR: two-pass rendering — opaque first, then transparent
                 unsafe { gl.use_program(Some(state.renderer.programs().pbr)); }
                 let default_mat = PbrParams::default();
 
+                let get_mat = |batch: &RenderBatch| -> PbrParams {
+                    let base = if batch.material_index < state.materials.len() {
+                        state.materials[batch.material_index].clone()
+                    } else if !state.materials.is_empty() {
+                        state.materials[0].clone()
+                    } else {
+                        default_mat.clone()
+                    };
+                    let mut m = base;
+                    m.has_env_map = has_env;
+                    m.env_mip_count = env_mips;
+                    m
+                };
+
+                // Pass 1: opaque (alpha_mode == 0 or 1)
                 for batch in &render_batches {
+                    let mat = get_mat(batch);
+                    if mat.alpha_mode > 1.5 { continue; } // skip BLEND
                     // Get this batch's material
                     let base_mat = if batch.material_index < state.materials.len() {
                         &state.materials[batch.material_index]
@@ -565,7 +582,60 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         );
                     }
                 }
-                // Skip the generic render call for PBR — we handled it above
+                // Pass 2: transparent (alpha_mode == BLEND)
+                unsafe {
+                    gl.depth_mask(false); // don't write depth for transparent
+                    gl.enable(glow::BLEND);
+                    gl.blend_func_separate(
+                        glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA,
+                        glow::ONE, glow::ONE_MINUS_SRC_ALPHA,
+                    );
+                }
+                for batch in &render_batches {
+                    let mat = get_mat(batch);
+                    if mat.alpha_mode < 1.5 { continue; } // skip opaque/mask
+
+                    state.renderer.pbr_ubo().upload(gl, &mat);
+                    state.renderer.pbr_ubo().bind(gl);
+
+                    let tex_defaults = [white, black, black, black, white];
+                    for (unit, &tex) in tex_defaults.iter().enumerate() {
+                        unsafe {
+                            gl.active_texture(glow::TEXTURE0 + unit as u32);
+                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                        }
+                    }
+                    let bind_tex = |unit: u32, idx: i32| {
+                        if idx >= 0 {
+                            let tex = state.texture_cache.get(Some(idx as usize));
+                            unsafe {
+                                gl.active_texture(glow::TEXTURE0 + unit);
+                                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                            }
+                        }
+                    };
+                    bind_tex(0, mat.base_color_tex_idx);
+                    bind_tex(1, mat.metallic_roughness_tex_idx);
+                    bind_tex(2, mat.normal_tex_idx);
+                    bind_tex(3, mat.emissive_tex_idx);
+                    bind_tex(4, mat.occlusion_tex_idx);
+
+                    quilting_renderer::pass::upload_batch_ubo(
+                        gl, state.renderer.vtx_ubo(), &camera,
+                        batch.perm_parity, batch.perm_index, 1,
+                    );
+                    unsafe {
+                        gl.bind_vertex_array(Some(batch.mesh.tri_vao));
+                        gl.draw_elements_instanced(
+                            glow::TRIANGLES, batch.mesh.num_tri_indices,
+                            glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
+                        );
+                    }
+                }
+                unsafe {
+                    gl.depth_mask(true);
+                }
+
                 state.renderer.end_frame();
                 return;
             }
