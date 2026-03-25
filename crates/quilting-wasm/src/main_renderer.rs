@@ -661,9 +661,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     let mat = get_mat(batch);
                     if mat.alpha_mode < 1.5 && mat.transmission_factor <= 0.0 { continue; }
 
-                    // Opaque-transmission: no blend, write depth (solid glass)
-                    // Alpha-blend: blend on, no depth write (transparent overlay)
                     let is_blend = mat.alpha_mode > 1.5;
+                    let is_transmission = mat.transmission_factor > 0.0;
                     unsafe {
                         if is_blend {
                             gl.enable(glow::BLEND);
@@ -672,9 +671,17 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 glow::ONE, glow::ONE_MINUS_SRC_ALPHA,
                             );
                             gl.depth_mask(false);
+                            gl.disable(glow::CULL_FACE);
                         } else {
                             gl.disable(glow::BLEND);
                             gl.depth_mask(true);
+                            // Cull back faces for transmission to prevent overdraw ghosting
+                            if is_transmission {
+                                gl.enable(glow::CULL_FACE);
+                                gl.cull_face(glow::BACK);
+                            } else {
+                                gl.disable(glow::CULL_FACE);
+                            }
                         }
                     }
 
@@ -717,6 +724,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
                 unsafe {
                     gl.depth_mask(true);
+                    gl.disable(glow::CULL_FACE);
+                    gl.disable(glow::BLEND);
                 }
 
                 state.renderer.end_frame();
