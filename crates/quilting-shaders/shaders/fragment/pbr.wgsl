@@ -352,28 +352,29 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
             volume_atten = exp(vec3<f32>(optical_depth) * log(max(pbr.attenuation_color, vec3<f32>(0.001))));
         }
 
-        // Screen-space transmission: frag_coord and texture share bottom-left origin
+        // Screen-space transmission
         let screen_size = vec2<f32>(textureDimensions(scene_color_tex));
         let screen_uv = in.frag_coord.xy / screen_size;
-        // Refraction offset from view-space normal
-        let ior_offset = (pbr.ior - 1.0) * 0.15;
-        let offset = n.xy * ior_offset;
-        let refract_uv = clamp(screen_uv + offset, vec2<f32>(0.001), vec2<f32>(0.999));
 
-        // Rough transmission: sample higher mip for blur (frosted glass)
+        // Refraction offset from view-space normal and IOR
+        let ior_offset = (pbr.ior - 1.0) * 0.1;
+        let refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
+
+        // Rough transmission: blur via mipmap LOD
         let max_mip = log2(max(screen_size.x, screen_size.y));
         let blur_lod = roughness * roughness * max_mip;
         let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, blur_lod).rgb;
-        // Tint by base color + volume absorption
+
+        // Tint transmitted light by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
 
-        // Fresnel: edges reflect more, center transmits more
+        // Fresnel: more reflection at edges, more transmission head-on
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
         let ior_f0_t = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
         let fresnel_t = ior_f0_t + (1.0 - ior_f0_t) * pow(1.0 - n_dot_v_t, 5.0);
-        // Metals don't transmit; only dielectric fraction transmits
         let effective_transmission = pbr.transmission_factor * (1.0 - fresnel_t) * (1.0 - metallic);
 
+        // Replace surface lighting with transmitted scene
         color = mix(color, transmitted, effective_transmission);
     }
 
