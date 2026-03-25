@@ -87,7 +87,14 @@ var env_irradiance: texture_cube<f32>;
 @group(0) @binding(15)
 var env_irradiance_sampler: sampler;
 
+// Screen-space scene color for transmission refraction
+@group(0) @binding(18)
+var scene_color_tex: texture_2d<f32>;
+@group(0) @binding(19)
+var scene_color_sampler: sampler;
+
 struct FragInput {
+    @builtin(position) frag_coord: vec4<f32>,
     @location(0) normal_vs: vec3<f32>,
     @location(1) density: f32,
     @location(2) tex_uv: vec2<f32>,
@@ -344,15 +351,25 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
             let optical_depth = -pbr.thickness_factor / pbr.attenuation_distance;
             volume_atten = exp(vec3<f32>(optical_depth) * log(max(pbr.attenuation_color, vec3<f32>(0.001))));
         }
-        // Transmission: blend between PBR surface color and transmitted background
-        // Without screen-space texture, approximate as base_color attenuated by volume
-        let transmitted = base.rgb * volume_atten * irradiance;
+
+        // Screen-space refraction: frag_coord gives pixel position
+        let screen_size = vec2<f32>(textureDimensions(scene_color_tex));
+        let screen_uv = in.frag_coord.xy / screen_size;
+        // Refraction offset from view-space normal and IOR
+        let refract_strength = pbr.thickness_factor * (1.0 / max(pbr.ior, 1.0)) * 0.05;
+        let offset = n.xy * refract_strength;
+        let refract_uv = clamp(screen_uv + offset, vec2<f32>(0.0), vec2<f32>(1.0));
+
+        // Sample the opaque scene through the refracting surface
+        let scene_behind = textureSample(scene_color_tex, scene_color_sampler, refract_uv).rgb;
+        let transmitted = scene_behind * volume_atten * base.rgb;
+
         // Fresnel: less transmission at grazing angles (more reflection)
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
-        let fresnel_t = pow(1.0 - n_dot_v_t, 5.0);
+        let ior_f0_t = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
+        let fresnel_t = ior_f0_t + (1.0 - ior_f0_t) * pow(1.0 - n_dot_v_t, 5.0);
         let effective_transmission = pbr.transmission_factor * (1.0 - fresnel_t);
         color = mix(color, transmitted, effective_transmission);
-        alpha = mix(alpha, 1.0, effective_transmission * 0.5); // partial opacity for transmitted
     }
 
     // Tone mapping: ACES filmic with slight exposure boost for deeper contrast

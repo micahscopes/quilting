@@ -34,6 +34,10 @@ struct MainState {
     num_faces: usize,
     render_mode: RenderMode,
     mobius: [f32; 16],
+    // Screen-space refraction: framebuffer copy for transmission
+    scene_color_fbo: Option<glow::Framebuffer>,
+    scene_color_tex: Option<glow::Texture>,
+    scene_color_size: (i32, i32),
 }
 
 struct GpuBatch {
@@ -105,6 +109,9 @@ pub fn mr_init(canvas_id: &str) -> bool {
             num_faces: 0,
             render_mode: RenderMode::Pbr,
             mobius: IDENTITY_MOBIUS,
+            scene_color_fbo: None,
+            scene_color_tex: None,
+            scene_color_size: (0, 0),
         });
     });
     info!("Renderer initialized on canvas '{}'", canvas_id);
@@ -466,8 +473,8 @@ pub fn mr_upload_animation_pose(matrices: &[f32], morph_weights: &[f32], skin_te
 #[wasm_bindgen(js_name = "mr_render")]
 pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
     STATE.with(|s| {
-        let state = s.borrow();
-        let state = match state.as_ref() { Some(s) => s, None => return };
+        let mut state = s.borrow_mut();
+        let state = match state.as_mut() { Some(s) => s, None => return };
         if state.batches.is_empty() { return; }
 
         let camera = Camera {
@@ -587,9 +594,69 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         );
                     }
                 }
+                // --- Blit opaque framebuffer to scene_color texture for refraction ---
+                let has_transmission = render_batches.iter().any(|b| {
+                    let m = get_mat(b);
+                    m.alpha_mode > 1.5 && m.transmission_factor > 0.0
+                });
+                if has_transmission {
+                    unsafe {
+                        // Get canvas size from viewport
+                        let mut vp_buf = [0i32; 4];
+                        gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp_buf);
+                        let vw = vp_buf[2].max(1);
+                        let vh = vp_buf[3].max(1);
+
+                        // Create/resize scene color texture if needed
+                        if state.scene_color_size != (vw, vh) {
+                            if let Some(fbo) = state.scene_color_fbo { gl.delete_framebuffer(fbo); }
+                            if let Some(tex) = state.scene_color_tex { gl.delete_texture(tex); }
+
+                            let tex = gl.create_texture().unwrap();
+                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                            gl.tex_image_2d(
+                                glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
+                                vw, vh, 0, glow::RGBA, glow::UNSIGNED_BYTE,
+                                glow::PixelUnpackData::Slice(None),
+                            );
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+
+                            let fbo = gl.create_framebuffer().unwrap();
+                            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+                            gl.framebuffer_texture_2d(
+                                glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                                glow::TEXTURE_2D, Some(tex), 0,
+                            );
+
+                            state.scene_color_fbo = Some(fbo);
+                            state.scene_color_tex = Some(tex);
+                            state.scene_color_size = (vw, vh);
+                        }
+
+                        // Blit current framebuffer (opaques) → scene_color_tex
+                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None); // read from default FB
+                        let dst_fbo = state.scene_color_fbo.unwrap();
+                        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
+                        gl.blit_framebuffer(
+                            0, 0, vw, vh, 0, 0, vw, vh,
+                            glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                        );
+                        // Restore default framebuffer for drawing
+                        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+
+                        // Bind scene color to texture unit 8 for transmission sampling
+                        gl.active_texture(glow::TEXTURE0 + 8);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(state.scene_color_tex.unwrap()));
+                    }
+                }
+
                 // Pass 2: transparent (alpha_mode == BLEND)
                 unsafe {
-                    gl.depth_mask(false); // don't write depth for transparent
+                    gl.depth_mask(false);
                     gl.enable(glow::BLEND);
                     gl.blend_func_separate(
                         glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA,

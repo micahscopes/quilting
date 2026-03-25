@@ -220,6 +220,8 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
             (15, 6),  // env_irradiance_sampler
             (16, 7),  // sheen_e_lut
             (17, 7),  // sheen_e_sampler
+            (18, 8),  // scene_color_tex (transmission refraction)
+            (19, 8),  // scene_color_sampler
         ];
         for &(binding, unit) in fs_sampler_bindings {
             let name = format!("_group_0_binding_{}_fs", binding);
