@@ -376,8 +376,8 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         }
 
         // Variable blur via Gaussian mip pyramid: each mip = blurrier
-        let max_lod = 7.0; // max mip levels in the blur pyramid
-        let blur_lod = roughness * roughness * max_lod;
+        // Cap at LOD 4 to prevent background bleeding into the blur
+        let blur_lod = roughness * roughness * 4.0;
         let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, blur_lod).rgb;
 
         // Convert scene from sRGB (tone-mapped output) back to linear for correct blending
