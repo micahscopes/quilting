@@ -375,8 +375,10 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let blur_t = clamp(roughness * 2.0, 0.0, 1.0);
         let scene_behind = mix(sharp, blurred, blur_t);
 
-        // Tint by base color + volume absorption
-        let transmitted = scene_behind * base.rgb * volume_atten;
+        // Convert scene from sRGB (tone-mapped output) back to linear for correct blending
+        let scene_linear = pow(max(scene_behind, vec3<f32>(0.0)), vec3<f32>(2.2));
+        // Tint by base color + volume absorption in linear space
+        let transmitted = scene_linear * base.rgb * volume_atten;
 
         // Fresnel controls reflection vs transmission balance
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
