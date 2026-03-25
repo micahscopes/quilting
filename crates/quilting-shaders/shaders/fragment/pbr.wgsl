@@ -360,10 +360,23 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let ior_offset = (pbr.ior - 1.0) * 0.1;
         let refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
 
-        // Rough transmission: blur via mipmap LOD
-        let max_mip = log2(max(screen_size.x, screen_size.y));
-        let blur_lod = roughness * roughness * max_mip;
-        let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, blur_lod).rgb;
+        // Rough transmission: manual blur (mipmap fallback)
+        let blur_radius = roughness * roughness * 0.05;
+        var scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
+        if blur_radius > 0.001 {
+            // 8-tap box blur for frosted glass
+            let br = blur_radius;
+            scene_behind = (
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, 0.0), 0.0).rgb +
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, 0.0), 0.0).rgb +
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, br), 0.0).rgb +
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, -br), 0.0).rgb +
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, br) * 0.707, 0.0).rgb +
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, br) * 0.707, 0.0).rgb +
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, -br) * 0.707, 0.0).rgb +
+                textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, -br) * 0.707, 0.0).rgb
+            ) / 8.0;
+        }
 
         // Tint transmitted light by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
