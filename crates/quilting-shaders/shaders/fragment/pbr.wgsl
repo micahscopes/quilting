@@ -360,11 +360,10 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let ior_offset = (pbr.ior - 1.0) * 0.1;
         let refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
 
-        // Rough transmission: manual blur (mipmap fallback)
-        let blur_radius = roughness * roughness * 0.05;
-        var scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
-        if blur_radius > 0.001 {
-            // 8-tap box blur for frosted glass
+        // Sample scene behind with optional blur for rough transmission
+        let blur_radius = roughness * roughness * 0.04;
+        var scene_behind: vec3<f32>;
+        if blur_radius > 0.002 {
             let br = blur_radius;
             scene_behind = (
                 textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, 0.0), 0.0).rgb +
@@ -376,23 +375,24 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
                 textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, -br) * 0.707, 0.0).rgb +
                 textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, -br) * 0.707, 0.0).rgb
             ) / 8.0;
+        } else {
+            scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
         }
 
-        // Tint transmitted light by base color + volume absorption
+        // Tint by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
 
-        // Fresnel: edges reflect, center transmits
+        // Fresnel controls reflection vs transmission balance
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
         let ior_f0_t = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
         let fresnel_t = ior_f0_t + (1.0 - ior_f0_t) * pow(1.0 - n_dot_v_t, 5.0);
         let t_factor = pbr.transmission_factor * (1.0 - metallic);
 
-        // Transmission replaces diffuse; specular reflection stays on top
-        // Approximate: transmitted scene replaces base diffuse contribution,
-        // then add back the specular reflection (Fresnel-weighted)
-        let specular_reflection = color * fresnel_t;
-        let diffuse_surface = color * (1.0 - fresnel_t);
-        color = mix(diffuse_surface, transmitted, t_factor) + specular_reflection;
+        // Specular reflection (Fresnel) always on top.
+        // Transmission replaces diffuse body; opaque keeps it.
+        let reflection = color * fresnel_t;
+        let body = mix(color * (1.0 - fresnel_t), transmitted, t_factor);
+        color = reflection + body;
     }
 
     // Tone mapping: ACES filmic with slight exposure boost for deeper contrast
