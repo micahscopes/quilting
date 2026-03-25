@@ -764,32 +764,46 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             state.blur_fbo2 = Some(f2); state.blur_tex2 = Some(t2);
                         }
 
-                        // Run 2-pass separable Gaussian blur (scene_color → blur_tex)
+                        // Multi-pass separable Gaussian blur (ping-pong for wide kernel)
                         if let (Some(prog), Some(vao)) = (state.blur_program, state.blur_vao) {
                             gl.use_program(Some(prog));
                             gl.bind_vertex_array(Some(vao));
                             gl.disable(glow::DEPTH_TEST);
+                            gl.disable(glow::BLEND);
 
                             let dir_loc = gl.get_uniform_location(prog, "u_dir");
+                            let px = 1.0 / hw as f32;
+                            let py = 1.0 / hh as f32;
 
-                            // Pass 1: horizontal (scene_color → blur_fbo)
+                            // Initial H pass: scene_color → blur_fbo
                             gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo);
                             gl.viewport(0, 0, hw, hh);
                             gl.active_texture(glow::TEXTURE0);
                             gl.bind_texture(glow::TEXTURE_2D, Some(state.scene_color_tex.unwrap()));
-                            if let Some(ref loc) = dir_loc {
-                                gl.uniform_2_f32(Some(loc), 1.0 / hw as f32, 0.0);
-                            }
+                            if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), px, 0.0); }
                             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-                            // Pass 2: vertical (blur_fbo → blur_fbo2)
+                            // Initial V pass: blur_tex → blur_fbo2
                             gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo2);
                             gl.active_texture(glow::TEXTURE0);
                             gl.bind_texture(glow::TEXTURE_2D, state.blur_tex);
-                            if let Some(ref loc) = dir_loc {
-                                gl.uniform_2_f32(Some(loc), 0.0, 1.0 / hh as f32);
-                            }
+                            if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), 0.0, py); }
                             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                            // Extra passes for wider blur (2x, 4x radius)
+                            for scale in [2.0f32, 4.0] {
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo);
+                                gl.active_texture(glow::TEXTURE0);
+                                gl.bind_texture(glow::TEXTURE_2D, Some(state.blur_tex2.unwrap()));
+                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), px * scale, 0.0); }
+                                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, state.blur_fbo2);
+                                gl.active_texture(glow::TEXTURE0);
+                                gl.bind_texture(glow::TEXTURE_2D, state.blur_tex);
+                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), 0.0, py * scale); }
+                                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                            }
 
                             // Restore state
                             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
