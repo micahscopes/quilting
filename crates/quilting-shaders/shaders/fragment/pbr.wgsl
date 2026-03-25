@@ -344,9 +344,6 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
     color = color + emissive;
 
     // --- KHR_materials_transmission + volume ---
-    // Discard back-facing fragments for transmission to prevent ghosting
-    // (QB tessellation can create overlapping geometry with wrong winding)
-    if pbr.transmission_factor > 0.0 && dot(n, view_dir) < 0.0 { discard; }
     if pbr.transmission_factor > 0.0 {
         // Volume absorption (Beer-Lambert law)
         var volume_atten = vec3<f32>(1.0);
@@ -359,28 +356,17 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let screen_size = vec2<f32>(textureDimensions(scene_color_tex));
         let screen_uv = in.frag_coord.xy / screen_size;
 
-        // Refraction offset: subtle distortion based on normal curvature and IOR
-        // Real glass has very little screen-space offset — mostly just at edges
-        let ior_offset = (pbr.ior - 1.0) * 0.02 * pbr.thickness_factor;
-        let refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
-
-        // Rough transmission: only blur when roughness is significant (>0.25)
-        // Use Gaussian-weighted taps to avoid ghost copies
-        var scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, 0.0).rgb;
-        if roughness > 0.25 {
-            let br = (roughness - 0.25) * 0.15; // ramp from 0 at r=0.25 to 0.11 at r=1.0
-            // Gaussian-weighted: center=4, ring=1 each (total weight=12)
-            let s0 = scene_behind * 4.0;
-            let s1 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, 0.0), 0.0).rgb;
-            let s2 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, 0.0), 0.0).rgb;
-            let s3 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, br), 0.0).rgb;
-            let s4 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(0.0, -br), 0.0).rgb;
-            let s5 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, br) * 0.707, 0.0).rgb;
-            let s6 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, br) * 0.707, 0.0).rgb;
-            let s7 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(br, -br) * 0.707, 0.0).rgb;
-            let s8 = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv + vec2<f32>(-br, -br) * 0.707, 0.0).rgb;
-            scene_behind = (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8) / 12.0;
+        // Refraction offset only when volume thickness is specified
+        var refract_uv = screen_uv;
+        if pbr.thickness_factor > 0.0 {
+            let ior_offset = (pbr.ior - 1.0) * 0.02 * pbr.thickness_factor;
+            refract_uv = clamp(screen_uv + n.xy * ior_offset, vec2<f32>(0.001), vec2<f32>(0.999));
         }
+
+        // Rough transmission: use mipmap LOD for blur (no multi-tap ghosting)
+        let max_mip = log2(max(screen_size.x, screen_size.y));
+        let blur_lod = roughness * roughness * max_mip * 0.5;
+        let scene_behind = textureSampleLevel(scene_color_tex, scene_color_sampler, refract_uv, blur_lod).rgb;
 
         // Tint by base color + volume absorption
         let transmitted = scene_behind * base.rgb * volume_atten;
