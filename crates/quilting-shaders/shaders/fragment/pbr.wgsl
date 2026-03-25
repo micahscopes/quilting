@@ -37,7 +37,7 @@ struct PbrUniforms {
     ior: f32,
     transmission_factor: f32,
     thickness_factor: f32,
-    _pbr_pad2: f32,
+    has_transmission_tex: f32,
     attenuation_color: vec3<f32>,
     attenuation_distance: f32,
 }
@@ -98,6 +98,12 @@ var scene_color_sampler: sampler;
 var scene_color_blurred: texture_2d<f32>;
 @group(0) @binding(21)
 var scene_color_blurred_sampler: sampler;
+
+// Per-pixel transmission modulator texture (R channel)
+@group(0) @binding(22)
+var transmission_tex: texture_2d<f32>;
+@group(0) @binding(23)
+var transmission_tex_sampler: sampler;
 
 struct FragInput {
     @builtin(position) frag_coord: vec4<f32>,
@@ -384,7 +390,11 @@ fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
         let n_dot_v_t = max(dot(n, view_dir), 0.001);
         let ior_f0_t = pow((pbr.ior - 1.0) / (pbr.ior + 1.0), 2.0);
         let fresnel_t = ior_f0_t + (1.0 - ior_f0_t) * pow(1.0 - n_dot_v_t, 5.0);
-        let t_factor = pbr.transmission_factor * (1.0 - metallic);
+        var t_factor = pbr.transmission_factor * (1.0 - metallic);
+        // Per-pixel transmission texture (creates patterns like cross-hatch)
+        if pbr.has_transmission_tex > 0.5 {
+            t_factor = t_factor * textureSample(transmission_tex, transmission_tex_sampler, in.tex_uv).r;
+        }
 
         // Specular reflection (Fresnel) always on top.
         // Transmission replaces diffuse body; opaque keeps it.

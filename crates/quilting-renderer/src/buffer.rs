@@ -527,6 +527,7 @@ pub struct PbrParams {
     pub normal_tex_idx: i32,
     pub emissive_tex_idx: i32,
     pub occlusion_tex_idx: i32,
+    pub transmission_tex_idx: i32,
 }
 
 impl Default for PbrParams {
@@ -568,6 +569,7 @@ impl Default for PbrParams {
             normal_tex_idx: -1,
             emissive_tex_idx: -1,
             occlusion_tex_idx: -1,
+            transmission_tex_idx: -1,
         }
     }
 }
@@ -618,8 +620,9 @@ impl PbrUniformBuf {
         f(160, p.normal_uv_rotation);
         // base_uv_scale, base_uv_rotation at offset 164
         f(164, p.base_uv_scale[0]); f(168, p.base_uv_scale[1]); f(172, p.base_uv_rotation);
-        // ior, transmission_factor, thickness_factor, pad at offset 176
+        // ior, transmission_factor, thickness_factor, has_transmission_tex at offset 176
         f(176, p.ior); f(180, p.transmission_factor); f(184, p.thickness_factor);
+        f(188, if p.transmission_tex_idx >= 0 { 1.0 } else { 0.0 });
         // attenuation_color vec4 at offset 192 (w = attenuation_distance)
         f(192, p.attenuation_color[0]); f(196, p.attenuation_color[1]); f(200, p.attenuation_color[2]);
         f(204, p.attenuation_distance);

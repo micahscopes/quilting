@@ -67,6 +67,8 @@ pub struct PbrMaterial {
 
     /// KHR_materials_transmission: fraction of light transmitted [0..1].
     pub transmission_factor: f64,
+    /// KHR_materials_transmission: per-pixel transmission modulator (R channel).
+    pub transmission_texture: Option<TextureRef>,
 
     /// KHR_materials_volume: thickness and absorption.
     pub thickness_factor: f64,
@@ -228,14 +230,20 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
     };
 
     // KHR_materials_transmission
-    let transmission_factor = {
+    let (transmission_factor, transmission_texture) = {
         let mut tf = 0.0;
+        let mut tt: Option<TextureRef> = None;
         if let Some(ext) = mat.extensions() {
             if let Some(trans) = ext.get("KHR_materials_transmission") {
                 tf = trans.get("transmissionFactor").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if let Some(tex_info) = trans.get("transmissionTexture") {
+                    let idx = tex_info.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let tc = tex_info.get("texCoord").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    tt = Some(TextureRef { index: idx, tex_coord: tc });
+                }
             }
         }
-        tf
+        (tf, tt)
     };
 
     // KHR_materials_volume
@@ -279,6 +287,7 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         specular_color_factor,
         ior,
         transmission_factor,
+        transmission_texture,
         thickness_factor,
         attenuation_color,
         attenuation_distance,
@@ -320,6 +329,7 @@ mod tests {
             specular_color_factor: [1.0; 3],
             ior: 1.5,
             transmission_factor: 0.0,
+            transmission_texture: None,
             thickness_factor: 0.0,
             attenuation_color: [1.0; 3],
             attenuation_distance: f64::INFINITY,

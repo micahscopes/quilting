@@ -1672,6 +1672,14 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         // KHR_materials_ior / transmission / volume
         js_sys::Reflect::set(&obj, &"ior".into(), &JsValue::from_f64(mat.ior)).unwrap();
         js_sys::Reflect::set(&obj, &"transmission_factor".into(), &JsValue::from_f64(mat.transmission_factor)).unwrap();
+        let trans_tex_idx = mat.transmission_texture.as_ref().and_then(|tex_ref| {
+            scene.texture_to_image.get(tex_ref.index).copied()
+        });
+        if let Some(idx) = trans_tex_idx {
+            js_sys::Reflect::set(&obj, &"transmission_texture_index".into(), &JsValue::from_f64(idx as f64)).unwrap();
+        } else {
+            js_sys::Reflect::set(&obj, &"transmission_texture_index".into(), &JsValue::NULL).unwrap();
+        }
         js_sys::Reflect::set(&obj, &"thickness_factor".into(), &JsValue::from_f64(mat.thickness_factor)).unwrap();
         let attn = js_sys::Array::new();
         for &c in &mat.attenuation_color { attn.push(&JsValue::from_f64(c)); }

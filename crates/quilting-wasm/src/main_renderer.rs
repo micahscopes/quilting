@@ -274,7 +274,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.materials.clear();
-            let stride = 48;
+            let stride = 49;
             for i in 0..num_materials as usize {
                 let o = i * stride;
                 if o + stride > data.len() { break; }
@@ -314,6 +314,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
                     thickness_factor: d[43],
                     attenuation_color: [d[44], d[45], d[46]],
                     attenuation_distance: d[47],
+                    transmission_tex_idx: d[48] as i32,
                     ..PbrParams::default()
                 });
             }
@@ -876,6 +877,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     bind_tex(2, mat.normal_tex_idx);
                     bind_tex(3, mat.emissive_tex_idx);
                     bind_tex(4, mat.occlusion_tex_idx);
+                    bind_tex(10, mat.transmission_tex_idx);
 
                     quilting_renderer::pass::upload_batch_ubo(
                         gl, state.renderer.vtx_ubo(), &camera,
