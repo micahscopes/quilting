@@ -134,10 +134,11 @@ void main() {
     // Normalize to [0,1] using actual range
     float range = max(mx - mn, 0.001);
     float normalized = (raw - mn) / range;
-    // Gaussian band selection on normalized value
+    // Inverted Gaussian: focused band is SHARP, everything else blurred
     float diff = normalized - u_focus;
     float bw = max(u_bandwidth, 0.01);
-    float w = exp(-(diff * diff) / (2.0 * bw * bw));
+    float sharpness = exp(-(diff * diff) / (2.0 * bw * bw));
+    float w = 1.0 - sharpness;
     o_color = vec4(w, 0.0, 0.0, 1.0);
 }
 "#;
@@ -154,10 +155,11 @@ uniform float u_bandwidth; // width of Gaussian band (smaller = tighter)
 
 void main() {
     float raw_stretch = texture(u_stretch, v_uv).r; // [0,1] via sigmoid
-    // Gaussian band: weight peaks where stretch matches focus
+    // Inverted Gaussian: focused band is SHARP, everything else blurred
     float diff = raw_stretch - u_focus;
     float bw = max(u_bandwidth, 0.01);
-    float w = exp(-(diff * diff) / (2.0 * bw * bw));
+    float sharpness = exp(-(diff * diff) / (2.0 * bw * bw));
+    float w = 1.0 - sharpness;
     o_color = vec4(w, 0.0, 0.0, 1.0);
 }
 "#;
