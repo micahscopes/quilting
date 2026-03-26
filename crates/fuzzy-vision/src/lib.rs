@@ -98,14 +98,11 @@ uniform float u_focus;     // 0.5 = neutral, 0 = squash, 1 = expand
 uniform float u_bandwidth; // width of Gaussian band (smaller = tighter)
 
 void main() {
-    float raw_stretch = texture(u_stretch, v_uv).r; // [0,1] encoded stretch
+    float raw_stretch = texture(u_stretch, v_uv).r; // [0,1] via sigmoid
     // Gaussian band: weight peaks where stretch matches focus
     float diff = raw_stretch - u_focus;
     float bw = max(u_bandwidth, 0.01);
     float w = exp(-(diff * diff) / (2.0 * bw * bw));
-    // Zero weight at neutral (0.5) unless focus is near neutral
-    float dist_from_neutral = abs(raw_stretch - 0.5);
-    w *= smoothstep(0.0, 0.05, dist_from_neutral);
     o_color = vec4(w, 0.0, 0.0, 1.0);
 }
 "#;
