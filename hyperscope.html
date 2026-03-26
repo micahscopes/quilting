@@ -135,13 +135,25 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     </div>
   </div>
 
+  <div class="section">
+    <label>Fuzzy Vision</label>
+    <div class="toggle-row">
+      <div class="toggle" id="fuzzy-toggle"></div>
+      <span class="toggle-label">Enable blur</span>
+    </div>
+    <label>Blur radius</label>
+    <div class="sr"><input type="range" id="fuzzy-radius" min="4" max="128" value="48"><span class="v" id="fuzzy-radius-v">48</span></div>
+    <label>Blur strength</label>
+    <div class="sr"><input type="range" id="fuzzy-strength" min="1" max="30" value="10"><span class="v" id="fuzzy-strength-v">1.0</span></div>
+  </div>
+
   <div class="stats" id="stats">Loading WASM...</div>
 </div>
 <button id="sidebar-toggle">▶</button>
 <script type="module">
 import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
-  mr_setInstanceData, mr_setFaceMaterials, mr_buildBatches,
+  mr_setInstanceData, mr_setFaceMaterials, mr_buildBatches, mr_setFuzzy,
   mr_uploadTessPatch, mr_uploadAnimationPose,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
@@ -481,6 +493,22 @@ $('animate-toggle').addEventListener('click', () => {
   $('animate-toggle').classList.toggle('on', animating);
   syncURL();
 });
+
+// --- Fuzzy Vision controls ---
+function updateFuzzy() {
+  const enabled = $('fuzzy-toggle').classList.contains('on');
+  const radius = parseFloat($('fuzzy-radius').value);
+  const strength = parseFloat($('fuzzy-strength').value) / 10.0;
+  $('fuzzy-radius-v').textContent = radius.toFixed(0);
+  $('fuzzy-strength-v').textContent = strength.toFixed(1);
+  mr_setFuzzy(enabled, radius, strength);
+}
+$('fuzzy-toggle').addEventListener('click', () => {
+  $('fuzzy-toggle').classList.toggle('on');
+  updateFuzzy();
+});
+$('fuzzy-radius').addEventListener('input', updateFuzzy);
+$('fuzzy-strength').addEventListener('input', updateFuzzy);
 
 // --- LOD controls ---
 function getTessParams() {

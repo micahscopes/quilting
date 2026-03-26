@@ -66,6 +66,21 @@ void main() {
 }
 "#;
 
+/// Generate a radial weight: center = 0 (sharp), edges = 1 (blurred).
+/// Good for vignette-style DoF or testing the pipeline.
+const FS_WEIGHT_RADIAL: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+
+void main() {
+    vec2 center = vec2(0.5);
+    float dist = distance(v_uv, center) * 2.0; // 0 at center, ~1.4 at corners
+    float w = smoothstep(0.3, 1.0, dist);
+    o_color = vec4(w, 0.0, 0.0, 1.0);
+}
+"#;
+
 /// JFA initialization: convert a weight texture into seed data.
 /// Input: weight texture (R=weight, 0=no blur, 1=max blur)
 /// Output: RGBA = (uv.x, uv.y, weight, 0)
@@ -263,6 +278,7 @@ pub struct JfaPipeline {
     prog_firmness: glow::Program,
     prog_blur_h: glow::Program,
     prog_blur_v: glow::Program,
+    prog_weight_radial: glow::Program,
     vao: glow::VertexArray,
     // Ping-pong FBOs + textures for JFA steps
     ping_fbo: glow::Framebuffer,
@@ -342,6 +358,7 @@ impl JfaPipeline {
         let prog_firmness = link_program(gl, VS_FULLSCREEN, FS_JFA_FIRMNESS)?;
         let prog_blur_h = link_program(gl, VS_FULLSCREEN, FS_BLUR_H)?;
         let prog_blur_v = link_program(gl, VS_FULLSCREEN, FS_BLUR_V)?;
+        let prog_weight_radial = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
 
         let fmt = match config.precision {
@@ -356,7 +373,7 @@ impl JfaPipeline {
         let (blur_fbo, blur_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
 
         Ok(JfaPipeline {
-            prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
+            prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v, prog_weight_radial,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, blur_fbo, blur_tex,
             jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
@@ -530,6 +547,43 @@ impl JfaPipeline {
         }
     }
 
+    /// Generate a radial weight texture (center sharp, edges blurred).
+    /// Writes to the provided FBO+texture at the given resolution.
+    pub fn generate_radial_weight(
+        &self,
+        gl: &glow::Context,
+        fbo: glow::Framebuffer,
+        width: i32,
+        height: i32,
+    ) {
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.viewport(0, 0, width, height);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+            gl.bind_vertex_array(Some(self.vao));
+            gl.use_program(Some(self.prog_weight_radial));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.bind_vertex_array(None);
+        }
+    }
+
+    /// Convenience: run the full pipeline with a built-in radial weight (vignette DoF).
+    /// Requires a weight FBO+texture to be provided (caller manages these).
+    pub fn run_radial(
+        &self,
+        gl: &glow::Context,
+        weight_fbo: glow::Framebuffer,
+        weight_tex: glow::Texture,
+        scene_tex: glow::Texture,
+        output_fbo: Option<glow::Framebuffer>,
+    ) {
+        let (fw, fh) = self.full_size;
+        if fw == 0 || fh == 0 { return; }
+        self.generate_radial_weight(gl, weight_fbo, fw, fh);
+        self.run(gl, weight_tex, scene_tex, output_fbo);
+    }
+
     /// Access the weight mask texture (firmness output) for external use.
     /// Useful for debugging or for feeding into other effects.
     pub fn weight_mask_tex(&self) -> glow::Texture {
@@ -562,6 +616,7 @@ impl JfaPipeline {
             gl.delete_program(self.prog_firmness);
             gl.delete_program(self.prog_blur_h);
             gl.delete_program(self.prog_blur_v);
+            gl.delete_program(self.prog_weight_radial);
             gl.delete_vertex_array(self.vao);
             for tex in [self.ping_tex, self.pong_tex, self.firmness_tex, self.blur_tex] {
                 gl.delete_texture(tex);

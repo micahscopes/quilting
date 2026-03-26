@@ -30,6 +30,7 @@ web-sys = { version = "0.3", features = [
 ] }
 glow = "0.16"
 quilting-renderer = { path = "../quilting-renderer" }
+fuzzy-vision = { path = "../fuzzy-vision" }
 tracing = "0.1"
 wasm-tracing = "2.1"
 

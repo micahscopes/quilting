@@ -45,6 +45,12 @@ struct MainState {
     blur_tex2: Option<glow::Texture>,
     blur_program: Option<glow::Program>,
     blur_vao: Option<glow::VertexArray>,
+    // Fuzzy-vision JFA blur pipeline
+    fuzzy: Option<fuzzy_vision::JfaPipeline>,
+    fuzzy_enabled: bool,
+    fuzzy_weight_fbo: Option<glow::Framebuffer>,
+    fuzzy_weight_tex: Option<glow::Texture>,
+    fuzzy_weight_size: (i32, i32),
 }
 
 struct GpuBatch {
@@ -169,6 +175,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
         }
     };
 
+    let fuzzy = fuzzy_vision::JfaPipeline::new(renderer.gl(), fuzzy_vision::JfaConfig::default()).ok();
+
     STATE.with(|s| {
         *s.borrow_mut() = Some(MainState {
             renderer, texture_cache,
@@ -189,6 +197,11 @@ pub fn mr_init(canvas_id: &str) -> bool {
             blur_tex2: None,
             blur_program: None,
             blur_vao: None,
+            fuzzy,
+            fuzzy_enabled: false,
+            fuzzy_weight_fbo: None,
+            fuzzy_weight_tex: None,
+            fuzzy_weight_size: (0, 0),
         });
     });
     info!("Renderer initialized on canvas '{}'", canvas_id);
@@ -221,6 +234,21 @@ pub fn mr_set_mobius(mobius: &[f32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             for (i, &v) in mobius.iter().take(16).enumerate() { st.mobius[i] = v; }
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "mr_setFuzzy")]
+pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32) {
+    STATE.with(|s| {
+        if let Some(ref mut st) = *s.borrow_mut() {
+            st.fuzzy_enabled = enabled;
+            if let Some(ref mut fv) = st.fuzzy {
+                let mut cfg = fv.config().clone();
+                cfg.max_distance = max_distance;
+                cfg.blur_strength = blur_strength;
+                fv.set_config(cfg);
+            }
         }
     });
 }
@@ -914,6 +942,78 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     gl.depth_mask(true);
                     gl.disable(glow::CULL_FACE);
                     gl.disable(glow::BLEND);
+                }
+
+                // --- Fuzzy-vision post-process ---
+                if state.fuzzy_enabled {
+                    if let Some(ref mut fv) = state.fuzzy {
+                        unsafe {
+                            let mut vp = [0i32; 4];
+                            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);
+                            let vw = vp[2].max(1);
+                            let vh = vp[3].max(1);
+
+                            fv.resize(gl, vw, vh);
+
+                            // Ensure we have a scene color texture to read from
+                            if state.scene_color_tex.is_none() || state.scene_color_size != (vw, vh) {
+                                if let Some(old) = state.scene_color_fbo { gl.delete_framebuffer(old); }
+                                if let Some(old) = state.scene_color_tex { gl.delete_texture(old); }
+                                let tex = gl.create_texture().unwrap();
+                                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
+                                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                let fbo = gl.create_framebuffer().unwrap();
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                                    glow::TEXTURE_2D, Some(tex), 0);
+                                state.scene_color_fbo = Some(fbo);
+                                state.scene_color_tex = Some(tex);
+                                state.scene_color_size = (vw, vh);
+                            }
+
+                            // Ensure weight texture exists
+                            if state.fuzzy_weight_tex.is_none() || state.fuzzy_weight_size != (vw, vh) {
+                                if let Some(old) = state.fuzzy_weight_fbo { gl.delete_framebuffer(old); }
+                                if let Some(old) = state.fuzzy_weight_tex { gl.delete_texture(old); }
+                                let tex = gl.create_texture().unwrap();
+                                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
+                                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                let fbo = gl.create_framebuffer().unwrap();
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                                    glow::TEXTURE_2D, Some(tex), 0);
+                                state.fuzzy_weight_fbo = Some(fbo);
+                                state.fuzzy_weight_tex = Some(tex);
+                                state.fuzzy_weight_size = (vw, vh);
+                            }
+
+                            // Blit scene to scene_color_tex
+                            let sc_fbo = state.scene_color_fbo.unwrap();
+                            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None); // read from default
+                            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(sc_fbo));
+                            gl.blit_framebuffer(0, 0, vw, vh, 0, 0, vw, vh,
+                                glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+
+                            // Run fuzzy-vision: radial weight → JFA → blur → default FB
+                            fv.run_radial(
+                                gl,
+                                state.fuzzy_weight_fbo.unwrap(),
+                                state.fuzzy_weight_tex.unwrap(),
+                                state.scene_color_tex.unwrap(),
+                                None, // output to default framebuffer
+                            );
+
+                            gl.viewport(0, 0, vw, vh);
+                            gl.enable(glow::DEPTH_TEST);
+                        }
+                    }
                 }
 
                 state.renderer.end_frame();
