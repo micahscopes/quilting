@@ -27,7 +27,7 @@ impl TextureCache {
     pub fn upload_images(
         &mut self,
         gl: &glow::Context,
-        images: &[(u32, u32, &[u8])], // (width, height, rgba_pixels)
+        images: &[(u32, u32, &[u8], u32, u32)], // (width, height, rgba_pixels, wrap_s, wrap_t)
     ) {
         // Delete old textures
         for tex in self.textures.drain(..) {
@@ -36,8 +36,8 @@ impl TextureCache {
             }
         }
 
-        self.textures = images.iter().map(|&(width, height, pixels)| {
-            upload_rgba8(gl, width, height, pixels).ok()
+        self.textures = images.iter().map(|&(width, height, pixels, wrap_s, wrap_t)| {
+            upload_rgba8(gl, width, height, pixels, wrap_s, wrap_t).ok()
         }).collect();
     }
 
@@ -145,6 +145,8 @@ fn upload_rgba8(
     width: u32,
     height: u32,
     pixels: &[u8],
+    wrap_s: u32,
+    wrap_t: u32,
 ) -> Result<glow::Texture, String> {
     unsafe {
         let tex = gl.create_texture().map_err(|e| format!("tex upload: {e}"))?;
@@ -174,12 +176,12 @@ fn upload_rgba8(
         gl.tex_parameter_i32(
             glow::TEXTURE_2D,
             glow::TEXTURE_WRAP_S,
-            glow::REPEAT as i32,
+            wrap_s as i32,
         );
         gl.tex_parameter_i32(
             glow::TEXTURE_2D,
             glow::TEXTURE_WRAP_T,
-            glow::REPEAT as i32,
+            wrap_t as i32,
         );
         Ok(tex)
     }

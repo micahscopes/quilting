@@ -1750,6 +1750,10 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         pixels.copy_from(&img.pixels);
         js_sys::Reflect::set(&obj, &"data".into(), &pixels).unwrap();
 
+        // Sampler wrap modes
+        js_sys::Reflect::set(&obj, &"wrap_s".into(), &JsValue::from_f64(img.wrap_s as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &"wrap_t".into(), &JsValue::from_f64(img.wrap_t as f64)).unwrap();
+
         js_textures.push(&obj);
     }
 

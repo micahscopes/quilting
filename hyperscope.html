@@ -1087,6 +1087,7 @@ async function loadModel(buffer, filename) {
       }
       if (totalSize > 0) {
         const allPixels = new Uint8Array(totalSize);
+        const wrapModes = new Uint32Array(info.textures.length * 2);
         let off = 0;
         for (let i = 0; i < info.textures.length; i++) {
           const t = info.textures[i];
@@ -1094,8 +1095,10 @@ async function loadModel(buffer, filename) {
           const pixels = raw ? new Uint8Array(raw.buffer || raw) : new Uint8Array(0);
           allPixels.set(pixels, off);
           off += widths[i] * heights[i] * 4;
+          wrapModes[i * 2] = t.wrap_s ?? 0x2901;     // default REPEAT
+          wrapModes[i * 2 + 1] = t.wrap_t ?? 0x2901;
         }
-        mr_uploadImages(allPixels, widths, heights);
+        mr_uploadImages(allPixels, widths, heights, wrapModes);
       }
     } catch (e) { console.warn('Texture upload error:', e); }
   }

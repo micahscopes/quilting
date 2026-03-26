@@ -6,6 +6,11 @@ pub mod evaluator;
 
 use std::fmt;
 
+/// GL wrap mode constants matching WebGL/glow values.
+pub const WRAP_REPEAT: u32 = 0x2901;
+pub const WRAP_CLAMP_TO_EDGE: u32 = 0x812F;
+pub const WRAP_MIRRORED_REPEAT: u32 = 0x8370;
+
 /// Decoded image data from a glTF file.
 #[derive(Debug, Clone)]
 pub struct ImageData {
@@ -13,6 +18,10 @@ pub struct ImageData {
     pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// GL wrap mode for S (U) axis. Default: REPEAT.
+    pub wrap_s: u32,
+    /// GL wrap mode for T (V) axis. Default: REPEAT.
+    pub wrap_t: u32,
 }
 
 /// All data extracted from a glTF/GLB file.
@@ -153,13 +162,32 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
                 vec![255u8; (img.width * img.height * 4) as usize]
             }
         };
-        ImageData { pixels, width: img.width, height: img.height }
+        ImageData { pixels, width: img.width, height: img.height,
+            wrap_s: WRAP_REPEAT, wrap_t: WRAP_REPEAT }
     }).collect();
 
-    // Build texture index -> image index mapping
-    let texture_to_image: Vec<usize> = document.textures().map(|tex| {
-        tex.source().index()
+    // Build per-texture image array: each glTF texture gets its own GL texture
+    // with the correct sampler wrap modes. Textures sharing an image get duplicated data.
+    let to_gl_wrap = |w: gltf::texture::WrappingMode| -> u32 {
+        match w {
+            gltf::texture::WrappingMode::ClampToEdge => WRAP_CLAMP_TO_EDGE,
+            gltf::texture::WrappingMode::MirroredRepeat => WRAP_MIRRORED_REPEAT,
+            gltf::texture::WrappingMode::Repeat => WRAP_REPEAT,
+        }
+    };
+    let tex_images: Vec<ImageData> = document.textures().map(|tex| {
+        let src = &images[tex.source().index()];
+        let sampler = tex.sampler();
+        ImageData {
+            pixels: src.pixels.clone(),
+            width: src.width,
+            height: src.height,
+            wrap_s: to_gl_wrap(sampler.wrap_s()),
+            wrap_t: to_gl_wrap(sampler.wrap_t()),
+        }
     }).collect();
+    // texture_to_image is now identity — index directly into tex_images
+    let texture_to_image: Vec<usize> = (0..tex_images.len()).collect();
 
     Ok(GltfScene {
         meshes,
@@ -168,7 +196,7 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
         skins,
         scenes,
         nodes,
-        images,
+        images: tex_images,
         texture_to_image,
         default_scene,
     })

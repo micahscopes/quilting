@@ -327,8 +327,9 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
 /// Upload glTF images to main-thread GL texture cache.
 /// `pixels`: flat RGBA8 data for all images concatenated
 /// `widths`/`heights`: per-image dimensions
+/// `wrap_modes`: pairs of [wrap_s, wrap_t] per image (GL enum values)
 #[wasm_bindgen(js_name = "mr_uploadImages")]
-pub fn mr_upload_images(pixels: &[u8], widths: &[u32], heights: &[u32]) {
+pub fn mr_upload_images(pixels: &[u8], widths: &[u32], heights: &[u32], wrap_modes: &[u32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             let gl = st.renderer.gl();
@@ -337,9 +338,11 @@ pub fn mr_upload_images(pixels: &[u8], widths: &[u32], heights: &[u32]) {
             for i in 0..widths.len() {
                 let w = widths[i];
                 let h = heights[i];
+                let ws = wrap_modes.get(i * 2).copied().unwrap_or(glow::REPEAT);
+                let wt = wrap_modes.get(i * 2 + 1).copied().unwrap_or(glow::REPEAT);
                 let size = (w * h * 4) as usize;
                 if offset + size <= pixels.len() {
-                    images.push((w, h, &pixels[offset..offset + size]));
+                    images.push((w, h, &pixels[offset..offset + size], ws, wt));
                 }
                 offset += size;
             }
