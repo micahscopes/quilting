@@ -151,7 +151,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <label>Blur strength</label>
     <div class="sr"><input type="range" id="fuzzy-strength" min="1" max="30" value="10"><span class="v" id="fuzzy-strength-v">1.0</span></div>
     <div class="toggle-row">
-      <div class="toggle on" id="fuzzy-norm-toggle"></div>
+      <div class="toggle" id="fuzzy-norm-toggle"></div>
       <span class="toggle-label">Normalize range</span>
     </div>
     <label>Focus (squash ← → expand)</label>
@@ -185,6 +185,7 @@ const PARAM_DEFAULTS = {
   res: '0', density: '100', atten: '1', minpx: '2',
   animate: '1', anim: '-1', atlas: '9',
   zoom: '3', rx: '0.3', ry: '0.5',
+  fuzzy: '0', fmode: '0', fradius: '48', fstr: '10', ffocus: '50', fbw: '15', fnorm: '0',
 };
 
 function readParams() {
@@ -207,6 +208,8 @@ function readParams() {
     zoom: get('zoom'),
     rx: get('rx'),
     ry: get('ry'),
+    fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
+    fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
   };
 }
 
@@ -241,6 +244,15 @@ function syncURL() {
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
     set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
     set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
+    // Fuzzy Vision
+    set('fuzzy', $('fuzzy-toggle').classList.contains('on') ? '1' : '0', PARAM_DEFAULTS.fuzzy);
+    const fmBtn = document.querySelector('#fuzzy-mode-btns button.a');
+    set('fmode', fmBtn ? fmBtn.dataset.v : '0', PARAM_DEFAULTS.fmode);
+    set('fradius', $('fuzzy-radius').value, PARAM_DEFAULTS.fradius);
+    set('fstr', $('fuzzy-strength').value, PARAM_DEFAULTS.fstr);
+    set('ffocus', $('fuzzy-focus').value, PARAM_DEFAULTS.ffocus);
+    set('fbw', $('fuzzy-bw').value, PARAM_DEFAULTS.fbw);
+    set('fnorm', $('fuzzy-norm-toggle').classList.contains('on') ? '1' : '0', PARAM_DEFAULTS.fnorm);
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -286,6 +298,21 @@ function applyParams(params) {
   zoom = parseFloat(params.zoom) || 3;
   rotX = parseFloat(params.rx) || 0.3;
   rotY = parseFloat(params.ry) || 0.5;
+  // Fuzzy Vision
+  if (params.fuzzy === '1') $('fuzzy-toggle').classList.add('on');
+  else $('fuzzy-toggle').classList.remove('on');
+  const fmBtn = document.querySelector(`#fuzzy-mode-btns button[data-v="${params.fmode}"]`);
+  if (fmBtn) {
+    document.querySelectorAll('#fuzzy-mode-btns button').forEach(b => b.classList.remove('a'));
+    fmBtn.classList.add('a');
+  }
+  fuzzyMode = parseInt(params.fmode) || 0;
+  $('fuzzy-radius').value = params.fradius; $('fuzzy-radius-v').textContent = params.fradius;
+  $('fuzzy-strength').value = params.fstr; $('fuzzy-strength-v').textContent = (parseFloat(params.fstr)/10).toFixed(1);
+  $('fuzzy-focus').value = params.ffocus; $('fuzzy-focus-v').textContent = ((parseFloat(params.ffocus)/100 - 0.5)*2).toFixed(2);
+  $('fuzzy-bw').value = params.fbw; $('fuzzy-bw-v').textContent = (parseFloat(params.fbw)/100).toFixed(2);
+  if (params.fnorm === '1') $('fuzzy-norm-toggle').classList.add('on');
+  else $('fuzzy-norm-toggle').classList.remove('on');
 }
 
 let currentGlb = PARAM_DEFAULTS.glb;
@@ -521,6 +548,7 @@ function updateFuzzy() {
   $('fuzzy-bw-v').textContent = bw.toFixed(2);
   const normalize = $('fuzzy-norm-toggle').classList.contains('on');
   mr_setFuzzy(enabled, radius, strength, fuzzyMode, focus, bw, normalize);
+  syncURL();
 }
 $('fuzzy-toggle').addEventListener('click', () => {
   $('fuzzy-toggle').classList.toggle('on');
