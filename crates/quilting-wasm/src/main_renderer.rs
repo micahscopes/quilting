@@ -588,6 +588,15 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let black = state.texture_cache.placeholder_black();
         let cube = state.texture_cache.placeholder_cube();
 
+        // Möbius inversion (c≠0) reverses orientation, flipping screen-space winding.
+        // Switch front face convention so culling and front_facing stay consistent.
+        let mob_c = &state.mobius[8..12];
+        let mob_c_len2 = mob_c[0] * mob_c[0] + mob_c[1] * mob_c[1] + mob_c[2] * mob_c[2] + mob_c[3] * mob_c[3];
+        let mobius_reverses = mob_c_len2 > 0.001;
+        unsafe {
+            gl.front_face(if mobius_reverses { glow::CW } else { glow::CCW });
+        }
+
         match state.render_mode {
             RenderMode::Pbr => {
                 // Env cubemaps: bind once (shared across all batches)
