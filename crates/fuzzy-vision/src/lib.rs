@@ -335,8 +335,14 @@ fn create_fbo_tex(gl: &glow::Context, w: i32, h: i32, format: u32) -> Result<(gl
     unsafe {
         let tex = gl.create_texture().map_err(|e| format!("{e}"))?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        // RGBA16F needs HALF_FLOAT type, RGBA32F needs FLOAT, RGBA8 needs UNSIGNED_BYTE
+        let (ext_format, ext_type) = match format {
+            glow::RGBA32F => (glow::RGBA, glow::FLOAT),
+            glow::RGBA16F => (glow::RGBA, glow::HALF_FLOAT),
+            _ => (glow::RGBA, glow::UNSIGNED_BYTE),
+        };
         gl.tex_image_2d(glow::TEXTURE_2D, 0, format as i32, w, h, 0,
-            glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(None));
+            ext_format, ext_type, glow::PixelUnpackData::Slice(None));
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
@@ -391,17 +397,22 @@ impl JfaPipeline {
         self.jfa_size = (jw, jh);
 
         let fmt = self.internal_format;
+        let (ext_format, ext_type) = match fmt {
+            glow::RGBA32F => (glow::RGBA, glow::FLOAT),
+            glow::RGBA16F => (glow::RGBA, glow::HALF_FLOAT),
+            _ => (glow::RGBA, glow::UNSIGNED_BYTE),
+        };
         unsafe {
             // Resize JFA ping/pong (downsampled)
             for tex in [self.ping_tex, self.pong_tex] {
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, jw, jh, 0,
-                    glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(None));
+                    ext_format, ext_type, glow::PixelUnpackData::Slice(None));
             }
             // Resize firmness (full res)
             gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
-                glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(None));
+                ext_format, ext_type, glow::PixelUnpackData::Slice(None));
             // Resize blur intermediate (full res, RGBA8)
             gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,

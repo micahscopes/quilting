@@ -977,7 +977,7 @@ async function recomputeLods() {
 
 async function loadModel(buffer, filename) {
   $('stats').textContent = `Loading ${filename}...`;
-  const resp = await broadcastCall('load_gltf_data', { bytes: buffer });
+  const resp = await workerCall('load_gltf_data', { bytes: buffer });
   meshInfo = resp.result;
   await finishModelUpload(resp.result, filename);
 }
@@ -1243,7 +1243,7 @@ try {
     if (resp.ok) buf = await resp.arrayBuffer();
   }
   if (buf) {
-    modelPromise = broadcastCall('load_gltf_data', { bytes: buf }).then(r => ({ result: r.result, filename: currentGlb, buffer: buf }));
+    modelPromise = workerCall('load_gltf_data', { bytes: buf }).then(r => ({ result: r.result, filename: currentGlb, buffer: buf }));
   }
 } catch (e) { console.warn(`Prefetch ${currentGlb}:`, e); }
 
