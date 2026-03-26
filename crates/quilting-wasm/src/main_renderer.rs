@@ -617,6 +617,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     let mut m = base;
                     m.has_env_map = has_env;
                     m.env_mip_count = env_mips;
+                    // m.debug_output reserved for future normals debug view
                     m
                 };
 
@@ -624,17 +625,16 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 for batch in &render_batches {
                     let mat = get_mat(batch);
                     if mat.alpha_mode > 1.5 || mat.transmission_factor > 0.0 { continue; }
-                    // Get this batch's material
-                    let base_mat = if batch.material_index < state.materials.len() {
-                        &state.materials[batch.material_index]
-                    } else if !state.materials.is_empty() {
-                        &state.materials[0]
-                    } else {
-                        &default_mat
-                    };
-                    let mut mat = base_mat.clone();
-                    mat.has_env_map = has_env;
-                    mat.env_mip_count = env_mips;
+
+                    // glTF spec: cull back faces for single-sided materials
+                    unsafe {
+                        if !mat.double_sided {
+                            gl.enable(glow::CULL_FACE);
+                            gl.cull_face(glow::BACK);
+                        } else {
+                            gl.disable(glow::CULL_FACE);
+                        }
+                    }
 
                     // Upload per-material PBR UBO
                     state.renderer.pbr_ubo().upload(gl, &mat);

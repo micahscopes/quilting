@@ -506,6 +506,7 @@ pub struct PbrParams {
     pub has_env_map: bool,
     pub env_mip_count: f32,
     pub double_sided: bool,
+    pub debug_output: bool,
     pub sheen_color: [f32; 3],
     pub has_sheen: bool,
     pub sheen_roughness: f32,
@@ -551,6 +552,7 @@ impl Default for PbrParams {
             has_env_map: false,
             env_mip_count: 1.0,
             double_sided: false,
+            debug_output: false,
             sheen_color: [0.0; 3],
             has_sheen: false,
             sheen_roughness: 0.0,
@@ -608,8 +610,8 @@ impl PbrUniformBuf {
         f(48, p.normal_scale); f(52, b(p.has_normal_tex)); f(56, b(p.has_emissive_tex)); f(60, b(p.has_occlusion_tex));
         // occlusion_strength, alpha_cutoff, alpha_mode, unlit at offset 64
         f(64, p.occlusion_strength); f(68, p.alpha_cutoff); f(72, p.alpha_mode); f(76, b(p.unlit));
-        // has_env_map, env_mip_count, double_sided, pad at offset 80
-        f(80, b(p.has_env_map)); f(84, p.env_mip_count); f(88, b(p.double_sided));
+        // has_env_map, env_mip_count, double_sided, debug_output at offset 80
+        f(80, b(p.has_env_map)); f(84, p.env_mip_count); f(88, b(p.double_sided)); f(92, b(p.debug_output));
         // sheen_color vec4 at offset 96 (w = has_sheen)
         f(96, p.sheen_color[0]); f(100, p.sheen_color[1]); f(104, p.sheen_color[2]); f(108, b(p.has_sheen));
         // sheen_roughness at offset 112

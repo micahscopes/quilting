@@ -512,9 +512,6 @@ pub fn export_all_patches() -> JsValue {
                 b
             }).collect();
 
-            let tris: Vec<u32> = mesh.triangles.iter()
-                .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
-
             // Emit all 6 permutations
             for perm in 0u32..6 {
                 let bary: Vec<f64> = base_bary.iter().map(|b| {
@@ -527,6 +524,18 @@ pub fn export_all_patches() -> JsValue {
                         _ => *b,
                     }
                 }).flat_map(|b| [b[0], b[1], b[2]]).collect();
+
+                // Odd permutations (1,2,5) reverse 2D winding of barycentric coords.
+                // Swap two indices per triangle to restore consistent CCW screen winding.
+                let is_odd_perm = matches!(perm, 1 | 2 | 5);
+                let tris: Vec<u32> = mesh.triangles.iter()
+                    .flat_map(|t| {
+                        if is_odd_perm {
+                            [t[0] as u32, t[2] as u32, t[1] as u32]
+                        } else {
+                            [t[0] as u32, t[1] as u32, t[2] as u32]
+                        }
+                    }).collect();
 
                 let obj = js_sys::Object::new();
                 let s = |k: &str, v: JsValue| { js_sys::Reflect::set(&obj, &k.into(), &v).ok(); };

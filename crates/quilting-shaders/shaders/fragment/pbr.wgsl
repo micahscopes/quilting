@@ -20,7 +20,7 @@ struct PbrUniforms {
     has_env_map: f32,                    // >0.5 = cubemap IBL available
     env_mip_count: f32,                  // number of mip levels in prefiltered env map
     double_sided: f32,                   // >0.5 = flip normal for back-facing fragments
-    _pbr_pad1: f32,
+    debug_output: f32,                   // >0.5 = output normals as RGB instead of lit color
     // KHR_materials_sheen
     sheen_color: vec4<f32>,              // rgb in xyz, w = has_sheen (>0.5)
     sheen_roughness: f32,
@@ -225,6 +225,16 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> @location
                 n = normalize(tbn * tangent_n);
             }
         }
+    }
+
+    // --- Debug: output final computed normal as RGB ---
+    if pbr.debug_output > 0.5 {
+        let dbg = n * 0.5 + 0.5;
+        // Tint back-faces slightly red so winding issues are visible
+        if !front_facing {
+            return vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade);
+        }
+        return vec4<f32>(dbg, in.fade);
     }
 
     // --- KHR_materials_specular: modify F0 before BRDF ---
