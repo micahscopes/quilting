@@ -368,26 +368,22 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     out.tess_bary = bary;
     out.instance_id = f32(instance_idx) + u._pad;
 
-    // Möbius conformal stretch: |det(Jacobian)| = |a| / |bot|²
-    // Higher stretch = more distortion = more blur needed
+    // Möbius conformal stretch: signed log2 of scale factor.
+    // Positive = expanded, negative = squashed, zero = undistorted.
+    // Encoded as (log2(stretch) / 6.0) * 0.5 + 0.5 to fit [0,1] for interpolation.
     let is_mobius = dot(u.mob_c, u.mob_c) > 0.001;
     if is_mobius {
-        // Interpolate stretch at the centroid using per-vertex differentials
         let b0 = qmul(u.mob_c, sp0) + u.mob_d;
         let b1 = qmul(u.mob_c, sp1) + u.mob_d;
         let b2 = qmul(u.mob_c, sp2) + u.mob_d;
-        let bot_len2_0 = dot(b0, b0);
-        let bot_len2_1 = dot(b1, b1);
-        let bot_len2_2 = dot(b2, b2);
-        // Stretch = 1/|bot|² (conformal scale factor). Normalize so identity Möbius = 1.
-        let s0 = 1.0 / max(bot_len2_0, 0.001);
-        let s1 = 1.0 / max(bot_len2_1, 0.001);
-        let s2 = 1.0 / max(bot_len2_2, 0.001);
+        let s0 = 1.0 / max(dot(b0, b0), 0.001);
+        let s1 = 1.0 / max(dot(b1, b1), 0.001);
+        let s2 = 1.0 / max(dot(b2, b2), 0.001);
         let stretch = bary.x * s0 + bary.y * s1 + bary.z * s2;
-        // Map stretch to blur weight: log scale, centered around 1.0 (no stretch)
-        out.mobius_stretch = clamp(abs(log2(stretch)) / 3.0, 0.0, 1.0);
+        // Signed log2, mapped to [0,1]: 0.5 = no stretch, 0 = max squash, 1 = max expand
+        out.mobius_stretch = clamp(log2(stretch) / 6.0 * 0.5 + 0.5, 0.0, 1.0);
     } else {
-        out.mobius_stretch = 0.0;
+        out.mobius_stretch = 0.5; // neutral = no Möbius
     }
 
     return out;

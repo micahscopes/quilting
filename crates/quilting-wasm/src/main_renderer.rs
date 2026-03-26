@@ -250,7 +250,7 @@ pub fn mr_set_mobius(mobius: &[f32]) {
 }
 
 #[wasm_bindgen(js_name = "mr_setFuzzy")]
-pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: u32) {
+pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: u32, focus: f32, bandwidth: f32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.fuzzy_enabled = enabled;
@@ -259,6 +259,8 @@ pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: 
                 let mut cfg = fv.config().clone();
                 cfg.max_distance = max_distance;
                 cfg.blur_strength = blur_strength;
+                cfg.focus = focus;
+                cfg.bandwidth = bandwidth;
                 fv.set_config(cfg);
             }
         }
@@ -1035,11 +1037,36 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             // Color is in pbr_color_tex, weight in fuzzy_weight_tex.
                             // When radial mode, PBR rendered to default FB — need to blit.
                             let (scene_tex, weight_tex) = if state.fuzzy_mode == 1 && state.pbr_color_tex.is_some() {
-                                // Conformal: use MRT outputs directly
-                                // Unbind MRT FBO, restore single-output for post-process
+                                // Conformal: MRT gave us raw stretch in fuzzy_weight_tex.
+                                // Run focused weight generator to apply Gaussian band selection.
                                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                                 gl.draw_buffers(&[glow::BACK]);
-                                (state.pbr_color_tex.unwrap(), state.fuzzy_weight_tex.unwrap())
+                                let stretch_tex = state.fuzzy_weight_tex.unwrap();
+                                // Need a separate FBO for the focused weight output
+                                if state.scene_color_tex.is_none() || state.scene_color_size != (vw, vh) {
+                                    if let Some(old) = state.scene_color_fbo { gl.delete_framebuffer(old); }
+                                    if let Some(old) = state.scene_color_tex { gl.delete_texture(old); }
+                                    let tex = gl.create_texture().unwrap();
+                                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
+                                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                    let fbo = gl.create_framebuffer().unwrap();
+                                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                                        glow::TEXTURE_2D, Some(tex), 0);
+                                    state.scene_color_fbo = Some(fbo);
+                                    state.scene_color_tex = Some(tex);
+                                    state.scene_color_size = (vw, vh);
+                                }
+                                // Generate focused weight from raw stretch
+                                fv.generate_conformal_weight(
+                                    gl, stretch_tex,
+                                    state.scene_color_fbo.unwrap(), vw, vh,
+                                );
+                                // scene_color_tex now has the focused weight; use it for JFA
+                                (state.pbr_color_tex.unwrap(), state.scene_color_tex.unwrap())
                             } else {
                                 // Radial: blit scene from default FB to a texture
                                 if state.scene_color_tex.is_none() || state.scene_color_size != (vw, vh) {

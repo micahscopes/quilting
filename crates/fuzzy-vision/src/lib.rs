@@ -42,6 +42,10 @@ pub struct JfaConfig {
     pub downsample: u32,
     /// Float precision for intermediate textures
     pub precision: Precision,
+    /// Focus point in stretch space: 0.5 = neutral, 0 = max squash, 1 = max expand
+    pub focus: f32,
+    /// Bandwidth of the Gaussian focus band (smaller = tighter focus)
+    pub bandwidth: f32,
 }
 
 impl Default for JfaConfig {
@@ -51,6 +55,8 @@ impl Default for JfaConfig {
             blur_strength: 1.0,
             downsample: 2,
             precision: Precision::Float16,
+            focus: 0.5,
+            bandwidth: 0.3,
         }
     }
 }
@@ -77,6 +83,29 @@ void main() {
     vec2 center = vec2(0.5);
     float dist = distance(v_uv, center) * 2.0; // 0 at center, ~1.4 at corners
     float w = smoothstep(0.3, 1.0, dist);
+    o_color = vec4(w, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// Focused conformal weight: read raw stretch texture, apply Gaussian band selection.
+/// Focus and bandwidth are uniforms controlling which stretch band gets blurred.
+const FS_WEIGHT_CONFORMAL: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_stretch;
+uniform float u_focus;     // 0.5 = neutral, 0 = squash, 1 = expand
+uniform float u_bandwidth; // width of Gaussian band (smaller = tighter)
+
+void main() {
+    float raw_stretch = texture(u_stretch, v_uv).r; // [0,1] encoded stretch
+    // Gaussian band: weight peaks where stretch matches focus
+    float diff = raw_stretch - u_focus;
+    float bw = max(u_bandwidth, 0.01);
+    float w = exp(-(diff * diff) / (2.0 * bw * bw));
+    // Zero weight at neutral (0.5) unless focus is near neutral
+    float dist_from_neutral = abs(raw_stretch - 0.5);
+    w *= smoothstep(0.0, 0.05, dist_from_neutral);
     o_color = vec4(w, 0.0, 0.0, 1.0);
 }
 "#;
@@ -279,6 +308,7 @@ pub struct JfaPipeline {
     prog_blur_h: glow::Program,
     prog_blur_v: glow::Program,
     prog_weight_radial: glow::Program,
+    prog_weight_conformal: glow::Program,
     vao: glow::VertexArray,
     // Ping-pong FBOs + textures for JFA steps
     ping_fbo: glow::Framebuffer,
@@ -365,6 +395,7 @@ impl JfaPipeline {
         let prog_blur_h = link_program(gl, VS_FULLSCREEN, FS_BLUR_H)?;
         let prog_blur_v = link_program(gl, VS_FULLSCREEN, FS_BLUR_V)?;
         let prog_weight_radial = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?;
+        let prog_weight_conformal = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
 
         let fmt = match config.precision {
@@ -379,7 +410,8 @@ impl JfaPipeline {
         let (blur_fbo, blur_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
 
         Ok(JfaPipeline {
-            prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v, prog_weight_radial,
+            prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
+            prog_weight_radial, prog_weight_conformal,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, blur_fbo, blur_tex,
             jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
@@ -558,6 +590,39 @@ impl JfaPipeline {
         }
     }
 
+    /// Generate a focused conformal weight from a raw stretch texture.
+    /// Applies Gaussian band selection around the configured focus point.
+    pub fn generate_conformal_weight(
+        &self,
+        gl: &glow::Context,
+        stretch_tex: glow::Texture,
+        output_fbo: glow::Framebuffer,
+        width: i32,
+        height: i32,
+    ) {
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+            gl.viewport(0, 0, width, height);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+            gl.bind_vertex_array(Some(self.vao));
+            gl.use_program(Some(self.prog_weight_conformal));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(stretch_tex));
+            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_stretch") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_focus") {
+                gl.uniform_1_f32(Some(&loc), self.config.focus);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_bandwidth") {
+                gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.bind_vertex_array(None);
+        }
+    }
+
     /// Generate a radial weight texture (center sharp, edges blurred).
     /// Writes to the provided FBO+texture at the given resolution.
     pub fn generate_radial_weight(
@@ -628,6 +693,7 @@ impl JfaPipeline {
             gl.delete_program(self.prog_blur_h);
             gl.delete_program(self.prog_blur_v);
             gl.delete_program(self.prog_weight_radial);
+            gl.delete_program(self.prog_weight_conformal);
             gl.delete_vertex_array(self.vao);
             for tex in [self.ping_tex, self.pong_tex, self.firmness_tex, self.blur_tex] {
                 gl.delete_texture(tex);

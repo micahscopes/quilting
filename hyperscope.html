@@ -150,6 +150,10 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="fuzzy-radius" min="4" max="128" value="48"><span class="v" id="fuzzy-radius-v">48</span></div>
     <label>Blur strength</label>
     <div class="sr"><input type="range" id="fuzzy-strength" min="1" max="30" value="10"><span class="v" id="fuzzy-strength-v">1.0</span></div>
+    <label>Focus (squash ← → expand)</label>
+    <div class="sr"><input type="range" id="fuzzy-focus" min="0" max="100" value="50"><span class="v" id="fuzzy-focus-v">0.0</span></div>
+    <label>Bandwidth</label>
+    <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" value="15"><span class="v" id="fuzzy-bw-v">0.15</span></div>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -505,9 +509,13 @@ function updateFuzzy() {
   const enabled = $('fuzzy-toggle').classList.contains('on');
   const radius = parseFloat($('fuzzy-radius').value);
   const strength = parseFloat($('fuzzy-strength').value) / 10.0;
+  const focus = parseFloat($('fuzzy-focus').value) / 100.0;
+  const bw = parseFloat($('fuzzy-bw').value) / 100.0;
   $('fuzzy-radius-v').textContent = radius.toFixed(0);
   $('fuzzy-strength-v').textContent = strength.toFixed(1);
-  mr_setFuzzy(enabled, radius, strength, fuzzyMode);
+  $('fuzzy-focus-v').textContent = ((focus - 0.5) * 2).toFixed(2);
+  $('fuzzy-bw-v').textContent = bw.toFixed(2);
+  mr_setFuzzy(enabled, radius, strength, fuzzyMode, focus, bw);
 }
 $('fuzzy-toggle').addEventListener('click', () => {
   $('fuzzy-toggle').classList.toggle('on');
@@ -515,6 +523,8 @@ $('fuzzy-toggle').addEventListener('click', () => {
 });
 $('fuzzy-radius').addEventListener('input', updateFuzzy);
 $('fuzzy-strength').addEventListener('input', updateFuzzy);
+$('fuzzy-focus').addEventListener('input', updateFuzzy);
+$('fuzzy-bw').addEventListener('input', updateFuzzy);
 setupBtnGroup('fuzzy-mode-btns', v => { fuzzyMode = parseInt(v); updateFuzzy(); });
 
 // --- LOD controls ---

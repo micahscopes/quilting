@@ -1,5 +1,5 @@
-// Möbius stretch heatmap: visualize conformal distortion as a color gradient.
-// Blue = no stretch (1.0), Green = moderate, Red = high stretch.
+// Möbius stretch heatmap: red shift (expanded) vs blue shift (squashed).
+// mobius_stretch encoded as [0,1]: 0.5 = neutral, <0.5 = squash, >0.5 = expand.
 
 struct FragInput {
     @location(0) normal_vs: vec3<f32>,
@@ -11,10 +11,14 @@ struct FragInput {
 @fragment
 fn fs_stretch(in: FragInput) -> @location(0) vec4<f32> {
     if in.fade < 0.001 { discard; }
-    let s = clamp(in.mobius_stretch, 0.0, 1.0);
-    // Heatmap: blue (0) → green (0.5) → red (1.0)
-    let r = smoothstep(0.4, 0.8, s);
-    let g = 1.0 - abs(s - 0.5) * 2.0;
-    let b = 1.0 - smoothstep(0.0, 0.4, s);
+    // Decode to signed: negative = squash, positive = expand
+    let s = (in.mobius_stretch - 0.5) * 2.0;
+    // Red shift for expansion, blue shift for compression
+    let expand = max(s, 0.0);    // 0 to 1
+    let squash = max(-s, 0.0);   // 0 to 1
+    // Neutral = dark gray, extremes = saturated
+    let r = 0.15 + expand * 0.85;
+    let g = 0.15 * (1.0 - max(expand, squash) * 0.8);
+    let b = 0.15 + squash * 0.85;
     return vec4<f32>(r, g, b, in.fade);
 }
