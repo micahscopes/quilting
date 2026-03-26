@@ -51,6 +51,7 @@ pub struct LodCompute {
     density_loc: glow::UniformLocation,
     mesh_radius_loc: glow::UniformLocation,
     min_px_loc: glow::UniformLocation,
+    max_lod_loc: glow::UniformLocation,
     vp_matrix_loc: glow::UniformLocation,
     vp_width_loc: glow::UniformLocation,
     vp_height_loc: glow::UniformLocation,
@@ -103,6 +104,7 @@ impl LodCompute {
             let density_loc = req("density")?;
             let mesh_radius_loc = req("mesh_radius")?;
             let min_px_loc = req("min_px")?;
+            let max_lod_loc = req("max_lod")?;
             let vp_matrix_loc = req("vp_matrix")?;
             let vp_width_loc = req("vp_width")?;
             let vp_height_loc = req("vp_height")?;
@@ -143,7 +145,7 @@ impl LodCompute {
                 morph_wt_loc: gl.get_uniform_location(program, "u_morph_wt"),
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
-                min_px_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
+                min_px_loc, max_lod_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
                 num_verts_loc, num_joints_loc, num_morph_loc,
                 max_faces,
                 bound: false,
@@ -351,6 +353,7 @@ impl LodCompute {
         density: f32,
         mesh_radius: f32,
         min_px: f32,
+        max_lod: f32,
         vp_matrix: &[f32; 16],
         vp_width: f32,
         vp_height: f32,
@@ -418,6 +421,7 @@ impl LodCompute {
             gl.uniform_1_f32(Some(&self.density_loc), density);
             gl.uniform_1_f32(Some(&self.mesh_radius_loc), mesh_radius);
             gl.uniform_1_f32(Some(&self.min_px_loc), min_px);
+            gl.uniform_1_f32(Some(&self.max_lod_loc), max_lod);
             gl.uniform_matrix_4_f32_slice(Some(&self.vp_matrix_loc), false, vp_matrix);
             gl.uniform_1_f32(Some(&self.vp_width_loc), vp_width);
             gl.uniform_1_f32(Some(&self.vp_height_loc), vp_height);

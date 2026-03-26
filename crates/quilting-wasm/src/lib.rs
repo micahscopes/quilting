@@ -143,8 +143,9 @@ pub fn gpu_compute_lods(
             mob[i] = v;
         }
         let identity_vp = [0.0f32; 16];
+        let max_lod = LOD_MAX.with(|m| *m.borrow());
         let n = compute.compute_lods(gl, num_faces as usize, num_vertices, 0, 0,
-            mob, density, mesh_radius, 0.0, &identity_vp, 0.0, 0.0);
+            mob, density, mesh_radius, 0.0, max_lod, &identity_vp, 0.0, 0.0);
         compute.read_back(gl, n)
     })
 }
@@ -156,6 +157,8 @@ thread_local! {
     static LOD_ATLAS_KEYS: RefCell<Vec<[u32; 3]>> = RefCell::new(Vec::new());
     /// Mesh bounding sphere radius (from rest-pose positions, for GPU density scaling).
     static LOD_MESH_RADIUS: RefCell<f64> = RefCell::new(1.0);
+    /// Maximum LOD the atlas supports — clamp here instead of falling to LOD 2.
+    static LOD_MAX: RefCell<f32> = RefCell::new(512.0);
 }
 
 /// Upload static animation data to the GPU compute context for per-frame LOD.
@@ -248,6 +251,8 @@ pub fn upload_model_to_compute() -> bool {
                         if lut_key < LUT_SIZE { lut[lut_key] = idx as u8; }
                     }
                     compute.upload_atlas_lut(gl, &lut);
+                    let max_lod = keys.last().map(|k| *k.iter().max().unwrap()).unwrap_or(512) as f32;
+                    LOD_MAX.with(|m| *m.borrow_mut() = max_lod);
                     LOD_ATLAS_KEYS.with(|ak| *ak.borrow_mut() = keys);
                 }
             });
@@ -382,10 +387,11 @@ pub fn compute_animated_lods(
             let mut vp = [0.0f32; 16];
             for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
 
+            let max_lod = LOD_MAX.with(|m| *m.borrow());
             let n = compute.compute_lods(
                 gl, num_faces, num_vertices,
                 num_joints, num_morph,
-                mob, density, mesh_radius, min_px,
+                mob, density, mesh_radius, min_px, max_lod,
                 &vp, vp_width, vp_height,
             );
             compute.read_back(gl, n)

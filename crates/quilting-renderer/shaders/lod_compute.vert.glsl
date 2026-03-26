@@ -45,6 +45,7 @@ uniform vec4 mob_d;
 uniform float density;
 uniform float mesh_radius;
 uniform float min_px;        // minimum pixels per subdivision (0 = no attenuation)
+uniform float max_lod;       // maximum LOD the atlas supports (clamp, don't fall off)
 uniform mat4 vp_matrix;      // view-projection matrix for screen-space projection
 uniform float vp_width;      // viewport width in pixels
 uniform float vp_height;     // viewport height in pixels
@@ -169,9 +170,9 @@ void main() {
     float raw_b = (med_a + med_c) * 0.5 / target_size;
     float raw_c = (med_a + med_b) * 0.5 / target_size;
 
-    out_lod_a = clamp(snap_pow2(raw_a), 2.0, 512.0);
-    out_lod_b = clamp(snap_pow2(raw_b), 2.0, 512.0);
-    out_lod_c = clamp(snap_pow2(raw_c), 2.0, 512.0);
+    out_lod_a = clamp(snap_pow2(raw_a), 2.0, max_lod);
+    out_lod_b = clamp(snap_pow2(raw_b), 2.0, max_lod);
+    out_lod_c = clamp(snap_pow2(raw_c), 2.0, max_lod);
 
     // Screen-space attenuation
     if (min_px > 0.0) {
@@ -186,9 +187,9 @@ void main() {
         float px_b = distance(s0, s2);
         float px_c = distance(s0, s1);
 
-        if (px_a / out_lod_a < min_px) out_lod_a = clamp(snap_pow2(px_a / min_px), 2.0, 512.0);
-        if (px_b / out_lod_b < min_px) out_lod_b = clamp(snap_pow2(px_b / min_px), 2.0, 512.0);
-        if (px_c / out_lod_c < min_px) out_lod_c = clamp(snap_pow2(px_c / min_px), 2.0, 512.0);
+        if (px_a / out_lod_a < min_px) out_lod_a = clamp(snap_pow2(px_a / min_px), 2.0, max_lod);
+        if (px_b / out_lod_b < min_px) out_lod_b = clamp(snap_pow2(px_b / min_px), 2.0, max_lod);
+        if (px_c / out_lod_c < min_px) out_lod_c = clamp(snap_pow2(px_c / min_px), 2.0, max_lod);
     }
 
     // Canonical form + S3 permutation
