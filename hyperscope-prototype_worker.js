@@ -105,7 +105,14 @@ self.onmessage = async function(e) {
       result.textures = decoded;
       console.log(`Browser-native image decode: ${result.textures.length} textures in ${(performance.now() - t0).toFixed(0)}ms`);
     }
-    self.postMessage({ type: 'gltf_loaded', id, result });
+    // Transfer pixel ArrayBuffers to avoid cloning (prevents OOM on large models)
+    const transfers = [];
+    if (result && result.textures) {
+      for (const t of result.textures) {
+        if (t.data && t.data.buffer) transfers.push(t.data.buffer);
+      }
+    }
+    self.postMessage({ type: 'gltf_loaded', id, result }, transfers);
     return;
   }
 

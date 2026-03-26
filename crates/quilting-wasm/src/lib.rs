@@ -20,7 +20,7 @@ pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
     let mut config = wasm_tracing::WasmLayerConfig::new();
-    config.set_max_level(tracing::Level::DEBUG);
+    config.set_max_level(tracing::Level::INFO);
     wasm_tracing::set_as_global_default_with_config(config);
 }
 
