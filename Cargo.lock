@@ -258,6 +258,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "fuzzy-vision"
+version = "0.1.0"
+dependencies = [
+ "glow",
+]
+
+[[package]]
 name = "geometry-predicates"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -641,6 +648,7 @@ name = "quilting-wasm"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "fuzzy-vision",
  "getrandom",
  "glow",
  "js-sys",
