@@ -947,6 +947,13 @@ async function recomputeLods() {
   lodInFlight = false;
 }
 
+async function loadModel(buffer, filename) {
+  $('stats').textContent = `Loading ${filename}...`;
+  const resp = await broadcastCall('load_gltf_data', { bytes: buffer });
+  meshInfo = resp.result;
+  await finishModelUpload(resp.result, filename);
+}
+
 // --- Render loop ---
 function frame(ts) {
   requestAnimationFrame(frame);
@@ -974,11 +981,7 @@ function frame(ts) {
 }
 
 // --- Load model ---
-async function loadModel(buffer, filename) {
-  $('stats').textContent = `Loading ${filename}...`;
-
-  const resp = await broadcastCall('load_gltf_data', { bytes: buffer });
-  const info = resp.result;
+async function finishModelUpload(info, filename) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   meshInfo = info;
 
@@ -1201,6 +1204,21 @@ for (const a of levels)
 allTriples.sort((a,b) => (b[2]+b[1]+b[0]) - (a[2]+a[1]+a[0]));
 
 $('stats').textContent = `Building ${allTriples.length} patches across ${ATLAS_WORKERS} workers...`;
+
+// Start glTF fetch + parse in parallel with atlas build (they're independent)
+let modelPromise = null;
+try {
+  let buf = await idbGet(currentGlb);
+  if (!buf) {
+    const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
+    const resp = await fetch(url);
+    if (resp.ok) buf = await resp.arrayBuffer();
+  }
+  if (buf) {
+    modelPromise = broadcastCall('load_gltf_data', { bytes: buf }).then(r => ({ result: r.result, filename: currentGlb, buffer: buf }));
+  }
+} catch (e) { console.warn(`Prefetch ${currentGlb}:`, e); }
+
 {
   let qi = 0;
   function dispatchNext(wi) {
@@ -1243,21 +1261,22 @@ dropExtraWorkers();
 $('stats').textContent = 'Atlas ready. Loading model...';
 requestAnimationFrame(frame);
 
-// Load model from URL param, IndexedDB, or server
+// Use the pre-fetched glTF result (parsed in parallel with atlas build)
 try {
-  let buf = await idbGet(currentGlb);
-  if (!buf) {
-    const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
-    const resp = await fetch(url);
-    if (resp.ok) buf = await resp.arrayBuffer();
-  }
-  if (buf) {
-    await loadModel(buf, currentGlb);
-    // After model loads, select the animation from URL params if specified
-    const animIdx = parseInt(initParams.anim);
-    if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
-      $('anim-sel').value = animIdx;
-      $('anim-sel').dispatchEvent(new Event('change'));
+  if (modelPromise) {
+    const { result: resp, filename } = await modelPromise;
+    if (resp) {
+      // loadModel expects to call broadcastCall itself, but we already have the result.
+      // Feed the pre-parsed result directly into the upload pipeline.
+      meshInfo = resp;
+      await finishModelUpload(resp, filename);
+      const animIdx = parseInt(initParams.anim);
+      if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
+        $('anim-sel').value = animIdx;
+        $('anim-sel').dispatchEvent(new Event('change'));
+      }
+    } else {
+      $('stats').textContent = 'Drop a .glb file to load';
     }
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
