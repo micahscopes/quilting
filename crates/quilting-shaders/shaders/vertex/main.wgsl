@@ -380,8 +380,10 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         let s1 = 1.0 / max(dot(b1, b1), 0.001);
         let s2 = 1.0 / max(dot(b2, b2), 0.001);
         let stretch = bary.x * s0 + bary.y * s1 + bary.z * s2;
-        // Signed log2, mapped to [0,1]: 0.5 = no stretch, 0 = max squash, 1 = max expand
-        out.mobius_stretch = clamp(log2(stretch) / 6.0 * 0.5 + 0.5, 0.0, 1.0);
+        // Signed log2, mapped to [0,1] via sigmoid for smooth falloff (no hard cutoff).
+        // 0.5 = no stretch, 0 = max squash, 1 = max expand.
+        let log_s = log2(stretch);
+        out.mobius_stretch = 1.0 / (1.0 + exp(-log_s * 0.5));
     } else {
         out.mobius_stretch = 0.5; // neutral = no Möbius
     }
