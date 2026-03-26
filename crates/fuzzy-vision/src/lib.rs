@@ -46,6 +46,8 @@ pub struct JfaConfig {
     pub focus: f32,
     /// Bandwidth of the Gaussian focus band (smaller = tighter focus)
     pub bandwidth: f32,
+    /// Normalize stretch to actual min/max each frame (true) or use absolute sigmoid values (false)
+    pub normalize: bool,
 }
 
 impl Default for JfaConfig {
@@ -57,6 +59,7 @@ impl Default for JfaConfig {
             precision: Precision::Float16,
             focus: 0.5,
             bandwidth: 0.3,
+            normalize: true,
         }
     }
 }
@@ -658,7 +661,8 @@ impl JfaPipeline {
     }
 
     /// Generate a focused conformal weight from a raw stretch texture.
-    /// First reduces to find global min/max, then normalizes and applies Gaussian band.
+    /// If config.normalize is true, reduces to find global min/max first.
+    /// Otherwise uses absolute sigmoid values directly.
     pub fn generate_conformal_weight(
         &self,
         gl: &glow::Context,
@@ -672,86 +676,84 @@ impl JfaPipeline {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
 
-            // --- Step 1: Initialize reduction. First pass reads stretch texture,
-            // packs R=value (will become min), G=value (will become max). ---
-            // We need the first reduction pass to read the raw stretch and set R=G=stretch.
-            // Use the stretch tex directly as input to the minmax reducer.
-            // But first pass needs R=stretch, G=stretch. The stretch tex has R=stretch already.
-            // The reducer reads .r for min and .g for max. On first pass, .g is 0 — wrong.
-            // Fix: use the non-normalized conformal shader for first pass to set R=G=stretch,
-            // or init a texture with R=G=stretch.
-            // Simplest: first reduction reads .r for both min and max (special case).
+            if self.config.normalize {
+                // --- Normalized mode: reduce to find min/max, then normalize ---
+                let mut src_tex = stretch_tex;
+                let mut src_w = width;
+                let mut src_h = height;
+                let mut write_to_a = true;
 
-            // Actually, let's just do the reduction with .r channel only, computing
-            // min/max from the same channel. Modify the approach: reduction shader
-            // computes min(.r) and max(.r) from 4 samples.
+                gl.use_program(Some(self.prog_reduce_minmax));
 
-            let mut src_tex = stretch_tex;
-            let mut src_w = width;
-            let mut src_h = height;
-            let mut write_to_a = true;
+                loop {
+                    let dst_w = (src_w / 2).max(1);
+                    let dst_h = (src_h / 2).max(1);
+                    let (dst_fbo, dst_tex) = if write_to_a {
+                        (self.reduce_fbo_a, self.reduce_tex_a)
+                    } else {
+                        (self.reduce_fbo_b, self.reduce_tex_b)
+                    };
+                    gl.bind_texture(glow::TEXTURE_2D, Some(dst_tex));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA16F as i32, dst_w, dst_h, 0,
+                        glow::RGBA, glow::HALF_FLOAT, glow::PixelUnpackData::Slice(None));
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
+                    gl.viewport(0, 0, dst_w, dst_h);
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
+                    if let Some(loc) = gl.get_uniform_location(self.prog_reduce_minmax, "u_source") {
+                        gl.uniform_1_i32(Some(&loc), 0);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_reduce_minmax, "u_source_dims") {
+                        gl.uniform_2_f32(Some(&loc), src_w as f32, src_h as f32);
+                    }
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                    src_tex = dst_tex;
+                    src_w = dst_w;
+                    src_h = dst_h;
+                    write_to_a = !write_to_a;
+                    if src_w <= 1 && src_h <= 1 { break; }
+                }
 
-            gl.use_program(Some(self.prog_reduce_minmax));
-
-            // Reduce until 1x1
-            loop {
-                let dst_w = (src_w / 2).max(1);
-                let dst_h = (src_h / 2).max(1);
-
-                let (dst_fbo, dst_tex) = if write_to_a {
-                    (self.reduce_fbo_a, self.reduce_tex_a)
-                } else {
-                    (self.reduce_fbo_b, self.reduce_tex_b)
-                };
-
-                // Resize destination
-                gl.bind_texture(glow::TEXTURE_2D, Some(dst_tex));
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA16F as i32, dst_w, dst_h, 0,
-                    glow::RGBA, glow::HALF_FLOAT, glow::PixelUnpackData::Slice(None));
-
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
-                gl.viewport(0, 0, dst_w, dst_h);
+                // Normalized weight with Gaussian band
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+                gl.viewport(0, 0, width, height);
+                gl.use_program(Some(self.prog_weight_conformal_norm));
                 gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(stretch_tex));
+                gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
-                if let Some(loc) = gl.get_uniform_location(self.prog_reduce_minmax, "u_source") {
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_stretch") {
                     gl.uniform_1_i32(Some(&loc), 0);
                 }
-                if let Some(loc) = gl.get_uniform_location(self.prog_reduce_minmax, "u_source_dims") {
-                    gl.uniform_2_f32(Some(&loc), src_w as f32, src_h as f32);
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_minmax") {
+                    gl.uniform_1_i32(Some(&loc), 1);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_focus") {
+                    gl.uniform_1_f32(Some(&loc), self.config.focus);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_bandwidth") {
+                    gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-                src_tex = dst_tex;
-                src_w = dst_w;
-                src_h = dst_h;
-                write_to_a = !write_to_a;
-
-                if src_w <= 1 && src_h <= 1 { break; }
+            } else {
+                // --- Absolute mode: use raw sigmoid stretch values directly ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+                gl.viewport(0, 0, width, height);
+                gl.use_program(Some(self.prog_weight_conformal));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(stretch_tex));
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_stretch") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_focus") {
+                    gl.uniform_1_f32(Some(&loc), self.config.focus);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_bandwidth") {
+                    gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
 
-            // src_tex now has the 1x1 min/max result
-
-            // --- Step 2: Normalized conformal weight with Gaussian band ---
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
-            gl.viewport(0, 0, width, height);
-            gl.use_program(Some(self.prog_weight_conformal_norm));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(stretch_tex));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(src_tex)); // 1x1 min/max
-            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_stretch") {
-                gl.uniform_1_i32(Some(&loc), 0);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_minmax") {
-                gl.uniform_1_i32(Some(&loc), 1);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_focus") {
-                gl.uniform_1_f32(Some(&loc), self.config.focus);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_bandwidth") {
-                gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
-            }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_vertex_array(None);
         }
     }

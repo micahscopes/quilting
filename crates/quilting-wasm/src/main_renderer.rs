@@ -250,7 +250,7 @@ pub fn mr_set_mobius(mobius: &[f32]) {
 }
 
 #[wasm_bindgen(js_name = "mr_setFuzzy")]
-pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: u32, focus: f32, bandwidth: f32) {
+pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: u32, focus: f32, bandwidth: f32, normalize: bool) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.fuzzy_enabled = enabled;
@@ -261,6 +261,7 @@ pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: 
                 cfg.blur_strength = blur_strength;
                 cfg.focus = focus;
                 cfg.bandwidth = bandwidth;
+                cfg.normalize = normalize;
                 fv.set_config(cfg);
             }
         }
