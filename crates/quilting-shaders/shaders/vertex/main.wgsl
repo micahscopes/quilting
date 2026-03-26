@@ -383,7 +383,7 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         // Signed log2, mapped to [0,1] via sigmoid for smooth falloff (no hard cutoff).
         // 0.5 = no stretch, 0 = max squash, 1 = max expand.
         let log_s = log2(stretch);
-        out.mobius_stretch = 1.0 / (1.0 + exp(-log_s * 0.5));
+        out.mobius_stretch = 1.0 / (1.0 + exp(-log_s * 0.25));
     } else {
         out.mobius_stretch = 0.5; // neutral = no Möbius
     }
