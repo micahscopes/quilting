@@ -141,6 +141,10 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="toggle" id="fuzzy-toggle"></div>
       <span class="toggle-label">Enable blur</span>
     </div>
+    <div class="btns" id="fuzzy-mode-btns">
+      <button class="a" data-v="0">Radial</button>
+      <button data-v="1">Conformal</button>
+    </div>
     <label>Blur radius</label>
     <div class="sr"><input type="range" id="fuzzy-radius" min="4" max="128" value="48"><span class="v" id="fuzzy-radius-v">48</span></div>
     <label>Blur strength</label>
@@ -495,13 +499,14 @@ $('animate-toggle').addEventListener('click', () => {
 });
 
 // --- Fuzzy Vision controls ---
+let fuzzyMode = 0;
 function updateFuzzy() {
   const enabled = $('fuzzy-toggle').classList.contains('on');
   const radius = parseFloat($('fuzzy-radius').value);
   const strength = parseFloat($('fuzzy-strength').value) / 10.0;
   $('fuzzy-radius-v').textContent = radius.toFixed(0);
   $('fuzzy-strength-v').textContent = strength.toFixed(1);
-  mr_setFuzzy(enabled, radius, strength);
+  mr_setFuzzy(enabled, radius, strength, fuzzyMode);
 }
 $('fuzzy-toggle').addEventListener('click', () => {
   $('fuzzy-toggle').classList.toggle('on');
@@ -509,6 +514,7 @@ $('fuzzy-toggle').addEventListener('click', () => {
 });
 $('fuzzy-radius').addEventListener('input', updateFuzzy);
 $('fuzzy-strength').addEventListener('input', updateFuzzy);
+setupBtnGroup('fuzzy-mode-btns', v => { fuzzyMode = parseInt(v); updateFuzzy(); });
 
 // --- LOD controls ---
 function getTessParams() {

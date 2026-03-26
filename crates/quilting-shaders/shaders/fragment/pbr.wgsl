@@ -117,10 +117,16 @@ struct FragInput {
     @location(7) position_ws: vec3<f32>,
     @location(8) camera_pos_ws: vec3<f32>,
     @location(9) fade: f32,
+    @location(12) mobius_stretch: f32,
+}
+
+struct PbrOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) weight: vec4<f32>,
 }
 
 @fragment
-fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> @location(0) vec4<f32> {
+fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput {
     if in.fade < 0.001 { discard; }
 
     var n = normalize(in.normal_vs);
@@ -166,7 +172,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> @location
         var unlit_color = base.rgb;
         // Gamma correction (base is already linear from sRGB conversion above)
         unlit_color = pow(unlit_color, vec3<f32>(1.0 / 2.2));
-        return vec4<f32>(unlit_color, alpha);
+        return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
     }
 
     // --- Metallic / Roughness ---
@@ -232,9 +238,9 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> @location
         let dbg = n * 0.5 + 0.5;
         // Tint back-faces slightly red so winding issues are visible
         if !front_facing {
-            return vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade);
+            return PbrOutput(vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
         }
-        return vec4<f32>(dbg, in.fade);
+        return PbrOutput(vec4<f32>(dbg, in.fade), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
     }
 
     // --- KHR_materials_specular: modify F0 before BRDF ---
@@ -423,5 +429,5 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> @location
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
 
-    return vec4<f32>(color, alpha * in.fade);
+    return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
 }
