@@ -1720,29 +1720,33 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         js_sys::Reflect::set(&obj, &"width".into(), &JsValue::from_f64(img.width as f64)).unwrap();
         js_sys::Reflect::set(&obj, &"height".into(), &JsValue::from_f64(img.height as f64)).unwrap();
 
-        // Compute average color (for fallback when not sampling textures)
-        let pixel_count = (img.width * img.height) as f64;
-        if pixel_count > 0.0 {
+        // Compute average color (for fallback when not sampling textures).
+        // Sample every 64th pixel with fast sRGB approximation (x² instead of x^2.2).
+        let pixel_count = (img.width * img.height) as usize;
+        if pixel_count > 0 {
+            let step = 64.max(1);
             let mut r_sum: f64 = 0.0;
             let mut g_sum: f64 = 0.0;
             let mut b_sum: f64 = 0.0;
             let mut a_sum: f64 = 0.0;
-            for chunk in img.pixels.chunks(4) {
-                if chunk.len() == 4 {
-                    // sRGB to linear for averaging
-                    r_sum += (chunk[0] as f64 / 255.0).powf(2.2);
-                    g_sum += (chunk[1] as f64 / 255.0).powf(2.2);
-                    b_sum += (chunk[2] as f64 / 255.0).powf(2.2);
-                    a_sum += chunk[3] as f64 / 255.0;
-                }
+            let mut n = 0u32;
+            for chunk in img.pixels.chunks(4 * step) {
+                let r = chunk[0] as f64 / 255.0;
+                let g = chunk[1] as f64 / 255.0;
+                let b = chunk[2] as f64 / 255.0;
+                r_sum += r * r; g_sum += g * g; b_sum += b * b;
+                a_sum += chunk[3] as f64 / 255.0;
+                n += 1;
             }
-            let avg_color = js_sys::Array::new();
-            // Convert back from linear to sRGB for display
-            avg_color.push(&JsValue::from_f64((r_sum / pixel_count).powf(1.0 / 2.2)));
-            avg_color.push(&JsValue::from_f64((g_sum / pixel_count).powf(1.0 / 2.2)));
-            avg_color.push(&JsValue::from_f64((b_sum / pixel_count).powf(1.0 / 2.2)));
-            avg_color.push(&JsValue::from_f64(a_sum / pixel_count));
-            js_sys::Reflect::set(&obj, &"avg_color".into(), &avg_color).unwrap();
+            if n > 0 {
+                let nf = n as f64;
+                let avg_color = js_sys::Array::new();
+                avg_color.push(&JsValue::from_f64((r_sum / nf).sqrt()));
+                avg_color.push(&JsValue::from_f64((g_sum / nf).sqrt()));
+                avg_color.push(&JsValue::from_f64((b_sum / nf).sqrt()));
+                avg_color.push(&JsValue::from_f64(a_sum / nf));
+                js_sys::Reflect::set(&obj, &"avg_color".into(), &avg_color).unwrap();
+            }
         }
 
         // Send pixel data as Uint8Array
@@ -1771,26 +1775,27 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             mat.base_color_factor[0] as f32, mat.base_color_factor[1] as f32,
             mat.base_color_factor[2] as f32, mat.base_color_factor[3] as f32,
         ];
-        // If this material has a texture, use the average color instead of the factor
+        // If this material has a texture, use sampled average color instead of the factor
         if let Some(tex_ref) = &mat.base_color_texture {
             if let Some(&img_idx) = scene.texture_to_image.get(tex_ref.index) {
                 if let Some(img) = scene.images.get(img_idx) {
-                    let pixel_count = (img.width * img.height) as f64;
-                    if pixel_count > 0.0 {
-                        let mut r: f64 = 0.0;
-                        let mut g: f64 = 0.0;
-                        let mut b: f64 = 0.0;
-                        for chunk in img.pixels.chunks(4) {
-                            if chunk.len() == 4 {
-                                r += (chunk[0] as f64 / 255.0).powf(2.2);
-                                g += (chunk[1] as f64 / 255.0).powf(2.2);
-                                b += (chunk[2] as f64 / 255.0).powf(2.2);
-                            }
-                        }
-                        // Multiply texture average with base_color_factor
-                        bc[0] = (bc[0] as f64 * (r / pixel_count).powf(1.0 / 2.2)) as f32;
-                        bc[1] = (bc[1] as f64 * (g / pixel_count).powf(1.0 / 2.2)) as f32;
-                        bc[2] = (bc[2] as f64 * (b / pixel_count).powf(1.0 / 2.2)) as f32;
+                    let step = 64.max(1);
+                    let mut r: f64 = 0.0;
+                    let mut g: f64 = 0.0;
+                    let mut b: f64 = 0.0;
+                    let mut n = 0u32;
+                    for chunk in img.pixels.chunks(4 * step) {
+                        let rv = chunk[0] as f64 / 255.0;
+                        let gv = chunk[1] as f64 / 255.0;
+                        let bv = chunk[2] as f64 / 255.0;
+                        r += rv * rv; g += gv * gv; b += bv * bv;
+                        n += 1;
+                    }
+                    if n > 0 {
+                        let nf = n as f64;
+                        bc[0] = (bc[0] as f64 * (r / nf).sqrt()) as f32;
+                        bc[1] = (bc[1] as f64 * (g / nf).sqrt()) as f32;
+                        bc[2] = (bc[2] as f64 * (b / nf).sqrt()) as f32;
                     }
                 }
             }

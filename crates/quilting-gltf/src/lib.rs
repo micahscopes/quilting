@@ -167,7 +167,8 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
     }).collect();
 
     // Build per-texture image array: each glTF texture gets its own GL texture
-    // with the correct sampler wrap modes. Textures sharing an image get duplicated data.
+    // with the correct sampler wrap modes. First texture claiming an image takes
+    // ownership (no clone); subsequent textures sharing the same image clone.
     let to_gl_wrap = |w: gltf::texture::WrappingMode| -> u32 {
         match w {
             gltf::texture::WrappingMode::ClampToEdge => WRAP_CLAMP_TO_EDGE,
@@ -175,17 +176,26 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
             gltf::texture::WrappingMode::Repeat => WRAP_REPEAT,
         }
     };
-    let tex_images: Vec<ImageData> = document.textures().map(|tex| {
-        let src = &images[tex.source().index()];
+    let mut images = images; // take ownership for move
+    let mut first_tex_for_image: Vec<Option<usize>> = vec![None; images.len()];
+    let mut tex_images: Vec<ImageData> = Vec::with_capacity(document.textures().len());
+    for tex in document.textures() {
+        let img_idx = tex.source().index();
+        if img_idx >= images.len() { continue; }
         let sampler = tex.sampler();
-        ImageData {
-            pixels: src.pixels.clone(),
-            width: src.width,
-            height: src.height,
-            wrap_s: to_gl_wrap(sampler.wrap_s()),
-            wrap_t: to_gl_wrap(sampler.wrap_t()),
-        }
-    }).collect();
+        let ws = to_gl_wrap(sampler.wrap_s());
+        let wt = to_gl_wrap(sampler.wrap_t());
+        let pixels = if let Some(first) = first_tex_for_image[img_idx] {
+            tex_images[first].pixels.clone()
+        } else {
+            first_tex_for_image[img_idx] = Some(tex_images.len());
+            std::mem::take(&mut images[img_idx].pixels)
+        };
+        tex_images.push(ImageData {
+            pixels, width: images[img_idx].width, height: images[img_idx].height,
+            wrap_s: ws, wrap_t: wt,
+        });
+    }
     // texture_to_image is now identity — index directly into tex_images
     let texture_to_image: Vec<usize> = (0..tex_images.len()).collect();
 
