@@ -372,17 +372,6 @@ pub fn compute_animated_lods(
 
             if !joint_matrices.is_empty() {
                 compute.upload_joint_matrices(gl, &joint_matrices);
-            } else {
-                // Static model: upload single identity joint so compute shader
-                // passes positions through without skinning
-                #[rustfmt::skip]
-                let identity: [f32; 16] = [
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
-                ];
-                compute.upload_joint_matrices(gl, &identity);
             }
             if !morph_weights.is_empty() {
                 compute.upload_morph_weights(gl, &morph_weights);
@@ -393,11 +382,9 @@ pub fn compute_animated_lods(
             let mut vp = [0.0f32; 16];
             for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
 
-            // For static models, we uploaded 1 identity joint above
-            let effective_joints = if num_joints == 0 { 1 } else { num_joints };
             let n = compute.compute_lods(
                 gl, num_faces, num_vertices,
-                effective_joints, num_morph,
+                num_joints, num_morph,
                 mob, density, mesh_radius, min_px,
                 &vp, vp_width, vp_height,
             );

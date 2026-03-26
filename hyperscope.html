@@ -483,10 +483,11 @@ $('animate-toggle').addEventListener('click', () => {
 
 // --- LOD controls ---
 function getTessParams() {
+  const on = $('screen-atten-toggle').classList.contains('on');
   return {
     density: parseInt($('tess-density').value),
-    screen_atten: $('screen-atten-toggle').classList.contains('on'),
-    minPx: parseInt($('min-px-sub').value),
+    screen_atten: on,
+    minPx: on ? parseInt($('min-px-sub').value) : 0,
   };
 }
 

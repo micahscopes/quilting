@@ -357,9 +357,11 @@ impl LodCompute {
     ) -> usize {
         let n = num_faces.min(self.max_faces);
         unsafe {
-            if !self.bound {
-                gl.use_program(Some(self.program));
+            // Always re-activate program — uniforms require it active,
+            // and we can't guarantee nothing else touched GL state between calls.
+            gl.use_program(Some(self.program));
 
+            if !self.bound {
                 // Bind all textures to fixed texture units
                 let mut unit = 0u32;
                 let bind_tex = |gl: &glow::Context, unit: &mut u32, tex: Option<glow::Texture>, loc: &Option<glow::UniformLocation>| {
