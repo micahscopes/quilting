@@ -18,6 +18,7 @@ pub mod sources {
     pub const FRAG_WIRE: &str = include_str!("../shaders/fragment/wire.wgsl");
     pub const FRAG_NORMALS: &str = include_str!("../shaders/fragment/normals.wgsl");
     pub const FRAG_PBR: &str = include_str!("../shaders/fragment/pbr.wgsl");
+    pub const FRAG_STRETCH: &str = include_str!("../shaders/fragment/stretch.wgsl");
     pub const FRAG_PICK: &str = include_str!("../shaders/fragment/pick.wgsl");
 }
 
@@ -147,6 +148,7 @@ pub fn compile_fragment_glsl(mode: &str) -> Result<String, Box<dyn std::error::E
         "wire" => (sources::FRAG_WIRE, "fs_wire"),
         "normals" => (sources::FRAG_NORMALS, "fs_normals"),
         "pbr" => (sources::FRAG_PBR, "fs_pbr"),
+        "stretch" => (sources::FRAG_STRETCH, "fs_stretch"),
         "pick" => (sources::FRAG_PICK, "fs_pick"),
         _ => return Err(format!("unknown fragment mode: {}", mode).into()),
     };
@@ -163,13 +165,13 @@ pub fn compile_vertex_glsl_native() -> Result<String, Box<dyn std::error::Error>
 
 /// Compile a fragment shader to GLSL ES 300 for native OpenGL/WebGL
 /// (no coordinate space adjustment).
-/// Supported modes: "matcap", "wire", "normals"
 pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::error::Error>> {
     let (source, entry) = match mode {
         "matcap" => (sources::FRAG_MATCAP, "fs_matcap"),
         "wire" => (sources::FRAG_WIRE, "fs_wire"),
         "normals" => (sources::FRAG_NORMALS, "fs_normals"),
         "pbr" => (sources::FRAG_PBR, "fs_pbr"),
+        "stretch" => (sources::FRAG_STRETCH, "fs_stretch"),
         "pick" => (sources::FRAG_PICK, "fs_pick"),
         _ => return Err(format!("unknown fragment mode: {}", mode).into()),
     };

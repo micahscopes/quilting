@@ -233,7 +233,7 @@ pub fn mr_set_render_mode(mode: &str) {
             st.render_mode = match mode {
                 "pbr" => RenderMode::Pbr, "matcap" => RenderMode::Matcap,
                 "wire" => RenderMode::Wire, "normals" => RenderMode::Normals,
-                "both" => RenderMode::Both, "lod" => RenderMode::Lod,
+                "both" => RenderMode::Both, "lod" => RenderMode::Lod, "stretch" => RenderMode::Stretch,
                 _ => RenderMode::Pbr,
             };
         }
@@ -655,7 +655,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
 
                 // Set up MRT FBO for PBR: color (attachment 0) + weight (attachment 1)
-                if state.fuzzy_enabled {
+                // Only for conformal mode (mode 1) — radial mode blits from default FB.
+                if state.fuzzy_enabled && state.fuzzy_mode == 1 {
                     unsafe {
                         let mut vp = [0i32; 4];
                         gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);

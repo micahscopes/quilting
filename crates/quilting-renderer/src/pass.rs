@@ -20,6 +20,8 @@ pub enum RenderMode {
     Pbr,
     /// LOD heatmap visualization.
     Lod,
+    /// Möbius stretch heatmap (conformal distortion debug).
+    Stretch,
 }
 
 /// Camera, projection, and scene-level state needed for rendering.
@@ -170,8 +172,25 @@ pub fn render_frame(
         }
     }
 
-    // PBR pass placeholder — will be implemented in Phase 3
-    // For now, falls through to matcap if PBR mode is selected
+    // Stretch heatmap pass (filled triangles)
+    if mode == RenderMode::Stretch {
+        unsafe { gl.use_program(Some(programs.stretch)); }
+
+        for batch in batches {
+            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
+
+            unsafe {
+                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
+                gl.draw_elements_instanced(
+                    glow::TRIANGLES,
+                    batch.mesh.num_tri_indices,
+                    glow::UNSIGNED_INT,
+                    0,
+                    batch.mesh.num_instances,
+                );
+            }
+        }
+    }
 
     unsafe { gl.bind_vertex_array(None); }
 }

@@ -20,16 +20,17 @@ pub struct Programs {
     pub wire: glow::Program,
     pub normals: glow::Program,
     pub pbr: glow::Program,
+    pub stretch: glow::Program,
 }
 
 impl Programs {
-    /// Delete all GL programs.
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.matcap);
             gl.delete_program(self.wire);
             gl.delete_program(self.normals);
             gl.delete_program(self.pbr);
+            gl.delete_program(self.stretch);
         }
     }
 }
@@ -49,7 +50,7 @@ pub struct CompiledGlsl {
 }
 
 /// Fragment shader modes that quilting-shaders supports.
-const FRAGMENT_MODES: &[&str] = &["matcap", "wire", "normals", "pbr"];
+const FRAGMENT_MODES: &[&str] = &["matcap", "wire", "normals", "pbr", "stretch"];
 
 /// Compile all WGSL shaders to GLSL via quilting-shaders (naga).
 /// Uses the "native" emission path (no Y-flip / Z-remap).
@@ -263,6 +264,7 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
     let mut wire = None;
     let mut normals = None;
     let mut pbr = None;
+    let mut stretch = None;
 
     for (name, compiled) in &glsl_sources {
         log_info(&format!("Compiling program '{}': VS {} chars, FS {} chars",
@@ -278,6 +280,7 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
             "wire" => wire = Some(program),
             "normals" => normals = Some(program),
             "pbr" => pbr = Some(program),
+            "stretch" => stretch = Some(program),
             _ => {}
         }
     }
@@ -288,5 +291,6 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
         wire: wire.ok_or("wire program not compiled")?,
         normals: normals.ok_or("normals program not compiled")?,
         pbr: pbr.ok_or("pbr program not compiled")?,
+        stretch: stretch.ok_or("stretch program not compiled")?,
     })
 }
