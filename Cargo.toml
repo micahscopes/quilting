@@ -7,6 +7,7 @@ members = [
     "crates/quilting-renderer",
     "crates/quilting-shaders",
     "crates/quilting-wasm",
+    "crates/fuzzy-vision",
 
     "crates/trunk-stub",
 ]

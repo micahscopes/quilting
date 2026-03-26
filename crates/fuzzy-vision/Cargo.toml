@@ -1,0 +1,8 @@
+[package]
+name = "fuzzy-vision"
+version = "0.1.0"
+edition = "2021"
+description = "JFA-based variable per-pixel blur for WebGL2/OpenGL — depth of field, conformal blur, transmission roughness, bloom"
+
+[dependencies]
+glow = "0.16"
