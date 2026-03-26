@@ -19,7 +19,7 @@ struct PbrUniforms {
     unlit: f32,                          // >0.5 = KHR_materials_unlit (base color only)
     has_env_map: f32,                    // >0.5 = cubemap IBL available
     env_mip_count: f32,                  // number of mip levels in prefiltered env map
-    _pbr_pad0: f32,
+    double_sided: f32,                   // >0.5 = flip normal for back-facing fragments
     _pbr_pad1: f32,
     // KHR_materials_sheen
     sheen_color: vec4<f32>,              // rgb in xyz, w = has_sheen (>0.5)
@@ -120,10 +120,13 @@ struct FragInput {
 }
 
 @fragment
-fn fs_pbr(in: FragInput) -> @location(0) vec4<f32> {
+fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> @location(0) vec4<f32> {
     if in.fade < 0.001 { discard; }
 
     var n = normalize(in.normal_vs);
+    // Double-sided materials: flip normal for back-facing fragments so they light correctly.
+    // Only when the material explicitly requests it — QB perm_parity handles orientation otherwise.
+    if pbr.double_sided > 0.5 && !front_facing { n = -n; }
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // view space: camera looks along +Z axis
 
     // --- Base color ---

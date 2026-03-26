@@ -274,7 +274,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.materials.clear();
-            let stride = 49;
+            let stride = 50;
             for i in 0..num_materials as usize {
                 let o = i * stride;
                 if o + stride > data.len() { break; }
@@ -315,6 +315,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
                     attenuation_color: [d[44], d[45], d[46]],
                     attenuation_distance: d[47],
                     transmission_tex_idx: d[48] as i32,
+                    double_sided: d[49] > 0.5,
                     ..PbrParams::default()
                 });
             }
