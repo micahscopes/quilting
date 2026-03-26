@@ -11,6 +11,21 @@ pub const WRAP_REPEAT: u32 = 0x2901;
 pub const WRAP_CLAMP_TO_EDGE: u32 = 0x812F;
 pub const WRAP_MIRRORED_REPEAT: u32 = 0x8370;
 
+/// Raw encoded image blob (PNG/JPEG bytes, not decoded).
+#[derive(Debug, Clone, Default)]
+pub struct RawImageBlob {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+}
+
+/// Per-texture raw image + sampler info for browser-native decoding.
+#[derive(Debug, Clone)]
+pub struct RawTextureInfo {
+    pub blob: RawImageBlob,
+    pub wrap_s: u32,
+    pub wrap_t: u32,
+}
+
 /// Decoded image data from a glTF file.
 #[derive(Debug, Clone)]
 pub struct ImageData {
@@ -38,6 +53,23 @@ pub struct GltfScene {
     /// Mapping from glTF texture index to image index.
     pub texture_to_image: Vec<usize>,
     /// Index of the default scene, if specified in the glTF.
+    pub default_scene: Option<usize>,
+}
+
+/// Like GltfScene but with raw image blobs instead of decoded pixels.
+/// Designed for browser-native image decoding via createImageBitmap.
+#[derive(Debug)]
+pub struct GltfSceneRaw {
+    pub meshes: Vec<mesh::Mesh>,
+    pub materials: Vec<material::PbrMaterial>,
+    pub animations: Vec<animation::Animation>,
+    pub skins: Vec<animation::Skin>,
+    pub scenes: Vec<scene::Scene>,
+    pub nodes: Vec<scene::Node>,
+    /// Raw image blobs per texture (ready for browser-native decode).
+    pub raw_textures: Vec<RawTextureInfo>,
+    /// Mapping from glTF texture index to raw_textures index.
+    pub texture_to_image: Vec<usize>,
     pub default_scene: Option<usize>,
 }
 
@@ -209,6 +241,94 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
         images: tex_images,
         texture_to_image,
         default_scene,
+    })
+}
+
+/// Load a glTF/GLB file, parsing structure but returning raw image blobs
+/// instead of decoded pixels. Designed for browser-native decoding via
+/// createImageBitmap (10-50× faster than WASM PNG decoding).
+pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
+    let gltf_obj = gltf::Gltf::from_slice(data)
+        .or_else(|_| gltf::Gltf::from_slice_without_validation(data))?;
+
+    let document = &gltf_obj.document;
+    let mut buffers = Vec::new();
+    if let Some(blob) = &gltf_obj.blob {
+        buffers.push(gltf::buffer::Data(blob.clone()));
+    }
+
+    let meshes = document.meshes()
+        .map(|m| mesh::extract_mesh(&m, &buffers))
+        .collect::<Result<Vec<_>, _>>()?;
+    let materials = document.materials()
+        .map(|m| material::extract_material(&m))
+        .collect();
+    let animations = document.animations()
+        .map(|a| animation::extract_animation(&a, &buffers))
+        .collect::<Result<Vec<_>, _>>()?;
+    let skins = document.skins()
+        .map(|s| animation::extract_skin(&s, &buffers))
+        .collect::<Result<Vec<_>, _>>()?;
+    let nodes: Vec<scene::Node> = document.nodes()
+        .map(|n| scene::extract_node(&n))
+        .collect();
+    let scenes: Vec<scene::Scene> = document.scenes()
+        .map(|s| scene::extract_scene(&s))
+        .collect();
+    let default_scene = document.default_scene().map(|s| s.index());
+
+    // Extract raw image blobs from the GLB buffer
+    let mut raw_images: Vec<RawImageBlob> = Vec::new();
+    for image in document.images() {
+        match image.source() {
+            gltf::image::Source::View { view, mime_type } => {
+                let buf_idx = view.buffer().index();
+                if buf_idx < buffers.len() {
+                    let begin = view.offset();
+                    let end = begin + view.length();
+                    raw_images.push(RawImageBlob {
+                        data: buffers[buf_idx].0[begin..end].to_vec(),
+                        mime_type: mime_type.to_string(),
+                    });
+                } else {
+                    raw_images.push(RawImageBlob::default());
+                }
+            }
+            gltf::image::Source::Uri { .. } => {
+                raw_images.push(RawImageBlob::default());
+            }
+        }
+    }
+
+    // Build per-texture entries with sampler wrap modes
+    let to_gl_wrap = |w: gltf::texture::WrappingMode| -> u32 {
+        match w {
+            gltf::texture::WrappingMode::ClampToEdge => WRAP_CLAMP_TO_EDGE,
+            gltf::texture::WrappingMode::MirroredRepeat => WRAP_MIRRORED_REPEAT,
+            gltf::texture::WrappingMode::Repeat => WRAP_REPEAT,
+        }
+    };
+    let mut first_tex_for_image: Vec<Option<usize>> = vec![None; raw_images.len()];
+    let mut raw_textures: Vec<RawTextureInfo> = Vec::with_capacity(document.textures().len());
+    for tex in document.textures() {
+        let img_idx = tex.source().index();
+        if img_idx >= raw_images.len() { continue; }
+        let sampler = tex.sampler();
+        let ws = to_gl_wrap(sampler.wrap_s());
+        let wt = to_gl_wrap(sampler.wrap_t());
+        let blob = if let Some(first) = first_tex_for_image[img_idx] {
+            raw_textures[first].blob.clone()
+        } else {
+            first_tex_for_image[img_idx] = Some(raw_textures.len());
+            std::mem::take(&mut raw_images[img_idx])
+        };
+        raw_textures.push(RawTextureInfo { blob, wrap_s: ws, wrap_t: wt });
+    }
+    let texture_to_image: Vec<usize> = (0..raw_textures.len()).collect();
+
+    Ok(GltfSceneRaw {
+        meshes, materials, animations, skins, scenes, nodes,
+        raw_textures, texture_to_image, default_scene,
     })
 }
 

@@ -86,6 +86,25 @@ self.onmessage = async function(e) {
 
   if (type === 'load_gltf_data') {
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
+    // Decode raw image blobs using browser-native decoders (parallel, fast)
+    if (result && result.textures && result.textures.length > 0) {
+      const t0 = performance.now();
+      const decoded = await Promise.all(result.textures.map(async (tex) => {
+        const raw = tex.raw_data;
+        if (!raw || raw.length === 0) return { width: 0, height: 0, pixels: null, wrap_s: tex.wrap_s, wrap_t: tex.wrap_t };
+        const blob = new Blob([raw], { type: tex.mime_type });
+        const bitmap = await createImageBitmap(blob);
+        const w = bitmap.width, h = bitmap.height;
+        const canvas = new OffscreenCanvas(w, h);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(bitmap, 0, 0);
+        const imageData = ctx.getImageData(0, 0, w, h);
+        bitmap.close();
+        return { width: w, height: h, data: imageData.data, wrap_s: tex.wrap_s, wrap_t: tex.wrap_t };
+      }));
+      result.textures = decoded;
+      console.log(`Browser-native image decode: ${result.textures.length} textures in ${(performance.now() - t0).toFixed(0)}ms`);
+    }
     self.postMessage({ type: 'gltf_loaded', id, result });
     return;
   }

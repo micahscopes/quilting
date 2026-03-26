@@ -1452,7 +1452,7 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
 pub fn load_gltf_data(data: &[u8]) -> JsValue {
     let t0 = js_sys::Date::now();
 
-    let scene = match quilting_gltf::load_gltf(data) {
+    let scene = match quilting_gltf::load_gltf_raw(data) {
         Ok(s) => s,
         Err(e) => {
             web_sys::console::warn_1(&format!("load_gltf_data: could not load: {e}").into());
@@ -1462,9 +1462,9 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
 
     let t_parse = js_sys::Date::now();
     web_sys::console::log_1(&format!(
-        "load_gltf_data: parsed in {:.0}ms — {} meshes, {} materials, {} animations, {} skins, {} nodes, {} images",
+        "load_gltf_data: parsed in {:.0}ms — {} meshes, {} materials, {} animations, {} skins, {} nodes, {} raw textures",
         t_parse - t0, scene.meshes.len(), scene.materials.len(),
-        scene.animations.len(), scene.skins.len(), scene.nodes.len(), scene.images.len()
+        scene.animations.len(), scene.skins.len(), scene.nodes.len(), scene.raw_textures.len()
     ).into());
 
     // Determine the active scene
@@ -1713,50 +1713,18 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         js_materials.push(&obj);
     }
 
-    // Build textures array — send image data + average color for each image
+    // Build textures array — send raw image blobs for browser-native decoding
     let js_textures = js_sys::Array::new();
-    for img in &scene.images {
+    for tex_info in &scene.raw_textures {
         let obj = js_sys::Object::new();
-        js_sys::Reflect::set(&obj, &"width".into(), &JsValue::from_f64(img.width as f64)).unwrap();
-        js_sys::Reflect::set(&obj, &"height".into(), &JsValue::from_f64(img.height as f64)).unwrap();
-
-        // Compute average color (for fallback when not sampling textures).
-        // Sample every 64th pixel with fast sRGB approximation (x² instead of x^2.2).
-        let pixel_count = (img.width * img.height) as usize;
-        if pixel_count > 0 {
-            let step = 64.max(1);
-            let mut r_sum: f64 = 0.0;
-            let mut g_sum: f64 = 0.0;
-            let mut b_sum: f64 = 0.0;
-            let mut a_sum: f64 = 0.0;
-            let mut n = 0u32;
-            for chunk in img.pixels.chunks(4 * step) {
-                let r = chunk[0] as f64 / 255.0;
-                let g = chunk[1] as f64 / 255.0;
-                let b = chunk[2] as f64 / 255.0;
-                r_sum += r * r; g_sum += g * g; b_sum += b * b;
-                a_sum += chunk[3] as f64 / 255.0;
-                n += 1;
-            }
-            if n > 0 {
-                let nf = n as f64;
-                let avg_color = js_sys::Array::new();
-                avg_color.push(&JsValue::from_f64((r_sum / nf).sqrt()));
-                avg_color.push(&JsValue::from_f64((g_sum / nf).sqrt()));
-                avg_color.push(&JsValue::from_f64((b_sum / nf).sqrt()));
-                avg_color.push(&JsValue::from_f64(a_sum / nf));
-                js_sys::Reflect::set(&obj, &"avg_color".into(), &avg_color).unwrap();
-            }
-        }
-
-        // Send pixel data as Uint8Array
-        let pixels = js_sys::Uint8Array::new_with_length(img.pixels.len() as u32);
-        pixels.copy_from(&img.pixels);
-        js_sys::Reflect::set(&obj, &"data".into(), &pixels).unwrap();
-
+        // Send raw encoded bytes (PNG/JPEG) for browser-native decoding
+        let raw = js_sys::Uint8Array::new_with_length(tex_info.blob.data.len() as u32);
+        raw.copy_from(&tex_info.blob.data);
+        js_sys::Reflect::set(&obj, &"raw_data".into(), &raw).unwrap();
+        js_sys::Reflect::set(&obj, &"mime_type".into(), &JsValue::from_str(&tex_info.blob.mime_type)).unwrap();
         // Sampler wrap modes
-        js_sys::Reflect::set(&obj, &"wrap_s".into(), &JsValue::from_f64(img.wrap_s as f64)).unwrap();
-        js_sys::Reflect::set(&obj, &"wrap_t".into(), &JsValue::from_f64(img.wrap_t as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &"wrap_s".into(), &JsValue::from_f64(tex_info.wrap_s as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &"wrap_t".into(), &JsValue::from_f64(tex_info.wrap_t as f64)).unwrap();
 
         js_textures.push(&obj);
     }
@@ -1768,38 +1736,14 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         .collect();
     js_face_materials.copy_from(&mat_indices);
 
-    // Extract first material as default (backward compat)
+    // Extract first material as default (backward compat).
+    // With raw image blobs (browser-native decode), we use base_color_factor directly.
     let (base_color, metallic, roughness) = if !scene.materials.is_empty() {
         let mat = &scene.materials[0];
-        let mut bc = [
+        let bc = [
             mat.base_color_factor[0] as f32, mat.base_color_factor[1] as f32,
             mat.base_color_factor[2] as f32, mat.base_color_factor[3] as f32,
         ];
-        // If this material has a texture, use sampled average color instead of the factor
-        if let Some(tex_ref) = &mat.base_color_texture {
-            if let Some(&img_idx) = scene.texture_to_image.get(tex_ref.index) {
-                if let Some(img) = scene.images.get(img_idx) {
-                    let step = 64.max(1);
-                    let mut r: f64 = 0.0;
-                    let mut g: f64 = 0.0;
-                    let mut b: f64 = 0.0;
-                    let mut n = 0u32;
-                    for chunk in img.pixels.chunks(4 * step) {
-                        let rv = chunk[0] as f64 / 255.0;
-                        let gv = chunk[1] as f64 / 255.0;
-                        let bv = chunk[2] as f64 / 255.0;
-                        r += rv * rv; g += gv * gv; b += bv * bv;
-                        n += 1;
-                    }
-                    if n > 0 {
-                        let nf = n as f64;
-                        bc[0] = (bc[0] as f64 * (r / nf).sqrt()) as f32;
-                        bc[1] = (bc[1] as f64 * (g / nf).sqrt()) as f32;
-                        bc[2] = (bc[2] as f64 * (b / nf).sqrt()) as f32;
-                    }
-                }
-            }
-        }
         (bc, mat.metallic_factor as f32, mat.roughness_factor as f32)
     } else {
         ([0.9, 0.75, 0.6, 1.0], 0.0, 0.4)
@@ -1855,7 +1799,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     let t_end = js_sys::Date::now();
     web_sys::console::log_1(&format!(
         "load_gltf_data: total {:.0}ms — {} verts, {} faces, {} materials, {} textures, time [{:.3}, {:.3}]",
-        t_end - t0, n_verts, n_tris, scene.materials.len(), scene.images.len(), time_min, time_max
+        t_end - t0, n_verts, n_tris, scene.materials.len(), scene.raw_textures.len(), time_min, time_max
     ).into());
 
     // Build result object using js_sys (not serde) for speed
@@ -2021,7 +1965,7 @@ fn flatten_multi_mesh_for_bake(
 /// Merge all mesh nodes in the scene into one combined Primitive,
 /// applying world transforms to positions and normals.
 fn merge_all_mesh_nodes(
-    scene: &quilting_gltf::GltfScene,
+    scene: &quilting_gltf::GltfSceneRaw,
     mesh_nodes: &[MeshNodeRef],
     face_materials: &mut Vec<Option<usize>>,
 ) -> quilting_gltf::mesh::Primitive {
