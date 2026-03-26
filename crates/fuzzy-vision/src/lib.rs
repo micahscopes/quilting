@@ -87,6 +87,61 @@ void main() {
 }
 "#;
 
+/// Min/max reduction: downsample 2x2 blocks, tracking min in R and max in G.
+/// Chain multiple passes to reduce to 1x1.
+const FS_REDUCE_MINMAX: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_source;
+uniform vec2 u_source_dims;
+
+void main() {
+    // Sample 4 texels from the source (2x2 block)
+    vec2 texel = 1.0 / u_source_dims;
+    vec2 base = v_uv - texel * 0.5;
+    vec4 a = texture(u_source, base);
+    vec4 b = texture(u_source, base + vec2(texel.x, 0.0));
+    vec4 c = texture(u_source, base + vec2(0.0, texel.y));
+    vec4 d = texture(u_source, base + texel);
+    // First pass: input has stretch in R only (G may be 0).
+    // Subsequent passes: R=min, G=max from prior reduction.
+    // Detect first pass: if all G values are 0, use R for both min and max.
+    float use_g = step(0.001, a.g + b.g + c.g + d.g);
+    float mn = min(min(a.r, b.r), min(c.r, d.r));
+    float mx = max(max(mix(a.r, a.g, use_g), mix(b.r, b.g, use_g)),
+                   max(mix(c.r, c.g, use_g), mix(d.r, d.g, use_g)));
+    o_color = vec4(mn, mx, 0.0, 1.0);
+}
+"#;
+
+/// Normalize stretch using min/max from reduction pass, then apply Gaussian band.
+const FS_WEIGHT_CONFORMAL_NORM: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_stretch;
+uniform sampler2D u_minmax;   // 1x1 texture: R=global min, G=global max
+uniform float u_focus;
+uniform float u_bandwidth;
+
+void main() {
+    float raw = texture(u_stretch, v_uv).r;
+    // Read global min/max from 1x1 reduction result
+    vec4 mm = texture(u_minmax, vec2(0.5));
+    float mn = mm.r;
+    float mx = mm.g;
+    // Normalize to [0,1] using actual range
+    float range = max(mx - mn, 0.001);
+    float normalized = (raw - mn) / range;
+    // Gaussian band selection on normalized value
+    float diff = normalized - u_focus;
+    float bw = max(u_bandwidth, 0.01);
+    float w = exp(-(diff * diff) / (2.0 * bw * bw));
+    o_color = vec4(w, 0.0, 0.0, 1.0);
+}
+"#;
+
 /// Focused conformal weight: read raw stretch texture, apply Gaussian band selection.
 /// Focus and bandwidth are uniforms controlling which stretch band gets blurred.
 const FS_WEIGHT_CONFORMAL: &str = r#"#version 300 es
@@ -306,7 +361,14 @@ pub struct JfaPipeline {
     prog_blur_v: glow::Program,
     prog_weight_radial: glow::Program,
     prog_weight_conformal: glow::Program,
+    prog_reduce_minmax: glow::Program,
+    prog_weight_conformal_norm: glow::Program,
     vao: glow::VertexArray,
+    // Reduction chain for min/max (ping-pong, shrinks to 1x1)
+    reduce_fbo_a: glow::Framebuffer,
+    reduce_tex_a: glow::Texture,
+    reduce_fbo_b: glow::Framebuffer,
+    reduce_tex_b: glow::Texture,
     // Ping-pong FBOs + textures for JFA steps
     ping_fbo: glow::Framebuffer,
     ping_tex: glow::Texture,
@@ -393,7 +455,11 @@ impl JfaPipeline {
         let prog_blur_v = link_program(gl, VS_FULLSCREEN, FS_BLUR_V)?;
         let prog_weight_radial = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?;
         let prog_weight_conformal = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?;
+        let prog_reduce_minmax = link_program(gl, VS_FULLSCREEN, FS_REDUCE_MINMAX)?;
+        let prog_weight_conformal_norm = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL_NORM)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
+        let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
+        let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
 
         let fmt = match config.precision {
             Precision::Float32 => glow::RGBA32F,
@@ -409,6 +475,8 @@ impl JfaPipeline {
         Ok(JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
             prog_weight_radial, prog_weight_conformal,
+            prog_reduce_minmax, prog_weight_conformal_norm,
+            reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, blur_fbo, blur_tex,
             jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
@@ -588,7 +656,7 @@ impl JfaPipeline {
     }
 
     /// Generate a focused conformal weight from a raw stretch texture.
-    /// Applies Gaussian band selection around the configured focus point.
+    /// First reduces to find global min/max, then normalizes and applies Gaussian band.
     pub fn generate_conformal_weight(
         &self,
         gl: &glow::Context,
@@ -598,21 +666,87 @@ impl JfaPipeline {
         height: i32,
     ) {
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
-            gl.viewport(0, 0, width, height);
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
-            gl.use_program(Some(self.prog_weight_conformal));
+
+            // --- Step 1: Initialize reduction. First pass reads stretch texture,
+            // packs R=value (will become min), G=value (will become max). ---
+            // We need the first reduction pass to read the raw stretch and set R=G=stretch.
+            // Use the stretch tex directly as input to the minmax reducer.
+            // But first pass needs R=stretch, G=stretch. The stretch tex has R=stretch already.
+            // The reducer reads .r for min and .g for max. On first pass, .g is 0 — wrong.
+            // Fix: use the non-normalized conformal shader for first pass to set R=G=stretch,
+            // or init a texture with R=G=stretch.
+            // Simplest: first reduction reads .r for both min and max (special case).
+
+            // Actually, let's just do the reduction with .r channel only, computing
+            // min/max from the same channel. Modify the approach: reduction shader
+            // computes min(.r) and max(.r) from 4 samples.
+
+            let mut src_tex = stretch_tex;
+            let mut src_w = width;
+            let mut src_h = height;
+            let mut write_to_a = true;
+
+            gl.use_program(Some(self.prog_reduce_minmax));
+
+            // Reduce until 1x1
+            loop {
+                let dst_w = (src_w / 2).max(1);
+                let dst_h = (src_h / 2).max(1);
+
+                let (dst_fbo, dst_tex) = if write_to_a {
+                    (self.reduce_fbo_a, self.reduce_tex_a)
+                } else {
+                    (self.reduce_fbo_b, self.reduce_tex_b)
+                };
+
+                // Resize destination
+                gl.bind_texture(glow::TEXTURE_2D, Some(dst_tex));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA16F as i32, dst_w, dst_h, 0,
+                    glow::RGBA, glow::HALF_FLOAT, glow::PixelUnpackData::Slice(None));
+
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
+                gl.viewport(0, 0, dst_w, dst_h);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
+                if let Some(loc) = gl.get_uniform_location(self.prog_reduce_minmax, "u_source") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_reduce_minmax, "u_source_dims") {
+                    gl.uniform_2_f32(Some(&loc), src_w as f32, src_h as f32);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                src_tex = dst_tex;
+                src_w = dst_w;
+                src_h = dst_h;
+                write_to_a = !write_to_a;
+
+                if src_w <= 1 && src_h <= 1 { break; }
+            }
+
+            // src_tex now has the 1x1 min/max result
+
+            // --- Step 2: Normalized conformal weight with Gaussian band ---
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+            gl.viewport(0, 0, width, height);
+            gl.use_program(Some(self.prog_weight_conformal_norm));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(stretch_tex));
-            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_stretch") {
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(src_tex)); // 1x1 min/max
+            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_stretch") {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
-            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_focus") {
+            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_minmax") {
+                gl.uniform_1_i32(Some(&loc), 1);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_focus") {
                 gl.uniform_1_f32(Some(&loc), self.config.focus);
             }
-            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_bandwidth") {
+            if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_bandwidth") {
                 gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -691,11 +825,15 @@ impl JfaPipeline {
             gl.delete_program(self.prog_blur_v);
             gl.delete_program(self.prog_weight_radial);
             gl.delete_program(self.prog_weight_conformal);
+            gl.delete_program(self.prog_reduce_minmax);
+            gl.delete_program(self.prog_weight_conformal_norm);
             gl.delete_vertex_array(self.vao);
-            for tex in [self.ping_tex, self.pong_tex, self.firmness_tex, self.blur_tex] {
+            for tex in [self.ping_tex, self.pong_tex, self.firmness_tex, self.blur_tex,
+                        self.reduce_tex_a, self.reduce_tex_b] {
                 gl.delete_texture(tex);
             }
-            for fbo in [self.ping_fbo, self.pong_fbo, self.firmness_fbo, self.blur_fbo] {
+            for fbo in [self.ping_fbo, self.pong_fbo, self.firmness_fbo, self.blur_fbo,
+                        self.reduce_fbo_a, self.reduce_fbo_b] {
                 gl.delete_framebuffer(fbo);
             }
         }
