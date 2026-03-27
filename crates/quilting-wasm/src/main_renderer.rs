@@ -715,10 +715,20 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             state.fuzzy_weight_size = (vw, vh);
                         }
 
-                        // Bind MRT FBO and clear both attachments
+                        // Bind MRT FBO and clear attachments separately:
+                        // attachment 0 (color) = scene background
+                        // attachment 1 (weight) = 0.5 (neutral stretch, won't pollute min/max)
                         gl.bind_framebuffer(glow::FRAMEBUFFER, state.pbr_fbo);
+                        // Clear color attachment only
+                        gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::NONE]);
                         gl.clear_color(0.2, 0.2, 0.3, 1.0);
                         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+                        // Clear weight attachment to neutral
+                        gl.draw_buffers(&[glow::NONE, glow::COLOR_ATTACHMENT1]);
+                        gl.clear_color(0.5, 0.0, 0.0, 1.0);
+                        gl.clear(glow::COLOR_BUFFER_BIT);
+                        // Re-enable both for rendering
+                        gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
                     }
                 }
 
