@@ -311,7 +311,13 @@ pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
     let mut first_tex_for_image: Vec<Option<usize>> = vec![None; raw_images.len()];
     let mut raw_textures: Vec<RawTextureInfo> = Vec::with_capacity(document.textures().len());
     for tex in document.textures() {
-        let img_idx = tex.source().index();
+        // Some textures use extensions (e.g. KHR_texture_basisu) with no standard source.
+        // tex.source() panics on these — catch and skip.
+        let source = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tex.source()));
+        let img_idx = match source {
+            Ok(img) => img.index(),
+            Err(_) => { raw_textures.push(RawTextureInfo { blob: RawImageBlob::default(), wrap_s: WRAP_REPEAT, wrap_t: WRAP_REPEAT }); continue; }
+        };
         if img_idx >= raw_images.len() { continue; }
         let sampler = tex.sampler();
         let ws = to_gl_wrap(sampler.wrap_s());
