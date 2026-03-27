@@ -173,11 +173,14 @@ impl LodCompute {
     }
 
     /// Upload face indices (3 floats per face — vertex indices as floats).
+    /// Clamps to max_faces to prevent GPU buffer overflow.
     pub fn upload_face_indices(&self, gl: &glow::Context, indices: &[f32]) {
+        let max_floats = self.max_faces * 3;
+        let clamped = if indices.len() > max_floats { &indices[..max_floats] } else { indices };
         unsafe {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.input_buf));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER,
-                bytemuck_cast_slice(indices), glow::STATIC_DRAW);
+                bytemuck_cast_slice(clamped), glow::STATIC_DRAW);
         }
     }
 
@@ -435,9 +438,9 @@ impl LodCompute {
         n
     }
 
-    /// Read back LOD results after compute.
+    /// Read back LOD results after compute. Clamps to max_faces.
     pub fn read_back(&self, gl: &glow::Context, num_faces: usize) -> Vec<f32> {
-        let size = num_faces * FLOATS_PER_FACE_OUTPUT;
+        let size = num_faces.min(self.max_faces) * FLOATS_PER_FACE_OUTPUT;
         let mut result = vec![0.0f32; size];
         unsafe {
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf));
