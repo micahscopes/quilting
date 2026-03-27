@@ -158,6 +158,17 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'sample_stretch_range') {
+    const { mobius, instances, numFaces } = data;
+    const range = wasm.sample_stretch_range(
+      new Float32Array(mobius),
+      new Float32Array(instances),
+      numFaces,
+    );
+    self.postMessage({ type: 'stretch_range', id, min: range[0], max: range[1] });
+    return;
+  }
+
   if (type === 'compute_animated_lods') {
     const { t, mobius, density, minPx, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub } = data;
     // Set tess params before compute

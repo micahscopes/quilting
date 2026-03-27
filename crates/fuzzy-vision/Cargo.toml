@@ -6,3 +6,4 @@ description = "JFA-based variable per-pixel blur for WebGL2/OpenGL — depth of 
 
 [dependencies]
 glow = "0.16"
+bytemuck = "1"

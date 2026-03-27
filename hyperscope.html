@@ -453,12 +453,37 @@ function computeMobius(type, cx, cy, cz, r) {
   return { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
 }
 
+let currentMobius = null;
+let stretchRange = { min: 0.5, max: 0.5 };
+let stretchSamplePending = false;
+
 function updateMobius() {
   const p = getMobiusParams();
   const m = computeMobius(p.type, p.x, p.y, p.z, p.r);
   const mob = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
+  currentMobius = mob;
   mr_setMobius(mob);
   debouncedLodRecompute();
+  sampleStretchAsync();
+}
+
+// Async CPU-side stretch sampling on worker — doesn't block rendering
+function sampleStretchAsync() {
+  if (stretchSamplePending || !currentMobius || !meshInfo) return;
+  const instances = meshInfo.instances;
+  const numFaces = meshInfo.num_faces;
+  if (!instances || !numFaces) return;
+  stretchSamplePending = true;
+  workerCall('sample_stretch_range', {
+    mobius: Array.from(currentMobius),
+    instances: Array.from(instances),
+    numFaces,
+  }).then(resp => {
+    stretchSamplePending = false;
+    if (resp.min != null && resp.max != null) {
+      stretchRange = { min: resp.min, max: resp.max };
+    }
+  }).catch(() => { stretchSamplePending = false; });
 }
 
 setupBtnGroup('xform-btns', v => { currentXform = v; updateMobius(); syncURL(); });
@@ -547,7 +572,7 @@ function updateFuzzy() {
   $('fuzzy-focus-v').textContent = ((focus - 0.5) * 2).toFixed(2);
   $('fuzzy-bw-v').textContent = bw.toFixed(2);
   const normalize = $('fuzzy-norm-toggle').classList.contains('on');
-  mr_setFuzzy(enabled, radius, strength, fuzzyMode, focus, bw, normalize);
+  mr_setFuzzy(enabled, radius, strength, fuzzyMode, focus, bw, normalize, stretchRange.min, stretchRange.max);
   syncURL();
 }
 $('fuzzy-toggle').addEventListener('click', () => {
@@ -1228,6 +1253,8 @@ async function finishModelUpload(info, filename) {
 
   mr_setInstanceData(instances, numFaces);
   mr_buildBatches(faceLods);
+  // Cache for async stretch sampling
+  if (meshInfo) { meshInfo.instances = instances; meshInfo.num_faces = numFaces; }
 
   zoom = 3.0;
   rotX = 0.15; rotY = 0;

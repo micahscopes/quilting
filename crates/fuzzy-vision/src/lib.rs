@@ -48,6 +48,9 @@ pub struct JfaConfig {
     pub bandwidth: f32,
     /// Normalize stretch to actual min/max each frame (true) or use absolute sigmoid values (false)
     pub normalize: bool,
+    /// CPU-sampled stretch range (from worker). If set, used instead of GPU reduction.
+    pub cpu_stretch_min: f32,
+    pub cpu_stretch_max: f32,
 }
 
 impl Default for JfaConfig {
@@ -60,6 +63,8 @@ impl Default for JfaConfig {
             focus: 0.5,
             bandwidth: 0.3,
             normalize: true,
+            cpu_stretch_min: 0.5,
+            cpu_stretch_max: 0.5,
         }
     }
 }
@@ -676,8 +681,39 @@ impl JfaPipeline {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
 
-            if self.config.normalize {
-                // --- Normalized mode: reduce to find min/max, then normalize ---
+            let has_cpu_range = self.config.cpu_stretch_min < self.config.cpu_stretch_max - 0.001;
+
+            if self.config.normalize && has_cpu_range {
+                // --- Normalized mode with CPU-sampled range (stable, no GPU reduction) ---
+                // Write min/max into a 1x1 texture for the normalization shader
+                let minmax_tex = self.reduce_tex_a;
+                gl.bind_texture(glow::TEXTURE_2D, Some(minmax_tex));
+                let minmax_data = [self.config.cpu_stretch_min, self.config.cpu_stretch_max, 0.0_f32, 0.0];
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA16F as i32, 1, 1, 0,
+                    glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&minmax_data))));
+
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+                gl.viewport(0, 0, width, height);
+                gl.use_program(Some(self.prog_weight_conformal_norm));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(stretch_tex));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(minmax_tex));
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_stretch") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_minmax") {
+                    gl.uniform_1_i32(Some(&loc), 1);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_focus") {
+                    gl.uniform_1_f32(Some(&loc), self.config.focus);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_bandwidth") {
+                    gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            } else if self.config.normalize {
+                // --- Normalized mode: GPU reduce to find min/max ---
                 let mut src_tex = stretch_tex;
                 let mut src_w = width;
                 let mut src_h = height;

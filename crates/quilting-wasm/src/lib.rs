@@ -297,6 +297,53 @@ pub fn upload_model_to_compute() -> bool {
 /// 7. Re-canonicalizes to (canonical_lod, perm_index, parity) per face
 ///
 /// Returns Float32Array with 5 floats per face: [canon_a, canon_b, canon_c, perm_index, parity]
+/// Sample Möbius stretch at the midpoint of each face (from instance data).
+/// Returns [min_stretch, max_stretch] as sigmoid-mapped values matching the vertex shader.
+/// Runs on CPU, async-safe — call from a worker without blocking rendering.
+#[wasm_bindgen]
+pub fn sample_stretch_range(mobius: &[f32], instances: &[f32], num_faces: u32) -> Vec<f32> {
+    if mobius.len() < 16 { return vec![0.5, 0.5]; }
+    let c = [mobius[8], mobius[9], mobius[10], mobius[11]];
+    let d = [mobius[12], mobius[13], mobius[14], mobius[15]];
+    let c_len2 = c[0]*c[0] + c[1]*c[1] + c[2]*c[2] + c[3]*c[3];
+    if c_len2 < 0.001 { return vec![0.5, 0.5]; } // identity Möbius, no stretch
+
+    let stride = 40usize; // INSTANCE_STRIDE floats per face
+    let nf = num_faces as usize;
+    let mut min_s = f32::INFINITY;
+    let mut max_s = f32::NEG_INFINITY;
+
+    for fi in 0..nf {
+        let base = fi * stride;
+        if base + 12 > instances.len() { break; }
+        // Instance data layout: [p0.x, p0.y, p0.z, w0, p1.x, p1.y, p1.z, w1, p2.x, p2.y, p2.z, w2, ...]
+        // Actually: positions are at offsets 0-2 (p0), 4-6 (p1), 8-10 (p2) within the instance
+        let p0 = [instances[base+0], instances[base+1], instances[base+2]];
+        let p1 = [instances[base+4], instances[base+5], instances[base+6]];
+        let p2 = [instances[base+8], instances[base+9], instances[base+10]];
+        // Centroid
+        let cx = (p0[0] + p1[0] + p2[0]) / 3.0;
+        let cy = (p0[1] + p1[1] + p2[1]) / 3.0;
+        let cz = (p0[2] + p1[2] + p2[2]) / 3.0;
+        // bot = c*p + d (quaternion multiply, p as pure imaginary (0, cx, cy, cz))
+        // For pure imaginary p: c*p = (c0*0 - c1*cx - c2*cy - c3*cz, c0*cx + c2*cz - c3*cy, c0*cy + c3*cx - c1*cz, c0*cz + c1*cy - c2*cx)
+        let bw = -c[1]*cx - c[2]*cy - c[3]*cz + d[0];
+        let bx = c[0]*cx + c[2]*cz - c[3]*cy + d[1];
+        let by = c[0]*cy + c[3]*cx - c[1]*cz + d[2];
+        let bz = c[0]*cz + c[1]*cy - c[2]*cx + d[3];
+        let bot_len2 = bw*bw + bx*bx + by*by + bz*bz;
+        let stretch = 1.0 / bot_len2.max(0.001);
+        // Sigmoid mapping matching vertex shader
+        let log_s = stretch.log2();
+        let sig = 1.0 / (1.0 + (-log_s * 0.25_f32).exp());
+        min_s = min_s.min(sig);
+        max_s = max_s.max(sig);
+    }
+
+    if min_s.is_infinite() { return vec![0.5, 0.5]; }
+    vec![min_s, max_s]
+}
+
 /// Uses mesh_radius computed at upload time (not hardcoded).
 #[wasm_bindgen]
 pub fn compute_animated_lods(
