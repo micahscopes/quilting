@@ -251,6 +251,8 @@ function phase(name, depNames, fn) {
 }
 // Check if a phase completed
 function phaseReady(name) { return phases[name]?.done?.peek() ?? false; }
+// Dedicated readiness signal — defined early so effects can subscribe via .get()
+const wasmOk = signal(false, 'wasmOk');
 // Bind a signal to a DOM slider (bidirectional)
 function bindSlider(id, sig, displayFn) {
   const el = $(id);
@@ -485,7 +487,7 @@ canvas.addEventListener('touchmove', e => {
 // --- Render mode (signal) ---
 const renderMode = signal('pbr', 'mode');
 bindBtnGroup('render-btns', renderMode);
-effect(() => { const v = renderMode.get(); if (phases.wasm?.done?.get()) mr_setRenderMode(v); syncURL(); });
+effect(() => { const v = renderMode.get(); if (wasmOk.get()) mr_setRenderMode(v); syncURL(); });
 
 // --- Möbius transform (signals) ---
 const mob = {
@@ -532,7 +534,7 @@ effect(() => {
   const m = computeMobius(type, mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10, mob.mr.get()/10);
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
-  if (!phases.wasm?.done?.get()) return;
+  if (!wasmOk.get()) return;
   mr_setMobius(flat);
   debouncedLodRecompute();
   sampleStretchAsync();
@@ -624,7 +626,7 @@ effect(() => {
   const mode = parseInt(fz.mode.get());
   const focus = fz.focus.get() / 100.0;
   const bw = fz.bandwidth.get() / 100.0;
-  if (phases.wasm?.done?.get()) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
+  if (wasmOk.get()) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
     mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get());
   syncURL();
 });
@@ -650,7 +652,7 @@ function getTessParams() {
 
 effect(() => {
   lod.res.get(); lod.density.get(); lod.screenAtten.get(); lod.minPx.get();
-  if (phases.wasm?.done?.get()) debouncedLodRecompute();
+  if (wasmOk.get()) debouncedLodRecompute();
   syncURL();
 });
 
@@ -664,7 +666,7 @@ $('matcap-sel').addEventListener('change', () => matcap.set($('matcap-sel').valu
 
 effect(() => {
   const v = envMap.get();
-  if (!phases.wasm?.done?.get()) return;
+  if (!wasmOk.get()) return;
   if (v === 'procedural') {
     const pf = generateProceduralEnvFaces(64);
     const ir = generateProceduralEnvFaces(16);
@@ -1349,10 +1351,13 @@ async function finishModelUpload(info, filename) {
 }
 
 // --- Init ---
-// Read URL params and apply to all controls before anything else
+// Read URL params — applied in wasm phase after mr_init
 const initParams = readParams();
-applyParams(initParams);
 currentGlb = initParams.glb;
+// Set camera early (not WASM-dependent)
+zoom = parseFloat(initParams.zoom) || 3;
+rotX = parseFloat(initParams.rx) || 0.3;
+rotY = parseFloat(initParams.ry) || 0.5;
 
 // ============================================================
 // Lifecycle phases — explicit async dependency ordering.
@@ -1364,6 +1369,7 @@ phase('wasm', [], async () => {
   await init();
   $('stats').textContent = 'Initializing renderer...';
   if (!mr_init('cv')) throw 'renderer init failed';
+  wasmOk.set(true); // Effects now re-fire with WASM ready
   applyParams(initParams);
   initEnvMaps();
 });
