@@ -334,29 +334,24 @@ function syncURL() {
     const p = new URLSearchParams();
     const set = (k, v, def) => { if (v !== def) p.set(k, v); };
     set('glb', currentGlb, PARAM_DEFAULTS.glb);
-    // All signal-driven params — use peek() to avoid tracking
-    const ss = (k, sig, def, fmt) => { if (typeof sig !== 'undefined') set(k, fmt ? fmt(sig.peek()) : String(sig.peek()), def); };
-    ss('mode', renderMode, PARAM_DEFAULTS.mode);
-    ss('xform', mob?.xform, PARAM_DEFAULTS.xform);
-    ss('mx', mob?.mx, PARAM_DEFAULTS.mx);
-    ss('my', mob?.my, PARAM_DEFAULTS.my);
-    ss('mz', mob?.mz, PARAM_DEFAULTS.mz);
-    ss('mr', mob?.mr, PARAM_DEFAULTS.mr);
-    ss('env', envMap, PARAM_DEFAULTS.env);
-    ss('matcap', matcap, PARAM_DEFAULTS.matcap);
-    ss('res', lod?.res, PARAM_DEFAULTS.res);
-    ss('density', lod?.density, PARAM_DEFAULTS.density);
-    if (typeof lod !== 'undefined') set('atten', lod.screenAtten.peek() ? '1' : '0', PARAM_DEFAULTS.atten);
-    ss('minpx', lod?.minPx, PARAM_DEFAULTS.minpx);
-    ss('atlas', lod?.atlas, PARAM_DEFAULTS.atlas);
-    if (typeof animating_sig !== 'undefined') set('animate', animating_sig.peek() ? '1' : '0', PARAM_DEFAULTS.animate);
-    set('anim', $('anim-sel').value, PARAM_DEFAULTS.anim);
-    // Camera
-    set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
-    set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
-    set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
-    // Fuzzy Vision
-    if (typeof fz !== 'undefined') {
+    // Signal-driven params — wrapped in try/catch to handle TDZ during early syncURL calls
+    try {
+      const ss = (k, sig, def) => set(k, String(sig.peek()), def);
+      ss('mode', renderMode, PARAM_DEFAULTS.mode);
+      ss('xform', mob.xform, PARAM_DEFAULTS.xform);
+      ss('mx', mob.mx, PARAM_DEFAULTS.mx);
+      ss('my', mob.my, PARAM_DEFAULTS.my);
+      ss('mz', mob.mz, PARAM_DEFAULTS.mz);
+      ss('mr', mob.mr, PARAM_DEFAULTS.mr);
+      ss('env', envMap, PARAM_DEFAULTS.env);
+      ss('matcap', matcap, PARAM_DEFAULTS.matcap);
+      ss('res', lod.res, PARAM_DEFAULTS.res);
+      ss('density', lod.density, PARAM_DEFAULTS.density);
+      set('atten', lod.screenAtten.peek() ? '1' : '0', PARAM_DEFAULTS.atten);
+      ss('minpx', lod.minPx, PARAM_DEFAULTS.minpx);
+      ss('atlas', lod.atlas, PARAM_DEFAULTS.atlas);
+      set('animate', animating_sig.peek() ? '1' : '0', PARAM_DEFAULTS.animate);
+      set('anim', $('anim-sel').value, PARAM_DEFAULTS.anim);
       set('fuzzy', fz.enabled.peek() ? '1' : '0', PARAM_DEFAULTS.fuzzy);
       ss('fmode', fz.mode, PARAM_DEFAULTS.fmode);
       ss('fradius', fz.radius, PARAM_DEFAULTS.fradius);
@@ -365,7 +360,11 @@ function syncURL() {
       ss('fbw', fz.bandwidth, PARAM_DEFAULTS.fbw);
       set('fnorm', fz.normalize.peek() ? '1' : '0', PARAM_DEFAULTS.fnorm);
       ss('fqual', fz.quality, PARAM_DEFAULTS.fqual);
-    }
+    } catch { /* signals not yet initialized */ }
+    // Camera
+    set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
+    set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
+    set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -374,42 +373,9 @@ function syncURL() {
 }
 
 // Apply URL params to controls on load
-function applyParams(params) {
-  // All signal-driven controls: just set signals, effects handle the rest
-  if (typeof renderMode !== 'undefined') renderMode.set(params.mode || 'pbr');
-  if (typeof mob !== 'undefined') {
-    mob.xform.set(params.xform || 'identity');
-    mob.mx.set(parseInt(params.mx) || 5);
-    mob.my.set(parseInt(params.my) || 0);
-    mob.mz.set(parseInt(params.mz) || 0);
-    mob.mr.set(parseInt(params.mr) || 20);
-  }
-  if (typeof envMap !== 'undefined') envMap.set(params.env || 'rosendal_plains_1_1k');
-  if (typeof matcap !== 'undefined') matcap.set(params.matcap || 'citric-acid');
-  if (typeof lod !== 'undefined') {
-    lod.res.set(parseInt(params.res) || 0);
-    lod.density.set(parseInt(params.density) || 100);
-    lod.screenAtten.set(params.atten !== '0');
-    lod.minPx.set(parseInt(params.minpx) || 2);
-    lod.atlas.set(parseInt(params.atlas) || 9);
-  }
-  if (typeof animating_sig !== 'undefined') animating_sig.set(params.animate !== '0');
-  // Camera (not signal-driven yet)
-  zoom = parseFloat(params.zoom) || 3;
-  rotX = parseFloat(params.rx) || 0.3;
-  rotY = parseFloat(params.ry) || 0.5;
-  // Fuzzy Vision
-  if (typeof fz !== 'undefined') {
-    fz.enabled.set(params.fuzzy === '1');
-    fz.mode.set(params.fmode || '0');
-    fz.radius.set(parseFloat(params.fradius) || 48);
-    fz.strength.set(parseFloat(params.fstr) || 10);
-    fz.focus.set(parseFloat(params.ffocus) || 50);
-    fz.bandwidth.set(parseFloat(params.fbw) || 15);
-    fz.normalize.set(params.fnorm === '1');
-    fz.quality.set(parseInt(params.fqual) || 2);
-  }
-}
+// applyParams is defined as a late-binding function — actual implementation
+// set after all signals are declared (avoids TDZ issues with const)
+let applyParams = () => {};
 
 let currentGlb = PARAM_DEFAULTS.glb;
 
@@ -709,6 +675,35 @@ effect(() => {
   syncURL();
 });
 effect(() => { matcap.get(); syncURL(); });
+
+// --- applyParams: set all signals from URL params (defined after all signals exist) ---
+applyParams = function(params) {
+  renderMode.set(params.mode || 'pbr');
+  mob.xform.set(params.xform || 'identity');
+  mob.mx.set(parseInt(params.mx) || 5);
+  mob.my.set(parseInt(params.my) || 0);
+  mob.mz.set(parseInt(params.mz) || 0);
+  mob.mr.set(parseInt(params.mr) || 20);
+  envMap.set(params.env || 'rosendal_plains_1_1k');
+  matcap.set(params.matcap || 'citric-acid');
+  lod.res.set(parseInt(params.res) || 0);
+  lod.density.set(parseInt(params.density) || 100);
+  lod.screenAtten.set(params.atten !== '0');
+  lod.minPx.set(parseInt(params.minpx) || 2);
+  lod.atlas.set(parseInt(params.atlas) || 9);
+  animating_sig.set(params.animate !== '0');
+  zoom = parseFloat(params.zoom) || 3;
+  rotX = parseFloat(params.rx) || 0.3;
+  rotY = parseFloat(params.ry) || 0.5;
+  fz.enabled.set(params.fuzzy === '1');
+  fz.mode.set(params.fmode || '0');
+  fz.radius.set(parseFloat(params.fradius) || 48);
+  fz.strength.set(parseFloat(params.fstr) || 10);
+  fz.focus.set(parseFloat(params.ffocus) || 50);
+  fz.bandwidth.set(parseFloat(params.fbw) || 15);
+  fz.normalize.set(params.fnorm === '1');
+  fz.quality.set(parseInt(params.fqual) || 2);
+};
 
 // --- IndexedDB for persisting dropped GLB files ---
 const IDB_NAME = 'hyperscope', IDB_STORE = 'glb';
@@ -1106,7 +1101,9 @@ async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
   try {
-    const m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10);
+    let m;
+    try { m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10); }
+    catch { m = computeMobius('identity', 0.5, 0, 0, 2); }
     const mob = [...m.a, ...m.b, ...m.c, ...m.d];
     const w = canvas.width, h = canvas.height;
     const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
