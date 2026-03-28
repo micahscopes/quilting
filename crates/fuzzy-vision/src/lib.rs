@@ -665,37 +665,6 @@ impl JfaPipeline {
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-            // --- Stage 3.5: Kawase smooth on weight mask (removes JFA boundary artifacts) ---
-            // Ping-pong firmness through blur_tex_b for 2 Kawase passes at increasing offsets
-            {
-                let kawase_offsets = [0.75_f32]; // single gentle pass — hybrid handles the boundary
-                let mut src = self.firmness_tex;
-                for &offset in &kawase_offsets {
-                    let dst_fbo = self.blur_fbo_b;
-                    let dst_tex = self.blur_tex_b;
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
-                    gl.viewport(0, 0, fw, fh);
-                    gl.use_program(Some(self.prog_weight_kawase));
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(src));
-                    if let Some(loc) = gl.get_uniform_location(self.prog_weight_kawase, "u_weight") {
-                        gl.uniform_1_i32(Some(&loc), 0);
-                    }
-                    if let Some(loc) = gl.get_uniform_location(self.prog_weight_kawase, "u_offset") {
-                        gl.uniform_1_f32(Some(&loc), offset);
-                    }
-                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-                    // Copy result back to firmness_tex for next pass / scene blur
-                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(dst_fbo));
-                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.firmness_fbo));
-                    gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST);
-                    src = self.firmness_tex;
-                }
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
-
             // --- Stage 4: Multi-pass weighted Gaussian blur (separable H+V) ---
             // Each pass reads from the previous output, doubling effective kernel width.
             // Pass 1: scene → blur_tex (H) → blur_tex_b (V)
