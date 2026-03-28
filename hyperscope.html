@@ -177,6 +177,70 @@ import init, {
 const $ = id => document.getElementById(id);
 
 // ============================================================
+// Minimal signal system — declarative reactive state for UI controls.
+// signal(value) → {get(), set(v)} — auto-tracks dependencies in effects.
+// computed(fn) → {get()} — memoized derived value.
+// effect(fn) → runs fn whenever dependencies change.
+// ============================================================
+let _activeEffect = null;
+function signal(value, name) {
+  const subs = new Set();
+  const s = {
+    name,
+    get() { if (_activeEffect) subs.add(_activeEffect); return value; },
+    set(v) { if (v !== value) { value = v; for (const fn of subs) fn(); } },
+    peek() { return value; }, // read without tracking
+  };
+  return s;
+}
+function computed(fn) {
+  let cached, dirty = true;
+  const c = signal(undefined);
+  effect(() => { c.set(fn()); });
+  return { get: () => c.get(), peek: () => c.peek() };
+}
+function effect(fn) {
+  const run = () => { const prev = _activeEffect; _activeEffect = run; try { fn(); } finally { _activeEffect = prev; } };
+  run();
+}
+// Bind a signal to a DOM slider (bidirectional)
+function bindSlider(id, sig, displayFn) {
+  const el = $(id);
+  const label = $(id + '-v');
+  el.value = sig.peek();
+  if (label && displayFn) label.textContent = displayFn(sig.peek());
+  el.addEventListener('input', () => {
+    sig.set(parseFloat(el.value));
+    if (label && displayFn) label.textContent = displayFn(sig.peek());
+  });
+  // Keep slider in sync if signal is set programmatically
+  effect(() => {
+    const v = sig.get();
+    if (parseFloat(el.value) !== v) el.value = v;
+    if (label && displayFn) label.textContent = displayFn(v);
+  });
+}
+// Bind a signal to a toggle (click toggles boolean)
+function bindToggle(id, sig) {
+  const el = $(id);
+  el.classList.toggle('on', sig.peek());
+  el.addEventListener('click', () => sig.set(!sig.peek()));
+  effect(() => el.classList.toggle('on', sig.get()));
+}
+// Bind a button group to a signal
+function bindBtnGroup(id, sig) {
+  const btns = document.querySelectorAll(`#${id} button`);
+  btns.forEach(b => {
+    b.classList.toggle('a', b.dataset.v === String(sig.peek()));
+    b.addEventListener('click', () => sig.set(b.dataset.v));
+  });
+  effect(() => {
+    const v = String(sig.get());
+    btns.forEach(b => b.classList.toggle('a', b.dataset.v === v));
+  });
+}
+
+// ============================================================
 // URL Router — bidirectional sync between controls and URL params.
 // Reads on load, writes on change (debounced replaceState).
 // ============================================================
@@ -246,15 +310,17 @@ function syncURL() {
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
     set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
     set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
-    // Fuzzy Vision
-    set('fuzzy', $('fuzzy-toggle').classList.contains('on') ? '1' : '0', PARAM_DEFAULTS.fuzzy);
-    const fmBtn = document.querySelector('#fuzzy-mode-btns button.a');
-    set('fmode', fmBtn ? fmBtn.dataset.v : '0', PARAM_DEFAULTS.fmode);
-    set('fradius', $('fuzzy-radius').value, PARAM_DEFAULTS.fradius);
-    set('fstr', $('fuzzy-strength').value, PARAM_DEFAULTS.fstr);
-    set('ffocus', $('fuzzy-focus').value, PARAM_DEFAULTS.ffocus);
-    set('fbw', $('fuzzy-bw').value, PARAM_DEFAULTS.fbw);
-    set('fnorm', $('fuzzy-norm-toggle').classList.contains('on') ? '1' : '0', PARAM_DEFAULTS.fnorm);
+    // Fuzzy Vision — read from signals
+    if (typeof fz !== 'undefined') {
+      set('fuzzy', fz.enabled.peek() ? '1' : '0', PARAM_DEFAULTS.fuzzy);
+      set('fmode', String(fz.mode.peek()), PARAM_DEFAULTS.fmode);
+      set('fradius', String(fz.radius.peek()), PARAM_DEFAULTS.fradius);
+      set('fstr', String(fz.strength.peek()), PARAM_DEFAULTS.fstr);
+      set('ffocus', String(fz.focus.peek()), PARAM_DEFAULTS.ffocus);
+      set('fbw', String(fz.bandwidth.peek()), PARAM_DEFAULTS.fbw);
+      set('fnorm', fz.normalize.peek() ? '1' : '0', PARAM_DEFAULTS.fnorm);
+      set('fqual', String(fz.quality.peek()), PARAM_DEFAULTS.fqual);
+    }
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -300,21 +366,18 @@ function applyParams(params) {
   zoom = parseFloat(params.zoom) || 3;
   rotX = parseFloat(params.rx) || 0.3;
   rotY = parseFloat(params.ry) || 0.5;
-  // Fuzzy Vision
-  if (params.fuzzy === '1') $('fuzzy-toggle').classList.add('on');
-  else $('fuzzy-toggle').classList.remove('on');
-  const fmBtn = document.querySelector(`#fuzzy-mode-btns button[data-v="${params.fmode}"]`);
-  if (fmBtn) {
-    document.querySelectorAll('#fuzzy-mode-btns button').forEach(b => b.classList.remove('a'));
-    fmBtn.classList.add('a');
+  // Fuzzy Vision — set signals (effects auto-update DOM + WASM)
+  // Signals are defined later but applyParams runs after they exist
+  if (typeof fz !== 'undefined') {
+    fz.enabled.set(params.fuzzy === '1');
+    fz.mode.set(params.fmode || '0');
+    fz.radius.set(parseFloat(params.fradius) || 48);
+    fz.strength.set(parseFloat(params.fstr) || 10);
+    fz.focus.set(parseFloat(params.ffocus) || 50);
+    fz.bandwidth.set(parseFloat(params.fbw) || 15);
+    fz.normalize.set(params.fnorm === '1');
+    fz.quality.set(parseInt(params.fqual) || 2);
   }
-  fuzzyMode = parseInt(params.fmode) || 0;
-  $('fuzzy-radius').value = params.fradius; $('fuzzy-radius-v').textContent = params.fradius;
-  $('fuzzy-strength').value = params.fstr; $('fuzzy-strength-v').textContent = (parseFloat(params.fstr)/10).toFixed(1);
-  $('fuzzy-focus').value = params.ffocus; $('fuzzy-focus-v').textContent = ((parseFloat(params.ffocus)/100 - 0.5)*2).toFixed(2);
-  $('fuzzy-bw').value = params.fbw; $('fuzzy-bw-v').textContent = (parseFloat(params.fbw)/100).toFixed(2);
-  if (params.fnorm === '1') $('fuzzy-norm-toggle').classList.add('on');
-  else $('fuzzy-norm-toggle').classList.remove('on');
 }
 
 let currentGlb = PARAM_DEFAULTS.glb;
@@ -561,38 +624,35 @@ $('animate-toggle').addEventListener('click', () => {
   syncURL();
 });
 
-// --- Fuzzy Vision controls ---
-let fuzzyMode = 0;
-function updateFuzzy() {
-  const enabled = $('fuzzy-toggle').classList.contains('on');
-  const radius = parseFloat($('fuzzy-radius').value);
-  const strength = parseFloat($('fuzzy-strength').value) / 10.0;
-  const focus = parseFloat($('fuzzy-focus').value) / 100.0;
-  const bw = parseFloat($('fuzzy-bw').value) / 100.0;
-  $('fuzzy-radius-v').textContent = radius.toFixed(0);
-  $('fuzzy-strength-v').textContent = strength.toFixed(1);
-  $('fuzzy-focus-v').textContent = ((focus - 0.5) * 2).toFixed(2);
-  $('fuzzy-bw-v').textContent = bw.toFixed(2);
-  const normalize = $('fuzzy-norm-toggle').classList.contains('on');
-  const quality = parseInt($('fuzzy-quality').value);
-  $('fuzzy-quality-v').textContent = quality;
-  mr_setFuzzy(enabled, radius, strength, fuzzyMode, focus, bw, normalize, stretchRange.min, stretchRange.max, quality);
+// --- Fuzzy Vision controls (signal-driven) ---
+const fz = {
+  enabled:   signal(false, 'fuzzy'),
+  mode:      signal('0', 'fmode'),
+  radius:    signal(48, 'fradius'),
+  strength:  signal(10, 'fstr'),
+  focus:     signal(50, 'ffocus'),
+  bandwidth: signal(15, 'fbw'),
+  normalize: signal(false, 'fnorm'),
+  quality:   signal(2, 'fqual'),
+};
+bindToggle('fuzzy-toggle', fz.enabled);
+bindBtnGroup('fuzzy-mode-btns', fz.mode);
+bindSlider('fuzzy-radius', fz.radius, v => v.toFixed(0));
+bindSlider('fuzzy-strength', fz.strength, v => (v / 10).toFixed(1));
+bindSlider('fuzzy-focus', fz.focus, v => ((v / 100 - 0.5) * 2).toFixed(2));
+bindSlider('fuzzy-bw', fz.bandwidth, v => (v / 100).toFixed(2));
+bindToggle('fuzzy-norm-toggle', fz.normalize);
+bindSlider('fuzzy-quality', fz.quality, v => v.toFixed(0));
+
+// Single effect: any fuzzy signal change → push to WASM + sync URL
+effect(() => {
+  const mode = parseInt(fz.mode.get());
+  const focus = fz.focus.get() / 100.0;
+  const bw = fz.bandwidth.get() / 100.0;
+  mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
+    mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get());
   syncURL();
-}
-$('fuzzy-toggle').addEventListener('click', () => {
-  $('fuzzy-toggle').classList.toggle('on');
-  updateFuzzy();
 });
-$('fuzzy-norm-toggle').addEventListener('click', () => {
-  $('fuzzy-norm-toggle').classList.toggle('on');
-  updateFuzzy();
-});
-$('fuzzy-radius').addEventListener('input', updateFuzzy);
-$('fuzzy-strength').addEventListener('input', updateFuzzy);
-$('fuzzy-focus').addEventListener('input', updateFuzzy);
-$('fuzzy-bw').addEventListener('input', updateFuzzy);
-$('fuzzy-quality').addEventListener('input', updateFuzzy);
-setupBtnGroup('fuzzy-mode-btns', v => { fuzzyMode = parseInt(v); updateFuzzy(); });
 
 // --- LOD controls ---
 function getTessParams() {
