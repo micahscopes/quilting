@@ -42,6 +42,8 @@ pub struct JfaConfig {
     pub downsample: u32,
     /// Number of blur passes (1=standard, 2-3=smoother, higher=silkier)
     pub blur_passes: u32,
+    /// Use mip-chain blur instead of multi-pass Gaussian (smoother, no boundary artifacts)
+    pub use_mip_blur: bool,
     /// Kawase weight smoothing: 0 = disabled, >0 = number of passes
     pub kawase_passes: u32,
     /// Kawase offset per pass
@@ -66,6 +68,7 @@ impl Default for JfaConfig {
             blur_strength: 1.0,
             downsample: 1, // full-res JFA eliminates 2x2 block artifacts
             blur_passes: 2,
+            use_mip_blur: true,
             kawase_passes: 0,
             kawase_offset: 0.75,
             precision: Precision::Float16,
@@ -304,6 +307,27 @@ uniform sampler2D u_tex;
 void main() { o_color = texture(u_tex, v_uv); }
 "#;
 
+/// Mip-chain blur composite: sample from scene mip level based on per-pixel weight.
+/// Smooth variable blur with zero boundary artifacts — LINEAR_MIPMAP_LINEAR interpolates.
+const FS_MIP_COMPOSITE: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_scene;    // scene with mip chain
+uniform sampler2D u_weight;   // firmness mask
+uniform float u_max_lod;      // max mip level available
+uniform float u_blur_strength;
+
+void main() {
+    vec4 w = texture(u_weight, v_uv);
+    float blur_weight = clamp(w.z * (1.0 - clamp(w.w, 0.0, 1.0)), 0.0, 1.0);
+
+    // Map weight to mip LOD: weight=0 → LOD 0 (sharp), weight=1 → max LOD (blurry)
+    float lod = blur_weight * u_blur_strength * u_max_lod;
+    o_color = textureLod(u_scene, v_uv, lod);
+}
+"#;
+
 /// Kawase blur on the weight mask — smooths JFA boundaries cheaply (5 taps).
 const FS_WEIGHT_KAWASE: &str = r#"#version 300 es
 precision highp float;
@@ -427,6 +451,7 @@ pub struct JfaPipeline {
     prog_weight_conformal_norm: glow::Program,
     prog_weight_kawase: glow::Program,
     prog_passthrough: glow::Program,
+    prog_mip_composite: glow::Program,
     vao: glow::VertexArray,
     // Reduction chain for min/max (ping-pong, shrinks to 1x1)
     reduce_fbo_a: glow::Framebuffer,
@@ -527,6 +552,7 @@ impl JfaPipeline {
         let prog_weight_conformal_norm = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL_NORM)?;
         let prog_weight_kawase = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?;
         let prog_passthrough = link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?;
+        let prog_mip_composite = link_program(gl, VS_FULLSCREEN, FS_MIP_COMPOSITE)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
@@ -548,7 +574,7 @@ impl JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
-            prog_passthrough,
+            prog_passthrough, prog_mip_composite,
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, smoothed_tex,
@@ -736,7 +762,42 @@ impl JfaPipeline {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
 
-            // --- Stage 4: Multi-pass weighted Gaussian blur (separable H+V) ---
+            // --- Stage 4: Blur application ---
+            if self.config.use_mip_blur {
+                // Mip-chain blur: generate mips from scene, sample LOD per weight.
+                // One pass, zero boundary artifacts, smooth variable blur.
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+                gl.generate_mipmap(glow::TEXTURE_2D);
+                let max_lod = ((fw.max(fh) as f32).log2().floor()).min(8.0);
+
+                gl.bind_framebuffer(glow::FRAMEBUFFER, output_fbo);
+                gl.viewport(0, 0, fw, fh);
+                gl.use_program(Some(self.prog_mip_composite));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                if let Some(loc) = gl.get_uniform_location(self.prog_mip_composite, "u_scene") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_mip_composite, "u_weight") {
+                    gl.uniform_1_i32(Some(&loc), 1);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_mip_composite, "u_max_lod") {
+                    gl.uniform_1_f32(Some(&loc), max_lod);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_mip_composite, "u_blur_strength") {
+                    gl.uniform_1_f32(Some(&loc), self.config.blur_strength);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                // Restore min filter
+                gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            } else {
+
+            // Multi-pass weighted Gaussian blur (separable H+V) ---
             // Each pass reads from the previous output, doubling effective kernel width.
             // Pass 1: scene → blur_tex (H) → blur_tex_b (V)
             // Pass 2: blur_tex_b → blur_tex (H) → blur_tex_b (V)
@@ -794,6 +855,7 @@ impl JfaPipeline {
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
+            } // end if !use_mip_blur
 
             // Restore state
             gl.enable(glow::DEPTH_TEST);
