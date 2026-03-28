@@ -160,9 +160,9 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="toggle" id="fuzzy-norm-toggle"></div>
       <span class="toggle-label">Normalize range</span>
     </div>
-    <label>Focus (squash ← → expand)</label>
+    <label id="fuzzy-focus-label">Focus (squash ← → expand)</label>
     <div class="sr"><input type="range" id="fuzzy-focus" min="0" max="100" value="50"><span class="v" id="fuzzy-focus-v">0.0</span></div>
-    <label>Bandwidth</label>
+    <label id="fuzzy-bw-label">Bandwidth</label>
     <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" value="15"><span class="v" id="fuzzy-bw-v">0.15</span></div>
     <label>Quality (blur passes)</label>
     <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="2"><span class="v" id="fuzzy-quality-v">2</span></div>
@@ -634,6 +634,21 @@ const fz = {
 };
 bindToggle('fuzzy-toggle', fz.enabled);
 bindBtnGroup('fuzzy-mode-btns', fz.mode);
+effect(() => {
+  const m = fz.mode.get();
+  const focusLabel = $('fuzzy-focus-label');
+  const bwLabel = $('fuzzy-bw-label');
+  if (m === '0') {
+    focusLabel.textContent = 'Focal distance (near ← → far)';
+    bwLabel.textContent = 'Aperture';
+  } else if (m === '1') {
+    focusLabel.textContent = 'Focus (squash ← → expand)';
+    bwLabel.textContent = 'Bandwidth';
+  } else {
+    focusLabel.textContent = 'Focus (combined)';
+    bwLabel.textContent = 'Bandwidth';
+  }
+});
 bindSlider('fuzzy-radius', fz.radius, v => v.toFixed(0));
 bindSlider('fuzzy-strength', fz.strength, v => (v / 10).toFixed(1));
 bindSlider('fuzzy-focus', fz.focus, v => ((v / 100 - 0.5) * 2).toFixed(2));
