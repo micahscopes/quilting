@@ -348,6 +348,51 @@ void main() {
 }
 "#;
 
+/// Kawase downsample: 5-tap diagonal + center at half resolution.
+/// Produces smooth Gaussian-quality downsample without axis artifacts.
+const FS_KAWASE_DOWN: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_tex;
+uniform vec2 u_halfpixel; // 0.5 / source_resolution
+
+void main() {
+    vec4 sum = texture(u_tex, v_uv) * 4.0;
+    sum += texture(u_tex, v_uv - u_halfpixel);
+    sum += texture(u_tex, v_uv + u_halfpixel);
+    sum += texture(u_tex, v_uv + vec2(u_halfpixel.x, -u_halfpixel.y));
+    sum += texture(u_tex, v_uv + vec2(-u_halfpixel.x, u_halfpixel.y));
+    o_color = sum / 8.0;
+}
+"#;
+
+/// Kawase-pyramid composite: blend between two pyramid levels per pixel weight.
+/// Gives smooth variable blur — each pixel picks its own blur amount.
+const FS_KAWASE_COMPOSITE: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_level0; // sharpest (or original scene)
+uniform sampler2D u_level1; // next blurrier
+uniform sampler2D u_weight;
+uniform float u_lo_idx;     // which level u_level0 represents (0-based)
+uniform float u_num_levels; // total levels
+uniform float u_blur_strength;
+
+void main() {
+    vec4 w = texture(u_weight, v_uv);
+    float blur_weight = clamp(w.z * (1.0 - clamp(w.w, 0.0, 1.0)), 0.0, 1.0);
+
+    float target_level = blur_weight * u_blur_strength * u_num_levels;
+    float frac = clamp(target_level - u_lo_idx, 0.0, 1.0);
+
+    vec4 sharp = texture(u_level0, v_uv);
+    vec4 blurry = texture(u_level1, v_uv);
+    o_color = mix(sharp, blurry, frac);
+}
+"#;
+
 /// Kawase blur on the weight mask — smooths JFA boundaries cheaply (5 taps).
 const FS_WEIGHT_KAWASE: &str = r#"#version 300 es
 precision highp float;
@@ -473,6 +518,12 @@ pub struct JfaPipeline {
     prog_passthrough: glow::Program,
     prog_mip_composite: glow::Program,
     prog_gauss_down: glow::Program,
+    prog_kawase_down: glow::Program,
+    prog_kawase_composite: glow::Program,
+    /// Kawase pyramid: each level is half the previous. [level0=full, level1=half, ...]
+    pyramid_tex: Vec<glow::Texture>,
+    pyramid_fbo: Vec<glow::Framebuffer>,
+    pyramid_sizes: Vec<(i32, i32)>,
     vao: glow::VertexArray,
     // Reduction chain for min/max (ping-pong, shrinks to 1x1)
     reduce_fbo_a: glow::Framebuffer,
@@ -575,6 +626,8 @@ impl JfaPipeline {
         let prog_passthrough = link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?;
         let prog_mip_composite = link_program(gl, VS_FULLSCREEN, FS_MIP_COMPOSITE)?;
         let prog_gauss_down = link_program(gl, VS_FULLSCREEN, FS_GAUSS_DOWN)?;
+        let prog_kawase_down = link_program(gl, VS_FULLSCREEN, FS_KAWASE_DOWN)?;
+        let prog_kawase_composite = link_program(gl, VS_FULLSCREEN, FS_KAWASE_COMPOSITE)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
@@ -597,6 +650,8 @@ impl JfaPipeline {
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
             prog_passthrough, prog_mip_composite, prog_gauss_down,
+            prog_kawase_down, prog_kawase_composite,
+            pyramid_tex: Vec::new(), pyramid_fbo: Vec::new(), pyramid_sizes: Vec::new(),
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, smoothed_tex,
@@ -650,7 +705,7 @@ impl JfaPipeline {
     /// `scene_tex`: the scene color texture to blur
     /// `output_fbo`: framebuffer to write the blurred result to (None = default FB)
     pub fn run(
-        &self,
+        &mut self,
         gl: &glow::Context,
         weight_tex: glow::Texture,
         scene_tex: glow::Texture,
@@ -882,7 +937,139 @@ impl JfaPipeline {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
             } else {
 
-            // Multi-pass weighted Gaussian blur (separable H+V) ---
+            // --- Kawase pyramid blur: downsample chain + per-pixel level blend ---
+            const NUM_PYRAMID_LEVELS: usize = 6;
+
+            // Build/resize pyramid textures if needed
+            if self.pyramid_tex.len() != NUM_PYRAMID_LEVELS {
+                // Clean up old
+                for tex in self.pyramid_tex.drain(..) { gl.delete_texture(tex); }
+                for fbo in self.pyramid_fbo.drain(..) { gl.delete_framebuffer(fbo); }
+                self.pyramid_sizes.clear();
+                for i in 0..NUM_PYRAMID_LEVELS {
+                    let pw = (fw >> i).max(1);
+                    let ph = (fh >> i).max(1);
+                    let tex = gl.create_texture().unwrap();
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, pw, ph, 0,
+                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                    let fbo = gl.create_framebuffer().unwrap();
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                        glow::TEXTURE_2D, Some(tex), 0);
+                    self.pyramid_tex.push(tex);
+                    self.pyramid_fbo.push(fbo);
+                    self.pyramid_sizes.push((pw, ph));
+                }
+            }
+
+            // Level 0 = copy scene
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pyramid_fbo[0]));
+            gl.viewport(0, 0, fw, fh);
+            gl.use_program(Some(self.prog_passthrough));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+            if let Some(loc) = gl.get_uniform_location(self.prog_passthrough, "u_tex") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+            // Downsample levels 1..N with Kawase filter
+            gl.use_program(Some(self.prog_kawase_down));
+            for i in 1..NUM_PYRAMID_LEVELS {
+                let (sw, sh) = self.pyramid_sizes[i - 1];
+                let (dw, dh) = self.pyramid_sizes[i];
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pyramid_fbo[i]));
+                gl.viewport(0, 0, dw, dh);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[i - 1]));
+                if let Some(loc) = gl.get_uniform_location(self.prog_kawase_down, "u_tex") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_kawase_down, "u_halfpixel") {
+                    gl.uniform_2_f32(Some(&loc), 0.5 / sw as f32, 0.5 / sh as f32);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+
+            // Composite: per pixel, blend between adjacent pyramid levels based on weight.
+            // Multi-pass: each pass blends level[i] and level[i+1], with the result going
+            // to output (last pass) or a temp buffer (intermediate).
+            // For simplicity: do a single composite pass blending ALL levels via cascading mix.
+            // We iterate from blurriest to sharpest, accumulating.
+            //
+            // Actually, simplest correct approach: one pass that reads firmness weight,
+            // computes target level, samples both adjacent levels, and blends.
+            // But GLSL can't dynamically index samplers. So we do N-1 composite passes,
+            // each blending one level pair, accumulating into the output.
+            //
+            // Even simpler: write a composite shader that takes the weight and ALL levels
+            // as a single texture array... but that requires texture arrays.
+            //
+            // Pragmatic approach: 1 composite pass per adjacent pair, writing pixels that
+            // fall in that pair's range. Use the passthrough for level 0 (sharp pixels).
+
+            // For now: single composite pass blending between level 0 (sharp) and the
+            // level matching the weight. We sample from both and blend.
+            // This means one texture lookup at full res + one at the target mip.
+            // Works because each pyramid level has LINEAR filtering for smooth upscale.
+
+            // Actually the cleanest: iterate backward from blurriest. Start with the
+            // blurriest level. For each level going sharper, blend it in where weight says so.
+            // Final result is fully composited.
+
+            // Let's do it simply: one pass, two levels (sharpest + blurriest matching weight).
+            // The composite shader handles the per-pixel level selection.
+
+            // SIMPLE VERSION: just blend scene (level 0) with the level matching blur_weight.
+            // For weight=0 → level 0 (sharp). For weight=1 → level N-1 (blurriest).
+            // Intermediate: linear interpolation between the two adjacent levels.
+
+            // We need a shader that can sample from any level. Since we can't index samplers,
+            // pre-blend into a single blurred texture by upsampling from blurriest to sharpest.
+
+            // UPSAMPLE approach: start from level N-1, upsample to N-2 (blend), upsample to
+            // N-3 (blend), ..., upsample to level 0. At each step, blend with the weight.
+            // Pixels with high weight keep the blurry version; low weight take the sharper.
+
+            // This is Dual Kawase's upsample path with weight modulation!
+
+            // For now: just composite level0 and level[N-1] as a proof of concept.
+            gl.bind_framebuffer(glow::FRAMEBUFFER, output_fbo);
+            gl.viewport(0, 0, fw, fh);
+            gl.use_program(Some(self.prog_kawase_composite));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[0]));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[NUM_PYRAMID_LEVELS - 1]));
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_level0") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_level1") {
+                gl.uniform_1_i32(Some(&loc), 1);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_weight") {
+                gl.uniform_1_i32(Some(&loc), 2);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_lo_idx") {
+                gl.uniform_1_f32(Some(&loc), 0.0);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_num_levels") {
+                gl.uniform_1_f32(Some(&loc), (NUM_PYRAMID_LEVELS - 1) as f32);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_blur_strength") {
+                gl.uniform_1_f32(Some(&loc), self.config.blur_strength);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+            // Skip old Gaussian path
+            if false {
             // Each pass reads from the previous output, doubling effective kernel width.
             // Pass 1: scene → blur_tex (H) → blur_tex_b (V)
             // Pass 2: blur_tex_b → blur_tex (H) → blur_tex_b (V)
@@ -940,6 +1127,7 @@ impl JfaPipeline {
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
+            } // end if false (old Gaussian)
             } // end if !use_mip_blur
 
             // Restore state
@@ -1102,7 +1290,7 @@ impl JfaPipeline {
     /// Convenience: run the full pipeline with a built-in radial weight (vignette DoF).
     /// Requires a weight FBO+texture to be provided (caller manages these).
     pub fn run_radial(
-        &self,
+        &mut self,
         gl: &glow::Context,
         weight_fbo: glow::Framebuffer,
         weight_tex: glow::Texture,
