@@ -1369,8 +1369,8 @@ phase('wasm', [], async () => {
   await init();
   $('stats').textContent = 'Initializing renderer...';
   if (!mr_init('cv')) throw 'renderer init failed';
-  wasmOk.set(true); // Effects now re-fire with WASM ready
-  applyParams(initParams);
+  applyParams(initParams); // Set signal values first
+  wasmOk.set(true); // THEN fire effects with correct values + WASM ready
   initEnvMaps();
 });
 
