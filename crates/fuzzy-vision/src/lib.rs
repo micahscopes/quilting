@@ -280,21 +280,24 @@ void main() {
     vec4 j11 = texture(u_jfa, base + texel);
     vec4 jfa = mix(mix(j00, j10, f.x), mix(j01, j11, f.x), f.y);
 
-    // JFA-propagated weight with distance falloff
-    float jfa_weight = 0.0;
+    // Hybrid boundary: analytical weight is authoritative where it exists.
+    // JFA only extends the blur BEYOND the analytical region (falloff zone).
+    // This prevents JFA from ever bleeding into the sharp region.
+    float weight;
     float ratio = 0.0;
-    if (jfa.z > 0.0) {
+    if (analytical_w > 0.001) {
+        // Inside the analytical weight region — use it directly (pixel-perfect)
+        weight = analytical_w;
+    } else if (jfa.z > 0.0) {
+        // Outside analytical region — use JFA distance falloff
         float dist = distance(v_uv * u_dims, jfa.xy * u_dims);
         float effective_max = u_max_distance * jfa.z;
         ratio = clamp(dist / max(effective_max, 1.0), 0.0, 1.0);
         float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
-        jfa_weight = jfa.z * falloff;
+        weight = jfa.z * falloff;
+    } else {
+        weight = 0.0;
     }
-
-    // Hybrid: analytical weight gives pixel-perfect sharp boundaries,
-    // JFA provides smooth distance falloff beyond the analytical region.
-    // At the boundary, analytical dominates (no JFA aliasing).
-    float weight = max(analytical_w, jfa_weight);
 
     if (weight <= 0.0) {
         o_color = vec4(0.0);
