@@ -358,8 +358,13 @@ void main() {
         float d = float(abs(x));
         float gw = exp(-(d * d) / (2.0 * sigma * sigma));
         vec2 uv = clamp(vec2(v_uv.x + float(x) * texel, v_uv.y), vec2(0.0), vec2(1.0));
-        color_sum += texture(u_scene, uv) * gw;
-        weight_sum += gw;
+        // Weight-aware: modulate each tap by neighbor's blur weight
+        // Sharp neighbors (weight≈0) contribute less, preventing halo bleeding
+        vec4 nw = texture(u_weight, uv);
+        float neighbor_w = clamp(nw.z * (1.0 - clamp(nw.w, 0.0, 1.0)), 0.0, 1.0);
+        float tap_w = gw * max(neighbor_w, 0.05); // floor prevents zero-weight gaps
+        color_sum += texture(u_scene, uv) * tap_w;
+        weight_sum += tap_w;
     }
 
     vec4 blurred = color_sum / max(weight_sum, 0.001);
@@ -397,8 +402,11 @@ void main() {
         float d = float(abs(y));
         float gw = exp(-(d * d) / (2.0 * sigma * sigma));
         vec2 uv = clamp(vec2(v_uv.x, v_uv.y + float(y) * texel), vec2(0.0), vec2(1.0));
-        color_sum += texture(u_scene, uv) * gw;
-        weight_sum += gw;
+        vec4 nw = texture(u_weight, uv);
+        float neighbor_w = clamp(nw.z * (1.0 - clamp(nw.w, 0.0, 1.0)), 0.0, 1.0);
+        float tap_w = gw * max(neighbor_w, 0.05);
+        color_sum += texture(u_scene, uv) * tap_w;
+        weight_sum += tap_w;
     }
 
     vec4 blurred = color_sum / max(weight_sum, 0.001);
