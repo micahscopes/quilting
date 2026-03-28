@@ -484,6 +484,9 @@ pub struct JfaPipeline {
     // Firmness output
     firmness_fbo: glow::Framebuffer,
     firmness_tex: glow::Texture,
+    // Smoothed weight (preserved for debug — not overwritten by scene blur)
+    smoothed_fbo: glow::Framebuffer,
+    smoothed_tex: glow::Texture,
     // Blur ping-pong
     blur_fbo: glow::Framebuffer,
     blur_tex: glow::Texture,
@@ -583,6 +586,7 @@ impl JfaPipeline {
         let (ping_fbo, ping_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
         let (pong_fbo, pong_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
         let (firmness_fbo, firmness_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
+        let (smoothed_fbo, smoothed_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
         let (blur_fbo, blur_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
         let (blur_fbo_b, blur_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
 
@@ -593,7 +597,8 @@ impl JfaPipeline {
             prog_preblur_h, prog_preblur_v, prog_passthrough,
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
-            firmness_fbo, firmness_tex, blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
+            firmness_fbo, firmness_tex, smoothed_fbo, smoothed_tex,
+            blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
             jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
         })
     }
@@ -625,7 +630,10 @@ impl JfaPipeline {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
                 ext_format, ext_type, glow::PixelUnpackData::Slice(None));
-            // Resize blur ping-pong (full res, RGBA8)
+            // Resize smoothed weight + blur ping-pong (full res, RGBA8)
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.smoothed_tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
+                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
             for tex in [self.blur_tex, self.blur_tex_b] {
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
@@ -669,8 +677,8 @@ impl JfaPipeline {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
-            // V pass: blur_tex_b → blur_tex (reuse as smoothed weight)
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo));
+            // V pass: blur_tex_b → smoothed_tex (dedicated, won't be overwritten by scene blur)
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.smoothed_fbo));
             gl.use_program(Some(self.prog_preblur_v));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
@@ -679,7 +687,7 @@ impl JfaPipeline {
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             // Use smoothed weight for JFA init and firmness analytical read
-            let smoothed_weight = self.blur_tex;
+            let smoothed_weight = self.smoothed_tex;
 
             // --- Stage 1: Init seeds from weight texture (into ping, at JFA resolution) ---
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.ping_fbo));
@@ -1017,7 +1025,7 @@ impl JfaPipeline {
         let (fw, fh) = self.full_size;
         if fw == 0 || fh == 0 { return; }
         let tex = match debug_stage {
-            1 => self.blur_tex,      // smoothed weight
+            1 => self.smoothed_tex,  // smoothed weight (preserved)
             2 => self.ping_tex,      // JFA result
             3 => self.firmness_tex,  // firmness
             _ => return,
