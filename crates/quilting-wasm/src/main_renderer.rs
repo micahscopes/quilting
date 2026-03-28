@@ -269,6 +269,7 @@ pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: 
                 cfg.blur_passes = blur_passes.max(1);
                 cfg.kawase_passes = kawase_passes;
                 cfg.kawase_offset = kawase_offset;
+                cfg.blur_mode = mode;
                 fv.set_config(cfg);
             }
         }
@@ -675,7 +676,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
                 // Set up MRT FBO for PBR: color (attachment 0) + weight (attachment 1)
                 // Only for conformal mode (mode 1) — radial mode blits from default FB.
-                if state.fuzzy_enabled && state.fuzzy_mode == 1 {
+                if state.fuzzy_enabled && true /* all fuzzy modes use MRT */ {
                     unsafe {
                         let mut vp = [0i32; 4];
                         gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);
@@ -1063,7 +1064,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             // When MRT is active (conformal mode), PBR rendered to pbr_fbo.
                             // Color is in pbr_color_tex, weight in fuzzy_weight_tex.
                             // When radial mode, PBR rendered to default FB — need to blit.
-                            let (scene_tex, weight_tex) = if state.fuzzy_mode == 1 && state.pbr_color_tex.is_some() {
+                            let (scene_tex, weight_tex) = if true /* all fuzzy modes use MRT */ && state.pbr_color_tex.is_some() {
                                 // Conformal: MRT gave us raw stretch in fuzzy_weight_tex.
                                 // Run focused weight generator to apply Gaussian band selection.
                                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);

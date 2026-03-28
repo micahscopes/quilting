@@ -42,6 +42,8 @@ pub struct JfaConfig {
     pub downsample: u32,
     /// Number of blur passes (1=standard, 2-3=smoother, higher=silkier)
     pub blur_passes: u32,
+    /// Blur mode: 0=DoF(depth), 1=Conformal(stretch), 2=Hybrid(max)
+    pub blur_mode: u32,
     /// Use mip-chain blur instead of multi-pass Gaussian (smoother, no boundary artifacts)
     pub use_mip_blur: bool,
     /// Kawase weight smoothing: 0 = disabled, >0 = number of passes
@@ -67,6 +69,7 @@ impl Default for JfaConfig {
             max_distance: 64.0,
             blur_strength: 1.0,
             downsample: 2, // half-res JFA + bilinear upsample in firmness
+            blur_mode: 1,
             blur_passes: 2,
             use_mip_blur: false, // Gaussian pyramid or mip blur (experimental)
             kawase_passes: 0,
@@ -1229,7 +1232,7 @@ impl JfaPipeline {
                 // Map from fuzzy_mode in config: fmode=0→radial(not here), fmode=1→conformal, etc.
                 // For now, pass mode from a new config field
                 if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_mode") {
-                    gl.uniform_1_f32(Some(&loc), 1.0); // TODO: wire to config
+                    gl.uniform_1_f32(Some(&loc), self.config.blur_mode as f32);
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
