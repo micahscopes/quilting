@@ -648,7 +648,7 @@ impl JfaPipeline {
             // --- Stage 3.5: Kawase smooth on weight mask (removes JFA boundary artifacts) ---
             // Ping-pong firmness through blur_tex_b for 2 Kawase passes at increasing offsets
             {
-                let kawase_offsets = [1.5_f32, 3.0];
+                let kawase_offsets = [0.5_f32, 1.0, 1.5];
                 let mut src = self.firmness_tex;
                 for &offset in &kawase_offsets {
                     let dst_fbo = self.blur_fbo_b;
