@@ -308,7 +308,7 @@ const PARAM_DEFAULTS = {
   res: '0', density: '100', atten: '1', minpx: '2',
   animate: '1', anim: '-1', atlas: '9',
   zoom: '3', rx: '0.3', ry: '0.5',
-  fuzzy: '0', fmode: '1', fradius: '32', fstr: '30', ffocus: '62', fbw: '12', fnorm: '0', fqual: '2',
+  fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0', fqual: '2',
 };
 
 function readParams() {
@@ -622,14 +622,14 @@ $('time').addEventListener('input', () => {
 const fz = {
   enabled:   signal(false, 'fuzzy'),
   mode:      signal('0', 'fmode'),
-  radius:    signal(32, 'fradius'),
+  radius:    signal(11, 'fradius'),
   strength:  signal(30, 'fstr'),
   focus:     signal(62, 'ffocus'),
-  bandwidth: signal(12, 'fbw'),
+  bandwidth: signal(10, 'fbw'),
   normalize: signal(false, 'fnorm'),
   quality:   signal(2, 'fqual'),
   kawase:    signal(1, 'fkaw'),
-  kawaseOff: signal(1, 'fkoff'),
+  kawaseOff: signal(15, 'fkoff'),
 };
 bindToggle('fuzzy-toggle', fz.enabled);
 bindBtnGroup('fuzzy-mode-btns', fz.mode);
