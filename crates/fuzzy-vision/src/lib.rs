@@ -984,20 +984,38 @@ impl JfaPipeline {
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-            // Downsample levels 1..N with Kawase filter
-            gl.use_program(Some(self.prog_kawase_down));
+            // Downsample levels 1..N with separable Gaussian (smooth, no crosshatch)
+            // Each level: H pass from level[i-1] → blur_tex_b, V pass → pyramid[i]
+            gl.use_program(Some(self.prog_gauss_down));
             for i in 1..NUM_PYRAMID_LEVELS {
                 let (sw, sh) = self.pyramid_sizes[i - 1];
                 let (dw, dh) = self.pyramid_sizes[i];
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pyramid_fbo[i]));
+
+                // H pass: pyramid[i-1] → blur_tex_b at target size
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, dw, dh, 0,
+                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo_b));
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D, Some(self.blur_tex_b), 0);
                 gl.viewport(0, 0, dw, dh);
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[i - 1]));
-                if let Some(loc) = gl.get_uniform_location(self.prog_kawase_down, "u_tex") {
+                if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_tex") {
                     gl.uniform_1_i32(Some(&loc), 0);
                 }
-                if let Some(loc) = gl.get_uniform_location(self.prog_kawase_down, "u_halfpixel") {
-                    gl.uniform_2_f32(Some(&loc), 0.5 / sw as f32, 0.5 / sh as f32);
+                if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_dir") {
+                    gl.uniform_2_f32(Some(&loc), 1.0 / sw as f32, 0.0);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                // V pass: blur_tex_b → pyramid[i]
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pyramid_fbo[i]));
+                gl.viewport(0, 0, dw, dh);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
+                if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_dir") {
+                    gl.uniform_2_f32(Some(&loc), 0.0, 1.0 / sh as f32);
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
