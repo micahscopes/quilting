@@ -241,12 +241,11 @@ void main() {
             if (neighbor.z <= 0.0) continue;
 
             float dist = distance(pixel_uv * u_dims, neighbor.xy * u_dims);
-            // Weight bonus: higher-weight seeds are more attractive
-            float bonus = neighbor.z * max(float(step_size), u_max_distance * 0.05);
-            float adj_dist = dist - bonus;
-            float adj_best = best_dist - best.z * max(float(step_size), u_max_distance * 0.05);
 
-            if (adj_dist < adj_best - 0.5 || (abs(adj_dist - adj_best) <= 0.5 && neighbor.z > best.z)) {
+            // Pure Euclidean nearest-seed: no weight bonus distortion.
+            // Weight is carried along but doesn't affect which seed "wins".
+            // Higher weight only breaks ties at equal distance.
+            if (dist < best_dist - 0.5 || (abs(dist - best_dist) <= 0.5 && neighbor.z > best.z)) {
                 best = neighbor;
                 best_dist = dist;
             }
