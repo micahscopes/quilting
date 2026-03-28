@@ -655,34 +655,9 @@ impl JfaPipeline {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
 
-            // --- Stage 0.5: Pre-blur analytical weight to smooth per-face scallops ---
-            // Two passes of separable 5-tap Gaussian (~4px effective radius).
-            // Pass 1: weight_tex → blur_tex_b (H) → smoothed_tex (V)
-            // Pass 2: smoothed_tex → blur_tex_b (H) → smoothed_tex (V)
-            let mut preblur_src = weight_tex;
-            for _ in 0..2 {
-                // H pass
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo_b));
-                gl.viewport(0, 0, fw, fh);
-                gl.use_program(Some(self.prog_preblur_h));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(preblur_src));
-                if let Some(loc) = gl.get_uniform_location(self.prog_preblur_h, "u_weight") {
-                    gl.uniform_1_i32(Some(&loc), 0);
-                }
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
-                // V pass
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.smoothed_fbo));
-                gl.use_program(Some(self.prog_preblur_v));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
-                if let Some(loc) = gl.get_uniform_location(self.prog_preblur_v, "u_weight") {
-                    gl.uniform_1_i32(Some(&loc), 0);
-                }
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
-                preblur_src = self.smoothed_tex;
-            }
-            let smoothed_weight = self.smoothed_tex;
+            // Use weight directly — pre-blur removed (caused box halos at geometry edges).
+            // JFA+2 with pure Euclidean distance handles boundaries cleanly.
+            let smoothed_weight = weight_tex;
 
             if self.config.skip_jfa {
                 // Direct mode: use smoothed analytical weight as firmness, skip JFA entirely.
