@@ -166,9 +166,9 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <label>Quality (blur passes)</label>
     <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="2"><span class="v" id="fuzzy-quality-v">2</span></div>
     <label>Mask smooth (kawase passes)</label>
-    <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="0"><span class="v" id="fuzzy-kawase-v">0</span></div>
+    <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="1"><span class="v" id="fuzzy-kawase-v">1</span></div>
     <label>Mask smooth offset</label>
-    <div class="sr"><input type="range" id="fuzzy-kawase-off" min="1" max="30" value="8"><span class="v" id="fuzzy-kawase-off-v">0.75</span></div>
+    <div class="sr"><input type="range" id="fuzzy-kawase-off" min="1" max="30" value="15"><span class="v" id="fuzzy-kawase-off-v">1.50</span></div>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -727,8 +727,8 @@ applyParams = function(params) {
   fz.bandwidth.set(parseFloat(params.fbw) || 15);
   fz.normalize.set(params.fnorm === '1');
   fz.quality.set(parseInt(params.fqual) || 2);
-  fz.kawase.set(parseInt(params.fkaw) || 0);
-  fz.kawaseOff.set(parseInt(params.fkoff) || 8);
+  fz.kawase.set(parseInt(params.fkaw ?? '1'));
+  fz.kawaseOff.set(parseInt(params.fkoff ?? '15'));
 };
 
 // --- IndexedDB for persisting dropped GLB files ---
