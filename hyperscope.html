@@ -177,6 +177,7 @@ import init, {
 } from './pkg/quilting_wasm.js';
 
 const $ = id => document.getElementById(id);
+let wasmReady = false; // Set to true after mr_init succeeds
 
 // ============================================================
 // Minimal signal system — declarative reactive state for UI controls.
@@ -473,7 +474,7 @@ canvas.addEventListener('touchmove', e => {
 // --- Render mode (signal) ---
 const renderMode = signal('pbr', 'mode');
 bindBtnGroup('render-btns', renderMode);
-effect(() => { mr_setRenderMode(renderMode.get()); syncURL(); });
+effect(() => { const v = renderMode.get(); if (wasmReady) mr_setRenderMode(v); syncURL(); });
 
 // --- Möbius transform (signals) ---
 const mob = {
@@ -520,6 +521,7 @@ effect(() => {
   const m = computeMobius(type, mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10, mob.mr.get()/10);
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
+  if (!wasmReady) return;
   mr_setMobius(flat);
   debouncedLodRecompute();
   sampleStretchAsync();
@@ -611,7 +613,7 @@ effect(() => {
   const mode = parseInt(fz.mode.get());
   const focus = fz.focus.get() / 100.0;
   const bw = fz.bandwidth.get() / 100.0;
-  mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
+  if (wasmReady) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
     mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get());
   syncURL();
 });
@@ -636,15 +638,14 @@ function getTessParams() {
 }
 
 effect(() => {
-  // Touch all LOD signals to track them
   lod.res.get(); lod.density.get(); lod.screenAtten.get(); lod.minPx.get();
-  debouncedLodRecompute(); syncURL();
+  if (wasmReady) debouncedLodRecompute();
+  syncURL();
 });
 
 // --- Environment/Matcap selectors ---
 const envMap = signal('rosendal_plains_1_1k', 'env');
 const matcap = signal('citric-acid', 'matcap');
-// Bind selects manually (not slider/toggle)
 $('envmap-sel').value = envMap.peek();
 $('envmap-sel').addEventListener('change', () => envMap.set($('envmap-sel').value));
 $('matcap-sel').value = matcap.peek();
@@ -652,6 +653,7 @@ $('matcap-sel').addEventListener('change', () => matcap.set($('matcap-sel').valu
 
 effect(() => {
   const v = envMap.get();
+  if (!wasmReady) return;
   if (v === 'procedural') {
     const pf = generateProceduralEnvFaces(64);
     const ir = generateProceduralEnvFaces(16);
@@ -1317,10 +1319,10 @@ if (!mr_init('cv')) {
   document.body.innerHTML = '<h1 style="color:#f85;padding:40px">Renderer init failed</h1>';
   throw 'renderer init failed';
 }
+wasmReady = true;
 
-// Apply render mode, Möbius, and env maps from URL params
-mr_setRenderMode(initParams.mode);
-updateMobius();
+// Apply params — signals trigger effects now that wasmReady=true
+applyParams(initParams);
 initEnvMaps();
 
 $('stats').textContent = `Starting ${ATLAS_WORKERS} workers for atlas build...`;
