@@ -68,7 +68,7 @@ impl Default for JfaConfig {
             blur_strength: 1.0,
             downsample: 1, // full-res JFA eliminates 2x2 block artifacts
             blur_passes: 2,
-            use_mip_blur: false, // mip needs proper blur pyramid, not generateMipmap
+            use_mip_blur: true, // Gaussian blur pyramid + textureLod composite
             kawase_passes: 0,
             kawase_offset: 0.75,
             precision: Precision::Float16,
@@ -307,6 +307,26 @@ uniform sampler2D u_tex;
 void main() { o_color = texture(u_tex, v_uv); }
 "#;
 
+/// Gaussian downsample: 9-tap separable Gaussian at half resolution per mip level.
+/// This replaces generateMipmap (box filter) with proper Gaussian quality.
+const FS_GAUSS_DOWN: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_tex;
+uniform vec2 u_dir; // (1/w, 0) for H pass, (0, 1/h) for V pass
+
+void main() {
+    // 5-tap Gaussian: weights [0.06, 0.24, 0.40, 0.24, 0.06]
+    vec4 c  = texture(u_tex, v_uv) * 0.40;
+    vec4 c1 = texture(u_tex, v_uv - u_dir) * 0.24;
+    vec4 c2 = texture(u_tex, v_uv + u_dir) * 0.24;
+    vec4 c3 = texture(u_tex, v_uv - 2.0 * u_dir) * 0.06;
+    vec4 c4 = texture(u_tex, v_uv + 2.0 * u_dir) * 0.06;
+    o_color = c + c1 + c2 + c3 + c4;
+}
+"#;
+
 /// Mip-chain blur composite: sample from scene mip level based on per-pixel weight.
 /// Smooth variable blur with zero boundary artifacts — LINEAR_MIPMAP_LINEAR interpolates.
 const FS_MIP_COMPOSITE: &str = r#"#version 300 es
@@ -452,6 +472,7 @@ pub struct JfaPipeline {
     prog_weight_kawase: glow::Program,
     prog_passthrough: glow::Program,
     prog_mip_composite: glow::Program,
+    prog_gauss_down: glow::Program,
     vao: glow::VertexArray,
     // Reduction chain for min/max (ping-pong, shrinks to 1x1)
     reduce_fbo_a: glow::Framebuffer,
@@ -553,6 +574,7 @@ impl JfaPipeline {
         let prog_weight_kawase = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?;
         let prog_passthrough = link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?;
         let prog_mip_composite = link_program(gl, VS_FULLSCREEN, FS_MIP_COMPOSITE)?;
+        let prog_gauss_down = link_program(gl, VS_FULLSCREEN, FS_GAUSS_DOWN)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
@@ -574,7 +596,7 @@ impl JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
-            prog_passthrough, prog_mip_composite,
+            prog_passthrough, prog_mip_composite, prog_gauss_down,
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, smoothed_tex,
@@ -764,14 +786,76 @@ impl JfaPipeline {
 
             // --- Stage 4: Blur application ---
             if self.config.use_mip_blur {
-                // Mip-chain blur: generate mips from scene, sample LOD per weight.
-                // One pass, zero boundary artifacts, smooth variable blur.
+                // Gaussian blur pyramid: build mip chain with proper Gaussian downsample,
+                // then composite with textureLod for smooth per-pixel variable blur.
+
+                // Allocate mip levels on scene texture
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+                let num_mips = ((fw.max(fh) as f32).log2().floor() as i32 + 1).min(8);
+                // Pre-allocate all mip levels
+                for mip in 1..num_mips {
+                    let mw = (fw >> mip).max(1);
+                    let mh = (fh >> mip).max(1);
+                    gl.tex_image_2d(glow::TEXTURE_2D, mip, glow::RGBA8 as i32, mw, mh, 0,
+                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                }
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
-                gl.generate_mipmap(glow::TEXTURE_2D);
-                let max_lod = ((fw.max(fh) as f32).log2().floor()).min(8.0);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, num_mips - 1);
 
+                // Build each mip: separable Gaussian from mip (level-1) → blur_tex_b (H) → mip (level) (V)
+                let sc_fbo = self.blur_fbo; // reuse as temp FBO for mip writes
+                gl.use_program(Some(self.prog_gauss_down));
+
+                for mip in 1..num_mips {
+                    let mw = (fw >> mip).max(1);
+                    let mh = (fh >> mip).max(1);
+                    let pw = (fw >> (mip - 1)).max(1);
+                    let ph = (fh >> (mip - 1)).max(1);
+
+                    // H pass: read mip (level-1) from scene → write to blur_tex_b
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, mw, mh, 0,
+                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo_b));
+                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                        glow::TEXTURE_2D, Some(self.blur_tex_b), 0);
+                    gl.viewport(0, 0, mw, mh);
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, mip - 1);
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, mip - 1);
+                    if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_tex") {
+                        gl.uniform_1_i32(Some(&loc), 0);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_dir") {
+                        gl.uniform_2_f32(Some(&loc), 1.0 / pw as f32, 0.0);
+                    }
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                    // V pass: blur_tex_b → scene_tex mip (level)
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(sc_fbo));
+                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                        glow::TEXTURE_2D, Some(scene_tex), mip);
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
+                    if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_dir") {
+                        gl.uniform_2_f32(Some(&loc), 0.0, 1.0 / ph as f32);
+                    }
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                }
+
+                // Restore base/max level for textureLod
+                gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, num_mips - 1);
+
+                // Restore blur_fbo attachment to blur_tex
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(sc_fbo));
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D, Some(self.blur_tex), 0);
+
+                // Final composite: textureLod per pixel weight
                 gl.bind_framebuffer(glow::FRAMEBUFFER, output_fbo);
                 gl.viewport(0, 0, fw, fh);
                 gl.use_program(Some(self.prog_mip_composite));
@@ -786,13 +870,14 @@ impl JfaPipeline {
                     gl.uniform_1_i32(Some(&loc), 1);
                 }
                 if let Some(loc) = gl.get_uniform_location(self.prog_mip_composite, "u_max_lod") {
-                    gl.uniform_1_f32(Some(&loc), max_lod);
+                    gl.uniform_1_f32(Some(&loc), (num_mips - 1) as f32);
                 }
                 if let Some(loc) = gl.get_uniform_location(self.prog_mip_composite, "u_blur_strength") {
                     gl.uniform_1_f32(Some(&loc), self.config.blur_strength);
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
-                // Restore min filter
+
+                // Restore scene_tex to non-mipmap mode
                 gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
             } else {
