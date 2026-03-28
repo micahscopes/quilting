@@ -996,7 +996,7 @@ impl JfaPipeline {
     }
 
     /// Debug: blit an internal texture to the output framebuffer for visualization.
-    /// debug_stage: 0=analytical weight, 1=smoothed weight, 2=JFA result, 3=firmness
+    /// 1=smoothed weight (pre-JFA), 2=JFA ping/pong result, 3=firmness mask
     pub fn debug_blit(
         &self,
         gl: &glow::Context,
@@ -1004,16 +1004,18 @@ impl JfaPipeline {
         output_fbo: Option<glow::Framebuffer>,
     ) {
         let (fw, fh) = self.full_size;
+        let (jw, jh) = self.jfa_size;
         if fw == 0 || fh == 0 { return; }
-        // Source depends on stage — we'll just blit firmness_tex for now
-        let src_fbo = match debug_stage {
-            3 => Some(self.firmness_fbo),
-            _ => Some(self.blur_fbo), // smoothed weight lives here after preblur
+        let (src_fbo, sw, sh) = match debug_stage {
+            1 => (Some(self.blur_fbo), fw, fh),           // smoothed weight
+            2 => (Some(self.ping_fbo), jw, jh),           // JFA result (may be in ping or pong)
+            3 => (Some(self.firmness_fbo), fw, fh),       // firmness
+            _ => return,
         };
         unsafe {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, src_fbo);
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, output_fbo);
-            gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.blit_framebuffer(0, 0, sw, sh, 0, 0, fw, fh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }

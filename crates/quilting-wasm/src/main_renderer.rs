@@ -54,6 +54,7 @@ struct MainState {
     fuzzy: Option<fuzzy_vision::JfaPipeline>,
     fuzzy_enabled: bool,
     fuzzy_mode: u32, // 0=radial, 1=conformal
+    fuzzy_debug: u32, // 0=off, 1=smoothed weight, 2=jfa, 3=firmness
     fuzzy_weight_fbo: Option<glow::Framebuffer>,
     fuzzy_weight_tex: Option<glow::Texture>,
     fuzzy_weight_size: (i32, i32),
@@ -210,6 +211,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             fuzzy,
             fuzzy_enabled: false,
             fuzzy_mode: 0,
+            fuzzy_debug: 0,
             fuzzy_weight_fbo: None,
             fuzzy_weight_tex: None,
             fuzzy_weight_size: (0, 0),
@@ -269,6 +271,15 @@ pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: 
                 cfg.kawase_offset = kawase_offset;
                 fv.set_config(cfg);
             }
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "mr_setFuzzyDebug")]
+pub fn mr_set_fuzzy_debug(debug_stage: u32) {
+    STATE.with(|s| {
+        if let Some(ref mut st) = *s.borrow_mut() {
+            st.fuzzy_debug = debug_stage;
         }
     });
 }
@@ -1132,7 +1143,13 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             };
 
                             // Run JFA blur → default FB
-                            fv.run(gl, weight_tex, scene_tex, None);
+                            if state.fuzzy_debug > 0 {
+                                // Debug: run pipeline but override output with intermediate texture
+                                fv.run(gl, weight_tex, scene_tex, None);
+                                fv.debug_blit(gl, state.fuzzy_debug, None);
+                            } else {
+                                fv.run(gl, weight_tex, scene_tex, None);
+                            }
                             gl.viewport(0, 0, vw, vh);
                             gl.enable(glow::DEPTH_TEST);
                         }
