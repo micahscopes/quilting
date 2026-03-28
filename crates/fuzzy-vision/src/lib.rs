@@ -283,24 +283,22 @@ void main() {
     vec4 j11 = texture(u_jfa, base + texel);
     vec4 jfa = mix(mix(j00, j10, f.x), mix(j01, j11, f.x), f.y);
 
-    // Hybrid boundary: analytical weight is authoritative where it exists.
-    // JFA only extends the blur BEYOND the analytical region (falloff zone).
-    // This prevents JFA from ever bleeding into the sharp region.
-    float weight;
+    // Hybrid boundary: smooth blend between analytical and JFA.
+    // Analytical dominates where strong, JFA provides falloff where analytical fades.
+    // smoothstep blend prevents hard threshold artifacts.
+    float jfa_weight = 0.0;
     float ratio = 0.0;
-    if (analytical_w > 0.001) {
-        // Inside the analytical weight region — use it directly (pixel-perfect)
-        weight = analytical_w;
-    } else if (jfa.z > 0.0) {
-        // Outside analytical region — use JFA distance falloff
+    if (jfa.z > 0.0) {
         float dist = distance(v_uv * u_dims, jfa.xy * u_dims);
         float effective_max = u_max_distance * jfa.z;
         ratio = clamp(dist / max(effective_max, 1.0), 0.0, 1.0);
         float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
-        weight = jfa.z * falloff;
-    } else {
-        weight = 0.0;
+        jfa_weight = jfa.z * falloff;
     }
+    // Smooth blend: analytical controls where it's present, JFA fills the rest.
+    // The smoothstep prevents a hard seam at the analytical boundary.
+    float blend = smoothstep(0.0, 0.02, analytical_w);
+    float weight = mix(jfa_weight, max(analytical_w, jfa_weight), blend);
 
     if (weight <= 0.0) {
         o_color = vec4(0.0);
