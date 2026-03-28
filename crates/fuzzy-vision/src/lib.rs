@@ -255,11 +255,15 @@ precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
 uniform sampler2D u_jfa;
+uniform sampler2D u_analytical;  // original full-res weight texture
 uniform vec2 u_dims;
 uniform float u_max_distance;
 
 void main() {
-    // Bilinear interpolation from downsampled JFA (eliminates blocky 2x2 artifacts)
+    // Read analytical weight at full resolution (pixel-perfect boundary)
+    float analytical_w = texture(u_analytical, v_uv).r;
+
+    // Bilinear interpolation from downsampled JFA
     vec2 texel = 1.0 / u_dims;
     vec2 sp = v_uv * u_dims - 0.5;
     vec2 base = floor(sp) * texel + texel * 0.5;
@@ -270,16 +274,26 @@ void main() {
     vec4 j11 = texture(u_jfa, base + texel);
     vec4 jfa = mix(mix(j00, j10, f.x), mix(j01, j11, f.x), f.y);
 
-    if (jfa.z <= 0.0) {
+    // JFA-propagated weight with distance falloff
+    float jfa_weight = 0.0;
+    float ratio = 0.0;
+    if (jfa.z > 0.0) {
+        float dist = distance(v_uv * u_dims, jfa.xy * u_dims);
+        float effective_max = u_max_distance * jfa.z;
+        ratio = clamp(dist / max(effective_max, 1.0), 0.0, 1.0);
+        float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
+        jfa_weight = jfa.z * falloff;
+    }
+
+    // Hybrid: analytical weight gives pixel-perfect sharp boundaries,
+    // JFA provides smooth distance falloff beyond the analytical region.
+    // At the boundary, analytical dominates (no JFA aliasing).
+    float weight = max(analytical_w, jfa_weight);
+
+    if (weight <= 0.0) {
         o_color = vec4(0.0);
         return;
     }
-
-    float dist = distance(v_uv * u_dims, jfa.xy * u_dims);
-    float effective_max = u_max_distance * jfa.z;
-    float ratio = clamp(dist / max(effective_max, 1.0), 0.0, 1.0);
-    float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
-    float weight = jfa.z * falloff;
 
     o_color = vec4(jfa.xy, weight, ratio);
 }
@@ -571,6 +585,8 @@ impl JfaPipeline {
         scene_tex: glow::Texture,
         output_fbo: Option<glow::Framebuffer>,
     ) {
+        // Store weight_tex for the firmness shader's analytical hybrid
+        let analytical_weight_tex = weight_tex;
         let (fw, fh) = self.full_size;
         let (jw, jh) = self.jfa_size;
         if fw == 0 || fh == 0 { return; }
@@ -633,11 +649,15 @@ impl JfaPipeline {
             gl.use_program(Some(self.prog_firmness));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(jfa_result_tex));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(analytical_weight_tex));
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_jfa") {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
+            if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_analytical") {
+                gl.uniform_1_i32(Some(&loc), 1);
+            }
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_dims") {
-                // Use JFA dims since that's what the JFA texture is at
                 gl.uniform_2_f32(Some(&loc), jw as f32, jh as f32);
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_max_distance") {
@@ -648,7 +668,7 @@ impl JfaPipeline {
             // --- Stage 3.5: Kawase smooth on weight mask (removes JFA boundary artifacts) ---
             // Ping-pong firmness through blur_tex_b for 2 Kawase passes at increasing offsets
             {
-                let kawase_offsets = [0.5_f32, 1.0, 1.5];
+                let kawase_offsets = [0.75_f32]; // single gentle pass — hybrid handles the boundary
                 let mut src = self.firmness_tex;
                 for &offset in &kawase_offsets {
                     let dst_fbo = self.blur_fbo_b;
