@@ -127,6 +127,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     </div>
     <label>Min px/subdivision</label>
     <div class="sr"><input type="range" id="min-px-sub" min="1" max="16" value="2" step="1"><span class="v" id="min-px-sub-v">2</span></div>
+    <label>Atlas resolution (reload to apply)</label>
+    <div class="sr"><input type="range" id="atlas-exp" min="3" max="9" value="9" step="1"><span class="v" id="atlas-exp-v">9</span></div>
   </div>
 
   <div class="section">
@@ -286,40 +288,37 @@ function syncURL() {
     const p = new URLSearchParams();
     const set = (k, v, def) => { if (v !== def) p.set(k, v); };
     set('glb', currentGlb, PARAM_DEFAULTS.glb);
-    // Render mode
-    const activeMode = document.querySelector('#render-btns button.a');
-    set('mode', activeMode ? activeMode.dataset.v : 'pbr', PARAM_DEFAULTS.mode);
-    // Möbius
-    set('xform', currentXform, PARAM_DEFAULTS.xform);
-    set('mx', $('mx').value, PARAM_DEFAULTS.mx);
-    set('my', $('my').value, PARAM_DEFAULTS.my);
-    set('mz', $('mz').value, PARAM_DEFAULTS.mz);
-    set('mr', $('mr').value, PARAM_DEFAULTS.mr);
-    // Selectors
-    set('env', $('envmap-sel').value, PARAM_DEFAULTS.env);
-    set('matcap', $('matcap-sel').value, PARAM_DEFAULTS.matcap);
-    // LOD
-    set('res', $('res').value, PARAM_DEFAULTS.res);
-    set('density', $('tess-density').value, PARAM_DEFAULTS.density);
-    set('atten', $('screen-atten-toggle').classList.contains('on') ? '1' : '0', PARAM_DEFAULTS.atten);
-    set('minpx', $('min-px-sub').value, PARAM_DEFAULTS.minpx);
-    // Animation
-    set('animate', animating ? '1' : '0', PARAM_DEFAULTS.animate);
+    // All signal-driven params — use peek() to avoid tracking
+    const ss = (k, sig, def, fmt) => { if (typeof sig !== 'undefined') set(k, fmt ? fmt(sig.peek()) : String(sig.peek()), def); };
+    ss('mode', renderMode, PARAM_DEFAULTS.mode);
+    ss('xform', mob?.xform, PARAM_DEFAULTS.xform);
+    ss('mx', mob?.mx, PARAM_DEFAULTS.mx);
+    ss('my', mob?.my, PARAM_DEFAULTS.my);
+    ss('mz', mob?.mz, PARAM_DEFAULTS.mz);
+    ss('mr', mob?.mr, PARAM_DEFAULTS.mr);
+    ss('env', envMap, PARAM_DEFAULTS.env);
+    ss('matcap', matcap, PARAM_DEFAULTS.matcap);
+    ss('res', lod?.res, PARAM_DEFAULTS.res);
+    ss('density', lod?.density, PARAM_DEFAULTS.density);
+    if (typeof lod !== 'undefined') set('atten', lod.screenAtten.peek() ? '1' : '0', PARAM_DEFAULTS.atten);
+    ss('minpx', lod?.minPx, PARAM_DEFAULTS.minpx);
+    ss('atlas', lod?.atlas, PARAM_DEFAULTS.atlas);
+    if (typeof animating_sig !== 'undefined') set('animate', animating_sig.peek() ? '1' : '0', PARAM_DEFAULTS.animate);
     set('anim', $('anim-sel').value, PARAM_DEFAULTS.anim);
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
     set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
     set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
-    // Fuzzy Vision — read from signals
+    // Fuzzy Vision
     if (typeof fz !== 'undefined') {
       set('fuzzy', fz.enabled.peek() ? '1' : '0', PARAM_DEFAULTS.fuzzy);
-      set('fmode', String(fz.mode.peek()), PARAM_DEFAULTS.fmode);
-      set('fradius', String(fz.radius.peek()), PARAM_DEFAULTS.fradius);
-      set('fstr', String(fz.strength.peek()), PARAM_DEFAULTS.fstr);
-      set('ffocus', String(fz.focus.peek()), PARAM_DEFAULTS.ffocus);
-      set('fbw', String(fz.bandwidth.peek()), PARAM_DEFAULTS.fbw);
+      ss('fmode', fz.mode, PARAM_DEFAULTS.fmode);
+      ss('fradius', fz.radius, PARAM_DEFAULTS.fradius);
+      ss('fstr', fz.strength, PARAM_DEFAULTS.fstr);
+      ss('ffocus', fz.focus, PARAM_DEFAULTS.ffocus);
+      ss('fbw', fz.bandwidth, PARAM_DEFAULTS.fbw);
       set('fnorm', fz.normalize.peek() ? '1' : '0', PARAM_DEFAULTS.fnorm);
-      set('fqual', String(fz.quality.peek()), PARAM_DEFAULTS.fqual);
+      ss('fqual', fz.quality, PARAM_DEFAULTS.fqual);
     }
 
     const qs = p.toString();
@@ -330,44 +329,30 @@ function syncURL() {
 
 // Apply URL params to controls on load
 function applyParams(params) {
-  // Render mode
-  const modeBtn = document.querySelector(`#render-btns button[data-v="${params.mode}"]`);
-  if (modeBtn) {
-    document.querySelectorAll('#render-btns button').forEach(b => b.classList.remove('a'));
-    modeBtn.classList.add('a');
+  // All signal-driven controls: just set signals, effects handle the rest
+  if (typeof renderMode !== 'undefined') renderMode.set(params.mode || 'pbr');
+  if (typeof mob !== 'undefined') {
+    mob.xform.set(params.xform || 'identity');
+    mob.mx.set(parseInt(params.mx) || 5);
+    mob.my.set(parseInt(params.my) || 0);
+    mob.mz.set(parseInt(params.mz) || 0);
+    mob.mr.set(parseInt(params.mr) || 20);
   }
-  // Möbius
-  currentXform = params.xform;
-  const xBtn = document.querySelector(`#xform-btns button[data-v="${params.xform}"]`);
-  if (xBtn) {
-    document.querySelectorAll('#xform-btns button').forEach(b => b.classList.remove('a'));
-    xBtn.classList.add('a');
+  if (typeof envMap !== 'undefined') envMap.set(params.env || 'rosendal_plains_1_1k');
+  if (typeof matcap !== 'undefined') matcap.set(params.matcap || 'citric-acid');
+  if (typeof lod !== 'undefined') {
+    lod.res.set(parseInt(params.res) || 0);
+    lod.density.set(parseInt(params.density) || 100);
+    lod.screenAtten.set(params.atten !== '0');
+    lod.minPx.set(parseInt(params.minpx) || 2);
+    lod.atlas.set(parseInt(params.atlas) || 9);
   }
-  $('mx').value = params.mx; $('mx-v').textContent = (parseInt(params.mx)/10).toFixed(1);
-  $('my').value = params.my; $('my-v').textContent = (parseInt(params.my)/10).toFixed(1);
-  $('mz').value = params.mz; $('mz-v').textContent = (parseInt(params.mz)/10).toFixed(1);
-  $('mr').value = params.mr; $('mr-v').textContent = (parseInt(params.mr)/10).toFixed(1);
-  // Selectors
-  $('envmap-sel').value = params.env;
-  $('matcap-sel').value = params.matcap;
-  // LOD
-  $('res').value = params.res;
-  $('res-v').textContent = params.res === '0' ? 'auto' : (1 << parseInt(params.res));
-  $('tess-density').value = params.density;
-  $('tess-density-v').textContent = params.density;
-  $('min-px-sub').value = params.minpx;
-  $('min-px-sub-v').textContent = params.minpx;
-  if (params.atten === '1') $('screen-atten-toggle').classList.add('on');
-  else $('screen-atten-toggle').classList.remove('on');
-  // Animation
-  animating = params.animate !== '0';
-  $('animate-toggle').classList.toggle('on', animating);
-  // Camera
+  if (typeof animating_sig !== 'undefined') animating_sig.set(params.animate !== '0');
+  // Camera (not signal-driven yet)
   zoom = parseFloat(params.zoom) || 3;
   rotX = parseFloat(params.rx) || 0.3;
   rotY = parseFloat(params.ry) || 0.5;
-  // Fuzzy Vision — set signals (effects auto-update DOM + WASM)
-  // Signals are defined later but applyParams runs after they exist
+  // Fuzzy Vision
   if (typeof fz !== 'undefined') {
     fz.enabled.set(params.fuzzy === '1');
     fz.mode.set(params.fmode || '0');
@@ -381,7 +366,6 @@ function applyParams(params) {
 }
 
 let currentGlb = PARAM_DEFAULTS.glb;
-let currentXform = 'identity';
 
 // --- Sidebar toggle ---
 $('sidebar-toggle').onclick = () => {
@@ -486,35 +470,27 @@ canvas.addEventListener('touchmove', e => {
 }, { passive: true });
 
 // --- Button group helper ---
-function setupBtnGroup(id, cb) {
-  for (const b of document.querySelectorAll(`#${id} button`))
-    b.onclick = () => {
-      document.querySelectorAll(`#${id} button`).forEach(x => x.classList.remove('a'));
-      b.classList.add('a');
-      cb(b.dataset.v);
-    };
-}
+// --- Render mode (signal) ---
+const renderMode = signal('pbr', 'mode');
+bindBtnGroup('render-btns', renderMode);
+effect(() => { mr_setRenderMode(renderMode.get()); syncURL(); });
 
-// --- Render mode ---
-setupBtnGroup('render-btns', v => { mr_setRenderMode(v); syncURL(); });
+// --- Möbius transform (signals) ---
+const mob = {
+  xform: signal('identity', 'xform'),
+  mx: signal(5, 'mx'), my: signal(0, 'my'), mz: signal(0, 'mz'), mr: signal(20, 'mr'),
+};
+bindBtnGroup('xform-btns', mob.xform);
+bindSlider('mx', mob.mx, v => (v/10).toFixed(1));
+bindSlider('my', mob.my, v => (v/10).toFixed(1));
+bindSlider('mz', mob.mz, v => (v/10).toFixed(1));
+bindSlider('mr', mob.mr, v => (v/10).toFixed(1));
 
-// --- Mobius transform ---
-function getMobiusParams() {
-  const x = parseInt($('mx').value) / 10;
-  const y = parseInt($('my').value) / 10;
-  const z = parseInt($('mz').value) / 10;
-  const r = parseInt($('mr').value) / 10;
-  return { type: currentXform, x, y, z, r };
-}
-
-// Compute Möbius quaternion coefficients matching the prototype.
-// Quaternion layout: [w, x, y, z]. Möbius: f(q) = (a*q + b) / (c*q + d)
 function computeMobius(type, cx, cy, cz, r) {
   if (type === 'sphere_reflection' && r > 0.01) {
     const csq = cx*cx + cy*cy + cz*cz;
     return { a: [0,cx,cy,cz], b: [csq-r*r,0,0,0], c: [1,0,0,0], d: [0,-cx,-cy,-cz] };
   }
-  // Identity for all other types (rotation/translation not yet implemented)
   return { a: [1,0,0,0], b: [0,0,0,0], c: [0,0,0,0], d: [1,0,0,0] };
 }
 
@@ -522,17 +498,6 @@ let currentMobius = null;
 let stretchRange = { min: 0.5, max: 0.5 };
 let stretchSamplePending = false;
 
-function updateMobius() {
-  const p = getMobiusParams();
-  const m = computeMobius(p.type, p.x, p.y, p.z, p.r);
-  const mob = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
-  currentMobius = mob;
-  mr_setMobius(mob);
-  debouncedLodRecompute();
-  sampleStretchAsync();
-}
-
-// Async CPU-side stretch sampling on worker — doesn't block rendering
 function sampleStretchAsync() {
   if (stretchSamplePending || !currentMobius || !meshInfo) return;
   const instances = meshInfo.instances;
@@ -545,22 +510,27 @@ function sampleStretchAsync() {
     numFaces,
   }).then(resp => {
     stretchSamplePending = false;
-    if (resp.min != null && resp.max != null) {
-      stretchRange = { min: resp.min, max: resp.max };
-    }
+    if (resp.min != null && resp.max != null) stretchRange = { min: resp.min, max: resp.max };
   }).catch(() => { stretchSamplePending = false; });
 }
 
-setupBtnGroup('xform-btns', v => { currentXform = v; updateMobius(); syncURL(); });
-for (const id of ['mx','my','mz','mr']) {
-  $(id).addEventListener('input', () => {
-    $(`${id}-v`).textContent = (parseInt($(id).value)/10).toFixed(1);
-    updateMobius();
-    syncURL();
-  });
-}
+// Möbius effect: any param change → recompute + push to WASM
+effect(() => {
+  const type = mob.xform.get();
+  const m = computeMobius(type, mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10, mob.mr.get()/10);
+  const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
+  currentMobius = flat;
+  mr_setMobius(flat);
+  debouncedLodRecompute();
+  sampleStretchAsync();
+  syncURL();
+});
 
 // --- Animation controls ---
+const animating_sig = signal(true, 'animate');
+bindToggle('animate-toggle', animating_sig);
+effect(() => { animating = animating_sig.get(); syncURL(); });
+
 $('anim-sel').addEventListener('change', async () => {
   const idx = parseInt($('anim-sel').value);
   if (idx < 0 || !meshInfo) return;
@@ -581,7 +551,6 @@ $('anim-sel').addEventListener('change', async () => {
   timeSlider.value = result.time_min;
   $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
 
-  // Re-fetch skinning data and instances for new animation
   const skinResp = await workerCall('get_skinning_data', {});
   const skinData = skinResp.skinData;
   const nv = skinData ? (skinData.num_vertices || 0) : 0;
@@ -617,13 +586,6 @@ $('time').addEventListener('input', () => {
   if (!animating) animTime = parseFloat($('time').value);
 });
 
-// Auto-animate toggle
-$('animate-toggle').addEventListener('click', () => {
-  animating = !animating;
-  $('animate-toggle').classList.toggle('on', animating);
-  syncURL();
-});
-
 // --- Fuzzy Vision controls (signal-driven) ---
 const fz = {
   enabled:   signal(false, 'fuzzy'),
@@ -654,37 +616,42 @@ effect(() => {
   syncURL();
 });
 
-// --- LOD controls ---
+// --- LOD controls (signals) ---
+const lod = {
+  res: signal(0, 'res'),
+  density: signal(100, 'density'),
+  screenAtten: signal(true, 'atten'),
+  minPx: signal(2, 'minpx'),
+  atlas: signal(9, 'atlas'),
+};
+bindSlider('res', lod.res, v => v === 0 ? 'auto' : String(1 << v));
+bindSlider('tess-density', lod.density, v => v.toFixed(0));
+bindSlider('min-px-sub', lod.minPx, v => v.toFixed(0));
+bindToggle('screen-atten-toggle', lod.screenAtten);
+bindSlider('atlas-exp', lod.atlas, v => v.toFixed(0));
+
 function getTessParams() {
-  const on = $('screen-atten-toggle').classList.contains('on');
-  return {
-    density: parseInt($('tess-density').value),
-    screen_atten: on,
-    minPx: on ? parseInt($('min-px-sub').value) : 0,
-  };
+  const on = lod.screenAtten.peek();
+  return { density: lod.density.peek(), screen_atten: on, minPx: on ? lod.minPx.peek() : 0 };
 }
 
-$('res').addEventListener('input', () => {
-  const v = parseInt($('res').value);
-  $('res-v').textContent = v === 0 ? 'auto' : (1 << v);
-  debouncedLodRecompute(); syncURL();
-});
-$('tess-density').addEventListener('input', () => {
-  $('tess-density-v').textContent = $('tess-density').value;
-  debouncedLodRecompute(); syncURL();
-});
-$('min-px-sub').addEventListener('input', () => {
-  $('min-px-sub-v').textContent = $('min-px-sub').value;
-  debouncedLodRecompute(); syncURL();
-});
-$('screen-atten-toggle').addEventListener('click', () => {
-  $('screen-atten-toggle').classList.toggle('on');
+effect(() => {
+  // Touch all LOD signals to track them
+  lod.res.get(); lod.density.get(); lod.screenAtten.get(); lod.minPx.get();
   debouncedLodRecompute(); syncURL();
 });
 
-// --- Environment/Matcap selectors (stubs — textures loaded in prototype, not yet in Rust) ---
-$('envmap-sel').addEventListener('change', () => {
-  const v = $('envmap-sel').value;
+// --- Environment/Matcap selectors ---
+const envMap = signal('rosendal_plains_1_1k', 'env');
+const matcap = signal('citric-acid', 'matcap');
+// Bind selects manually (not slider/toggle)
+$('envmap-sel').value = envMap.peek();
+$('envmap-sel').addEventListener('change', () => envMap.set($('envmap-sel').value));
+$('matcap-sel').value = matcap.peek();
+$('matcap-sel').addEventListener('change', () => matcap.set($('matcap-sel').value));
+
+effect(() => {
+  const v = envMap.get();
   if (v === 'procedural') {
     const pf = generateProceduralEnvFaces(64);
     const ir = generateProceduralEnvFaces(16);
@@ -694,11 +661,7 @@ $('envmap-sel').addEventListener('change', () => {
   }
   syncURL();
 });
-$('matcap-sel').addEventListener('change', () => {
-  // TODO: load matcap texture in Rust renderer
-  console.log('Matcap selected:', $('matcap-sel').value);
-  syncURL();
-});
+effect(() => { matcap.get(); syncURL(); });
 
 // --- IndexedDB for persisting dropped GLB files ---
 const IDB_NAME = 'hyperscope', IDB_STORE = 'glb';
