@@ -485,7 +485,7 @@ canvas.addEventListener('touchmove', e => {
 // --- Render mode (signal) ---
 const renderMode = signal('pbr', 'mode');
 bindBtnGroup('render-btns', renderMode);
-effect(() => { const v = renderMode.get(); if (phaseReady('wasm')) mr_setRenderMode(v); syncURL(); });
+effect(() => { const v = renderMode.get(); if (phases.wasm?.done?.get()) mr_setRenderMode(v); syncURL(); });
 
 // --- Möbius transform (signals) ---
 const mob = {
@@ -532,7 +532,7 @@ effect(() => {
   const m = computeMobius(type, mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10, mob.mr.get()/10);
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
-  if (!phaseReady('wasm')) return;
+  if (!phases.wasm?.done?.get()) return;
   mr_setMobius(flat);
   debouncedLodRecompute();
   sampleStretchAsync();
@@ -624,7 +624,7 @@ effect(() => {
   const mode = parseInt(fz.mode.get());
   const focus = fz.focus.get() / 100.0;
   const bw = fz.bandwidth.get() / 100.0;
-  if (phaseReady('wasm')) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
+  if (phases.wasm?.done?.get()) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
     mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get());
   syncURL();
 });
@@ -650,7 +650,7 @@ function getTessParams() {
 
 effect(() => {
   lod.res.get(); lod.density.get(); lod.screenAtten.get(); lod.minPx.get();
-  if (phaseReady('wasm')) debouncedLodRecompute();
+  if (phases.wasm?.done?.get()) debouncedLodRecompute();
   syncURL();
 });
 
@@ -664,7 +664,7 @@ $('matcap-sel').addEventListener('change', () => matcap.set($('matcap-sel').valu
 
 effect(() => {
   const v = envMap.get();
-  if (!phaseReady('wasm')) return;
+  if (!phases.wasm?.done?.get()) return;
   if (v === 'procedural') {
     const pf = generateProceduralEnvFaces(64);
     const ir = generateProceduralEnvFaces(16);
