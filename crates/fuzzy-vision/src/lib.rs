@@ -433,6 +433,7 @@ uniform sampler2D u_weight;
 uniform float u_blur_radius;
 uniform float u_blur_strength;
 uniform vec2 u_dir; // normalized direction * texel_size
+uniform float u_is_final; // >0.5 = apply mix() crossfade, else full blur
 
 const int MAX_RADIUS = 48;
 
@@ -458,7 +459,13 @@ void main() {
     }
 
     vec4 blurred = color_sum / max(weight_sum, 0.001);
-    o_color = mix(original, blurred, blur_weight);
+    // Only final pass applies the sharp/blur crossfade.
+    // Intermediate passes do full blur — prevents compound halo at boundaries.
+    if (u_is_final > 0.5) {
+        o_color = mix(original, blurred, blur_weight);
+    } else {
+        o_color = blurred;
+    }
 }
 "#;
 
@@ -1064,6 +1071,9 @@ impl JfaPipeline {
                     }
                     if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_dir") {
                         gl.uniform_2_f32(Some(&loc), dx * tx, dy * ty);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_is_final") {
+                        gl.uniform_1_f32(Some(&loc), if is_last { 1.0 } else { 0.0 });
                     }
                     gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
