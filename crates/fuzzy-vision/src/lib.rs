@@ -138,31 +138,24 @@ void main() {
 }
 "#;
 
-/// Normalize stretch using min/max from reduction pass, then apply Gaussian band.
+/// Normalize stretch using min/max from reduction pass, pass through for JFA.
+/// Focus applied post-JFA in firmness shader.
 const FS_WEIGHT_CONFORMAL_NORM: &str = r#"#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
 uniform sampler2D u_stretch;
 uniform sampler2D u_minmax;   // 1x1 texture: R=global min, G=global max
-uniform float u_focus;
-uniform float u_bandwidth;
 
 void main() {
     float raw = texture(u_stretch, v_uv).r;
-    // Read global min/max from 1x1 reduction result
     vec4 mm = texture(u_minmax, vec2(0.5));
     float mn = mm.r;
     float mx = mm.g;
-    // Normalize to [0,1] using actual range
     float range = max(mx - mn, 0.001);
     float normalized = (raw - mn) / range;
-    // Inverted Gaussian: focused band is SHARP, everything else blurred
-    float diff = normalized - u_focus;
-    float bw = max(u_bandwidth, 0.01);
-    float sharpness = exp(-(diff * diff) / (2.0 * bw * bw));
-    float w = 1.0 - sharpness;
-    o_color = vec4(w, 0.0, 0.0, 1.0);
+    // Pass normalized value through — focus applied post-JFA in firmness
+    o_color = vec4(normalized, 0.0, 0.0, 1.0);
 }
 "#;
 
@@ -1152,12 +1145,6 @@ impl JfaPipeline {
                 if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_minmax") {
                     gl.uniform_1_i32(Some(&loc), 1);
                 }
-                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_focus") {
-                    gl.uniform_1_f32(Some(&loc), self.config.focus);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_bandwidth") {
-                    gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
-                }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             } else if self.config.normalize {
                 // --- Normalized mode: GPU reduce to find min/max ---
@@ -1210,12 +1197,6 @@ impl JfaPipeline {
                 }
                 if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_minmax") {
                     gl.uniform_1_i32(Some(&loc), 1);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_focus") {
-                    gl.uniform_1_f32(Some(&loc), self.config.focus);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal_norm, "u_bandwidth") {
-                    gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             } else {
