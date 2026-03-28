@@ -42,6 +42,8 @@ pub struct JfaConfig {
     pub downsample: u32,
     /// Number of blur passes (1=standard, 2-3=smoother, higher=silkier)
     pub blur_passes: u32,
+    /// Skip JFA entirely — use analytical weight directly (no distance falloff)
+    pub skip_jfa: bool,
     /// Kawase weight smoothing: 0 = disabled, >0 = number of passes
     pub kawase_passes: u32,
     /// Kawase offset per pass
@@ -66,6 +68,7 @@ impl Default for JfaConfig {
             blur_strength: 1.0,
             downsample: 1, // full-res JFA eliminates 2x2 block artifacts
             blur_passes: 2,
+            skip_jfa: false,
             kawase_passes: 0,
             kawase_offset: 0.75,
             precision: Precision::Float16,
@@ -694,6 +697,20 @@ impl JfaPipeline {
             }
             let smoothed_weight = self.smoothed_tex;
 
+            if self.config.skip_jfa {
+                // Direct mode: use smoothed analytical weight as firmness, skip JFA entirely.
+                // Copy smoothed weight to firmness texture (passthrough, preserving R as weight).
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.firmness_fbo));
+                gl.viewport(0, 0, fw, fh);
+                gl.use_program(Some(self.prog_passthrough));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(smoothed_weight));
+                if let Some(loc) = gl.get_uniform_location(self.prog_passthrough, "u_tex") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            } else {
+
             // --- Stage 1: Init seeds from weight texture (into ping, at JFA resolution) ---
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.ping_fbo));
             gl.viewport(0, 0, jw, jh);
@@ -762,6 +779,8 @@ impl JfaPipeline {
                 gl.uniform_1_f32(Some(&loc), self.config.max_distance / self.config.downsample as f32);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+            } // end if !skip_jfa
 
             // --- Stage 3.5: Optional Kawase weight smoothing ---
             if self.config.kawase_passes > 0 {
