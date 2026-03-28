@@ -215,7 +215,7 @@ pub fn upload_model_to_compute() -> bool {
                 compute.upload_skinning_texture(gl, &ji_default, &jw_default);
             }
 
-            // Upload morph deltas if present
+            // Upload morph deltas — always upload even if empty, to clear stale data
             if !combined.morph_targets.is_empty() {
                 let num_targets = combined.morph_targets.len();
                 let ns = data.norm_scale as f32;
@@ -232,6 +232,9 @@ pub fn upload_model_to_compute() -> bool {
                     }
                 }
                 compute.upload_morph_deltas(gl, &deltas, nv, num_targets);
+            } else {
+                // No morph targets: upload a 1x1 zero texture to clear stale data
+                compute.upload_morph_deltas(gl, &[0.0; 3], 1, 1);
             }
 
             // Upload atlas LUT and cache keys for readback mapping

@@ -102,7 +102,9 @@ fn skin_position(pos: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
     return skinned;
 }
 
-// Apply skeletal skinning to a normal (mat3 upper-left of joint matrix).
+// Apply skeletal skinning to a normal using the cofactor (adjugate) of the 3x3.
+// cofactor(M) = det(M) * inverse_transpose(M), which correctly handles non-uniform scale.
+// For pure rotation (det=1), this is equivalent to M itself.
 fn skin_normal(nrm: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
     if joints.num_joints <= 0 { return nrm; }
 
@@ -118,7 +120,14 @@ fn skin_normal(nrm: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
         let idx = i32(ji[k]);
         if idx >= joints.num_joints { continue; }
         let m = joints.matrices[idx];
-        skinned = skinned + w * (mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz) * nrm);
+        let m3 = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
+        // Cofactor matrix: each row is cross product of the other two columns
+        let cof = mat3x3<f32>(
+            cross(m3[1], m3[2]),
+            cross(m3[2], m3[0]),
+            cross(m3[0], m3[1]),
+        );
+        skinned = skinned + w * (cof * nrm);
     }
     let l = length(skinned);
     if l > 1e-8 { return skinned / l; }
