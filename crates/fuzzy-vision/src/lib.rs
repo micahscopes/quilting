@@ -64,7 +64,7 @@ impl Default for JfaConfig {
         JfaConfig {
             max_distance: 64.0,
             blur_strength: 1.0,
-            downsample: 2,
+            downsample: 1, // full-res JFA eliminates 2x2 block artifacts
             blur_passes: 2,
             kawase_passes: 0,
             kawase_offset: 0.75,
@@ -308,6 +308,42 @@ void main() {
 }
 "#;
 
+/// Pre-blur the analytical weight — smooths per-face scallops at the boundary.
+/// Separable 5-tap Gaussian, radius ~2px. Applied to weight texture before JFA init.
+const FS_WEIGHT_PREBLUR_H: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_weight;
+
+void main() {
+    vec2 texel = vec2(1.0 / float(textureSize(u_weight, 0).x), 0.0);
+    float w0 = texture(u_weight, v_uv - 2.0 * texel).r * 0.06;
+    float w1 = texture(u_weight, v_uv - texel).r * 0.24;
+    float w2 = texture(u_weight, v_uv).r * 0.40;
+    float w3 = texture(u_weight, v_uv + texel).r * 0.24;
+    float w4 = texture(u_weight, v_uv + 2.0 * texel).r * 0.06;
+    o_color = vec4(w0 + w1 + w2 + w3 + w4, 0.0, 0.0, 1.0);
+}
+"#;
+
+const FS_WEIGHT_PREBLUR_V: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_weight;
+
+void main() {
+    vec2 texel = vec2(0.0, 1.0 / float(textureSize(u_weight, 0).y));
+    float w0 = texture(u_weight, v_uv - 2.0 * texel).r * 0.06;
+    float w1 = texture(u_weight, v_uv - texel).r * 0.24;
+    float w2 = texture(u_weight, v_uv).r * 0.40;
+    float w3 = texture(u_weight, v_uv + texel).r * 0.24;
+    float w4 = texture(u_weight, v_uv + 2.0 * texel).r * 0.06;
+    o_color = vec4(w0 + w1 + w2 + w3 + w4, 0.0, 0.0, 1.0);
+}
+"#;
+
 /// Kawase blur on the weight mask — smooths JFA boundaries cheaply (5 taps).
 const FS_WEIGHT_KAWASE: &str = r#"#version 300 es
 precision highp float;
@@ -422,6 +458,8 @@ pub struct JfaPipeline {
     prog_reduce_minmax: glow::Program,
     prog_weight_conformal_norm: glow::Program,
     prog_weight_kawase: glow::Program,
+    prog_preblur_h: glow::Program,
+    prog_preblur_v: glow::Program,
     vao: glow::VertexArray,
     // Reduction chain for min/max (ping-pong, shrinks to 1x1)
     reduce_fbo_a: glow::Framebuffer,
@@ -519,6 +557,8 @@ impl JfaPipeline {
         let prog_reduce_minmax = link_program(gl, VS_FULLSCREEN, FS_REDUCE_MINMAX)?;
         let prog_weight_conformal_norm = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL_NORM)?;
         let prog_weight_kawase = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?;
+        let prog_preblur_h = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_PREBLUR_H)?;
+        let prog_preblur_v = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_PREBLUR_V)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
@@ -539,6 +579,7 @@ impl JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
+            prog_preblur_h, prog_preblur_v,
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
@@ -605,12 +646,36 @@ impl JfaPipeline {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
 
+            // --- Stage 0.5: Pre-blur analytical weight to smooth per-face scallops ---
+            // Separable 5-tap Gaussian (~2px radius) on the weight texture.
+            // H pass: weight_tex → blur_tex_b
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo_b));
+            gl.viewport(0, 0, fw, fh);
+            gl.use_program(Some(self.prog_preblur_h));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(weight_tex));
+            if let Some(loc) = gl.get_uniform_location(self.prog_preblur_h, "u_weight") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            // V pass: blur_tex_b → blur_tex (reuse as smoothed weight)
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo));
+            gl.use_program(Some(self.prog_preblur_v));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
+            if let Some(loc) = gl.get_uniform_location(self.prog_preblur_v, "u_weight") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            // Use smoothed weight for JFA init and firmness analytical read
+            let smoothed_weight = self.blur_tex;
+
             // --- Stage 1: Init seeds from weight texture (into ping, at JFA resolution) ---
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.ping_fbo));
             gl.viewport(0, 0, jw, jh);
             gl.use_program(Some(self.prog_init));
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(weight_tex));
+            gl.bind_texture(glow::TEXTURE_2D, Some(smoothed_weight));
             if let Some(loc) = gl.get_uniform_location(self.prog_init, "u_weight") {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
@@ -659,7 +724,7 @@ impl JfaPipeline {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(jfa_result_tex));
             gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(analytical_weight_tex));
+            gl.bind_texture(glow::TEXTURE_2D, Some(smoothed_weight));
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_jfa") {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
@@ -928,6 +993,29 @@ impl JfaPipeline {
         if fw == 0 || fh == 0 { return; }
         self.generate_radial_weight(gl, weight_fbo, fw, fh);
         self.run(gl, weight_tex, scene_tex, output_fbo);
+    }
+
+    /// Debug: blit an internal texture to the output framebuffer for visualization.
+    /// debug_stage: 0=analytical weight, 1=smoothed weight, 2=JFA result, 3=firmness
+    pub fn debug_blit(
+        &self,
+        gl: &glow::Context,
+        debug_stage: u32,
+        output_fbo: Option<glow::Framebuffer>,
+    ) {
+        let (fw, fh) = self.full_size;
+        if fw == 0 || fh == 0 { return; }
+        // Source depends on stage — we'll just blit firmness_tex for now
+        let src_fbo = match debug_stage {
+            3 => Some(self.firmness_fbo),
+            _ => Some(self.blur_fbo), // smoothed weight lives here after preblur
+        };
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, src_fbo);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, output_fbo);
+            gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
     }
 
     /// Access the weight mask texture (firmness output) for external use.
