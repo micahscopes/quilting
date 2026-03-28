@@ -177,13 +177,14 @@ import init, {
 } from './pkg/quilting_wasm.js';
 
 const $ = id => document.getElementById(id);
-let wasmReady = false; // Set to true after mr_init succeeds
 
 // ============================================================
-// Minimal signal system — declarative reactive state for UI controls.
-// signal(value) → {get(), set(v)} — auto-tracks dependencies in effects.
-// computed(fn) → {get()} — memoized derived value.
-// effect(fn) → runs fn whenever dependencies change.
+// Signal system with async support.
+// signal(value) → sync reactive state
+// effect(fn) → runs fn when dependencies change (sync)
+// asyncEffect(fn) → like effect but fn can be async; re-runs on dep change
+// gate(sig) → returns a promise that resolves when sig becomes truthy
+// phase(name, deps, fn) → async lifecycle phase: waits for deps, runs fn, resolves
 // ============================================================
 let _activeEffect = null;
 function signal(value, name) {
@@ -192,12 +193,11 @@ function signal(value, name) {
     name,
     get() { if (_activeEffect) subs.add(_activeEffect); return value; },
     set(v) { if (v !== value) { value = v; for (const fn of subs) fn(); } },
-    peek() { return value; }, // read without tracking
+    peek() { return value; },
   };
   return s;
 }
 function computed(fn) {
-  let cached, dirty = true;
   const c = signal(undefined);
   effect(() => { c.set(fn()); });
   return { get: () => c.get(), peek: () => c.peek() };
@@ -206,6 +206,51 @@ function effect(fn) {
   const run = () => { const prev = _activeEffect; _activeEffect = run; try { fn(); } finally { _activeEffect = prev; } };
   run();
 }
+// Async effect: re-runs when deps change, cancels previous run
+function asyncEffect(fn) {
+  let cancel = false;
+  effect(() => {
+    cancel = true; // cancel previous
+    cancel = false;
+    const token = { cancelled: false };
+    const prev = cancel;
+    fn(token).catch(e => { if (!token.cancelled) console.warn('asyncEffect error:', e); });
+  });
+}
+// Gate: resolves when signal becomes truthy
+function gate(sig) {
+  if (sig.peek()) return Promise.resolve(sig.peek());
+  return new Promise(resolve => {
+    const unsub = effect(() => {
+      const v = sig.get();
+      if (v) { resolve(v); }
+    });
+  });
+}
+// Lifecycle phase: async step that depends on other phases
+const phases = {};
+function phase(name, depNames, fn) {
+  const done = signal(false, `phase:${name}`);
+  const result = signal(null, `phase:${name}:result`);
+  phases[name] = { done, result };
+  (async () => {
+    // Wait for all dependency phases
+    for (const dep of depNames) {
+      if (!phases[dep]) { console.warn(`phase ${name}: unknown dep ${dep}`); continue; }
+      await gate(phases[dep].done);
+    }
+    try {
+      const r = await fn();
+      result.set(r);
+    } catch (e) {
+      console.error(`phase ${name} failed:`, e);
+    }
+    done.set(true);
+  })();
+  return { done, result };
+}
+// Check if a phase completed
+function phaseReady(name) { return phases[name]?.done?.peek() ?? false; }
 // Bind a signal to a DOM slider (bidirectional)
 function bindSlider(id, sig, displayFn) {
   const el = $(id);
@@ -474,7 +519,7 @@ canvas.addEventListener('touchmove', e => {
 // --- Render mode (signal) ---
 const renderMode = signal('pbr', 'mode');
 bindBtnGroup('render-btns', renderMode);
-effect(() => { const v = renderMode.get(); if (wasmReady) mr_setRenderMode(v); syncURL(); });
+effect(() => { const v = renderMode.get(); if (phaseReady('wasm')) mr_setRenderMode(v); syncURL(); });
 
 // --- Möbius transform (signals) ---
 const mob = {
@@ -521,7 +566,7 @@ effect(() => {
   const m = computeMobius(type, mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10, mob.mr.get()/10);
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
-  if (!wasmReady) return;
+  if (!phaseReady('wasm')) return;
   mr_setMobius(flat);
   debouncedLodRecompute();
   sampleStretchAsync();
@@ -613,7 +658,7 @@ effect(() => {
   const mode = parseInt(fz.mode.get());
   const focus = fz.focus.get() / 100.0;
   const bw = fz.bandwidth.get() / 100.0;
-  if (wasmReady) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
+  if (phaseReady('wasm')) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
     mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get());
   syncURL();
 });
@@ -639,7 +684,7 @@ function getTessParams() {
 
 effect(() => {
   lod.res.get(); lod.density.get(); lod.screenAtten.get(); lod.minPx.get();
-  if (wasmReady) debouncedLodRecompute();
+  if (phaseReady('wasm')) debouncedLodRecompute();
   syncURL();
 });
 
@@ -653,7 +698,7 @@ $('matcap-sel').addEventListener('change', () => matcap.set($('matcap-sel').valu
 
 effect(() => {
   const v = envMap.get();
-  if (!wasmReady) return;
+  if (!phaseReady('wasm')) return;
   if (v === 'procedural') {
     const pf = generateProceduralEnvFaces(64);
     const ir = generateProceduralEnvFaces(16);
@@ -1312,53 +1357,43 @@ const initParams = readParams();
 applyParams(initParams);
 currentGlb = initParams.glb;
 
-await init();
+// ============================================================
+// Lifecycle phases — explicit async dependency ordering.
+// Each phase waits for its deps before running.
+// ============================================================
 
-$('stats').textContent = 'Initializing renderer...';
-if (!mr_init('cv')) {
-  document.body.innerHTML = '<h1 style="color:#f85;padding:40px">Renderer init failed</h1>';
-  throw 'renderer init failed';
-}
-wasmReady = true;
+// Phase 1: Initialize WASM + renderer
+phase('wasm', [], async () => {
+  await init();
+  $('stats').textContent = 'Initializing renderer...';
+  if (!mr_init('cv')) throw 'renderer init failed';
+  applyParams(initParams);
+  initEnvMaps();
+});
 
-// Apply params — signals trigger effects now that wasmReady=true
-applyParams(initParams);
-initEnvMaps();
+// Phase 2: Initialize workers (depends on wasm for shader compilation)
+phase('workers', ['wasm'], async () => {
+  $('stats').textContent = `Starting ${ATLAS_WORKERS} workers...`;
+  await Promise.all(workers.map((_, i) => workerCallN(i, 'init', {})));
+});
 
-$('stats').textContent = `Starting ${ATLAS_WORKERS} workers for atlas build...`;
-await Promise.all(workers.map((_, i) => workerCallN(i, 'init', {})));
+// Phase 3: Build tessellation atlas (depends on workers)
+phase('atlas', ['workers'], async () => {
+  const ATLAS_EXP = parseInt(initParams.atlas);
+  const levels = [];
+  for (let i = 0; i <= ATLAS_EXP; i++) levels.push(1 << i);
+  const allTriples = [];
+  const seen = new Set();
+  for (const a of levels)
+    for (const b of levels)
+      for (const c of levels) {
+        const s = [a,b,c].sort((x,y)=>x-y);
+        const k = s.join(',');
+        if (!seen.has(k)) { seen.add(k); allTriples.push(s); }
+      }
+  allTriples.sort((a,b) => (b[2]+b[1]+b[0]) - (a[2]+a[1]+a[0]));
 
-const ATLAS_EXP = parseInt(initParams.atlas);
-const levels = [];
-for (let i = 0; i <= ATLAS_EXP; i++) levels.push(1 << i);
-const allTriples = [];
-const seen = new Set();
-for (const a of levels)
-  for (const b of levels)
-    for (const c of levels) {
-      const s = [a,b,c].sort((x,y)=>x-y);
-      const k = s.join(',');
-      if (!seen.has(k)) { seen.add(k); allTriples.push(s); }
-    }
-allTriples.sort((a,b) => (b[2]+b[1]+b[0]) - (a[2]+a[1]+a[0]));
-
-$('stats').textContent = `Building ${allTriples.length} patches across ${ATLAS_WORKERS} workers...`;
-
-// Start glTF fetch + parse in parallel with atlas build (they're independent)
-let modelPromise = null;
-try {
-  let buf = await idbGet(currentGlb);
-  if (!buf) {
-    const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
-    const resp = await fetch(url);
-    if (resp.ok) buf = await resp.arrayBuffer();
-  }
-  if (buf) {
-    modelPromise = workerCall('load_gltf_data', { bytes: buf }).then(r => ({ result: r.result, filename: currentGlb, buffer: buf }));
-  }
-} catch (e) { console.warn(`Prefetch ${currentGlb}:`, e); }
-
-{
+  $('stats').textContent = `Building ${allTriples.length} patches across ${ATLAS_WORKERS} workers...`;
   let qi = 0;
   function dispatchNext(wi) {
     if (qi >= allTriples.length) return Promise.resolve();
@@ -1366,10 +1401,8 @@ try {
     return workerCallN(wi, 'generate_single', { a, b, c }).then(() => dispatchNext(wi));
   }
   await Promise.all(workers.map((_, i) => dispatchNext(i)));
-}
 
-// Export patches from all workers in parallel (skip merge — each worker has its subset)
-{
+  // Export patches from all workers in parallel
   const allPatchResps = await Promise.all(
     workers.map((_, i) => workerCallN(i, 'export_patches', {}))
   );
@@ -1385,45 +1418,52 @@ try {
       mr_uploadTessPatch(key, bary, tris, new Uint32Array(lines));
     }
   }
-}
 
-// Merge atlas into worker 0 for runtime (glTF instance compute needs full atlas)
-if (ATLAS_WORKERS > 1) {
-  const subExports = await Promise.all(
-    workers.slice(1).map((_, i) => workerCallN(i + 1, 'export_atlas_bytes', {}))
-  );
-  for (const exp of subExports) await workerCallN(0, 'merge_atlas_bytes', { bytes: exp.bytes });
-}
+  // Merge atlas into worker 0 for runtime
+  if (ATLAS_WORKERS > 1) {
+    const subExports = await Promise.all(
+      workers.slice(1).map((_, i) => workerCallN(i + 1, 'export_atlas_bytes', {}))
+    );
+    for (const exp of subExports) await workerCallN(0, 'merge_atlas_bytes', { bytes: exp.bytes });
+  }
+  dropExtraWorkers();
+});
 
-dropExtraWorkers();
+// Phase 4: Load model (depends on workers, runs in parallel with atlas)
+phase('model', ['workers'], async () => {
+  let buf = await idbGet(currentGlb);
+  if (!buf) {
+    const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
+    const resp = await fetch(url);
+    if (resp.ok) buf = await resp.arrayBuffer();
+  }
+  if (!buf) return null;
+  const resp = await workerCall('load_gltf_data', { bytes: buf });
+  return { result: resp.result, filename: currentGlb };
+});
 
-$('stats').textContent = 'Atlas ready. Loading model...';
-requestAnimationFrame(frame);
-
-// Use the pre-fetched glTF result (parsed in parallel with atlas build)
-try {
-  if (modelPromise) {
-    const { result: resp, filename } = await modelPromise;
-    if (resp) {
-      // loadModel expects to call broadcastCall itself, but we already have the result.
-      // Feed the pre-parsed result directly into the upload pipeline.
-      meshInfo = resp;
-      await finishModelUpload(resp, filename);
-      const animIdx = parseInt(initParams.anim);
-      if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
-        $('anim-sel').value = animIdx;
-        $('anim-sel').dispatchEvent(new Event('change'));
-      }
-    } else {
-      $('stats').textContent = 'Drop a .glb file to load';
+// Phase 5: Upload model + start rendering (depends on atlas + model + wasm)
+phase('render', ['wasm', 'atlas', 'model'], async () => {
+  requestAnimationFrame(frame);
+  const modelData = phases.model.result.peek();
+  if (modelData && modelData.result) {
+    meshInfo = modelData.result;
+    await finishModelUpload(modelData.result, modelData.filename);
+    const animIdx = parseInt(initParams.anim);
+    if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
+      $('anim-sel').value = animIdx;
+      $('anim-sel').dispatchEvent(new Event('change'));
     }
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
   }
-} catch (e) {
-  console.warn(`Could not auto-load ${currentGlb}:`, e);
+});
+
+// Error handling for all phases
+(async () => { try { await gate(phases.render.done); } catch (e) {
+  console.warn(`Startup error:`, e);
   $('stats').textContent = 'Drop a .glb file to load';
-}
+} })();
 </script>
 </body>
 </html>
