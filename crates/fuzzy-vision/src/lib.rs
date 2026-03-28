@@ -163,24 +163,19 @@ void main() {
 }
 "#;
 
-/// Focused conformal weight: read raw stretch texture, apply Gaussian band selection.
-/// Focus and bandwidth are uniforms controlling which stretch band gets blurred.
+/// Conformal weight: pass raw stretch through for JFA propagation.
+/// Focus/bandwidth applied post-JFA in the firmness shader.
 const FS_WEIGHT_CONFORMAL: &str = r#"#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
 uniform sampler2D u_stretch;
-uniform float u_focus;     // 0.5 = neutral, 0 = squash, 1 = expand
-uniform float u_bandwidth; // width of Gaussian band (smaller = tighter)
 
 void main() {
-    float raw_stretch = texture(u_stretch, v_uv).r; // [0,1] via sigmoid
-    // Inverted Gaussian: focused band is SHARP, everything else blurred
-    float diff = raw_stretch - u_focus;
-    float bw = max(u_bandwidth, 0.01);
-    float sharpness = exp(-(diff * diff) / (2.0 * bw * bw));
-    float w = 1.0 - sharpness;
-    o_color = vec4(w, 0.0, 0.0, 1.0);
+    float raw_stretch = texture(u_stretch, v_uv).r;
+    // Pass raw stretch as weight — JFA propagates this stably.
+    // Focus band applied later in firmness shader.
+    o_color = vec4(raw_stretch, 0.0, 0.0, 1.0);
 }
 "#;
 
@@ -256,8 +251,9 @@ void main() {
 }
 "#;
 
-/// Firmness blend: apply distance-based falloff to JFA result.
-/// Converts raw JFA output to a smooth weight mask.
+/// Firmness blend: apply distance-based falloff AND focus/bandwidth post-JFA.
+/// JFA propagates raw stretch values. Focus band is applied HERE, not before JFA.
+/// This makes JFA stable regardless of focus settings.
 const FS_JFA_FIRMNESS: &str = r#"#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -265,9 +261,11 @@ out vec4 o_color;
 uniform sampler2D u_jfa;
 uniform vec2 u_dims;
 uniform float u_max_distance;
+uniform float u_focus;     // applied post-JFA
+uniform float u_bandwidth; // applied post-JFA
 
 void main() {
-    // Bilinear interpolation from JFA (handles downsample smoothly)
+    // Bilinear interpolation from JFA
     vec2 texel = 1.0 / u_dims;
     vec2 sp = v_uv * u_dims - 0.5;
     vec2 base = floor(sp) * texel + texel * 0.5;
@@ -278,21 +276,25 @@ void main() {
     vec4 j11 = texture(u_jfa, base + texel);
     vec4 jfa = mix(mix(j00, j10, f.x), mix(j01, j11, f.x), f.y);
 
-    // Simple JFA distance falloff — no analytical override
-    float weight = 0.0;
-    float ratio = 0.0;
-    if (jfa.z > 0.0) {
-        float dist = distance(v_uv * u_dims, jfa.xy * u_dims);
-        float effective_max = u_max_distance * jfa.z;
-        ratio = clamp(dist / max(effective_max, 1.0), 0.0, 1.0);
-        float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
-        weight = jfa.z * falloff;
-    }
-
-    if (weight <= 0.0) {
+    if (jfa.z <= 0.0) {
         o_color = vec4(0.0);
         return;
     }
+
+    // jfa.z = raw stretch value (propagated by JFA, NOT focus-applied)
+    // Apply focus/bandwidth HERE on the smooth propagated stretch
+    float stretch = jfa.z;
+    float diff = stretch - u_focus;
+    float bw = max(u_bandwidth, 0.01);
+    float sharpness = exp(-(diff * diff) / (2.0 * bw * bw));
+    float focus_weight = 1.0 - sharpness; // inverted: focused band is sharp
+
+    // Distance falloff from JFA seed
+    float dist = distance(v_uv * u_dims, jfa.xy * u_dims);
+    float effective_max = u_max_distance * focus_weight;
+    float ratio = clamp(dist / max(effective_max, 1.0), 0.0, 1.0);
+    float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
+    float weight = focus_weight * falloff;
 
     o_color = vec4(jfa.xy, weight, ratio);
 }
@@ -779,6 +781,12 @@ impl JfaPipeline {
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_max_distance") {
                 gl.uniform_1_f32(Some(&loc), self.config.max_distance / self.config.downsample as f32);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_focus") {
+                gl.uniform_1_f32(Some(&loc), self.config.focus);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_bandwidth") {
+                gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
