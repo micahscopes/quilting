@@ -367,29 +367,35 @@ void main() {
 }
 "#;
 
-/// Kawase-pyramid composite: blend between two pyramid levels per pixel weight.
-/// Gives smooth variable blur — each pixel picks its own blur amount.
+/// Kawase-pyramid composite: per-pixel level selection from 6 pyramid levels.
+/// Binds all 6 levels as separate samplers, selects pair per pixel, interpolates.
 const FS_KAWASE_COMPOSITE: &str = r#"#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
-uniform sampler2D u_level0; // sharpest (or original scene)
-uniform sampler2D u_level1; // next blurrier
+uniform sampler2D u_l0, u_l1, u_l2, u_l3, u_l4, u_l5;
 uniform sampler2D u_weight;
-uniform float u_lo_idx;     // which level u_level0 represents (0-based)
-uniform float u_num_levels; // total levels
 uniform float u_blur_strength;
+
+vec4 sampleLevel(int i) {
+    if (i <= 0) return texture(u_l0, v_uv);
+    if (i == 1) return texture(u_l1, v_uv);
+    if (i == 2) return texture(u_l2, v_uv);
+    if (i == 3) return texture(u_l3, v_uv);
+    if (i == 4) return texture(u_l4, v_uv);
+    return texture(u_l5, v_uv);
+}
 
 void main() {
     vec4 w = texture(u_weight, v_uv);
     float blur_weight = clamp(w.z * (1.0 - clamp(w.w, 0.0, 1.0)), 0.0, 1.0);
 
-    float target_level = blur_weight * u_blur_strength * u_num_levels;
-    float frac = clamp(target_level - u_lo_idx, 0.0, 1.0);
+    float target = blur_weight * u_blur_strength * 5.0; // 0..5 across 6 levels
+    int lo = int(floor(target));
+    int hi = min(lo + 1, 5);
+    float frac = fract(target);
 
-    vec4 sharp = texture(u_level0, v_uv);
-    vec4 blurry = texture(u_level1, v_uv);
-    o_color = mix(sharp, blurry, frac);
+    o_color = mix(sampleLevel(lo), sampleLevel(hi), frac);
 }
 "#;
 
@@ -1039,29 +1045,26 @@ impl JfaPipeline {
             // This is Dual Kawase's upsample path with weight modulation!
 
             // For now: just composite level0 and level[N-1] as a proof of concept.
+            // Composite: bind all 6 pyramid levels + weight, one-pass variable blur
             gl.bind_framebuffer(glow::FRAMEBUFFER, output_fbo);
             gl.viewport(0, 0, fw, fh);
             gl.use_program(Some(self.prog_kawase_composite));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[0]));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[NUM_PYRAMID_LEVELS - 1]));
-            gl.active_texture(glow::TEXTURE2);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_level0") {
-                gl.uniform_1_i32(Some(&loc), 0);
+            // Bind pyramid levels to units 0-5
+            for i in 0..NUM_PYRAMID_LEVELS {
+                gl.active_texture(glow::TEXTURE0 + i as u32);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[i]));
             }
-            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_level1") {
-                gl.uniform_1_i32(Some(&loc), 1);
+            // Weight at unit 6
+            gl.active_texture(glow::TEXTURE0 + 6);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+            let names = ["u_l0", "u_l1", "u_l2", "u_l3", "u_l4", "u_l5"];
+            for (i, name) in names.iter().enumerate() {
+                if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, name) {
+                    gl.uniform_1_i32(Some(&loc), i as i32);
+                }
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_weight") {
-                gl.uniform_1_i32(Some(&loc), 2);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_lo_idx") {
-                gl.uniform_1_f32(Some(&loc), 0.0);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_num_levels") {
-                gl.uniform_1_f32(Some(&loc), (NUM_PYRAMID_LEVELS - 1) as f32);
+                gl.uniform_1_i32(Some(&loc), 6);
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_blur_strength") {
                 gl.uniform_1_f32(Some(&loc), self.config.blur_strength);
