@@ -40,6 +40,8 @@ pub struct JfaConfig {
     pub blur_strength: f32,
     /// Downsample factor for JFA computation (e.g. 2 or 4)
     pub downsample: u32,
+    /// Number of blur passes (1=standard, 2-3=smoother, higher=silkier)
+    pub blur_passes: u32,
     /// Float precision for intermediate textures
     pub precision: Precision,
     /// Focus point in stretch space: 0.5 = neutral, 0 = max squash, 1 = max expand
@@ -59,6 +61,7 @@ impl Default for JfaConfig {
             max_distance: 64.0,
             blur_strength: 1.0,
             downsample: 2,
+            blur_passes: 2,
             precision: Precision::Float16,
             focus: 0.5,
             bandwidth: 0.3,
@@ -387,9 +390,11 @@ pub struct JfaPipeline {
     // Firmness output
     firmness_fbo: glow::Framebuffer,
     firmness_tex: glow::Texture,
-    // Blur intermediate
+    // Blur ping-pong
     blur_fbo: glow::Framebuffer,
     blur_tex: glow::Texture,
+    blur_fbo_b: glow::Framebuffer,
+    blur_tex_b: glow::Texture,
     // Current allocated size (downsampled for JFA, full for blur)
     jfa_size: (i32, i32),
     full_size: (i32, i32),
@@ -481,6 +486,7 @@ impl JfaPipeline {
         let (pong_fbo, pong_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
         let (firmness_fbo, firmness_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
         let (blur_fbo, blur_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
+        let (blur_fbo_b, blur_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
 
         Ok(JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
@@ -488,7 +494,7 @@ impl JfaPipeline {
             prog_reduce_minmax, prog_weight_conformal_norm,
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
-            firmness_fbo, firmness_tex, blur_fbo, blur_tex,
+            firmness_fbo, firmness_tex, blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
             jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
         })
     }
@@ -520,10 +526,12 @@ impl JfaPipeline {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
                 ext_format, ext_type, glow::PixelUnpackData::Slice(None));
-            // Resize blur intermediate (full res, RGBA8)
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
-                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            // Resize blur ping-pong (full res, RGBA8)
+            for tex in [self.blur_tex, self.blur_tex_b] {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
+                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            }
         }
     }
 
@@ -613,50 +621,64 @@ impl JfaPipeline {
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-            // --- Stage 4: Weighted Gaussian blur (separable H+V) ---
-            // H pass: scene → blur_tex
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo));
-            gl.viewport(0, 0, fw, fh);
-            gl.use_program(Some(self.prog_blur_h));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_scene") {
-                gl.uniform_1_i32(Some(&loc), 0);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_weight") {
-                gl.uniform_1_i32(Some(&loc), 1);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_blur_radius") {
-                gl.uniform_1_f32(Some(&loc), self.config.max_distance);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_blur_strength") {
-                gl.uniform_1_f32(Some(&loc), self.config.blur_strength);
-            }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            // --- Stage 4: Multi-pass weighted Gaussian blur (separable H+V) ---
+            // Each pass reads from the previous output, doubling effective kernel width.
+            // Pass 1: scene → blur_tex (H) → blur_tex_b (V)
+            // Pass 2: blur_tex_b → blur_tex (H) → blur_tex_b (V)
+            // ...
+            // Final V writes to output_fbo.
+            let num_passes = self.config.blur_passes.max(1);
+            let per_pass_strength = self.config.blur_strength / (num_passes as f32).sqrt();
 
-            // V pass: blur_tex → output
-            gl.bind_framebuffer(glow::FRAMEBUFFER, output_fbo);
-            gl.viewport(0, 0, fw, fh);
-            gl.use_program(Some(self.prog_blur_v));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_scene") {
-                gl.uniform_1_i32(Some(&loc), 0);
+            for pass in 0..num_passes {
+                let src = if pass == 0 { scene_tex } else { self.blur_tex_b };
+                let is_last = pass == num_passes - 1;
+
+                // H pass: src → blur_tex
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo));
+                gl.viewport(0, 0, fw, fh);
+                gl.use_program(Some(self.prog_blur_h));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(src));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_scene") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_weight") {
+                    gl.uniform_1_i32(Some(&loc), 1);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_blur_radius") {
+                    gl.uniform_1_f32(Some(&loc), self.config.max_distance);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_blur_strength") {
+                    gl.uniform_1_f32(Some(&loc), per_pass_strength);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                // V pass: blur_tex → blur_tex_b (or output on last pass)
+                let v_dst = if is_last { output_fbo } else { Some(self.blur_fbo_b) };
+                gl.bind_framebuffer(glow::FRAMEBUFFER, v_dst);
+                gl.viewport(0, 0, fw, fh);
+                gl.use_program(Some(self.prog_blur_v));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_scene") {
+                    gl.uniform_1_i32(Some(&loc), 0);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_weight") {
+                    gl.uniform_1_i32(Some(&loc), 1);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_blur_radius") {
+                    gl.uniform_1_f32(Some(&loc), self.config.max_distance);
+                }
+                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_blur_strength") {
+                    gl.uniform_1_f32(Some(&loc), per_pass_strength);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_weight") {
-                gl.uniform_1_i32(Some(&loc), 1);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_blur_radius") {
-                gl.uniform_1_f32(Some(&loc), self.config.max_distance);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_blur_strength") {
-                gl.uniform_1_f32(Some(&loc), self.config.blur_strength);
-            }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             // Restore state
             gl.enable(glow::DEPTH_TEST);
@@ -868,11 +890,11 @@ impl JfaPipeline {
             gl.delete_program(self.prog_reduce_minmax);
             gl.delete_program(self.prog_weight_conformal_norm);
             gl.delete_vertex_array(self.vao);
-            for tex in [self.ping_tex, self.pong_tex, self.firmness_tex, self.blur_tex,
+            for tex in [self.ping_tex, self.pong_tex, self.firmness_tex, self.blur_tex, self.blur_tex_b,
                         self.reduce_tex_a, self.reduce_tex_b] {
                 gl.delete_texture(tex);
             }
-            for fbo in [self.ping_fbo, self.pong_fbo, self.firmness_fbo, self.blur_fbo,
+            for fbo in [self.ping_fbo, self.pong_fbo, self.firmness_fbo, self.blur_fbo, self.blur_fbo_b,
                         self.reduce_fbo_a, self.reduce_fbo_b] {
                 gl.delete_framebuffer(fbo);
             }
