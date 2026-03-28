@@ -308,6 +308,15 @@ void main() {
 }
 "#;
 
+/// Simple passthrough — draws a texture to the screen (avoids blit issues with multisampled FB).
+const FS_PASSTHROUGH: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_tex;
+void main() { o_color = texture(u_tex, v_uv); }
+"#;
+
 /// Pre-blur the analytical weight — smooths per-face scallops at the boundary.
 /// Separable 5-tap Gaussian, radius ~2px. Applied to weight texture before JFA init.
 const FS_WEIGHT_PREBLUR_H: &str = r#"#version 300 es
@@ -460,6 +469,7 @@ pub struct JfaPipeline {
     prog_weight_kawase: glow::Program,
     prog_preblur_h: glow::Program,
     prog_preblur_v: glow::Program,
+    prog_passthrough: glow::Program,
     vao: glow::VertexArray,
     // Reduction chain for min/max (ping-pong, shrinks to 1x1)
     reduce_fbo_a: glow::Framebuffer,
@@ -559,6 +569,7 @@ impl JfaPipeline {
         let prog_weight_kawase = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?;
         let prog_preblur_h = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_PREBLUR_H)?;
         let prog_preblur_v = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_PREBLUR_V)?;
+        let prog_passthrough = link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
@@ -579,7 +590,7 @@ impl JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
-            prog_preblur_h, prog_preblur_v,
+            prog_preblur_h, prog_preblur_v, prog_passthrough,
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
@@ -995,8 +1006,8 @@ impl JfaPipeline {
         self.run(gl, weight_tex, scene_tex, output_fbo);
     }
 
-    /// Debug: blit an internal texture to the output framebuffer for visualization.
-    /// 1=smoothed weight (pre-JFA), 2=JFA ping/pong result, 3=firmness mask
+    /// Debug: draw an internal texture to the output framebuffer for visualization.
+    /// 1=smoothed weight (pre-JFA), 2=JFA result, 3=firmness mask
     pub fn debug_blit(
         &self,
         gl: &glow::Context,
@@ -1004,19 +1015,27 @@ impl JfaPipeline {
         output_fbo: Option<glow::Framebuffer>,
     ) {
         let (fw, fh) = self.full_size;
-        let (jw, jh) = self.jfa_size;
         if fw == 0 || fh == 0 { return; }
-        let (src_fbo, sw, sh) = match debug_stage {
-            1 => (Some(self.blur_fbo), fw, fh),           // smoothed weight
-            2 => (Some(self.ping_fbo), jw, jh),           // JFA result (may be in ping or pong)
-            3 => (Some(self.firmness_fbo), fw, fh),       // firmness
+        let tex = match debug_stage {
+            1 => self.blur_tex,      // smoothed weight
+            2 => self.ping_tex,      // JFA result
+            3 => self.firmness_tex,  // firmness
             _ => return,
         };
         unsafe {
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, src_fbo);
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, output_fbo);
-            gl.blit_framebuffer(0, 0, sw, sh, 0, 0, fw, fh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, output_fbo);
+            gl.viewport(0, 0, fw, fh);
+            gl.disable(glow::DEPTH_TEST);
+            gl.bind_vertex_array(Some(self.vao));
+            gl.use_program(Some(self.prog_passthrough));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            if let Some(loc) = gl.get_uniform_location(self.prog_passthrough, "u_tex") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.enable(glow::DEPTH_TEST);
+            gl.bind_vertex_array(None);
         }
     }
 
