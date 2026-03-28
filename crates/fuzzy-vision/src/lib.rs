@@ -264,15 +264,11 @@ precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
 uniform sampler2D u_jfa;
-uniform sampler2D u_analytical;  // original full-res weight texture
 uniform vec2 u_dims;
 uniform float u_max_distance;
 
 void main() {
-    // Read analytical weight at full resolution (pixel-perfect boundary)
-    float analytical_w = texture(u_analytical, v_uv).r;
-
-    // Bilinear interpolation from downsampled JFA
+    // Bilinear interpolation from JFA (handles downsample smoothly)
     vec2 texel = 1.0 / u_dims;
     vec2 sp = v_uv * u_dims - 0.5;
     vec2 base = floor(sp) * texel + texel * 0.5;
@@ -283,22 +279,16 @@ void main() {
     vec4 j11 = texture(u_jfa, base + texel);
     vec4 jfa = mix(mix(j00, j10, f.x), mix(j01, j11, f.x), f.y);
 
-    // Hybrid boundary: smooth blend between analytical and JFA.
-    // Analytical dominates where strong, JFA provides falloff where analytical fades.
-    // smoothstep blend prevents hard threshold artifacts.
-    float jfa_weight = 0.0;
+    // Simple JFA distance falloff — no analytical override
+    float weight = 0.0;
     float ratio = 0.0;
     if (jfa.z > 0.0) {
         float dist = distance(v_uv * u_dims, jfa.xy * u_dims);
         float effective_max = u_max_distance * jfa.z;
         ratio = clamp(dist / max(effective_max, 1.0), 0.0, 1.0);
         float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
-        jfa_weight = jfa.z * falloff;
+        weight = jfa.z * falloff;
     }
-    // Smooth blend: analytical controls where it's present, JFA fills the rest.
-    // The smoothstep prevents a hard seam at the analytical boundary.
-    float blend = smoothstep(0.0, 0.02, analytical_w);
-    float weight = mix(jfa_weight, max(analytical_w, jfa_weight), blend);
 
     if (weight <= 0.0) {
         o_color = vec4(0.0);
@@ -748,6 +738,24 @@ impl JfaPipeline {
                 }
                 if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_max_distance") {
                     gl.uniform_1_f32(Some(&loc), self.config.max_distance / self.config.downsample as f32);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                read_from_ping = !read_from_ping;
+            }
+
+            // JFA+2: extra step=1 cleanup passes to fix boundary artifacts.
+            // These catch seed assignment errors that the main passes miss.
+            for _ in 0..2 {
+                let (src_tex, dst_fbo) = if read_from_ping {
+                    (self.ping_tex, self.pong_fbo)
+                } else {
+                    (self.pong_tex, self.ping_fbo)
+                };
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
+                if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_step") {
+                    gl.uniform_1_i32(Some(&loc), 1);
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
                 read_from_ping = !read_from_ping;
