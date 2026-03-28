@@ -66,7 +66,7 @@ impl Default for JfaConfig {
         JfaConfig {
             max_distance: 64.0,
             blur_strength: 1.0,
-            downsample: 1, // full-res JFA eliminates 2x2 block artifacts
+            downsample: 2, // half-res JFA + bilinear upsample in firmness
             blur_passes: 2,
             use_mip_blur: false, // Gaussian pyramid or mip blur (experimental)
             kawase_passes: 0,
