@@ -165,10 +165,6 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" value="15"><span class="v" id="fuzzy-bw-v">0.15</span></div>
     <label>Quality (blur passes)</label>
     <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="2"><span class="v" id="fuzzy-quality-v">2</span></div>
-    <div class="toggle-row">
-      <div class="toggle" id="fuzzy-skipjfa-toggle"></div>
-      <span class="toggle-label">Skip JFA (analytical only)</span>
-    </div>
     <label>Mask smooth (kawase passes)</label>
     <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="0"><span class="v" id="fuzzy-kawase-v">0</span></div>
     <label>Mask smooth offset</label>
@@ -634,7 +630,6 @@ const fz = {
   quality:   signal(2, 'fqual'),
   kawase:    signal(0, 'fkaw'),
   kawaseOff: signal(8, 'fkoff'),
-  skipJfa: signal(false, 'fskipjfa'),
 };
 bindToggle('fuzzy-toggle', fz.enabled);
 bindBtnGroup('fuzzy-mode-btns', fz.mode);
@@ -646,7 +641,6 @@ bindToggle('fuzzy-norm-toggle', fz.normalize);
 bindSlider('fuzzy-quality', fz.quality, v => v.toFixed(0));
 bindSlider('fuzzy-kawase', fz.kawase, v => v.toFixed(0));
 bindSlider('fuzzy-kawase-off', fz.kawaseOff, v => (v / 10).toFixed(2));
-bindToggle('fuzzy-skipjfa-toggle', fz.skipJfa);
 
 // Single effect: any fuzzy signal change → push to WASM + sync URL
 effect(() => {
@@ -655,7 +649,7 @@ effect(() => {
   const bw = fz.bandwidth.get() / 100.0;
   if (wasmOk.get()) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
     mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get(),
-    fz.kawase.get(), fz.kawaseOff.get() / 10.0, fz.skipJfa.get());
+    fz.kawase.get(), fz.kawaseOff.get() / 10.0);
   syncURL();
 });
 
@@ -735,7 +729,6 @@ applyParams = function(params) {
   fz.quality.set(parseInt(params.fqual) || 2);
   fz.kawase.set(parseInt(params.fkaw) || 0);
   fz.kawaseOff.set(parseInt(params.fkoff) || 8);
-  fz.skipJfa.set(params.fskipjfa === '1');
 };
 
 // --- IndexedDB for persisting dropped GLB files ---
