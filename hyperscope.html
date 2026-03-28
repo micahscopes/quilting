@@ -1061,7 +1061,7 @@ async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
   try {
-    const m = computeMobius(currentXform, ...['mx','my','mz','mr'].map(id => parseInt($(id).value)/10));
+    const m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10);
     const mob = [...m.a, ...m.b, ...m.c, ...m.d];
     const w = canvas.width, h = canvas.height;
     const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
