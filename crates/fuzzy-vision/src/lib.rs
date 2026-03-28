@@ -422,9 +422,9 @@ void main() {
 }
 "#;
 
-/// Weighted Gaussian blur — horizontal pass.
-/// Blur radius varies per-pixel based on the weight mask.
-const FS_BLUR_H: &str = r#"#version 300 es
+/// Directional Gaussian blur — arbitrary angle via u_dir uniform.
+/// Used for hex blur: 3 passes at 0°, 60°, 120° for near-circular blur.
+const FS_BLUR_DIR: &str = r#"#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
@@ -432,6 +432,7 @@ uniform sampler2D u_scene;
 uniform sampler2D u_weight;
 uniform float u_blur_radius;
 uniform float u_blur_strength;
+uniform vec2 u_dir; // normalized direction * texel_size
 
 const int MAX_RADIUS = 48;
 
@@ -445,63 +446,15 @@ void main() {
     float effective_radius = u_blur_radius * blur_weight * u_blur_strength;
     float sigma = max(effective_radius / 2.0, 0.001);
     int radius = min(max(int(ceil(effective_radius)), 1), MAX_RADIUS);
-    float texel = 1.0 / float(textureSize(u_scene, 0).x);
 
     vec4 color_sum = vec4(0.0);
     float weight_sum = 0.0;
-    for (int x = -radius; x <= radius; x++) {
-        float d = float(abs(x));
+    for (int i = -radius; i <= radius; i++) {
+        float d = float(abs(i));
         float gw = exp(-(d * d) / (2.0 * sigma * sigma));
-        vec2 uv = clamp(vec2(v_uv.x + float(x) * texel, v_uv.y), vec2(0.0), vec2(1.0));
-        // Weight-aware: modulate each tap by neighbor's blur weight
-        // Sharp neighbors (weight≈0) contribute less, preventing halo bleeding
-        vec4 nw = texture(u_weight, uv);
-        float neighbor_w = clamp(nw.z * (1.0 - clamp(nw.w, 0.0, 1.0)), 0.0, 1.0);
-        float tap_w = gw * max(neighbor_w, 0.05); // floor prevents zero-weight gaps
-        color_sum += texture(u_scene, uv) * tap_w;
-        weight_sum += tap_w;
-    }
-
-    vec4 blurred = color_sum / max(weight_sum, 0.001);
-    o_color = mix(original, blurred, blur_weight);
-}
-"#;
-
-/// Weighted Gaussian blur — vertical pass.
-const FS_BLUR_V: &str = r#"#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 o_color;
-uniform sampler2D u_scene;
-uniform sampler2D u_weight;
-uniform float u_blur_radius;
-uniform float u_blur_strength;
-
-const int MAX_RADIUS = 48;
-
-void main() {
-    vec4 w = texture(u_weight, v_uv);
-    float blur_weight = clamp(w.z * (1.0 - clamp(w.w, 0.0, 1.0)), 0.0, 1.0);
-    vec4 original = texture(u_scene, v_uv);
-
-    if (u_blur_strength <= 0.001) { o_color = original; return; }
-
-    float effective_radius = u_blur_radius * blur_weight * u_blur_strength;
-    float sigma = max(effective_radius / 2.0, 0.001);
-    int radius = min(max(int(ceil(effective_radius)), 1), MAX_RADIUS);
-    float texel = 1.0 / float(textureSize(u_scene, 0).y);
-
-    vec4 color_sum = vec4(0.0);
-    float weight_sum = 0.0;
-    for (int y = -radius; y <= radius; y++) {
-        float d = float(abs(y));
-        float gw = exp(-(d * d) / (2.0 * sigma * sigma));
-        vec2 uv = clamp(vec2(v_uv.x, v_uv.y + float(y) * texel), vec2(0.0), vec2(1.0));
-        vec4 nw = texture(u_weight, uv);
-        float neighbor_w = clamp(nw.z * (1.0 - clamp(nw.w, 0.0, 1.0)), 0.0, 1.0);
-        float tap_w = gw * max(neighbor_w, 0.05);
-        color_sum += texture(u_scene, uv) * tap_w;
-        weight_sum += tap_w;
+        vec2 uv = clamp(v_uv + float(i) * u_dir, vec2(0.0), vec2(1.0));
+        color_sum += texture(u_scene, uv) * gw;
+        weight_sum += gw;
     }
 
     vec4 blurred = color_sum / max(weight_sum, 0.001);
@@ -514,8 +467,9 @@ pub struct JfaPipeline {
     prog_init: glow::Program,
     prog_step: glow::Program,
     prog_firmness: glow::Program,
-    prog_blur_h: glow::Program,
-    prog_blur_v: glow::Program,
+    prog_blur_h: glow::Program, // legacy, unused
+    prog_blur_v: glow::Program, // legacy, unused
+    prog_blur_dir: glow::Program,
     prog_weight_radial: glow::Program,
     prog_weight_conformal: glow::Program,
     prog_reduce_minmax: glow::Program,
@@ -622,8 +576,9 @@ impl JfaPipeline {
         let prog_init = link_program(gl, VS_FULLSCREEN, FS_JFA_INIT)?;
         let prog_step = link_program(gl, VS_FULLSCREEN, FS_JFA_STEP)?;
         let prog_firmness = link_program(gl, VS_FULLSCREEN, FS_JFA_FIRMNESS)?;
-        let prog_blur_h = link_program(gl, VS_FULLSCREEN, FS_BLUR_H)?;
-        let prog_blur_v = link_program(gl, VS_FULLSCREEN, FS_BLUR_V)?;
+        let prog_blur_h = link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?; // legacy name, uses directional
+        let prog_blur_v = link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?; // legacy name, uses directional
+        let prog_blur_dir = link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?;
         let prog_weight_radial = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?;
         let prog_weight_conformal = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?;
         let prog_reduce_minmax = link_program(gl, VS_FULLSCREEN, FS_REDUCE_MINMAX)?;
@@ -655,6 +610,7 @@ impl JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
+            prog_blur_dir,
             prog_passthrough, prog_mip_composite, prog_gauss_down,
             prog_kawase_down, prog_kawase_composite,
             pyramid_tex: Vec::new(), pyramid_fbo: Vec::new(), pyramid_sizes: Vec::new(),
@@ -1063,92 +1019,59 @@ impl JfaPipeline {
             // This is Dual Kawase's upsample path with weight modulation!
 
             // For now: just composite level0 and level[N-1] as a proof of concept.
-            // Composite: bind all 6 pyramid levels + weight, one-pass variable blur
-            gl.bind_framebuffer(glow::FRAMEBUFFER, output_fbo);
-            gl.viewport(0, 0, fw, fh);
-            gl.use_program(Some(self.prog_kawase_composite));
-            // Bind pyramid levels to units 0-5
-            for i in 0..NUM_PYRAMID_LEVELS {
-                gl.active_texture(glow::TEXTURE0 + i as u32);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[i]));
-            }
-            // Weight at unit 6
-            gl.active_texture(glow::TEXTURE0 + 6);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-            let names = ["u_l0", "u_l1", "u_l2", "u_l3", "u_l4", "u_l5"];
-            for (i, name) in names.iter().enumerate() {
-                if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, name) {
-                    gl.uniform_1_i32(Some(&loc), i as i32);
-                }
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_weight") {
-                gl.uniform_1_i32(Some(&loc), 6);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_kawase_composite, "u_blur_strength") {
-                gl.uniform_1_f32(Some(&loc), self.config.blur_strength);
-            }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-            // Skip old Gaussian path
-            if false {
-            // Each pass reads from the previous output, doubling effective kernel width.
-            // Pass 1: scene → blur_tex (H) → blur_tex_b (V)
-            // Pass 2: blur_tex_b → blur_tex (H) → blur_tex_b (V)
-            // ...
-            // Final V writes to output_fbo.
+            // --- Hex blur: 3 directional Gaussian passes at 0°, 60°, 120° ---
+            // Near-circular blur with no axis-aligned artifacts.
+            // Each pass reads previous output, compounds the blur.
+            let hex_angles: [(f32, f32); 3] = [
+                (1.0, 0.0),                            // 0°
+                (0.5, 0.866),                           // 60° (cos60, sin60)
+                (-0.5, 0.866),                          // 120° (cos120, sin120)
+            ];
             let num_passes = self.config.blur_passes.max(1);
-            let per_pass_strength = self.config.blur_strength / (num_passes as f32).sqrt();
+            let per_pass_strength = self.config.blur_strength / (num_passes as f32 * 3.0).sqrt();
+            let texel = vec![1.0 / fw as f32, 1.0 / fh as f32];
+
+            gl.use_program(Some(self.prog_blur_dir));
 
             for pass in 0..num_passes {
-                let src = if pass == 0 { scene_tex } else { self.blur_tex_b };
-                let is_last = pass == num_passes - 1;
+                for (angle_idx, &(dx, dy)) in hex_angles.iter().enumerate() {
+                    let src = if pass == 0 && angle_idx == 0 { scene_tex }
+                              else { self.blur_tex_b };
+                    let is_last = pass == num_passes - 1 && angle_idx == 2;
+                    let dst = if is_last { output_fbo } else { Some(self.blur_fbo) };
 
-                // H pass: src → blur_tex
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo));
-                gl.viewport(0, 0, fw, fh);
-                gl.use_program(Some(self.prog_blur_h));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(src));
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_scene") {
-                    gl.uniform_1_i32(Some(&loc), 0);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_weight") {
-                    gl.uniform_1_i32(Some(&loc), 1);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_blur_radius") {
-                    gl.uniform_1_f32(Some(&loc), self.config.max_distance);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_h, "u_blur_strength") {
-                    gl.uniform_1_f32(Some(&loc), per_pass_strength);
-                }
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, dst);
+                    gl.viewport(0, 0, fw, fh);
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(src));
+                    gl.active_texture(glow::TEXTURE1);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_scene") {
+                        gl.uniform_1_i32(Some(&loc), 0);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_weight") {
+                        gl.uniform_1_i32(Some(&loc), 1);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_radius") {
+                        gl.uniform_1_f32(Some(&loc), self.config.max_distance);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_strength") {
+                        gl.uniform_1_f32(Some(&loc), per_pass_strength);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_dir") {
+                        gl.uniform_2_f32(Some(&loc), dx * texel[0], dy * texel[1]);
+                    }
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-                // V pass: blur_tex → blur_tex_b (or output on last pass)
-                let v_dst = if is_last { output_fbo } else { Some(self.blur_fbo_b) };
-                gl.bind_framebuffer(glow::FRAMEBUFFER, v_dst);
-                gl.viewport(0, 0, fw, fh);
-                gl.use_program(Some(self.prog_blur_v));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex));
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_scene") {
-                    gl.uniform_1_i32(Some(&loc), 0);
+                    // After each sub-pass (except last), copy result to blur_tex_b for next read
+                    if !is_last {
+                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.blur_fbo));
+                        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.blur_fbo_b));
+                        gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh,
+                            glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                    }
                 }
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_weight") {
-                    gl.uniform_1_i32(Some(&loc), 1);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_blur_radius") {
-                    gl.uniform_1_f32(Some(&loc), self.config.max_distance);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_blur_v, "u_blur_strength") {
-                    gl.uniform_1_f32(Some(&loc), per_pass_strength);
-                }
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
-            } // end if false (old Gaussian)
             } // end if !use_mip_blur
 
             // Restore state
