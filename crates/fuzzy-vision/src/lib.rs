@@ -259,8 +259,16 @@ uniform vec2 u_dims;
 uniform float u_max_distance;
 
 void main() {
-    ivec2 coords = ivec2(v_uv * u_dims);
-    vec4 jfa = texelFetch(u_jfa, coords, 0);
+    // Bilinear interpolation from downsampled JFA (eliminates blocky 2x2 artifacts)
+    vec2 texel = 1.0 / u_dims;
+    vec2 sp = v_uv * u_dims - 0.5;
+    vec2 base = floor(sp) * texel + texel * 0.5;
+    vec2 f = fract(sp);
+    vec4 j00 = texture(u_jfa, base);
+    vec4 j10 = texture(u_jfa, base + vec2(texel.x, 0.0));
+    vec4 j01 = texture(u_jfa, base + vec2(0.0, texel.y));
+    vec4 j11 = texture(u_jfa, base + texel);
+    vec4 jfa = mix(mix(j00, j10, f.x), mix(j01, j11, f.x), f.y);
 
     if (jfa.z <= 0.0) {
         o_color = vec4(0.0);
@@ -273,7 +281,6 @@ void main() {
     float falloff = 1.0 - smoothstep(0.0, 1.0, ratio);
     float weight = jfa.z * falloff;
 
-    // Output: RG=seed_uv, B=attenuated weight, A=distance ratio
     o_color = vec4(jfa.xy, weight, ratio);
 }
 "#;
@@ -293,32 +300,28 @@ const int MAX_RADIUS = 48;
 
 void main() {
     vec4 w = texture(u_weight, v_uv);
-    float blur_weight = w.z * (1.0 - clamp(w.w, 0.0, 1.0));
+    float blur_weight = clamp(w.z * (1.0 - clamp(w.w, 0.0, 1.0)), 0.0, 1.0);
     vec4 original = texture(u_scene, v_uv);
 
-    if (blur_weight <= 0.001 || u_blur_strength <= 0.001) {
-        o_color = original;
-        return;
-    }
+    if (u_blur_strength <= 0.001) { o_color = original; return; }
 
     float effective_radius = u_blur_radius * blur_weight * u_blur_strength;
     float sigma = max(effective_radius / 2.0, 0.001);
-    int radius = min(int(ceil(effective_radius)), MAX_RADIUS);
+    int radius = min(max(int(ceil(effective_radius)), 1), MAX_RADIUS);
     float texel = 1.0 / float(textureSize(u_scene, 0).x);
 
     vec4 color_sum = vec4(0.0);
     float weight_sum = 0.0;
-
     for (int x = -radius; x <= radius; x++) {
         float d = float(abs(x));
         float gw = exp(-(d * d) / (2.0 * sigma * sigma));
-        vec2 uv = vec2(v_uv.x + float(x) * texel, v_uv.y);
-        uv = clamp(uv, vec2(0.0), vec2(1.0));
+        vec2 uv = clamp(vec2(v_uv.x + float(x) * texel, v_uv.y), vec2(0.0), vec2(1.0));
         color_sum += texture(u_scene, uv) * gw;
         weight_sum += gw;
     }
 
-    o_color = color_sum / max(weight_sum, 0.001);
+    vec4 blurred = color_sum / max(weight_sum, 0.001);
+    o_color = mix(original, blurred, blur_weight);
 }
 "#;
 
@@ -336,32 +339,28 @@ const int MAX_RADIUS = 48;
 
 void main() {
     vec4 w = texture(u_weight, v_uv);
-    float blur_weight = w.z * (1.0 - clamp(w.w, 0.0, 1.0));
+    float blur_weight = clamp(w.z * (1.0 - clamp(w.w, 0.0, 1.0)), 0.0, 1.0);
     vec4 original = texture(u_scene, v_uv);
 
-    if (blur_weight <= 0.001 || u_blur_strength <= 0.001) {
-        o_color = original;
-        return;
-    }
+    if (u_blur_strength <= 0.001) { o_color = original; return; }
 
     float effective_radius = u_blur_radius * blur_weight * u_blur_strength;
     float sigma = max(effective_radius / 2.0, 0.001);
-    int radius = min(int(ceil(effective_radius)), MAX_RADIUS);
+    int radius = min(max(int(ceil(effective_radius)), 1), MAX_RADIUS);
     float texel = 1.0 / float(textureSize(u_scene, 0).y);
 
     vec4 color_sum = vec4(0.0);
     float weight_sum = 0.0;
-
     for (int y = -radius; y <= radius; y++) {
         float d = float(abs(y));
         float gw = exp(-(d * d) / (2.0 * sigma * sigma));
-        vec2 uv = vec2(v_uv.x, v_uv.y + float(y) * texel);
-        uv = clamp(uv, vec2(0.0), vec2(1.0));
+        vec2 uv = clamp(vec2(v_uv.x, v_uv.y + float(y) * texel), vec2(0.0), vec2(1.0));
         color_sum += texture(u_scene, uv) * gw;
         weight_sum += gw;
     }
 
-    o_color = color_sum / max(weight_sum, 0.001);
+    vec4 blurred = color_sum / max(weight_sum, 0.001);
+    o_color = mix(original, blurred, blur_weight);
 }
 "#;
 
