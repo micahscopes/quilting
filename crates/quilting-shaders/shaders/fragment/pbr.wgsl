@@ -172,7 +172,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         var unlit_color = base.rgb;
         // Gamma correction (base is already linear from sRGB conversion above)
         unlit_color = pow(unlit_color, vec3<f32>(1.0 / 2.2));
-        return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
+        return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, clamp(-in.position_vs.z / 10.0, 0.0, 1.0), 0.0, 1.0));
     }
 
     // --- Metallic / Roughness ---
@@ -238,9 +238,9 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         let dbg = n * 0.5 + 0.5;
         // Tint back-faces slightly red so winding issues are visible
         if !front_facing {
-            return PbrOutput(vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
+            return PbrOutput(vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade), vec4<f32>(in.mobius_stretch, clamp(-in.position_vs.z / 10.0, 0.0, 1.0), 0.0, 1.0));
         }
-        return PbrOutput(vec4<f32>(dbg, in.fade), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
+        return PbrOutput(vec4<f32>(dbg, in.fade), vec4<f32>(in.mobius_stretch, clamp(-in.position_vs.z / 10.0, 0.0, 1.0), 0.0, 1.0));
     }
 
     // --- KHR_materials_specular: modify F0 before BRDF ---
@@ -429,5 +429,5 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
 
-    return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, 0.0, 0.0, 1.0));
+    return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, clamp(-in.position_vs.z / 10.0, 0.0, 1.0), 0.0, 1.0));
 }

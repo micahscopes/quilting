@@ -163,19 +163,28 @@ void main() {
 }
 "#;
 
-/// Conformal weight: pass raw stretch through for JFA propagation.
-/// Focus/bandwidth applied post-JFA in the firmness shader.
+/// Conformal/DoF weight: select signal for JFA based on mode.
+/// Mode 0 = DoF (depth), Mode 1 = Conformal (stretch), Mode 2 = Hybrid (max).
 const FS_WEIGHT_CONFORMAL: &str = r#"#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
-uniform sampler2D u_stretch;
+uniform sampler2D u_stretch; // MRT: R=stretch, G=depth
+uniform float u_mode; // 0=dof, 1=conformal, 2=hybrid
 
 void main() {
-    float raw_stretch = texture(u_stretch, v_uv).r;
-    // Pass raw stretch as weight — JFA propagates this stably.
-    // Focus band applied later in firmness shader.
-    o_color = vec4(raw_stretch, 0.0, 0.0, 1.0);
+    vec4 data = texture(u_stretch, v_uv);
+    float stretch = data.r;
+    float depth = data.g;
+    float w;
+    if (u_mode < 0.5) {
+        w = depth;           // DoF: use depth directly (dense, every pixel)
+    } else if (u_mode < 1.5) {
+        w = stretch;         // Conformal: use stretch (sparse, needs JFA)
+    } else {
+        w = max(stretch, depth); // Hybrid: both signals
+    }
+    o_color = vec4(w, 0.0, 0.0, 1.0);
 }
 "#;
 
@@ -1216,11 +1225,11 @@ impl JfaPipeline {
                 if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_stretch") {
                     gl.uniform_1_i32(Some(&loc), 0);
                 }
-                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_focus") {
-                    gl.uniform_1_f32(Some(&loc), self.config.focus);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_bandwidth") {
-                    gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
+                // Mode: 0=DoF(depth), 1=Conformal(stretch), 2=Hybrid(max)
+                // Map from fuzzy_mode in config: fmode=0→radial(not here), fmode=1→conformal, etc.
+                // For now, pass mode from a new config field
+                if let Some(loc) = gl.get_uniform_location(self.prog_weight_conformal, "u_mode") {
+                    gl.uniform_1_f32(Some(&loc), 1.0); // TODO: wire to config
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
