@@ -1020,30 +1020,35 @@ impl JfaPipeline {
 
             // For now: just composite level0 and level[N-1] as a proof of concept.
             // --- Hex blur: 3 directional Gaussian passes at 0°, 60°, 120° ---
-            // Near-circular blur with no axis-aligned artifacts.
-            // Each pass reads previous output, compounds the blur.
-            let hex_angles: [(f32, f32); 3] = [
-                (1.0, 0.0),                            // 0°
-                (0.5, 0.866),                           // 60° (cos60, sin60)
-                (-0.5, 0.866),                          // 120° (cos120, sin120)
+            let hex_dirs: [(f32, f32); 3] = [
+                (1.0, 0.0),      // 0°
+                (0.5, 0.866),    // 60°
+                (-0.5, 0.866),   // 120°
             ];
             let num_passes = self.config.blur_passes.max(1);
             let per_pass_strength = self.config.blur_strength / (num_passes as f32 * 3.0).sqrt();
-            let texel = vec![1.0 / fw as f32, 1.0 / fh as f32];
+            let tx = 1.0 / fw as f32;
+            let ty = 1.0 / fh as f32;
 
             gl.use_program(Some(self.prog_blur_dir));
+            // Ping-pong: read from A, write to B, swap
+            let mut read_tex = scene_tex;
+            let mut write_to_a = true; // true = write to blur_fbo, false = write to blur_fbo_b
+            let total_sub = num_passes * 3;
+            let mut sub_idx = 0u32;
 
             for pass in 0..num_passes {
-                for (angle_idx, &(dx, dy)) in hex_angles.iter().enumerate() {
-                    let src = if pass == 0 && angle_idx == 0 { scene_tex }
-                              else { self.blur_tex_b };
-                    let is_last = pass == num_passes - 1 && angle_idx == 2;
-                    let dst = if is_last { output_fbo } else { Some(self.blur_fbo) };
+                for &(dx, dy) in &hex_dirs {
+                    sub_idx += 1;
+                    let is_last = sub_idx == total_sub;
+                    let dst_fbo = if is_last { output_fbo }
+                        else if write_to_a { Some(self.blur_fbo) }
+                        else { Some(self.blur_fbo_b) };
 
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, dst);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, dst_fbo);
                     gl.viewport(0, 0, fw, fh);
                     gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(src));
+                    gl.bind_texture(glow::TEXTURE_2D, Some(read_tex));
                     gl.active_texture(glow::TEXTURE1);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
                     if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_scene") {
@@ -1059,16 +1064,13 @@ impl JfaPipeline {
                         gl.uniform_1_f32(Some(&loc), per_pass_strength);
                     }
                     if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_dir") {
-                        gl.uniform_2_f32(Some(&loc), dx * texel[0], dy * texel[1]);
+                        gl.uniform_2_f32(Some(&loc), dx * tx, dy * ty);
                     }
                     gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-                    // After each sub-pass (except last), copy result to blur_tex_b for next read
                     if !is_last {
-                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.blur_fbo));
-                        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.blur_fbo_b));
-                        gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh,
-                            glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                        read_tex = if write_to_a { self.blur_tex } else { self.blur_tex_b };
+                        write_to_a = !write_to_a;
                     }
                 }
             }
