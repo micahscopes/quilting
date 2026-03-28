@@ -88,6 +88,9 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button data-v="both">Both</button>
       <button data-v="normals">Normals</button>
       <button data-v="stretch">Stretch</button>
+      <button data-v="fz-weight">Weight</button>
+      <button data-v="fz-jfa">JFA</button>
+      <button data-v="fz-firmness">Firmness</button>
     </div>
   </div>
 
@@ -166,13 +169,6 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="0"><span class="v" id="fuzzy-kawase-v">0</span></div>
     <label>Mask smooth offset</label>
     <div class="sr"><input type="range" id="fuzzy-kawase-off" min="1" max="30" value="8"><span class="v" id="fuzzy-kawase-off-v">0.75</span></div>
-    <label>Debug view</label>
-    <select id="fuzzy-debug-sel">
-      <option value="0">Off (normal)</option>
-      <option value="1">Smoothed weight</option>
-      <option value="2">JFA result</option>
-      <option value="3">Firmness mask</option>
-    </select>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -500,7 +496,15 @@ canvas.addEventListener('touchmove', e => {
 // --- Render mode (signal) ---
 const renderMode = signal('pbr', 'mode');
 bindBtnGroup('render-btns', renderMode);
-effect(() => { const v = renderMode.get(); if (wasmOk.get()) mr_setRenderMode(v); syncURL(); });
+effect(() => {
+  const v = renderMode.get();
+  if (!wasmOk.get()) return;
+  // Fuzzy debug views: render PBR underneath, then debug blit replaces output
+  const fzDebug = { 'fz-weight': 1, 'fz-jfa': 2, 'fz-firmness': 3 }[v];
+  mr_setRenderMode(fzDebug ? 'pbr' : v);
+  mr_setFuzzyDebug(fzDebug || 0);
+  syncURL();
+});
 
 // --- Möbius transform (signals) ---
 const mob = {
@@ -626,7 +630,6 @@ const fz = {
   quality:   signal(2, 'fqual'),
   kawase:    signal(0, 'fkaw'),
   kawaseOff: signal(8, 'fkoff'),
-  debug: signal(0, 'fdbg'),
 };
 bindToggle('fuzzy-toggle', fz.enabled);
 bindBtnGroup('fuzzy-mode-btns', fz.mode);
@@ -638,9 +641,6 @@ bindToggle('fuzzy-norm-toggle', fz.normalize);
 bindSlider('fuzzy-quality', fz.quality, v => v.toFixed(0));
 bindSlider('fuzzy-kawase', fz.kawase, v => v.toFixed(0));
 bindSlider('fuzzy-kawase-off', fz.kawaseOff, v => (v / 10).toFixed(2));
-// Debug view select
-$('fuzzy-debug-sel').addEventListener('change', () => fz.debug.set(parseInt($('fuzzy-debug-sel').value)));
-effect(() => { if (wasmOk.get()) mr_setFuzzyDebug(fz.debug.get()); });
 
 // Single effect: any fuzzy signal change → push to WASM + sync URL
 effect(() => {
