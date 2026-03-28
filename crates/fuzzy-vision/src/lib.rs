@@ -285,6 +285,29 @@ void main() {
 }
 "#;
 
+/// Kawase blur on the weight mask — smooths JFA boundaries cheaply (5 taps).
+const FS_WEIGHT_KAWASE: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_weight;
+uniform float u_offset;
+
+void main() {
+    vec2 texel = 1.0 / vec2(textureSize(u_weight, 0));
+    float off = u_offset;
+    vec4 c  = texture(u_weight, v_uv);
+    vec4 tl = texture(u_weight, v_uv + vec2(-off, -off) * texel);
+    vec4 tr = texture(u_weight, v_uv + vec2( off, -off) * texel);
+    vec4 bl = texture(u_weight, v_uv + vec2(-off,  off) * texel);
+    vec4 br = texture(u_weight, v_uv + vec2( off,  off) * texel);
+    // Blend weight (z) and distance (w), keep UV (xy) from center
+    float avg_w = (c.z + tl.z + tr.z + bl.z + br.z) / 5.0;
+    float avg_d = (c.w + tl.w + tr.w + bl.w + br.w) / 5.0;
+    o_color = vec4(c.xy, avg_w, avg_d);
+}
+"#;
+
 /// Weighted Gaussian blur — horizontal pass.
 /// Blur radius varies per-pixel based on the weight mask.
 const FS_BLUR_H: &str = r#"#version 300 es
@@ -375,6 +398,7 @@ pub struct JfaPipeline {
     prog_weight_conformal: glow::Program,
     prog_reduce_minmax: glow::Program,
     prog_weight_conformal_norm: glow::Program,
+    prog_weight_kawase: glow::Program,
     vao: glow::VertexArray,
     // Reduction chain for min/max (ping-pong, shrinks to 1x1)
     reduce_fbo_a: glow::Framebuffer,
@@ -471,6 +495,7 @@ impl JfaPipeline {
         let prog_weight_conformal = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?;
         let prog_reduce_minmax = link_program(gl, VS_FULLSCREEN, FS_REDUCE_MINMAX)?;
         let prog_weight_conformal_norm = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL_NORM)?;
+        let prog_weight_kawase = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?;
         let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
@@ -490,7 +515,7 @@ impl JfaPipeline {
         Ok(JfaPipeline {
             prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
             prog_weight_radial, prog_weight_conformal,
-            prog_reduce_minmax, prog_weight_conformal_norm,
+            prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex, blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
@@ -619,6 +644,37 @@ impl JfaPipeline {
                 gl.uniform_1_f32(Some(&loc), self.config.max_distance / self.config.downsample as f32);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+            // --- Stage 3.5: Kawase smooth on weight mask (removes JFA boundary artifacts) ---
+            // Ping-pong firmness through blur_tex_b for 2 Kawase passes at increasing offsets
+            {
+                let kawase_offsets = [1.5_f32, 3.0];
+                let mut src = self.firmness_tex;
+                for &offset in &kawase_offsets {
+                    let dst_fbo = self.blur_fbo_b;
+                    let dst_tex = self.blur_tex_b;
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
+                    gl.viewport(0, 0, fw, fh);
+                    gl.use_program(Some(self.prog_weight_kawase));
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(src));
+                    if let Some(loc) = gl.get_uniform_location(self.prog_weight_kawase, "u_weight") {
+                        gl.uniform_1_i32(Some(&loc), 0);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_weight_kawase, "u_offset") {
+                        gl.uniform_1_f32(Some(&loc), offset);
+                    }
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+                    // Copy result back to firmness_tex for next pass / scene blur
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(dst_fbo));
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.firmness_fbo));
+                    gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh,
+                        glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                    src = self.firmness_tex;
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
 
             // --- Stage 4: Multi-pass weighted Gaussian blur (separable H+V) ---
             // Each pass reads from the previous output, doubling effective kernel width.
