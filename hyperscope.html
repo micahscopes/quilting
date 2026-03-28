@@ -158,6 +158,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="fuzzy-focus" min="0" max="100" value="50"><span class="v" id="fuzzy-focus-v">0.0</span></div>
     <label>Bandwidth</label>
     <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" value="15"><span class="v" id="fuzzy-bw-v">0.15</span></div>
+    <label>Quality (blur passes)</label>
+    <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="2"><span class="v" id="fuzzy-quality-v">2</span></div>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -185,7 +187,7 @@ const PARAM_DEFAULTS = {
   res: '0', density: '100', atten: '1', minpx: '2',
   animate: '1', anim: '-1', atlas: '9',
   zoom: '3', rx: '0.3', ry: '0.5',
-  fuzzy: '0', fmode: '0', fradius: '48', fstr: '10', ffocus: '50', fbw: '15', fnorm: '0',
+  fuzzy: '0', fmode: '0', fradius: '48', fstr: '10', ffocus: '50', fbw: '15', fnorm: '0', fqual: '2',
 };
 
 function readParams() {
@@ -572,7 +574,9 @@ function updateFuzzy() {
   $('fuzzy-focus-v').textContent = ((focus - 0.5) * 2).toFixed(2);
   $('fuzzy-bw-v').textContent = bw.toFixed(2);
   const normalize = $('fuzzy-norm-toggle').classList.contains('on');
-  mr_setFuzzy(enabled, radius, strength, fuzzyMode, focus, bw, normalize, stretchRange.min, stretchRange.max);
+  const quality = parseInt($('fuzzy-quality').value);
+  $('fuzzy-quality-v').textContent = quality;
+  mr_setFuzzy(enabled, radius, strength, fuzzyMode, focus, bw, normalize, stretchRange.min, stretchRange.max, quality);
   syncURL();
 }
 $('fuzzy-toggle').addEventListener('click', () => {
@@ -587,6 +591,7 @@ $('fuzzy-radius').addEventListener('input', updateFuzzy);
 $('fuzzy-strength').addEventListener('input', updateFuzzy);
 $('fuzzy-focus').addEventListener('input', updateFuzzy);
 $('fuzzy-bw').addEventListener('input', updateFuzzy);
+$('fuzzy-quality').addEventListener('input', updateFuzzy);
 setupBtnGroup('fuzzy-mode-btns', v => { fuzzyMode = parseInt(v); updateFuzzy(); });
 
 // --- LOD controls ---

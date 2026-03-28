@@ -221,6 +221,7 @@ impl LodCompute {
         joint_indices: &[[u16; 4]], joint_weights: &[[f32; 4]],
     ) {
         let nv = joint_indices.len();
+        if nv == 0 { return; }
         let width = nv.min(4096);
         let height = ((nv + width - 1) / width) * 2; // 2 rows per chunk
         let mut data = vec![0.0f32; width * height * 4];
