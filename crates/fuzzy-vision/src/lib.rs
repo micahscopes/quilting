@@ -68,7 +68,7 @@ impl Default for JfaConfig {
             blur_strength: 1.0,
             downsample: 1, // full-res JFA eliminates 2x2 block artifacts
             blur_passes: 2,
-            use_mip_blur: true,
+            use_mip_blur: false, // mip needs proper blur pyramid, not generateMipmap
             kawase_passes: 0,
             kawase_offset: 0.75,
             precision: Precision::Float16,
