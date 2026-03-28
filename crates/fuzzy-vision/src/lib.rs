@@ -42,6 +42,10 @@ pub struct JfaConfig {
     pub downsample: u32,
     /// Number of blur passes (1=standard, 2-3=smoother, higher=silkier)
     pub blur_passes: u32,
+    /// Kawase weight smoothing: 0 = disabled, >0 = number of passes
+    pub kawase_passes: u32,
+    /// Kawase offset per pass
+    pub kawase_offset: f32,
     /// Float precision for intermediate textures
     pub precision: Precision,
     /// Focus point in stretch space: 0.5 = neutral, 0 = max squash, 1 = max expand
@@ -62,6 +66,8 @@ impl Default for JfaConfig {
             blur_strength: 1.0,
             downsample: 2,
             blur_passes: 2,
+            kawase_passes: 0,
+            kawase_offset: 0.75,
             precision: Precision::Float16,
             focus: 0.5,
             bandwidth: 0.3,
@@ -664,6 +670,30 @@ impl JfaPipeline {
                 gl.uniform_1_f32(Some(&loc), self.config.max_distance / self.config.downsample as f32);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+            // --- Stage 3.5: Optional Kawase weight smoothing ---
+            if self.config.kawase_passes > 0 {
+                for pass in 0..self.config.kawase_passes {
+                    let offset = self.config.kawase_offset * (pass as f32 + 1.0);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo_b));
+                    gl.viewport(0, 0, fw, fh);
+                    gl.use_program(Some(self.prog_weight_kawase));
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                    if let Some(loc) = gl.get_uniform_location(self.prog_weight_kawase, "u_weight") {
+                        gl.uniform_1_i32(Some(&loc), 0);
+                    }
+                    if let Some(loc) = gl.get_uniform_location(self.prog_weight_kawase, "u_offset") {
+                        gl.uniform_1_f32(Some(&loc), offset);
+                    }
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                    // Copy back to firmness
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.blur_fbo_b));
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.firmness_fbo));
+                    gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
 
             // --- Stage 4: Multi-pass weighted Gaussian blur (separable H+V) ---
             // Each pass reads from the previous output, doubling effective kernel width.

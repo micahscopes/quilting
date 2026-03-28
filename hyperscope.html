@@ -162,6 +162,10 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" value="15"><span class="v" id="fuzzy-bw-v">0.15</span></div>
     <label>Quality (blur passes)</label>
     <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="2"><span class="v" id="fuzzy-quality-v">2</span></div>
+    <label>Mask smooth (kawase passes)</label>
+    <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="0"><span class="v" id="fuzzy-kawase-v">0</span></div>
+    <label>Mask smooth offset</label>
+    <div class="sr"><input type="range" id="fuzzy-kawase-off" min="1" max="30" value="8"><span class="v" id="fuzzy-kawase-off-v">0.75</span></div>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -362,6 +366,8 @@ function syncURL() {
       ss('fbw', fz.bandwidth, PARAM_DEFAULTS.fbw);
       set('fnorm', fz.normalize.peek() ? '1' : '0', PARAM_DEFAULTS.fnorm);
       ss('fqual', fz.quality, PARAM_DEFAULTS.fqual);
+      ss('fkaw', fz.kawase, '0');
+      ss('fkoff', fz.kawaseOff, '8');
     } catch { /* signals not yet initialized */ }
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
@@ -611,6 +617,8 @@ const fz = {
   bandwidth: signal(15, 'fbw'),
   normalize: signal(false, 'fnorm'),
   quality:   signal(2, 'fqual'),
+  kawase:    signal(0, 'fkaw'),
+  kawaseOff: signal(8, 'fkoff'),
 };
 bindToggle('fuzzy-toggle', fz.enabled);
 bindBtnGroup('fuzzy-mode-btns', fz.mode);
@@ -620,6 +628,8 @@ bindSlider('fuzzy-focus', fz.focus, v => ((v / 100 - 0.5) * 2).toFixed(2));
 bindSlider('fuzzy-bw', fz.bandwidth, v => (v / 100).toFixed(2));
 bindToggle('fuzzy-norm-toggle', fz.normalize);
 bindSlider('fuzzy-quality', fz.quality, v => v.toFixed(0));
+bindSlider('fuzzy-kawase', fz.kawase, v => v.toFixed(0));
+bindSlider('fuzzy-kawase-off', fz.kawaseOff, v => (v / 10).toFixed(2));
 
 // Single effect: any fuzzy signal change → push to WASM + sync URL
 effect(() => {
@@ -627,7 +637,8 @@ effect(() => {
   const focus = fz.focus.get() / 100.0;
   const bw = fz.bandwidth.get() / 100.0;
   if (wasmOk.get()) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
-    mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get());
+    mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get(),
+    fz.kawase.get(), fz.kawaseOff.get() / 10.0);
   syncURL();
 });
 
@@ -705,6 +716,8 @@ applyParams = function(params) {
   fz.bandwidth.set(parseFloat(params.fbw) || 15);
   fz.normalize.set(params.fnorm === '1');
   fz.quality.set(parseInt(params.fqual) || 2);
+  fz.kawase.set(parseInt(params.fkaw) || 0);
+  fz.kawaseOff.set(parseInt(params.fkoff) || 8);
 };
 
 // --- IndexedDB for persisting dropped GLB files ---
