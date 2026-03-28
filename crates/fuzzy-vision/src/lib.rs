@@ -898,9 +898,8 @@ impl JfaPipeline {
                 gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
             } else {
-
-            // --- Kawase pyramid blur: downsample chain + per-pixel level blend ---
-            const NUM_PYRAMID_LEVELS: usize = 6;
+            // Pyramid code removed — was resizing blur_tex_b to tiny sizes.
+            if false { const NUM_PYRAMID_LEVELS: usize = 6;
 
             // Build/resize pyramid textures if needed
             if self.pyramid_tex.len() != NUM_PYRAMID_LEVELS {
@@ -1018,7 +1017,7 @@ impl JfaPipeline {
 
             // This is Dual Kawase's upsample path with weight modulation!
 
-            // For now: just composite level0 and level[N-1] as a proof of concept.
+            } // end if false (pyramid disabled)
             // --- Hex blur: 3 directional Gaussian passes at 0°, 60°, 120° ---
             let hex_dirs: [(f32, f32); 3] = [
                 (1.0, 0.0),      // 0°
