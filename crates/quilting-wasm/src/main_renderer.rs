@@ -58,6 +58,12 @@ struct MainState {
     fuzzy_weight_fbo: Option<glow::Framebuffer>,
     fuzzy_weight_tex: Option<glow::Texture>,
     fuzzy_weight_size: (i32, i32),
+    // Pick buffer for face inspection
+    pick_fbo: Option<glow::Framebuffer>,
+    pick_tex: Option<glow::Texture>,
+    pick_depth: Option<glow::Renderbuffer>,
+    pick_size: (i32, i32),
+    highlight_face: i32, // -1 = none
 }
 
 struct GpuBatch {
@@ -215,6 +221,11 @@ pub fn mr_init(canvas_id: &str) -> bool {
             fuzzy_weight_fbo: None,
             fuzzy_weight_tex: None,
             fuzzy_weight_size: (0, 0),
+            pick_fbo: None,
+            pick_tex: None,
+            pick_depth: None,
+            pick_size: (0, 0),
+            highlight_face: -1,
         });
     });
     info!("Renderer initialized on canvas '{}'", canvas_id);
@@ -283,6 +294,147 @@ pub fn mr_set_fuzzy_debug(debug_stage: u32) {
             st.fuzzy_debug = debug_stage;
         }
     });
+}
+
+#[wasm_bindgen(js_name = "mr_highlightFace")]
+pub fn mr_highlight_face(face_id: i32) {
+    STATE.with(|s| {
+        if let Some(ref mut st) = *s.borrow_mut() {
+            st.highlight_face = face_id;
+        }
+    });
+}
+
+/// Pick the face under pixel (x, y). Renders a pick pass and reads back the face ID.
+/// Returns face ID (>= 0) or -1 if no face at that pixel.
+/// Also logs face info (LOD, edge lengths, instance data) to console.
+#[wasm_bindgen(js_name = "mr_pick")]
+pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i32 {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let state = match state.as_mut() { Some(s) => s, None => return -1 };
+        let gl = state.renderer.gl();
+
+        unsafe {
+            let mut vp = [0i32; 4];
+            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);
+            let vw = vp[2].max(1);
+            let vh = vp[3].max(1);
+
+            // Create/resize pick FBO
+            if state.pick_fbo.is_none() || state.pick_size != (vw, vh) {
+                if let Some(f) = state.pick_fbo { gl.delete_framebuffer(f); }
+                if let Some(t) = state.pick_tex { gl.delete_texture(t); }
+                if let Some(r) = state.pick_depth { gl.delete_renderbuffer(r); }
+
+                let tex = gl.create_texture().unwrap();
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
+                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+
+                let depth = gl.create_renderbuffer().unwrap();
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, vw, vh);
+
+                let fbo = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D, Some(tex), 0);
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT,
+                    glow::RENDERBUFFER, Some(depth));
+
+                state.pick_fbo = Some(fbo);
+                state.pick_tex = Some(tex);
+                state.pick_depth = Some(depth);
+                state.pick_size = (vw, vh);
+            }
+
+            // Render pick pass
+            gl.bind_framebuffer(glow::FRAMEBUFFER, state.pick_fbo);
+            gl.viewport(0, 0, vw, vh);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            gl.enable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+
+            gl.use_program(Some(state.renderer.programs().pick));
+
+            let camera = quilting_renderer::pass::Camera {
+                mvp: mvp[..16].try_into().unwrap_or([0.0; 16]),
+                mv: mv[..16].try_into().unwrap_or([0.0; 16]),
+                mobius: state.mobius,
+                camera_pos: [
+                    camera_pos.get(0).copied().unwrap_or(0.0),
+                    camera_pos.get(1).copied().unwrap_or(0.0),
+                    camera_pos.get(2).copied().unwrap_or(0.0),
+                ],
+            };
+
+            let mut face_offset = 0i32;
+            for batch in &state.batches {
+                // Upload UBO with _pad = face_offset for global face ID
+                let vtx_ubo = state.renderer.vtx_ubo();
+                vtx_ubo.upload(
+                    gl, &camera.mvp, &camera.mv,
+                    batch.perm_parity, batch.perm_index, 1,
+                    &camera.mobius, &camera.camera_pos,
+                );
+                // Write face_offset to _pad (offset 140 in UBO)
+                gl.bind_buffer(glow::UNIFORM_BUFFER, Some(vtx_ubo.ubo));
+                let offset_bytes = (face_offset as f32).to_le_bytes();
+                gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 140, &offset_bytes);
+                vtx_ubo.bind(gl);
+
+                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
+                gl.draw_elements_instanced(
+                    glow::TRIANGLES, batch.mesh.num_tri_indices,
+                    glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
+                );
+                face_offset += batch.mesh.num_instances;
+            }
+
+            // Read pixel (flip Y for framebuffer coords)
+            let fy = vh - 1 - y;
+            let mut px = [0u8; 4];
+            gl.read_pixels(x, fy, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut px)));
+
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.viewport(0, 0, vw, vh);
+
+            // Decode face ID
+            if px[0] == 0 && px[1] == 0 && px[2] == 0 && px[3] == 0 {
+                return -1;
+            }
+            let face_id = (px[0] as i32) | ((px[1] as i32) << 8);
+
+            // Log face info
+            let stride = 40; // INSTANCE_STRIDE
+            let base = face_id as usize * stride;
+            if base + 12 <= state.cached_instances.len() {
+                let p0 = &state.cached_instances[base..base+3];
+                let p1 = &state.cached_instances[base+4..base+7];
+                let p2 = &state.cached_instances[base+8..base+11];
+                info!("Pick face {}: p0=[{:.3},{:.3},{:.3}] p1=[{:.3},{:.3},{:.3}] p2=[{:.3},{:.3},{:.3}]",
+                    face_id, p0[0],p0[1],p0[2], p1[0],p1[1],p1[2], p2[0],p2[1],p2[2]);
+
+                // Compute edge lengths and medians
+                let d = |a: &[f32], b: &[f32]| ((a[0]-b[0]).powi(2)+(a[1]-b[1]).powi(2)+(a[2]-b[2]).powi(2)).sqrt();
+                let mid = |a: &[f32], b: &[f32]| [(a[0]+b[0])/2.0, (a[1]+b[1])/2.0, (a[2]+b[2])/2.0];
+                let ea = d(p1, p2); let eb = d(p0, p2); let ec = d(p0, p1);
+                let ma = d(p0, &mid(p1, p2)); let mb = d(p1, &mid(p0, p2)); let mc = d(p2, &mid(p0, p1));
+                info!("  edges: a={:.4} b={:.4} c={:.4}", ea, eb, ec);
+                info!("  medians: a={:.4} b={:.4} c={:.4}", ma, mb, mc);
+                info!("  bary at click: ({:.2}, {:.2})", px[2] as f32 / 255.0, px[3] as f32 / 255.0);
+            }
+
+            // Set highlight
+            state.highlight_face = face_id;
+            face_id
+        }
+    })
 }
 
 #[wasm_bindgen(js_name = "mr_setInstanceData")]

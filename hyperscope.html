@@ -182,6 +182,7 @@ import init, {
   mr_uploadTessPatch, mr_uploadAnimationPose,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
+  mr_pick, mr_highlightFace,
 } from './pkg/quilting_wasm.js';
 
 const $ = id => document.getElementById(id);
@@ -446,8 +447,30 @@ let gpuSkinned = false;
 let animating = true;
 let meshInfo = null;
 
-// --- Mouse: orbit + shift-pan + wheel zoom ---
+// --- Pick debugger: ctrl-click to inspect face ---
 const canvas = $('cv');
+canvas.addEventListener('click', e => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  if (!wasmOk.peek()) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
+  const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
+  const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
+  const ey = zoom*Math.sin(rotX)+panY;
+  const ez = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
+  const view = lookAt(ex,ey,ez, panX,panY,panZ, 0,1,0);
+  const proj = perspective(Math.PI/3, canvas.width/canvas.height, 0.01, 10000);
+  const mvp = mulM4(proj, view);
+  const faceId = mr_pick(mvp, view, new Float32Array([ex,ey,ez]), x, y);
+  if (faceId >= 0) {
+    console.log(`Picked face ${faceId}`);
+    mr_highlightFace(faceId);
+  } else {
+    mr_highlightFace(-1);
+  }
+});
+
+// --- Mouse: orbit + shift-pan + wheel zoom ---
 canvas.addEventListener('mousedown', e => { drag = true; lx = e.clientX; ly = e.clientY; });
 window.addEventListener('mouseup', () => drag = false);
 let camDebounce = null;

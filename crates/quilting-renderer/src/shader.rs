@@ -21,6 +21,7 @@ pub struct Programs {
     pub normals: glow::Program,
     pub pbr: glow::Program,
     pub stretch: glow::Program,
+    pub pick: glow::Program,
 }
 
 impl Programs {
@@ -31,6 +32,7 @@ impl Programs {
             gl.delete_program(self.normals);
             gl.delete_program(self.pbr);
             gl.delete_program(self.stretch);
+            gl.delete_program(self.pick);
         }
     }
 }
@@ -50,7 +52,7 @@ pub struct CompiledGlsl {
 }
 
 /// Fragment shader modes that quilting-shaders supports.
-const FRAGMENT_MODES: &[&str] = &["matcap", "wire", "normals", "pbr", "stretch"];
+const FRAGMENT_MODES: &[&str] = &["matcap", "wire", "normals", "pbr", "stretch", "pick"];
 
 /// Compile all WGSL shaders to GLSL via quilting-shaders (naga).
 /// Uses the "native" emission path (no Y-flip / Z-remap).
@@ -265,6 +267,7 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
     let mut normals = None;
     let mut pbr = None;
     let mut stretch = None;
+    let mut pick = None;
 
     for (name, compiled) in &glsl_sources {
         log_info(&format!("Compiling program '{}': VS {} chars, FS {} chars",
@@ -281,6 +284,7 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
             "normals" => normals = Some(program),
             "pbr" => pbr = Some(program),
             "stretch" => stretch = Some(program),
+            "pick" => pick = Some(program),
             _ => {}
         }
     }
@@ -292,5 +296,6 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
         normals: normals.ok_or("normals program not compiled")?,
         pbr: pbr.ok_or("pbr program not compiled")?,
         stretch: stretch.ok_or("stretch program not compiled")?,
+        pick: pick.ok_or("pick program not compiled")?,
     })
 }
