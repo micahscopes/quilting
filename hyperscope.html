@@ -1143,10 +1143,10 @@ async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
   try {
-    let m;
-    try { m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10); }
-    catch { m = computeMobius('identity', 0.5, 0, 0, 2); }
-    const mob = [...m.a, ...m.b, ...m.c, ...m.d];
+    // LOD uses identity Möbius — tessellation based on pre-Möbius geometry
+    // for uniform density. Vertex shader applies Möbius at render time.
+    // Passing actual Möbius creates extreme density variation near the pole.
+    const mobFlat = [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0];
     const w = canvas.width, h = canvas.height;
     const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
     const ey = zoom*Math.sin(rotX)+panY;
@@ -1156,7 +1156,7 @@ async function recomputeLods() {
     const vp = mulM4(proj, view);
     const tp = getTessParams();
     const resp = await workerCall('compute_animated_lods', {
-      t: animTime, mobius: Array.from(mob), density: tp.density, minPx: tp.minPx,
+      t: animTime, mobius: Array.from(mobFlat), density: tp.density, minPx: tp.minPx,
       vpMatrix: Array.from(vp), vpWidth: w, vpHeight: h,
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
     });
