@@ -317,6 +317,27 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         let state = match state.as_mut() { Some(s) => s, None => return -1 };
+        // Lazy-init highlight program
+        if state.highlight_prog.is_none() {
+            let gl = state.renderer.gl();
+            unsafe {
+                let vs = gl.create_shader(glow::VERTEX_SHADER).unwrap();
+                gl.shader_source(vs, HIGHLIGHT_VS);
+                gl.compile_shader(vs);
+                let fs = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
+                gl.shader_source(fs, HIGHLIGHT_FS);
+                gl.compile_shader(fs);
+                let prog = gl.create_program().unwrap();
+                gl.attach_shader(prog, vs);
+                gl.attach_shader(prog, fs);
+                gl.link_program(prog);
+                gl.delete_shader(vs);
+                gl.delete_shader(fs);
+                state.highlight_prog = Some(prog);
+                state.highlight_vao = Some(gl.create_vertex_array().unwrap());
+            }
+        }
+
         let gl = state.renderer.gl();
 
         unsafe {
@@ -408,11 +429,11 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.viewport(0, 0, vw, vh);
 
-            // Decode face ID
-            if px[0] == 0 && px[1] == 0 && px[2] == 0 && px[3] == 0 {
-                return -1;
+            // Decode 24-bit face ID from RGB
+            if px[3] == 0 {
+                return -1; // no geometry (alpha=0 from clear)
             }
-            let face_id = (px[0] as i32) | ((px[1] as i32) << 8);
+            let face_id = (px[0] as i32) | ((px[1] as i32) << 8) | ((px[2] as i32) << 16);
 
             // Log face info
             let stride = 40; // INSTANCE_STRIDE
@@ -1330,46 +1351,114 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         state.renderer.render(state.render_mode, &camera, &render_batches);
 
-        // Highlight pass: re-render highlighted face with bright overlay
-        if state.highlight_face >= 0 {
-            render_highlight(gl, state, &camera);
+        // Highlight pass: overlay picked QB patch with cyan
+        if state.highlight_face >= 0 && state.highlight_prog.is_some() {
+            render_highlight(state.renderer.gl(), state, &camera);
         }
 
         state.renderer.end_frame();
     });
 }
 
+const HIGHLIGHT_VS: &str = r#"#version 300 es
+out vec2 v_uv;
+void main() {
+    float x = (gl_VertexID == 1) ? 3.0 : -1.0;
+    float y = (gl_VertexID == 2) ? 3.0 : -1.0;
+    v_uv = vec2(x * 0.5 + 0.5, y * 0.5 + 0.5);
+    gl_Position = vec4(x, y, 0.0, 1.0);
+}
+"#;
+
+const HIGHLIGHT_FS: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_pick;
+uniform vec3 u_target;
+
+void main() {
+    vec4 px = texture(u_pick, v_uv);
+    if (px.a < 0.5) discard; // background
+    if (abs(px.r - u_target.r) > 0.003 ||
+        abs(px.g - u_target.g) > 0.003 ||
+        abs(px.b - u_target.b) > 0.003) discard;
+    o_color = vec4(0.0, 1.0, 1.0, 0.5);
+}
+"#;
+
+
+/// Render highlight overlay for the picked face.
+/// Requires pick FBO + highlight program to exist (created in mr_pick).
+/// Renders pick pass to FBO, then fullscreen overlay where face ID matches.
 fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_renderer::pass::Camera) {
+    let target_id = state.highlight_face;
+    let (highlight_prog, highlight_vao, pick_fbo, pick_tex) = match (
+        state.highlight_prog, state.highlight_vao, state.pick_fbo, state.pick_tex,
+    ) {
+        (Some(p), Some(v), Some(f), Some(t)) => (p, v, f, t),
+        _ => return, // not initialized (mr_pick hasn't been called yet)
+    };
+
     unsafe {
-        let target_id = state.highlight_face;
+        let (vw, vh) = state.pick_size;
+        if vw == 0 { return; }
+
+        // Render pick pass to FBO
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(pick_fbo));
+        gl.viewport(0, 0, vw, vh);
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+        gl.enable(glow::DEPTH_TEST);
+        gl.disable(glow::BLEND);
+        gl.use_program(Some(state.renderer.programs().pick));
+
         let mut face_offset = 0i32;
         for batch in &state.batches {
-            let batch_size = batch.mesh.num_instances;
-            if target_id >= face_offset && target_id < face_offset + batch_size {
-                // Render this batch's wireframe with additive blending as highlight
-                gl.enable(glow::BLEND);
-                gl.blend_func(glow::ONE, glow::ONE); // additive
-                gl.enable(glow::DEPTH_TEST);
-                gl.depth_func(glow::LEQUAL); // draw on top of existing geometry
+            quilting_renderer::pass::upload_batch_ubo(
+                gl, state.renderer.vtx_ubo(), camera,
+                batch.perm_parity, batch.perm_index, 1,
+            );
+            // Write face_offset to _pad (offset 140)
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(state.renderer.vtx_ubo().ubo));
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 140, &(face_offset as f32).to_le_bytes());
+            state.renderer.vtx_ubo().bind(gl);
 
-                gl.use_program(Some(state.renderer.programs().wire));
-                quilting_renderer::pass::upload_batch_ubo(
-                    gl, state.renderer.vtx_ubo(), camera,
-                    batch.perm_parity, batch.perm_index, 1,
-                );
-                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
-                // Draw wireframe (lines)
-                gl.draw_elements_instanced(
-                    glow::LINES, batch.mesh.num_line_indices,
-                    glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
-                );
-
-                gl.depth_func(glow::LESS);
-                gl.disable(glow::BLEND);
-                break;
-            }
-            face_offset += batch_size;
+            gl.bind_vertex_array(Some(batch.mesh.tri_vao));
+            gl.draw_elements_instanced(glow::TRIANGLES, batch.mesh.num_tri_indices,
+                glow::UNSIGNED_INT, 0, batch.mesh.num_instances);
+            face_offset += batch.mesh.num_instances;
         }
+
+        // Reset _pad
+        gl.bind_buffer(glow::UNIFORM_BUFFER, Some(state.renderer.vtx_ubo().ubo));
+        gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 140, &0.0f32.to_le_bytes());
+
+        // Fullscreen overlay: cyan where pick matches target face
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.viewport(0, 0, vw, vh);
+        gl.use_program(Some(highlight_prog));
+        gl.disable(glow::DEPTH_TEST);
+        gl.enable(glow::BLEND);
+        gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(pick_tex));
+        if let Some(loc) = gl.get_uniform_location(highlight_prog, "u_pick") {
+            gl.uniform_1_i32(Some(&loc), 0);
+        }
+        let tr = (target_id & 255) as f32 / 255.0;
+        let tg = ((target_id >> 8) & 255) as f32 / 255.0;
+        let tb = ((target_id >> 16) & 255) as f32 / 255.0;
+        if let Some(loc) = gl.get_uniform_location(highlight_prog, "u_target") {
+            gl.uniform_3_f32(Some(&loc), tr, tg, tb);
+        }
+
+        gl.bind_vertex_array(Some(highlight_vao));
+        gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+        gl.disable(glow::BLEND);
+        gl.enable(glow::DEPTH_TEST);
     }
 }
 

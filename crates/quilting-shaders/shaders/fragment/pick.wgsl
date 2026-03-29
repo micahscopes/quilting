@@ -1,6 +1,6 @@
 // Pick buffer fragment shader.
-// Encodes global face ID + tessellation bary coords for mouse picking.
-// R,G = global face ID (low, high byte), B = bary.x, A = bary.y
+// Encodes global face ID (24-bit) for mouse picking.
+// R,G,B = face ID (low, mid, high byte), A = 1.0
 
 struct FragInput {
     @location(9) fade: f32,
@@ -15,8 +15,7 @@ fn fs_pick(in: FragInput) -> @location(0) vec4<f32> {
     let id = i32(in.instance_id + 0.5);
     let r = f32(id & 255) / 255.0;
     let g = f32((id >> 8) & 255) / 255.0;
-    let b = in.tess_bary.x;
-    let a = in.tess_bary.y;
+    let b = f32((id >> 16) & 255) / 255.0;
 
-    return vec4<f32>(r, g, b, a);
+    return vec4<f32>(r, g, b, 1.0);
 }
