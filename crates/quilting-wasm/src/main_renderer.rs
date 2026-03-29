@@ -64,6 +64,8 @@ struct MainState {
     pick_depth: Option<glow::Renderbuffer>,
     pick_size: (i32, i32),
     highlight_face: i32, // -1 = none
+    highlight_prog: Option<glow::Program>,
+    highlight_vao: Option<glow::VertexArray>,
 }
 
 struct GpuBatch {
@@ -226,6 +228,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             pick_depth: None,
             pick_size: (0, 0),
             highlight_face: -1,
+            highlight_prog: None,
+            highlight_vao: None,
         });
     });
     info!("Renderer initialized on canvas '{}'", canvas_id);
@@ -1325,8 +1329,48 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         }
 
         state.renderer.render(state.render_mode, &camera, &render_batches);
+
+        // Highlight pass: re-render highlighted face with bright overlay
+        if state.highlight_face >= 0 {
+            render_highlight(gl, state, &camera);
+        }
+
         state.renderer.end_frame();
     });
+}
+
+fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_renderer::pass::Camera) {
+    unsafe {
+        let target_id = state.highlight_face;
+        let mut face_offset = 0i32;
+        for batch in &state.batches {
+            let batch_size = batch.mesh.num_instances;
+            if target_id >= face_offset && target_id < face_offset + batch_size {
+                // Render this batch's wireframe with additive blending as highlight
+                gl.enable(glow::BLEND);
+                gl.blend_func(glow::ONE, glow::ONE); // additive
+                gl.enable(glow::DEPTH_TEST);
+                gl.depth_func(glow::LEQUAL); // draw on top of existing geometry
+
+                gl.use_program(Some(state.renderer.programs().wire));
+                quilting_renderer::pass::upload_batch_ubo(
+                    gl, state.renderer.vtx_ubo(), camera,
+                    batch.perm_parity, batch.perm_index, 1,
+                );
+                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
+                // Draw wireframe (lines)
+                gl.draw_elements_instanced(
+                    glow::LINES, batch.mesh.num_line_indices,
+                    glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
+                );
+
+                gl.depth_func(glow::LESS);
+                gl.disable(glow::BLEND);
+                break;
+            }
+            face_offset += batch_size;
+        }
+    }
 }
 
 fn lod_color(lod: &[u32; 3]) -> [f32; 3] {
