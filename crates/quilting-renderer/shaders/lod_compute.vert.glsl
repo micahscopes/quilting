@@ -159,19 +159,23 @@ void main() {
     vec3 dm_b = mobius(mid_b);
     vec3 dm_c = mobius(mid_c);
 
-    // Deformed medians → LOD
-    float med_a = distance(d0, dm_a);
-    float med_b = distance(d1, dm_b);
-    float med_c = distance(d2, dm_c);
+    // 6-arclength evaluation: 3 edges + 3 medians
+    float edge_a = distance(d1, d2);  // edge opposite v0
+    float edge_b = distance(d0, d2);  // edge opposite v1
+    float edge_c = distance(d0, d1);  // edge opposite v2
+    float med_a = distance(d0, dm_a); // v0 to midpoint of edge a
+    float med_b = distance(d1, dm_b); // v1 to midpoint of edge b
+    float med_c = distance(d2, dm_c); // v2 to midpoint of edge c
 
     float target_size = mesh_radius / density;
 
-    // Per-edge LOD from the max of the two endpoint medians.
-    // Average would let a small median (degenerate vertex near opposite edge)
-    // sabotage an edge that genuinely needs detail.
-    float raw_a = max(med_b, med_c) / target_size;
-    float raw_b = max(med_a, med_c) / target_size;
-    float raw_c = max(med_a, med_b) / target_size;
+    // Per-edge LOD: max of the edge's own length and its endpoint medians.
+    // Edge length captures anisotropy (long thin triangles).
+    // Medians capture surface detail (conformal curvature).
+    // Max ensures neither a small edge nor a small median can sabotage detail.
+    float raw_a = max(edge_a, max(med_b, med_c)) / target_size;
+    float raw_b = max(edge_b, max(med_a, med_c)) / target_size;
+    float raw_c = max(edge_c, max(med_a, med_b)) / target_size;
 
     out_lod_a = clamp(snap_pow2(raw_a), 2.0, max_lod);
     out_lod_b = clamp(snap_pow2(raw_b), 2.0, max_lod);
