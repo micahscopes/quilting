@@ -166,9 +166,12 @@ void main() {
 
     float target_size = mesh_radius / density;
 
-    float raw_a = (med_b + med_c) * 0.5 / target_size;
-    float raw_b = (med_a + med_c) * 0.5 / target_size;
-    float raw_c = (med_a + med_b) * 0.5 / target_size;
+    // Per-edge LOD from the max of the two endpoint medians.
+    // Average would let a small median (degenerate vertex near opposite edge)
+    // sabotage an edge that genuinely needs detail.
+    float raw_a = max(med_b, med_c) / target_size;
+    float raw_b = max(med_a, med_c) / target_size;
+    float raw_c = max(med_a, med_b) / target_size;
 
     out_lod_a = clamp(snap_pow2(raw_a), 2.0, max_lod);
     out_lod_b = clamp(snap_pow2(raw_b), 2.0, max_lod);
