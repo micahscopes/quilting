@@ -740,9 +740,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::NONE]);
                         gl.clear_color(0.2, 0.2, 0.3, 1.0);
                         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-                        // Clear weight attachment to neutral
+                        // Clear weight attachment: R=0.5 (neutral stretch), G=1.0 (far depth)
                         gl.draw_buffers(&[glow::NONE, glow::COLOR_ATTACHMENT1]);
-                        gl.clear_color(0.5, 0.0, 0.0, 1.0);
+                        gl.clear_color(0.5, 1.0, 0.0, 1.0);
                         gl.clear(glow::COLOR_BUFFER_BIT);
                         // Re-enable both for rendering
                         gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);

@@ -377,9 +377,7 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     out.tess_bary = bary;
     out.instance_id = f32(instance_idx) + u._pad;
 
-    // Möbius conformal stretch: signed log2 of scale factor.
-    // Positive = expanded, negative = squashed, zero = undistorted.
-    // Encoded as (log2(stretch) / 6.0) * 0.5 + 0.5 to fit [0,1] for interpolation.
+    // Möbius conformal stretch.
     let is_mobius = dot(u.mob_c, u.mob_c) > 0.001;
     if is_mobius {
         let b0 = qmul(u.mob_c, sp0) + u.mob_d;

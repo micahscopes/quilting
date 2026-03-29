@@ -129,6 +129,14 @@ struct PbrOutput {
 fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput {
     if in.fade < 0.001 { discard; }
 
+    // DoF depth: log-encoded view-space distance.
+    // position_vs = mv * post_mobius_pos, so length(position_vs) is the apparent distance
+    // from the viewer to wherever the geometry ended up after Möbius warp.
+    // Log encoding handles the wide distance range under Möbius (0.03 to 32 units → [0,1]).
+    // 0.5 = 1 unit distance. Matches the log-space of stretch encoding.
+    let dof_dist = max(length(in.position_vs), 0.001);
+    let dof_depth = clamp(log2(dof_dist) / 10.0 + 0.5, 0.0, 1.0);
+
     var n = normalize(in.normal_vs);
     // Double-sided materials: flip normal for back-facing fragments so they light correctly.
     // Only when the material explicitly requests it — QB perm_parity handles orientation otherwise.
@@ -172,7 +180,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         var unlit_color = base.rgb;
         // Gamma correction (base is already linear from sRGB conversion above)
         unlit_color = pow(unlit_color, vec3<f32>(1.0 / 2.2));
-        return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, clamp(length(in.camera_pos_ws - in.position_ws) / 5.0, 0.0, 1.0), 0.0, 1.0));
+        return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
     }
 
     // --- Metallic / Roughness ---
@@ -238,9 +246,9 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         let dbg = n * 0.5 + 0.5;
         // Tint back-faces slightly red so winding issues are visible
         if !front_facing {
-            return PbrOutput(vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade), vec4<f32>(in.mobius_stretch, clamp(length(in.camera_pos_ws - in.position_ws) / 5.0, 0.0, 1.0), 0.0, 1.0));
+            return PbrOutput(vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
         }
-        return PbrOutput(vec4<f32>(dbg, in.fade), vec4<f32>(in.mobius_stretch, clamp(length(in.camera_pos_ws - in.position_ws) / 5.0, 0.0, 1.0), 0.0, 1.0));
+        return PbrOutput(vec4<f32>(dbg, in.fade), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
     }
 
     // --- KHR_materials_specular: modify F0 before BRDF ---
@@ -429,5 +437,5 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
 
-    return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, clamp(length(in.camera_pos_ws - in.position_ws) / 5.0, 0.0, 1.0), 0.0, 1.0));
+    return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
 }
