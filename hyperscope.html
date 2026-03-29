@@ -1159,12 +1159,13 @@ async function tickAnimation(t) {
 
 function debouncedLodRecompute() {
   clearTimeout(lodDebounceTimer);
-  lodDebounceTimer = setTimeout(recomputeLods, 200);
+  lodDebounceTimer = setTimeout(recomputeLods, 50);
 }
 
 async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
+  const lodT0 = performance.now();
   try {
     // Pass real Möbius to LOD compute — deformed arc lengths match screen-space.
     // Uniform per-face LOD prevents pole discontinuities (all pole faces clamp to max_lod).
@@ -1188,7 +1189,9 @@ async function recomputeLods() {
     });
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
+      const t0 = performance.now();
       mr_buildBatches(faceLods);
+      console.log(`LOD: worker=${(t0-lodT0).toFixed(0)}ms build=${(performance.now()-t0).toFixed(0)}ms`);
     }
   } catch (e) { console.warn('LOD recompute error:', e); }
   lodInFlight = false;

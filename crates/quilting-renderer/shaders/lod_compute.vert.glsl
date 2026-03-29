@@ -159,29 +159,19 @@ void main() {
     vec3 dm_b = mobius(mid_b);
     vec3 dm_c = mobius(mid_c);
 
-    // 12-arclength evaluation: 6 un-deformed + 6 Möbius-deformed.
-    // Un-deformed ensures intrinsic surface quality (conformal patch detail).
-    // Deformed ensures screen-space adequacy (Möbius-stretched faces get more tess).
-
-    // Un-deformed: original geometry
-    float ue_a = distance(p1, p2);     float ue_b = distance(p0, p2);     float ue_c = distance(p0, p1);
-    float um_a = distance(p0, mid_a);  float um_b = distance(p1, mid_b);  float um_c = distance(p2, mid_c);
-
-    // Deformed: post-Möbius
-    float de_a = distance(d1, d2);     float de_b = distance(d0, d2);     float de_c = distance(d0, d1);
-    float dm_a2 = distance(d0, dm_a);  float dm_b2 = distance(d1, dm_b);  float dm_c2 = distance(d2, dm_c);
+    // Deformed medians: vertex-to-opposite-midpoint distance in post-Möbius space.
+    // Captures both intrinsic geometry size and Möbius conformal stretch.
+    float med_a = distance(d0, dm_a);
+    float med_b = distance(d1, dm_b);
+    float med_c = distance(d2, dm_c);
 
     float target_size = mesh_radius / density;
 
-    // Per-edge: max across all un-deformed and deformed measurements
-    float raw_a = max(max(ue_a, max(um_b, um_c)), max(de_a, max(dm_b2, dm_c2)));
-    float raw_b = max(max(ue_b, max(um_a, um_c)), max(de_b, max(dm_a2, dm_c2)));
-    float raw_c = max(max(ue_c, max(um_a, um_b)), max(de_c, max(dm_a2, dm_b2)));
-
-    // Uniform per-face LOD: max measurement across all edges.
-    // Prevents skinny-triangle anisotropy artifacts.
-    float max_raw = max(raw_a, max(raw_b, raw_c)) / target_size;
-    out_lod_a = clamp(snap_pow2(max_raw), 2.0, max_lod);
+    // Uniform per-face LOD from the largest median.
+    // Max prevents small-median sabotage on skinny triangles.
+    // Uniform prevents anisotropic tessellation artifacts.
+    float max_med = max(med_a, max(med_b, med_c)) / target_size;
+    out_lod_a = clamp(snap_pow2(max_med), 2.0, max_lod);
     out_lod_b = out_lod_a;
     out_lod_c = out_lod_a;
 
