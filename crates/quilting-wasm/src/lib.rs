@@ -373,46 +373,53 @@ pub fn compute_animated_lods(
         let mesh_radius = LOD_MESH_RADIUS.with(|r| *r.borrow()) as f32;
 
         // 1. Evaluate animation pose at time t
+        // t < 0 signals "skip animation" — use rest pose for LOD so it matches
+        // the uninitialized rendering state when animation is paused.
+        let use_anim = t >= 0.0;
         let (joint_matrices, morph_weights, num_joints, num_morph) =
-            if let Some(ref eval) = data.evaluator {
-                let pose = eval.evaluate(t);
+            if use_anim {
+                if let Some(ref eval) = data.evaluator {
+                    let pose = eval.evaluate(t.max(0.0));
 
-                let c = data.norm_center;
-                let s = data.norm_scale;
-                let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
-                let sf = s as f32; let sif = si as f32;
-                let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
-                let norm: [f32; 16] = [
-                    sf, 0.0, 0.0, 0.0, 0.0, sf, 0.0, 0.0,
-                    0.0, 0.0, sf, 0.0, -cx*sf, -cy*sf, -cz*sf, 1.0,
-                ];
-                let unnorm: [f32; 16] = [
-                    sif, 0.0, 0.0, 0.0, 0.0, sif, 0.0, 0.0,
-                    0.0, 0.0, sif, 0.0, cx, cy, cz, 1.0,
-                ];
-                fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-                    let mut out = [0.0f32; 16];
-                    for col in 0..4 {
-                        for row in 0..4 {
-                            out[col * 4 + row] = a[row] * b[col * 4]
-                                + a[4 + row] * b[col * 4 + 1]
-                                + a[8 + row] * b[col * 4 + 2]
-                                + a[12 + row] * b[col * 4 + 3];
+                    let c = data.norm_center;
+                    let s = data.norm_scale;
+                    let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
+                    let sf = s as f32; let sif = si as f32;
+                    let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
+                    let norm: [f32; 16] = [
+                        sf, 0.0, 0.0, 0.0, 0.0, sf, 0.0, 0.0,
+                        0.0, 0.0, sf, 0.0, -cx*sf, -cy*sf, -cz*sf, 1.0,
+                    ];
+                    let unnorm: [f32; 16] = [
+                        sif, 0.0, 0.0, 0.0, 0.0, sif, 0.0, 0.0,
+                        0.0, 0.0, sif, 0.0, cx, cy, cz, 1.0,
+                    ];
+                    fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+                        let mut out = [0.0f32; 16];
+                        for col in 0..4 {
+                            for row in 0..4 {
+                                out[col * 4 + row] = a[row] * b[col * 4]
+                                    + a[4 + row] * b[col * 4 + 1]
+                                    + a[8 + row] * b[col * 4 + 2]
+                                    + a[12 + row] * b[col * 4 + 3];
+                            }
                         }
+                        out
                     }
-                    out
-                }
 
-                let mut normalized_mats = Vec::with_capacity(pose.joint_matrices.len());
-                let nj = pose.joint_matrices.len() / 16;
-                for ji in 0..nj {
-                    let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
-                    let nmu = mat4_mul_f32(&norm, &mat4_mul_f32(&m, &unnorm));
-                    normalized_mats.extend_from_slice(&nmu);
-                }
+                    let mut normalized_mats = Vec::with_capacity(pose.joint_matrices.len());
+                    let nj = pose.joint_matrices.len() / 16;
+                    for ji in 0..nj {
+                        let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
+                        let nmu = mat4_mul_f32(&norm, &mat4_mul_f32(&m, &unnorm));
+                        normalized_mats.extend_from_slice(&nmu);
+                    }
 
-                let nm = pose.morph_weights.len() as u32;
-                (normalized_mats, pose.morph_weights, nj as u32, nm)
+                    let nm = pose.morph_weights.len() as u32;
+                    (normalized_mats, pose.morph_weights, nj as u32, nm)
+                } else {
+                    (vec![], vec![], 0u32, 0u32)
+                }
             } else {
                 (vec![], vec![], 0u32, 0u32)
             };
@@ -453,6 +460,7 @@ pub fn compute_animated_lods(
         let nf = num_faces;
         let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
         let mut face_lods = vec![[2u32; 3]; nf];
+
 
         LOD_ATLAS_KEYS.with(|ak| {
             let keys = ak.borrow();
