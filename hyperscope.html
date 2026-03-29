@@ -1166,9 +1166,12 @@ async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
   try {
-    // Identity Möbius for LOD — uniform tessellation on original geometry.
-    // Möbius warp applied in vertex shader at render time.
-    const mobFlat = [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0];
+    // Pass real Möbius to LOD compute — deformed arc lengths match screen-space.
+    // Uniform per-face LOD prevents pole discontinuities (all pole faces clamp to max_lod).
+    let m;
+    try { m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10); }
+    catch { m = computeMobius('identity', 0.5, 0, 0, 2); }
+    const mobFlat = [...m.a, ...m.b, ...m.c, ...m.d];
     const w = canvas.width, h = canvas.height;
     const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
     const ey = zoom*Math.sin(rotX)+panY;

@@ -159,27 +159,31 @@ void main() {
     vec3 dm_b = mobius(mid_b);
     vec3 dm_c = mobius(mid_c);
 
-    // 6-arclength evaluation: 3 edges + 3 medians
-    float edge_a = distance(d1, d2);  // edge opposite v0
-    float edge_b = distance(d0, d2);  // edge opposite v1
-    float edge_c = distance(d0, d1);  // edge opposite v2
-    float med_a = distance(d0, dm_a); // v0 to midpoint of edge a
-    float med_b = distance(d1, dm_b); // v1 to midpoint of edge b
-    float med_c = distance(d2, dm_c); // v2 to midpoint of edge c
+    // 12-arclength evaluation: 6 un-deformed + 6 Möbius-deformed.
+    // Un-deformed ensures intrinsic surface quality (conformal patch detail).
+    // Deformed ensures screen-space adequacy (Möbius-stretched faces get more tess).
+
+    // Un-deformed: original geometry
+    float ue_a = distance(p1, p2);     float ue_b = distance(p0, p2);     float ue_c = distance(p0, p1);
+    float um_a = distance(p0, mid_a);  float um_b = distance(p1, mid_b);  float um_c = distance(p2, mid_c);
+
+    // Deformed: post-Möbius
+    float de_a = distance(d1, d2);     float de_b = distance(d0, d2);     float de_c = distance(d0, d1);
+    float dm_a2 = distance(d0, dm_a);  float dm_b2 = distance(d1, dm_b);  float dm_c2 = distance(d2, dm_c);
 
     float target_size = mesh_radius / density;
 
-    // Per-edge LOD: max of the edge's own length and its endpoint medians.
-    // Edge length captures anisotropy (long thin triangles).
-    // Medians capture surface detail (conformal curvature).
-    // Max ensures neither a small edge nor a small median can sabotage detail.
-    float raw_a = max(edge_a, max(med_b, med_c)) / target_size;
-    float raw_b = max(edge_b, max(med_a, med_c)) / target_size;
-    float raw_c = max(edge_c, max(med_a, med_b)) / target_size;
+    // Per-edge: max across all un-deformed and deformed measurements
+    float raw_a = max(max(ue_a, max(um_b, um_c)), max(de_a, max(dm_b2, dm_c2)));
+    float raw_b = max(max(ue_b, max(um_a, um_c)), max(de_b, max(dm_a2, dm_c2)));
+    float raw_c = max(max(ue_c, max(um_a, um_b)), max(de_c, max(dm_a2, dm_b2)));
 
-    out_lod_a = clamp(snap_pow2(raw_a), 2.0, max_lod);
-    out_lod_b = clamp(snap_pow2(raw_b), 2.0, max_lod);
-    out_lod_c = clamp(snap_pow2(raw_c), 2.0, max_lod);
+    // Uniform per-face LOD: max measurement across all edges.
+    // Prevents skinny-triangle anisotropy artifacts.
+    float max_raw = max(raw_a, max(raw_b, raw_c)) / target_size;
+    out_lod_a = clamp(snap_pow2(max_raw), 2.0, max_lod);
+    out_lod_b = out_lod_a;
+    out_lod_c = out_lod_a;
 
     // Screen-space attenuation
     if (min_px > 0.0) {
