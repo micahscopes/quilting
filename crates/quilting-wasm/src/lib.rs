@@ -118,7 +118,8 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
 /// Call once per worker — creates a WebGL2 context for transform feedback LOD computation.
 #[wasm_bindgen]
 pub fn init_gpu_compute(max_faces: u32) -> bool {
-    let canvas = web_sys::OffscreenCanvas::new(1, 1);
+    // Size must accommodate pass 1 FBO viewport (4096 × ceil(num_faces/4096))
+    let canvas = web_sys::OffscreenCanvas::new(4096, 4096);
     let canvas = match canvas {
         Ok(c) => c,
         Err(_) => return false,

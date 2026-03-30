@@ -211,6 +211,14 @@ self.onmessage = async function(e) {
     performance.clearMarks();
     const timing = { tess_params: wt1-wt0, wasm_total: wt2-wt1, wasm_phases: wasmMeasures };
     if (result && result.length > 0) {
+      // Debug: sample a few values before transferring buffer
+      const dbgSamples = [];
+      for (const fi of [0, 1, Math.floor(result.length/12), Math.floor(result.length/6)-1]) {
+        const o = fi * 6;
+        if (o+5 < result.length) dbgSamples.push(`f${fi}=[${result[o]},${result[o+1]},${result[o+2]} p${result[o+3]} par${result[o+4]} a${result[o+5]}]`);
+      }
+      timing.dbgSamples = dbgSamples.join(', ');
+      try { timing.gpuState = wasm.debug_gpu_compute_state(); } catch(e) {}
       self.postMessage({ type: 'animated_lods', id, lods: result, timing }, [result.buffer]);
     } else {
       // Surface worker-side console messages for debugging
@@ -222,7 +230,7 @@ self.onmessage = async function(e) {
       let gpuState = 'unknown';
       try { gpuState = wasm.debug_gpu_compute_state ? wasm.debug_gpu_compute_state() : 'no debug fn'; } catch(e) { gpuState = e.message; }
       self.postMessage({ type: 'animated_lods', id, lods: null, timing,
-        debug: { resultType: typeof result, resultNull: result === null, workerLogs, gpuState } });
+        debug: { resultType: typeof result, resultNull: result === null, workerLogs, gpuState, wt: wt2-wt1 } });
     }
     return;
   }

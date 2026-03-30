@@ -506,8 +506,13 @@ impl LodCompute {
             gl.uniform_1_f32(Some(&self.vp_height_loc), vp_height);
 
             // Clear FBO and render pass 1 (one point per face → one pixel of LOD exponents)
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            // Use a sentinel clear value that would produce obviously wrong LOD if read
+            gl.clear_color(-1.0, -1.0, -1.0, 0.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
+
+            // Ensure depth test doesn't cull our points
+            gl.disable(glow::DEPTH_TEST);
+
             gl.draw_arrays(glow::POINTS, 0, n as i32);
 
             // Unbind FBO — pass1_texture now contains LOD exponents
@@ -557,14 +562,19 @@ impl LodCompute {
             gl.disable(glow::RASTERIZER_DISCARD);
             gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
             gl.bind_vertex_array(None);
+            gl.use_program(None);
             gl.flush();
+
+            // Pass 2 clobbers texture units — force rebind on next frame
+            self.bound1 = false;
         }
         n
     }
 
-    /// Read back final LOD results (pass 2 output). 5 floats per face.
+    /// Read back final LOD results (pass 2 output). 6 floats per face.
     pub fn read_back(&self, gl: &glow::Context, num_faces: usize) -> Vec<f32> {
-        let size = num_faces.min(self.max_faces) * FLOATS_PER_FACE_OUTPUT;
+        let n = num_faces.min(self.max_faces);
+        let size = n * FLOATS_PER_FACE_OUTPUT;
         let mut result = vec![0.0f32; size];
         unsafe {
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf2));

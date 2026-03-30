@@ -1200,6 +1200,8 @@ async function recomputeLods() {
     performance.measure('lod-worker-roundtrip', 'lod-worker-start', 'lod-worker-end');
 
     if (resp.debug) console.warn('LOD worker debug:', resp.debug);
+    if (resp.timing?.dbgSamples) console.log('LOD samples:', resp.timing.dbgSamples);
+    if (resp.timing?.gpuState) console.log('GPU state:', resp.timing.gpuState);
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       const tWorkerDone = performance.now();
