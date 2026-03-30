@@ -1199,6 +1199,7 @@ async function recomputeLods() {
     performance.mark('lod-worker-end');
     performance.measure('lod-worker-roundtrip', 'lod-worker-start', 'lod-worker-end');
 
+    if (resp.debug) console.warn('LOD worker debug:', resp.debug);
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       const tWorkerDone = performance.now();

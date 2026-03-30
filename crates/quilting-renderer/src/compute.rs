@@ -1,49 +1,61 @@
 //! GPU compute via transform feedback (WebGL2 GPGPU).
 //!
-//! Runs a vertex shader as a compute kernel — one "vertex" per face.
-//! Transform feedback captures the output into a GPU buffer.
-//! Used for per-frame LOD computation: fetch rest-pose positions, apply
-//! morph targets + skeletal animation on the GPU, then Möbius-transform
-//! edge midpoints → deformed medians → LOD per edge.
+//! Two-pass pipeline — one "vertex" per face:
+//!   Pass 1: animated positions → Möbius → medians → raw LOD exponents per edge
+//!   Pass 2: edge coherence (via adjacency texture) + canonical sort + atlas LUT
+//!
+//! Pass 1 output is copied to a texture (via PBO) for pass 2 to read.
+//! Final output: 5 floats per face (canon_a, canon_b, canon_c, perm_index, parity),
+//! directly consumable by group_into_batches.
 
 use glow::HasContext;
 
-/// Per-face output: atlas_index + perm_index = 2 floats.
-pub const FLOATS_PER_FACE_OUTPUT: usize = 2;
+#[cfg(target_arch = "wasm32")]
+fn log_info(msg: &str) {
+    web_sys::console::info_1(&msg.into());
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn log_info(msg: &str) {
+    eprintln!("{}", msg);
+}
 
-/// Transform feedback compute pipeline for per-frame LOD calculation.
-///
-/// Supports three animation modes (all on the GPU):
-/// - **Static**: reads rest-pose positions directly
-/// - **Morph targets**: applies weighted morph deltas to rest-pose
-/// - **Skeletal**: applies joint matrix skinning after morph
-///
-/// The shader mirrors the rendering vertex shader's animation pipeline:
-/// rest-pose → morph → skin → Möbius → LOD.
+/// Pass 1: raw LOD exponents (lod_a, lod_b, lod_c) = 3 floats per face.
+pub const FLOATS_PER_FACE_PASS1: usize = 3;
+
+/// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity) = 5 floats per face.
+pub const FLOATS_PER_FACE_OUTPUT: usize = 5;
+
+const LOD_COMPUTE_VS: &str = include_str!("../shaders/lod_compute.vert.glsl");
+const LOD_COMPUTE_FS: &str = include_str!("../shaders/lod_compute.frag.glsl");
+const LOD_COHERENCE_VS: &str = include_str!("../shaders/lod_coherence.vert.glsl");
+const DUMMY_FS: &str = include_str!("../shaders/lod_dummy.frag.glsl");
+
+/// Two-pass LOD compute pipeline.
+/// Pass 1: FBO render (LOD exponents → RGBA32F texture, one pixel per face)
+/// Pass 2: Transform feedback (edge coherence + canonicalize → readback buffer)
 pub struct LodCompute {
-    program: glow::Program,
-    vao: glow::VertexArray,
-    input_buf: glow::Buffer,
-    output_buf: glow::Buffer,
-    tf: glow::TransformFeedback,
+    // --- Pass 1: FBO render for LOD exponents ---
+    program1: glow::Program,
+    vao1: glow::VertexArray,
+    input_buf: glow::Buffer,        // face indices (3 floats per face)
+    pass1_fbo: glow::Framebuffer,   // renders LOD exponents to texture
+    pass1_texture: Option<glow::Texture>,  // RGBA32F, one pixel per face
+    pass1_tex_w: i32,
+    pass1_tex_h: i32,
 
-    // Textures — all RGBA32F unless noted
-    pos_texture: Option<glow::Texture>,      // rest-pose positions (static)
-    lut_texture: Option<glow::Texture>,      // atlas LUT (R8, static)
-    skinning_texture: Option<glow::Texture>, // joint indices + weights (static)
-    joints_texture: Option<glow::Texture>,   // joint matrices (per-frame)
-    morph_texture: Option<glow::Texture>,    // morph deltas (static)
-    morph_wt_texture: Option<glow::Texture>, // morph weights (per-frame)
+    // Textures for pass 1 (animation + geometry)
+    pos_texture: Option<glow::Texture>,
+    skinning_texture: Option<glow::Texture>,
+    joints_texture: Option<glow::Texture>,
+    morph_texture: Option<glow::Texture>,
+    morph_wt_texture: Option<glow::Texture>,
 
-    // Sampler uniform locations
+    // Pass 1 uniform locations
     pos_loc: Option<glow::UniformLocation>,
-    lut_loc: Option<glow::UniformLocation>,
     skinning_loc: Option<glow::UniformLocation>,
     joints_loc: Option<glow::UniformLocation>,
     morph_deltas_loc: Option<glow::UniformLocation>,
     morph_wt_loc: Option<glow::UniformLocation>,
-
-    // Scalar uniforms
     mob_a_loc: glow::UniformLocation,
     mob_b_loc: glow::UniformLocation,
     mob_c_loc: glow::UniformLocation,
@@ -58,63 +70,62 @@ pub struct LodCompute {
     num_verts_loc: Option<glow::UniformLocation>,
     num_joints_loc: Option<glow::UniformLocation>,
     num_morph_loc: Option<glow::UniformLocation>,
+    fbo_width_loc: Option<glow::UniformLocation>,
+    fbo_height_loc: Option<glow::UniformLocation>,
+
+    // --- Pass 2: TF edge coherence + canonicalize ---
+    program2: glow::Program,
+    vao2: glow::VertexArray,
+    output_buf2: glow::Buffer,      // TF output: 5 floats per face (final)
+    tf2: glow::TransformFeedback,
+
+    // Static adjacency texture (uploaded once per model)
+    adjacency_texture: Option<glow::Texture>,
+
+    // Atlas LUT texture (shared by pass 2)
+    lut_texture: Option<glow::Texture>,
+
+    // Pass 2 uniform locations
+    p2_lods_loc: Option<glow::UniformLocation>,
+    p2_adj_loc: Option<glow::UniformLocation>,
+    p2_lut_loc: Option<glow::UniformLocation>,
+    p2_num_faces_loc: Option<glow::UniformLocation>,
 
     max_faces: usize,
-    bound: bool,
+    bound1: bool,
 }
-
-const LOD_COMPUTE_VS: &str = include_str!("../shaders/lod_compute.vert.glsl");
-const LOD_COMPUTE_FS: &str = include_str!("../shaders/lod_compute.frag.glsl");
 
 impl LodCompute {
     pub fn new(gl: &glow::Context, max_faces: usize) -> Result<Self, String> {
         unsafe {
-            let vs = compile_shader(gl, glow::VERTEX_SHADER, LOD_COMPUTE_VS)?;
-            let fs = compile_shader(gl, glow::FRAGMENT_SHADER, LOD_COMPUTE_FS)?;
+            // --- Pass 1: regular program (renders to FBO, not TF) ---
+            let program1 = build_program(gl, LOD_COMPUTE_VS, LOD_COMPUTE_FS, "LOD pass 1")?;
 
-            let program = gl.create_program().map_err(|e| format!("{e}"))?;
-            gl.attach_shader(program, vs);
-            gl.attach_shader(program, fs);
-
-            gl.transform_feedback_varyings(
-                program,
-                &["out_atlas_index", "out_perm_index"],
-                glow::INTERLEAVED_ATTRIBS,
-            );
-
-            gl.link_program(program);
-            if !gl.get_program_link_status(program) {
-                let log = gl.get_program_info_log(program);
-                return Err(format!("LOD compute link: {log}"));
-            }
-            gl.detach_shader(program, vs);
-            gl.detach_shader(program, fs);
-            gl.delete_shader(vs);
-            gl.delete_shader(fs);
-
-            let req = |name: &str| -> Result<glow::UniformLocation, String> {
-                gl.get_uniform_location(program, name)
-                    .ok_or_else(|| format!("{name} uniform not found"))
+            let req = |prog, name: &str| -> Result<glow::UniformLocation, String> {
+                gl.get_uniform_location(prog, name)
+                    .ok_or_else(|| format!("{name} uniform not found in pass 1"))
             };
 
-            let mob_a_loc = req("mob_a")?;
-            let mob_b_loc = req("mob_b")?;
-            let mob_c_loc = req("mob_c")?;
-            let mob_d_loc = req("mob_d")?;
-            let density_loc = req("density")?;
-            let mesh_radius_loc = req("mesh_radius")?;
-            let min_px_loc = req("min_px")?;
-            let max_lod_loc = req("max_lod")?;
-            let vp_matrix_loc = req("vp_matrix")?;
-            let vp_width_loc = req("vp_width")?;
-            let vp_height_loc = req("vp_height")?;
-            // These may be optimized out by the GLSL compiler when unused
-            let num_verts_loc = gl.get_uniform_location(program, "u_num_vertices");
-            let num_joints_loc = gl.get_uniform_location(program, "u_num_joints");
-            let num_morph_loc = gl.get_uniform_location(program, "u_num_morph_targets");
+            let mob_a_loc = req(program1, "mob_a")?;
+            let mob_b_loc = req(program1, "mob_b")?;
+            let mob_c_loc = req(program1, "mob_c")?;
+            let mob_d_loc = req(program1, "mob_d")?;
+            let density_loc = req(program1, "density")?;
+            let mesh_radius_loc = req(program1, "mesh_radius")?;
+            let min_px_loc = req(program1, "min_px")?;
+            let max_lod_loc = req(program1, "max_lod")?;
+            let vp_matrix_loc = req(program1, "vp_matrix")?;
+            let vp_width_loc = req(program1, "vp_width")?;
+            let vp_height_loc = req(program1, "vp_height")?;
+            let num_verts_loc = gl.get_uniform_location(program1, "u_num_vertices");
+            let num_joints_loc = gl.get_uniform_location(program1, "u_num_joints");
+            let num_morph_loc = gl.get_uniform_location(program1, "u_num_morph_targets");
+            let fbo_width_loc = gl.get_uniform_location(program1, "u_fbo_width");
+            let fbo_height_loc = gl.get_uniform_location(program1, "u_fbo_height");
 
-            let vao = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
-            gl.bind_vertex_array(Some(vao));
+            // Pass 1 VAO + input buffer
+            let vao1 = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
+            gl.bind_vertex_array(Some(vao1));
 
             let input_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(input_buf));
@@ -122,36 +133,58 @@ impl LodCompute {
                 (max_faces * 3 * 4) as i32, glow::STATIC_DRAW);
             gl.enable_vertex_attrib_array(0);
             gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+            gl.bind_vertex_array(None);
 
-            let output_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
-            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(output_buf));
+            // Pass 1 FBO (texture attached in upload_adjacency when we know num_faces)
+            let pass1_fbo = gl.create_framebuffer().map_err(|e| format!("{e}"))?;
+
+            // --- Pass 2: TF program ---
+            let program2 = build_tf_program(gl, LOD_COHERENCE_VS, DUMMY_FS,
+                &["out_canon_a", "out_canon_b", "out_canon_c", "out_perm_index", "out_parity"],
+                "LOD pass 2")?;
+
+            let vao2 = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
+
+            let output_buf2 = gl.create_buffer().map_err(|e| format!("{e}"))?;
+            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(output_buf2));
             gl.buffer_data_size(glow::TRANSFORM_FEEDBACK_BUFFER,
                 (max_faces * FLOATS_PER_FACE_OUTPUT * 4) as i32,
                 glow::DYNAMIC_READ);
 
-            let tf = gl.create_transform_feedback().map_err(|e| format!("{e}"))?;
-            gl.bind_vertex_array(None);
+            let tf2 = gl.create_transform_feedback().map_err(|e| format!("{e}"))?;
 
             Ok(Self {
-                program, vao, input_buf, output_buf, tf,
-                pos_texture: None, lut_texture: None,
-                skinning_texture: None, joints_texture: None,
+                program1, vao1, input_buf, pass1_fbo,
+                pass1_texture: None, pass1_tex_w: 0, pass1_tex_h: 0,
+                pos_texture: None, skinning_texture: None, joints_texture: None,
                 morph_texture: None, morph_wt_texture: None,
-                pos_loc: gl.get_uniform_location(program, "u_positions"),
-                lut_loc: gl.get_uniform_location(program, "u_atlas_lut"),
-                skinning_loc: gl.get_uniform_location(program, "u_skinning"),
-                joints_loc: gl.get_uniform_location(program, "u_joints"),
-                morph_deltas_loc: gl.get_uniform_location(program, "u_morph_deltas"),
-                morph_wt_loc: gl.get_uniform_location(program, "u_morph_wt"),
+                pos_loc: gl.get_uniform_location(program1, "u_positions"),
+                skinning_loc: gl.get_uniform_location(program1, "u_skinning"),
+                joints_loc: gl.get_uniform_location(program1, "u_joints"),
+                morph_deltas_loc: gl.get_uniform_location(program1, "u_morph_deltas"),
+                morph_wt_loc: gl.get_uniform_location(program1, "u_morph_wt"),
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 density_loc, mesh_radius_loc,
                 min_px_loc, max_lod_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
                 num_verts_loc, num_joints_loc, num_morph_loc,
+                fbo_width_loc, fbo_height_loc,
+
+                program2, vao2, output_buf2, tf2,
+                adjacency_texture: None,
+                lut_texture: None,
+                p2_lods_loc: gl.get_uniform_location(program2, "u_pass1_lods"),
+                p2_adj_loc: gl.get_uniform_location(program2, "u_adjacency"),
+                p2_lut_loc: gl.get_uniform_location(program2, "u_atlas_lut"),
+                p2_num_faces_loc: gl.get_uniform_location(program2, "u_num_faces"),
+
                 max_faces,
-                bound: false,
+                bound1: false,
             })
         }
     }
+
+    pub fn has_pass1_texture(&self) -> bool { self.pass1_texture.is_some() }
+    pub fn has_adjacency_texture(&self) -> bool { self.adjacency_texture.is_some() }
 
     // --- Static data uploads (called once on model load) ---
 
@@ -168,12 +201,11 @@ impl LodCompute {
                 glow::PixelUnpackData::Slice(Some(&data)));
             set_nearest(gl);
             self.lut_texture = Some(tex);
-            self.bound = false;
+            self.bound1 = false;
         }
     }
 
     /// Upload face indices (3 floats per face — vertex indices as floats).
-    /// Clamps to max_faces to prevent GPU buffer overflow.
     pub fn upload_face_indices(&self, gl: &glow::Context, indices: &[f32]) {
         let max_floats = self.max_faces * 3;
         let clamped = if indices.len() > max_floats { &indices[..max_floats] } else { indices };
@@ -185,8 +217,6 @@ impl LodCompute {
     }
 
     /// Upload rest-pose positions as a float texture.
-    /// `positions`: flat [x,y,z, ...] for all vertices (single frame).
-    /// Packed into a 4096-wide RGBA32F texture.
     pub fn upload_positions_texture(&mut self, gl: &glow::Context, positions: &[f32], num_vertices: usize) {
         unsafe {
             let mut rgba = vec![0.0f32; num_vertices * 4];
@@ -209,13 +239,11 @@ impl LodCompute {
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
             set_nearest(gl);
             self.pos_texture = Some(tex);
-            self.bound = false;
+            self.bound1 = false;
         }
     }
 
     /// Upload per-vertex skinning data (joint indices + weights).
-    /// Tiled layout: RGBA32F, width = min(num_vertices, 4096), rows alternate
-    /// (indices, weights) per chunk. Matches the rendering vertex shader's tiled lookup.
     pub fn upload_skinning_texture(
         &mut self, gl: &glow::Context,
         joint_indices: &[[u16; 4]], joint_weights: &[[f32; 4]],
@@ -223,7 +251,7 @@ impl LodCompute {
         let nv = joint_indices.len();
         if nv == 0 { return; }
         let width = nv.min(4096);
-        let height = ((nv + width - 1) / width) * 2; // 2 rows per chunk
+        let height = ((nv + width - 1) / width) * 2;
         let mut data = vec![0.0f32; width * height * 4];
         for (i, (ji, jw)) in joint_indices.iter().zip(joint_weights.iter()).enumerate() {
             let chunk = i / width;
@@ -250,13 +278,11 @@ impl LodCompute {
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&data))));
             set_nearest(gl);
             self.skinning_texture = Some(tex);
-            self.bound = false;
+            self.bound1 = false;
         }
     }
 
-    /// Upload morph target delta texture (static — deltas don't change).
-    /// `deltas`: flat [dx, dy, dz, ...] for all vertices × all targets.
-    /// Layout: RGBA32F, width = num_vertices, height = num_targets.
+    /// Upload morph target delta texture (static).
     pub fn upload_morph_deltas(
         &mut self, gl: &glow::Context,
         deltas: &[f32], num_vertices: usize, num_targets: usize,
@@ -283,21 +309,72 @@ impl LodCompute {
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
             set_nearest(gl);
             self.morph_texture = Some(tex);
-            self.bound = false;
+            self.bound1 = false;
+        }
+    }
+
+    /// Upload adjacency data for edge coherence (called once per model).
+    ///
+    /// `data`: flat f32 array, 4 floats per entry, 3 entries per face.
+    /// Entry for face `fi`, edge `e`: data[(fi*3+e)*4 .. +4] = (neighbor_face, neighbor_lod_idx, 0, 0).
+    /// neighbor_face < 0 means boundary (no neighbor).
+    ///
+    /// Stored as RGBA32F texture, tiled 4096-wide.
+    pub fn upload_adjacency(&mut self, gl: &glow::Context, data: &[f32], num_faces: usize) {
+        let total_texels = num_faces * 3;
+        let width = 4096;
+        let height = (total_texels + width - 1) / width;
+        let mut padded = vec![0.0f32; width * height * 4];
+        let copy_len = data.len().min(padded.len());
+        padded[..copy_len].copy_from_slice(&data[..copy_len]);
+
+        unsafe {
+            if let Some(old) = self.adjacency_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                width as i32, height as i32, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&padded))));
+            set_nearest(gl);
+            self.adjacency_texture = Some(tex);
+        }
+
+        // Allocate pass 1 FBO texture (RGBA32F, one pixel per face)
+        let p1_w = 4096i32;
+        let p1_h = ((num_faces + 4095) / 4096) as i32;
+        unsafe {
+            if let Some(old) = self.pass1_texture { gl.delete_texture(old); }
+            let tex = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                p1_w, p1_h, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(None));
+            set_nearest(gl);
+            self.pass1_texture = Some(tex);
+            self.pass1_tex_w = p1_w;
+            self.pass1_tex_h = p1_h;
+
+            // Attach texture to FBO
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pass1_fbo));
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D, Some(tex), 0);
+
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                log_info(&format!("Pass 1 FBO incomplete: 0x{:x}", status));
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }
 
     // --- Per-frame animation uploads ---
 
     /// Upload joint matrices for the current frame.
-    /// `matrices`: flat column-major f32, num_joints × 16 floats.
-    /// Stored as RGBA32F texture: width = 4, height = num_joints.
-    /// Each row = one joint, 4 texels = 4 matrix columns.
     pub fn upload_joint_matrices(&mut self, gl: &glow::Context, matrices: &[f32]) {
         let num_joints = matrices.len() / 16;
         if num_joints == 0 { return; }
-
-        // Already in the right layout: 4 vec4s per joint = width 4, height num_joints
         unsafe {
             if let Some(old) = self.joints_texture { gl.delete_texture(old); }
             let tex = gl.create_texture().unwrap();
@@ -308,17 +385,13 @@ impl LodCompute {
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(matrices))));
             set_nearest(gl);
             self.joints_texture = Some(tex);
-            self.bound = false;
+            self.bound1 = false;
         }
     }
 
     /// Upload morph weights for the current frame.
-    /// `weights`: one f32 per morph target.
-    /// Stored as RGBA32F texture: width = num_targets, height = 1.
     pub fn upload_morph_weights(&mut self, gl: &glow::Context, weights: &[f32]) {
         if weights.is_empty() { return; }
-
-        // Pack as RGBA (only .r used per texel, but RGBA32F is the reliable format)
         let mut rgba = vec![0.0f32; weights.len() * 4];
         for (i, &w) in weights.iter().enumerate() {
             rgba[i * 4] = w;
@@ -333,19 +406,13 @@ impl LodCompute {
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
             set_nearest(gl);
             self.morph_wt_texture = Some(tex);
-            self.bound = false;
+            self.bound1 = false;
         }
     }
 
-    // --- Compute pass ---
+    // --- Two-pass compute ---
 
-    /// Run the LOD compute pass.
-    ///
-    /// Reads rest-pose positions, applies animation (morph + skeletal) on the GPU,
-    /// then Möbius-transforms and computes per-face LOD classification.
-    ///
-    /// `num_joints` / `num_morph_targets`: set to 0 to disable that animation type.
-    /// Animation textures must have been uploaded before calling this.
+    /// Run both LOD compute passes. Returns number of faces processed.
     pub fn compute_lods(
         &mut self,
         gl: &glow::Context,
@@ -363,13 +430,16 @@ impl LodCompute {
         vp_height: f32,
     ) -> usize {
         let n = num_faces.min(self.max_faces);
+        if self.pass1_texture.is_none() || self.adjacency_texture.is_none() {
+            log_info(&format!("LOD compute skipped: pass1_tex={} adj_tex={}",
+                self.pass1_texture.is_some(), self.adjacency_texture.is_some()));
+            return 0;
+        }
         unsafe {
-            // Always re-activate program — uniforms require it active,
-            // and we can't guarantee nothing else touched GL state between calls.
-            gl.use_program(Some(self.program));
+            // === Pass 1: LOD exponent computation (FBO render) ===
+            gl.use_program(Some(self.program1));
 
-            if !self.bound {
-                // Bind all textures to fixed texture units
+            if !self.bound1 {
                 let mut unit = 0u32;
                 let bind_tex = |gl: &glow::Context, unit: &mut u32, tex: Option<glow::Texture>, loc: &Option<glow::UniformLocation>| {
                     gl.active_texture(glow::TEXTURE0 + *unit);
@@ -382,20 +452,19 @@ impl LodCompute {
                     *unit += 1;
                 };
 
-                bind_tex(gl, &mut unit, self.pos_texture, &self.pos_loc);       // unit 0
-                bind_tex(gl, &mut unit, self.lut_texture, &self.lut_loc);        // unit 1
-                bind_tex(gl, &mut unit, self.skinning_texture, &self.skinning_loc); // unit 2
-                bind_tex(gl, &mut unit, self.joints_texture, &self.joints_loc);  // unit 3
-                bind_tex(gl, &mut unit, self.morph_texture, &self.morph_deltas_loc); // unit 4
-                bind_tex(gl, &mut unit, self.morph_wt_texture, &self.morph_wt_loc); // unit 5
+                bind_tex(gl, &mut unit, self.pos_texture, &self.pos_loc);           // unit 0
+                bind_tex(gl, &mut unit, self.skinning_texture, &self.skinning_loc);  // unit 1
+                bind_tex(gl, &mut unit, self.joints_texture, &self.joints_loc);      // unit 2
+                bind_tex(gl, &mut unit, self.morph_texture, &self.morph_deltas_loc); // unit 3
+                bind_tex(gl, &mut unit, self.morph_wt_texture, &self.morph_wt_loc);  // unit 4
 
-                gl.bind_vertex_array(Some(self.vao));
-                gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf));
-                gl.bind_buffer_base(glow::TRANSFORM_FEEDBACK_BUFFER, 0, Some(self.output_buf));
-                gl.enable(glow::RASTERIZER_DISCARD);
-
-                self.bound = true;
+                self.bound1 = true;
             }
+
+            // Bind pass 1 VAO and FBO
+            gl.bind_vertex_array(Some(self.vao1));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pass1_fbo));
+            gl.viewport(0, 0, self.pass1_tex_w, self.pass1_tex_h);
 
             // Per-frame uniforms
             if let Some(ref loc) = self.num_verts_loc {
@@ -407,14 +476,20 @@ impl LodCompute {
             if let Some(ref loc) = self.num_morph_loc {
                 gl.uniform_1_i32(Some(loc), num_morph_targets as i32);
             }
+            if let Some(ref loc) = self.fbo_width_loc {
+                gl.uniform_1_i32(Some(loc), self.pass1_tex_w);
+            }
+            if let Some(ref loc) = self.fbo_height_loc {
+                gl.uniform_1_i32(Some(loc), self.pass1_tex_h);
+            }
 
-            // Re-bind per-frame textures (joints + morph weights change each frame)
+            // Re-bind per-frame textures
             if let Some(tex) = self.joints_texture {
-                gl.active_texture(glow::TEXTURE3);
+                gl.active_texture(glow::TEXTURE2);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             }
             if let Some(tex) = self.morph_wt_texture {
-                gl.active_texture(glow::TEXTURE5);
+                gl.active_texture(glow::TEXTURE4);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             }
 
@@ -430,21 +505,69 @@ impl LodCompute {
             gl.uniform_1_f32(Some(&self.vp_width_loc), vp_width);
             gl.uniform_1_f32(Some(&self.vp_height_loc), vp_height);
 
+            // Clear FBO and render pass 1 (one point per face → one pixel of LOD exponents)
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            gl.draw_arrays(glow::POINTS, 0, n as i32);
+
+            // Unbind FBO — pass1_texture now contains LOD exponents
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+
+            // === Pass 2: edge coherence + canonicalize (TF) ===
+            gl.enable(glow::RASTERIZER_DISCARD);
+            gl.use_program(Some(self.program2));
+
+            // Bind textures for pass 2
+            gl.active_texture(glow::TEXTURE0);
+            if let Some(tex) = self.pass1_texture {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+            if let Some(ref loc) = self.p2_lods_loc {
+                gl.uniform_1_i32(Some(loc), 0);
+            }
+
+            gl.active_texture(glow::TEXTURE1);
+            if let Some(tex) = self.adjacency_texture {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+            if let Some(ref loc) = self.p2_adj_loc {
+                gl.uniform_1_i32(Some(loc), 1);
+            }
+
+            gl.active_texture(glow::TEXTURE2);
+            if let Some(tex) = self.lut_texture {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+            if let Some(ref loc) = self.p2_lut_loc {
+                gl.uniform_1_i32(Some(loc), 2);
+            }
+
+            if let Some(ref loc) = self.p2_num_faces_loc {
+                gl.uniform_1_i32(Some(loc), n as i32);
+            }
+
+            gl.bind_vertex_array(Some(self.vao2));
+            gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, Some(self.tf2));
+            gl.bind_buffer_base(glow::TRANSFORM_FEEDBACK_BUFFER, 0, Some(self.output_buf2));
+
             gl.begin_transform_feedback(glow::POINTS);
             gl.draw_arrays(glow::POINTS, 0, n as i32);
             gl.end_transform_feedback();
 
+            gl.disable(glow::RASTERIZER_DISCARD);
+            gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
+            gl.bind_vertex_array(None);
             gl.flush();
         }
         n
     }
 
-    /// Read back LOD results after compute. Clamps to max_faces.
+    /// Read back final LOD results (pass 2 output). 5 floats per face.
     pub fn read_back(&self, gl: &glow::Context, num_faces: usize) -> Vec<f32> {
         let size = num_faces.min(self.max_faces) * FLOATS_PER_FACE_OUTPUT;
         let mut result = vec![0.0f32; size];
         unsafe {
-            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf));
+            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf2));
             gl.get_buffer_sub_data(glow::TRANSFORM_FEEDBACK_BUFFER, 0,
                 bytemuck_cast_slice_mut(&mut result));
         }
@@ -453,18 +576,84 @@ impl LodCompute {
 
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
-            gl.delete_program(self.program);
-            gl.delete_vertex_array(self.vao);
+            gl.delete_program(self.program1);
+            gl.delete_vertex_array(self.vao1);
             gl.delete_buffer(self.input_buf);
-            gl.delete_buffer(self.output_buf);
-            gl.delete_transform_feedback(self.tf);
+            gl.delete_framebuffer(self.pass1_fbo);
+
+            gl.delete_program(self.program2);
+            gl.delete_vertex_array(self.vao2);
+            gl.delete_buffer(self.output_buf2);
+            gl.delete_transform_feedback(self.tf2);
+
             if let Some(t) = self.pos_texture { gl.delete_texture(t); }
             if let Some(t) = self.lut_texture { gl.delete_texture(t); }
             if let Some(t) = self.skinning_texture { gl.delete_texture(t); }
             if let Some(t) = self.joints_texture { gl.delete_texture(t); }
             if let Some(t) = self.morph_texture { gl.delete_texture(t); }
             if let Some(t) = self.morph_wt_texture { gl.delete_texture(t); }
+            if let Some(t) = self.pass1_texture { gl.delete_texture(t); }
+            if let Some(t) = self.adjacency_texture { gl.delete_texture(t); }
         }
+    }
+}
+
+/// Build a regular (non-TF) program from vertex + fragment source.
+fn build_program(
+    gl: &glow::Context,
+    vs_src: &str,
+    fs_src: &str,
+    label: &str,
+) -> Result<glow::Program, String> {
+    unsafe {
+        let vs = compile_shader(gl, glow::VERTEX_SHADER, vs_src)?;
+        let fs = compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?;
+
+        let program = gl.create_program().map_err(|e| format!("{e}"))?;
+        gl.attach_shader(program, vs);
+        gl.attach_shader(program, fs);
+
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            let log = gl.get_program_info_log(program);
+            return Err(format!("{label} link: {log}"));
+        }
+        gl.detach_shader(program, vs);
+        gl.detach_shader(program, fs);
+        gl.delete_shader(vs);
+        gl.delete_shader(fs);
+        Ok(program)
+    }
+}
+
+/// Build a TF program from vertex + fragment source with specified varyings.
+fn build_tf_program(
+    gl: &glow::Context,
+    vs_src: &str,
+    fs_src: &str,
+    varyings: &[&str],
+    label: &str,
+) -> Result<glow::Program, String> {
+    unsafe {
+        let vs = compile_shader(gl, glow::VERTEX_SHADER, vs_src)?;
+        let fs = compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?;
+
+        let program = gl.create_program().map_err(|e| format!("{e}"))?;
+        gl.attach_shader(program, vs);
+        gl.attach_shader(program, fs);
+
+        gl.transform_feedback_varyings(program, varyings, glow::INTERLEAVED_ATTRIBS);
+
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            let log = gl.get_program_info_log(program);
+            return Err(format!("{label} link: {log}"));
+        }
+        gl.detach_shader(program, vs);
+        gl.detach_shader(program, fs);
+        gl.delete_shader(vs);
+        gl.delete_shader(fs);
+        Ok(program)
     }
 }
 

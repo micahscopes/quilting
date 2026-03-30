@@ -49,11 +49,11 @@ uniform float max_lod;       // maximum LOD the atlas supports (clamp, don't fal
 uniform mat4 vp_matrix;      // view-projection matrix for screen-space projection
 uniform float vp_width;      // viewport width in pixels
 uniform float vp_height;     // viewport height in pixels
-uniform highp sampler2D u_atlas_lut; // exponent triple → atlas index (40×30 R8)
+// Pass LOD exponents to fragment shader for FBO render (pass 2 reads as texture)
+flat out vec3 v_lods;
 
-// Transform feedback outputs
-out float out_atlas_index;
-out float out_perm_index;
+uniform int u_fbo_width;
+uniform int u_fbo_height;
 
 // --- Quaternion math ---
 
@@ -139,7 +139,7 @@ vec3 fetch_animated_pos(int vertex_id) {
 // --- Main ---
 
 void main() {
-    float out_lod_a, out_lod_b, out_lod_c;
+    float lod_a, lod_b, lod_c;
 
     // Fetch animated vertex positions
     vec3 p0 = fetch_animated_pos(int(face_indices.x));
@@ -171,9 +171,9 @@ void main() {
     // Max prevents small-median sabotage on skinny triangles.
     // Uniform prevents anisotropic tessellation artifacts.
     float max_med = max(med_a, max(med_b, med_c)) / target_size;
-    out_lod_a = clamp(snap_pow2(max_med), 2.0, max_lod);
-    out_lod_b = out_lod_a;
-    out_lod_c = out_lod_a;
+    lod_a = clamp(snap_pow2(max_med), 2.0, max_lod);
+    lod_b = lod_a;
+    lod_c = lod_a;
 
     // Screen-space attenuation
     if (min_px > 0.0) {
@@ -188,30 +188,21 @@ void main() {
         float px_b = distance(s0, s2);
         float px_c = distance(s0, s1);
 
-        if (px_a / out_lod_a < min_px) out_lod_a = clamp(snap_pow2(px_a / min_px), 2.0, max_lod);
-        if (px_b / out_lod_b < min_px) out_lod_b = clamp(snap_pow2(px_b / min_px), 2.0, max_lod);
-        if (px_c / out_lod_c < min_px) out_lod_c = clamp(snap_pow2(px_c / min_px), 2.0, max_lod);
+        if (px_a / lod_a < min_px) lod_a = clamp(snap_pow2(px_a / min_px), 2.0, max_lod);
+        if (px_b / lod_b < min_px) lod_b = clamp(snap_pow2(px_b / min_px), 2.0, max_lod);
+        if (px_c / lod_c < min_px) lod_c = clamp(snap_pow2(px_c / min_px), 2.0, max_lod);
     }
 
-    // Canonical form + S3 permutation
-    int ea = int(log2(out_lod_a));
-    int eb = int(log2(out_lod_b));
-    int ec = int(log2(out_lod_c));
+    // Output raw LOD exponents to fragment shader for FBO write
+    v_lods = vec3(log2(lod_a), log2(lod_b), log2(lod_c));
 
-    int sa, sb, sc, perm;
-    if (ea <= eb && eb <= ec)       { sa=ea; sb=eb; sc=ec; perm=0; }
-    else if (ea <= ec && ec <= eb)  { sa=ea; sb=ec; sc=eb; perm=1; }
-    else if (eb <= ea && ea <= ec)  { sa=eb; sb=ea; sc=ec; perm=2; }
-    else if (eb <= ec && ec <= ea)  { sa=eb; sb=ec; sc=ea; perm=4; }
-    else if (ec <= ea && ea <= eb)  { sa=ec; sb=ea; sc=eb; perm=3; }
-    else                            { sa=ec; sb=eb; sc=ea; perm=5; }
-
-    // Atlas LUT lookup
-    int key = sa + sb * 10 + sc * 100;
-    int lut_x = key % 40;
-    int lut_y = key / 40;
-    out_atlas_index = texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0;
-    out_perm_index = float(perm);
-
-    gl_Position = vec4(0.0);
+    // Position this face's point at its corresponding pixel in the FBO
+    int face_id = gl_VertexID;
+    int px = face_id % u_fbo_width;
+    int py = face_id / u_fbo_width;
+    // Map pixel center to NDC: (px + 0.5) / width * 2 - 1
+    float ndc_x = (float(px) + 0.5) / float(u_fbo_width) * 2.0 - 1.0;
+    float ndc_y = (float(py) + 0.5) / float(u_fbo_height) * 2.0 - 1.0;
+    gl_Position = vec4(ndc_x, ndc_y, 0.0, 1.0);
+    gl_PointSize = 1.0;
 }

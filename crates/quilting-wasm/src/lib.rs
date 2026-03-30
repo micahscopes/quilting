@@ -134,6 +134,9 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
         None => return false,
     };
 
+    // Enable float FBO rendering for pass 1 (LOD exponents → RGBA32F texture)
+    gl_ctx.get_extension("EXT_color_buffer_float").ok();
+
     let gl = glow::Context::from_webgl2_context(gl_ctx);
 
     match LodCompute::new(&gl, max_faces as usize) {
@@ -288,12 +291,43 @@ pub fn upload_model_to_compute() -> bool {
                 }
             });
 
-            // Build half-edge mesh for edge coherence (once)
+            // Build half-edge mesh and upload adjacency texture for GPU edge coherence
             let faces_u32: Vec<[u32; 3]> = combined.triangles.iter()
                 .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
                 .collect();
+            let he_mesh = HalfEdgeMesh::from_triangles(nv as u32, &faces_u32);
+            {
+                // Build adjacency data: 4 floats per entry, 3 entries per face
+                // (neighbor_face, neighbor_lod_idx, 0, 0) per edge
+                let nf = faces_u32.len();
+                let mut adj_data = vec![0.0f32; nf * 3 * 4];
+                for fi in 0..nf {
+                    let hes = he_mesh.face_half_edges(fi as u32);
+                    for (hi, &he_id) in hes.iter().enumerate() {
+                        let lod_idx = (hi + 2) % 3;
+                        let base = (fi * 3 + lod_idx) * 4;
+                        if let Some(twin_id) = quilting_mesh::unpack_twin(he_mesh.half_edges[he_id as usize].twin) {
+                            let adj_fi = he_mesh.half_edges[twin_id as usize].face as usize;
+                            let adj_hes = he_mesh.face_half_edges(adj_fi as u32);
+                            let mut adj_lod_idx = 0;
+                            for (adj_hi, &adj_he_id) in adj_hes.iter().enumerate() {
+                                if adj_he_id == twin_id {
+                                    adj_lod_idx = (adj_hi + 2) % 3;
+                                    break;
+                                }
+                            }
+                            adj_data[base]     = adj_fi as f32;
+                            adj_data[base + 1] = adj_lod_idx as f32;
+                        } else {
+                            adj_data[base]     = -1.0; // boundary
+                            adj_data[base + 1] = 0.0;
+                        }
+                    }
+                }
+                compute.upload_adjacency(gl, &adj_data, nf);
+            }
             LOD_HALF_EDGE.with(|he| {
-                *he.borrow_mut() = Some(HalfEdgeMesh::from_triangles(nv as u32, &faces_u32));
+                *he.borrow_mut() = Some(he_mesh);
             });
 
             // Compute mesh_radius from normalized positions
@@ -373,6 +407,21 @@ pub fn sample_stretch_range(mobius: &[f32], instances: &[f32], num_faces: u32) -
 
     if min_s.is_infinite() { return vec![0.5, 0.5]; }
     vec![min_s, max_s]
+}
+
+#[wasm_bindgen]
+pub fn debug_gpu_compute_state() -> String {
+    GPU_COMPUTE.with(|gc| {
+        let gc = gc.borrow();
+        match gc.as_ref() {
+            None => "GPU_COMPUTE is None".to_string(),
+            Some((_gl, compute)) => format!(
+                "pass1_tex={} adj_tex={}",
+                compute.has_pass1_texture(),
+                compute.has_adjacency_texture(),
+            ),
+        }
+    })
 }
 
 /// Uses mesh_radius computed at upload time (not hardcoded).
@@ -498,89 +547,23 @@ pub fn compute_animated_lods(
         perf_mark("lod-gpu-compute-end");
         perf_measure("lod-gpu-compute", "lod-gpu-compute-start", "lod-gpu-compute-end");
 
-        if gpu_class.is_empty() { return JsValue::NULL; }
-
-        // 4-5. Invert permutation to recover unsorted per-face LODs
-        perf_mark("lod-classify-start");
-        let nf = num_faces;
-        let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
-        let mut face_lods = vec![[2u32; 3]; nf];
-
-
-        LOD_ATLAS_KEYS.with(|ak| {
-            let keys = ak.borrow();
-            for fi in 0..nf {
-                let rb = fi * stride;
-                if rb + 1 < gpu_class.len() {
-                    let atlas_idx = gpu_class[rb] as usize;
-                    let perm_idx = gpu_class[rb + 1] as usize;
-                    if atlas_idx < keys.len() && perm_idx < 6 {
-                        let canonical = keys[atlas_idx];
-                        let perm = quilting_core::permutation::S3_PERMUTATIONS[perm_idx];
-                        face_lods[fi] = [canonical[perm[0]], canonical[perm[1]], canonical[perm[2]]];
-                    }
-                }
-            }
-        });
-
-        perf_mark("lod-classify-end");
-        perf_measure("lod-classify", "lod-classify-start", "lod-classify-end");
-
-        // 6. Edge coherence: shared edges must have matching LODs
-        // Guard: skip if half-edge mesh doesn't match current model (stale from previous load)
-        perf_mark("lod-edge-coherence-start");
-        LOD_HALF_EDGE.with(|he_cell| {
-            let he_opt = he_cell.borrow();
-            if let Some(he) = he_opt.as_ref() {
-                if he.num_faces as usize != nf { return; } // stale mesh
-                for fi in 0..nf {
-                    let hes = he.face_half_edges(fi as u32);
-                    for (hi, &he_id) in hes.iter().enumerate() {
-                        let lod_idx = (hi + 2) % 3;
-                        if let Some(twin_id) = quilting_mesh::unpack_twin(he.half_edges[he_id as usize].twin) {
-                            let adj_fi = he.half_edges[twin_id as usize].face as usize;
-                            if adj_fi < nf {
-                                let adj_hes = he.face_half_edges(adj_fi as u32);
-                                for (adj_hi, &adj_he_id) in adj_hes.iter().enumerate() {
-                                    if adj_he_id == twin_id {
-                                        let adj_lod_idx = (adj_hi + 2) % 3;
-                                        let max_lod = face_lods[fi][lod_idx].max(face_lods[adj_fi][adj_lod_idx]);
-                                        face_lods[fi][lod_idx] = max_lod;
-                                        face_lods[adj_fi][adj_lod_idx] = max_lod;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        perf_mark("lod-edge-coherence-end");
-        perf_measure("lod-edge-coherence", "lod-edge-coherence-start", "lod-edge-coherence-end");
-
-        // 7. Re-canonicalize to (canonical_lod, perm_index, parity)
-        perf_mark("lod-canonicalize-start");
-        let mut result = Vec::with_capacity(nf * 5);
-        for fi in 0..nf {
-            let ck = canonical_form(face_lods[fi]);
-            let parity = perm_sign(ck.perm_index);
-            result.push(ck.res[0] as f32);
-            result.push(ck.res[1] as f32);
-            result.push(ck.res[2] as f32);
-            result.push(ck.perm_index as f32);
-            result.push(parity as f32);
+        if gpu_class.is_empty() {
+            web_sys::console::warn_1(&format!(
+                "LOD compute returned empty: faces={} verts={}",
+                num_faces, num_vertices
+            ).into());
+            return JsValue::NULL;
         }
 
-        perf_mark("lod-canonicalize-end");
-        perf_measure("lod-canonicalize", "lod-canonicalize-start", "lod-canonicalize-end");
+        // GPU pass 2 already did edge coherence + canonicalize + atlas LUT.
+        // Output is 5 floats per face: (canon_a, canon_b, canon_c, perm_index, parity)
+        // — directly consumable by group_into_batches.
 
         perf_mark("lod-wasm-end");
         perf_measure("lod-wasm-total", "lod-wasm-start", "lod-wasm-end");
 
-        let arr = js_sys::Float32Array::new_with_length(result.len() as u32);
-        arr.copy_from(&result);
+        let arr = js_sys::Float32Array::new_with_length(gpu_class.len() as u32);
+        arr.copy_from(&gpu_class);
         arr.into()
     })
 }

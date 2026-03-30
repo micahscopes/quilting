@@ -1,4 +1,9 @@
 #version 300 es
-precision lowp float;
-out vec4 dummy;
-void main() { dummy = vec4(0.0); }
+precision highp float;
+
+flat in vec3 v_lods;
+out vec4 frag_color;
+
+void main() {
+    frag_color = vec4(v_lods, 0.0);
+}

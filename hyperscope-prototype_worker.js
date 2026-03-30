@@ -178,15 +178,26 @@ self.onmessage = async function(e) {
       if (minPxSub != null) wasm.set_min_px_per_sub(minPxSub);
     }
     const wt1 = performance.now();
-    const result = wasm.compute_animated_lods(
-      skipAnimation ? -1.0 : t,  // t < 0 signals: skip animation, use rest pose
-      new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
-      density || 20.0,
-      minPx || 0.0,
-      new Float32Array(vpMatrix || new Array(16).fill(0)),
-      vpWidth || 0,
-      vpHeight || 0,
-    );
+    let result;
+    try {
+      result = wasm.compute_animated_lods(
+        skipAnimation ? -1.0 : t,  // t < 0 signals: skip animation, use rest pose
+        new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
+        density || 20.0,
+        minPx || 0.0,
+        new Float32Array(vpMatrix || new Array(16).fill(0)),
+        vpWidth || 0,
+        vpHeight || 0,
+      );
+    } catch (e) {
+      result = null;
+      console.error('compute_animated_lods threw:', e.message, e.stack);
+    }
+    if (result === null || result === undefined) {
+      console.warn('compute_animated_lods returned null/undefined');
+    } else {
+      console.log('compute_animated_lods returned', result.length, 'floats');
+    }
     const wt2 = performance.now();
     // Grab WASM-side perf measures (they land in worker's performance context)
     const wasmMeasures = {};
@@ -199,10 +210,19 @@ self.onmessage = async function(e) {
     performance.clearMeasures();
     performance.clearMarks();
     const timing = { tess_params: wt1-wt0, wasm_total: wt2-wt1, wasm_phases: wasmMeasures };
-    if (result) {
+    if (result && result.length > 0) {
       self.postMessage({ type: 'animated_lods', id, lods: result, timing }, [result.buffer]);
     } else {
-      self.postMessage({ type: 'animated_lods', id, lods: null, timing });
+      // Surface worker-side console messages for debugging
+      const workerLogs = [];
+      for (const m of performance.getEntriesByType('measure')) {
+        if (m.name.startsWith('INFO') || m.name.startsWith('LOD')) workerLogs.push(m.name);
+      }
+      // Also try to check GPU compute state
+      let gpuState = 'unknown';
+      try { gpuState = wasm.debug_gpu_compute_state ? wasm.debug_gpu_compute_state() : 'no debug fn'; } catch(e) { gpuState = e.message; }
+      self.postMessage({ type: 'animated_lods', id, lods: null, timing,
+        debug: { resultType: typeof result, resultNull: result === null, workerLogs, gpuState } });
     }
     return;
   }
