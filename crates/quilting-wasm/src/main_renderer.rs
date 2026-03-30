@@ -11,7 +11,7 @@ use crate::{perf_mark, perf_measure};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
-    MeshBuffers, TessBuffers, PbrParams, EnvironmentMaps,
+    MeshBuffers, TessBuffers, PbrParams, EnvironmentMaps, PersistentInstances,
 };
 use quilting_renderer::pass::{Camera, RenderBatch, RenderMode};
 use quilting_renderer::Renderer;
@@ -30,6 +30,7 @@ struct MainState {
     env_maps: EnvironmentMaps,
     batches: Vec<GpuBatch>,
     cached_instances: Vec<f32>,
+    persistent_buf: Option<PersistentInstances>,
     face_materials: Vec<usize>,
     materials: Vec<PbrParams>,
     num_faces: usize,
@@ -71,6 +72,7 @@ struct MainState {
 
 struct GpuBatch {
     mesh: MeshBuffers,
+    shared_buf: bool, // true = mesh uses shared instance buffer, don't delete instance_buf
     perm_parity: f32,
     perm_index: i32,
     material_index: usize,
@@ -199,6 +201,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             env_maps: EnvironmentMaps::default(),
             batches: Vec::new(),
             cached_instances: Vec::new(),
+            persistent_buf: None,
             face_materials: Vec::new(),
             materials: Vec::new(),
             num_faces: 0,
@@ -764,42 +767,128 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let gl = state.renderer.gl();
 
         perf_mark("batch-destroy-start");
-        for b in state.batches.drain(..) { b.mesh.destroy(gl); }
+        for b in state.batches.drain(..) {
+            if b.shared_buf {
+                b.mesh.destroy_vaos_only(gl);
+            } else {
+                b.mesh.destroy(gl);
+            }
+        }
         perf_mark("batch-destroy-end");
         perf_measure("batch-destroy-old", "batch-destroy-start", "batch-destroy-end");
 
+        // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
         perf_mark("batch-group-start");
-        let logical = batch::group_into_batches(
-            face_lods, &state.cached_instances, &state.face_materials, state.num_faces,
-        );
+        let num_materials = state.face_materials.iter().copied().max().unwrap_or(0) + 1;
+        let num_buckets = 256 * 6 * num_materials;
+        let nf = state.num_faces;
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
+        for fi in 0..nf {
+            let lo = fi * batch::FACE_LOD_STRIDE;
+            if lo + 5 >= face_lods.len() { break; }
+            let atlas_idx = face_lods[lo + 5] as usize;
+            let perm = face_lods[lo + 3] as usize;
+            let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
+            let key = atlas_idx * (6 * num_materials) + perm * num_materials + mat;
+            if key < num_buckets { buckets[key].push(fi as u32); }
+        }
         perf_mark("batch-group-end");
         perf_measure("batch-group", "batch-group-start", "batch-group-end");
 
+        // Phase 2: write each batch's instance data contiguously into the persistent GPU buffer
+        // and create lightweight VAOs pointing at the right offset
         perf_mark("batch-upload-start");
+
+        // Ensure persistent buffer is large enough
+        let total_bytes = nf * batch::INSTANCE_STRIDE * 4;
+        match state.persistent_buf {
+            Some(ref pb) => {
+                if total_bytes > pb.capacity {
+                    // Reallocate
+                    pb.destroy(gl);
+                    state.persistent_buf = None;
+                }
+            }
+            None => {}
+        }
+        if state.persistent_buf.is_none() {
+            let dummy = vec![0.0f32; nf * batch::INSTANCE_STRIDE];
+            match PersistentInstances::new(gl, &dummy) {
+                Ok(pb) => state.persistent_buf = Some(pb),
+                Err(e) => { info!("Failed to create persistent buf: {e}"); return; }
+            }
+        }
+        let pb = state.persistent_buf.as_ref().unwrap();
+
+        // Stream each batch's instance data into contiguous regions of the GPU buffer
+        let mut gpu_offset: usize = 0; // current write position in floats
         let mut built = 0;
         let mut missing = 0;
+        let stride = batch::INSTANCE_STRIDE;
+
+        // Pre-allocate a batch-sized CPU staging buffer (reused across batches)
+        let max_batch_size = buckets.iter().map(|b| b.len()).max().unwrap_or(0);
+        let mut staging = vec![0.0f32; max_batch_size * stride];
+
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
-            for lb in &logical {
-                let key = lb.tess_key.as_string();
-                let tess = match tc.get(&key) {
+            for (key, faces) in buckets.iter().enumerate() {
+                if faces.is_empty() { continue; }
+
+                let mat = key % num_materials;
+                let perm = (key / num_materials) % 6;
+                let fi0 = faces[0] as usize;
+                let lo = fi0 * batch::FACE_LOD_STRIDE;
+                let ca = face_lods[lo] as u32;
+                let cb = face_lods[lo + 1] as u32;
+                let cc = face_lods[lo + 2] as u32;
+                let parity = face_lods[lo + 4];
+                let tess_key = batch::TessKey { lod: [ca, cb, cc], perm_index: perm as u32 };
+
+                let tess = match tc.get(&tess_key.as_string()) {
                     Some(t) => t,
                     None => { missing += 1; continue; }
                 };
-                let mesh = match MeshBuffers::new(gl, tess, &lb.instance_data, lb.face_indices.len() as i32) {
+
+                // Gather this batch's instance data into staging buffer
+                let batch_floats = faces.len() * stride;
+                for (i, &fi) in faces.iter().enumerate() {
+                    let src = fi as usize * stride;
+                    let dst = i * stride;
+                    staging[dst..dst + stride]
+                        .copy_from_slice(&state.cached_instances[src..src + stride]);
+                }
+
+                // Upload this batch's data to the GPU at the current offset
+                let byte_offset = gpu_offset * 4;
+                unsafe {
+                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(pb.buf));
+                    gl.buffer_sub_data_u8_slice(
+                        glow::ARRAY_BUFFER,
+                        byte_offset as i32,
+                        bytemuck_cast_slice(&staging[..batch_floats]),
+                    );
+                }
+
+                // Create VAOs pointing at this offset in the shared buffer
+                let mesh = match MeshBuffers::from_shared(
+                    gl, tess, &pb.buf, byte_offset as i32, faces.len() as i32,
+                ) {
                     Ok(m) => m, Err(_) => continue,
                 };
+
                 state.batches.push(GpuBatch {
-                    mesh, perm_parity: lb.parity, perm_index: lb.perm_index as i32,
-                    material_index: lb.material_index, lod: lb.lod,
+                    mesh, shared_buf: true, perm_parity: parity,
+                    perm_index: perm as i32,
+                    material_index: mat, lod: [ca, cb, cc],
                 });
                 built += 1;
+                gpu_offset += batch_floats;
             }
         });
         perf_mark("batch-upload-end");
         perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
 
-        // Log batch material distribution
         let mut mat_counts = std::collections::BTreeMap::new();
         for b in &state.batches {
             *mat_counts.entry(b.material_index).or_insert(0usize) += b.mesh.num_instances as usize;

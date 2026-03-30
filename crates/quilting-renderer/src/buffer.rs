@@ -126,6 +126,44 @@ impl MeshBuffers {
         }
     }
 
+    /// Create VAOs that reference a shared (persistent) instance buffer at a byte offset.
+    /// The shared buffer is NOT owned by this MeshBuffers — `destroy` won't delete it.
+    pub fn from_shared(
+        gl: &glow::Context,
+        tess: &TessBuffers,
+        shared_buf: &glow::Buffer,
+        byte_offset: i32,
+        num_instances: i32,
+    ) -> Result<Self, String> {
+        unsafe {
+            let tri_vao = gl.create_vertex_array().map_err(|e| format!("tri vao: {e}"))?;
+            setup_vao_offset(gl, tri_vao, &tess.bary_buf, &tess.tri_index_buf, shared_buf, byte_offset);
+
+            let line_vao = gl.create_vertex_array().map_err(|e| format!("line vao: {e}"))?;
+            setup_vao_offset(gl, line_vao, &tess.bary_buf, &tess.line_index_buf, shared_buf, byte_offset);
+
+            gl.bind_vertex_array(None);
+
+            Ok(MeshBuffers {
+                tri_vao,
+                line_vao,
+                instance_buf: *shared_buf, // NOT owned — just a reference
+                instance_buf_capacity: 0,  // 0 signals "shared, don't delete"
+                num_tri_indices: tess.num_tri_indices,
+                num_line_indices: tess.num_line_indices,
+                num_instances,
+            })
+        }
+    }
+
+    /// Destroy VAOs. Skips deleting instance_buf if it's shared (capacity == 0).
+    pub fn destroy_vaos_only(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_vertex_array(self.tri_vao);
+            gl.delete_vertex_array(self.line_vao);
+        }
+    }
+
     /// Re-upload instance data without recreating VAOs.
     pub fn update_instances(
         &mut self,
@@ -186,11 +224,6 @@ unsafe fn setup_vao(
     gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 0, 0);
 
     // Instanced attributes from compact 160-byte stride.
-    // Maps (location, byte_offset) matching JS compactMap.
-    const COMPACT_MAP: [(u32, i32); 10] = [
-        (1, 0), (2, 16), (3, 32), (7, 48), (8, 64),
-        (9, 80), (10, 96), (11, 112), (12, 128), (13, 144),
-    ];
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
     for &(loc, offset) in &COMPACT_MAP {
         gl.enable_vertex_attrib_array(loc);
@@ -207,6 +240,109 @@ unsafe fn setup_vao(
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
 
     gl.bind_vertex_array(None);
+}
+
+/// Configure a VAO like `setup_vao` but with instance attribs starting at `byte_offset`.
+unsafe fn setup_vao_offset(
+    gl: &glow::Context,
+    vao: glow::VertexArray,
+    bary_buf: &glow::Buffer,
+    index_buf: &glow::Buffer,
+    instance_buf: &glow::Buffer,
+    byte_offset: i32,
+) {
+    gl.bind_vertex_array(Some(vao));
+
+    gl.bind_buffer(glow::ARRAY_BUFFER, Some(*bary_buf));
+    gl.enable_vertex_attrib_array(0);
+    gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 0, 0);
+
+    gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
+    for &(loc, attr_offset) in &COMPACT_MAP {
+        gl.enable_vertex_attrib_array(loc);
+        gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, INSTANCE_STRIDE_BYTES, byte_offset + attr_offset);
+        gl.vertex_attrib_divisor(loc, 1);
+    }
+
+    gl.vertex_attrib_4_f32(4, 1.0, 0.0, 0.0, 0.0);
+    gl.vertex_attrib_4_f32(5, 1.0, 0.0, 0.0, 0.0);
+    gl.vertex_attrib_4_f32(6, 1.0, 0.0, 0.0, 0.0);
+
+    gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
+    gl.bind_vertex_array(None);
+}
+
+/// Create a VAO binding tessellation geometry + persistent instance buffer.
+/// The instance attrib pointers start at byte offset 0 — call `bind_at_offset`
+/// before each batch draw to adjust.
+pub fn create_shared_vao(
+    gl: &glow::Context,
+    bary_buf: &glow::Buffer,
+    index_buf: &glow::Buffer,
+    instance_buf: &glow::Buffer,
+) -> Result<glow::VertexArray, String> {
+    unsafe {
+        let vao = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
+        setup_vao(gl, vao, bary_buf, index_buf, instance_buf);
+        Ok(vao)
+    }
+}
+
+/// Instance attribute locations and byte offsets within the 160-byte stride.
+pub const COMPACT_MAP: [(u32, i32); 10] = [
+    (1, 0), (2, 16), (3, 32), (7, 48), (8, 64),
+    (9, 80), (10, 96), (11, 112), (12, 128), (13, 144),
+];
+
+/// A single persistent GPU buffer holding all instance data for all faces.
+/// Batches are contiguous ranges — no per-batch copy needed.
+pub struct PersistentInstances {
+    pub buf: glow::Buffer,
+    pub capacity: usize, // in bytes
+}
+
+impl PersistentInstances {
+    pub fn new(gl: &glow::Context, data: &[f32]) -> Result<Self, String> {
+        unsafe {
+            let buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(buf));
+            let bytes = bytemuck_cast_slice(data);
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+            Ok(Self { buf, capacity: bytes.len() })
+        }
+    }
+
+    /// Re-upload the entire sorted buffer.
+    pub fn upload(&self, gl: &glow::Context, data: &[f32]) {
+        unsafe {
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buf));
+            let bytes = bytemuck_cast_slice(data);
+            if bytes.len() <= self.capacity {
+                gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+            } else {
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+            }
+        }
+    }
+
+    /// Bind instance attributes at a byte offset into this buffer.
+    /// Call before each batch's draw call.
+    pub fn bind_at_offset(&self, gl: &glow::Context, byte_offset: i32) {
+        unsafe {
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buf));
+            for &(loc, attr_offset) in &COMPACT_MAP {
+                gl.vertex_attrib_pointer_f32(
+                    loc, 4, glow::FLOAT, false,
+                    INSTANCE_STRIDE_BYTES,
+                    byte_offset + attr_offset,
+                );
+            }
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe { gl.delete_buffer(self.buf); }
+    }
 }
 
 /// UBO for vertex shader uniforms (matches WGSL Uniforms struct).

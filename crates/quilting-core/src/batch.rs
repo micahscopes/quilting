@@ -122,6 +122,97 @@ pub fn group_into_batches(
     result
 }
 
+/// A batch range into a shared, sorted instance buffer.
+/// No instance data copy — just an offset and count.
+#[derive(Debug)]
+pub struct BatchRange {
+    pub lod: [u32; 3],
+    pub perm_index: u32,
+    pub parity: f32,
+    pub material_index: usize,
+    pub tess_key: TessKey,
+    /// Byte offset into the shared instance buffer where this batch starts.
+    pub instance_offset: usize,
+    /// Number of instances (faces) in this batch.
+    pub instance_count: usize,
+}
+
+/// Sort instance data by batch key and return contiguous ranges.
+///
+/// Permutes `all_instances` in-place so faces in the same batch are contiguous.
+/// Returns `BatchRange`s pointing into the sorted buffer.
+///
+/// This avoids copying 73MB of instance data into per-batch vecs.
+pub fn sort_into_ranges(
+    face_lods: &[f32],
+    all_instances: &mut [f32],
+    face_materials: &[usize],
+    num_faces: usize,
+) -> Vec<BatchRange> {
+    if num_faces == 0 { return Vec::new(); }
+    assert!(face_lods.len() >= num_faces * FACE_LOD_STRIDE);
+    assert!(all_instances.len() >= num_faces * INSTANCE_STRIDE);
+
+    let num_materials = face_materials.iter().copied().max().unwrap_or(0) + 1;
+    let num_buckets = 256 * 6 * num_materials;
+
+    // Phase 1: bucket sort to get face ordering
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
+    for fi in 0..num_faces {
+        let lo = fi * FACE_LOD_STRIDE;
+        let atlas_idx = face_lods[lo + 5] as usize;
+        let perm = face_lods[lo + 3] as usize;
+        let mat = if fi < face_materials.len() { face_materials[fi] } else { 0 };
+        let key = atlas_idx * (6 * num_materials) + perm * num_materials + mat;
+        if key < num_buckets {
+            buckets[key].push(fi as u32);
+        }
+    }
+
+    // Phase 2: build the sorted permutation and batch ranges
+    let mut sorted_order: Vec<u32> = Vec::with_capacity(num_faces);
+    let mut ranges: Vec<BatchRange> = Vec::new();
+
+    for (key, faces) in buckets.into_iter().enumerate() {
+        if faces.is_empty() { continue; }
+        let mat = key % num_materials;
+        let perm = (key / num_materials) % 6;
+
+        let fi0 = faces[0] as usize;
+        let lo = fi0 * FACE_LOD_STRIDE;
+        let ca = face_lods[lo] as u32;
+        let cb = face_lods[lo + 1] as u32;
+        let cc = face_lods[lo + 2] as u32;
+        let parity = face_lods[lo + 4];
+
+        let offset = sorted_order.len();
+        sorted_order.extend_from_slice(&faces);
+
+        ranges.push(BatchRange {
+            lod: [ca, cb, cc],
+            perm_index: perm as u32,
+            parity,
+            material_index: mat,
+            tess_key: TessKey { lod: [ca, cb, cc], perm_index: perm as u32 },
+            instance_offset: offset * INSTANCE_STRIDE * 4, // byte offset
+            instance_count: faces.len(),
+        });
+    }
+
+    // Phase 3: permute all_instances according to sorted_order
+    // Use a temporary buffer for the permutation (unavoidable for in-place sort of strided data)
+    let mut sorted = vec![0.0f32; num_faces * INSTANCE_STRIDE];
+    for (dst, &src_fi) in sorted_order.iter().enumerate() {
+        let src = src_fi as usize * INSTANCE_STRIDE;
+        let dst_off = dst * INSTANCE_STRIDE;
+        sorted[dst_off..dst_off + INSTANCE_STRIDE]
+            .copy_from_slice(&all_instances[src..src + INSTANCE_STRIDE]);
+    }
+    all_instances[..num_faces * INSTANCE_STRIDE].copy_from_slice(&sorted[..num_faces * INSTANCE_STRIDE]);
+
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
