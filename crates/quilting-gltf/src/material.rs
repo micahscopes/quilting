@@ -98,21 +98,55 @@ pub enum AlphaMode {
 pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
     let pbr = mat.pbr_metallic_roughness();
 
-    let base_color_factor = {
+    let mut base_color_factor = {
         let f = pbr.base_color_factor();
         [f[0] as f64, f[1] as f64, f[2] as f64, f[3] as f64]
     };
 
-    let base_color_texture = pbr.base_color_texture().map(|info| TextureRef {
+    let mut base_color_texture = pbr.base_color_texture().map(|info| TextureRef {
         index: info.texture().index(),
         tex_coord: info.tex_coord(),
     });
+
+    // Fallback: KHR_materials_pbrSpecularGlossiness → approximate as metallic-roughness
+    let mut spec_gloss_override = false;
+    if base_color_texture.is_none() {
+        if let Some(ext) = mat.extensions() {
+            if let Some(sg) = ext.get("KHR_materials_pbrSpecularGlossiness") {
+                spec_gloss_override = true;
+                if let Some(dt) = sg.get("diffuseTexture") {
+                    let idx = dt.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let tc = dt.get("texCoord").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    base_color_texture = Some(TextureRef { index: idx, tex_coord: tc });
+                }
+                if let Some(df) = sg.get("diffuseFactor").and_then(|v| v.as_array()) {
+                    for (i, v) in df.iter().take(4).enumerate() {
+                        base_color_factor[i] = v.as_f64().unwrap_or(base_color_factor[i]);
+                    }
+                }
+            }
+        }
+    }
 
     let metallic_roughness_texture =
         pbr.metallic_roughness_texture().map(|info| TextureRef {
             index: info.texture().index(),
             tex_coord: info.tex_coord(),
         });
+
+    // Spec-gloss models are dielectric (non-metallic); approximate roughness from glossiness
+    let (metallic_override, roughness_override) = if spec_gloss_override {
+        let glossiness = mat.extensions()
+            .and_then(|e| e.get("KHR_materials_pbrSpecularGlossiness"))
+            .and_then(|sg| sg.get("glossinessFactor"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5);
+        // Clamp roughness — spec-gloss textures modulate glossiness per-pixel
+        // but we don't read the specularGlossinessTexture, so use a conservative floor
+        (Some(0.0), Some((1.0 - glossiness).max(0.3)))
+    } else {
+        (None, None)
+    };
 
     let normal_texture = mat.normal_texture().map(|info| TextureRef {
         index: info.texture().index(),
@@ -269,8 +303,8 @@ pub fn extract_material(mat: &gltf::Material<'_>) -> PbrMaterial {
         name: mat.name().map(|s| s.to_string()),
         base_color_factor,
         base_color_texture,
-        metallic_factor: pbr.metallic_factor() as f64,
-        roughness_factor: pbr.roughness_factor() as f64,
+        metallic_factor: metallic_override.unwrap_or(pbr.metallic_factor() as f64),
+        roughness_factor: roughness_override.unwrap_or(pbr.roughness_factor() as f64),
         metallic_roughness_texture,
         normal_texture,
         normal_scale,
