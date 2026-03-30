@@ -15,6 +15,34 @@ use std::cell::RefCell;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
+/// Performance.mark/measure helper for profiling in Chrome DevTools.
+/// Works in both Window and Worker contexts.
+pub fn perf_mark(name: &str) {
+    let global = js_sys::global();
+    if let Ok(perf) = js_sys::Reflect::get(&global, &"performance".into()) {
+        if !perf.is_undefined() {
+            let _ = js_sys::Reflect::apply(
+                &js_sys::Reflect::get(&perf, &"mark".into()).unwrap().into(),
+                &perf,
+                &js_sys::Array::of1(&name.into()),
+            );
+        }
+    }
+}
+
+pub fn perf_measure(name: &str, start: &str, end: &str) {
+    let global = js_sys::global();
+    if let Ok(perf) = js_sys::Reflect::get(&global, &"performance".into()) {
+        if !perf.is_undefined() {
+            let _ = js_sys::Reflect::apply(
+                &js_sys::Reflect::get(&perf, &"measure".into()).unwrap().into(),
+                &perf,
+                &js_sys::Array::of3(&name.into(), &start.into(), &end.into()),
+            );
+        }
+    }
+}
+
 #[wasm_bindgen(start)]
 pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
@@ -372,9 +400,12 @@ pub fn compute_animated_lods(
         let num_vertices = data.combined.positions.len() as u32;
         let mesh_radius = LOD_MESH_RADIUS.with(|r| *r.borrow()) as f32;
 
+        perf_mark("lod-wasm-start");
+
         // 1. Evaluate animation pose at time t
         // t < 0 signals "skip animation" — use rest pose for LOD so it matches
         // the uninitialized rendering state when animation is paused.
+        perf_mark("lod-anim-eval-start");
         let use_anim = t >= 0.0;
         let (joint_matrices, morph_weights, num_joints, num_morph) =
             if use_anim {
@@ -424,7 +455,11 @@ pub fn compute_animated_lods(
                 (vec![], vec![], 0u32, 0u32)
             };
 
+        perf_mark("lod-anim-eval-end");
+        perf_measure("lod-anim-eval", "lod-anim-eval-start", "lod-anim-eval-end");
+
         // 2-3. GPU compute
+        perf_mark("lod-gpu-compute-start");
         let gpu_class = GPU_COMPUTE.with(|gc| {
             let mut gc = gc.borrow_mut();
             let (gl, compute) = match gc.as_mut() {
@@ -445,18 +480,28 @@ pub fn compute_animated_lods(
             for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
 
             let max_lod = LOD_MAX.with(|m| *m.borrow());
+            perf_mark("lod-gpu-dispatch-start");
             let n = compute.compute_lods(
                 gl, num_faces, num_vertices,
                 num_joints, num_morph,
                 mob, density, mesh_radius, min_px, max_lod,
                 &vp, vp_width, vp_height,
             );
-            compute.read_back(gl, n)
+            perf_mark("lod-gpu-dispatch-end");
+            perf_measure("lod-gpu-dispatch", "lod-gpu-dispatch-start", "lod-gpu-dispatch-end");
+            perf_mark("lod-gpu-readback-start");
+            let result = compute.read_back(gl, n);
+            perf_mark("lod-gpu-readback-end");
+            perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
+            result
         });
+        perf_mark("lod-gpu-compute-end");
+        perf_measure("lod-gpu-compute", "lod-gpu-compute-start", "lod-gpu-compute-end");
 
         if gpu_class.is_empty() { return JsValue::NULL; }
 
         // 4-5. Invert permutation to recover unsorted per-face LODs
+        perf_mark("lod-classify-start");
         let nf = num_faces;
         let stride = quilting_renderer::compute::FLOATS_PER_FACE_OUTPUT;
         let mut face_lods = vec![[2u32; 3]; nf];
@@ -478,8 +523,12 @@ pub fn compute_animated_lods(
             }
         });
 
+        perf_mark("lod-classify-end");
+        perf_measure("lod-classify", "lod-classify-start", "lod-classify-end");
+
         // 6. Edge coherence: shared edges must have matching LODs
         // Guard: skip if half-edge mesh doesn't match current model (stale from previous load)
+        perf_mark("lod-edge-coherence-start");
         LOD_HALF_EDGE.with(|he_cell| {
             let he_opt = he_cell.borrow();
             if let Some(he) = he_opt.as_ref() {
@@ -508,7 +557,11 @@ pub fn compute_animated_lods(
             }
         });
 
+        perf_mark("lod-edge-coherence-end");
+        perf_measure("lod-edge-coherence", "lod-edge-coherence-start", "lod-edge-coherence-end");
+
         // 7. Re-canonicalize to (canonical_lod, perm_index, parity)
+        perf_mark("lod-canonicalize-start");
         let mut result = Vec::with_capacity(nf * 5);
         for fi in 0..nf {
             let ck = canonical_form(face_lods[fi]);
@@ -519,6 +572,12 @@ pub fn compute_animated_lods(
             result.push(ck.perm_index as f32);
             result.push(parity as f32);
         }
+
+        perf_mark("lod-canonicalize-end");
+        perf_measure("lod-canonicalize", "lod-canonicalize-start", "lod-canonicalize-end");
+
+        perf_mark("lod-wasm-end");
+        perf_measure("lod-wasm-total", "lod-wasm-start", "lod-wasm-end");
 
         let arr = js_sys::Float32Array::new_with_length(result.len() as u32);
         arr.copy_from(&result);

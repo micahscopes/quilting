@@ -171,11 +171,13 @@ self.onmessage = async function(e) {
 
   if (type === 'compute_animated_lods') {
     const { t, mobius, density, minPx, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub, skipAnimation } = data;
+    const wt0 = performance.now();
     // Set tess params before compute
     if (tessDensity != null) {
       wasm.set_tess_params(tessDensity, !!screenAtten);
       if (minPxSub != null) wasm.set_min_px_per_sub(minPxSub);
     }
+    const wt1 = performance.now();
     const result = wasm.compute_animated_lods(
       skipAnimation ? -1.0 : t,  // t < 0 signals: skip animation, use rest pose
       new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
@@ -185,10 +187,22 @@ self.onmessage = async function(e) {
       vpWidth || 0,
       vpHeight || 0,
     );
+    const wt2 = performance.now();
+    // Grab WASM-side perf measures (they land in worker's performance context)
+    const wasmMeasures = {};
+    for (const m of performance.getEntriesByType('measure')) {
+      if (m.name.startsWith('lod-')) {
+        if (!wasmMeasures[m.name]) wasmMeasures[m.name] = [];
+        wasmMeasures[m.name].push(Math.round(m.duration * 100) / 100);
+      }
+    }
+    performance.clearMeasures();
+    performance.clearMarks();
+    const timing = { tess_params: wt1-wt0, wasm_total: wt2-wt1, wasm_phases: wasmMeasures };
     if (result) {
-      self.postMessage({ type: 'animated_lods', id, lods: result }, [result.buffer]);
+      self.postMessage({ type: 'animated_lods', id, lods: result, timing }, [result.buffer]);
     } else {
-      self.postMessage({ type: 'animated_lods', id, lods: null });
+      self.postMessage({ type: 'animated_lods', id, lods: null, timing });
     }
     return;
   }

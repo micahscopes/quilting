@@ -755,9 +755,12 @@ applyParams = function(params) {
   lod.minPx.set(parseInt(params.minpx) || 2);
   lod.atlas.set(parseInt(params.atlas) || 9);
   animating_sig.set(params.animate !== '0');
-  zoom = parseFloat(params.zoom) || 3;
-  rotX = parseFloat(params.rx) || 0.3;
-  rotY = parseFloat(params.ry) || 0.5;
+  {
+    const pf = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+    zoom = pf(params.zoom, 3);
+    rotX = pf(params.rx, 0.3);
+    rotY = pf(params.ry, 0.5);
+  }
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
   fz.radius.set(parseFloat(params.fradius) || 48);
@@ -1165,10 +1168,12 @@ function debouncedLodRecompute() {
 async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
+  performance.mark('lod-start');
   const lodT0 = performance.now();
   try {
     // Pass real Möbius to LOD compute — deformed arc lengths match screen-space.
     // Uniform per-face LOD prevents pole discontinuities (all pole faces clamp to max_lod).
+    performance.mark('lod-setup-start');
     let m;
     try { m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10); }
     catch { m = computeMobius('identity', 0.5, 0, 0, 2); }
@@ -1181,18 +1186,42 @@ async function recomputeLods() {
     const proj = perspective(Math.PI/3, w/h, 0.01, 10000);
     const vp = mulM4(proj, view);
     const tp = getTessParams();
+    performance.mark('lod-setup-end');
+    performance.measure('lod-setup', 'lod-setup-start', 'lod-setup-end');
+
+    performance.mark('lod-worker-start');
     const resp = await workerCall('compute_animated_lods', {
       t: animating ? animTime : 0, mobius: Array.from(mobFlat), density: tp.density, minPx: tp.minPx,
       vpMatrix: Array.from(vp), vpWidth: w, vpHeight: h,
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
       skipAnimation: !animating,
     });
+    performance.mark('lod-worker-end');
+    performance.measure('lod-worker-roundtrip', 'lod-worker-start', 'lod-worker-end');
+
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
-      const t0 = performance.now();
+      const tWorkerDone = performance.now();
+      performance.mark('lod-build-start');
       mr_buildBatches(faceLods);
-      console.log(`LOD: worker=${(t0-lodT0).toFixed(0)}ms build=${(performance.now()-t0).toFixed(0)}ms`);
+      performance.mark('lod-build-end');
+      performance.measure('lod-batch-build', 'lod-build-start', 'lod-build-end');
+      const tBuildDone = performance.now();
+      const wt = resp.timing || {};
+      const phases = wt.wasm_phases || {};
+      const ph = Object.entries(phases).map(([k, v]) => {
+        const last = v[v.length - 1];
+        return `${k.replace('lod-','')}=${last}ms`;
+      }).join(' ');
+      console.log(
+        `LOD: total=${(tBuildDone-lodT0).toFixed(1)}ms | ` +
+        `worker-roundtrip=${(tWorkerDone-lodT0).toFixed(1)}ms | ` +
+        `batch-build=${(tBuildDone-tWorkerDone).toFixed(1)}ms | ` +
+        `wasm=${wt.wasm_total?.toFixed(1) ?? '?'}ms [${ph}]`
+      );
     }
+    performance.mark('lod-end');
+    performance.measure('lod-total', 'lod-start', 'lod-end');
   } catch (e) { console.warn('LOD recompute error:', e); }
   lodInFlight = false;
 }
@@ -1424,9 +1453,12 @@ async function finishModelUpload(info, filename) {
 const initParams = readParams();
 currentGlb = initParams.glb;
 // Set camera early (not WASM-dependent)
-zoom = parseFloat(initParams.zoom) || 3;
-rotX = parseFloat(initParams.rx) || 0.3;
-rotY = parseFloat(initParams.ry) || 0.5;
+{
+  const pf = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+  zoom = pf(initParams.zoom, 3);
+  rotX = pf(initParams.rx, 0.3);
+  rotY = pf(initParams.ry, 0.5);
+}
 
 // ============================================================
 // Lifecycle phases — explicit async dependency ordering.

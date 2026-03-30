@@ -7,6 +7,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use std::cell::RefCell;
 use tracing::{info, debug};
+use crate::{perf_mark, perf_measure};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
@@ -439,10 +440,11 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             let stride = 40; // INSTANCE_STRIDE
             let base = face_id as usize * stride;
             if base + 12 <= state.cached_instances.len() {
-                let p0 = &state.cached_instances[base..base+3];
-                let p1 = &state.cached_instances[base+4..base+7];
-                let p2 = &state.cached_instances[base+8..base+11];
-                info!("Pick face {}: p0=[{:.3},{:.3},{:.3}] p1=[{:.3},{:.3},{:.3}] p2=[{:.3},{:.3},{:.3}]",
+                // Instance layout: [vi, x, y, z] per control point — skip vertex index at offset 0
+                let p0 = &state.cached_instances[base+1..base+4];
+                let p1 = &state.cached_instances[base+5..base+8];
+                let p2 = &state.cached_instances[base+9..base+12];
+                info!("Pick face {}: p0=[{:.4},{:.4},{:.4}] p1=[{:.4},{:.4},{:.4}] p2=[{:.4},{:.4},{:.4}]",
                     face_id, p0[0],p0[1],p0[2], p1[0],p1[1],p1[2], p2[0],p2[1],p2[2]);
 
                 // Compute edge lengths and medians
@@ -453,6 +455,19 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 info!("  edges: a={:.4} b={:.4} c={:.4}", ea, eb, ec);
                 info!("  medians: a={:.4} b={:.4} c={:.4}", ma, mb, mc);
                 info!("  bary at click: ({:.2}, {:.2})", px[2] as f32 / 255.0, px[3] as f32 / 255.0);
+
+                // Find batch and report LOD triple
+                let mut fo = 0i32;
+                for batch in &state.batches {
+                    let bs = batch.mesh.num_instances;
+                    if face_id >= fo && face_id < fo + bs {
+                        info!("  LOD triple: [{}, {}, {}] perm={} parity={:.0}",
+                            batch.lod[0], batch.lod[1], batch.lod[2],
+                            batch.perm_index, batch.perm_parity);
+                        break;
+                    }
+                    fo += bs;
+                }
             }
 
             // Set highlight
@@ -748,12 +763,19 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let state = match state.as_mut() { Some(s) => s, None => return };
         let gl = state.renderer.gl();
 
+        perf_mark("batch-destroy-start");
         for b in state.batches.drain(..) { b.mesh.destroy(gl); }
+        perf_mark("batch-destroy-end");
+        perf_measure("batch-destroy-old", "batch-destroy-start", "batch-destroy-end");
 
+        perf_mark("batch-group-start");
         let logical = batch::group_into_batches(
             face_lods, &state.cached_instances, &state.face_materials, state.num_faces,
         );
+        perf_mark("batch-group-end");
+        perf_measure("batch-group", "batch-group-start", "batch-group-end");
 
+        perf_mark("batch-upload-start");
         let mut built = 0;
         let mut missing = 0;
         TESS_CACHE.with(|tc| {
@@ -774,6 +796,9 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 built += 1;
             }
         });
+        perf_mark("batch-upload-end");
+        perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
+
         // Log batch material distribution
         let mut mat_counts = std::collections::BTreeMap::new();
         for b in &state.batches {
