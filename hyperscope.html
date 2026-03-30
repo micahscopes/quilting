@@ -1160,7 +1160,10 @@ async function tickAnimation(t) {
   animInFlight = false;
 }
 
+let lodDirty = false; // set true when camera moves while LOD is in flight
+
 function debouncedLodRecompute() {
+  if (lodInFlight) { lodDirty = true; return; } // mark dirty, don't queue
   clearTimeout(lodDebounceTimer);
   lodDebounceTimer = setTimeout(recomputeLods, 0);
 }
@@ -1168,11 +1171,10 @@ function debouncedLodRecompute() {
 async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
+  lodDirty = false;
   performance.mark('lod-start');
   const lodT0 = performance.now();
   try {
-    // Pass real Möbius to LOD compute — deformed arc lengths match screen-space.
-    // Uniform per-face LOD prevents pole discontinuities (all pole faces clamp to max_lod).
     performance.mark('lod-setup-start');
     let m;
     try { m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10); }
@@ -1199,9 +1201,13 @@ async function recomputeLods() {
     performance.mark('lod-worker-end');
     performance.measure('lod-worker-roundtrip', 'lod-worker-start', 'lod-worker-end');
 
-    if (resp.debug) console.warn('LOD worker debug:', resp.debug);
-    if (resp.timing?.dbgSamples) console.log('LOD samples:', resp.timing.dbgSamples);
-    if (resp.timing?.gpuState) console.log('GPU state:', resp.timing.gpuState);
+    // If camera moved while we were computing, skip this stale result and recompute
+    if (lodDirty) {
+      lodInFlight = false;
+      recomputeLods();
+      return;
+    }
+
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       const tWorkerDone = performance.now();
@@ -1227,6 +1233,8 @@ async function recomputeLods() {
     performance.measure('lod-total', 'lod-start', 'lod-end');
   } catch (e) { console.warn('LOD recompute error:', e); }
   lodInFlight = false;
+  // If camera moved during batch build, fire another recompute
+  if (lodDirty) recomputeLods();
 }
 
 async function loadModel(buffer, filename) {
