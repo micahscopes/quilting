@@ -22,8 +22,8 @@ fn log_info(msg: &str) {
 /// Pass 1: raw LOD exponents (lod_a, lod_b, lod_c) = 3 floats per face.
 pub const FLOATS_PER_FACE_PASS1: usize = 3;
 
-/// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity) = 5 floats per face.
-pub const FLOATS_PER_FACE_OUTPUT: usize = 5;
+/// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) = 6 floats per face.
+pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
 
 const LOD_COMPUTE_VS: &str = include_str!("../shaders/lod_compute.vert.glsl");
 const LOD_COMPUTE_FS: &str = include_str!("../shaders/lod_compute.frag.glsl");
@@ -140,7 +140,7 @@ impl LodCompute {
 
             // --- Pass 2: TF program ---
             let program2 = build_tf_program(gl, LOD_COHERENCE_VS, DUMMY_FS,
-                &["out_canon_a", "out_canon_b", "out_canon_c", "out_perm_index", "out_parity"],
+                &["out_canon_a", "out_canon_b", "out_canon_c", "out_perm_index", "out_parity", "out_atlas_index"],
                 "LOD pass 2")?;
 
             let vao2 = gl.create_vertex_array().map_err(|e| format!("{e}"))?;

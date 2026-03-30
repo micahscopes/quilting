@@ -1496,8 +1496,9 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
         arr.copy_from(&instances);
 
         // Build per-face LOD classification for batch grouping
-        // Each face: [canonical_a, canonical_b, canonical_c, perm_index, parity]
-        let mut face_lods = Vec::with_capacity(nf * 5);
+        // Each face: [canonical_a, canonical_b, canonical_c, perm_index, parity, atlas_index]
+        let atlas_keys: Vec<[u32; 3]> = LOD_ATLAS_KEYS.with(|ak| ak.borrow().clone());
+        let mut face_lods = Vec::with_capacity(nf * 6);
         for fi in 0..nf {
             let b = fi * COMPACT_STRIDE;
             let l0 = instances[b + 12] as u32;
@@ -1508,11 +1509,13 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
             let canonical = ck.res;
             let perm_idx = ck.perm_index;
             let parity = quilting_core::permutation::perm_sign(perm_idx);
+            let atlas_idx = atlas_keys.iter().position(|k| *k == canonical).unwrap_or(0);
             face_lods.push(canonical[0] as f32);
             face_lods.push(canonical[1] as f32);
             face_lods.push(canonical[2] as f32);
             face_lods.push(perm_idx as f32);
             face_lods.push(parity as f32);
+            face_lods.push(atlas_idx as f32);
         }
         let lod_arr = js_sys::Float32Array::new_with_length(face_lods.len() as u32);
         lod_arr.copy_from(&face_lods);

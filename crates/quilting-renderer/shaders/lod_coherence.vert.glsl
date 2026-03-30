@@ -27,6 +27,7 @@ out float out_canon_b;
 out float out_canon_c;
 out float out_perm_index;
 out float out_parity;
+out float out_atlas_index;
 
 // Read pass 1 LODs for a face (tiled 4096-wide)
 vec3 read_lods(int face_id) {
@@ -108,6 +109,7 @@ void main() {
     out_canon_c = exp2(float(sc));
     out_perm_index = float(perm);
     out_parity = parity;
+    out_atlas_index = atlas_index;
 
     gl_Position = vec4(0.0);
 }

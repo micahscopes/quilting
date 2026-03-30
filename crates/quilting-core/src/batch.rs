@@ -1,12 +1,13 @@
-//! Batch grouping: group faces by (canonical LOD, permutation, material) for instanced draw.
+//! Batch grouping: group faces by (atlas index, permutation, material) for instanced draw.
 //!
-//! This is pure data transformation — no GPU dependency. Replaces the duplicated
-//! grouping logic that was in JS (setupGpuSkinning + rebuildBatchesFromFaceLods).
-
-use std::collections::BTreeMap;
+//! Uses O(n) bucket sort with direct indexing — the key space is bounded
+//! (atlas 0-255 × perm 0-5 × materials) and small enough for a flat Vec.
 
 /// Instance data stride: 40 floats per face.
 pub const INSTANCE_STRIDE: usize = 40;
+
+/// Per-face LOD stride: 6 floats from GPU pass 2.
+pub const FACE_LOD_STRIDE: usize = 6;
 
 /// A tessellation key identifying a unique atlas patch + permutation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -43,63 +44,82 @@ pub struct DrawBatch {
     pub instance_data: Vec<f32>,
 }
 
-/// Group faces into draw batches by (canonical LOD triple, permutation, material).
+/// Group faces into draw batches using O(n) bucket sort.
 ///
 /// # Arguments
-/// - `face_lods`: 5 floats per face: [canon_a, canon_b, canon_c, perm_index, parity]
+/// - `face_lods`: 6 floats per face: [canon_a, canon_b, canon_c, perm_index, parity, atlas_index]
 /// - `all_instances`: flat f32 array, INSTANCE_STRIDE floats per face
 /// - `face_materials`: per-face material index (len == num_faces)
 /// - `num_faces`: number of faces
 ///
 /// # Returns
-/// Grouped `DrawBatch`es sorted by key for deterministic ordering.
+/// Grouped `DrawBatch`es. Order is deterministic (sorted by bucket key).
 pub fn group_into_batches(
     face_lods: &[f32],
     all_instances: &[f32],
     face_materials: &[usize],
     num_faces: usize,
 ) -> Vec<DrawBatch> {
-    assert!(face_lods.len() >= num_faces * 5);
+    if num_faces == 0 { return Vec::new(); }
+    assert!(face_lods.len() >= num_faces * FACE_LOD_STRIDE);
     assert!(all_instances.len() >= num_faces * INSTANCE_STRIDE);
 
-    // BTreeMap for deterministic ordering.
-    // Key: (lod_a, lod_b, lod_c, perm_index, material_index)
-    let mut groups: BTreeMap<(u32, u32, u32, u32, usize), (f32, Vec<u32>)> = BTreeMap::new();
+    // Find max material index for bucket array sizing
+    let num_materials = face_materials.iter().copied().max().unwrap_or(0) + 1;
 
+    // Bucket array: key = atlas_idx * (6 * num_materials) + perm * num_materials + material
+    // Max atlas_idx = 255, max perm = 5, so max buckets = 256 * 6 * num_materials
+    let num_buckets = 256 * 6 * num_materials;
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
+
+    // Single pass: distribute faces into buckets
     for fi in 0..num_faces {
-        let lo = fi * 5;
+        let lo = fi * FACE_LOD_STRIDE;
+        let atlas_idx = face_lods[lo + 5] as usize;
+        let perm = face_lods[lo + 3] as usize;
+        let mat = if fi < face_materials.len() { face_materials[fi] } else { 0 };
+
+        let key = atlas_idx * (6 * num_materials) + perm * num_materials + mat;
+        if key < num_buckets {
+            buckets[key].push(fi as u32);
+        }
+    }
+
+    // Collect non-empty buckets into DrawBatches
+    let mut result = Vec::new();
+    for (key, faces) in buckets.into_iter().enumerate() {
+        if faces.is_empty() { continue; }
+
+        let mat = key % num_materials;
+        let perm = (key / num_materials) % 6;
+
+        // Read canonical LODs and parity from first face in bucket
+        let fi0 = faces[0] as usize;
+        let lo = fi0 * FACE_LOD_STRIDE;
         let ca = face_lods[lo] as u32;
         let cb = face_lods[lo + 1] as u32;
         let cc = face_lods[lo + 2] as u32;
-        let perm_idx = face_lods[lo + 3] as u32;
         let parity = face_lods[lo + 4];
-        let mat_idx = if fi < face_materials.len() { face_materials[fi] } else { 0 };
 
-        let key = (ca, cb, cc, perm_idx, mat_idx);
-        groups.entry(key)
-            .or_insert_with(|| (parity, Vec::new()))
-            .1
-            .push(fi as u32);
-    }
-
-    groups.into_iter().map(|((ca, cb, cc, perm_idx, mat_idx), (parity, faces))| {
-        // Pack instance data for this group
+        // Pack instance data
         let mut instance_data = Vec::with_capacity(faces.len() * INSTANCE_STRIDE);
         for &fi in &faces {
             let start = fi as usize * INSTANCE_STRIDE;
             instance_data.extend_from_slice(&all_instances[start..start + INSTANCE_STRIDE]);
         }
 
-        DrawBatch {
+        result.push(DrawBatch {
             lod: [ca, cb, cc],
-            perm_index: perm_idx,
+            perm_index: perm as u32,
             parity,
-            material_index: mat_idx,
-            tess_key: TessKey { lod: [ca, cb, cc], perm_index: perm_idx },
+            material_index: mat,
+            tess_key: TessKey { lod: [ca, cb, cc], perm_index: perm as u32 },
             face_indices: faces,
             instance_data,
-        }
-    }).collect()
+        });
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -108,8 +128,9 @@ mod tests {
 
     #[test]
     fn single_face_single_batch() {
-        let face_lods = vec![4.0, 4.0, 4.0, 0.0, 1.0]; // one face
-        let all_instances = vec![0.0f32; INSTANCE_STRIDE]; // one face of data
+        // 6 floats: canon_a=4, canon_b=4, canon_c=4, perm=0, parity=1, atlas_idx=0
+        let face_lods = vec![4.0, 4.0, 4.0, 0.0, 1.0, 0.0];
+        let all_instances = vec![0.0f32; INSTANCE_STRIDE];
         let face_materials = vec![0];
         let batches = group_into_batches(&face_lods, &all_instances, &face_materials, 1);
         assert_eq!(batches.len(), 1);
@@ -120,14 +141,12 @@ mod tests {
 
     #[test]
     fn groups_by_lod_and_material() {
-        // 3 faces: two share LOD+material, one differs
         let face_lods = vec![
-            4.0, 4.0, 4.0, 0.0, 1.0,  // face 0
-            4.0, 4.0, 4.0, 0.0, 1.0,  // face 1 (same group as 0)
-            8.0, 8.0, 8.0, 0.0, 1.0,  // face 2 (different LOD)
+            4.0, 4.0, 4.0, 0.0, 1.0, 0.0,  // face 0, atlas=0
+            4.0, 4.0, 4.0, 0.0, 1.0, 0.0,  // face 1, same atlas
+            8.0, 8.0, 8.0, 0.0, 1.0, 1.0,  // face 2, atlas=1
         ];
         let mut all_instances = vec![0.0f32; 3 * INSTANCE_STRIDE];
-        // Tag each face's first float so we can verify data packing
         all_instances[0] = 100.0;
         all_instances[INSTANCE_STRIDE] = 200.0;
         all_instances[2 * INSTANCE_STRIDE] = 300.0;
@@ -149,11 +168,11 @@ mod tests {
     #[test]
     fn groups_by_material() {
         let face_lods = vec![
-            4.0, 4.0, 4.0, 0.0, 1.0,
-            4.0, 4.0, 4.0, 0.0, 1.0,
+            4.0, 4.0, 4.0, 0.0, 1.0, 0.0,
+            4.0, 4.0, 4.0, 0.0, 1.0, 0.0,
         ];
         let all_instances = vec![0.0f32; 2 * INSTANCE_STRIDE];
-        let face_materials = vec![0, 1]; // different materials
+        let face_materials = vec![0, 1];
         let batches = group_into_batches(&face_lods, &all_instances, &face_materials, 2);
         assert_eq!(batches.len(), 2);
     }
