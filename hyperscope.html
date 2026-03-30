@@ -493,14 +493,14 @@ window.addEventListener('mousemove', e => {
     rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
   }
   clearTimeout(camDebounce);
-  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 150);
+  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
 });
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
   zoom *= e.deltaY > 0 ? 1.1 : 0.9;
   zoom = Math.max(0.1, Math.min(100, zoom));
   clearTimeout(camDebounce);
-  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 150);
+  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
 }, { passive: false });
 
 // Touch support
@@ -1162,7 +1162,7 @@ async function tickAnimation(t) {
 
 function debouncedLodRecompute() {
   clearTimeout(lodDebounceTimer);
-  lodDebounceTimer = setTimeout(recomputeLods, 50);
+  lodDebounceTimer = setTimeout(recomputeLods, 0);
 }
 
 async function recomputeLods() {
