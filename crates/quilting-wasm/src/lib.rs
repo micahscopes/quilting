@@ -2155,6 +2155,323 @@ fn merge_all_mesh_nodes(
     }
 }
 
+// ============================================================
+// Remeshing integration
+// ============================================================
+
+thread_local! {
+    static REMESH_DATA: RefCell<Option<RemeshedModel>> = RefCell::new(None);
+}
+
+struct RemeshedModel {
+    patches: Vec<quilting_core::patch::QBTriPatch>,
+    patch_uvs: Vec<[[f32; 2]; 3]>,
+    patch_normals: Vec<[[f32; 3]; 3]>,
+}
+
+/// Load a test shape (sphere or cylinder) as the current model for remeshing experiments.
+/// shape: "sphere" or "cylinder"
+/// param1: subdivisions (sphere) or segments (cylinder)
+/// param2: unused (sphere) or rings (cylinder)
+#[wasm_bindgen]
+pub fn load_test_shape(shape: &str, param1: u32, param2: u32) -> JsValue {
+    let (positions, faces) = match shape {
+        "sphere" => quilting_remesh::test_shapes::sphere(param1),
+        "cylinder" => quilting_remesh::test_shapes::cylinder(param1 as usize, param2 as usize, 1.0, 0.3),
+        _ => return JsValue::NULL,
+    };
+
+    let normals = quilting_remesh::geometry::compute_vertex_normals(&positions, &faces);
+
+    let num_faces = faces.len();
+    let num_verts = positions.len();
+
+    // Store as GLTF_DATA so remesh_current_model can access it
+    // We need to create a StoredGltfData-compatible struct
+    // Instead, store directly in REMESH for simplicity and also
+    // build instances for rendering
+
+    // Pack instances in compact 40-float format for rendering
+    const COMPACT_STRIDE: usize = 40;
+    let mut instances = vec![0.0f32; num_faces * COMPACT_STRIDE];
+
+    for (fi, face) in faces.iter().enumerate() {
+        let b = fi * COMPACT_STRIDE;
+        for vi in 0..3 {
+            let off = b + vi * 4;
+            instances[off]     = face[vi] as f32;
+            instances[off + 1] = positions[face[vi]][0] as f32;
+            instances[off + 2] = positions[face[vi]][1] as f32;
+            instances[off + 3] = positions[face[vi]][2] as f32;
+        }
+        // Default LODs
+        instances[b + 12] = 4.0; instances[b + 13] = 4.0; instances[b + 14] = 4.0;
+        instances[b + 16] = 4.0; instances[b + 17] = 4.0; instances[b + 18] = 4.0;
+        // Normals
+        for vi in 0..3 {
+            let off = b + 28 + vi * 4;
+            instances[off]     = normals[face[vi]][0] as f32;
+            instances[off + 1] = normals[face[vi]][1] as f32;
+            instances[off + 2] = normals[face[vi]][2] as f32;
+        }
+    }
+
+    // Also store positions/faces for remeshing
+    REMESH_SOURCE.with(|rs| {
+        *rs.borrow_mut() = Some(RemeshSource {
+            positions: positions.clone(),
+            faces: faces.clone(),
+        });
+    });
+
+    // Build face LODs
+    let mut face_lods = Vec::with_capacity(num_faces * 6);
+    let canon = quilting_core::permutation::canonical_form([4, 4, 4]);
+    for _ in 0..num_faces {
+        face_lods.push(canon.res[0] as f32);
+        face_lods.push(canon.res[1] as f32);
+        face_lods.push(canon.res[2] as f32);
+        face_lods.push(canon.perm_index as f32);
+        face_lods.push(quilting_core::permutation::perm_sign(canon.perm_index) as f32);
+        face_lods.push(0.0f32); // atlas_idx
+    }
+
+    let result = js_sys::Object::new();
+    let js_instances = js_sys::Float32Array::new_with_length(instances.len() as u32);
+    js_instances.copy_from(&instances);
+    js_sys::Reflect::set(&result, &"instances".into(), &js_instances).unwrap();
+    js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(num_faces as f64)).unwrap();
+    js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(num_verts as f64)).unwrap();
+
+    let js_lods = js_sys::Float32Array::new_with_length(face_lods.len() as u32);
+    js_lods.copy_from(&face_lods);
+    js_sys::Reflect::set(&result, &"face_lods".into(), &js_lods).unwrap();
+
+    let js_materials = js_sys::Int32Array::new_with_length(num_faces as u32);
+    js_sys::Reflect::set(&result, &"face_materials".into(), &js_materials).unwrap();
+
+    web_sys::console::log_1(&format!(
+        "load_test_shape: {} — {} verts, {} faces", shape, num_verts, num_faces
+    ).into());
+
+    result.into()
+}
+
+/// Source mesh data for remeshing (separate from GLTF_DATA so test shapes work).
+struct RemeshSource {
+    positions: Vec<[f64; 3]>,
+    faces: Vec<[usize; 3]>,
+}
+
+thread_local! {
+    static REMESH_SOURCE: RefCell<Option<RemeshSource>> = RefCell::new(None);
+}
+
+/// Remesh the currently loaded glTF model into QB patches.
+/// Returns a JS object with stats: { num_patches, original_faces, reduction_ratio, time_ms,
+///   rms_position_error, max_position_error, rms_normal_error }.
+#[wasm_bindgen]
+pub fn remesh_current_model(target_patches: u32) -> JsValue {
+    // Try REMESH_SOURCE first (test shapes), then GLTF_DATA
+    let (positions_owned, faces_owned) = REMESH_SOURCE.with(|rs| {
+        let src = rs.borrow();
+        if let Some(s) = src.as_ref() {
+            return Some((s.positions.clone(), s.faces.clone()));
+        }
+        None
+    }).or_else(|| {
+        GLTF_DATA.with(|gd| {
+            let data = gd.borrow();
+            let data = data.as_ref()?;
+            let center = data.norm_center;
+            let scale = data.norm_scale;
+            let norm_positions: Vec<[f64; 3]> = data.combined.positions.iter().map(|v| {
+                [(v[0]-center[0])*scale, (v[1]-center[1])*scale, (v[2]-center[2])*scale]
+            }).collect();
+            Some((norm_positions, data.combined.triangles.clone()))
+        })
+    }).unwrap_or_else(|| {
+        web_sys::console::error_1(&"remesh_current_model: no model loaded".into());
+        return (vec![], vec![]);
+    });
+
+    if faces_owned.is_empty() { return JsValue::NULL; }
+
+    {
+        let positions = &positions_owned;
+        let faces = &faces_owned;
+
+        web_sys::console::log_1(&format!(
+            "remesh: starting — {} verts, {} faces, target {} patches",
+            positions.len(), faces.len(), target_patches
+        ).into());
+
+        let t0 = js_sys::Date::now();
+
+        let result = match quilting_remesh::remesh_simplified(positions, faces, target_patches as usize) {
+            Ok(r) => r,
+            Err(e) => {
+                web_sys::console::error_1(&format!("remesh failed: {}", e).into());
+                return JsValue::NULL;
+            }
+        };
+
+        let elapsed = js_sys::Date::now() - t0;
+
+        web_sys::console::log_1(&format!(
+            "remesh: done in {:.0}ms — {} patches from {} faces ({:.1}x reduction)",
+            elapsed, result.stats.num_patches, result.stats.original_faces, result.stats.reduction_ratio
+        ).into());
+
+        // Store the remeshed data
+        REMESH_DATA.with(|rd| {
+            *rd.borrow_mut() = Some(RemeshedModel {
+                patches: result.patches.clone(),
+                patch_uvs: result.patch_uvs.clone(),
+                patch_normals: result.patch_normals.clone(),
+            });
+        });
+
+        // Return stats
+        let obj = js_sys::Object::new();
+        let s = &result.stats;
+        js_sys::Reflect::set(&obj, &"num_patches".into(), &JsValue::from_f64(s.num_patches as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &"original_faces".into(), &JsValue::from_f64(s.original_faces as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &"reduction_ratio".into(), &JsValue::from_f64(s.reduction_ratio)).unwrap();
+        js_sys::Reflect::set(&obj, &"time_ms".into(), &JsValue::from_f64(elapsed)).unwrap();
+        js_sys::Reflect::set(&obj, &"rms_position_error".into(), &JsValue::from_f64(s.avg_position_error)).unwrap();
+        js_sys::Reflect::set(&obj, &"max_position_error".into(), &JsValue::from_f64(s.max_position_error)).unwrap();
+        js_sys::Reflect::set(&obj, &"rms_normal_error".into(), &JsValue::from_f64(s.avg_normal_error_degrees)).unwrap();
+        js_sys::Reflect::set(&obj, &"num_flipped".into(), &JsValue::from_f64(s.num_flipped as f64)).unwrap();
+        obj.into()
+    }
+}
+
+/// Compute instances from remeshed QB patches (replaces compute_mesh_batches for remeshed model).
+/// Returns the same format as compute_mesh_batches: packed f32 instance data + face LOD data.
+#[wasm_bindgen]
+pub fn compute_remeshed_instances(
+    mobius: &[f32],
+    lod: u32,
+) -> JsValue {
+    REMESH_DATA.with(|rd| {
+        let data = rd.borrow();
+        let data = match data.as_ref() {
+            Some(d) => d,
+            None => return JsValue::NULL,
+        };
+
+        let transform = if mobius.len() >= 16 {
+            let a = Quat::new(mobius[0] as f64, mobius[1] as f64, mobius[2] as f64, mobius[3] as f64);
+            let b = Quat::new(mobius[4] as f64, mobius[5] as f64, mobius[6] as f64, mobius[7] as f64);
+            let c = Quat::new(mobius[8] as f64, mobius[9] as f64, mobius[10] as f64, mobius[11] as f64);
+            let d = Quat::new(mobius[12] as f64, mobius[13] as f64, mobius[14] as f64, mobius[15] as f64);
+            Mobius { a, b, c, d }
+        } else {
+            Mobius::identity()
+        };
+
+        let instances = quilting_core::evaluate::compute_instances_from_patches(
+            &data.patches,
+            &data.patch_uvs,
+            &data.patch_normals,
+            &transform,
+            lod,
+        );
+
+        let num_faces = instances.len();
+
+        // Pack in compact 40-float format matching get_rest_pose_instances layout:
+        // [0-3]: vertex_idx(0) + position xyz  (we use 0 for vertex_idx since there's no skinning)
+        // [4-7]: vertex_idx(0) + position xyz
+        // [8-11]: vertex_idx(0) + position xyz
+        // [12-14]: edge LODs, [15]: pad
+        // [16-18]: vertex LODs, [19]: pad
+        // [20-25]: UVs (u0,v0,u1,v1,u2,v2), [26-27]: pad
+        // [28-39]: normals (n0xyz+pad, n1xyz+pad, n2xyz+pad)
+        const COMPACT_STRIDE: usize = 40;
+        let mut all_instances = vec![0.0f32; num_faces * COMPACT_STRIDE];
+        for (fi, inst) in instances.iter().enumerate() {
+            let b = fi * COMPACT_STRIDE;
+            // Positions (use .to_point() to get xyz from quaternion)
+            for vi in 0..3 {
+                let p = inst.positions[vi].to_point();
+                all_instances[b + vi*4]     = 0.0; // vertex index (unused for remeshed)
+                all_instances[b + vi*4 + 1] = p[0] as f32;
+                all_instances[b + vi*4 + 2] = p[1] as f32;
+                all_instances[b + vi*4 + 3] = p[2] as f32;
+            }
+            // Edge LODs
+            all_instances[b + 12] = inst.edge_lods[0] as f32;
+            all_instances[b + 13] = inst.edge_lods[1] as f32;
+            all_instances[b + 14] = inst.edge_lods[2] as f32;
+            // Vertex LODs
+            all_instances[b + 16] = inst.vertex_lods[0] as f32;
+            all_instances[b + 17] = inst.vertex_lods[1] as f32;
+            all_instances[b + 18] = inst.vertex_lods[2] as f32;
+            // UVs
+            all_instances[b + 20] = inst.uvs[0][0]; all_instances[b + 21] = inst.uvs[0][1];
+            all_instances[b + 22] = inst.uvs[1][0]; all_instances[b + 23] = inst.uvs[1][1];
+            all_instances[b + 24] = inst.uvs[2][0]; all_instances[b + 25] = inst.uvs[2][1];
+            // Normals
+            for vi in 0..3 {
+                let off = b + 28 + vi * 4;
+                all_instances[off]   = inst.normals[vi][0];
+                all_instances[off+1] = inst.normals[vi][1];
+                all_instances[off+2] = inst.normals[vi][2];
+            }
+        }
+
+        // Face LOD data: all uniform since remeshed patches don't use adaptive LOD
+        let effective_lod = if lod > 0 { lod } else { 4 };
+        let canon = quilting_core::permutation::canonical_form([effective_lod, effective_lod, effective_lod]);
+        let atlas_idx = ATLAS.with(|a| {
+            a.borrow().as_ref().and_then(|atlas| {
+                atlas.get_patch([effective_lod, effective_lod, effective_lod]).map(|_| 0u32)
+            }).unwrap_or(0)
+        });
+
+        let mut face_lods = Vec::with_capacity(num_faces * 6);
+        for _ in 0..num_faces {
+            face_lods.push(canon.res[0] as f32);
+            face_lods.push(canon.res[1] as f32);
+            face_lods.push(canon.res[2] as f32);
+            face_lods.push(canon.perm_index as f32);
+            face_lods.push(quilting_core::permutation::perm_sign(canon.perm_index) as f32);
+            face_lods.push(atlas_idx as f32);
+        }
+
+        // Build result object
+        let result = js_sys::Object::new();
+        let js_instances = js_sys::Float32Array::new_with_length(all_instances.len() as u32);
+        js_instances.copy_from(&all_instances);
+        js_sys::Reflect::set(&result, &"instances".into(), &js_instances).unwrap();
+        js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(num_faces as f64)).unwrap();
+
+        let js_lods = js_sys::Float32Array::new_with_length(face_lods.len() as u32);
+        js_lods.copy_from(&face_lods);
+        js_sys::Reflect::set(&result, &"face_lods".into(), &js_lods).unwrap();
+
+        // Face materials: all default (index 0)
+        let js_materials = js_sys::Int32Array::new_with_length(num_faces as u32);
+        js_sys::Reflect::set(&result, &"face_materials".into(), &js_materials).unwrap();
+
+        result.into()
+    })
+}
+
+/// Check if remeshed data is available.
+#[wasm_bindgen]
+pub fn has_remeshed_data() -> bool {
+    REMESH_DATA.with(|rd| rd.borrow().is_some())
+}
+
+/// Clear remeshed data (go back to original mesh).
+#[wasm_bindgen]
+pub fn clear_remeshed_data() {
+    REMESH_DATA.with(|rd| *rd.borrow_mut() = None);
+}
+
 /// Helper struct to pass mesh node info to merge_all_mesh_nodes.
 struct MeshNodeRef {
     mesh_idx: usize,

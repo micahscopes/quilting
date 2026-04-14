@@ -232,6 +232,29 @@ pub fn compute_instances_xform_only(
     instances
 }
 
+/// Compute instances from pre-fitted QB patches (for the remeshing pipeline).
+/// Each patch has pre-computed positions and weights; the Möbius transform
+/// is applied on top via QBTriPatch::transform.
+pub fn compute_instances_from_patches(
+    patches: &[crate::patch::QBTriPatch],
+    patch_uvs: &[[[f32; 2]; 3]],
+    patch_normals: &[[[f32; 3]; 3]],
+    transform: &Mobius,
+    lod: u32,
+) -> Vec<FaceInstance> {
+    patches.iter().enumerate().map(|(i, patch)| {
+        let transformed = patch.transform(transform);
+        FaceInstance {
+            positions: transformed.positions,
+            weights: transformed.weights,
+            edge_lods: [lod, lod, lod],
+            vertex_lods: [lod, lod, lod],
+            uvs: patch_uvs[i],
+            normals: patch_normals[i],
+        }
+    }).collect()
+}
+
 /// Compute instances with optional per-vertex UVs and normals.
 pub fn compute_instances_with_uvs(
     vertices: &[[f64; 3]],

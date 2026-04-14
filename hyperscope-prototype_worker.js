@@ -241,4 +241,50 @@ self.onmessage = async function(e) {
     self.postMessage({ type: 'generated', id });
     return;
   }
+
+  if (type === 'load_test_shape') {
+    const { shape, param1, param2 } = data;
+    const result = wasm.load_test_shape(shape, param1 || 2, param2 || 8);
+    if (result) {
+      const transfers = [];
+      if (result.instances?.buffer) transfers.push(result.instances.buffer);
+      if (result.face_lods?.buffer) transfers.push(result.face_lods.buffer);
+      if (result.face_materials?.buffer) transfers.push(result.face_materials.buffer);
+      self.postMessage({ type: 'test_shape_loaded', id, result }, transfers);
+    } else {
+      self.postMessage({ type: 'test_shape_loaded', id, result: null });
+    }
+    return;
+  }
+
+  if (type === 'remesh') {
+    const targetPatches = data.targetPatches || 200;
+    const stats = wasm.remesh_current_model(targetPatches);
+    self.postMessage({ type: 'remeshed', id, stats });
+    return;
+  }
+
+  if (type === 'compute_remeshed') {
+    const { mobius, lod } = data;
+    const result = wasm.compute_remeshed_instances(
+      new Float32Array(mobius),
+      lod || 4,
+    );
+    if (result) {
+      const transfers = [];
+      if (result.instances?.buffer) transfers.push(result.instances.buffer);
+      if (result.face_lods?.buffer) transfers.push(result.face_lods.buffer);
+      if (result.face_materials?.buffer) transfers.push(result.face_materials.buffer);
+      self.postMessage({ type: 'remeshed_instances', id, result }, transfers);
+    } else {
+      self.postMessage({ type: 'remeshed_instances', id, result: null });
+    }
+    return;
+  }
+
+  if (type === 'clear_remesh') {
+    wasm.clear_remeshed_data();
+    self.postMessage({ type: 'remesh_cleared', id });
+    return;
+  }
 };

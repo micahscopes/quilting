@@ -1,0 +1,11 @@
+[package]
+name = "quilting-remesh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quilting-core = { path = "../quilting-core" }
+quilting-mesh = { path = "../quilting-mesh" }
+quilting-gltf = { path = "../quilting-gltf" }
+rand = "0.8"
+rand_pcg = "0.3"

@@ -628,6 +628,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "quilting-remesh"
+version = "0.1.0"
+dependencies = [
+ "quilting-core",
+ "quilting-gltf",
+ "quilting-mesh",
+ "rand",
+ "rand_pcg",
+]
+
+[[package]]
 name = "quilting-renderer"
 version = "0.1.0"
 dependencies = [
@@ -656,6 +667,7 @@ dependencies = [
  "quilting-core",
  "quilting-gltf",
  "quilting-mesh",
+ "quilting-remesh",
  "quilting-renderer",
  "quilting-shaders",
  "rustc-hash 2.1.1",
