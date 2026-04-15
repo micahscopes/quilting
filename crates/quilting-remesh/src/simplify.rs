@@ -6,6 +6,8 @@ use std::cmp::Ordering;
 use crate::geometry;
 
 /// Simplify a triangle mesh to approximately `target_faces` triangles.
+/// Uses cyclide-aware edge costs: edges where both vertices have similar
+/// curvature (same cyclide region) are cheaper to collapse.
 pub fn simplify(
     positions: &[[f64; 3]],
     faces: &[[usize; 3]],
@@ -17,6 +19,9 @@ pub fn simplify(
     if n_faces <= target_faces {
         return (positions.to_vec(), faces.to_vec());
     }
+
+    // Compute curvatures for cyclide-aware cost
+    let curvatures = crate::curvature::compute_vertex_curvatures(positions, faces);
 
     // Per-vertex quadric error matrix (symmetric 4x4, stored as 10 floats)
     let mut quadrics = vec![[0.0f64; 10]; n_verts];
@@ -61,7 +66,10 @@ pub fn simplify(
             let a = face[i]; let b = face[(i + 1) % 3];
             let key = (a.min(b), a.max(b));
             if edge_set.insert(key) {
-                let (cost, target) = edge_cost(&quadrics[a], &quadrics[b], &pos[a], &pos[b]);
+                let (cost, target) = edge_cost(
+                    &quadrics[a], &quadrics[b], &pos[a], &pos[b],
+                    &curvatures[a], &curvatures[b],
+                );
                 heap.push(EdgeCollapse { cost, v0: a, v1: b, target_pos: target });
             }
         }
@@ -132,7 +140,10 @@ pub fn simplify(
         }
 
         for &nb in &neighbors {
-            let (cost, target) = edge_cost(&quadrics[v0], &quadrics[nb], &pos[v0], &pos[nb]);
+            let (cost, target) = edge_cost(
+                &quadrics[v0], &quadrics[nb], &pos[v0], &pos[nb],
+                &curvatures[v0], &curvatures[nb],
+            );
             heap.push(EdgeCollapse { cost, v0, v1: nb, target_pos: target });
         }
     }
@@ -202,7 +213,13 @@ fn check_collapse_valid(
 }
 
 /// Compute optimal collapse position and cost.
-fn edge_cost(q0: &[f64; 10], q1: &[f64; 10], p0: &[f64; 3], p1: &[f64; 3]) -> (f64, [f64; 3]) {
+/// Cost is scaled by cyclide compatibility: edges within the same cyclide
+/// region (similar curvature) are cheaper to collapse. Edges at curvature
+/// boundaries are expensive — they should become patch boundaries.
+fn edge_cost(
+    q0: &[f64; 10], q1: &[f64; 10], p0: &[f64; 3], p1: &[f64; 3],
+    c0: &crate::curvature::VertexCurvature, c1: &crate::curvature::VertexCurvature,
+) -> (f64, [f64; 3]) {
     let mut q = [0.0; 10];
     for i in 0..10 { q[i] = q0[i] + q1[i]; }
 
@@ -211,9 +228,14 @@ fn edge_cost(q0: &[f64; 10], q1: &[f64; 10], p0: &[f64; 3], p1: &[f64; 3]) -> (f
 
     // Penalize short edges to preserve thin features
     let edge_len = geometry::vec3_dist(*p0, *p1);
-    let penalty = if edge_len > 1e-10 { 1.0 / edge_len } else { 1e10 };
+    let len_penalty = if edge_len > 1e-10 { 1.0 / edge_len } else { 1e10 };
 
-    (error * penalty, target)
+    // Cyclide compatibility: high compatibility = low cost multiplier.
+    // Edges at curvature boundaries get 5x higher cost.
+    let compat = crate::curvature::cyclide_compatibility(c0, c1);
+    let curvature_penalty = 1.0 + 4.0 * (1.0 - compat);
+
+    (error * len_penalty * curvature_penalty, target)
 }
 
 fn optimal_position(q: &[f64; 10], p0: &[f64; 3], p1: &[f64; 3]) -> [f64; 3] {

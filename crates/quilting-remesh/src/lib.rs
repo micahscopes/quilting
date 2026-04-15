@@ -5,6 +5,7 @@ pub mod cluster;
 pub mod parameterize;
 pub mod fit;
 pub mod simplify;
+pub mod curvature;
 pub mod test_shapes;
 
 use quilting_core::patch::QBTriPatch;
