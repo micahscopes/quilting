@@ -2169,6 +2169,154 @@ struct RemeshedModel {
     patch_normals: Vec<[[f32; 3]; 3]>,
 }
 
+// ============================================================
+// Remesh Lab — clean API for test harness
+// ============================================================
+
+/// Generate a test mesh. Returns { positions: [[x,y,z],...], faces: [[a,b,c],...], num_vertices, num_faces }.
+#[wasm_bindgen]
+pub fn generate_test_mesh(shape: &str, subdivisions: u32) -> JsValue {
+    let (positions, faces) = match shape {
+        "sphere" => quilting_remesh::test_shapes::sphere(subdivisions),
+        "cylinder" => quilting_remesh::test_shapes::cylinder(
+            (8 * 2_usize.pow(subdivisions.min(4))) .min(64),
+            (4 * 2_usize.pow(subdivisions.min(4))).min(32),
+            1.0, 0.3,
+        ),
+        "torus" => generate_torus(subdivisions),
+        _ => return JsValue::NULL,
+    };
+
+    let result = js_sys::Object::new();
+
+    // Positions as nested array
+    let js_pos = js_sys::Array::new();
+    for p in &positions {
+        let arr = js_sys::Array::of3(
+            &JsValue::from_f64(p[0]),
+            &JsValue::from_f64(p[1]),
+            &JsValue::from_f64(p[2]),
+        );
+        js_pos.push(&arr);
+    }
+    js_sys::Reflect::set(&result, &"positions".into(), &js_pos).unwrap();
+
+    let js_faces = js_sys::Array::new();
+    for f in &faces {
+        let arr = js_sys::Array::of3(
+            &JsValue::from_f64(f[0] as f64),
+            &JsValue::from_f64(f[1] as f64),
+            &JsValue::from_f64(f[2] as f64),
+        );
+        js_faces.push(&arr);
+    }
+    js_sys::Reflect::set(&result, &"faces".into(), &js_faces).unwrap();
+    js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(positions.len() as f64)).unwrap();
+    js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(faces.len() as f64)).unwrap();
+
+    result.into()
+}
+
+/// Simplify a mesh via QEM edge collapse.
+/// positions: flat f64 array [x0,y0,z0, x1,y1,z1, ...]
+/// faces: flat u32 array [a0,b0,c0, a1,b1,c1, ...]
+/// Returns { positions, faces, max_error }.
+#[wasm_bindgen]
+pub fn simplify_mesh(positions: &[f64], faces: &[u32], target: u32) -> JsValue {
+    let pos: Vec<[f64; 3]> = positions.chunks(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let tris: Vec<[usize; 3]> = faces.chunks(3)
+        .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize])
+        .collect();
+
+    let (simp_pos, simp_faces) = quilting_remesh::simplify::simplify(&pos, &tris, target as usize);
+
+    // Compute max error
+    let mut max_err = 0.0_f64;
+    for p in &pos {
+        let mut min_d = f64::MAX;
+        for f in &simp_faces {
+            let d = point_plane_dist(*p, simp_pos[f[0]], simp_pos[f[1]], simp_pos[f[2]]);
+            min_d = min_d.min(d);
+        }
+        max_err = max_err.max(min_d);
+    }
+
+    let result = js_sys::Object::new();
+
+    let js_pos = js_sys::Array::new();
+    for p in &simp_pos {
+        let arr = js_sys::Array::of3(
+            &JsValue::from_f64(p[0]),
+            &JsValue::from_f64(p[1]),
+            &JsValue::from_f64(p[2]),
+        );
+        js_pos.push(&arr);
+    }
+    js_sys::Reflect::set(&result, &"positions".into(), &js_pos).unwrap();
+
+    let js_faces = js_sys::Array::new();
+    for f in &simp_faces {
+        let arr = js_sys::Array::of3(
+            &JsValue::from_f64(f[0] as f64),
+            &JsValue::from_f64(f[1] as f64),
+            &JsValue::from_f64(f[2] as f64),
+        );
+        js_faces.push(&arr);
+    }
+    js_sys::Reflect::set(&result, &"faces".into(), &js_faces).unwrap();
+    js_sys::Reflect::set(&result, &"max_error".into(), &JsValue::from_f64(max_err)).unwrap();
+
+    result.into()
+}
+
+fn point_plane_dist(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
+    let ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
+    let ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
+    let n = [ab[1]*ac[2]-ab[2]*ac[1], ab[2]*ac[0]-ab[0]*ac[2], ab[0]*ac[1]-ab[1]*ac[0]];
+    let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+    if len < 1e-15 { return f64::MAX; }
+    let ap = [p[0]-a[0], p[1]-a[1], p[2]-a[2]];
+    (ap[0]*n[0] + ap[1]*n[1] + ap[2]*n[2]).abs() / len
+}
+
+fn generate_torus(subdivisions: u32) -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
+    let seg = (8 * 2_usize.pow(subdivisions.min(3))).min(48);
+    let ring = seg;
+    let r_major = 0.5;
+    let r_minor = 0.2;
+
+    let mut positions = Vec::new();
+    let mut faces = Vec::new();
+
+    for i in 0..seg {
+        let theta = 2.0 * std::f64::consts::PI * (i as f64 / seg as f64);
+        for j in 0..ring {
+            let phi = 2.0 * std::f64::consts::PI * (j as f64 / ring as f64);
+            let x = (r_major + r_minor * phi.cos()) * theta.cos();
+            let y = r_minor * phi.sin();
+            let z = (r_major + r_minor * phi.cos()) * theta.sin();
+            positions.push([x, y, z]);
+        }
+    }
+
+    for i in 0..seg {
+        let ni = (i + 1) % seg;
+        for j in 0..ring {
+            let nj = (j + 1) % ring;
+            let a = i * ring + j;
+            let b = i * ring + nj;
+            let c = ni * ring + nj;
+            let d = ni * ring + j;
+            faces.push([a, b, c]);
+            faces.push([a, c, d]);
+        }
+    }
+
+    (positions, faces)
+}
+
 /// Load a test shape (sphere or cylinder) as the current model for remeshing experiments.
 /// shape: "sphere" or "cylinder"
 /// param1: subdivisions (sphere) or segments (cylinder)

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Remesh Lab</title>
+<link data-trunk rel="rust" data-wasm-opt="0" href="crates/trunk-stub" />
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #1a1a2e; color: #e0e0e0; font-family: monospace; }
+body { display: flex; }
+#viewport { flex: 1; position: relative; }
+canvas { width: 100%; height: 100%; display: block; }
+#panel {
+  width: 280px; padding: 12px; background: #16213e;
+  border-left: 1px solid #0f3460; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+}
+h2 { color: #e94560; font-size: 14px; letter-spacing: 2px; }
+.sub { color: #666; font-size: 10px; margin-bottom: 8px; }
+label { color: #999; font-size: 11px; text-transform: uppercase; }
+.row { display: flex; align-items: center; gap: 6px; }
+input[type=range] { flex: 1; accent-color: #e94560; }
+.val { color: #e94560; font-size: 12px; font-weight: bold; min-width: 36px; text-align: right; }
+button {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #e94560;
+  padding: 6px 12px; font-family: monospace; font-size: 11px;
+  cursor: pointer; border-radius: 3px;
+}
+button:hover { background: #e94560; color: #fff; }
+button:disabled { opacity: 0.4; cursor: default; }
+.btns { display: flex; gap: 4px; flex-wrap: wrap; }
+.btns button { flex: 1; min-width: 60px; }
+#stats {
+  color: #666; font-size: 10px; line-height: 1.5;
+  border-top: 1px solid #0f3460; padding-top: 8px; margin-top: auto;
+}
+#stats .h { color: #e94560; }
+</style>
+</head>
+<body>
+<div id="viewport">
+  <canvas id="cv"></canvas>
+</div>
+<div id="panel">
+  <h2>REMESH LAB</h2>
+  <div class="sub">QB patch simplification testbed</div>
+
+  <label>Shape</label>
+  <div class="btns">
+    <button id="btn-sphere">Sphere</button>
+    <button id="btn-cylinder">Cylinder</button>
+    <button id="btn-torus">Torus</button>
+  </div>
+
+  <label>Subdivisions</label>
+  <div class="row">
+    <input type="range" id="subdivs" min="1" max="5" value="3" step="1">
+    <span class="val" id="subdivs-v">3</span>
+  </div>
+
+  <label>Target patches</label>
+  <div class="row">
+    <input type="range" id="target" min="4" max="500" value="20" step="1">
+    <span class="val" id="target-v">20</span>
+  </div>
+
+  <div class="btns">
+    <button id="btn-remesh">Remesh</button>
+  </div>
+
+  <label>View</label>
+  <div class="btns">
+    <button id="btn-original" class="active">Original</button>
+    <button id="btn-remeshed">Remeshed</button>
+    <button id="btn-both">Both</button>
+  </div>
+
+  <div class="btns" style="margin-top:4px">
+    <button id="btn-wire">Wireframe</button>
+    <button id="btn-flat">Flat</button>
+  </div>
+
+  <div id="stats">Ready</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const $ = id => document.getElementById(id);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
+camera.position.set(0, 1.2, 2.5);
+
+const renderer = new THREE.WebGLRenderer({ canvas: $('cv'), antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+
+const controls = new OrbitControls(camera, $('cv'));
+controls.enableDamping = true;
+
+// Lights
+scene.add(new THREE.AmbientLight(0x404060));
+const d1 = new THREE.DirectionalLight(0xffffff, 1.0);
+d1.position.set(3, 5, 4);
+scene.add(d1);
+const d2 = new THREE.DirectionalLight(0x4466aa, 0.4);
+d2.position.set(-3, -1, -3);
+scene.add(d2);
+
+// Materials
+const matOriginal = new THREE.MeshStandardMaterial({
+  color: 0x4488aa, roughness: 0.6, metalness: 0.1,
+  side: THREE.DoubleSide, flatShading: true,
+});
+const matRemeshed = new THREE.MeshStandardMaterial({
+  color: 0xe94560, roughness: 0.5, metalness: 0.1,
+  side: THREE.DoubleSide, flatShading: true,
+});
+const matWireOrig = new THREE.MeshBasicMaterial({
+  color: 0x4488aa, wireframe: true, side: THREE.DoubleSide,
+});
+const matWireRemesh = new THREE.MeshBasicMaterial({
+  color: 0xe94560, wireframe: true, side: THREE.DoubleSide,
+});
+
+let meshOriginal = null;
+let meshRemeshed = null;
+let wireframe = false;
+let viewMode = 'both'; // 'original', 'remeshed', 'both'
+
+// State
+let currentPositions = null;
+let currentFaces = null;
+let remeshedPositions = null;
+let remeshedFaces = null;
+
+// WASM worker
+// Load WASM directly on main thread (no worker caching issues)
+let wasm = null;
+
+async function init() {
+  $('stats').textContent = 'Initializing WASM...';
+  const mod = await import('./pkg/quilting_wasm.js');
+  await mod.default();
+  wasm = mod;
+  $('stats').textContent = 'Ready';
+}
+
+function buildMesh(positions, faces, material) {
+  const geo = new THREE.BufferGeometry();
+  const verts = new Float32Array(faces.length * 9);
+  for (let i = 0; i < faces.length; i++) {
+    for (let j = 0; j < 3; j++) {
+      const vi = faces[i][j];
+      verts[i*9 + j*3 + 0] = positions[vi][0];
+      verts[i*9 + j*3 + 1] = positions[vi][1];
+      verts[i*9 + j*3 + 2] = positions[vi][2];
+    }
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  geo.computeVertexNormals();
+  return new THREE.Mesh(geo, material);
+}
+
+function centerAndScale(mesh) {
+  mesh.geometry.computeBoundingBox();
+  const box = mesh.geometry.boundingBox;
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  mesh.position.sub(center);
+  mesh.scale.multiplyScalar(1.5 / maxDim);
+}
+
+function updateView() {
+  if (meshOriginal) meshOriginal.visible = (viewMode === 'original' || viewMode === 'both');
+  if (meshRemeshed) meshRemeshed.visible = (viewMode === 'remeshed' || viewMode === 'both');
+
+  if (meshOriginal) meshOriginal.material = wireframe ? matWireOrig : matOriginal;
+  if (meshRemeshed) meshRemeshed.material = wireframe ? matWireRemesh : matRemeshed;
+
+  // Offset for side-by-side in 'both' mode
+  if (viewMode === 'both') {
+    if (meshOriginal) meshOriginal.position.x = -0.8;
+    if (meshRemeshed) meshRemeshed.position.x = 0.8;
+  } else {
+    if (meshOriginal) meshOriginal.position.x = 0;
+    if (meshRemeshed) meshRemeshed.position.x = 0;
+  }
+}
+
+async function loadShape(shape) {
+  const subdivs = parseInt($('subdivs').value);
+  $('stats').textContent = `Generating ${shape}...`;
+
+  const result = wasm.generate_test_mesh(shape, subdivs);
+  if (!result) { $('stats').textContent = 'Failed'; return; }
+  // Convert from JsValue arrays to plain JS arrays
+  currentPositions = Array.from(result.positions).map(p => Array.from(p));
+  currentFaces = Array.from(result.faces).map(f => Array.from(f).map(Number));
+
+  if (meshOriginal) scene.remove(meshOriginal);
+  meshOriginal = buildMesh(currentPositions, currentFaces, matOriginal);
+  centerAndScale(meshOriginal);
+  scene.add(meshOriginal);
+
+  // Clear remeshed
+  if (meshRemeshed) { scene.remove(meshRemeshed); meshRemeshed = null; }
+  remeshedPositions = null;
+  remeshedFaces = null;
+
+  $('stats').innerHTML = `<span class="h">${shape}</span>: ${currentPositions.length} verts, ${currentFaces.length} faces`;
+  updateView();
+}
+
+async function doRemesh() {
+  if (!currentPositions) return;
+  const target = parseInt($('target').value);
+  $('stats').textContent = 'Remeshing...';
+  $('btn-remesh').disabled = true;
+
+  const t0 = performance.now();
+  const result = wasm.simplify_mesh(
+    new Float64Array(currentPositions.flat()),
+    new Uint32Array(currentFaces.flat()),
+    target,
+  );
+  const elapsed = performance.now() - t0;
+
+  if (!result) { $('stats').textContent = 'Simplification failed'; $('btn-remesh').disabled = false; return; }
+  remeshedPositions = Array.from(result.positions).map(p => Array.from(p));
+  remeshedFaces = Array.from(result.faces).map(f => Array.from(f).map(Number));
+
+  if (meshRemeshed) scene.remove(meshRemeshed);
+  meshRemeshed = buildMesh(remeshedPositions, remeshedFaces, matRemeshed);
+  // Apply same transform as original
+  if (meshOriginal) {
+    meshRemeshed.scale.copy(meshOriginal.scale);
+    meshRemeshed.position.copy(meshOriginal.position);
+  }
+  scene.add(meshRemeshed);
+
+  $('stats').innerHTML =
+    `<span class="h">Remeshed</span>: ${remeshedFaces.length} patches from ${currentFaces.length} faces ` +
+    `(${(currentFaces.length / remeshedFaces.length).toFixed(1)}x)<br>` +
+    `Time: ${elapsed.toFixed(0)}ms, max err: ${(result.max_error || 0).toFixed(4)}`;
+
+  $('btn-remesh').disabled = false;
+  viewMode = 'both';
+  updateView();
+}
+
+// UI bindings
+$('subdivs').oninput = () => { $('subdivs-v').textContent = $('subdivs').value; };
+$('target').oninput = () => { $('target-v').textContent = $('target').value; };
+$('btn-sphere').onclick = () => loadShape('sphere');
+$('btn-cylinder').onclick = () => loadShape('cylinder');
+$('btn-torus').onclick = () => loadShape('torus');
+$('btn-remesh').onclick = doRemesh;
+$('btn-original').onclick = () => { viewMode = 'original'; updateView(); };
+$('btn-remeshed').onclick = () => { viewMode = 'remeshed'; updateView(); };
+$('btn-both').onclick = () => { viewMode = 'both'; updateView(); };
+$('btn-wire').onclick = () => { wireframe = true; updateView(); };
+$('btn-flat').onclick = () => { wireframe = false; updateView(); };
+
+function resize() {
+  const vp = $('viewport');
+  camera.aspect = vp.clientWidth / vp.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(vp.clientWidth, vp.clientHeight);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+addEventListener('resize', resize);
+resize();
+animate();
+init().then(() => loadShape('sphere'));
+</script>
+</body>
+</html>

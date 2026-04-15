@@ -1,0 +1,24 @@
+[build]
+target = "remesh-lab.html"
+dist = "dist-lab"
+
+[serve]
+port = 9090
+
+[watch]
+watch = [
+    "remesh-lab.html",
+    "remesh-lab-worker.js",
+    "crates/quilting-wasm/src/",
+    "crates/quilting-remesh/src/",
+]
+
+[[hooks]]
+stage = "pre_build"
+command = "wasm-pack"
+command_arguments = ["build", "--dev", "--target", "web", "--out-dir", "../../pkg", "crates/quilting-wasm"]
+
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["-c", "cp remesh-lab-worker.js dist-lab/ && cp -r pkg dist-lab/"]
