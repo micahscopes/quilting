@@ -9,7 +9,7 @@
 /// - Segmentation (does the pipeline find the right patch boundaries?)
 
 use quilting_core::patch::QBTriPatch;
-use quilting_core::quaternion::Quat;
+use quilting_core::quaternion::{Quat, Mobius};
 
 /// Result of tessellating a QB patch.
 pub struct TessellationResult {
@@ -131,6 +131,176 @@ impl std::fmt::Display for ExperimentResult {
     }
 }
 
+/// Estimate QB weights by finding the Möbius transform that maps a flat reference
+/// triangle to the observed curved surface.
+///
+/// Given flat control points P and curved sample points X with bary coords λ:
+/// - The flat point at λ is p = Σλᵢ*Pᵢ
+/// - The Möbius image should be X = (a*p+b)(c*p+d)⁻¹
+/// - The QB weight is wᵢ = c*Pᵢ + d
+///
+/// We minimize Σ |X_k - (a*p_k+b)(c*p_k+d)⁻¹|² over (a,b,c,d) quaternions.
+/// Since this is 16 params with 4 gauge DOF = 12 effective DOF, and each sample
+/// gives 3 constraints, we need >= 4 samples.
+///
+/// Simpler approach: use only the 3 corner correspondences (flat corners → curved corners)
+/// to determine c, d (6 DOF from the weight transform, minus gauge).
+pub fn estimate_weights_from_mobius(
+    flat_corners: &[[f64; 3]; 3],
+    curved_corners: &[[f64; 3]; 3],
+    samples: &[[f64; 3]],
+    sample_bary: &[[f64; 3]],
+) -> [Quat; 3] {
+    // Strategy: the QB formula with weights wᵢ and flat positions pᵢ evaluates to:
+    //   X(λ) = (Σ λᵢ pᵢ wᵢ)(Σ λᵢ wᵢ)⁻¹
+    //
+    // At corners (λᵢ = 1, rest 0): X = pᵢ wᵢ wᵢ⁻¹ = pᵢ
+    // So the flat positions ARE the corner positions of the output surface!
+    //
+    // But we want the curved corners to be the output. So we need:
+    //   curved_corner_i = flat_corner_i  (for the patch to pass through curved corners)
+    // That's only true if we use the CURVED corners as the patch positions.
+    //
+    // The Möbius approach: start with flat patch positions = flat_corners, apply
+    // Möbius F. New positions = F(flat_corners). New weights = (c*flat_corner_i + d).
+    // We need F(flat_corners) = curved_corners, so F maps flat → curved.
+    //
+    // Find c, d such that: curved_i = (a*flat_i + b)(c*flat_i + d)⁻¹
+    //
+    // For the weight computation, we only need c and d.
+    // The weight transform is: wᵢ = (c * flat_i + d) * identity = c * flat_i + d
+    //
+    // From 3 correspondences flat_i → curved_i, and the Möbius formula:
+    //   curved_i * (c * flat_i + d) = a * flat_i + b
+    //
+    // This gives 3 quaternion equations in 4 quaternion unknowns (a,b,c,d).
+    // Fix gauge by setting d = 1 (identity quaternion).
+    //
+    // Then: curved_i * (c * flat_i + 1) = a * flat_i + b
+    //   ⟹ a * flat_i + b = curved_i * c * flat_i + curved_i
+    //   ⟹ a * flat_i - curved_i * c * flat_i = curved_i - b
+    //   ⟹ (a - curved_i * c) * flat_i = curved_i - b
+    //
+    // Three equations:
+    //   (a - C0*c) * F0 = C0 - b
+    //   (a - C1*c) * F1 = C1 - b
+    //   (a - C2*c) * F2 = C2 - b
+    //
+    // Subtract pairs to eliminate b:
+    //   (a - C0*c)*F0 - (a - C1*c)*F1 = C0 - C1
+    //   (a - C0*c)*F0 - (a - C2*c)*F2 = C0 - C2
+    //
+    // This is getting complex. Let me try a simpler numerical approach:
+    // fit c (4 params) to minimize the distance between QB-eval points and samples.
+
+    let fp = [
+        Quat::from_point(flat_corners[0][0], flat_corners[0][1], flat_corners[0][2]),
+        Quat::from_point(flat_corners[1][0], flat_corners[1][1], flat_corners[1][2]),
+        Quat::from_point(flat_corners[2][0], flat_corners[2][1], flat_corners[2][2]),
+    ];
+    let cp = [
+        Quat::from_point(curved_corners[0][0], curved_corners[0][1], curved_corners[0][2]),
+        Quat::from_point(curved_corners[1][0], curved_corners[1][1], curved_corners[1][2]),
+        Quat::from_point(curved_corners[2][0], curved_corners[2][1], curved_corners[2][2]),
+    ];
+
+    // Try a direct approach: find Möbius F s.t. F(flat_i) = curved_i using
+    // the cross-ratio. For 3 points, the Möbius is not unique (need 4 points
+    // in the plane, but we're in 3D / quaternion space).
+    //
+    // Simplest working approach: set d=1, c=0 initially (identity Möbius → flat patch).
+    // Then search for c that makes the QB patch match the curved surface.
+    // Since w_i = c * flat_i + d = c * flat_i + 1:
+    //
+    // The QB eval becomes:
+    //   X(λ) = (Σ λᵢ pᵢ (c*pᵢ+1)) (Σ λᵢ (c*pᵢ+1))⁻¹
+    //
+    // where pᵢ are the CURVED corner positions (the patch control points).
+    //
+    // Wait — the control point positions in the patch are the curved corners (not flat).
+    // The flat corners are just for the Möbius derivation. The actual QB patch has:
+    //   positions = curved_corners
+    //   weights = c * flat_corners + 1
+    //
+    // So we optimize c (4 params) to minimize:
+    //   Σ_k |X(λ_k) - sample_k|²
+    //
+    // where X is the QB eval with the above positions/weights.
+
+    // Simple gradient descent on c
+    let mut c = Quat::ZERO; // start with c=0 → weights = 1 → flat patch
+    let step = 0.001;
+    let n_iters = 500;
+
+    for _ in 0..n_iters {
+        // Compute gradient via finite differences
+        let loss = mobius_loss(&cp, &fp, c, samples, sample_bary);
+        let mut grad = Quat::ZERO;
+        let eps = 1e-5;
+        for dim in 0..4 {
+            let mut c_plus = c;
+            match dim {
+                0 => c_plus.w += eps,
+                1 => c_plus.x += eps,
+                2 => c_plus.y += eps,
+                _ => c_plus.z += eps,
+            }
+            let loss_plus = mobius_loss(&cp, &fp, c_plus, samples, sample_bary);
+            let g = (loss_plus - loss) / eps;
+            match dim {
+                0 => grad.w = g,
+                1 => grad.x = g,
+                2 => grad.y = g,
+                _ => grad.z = g,
+            }
+        }
+        // Gradient descent step
+        c.w -= step * grad.w;
+        c.x -= step * grad.x;
+        c.y -= step * grad.y;
+        c.z -= step * grad.z;
+    }
+
+    // Weights: wᵢ = c * flat_i + 1, gauge-normalized so w0 = 1
+    let w0 = c * fp[0] + Quat::ONE;
+    let w1 = c * fp[1] + Quat::ONE;
+    let w2 = c * fp[2] + Quat::ONE;
+
+    let w0_inv = w0.inv();
+    [Quat::ONE, w1 * w0_inv, w2 * w0_inv]
+}
+
+/// Loss function for Möbius weight estimation.
+fn mobius_loss(
+    curved_corners: &[Quat; 3],
+    flat_corners: &[Quat; 3],
+    c: Quat,
+    samples: &[[f64; 3]],
+    sample_bary: &[[f64; 3]],
+) -> f64 {
+    let weights = [
+        c * flat_corners[0] + Quat::ONE,
+        c * flat_corners[1] + Quat::ONE,
+        c * flat_corners[2] + Quat::ONE,
+    ];
+    // Gauge normalize
+    let w0_inv = weights[0].inv();
+    let w = [Quat::ONE, weights[1] * w0_inv, weights[2] * w0_inv];
+
+    let patch = QBTriPatch::new(*curved_corners, w);
+
+    let mut loss = 0.0;
+    for (k, bary) in sample_bary.iter().enumerate() {
+        let u = bary[1];
+        let v = bary[2];
+        let eval = patch.eval(u, v);
+        let target = Quat::from_point(samples[k][0], samples[k][1], samples[k][2]);
+        let diff = eval - target;
+        loss += diff.norm_sq();
+    }
+    loss
+}
+
 /// Run recovery on a patch using given FitConfig and barycentric coordinates.
 pub fn run_recovery(
     name: &str,
@@ -164,17 +334,13 @@ pub fn run_recovery(
 /// Takes a flat triangle, translates it away from the origin, then applies
 /// spherical inversion. The image is a curved triangle on a sphere.
 /// The weights are computed correctly by QBTriPatch::transform.
+/// Returns (curved_patch, flat_corners) — flat_corners needed for weight recovery.
 pub fn spherical_patch_via_inversion(
     p0: [f64; 3], p1: [f64; 3], p2: [f64; 3],
-) -> QBTriPatch {
-    use quilting_core::quaternion::Mobius;
-
-    // Start with a flat patch
+) -> (QBTriPatch, [[f64; 3]; 3]) {
     let flat = QBTriPatch::flat(p0, p1, p2);
-
-    // Inversion: x ↦ -x⁻¹ maps planes not through origin to spheres
     let inv = Mobius::inversion();
-    flat.transform(&inv)
+    (flat.transform(&inv), [p0, p1, p2])
 }
 
 /// Create a set of QB patches forming a sphere via Möbius inversion of a flat octahedron.
@@ -300,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_inverted_patch_is_curved() {
-        let patch = spherical_patch_via_inversion(
+        let (patch, _) = spherical_patch_via_inversion(
             [1.0, 0.0, 2.0], [0.0, 1.0, 2.0], [-1.0, 0.0, 2.0],
         );
         let tess = tessellate_patch(&patch, 8);
@@ -348,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_inverted_patch() {
-        let original = spherical_patch_via_inversion(
+        let (original, _) = spherical_patch_via_inversion(
             [0.5, 0.0, 2.0], [0.0, 0.5, 2.0], [-0.5, 0.0, 2.0],
         );
         let tess = tessellate_patch(&original, 10);
@@ -374,15 +540,20 @@ mod tests {
     fn test_experiment_matrix() {
         eprintln!("\n{:=<100}", "= QB PATCH RECOVERY EXPERIMENTS ");
 
-        // Test surfaces
-        let surfaces: Vec<(&str, QBTriPatch)> = vec![
-            ("flat", QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])),
-            ("mild_curve", spherical_patch_via_inversion(
-                [0.3, 0.0, 3.0], [0.0, 0.3, 3.0], [-0.3, 0.0, 3.0])),
-            ("medium_curve", spherical_patch_via_inversion(
-                [0.5, 0.0, 2.0], [0.0, 0.5, 2.0], [-0.5, 0.0, 2.0])),
-            ("strong_curve", spherical_patch_via_inversion(
-                [1.0, 0.0, 1.5], [0.0, 1.0, 1.5], [-1.0, 0.0, 1.5])),
+        // Test surfaces: (name, patch, flat_corners_if_inverted)
+        let flat_corners_default = [[0.0; 3]; 3];
+        let (mild, mild_flat) = spherical_patch_via_inversion(
+            [0.3, 0.0, 3.0], [0.0, 0.3, 3.0], [-0.3, 0.0, 3.0]);
+        let (medium, medium_flat) = spherical_patch_via_inversion(
+            [0.5, 0.0, 2.0], [0.0, 0.5, 2.0], [-0.5, 0.0, 2.0]);
+        let (strong, strong_flat) = spherical_patch_via_inversion(
+            [1.0, 0.0, 1.5], [0.0, 1.0, 1.5], [-1.0, 0.0, 1.5]);
+
+        let surfaces: Vec<(&str, QBTriPatch, [[f64; 3]; 3])> = vec![
+            ("flat", QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), flat_corners_default),
+            ("mild_curve", mild, mild_flat),
+            ("medium_curve", medium, medium_flat),
+            ("strong_curve", strong, strong_flat),
         ];
 
         // Approaches: vary GN iterations, regularization (via lambda_normal), etc.
@@ -421,10 +592,72 @@ mod tests {
             }),
         ];
 
-        // Also test with "oracle" initial weights (perturbed ground truth)
-        // to verify the optimizer CAN recover if started near the right basin
-        eprintln!("\n--- Oracle init (perturbed ground truth) ---");
-        for (surf_name, patch) in &surfaces {
+        // Möbius weight estimation approach
+        eprintln!("\n--- Möbius weight estimation ---");
+        for (surf_name, patch, flat_cp) in &surfaces {
+            let tess = tessellate_patch(patch, 12);
+            let cp = corners(patch);
+
+            // Use the stored flat corners (pre-inversion positions) for Möbius recovery
+            let flat_ref = if *surf_name == "flat" { cp } else { *flat_cp };
+            let weights = estimate_weights_from_mobius(&flat_ref, &cp, &tess.positions, &tess.bary);
+
+            let recovered = QBTriPatch::new(patch.positions, weights);
+            let err = measure_recovery_error(patch, &recovered, 20);
+
+            eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}° {:8.4} {:8.4}",
+                surf_name, "mobius_est",
+                err.rms_position, err.max_position,
+                err.rms_normal_degrees,
+                err.weight_errors[1], err.weight_errors[2]);
+        }
+
+        // Multi-start: run from several random initial weights, pick best
+        eprintln!("\n--- Multi-start optimization ---");
+        for (surf_name, patch, _flat_cp) in &surfaces {
+            let tess = tessellate_patch(patch, 12);
+            let cp = corners(patch);
+
+            let mut best_result: Option<ExperimentResult> = None;
+            let seeds: Vec<[Quat; 3]> = vec![
+                [Quat::ONE, Quat::ONE, Quat::ONE], // identity
+                [Quat::ONE, Quat::new(0.0, 1.0, 0.0, 0.0), Quat::new(0.0, 0.0, 1.0, 0.0)], // pure i, j
+                [Quat::ONE, Quat::new(0.0, 0.0, 0.0, 1.0), Quat::new(0.0, 1.0, 0.0, 0.0)], // pure k, i
+                [Quat::ONE, Quat::new(0.5, 0.5, 0.5, 0.5), Quat::new(0.5, -0.5, 0.5, -0.5)], // mixed
+                [Quat::ONE, Quat::new(2.0, 0.0, 0.0, 0.0), Quat::new(2.0, 0.0, 0.0, 0.0)], // scaled
+                [Quat::ONE, Quat::new(0.0, 0.0, 0.5, 2.0), Quat::new(0.0, -0.5, 0.0, 2.0)], // near inverted weights
+            ];
+
+            for (si, seed) in seeds.iter().enumerate() {
+                let cfg = FitConfig {
+                    gauss_newton_iterations: 50,
+                    lambda_normal: 0.1,
+                    convergence_tol: 1e-12,
+                    regularization: 0.0,
+                    corner_positions: Some(cp),
+                    initial_weights: Some(*seed),
+                    ..Default::default()
+                };
+                let r = run_recovery(surf_name, &format!("seed_{}", si), patch,
+                    &tess.positions, &tess.normals, &tess.bary, &cfg);
+
+                if best_result.as_ref().map_or(true, |b| r.rms_position < b.rms_position) {
+                    best_result = Some(r);
+                }
+            }
+
+            if let Some(r) = &best_result {
+                eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}° {:8.4} {:8.4}",
+                    surf_name, &r.approach,
+                    r.rms_position, r.max_position,
+                    r.rms_normal_degrees,
+                    r.weight_error_w1, r.weight_error_w2);
+            }
+        }
+
+        // Also test with exact init to verify minimum
+        eprintln!("\n--- Exact init (verify minimum) ---");
+        for (surf_name, patch, _flat_cp) in &surfaces {
             let tess = tessellate_patch(patch, 12);
             let cp = corners(patch);
 
@@ -455,7 +688,7 @@ mod tests {
             "surface", "approach", "pos_rms", "pos_max", "norm", "w1_err", "w2_err");
         eprintln!("{:-<100}", "");
 
-        for (surf_name, patch) in &surfaces {
+        for (surf_name, patch, _flat_cp) in &surfaces {
             let tess = tessellate_patch(patch, 12);
             let cp = corners(patch);
 
