@@ -133,20 +133,13 @@ fn remesh_simplified_inner(
     let mut patch_normals = Vec::with_capacity(simp_faces.len());
 
     if fit_curved {
-        // For each simplified face, find nearby original vertices and fit a curved patch
-        for face in &simp_faces {
-            let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
-
-            // Find original vertices that project inside this triangle
-            let (samples, sample_bary, sample_normals) =
-                collect_samples_for_triangle(&cp, positions, &orig_normals);
-
-            if samples.len() >= 4 {
-                let patch = roundtrip::fit_patch_from_samples(cp, &samples, &sample_bary, &sample_normals);
-                patches.push(patch);
-            } else {
-                patches.push(quilting_core::patch::QBTriPatch::flat(cp[0], cp[1], cp[2]));
-            }
+        // Global fit: c-estimator per face, averaged at shared vertices for continuity.
+        // 0 GN iterations = init-only, which experimentally gives best sphere fit.
+        let fit_result = global_fit::global_fit(
+            &simp_pos, &simp_faces, positions, &orig_normals, 0,
+        );
+        for (fi, face) in simp_faces.iter().enumerate() {
+            patches.push(fit_result.patches[fi]);
             patch_uvs.push([[0.0f32, 0.0]; 3]);
             patch_normals.push([
                 [vertex_normals[face[0]][0] as f32, vertex_normals[face[0]][1] as f32, vertex_normals[face[0]][2] as f32],

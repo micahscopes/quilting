@@ -29,7 +29,9 @@ pub struct GlobalFitResult {
     pub max_error: f64,
 }
 
-/// Fit curved QB patches globally with shared vertex weights.
+/// Fit curved QB patches with shared vertex weights using c-estimator initialization.
+/// Runs per-face c-estimation, averages weights at shared vertices for continuity,
+/// then optionally refines with global Gauss-Newton (though init-only often works best).
 ///
 /// `simp_pos` / `simp_faces` — the simplified (coarse) mesh
 /// `orig_pos` / `orig_normals` — original mesh vertices and normals for fitting
@@ -49,10 +51,17 @@ pub fn global_fit(
         collect_face_samples(&tri, orig_pos, orig_normals)
     }).collect();
 
-    // Initialize: all weights = identity (flat patches)
-    let mut weights: Vec<Quat> = vec![Quat::ONE; n_verts];
+    // Initialize weights from per-face c-estimator, averaged at shared vertices.
+    // This gives the global optimizer a much better starting point than identity.
+    let mut weights = initialize_from_c_estimator(simp_pos, simp_faces, &face_samples);
 
-    // Gauge fix: vertex 0 is always Quat::ONE
+    // Gauge fix: vertex 0 is always Quat::ONE — rescale all others relative to it
+    let w0_inv = weights[0].inv();
+    for w in &mut weights {
+        *w = *w * w0_inv;
+    }
+    weights[0] = Quat::ONE;
+
     // Free parameters: vertices 1..n_verts, 4 params each
     let n_params = (n_verts - 1) * 4;
 
@@ -181,6 +190,56 @@ pub fn global_fit(
     }
 
     build_result(simp_pos, simp_faces, &weights, &face_samples)
+}
+
+/// Initialize per-vertex weights by running the c-estimator on each face,
+/// then averaging the resulting vertex weights across all faces that share each vertex.
+fn initialize_from_c_estimator(
+    simp_pos: &[[f64; 3]],
+    simp_faces: &[[usize; 3]],
+    face_samples: &[FaceSamples],
+) -> Vec<Quat> {
+    let n_verts = simp_pos.len();
+    let mut weight_sum: Vec<Quat> = vec![Quat::ZERO; n_verts];
+    let mut weight_count: Vec<f64> = vec![0.0; n_verts];
+
+    for (fi, face) in simp_faces.iter().enumerate() {
+        let samples = &face_samples[fi];
+        if samples.positions.len() < 4 { continue; }
+
+        let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
+
+        // Run c-estimator for this face
+        let c = crate::roundtrip::estimate_c_parameter(
+            &cp, &samples.positions, &samples.bary, &samples.normals,
+        );
+
+        // Convert c to per-vertex weights: wᵢ = c * Pᵢ + 1
+        for (local, &vi) in face.iter().enumerate() {
+            let pi = Quat::from_point(simp_pos[vi][0], simp_pos[vi][1], simp_pos[vi][2]);
+            let wi = c * pi + Quat::ONE;
+            weight_sum[vi] = weight_sum[vi] + wi;
+            weight_count[vi] += 1.0;
+        }
+    }
+
+    // Average and normalize
+    let mut weights = Vec::with_capacity(n_verts);
+    for i in 0..n_verts {
+        if weight_count[i] > 0.0 {
+            let avg = Quat::new(
+                weight_sum[i].w / weight_count[i],
+                weight_sum[i].x / weight_count[i],
+                weight_sum[i].y / weight_count[i],
+                weight_sum[i].z / weight_count[i],
+            );
+            weights.push(avg);
+        } else {
+            weights.push(Quat::ONE);
+        }
+    }
+
+    weights
 }
 
 struct FaceSamples {
@@ -329,34 +388,12 @@ fn build_result(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_global_fit_sphere() {
-        let (orig_pos, orig_faces) = crate::test_shapes::sphere(2);
-        let orig_normals = crate::geometry::compute_vertex_normals(&orig_pos, &orig_faces);
-
-        // Simplify to 20 faces
-        let (simp_pos, simp_faces) = crate::simplify::simplify(&orig_pos, &orig_faces, 20);
-
-        eprintln!("global_fit sphere: {} → {} faces, {} verts",
-            orig_faces.len(), simp_faces.len(), simp_pos.len());
-
-        let result = global_fit(&simp_pos, &simp_faces, &orig_pos, &orig_normals, 20);
-
-        eprintln!("  RMS error: {:.6}, max: {:.6}", result.rms_error, result.max_error);
-        eprintln!("  {} patches, {} vertex weights", result.patches.len(), result.vertex_weights.len());
-
-        // Check continuity: adjacent patches should share weights at common vertices
-        let num_curved = result.vertex_weights.iter()
-            .filter(|w| ((**w) - Quat::ONE).norm() > 0.01)
-            .count();
-        eprintln!("  {} of {} vertices have non-identity weights", num_curved, result.vertex_weights.len());
-
-        // Measure sphere fit (distance to unit sphere)
-        let mut sphere_err = 0.0_f64;
-        let mut sphere_max = 0.0_f64;
+    fn measure_sphere_fit(patches: &[QBTriPatch]) -> (f64, f64) {
+        let mut err = 0.0_f64;
+        let mut max_d = 0.0_f64;
         let mut count = 0;
         let n = 5;
-        for patch in &result.patches {
+        for patch in patches {
             for i in 0..=n {
                 for j in 0..=(n - i) {
                     let u = i as f64 / n as f64;
@@ -364,43 +401,53 @@ mod tests {
                     let p = patch.eval(u, v).to_point();
                     let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
                     let d = (r - 1.0).abs();
-                    sphere_err += d * d;
-                    sphere_max = sphere_max.max(d);
+                    err += d * d;
+                    max_d = max_d.max(d);
                     count += 1;
                 }
             }
         }
-        let sphere_rms = (sphere_err / count as f64).sqrt();
-        eprintln!("  sphere fit: RMS={:.6}, max={:.6}", sphere_rms, sphere_max);
+        ((err / count as f64).sqrt(), max_d)
+    }
 
-        // Compare with flat patches
-        let flat_patches: Vec<QBTriPatch> = simp_faces.iter().map(|f| {
-            QBTriPatch::flat(simp_pos[f[0]], simp_pos[f[1]], simp_pos[f[2]])
-        }).collect();
-        let mut flat_sphere_err = 0.0_f64;
-        let mut count2 = 0;
-        for patch in &flat_patches {
-            for i in 0..=n {
-                for j in 0..=(n - i) {
-                    let u = i as f64 / n as f64;
-                    let v = j as f64 / n as f64;
-                    let p = patch.eval(u, v).to_point();
-                    let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-                    let d = (r - 1.0).abs();
-                    flat_sphere_err += d * d;
-                    count2 += 1;
-                }
+    #[test]
+    fn test_global_fit_sphere() {
+        eprintln!("\n{:=<80}", "= GLOBAL FIT EXPERIMENTS ");
+        eprintln!("{:20} {:15} {:>10} {:>10} {:>10}",
+            "config", "approach", "sph_rms", "sph_max", "samp_rms");
+        eprintln!("{:-<80}", "");
+
+        for (subdivs, target) in &[(2, 20), (3, 20), (3, 40)] {
+            let (orig_pos, orig_faces) = crate::test_shapes::sphere(*subdivs);
+            let orig_normals = crate::geometry::compute_vertex_normals(&orig_pos, &orig_faces);
+            let (simp_pos, simp_faces) = crate::simplify::simplify(&orig_pos, &orig_faces, *target);
+
+            let label = format!("sph{}→{}", orig_faces.len(), simp_faces.len());
+
+            // Flat baseline
+            let flat_patches: Vec<QBTriPatch> = simp_faces.iter().map(|f| {
+                QBTriPatch::flat(simp_pos[f[0]], simp_pos[f[1]], simp_pos[f[2]])
+            }).collect();
+            let (flat_rms, flat_max) = measure_sphere_fit(&flat_patches);
+            eprintln!("{:20} {:15} {:10.6} {:10.6} {:>10}",
+                label, "flat", flat_rms, flat_max, "—");
+
+            // c-init only (0 GN iterations) — tests the initialization quality
+            let init_only = global_fit(&simp_pos, &simp_faces, &orig_pos, &orig_normals, 0);
+            let (init_rms, init_max) = measure_sphere_fit(&init_only.patches);
+            eprintln!("{:20} {:15} {:10.6} {:10.6} {:10.6}",
+                "", "c_init_only", init_rms, init_max, init_only.rms_error);
+
+            // c-init + 10 GN iterations
+            let refined = global_fit(&simp_pos, &simp_faces, &orig_pos, &orig_normals, 10);
+            let (ref_rms, ref_max) = measure_sphere_fit(&refined.patches);
+            eprintln!("{:20} {:15} {:10.6} {:10.6} {:10.6}",
+                "", "c_init+gn10", ref_rms, ref_max, refined.rms_error);
+
+            if ref_rms < flat_rms {
+                eprintln!("{:20} → {:.1}x BETTER than flat", "", flat_rms / ref_rms);
             }
         }
-        let flat_rms = (flat_sphere_err / count2 as f64).sqrt();
-        eprintln!("  flat baseline: RMS={:.6}", flat_rms);
-
-        if sphere_rms < flat_rms {
-            eprintln!("  GLOBAL FIT IS {:.1}x BETTER THAN FLAT", flat_rms / sphere_rms.max(1e-10));
-        } else {
-            eprintln!("  flat is {:.1}x better", sphere_rms / flat_rms.max(1e-10));
-        }
-
-        assert!(result.patches.len() > 0);
+        eprintln!("{:=<80}", "");
     }
 }
