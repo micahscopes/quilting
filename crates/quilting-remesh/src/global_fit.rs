@@ -363,9 +363,29 @@ pub fn per_patch_fit(
         let samples = &face_samples[fi];
 
         if samples.positions.len() >= 4 {
-            let fitted = crate::roundtrip::fit_patch_from_samples(
+            let mut fitted = crate::roundtrip::fit_patch_from_samples(
                 cp, &samples.positions, &samples.bary, &samples.normals,
             );
+
+            // Normal consistency: check that the patch curves in the right direction
+            // by comparing normal at centroid with average sample normal
+            let centroid_sp = fitted.eval_with_normal(1.0/3.0, 1.0/3.0);
+            let mut avg_normal = [0.0f64; 3];
+            for n in &samples.normals {
+                avg_normal[0] += n[0]; avg_normal[1] += n[1]; avg_normal[2] += n[2];
+            }
+            let nn = samples.normals.len() as f64;
+            avg_normal[0] /= nn; avg_normal[1] /= nn; avg_normal[2] /= nn;
+            let dot = centroid_sp.normal[0] * avg_normal[0]
+                + centroid_sp.normal[1] * avg_normal[1]
+                + centroid_sp.normal[2] * avg_normal[2];
+            if dot < 0.0 {
+                // Normal is flipped — swap two vertices to fix winding
+                let mut fixed = fitted;
+                fixed.positions.swap(1, 2);
+                fixed.weights.swap(1, 2);
+                fitted = fixed;
+            }
 
             // Validate: sample the patch and check for blow-up
             let mut bad = false;
