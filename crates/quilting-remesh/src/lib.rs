@@ -9,6 +9,7 @@ pub mod simplify;
 pub mod curvature;
 pub mod test_shapes;
 pub mod roundtrip;
+pub mod global_fit;
 
 use quilting_core::patch::QBTriPatch;
 
