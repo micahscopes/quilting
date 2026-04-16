@@ -493,6 +493,123 @@ mod tests {
         assert_eq!(unique.len(), 8);
     }
 
+    // ── Verification: Möbius weight formula ────────────────────────
+
+    /// Verify that the weight formula wᵢ = (c*pᵢ+d) from the Möbius transform
+    /// produces the exact same patch as QBTriPatch::transform.
+    #[test]
+    fn test_mobius_weight_formula_direct() {
+        let flat_corners = [[0.5, 0.0, 2.0], [0.0, 0.5, 2.0], [-0.5, 0.0, 2.0]];
+        let flat = QBTriPatch::flat(flat_corners[0], flat_corners[1], flat_corners[2]);
+        let inv = Mobius::inversion();
+
+        // Method 1: QBTriPatch::transform (known correct)
+        let transformed = flat.transform(&inv);
+
+        // Method 2: manual weight computation via wᵢ = (c*pᵢ + d)
+        // For inversion: c=1, d=0
+        let fp = [
+            Quat::from_point(flat_corners[0][0], flat_corners[0][1], flat_corners[0][2]),
+            Quat::from_point(flat_corners[1][0], flat_corners[1][1], flat_corners[1][2]),
+            Quat::from_point(flat_corners[2][0], flat_corners[2][1], flat_corners[2][2]),
+        ];
+
+        // The Möbius inversion is F(x) = (0*x + (-1))(1*x + 0)^-1
+        // So a=0, b=-1, c=1, d=0
+        // Weight formula: wᵢ = (c*pᵢ + d) * flat_wᵢ = (1*pᵢ + 0) * 1 = pᵢ
+        let weights_manual = [fp[0], fp[1], fp[2]]; // = flat positions as quaternions
+
+        // Gauge normalize: w0 becomes identity
+        let w0_inv = weights_manual[0].inv();
+        let weights_normalized = [
+            Quat::ONE,
+            weights_manual[1] * w0_inv,
+            weights_manual[2] * w0_inv,
+        ];
+
+        eprintln!("Möbius weight formula verification:");
+        eprintln!("  transform weights: {:?}", transformed.weights);
+        eprintln!("  manual weights:    {:?}", weights_normalized);
+
+        // Compare weights
+        for i in 0..3 {
+            let diff = (transformed.weights[i] - weights_normalized[i]).norm();
+            eprintln!("  w{} diff: {:.2e}", i, diff);
+            // Note: may not be identical due to different gauge choices
+        }
+
+        // The real test: do both produce the same surface?
+        let n = 10;
+        let mut max_diff = 0.0_f64;
+        let manual_patch = QBTriPatch::new(transformed.positions, weights_normalized);
+        for i in 0..=n {
+            for j in 0..=(n-i) {
+                let u = i as f64 / n as f64;
+                let v = j as f64 / n as f64;
+                let p1 = transformed.eval(u, v).to_point();
+                let p2 = manual_patch.eval(u, v).to_point();
+                let d = ((p1[0]-p2[0]).powi(2) + (p1[1]-p2[1]).powi(2) + (p1[2]-p2[2]).powi(2)).sqrt();
+                max_diff = max_diff.max(d);
+            }
+        }
+        eprintln!("  max surface difference: {:.2e}", max_diff);
+        assert!(max_diff < 1e-10, "manual weights should produce identical surface, diff={}", max_diff);
+    }
+
+    /// Test: use Möbius-derived initial weights, then refine with Gauss-Newton.
+    #[test]
+    fn test_mobius_init_then_gauss_newton() {
+        let flat_corners = [[0.5, 0.0, 2.0], [0.0, 0.5, 2.0], [-0.5, 0.0, 2.0]];
+        let (original, _) = spherical_patch_via_inversion(
+            flat_corners[0], flat_corners[1], flat_corners[2],
+        );
+        let tess = tessellate_patch(&original, 12);
+        let cp = corners(&original);
+
+        // Compute Möbius-derived weights (we know the transform is inversion)
+        let fp = [
+            Quat::from_point(flat_corners[0][0], flat_corners[0][1], flat_corners[0][2]),
+            Quat::from_point(flat_corners[1][0], flat_corners[1][1], flat_corners[1][2]),
+            Quat::from_point(flat_corners[2][0], flat_corners[2][1], flat_corners[2][2]),
+        ];
+        // For inversion: wᵢ = pᵢ (the flat position quaternion)
+        let w0_inv = fp[0].inv();
+        let mobius_weights = [
+            Quat::ONE,
+            fp[1] * w0_inv,
+            fp[2] * w0_inv,
+        ];
+
+        // Test 1: Möbius weights alone (no optimization)
+        let mobius_patch = QBTriPatch::new(original.positions, mobius_weights);
+        let err_mobius = measure_recovery_error(&original, &mobius_patch, 20);
+        eprintln!("Möbius-derived weights (no optimization):");
+        eprintln!("  pos RMS={:.6}, norm={:.2}°, w1_err={:.4}, w2_err={:.4}",
+            err_mobius.rms_position, err_mobius.rms_normal_degrees,
+            err_mobius.weight_errors[1], err_mobius.weight_errors[2]);
+
+        // Test 2: Möbius weights as init → Gauss-Newton refinement
+        let config = FitConfig {
+            gauss_newton_iterations: 50,
+            lambda_normal: 0.1,
+            convergence_tol: 1e-12,
+            regularization: 0.0,
+            corner_positions: Some(cp),
+            initial_weights: Some(mobius_weights),
+            ..Default::default()
+        };
+        let result = crate::fit::fit_qb_patch(
+            &tess.positions, &tess.normals, &tess.bary, &config);
+        let err_refined = measure_recovery_error(&original, &result.patch, 20);
+        eprintln!("Möbius init + Gauss-Newton refinement:");
+        eprintln!("  pos RMS={:.6}, norm={:.2}°, w1_err={:.4}, w2_err={:.4}",
+            err_refined.rms_position, err_refined.rms_normal_degrees,
+            err_refined.weight_errors[1], err_refined.weight_errors[2]);
+
+        assert!(err_mobius.rms_position < 1e-6,
+            "Möbius weights should produce near-exact surface");
+    }
+
     // ── Recovery tests ──────────────────────────────────────────────
 
     #[test]
@@ -556,156 +673,76 @@ mod tests {
             ("strong_curve", strong, strong_flat),
         ];
 
-        // Approaches: vary GN iterations, regularization (via lambda_normal), etc.
-        let approaches: Vec<(&str, FitConfig)> = vec![
-            ("baseline", FitConfig {
-                gauss_newton_iterations: 10,
-                lambda_normal: 0.05,
-                ..Default::default()
-            }),
-            ("more_iters", FitConfig {
-                gauss_newton_iterations: 50,
-                lambda_normal: 0.05,
-                convergence_tol: 1e-12,
-                ..Default::default()
-            }),
-            ("no_reg", FitConfig {
-                gauss_newton_iterations: 50,
-                lambda_normal: 0.1,
-                convergence_tol: 1e-12,
-                regularization: 0.0,
-                ..Default::default()
-            }),
-            ("low_reg", FitConfig {
-                gauss_newton_iterations: 50,
-                lambda_normal: 0.1,
-                convergence_tol: 1e-12,
-                regularization: 0.001,
-                ..Default::default()
-            }),
-            ("heavy_normal_no_reg", FitConfig {
-                gauss_newton_iterations: 50,
-                lambda_normal: 1.0,
-                convergence_tol: 1e-12,
-                regularization: 0.0,
-                ..Default::default()
-            }),
-        ];
+        eprintln!("{:20} {:20} {:>10} {:>10} {:>8}",
+            "surface", "approach", "pos_rms", "pos_max", "norm_deg");
+        eprintln!("{:-<80}", "");
 
-        // Möbius weight estimation approach
-        eprintln!("\n--- Möbius weight estimation ---");
         for (surf_name, patch, flat_cp) in &surfaces {
             let tess = tessellate_patch(patch, 12);
             let cp = corners(patch);
 
-            // Use the stored flat corners (pre-inversion positions) for Möbius recovery
-            let flat_ref = if *surf_name == "flat" { cp } else { *flat_cp };
-            let weights = estimate_weights_from_mobius(&flat_ref, &cp, &tess.positions, &tess.bary);
+            // 1. GN baseline (identity init, default regularization)
+            {
+                let cfg = FitConfig {
+                    gauss_newton_iterations: 10,
+                    corner_positions: Some(cp),
+                    ..Default::default()
+                };
+                let r = run_recovery(surf_name, "gn_baseline", patch,
+                    &tess.positions, &tess.normals, &tess.bary, &cfg);
+                eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}°",
+                    surf_name, "gn_baseline", r.rms_position, r.max_position, r.rms_normal_degrees);
+            }
 
-            let recovered = QBTriPatch::new(patch.positions, weights);
-            let err = measure_recovery_error(patch, &recovered, 20);
-
-            eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}° {:8.4} {:8.4}",
-                surf_name, "mobius_est",
-                err.rms_position, err.max_position,
-                err.rms_normal_degrees,
-                err.weight_errors[1], err.weight_errors[2]);
-        }
-
-        // Multi-start: run from several random initial weights, pick best
-        eprintln!("\n--- Multi-start optimization ---");
-        for (surf_name, patch, _flat_cp) in &surfaces {
-            let tess = tessellate_patch(patch, 12);
-            let cp = corners(patch);
-
-            let mut best_result: Option<ExperimentResult> = None;
-            let seeds: Vec<[Quat; 3]> = vec![
-                [Quat::ONE, Quat::ONE, Quat::ONE], // identity
-                [Quat::ONE, Quat::new(0.0, 1.0, 0.0, 0.0), Quat::new(0.0, 0.0, 1.0, 0.0)], // pure i, j
-                [Quat::ONE, Quat::new(0.0, 0.0, 0.0, 1.0), Quat::new(0.0, 1.0, 0.0, 0.0)], // pure k, i
-                [Quat::ONE, Quat::new(0.5, 0.5, 0.5, 0.5), Quat::new(0.5, -0.5, 0.5, -0.5)], // mixed
-                [Quat::ONE, Quat::new(2.0, 0.0, 0.0, 0.0), Quat::new(2.0, 0.0, 0.0, 0.0)], // scaled
-                [Quat::ONE, Quat::new(0.0, 0.0, 0.5, 2.0), Quat::new(0.0, -0.5, 0.0, 2.0)], // near inverted weights
-            ];
-
-            for (si, seed) in seeds.iter().enumerate() {
+            // 2. GN no regularization
+            {
                 let cfg = FitConfig {
                     gauss_newton_iterations: 50,
                     lambda_normal: 0.1,
                     convergence_tol: 1e-12,
                     regularization: 0.0,
                     corner_positions: Some(cp),
-                    initial_weights: Some(*seed),
                     ..Default::default()
                 };
-                let r = run_recovery(surf_name, &format!("seed_{}", si), patch,
+                let r = run_recovery(surf_name, "gn_no_reg", patch,
                     &tess.positions, &tess.normals, &tess.bary, &cfg);
-
-                if best_result.as_ref().map_or(true, |b| r.rms_position < b.rms_position) {
-                    best_result = Some(r);
-                }
+                eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}°",
+                    surf_name, "gn_no_reg", r.rms_position, r.max_position, r.rms_normal_degrees);
             }
 
-            if let Some(r) = &best_result {
-                eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}° {:8.4} {:8.4}",
-                    surf_name, &r.approach,
-                    r.rms_position, r.max_position,
-                    r.rms_normal_degrees,
-                    r.weight_error_w1, r.weight_error_w2);
-            }
-        }
+            // 3. Möbius-derived init (if we know the flat corners) + GN refinement
+            if *surf_name != "flat" {
+                let fp = [
+                    Quat::from_point(flat_cp[0][0], flat_cp[0][1], flat_cp[0][2]),
+                    Quat::from_point(flat_cp[1][0], flat_cp[1][1], flat_cp[1][2]),
+                    Quat::from_point(flat_cp[2][0], flat_cp[2][1], flat_cp[2][2]),
+                ];
+                // Inversion weights: wᵢ = pᵢ_flat, gauge-normalized
+                let w0_inv = fp[0].inv();
+                let mobius_w = [Quat::ONE, fp[1] * w0_inv, fp[2] * w0_inv];
 
-        // Also test with exact init to verify minimum
-        eprintln!("\n--- Exact init (verify minimum) ---");
-        for (surf_name, patch, _flat_cp) in &surfaces {
-            let tess = tessellate_patch(patch, 12);
-            let cp = corners(patch);
+                // Without GN
+                let mobius_patch = QBTriPatch::new(patch.positions, mobius_w);
+                let err = measure_recovery_error(patch, &mobius_patch, 20);
+                eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}°",
+                    surf_name, "mobius_exact", err.rms_position, err.max_position, err.rms_normal_degrees);
 
-            // Test exact true weights (zero perturbation) — verify it's a minimum
-            let perturbed = patch.weights;
-
-            let cfg = FitConfig {
-                gauss_newton_iterations: 50,
-                lambda_normal: 0.1,
-                convergence_tol: 1e-12,
-                regularization: 0.0,
-                corner_positions: Some(cp),
-                initial_weights: Some(perturbed),
-                ..Default::default()
-            };
-
-            let r = run_recovery(surf_name, "oracle_init", patch,
-                &tess.positions, &tess.normals, &tess.bary, &cfg);
-
-            eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}° {:8.4} {:8.4}",
-                surf_name, "oracle_init",
-                r.rms_position, r.max_position,
-                r.rms_normal_degrees,
-                r.weight_error_w1, r.weight_error_w2);
-        }
-
-        eprintln!("{:20} {:20} {:>10} {:>10} {:>8} {:>8} {:>8}",
-            "surface", "approach", "pos_rms", "pos_max", "norm", "w1_err", "w2_err");
-        eprintln!("{:-<100}", "");
-
-        for (surf_name, patch, _flat_cp) in &surfaces {
-            let tess = tessellate_patch(patch, 12);
-            let cp = corners(patch);
-
-            for (app_name, config) in &approaches {
-                let mut cfg = config.clone();
-                cfg.corner_positions = Some(cp);
-
-                let r = run_recovery(surf_name, app_name, patch,
+                // With GN refinement
+                let cfg = FitConfig {
+                    gauss_newton_iterations: 50,
+                    lambda_normal: 0.1,
+                    convergence_tol: 1e-12,
+                    regularization: 0.0,
+                    corner_positions: Some(cp),
+                    initial_weights: Some(mobius_w),
+                    ..Default::default()
+                };
+                let r = run_recovery(surf_name, "mobius+gn", patch,
                     &tess.positions, &tess.normals, &tess.bary, &cfg);
-
-                eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}° {:8.4} {:8.4}",
-                    surf_name, app_name,
-                    r.rms_position, r.max_position,
-                    r.rms_normal_degrees,
-                    r.weight_error_w1, r.weight_error_w2);
+                eprintln!("{:20} {:20} {:10.6} {:10.6} {:7.2}°",
+                    surf_name, "mobius+gn", r.rms_position, r.max_position, r.rms_normal_degrees);
             }
         }
-        eprintln!("{:=<100}", "");
+        eprintln!("{:=<80}", "");
     }
 }
