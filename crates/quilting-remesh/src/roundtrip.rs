@@ -1078,9 +1078,9 @@ mod tests {
             let (flat_rms, flat_max) = measure_sphere_fit(&flat_result.patches);
             let (curved_rms, curved_max) = measure_sphere_fit(&curved_result.patches);
 
-            let label = format!("sphere_{}→{}", faces.len(), target);
-            eprintln!("{:20} {:15} {:10.6} {:10.6}", label, "flat_patches", flat_rms, flat_max);
-            eprintln!("{:20} {:15} {:10.6} {:10.6}", label, "curved_patches", curved_rms, curved_max);
+            let label = format!("sph{}→{}", faces.len(), target);
+            eprintln!("{:20} {:15} {:10.6} {:10.6}", label, "flat", flat_rms, flat_max);
+            eprintln!("{:20} {:15} {:10.6} {:10.6}", label, "curved", curved_rms, curved_max);
 
             // Show c magnitudes for curved patches
             let c_norms: Vec<f64> = curved_result.patches.iter()
