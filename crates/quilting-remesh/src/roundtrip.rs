@@ -159,8 +159,10 @@ pub fn estimate_c_parameter(
     ];
 
     // Use Gauss-Newton on c (4 parameters) to minimize position + normal error
+    // with regularization to prevent overshoot
     let mut c = Quat::ZERO;
     let eps = 1e-6;
+    let c_reg = 0.01; // regularize |c|² to prevent overshoot on noisy data
 
     for _iter in 0..100 {
         let mut residuals = Vec::new();
@@ -214,6 +216,14 @@ pub fn estimate_c_parameter(
                 }
             }
         }
+
+        // Regularization: penalize |c|² to prevent overshoot
+        let c_vals = [c.w, c.x, c.y, c.z];
+        for i in 0..4 {
+            jtr[i] -= c_reg * c_vals[i];
+            jtj[i][i] += c_reg;
+        }
+
         // LM damping
         for i in 0..4 { jtj[i][i] += 1e-6 * (jtj[i][i] + 1e-8); }
 
@@ -1032,6 +1042,63 @@ mod tests {
             eprintln!("{:20} {:15} {:10.6}",
                 "sphere_cap", "flat_baseline", (flat_err/n).sqrt());
         }
+
+        // ── Realistic test: actual mesh pipeline ─────────────────────
+        eprintln!("\n--- Realistic: QEM sphere simplification ---");
+        // Test at different reduction ratios
+        for (subdivs, target) in &[(2, 20), (3, 40), (3, 20)] {
+            let (positions, faces) = crate::test_shapes::sphere(*subdivs);
+            let flat_result = crate::remesh_simplified(&positions, &faces, *target).unwrap();
+            let curved_result = crate::remesh_simplified_curved(&positions, &faces, *target).unwrap();
+
+            // Measure how well each approach approximates the unit sphere
+            // Sample the QB patches and check distance to unit sphere
+            let measure_sphere_fit = |patches: &[QBTriPatch]| -> (f64, f64) {
+                let mut total = 0.0_f64;
+                let mut max_d = 0.0_f64;
+                let mut count = 0;
+                let n = 5;
+                for patch in patches {
+                    for i in 0..=n {
+                        for j in 0..=(n-i) {
+                            let u = i as f64 / n as f64;
+                            let v = j as f64 / n as f64;
+                            let p = patch.eval(u, v).to_point();
+                            let r = (p[0]*p[0] + p[1]*p[1] + p[2]*p[2]).sqrt();
+                            let d = (r - 1.0).abs();
+                            total += d * d;
+                            max_d = max_d.max(d);
+                            count += 1;
+                        }
+                    }
+                }
+                ((total / count as f64).sqrt(), max_d)
+            };
+
+            let (flat_rms, flat_max) = measure_sphere_fit(&flat_result.patches);
+            let (curved_rms, curved_max) = measure_sphere_fit(&curved_result.patches);
+
+            let label = format!("sphere_{}→{}", faces.len(), target);
+            eprintln!("{:20} {:15} {:10.6} {:10.6}", label, "flat_patches", flat_rms, flat_max);
+            eprintln!("{:20} {:15} {:10.6} {:10.6}", label, "curved_patches", curved_rms, curved_max);
+
+            // Show c magnitudes for curved patches
+            let c_norms: Vec<f64> = curved_result.patches.iter()
+                .map(|p| {
+                    // c is implicit in the weights; |w1 - 1| gives a rough magnitude
+                    (p.weights[1] - Quat::ONE).norm()
+                })
+                .collect();
+            let avg_c = c_norms.iter().sum::<f64>() / c_norms.len() as f64;
+            let max_c = c_norms.iter().fold(0.0_f64, |a, &b| a.max(b));
+            eprintln!("  avg |w1-1|={:.4}, max={:.4}", avg_c, max_c);
+
+            if curved_rms < flat_rms {
+                eprintln!("  curved is {:.1}x better than flat!", flat_rms / curved_rms.max(1e-10));
+            } else {
+                eprintln!("  flat is {:.1}x better", curved_rms / flat_rms.max(1e-10));
+            }
+        }  // end reduction ratio loop
 
         eprintln!("{:=<70}", "");
     }
