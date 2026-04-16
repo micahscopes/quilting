@@ -369,18 +369,24 @@ pub fn per_patch_fit(
 
             // Validate: sample the patch and check for blow-up
             let mut bad = false;
-            let n = 4;
+            let n = 8; // higher resolution to catch localized blow-ups
             let cx = (cp[0][0] + cp[1][0] + cp[2][0]) / 3.0;
             let cy = (cp[0][1] + cp[1][1] + cp[2][1]) / 3.0;
             let cz = (cp[0][2] + cp[1][2] + cp[2][2]) / 3.0;
             let mut max_r = 0.0_f64;
             for c in &cp { max_r = max_r.max(((c[0]-cx).powi(2)+(c[1]-cy).powi(2)+(c[2]-cz).powi(2)).sqrt()); }
-            let thresh = max_r * 2.0;
+            let thresh = max_r * 1.5; // tight threshold
 
             'check: for i in 0..=n {
                 for j in 0..=(n-i) {
                     let u = i as f64 / n as f64;
                     let v = j as f64 / n as f64;
+                    let w = 1.0 - u - v;
+                    // Check denominator magnitude (Σλᵢwᵢ)
+                    let denom = w * fitted.weights[0] + u * fitted.weights[1] + v * fitted.weights[2];
+                    if denom.norm() < 0.1 {
+                        bad = true; break 'check;
+                    }
                     let p = fitted.eval(u, v).to_point();
                     let d = ((p[0]-cx).powi(2)+(p[1]-cy).powi(2)+(p[2]-cz).powi(2)).sqrt();
                     if d > thresh || !p[0].is_finite() { bad = true; break 'check; }
