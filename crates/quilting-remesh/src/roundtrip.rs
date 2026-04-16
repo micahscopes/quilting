@@ -473,6 +473,26 @@ pub fn spherical_patch_via_inversion(
     (flat.transform(&inv), [p0, p1, p2])
 }
 
+/// Create a QB patch from arbitrary corner positions and sample points.
+/// This tests the c-estimator on surfaces that are NOT Möbius images.
+/// The patch is constructed by fitting c to best match the samples.
+pub fn fit_patch_from_samples(
+    corner_positions: [[f64; 3]; 3],
+    samples: &[[f64; 3]],
+    sample_bary: &[[f64; 3]],
+    sample_normals: &[[f64; 3]],
+) -> QBTriPatch {
+    let cp = [
+        Quat::from_point(corner_positions[0][0], corner_positions[0][1], corner_positions[0][2]),
+        Quat::from_point(corner_positions[1][0], corner_positions[1][1], corner_positions[1][2]),
+        Quat::from_point(corner_positions[2][0], corner_positions[2][1], corner_positions[2][2]),
+    ];
+
+    let c = estimate_c_parameter(&corner_positions, samples, sample_bary, sample_normals);
+    let weights = make_weights_from_c(c, &cp);
+    QBTriPatch::new(cp, weights)
+}
+
 /// Create a set of QB patches forming a sphere via Möbius inversion of a flat octahedron.
 ///
 /// Start with a flat octahedron offset from the origin, invert it.
@@ -796,6 +816,69 @@ mod tests {
         let (strong, strong_flat) = spherical_patch_via_inversion(
             [1.0, 0.0, 1.5], [0.0, 1.0, 1.5], [-1.0, 0.0, 1.5]);
 
+        // Non-Möbius surfaces: create patches from real geometric shapes
+        // Saddle surface: z = x*y (hyperbolic paraboloid, K < 0)
+        let saddle = {
+            let corners = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [-0.5, -0.5, 0.25]];
+            // Sample saddle z = x*y at interior points
+            let n = 8;
+            let mut positions = Vec::new();
+            let mut bary_coords = Vec::new();
+            let mut normals = Vec::new();
+            for i in 0..=n {
+                for j in 0..=(n-i) {
+                    let u = i as f64 / n as f64;
+                    let v = j as f64 / n as f64;
+                    let w = 1.0 - u - v;
+                    // Linear interpolation of corners
+                    let x = w * corners[0][0] + u * corners[1][0] + v * corners[2][0];
+                    let y = w * corners[0][1] + u * corners[1][1] + v * corners[2][1];
+                    // Saddle displacement: z = x*y
+                    let z = x * y;
+                    positions.push([x, y, z]);
+                    bary_coords.push([w, u, v]);
+                    // Normal of z=xy surface: n = (-dz/dx, -dz/dy, 1) normalized = (-y, -x, 1)/|...|
+                    let nl = (y*y + x*x + 1.0).sqrt();
+                    normals.push([-y/nl, -x/nl, 1.0/nl]);
+                }
+            }
+            // Control points ARE the corners (with z=x*y applied)
+            let cp = [
+                [corners[0][0], corners[0][1], corners[0][0]*corners[0][1]],
+                [corners[1][0], corners[1][1], corners[1][0]*corners[1][1]],
+                [corners[2][0], corners[2][1], corners[2][0]*corners[2][1]],
+            ];
+            (cp, positions, bary_coords, normals)
+        };
+
+        // Hemisphere cap: take a patch from a unit sphere (not via Möbius)
+        let sphere_cap = {
+            let corners = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+            let n = 8;
+            let mut positions = Vec::new();
+            let mut bary_coords = Vec::new();
+            let mut normals = Vec::new();
+            for i in 0..=n {
+                for j in 0..=(n-i) {
+                    let u = i as f64 / n as f64;
+                    let v = j as f64 / n as f64;
+                    let w = 1.0 - u - v;
+                    let x = w * corners[0][0] + u * corners[1][0] + v * corners[2][0];
+                    let y = w * corners[0][1] + u * corners[1][1] + v * corners[2][1];
+                    let z = w * corners[0][2] + u * corners[1][2] + v * corners[2][2];
+                    // Project onto unit sphere
+                    let r = (x*x + y*y + z*z).sqrt();
+                    let px = x / r;
+                    let py = y / r;
+                    let pz = z / r;
+                    positions.push([px, py, pz]);
+                    bary_coords.push([w, u, v]);
+                    normals.push([px, py, pz]); // sphere normal = position
+                }
+            }
+            (corners, positions, bary_coords, normals)
+        };
+
         let surfaces: Vec<(&str, QBTriPatch, [[f64; 3]; 3])> = vec![
             ("flat", QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), flat_corners_default),
             ("mild_curve", mild, mild_flat),
@@ -869,6 +952,87 @@ mod tests {
                     surf_name, "mobius_oracle", err.rms_position, err.max_position, err.rms_normal_degrees);
             }
         }
+        // ── Non-Möbius surfaces ──────────────────────────────────────
+        eprintln!("\n--- Non-Möbius surfaces (c-estimator only) ---");
+
+        // Saddle
+        {
+            let (cp, ref positions, ref bary_coords, ref normals) = saddle;
+            let c = estimate_c_parameter(&cp, positions, bary_coords, normals);
+            let cpq = [
+                Quat::from_point(cp[0][0], cp[0][1], cp[0][2]),
+                Quat::from_point(cp[1][0], cp[1][1], cp[1][2]),
+                Quat::from_point(cp[2][0], cp[2][1], cp[2][2]),
+            ];
+            let weights = make_weights_from_c(c, &cpq);
+            let fitted = QBTriPatch::new(cpq, weights);
+
+            // Measure error against the sample points
+            let mut pos_err = 0.0_f64;
+            let mut pos_max = 0.0_f64;
+            let mut norm_err = 0.0_f64;
+            for (k, bary) in bary_coords.iter().enumerate() {
+                let eval = fitted.eval_with_normal(bary[1], bary[2]);
+                let dx = positions[k][0] - eval.position[0];
+                let dy = positions[k][1] - eval.position[1];
+                let dz = positions[k][2] - eval.position[2];
+                let d = (dx*dx + dy*dy + dz*dz).sqrt();
+                pos_err += d * d;
+                pos_max = pos_max.max(d);
+                let dot = normals[k][0]*eval.normal[0] + normals[k][1]*eval.normal[1] + normals[k][2]*eval.normal[2];
+                norm_err += dot.clamp(-1.0, 1.0).acos().to_degrees().powi(2);
+            }
+            let n = bary_coords.len() as f64;
+            eprintln!("{:20} {:15} {:10.6} {:10.6} {:7.2}°",
+                "saddle", "c_estimator", (pos_err/n).sqrt(), pos_max, (norm_err/n).sqrt());
+            eprintln!("  c = {:?}", c);
+        }
+
+        // Sphere cap
+        {
+            let (cp, ref positions, ref bary_coords, ref normals) = sphere_cap;
+            let c = estimate_c_parameter(&cp, positions, bary_coords, normals);
+            let cpq = [
+                Quat::from_point(cp[0][0], cp[0][1], cp[0][2]),
+                Quat::from_point(cp[1][0], cp[1][1], cp[1][2]),
+                Quat::from_point(cp[2][0], cp[2][1], cp[2][2]),
+            ];
+            let weights = make_weights_from_c(c, &cpq);
+            let fitted = QBTriPatch::new(cpq, weights);
+
+            let mut pos_err = 0.0_f64;
+            let mut pos_max = 0.0_f64;
+            let mut norm_err = 0.0_f64;
+            for (k, bary) in bary_coords.iter().enumerate() {
+                let eval = fitted.eval_with_normal(bary[1], bary[2]);
+                let dx = positions[k][0] - eval.position[0];
+                let dy = positions[k][1] - eval.position[1];
+                let dz = positions[k][2] - eval.position[2];
+                let d = (dx*dx + dy*dy + dz*dz).sqrt();
+                pos_err += d * d;
+                pos_max = pos_max.max(d);
+                let dot = normals[k][0]*eval.normal[0] + normals[k][1]*eval.normal[1] + normals[k][2]*eval.normal[2];
+                norm_err += dot.clamp(-1.0, 1.0).acos().to_degrees().powi(2);
+            }
+            let n = bary_coords.len() as f64;
+            eprintln!("{:20} {:15} {:10.6} {:10.6} {:7.2}°",
+                "sphere_cap", "c_estimator", (pos_err/n).sqrt(), pos_max, (norm_err/n).sqrt());
+            eprintln!("  c = {:?}", c);
+
+            // Compare with flat (c=0) to show improvement
+            let flat = QBTriPatch::new(cpq, [Quat::ONE, Quat::ONE, Quat::ONE]);
+            let mut flat_err = 0.0_f64;
+            for (k, bary) in bary_coords.iter().enumerate() {
+                let eval = flat.eval(bary[1], bary[2]).to_point();
+                let dx = positions[k][0] - eval[0];
+                let dy = positions[k][1] - eval[1];
+                let dz = positions[k][2] - eval[2];
+                flat_err += dx*dx + dy*dy + dz*dz;
+            }
+            eprintln!("{:20} {:15} {:10.6}",
+                "sphere_cap", "flat_baseline", (flat_err/n).sqrt());
+        }
+
         eprintln!("{:=<70}", "");
     }
 }
