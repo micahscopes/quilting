@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Remesh Lab</title>
 <link data-trunk rel="rust" data-wasm-opt="0" href="crates/trunk-stub" />
+<link data-trunk rel="copy-dir" href="pkg" />
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; background: #1a1a2e; color: #e0e0e0; font-family: monospace; }
@@ -35,6 +36,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   border-top: 1px solid #0f3460; padding-top: 8px; margin-top: auto;
 }
 #stats .h { color: #e94560; }
+.legend { font-size: 10px; color: #888; line-height: 1.6; margin-top: 4px; }
+.legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -58,26 +61,35 @@ button:disabled { opacity: 0.4; cursor: default; }
     <span class="val" id="subdivs-v">3</span>
   </div>
 
-  <label>Target patches</label>
+  <label>Target clusters / patches</label>
   <div class="row">
     <input type="range" id="target" min="4" max="500" value="20" step="1">
     <span class="val" id="target-v">20</span>
   </div>
 
+  <label>Method</label>
   <div class="btns">
-    <button id="btn-remesh">Remesh</button>
+    <button id="btn-remesh">QEM Simplify</button>
+    <button id="btn-quadric">Quadric VSA</button>
   </div>
 
   <label>View</label>
   <div class="btns">
-    <button id="btn-original" class="active">Original</button>
-    <button id="btn-remeshed">Remeshed</button>
+    <button id="btn-original">Original</button>
+    <button id="btn-remeshed">Result</button>
     <button id="btn-both">Both</button>
   </div>
 
   <div class="btns" style="margin-top:4px">
     <button id="btn-wire">Wireframe</button>
     <button id="btn-flat">Flat</button>
+  </div>
+
+  <div id="legend" class="legend" style="display:none">
+    <span style="background:#44aa88"></span>Plane
+    <span style="background:#e94560;margin-left:8px"></span>Sphere
+    <span style="background:#4488ee;margin-left:8px"></span>Cylinder
+    <span style="background:#aa66cc;margin-left:8px"></span>General
   </div>
 
   <div id="stats">Ready</div>
@@ -108,7 +120,6 @@ renderer.setPixelRatio(devicePixelRatio);
 const controls = new OrbitControls(camera, $('cv'));
 controls.enableDamping = true;
 
-// Lights
 scene.add(new THREE.AmbientLight(0x404060));
 const d1 = new THREE.DirectionalLight(0xffffff, 1.0);
 d1.position.set(3, 5, 4);
@@ -136,17 +147,34 @@ const matWireRemesh = new THREE.MeshBasicMaterial({
 let meshOriginal = null;
 let meshRemeshed = null;
 let wireframe = false;
-let viewMode = 'both'; // 'original', 'remeshed', 'both'
+let viewMode = 'both';
 
-// State
 let currentPositions = null;
 let currentFaces = null;
-let remeshedPositions = null;
-let remeshedFaces = null;
 
-// WASM worker
-// Load WASM directly on main thread (no worker caching issues)
 let wasm = null;
+
+// Surface type color palette
+const TYPE_COLORS = {
+  plane:    new THREE.Color(0x44aa88),
+  sphere:   new THREE.Color(0xe94560),
+  cylinder: new THREE.Color(0x4488ee),
+  general:  new THREE.Color(0xaa66cc),
+};
+
+// Distinct cluster colors (for per-cluster coloring within a type)
+function clusterColor(idx, type) {
+  const base = TYPE_COLORS[type] || new THREE.Color(0x888888);
+  // Vary brightness per cluster
+  const h = new THREE.Color();
+  h.setHSL((idx * 0.618033988749895) % 1.0, 0.7, 0.5);
+  // Blend: 60% type color, 40% unique hue
+  return new THREE.Color(
+    base.r * 0.6 + h.r * 0.4,
+    base.g * 0.6 + h.g * 0.4,
+    base.b * 0.6 + h.b * 0.4,
+  );
+}
 
 async function init() {
   $('stats').textContent = 'Initializing WASM...';
@@ -172,6 +200,38 @@ function buildMesh(positions, faces, material) {
   return new THREE.Mesh(geo, material);
 }
 
+/** Build mesh with per-face vertex colors from cluster labels + surface types. */
+function buildColoredMesh(positions, faces, labels, surfaceTypes) {
+  const geo = new THREE.BufferGeometry();
+  const nFaces = faces.length;
+  const verts = new Float32Array(nFaces * 9);
+  const colors = new Float32Array(nFaces * 9);
+
+  for (let i = 0; i < nFaces; i++) {
+    const label = labels[i];
+    const type = surfaceTypes[label] || 'general';
+    const col = clusterColor(label, type);
+    for (let j = 0; j < 3; j++) {
+      const vi = faces[i][j];
+      verts[i*9 + j*3 + 0] = positions[vi][0];
+      verts[i*9 + j*3 + 1] = positions[vi][1];
+      verts[i*9 + j*3 + 2] = positions[vi][2];
+      colors[i*9 + j*3 + 0] = col.r;
+      colors[i*9 + j*3 + 1] = col.g;
+      colors[i*9 + j*3 + 2] = col.b;
+    }
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.5, metalness: 0.1,
+    side: THREE.DoubleSide, flatShading: true,
+  });
+  return new THREE.Mesh(geo, mat);
+}
+
 function centerAndScale(mesh) {
   mesh.geometry.computeBoundingBox();
   const box = mesh.geometry.boundingBox;
@@ -182,20 +242,27 @@ function centerAndScale(mesh) {
   mesh.scale.multiplyScalar(1.5 / maxDim);
 }
 
+// Store original transform for applying to result mesh
+let origScale = 1;
+let origPos = new THREE.Vector3();
+
 function updateView() {
   if (meshOriginal) meshOriginal.visible = (viewMode === 'original' || viewMode === 'both');
   if (meshRemeshed) meshRemeshed.visible = (viewMode === 'remeshed' || viewMode === 'both');
 
-  if (meshOriginal) meshOriginal.material = wireframe ? matWireOrig : matOriginal;
-  if (meshRemeshed) meshRemeshed.material = wireframe ? matWireRemesh : matRemeshed;
+  if (meshOriginal && !meshOriginal.userData.isColored) {
+    meshOriginal.material = wireframe ? matWireOrig : matOriginal;
+  }
+  if (meshRemeshed && !meshRemeshed.userData.isColored) {
+    meshRemeshed.material = wireframe ? matWireRemesh : matRemeshed;
+  }
 
-  // Offset for side-by-side in 'both' mode
   if (viewMode === 'both') {
-    if (meshOriginal) meshOriginal.position.x = -0.8;
-    if (meshRemeshed) meshRemeshed.position.x = 0.8;
+    if (meshOriginal) meshOriginal.position.x = origPos.x - 0.8;
+    if (meshRemeshed) meshRemeshed.position.x = origPos.x + 0.8;
   } else {
-    if (meshOriginal) meshOriginal.position.x = 0;
-    if (meshRemeshed) meshRemeshed.position.x = 0;
+    if (meshOriginal) meshOriginal.position.x = origPos.x;
+    if (meshRemeshed) meshRemeshed.position.x = origPos.x;
   }
 }
 
@@ -205,19 +272,18 @@ async function loadShape(shape) {
 
   const result = wasm.generate_test_mesh(shape, subdivs);
   if (!result) { $('stats').textContent = 'Failed'; return; }
-  // Convert from JsValue arrays to plain JS arrays
   currentPositions = Array.from(result.positions).map(p => Array.from(p));
   currentFaces = Array.from(result.faces).map(f => Array.from(f).map(Number));
 
   if (meshOriginal) scene.remove(meshOriginal);
   meshOriginal = buildMesh(currentPositions, currentFaces, matOriginal);
   centerAndScale(meshOriginal);
+  origScale = meshOriginal.scale.x;
+  origPos = meshOriginal.position.clone();
   scene.add(meshOriginal);
 
-  // Clear remeshed
   if (meshRemeshed) { scene.remove(meshRemeshed); meshRemeshed = null; }
-  remeshedPositions = null;
-  remeshedFaces = null;
+  $('legend').style.display = 'none';
 
   $('stats').innerHTML = `<span class="h">${shape}</span>: ${currentPositions.length} verts, ${currentFaces.length} faces`;
   updateView();
@@ -226,7 +292,7 @@ async function loadShape(shape) {
 async function doRemesh() {
   if (!currentPositions) return;
   const target = parseInt($('target').value);
-  $('stats').textContent = 'Remeshing...';
+  $('stats').textContent = 'QEM simplifying...';
   $('btn-remesh').disabled = true;
 
   const t0 = performance.now();
@@ -238,24 +304,67 @@ async function doRemesh() {
   const elapsed = performance.now() - t0;
 
   if (!result) { $('stats').textContent = 'Simplification failed'; $('btn-remesh').disabled = false; return; }
-  remeshedPositions = Array.from(result.positions).map(p => Array.from(p));
-  remeshedFaces = Array.from(result.faces).map(f => Array.from(f).map(Number));
+  const remeshedPositions = Array.from(result.positions).map(p => Array.from(p));
+  const remeshedFaces = Array.from(result.faces).map(f => Array.from(f).map(Number));
 
   if (meshRemeshed) scene.remove(meshRemeshed);
   meshRemeshed = buildMesh(remeshedPositions, remeshedFaces, matRemeshed);
-  // Apply same transform as original
-  if (meshOriginal) {
-    meshRemeshed.scale.copy(meshOriginal.scale);
-    meshRemeshed.position.copy(meshOriginal.position);
-  }
+  meshRemeshed.scale.setScalar(origScale);
+  meshRemeshed.position.copy(origPos);
   scene.add(meshRemeshed);
 
+  $('legend').style.display = 'none';
   $('stats').innerHTML =
-    `<span class="h">Remeshed</span>: ${remeshedFaces.length} patches from ${currentFaces.length} faces ` +
+    `<span class="h">QEM</span>: ${remeshedFaces.length} patches from ${currentFaces.length} faces ` +
     `(${(currentFaces.length / remeshedFaces.length).toFixed(1)}x)<br>` +
     `Time: ${elapsed.toFixed(0)}ms, max err: ${(result.max_error || 0).toFixed(4)}`;
 
   $('btn-remesh').disabled = false;
+  viewMode = 'both';
+  updateView();
+}
+
+async function doQuadricVSA() {
+  if (!currentPositions) return;
+  const target = parseInt($('target').value);
+  $('stats').textContent = 'Quadric VSA segmenting...';
+  $('btn-quadric').disabled = true;
+
+  const t0 = performance.now();
+  const result = wasm.quadric_vsa_segment(
+    new Float64Array(currentPositions.flat()),
+    new Uint32Array(currentFaces.flat()),
+    target,
+  );
+  const elapsed = performance.now() - t0;
+
+  if (!result) { $('stats').textContent = 'Segmentation failed'; $('btn-quadric').disabled = false; return; }
+
+  const labels = Array.from(result.labels).map(Number);
+  const surfaceTypes = Array.from(result.surface_types);
+  const numClusters = result.num_clusters;
+
+  // Count types
+  const typeCounts = {};
+  for (const t of surfaceTypes) {
+    typeCounts[t] = (typeCounts[t] || 0) + 1;
+  }
+
+  if (meshRemeshed) scene.remove(meshRemeshed);
+  meshRemeshed = buildColoredMesh(currentPositions, currentFaces, labels, surfaceTypes);
+  meshRemeshed.userData.isColored = true;
+  meshRemeshed.scale.setScalar(origScale);
+  meshRemeshed.position.copy(origPos);
+  scene.add(meshRemeshed);
+
+  $('legend').style.display = 'block';
+  const typeStr = Object.entries(typeCounts).map(([t,n]) => `${t}:${n}`).join(', ');
+  $('stats').innerHTML =
+    `<span class="h">Quadric VSA</span>: ${numClusters} clusters from ${currentFaces.length} faces<br>` +
+    `Types: ${typeStr}<br>` +
+    `Time: ${elapsed.toFixed(0)}ms`;
+
+  $('btn-quadric').disabled = false;
   viewMode = 'both';
   updateView();
 }
@@ -267,6 +376,7 @@ $('btn-sphere').onclick = () => loadShape('sphere');
 $('btn-cylinder').onclick = () => loadShape('cylinder');
 $('btn-torus').onclick = () => loadShape('torus');
 $('btn-remesh').onclick = doRemesh;
+$('btn-quadric').onclick = doQuadricVSA;
 $('btn-original').onclick = () => { viewMode = 'original'; updateView(); };
 $('btn-remeshed').onclick = () => { viewMode = 'remeshed'; updateView(); };
 $('btn-both').onclick = () => { viewMode = 'both'; updateView(); };

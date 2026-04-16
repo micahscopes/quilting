@@ -2271,6 +2271,75 @@ pub fn simplify_mesh(positions: &[f64], faces: &[u32], target: u32) -> JsValue {
     result.into()
 }
 
+/// Quadric VSA segmentation — clusters by fitted quadric surface instead of planar normal.
+/// Returns the same format as simplify_mesh (positions, faces, max_error) plus
+/// a `surface_types` array with per-cluster classification.
+#[wasm_bindgen]
+pub fn quadric_vsa_segment(positions: &[f64], faces: &[u32], target: u32) -> JsValue {
+    let pos: Vec<[f64; 3]> = positions.chunks(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let tris: Vec<[usize; 3]> = faces.chunks(3)
+        .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize])
+        .collect();
+
+    if tris.len() < 4 {
+        return JsValue::NULL;
+    }
+
+    // Build half-edge mesh for VSA
+    let faces_u32: Vec<[u32; 3]> = tris.iter()
+        .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+        .collect();
+    let he_mesh = quilting_mesh::HalfEdgeMesh::from_triangles(pos.len() as u32, &faces_u32);
+
+    let config = quilting_remesh::quadric_vsa::QuadricVsaConfig {
+        target_clusters: target as usize,
+        max_iterations: 20,
+        sharp_edge_threshold: 40.0_f64.to_radians(),
+        quadric_weight: 0.5,
+    };
+    let result = quilting_remesh::quadric_vsa::segment(&pos, &tris, &he_mesh, &config);
+
+    // Build response object
+    let obj = js_sys::Object::new();
+
+    // Face labels (per-face cluster ID)
+    let js_labels = js_sys::Array::new();
+    for &l in &result.face_labels {
+        js_labels.push(&JsValue::from_f64(l as f64));
+    }
+    js_sys::Reflect::set(&obj, &"labels".into(), &js_labels).unwrap();
+    js_sys::Reflect::set(&obj, &"num_clusters".into(), &JsValue::from_f64(result.num_clusters as f64)).unwrap();
+
+    // Surface type per cluster
+    let js_types = js_sys::Array::new();
+    for proxy in &result.proxies {
+        let t = match &proxy.surface_type {
+            quilting_remesh::quadric_vsa::SurfaceType::Plane => "plane",
+            quilting_remesh::quadric_vsa::SurfaceType::Sphere { .. } => "sphere",
+            quilting_remesh::quadric_vsa::SurfaceType::Cylinder { .. } => "cylinder",
+            quilting_remesh::quadric_vsa::SurfaceType::General => "general",
+        };
+        js_types.push(&JsValue::from_str(t));
+    }
+    js_sys::Reflect::set(&obj, &"surface_types".into(), &js_types).unwrap();
+
+    // Proxy centroids (for visualization)
+    let js_centroids = js_sys::Array::new();
+    for proxy in &result.proxies {
+        let arr = js_sys::Array::of3(
+            &JsValue::from_f64(proxy.centroid[0]),
+            &JsValue::from_f64(proxy.centroid[1]),
+            &JsValue::from_f64(proxy.centroid[2]),
+        );
+        js_centroids.push(&arr);
+    }
+    js_sys::Reflect::set(&obj, &"centroids".into(), &js_centroids).unwrap();
+
+    obj.into()
+}
+
 fn point_plane_dist(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
     let ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
     let ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];

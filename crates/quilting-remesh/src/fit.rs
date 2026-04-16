@@ -21,6 +21,11 @@ pub struct FitConfig {
     pub convergence_tol: f64,
     /// If provided, use these as initial control points instead of least-squares fit.
     pub corner_positions: Option<[[f64; 3]; 3]>,
+    /// Regularization weight pulling weights toward identity. Default 0.1.
+    /// Set to 0.0 to disable regularization (for round-trip recovery tests).
+    pub regularization: f64,
+    /// If provided, use these as initial weights instead of identity.
+    pub initial_weights: Option<[Quat; 3]>,
 }
 
 impl Default for FitConfig {
@@ -31,6 +36,8 @@ impl Default for FitConfig {
             lambda_normal: 0.05,
             convergence_tol: 1e-6,
             corner_positions: None,
+            regularization: 0.1,
+            initial_weights: None,
         }
     }
 }
@@ -64,14 +71,15 @@ pub fn fit_qb_patch(
         None => fit_positions(sample_positions, sample_bary),
     };
 
-    // Build initial patch with identity weights
+    // Build initial patch
+    let initial_weights = config.initial_weights.unwrap_or([Quat::ONE, Quat::ONE, Quat::ONE]);
     let mut patch = QBTriPatch::new(
         [
             Quat::from_point(control_points[0][0], control_points[0][1], control_points[0][2]),
             Quat::from_point(control_points[1][0], control_points[1][1], control_points[1][2]),
             Quat::from_point(control_points[2][0], control_points[2][1], control_points[2][2]),
         ],
-        [Quat::ONE, Quat::ONE, Quat::ONE],
+        initial_weights,
     );
 
     // Phase 2: Gauss-Newton weight optimization
@@ -197,7 +205,7 @@ fn optimize_weights(
         }
 
         // Regularize: penalize weight deviation from identity
-        let reg_weight = 0.1;
+        let reg_weight = config.regularization;
         let w1 = patch.weights[1];
         let w2 = patch.weights[2];
         let w_dev = [w1.w - 1.0, w1.x, w1.y, w1.z, w2.w - 1.0, w2.x, w2.y, w2.z];

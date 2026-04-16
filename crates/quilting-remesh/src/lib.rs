@@ -1,12 +1,14 @@
 pub mod geometry;
 pub mod sparse;
 pub mod vsa;
+pub mod quadric_vsa;
 pub mod cluster;
 pub mod parameterize;
 pub mod fit;
 pub mod simplify;
 pub mod curvature;
 pub mod test_shapes;
+pub mod roundtrip;
 
 use quilting_core::patch::QBTriPatch;
 
@@ -359,6 +361,194 @@ pub fn remesh(
         patch_normals: patch_normals_out,
         face_cluster_ids: vsa_result.face_labels,
         stats,
+    })
+}
+
+/// Run remeshing with quadric VSA segmentation.
+/// Uses implicit quadric surface proxies instead of planar normals, so regions
+/// that lie on the same sphere/cylinder stay as single clusters.
+pub fn remesh_quadric(
+    positions: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    normals: Option<&[[f64; 3]]>,
+    uvs: Option<&[[f64; 2]]>,
+    config: &RemeshConfig,
+) -> Result<RemeshResult, RemeshError> {
+    if faces.len() < 4 {
+        return Err(RemeshError::TooFewFaces);
+    }
+
+    let computed_normals;
+    let vertex_normals = match normals {
+        Some(n) => n,
+        None => {
+            computed_normals = geometry::compute_vertex_normals(positions, faces);
+            &computed_normals
+        }
+    };
+
+    let num_verts = positions.len() as u32;
+    let faces_u32: Vec<[u32; 3]> = faces.iter()
+        .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+        .collect();
+    let he_mesh = quilting_mesh::HalfEdgeMesh::from_triangles(num_verts, &faces_u32);
+
+    // Quadric VSA segmentation
+    let qvsa_config = quadric_vsa::QuadricVsaConfig {
+        target_clusters: config.target_patches,
+        max_iterations: config.vsa_iterations,
+        sharp_edge_threshold: config.sharp_edge_angle,
+        quadric_weight: 0.5,
+    };
+    let qvsa_result = quadric_vsa::segment(positions, faces, &he_mesh, &qvsa_config);
+
+    // Log surface type statistics
+    let mut n_plane = 0;
+    let mut n_sphere = 0;
+    let mut n_cyl = 0;
+    let mut n_gen = 0;
+    for p in &qvsa_result.proxies {
+        match &p.surface_type {
+            quadric_vsa::SurfaceType::Plane => n_plane += 1,
+            quadric_vsa::SurfaceType::Sphere { .. } => n_sphere += 1,
+            quadric_vsa::SurfaceType::Cylinder { .. } => n_cyl += 1,
+            quadric_vsa::SurfaceType::General => n_gen += 1,
+        }
+    }
+    eprintln!(
+        "quadric VSA: {} clusters (plane={}, sphere={}, cylinder={}, general={})",
+        qvsa_result.num_clusters, n_plane, n_sphere, n_cyl, n_gen
+    );
+
+    // Convert to planar VsaResult for downstream compatibility
+    let mut vsa_result = qvsa_result.to_vsa_result();
+
+    // Adaptive splitting (same as planar path)
+    let effective_max = if config.max_cluster_size > 0 {
+        let avg = faces.len() / config.target_patches.max(1);
+        config.max_cluster_size.max(avg)
+    } else {
+        usize::MAX
+    };
+    if effective_max < usize::MAX {
+        split_large_clusters(&mut vsa_result, positions, faces, effective_max);
+    }
+
+    // Extract clusters and fit QB patches (same as planar path)
+    let clusters = cluster::extract_clusters(positions, faces, &he_mesh, &vsa_result);
+
+    let mut patches = Vec::with_capacity(clusters.len());
+    let mut patch_uvs = Vec::with_capacity(clusters.len());
+    let mut patch_normals_out = Vec::with_capacity(clusters.len());
+    let mut total_pos_err = 0.0;
+    let mut max_pos_err = 0.0_f64;
+    let mut total_norm_err = 0.0;
+    let mut max_norm_err = 0.0_f64;
+    let mut num_fitted = 0usize;
+    let mut num_skipped = 0usize;
+    let mut num_flipped = 0usize;
+    let mut per_patch_normal_error = Vec::new();
+
+    for cl in &clusters {
+        let param = match parameterize::parameterize_cluster(positions, faces, cl, &he_mesh) {
+            Ok(p) => p,
+            Err(_) => { num_skipped += 1; continue; }
+        };
+
+        let sample_positions: Vec<[f64; 3]> = cl.vertex_indices.iter()
+            .map(|&vi| positions[vi])
+            .collect();
+        let sample_normals: Vec<[f64; 3]> = cl.vertex_indices.iter()
+            .map(|&vi| vertex_normals[vi])
+            .collect();
+
+        let mut fit_result = fit::FitResult {
+            patch: quilting_core::patch::QBTriPatch::flat(
+                positions[cl.corner_vertices[0]],
+                positions[cl.corner_vertices[1]],
+                positions[cl.corner_vertices[2]],
+            ),
+            rms_position_error: 0.0,
+            max_position_error: 0.0,
+            rms_normal_error_degrees: 0.0,
+            max_normal_error_degrees: 0.0,
+        };
+
+        let p0 = fit_result.patch.positions[0].to_point();
+        let p1 = fit_result.patch.positions[1].to_point();
+        let p2 = fit_result.patch.positions[2].to_point();
+        let tri_normal = geometry::face_normal_normalized(&[p0, p1, p2], [0, 1, 2]);
+
+        let mut cluster_normal = [0.0; 3];
+        for &fi in &cl.face_indices {
+            let fn_ = geometry::face_normal(positions, faces[fi]);
+            cluster_normal = geometry::vec3_add(cluster_normal, fn_);
+        }
+        cluster_normal = geometry::vec3_normalize(cluster_normal);
+
+        if geometry::vec3_dot(tri_normal, cluster_normal) < 0.0 {
+            fit_result.patch.positions.swap(1, 2);
+            fit_result.patch.weights.swap(1, 2);
+            num_flipped += 1;
+        }
+
+        let (rms_pos, max_pos_local, rms_norm, max_norm_local) =
+            fit::compute_errors(&fit_result.patch, &sample_positions, &sample_normals, &param.vertex_bary);
+
+        total_pos_err += rms_pos;
+        max_pos_err = max_pos_err.max(max_pos_local);
+        total_norm_err += rms_norm;
+        max_norm_err = max_norm_err.max(max_norm_local);
+        per_patch_normal_error.push(rms_norm);
+        num_fitted += 1;
+
+        patches.push(fit_result.patch);
+
+        let corner_uvs = if let Some(uv_data) = uvs {
+            [
+                [uv_data[cl.corner_vertices[0]][0] as f32, uv_data[cl.corner_vertices[0]][1] as f32],
+                [uv_data[cl.corner_vertices[1]][0] as f32, uv_data[cl.corner_vertices[1]][1] as f32],
+                [uv_data[cl.corner_vertices[2]][0] as f32, uv_data[cl.corner_vertices[2]][1] as f32],
+            ]
+        } else {
+            [[0.0, 0.0]; 3]
+        };
+        patch_uvs.push(corner_uvs);
+
+        let cn = [
+            [vertex_normals[cl.corner_vertices[0]][0] as f32,
+             vertex_normals[cl.corner_vertices[0]][1] as f32,
+             vertex_normals[cl.corner_vertices[0]][2] as f32],
+            [vertex_normals[cl.corner_vertices[1]][0] as f32,
+             vertex_normals[cl.corner_vertices[1]][1] as f32,
+             vertex_normals[cl.corner_vertices[1]][2] as f32],
+            [vertex_normals[cl.corner_vertices[2]][0] as f32,
+             vertex_normals[cl.corner_vertices[2]][1] as f32,
+             vertex_normals[cl.corner_vertices[2]][2] as f32],
+        ];
+        patch_normals_out.push(cn);
+    }
+
+    let n = num_fitted.max(1) as f64;
+    let num_patches = patches.len();
+    Ok(RemeshResult {
+        patches,
+        patch_uvs,
+        patch_normals: patch_normals_out,
+        face_cluster_ids: vsa_result.face_labels,
+        stats: RemeshStats {
+            original_faces: faces.len(),
+            num_clusters: vsa_result.num_clusters,
+            num_patches,
+            avg_position_error: total_pos_err / n,
+            max_position_error: max_pos_err,
+            avg_normal_error_degrees: total_norm_err / n,
+            max_normal_error_degrees: max_norm_err,
+            reduction_ratio: faces.len() as f64 / num_patches.max(1) as f64,
+            num_skipped,
+            num_flipped,
+            per_patch_normal_error,
+        },
     })
 }
 
