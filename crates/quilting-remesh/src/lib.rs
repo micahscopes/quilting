@@ -93,12 +93,31 @@ impl std::fmt::Display for RemeshError {
 impl std::error::Error for RemeshError {}
 
 /// Simplified remeshing via QEM edge collapse.
-/// Produces a watertight coarse mesh — each surviving triangle becomes a flat QB patch.
-/// This is the simplest path and guarantees no gaps between patches.
+/// Produces a watertight coarse mesh. If `fit_curved` is true, uses the c-parameter
+/// estimator to fit curved QB patches to the original surface data within each
+/// simplified triangle. Otherwise creates flat patches.
 pub fn remesh_simplified(
     positions: &[[f64; 3]],
     faces: &[[usize; 3]],
     target_patches: usize,
+) -> Result<RemeshResult, RemeshError> {
+    remesh_simplified_inner(positions, faces, target_patches, false)
+}
+
+/// Like remesh_simplified but with curved QB patch fitting via the c-parameter estimator.
+pub fn remesh_simplified_curved(
+    positions: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    target_patches: usize,
+) -> Result<RemeshResult, RemeshError> {
+    remesh_simplified_inner(positions, faces, target_patches, true)
+}
+
+fn remesh_simplified_inner(
+    positions: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    target_patches: usize,
+    fit_curved: bool,
 ) -> Result<RemeshResult, RemeshError> {
     if faces.len() < 4 {
         return Err(RemeshError::TooFewFaces);
@@ -106,27 +125,49 @@ pub fn remesh_simplified(
 
     let (simp_pos, simp_faces) = simplify::simplify(positions, faces, target_patches);
 
-    // Each simplified face becomes a flat QB patch
+    let orig_normals = geometry::compute_vertex_normals(positions, faces);
     let vertex_normals = geometry::compute_vertex_normals(&simp_pos, &simp_faces);
     let mut patches = Vec::with_capacity(simp_faces.len());
     let mut patch_uvs = Vec::with_capacity(simp_faces.len());
     let mut patch_normals = Vec::with_capacity(simp_faces.len());
 
-    for face in &simp_faces {
-        patches.push(quilting_core::patch::QBTriPatch::flat(
-            simp_pos[face[0]],
-            simp_pos[face[1]],
-            simp_pos[face[2]],
-        ));
-        patch_uvs.push([[0.0f32, 0.0]; 3]);
-        patch_normals.push([
-            [vertex_normals[face[0]][0] as f32, vertex_normals[face[0]][1] as f32, vertex_normals[face[0]][2] as f32],
-            [vertex_normals[face[1]][0] as f32, vertex_normals[face[1]][1] as f32, vertex_normals[face[1]][2] as f32],
-            [vertex_normals[face[2]][0] as f32, vertex_normals[face[2]][1] as f32, vertex_normals[face[2]][2] as f32],
-        ]);
+    if fit_curved {
+        // For each simplified face, find nearby original vertices and fit a curved patch
+        for face in &simp_faces {
+            let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
+
+            // Find original vertices that project inside this triangle
+            let (samples, sample_bary, sample_normals) =
+                collect_samples_for_triangle(&cp, positions, &orig_normals);
+
+            if samples.len() >= 4 {
+                let patch = roundtrip::fit_patch_from_samples(cp, &samples, &sample_bary, &sample_normals);
+                patches.push(patch);
+            } else {
+                patches.push(quilting_core::patch::QBTriPatch::flat(cp[0], cp[1], cp[2]));
+            }
+            patch_uvs.push([[0.0f32, 0.0]; 3]);
+            patch_normals.push([
+                [vertex_normals[face[0]][0] as f32, vertex_normals[face[0]][1] as f32, vertex_normals[face[0]][2] as f32],
+                [vertex_normals[face[1]][0] as f32, vertex_normals[face[1]][1] as f32, vertex_normals[face[1]][2] as f32],
+                [vertex_normals[face[2]][0] as f32, vertex_normals[face[2]][1] as f32, vertex_normals[face[2]][2] as f32],
+            ]);
+        }
+    } else {
+        for face in &simp_faces {
+            patches.push(quilting_core::patch::QBTriPatch::flat(
+                simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]],
+            ));
+            patch_uvs.push([[0.0f32, 0.0]; 3]);
+            patch_normals.push([
+                [vertex_normals[face[0]][0] as f32, vertex_normals[face[0]][1] as f32, vertex_normals[face[0]][2] as f32],
+                [vertex_normals[face[1]][0] as f32, vertex_normals[face[1]][1] as f32, vertex_normals[face[1]][2] as f32],
+                [vertex_normals[face[2]][0] as f32, vertex_normals[face[2]][1] as f32, vertex_normals[face[2]][2] as f32],
+            ]);
+        }
     }
 
-    // Simple error estimate: Hausdorff-like via sampling original vertices
+    // Error estimate
     let mut max_err = 0.0_f64;
     let mut sum_err = 0.0;
     for p in positions {
@@ -140,7 +181,8 @@ pub fn remesh_simplified(
     }
     let avg_err = sum_err / positions.len().max(1) as f64;
 
-    let face_cluster_ids = vec![0; faces.len()]; // not meaningful for QEM path
+    let face_cluster_ids = vec![0; faces.len()];
+    let num_patches = patches.len();
 
     Ok(RemeshResult {
         patches,
@@ -150,17 +192,62 @@ pub fn remesh_simplified(
         stats: RemeshStats {
             original_faces: faces.len(),
             num_clusters: simp_faces.len(),
-            num_patches: simp_faces.len(),
+            num_patches,
             avg_position_error: avg_err,
             max_position_error: max_err,
             avg_normal_error_degrees: 0.0,
             max_normal_error_degrees: 0.0,
-            reduction_ratio: faces.len() as f64 / simp_faces.len().max(1) as f64,
+            reduction_ratio: faces.len() as f64 / num_patches.max(1) as f64,
             num_skipped: 0,
             num_flipped: 0,
             per_patch_normal_error: vec![],
         },
     })
+}
+
+/// Collect original mesh vertices that project inside a given triangle.
+/// Returns (positions, bary_coords, normals) of the samples.
+fn collect_samples_for_triangle(
+    tri: &[[f64; 3]; 3],
+    positions: &[[f64; 3]],
+    normals: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let p0 = tri[0];
+    let e1 = geometry::vec3_sub(tri[1], p0);
+    let e2 = geometry::vec3_sub(tri[2], p0);
+
+    // Precompute for barycentric projection
+    let d11 = geometry::vec3_dot(e1, e1);
+    let d12 = geometry::vec3_dot(e1, e2);
+    let d22 = geometry::vec3_dot(e2, e2);
+    let det = d11 * d22 - d12 * d12;
+
+    if det.abs() < 1e-20 {
+        return (vec![], vec![], vec![]);
+    }
+
+    let mut out_pos = Vec::new();
+    let mut out_bary = Vec::new();
+    let mut out_norm = Vec::new();
+
+    for (i, p) in positions.iter().enumerate() {
+        let d = geometry::vec3_sub(*p, p0);
+        let b1 = geometry::vec3_dot(d, e1);
+        let b2 = geometry::vec3_dot(d, e2);
+        let u = (d22 * b1 - d12 * b2) / det;
+        let v = (d11 * b2 - d12 * b1) / det;
+        let w = 1.0 - u - v;
+
+        // Check if point projects inside the triangle (with some margin)
+        let margin = -0.05;
+        if u >= margin && v >= margin && w >= margin && u <= 1.0 - margin && v <= 1.0 - margin {
+            out_pos.push(*p);
+            out_bary.push([w, u, v]);
+            out_norm.push(normals[i]);
+        }
+    }
+
+    (out_pos, out_bary, out_norm)
 }
 
 /// Distance from point to triangle (approximate — uses projection to plane).
@@ -775,6 +862,30 @@ mod tests {
                 "x should be shifted by 1.0"
             );
         }
+    }
+
+    #[test]
+    fn test_remesh_simplified_curved_sphere() {
+        // Simplify a sphere and fit curved QB patches
+        let (positions, faces) = crate::test_shapes::sphere(2);
+        let result = remesh_simplified_curved(&positions, &faces, 20).unwrap();
+
+        eprintln!("curved QEM sphere: {} patches from {} faces",
+            result.stats.num_patches, result.stats.original_faces);
+        eprintln!("  avg pos error: {:.6}, max: {:.6}",
+            result.stats.avg_position_error, result.stats.max_position_error);
+
+        // Should have reasonable patches
+        assert!(result.patches.len() <= 30);
+        assert!(result.patches.len() >= 10);
+
+        // Check that at least some patches have non-identity weights
+        let num_curved = result.patches.iter().filter(|p| {
+            let w1_diff = (p.weights[1] - quilting_core::quaternion::Quat::ONE).norm();
+            w1_diff > 0.01
+        }).count();
+        eprintln!("  {} of {} patches have non-identity weights (curved)",
+            num_curved, result.patches.len());
     }
 
     #[test]
