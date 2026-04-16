@@ -158,24 +158,22 @@ pub fn estimate_c_parameter(
         Quat::from_point(control_points[2][0], control_points[2][1], control_points[2][2]),
     ];
 
-    // Use Gauss-Newton on c (4 parameters) to minimize position + normal error
-    // with regularization to prevent overshoot
+    // Optimize c (4 parameters) to minimize position + normal error.
+    // Use regularization to prevent overshoot on noisy/projected data.
     let mut c = Quat::ZERO;
     let eps = 1e-6;
-    let c_reg = 0.01; // regularize |c|² to prevent overshoot on noisy data
+    let c_reg = 0.01;
 
     for _iter in 0..100 {
         let mut residuals = Vec::new();
         let weights = make_weights_from_c(c, &cp);
         let patch = QBTriPatch::new(cp, weights);
 
-        // Position residuals
         for (k, bary) in sample_bary.iter().enumerate() {
             let eval = patch.eval_with_normal(bary[1], bary[2]);
             residuals.push(samples[k][0] - eval.position[0]);
             residuals.push(samples[k][1] - eval.position[1]);
             residuals.push(samples[k][2] - eval.position[2]);
-            // Normal residuals (weighted lower)
             let nw = 0.1;
             residuals.push(nw * (sample_normals[k][0] - eval.normal[0]));
             residuals.push(nw * (sample_normals[k][1] - eval.normal[1]));
@@ -184,7 +182,7 @@ pub fn estimate_c_parameter(
 
         let nr = residuals.len();
 
-        // Jacobian via finite differences (4 columns, nr rows)
+        // Jacobian: 4 columns, nr rows
         let mut jac = vec![vec![0.0; 4]; nr];
         for dim in 0..4 {
             let mut c_plus = c;
@@ -205,7 +203,7 @@ pub fn estimate_c_parameter(
             }
         }
 
-        // Normal equations: (J^T J) delta = -J^T r
+        // Normal equations: 4x4
         let mut jtj = [[0.0f64; 4]; 4];
         let mut jtr = [0.0f64; 4];
         for r in 0..nr {
@@ -244,6 +242,30 @@ fn make_weights_from_c(c: Quat, cp: &[Quat; 3]) -> [Quat; 3] {
     let w2 = c * cp[2] + Quat::ONE;
     let w0_inv = w0.inv();
     [Quat::ONE, w1 * w0_inv, w2 * w0_inv]
+}
+
+fn solve_3x3(a: [[f64; 3]; 3], b: [f64; 3]) -> [f64; 3] {
+    let mut m = [[0.0; 4]; 3];
+    for i in 0..3 { for j in 0..3 { m[i][j] = a[i][j]; } m[i][3] = b[i]; }
+    for col in 0..3 {
+        let mut max_row = col;
+        for row in (col+1)..3 {
+            if m[row][col].abs() > m[max_row][col].abs() { max_row = row; }
+        }
+        m.swap(col, max_row);
+        if m[col][col].abs() < 1e-15 { continue; }
+        for row in (col+1)..3 {
+            let factor = m[row][col] / m[col][col];
+            for j in col..4 { m[row][j] -= factor * m[col][j]; }
+        }
+    }
+    let mut x = [0.0; 3];
+    for i in (0..3).rev() {
+        x[i] = m[i][3];
+        for j in (i+1)..3 { x[i] -= m[i][j] * x[j]; }
+        if m[i][i].abs() > 1e-15 { x[i] /= m[i][i]; }
+    }
+    x
 }
 
 fn solve_4x4(a: [[f64; 4]; 4], b: [f64; 4]) -> [f64; 4] {
