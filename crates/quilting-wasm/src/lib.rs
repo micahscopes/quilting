@@ -2271,6 +2271,68 @@ pub fn simplify_mesh(positions: &[f64], faces: &[u32], target: u32) -> JsValue {
     result.into()
 }
 
+/// Simplify mesh with curved QB patch fitting.
+/// Returns tessellated curved patches (sampled from the QB surface, not flat triangles).
+#[wasm_bindgen]
+pub fn simplify_mesh_curved(positions: &[f64], faces: &[u32], target: u32, tess_res: u32) -> JsValue {
+    let pos: Vec<[f64; 3]> = positions.chunks(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let tris: Vec<[usize; 3]> = faces.chunks(3)
+        .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize])
+        .collect();
+
+    let res = tess_res.max(1).min(10) as usize;
+
+    match quilting_remesh::remesh_simplified_curved(&pos, &tris, target as usize) {
+        Ok(remesh_result) => {
+            // Tessellate each curved QB patch at the requested resolution
+            let mut all_positions: Vec<[f64; 3]> = Vec::new();
+            let mut all_faces: Vec<[usize; 3]> = Vec::new();
+
+            for patch in &remesh_result.patches {
+                let tess = quilting_remesh::roundtrip::tessellate_patch(patch, res);
+                let offset = all_positions.len();
+                all_positions.extend_from_slice(&tess.positions);
+                for f in &tess.faces {
+                    all_faces.push([f[0] + offset, f[1] + offset, f[2] + offset]);
+                }
+            }
+
+            let result = js_sys::Object::new();
+
+            let js_pos = js_sys::Array::new();
+            for p in &all_positions {
+                let arr = js_sys::Array::of3(
+                    &JsValue::from_f64(p[0]),
+                    &JsValue::from_f64(p[1]),
+                    &JsValue::from_f64(p[2]),
+                );
+                js_pos.push(&arr);
+            }
+            js_sys::Reflect::set(&result, &"positions".into(), &js_pos).unwrap();
+
+            let js_faces = js_sys::Array::new();
+            for f in &all_faces {
+                let arr = js_sys::Array::of3(
+                    &JsValue::from_f64(f[0] as f64),
+                    &JsValue::from_f64(f[1] as f64),
+                    &JsValue::from_f64(f[2] as f64),
+                );
+                js_faces.push(&arr);
+            }
+            js_sys::Reflect::set(&result, &"faces".into(), &js_faces).unwrap();
+            js_sys::Reflect::set(&result, &"num_patches".into(),
+                &JsValue::from_f64(remesh_result.patches.len() as f64)).unwrap();
+            js_sys::Reflect::set(&result, &"max_error".into(),
+                &JsValue::from_f64(remesh_result.stats.max_position_error)).unwrap();
+
+            result.into()
+        }
+        Err(_) => JsValue::NULL,
+    }
+}
+
 /// Quadric VSA segmentation — clusters by fitted quadric surface instead of planar normal.
 /// Returns the same format as simplify_mesh (positions, faces, max_error) plus
 /// a `surface_types` array with per-cluster classification.

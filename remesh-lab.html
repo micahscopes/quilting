@@ -69,7 +69,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 
   <label>Method</label>
   <div class="btns">
-    <button id="btn-remesh">QEM Simplify</button>
+    <button id="btn-remesh">QEM Flat</button>
+    <button id="btn-curved">QEM Curved</button>
     <button id="btn-quadric">Quadric VSA</button>
   </div>
 
@@ -324,6 +325,42 @@ async function doRemesh() {
   updateView();
 }
 
+async function doCurvedRemesh() {
+  if (!currentPositions) return;
+  const target = parseInt($('target').value);
+  $('stats').textContent = 'Curved QB fitting...';
+  $('btn-curved').disabled = true;
+
+  const t0 = performance.now();
+  const result = wasm.simplify_mesh_curved(
+    new Float64Array(currentPositions.flat()),
+    new Uint32Array(currentFaces.flat()),
+    target,
+    4, // tessellation resolution per patch
+  );
+  const elapsed = performance.now() - t0;
+
+  if (!result) { $('stats').textContent = 'Curved fitting failed'; $('btn-curved').disabled = false; return; }
+  const remeshedPositions = Array.from(result.positions).map(p => Array.from(p));
+  const remeshedFaces = Array.from(result.faces).map(f => Array.from(f).map(Number));
+
+  if (meshRemeshed) scene.remove(meshRemeshed);
+  meshRemeshed = buildMesh(remeshedPositions, remeshedFaces, matRemeshed);
+  meshRemeshed.scale.setScalar(origScale);
+  meshRemeshed.position.copy(origPos);
+  scene.add(meshRemeshed);
+
+  $('legend').style.display = 'none';
+  const numPatches = result.num_patches || '?';
+  $('stats').innerHTML =
+    `<span class="h">Curved QB</span>: ${numPatches} patches (${remeshedFaces.length} tris) from ${currentFaces.length} faces<br>` +
+    `Time: ${elapsed.toFixed(0)}ms`;
+
+  $('btn-curved').disabled = false;
+  viewMode = 'both';
+  updateView();
+}
+
 async function doQuadricVSA() {
   if (!currentPositions) return;
   const target = parseInt($('target').value);
@@ -376,6 +413,7 @@ $('btn-sphere').onclick = () => loadShape('sphere');
 $('btn-cylinder').onclick = () => loadShape('cylinder');
 $('btn-torus').onclick = () => loadShape('torus');
 $('btn-remesh').onclick = doRemesh;
+$('btn-curved').onclick = doCurvedRemesh;
 $('btn-quadric').onclick = doQuadricVSA;
 $('btn-original').onclick = () => { viewMode = 'original'; updateView(); };
 $('btn-remeshed').onclick = () => { viewMode = 'remeshed'; updateView(); };

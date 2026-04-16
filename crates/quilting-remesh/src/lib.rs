@@ -133,10 +133,10 @@ fn remesh_simplified_inner(
     let mut patch_normals = Vec::with_capacity(simp_faces.len());
 
     if fit_curved {
-        // Global fit: c-estimator per face, averaged at shared vertices for continuity.
-        // 0 GN iterations = init-only, which experimentally gives best sphere fit.
-        let fit_result = global_fit::global_fit(
-            &simp_pos, &simp_faces, positions, &orig_normals, 0,
+        // Per-patch fit: each patch gets its own c parameter with blow-up validation.
+        // Uses per_patch_fit which is more stable than global_fit for visual output.
+        let fit_result = global_fit::per_patch_fit(
+            &simp_pos, &simp_faces, positions, &orig_normals,
         );
         for (fi, face) in simp_faces.iter().enumerate() {
             patches.push(fit_result.patches[fi]);

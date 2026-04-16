@@ -52,13 +52,14 @@ pub fn global_fit(
     }).collect();
 
     // Initialize weights from per-face c-estimator, averaged at shared vertices.
-    // This gives the global optimizer a much better starting point than identity.
     let mut weights = initialize_from_c_estimator(simp_pos, simp_faces, &face_samples);
 
     // Gauge fix: vertex 0 is always Quat::ONE — rescale all others relative to it
-    let w0_inv = weights[0].inv();
-    for w in &mut weights {
-        *w = *w * w0_inv;
+    if weights[0].norm() > 1e-10 {
+        let w0_inv = weights[0].inv();
+        for w in &mut weights {
+            *w = *w * w0_inv;
+        }
     }
     weights[0] = Quat::ONE;
 
@@ -192,48 +193,48 @@ pub fn global_fit(
     build_result(simp_pos, simp_faces, &weights, &face_samples)
 }
 
-/// Initialize per-vertex weights by running the c-estimator on each face,
-/// then averaging the resulting vertex weights across all faces that share each vertex.
+/// Initialize per-vertex weights using per-face c-estimation, averaged at shared vertices.
 fn initialize_from_c_estimator(
     simp_pos: &[[f64; 3]],
     simp_faces: &[[usize; 3]],
     face_samples: &[FaceSamples],
 ) -> Vec<Quat> {
     let n_verts = simp_pos.len();
-    let mut weight_sum: Vec<Quat> = vec![Quat::ZERO; n_verts];
-    let mut weight_count: Vec<f64> = vec![0.0; n_verts];
+
+    // Strategy: run c-estimator per face, convert to per-vertex weights,
+    // average at shared vertices, then clamp for stability.
+    let mut c_sum = vec![Quat::ZERO; n_verts];
+    let mut c_count = vec![0.0f64; n_verts];
 
     for (fi, face) in simp_faces.iter().enumerate() {
         let samples = &face_samples[fi];
         if samples.positions.len() < 4 { continue; }
 
         let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
-
-        // Run c-estimator for this face
         let c = crate::roundtrip::estimate_c_parameter(
             &cp, &samples.positions, &samples.bary, &samples.normals,
         );
 
-        // Convert c to per-vertex weights: wᵢ = c * Pᵢ + 1
-        for (local, &vi) in face.iter().enumerate() {
-            let pi = Quat::from_point(simp_pos[vi][0], simp_pos[vi][1], simp_pos[vi][2]);
-            let wi = c * pi + Quat::ONE;
-            weight_sum[vi] = weight_sum[vi] + wi;
-            weight_count[vi] += 1.0;
+        // Accumulate c (not weights!) at each vertex for averaging
+        for &vi in face {
+            c_sum[vi] = c_sum[vi] + c;
+            c_count[vi] += 1.0;
         }
     }
 
-    // Average and normalize
+    // Average c per vertex, then compute weights w = c_avg * P + 1
     let mut weights = Vec::with_capacity(n_verts);
     for i in 0..n_verts {
-        if weight_count[i] > 0.0 {
-            let avg = Quat::new(
-                weight_sum[i].w / weight_count[i],
-                weight_sum[i].x / weight_count[i],
-                weight_sum[i].y / weight_count[i],
-                weight_sum[i].z / weight_count[i],
+        if c_count[i] > 0.0 {
+            let c_avg = Quat::new(
+                c_sum[i].w / c_count[i],
+                c_sum[i].x / c_count[i],
+                c_sum[i].y / c_count[i],
+                c_sum[i].z / c_count[i],
             );
-            weights.push(avg);
+            let pi = Quat::from_point(simp_pos[i][0], simp_pos[i][1], simp_pos[i][2]);
+            let wi = c_avg * pi + Quat::ONE;
+            weights.push(wi);
         } else {
             weights.push(Quat::ONE);
         }
@@ -341,13 +342,137 @@ fn solve_4x4_from_slice(jtj: &[Vec<f64>], jtr: &[f64], off: usize) -> [f64; 4] {
     x
 }
 
+/// Per-patch independent fitting: each patch gets its own c parameter.
+/// No vertex sharing, so no continuity guarantee, but each patch is individually stable.
+/// Uses the c-estimator with validation to prevent blow-ups.
+pub fn per_patch_fit(
+    simp_pos: &[[f64; 3]],
+    simp_faces: &[[usize; 3]],
+    orig_pos: &[[f64; 3]],
+    orig_normals: &[[f64; 3]],
+) -> GlobalFitResult {
+    let face_samples: Vec<FaceSamples> = simp_faces.iter().map(|face| {
+        let tri = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
+        collect_face_samples(&tri, orig_pos, orig_normals)
+    }).collect();
+
+    let mut patches = Vec::with_capacity(simp_faces.len());
+
+    for (fi, face) in simp_faces.iter().enumerate() {
+        let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
+        let samples = &face_samples[fi];
+
+        if samples.positions.len() >= 4 {
+            let fitted = crate::roundtrip::fit_patch_from_samples(
+                cp, &samples.positions, &samples.bary, &samples.normals,
+            );
+
+            // Validate: sample the patch and check for blow-up
+            let mut bad = false;
+            let n = 4;
+            let cx = (cp[0][0] + cp[1][0] + cp[2][0]) / 3.0;
+            let cy = (cp[0][1] + cp[1][1] + cp[2][1]) / 3.0;
+            let cz = (cp[0][2] + cp[1][2] + cp[2][2]) / 3.0;
+            let mut max_r = 0.0_f64;
+            for c in &cp { max_r = max_r.max(((c[0]-cx).powi(2)+(c[1]-cy).powi(2)+(c[2]-cz).powi(2)).sqrt()); }
+            let thresh = max_r * 2.0;
+
+            'check: for i in 0..=n {
+                for j in 0..=(n-i) {
+                    let u = i as f64 / n as f64;
+                    let v = j as f64 / n as f64;
+                    let p = fitted.eval(u, v).to_point();
+                    let d = ((p[0]-cx).powi(2)+(p[1]-cy).powi(2)+(p[2]-cz).powi(2)).sqrt();
+                    if d > thresh || !p[0].is_finite() { bad = true; break 'check; }
+                }
+            }
+
+            if bad {
+                patches.push(QBTriPatch::flat(cp[0], cp[1], cp[2]));
+            } else {
+                patches.push(fitted);
+            }
+        } else {
+            patches.push(QBTriPatch::flat(cp[0], cp[1], cp[2]));
+        }
+    }
+
+    // Compute error
+    let mut sum_err = 0.0_f64;
+    let mut max_err = 0.0_f64;
+    let mut count = 0;
+    for (fi, _) in simp_faces.iter().enumerate() {
+        let patch = &patches[fi];
+        for (k, bary) in face_samples[fi].bary.iter().enumerate() {
+            let eval = patch.eval(bary[1], bary[2]).to_point();
+            let dx = face_samples[fi].positions[k][0] - eval[0];
+            let dy = face_samples[fi].positions[k][1] - eval[1];
+            let dz = face_samples[fi].positions[k][2] - eval[2];
+            let d = (dx*dx + dy*dy + dz*dz).sqrt();
+            sum_err += d * d;
+            max_err = max_err.max(d);
+            count += 1;
+        }
+    }
+
+    GlobalFitResult {
+        patches,
+        vertex_weights: vec![], // not meaningful for per-patch fit
+        rms_error: if count > 0 { (sum_err / count as f64).sqrt() } else { 0.0 },
+        max_error: max_err,
+    }
+}
+
+/// Validate each patch: if any tessellated point is too far from the control triangle,
+/// reset that patch to flat (identity weights). This prevents visual blow-ups while
+/// keeping the improvement where it works.
+fn validate_and_fix_patches(patches: &mut Vec<QBTriPatch>, simp_pos: &[[f64; 3]], simp_faces: &[[usize; 3]], weights: &mut Vec<Quat>) {
+    let n = 4; // sample resolution for validation
+    for (fi, face) in simp_faces.iter().enumerate() {
+        let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
+        // Compute bounding radius of the control triangle
+        let cx = (cp[0][0] + cp[1][0] + cp[2][0]) / 3.0;
+        let cy = (cp[0][1] + cp[1][1] + cp[2][1]) / 3.0;
+        let cz = (cp[0][2] + cp[1][2] + cp[2][2]) / 3.0;
+        let mut max_r = 0.0_f64;
+        for c in &cp {
+            let d = ((c[0]-cx).powi(2) + (c[1]-cy).powi(2) + (c[2]-cz).powi(2)).sqrt();
+            max_r = max_r.max(d);
+        }
+        let threshold = max_r * 3.0; // allow 3x the triangle radius
+
+        let mut bad = false;
+        'check: for i in 0..=n {
+            for j in 0..=(n - i) {
+                let u = i as f64 / n as f64;
+                let v = j as f64 / n as f64;
+                let p = patches[fi].eval(u, v).to_point();
+                let d = ((p[0]-cx).powi(2) + (p[1]-cy).powi(2) + (p[2]-cz).powi(2)).sqrt();
+                if d > threshold || !p[0].is_finite() || !p[1].is_finite() || !p[2].is_finite() {
+                    bad = true;
+                    break 'check;
+                }
+            }
+        }
+
+        if bad {
+            // Reset to flat
+            patches[fi] = QBTriPatch::flat(cp[0], cp[1], cp[2]);
+            for &vi in face {
+                weights[vi] = Quat::ONE; // Note: this affects other patches sharing these vertices
+            }
+        }
+    }
+}
+
 fn build_result(
     simp_pos: &[[f64; 3]],
     simp_faces: &[[usize; 3]],
     weights: &[Quat],
     face_samples: &[FaceSamples],
 ) -> GlobalFitResult {
-    let patches: Vec<QBTriPatch> = simp_faces.iter().map(|face| {
+    let mut vertex_weights = weights.to_vec();
+    let mut patches: Vec<QBTriPatch> = simp_faces.iter().map(|face| {
         QBTriPatch::new(
             [
                 Quat::from_point(simp_pos[face[0]][0], simp_pos[face[0]][1], simp_pos[face[0]][2]),
@@ -358,11 +483,14 @@ fn build_result(
         )
     }).collect();
 
+    // Validate: reset blow-up patches to flat
+    validate_and_fix_patches(&mut patches, simp_pos, simp_faces, &mut vertex_weights);
+
     // Compute error stats
     let mut sum_err = 0.0_f64;
     let mut max_err = 0.0_f64;
     let mut count = 0;
-    for (fi, face) in simp_faces.iter().enumerate() {
+    for (fi, _face) in simp_faces.iter().enumerate() {
         let patch = &patches[fi];
         for (k, bary) in face_samples[fi].bary.iter().enumerate() {
             let eval = patch.eval(bary[1], bary[2]).to_point();
@@ -378,7 +506,7 @@ fn build_result(
 
     GlobalFitResult {
         patches,
-        vertex_weights: weights.to_vec(),
+        vertex_weights,
         rms_error: if count > 0 { (sum_err / count as f64).sqrt() } else { 0.0 },
         max_error: max_err,
     }
