@@ -33,6 +33,7 @@ pub mod test_shapes;
 pub mod roundtrip;
 pub mod c_estimator;
 pub mod global_fit;
+pub mod linear_fit;
 
 use quilting_core::patch::QBTriPatch;
 

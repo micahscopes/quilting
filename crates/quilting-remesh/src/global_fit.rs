@@ -345,16 +345,16 @@ fn initialize_from_c_estimator(
     weights
 }
 
-struct FaceSamples {
-    positions: Vec<[f64; 3]>,
-    normals: Vec<[f64; 3]>,
-    bary: Vec<[f64; 3]>,
+pub(crate) struct FaceSamples {
+    pub(crate) positions: Vec<[f64; 3]>,
+    pub(crate) normals: Vec<[f64; 3]>,
+    pub(crate) bary: Vec<[f64; 3]>,
 }
 
 /// Collect the original-mesh vertices that project into `tri`, together with
 /// their barycentric coordinates and normals. `margin` is the barycentric slack
 /// allowed outside the triangle (see [`CurvedFitConfig::sample_margin`]).
-fn collect_face_samples(
+pub(crate) fn collect_face_samples(
     tri: &[[f64; 3]; 3],
     orig_pos: &[[f64; 3]],
     orig_normals: &[[f64; 3]],
