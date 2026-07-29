@@ -46,7 +46,7 @@ pub fn init() {
     console_error_panic_hook::set_once();
     let mut config = wasm_tracing::WasmLayerConfig::new();
     config.set_max_level(tracing::Level::INFO);
-    wasm_tracing::set_as_global_default_with_config(config);
+    let _ = wasm_tracing::set_as_global_default_with_config(config);
 }
 
 /// Stored glTF data for animation switching without re-parsing.
@@ -1060,7 +1060,7 @@ pub fn get_skinning_data() -> JsValue {
 /// Vertex indices are packed in p0.x/p1.x/p2.x for skinning texture lookup.
 /// Returns null if no skinned model is loaded.
 #[wasm_bindgen]
-pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
+pub fn get_rest_pose_instances() -> JsValue {
     GLTF_DATA.with(|gd| {
         let data = gd.borrow();
         let data = match data.as_ref() {
@@ -1070,7 +1070,6 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
 
         let combined = &data.combined;
         let nf = combined.triangles.len();
-        let has_uvs = combined.uvs.is_some();
 
         let mut instances = vec![0.0f32; nf * instance_layout::STRIDE];
 

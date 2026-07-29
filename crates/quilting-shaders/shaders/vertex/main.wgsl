@@ -24,6 +24,17 @@ struct Uniforms {
 @group(0) @binding(0)
 var<uniform> u: Uniforms;
 
+// Hard ceiling on evaluated positions, in model units (meshes are normalized
+// to unit half-extent upstream). Near a Möbius pole |X| ~ 1/|bot| grows
+// without bound and bottoms out at the qinv sentinel (~1e10) when the f32
+// denominator cancels outright; coordinates that large wreck rasterizer and
+// depth precision. 1e4 is far beyond anything distinguishable on screen at
+// any usable zoom — sphere inversions that legitimately send geometry far
+// away are untouched — while staying well inside f32 range for the mvp
+// multiply. Direction is preserved, so clamped spikes still point the right
+// way and shrink continuously as the pole recedes.
+const POSITION_CLAMP: f32 = 1e4;
+
 // Skeletal animation: skin matrices (joint_world * inverse_bind) uploaded per frame.
 // num_joints = 0 means no skinning active.
 const MAX_JOINTS: u32 = 128u;
@@ -218,16 +229,35 @@ fn eval_mobius_qb(
     let bi = qinv(bot);
     let X = qmul(top, bi);
 
-    // Conformal fade: |bot|² → 0 near Möbius pole
+    // Conformal fade: |bot|² → 0 near Möbius pole.
+    //
+    // Fade is deliberately a *shading* control (fragment alpha + discard),
+    // not a geometry one. Collapsing or clipping faded vertices here would
+    // pop whole patches that still contain valid visible geometry — a patch
+    // can have one corner at the pole and the others in plain sight. Instead:
+    // the LOD passes saturate tessellation near the pole (so every
+    // sub-triangle touching it has all corners deep in the fade≈0 band and
+    // gets discarded by the fragment shaders), and POSITION_CLAMP bounds
+    // whatever the rasterizer sees. Sphere inversions that legitimately send
+    // geometry far away keep rendering.
     let fade = smoothstep(0.0001, 0.001, dot(bot, bot));
 
-    // Analytic normal via quotient rule
+    // Analytic normal via quotient rule: dXu = (dtop_u - X*dbot_u) * bot⁻¹.
+    // Both tangents share the right factor bot⁻¹ = conj(bot)/|bot|². The
+    // 1/|bot|² part is a positive real scalar common to both, so it scales
+    // the cross product without turning it — and it is exactly what overflows
+    // f32 near the pole: |dX| ~ 1/|bot|², so length(n) computes
+    // dot(n, n) ~ 1/|bot|⁸, which hits +inf at |bot|² ≈ 2.6e-10 (ten orders
+    // above the qinv guard), making n/inf = 0 and the view-space normal NaN.
+    // Right-multiplying by conj(bot) instead keeps the exact normal direction
+    // with every intermediate O(|X|·|bot|); normalize() absorbs the scale.
     let dtop_u = pw1 - pw0;
     let dbot_u = bw1 - bw0;
     let dtop_v = pw2 - pw0;
     let dbot_v = bw2 - bw0;
-    let dXu = qmul(dtop_u - qmul(X, dbot_u), bi);
-    let dXv = qmul(dtop_v - qmul(X, dbot_v), bi);
+    let cb = qconj(bot);
+    let dXu = qmul(dtop_u - qmul(X, dbot_u), cb);
+    let dXv = qmul(dtop_v - qmul(X, dbot_v), cb);
 
     var n = cross(dXu.yzw, dXv.yzw);
     let nl = length(n);
@@ -298,8 +328,27 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         let mp1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(qmul(u.mob_c, sp1) + u.mob_d));
         let mp2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(qmul(u.mob_c, sp2) + u.mob_d));
         pos = eval_flat(bary, mp0, mp1, mp2);
-        nrm = normalize(cross(mp1.yzw - mp0.yzw, mp2.yzw - mp0.yzw));
+        // Normalize the edges before crossing: near a Möbius pole the
+        // transformed corners reach sentinel scale (~1e10) and the raw cross
+        // product overflows dot(n, n) inside normalize(). Unit edges give the
+        // same direction at O(1) magnitude; degenerate edges fall back
+        // instead of producing NaN.
+        let fe1 = normalize(mp1.yzw - mp0.yzw);
+        let fe2 = normalize(mp2.yzw - mp0.yzw);
+        let fcross = cross(fe1, fe2);
+        let flen = length(fcross);
+        if flen > 1e-10 {
+            nrm = fcross / flen;
+        } else {
+            nrm = vec3<f32>(0.0, 0.0, 1.0);
+        }
         nrm = nrm * u.perm_parity;
+    }
+
+    // Backstop against Möbius-pole blow-ups; see POSITION_CLAMP.
+    let pos_r = length(pos);
+    if pos_r > POSITION_CLAMP {
+        pos = pos * (POSITION_CLAMP / pos_r);
     }
 
     // Smooth normals: skin them if GPU skinning is active, then transform through Möbius.
@@ -334,7 +383,17 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
             let a2 = u.mob_a - qmul(M2, u.mob_c);
             let rn2 = qmul(qmul(a2, vec4<f32>(0.0, sn2)), qinv(bot2)).yzw;
 
-            nrm = normalize(bary.x * rn0 + bary.y * rn1 + bary.z * rn2);
+            // Each rnᵢ carries ~1/|botᵢ|² of conformal magnitude and reaches
+            // ~1e20 near a Möbius pole, where dot() inside normalize() would
+            // overflow to inf and NaN the normal. Rescale the blend by its
+            // largest component first — a positive scalar, so direction and
+            // blend weights are untouched. If the blend is degenerate, keep
+            // the analytic normal already in nrm.
+            let nsum = bary.x * rn0 + bary.y * rn1 + bary.z * rn2;
+            let nmax = max(max(abs(nsum.x), abs(nsum.y)), abs(nsum.z));
+            if nmax > 1e-20 {
+                nrm = normalize(nsum / nmax);
+            }
         } else {
             nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
         }

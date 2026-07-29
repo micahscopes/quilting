@@ -644,7 +644,7 @@ $('anim-sel').addEventListener('change', async () => {
     );
   }
 
-  const rpResp = await workerCall('get_rest_pose_instances', { lod_time: 0 });
+  const rpResp = await workerCall('get_rest_pose_instances', {});
   const rp = rpResp.data || rpResp;
   if (rp && rp.instances) {
     mr_setInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
@@ -779,7 +779,7 @@ $('remesh-clear-btn').addEventListener('click', async () => {
   remeshedMode = false;
   $('remesh-stats').textContent = '';
   // Re-render original mesh
-  const rpResp = await workerCall('get_rest_pose_instances', { lod_time: 0 });
+  const rpResp = await workerCall('get_rest_pose_instances', {});
   const rp = rpResp.data || rpResp;
   if (rp && rp.instances) {
     mr_setInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
@@ -1503,7 +1503,7 @@ async function finishModelUpload(info, filename) {
   const tp = getTessParams();
   await workerCall('set_tess_params', { density: tp.density, screenAtten: tp.screen_atten, minPx: tp.minPx });
 
-  const rpResp = await workerCall('get_rest_pose_instances', { lod_time: 0 });
+  const rpResp = await workerCall('get_rest_pose_instances', {});
   const rp = rpResp.data || rpResp;
 
   if (!rp || !rp.instances) {

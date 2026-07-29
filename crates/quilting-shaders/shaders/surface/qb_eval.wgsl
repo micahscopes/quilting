@@ -1,6 +1,6 @@
 #define_import_path quilting::surface::qb_eval
 
-#import quilting::math::quaternion::{qmul, qinv, q_to_point}
+#import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
 
 // QB triangle surface evaluation.
 //
@@ -52,9 +52,14 @@ fn eval_qb_with_normal(
     let dtop_v = pw2 - pw0;
     let dbot_v = w2 - w0;
 
-    // Quotient rule
-    let dXu = qmul(dtop_u - qmul(X, dbot_u), bi);
-    let dXv = qmul(dtop_v - qmul(X, dbot_v), bi);
+    // Quotient rule, right-multiplied by conj(bot) instead of bot⁻¹: the
+    // omitted 1/|bot|² is a positive real scalar common to both tangents, so
+    // the normalized cross product is identical, but intermediates stay
+    // bounded when |bot| gets small (the raw form overflows f32 through
+    // dot(n, n) ~ 1/|bot|⁸; see eval_mobius_qb in vertex/main.wgsl).
+    let cb = qconj(bot);
+    let dXu = qmul(dtop_u - qmul(X, dbot_u), cb);
+    let dXv = qmul(dtop_v - qmul(X, dbot_v), cb);
 
     var n = cross(dXu.yzw, dXv.yzw);
     let nl = length(n);

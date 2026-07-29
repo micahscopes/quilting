@@ -41,14 +41,22 @@ struct MainState {
     render_mode: RenderMode,
     mobius: [f32; 16],
     // Screen-space refraction: framebuffer copy for transmission
+    /// Mip-chained scene copy for the transmission/refraction blur pyramid.
+    /// Distinct from `fuzzy_scene_*`: this one carries a full mip chain with
+    /// LINEAR_MIPMAP_LINEAR filtering, which the fuzzy paths must not inherit.
     scene_color_fbo: Option<glow::Framebuffer>,
     scene_color_tex: Option<glow::Texture>,
     scene_color_size: (i32, i32),
+    /// Flat (single-level) scratch target for the fuzzy-vision weight paths.
+    /// Kept separate from `scene_color_*` because both keyed reallocation on
+    /// viewport size alone, so whichever path ran first silently imposed its
+    /// texture shape on the other for the rest of the session.
+    fuzzy_scene_fbo: Option<glow::Framebuffer>,
+    fuzzy_scene_tex: Option<glow::Texture>,
+    fuzzy_scene_size: (i32, i32),
     // Gaussian-blurred scene color for rough transmission
     blur_fbo: Option<glow::Framebuffer>,
     blur_tex: Option<glow::Texture>,
-    blur_fbo2: Option<glow::Framebuffer>,
-    blur_tex2: Option<glow::Texture>,
     blur_program: Option<glow::Program>,
     blur_vao: Option<glow::VertexArray>,
     // MRT: PBR renders to this FBO with color + weight attachments
@@ -214,10 +222,11 @@ pub fn mr_init(canvas_id: &str) -> bool {
             scene_color_fbo: None,
             scene_color_tex: None,
             scene_color_size: (0, 0),
+            fuzzy_scene_fbo: None,
+            fuzzy_scene_tex: None,
+            fuzzy_scene_size: (0, 0),
             blur_fbo: None,
             blur_tex: None,
-            blur_fbo2: None,
-            blur_tex2: None,
             blur_program: None,
             blur_vao: None,
             pbr_fbo: None,
@@ -1369,9 +1378,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 gl.draw_buffers(&[glow::BACK]);
                                 let stretch_tex = state.fuzzy_weight_tex.unwrap();
                                 // Need a separate FBO for the focused weight output
-                                if state.scene_color_tex.is_none() || state.scene_color_size != (vw, vh) {
-                                    if let Some(old) = state.scene_color_fbo { gl.delete_framebuffer(old); }
-                                    if let Some(old) = state.scene_color_tex { gl.delete_texture(old); }
+                                if state.fuzzy_scene_tex.is_none() || state.fuzzy_scene_size != (vw, vh) {
+                                    if let Some(old) = state.fuzzy_scene_fbo { gl.delete_framebuffer(old); }
+                                    if let Some(old) = state.fuzzy_scene_tex { gl.delete_texture(old); }
                                     let tex = gl.create_texture().unwrap();
                                     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                                     gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
@@ -1382,22 +1391,22 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                                     gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
                                         glow::TEXTURE_2D, Some(tex), 0);
-                                    state.scene_color_fbo = Some(fbo);
-                                    state.scene_color_tex = Some(tex);
-                                    state.scene_color_size = (vw, vh);
+                                    state.fuzzy_scene_fbo = Some(fbo);
+                                    state.fuzzy_scene_tex = Some(tex);
+                                    state.fuzzy_scene_size = (vw, vh);
                                 }
                                 // Generate focused weight from raw stretch
                                 fv.generate_conformal_weight(
                                     gl, stretch_tex,
-                                    state.scene_color_fbo.unwrap(), vw, vh,
+                                    state.fuzzy_scene_fbo.unwrap(), vw, vh,
                                 );
-                                // scene_color_tex now has the focused weight; use it for JFA
-                                (state.pbr_color_tex.unwrap(), state.scene_color_tex.unwrap())
+                                // fuzzy_scene_tex now has the focused weight; use it for JFA
+                                (state.pbr_color_tex.unwrap(), state.fuzzy_scene_tex.unwrap())
                             } else {
                                 // Radial: blit scene from default FB to a texture
-                                if state.scene_color_tex.is_none() || state.scene_color_size != (vw, vh) {
-                                    if let Some(old) = state.scene_color_fbo { gl.delete_framebuffer(old); }
-                                    if let Some(old) = state.scene_color_tex { gl.delete_texture(old); }
+                                if state.fuzzy_scene_tex.is_none() || state.fuzzy_scene_size != (vw, vh) {
+                                    if let Some(old) = state.fuzzy_scene_fbo { gl.delete_framebuffer(old); }
+                                    if let Some(old) = state.fuzzy_scene_tex { gl.delete_texture(old); }
                                     let tex = gl.create_texture().unwrap();
                                     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                                     gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
@@ -1408,9 +1417,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                                     gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
                                         glow::TEXTURE_2D, Some(tex), 0);
-                                    state.scene_color_fbo = Some(fbo);
-                                    state.scene_color_tex = Some(tex);
-                                    state.scene_color_size = (vw, vh);
+                                    state.fuzzy_scene_fbo = Some(fbo);
+                                    state.fuzzy_scene_tex = Some(tex);
+                                    state.fuzzy_scene_size = (vw, vh);
                                 }
                                 // Ensure radial weight texture
                                 if state.fuzzy_weight_tex.is_none() || state.fuzzy_weight_size != (vw, vh) {
@@ -1430,7 +1439,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                     state.fuzzy_weight_tex = Some(tex);
                                     state.fuzzy_weight_size = (vw, vh);
                                 }
-                                let sc_fbo = state.scene_color_fbo.unwrap();
+                                let sc_fbo = state.fuzzy_scene_fbo.unwrap();
                                 gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                                 gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(sc_fbo));
                                 gl.blit_framebuffer(0, 0, vw, vh, 0, 0, vw, vh,
@@ -1438,7 +1447,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                                 // Generate radial weight
                                 fv.generate_radial_weight(gl, state.fuzzy_weight_fbo.unwrap(), vw, vh);
-                                (state.scene_color_tex.unwrap(), state.fuzzy_weight_tex.unwrap())
+                                (state.fuzzy_scene_tex.unwrap(), state.fuzzy_weight_tex.unwrap())
                             };
 
                             // Run JFA blur → default FB

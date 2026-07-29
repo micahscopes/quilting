@@ -12,7 +12,6 @@ fn main() {
     let source_dirs = [
         "../quilting-wasm/src",
         "../quilting-mesh/src",
-        "../quilting-spacetime/src",
         "src",  // quilting-core's own source (atlas.rs, evaluate.rs, etc.)
     ];
     let cargo_tomls = [

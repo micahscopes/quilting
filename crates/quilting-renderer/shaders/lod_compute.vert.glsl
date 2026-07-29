@@ -66,15 +66,32 @@ vec4 qmul(vec4 a, vec4 b) {
     );
 }
 
+// Inverse with the Möbius-pole guard. Must match qinv in
+// quilting-shaders/shaders/math/quaternion.wgsl and Quat::inv in
+// quilting-core (SINGULARITY_NORM_SQ / SINGULARITY_SENTINEL): below the
+// threshold the point is "very far away", not at the origin. The previous
+// max(n, 1e-20) form returned 0 at the pole, collapsing straddling vertices
+// to the world origin — the median then collapsed too and the most distorted
+// face on screen got the LEAST tessellation.
 vec4 qinv(vec4 q) {
     float n = dot(q, q);
-    return vec4(q.x, -q.yzw) / max(n, 1e-20);
+    if (n < 1e-20) return vec4(1e10, 0.0, 0.0, 0.0);
+    return vec4(q.x, -q.yzw) / n;
 }
+
+// Smallest |c*q + d|^2 seen by mobius() for the current face. The sentinel
+// alone cannot keep the medians honest: when the pole sits on a sampled
+// point, f32 rounding cancels the imaginary numerator together with the
+// denominator (the point and the pole share the same f32 bits), so even
+// sentinel * top lands at the origin. Track the denominator and saturate the
+// LOD directly instead (see main below).
+float min_bot_sq = 1e30;
 
 vec3 mobius(vec3 p) {
     vec4 q = vec4(0.0, p);
     vec4 top = qmul(mob_a, q) + mob_b;
     vec4 bot = qmul(mob_c, q) + mob_d;
+    min_bot_sq = min(min_bot_sq, dot(bot, bot));
     vec4 result = qmul(top, qinv(bot));
     return result.yzw;
 }
@@ -191,6 +208,17 @@ void main() {
         if (px_a / lod_a < min_px) lod_a = clamp(snap_pow2(px_a / min_px), 2.0, max_lod);
         if (px_b / lod_b < min_px) lod_b = clamp(snap_pow2(px_b / min_px), 2.0, max_lod);
         if (px_c / lod_c < min_px) lod_c = clamp(snap_pow2(px_c / min_px), 2.0, max_lod);
+    }
+
+    // Pole proximity overrides everything: a face whose sampled denominator
+    // vanishes is the most conformally stretched face in the frame, whatever
+    // its (possibly origin-collapsed) medians or screen extents claim.
+    // Threshold mirrors POLE_PROXIMITY_NORM_SQ in quilting-core, which
+    // applies the same saturation in the CPU LOD path.
+    if (min_bot_sq < 1e-8) {
+        lod_a = max_lod;
+        lod_b = max_lod;
+        lod_c = max_lod;
     }
 
     // Output raw LOD exponents to fragment shader for FBO write

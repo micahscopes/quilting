@@ -252,7 +252,7 @@ fn handle_request(request: &str, cache: &RefCell<CachedAtlas>) -> (String, Strin
         let mut total_tris = 0usize;
 
         for (&(canonical_lod, perm_index), face_indices) in &batches {
-            let (bary_data, pos_data, tri_data) = tess_cache
+            let (bary_data, _pos_data, tri_data) = tess_cache
                 .entry(canonical_lod)
                 .or_insert_with(|| {
                     let tess = tri_patch([canonical_lod[0] as f64, canonical_lod[1] as f64, canonical_lod[2] as f64], &tess_config);

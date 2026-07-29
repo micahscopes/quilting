@@ -19,6 +19,13 @@
 //! ## Multi-effect efficiency
 //! Composite multiple weights into RGBA channels of a single texture,
 //! or `max()` them into one channel — one JFA pass serves all effects.
+//!
+//! ## Lifecycle
+//! [`JfaPipeline::new`] compiles every program up front and allocates its render
+//! targets at 1x1; call [`JfaPipeline::resize`] before the first
+//! [`JfaPipeline::run`] to size them to the viewport. `glow::Context` is not
+//! reachable from `Drop`, so GL objects are *not* released automatically —
+//! call [`JfaPipeline::destroy`] explicitly when tearing the pipeline down.
 
 use glow::HasContext;
 
@@ -214,7 +221,6 @@ out vec4 o_color;
 uniform sampler2D u_source;
 uniform int u_step;
 uniform vec2 u_dims;
-uniform float u_max_distance;
 
 void main() {
     ivec2 dims = ivec2(u_dims);
@@ -355,57 +361,6 @@ void main() {
 }
 "#;
 
-/// Kawase downsample: 5-tap diagonal + center at half resolution.
-/// Produces smooth Gaussian-quality downsample without axis artifacts.
-const FS_KAWASE_DOWN: &str = r#"#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 o_color;
-uniform sampler2D u_tex;
-uniform vec2 u_halfpixel; // 0.5 / source_resolution
-
-void main() {
-    vec4 sum = texture(u_tex, v_uv) * 4.0;
-    sum += texture(u_tex, v_uv - u_halfpixel);
-    sum += texture(u_tex, v_uv + u_halfpixel);
-    sum += texture(u_tex, v_uv + vec2(u_halfpixel.x, -u_halfpixel.y));
-    sum += texture(u_tex, v_uv + vec2(-u_halfpixel.x, u_halfpixel.y));
-    o_color = sum / 8.0;
-}
-"#;
-
-/// Kawase-pyramid composite: per-pixel level selection from 6 pyramid levels.
-/// Binds all 6 levels as separate samplers, selects pair per pixel, interpolates.
-const FS_KAWASE_COMPOSITE: &str = r#"#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 o_color;
-uniform sampler2D u_l0, u_l1, u_l2, u_l3, u_l4, u_l5;
-uniform sampler2D u_weight;
-uniform float u_blur_strength;
-
-vec4 sampleLevel(int i) {
-    if (i <= 0) return texture(u_l0, v_uv);
-    if (i == 1) return texture(u_l1, v_uv);
-    if (i == 2) return texture(u_l2, v_uv);
-    if (i == 3) return texture(u_l3, v_uv);
-    if (i == 4) return texture(u_l4, v_uv);
-    return texture(u_l5, v_uv);
-}
-
-void main() {
-    vec4 w = texture(u_weight, v_uv);
-    float blur_weight = clamp(w.z * (1.0 - clamp(w.w, 0.0, 1.0)), 0.0, 1.0);
-
-    float target = blur_weight * u_blur_strength * 5.0; // 0..5 across 6 levels
-    int lo = int(floor(target));
-    int hi = min(lo + 1, 5);
-    float frac = fract(target);
-
-    o_color = mix(sampleLevel(lo), sampleLevel(hi), frac);
-}
-"#;
-
 /// Kawase blur on the weight mask — smooths JFA boundaries cheaply (5 taps).
 const FS_WEIGHT_KAWASE: &str = r#"#version 300 es
 precision highp float;
@@ -481,8 +436,6 @@ pub struct JfaPipeline {
     prog_init: glow::Program,
     prog_step: glow::Program,
     prog_firmness: glow::Program,
-    prog_blur_h: glow::Program, // legacy, unused
-    prog_blur_v: glow::Program, // legacy, unused
     prog_blur_dir: glow::Program,
     prog_weight_radial: glow::Program,
     prog_weight_conformal: glow::Program,
@@ -492,12 +445,6 @@ pub struct JfaPipeline {
     prog_passthrough: glow::Program,
     prog_mip_composite: glow::Program,
     prog_gauss_down: glow::Program,
-    prog_kawase_down: glow::Program,
-    prog_kawase_composite: glow::Program,
-    /// Kawase pyramid: each level is half the previous. [level0=full, level1=half, ...]
-    pyramid_tex: Vec<glow::Texture>,
-    pyramid_fbo: Vec<glow::Framebuffer>,
-    pyramid_sizes: Vec<(i32, i32)>,
     vao: glow::VertexArray,
     // Reduction chain for min/max (ping-pong, shrinks to 1x1)
     reduce_fbo_a: glow::Framebuffer,
@@ -512,8 +459,6 @@ pub struct JfaPipeline {
     // Firmness output
     firmness_fbo: glow::Framebuffer,
     firmness_tex: glow::Texture,
-    // Smoothed weight texture (preserved for Weight debug view)
-    smoothed_tex: glow::Texture,
     // Blur ping-pong
     blur_fbo: glow::Framebuffer,
     blur_tex: glow::Texture,
@@ -524,11 +469,17 @@ pub struct JfaPipeline {
     full_size: (i32, i32),
     config: JfaConfig,
     internal_format: u32,
+    // --- Debug bookkeeping, recorded by `run()` so `debug_blit` shows real data ---
+    /// Weight texture handed to the most recent `run()`. `None` before the first run.
+    last_weight_tex: Option<glow::Texture>,
+    /// Which ping-pong buffer holds the JFA result after the most recent `run()`.
+    /// Parity depends on the JFA step count, so it has to be recorded, not guessed.
+    jfa_result_in_ping: bool,
 }
 
 fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<glow::Shader, String> {
     unsafe {
-        let shader = gl.create_shader(shader_type).map_err(|e| format!("{e}"))?;
+        let shader = gl.create_shader(shader_type)?;
         gl.shader_source(shader, source);
         gl.compile_shader(shader);
         if !gl.get_shader_compile_status(shader) {
@@ -544,7 +495,7 @@ fn link_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> Result<glow::
     unsafe {
         let vs = compile_shader(gl, glow::VERTEX_SHADER, vs_src)?;
         let fs = compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?;
-        let prog = gl.create_program().map_err(|e| format!("{e}"))?;
+        let prog = gl.create_program()?;
         gl.attach_shader(prog, vs);
         gl.attach_shader(prog, fs);
         gl.link_program(prog);
@@ -561,7 +512,7 @@ fn link_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> Result<glow::
 
 fn create_fbo_tex(gl: &glow::Context, w: i32, h: i32, format: u32) -> Result<(glow::Framebuffer, glow::Texture), String> {
     unsafe {
-        let tex = gl.create_texture().map_err(|e| format!("{e}"))?;
+        let tex = gl.create_texture()?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         // RGBA16F needs HALF_FLOAT type, RGBA32F needs FLOAT, RGBA8 needs UNSIGNED_BYTE
         let (ext_format, ext_type) = match format {
@@ -576,12 +527,50 @@ fn create_fbo_tex(gl: &glow::Context, w: i32, h: i32, format: u32) -> Result<(gl
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
 
-        let fbo = gl.create_framebuffer().map_err(|e| format!("{e}"))?;
+        let fbo = gl.create_framebuffer()?;
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         Ok((fbo, tex))
     }
+}
+
+/// Resolution of the JFA ping-pong buffers for a given viewport.
+///
+/// JFA runs at `1/downsample` resolution and is bilinearly upsampled in the
+/// firmness pass; `downsample` is clamped to at least 1 and the result never
+/// degenerates to a zero-sized texture.
+fn downsampled_size(width: i32, height: i32, downsample: u32) -> (i32, i32) {
+    let ds = downsample.max(1) as i32;
+    ((width / ds).max(1), (height / ds).max(1))
+}
+
+/// Number of jump-flooding passes needed to cover a `w` x `h` buffer.
+///
+/// Standard JFA starts at `2^(n-1)` and halves to 1, so `n = ceil(log2(max_dim))`.
+/// This is the "O(log n) regardless of blur radius" property the library sells.
+fn jfa_step_count(width: i32, height: i32) -> u32 {
+    let max_dim = width.max(height).max(1) as f32;
+    max_dim.log2().ceil().max(0.0) as u32
+}
+
+/// Number of mip levels (including level 0) used by the mip-blur path.
+///
+/// Capped at 8 — beyond that the levels are a few pixels wide and contribute
+/// nothing but bandwidth.
+fn mip_level_count(width: i32, height: i32) -> i32 {
+    let max_dim = width.max(height).max(1) as f32;
+    (max_dim.log2().floor() as i32 + 1).clamp(1, 8)
+}
+
+/// Per-sub-pass blur strength for the hex blur.
+///
+/// The hex blur fires `blur_passes * 3` directional Gaussians; dividing by
+/// `sqrt(passes * 3)` keeps total blur roughly constant as `blur_passes` varies,
+/// because independent Gaussian variances add.
+fn per_pass_blur_strength(blur_strength: f32, blur_passes: u32) -> f32 {
+    let n = blur_passes.max(1);
+    blur_strength / (n as f32 * 3.0).sqrt()
 }
 
 impl JfaPipeline {
@@ -590,8 +579,6 @@ impl JfaPipeline {
         let prog_init = link_program(gl, VS_FULLSCREEN, FS_JFA_INIT)?;
         let prog_step = link_program(gl, VS_FULLSCREEN, FS_JFA_STEP)?;
         let prog_firmness = link_program(gl, VS_FULLSCREEN, FS_JFA_FIRMNESS)?;
-        let prog_blur_h = link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?; // legacy name, uses directional
-        let prog_blur_v = link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?; // legacy name, uses directional
         let prog_blur_dir = link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?;
         let prog_weight_radial = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?;
         let prog_weight_conformal = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?;
@@ -601,9 +588,7 @@ impl JfaPipeline {
         let prog_passthrough = link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?;
         let prog_mip_composite = link_program(gl, VS_FULLSCREEN, FS_MIP_COMPOSITE)?;
         let prog_gauss_down = link_program(gl, VS_FULLSCREEN, FS_GAUSS_DOWN)?;
-        let prog_kawase_down = link_program(gl, VS_FULLSCREEN, FS_KAWASE_DOWN)?;
-        let prog_kawase_composite = link_program(gl, VS_FULLSCREEN, FS_KAWASE_COMPOSITE)?;
-        let vao = unsafe { gl.create_vertex_array().map_err(|e| format!("{e}"))? };
+        let vao = unsafe { gl.create_vertex_array()? };
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
 
@@ -616,23 +601,21 @@ impl JfaPipeline {
         let (ping_fbo, ping_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
         let (pong_fbo, pong_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
         let (firmness_fbo, firmness_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
-        let (_, smoothed_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?; // FBO unused, tex for debug view
         let (blur_fbo, blur_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
         let (blur_fbo_b, blur_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
 
         Ok(JfaPipeline {
-            prog_init, prog_step, prog_firmness, prog_blur_h, prog_blur_v,
+            prog_init, prog_step, prog_firmness,
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
             prog_blur_dir,
             prog_passthrough, prog_mip_composite, prog_gauss_down,
-            prog_kawase_down, prog_kawase_composite,
-            pyramid_tex: Vec::new(), pyramid_fbo: Vec::new(), pyramid_sizes: Vec::new(),
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
-            firmness_fbo, firmness_tex, smoothed_tex,
+            firmness_fbo, firmness_tex,
             blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
             jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
+            last_weight_tex: None, jfa_result_in_ping: false,
         })
     }
 
@@ -641,9 +624,7 @@ impl JfaPipeline {
         if self.full_size == (width, height) { return; }
         self.full_size = (width, height);
 
-        let ds = self.config.downsample.max(1) as i32;
-        let jw = (width / ds).max(1);
-        let jh = (height / ds).max(1);
+        let (jw, jh) = downsampled_size(width, height, self.config.downsample);
         self.jfa_size = (jw, jh);
 
         let fmt = self.internal_format;
@@ -663,10 +644,7 @@ impl JfaPipeline {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
                 ext_format, ext_type, glow::PixelUnpackData::Slice(None));
-            // Resize smoothed weight + blur ping-pong (full res, RGBA8)
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.smoothed_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
-                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            // Resize blur ping-pong (full res, RGBA8)
             for tex in [self.blur_tex, self.blur_tex_b] {
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
@@ -691,31 +669,29 @@ impl JfaPipeline {
         let (jw, jh) = self.jfa_size;
         if fw == 0 || fh == 0 { return; }
 
+        // The weight texture is used as-is — the old pre-blur pass was removed because
+        // it produced box halos at geometry edges. JFA+2 with pure Euclidean distance
+        // handles boundaries cleanly on its own.
+        self.last_weight_tex = Some(weight_tex);
+
         unsafe {
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
-
-            // Use weight directly — pre-blur removed (caused box halos at geometry edges).
-            // JFA+2 with pure Euclidean distance handles boundaries cleanly.
-            let smoothed_weight = weight_tex;
-
-            {
 
             // --- Stage 1: Init seeds from weight texture (into ping, at JFA resolution) ---
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.ping_fbo));
             gl.viewport(0, 0, jw, jh);
             gl.use_program(Some(self.prog_init));
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(smoothed_weight));
+            gl.bind_texture(glow::TEXTURE_2D, Some(weight_tex));
             if let Some(loc) = gl.get_uniform_location(self.prog_init, "u_weight") {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             // --- Stage 2: JFA propagation (log2 passes, ping-pong) ---
-            let max_dim = jw.max(jh) as u32;
-            let num_steps = (max_dim as f32).log2().ceil() as u32;
+            let num_steps = jfa_step_count(jw, jh);
             let mut read_from_ping = true;
 
             for i in 0..num_steps {
@@ -739,9 +715,6 @@ impl JfaPipeline {
                 if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_dims") {
                     gl.uniform_2_f32(Some(&loc), jw as f32, jh as f32);
                 }
-                if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_max_distance") {
-                    gl.uniform_1_f32(Some(&loc), self.config.max_distance / self.config.downsample as f32);
-                }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
                 read_from_ping = !read_from_ping;
             }
@@ -764,7 +737,9 @@ impl JfaPipeline {
                 read_from_ping = !read_from_ping;
             }
 
-            // JFA result is in whichever buffer was last written to
+            // JFA result is in whichever buffer was last written to. Which one that is
+            // depends on the step-count parity, so record it for debug_blit().
+            self.jfa_result_in_ping = read_from_ping;
             let jfa_result_tex = if read_from_ping { self.ping_tex } else { self.pong_tex };
 
             // --- Stage 3: Firmness blend (full resolution) ---
@@ -773,13 +748,8 @@ impl JfaPipeline {
             gl.use_program(Some(self.prog_firmness));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(jfa_result_tex));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(smoothed_weight));
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_jfa") {
                 gl.uniform_1_i32(Some(&loc), 0);
-            }
-            if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_analytical") {
-                gl.uniform_1_i32(Some(&loc), 1);
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_dims") {
                 gl.uniform_2_f32(Some(&loc), jw as f32, jh as f32);
@@ -794,8 +764,6 @@ impl JfaPipeline {
                 gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-            }
 
             // --- Stage 3.5: Optional Kawase weight smoothing ---
             if self.config.kawase_passes > 0 {
@@ -829,7 +797,7 @@ impl JfaPipeline {
                 // Allocate mip levels on scene texture
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
-                let num_mips = ((fw.max(fh) as f32).log2().floor() as i32 + 1).min(8);
+                let num_mips = mip_level_count(fw, fh);
                 // Pre-allocate all mip levels
                 for mip in 1..num_mips {
                     let mw = (fw >> mip).max(1);
@@ -918,184 +886,64 @@ impl JfaPipeline {
                 gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
             } else {
-            // Pyramid code removed — was resizing blur_tex_b to tiny sizes.
-            if false { const NUM_PYRAMID_LEVELS: usize = 6;
+                // --- Hex blur: 3 directional Gaussian passes at 0°, 60°, 120° ---
+                let hex_dirs: [(f32, f32); 3] = [
+                    (1.0, 0.0),      // 0°
+                    (0.5, 0.866),    // 60°
+                    (-0.5, 0.866),   // 120°
+                ];
+                let num_passes = self.config.blur_passes.max(1);
+                let per_pass_strength = per_pass_blur_strength(self.config.blur_strength, num_passes);
+                let tx = 1.0 / fw as f32;
+                let ty = 1.0 / fh as f32;
 
-            // Build/resize pyramid textures if needed
-            if self.pyramid_tex.len() != NUM_PYRAMID_LEVELS {
-                // Clean up old
-                for tex in self.pyramid_tex.drain(..) { gl.delete_texture(tex); }
-                for fbo in self.pyramid_fbo.drain(..) { gl.delete_framebuffer(fbo); }
-                self.pyramid_sizes.clear();
-                for i in 0..NUM_PYRAMID_LEVELS {
-                    let pw = (fw >> i).max(1);
-                    let ph = (fh >> i).max(1);
-                    let tex = gl.create_texture().unwrap();
-                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, pw, ph, 0,
-                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
-                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-                    let fbo = gl.create_framebuffer().unwrap();
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
-                        glow::TEXTURE_2D, Some(tex), 0);
-                    self.pyramid_tex.push(tex);
-                    self.pyramid_fbo.push(fbo);
-                    self.pyramid_sizes.push((pw, ph));
-                }
-            }
+                gl.use_program(Some(self.prog_blur_dir));
+                // Ping-pong: read from A, write to B, swap
+                let mut read_tex = scene_tex;
+                let mut write_to_a = true; // true = write to blur_fbo, false = write to blur_fbo_b
+                let total_sub = num_passes * 3;
+                let mut sub_idx = 0u32;
 
-            // Level 0 = copy scene
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pyramid_fbo[0]));
-            gl.viewport(0, 0, fw, fh);
-            gl.use_program(Some(self.prog_passthrough));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
-            if let Some(loc) = gl.get_uniform_location(self.prog_passthrough, "u_tex") {
-                gl.uniform_1_i32(Some(&loc), 0);
-            }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                for _ in 0..num_passes {
+                    for &(dx, dy) in &hex_dirs {
+                        sub_idx += 1;
+                        let is_last = sub_idx == total_sub;
+                        let dst_fbo = if is_last { output_fbo }
+                            else if write_to_a { Some(self.blur_fbo) }
+                            else { Some(self.blur_fbo_b) };
 
-            // Downsample levels 1..N with separable Gaussian (smooth, no crosshatch)
-            // Each level: H pass from level[i-1] → blur_tex_b, V pass → pyramid[i]
-            gl.use_program(Some(self.prog_gauss_down));
-            for i in 1..NUM_PYRAMID_LEVELS {
-                let (sw, sh) = self.pyramid_sizes[i - 1];
-                let (dw, dh) = self.pyramid_sizes[i];
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, dst_fbo);
+                        gl.viewport(0, 0, fw, fh);
+                        gl.active_texture(glow::TEXTURE0);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(read_tex));
+                        gl.active_texture(glow::TEXTURE1);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_scene") {
+                            gl.uniform_1_i32(Some(&loc), 0);
+                        }
+                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_weight") {
+                            gl.uniform_1_i32(Some(&loc), 1);
+                        }
+                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_radius") {
+                            gl.uniform_1_f32(Some(&loc), self.config.max_distance);
+                        }
+                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_strength") {
+                            gl.uniform_1_f32(Some(&loc), per_pass_strength);
+                        }
+                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_dir") {
+                            gl.uniform_2_f32(Some(&loc), dx * tx, dy * ty);
+                        }
+                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_is_final") {
+                            gl.uniform_1_f32(Some(&loc), if is_last { 1.0 } else { 0.0 });
+                        }
+                        gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-                // H pass: pyramid[i-1] → blur_tex_b at target size
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, dw, dh, 0,
-                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo_b));
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
-                    glow::TEXTURE_2D, Some(self.blur_tex_b), 0);
-                gl.viewport(0, 0, dw, dh);
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pyramid_tex[i - 1]));
-                if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_tex") {
-                    gl.uniform_1_i32(Some(&loc), 0);
-                }
-                if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_dir") {
-                    gl.uniform_2_f32(Some(&loc), 1.0 / sw as f32, 0.0);
-                }
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-                // V pass: blur_tex_b → pyramid[i]
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.pyramid_fbo[i]));
-                gl.viewport(0, 0, dw, dh);
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.blur_tex_b));
-                if let Some(loc) = gl.get_uniform_location(self.prog_gauss_down, "u_dir") {
-                    gl.uniform_2_f32(Some(&loc), 0.0, 1.0 / sh as f32);
-                }
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
-            }
-
-            // Composite: per pixel, blend between adjacent pyramid levels based on weight.
-            // Multi-pass: each pass blends level[i] and level[i+1], with the result going
-            // to output (last pass) or a temp buffer (intermediate).
-            // For simplicity: do a single composite pass blending ALL levels via cascading mix.
-            // We iterate from blurriest to sharpest, accumulating.
-            //
-            // Actually, simplest correct approach: one pass that reads firmness weight,
-            // computes target level, samples both adjacent levels, and blends.
-            // But GLSL can't dynamically index samplers. So we do N-1 composite passes,
-            // each blending one level pair, accumulating into the output.
-            //
-            // Even simpler: write a composite shader that takes the weight and ALL levels
-            // as a single texture array... but that requires texture arrays.
-            //
-            // Pragmatic approach: 1 composite pass per adjacent pair, writing pixels that
-            // fall in that pair's range. Use the passthrough for level 0 (sharp pixels).
-
-            // For now: single composite pass blending between level 0 (sharp) and the
-            // level matching the weight. We sample from both and blend.
-            // This means one texture lookup at full res + one at the target mip.
-            // Works because each pyramid level has LINEAR filtering for smooth upscale.
-
-            // Actually the cleanest: iterate backward from blurriest. Start with the
-            // blurriest level. For each level going sharper, blend it in where weight says so.
-            // Final result is fully composited.
-
-            // Let's do it simply: one pass, two levels (sharpest + blurriest matching weight).
-            // The composite shader handles the per-pixel level selection.
-
-            // SIMPLE VERSION: just blend scene (level 0) with the level matching blur_weight.
-            // For weight=0 → level 0 (sharp). For weight=1 → level N-1 (blurriest).
-            // Intermediate: linear interpolation between the two adjacent levels.
-
-            // We need a shader that can sample from any level. Since we can't index samplers,
-            // pre-blend into a single blurred texture by upsampling from blurriest to sharpest.
-
-            // UPSAMPLE approach: start from level N-1, upsample to N-2 (blend), upsample to
-            // N-3 (blend), ..., upsample to level 0. At each step, blend with the weight.
-            // Pixels with high weight keep the blurry version; low weight take the sharper.
-
-            // This is Dual Kawase's upsample path with weight modulation!
-
-            } // end if false (pyramid disabled)
-            // --- Hex blur: 3 directional Gaussian passes at 0°, 60°, 120° ---
-            let hex_dirs: [(f32, f32); 3] = [
-                (1.0, 0.0),      // 0°
-                (0.5, 0.866),    // 60°
-                (-0.5, 0.866),   // 120°
-            ];
-            let num_passes = self.config.blur_passes.max(1);
-            let per_pass_strength = self.config.blur_strength / (num_passes as f32 * 3.0).sqrt();
-            let tx = 1.0 / fw as f32;
-            let ty = 1.0 / fh as f32;
-
-            gl.use_program(Some(self.prog_blur_dir));
-            // Ping-pong: read from A, write to B, swap
-            let mut read_tex = scene_tex;
-            let mut write_to_a = true; // true = write to blur_fbo, false = write to blur_fbo_b
-            let total_sub = num_passes * 3;
-            let mut sub_idx = 0u32;
-
-            for pass in 0..num_passes {
-                for &(dx, dy) in &hex_dirs {
-                    sub_idx += 1;
-                    let is_last = sub_idx == total_sub;
-                    let dst_fbo = if is_last { output_fbo }
-                        else if write_to_a { Some(self.blur_fbo) }
-                        else { Some(self.blur_fbo_b) };
-
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, dst_fbo);
-                    gl.viewport(0, 0, fw, fh);
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(read_tex));
-                    gl.active_texture(glow::TEXTURE1);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_scene") {
-                        gl.uniform_1_i32(Some(&loc), 0);
-                    }
-                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_weight") {
-                        gl.uniform_1_i32(Some(&loc), 1);
-                    }
-                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_radius") {
-                        gl.uniform_1_f32(Some(&loc), self.config.max_distance);
-                    }
-                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_strength") {
-                        gl.uniform_1_f32(Some(&loc), per_pass_strength);
-                    }
-                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_dir") {
-                        gl.uniform_2_f32(Some(&loc), dx * tx, dy * ty);
-                    }
-                    if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_is_final") {
-                        gl.uniform_1_f32(Some(&loc), if is_last { 1.0 } else { 0.0 });
-                    }
-                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-                    if !is_last {
-                        read_tex = if write_to_a { self.blur_tex } else { self.blur_tex_b };
-                        write_to_a = !write_to_a;
+                        if !is_last {
+                            read_tex = if write_to_a { self.blur_tex } else { self.blur_tex_b };
+                            write_to_a = !write_to_a;
+                        }
                     }
                 }
-            }
             } // end if !use_mip_blur
 
             // Restore state
@@ -1277,8 +1125,19 @@ impl JfaPipeline {
         self.run(gl, weight_tex, scene_tex, output_fbo);
     }
 
-    /// Debug: draw an internal texture to the output framebuffer for visualization.
-    /// 1=smoothed weight (pre-JFA), 2=JFA result, 3=firmness mask
+    /// Debug: draw an internal pipeline texture to the output framebuffer.
+    ///
+    /// All stages reflect the most recent [`run`](Self::run); calling this before the
+    /// first `run` draws nothing. Stages:
+    ///
+    /// - `1` — the weight texture that was passed into `run`, exactly as the caller
+    ///   supplied it. The library does not pre-smooth it, so this is the raw JFA input.
+    /// - `2` — the raw JFA output at JFA resolution, upscaled to fill the viewport.
+    ///   RG = the nearest seed's UV, B = that seed's weight.
+    /// - `3` — the firmness mask (post-JFA falloff + focus band), the texture the blur
+    ///   passes actually read. Same content as [`weight_mask_tex`](Self::weight_mask_tex).
+    ///
+    /// Any other value draws nothing.
     pub fn debug_blit(
         &self,
         gl: &glow::Context,
@@ -1287,10 +1146,15 @@ impl JfaPipeline {
     ) {
         let (fw, fh) = self.full_size;
         if fw == 0 || fh == 0 { return; }
+        // Every stage shows a product of the last run; before that they are all
+        // uninitialized textures, so draw nothing rather than garbage.
+        let Some(weight_tex) = self.last_weight_tex else { return };
         let tex = match debug_stage {
-            1 => self.smoothed_tex,  // smoothed weight (preserved)
-            2 => self.ping_tex,      // JFA result
-            3 => self.firmness_tex,  // firmness
+            1 => weight_tex,
+            // Ping-pong parity depends on the JFA step count, so use the buffer
+            // `run` actually finished in rather than assuming ping.
+            2 => if self.jfa_result_in_ping { self.ping_tex } else { self.pong_tex },
+            3 => self.firmness_tex,
             _ => return,
         };
         unsafe {
@@ -1326,35 +1190,128 @@ impl JfaPipeline {
     }
 }
 
-impl Drop for JfaPipeline {
-    fn drop(&mut self) {
-        // Note: glow::Context not available in Drop. Resources leak on drop.
-        // Call destroy() explicitly before dropping if cleanup is needed.
-    }
-}
-
 impl JfaPipeline {
-    /// Explicitly destroy GPU resources.
+    /// Explicitly release every GL object this pipeline created.
+    ///
+    /// `glow::Context` is not reachable from `Drop`, so cleanup cannot be automatic —
+    /// call this before dropping the pipeline or the resources leak for the lifetime
+    /// of the GL context. The lists below must stay in sync with the fields on
+    /// [`JfaPipeline`]; every program, texture, framebuffer and VAO created in
+    /// [`new`](Self::new) appears exactly once.
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
-            gl.delete_program(self.prog_init);
-            gl.delete_program(self.prog_step);
-            gl.delete_program(self.prog_firmness);
-            gl.delete_program(self.prog_blur_h);
-            gl.delete_program(self.prog_blur_v);
-            gl.delete_program(self.prog_weight_radial);
-            gl.delete_program(self.prog_weight_conformal);
-            gl.delete_program(self.prog_reduce_minmax);
-            gl.delete_program(self.prog_weight_conformal_norm);
+            for prog in [
+                self.prog_init,
+                self.prog_step,
+                self.prog_firmness,
+                self.prog_blur_dir,
+                self.prog_weight_radial,
+                self.prog_weight_conformal,
+                self.prog_reduce_minmax,
+                self.prog_weight_conformal_norm,
+                self.prog_weight_kawase,
+                self.prog_passthrough,
+                self.prog_mip_composite,
+                self.prog_gauss_down,
+            ] {
+                gl.delete_program(prog);
+            }
             gl.delete_vertex_array(self.vao);
-            for tex in [self.ping_tex, self.pong_tex, self.firmness_tex, self.blur_tex, self.blur_tex_b,
-                        self.reduce_tex_a, self.reduce_tex_b] {
+            for tex in [
+                self.reduce_tex_a, self.reduce_tex_b,
+                self.ping_tex, self.pong_tex,
+                self.firmness_tex,
+                self.blur_tex, self.blur_tex_b,
+            ] {
                 gl.delete_texture(tex);
             }
-            for fbo in [self.ping_fbo, self.pong_fbo, self.firmness_fbo, self.blur_fbo, self.blur_fbo_b,
-                        self.reduce_fbo_a, self.reduce_fbo_b] {
+            for fbo in [
+                self.reduce_fbo_a, self.reduce_fbo_b,
+                self.ping_fbo, self.pong_fbo,
+                self.firmness_fbo,
+                self.blur_fbo, self.blur_fbo_b,
+            ] {
                 gl.delete_framebuffer(fbo);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downsample_never_produces_empty_buffers() {
+        assert_eq!(downsampled_size(1920, 1080, 2), (960, 540));
+        assert_eq!(downsampled_size(1920, 1080, 4), (480, 270));
+        // downsample=0 is treated as 1 rather than dividing by zero
+        assert_eq!(downsampled_size(800, 600, 0), (800, 600));
+        // A viewport smaller than the downsample factor still yields a 1x1 buffer
+        assert_eq!(downsampled_size(3, 1, 8), (1, 1));
+    }
+
+    #[test]
+    fn jfa_step_count_covers_the_buffer() {
+        // The first jump is 2^(n-1), which must reach at least half way across the
+        // buffer for the flood to be complete — equivalently 2^n >= max_dim.
+        for &(w, h) in &[(1, 1), (2, 2), (17, 5), (960, 540), (1920, 1080), (4096, 2160)] {
+            let n = jfa_step_count(w, h);
+            let reach = 1u64 << n;
+            assert!(
+                reach >= w.max(h) as u64,
+                "{w}x{h}: {n} steps only reach {reach}px",
+            );
+        }
+    }
+
+    #[test]
+    fn jfa_step_count_is_logarithmic_not_linear() {
+        // The whole pitch of the scatter formulation: cost grows with log of the
+        // buffer size, not with the blur radius.
+        assert_eq!(jfa_step_count(1, 1), 0);
+        assert_eq!(jfa_step_count(2, 2), 1);
+        assert_eq!(jfa_step_count(256, 256), 8);
+        assert_eq!(jfa_step_count(257, 1), 9);
+        // Doubling the buffer adds exactly one pass.
+        assert_eq!(jfa_step_count(1024, 1024) + 1, jfa_step_count(2048, 2048));
+    }
+
+    #[test]
+    fn mip_levels_stay_addressable() {
+        // Every level the mip-blur path allocates must be at least one texel.
+        for &(w, h) in &[(1, 1), (64, 64), (1920, 1080), (8192, 8192)] {
+            let n = mip_level_count(w, h);
+            assert!((1..=8).contains(&n), "{w}x{h} produced {n} levels");
+            assert!(w >> (n - 1) >= 1 && h.max(w) >> (n - 1) >= 1);
+        }
+        assert_eq!(mip_level_count(1, 1), 1);
+        assert_eq!(mip_level_count(1920, 1080), 8); // capped
+        assert_eq!(mip_level_count(64, 32), 7);
+    }
+
+    #[test]
+    fn per_pass_strength_keeps_total_blur_stable() {
+        // Independent Gaussian variances add, so N sub-passes at strength s/sqrt(N)
+        // sum back to the requested strength.
+        for passes in 1..=6u32 {
+            let s = per_pass_blur_strength(1.0, passes);
+            let total = (s * s * (passes * 3) as f32).sqrt();
+            assert!((total - 1.0).abs() < 1e-5, "{passes} passes -> {total}");
+        }
+        // blur_passes=0 is clamped to a single pass instead of dividing by zero.
+        assert_eq!(per_pass_blur_strength(1.0, 0), per_pass_blur_strength(1.0, 1));
+    }
+
+    #[test]
+    fn default_config_is_internally_consistent() {
+        let c = JfaConfig::default();
+        assert!(c.downsample >= 1, "downsample must not be zero");
+        assert!(c.blur_passes >= 1, "blur_passes must not be zero");
+        assert!(c.bandwidth > 0.0, "zero bandwidth collapses the focus band");
+        assert!(c.max_distance > 0.0);
+        // JFA runs at the downsampled resolution, so max_distance is divided by
+        // `downsample` when uploaded — that must stay a meaningful radius.
+        assert!(c.max_distance / c.downsample as f32 >= 1.0);
     }
 }

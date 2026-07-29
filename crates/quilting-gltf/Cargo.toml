@@ -1,7 +1,10 @@
 [package]
 name = "quilting-gltf"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "glTF 2.0 loader for quilting — extracts meshes, materials, animations, and scene graphs"
 
 [dependencies]

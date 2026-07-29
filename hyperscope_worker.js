@@ -141,7 +141,7 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'get_rest_pose_instances') {
-    const rpData = wasm.get_rest_pose_instances(data.lod_time || 0);
+    const rpData = wasm.get_rest_pose_instances();
     self.postMessage({ type: 'rest_pose_instances', id, data: rpData });
     return;
   }

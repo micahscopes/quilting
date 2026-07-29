@@ -176,16 +176,6 @@ fn read_outputs_to_f32(outputs: gltf::animation::util::ReadOutputs<'_>) -> Vec<f
 }
 
 
-/// Number of f32 values per keyframe for a given property.
-fn property_stride(prop: AnimationProperty) -> usize {
-    match prop {
-        AnimationProperty::Translation => 3,
-        AnimationProperty::Rotation => 4,
-        AnimationProperty::Scale => 3,
-        // MorphTargetWeights stride is dynamic (depends on target count).
-        AnimationProperty::MorphTargetWeights => 1,
-    }
-}
 
 // --- Animation evaluation helpers ---
 // These were previously in bake.rs but are needed by evaluator.rs and wasm bindings.
