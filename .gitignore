@@ -2,6 +2,7 @@
 /target/
 /pkg/
 /dist/
+/dist-lab/
 
 # OS
 .DS_Store
@@ -9,9 +10,26 @@
 # IDE
 .vscode
 .idea
+.claude/
 
 # Logs
 *.log
 
 # wasm-pack
 /wasm-pack.log
+
+# Scratch output from debugging sessions
+screenshot_*.png
+*.obj
+*.json.gz
+
+# Large assets kept out of the repo. `horse.glb`, `ant.glb`, and
+# `TextureSettingsTest.glb` stay tracked (the demo loads them), so there is
+# deliberately no blanket `*.glb` rule here. Run `scripts/fetch-assets.sh` to
+# pull the Khronos sample models back down.
+/DragonAttenuation.glb
+/IORTestGrid.glb
+/TransmissionTest.glb
+/food_cans.glb
+/sardine_tin.glb
+/violin.glb

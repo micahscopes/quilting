@@ -1,18 +1,43 @@
 [workspace]
 members = [
     "crates/distressed-blue-noise",
+    "crates/fuzzy-vision",
     "crates/quilting-core",
     "crates/quilting-gltf",
     "crates/quilting-mesh",
+    "crates/quilting-remesh",
     "crates/quilting-renderer",
     "crates/quilting-shaders",
     "crates/quilting-wasm",
-    "crates/fuzzy-vision",
-
     "crates/trunk-stub",
+]
+
+# `quilting-wasm` only compiles for wasm32 (it calls
+# `glow::Context::from_webgl2_context`), and `trunk-stub` is a placeholder
+# cdylib that exists solely to give Trunk something to build. Excluding both
+# from the default set lets a bare `cargo build` / `cargo test` succeed on a
+# fresh clone. Build them explicitly:
+#
+#     cargo check --target wasm32-unknown-unknown -p quilting-wasm
+default-members = [
+    "crates/distressed-blue-noise",
+    "crates/fuzzy-vision",
+    "crates/quilting-core",
+    "crates/quilting-gltf",
+    "crates/quilting-mesh",
     "crates/quilting-remesh",
+    "crates/quilting-renderer",
+    "crates/quilting-shaders",
 ]
 resolver = "2"
+
+# Shared metadata. Crates opt in with `license.workspace = true`, etc.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Micah <micahscopes@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/micahscopes/quilting"
 
 [profile.release]
 opt-level = 2

@@ -643,6 +643,7 @@ name = "quilting-renderer"
 version = "0.1.0"
 dependencies = [
  "glow",
+ "quilting-core",
  "quilting-shaders",
  "web-sys",
 ]

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, rust]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Bare `cargo build` / `cargo test` resolve to the workspace's
+      # default-members, which exclude `quilting-wasm` (wasm32-only) and
+      # `trunk-stub`. This is exactly what a fresh clone runs.
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+  wasm:
+    name: check (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check quilting-wasm
+        run: cargo check --target wasm32-unknown-unknown -p quilting-wasm
+
+# A `cargo fmt --check` job is deliberately absent: the tree is not currently
+# rustfmt-clean, so gating on it would fail every build. Run `cargo fmt` across
+# the workspace once and it can be added here. Likewise `cargo clippy -D
+# warnings`, which the existing dead-code warnings would trip.
