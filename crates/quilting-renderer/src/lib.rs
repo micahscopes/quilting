@@ -182,7 +182,13 @@ mod tests {
     fn glsl_compilation_succeeds() {
         // Verify that WGSL -> GLSL compilation works without a GL context.
         let sources = compiled_glsl_sources().unwrap();
-        assert_eq!(sources.len(), 5, "should have 5 programs (matcap, wire, normals, pbr, stretch)");
+        // Compare against the mode list itself rather than a hardcoded count, so
+        // adding a fragment mode doesn't strand this assertion the way `pick` did.
+        let mut got: Vec<&str> = sources.iter().map(|&(name, _, _)| name).collect();
+        let mut want = shader::FRAGMENT_MODES.to_vec();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "compiled programs should match FRAGMENT_MODES");
 
         for (name, vertex, fragment) in &sources {
             assert!(

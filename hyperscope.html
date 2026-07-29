@@ -9,7 +9,7 @@
 <link data-trunk rel="copy-dir" href="pkg" />
 <link data-trunk rel="copy-dir" href="envmaps" />
 <link data-trunk rel="copy-dir" href="matcaps" />
-<link data-trunk rel="copy-file" href="hyperscope-prototype_worker.js" />
+<link data-trunk rel="copy-file" href="hyperscope_worker.js" />
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
 <style>
@@ -433,7 +433,7 @@ const pending = new Map();
 let msgId = 0;
 
 function spawnWorker() {
-  const w = new Worker('./hyperscope-prototype_worker.js', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }

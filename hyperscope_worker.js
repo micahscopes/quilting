@@ -27,12 +27,6 @@ self.onmessage = async function(e) {
     return;
   }
 
-  if (type === 'set_sliver') {
-    wasm.set_sliver_threshold(data.threshold);
-    self.postMessage({ type: 'sliver_set', id });
-    return;
-  }
-
   if (type === 'set_tess_params') {
     wasm.set_tess_params(data.density || 20, !!data.screenAtten);
     if (data.minPx != null) wasm.set_min_px_per_sub(data.minPx);

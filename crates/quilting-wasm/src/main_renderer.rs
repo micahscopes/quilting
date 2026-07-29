@@ -17,6 +17,10 @@ use quilting_renderer::pass::{Camera, RenderBatch, RenderMode};
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
+use quilting_core::instance_layout;
+
+/// Floats per material in the array `mr_setMaterials` receives.
+const MATERIAL_STRIDE: usize = 50;
 
 fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe {
@@ -403,17 +407,13 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
 
             let mut face_offset = 0i32;
             for batch in &state.batches {
-                // Upload UBO with _pad = face_offset for global face ID
                 let vtx_ubo = state.renderer.vtx_ubo();
                 vtx_ubo.upload(
                     gl, &camera.mvp, &camera.mv,
                     batch.perm_parity, batch.perm_index, 1,
                     &camera.mobius, &camera.camera_pos,
                 );
-                // Write face_offset to _pad (offset 140 in UBO)
-                gl.bind_buffer(glow::UNIFORM_BUFFER, Some(vtx_ubo.ubo));
-                let offset_bytes = (face_offset as f32).to_le_bytes();
-                gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 140, &offset_bytes);
+                vtx_ubo.set_face_offset(gl, face_offset);
                 vtx_ubo.bind(gl);
 
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -440,8 +440,8 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             let face_id = (px[0] as i32) | ((px[1] as i32) << 8) | ((px[2] as i32) << 16);
 
             // Log face info
-            let stride = 40; // INSTANCE_STRIDE
-            let base = face_id as usize * stride;
+            let base = face_id as usize * instance_layout::STRIDE
+                + instance_layout::offset::POSITIONS;
             if base + 12 <= state.cached_instances.len() {
                 // Instance layout: [vi, x, y, z] per control point — skip vertex index at offset 0
                 let p0 = &state.cached_instances[base+1..base+4];
@@ -510,11 +510,8 @@ pub fn mr_upload_tess_patch(key: &str, bary: &[f32], tri_idx: &[u32], line_idx: 
     });
 }
 
-/// Upload skinning texture (joint indices + weights) to main-thread GL.
-/// `joint_indices`: flat f32 array [j0,j1,j2,j3] × num_vertices
-/// `joint_weights`: flat f32 array [w0,w1,w2,w3] × num_vertices
 /// Set PBR material parameters from JS material objects.
-/// Each material is a flat f32 array packed as:
+/// Each material is a flat f32 array of `MATERIAL_STRIDE` floats packed as:
 /// [base_r, base_g, base_b, base_a, metallic, roughness, normal_scale,
 ///  occlusion_strength, alpha_cutoff, alpha_mode, unlit,
 ///  emissive_r, emissive_g, emissive_b,
@@ -522,14 +519,19 @@ pub fn mr_upload_tess_patch(key: &str, bary: &[f32], tri_idx: &[u32], line_idx: 
 ///  sheen_r, sheen_g, sheen_b, has_sheen, sheen_roughness,
 ///  specular_r, specular_g, specular_b, has_specular,
 ///  normal_uv_scale_x, normal_uv_scale_y, normal_uv_offset_x, normal_uv_offset_y, normal_uv_rotation,
-///  base_uv_scale_x, base_uv_scale_y, base_uv_rotation]
-/// 36 floats per material.
+///  base_uv_scale_x, base_uv_scale_y, base_uv_rotation,
+///  base_color_tex_idx, mr_tex_idx, normal_tex_idx, emissive_tex_idx, occlusion_tex_idx,
+///  ior, transmission_factor, thickness_factor,
+///  attenuation_r, attenuation_g, attenuation_b, attenuation_distance,
+///  transmission_tex_idx, double_sided]
+///
+/// `hyperscope.html` packs the matching array.
 #[wasm_bindgen(js_name = "mr_setMaterials")]
 pub fn mr_set_materials(data: &[f32], num_materials: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.materials.clear();
-            let stride = 50;
+            let stride = MATERIAL_STRIDE;
             for i in 0..num_materials as usize {
                 let o = i * stride;
                 if o + stride > data.len() { break; }
@@ -607,6 +609,9 @@ pub fn mr_upload_images(pixels: &[u8], widths: &[u32], heights: &[u32], wrap_mod
     });
 }
 
+/// Upload skinning texture (joint indices + weights) to main-thread GL.
+/// `joint_indices`: flat f32 array [j0,j1,j2,j3] × num_vertices
+/// `joint_weights`: flat f32 array [w0,w1,w2,w3] × num_vertices
 #[wasm_bindgen(js_name = "mr_uploadSkinningTexture")]
 pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], num_vertices: u32) {
     STATE.with(|s| {
@@ -800,7 +805,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         perf_mark("batch-upload-start");
 
         // Ensure persistent buffer is large enough
-        let total_bytes = nf * batch::INSTANCE_STRIDE * 4;
+        let total_bytes = nf * instance_layout::STRIDE * 4;
         match state.persistent_buf {
             Some(ref pb) => {
                 if total_bytes > pb.capacity {
@@ -812,7 +817,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             None => {}
         }
         if state.persistent_buf.is_none() {
-            let dummy = vec![0.0f32; nf * batch::INSTANCE_STRIDE];
+            let dummy = vec![0.0f32; nf * instance_layout::STRIDE];
             match PersistentInstances::new(gl, &dummy) {
                 Ok(pb) => state.persistent_buf = Some(pb),
                 Err(e) => { info!("Failed to create persistent buf: {e}"); return; }
@@ -824,7 +829,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let mut gpu_offset: usize = 0; // current write position in floats
         let mut built = 0;
         let mut missing = 0;
-        let stride = batch::INSTANCE_STRIDE;
+        let stride = instance_layout::STRIDE;
 
         // Pre-allocate a batch-sized CPU staging buffer (reused across batches)
         let max_batch_size = buckets.iter().map(|b| b.len()).max().unwrap_or(0);
@@ -1533,9 +1538,7 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
                 gl, state.renderer.vtx_ubo(), camera,
                 batch.perm_parity, batch.perm_index, 1,
             );
-            // Write face_offset to _pad (offset 140)
-            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(state.renderer.vtx_ubo().ubo));
-            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 140, &(face_offset as f32).to_le_bytes());
+            state.renderer.vtx_ubo().set_face_offset(gl, face_offset);
             state.renderer.vtx_ubo().bind(gl);
 
             gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -1544,9 +1547,7 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
             face_offset += batch.mesh.num_instances;
         }
 
-        // Reset _pad
-        gl.bind_buffer(glow::UNIFORM_BUFFER, Some(state.renderer.vtx_ubo().ubo));
-        gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 140, &0.0f32.to_le_bytes());
+        state.renderer.vtx_ubo().set_face_offset(gl, 0);
 
         // Fullscreen overlay: cyan where pick matches target face
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);

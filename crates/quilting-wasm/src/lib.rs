@@ -4,15 +4,12 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_renderer::compute::LodCompute;
-use quilting_core::evaluate::{compute_instances, compute_instances_no_lod, ScreenInfo};
-use quilting_core::permutation::{canonical_form, perm_sign};
+use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
-use quilting_core::shapes;
 use quilting_core::triangle;
 use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
-use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 /// Performance.mark/measure helper for profiling in Chrome DevTools.
@@ -71,29 +68,14 @@ struct StoredGltfData {
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
-    /// Cached half-edge mesh — built once per shape, reused across frames.
-    static MESH_CACHE: RefCell<Option<CachedMesh>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
-struct CachedMesh {
-    half_edge: HalfEdgeMesh,
-    verts: Vec<[f64; 3]>,
-    tris: Vec<[usize; 3]>,
-}
-
 /// Build the tessellation atlas client-side. Call once at init.
 /// max_lod_exp: build LODs from 2^0 to 2^max_lod_exp (e.g., 8 → up to 256)
 /// mode: "direct" or "hierarchical"
-/// Set the sliver filter threshold. 0.0 = no filtering, 0.01 = default.
-/// Must call build_atlas after changing to take effect.
-#[wasm_bindgen]
-pub fn set_sliver_threshold(threshold: f64) {
-    quilting_core::atlas::set_sliver_threshold(threshold);
-}
-
 #[wasm_bindgen]
 pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     let config = PatchConfig { k_candidates: 30, seed: 42 };
@@ -150,36 +132,6 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
             false
         }
     }
-}
-
-/// Run GPU LOD computation via transform feedback.
-/// Positions must have been uploaded via upload_positions_to_compute() first.
-/// mobius: 16 floats (a,b,c,d quaternions)
-/// Returns: flat f32 array, 2 floats per face (atlas_index, perm_index)
-#[wasm_bindgen]
-pub fn gpu_compute_lods(
-    num_faces: u32,
-    num_vertices: u32,
-    mobius: &[f32],
-    density: f32,
-    mesh_radius: f32,
-) -> Vec<f32> {
-    GPU_COMPUTE.with(|gc| {
-        let mut gc = gc.borrow_mut();
-        let (gl, compute) = match gc.as_mut() {
-            Some(pair) => pair,
-            None => return vec![],
-        };
-        let mut mob = [0.0f32; 16];
-        for (i, &v) in mobius.iter().take(16).enumerate() {
-            mob[i] = v;
-        }
-        let identity_vp = [0.0f32; 16];
-        let max_lod = LOD_MAX.with(|m| *m.borrow());
-        let n = compute.compute_lods(gl, num_faces as usize, num_vertices, 0, 0,
-            mob, density, mesh_radius, 0.0, max_lod, &identity_vp, 0.0, 0.0);
-        compute.read_back(gl, n)
-    })
 }
 
 thread_local! {
@@ -352,18 +304,7 @@ pub fn upload_model_to_compute() -> bool {
     })
 }
 
-/// Per-frame GPU LOD computation with edge coherence reconciliation.
-///
-/// 1. Evaluates animation (morph + skeletal) at time t
-/// 2. Uploads joint matrices + morph weights to worker GPU
-/// 3. Runs transform feedback LOD compute (Möbius + medians + snap)
-/// 4. Reads back raw (atlas_index, perm_index) per face
-/// 5. Inverts permutation to recover unsorted per-edge LODs
-/// 6. Enforces edge coherence via half-edge mesh (max across shared edges)
-/// 7. Re-canonicalizes to (canonical_lod, perm_index, parity) per face
-///
-/// Returns Float32Array with 5 floats per face: [canon_a, canon_b, canon_c, perm_index, parity]
-/// Sample Möbius stretch at the midpoint of each face (from instance data).
+/// Sample Möbius stretch at the centroid of each face (from instance data).
 /// Returns [min_stretch, max_stretch] as sigmoid-mapped values matching the vertex shader.
 /// Runs on CPU, async-safe — call from a worker without blocking rendering.
 #[wasm_bindgen]
@@ -374,19 +315,20 @@ pub fn sample_stretch_range(mobius: &[f32], instances: &[f32], num_faces: u32) -
     let c_len2 = c[0]*c[0] + c[1]*c[1] + c[2]*c[2] + c[3]*c[3];
     if c_len2 < 0.001 { return vec![0.5, 0.5]; } // identity Möbius, no stretch
 
-    let stride = 40usize; // INSTANCE_STRIDE floats per face
+    let stride = instance_layout::STRIDE;
     let nf = num_faces as usize;
     let mut min_s = f32::INFINITY;
     let mut max_s = f32::NEG_INFINITY;
 
     for fi in 0..nf {
-        let base = fi * stride;
+        let base = fi * stride + instance_layout::offset::POSITIONS;
         if base + 12 > instances.len() { break; }
-        // Instance data layout: [p0.x, p0.y, p0.z, w0, p1.x, p1.y, p1.z, w1, p2.x, p2.y, p2.z, w2, ...]
-        // Actually: positions are at offsets 0-2 (p0), 4-6 (p1), 8-10 (p2) within the instance
-        let p0 = [instances[base+0], instances[base+1], instances[base+2]];
-        let p1 = [instances[base+4], instances[base+5], instances[base+6]];
-        let p2 = [instances[base+8], instances[base+9], instances[base+10]];
+        // Each position is [vertex_idx, x, y, z] — skip the index in slot 0.
+        let p = |i: usize| {
+            let o = base + i * 4 + 1;
+            [instances[o], instances[o + 1], instances[o + 2]]
+        };
+        let (p0, p1, p2) = (p(0), p(1), p(2));
         // Centroid
         let cx = (p0[0] + p1[0] + p2[0]) / 3.0;
         let cy = (p0[1] + p1[1] + p2[1]) / 3.0;
@@ -425,6 +367,17 @@ pub fn debug_gpu_compute_state() -> String {
     })
 }
 
+/// Per-frame GPU LOD computation with edge coherence reconciliation.
+///
+/// 1. Evaluates animation (morph + skeletal) at time t
+/// 2. Uploads joint matrices + morph weights to worker GPU
+/// 3. Runs transform feedback LOD compute (Möbius + medians + snap)
+/// 4. Reads back raw (atlas_index, perm_index) per face
+/// 5. Inverts permutation to recover unsorted per-edge LODs
+/// 6. Enforces edge coherence via half-edge mesh (max across shared edges)
+/// 7. Re-canonicalizes to (canonical_lod, perm_index, parity) per face
+///
+/// Returns Float32Array with 5 floats per face: [canon_a, canon_b, canon_c, perm_index, parity].
 /// Uses mesh_radius computed at upload time (not hardcoded).
 #[wasm_bindgen]
 pub fn compute_animated_lods(
@@ -822,290 +775,6 @@ fn ensure_patch(atlas: &mut TessellationAtlas, key: [u32; 3]) -> bool {
     true
 }
 
-/// Get a built-in shape.
-#[wasm_bindgen]
-pub fn get_shape(name: &str) -> JsValue {
-    let (verts, faces) = match name {
-        "tetrahedron" => shapes::tetrahedron(),
-        "octahedron" => shapes::octahedron(),
-        "icosahedron" => shapes::icosahedron(),
-        _ => shapes::cube(),
-    };
-    let positions: Vec<f64> = verts.iter().flat_map(|v| [v[0], v[1], v[2]]).collect();
-    let indices: Vec<u32> = faces.iter().flat_map(|f| [f[0] as u32, f[1] as u32, f[2] as u32]).collect();
-    serde_wasm_bindgen::to_value(&ShapeData {
-        positions, faces: indices,
-        num_verts: verts.len(), num_faces: faces.len(),
-    }).unwrap()
-}
-
-#[derive(serde::Serialize)]
-struct ShapeData {
-    positions: Vec<f64>,
-    faces: Vec<u32>,
-    num_verts: usize,
-    num_faces: usize,
-}
-
-/// Compute batched mesh data using the precomputed atlas.
-#[wasm_bindgen]
-pub fn compute_mesh_batches(
-    positions: &[f64],
-    faces: &[u32],
-    transform_type: &str,
-    params: &[f64],
-    override_res: u32,
-    vp_matrix: &[f64],     // 16 doubles: column-major view-projection matrix
-    viewport_width: f64,
-    viewport_height: f64,
-) -> JsValue {
-    let verts: Vec<[f64; 3]> = positions.chunks(3)
-        .map(|c| [c[0], c[1], c[2]]).collect();
-    let tris: Vec<[usize; 3]> = faces.chunks(3)
-        .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize]).collect();
-
-    // Build or reuse cached half-edge mesh. Rebuild only when topology changes.
-    MESH_CACHE.with(|cache_cell| {
-        let mut cache = cache_cell.borrow_mut();
-        let needs_rebuild = match cache.as_ref() {
-            Some(c) => c.tris.len() != tris.len() || c.verts.len() != verts.len(),
-            None => true,
-        };
-        if needs_rebuild {
-            let faces_u32: Vec<[u32; 3]> = tris.iter()
-                .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
-                .collect();
-            *cache = Some(CachedMesh {
-                half_edge: HalfEdgeMesh::from_triangles(verts.len() as u32, &faces_u32),
-                verts: verts.clone(),
-                tris: tris.clone(),
-            });
-        }
-    });
-
-    let transform = match transform_type {
-        "sphere_reflection" if params.len() >= 4 && params[3] > 0.001 => {
-            Mobius::sphere_reflection(
-                Quat::from_point(params[0], params[1], params[2]),
-                params[3],
-            )
-        }
-        "rotation" if params.len() >= 4 => {
-            Mobius::rotation(params[0], params[1], params[2], params[3])
-        }
-        "translation" if params.len() >= 3 => {
-            Mobius::translation(Quat::from_point(params[0], params[1], params[2]))
-        }
-        _ => Mobius::identity(),
-    };
-
-    let screen = if vp_matrix.len() >= 16 && viewport_width > 0.0 {
-        let mut m = [0.0f64; 16];
-        m.copy_from_slice(&vp_matrix[..16]);
-        Some(ScreenInfo { vp_matrix: m, width: viewport_width, height: viewport_height })
-    } else {
-        None
-    };
-
-    let t0 = js_sys::Date::now();
-
-    let instances_orig = compute_instances_no_lod(&verts, &tris);
-    let t1 = js_sys::Date::now();
-
-    let instances_xform = MESH_CACHE.with(|cache_cell| {
-        let cache = cache_cell.borrow();
-        let mesh_ref = cache.as_ref().map(|c| &c.half_edge);
-        compute_instances(&verts, &tris, &transform, screen.as_ref(), mesh_ref)
-    });
-    let t2 = js_sys::Date::now();
-
-    // Group by (canonical LOD, perm_index)
-    let mut groups: FxHashMap<([u32; 3], usize), Vec<usize>> = FxHashMap::default();
-    for (fi, inst) in instances_xform.iter().enumerate() {
-        let lod = if override_res > 0 {
-            [override_res, override_res, override_res]
-        } else {
-            inst.edge_lods
-        };
-        let key = canonical_form(lod);
-        groups.entry((key.res, key.perm_index)).or_default().push(fi);
-    }
-
-    let mut batches = Vec::new();
-
-    // Try atlas lookup, fall back to the mesh stored in atlas
-    ATLAS.with(|atlas_cell| {
-        let atlas_ref = atlas_cell.borrow();
-
-        for (&(canonical_lod, perm_index), face_indices) in &groups {
-            // Find the best available LOD that preserves edge stitching.
-            // Safe fallback: uniform patch at min(edge LODs). This ensures
-            // shared edges still match — the min-LOD edges are correct and
-            // higher-LOD edges just get undersampled.
-            let (mesh, used_lod) = {
-                let mut found = None;
-                if let Some(atlas) = atlas_ref.as_ref() {
-                    // Try exact match
-                    if let Some(m) = atlas.get_patch(canonical_lod) {
-                        found = Some((m, canonical_lod));
-                    } else {
-                        // Fall back to uniform at min edge LOD, then halve
-                        let min_lod = canonical_lod[0]; // sorted, so [0] is min
-                        let mut try_res = min_lod;
-                        while try_res >= 1 {
-                            let uniform = [try_res, try_res, try_res];
-                            if let Some(m) = atlas.get_patch(uniform) {
-                                found = Some((m, uniform));
-                                break;
-                            }
-                            if try_res <= 1 { break; }
-                            try_res /= 2;
-                        }
-                    }
-                }
-                found.unwrap_or_else(|| {
-                    web_sys::console::warn_1(&format!(
-                        "ATLAS FALLBACK: wanted {:?}, no match found — using [1,1,1]",
-                        canonical_lod
-                    ).into());
-                    let config = PatchConfig { k_candidates: 30, seed: 42 };
-                    let sample = quilting_core::sampling::tri_patch([1.0, 1.0, 1.0], &config);
-                    let tri = quilting_core::delaunay::triangulate_2d_clipped(&sample.positions);
-                    (quilting_core::mesh::TessellationMesh::from_2d(tri.positions, tri.triangles), [1, 1, 1])
-                })
-            };
-
-            let is_fallback = used_lod != canonical_lod;
-            if is_fallback {
-                web_sys::console::warn_1(&format!(
-                    "LOD MISMATCH: wanted {:?}, got {:?} ({} faces)",
-                    canonical_lod, used_lod, face_indices.len()
-                ).into());
-            }
-            let parity = perm_sign(perm_index);
-
-            let actual_lod = if override_res > 0 {
-                [override_res, override_res, override_res]
-            } else {
-                instances_xform[face_indices[0]].edge_lods
-            };
-
-            // Tess cache key includes perm_index — each permutation gets its own
-            // pre-remapped bary buffer for exact edge stitching.
-            // Key by used_lod (not canonical_lod) so fallback data and correct
-            // data get separate cache entries — no invalidation needed.
-            let tess_key = format!("{},{},{}/{}", used_lod[0], used_lod[1], used_lod[2], perm_index);
-
-            let already_sent = SENT_TESS.with(|s| s.borrow().contains(&tess_key));
-
-            let (bary_data, tess_tris, n_verts, n_tris) = if already_sent {
-                (vec![], vec![], mesh.positions.len(), mesh.triangles.len())
-            } else {
-                // Convert to bary first, then permute by swapping components.
-                // This is exact (no arithmetic error) unlike the old approach
-                // of remapping in 2D cartesian then converting to bary.
-                let bary: Vec<f64> = mesh.positions.iter().map(|p| {
-                    let mut b = triangle::cartesian_to_bary(p[0], p[1]);
-                    // Snap near-zero bary to exact 0.0
-                    for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
-                    let sum = b[0] + b[1] + b[2];
-                    if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
-                    // Permute in bary space — just component swap, bit-identical
-                    match perm_index {
-                        1 => [b[0], b[2], b[1]],
-                        2 => [b[1], b[0], b[2]],
-                        3 => [b[1], b[2], b[0]],
-                        4 => [b[2], b[0], b[1]],
-                        5 => [b[2], b[1], b[0]],
-                        _ => b,
-                    }
-                }).flat_map(|b| [b[0], b[1], b[2]]).collect();
-
-                let tris: Vec<u32> = mesh.triangles.iter()
-                    .flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
-
-                let nv = bary.len() / 3;
-                let nt = tris.len() / 3;
-                SENT_TESS.with(|s| s.borrow_mut().insert(tess_key));
-                (bary, tris, nv, nt)
-            };
-
-            let nf = face_indices.len();
-            let mut orig_data = vec![0.0f32; nf * 52];
-            let mut xform_data = vec![0.0f32; nf * 52];
-
-            for (i, &fi) in face_indices.iter().enumerate() {
-                let o = instances_orig[fi].to_f32_array();
-                let x = instances_xform[fi].to_f32_array();
-                orig_data[i*52..(i+1)*52].copy_from_slice(&o);
-                xform_data[i*52..(i+1)*52].copy_from_slice(&x);
-            }
-
-            batches.push(BatchData {
-                lod: actual_lod,
-                wanted_lod: [canonical_lod[0], canonical_lod[1], canonical_lod[2]],
-                used_lod: [used_lod[0], used_lod[1], used_lod[2]],
-                is_fallback,
-                perm_parity: parity,
-                perm_index,
-                material_index: -1,
-                instances_orig: orig_data,
-                instances_xform: xform_data,
-                tess_bary: bary_data,
-                tess_triangles: tess_tris,
-                face_indices: face_indices.iter().map(|&i| i as u32).collect(),
-                num_faces: face_indices.len(),
-                verts_per_face: n_verts,
-                tris_per_face: n_tris,
-            });
-        }
-    });
-
-    let t3 = js_sys::Date::now();
-
-    let result = serde_wasm_bindgen::to_value(&MeshBatches {
-        batches,
-        total_faces: tris.len(),
-        num_batches: groups.len(),
-        timings: [t1 - t0, t2 - t1, t3 - t2],
-    }).unwrap();
-
-    let t4 = js_sys::Date::now();
-    // Log timings: [orig_instances_ms, xform_lod_ms, batching_ms, serde_ms]
-    web_sys::console::log_1(&format!(
-        "compute_mesh_batches: orig={:.1}ms lod={:.1}ms batch={:.1}ms serde={:.1}ms total={:.1}ms",
-        t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0
-    ).into());
-
-    result
-}
-
-#[derive(serde::Serialize)]
-struct BatchData {
-    lod: [u32; 3],
-    wanted_lod: [u32; 3],
-    used_lod: [u32; 3],
-    is_fallback: bool,
-    perm_parity: i32,  // +1 for even permutations, -1 for odd (normal flip)
-    perm_index: usize, // S3 permutation index (0-5) for vertex shader bary remapping
-    material_index: i32, // material index (-1 = default)
-    instances_orig: Vec<f32>,
-    instances_xform: Vec<f32>,
-    tess_bary: Vec<f64>,
-    tess_triangles: Vec<u32>,
-    face_indices: Vec<u32>, // original mesh face indices for pick identification
-    num_faces: usize,
-    verts_per_face: usize,
-    tris_per_face: usize,
-}
-
-#[derive(serde::Serialize)]
-struct MeshBatches {
-    batches: Vec<BatchData>,
-    total_faces: usize,
-    num_batches: usize,
-    timings: [f64; 3], // [orig_ms, lod_ms, batch_ms]
-}
 
 // --- Shader compilation via quilting-shaders ---
 
@@ -1403,8 +1072,7 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
         let nf = combined.triangles.len();
         let has_uvs = combined.uvs.is_some();
 
-        const COMPACT_STRIDE: usize = 40;
-        let mut instances = vec![0.0f32; nf * COMPACT_STRIDE];
+        let mut instances = vec![0.0f32; nf * instance_layout::STRIDE];
 
         // Compute smooth normals from rest pose
         let n_verts = combined.positions.len();
@@ -1459,37 +1127,29 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
             vertex_normals_f32.as_deref(),
         );
 
-        // Pack into compact 40-float format for GPU animation path
+        // Pack into the compact instance format for the GPU animation path
         for (fi, face) in combined.triangles.iter().enumerate() {
-            let b = fi * COMPACT_STRIDE;
             let inst = &lod_instances[fi];
+            let mut w = InstanceWriter::new(&mut instances, fi);
 
-            // p0/p1/p2: vertex_index in .x, normalized rest-pose xyz in .yzw
             for (vi, &vert_idx) in face.iter().enumerate() {
-                let off = b + vi * 4;
-                instances[off]   = vert_idx as f32;
-                instances[off+1] = norm_positions[vert_idx][0] as f32;
-                instances[off+2] = norm_positions[vert_idx][1] as f32;
-                instances[off+3] = norm_positions[vert_idx][2] as f32;
+                let p = norm_positions[vert_idx];
+                w.set_position(vi, vert_idx as u32, [p[0] as f32, p[1] as f32, p[2] as f32]);
             }
             // Edge LODs from compute_instances (half-edge coherent)
-            instances[b + 12] = inst.edge_lods[0] as f32;
-            instances[b + 13] = inst.edge_lods[1] as f32;
-            instances[b + 14] = inst.edge_lods[2] as f32;
-            // Vertex LODs
-            instances[b + 16] = inst.vertex_lods[0] as f32;
-            instances[b + 17] = inst.vertex_lods[1] as f32;
-            instances[b + 18] = inst.vertex_lods[2] as f32;
-            // UVs at offset 20
-            instances[b+20] = inst.uvs[0][0]; instances[b+21] = inst.uvs[0][1];
-            instances[b+22] = inst.uvs[1][0]; instances[b+23] = inst.uvs[1][1];
-            instances[b+24] = inst.uvs[2][0]; instances[b+25] = inst.uvs[2][1];
-            // Normals at offset 28
+            w.set_edge_lods([
+                inst.edge_lods[0] as f32,
+                inst.edge_lods[1] as f32,
+                inst.edge_lods[2] as f32,
+            ]);
+            w.set_vertex_lods([
+                inst.vertex_lods[0] as f32,
+                inst.vertex_lods[1] as f32,
+                inst.vertex_lods[2] as f32,
+            ]);
+            w.set_uvs(inst.uvs);
             for vi in 0..3 {
-                let off = b + 28 + vi * 4;
-                instances[off]   = inst.normals[vi][0];
-                instances[off+1] = inst.normals[vi][1];
-                instances[off+2] = inst.normals[vi][2];
+                w.set_normal(vi, inst.normals[vi]);
             }
         }
 
@@ -1501,11 +1161,8 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
         let atlas_keys: Vec<[u32; 3]> = LOD_ATLAS_KEYS.with(|ak| ak.borrow().clone());
         let mut face_lods = Vec::with_capacity(nf * 6);
         for fi in 0..nf {
-            let b = fi * COMPACT_STRIDE;
-            let l0 = instances[b + 12] as u32;
-            let l1 = instances[b + 13] as u32;
-            let l2 = instances[b + 14] as u32;
-            let lods = [l0, l1, l2];
+            let e = fi * instance_layout::STRIDE + instance_layout::offset::EDGE_LODS;
+            let lods = [instances[e] as u32, instances[e + 1] as u32, instances[e + 2] as u32];
             let ck = quilting_core::permutation::canonical_form(lods);
             let canonical = ck.res;
             let perm_idx = ck.perm_index;
@@ -1536,7 +1193,7 @@ pub fn get_rest_pose_instances(lod_time: f64) -> JsValue {
         js_sys::Reflect::set(&result, &"instances".into(), &arr).unwrap();
         js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(nf as f64)).unwrap();
         js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(n_verts as f64)).unwrap();
-        js_sys::Reflect::set(&result, &"stride".into(), &JsValue::from_f64(COMPACT_STRIDE as f64)).unwrap();
+        js_sys::Reflect::set(&result, &"stride".into(), &JsValue::from_f64(instance_layout::STRIDE as f64)).unwrap();
         js_sys::Reflect::set(&result, &"extent".into(), &JsValue::from_f64(extent)).unwrap();
         js_sys::Reflect::set(&result, &"face_lods".into(), &lod_arr).unwrap();
         result.into()
@@ -1899,6 +1556,10 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
 
     FACE_MATERIALS.with(|fm| *fm.borrow_mut() = face_material_indices);
     SENT_TESS.with(|s| s.borrow_mut().clear());
+    // A previously loaded test shape takes priority in remesh_current_model —
+    // drop it, or remeshing would silently operate on the stale shape.
+    REMESH_SOURCE.with(|rs| *rs.borrow_mut() = None);
+    REMESH_DATA.with(|rd| *rd.borrow_mut() = None);
 
     let t_end = js_sys::Date::now();
     web_sys::console::log_1(&format!(
@@ -2465,34 +2126,22 @@ pub fn load_test_shape(shape: &str, param1: u32, param2: u32) -> JsValue {
     let num_faces = faces.len();
     let num_verts = positions.len();
 
-    // Store as GLTF_DATA so remesh_current_model can access it
-    // We need to create a StoredGltfData-compatible struct
-    // Instead, store directly in REMESH for simplicity and also
-    // build instances for rendering
+    // Test shapes bypass StoredGltfData entirely: the geometry goes into
+    // REMESH_SOURCE (below) and the render path gets instances built here.
 
-    // Pack instances in compact 40-float format for rendering
-    const COMPACT_STRIDE: usize = 40;
-    let mut instances = vec![0.0f32; num_faces * COMPACT_STRIDE];
+    // Pack instances in the compact format for rendering
+    let mut instances = vec![0.0f32; num_faces * instance_layout::STRIDE];
 
     for (fi, face) in faces.iter().enumerate() {
-        let b = fi * COMPACT_STRIDE;
+        let mut w = InstanceWriter::new(&mut instances, fi);
         for vi in 0..3 {
-            let off = b + vi * 4;
-            instances[off]     = face[vi] as f32;
-            instances[off + 1] = positions[face[vi]][0] as f32;
-            instances[off + 2] = positions[face[vi]][1] as f32;
-            instances[off + 3] = positions[face[vi]][2] as f32;
+            let p = positions[face[vi]];
+            w.set_position(vi, face[vi] as u32, [p[0] as f32, p[1] as f32, p[2] as f32]);
+            let n = normals[face[vi]];
+            w.set_normal(vi, [n[0] as f32, n[1] as f32, n[2] as f32]);
         }
-        // Default LODs
-        instances[b + 12] = 4.0; instances[b + 13] = 4.0; instances[b + 14] = 4.0;
-        instances[b + 16] = 4.0; instances[b + 17] = 4.0; instances[b + 18] = 4.0;
-        // Normals
-        for vi in 0..3 {
-            let off = b + 28 + vi * 4;
-            instances[off]     = normals[face[vi]][0] as f32;
-            instances[off + 1] = normals[face[vi]][1] as f32;
-            instances[off + 2] = normals[face[vi]][2] as f32;
-        }
+        w.set_edge_lods([4.0; 3]);
+        w.set_vertex_lods([4.0; 3]);
     }
 
     // Also store positions/faces for remeshing
@@ -2626,8 +2275,9 @@ pub fn remesh_current_model(target_patches: u32) -> JsValue {
     }
 }
 
-/// Compute instances from remeshed QB patches (replaces compute_mesh_batches for remeshed model).
-/// Returns the same format as compute_mesh_batches: packed f32 instance data + face LOD data.
+/// Compute instances from remeshed QB patches.
+/// Returns the same shape as `get_rest_pose_instances`: packed f32 instance data,
+/// per-face LOD data, and per-face material indices.
 #[wasm_bindgen]
 pub fn compute_remeshed_instances(
     mobius: &[f32],
@@ -2660,45 +2310,27 @@ pub fn compute_remeshed_instances(
 
         let num_faces = instances.len();
 
-        // Pack in compact 40-float format matching get_rest_pose_instances layout:
-        // [0-3]: vertex_idx(0) + position xyz  (we use 0 for vertex_idx since there's no skinning)
-        // [4-7]: vertex_idx(0) + position xyz
-        // [8-11]: vertex_idx(0) + position xyz
-        // [12-14]: edge LODs, [15]: pad
-        // [16-18]: vertex LODs, [19]: pad
-        // [20-25]: UVs (u0,v0,u1,v1,u2,v2), [26-27]: pad
-        // [28-39]: normals (n0xyz+pad, n1xyz+pad, n2xyz+pad)
-        const COMPACT_STRIDE: usize = 40;
-        let mut all_instances = vec![0.0f32; num_faces * COMPACT_STRIDE];
+        // Same compact layout as get_rest_pose_instances. Remeshed patches are
+        // never GPU-skinned, so the vertex index slot stays 0.
+        let mut all_instances = vec![0.0f32; num_faces * instance_layout::STRIDE];
         for (fi, inst) in instances.iter().enumerate() {
-            let b = fi * COMPACT_STRIDE;
-            // Positions (use .to_point() to get xyz from quaternion)
+            let mut w = InstanceWriter::new(&mut all_instances, fi);
             for vi in 0..3 {
                 let p = inst.positions[vi].to_point();
-                all_instances[b + vi*4]     = 0.0; // vertex index (unused for remeshed)
-                all_instances[b + vi*4 + 1] = p[0] as f32;
-                all_instances[b + vi*4 + 2] = p[1] as f32;
-                all_instances[b + vi*4 + 3] = p[2] as f32;
+                w.set_position(vi, 0, [p[0] as f32, p[1] as f32, p[2] as f32]);
+                w.set_normal(vi, inst.normals[vi]);
             }
-            // Edge LODs
-            all_instances[b + 12] = inst.edge_lods[0] as f32;
-            all_instances[b + 13] = inst.edge_lods[1] as f32;
-            all_instances[b + 14] = inst.edge_lods[2] as f32;
-            // Vertex LODs
-            all_instances[b + 16] = inst.vertex_lods[0] as f32;
-            all_instances[b + 17] = inst.vertex_lods[1] as f32;
-            all_instances[b + 18] = inst.vertex_lods[2] as f32;
-            // UVs
-            all_instances[b + 20] = inst.uvs[0][0]; all_instances[b + 21] = inst.uvs[0][1];
-            all_instances[b + 22] = inst.uvs[1][0]; all_instances[b + 23] = inst.uvs[1][1];
-            all_instances[b + 24] = inst.uvs[2][0]; all_instances[b + 25] = inst.uvs[2][1];
-            // Normals
-            for vi in 0..3 {
-                let off = b + 28 + vi * 4;
-                all_instances[off]   = inst.normals[vi][0];
-                all_instances[off+1] = inst.normals[vi][1];
-                all_instances[off+2] = inst.normals[vi][2];
-            }
+            w.set_edge_lods([
+                inst.edge_lods[0] as f32,
+                inst.edge_lods[1] as f32,
+                inst.edge_lods[2] as f32,
+            ]);
+            w.set_vertex_lods([
+                inst.vertex_lods[0] as f32,
+                inst.vertex_lods[1] as f32,
+                inst.vertex_lods[2] as f32,
+            ]);
+            w.set_uvs(inst.uvs);
         }
 
         // Face LOD data: all uniform since remeshed patches don't use adaptive LOD
@@ -2739,16 +2371,11 @@ pub fn compute_remeshed_instances(
     })
 }
 
-/// Check if remeshed data is available.
-#[wasm_bindgen]
-pub fn has_remeshed_data() -> bool {
-    REMESH_DATA.with(|rd| rd.borrow().is_some())
-}
-
-/// Clear remeshed data (go back to original mesh).
+/// Clear remeshed data and the remesh source, going back to the loaded glTF.
 #[wasm_bindgen]
 pub fn clear_remeshed_data() {
     REMESH_DATA.with(|rd| *rd.borrow_mut() = None);
+    REMESH_SOURCE.with(|rs| *rs.borrow_mut() = None);
 }
 
 /// Helper struct to pass mesh node info to merge_all_mesh_nodes.

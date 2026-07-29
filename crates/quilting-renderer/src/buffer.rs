@@ -1,11 +1,14 @@
 //! GPU buffer management: VAO, VBO, IBO, instance buffers, and UBOs.
 //!
-//! Mirrors the index.html buffer setup:
 //! - Vertex attribute 0: bary coords (vec3, per-vertex)
-//! - Attributes 1-13: instance data (13 x vec4 = 52 floats per instance)
-//!   [p0, p1, p2, w0, w1, w2, edge_lods, vertex_lods, uv01, uv2_pad, n0, n1, n2]
+//! - Attributes 1-3 and 7-13: per-instance vec4s read from the instance buffer
+//! - Attributes 4-6: constant weight quaternions, not backed by the buffer
+//!
+//! The instance stride and per-attribute offsets come from
+//! [`quilting_core::instance_layout`] — never hardcode them here.
 
 use glow::HasContext;
+use quilting_core::instance_layout;
 
 /// Per-batch tessellation geometry (bary coords + indices).
 /// Cached by LOD triple -- these never change, only instance data changes per frame.
@@ -200,15 +203,26 @@ impl MeshBuffers {
     }
 }
 
-/// Instance data stride: 40 floats = 160 bytes per face.
-pub const INSTANCE_STRIDE: usize = 40;
-const INSTANCE_STRIDE_BYTES: i32 = (INSTANCE_STRIDE * 4) as i32;
+const INSTANCE_STRIDE_BYTES: i32 = instance_layout::STRIDE_BYTES as i32;
+
+/// Identity quaternion fed to the constant weight attributes.
+const IDENTITY_WEIGHT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+
+/// Point the weight-quaternion attributes at a constant instead of the buffer.
+unsafe fn set_constant_weights(gl: &glow::Context) {
+    for loc in instance_layout::CONSTANT_WEIGHT_LOCATIONS {
+        gl.vertex_attrib_4_f32(
+            loc,
+            IDENTITY_WEIGHT[0], IDENTITY_WEIGHT[1], IDENTITY_WEIGHT[2], IDENTITY_WEIGHT[3],
+        );
+    }
+}
 
 /// Configure a VAO with the quilting compact vertex layout.
 ///
 /// Attribute 0: vec3 bary coords (per-vertex from tess buffer)
-/// Attributes 1-3, 7-13: vec4 (per-instance from compact 160-byte stride)
-/// Attributes 4-6: constant [1,0,0,0] (unused weight slots)
+/// Instanced attributes: one vec4 per `instance_layout::ATTR_MAP` entry
+/// Weight attributes: constant [1,0,0,0], see `CONSTANT_WEIGHT_LOCATIONS`
 unsafe fn setup_vao(
     gl: &glow::Context,
     vao: glow::VertexArray,
@@ -223,7 +237,7 @@ unsafe fn setup_vao(
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 0, 0);
 
-    // Instanced attributes from compact 160-byte stride.
+    // Instanced attributes from the compact stride.
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
     for &(loc, offset) in &COMPACT_MAP {
         gl.enable_vertex_attrib_array(loc);
@@ -231,10 +245,7 @@ unsafe fn setup_vao(
         gl.vertex_attrib_divisor(loc, 1);
     }
 
-    // Constant attributes for unused weight slots (locations 4, 5, 6)
-    gl.vertex_attrib_4_f32(4, 1.0, 0.0, 0.0, 0.0);
-    gl.vertex_attrib_4_f32(5, 1.0, 0.0, 0.0, 0.0);
-    gl.vertex_attrib_4_f32(6, 1.0, 0.0, 0.0, 0.0);
+    set_constant_weights(gl);
 
     // Index buffer
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
@@ -264,9 +275,7 @@ unsafe fn setup_vao_offset(
         gl.vertex_attrib_divisor(loc, 1);
     }
 
-    gl.vertex_attrib_4_f32(4, 1.0, 0.0, 0.0, 0.0);
-    gl.vertex_attrib_4_f32(5, 1.0, 0.0, 0.0, 0.0);
-    gl.vertex_attrib_4_f32(6, 1.0, 0.0, 0.0, 0.0);
+    set_constant_weights(gl);
 
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
     gl.bind_vertex_array(None);
@@ -288,11 +297,8 @@ pub fn create_shared_vao(
     }
 }
 
-/// Instance attribute locations and byte offsets within the 160-byte stride.
-pub const COMPACT_MAP: [(u32, i32); 10] = [
-    (1, 0), (2, 16), (3, 32), (7, 48), (8, 64),
-    (9, 80), (10, 96), (11, 112), (12, 128), (13, 144),
-];
+/// Instance attribute locations and byte offsets within the instance stride.
+pub use instance_layout::ATTR_MAP as COMPACT_MAP;
 
 /// A single persistent GPU buffer holding all instance data for all faces.
 /// Batches are contiguous ranges — no per-batch copy needed.
@@ -353,7 +359,7 @@ impl PersistentInstances {
 ///   float perm_parity  (offset 128, 4 bytes)
 ///   int perm_index     (offset 132, 4 bytes)
 ///   int use_qb         (offset 136, 4 bytes)
-///   float _pad         (offset 140, 4 bytes)
+///   float _pad         (offset 140, 4 bytes) -- the pick pass's face offset
 ///   vec4 mob_a         (offset 144, 16 bytes)
 ///   vec4 mob_b         (offset 160, 16 bytes)
 ///   vec4 mob_c         (offset 176, 16 bytes)
@@ -362,6 +368,10 @@ impl PersistentInstances {
 pub struct VertexUniformBuf {
     pub ubo: glow::Buffer,
 }
+
+/// Byte offset of the `_pad` slot. Despite the name it is load-bearing — the
+/// vertex shader computes `instance_id = instance_idx + u._pad`.
+const FACE_OFFSET_BYTES: i32 = 140;
 
 impl VertexUniformBuf {
     pub fn new(gl: &glow::Context) -> Result<Self, String> {
@@ -411,6 +421,22 @@ impl VertexUniformBuf {
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
             gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
+        }
+    }
+
+    /// Overwrite the `_pad` slot with the base face ID of the batch about to be
+    /// drawn. The vertex shader adds the instance index to it, so the pick pass
+    /// gets a global face ID; set it per batch and reset it to 0 afterwards.
+    ///
+    /// `upload` zeroes the slot, so call this after it.
+    pub fn set_face_offset(&self, gl: &glow::Context, face_offset: i32) {
+        unsafe {
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
+            gl.buffer_sub_data_u8_slice(
+                glow::UNIFORM_BUFFER,
+                FACE_OFFSET_BYTES,
+                &(face_offset as f32).to_le_bytes(),
+            );
         }
     }
 

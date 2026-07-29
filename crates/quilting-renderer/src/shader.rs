@@ -52,7 +52,8 @@ pub struct CompiledGlsl {
 }
 
 /// Fragment shader modes that quilting-shaders supports.
-const FRAGMENT_MODES: &[&str] = &["matcap", "wire", "normals", "pbr", "stretch", "pick"];
+pub(crate) const FRAGMENT_MODES: &[&str] =
+    &["matcap", "wire", "normals", "pbr", "stretch", "pick"];
 
 /// Compile all WGSL shaders to GLSL via quilting-shaders (naga).
 /// Uses the "native" emission path (no Y-flip / Z-remap).
