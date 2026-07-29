@@ -24,7 +24,10 @@ Quaternion layout convention (critical — must be consistent everywhere):
 
 - Rust: `Quat { w, x, y, z }` where `w` is real, `(x, y, z)` is imaginary
 - WGSL/GLSL: `vec4(w, x, y, z)` — scalar in `.x`, vector in `.yzw`
-- Instance data packing: `[w, x, y, z]` per quaternion — 4 floats
+- Instance data packing: `[w, x, y, z]` per quaternion — 4 floats. The one
+  exception is the three position slots, whose first component carries a
+  vertex index for GPU skinning instead of a scalar part (positions are pure
+  imaginary, so the slot was free). See `quilting-core::instance_layout`.
 
 The `q_to_point` function extracts `.yzw` (the imaginary part) to get the 3D position.
 
@@ -93,16 +96,29 @@ where `u` and `v` are the barycentric tangent directions (bary.x->bary.y and bar
 ```
 quilting/
   crates/
-    quilting-core/       # Math, tessellation atlas, LOD, evaluation
-    quilting-mesh/       # Half-edge mesh data structure
-    quilting-shaders/    # WGSL shader modules, naga compilation to GLSL
-    quilting-renderer/   # glow-based WebGL2 renderer (UBOs, VAO cache, draw calls)
-    quilting-gltf/       # glTF/GLB loader (meshes, materials, animations, skins)
-    quilting-spacetime/  # 4D slicer (HyperMesh, marching prisms, toroidal embedding)
-    quilting-wasm/       # WASM entry point (wasm-pack, JS interop)
-  hyperscope.html        # Primary frontend (Hyperscope app)
-  hyperscope_worker.js   # Web worker for WASM computation
+    quilting-core/          # Math, tessellation atlas, LOD, evaluation, instance layout
+    quilting-mesh/          # Half-edge mesh data structure
+    quilting-shaders/       # WGSL shader modules, naga compilation to GLSL
+    quilting-renderer/      # glow-based WebGL2 renderer (UBOs, VAO cache, draw calls)
+    quilting-gltf/          # glTF/GLB loader (meshes, materials, animations, skins)
+    quilting-remesh/        # VSA clustering + QB patch fitting (dense mesh -> curved patches)
+    quilting-wasm/          # WASM entry point (wasm-pack, JS interop)
+    distressed-blue-noise/  # Variable-density Poisson disk sampler (Bridson)
+    fuzzy-vision/           # JFA-based variable per-pixel blur post-process
+    trunk-stub/             # Placeholder cdylib so Trunk has something to build
+  hyperscope.html           # Primary frontend (Hyperscope app)
+  hyperscope_worker.js      # Web worker for WASM computation
 ```
+
+`quilting-wasm` and `trunk-stub` are excluded from the workspace's
+`default-members`: the former only compiles for `wasm32` (it calls
+`glow::Context::from_webgl2_context`), so a bare `cargo test` would fail on a
+fresh clone. Build it with `cargo check --target wasm32-unknown-unknown -p
+quilting-wasm`.
+
+There is no longer a `quilting-spacetime` crate. The 4D slicing pipeline it
+implemented was removed wholesale (see §6); the sections below describe it as
+historical design, not as shipping code.
 
 ### Pipeline
 
@@ -113,15 +129,11 @@ glTF file
 quilting-gltf: parse meshes, materials, textures, animations, skins
   |
   v
-quilting-spacetime: bake animations -> HyperMesh (vertex trajectories)
-                    slice at time t -> 3D mesh + UVs + normals
-  |
-  v
 quilting-core: compute FaceInstance data
                - apply Mobius transform to positions
                - compute conformal weights: w' = (c*x + d) * w
-               - compute per-edge LOD from screen-space arc lengths
-               - pack 52 floats per instance (208 bytes)
+               - compute per-edge LOD from deformed medians + screen attenuation
+               - pack one instance per face (layout: quilting-core::instance_layout)
   |
   v
 quilting-renderer: upload to GPU
@@ -159,9 +171,16 @@ The tessellation atlas is a dictionary of pre-computed triangle sub-meshes, keye
 
 Edge LODs are always powers of 2, snapped with hysteresis to prevent oscillation:
 
-- Raw LOD computed from screen-space arc length / target pixels per subdivision (16 px)
+- Raw LOD computed from the Mobius-deformed median lengths of the two faces
+  meeting at the edge, divided by a target edge size (mesh radius / density)
+- Optionally attenuated so a subdivision never falls below `min_px_per_sub`
+  screen pixels
 - Snapped to nearest power of 2 with 1.3x hysteresis bias toward lower LOD
-- Clamped to max LOD of 64
+- Clamped to [2, 512] (`evaluate::MAX_LOD`)
+
+The practical ceiling is usually lower than 512: `quilting-wasm` clamps to the
+largest LOD actually present in the built atlas, and the atlas is normally
+built with `max_lod_exp` of 8 or 9.
 
 This keeps the atlas size manageable (only need patches for power-of-2 triples) and provides natural 2x jumps that align well with hierarchical subdivision.
 
@@ -221,30 +240,53 @@ The vertex UBO (binding 0) contains:
 - `use_qb`: 1 for QB evaluation, 0 for flat (linear) interpolation
 - `mob_a, mob_b, mob_c, mob_d`: the four Mobius quaternions as vec4
 
-When the user drags a Mobius slider, only the uniform quaternions change — no CPU work, no buffer re-upload. The worker thread only runs when the time slice changes (new geometry needed).
+When the user drags a Mobius slider, only the uniform quaternions change — no CPU work, no buffer re-upload. The worker thread only runs when the geometry itself changes.
 
 ### Instance Data Layout
 
-Each face instance is 52 floats (208 bytes, 13 vec4s):
+**Normative source: `quilting-core::instance_layout`.** That module owns the
+stride, the field offsets, the attribute map, and an `InstanceWriter` that
+packs a record without anyone rediscovering offsets. Read it rather than
+trusting a table; this section only sketches the shape so the pipeline
+description reads coherently.
 
-| Offset | Content | Notes |
-|--------|---------|-------|
-| 0-11   | p0, p1, p2 (3 x vec4) | Position quaternions [w,x,y,z] |
-| 12-23  | w0, w1, w2 (3 x vec4) | Weight quaternions |
-| 24-27  | edge_lods + pad (vec4) | Per-edge LOD [a,b,c,0] |
-| 28-31  | vertex_lods + pad (vec4) | Per-vertex LOD (max of adjacent edges) |
-| 32-39  | uv01, uv2_pad (2 x vec4) | UVs: (u0,v0,u1,v1), (u2,v2,0,0) |
-| 40-51  | n0, n1, n2 (3 x vec4) | Smooth normals [nx,ny,nz,0] |
+One face instance is **40 floats / 160 bytes / 10 instanced vec4 attributes**,
+all with a divisor of 1: three positions, edge LODs, vertex LODs, three UV
+pairs packed into two vec4s, and three smooth normals.
+
+Two things about this layout are not guessable:
+
+- The `.x` component of each position vec4 is a **vertex index** used by GPU
+  skinning, not the quaternion scalar part. Everywhere else in the codebase a
+  quaternion is `(w, x, y, z)`; this is the one deliberate exception.
+- The QB weight quaternions (`@location` 4, 5, 6) are **not in the buffer at
+  all**. They are bound as the constant `[1, 0, 0, 0]`, because the fused
+  Mobius-QB vertex shader derives the conformal weight `(c*p + d)` from the
+  Mobius uniforms per vertex. There is nothing per-instance left to upload.
+
+The earlier 52-float / 208-byte layout — which did carry explicit weight
+quaternions — was retired when that fusion landed. `FaceInstance::to_f32_array`
+still emits the old 52-float record and is kept only for the callers that have
+not moved to `InstanceWriter`.
 
 ### LOD Computation
 
-Currently done on the CPU (WASM), with the intent to move to GPU later:
+Currently done on the CPU (WASM), with the intent to move to GPU later
+(`quilting-renderer::compute` already implements the GPU pass; see §10):
 
-1. For each edge, compute screen-space arc length by sampling the Mobius-transformed edge at 9 points
-2. LOD = ceil(arc_length / 16 pixels), snapped to power of 2
-3. Additionally, check medians (vertex to opposite edge midpoint) to catch faces that are large in screen space even if individual edges aren't
-4. Cap all LODs at 64
-5. For affine transforms, skip LOD computation entirely (mesh is already tessellated)
+1. Compute a target edge size: mesh bounding-sphere radius / tessellation density
+2. Per face, push the three edge midpoints through the Mobius transform and
+   measure the three deformed medians (vertex to deformed opposite midpoint)
+3. Each edge's raw LOD is `ceil(mean of its two endpoint medians / target size)`
+4. Store per canonical edge index, taking the max across the two adjacent faces
+   (this is what makes invariant 1 hold)
+5. If screen attenuation is on, sample the deformed edge at 9 points to get its
+   screen arc length and reduce the LOD so each subdivision spans at least
+   `min_px_per_sub` pixels
+6. Snap to a power of 2 with hysteresis, clamp to [2, `MAX_LOD` = 512]
+
+LOD is computed even for the identity Mobius: the atlas still supplies the
+sub-triangle sampling that QB evaluation needs.
 
 LOD budget: 500K total tessellated triangles max (enforced in the frontend).
 
@@ -252,7 +294,9 @@ LOD budget: 500K total tessellated triangles max (enforced in the frontend).
 
 Near the Mobius pole, `|bot|^2 -> 0` and the surface stretches to infinity. A `smoothstep(0.0001, 0.001, dot(bot, bot))` fade factor allows the fragment shader to attenuate these regions.
 
-### What Becomes Static (Updated Only on Slice Change)
+This is a *visual* fade and is deliberately much wider than the *numeric* pole guard in `qinv` (`|q|^2 < 1e-20`, mirrored by `SINGULARITY_NORM_SQ` in `quilting-core`). Geometry is already faded out sixteen orders of magnitude before the inverse has to fall back to a sentinel, so the sentinel should never be visible — it exists to keep NaNs from propagating, not to be looked at. The CPU and GPU guards must use the same constants, because the CPU computes the LODs and smooth normals for exactly the geometry the shader evaluates.
+
+### What Becomes Static (Updated Only When Geometry Changes)
 
 - Instance buffer with original positions and identity weights
 - Tessellation atlas VBO
@@ -265,6 +309,11 @@ Near the Mobius pole, `|bot|^2 -> 0` and the surface stretches to infinity. A `s
 - Camera info
 
 ## 6. Spacetime
+
+**This section is historical.** The `quilting-spacetime` crate was deleted in
+commit `b077ca5` ("Remove spacetime/prebake pipeline, unify on QB + async
+LOD"); none of the code described below is in the workspace. It is kept as a
+record of the design, since the roadmap in §10 still intends to revive it.
 
 ### 4D Slicing
 
@@ -292,7 +341,7 @@ The slicer computes hyperplane intersections along each vertex trajectory (cubic
 
 ### Status
 
-Spacetime functionality works but is on hold. The 4D Mobius pre-slice (applying a Mobius transform in R^4 before slicing) was attempted but parked — the hyperplane doesn't track the deformed torus correctly.
+Removed. The pipeline worked, but the 4D Mobius pre-slice (applying a Mobius transform in R^4 before slicing) was never made to behave — the hyperplane doesn't track the deformed torus correctly — and carrying the crate through the QB/async-LOD unification was not worth it. Recovering it means reading `crates/quilting-spacetime` out of history at `b077ca5^`.
 
 ## 7. glTF/PBR
 
@@ -361,7 +410,7 @@ These must always hold. Violating any of them produces visible artifacts.
 
 1. **Edge LOD matching**: adjacent faces sharing an edge must have the same LOD on that edge. Enforced by canonical edge indexing via the half-edge mesh. Violation causes T-junction cracks.
 
-2. **Quaternion layout (w,x,y,z)**: the scalar part `w` is always first, in Rust, in WGSL, and in the instance data packing. Swapping components silently produces wrong geometry.
+2. **Quaternion layout (w,x,y,z)**: the scalar part `w` is always first, in Rust, in WGSL, and in the instance data packing. Swapping components silently produces wrong geometry. The documented exception is the instance buffer's position slots, which reuse the (always-zero) scalar component to carry a skinning vertex index.
 
 3. **Power-of-2 LODs**: all edge LODs must be powers of 2. The tessellation atlas only contains patches for power-of-2 triples. A non-power-of-2 LOD will miss the atlas lookup.
 
@@ -369,7 +418,7 @@ These must always hold. Violating any of them produces visible artifacts.
 
 5. **Mobius weight formula**: `w' = (c*x + d) * w`, NOT `w' = (c*x + d)^{-1} * w`. The inverse form is wrong and produces inside-out geometry.
 
-6. **Instance data alignment**: 52 floats per instance, 13 vec4s, 208 bytes. The vertex attribute divisor must be 1. Misalignment silently shifts all subsequent fields.
+6. **Instance data alignment**: the packer, the renderer's VAO setup, and the WGSL vertex shader must all agree on the instance stride and field offsets, and every instanced attribute must have a divisor of 1. Misalignment silently shifts every subsequent field, so it produces garbled geometry rather than an error. `quilting-core::instance_layout` is the normative definition (currently 40 floats / 160 bytes / 10 attributes) and carries tests that the attributes tile the stride exactly. Anything that hardcodes a stride or offset instead of using those constants is a silent-corruption hazard, and restating them in prose is how this section came to describe a layout that had not shipped since commit `3628c4f` (2026-03-24).
 
 7. **UVs and normals are NOT permuted**: only tessellation bary coords go through S3 permutation. Permuting UVs/normals causes visible orientation jumps when LOD redistribution changes the perm_index.
 
@@ -408,7 +457,7 @@ After a WASM panic (e.g., from an unexpected glTF format), RefCell borrows in th
 LOD changes cause tessellation pattern changes, which can produce visual flickering. Mitigated by:
 - Power-of-2 snapping with 1.3x hysteresis
 - Fixed resolution during drag (debounced LOD recomputation)
-- Max LOD cap of 64
+- Clamping to the largest LOD the atlas was actually built with
 
 ### UV Permutation
 

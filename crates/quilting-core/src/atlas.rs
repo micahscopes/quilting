@@ -7,7 +7,14 @@ use crate::permutation::{canonical_form, remap_position};
 use crate::sampling::{tri_patch, PatchConfig};
 use crate::subdivide;
 
-/// Legacy API — sliver filtering is no longer needed with constrained Delaunay.
+/// Legacy no-op. Patch generation used to discard sliver triangles above an
+/// aspect-ratio threshold; constrained Delaunay stopped producing them, so
+/// there is nothing left to tune.
+///
+/// Kept because `quilting-wasm` re-exports it to JS and the worker still calls
+/// it. Retiring it means dropping the `set_sliver_threshold` message from
+/// `hyperscope_worker.js` and the `#[wasm_bindgen]` wrapper in
+/// `quilting-wasm/src/lib.rs` first.
 pub fn set_sliver_threshold(_threshold: f64) {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,3 +1,20 @@
+//! Per-face LOD computation and [`FaceInstance`] construction.
+//!
+//! Given a mesh and a Möbius transform, this decides how finely each face has
+//! to be tessellated for the deformed surface to look smooth, then packages
+//! the per-face data the renderer instances over. LOD is driven by the
+//! *deformed* geometry — a face that the transform inflates needs more
+//! subdivisions than its rest-pose size suggests — and is stored per canonical
+//! half-edge so that adjacent faces cannot disagree (SPEC invariant 1).
+//!
+//! The tessellation knobs live in thread-locals rather than a parameter
+//! struct. They are UI settings owned by `quilting-wasm`, which pokes them from
+//! JS callbacks and then calls in here from the same worker thread; threading
+//! them through every signature would push a config struct into call sites
+//! that have no opinion about it. This is the one piece of ambient state in an
+//! otherwise pure crate — if the LOD pass ever moves off the worker thread,
+//! it should become an explicit argument.
+
 use crate::quaternion::{Quat, Mobius};
 use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
@@ -7,6 +24,19 @@ thread_local! {
     static SCREEN_ATTEN: RefCell<bool> = RefCell::new(true);
     static MIN_PX_PER_SUB: RefCell<f64> = RefCell::new(2.0);
 }
+
+/// Hard ceiling on any edge LOD.
+///
+/// This is a sanity clamp, not the practical limit: `quilting-wasm` further
+/// clamps to the largest LOD actually present in the built atlas (an atlas
+/// built with `max_lod_exp = 8` tops out at 256), and a face whose LOD exceeds
+/// what the atlas holds has no patch to look up. The GPU LOD pass applies the
+/// same 512 clamp so the two paths agree.
+pub const MAX_LOD: u32 = 512;
+
+/// Floor on any edge LOD. LOD 1 would mean an untessellated face, which cannot
+/// represent QB curvature at all.
+pub const MIN_LOD: u32 = 2;
 
 /// Get current tessellation density.
 pub fn get_tess_density() -> f64 {
@@ -92,55 +122,35 @@ impl ScreenInfo {
     }
 }
 
-/// Compute instance data without LOD — just copy vertex positions/weights.
-/// Used for the untransformed original mesh display.
+/// Compute instance data without LOD — just copy vertex positions, with
+/// identity weights and flat face normals.
+///
+/// Used for the untransformed original mesh display, where there is no Möbius
+/// curvature to resolve and the input mesh's own tessellation is the geometry.
+/// Face indices are clamped to the vertex count, so a malformed index yields a
+/// degenerate triangle rather than a panic.
 pub fn compute_instances_no_lod(
     vertices: &[[f64; 3]],
     faces: &[[usize; 3]],
 ) -> Vec<FaceInstance> {
-    compute_instances_no_lod_with_uvs(vertices, faces, None, None)
-}
-
-/// Compute instance data without LOD, with optional per-vertex UVs and normals.
-pub fn compute_instances_no_lod_with_uvs(
-    vertices: &[[f64; 3]],
-    faces: &[[usize; 3]],
-    vertex_uvs: Option<&[[f32; 2]]>,
-    vertex_normals: Option<&[[f32; 3]]>,
-) -> Vec<FaceInstance> {
+    let last = vertices.len().saturating_sub(1);
     faces.iter().map(|face| {
-        let nv = vertices.len();
         let v = [
-            vertices[face[0].min(nv - 1)],
-            vertices[face[1].min(nv - 1)],
-            vertices[face[2].min(nv - 1)],
+            vertices[face[0].min(last)],
+            vertices[face[1].min(last)],
+            vertices[face[2].min(last)],
         ];
-        let p0 = Quat::from_point(v[0][0], v[0][1], v[0][2]);
-        let p1 = Quat::from_point(v[1][0], v[1][1], v[1][2]);
-        let p2 = Quat::from_point(v[2][0], v[2][1], v[2][2]);
-        let uvs = match vertex_uvs {
-            Some(uvs) => [
-                uvs.get(face[0]).copied().unwrap_or([0.0, 0.0]),
-                uvs.get(face[1]).copied().unwrap_or([0.0, 0.0]),
-                uvs.get(face[2]).copied().unwrap_or([0.0, 0.0]),
-            ],
-            None => [[0.0, 0.0]; 3],
-        };
-        let normals = match vertex_normals {
-            Some(n) => [
-                n.get(face[0]).copied().unwrap_or([0.0, 1.0, 0.0]),
-                n.get(face[1]).copied().unwrap_or([0.0, 1.0, 0.0]),
-                n.get(face[2]).copied().unwrap_or([0.0, 1.0, 0.0]),
-            ],
-            None => face_normal_f32(&v),
-        };
         FaceInstance {
-            positions: [p0, p1, p2],
+            positions: [
+                Quat::from_point(v[0][0], v[0][1], v[0][2]),
+                Quat::from_point(v[1][0], v[1][1], v[1][2]),
+                Quat::from_point(v[2][0], v[2][1], v[2][2]),
+            ],
             weights: [Quat::ONE, Quat::ONE, Quat::ONE],
             edge_lods: [1, 1, 1],
             vertex_lods: [1, 1, 1],
-            uvs,
-            normals,
+            uvs: [[0.0, 0.0]; 3],
+            normals: face_normal_f32(&v),
         }
     }).collect()
 }
@@ -307,7 +317,6 @@ pub fn compute_instances_with_uvs(
     // the same slot → guaranteed matching. This is the v0.2.0 proven
     // approach that was working before the LOD refactors.
 
-    const MAX_LOD: u32 = 512;
     let tess_density = TESS_DENSITY.with(|d| *d.borrow());
     let screen_atten_enabled = SCREEN_ATTEN.with(|s| *s.borrow());
     let min_px = MIN_PX_PER_SUB.with(|p| *p.borrow());
@@ -327,10 +336,7 @@ pub fn compute_instances_with_uvs(
     let nf = mesh.num_faces as usize;
 
     let canonical_edge = |he_idx: usize| -> usize {
-        match mesh.half_edges[he_idx].twin {
-            Some(nz) => he_idx.min((nz.get() - 1) as usize),
-            None => he_idx,
-        }
+        mesh.canonical_edge(he_idx as u32) as usize
     };
 
     let screen_arc_len = |va: usize, vb: usize| -> f64 {
@@ -471,7 +477,7 @@ pub fn compute_instances_with_uvs(
             } else {
                 edge_lods_world[canon]
             };
-            edge_lods[canon] = snap_to_power_of_2(lod).max(2).min(MAX_LOD);
+            edge_lods[canon] = snap_to_power_of_2(lod).clamp(MIN_LOD, MAX_LOD);
         }
     }
 
@@ -603,9 +609,20 @@ fn face_normal_f32(v: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
 }
 
 impl FaceInstance {
-    /// Pack as 52 f32s (13 vec4s = 208 bytes per instance):
-    /// [p0(4), p1(4), p2(4), w0(4), w1(4), w2(4), edgeLods(3)+pad, vertexLods(3)+pad,
-    ///  uv01(u0,v0,u1,v1), uv2(u2,v2,pad,pad), n0(3)+pad, n1(3)+pad, n2(3)+pad]
+    /// Pack as the **legacy** 52-float (13 vec4, 208-byte) record:
+    /// `[p0, p1, p2, w0, w1, w2, edgeLods+pad, vertexLods+pad, uv01, uv2+pad,
+    /// n0+pad, n1+pad, n2+pad]`.
+    ///
+    /// This is not the layout the renderer binds. Production uses
+    /// [`crate::instance_layout`] (40 floats), which drops the explicit weight
+    /// quaternions because the fused Möbius-QB shader derives them from the
+    /// Möbius uniforms, and puts a skinning vertex index in each position's
+    /// scalar slot.
+    ///
+    /// Kept for the callers that still build their own buffers against the old
+    /// shape: `quilting-remesh`, `quilting-wasm`, and the `web_demo` example.
+    /// New code should pack through
+    /// [`crate::instance_layout::InstanceWriter`].
     pub fn to_f32_array(&self) -> [f32; 52] {
         let mut out = [0.0f32; 52];
         for (i, p) in self.positions.iter().enumerate() {

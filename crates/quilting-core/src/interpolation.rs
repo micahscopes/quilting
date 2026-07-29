@@ -34,33 +34,6 @@ pub fn tri_edge_weight(bary: [f64; 3], res: [f64; 3]) -> f64 {
     1.0 / log_res.exp()
 }
 
-/// Compute interpolated spacing for a point inside a quad patch.
-///
-/// `uv` in [0,1]^2, `res` = [A, B, C, D] edge resolutions.
-///
-/// Matches the original TS: each edge's influence is the product of its two
-/// adjacent bilinear basis functions. For edge A (left, u=0): influence = y*(1-x)*(1-y),
-/// edge B (bottom, v=0): x*(1-x)*(1-y), etc.
-///
-/// Returns the local spacing (inverse of local density).
-pub fn quad_edge_weight(uv: [f64; 2], res: [f64; 4]) -> f64 {
-    let [x, y] = uv;
-    let z = 1.0 - x;
-    let w = 1.0 - y;
-    let e0 = y * z * w; // edge A (left)
-    let e1 = x * z * w; // edge B (bottom)
-    let e2 = x * y * w; // edge C (right)
-    let e3 = x * y * z; // edge D (top)
-    let sum = e0 + e1 + e2 + e3;
-    if sum < 1e-30 {
-        let max_res = res[0].max(res[1]).max(res[2]).max(res[3]);
-        return 1.0 / max_res;
-    }
-    let log_res = (e0 * res[0].ln() + e1 * res[1].ln()
-                 + e2 * res[2].ln() + e3 * res[3].ln()) / sum;
-    1.0 / log_res.exp()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,26 +83,5 @@ mod tests {
         let spacing = tri_edge_weight([0.99, 0.005, 0.005], res);
         // Near vertex, all edges have low influence; should not crash
         assert!(spacing > 0.0 && spacing.is_finite());
-    }
-
-    #[test]
-    fn quad_edge_midpoint_dominated_by_edge() {
-        // At bottom edge midpoint [0.5, 0.0]: z=0.5, w=1.0
-        // e0 = 0*0.5*1 = 0, e1 = 0.5*0.5*1 = 0.25, e2 = 0.5*0*1 = 0, e3 = 0.5*0*0.5 = 0
-        // Only edge B contributes → spacing = 1/res_b
-        let res = [2.0, 10.0, 2.0, 2.0];
-        let spacing = quad_edge_weight([0.5, 0.0], res);
-        assert!(
-            (spacing - 1.0 / 10.0).abs() < 1e-12,
-            "at bottom edge midpoint, spacing should be 1/res_b, got {}",
-            spacing
-        );
-    }
-
-    #[test]
-    fn quad_center_equal() {
-        let res = [8.0, 8.0, 8.0, 8.0];
-        let spacing = quad_edge_weight([0.5, 0.5], res);
-        assert!((spacing - 1.0 / 8.0).abs() < 1e-12);
     }
 }

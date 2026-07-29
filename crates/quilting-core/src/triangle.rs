@@ -1,12 +1,12 @@
-/// Reference equilateral triangle geometry.
-///
-/// Vertices inscribed in the unit circle, centered at the origin:
-///   A = (0, 1)          — top
-///   B = (-√3/2, -1/2)   — bottom-left
-///   C = (√3/2, -1/2)    — bottom-right
-///
-/// Side length = √3. S3 permutations correspond to geometric symmetries:
-/// cyclic permutations → 120°/240° rotations, transpositions → reflections.
+//! Reference equilateral triangle geometry.
+//!
+//! Vertices inscribed in the unit circle, centered at the origin:
+//!   A = (0, 1)          — top
+//!   B = (-√3/2, -1/2)   — bottom-left
+//!   C = (√3/2, -1/2)    — bottom-right
+//!
+//! Side length = √3. S3 permutations correspond to geometric symmetries:
+//! cyclic permutations → 120°/240° rotations, transpositions → reflections.
 
 pub const SQRT3: f64 = 1.732_050_808_068_887_2;
 pub const SQRT3_OVER_2: f64 = 0.866_025_403_784_438_6;

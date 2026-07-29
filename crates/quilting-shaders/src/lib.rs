@@ -235,4 +235,26 @@ mod tests {
         let result = compile_fragment_glsl("nonexistent");
         assert!(result.is_err());
     }
+
+    /// `qinv`'s pole guard must stay in step with `SINGULARITY_NORM_SQ` /
+    /// `SINGULARITY_SENTINEL` in quilting-core's `quaternion.rs`. The CPU
+    /// computes LODs and smooth normals for the geometry this shader draws, so
+    /// if the two disagree about where a Möbius pole starts, the mismatch shows
+    /// up exactly where the surface stretches to infinity.
+    ///
+    /// This crate can't import quilting-core (that would be a dependency
+    /// cycle through the renderer), so the constants are asserted literally.
+    /// If you change one side, change both.
+    #[test]
+    fn qinv_pole_guard_matches_the_cpu_constants() {
+        let src = sources::QUATERNION;
+        assert!(
+            src.contains("d < 1e-20"),
+            "qinv threshold changed; update SINGULARITY_NORM_SQ in quilting-core too"
+        );
+        assert!(
+            src.contains("vec4<f32>(1e10, 0.0, 0.0, 0.0)"),
+            "qinv sentinel changed; update SINGULARITY_SENTINEL in quilting-core too"
+        );
+    }
 }

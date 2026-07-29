@@ -1,6 +1,34 @@
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, Sub, Mul, Neg, Div};
 
+/// Squared norm below which a quaternion counts as a Möbius pole and `inv`
+/// returns a sentinel instead of dividing. Equivalently `|q| < 1e-10`.
+///
+/// This constant is mirrored by `qinv` in `shaders/math/quaternion.wgsl` and
+/// the two must stay equal, even though the CPU runs f64 and the GPU runs f32.
+/// The GPU is the binding constraint:
+///
+/// - f32 `dot(q, q)` for `|q| ~ 1e-10` is `~1e-20`, still a normal float with
+///   ample mantissa. Push the cutoff much lower and the squares slide toward
+///   f32's subnormal range (min normal `1.2e-38`) and the inverse loses all
+///   precision before the guard ever fires.
+/// - The sentinel then propagates into positions, cross products and
+///   normalizations. `1e10` squares to `1e20`, eighteen orders below f32's
+///   `3.4e38` ceiling, so the analytic-normal path stays finite.
+///
+/// f64 could take a far tighter cutoff (`1e-30` was the historical value), but
+/// a CPU that admits poles the GPU rejects is worse than a slightly blunt one:
+/// the CPU computes the LODs and smooth normals for exactly the geometry the
+/// GPU draws, so disagreeing about where the pole is puts a discontinuity
+/// precisely where the artifacts are most visible. Coordinates are model-scale
+/// (order 1), so `|c*x + d| < 1e-10` already means the point maps ten billion
+/// units away — nothing renderable is lost by treating it as infinity.
+pub const SINGULARITY_NORM_SQ: f64 = 1e-20;
+
+/// Scalar part returned by [`Quat::inv`] at a pole. Chosen as
+/// `1 / sqrt(SINGULARITY_NORM_SQ)` so `|q⁻¹|` is continuous across the guard.
+pub const SINGULARITY_SENTINEL: f64 = 1e10;
+
 /// Quaternion: q = w + xi + yj + zk
 ///
 /// Following the convention in Krasauskas & Zubė where R³ is identified
@@ -68,10 +96,10 @@ impl Quat {
     #[inline]
     pub fn inv(self) -> Self {
         let n2 = self.norm_sq();
-        if n2 < 1e-30 {
-            // Near-zero quaternion — return a large but finite value
-            // This happens at singularities of Möbius transformations
-            return Self { w: 1e15, x: 0.0, y: 0.0, z: 0.0 };
+        if n2 < SINGULARITY_NORM_SQ {
+            // At a Möbius pole. Return a large but finite value so callers get
+            // "very far away" rather than NaN.
+            return Self { w: SINGULARITY_SENTINEL, x: 0.0, y: 0.0, z: 0.0 };
         }
         let inv_n2 = 1.0 / n2;
         Self {
@@ -172,7 +200,7 @@ impl Neg for Quat {
 
 /// Möbius transformation in R³: F(x) = (ax + b)(cx + d)⁻¹
 ///
-/// Represented as a 2×2 quaternion matrix [[a,b],[c,d]].
+/// Represented as a 2×2 quaternion matrix `[[a, b], [c, d]]`.
 /// Composition corresponds to matrix multiplication.
 #[derive(Debug, Clone, Copy)]
 pub struct Mobius {
@@ -335,6 +363,40 @@ mod tests {
         let qi = q.inv();
         assert!(approx_eq(q * qi, Quat::ONE));
         assert!(approx_eq(qi * q, Quat::ONE));
+    }
+
+    /// The pole guard should hand back a finite continuation rather than a
+    /// discontinuity: `|q⁻¹|` at the threshold is `1/sqrt(threshold)`, which is
+    /// exactly the sentinel. See `SINGULARITY_NORM_SQ` for why these particular
+    /// values, and `qinv` in `shaders/math/quaternion.wgsl` for the GPU copy.
+    #[test]
+    fn pole_sentinel_is_continuous_with_the_real_inverse() {
+        assert!(
+            (SINGULARITY_SENTINEL - 1.0 / SINGULARITY_NORM_SQ.sqrt()).abs()
+                < 1e-6 * SINGULARITY_SENTINEL,
+            "sentinel should be 1/sqrt(threshold)"
+        );
+
+        // Just above the threshold: the real inverse, magnitude ~= sentinel.
+        let just_above = Quat::from_point(SINGULARITY_NORM_SQ.sqrt() * 1.001, 0.0, 0.0);
+        let norm_above = just_above.inv().norm();
+        assert!(
+            (norm_above / SINGULARITY_SENTINEL - 1.0).abs() < 0.01,
+            "inverse magnitude {norm_above:e} should be near the sentinel"
+        );
+
+        // Just below: the guard, exactly the sentinel and still finite.
+        let just_below = Quat::from_point(SINGULARITY_NORM_SQ.sqrt() * 0.999, 0.0, 0.0);
+        assert_eq!(just_below.inv().norm(), SINGULARITY_SENTINEL);
+        assert!(Quat::ZERO.inv().norm().is_finite());
+    }
+
+    /// The sentinel must survive being squared in f32, since that is what the
+    /// shader does when it normalizes an analytic QB normal.
+    #[test]
+    fn pole_sentinel_stays_in_f32_range_when_squared() {
+        let s = SINGULARITY_SENTINEL as f32;
+        assert!(s.is_finite() && (s * s).is_finite(), "sentinel overflows f32 when squared");
     }
 
     #[test]

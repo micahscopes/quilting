@@ -1,24 +1,31 @@
-/// Half-edge mesh data structure for efficient adjacency queries.
-///
-/// Built once from an indexed triangle list, provides O(1) lookups for:
-/// - Vertex -> outgoing half-edges
-/// - Half-edge -> twin, next, prev, face, vertex
-/// - Face -> one half-edge (iterate to get all 3)
-/// - Edge -> both half-edges (or one if boundary)
+//! Half-edge mesh data structure for efficient adjacency queries.
+//!
+//! Built once from an indexed triangle list, provides O(1) lookups for:
+//! - Vertex -> outgoing half-edges
+//! - Half-edge -> twin, next, prev, face, vertex
+//! - Face -> one half-edge (iterate to get all 3)
+//! - Edge -> both half-edges (or one if boundary)
+//!
+//! Quilting leans on this for one thing above all: the *canonical edge index*.
+//! Two faces sharing an edge must agree on that edge's LOD or the tessellation
+//! cracks (SPEC invariant 1). Indexing edge state by `min(he, twin(he))` makes
+//! agreement structural rather than something the LOD code has to remember.
+//!
+//! Every index is a bare `u32` into the corresponding `Vec`. There is no
+//! newtype wrapper: the crate is called almost entirely from code that already
+//! holds raw indices, and wrappers that get unwrapped at every boundary
+//! advertise a type safety that isn't there.
 
 use std::num::NonZeroU32;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VertexId(pub u32);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HalfEdgeId(pub u32);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FaceId(pub u32);
 
 fn pack_twin(idx: u32) -> Option<NonZeroU32> {
     Some(NonZeroU32::new(idx + 1).unwrap())
 }
 
+/// Decode the `+1`-biased twin field into a plain half-edge index.
+///
+/// Prefer [`HalfEdge::twin_index`] or [`HalfEdgeMesh::twin`]; this is public
+/// for callers that already hold a raw field value.
 pub fn unpack_twin(val: Option<NonZeroU32>) -> Option<u32> {
     val.map(|v| v.get() - 1)
 }
@@ -26,10 +33,22 @@ pub fn unpack_twin(val: Option<NonZeroU32>) -> Option<u32> {
 #[derive(Debug, Clone)]
 pub struct HalfEdge {
     pub vertex: u32,
+    /// Opposing half-edge as `index + 1`, or `None` on a boundary. The bias
+    /// lets `NonZeroU32` niche-pack the `Option`, keeping `HalfEdge` at 20
+    /// bytes. Read it through [`Self::twin_index`] rather than subtracting by
+    /// hand.
     pub twin: Option<NonZeroU32>,
     pub next: u32,
     pub prev: u32,
     pub face: u32,
+}
+
+impl HalfEdge {
+    /// Index of the opposing half-edge, or `None` if this is a boundary edge.
+    #[inline]
+    pub fn twin_index(&self) -> Option<u32> {
+        unpack_twin(self.twin)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,9 +133,28 @@ impl HalfEdgeMesh {
         [he0, he1, he2]
     }
 
+    /// Opposing half-edge, or `None` on a boundary edge.
+    #[inline]
+    pub fn twin(&self, half_edge: u32) -> Option<u32> {
+        self.half_edges[half_edge as usize].twin_index()
+    }
+
+    /// The shared identity of the undirected edge `half_edge` belongs to:
+    /// the lower of the two half-edge indices, or the half-edge itself on a
+    /// boundary.
+    ///
+    /// Per-edge state keyed by this index is automatically consistent between
+    /// the two adjacent faces, which is how matching edge LODs are guaranteed.
+    #[inline]
+    pub fn canonical_edge(&self, half_edge: u32) -> u32 {
+        match self.twin(half_edge) {
+            Some(t) => half_edge.min(t),
+            None => half_edge,
+        }
+    }
+
     pub fn adjacent_face(&self, half_edge: u32) -> Option<u32> {
-        unpack_twin(self.half_edges[half_edge as usize].twin)
-            .map(|t| self.half_edges[t as usize].face)
+        self.twin(half_edge).map(|t| self.half_edges[t as usize].face)
     }
 
     pub fn edge_vertices(&self, half_edge: u32) -> (u32, u32) {
@@ -139,8 +177,7 @@ impl HalfEdgeMesh {
         let mut current = start;
         loop {
             result.push(current);
-            let twin = unpack_twin(self.half_edges[current as usize].twin);
-            match twin {
+            match self.twin(current) {
                 None => break,
                 Some(t) => {
                     current = self.half_edges[t as usize].next;
@@ -195,6 +232,33 @@ mod tests {
         assert_eq!(mesh.num_faces, 12);
         assert_eq!(mesh.half_edges.len(), 36);
         assert_eq!(mesh.num_boundary_edges(), 0);
+    }
+
+    /// Both half-edges of a shared edge must canonicalize to the same index —
+    /// this is what lets per-edge LODs be stored in a flat Vec and read back
+    /// identically from both adjacent faces.
+    #[test]
+    fn twins_share_a_canonical_edge() {
+        let faces = vec![
+            [0,1,2],[0,2,3], [5,4,7],[5,7,6], [4,0,3],[4,3,7],
+            [1,5,6],[1,6,2], [3,2,6],[3,6,7], [4,5,1],[4,1,0],
+        ];
+        let mesh = HalfEdgeMesh::from_triangles(8, &faces);
+
+        let mut canonical_seen = std::collections::HashSet::new();
+        for he in 0..mesh.half_edges.len() as u32 {
+            let canon = mesh.canonical_edge(he);
+            canonical_seen.insert(canon);
+            match mesh.twin(he) {
+                Some(t) => {
+                    assert_eq!(canon, mesh.canonical_edge(t), "twins disagree on canonical edge");
+                    assert_eq!(canon, he.min(t));
+                }
+                None => assert_eq!(canon, he, "boundary edge is its own canonical edge"),
+            }
+        }
+        // A closed cube: 36 half-edges pairing into 18 undirected edges.
+        assert_eq!(canonical_seen.len(), 18);
     }
 
     #[test]

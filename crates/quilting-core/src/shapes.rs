@@ -1,5 +1,5 @@
-/// Simple procedural meshes as triangle soups.
-/// Each returns (positions: Vec<[f64;3]>, triangles: Vec<[usize;3]>).
+//! Simple procedural meshes as triangle soups.
+//! Each returns `(positions: Vec<[f64; 3]>, triangles: Vec<[usize; 3]>)`.
 
 pub fn cube() -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
     let v = vec![

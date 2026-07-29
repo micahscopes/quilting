@@ -100,79 +100,6 @@ impl QBTriPatch {
     }
 }
 
-/// A QB quad patch (bilinear, 4 control points).
-#[derive(Debug, Clone, Copy)]
-pub struct QBQuadPatch {
-    /// Control positions: [p00, p10, p01, p11]
-    pub positions: [Quat; 4],
-    /// Control weights
-    pub weights: [Quat; 4],
-}
-
-impl QBQuadPatch {
-    pub fn new(positions: [Quat; 4], weights: [Quat; 4]) -> Self {
-        Self { positions, weights }
-    }
-
-    /// Evaluate at (s, t) in [0,1]².
-    #[inline]
-    pub fn eval(&self, s: f64, t: f64) -> Quat {
-        let s0 = 1.0 - s;
-        let s1 = s;
-        let t0 = 1.0 - t;
-        let t1 = t;
-
-        let [p00, p10, p01, p11] = self.positions;
-        let [w00, w10, w01, w11] = self.weights;
-
-        let top = (s0 * t0) * (p00 * w00)
-                + (s1 * t0) * (p10 * w10)
-                + (s0 * t1) * (p01 * w01)
-                + (s1 * t1) * (p11 * w11);
-        let bottom = (s0 * t0) * w00
-                   + (s1 * t0) * w10
-                   + (s0 * t1) * w01
-                   + (s1 * t1) * w11;
-
-        top * bottom.inv()
-    }
-
-    pub fn eval_with_normal(&self, s: f64, t: f64) -> SurfacePoint {
-        let eps = 1e-4;
-        let p = self.eval(s, t);
-        let ps = self.eval(s + eps, t);
-        let pt = self.eval(s, t + eps);
-
-        let ds = [ps.x - p.x, ps.y - p.y, ps.z - p.z];
-        let dt = [pt.x - p.x, pt.y - p.y, pt.z - p.z];
-
-        let nx = ds[1] * dt[2] - ds[2] * dt[1];
-        let ny = ds[2] * dt[0] - ds[0] * dt[2];
-        let nz = ds[0] * dt[1] - ds[1] * dt[0];
-        let len = (nx * nx + ny * ny + nz * nz).sqrt();
-        let normal = if len > 1e-12 {
-            [nx / len, ny / len, nz / len]
-        } else {
-            [0.0, 0.0, 1.0]
-        };
-
-        SurfacePoint {
-            position: p.to_point(),
-            normal,
-        }
-    }
-
-    pub fn transform(&self, m: &Mobius) -> Self {
-        let mut new_positions = [Quat::ZERO; 4];
-        let mut new_weights = [Quat::ZERO; 4];
-        for i in 0..4 {
-            new_positions[i] = m.apply(self.positions[i]);
-            new_weights[i] = m.transform_weight(self.positions[i], self.weights[i]);
-        }
-        Self { positions: new_positions, weights: new_weights }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +175,109 @@ mod tests {
 
         let diff = (0..3).map(|i| (p_weighted[i] - p_flat[i]).abs()).sum::<f64>();
         assert!(diff > 0.01, "non-unit weights should deform the surface, diff={}", diff);
+    }
+
+    /// Interior barycentric samples, avoiding the corners (where the identity
+    /// is trivial) and the edges.
+    const INTERIOR: [(f64, f64); 6] = [
+        (1.0/3.0, 1.0/3.0),
+        (0.1, 0.1),
+        (0.7, 0.2),
+        (0.2, 0.7),
+        (0.45, 0.05),
+        (0.05, 0.45),
+    ];
+
+    /// The theorem the whole system rests on: a Möbius map commutes with QB
+    /// evaluation. Transforming the control points and weights and *then*
+    /// evaluating gives the same point as evaluating and then transforming.
+    ///
+    /// It holds exactly, not approximately. Writing `X = top·bot⁻¹`, the
+    /// transform rules give `top' = a·top + b·bot` and `bot' = c·top + d·bot`,
+    /// because each control point's `(c·pᵢ + d)⁻¹` cancels against the weight
+    /// rule `w'ᵢ = (c·pᵢ + d)·wᵢ`. Then
+    /// `top'·bot'⁻¹ = (a·top + b·bot)(c·top + d·bot)⁻¹ = (aX + b)(cX + d)⁻¹`.
+    ///
+    /// This is why the GPU can fold the transform into the rational form and
+    /// spend one quaternion inverse per vertex instead of one per control
+    /// point, and why dragging a Möbius slider needs no CPU work.
+    ///
+    /// The interesting case is `c ≠ 0`. With `c = 0` the map is affine and the
+    /// identity collapses to linearity of the numerator, which proves much
+    /// less — so these cases all use sphere reflections and inversions.
+    #[test]
+    fn mobius_commutes_with_evaluation_when_c_is_nonzero() {
+        // Poles sit at the reflection centres, so keep those off the patch.
+        let flat = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let curved = QBTriPatch::new(
+            [
+                Quat::from_point(0.0, 0.0, 0.0),
+                Quat::from_point(1.0, 0.0, 0.0),
+                Quat::from_point(0.0, 1.0, 0.0),
+            ],
+            [
+                Quat::new(0.8, 0.1, -0.2, 0.3),
+                Quat::new(1.0, 0.0, 0.0, 0.0),
+                Quat::new(0.4, -0.5, 0.6, 0.2),
+            ],
+        );
+
+        let cases: [(&str, Mobius); 3] = [
+            (
+                "sphere reflection",
+                Mobius::sphere_reflection(Quat::from_point(0.4, -0.3, 1.9), 1.7),
+            ),
+            (
+                "sphere inversion (two reflections)",
+                Mobius::sphere_inversion(
+                    Quat::from_point(0.2, 0.5, -1.4), 0.9,
+                    Quat::from_point(-0.6, 0.1, 2.2), 1.3,
+                ),
+            ),
+            (
+                "reflection composed with rotation",
+                Mobius::sphere_reflection(Quat::from_point(-1.1, 0.7, 1.5), 2.0)
+                    .compose(&Mobius::rotation(0.3, 1.0, -0.2, 0.9)),
+            ),
+        ];
+
+        for (name, m) in cases {
+            assert!(!m.is_affine(), "{name}: c must be nonzero for this to test anything");
+            for (patch_name, patch) in [("flat", flat), ("curved weights", curved)] {
+                let transformed = patch.transform(&m);
+                for (u, v) in INTERIOR {
+                    let via_patch = transformed.eval(u, v);
+                    let via_point = m.apply(patch.eval(u, v));
+                    // Scale tolerance with magnitude: sphere reflections push
+                    // points a long way, so a fixed absolute epsilon would be
+                    // meaninglessly strict out there and vacuous near zero.
+                    let scale = via_point.norm().max(1.0);
+                    let err = (via_patch - via_point).norm();
+                    assert!(
+                        err < 1e-9 * scale,
+                        "{name} / {patch_name} at ({u}, {v}): \
+                         transform-then-eval {via_patch:?} != eval-then-transform \
+                         {via_point:?} (err {err:e})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Corners are fixed points of the identity above, but they also pin down
+    /// the transform rule itself: control point i must land exactly on the
+    /// Möbius image of the original control point.
+    #[test]
+    fn transform_moves_control_points_to_their_images() {
+        let m = Mobius::sphere_reflection(Quat::from_point(0.3, 0.2, 2.5), 1.4);
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let transformed = patch.transform(&m);
+        for i in 0..3 {
+            let expected = m.apply(patch.positions[i]);
+            assert!(
+                (transformed.positions[i] - expected).norm() < 1e-12,
+                "control point {i} misplaced"
+            );
+        }
     }
 }

@@ -16,6 +16,12 @@ fn qconj(q: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(q.x, -q.y, -q.z, -q.w);
 }
 
+// Inverse, with a Möbius-pole guard. The threshold and sentinel must match
+// SINGULARITY_NORM_SQ / SINGULARITY_SENTINEL in quilting-core's quaternion.rs —
+// the CPU computes LODs and smooth normals for the same geometry this shader
+// evaluates, so the two must agree on where the pole is. 1e-20 is about as low
+// as f32 can go before dot(q, q) drifts into the subnormal range, and the 1e10
+// sentinel squares to 1e20, far under f32's 3.4e38 ceiling.
 fn qinv(q: vec4<f32>) -> vec4<f32> {
     let d = dot(q, q);
     if d < 1e-20 {

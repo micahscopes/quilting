@@ -3,8 +3,9 @@
 //! Uses O(n) bucket sort with direct indexing — the key space is bounded
 //! (atlas 0-255 × perm 0-5 × materials) and small enough for a flat Vec.
 
-/// Instance data stride: 40 floats per face.
-pub const INSTANCE_STRIDE: usize = 40;
+/// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
+/// which is the normative definition — do not restate the number here.
+pub use crate::instance_layout::STRIDE as INSTANCE_STRIDE;
 
 /// Per-face LOD stride: 6 floats from GPU pass 2.
 pub const FACE_LOD_STRIDE: usize = 6;
@@ -194,7 +195,7 @@ pub fn sort_into_ranges(
             parity,
             material_index: mat,
             tess_key: TessKey { lod: [ca, cb, cc], perm_index: perm as u32 },
-            instance_offset: offset * INSTANCE_STRIDE * 4, // byte offset
+            instance_offset: offset * crate::instance_layout::STRIDE_BYTES,
             instance_count: faces.len(),
         });
     }

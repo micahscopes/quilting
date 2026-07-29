@@ -42,28 +42,6 @@ pub fn canonical_form(res: [u32; 3]) -> CanonicalKey {
     }
 }
 
-/// Apply a permutation to vertex indices.
-pub fn apply_perm(perm_index: usize, verts: [usize; 3]) -> [usize; 3] {
-    let perm = S3_PERMUTATIONS[perm_index];
-    [verts[perm[0]], verts[perm[1]], verts[perm[2]]]
-}
-
-/// Get inverse permutation index.
-pub fn inverse_perm(perm_index: usize) -> usize {
-    let perm = S3_PERMUTATIONS[perm_index];
-    for (idx, candidate) in S3_PERMUTATIONS.iter().enumerate() {
-        let composed = [
-            candidate[perm[0]],
-            candidate[perm[1]],
-            candidate[perm[2]],
-        ];
-        if composed == [0, 1, 2] {
-            return idx;
-        }
-    }
-    0
-}
-
 /// Returns +1 for even permutations (rotations), -1 for odd (reflections).
 pub fn perm_sign(perm_index: usize) -> i32 {
     // Even: identity [0,1,2], cycles [1,2,0] [2,0,1]
@@ -130,17 +108,6 @@ mod tests {
     }
 
     #[test]
-    fn inverse_perm_is_inverse() {
-        for (idx, _) in S3_PERMUTATIONS.iter().enumerate() {
-            let inv = inverse_perm(idx);
-            let perm = S3_PERMUTATIONS[idx];
-            let inv_perm = S3_PERMUTATIONS[inv];
-            let composed = [inv_perm[perm[0]], inv_perm[perm[1]], inv_perm[perm[2]]];
-            assert_eq!(composed, [0, 1, 2]);
-        }
-    }
-
-    #[test]
     fn remap_identity() {
         // A point inside the equilateral triangle
         let pos = [0.1, 0.2];
@@ -189,6 +156,73 @@ mod tests {
                     close_to_vertex,
                     "remap({}) produced {:?} which isn't a vertex",
                     perm_idx, r
+                );
+            }
+        }
+    }
+
+    /// Signed area of a 2D triangle; positive when the winding is CCW.
+    fn signed_area(t: [[f64; 2]; 3]) -> f64 {
+        let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1]];
+        let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1]];
+        0.5 * (e1[0] * e2[1] - e1[1] * e2[0])
+    }
+
+    /// `perm_sign` has to mean something geometric, not just count inversions:
+    /// odd permutations are reflections of the reference triangle, so remapping
+    /// its vertices through one reverses the winding order.
+    ///
+    /// This is what SPEC invariant 4 turns on. The renderer feeds `perm_sign`
+    /// to the shader as `perm_parity`; if it disagreed with the actual winding
+    /// of the remapped tessellation, every face using an odd permutation would
+    /// light with an inside-out normal.
+    #[test]
+    fn odd_permutations_reverse_winding() {
+        let reference = [VERTEX_A, VERTEX_B, VERTEX_C];
+        assert!(signed_area(reference) > 0.0, "reference triangle should be CCW");
+
+        for perm_idx in 0..S3_PERMUTATIONS.len() {
+            let remapped = [
+                remap_position(perm_idx, VERTEX_A),
+                remap_position(perm_idx, VERTEX_B),
+                remap_position(perm_idx, VERTEX_C),
+            ];
+            let area = signed_area(remapped);
+            // Same shape, so only the orientation can change.
+            assert!(
+                (area.abs() - signed_area(reference)).abs() < 1e-12,
+                "perm {perm_idx} changed triangle area: {area}"
+            );
+            let winding = if area > 0.0 { 1 } else { -1 };
+            assert_eq!(
+                winding,
+                perm_sign(perm_idx),
+                "perm {perm_idx} ({:?}) has sign {} but remaps to winding {winding}",
+                S3_PERMUTATIONS[perm_idx],
+                perm_sign(perm_idx),
+            );
+        }
+    }
+
+    #[test]
+    fn perm_sign_matches_the_group_structure() {
+        // Identity and the two 3-cycles are even; the three transpositions odd.
+        assert_eq!(perm_sign(0), 1, "identity");
+        assert_eq!(perm_sign(1), -1, "swap 1,2");
+        assert_eq!(perm_sign(2), -1, "swap 0,1");
+        assert_eq!(perm_sign(3), 1, "120 deg rotation");
+        assert_eq!(perm_sign(4), 1, "240 deg rotation");
+        assert_eq!(perm_sign(5), -1, "swap 0,2");
+
+        // sign is a homomorphism: sign(a∘b) = sign(a)·sign(b).
+        for (i, &a) in S3_PERMUTATIONS.iter().enumerate() {
+            for (j, &b) in S3_PERMUTATIONS.iter().enumerate() {
+                let composed = [a[b[0]], a[b[1]], a[b[2]]];
+                let k = S3_PERMUTATIONS.iter().position(|p| *p == composed).unwrap();
+                assert_eq!(
+                    perm_sign(k),
+                    perm_sign(i) * perm_sign(j),
+                    "sign not multiplicative for {i} o {j}"
                 );
             }
         }
