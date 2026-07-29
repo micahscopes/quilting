@@ -1,4 +1,10 @@
-/// Variational Shape Approximation — clusters mesh faces by normal similarity.
+//! Variational Shape Approximation — clusters mesh faces by normal similarity.
+//!
+//! RESEARCH BASELINE, NOT ON THE PRODUCT PATH. The only caller is the test-only
+//! [`crate::remesh`] pipeline. Planar proxies split any curved region into many
+//! near-flat clusters, which is the opposite of what QB patches want; the live
+//! segmenter is [`crate::quadric_vsa`], which fits implicit quadrics so a whole
+//! sphere or cylinder can stay one cluster. Kept for comparison.
 
 use std::collections::BinaryHeap;
 use std::cmp::Ordering;

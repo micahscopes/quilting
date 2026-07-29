@@ -1,4 +1,26 @@
+//! Recovering a small set of curved QB patches from a dense triangle mesh.
+//!
+//! Two pipelines live here, and they are not equally load-bearing.
+//!
+//! **Product path.** [`remesh_simplified`] / [`remesh_simplified_curved`]:
+//! QEM edge collapse ([`simplify`], [`curvature`]) produces a coarse watertight
+//! mesh, then each simplified triangle is fitted independently with the Möbius
+//! c-parameter estimator ([`c_estimator`], driven by [`global_fit::per_patch_fit`])
+//! and screened by a blow-up guard. [`quadric_vsa`] and [`roundtrip::tessellate_patch`]
+//! are also called directly from the WASM bindings.
+//!
+//! **Research path.** [`remesh`] — VSA segmentation ([`vsa`]) → cluster extraction
+//! ([`cluster`]) → harmonic parameterization ([`parameterize`], [`sparse`]) →
+//! Gauss-Newton weight fitting ([`fit`]). It is exercised only by tests, and note
+//! that it no longer fits anything: it hand-builds a flat patch through each
+//! cluster's three corner vertices. It survives as a segmentation baseline.
+//!
+//! Fitting curved QB patches to arbitrary meshes is an open problem in this
+//! codebase, not a solved one. [`c_estimator`] and the round-trip invariants in
+//! [`roundtrip`] are the parts worth building on.
+
 pub mod geometry;
+pub mod linalg;
 pub mod sparse;
 pub mod vsa;
 pub mod quadric_vsa;
@@ -9,6 +31,7 @@ pub mod simplify;
 pub mod curvature;
 pub mod test_shapes;
 pub mod roundtrip;
+pub mod c_estimator;
 pub mod global_fit;
 
 use quilting_core::patch::QBTriPatch;
@@ -22,10 +45,6 @@ pub struct RemeshConfig {
     pub vsa_iterations: usize,
     /// Dihedral angle threshold for sharp edge detection (radians).
     pub sharp_edge_angle: f64,
-    /// Gauss-Newton iterations for quaternion weight optimization.
-    pub fit_iterations: usize,
-    /// Weight for normal deviation in fitting objective.
-    pub fit_normal_weight: f64,
     /// Maximum faces per cluster before adaptive splitting.
     pub max_cluster_size: usize,
 }
@@ -36,8 +55,6 @@ impl Default for RemeshConfig {
             target_patches: 500,
             vsa_iterations: 20,
             sharp_edge_angle: 40.0_f64.to_radians(),
-            fit_iterations: 15,
-            fit_normal_weight: 0.1,
             max_cluster_size: 20,
         }
     }
@@ -94,31 +111,41 @@ impl std::fmt::Display for RemeshError {
 impl std::error::Error for RemeshError {}
 
 /// Simplified remeshing via QEM edge collapse.
-/// Produces a watertight coarse mesh. If `fit_curved` is true, uses the c-parameter
-/// estimator to fit curved QB patches to the original surface data within each
-/// simplified triangle. Otherwise creates flat patches.
+/// Produces a watertight coarse mesh of flat QB patches.
 pub fn remesh_simplified(
     positions: &[[f64; 3]],
     faces: &[[usize; 3]],
     target_patches: usize,
 ) -> Result<RemeshResult, RemeshError> {
-    remesh_simplified_inner(positions, faces, target_patches, false)
+    remesh_simplified_inner(positions, faces, target_patches, None)
 }
 
-/// Like remesh_simplified but with curved QB patch fitting via the c-parameter estimator.
+/// Like [`remesh_simplified`] but fits a curved QB patch inside each simplified
+/// triangle with the c-parameter estimator, using the shipped default tuning.
 pub fn remesh_simplified_curved(
     positions: &[[f64; 3]],
     faces: &[[usize; 3]],
     target_patches: usize,
 ) -> Result<RemeshResult, RemeshError> {
-    remesh_simplified_inner(positions, faces, target_patches, true)
+    remesh_simplified_curved_with(positions, faces, target_patches, &Default::default())
+}
+
+/// [`remesh_simplified_curved`] with explicit fitting tuning — the knobs that
+/// used to be inline literals in the fitter (see [`global_fit::CurvedFitConfig`]).
+pub fn remesh_simplified_curved_with(
+    positions: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    target_patches: usize,
+    config: &global_fit::CurvedFitConfig,
+) -> Result<RemeshResult, RemeshError> {
+    remesh_simplified_inner(positions, faces, target_patches, Some(config))
 }
 
 fn remesh_simplified_inner(
     positions: &[[f64; 3]],
     faces: &[[usize; 3]],
     target_patches: usize,
-    fit_curved: bool,
+    fit_curved: Option<&global_fit::CurvedFitConfig>,
 ) -> Result<RemeshResult, RemeshError> {
     if faces.len() < 4 {
         return Err(RemeshError::TooFewFaces);
@@ -132,11 +159,11 @@ fn remesh_simplified_inner(
     let mut patch_uvs = Vec::with_capacity(simp_faces.len());
     let mut patch_normals = Vec::with_capacity(simp_faces.len());
 
-    if fit_curved {
-        // Per-patch fit: each patch gets its own c parameter with blow-up validation.
-        // Uses per_patch_fit which is more stable than global_fit for visual output.
+    if let Some(fit_config) = fit_curved {
+        // Per-patch fit: each patch gets its own c parameter with a blow-up guard.
+        // per_patch_fit is more stable than global_fit for visual output.
         let fit_result = global_fit::per_patch_fit(
-            &simp_pos, &simp_faces, positions, &orig_normals,
+            &simp_pos, &simp_faces, positions, &orig_normals, fit_config,
         );
         for (fi, face) in simp_faces.iter().enumerate() {
             patches.push(fit_result.patches[fi]);
@@ -199,51 +226,6 @@ fn remesh_simplified_inner(
     })
 }
 
-/// Collect original mesh vertices that project inside a given triangle.
-/// Returns (positions, bary_coords, normals) of the samples.
-fn collect_samples_for_triangle(
-    tri: &[[f64; 3]; 3],
-    positions: &[[f64; 3]],
-    normals: &[[f64; 3]],
-) -> (Vec<[f64; 3]>, Vec<[f64; 3]>, Vec<[f64; 3]>) {
-    let p0 = tri[0];
-    let e1 = geometry::vec3_sub(tri[1], p0);
-    let e2 = geometry::vec3_sub(tri[2], p0);
-
-    // Precompute for barycentric projection
-    let d11 = geometry::vec3_dot(e1, e1);
-    let d12 = geometry::vec3_dot(e1, e2);
-    let d22 = geometry::vec3_dot(e2, e2);
-    let det = d11 * d22 - d12 * d12;
-
-    if det.abs() < 1e-20 {
-        return (vec![], vec![], vec![]);
-    }
-
-    let mut out_pos = Vec::new();
-    let mut out_bary = Vec::new();
-    let mut out_norm = Vec::new();
-
-    for (i, p) in positions.iter().enumerate() {
-        let d = geometry::vec3_sub(*p, p0);
-        let b1 = geometry::vec3_dot(d, e1);
-        let b2 = geometry::vec3_dot(d, e2);
-        let u = (d22 * b1 - d12 * b2) / det;
-        let v = (d11 * b2 - d12 * b1) / det;
-        let w = 1.0 - u - v;
-
-        // Check if point projects inside the triangle (with some margin)
-        let margin = -0.05;
-        if u >= margin && v >= margin && w >= margin && u <= 1.0 - margin && v <= 1.0 - margin {
-            out_pos.push(*p);
-            out_bary.push([w, u, v]);
-            out_norm.push(normals[i]);
-        }
-    }
-
-    (out_pos, out_bary, out_norm)
-}
-
 /// Distance from point to triangle (approximate — uses projection to plane).
 fn point_to_triangle_dist(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
     let ab = geometry::vec3_sub(b, a);
@@ -255,7 +237,16 @@ fn point_to_triangle_dist(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) ->
     d
 }
 
-/// Run the full remeshing pipeline.
+/// Run the VSA segmentation pipeline: segment → extract clusters → parameterize
+/// → emit one patch per cluster.
+///
+/// Test-only, and it does NOT fit QB patches despite the machinery it drags in.
+/// The fitting step was removed when free-weight Gauss-Newton proved unusable;
+/// what remains hand-builds a flat [`fit::FitResult`] through each cluster's
+/// three corner vertices (with a winding fix), then reports how far the original
+/// surface strays from it. Useful as a segmentation-quality baseline and as the
+/// only consumer of [`vsa`], [`cluster`], [`parameterize`] and [`sparse`]. The
+/// live entry points are [`remesh_simplified`] and [`remesh_simplified_curved`].
 pub fn remesh(
     positions: &[[f64; 3]],
     faces: &[[usize; 3]],
@@ -445,194 +436,6 @@ pub fn remesh(
     })
 }
 
-/// Run remeshing with quadric VSA segmentation.
-/// Uses implicit quadric surface proxies instead of planar normals, so regions
-/// that lie on the same sphere/cylinder stay as single clusters.
-pub fn remesh_quadric(
-    positions: &[[f64; 3]],
-    faces: &[[usize; 3]],
-    normals: Option<&[[f64; 3]]>,
-    uvs: Option<&[[f64; 2]]>,
-    config: &RemeshConfig,
-) -> Result<RemeshResult, RemeshError> {
-    if faces.len() < 4 {
-        return Err(RemeshError::TooFewFaces);
-    }
-
-    let computed_normals;
-    let vertex_normals = match normals {
-        Some(n) => n,
-        None => {
-            computed_normals = geometry::compute_vertex_normals(positions, faces);
-            &computed_normals
-        }
-    };
-
-    let num_verts = positions.len() as u32;
-    let faces_u32: Vec<[u32; 3]> = faces.iter()
-        .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
-        .collect();
-    let he_mesh = quilting_mesh::HalfEdgeMesh::from_triangles(num_verts, &faces_u32);
-
-    // Quadric VSA segmentation
-    let qvsa_config = quadric_vsa::QuadricVsaConfig {
-        target_clusters: config.target_patches,
-        max_iterations: config.vsa_iterations,
-        sharp_edge_threshold: config.sharp_edge_angle,
-        quadric_weight: 0.5,
-    };
-    let qvsa_result = quadric_vsa::segment(positions, faces, &he_mesh, &qvsa_config);
-
-    // Log surface type statistics
-    let mut n_plane = 0;
-    let mut n_sphere = 0;
-    let mut n_cyl = 0;
-    let mut n_gen = 0;
-    for p in &qvsa_result.proxies {
-        match &p.surface_type {
-            quadric_vsa::SurfaceType::Plane => n_plane += 1,
-            quadric_vsa::SurfaceType::Sphere { .. } => n_sphere += 1,
-            quadric_vsa::SurfaceType::Cylinder { .. } => n_cyl += 1,
-            quadric_vsa::SurfaceType::General => n_gen += 1,
-        }
-    }
-    eprintln!(
-        "quadric VSA: {} clusters (plane={}, sphere={}, cylinder={}, general={})",
-        qvsa_result.num_clusters, n_plane, n_sphere, n_cyl, n_gen
-    );
-
-    // Convert to planar VsaResult for downstream compatibility
-    let mut vsa_result = qvsa_result.to_vsa_result();
-
-    // Adaptive splitting (same as planar path)
-    let effective_max = if config.max_cluster_size > 0 {
-        let avg = faces.len() / config.target_patches.max(1);
-        config.max_cluster_size.max(avg)
-    } else {
-        usize::MAX
-    };
-    if effective_max < usize::MAX {
-        split_large_clusters(&mut vsa_result, positions, faces, effective_max);
-    }
-
-    // Extract clusters and fit QB patches (same as planar path)
-    let clusters = cluster::extract_clusters(positions, faces, &he_mesh, &vsa_result);
-
-    let mut patches = Vec::with_capacity(clusters.len());
-    let mut patch_uvs = Vec::with_capacity(clusters.len());
-    let mut patch_normals_out = Vec::with_capacity(clusters.len());
-    let mut total_pos_err = 0.0;
-    let mut max_pos_err = 0.0_f64;
-    let mut total_norm_err = 0.0;
-    let mut max_norm_err = 0.0_f64;
-    let mut num_fitted = 0usize;
-    let mut num_skipped = 0usize;
-    let mut num_flipped = 0usize;
-    let mut per_patch_normal_error = Vec::new();
-
-    for cl in &clusters {
-        let param = match parameterize::parameterize_cluster(positions, faces, cl, &he_mesh) {
-            Ok(p) => p,
-            Err(_) => { num_skipped += 1; continue; }
-        };
-
-        let sample_positions: Vec<[f64; 3]> = cl.vertex_indices.iter()
-            .map(|&vi| positions[vi])
-            .collect();
-        let sample_normals: Vec<[f64; 3]> = cl.vertex_indices.iter()
-            .map(|&vi| vertex_normals[vi])
-            .collect();
-
-        let mut fit_result = fit::FitResult {
-            patch: quilting_core::patch::QBTriPatch::flat(
-                positions[cl.corner_vertices[0]],
-                positions[cl.corner_vertices[1]],
-                positions[cl.corner_vertices[2]],
-            ),
-            rms_position_error: 0.0,
-            max_position_error: 0.0,
-            rms_normal_error_degrees: 0.0,
-            max_normal_error_degrees: 0.0,
-        };
-
-        let p0 = fit_result.patch.positions[0].to_point();
-        let p1 = fit_result.patch.positions[1].to_point();
-        let p2 = fit_result.patch.positions[2].to_point();
-        let tri_normal = geometry::face_normal_normalized(&[p0, p1, p2], [0, 1, 2]);
-
-        let mut cluster_normal = [0.0; 3];
-        for &fi in &cl.face_indices {
-            let fn_ = geometry::face_normal(positions, faces[fi]);
-            cluster_normal = geometry::vec3_add(cluster_normal, fn_);
-        }
-        cluster_normal = geometry::vec3_normalize(cluster_normal);
-
-        if geometry::vec3_dot(tri_normal, cluster_normal) < 0.0 {
-            fit_result.patch.positions.swap(1, 2);
-            fit_result.patch.weights.swap(1, 2);
-            num_flipped += 1;
-        }
-
-        let (rms_pos, max_pos_local, rms_norm, max_norm_local) =
-            fit::compute_errors(&fit_result.patch, &sample_positions, &sample_normals, &param.vertex_bary);
-
-        total_pos_err += rms_pos;
-        max_pos_err = max_pos_err.max(max_pos_local);
-        total_norm_err += rms_norm;
-        max_norm_err = max_norm_err.max(max_norm_local);
-        per_patch_normal_error.push(rms_norm);
-        num_fitted += 1;
-
-        patches.push(fit_result.patch);
-
-        let corner_uvs = if let Some(uv_data) = uvs {
-            [
-                [uv_data[cl.corner_vertices[0]][0] as f32, uv_data[cl.corner_vertices[0]][1] as f32],
-                [uv_data[cl.corner_vertices[1]][0] as f32, uv_data[cl.corner_vertices[1]][1] as f32],
-                [uv_data[cl.corner_vertices[2]][0] as f32, uv_data[cl.corner_vertices[2]][1] as f32],
-            ]
-        } else {
-            [[0.0, 0.0]; 3]
-        };
-        patch_uvs.push(corner_uvs);
-
-        let cn = [
-            [vertex_normals[cl.corner_vertices[0]][0] as f32,
-             vertex_normals[cl.corner_vertices[0]][1] as f32,
-             vertex_normals[cl.corner_vertices[0]][2] as f32],
-            [vertex_normals[cl.corner_vertices[1]][0] as f32,
-             vertex_normals[cl.corner_vertices[1]][1] as f32,
-             vertex_normals[cl.corner_vertices[1]][2] as f32],
-            [vertex_normals[cl.corner_vertices[2]][0] as f32,
-             vertex_normals[cl.corner_vertices[2]][1] as f32,
-             vertex_normals[cl.corner_vertices[2]][2] as f32],
-        ];
-        patch_normals_out.push(cn);
-    }
-
-    let n = num_fitted.max(1) as f64;
-    let num_patches = patches.len();
-    Ok(RemeshResult {
-        patches,
-        patch_uvs,
-        patch_normals: patch_normals_out,
-        face_cluster_ids: vsa_result.face_labels,
-        stats: RemeshStats {
-            original_faces: faces.len(),
-            num_clusters: vsa_result.num_clusters,
-            num_patches,
-            avg_position_error: total_pos_err / n,
-            max_position_error: max_pos_err,
-            avg_normal_error_degrees: total_norm_err / n,
-            max_normal_error_degrees: max_norm_err,
-            reduction_ratio: faces.len() as f64 / num_patches.max(1) as f64,
-            num_skipped,
-            num_flipped,
-            per_patch_normal_error,
-        },
-    })
-}
-
 /// Split clusters that exceed max_cluster_size by re-running VSA on their faces.
 fn split_large_clusters(
     result: &mut vsa::VsaResult,
@@ -759,7 +562,6 @@ mod tests {
             target_patches: 5,
             vsa_iterations: 10,
             sharp_edge_angle: std::f64::consts::PI, // no sharp edges
-            fit_iterations: 3,
             ..Default::default()
         };
         let result = remesh(&positions, &faces, None, None, &config).unwrap();
@@ -775,7 +577,6 @@ mod tests {
             target_patches: 6,
             vsa_iterations: 10,
             sharp_edge_angle: std::f64::consts::PI,
-            fit_iterations: 0,
             ..Default::default()
         };
         let result = remesh(&positions, &faces, None, None, &config).unwrap();
@@ -790,7 +591,6 @@ mod tests {
         let (positions, faces) = quilting_core::shapes::icosahedron();
         let config = RemeshConfig {
             target_patches: 5,
-            fit_iterations: 0,
             ..Default::default()
         };
         let result = remesh(&positions, &faces, None, None, &config).unwrap();
@@ -830,7 +630,6 @@ mod tests {
         let (positions, faces) = quilting_core::shapes::octahedron();
         let config = RemeshConfig {
             target_patches: 4,
-            fit_iterations: 0,
             ..Default::default()
         };
         let result = remesh(&positions, &faces, None, None, &config).unwrap();

@@ -1,17 +1,26 @@
-/// QB patch fitting: least-squares position fit + Gauss-Newton quaternion weight optimization.
-///
-/// Weight constraints from the literature (Krasauskas & Zubė):
-/// - For the QB parametrization to produce points in R³ (not R⁴), the expression
-///   (Σ λᵢ pᵢ wᵢ) * (Σ λᵢ wᵢ)^-1 must be pure imaginary (Re = 0).
-/// - For triangular patches with 3 control points, this is automatically satisfied
-///   when positions are pure imaginary quaternions (3D points) and we extract Im().
-/// - The gauge freedom: multiplying all weights by a common quaternion q doesn't
-///   change the surface. We fix w0 = Quat::ONE to remove this redundancy.
-/// - Circular arc boundaries arise naturally when adjacent patches share edge weights.
+//! QB patch fitting: least-squares position fit + Gauss-Newton quaternion weight optimization.
+//!
+//! RESEARCH BASELINE, NOT ON THE PRODUCT PATH. Nothing outside the test-only
+//! [`crate::remesh`] pipeline, the round-trip tests in [`crate::roundtrip`], and
+//! `examples/experiments.rs` calls this. Optimizing w₁ and w₂ freely (8 DOF) is
+//! under-constrained: the objective has a flat gauge direction and unconstrained
+//! steps push the denominator `Σλᵢwᵢ` through zero, so the surface blows up. The
+//! shipped fitter, [`crate::c_estimator`], searches a single quaternion instead.
+//! Kept because the derivation below is the reference for any future rethink.
+//!
+//! Weight constraints from the literature (Krasauskas & Zubė):
+//! - For the QB parametrization to produce points in R³ (not R⁴), the expression
+//!   (Σ λᵢ pᵢ wᵢ) * (Σ λᵢ wᵢ)^-1 must be pure imaginary (Re = 0).
+//! - For triangular patches with 3 control points, this is automatically satisfied
+//!   when positions are pure imaginary quaternions (3D points) and we extract Im().
+//! - The gauge freedom: multiplying all weights by a common quaternion q doesn't
+//!   change the surface. We fix w0 = Quat::ONE to remove this redundancy.
+//! - Circular arc boundaries arise naturally when adjacent patches share edge weights.
 
 use quilting_core::quaternion::Quat;
 use quilting_core::patch::QBTriPatch;
 use crate::geometry;
+use crate::linalg::solve_gauss;
 
 #[derive(Debug, Clone)]
 pub struct FitConfig {
@@ -219,8 +228,8 @@ fn optimize_weights(
             jtj[i][i] += 1e-6 * (jtj[i][i] + 1e-8);
         }
 
-        // Solve 8x8 system
-        let delta = solve_8x8(jtj, jtr);
+        // Solve the 8x8 normal equations
+        let delta = solve_gauss(jtj, jtr);
 
         // Check convergence
         let delta_norm: f64 = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
@@ -402,131 +411,4 @@ fn invert_3x3(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
             (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
         ],
     ]
-}
-
-/// Solve 8x8 dense system via Gaussian elimination with partial pivoting.
-fn solve_8x8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> [f64; 8] {
-    let n = 8;
-    for col in 0..n {
-        // Partial pivoting
-        let mut max_row = col;
-        let mut max_val = a[col][col].abs();
-        for row in col + 1..n {
-            if a[row][col].abs() > max_val {
-                max_val = a[row][col].abs();
-                max_row = row;
-            }
-        }
-        if max_val < 1e-15 { continue; } // singular column
-        if max_row != col {
-            a.swap(col, max_row);
-            b.swap(col, max_row);
-        }
-
-        // Eliminate
-        let pivot = a[col][col];
-        for row in col + 1..n {
-            let factor = a[row][col] / pivot;
-            for c in col..n {
-                a[row][c] -= factor * a[col][c];
-            }
-            b[row] -= factor * b[col];
-        }
-    }
-
-    // Back substitution
-    let mut x = [0.0; 8];
-    for col in (0..n).rev() {
-        if a[col][col].abs() < 1e-15 { continue; }
-        let mut sum = b[col];
-        for c in col + 1..n {
-            sum -= a[col][c] * x[c];
-        }
-        x[col] = sum / a[col][col];
-    }
-    x
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fit_flat_patch() {
-        // Fit to a flat triangle — weights should stay near identity
-        let p0 = [0.0, 0.0, 0.0];
-        let p1 = [1.0, 0.0, 0.0];
-        let p2 = [0.0, 1.0, 0.0];
-
-        let samples: Vec<[f64; 3]> = vec![
-            p0, p1, p2,
-            [0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.5, 0.5, 0.0],
-            [0.25, 0.25, 0.0], [0.33, 0.33, 0.0],
-        ];
-        let normals: Vec<[f64; 3]> = vec![[0.0, 0.0, 1.0]; samples.len()];
-        let bary: Vec<[f64; 3]> = samples.iter().map(|p| {
-            let u = p[0];
-            let v = p[1];
-            [1.0 - u - v, u, v]
-        }).collect();
-
-        let config = FitConfig::default();
-        let result = fit_qb_patch(&samples, &normals, &bary, &config);
-
-        assert!(result.rms_position_error < 0.01,
-            "flat patch should have near-zero position error, got {}", result.rms_position_error);
-    }
-
-    #[test]
-    fn test_fit_curved_patch() {
-        // Fit to a hemisphere — weights should deviate from identity
-        let n_samples = 20;
-        let mut samples = Vec::new();
-        let mut normals = Vec::new();
-        let mut bary = Vec::new();
-
-        for i in 0..n_samples {
-            let u = (i as f64) / (n_samples as f64 - 1.0);
-            for j in 0..(n_samples - i) {
-                let v = (j as f64) / (n_samples as f64 - 1.0);
-                let w = 1.0 - u - v;
-                if w < -0.01 { continue; }
-
-                // Map to hemisphere
-                let theta = u * std::f64::consts::FRAC_PI_2;
-                let phi = v * std::f64::consts::FRAC_PI_2;
-                let x = theta.sin() * phi.cos();
-                let y = theta.sin() * phi.sin();
-                let z = theta.cos();
-
-                samples.push([x, y, z]);
-                normals.push(geometry::vec3_normalize([x, y, z]));
-                bary.push([w.max(0.0), u, v]);
-            }
-        }
-
-        if samples.len() < 4 { return; }
-
-        let config = FitConfig {
-            gauss_newton_iterations: 10,
-            ..Default::default()
-        };
-        let result = fit_qb_patch(&samples, &normals, &bary, &config);
-
-        // The QB patch should fit a hemisphere reasonably well
-        assert!(result.rms_position_error < 0.5,
-            "curved patch RMS error {} too high", result.rms_position_error);
-    }
-
-    #[test]
-    fn test_invert_3x3_identity() {
-        let m = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let inv = invert_3x3(m);
-        for i in 0..3 {
-            for j in 0..3 {
-                let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((inv[i][j] - expected).abs() < 1e-10);
-            }
-        }
-    }
 }

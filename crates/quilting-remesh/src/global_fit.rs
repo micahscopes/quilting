@@ -1,21 +1,113 @@
-/// Global QB weight optimization with inter-patch continuity.
-///
-/// After QEM simplification produces a watertight triangle mesh, we fit curved
-/// QB patches by optimizing per-vertex quaternion weights globally. Adjacent
-/// patches automatically share weights at common vertices, ensuring C0 continuity.
-///
-/// The approach:
-/// 1. Collect sample points (original mesh vertices) for each simplified face
-/// 2. Assign per-vertex weight parameters (4 floats per vertex, gauge-fixed at one vertex)
-/// 3. Gauss-Newton optimization: minimize surface error across ALL patches simultaneously
-///    subject to shared-vertex constraints (which are implicit — same variable used)
-///
-/// The weight at vertex i is: wᵢ (a free quaternion parameter)
-/// with w₀ pinned to Quat::ONE for gauge fixing.
+//! Fitting curved QB patches onto a QEM-simplified mesh.
+//!
+//! [`per_patch_fit`] is the live product path: each simplified face gets its own
+//! Möbius `c` parameter from [`crate::c_estimator`], independently of its
+//! neighbours. Patches therefore meet at shared corner positions but have no
+//! continuity of curvature across edges.
+//!
+//! [`global_fit`] is the research alternative — it optimizes one quaternion
+//! weight per *vertex* so adjacent patches share weights and are C0 by
+//! construction. It is reachable only from `examples/experiments.rs`; the
+//! coupled Gauss-Newton never beat per-patch fitting for visual output, and the
+//! shared-vertex coupling means one bad patch drags its neighbours with it.
 
 use quilting_core::quaternion::Quat;
 use quilting_core::patch::QBTriPatch;
+use crate::c_estimator::CEstimatorConfig;
 use crate::geometry;
+use crate::linalg::solve_gauss;
+
+/// Tuning for the blow-up guard.
+///
+/// A QB patch is a rational map: the surface is `(Σλᵢpᵢwᵢ)(Σλᵢwᵢ)⁻¹`, so
+/// wherever the denominator approaches zero inside the parameter triangle the
+/// patch runs off toward infinity. Rather than constrain the fit itself we probe
+/// the fitted patch and fall back to a flat triangle when it misbehaves. These
+/// numbers get retuned regularly, which is why they live here rather than inline.
+#[derive(Debug, Clone)]
+pub struct BlowUpGuard {
+    /// Barycentric grid resolution used to probe the patch. Higher resolution
+    /// catches more localized blow-ups, at linear cost.
+    pub grid: usize,
+    /// Reject if a probe lands further than this multiple of the control
+    /// triangle's corner radius away from its centroid.
+    pub radius_factor: f64,
+    /// Reject if |Σλᵢwᵢ| drops below this — the patch is about to invert.
+    pub min_denominator: f64,
+}
+
+impl Default for BlowUpGuard {
+    fn default() -> Self {
+        Self { grid: 8, radius_factor: 1.5, min_denominator: 0.1 }
+    }
+}
+
+impl BlowUpGuard {
+    /// True if `patch` misbehaves anywhere over the control triangle `cp`.
+    pub fn rejects(&self, patch: &QBTriPatch, cp: &[[f64; 3]; 3]) -> bool {
+        let n = self.grid.max(1);
+        let cx = (cp[0][0] + cp[1][0] + cp[2][0]) / 3.0;
+        let cy = (cp[0][1] + cp[1][1] + cp[2][1]) / 3.0;
+        let cz = (cp[0][2] + cp[1][2] + cp[2][2]) / 3.0;
+        let mut max_r = 0.0_f64;
+        for c in cp {
+            max_r = max_r.max(((c[0] - cx).powi(2) + (c[1] - cy).powi(2) + (c[2] - cz).powi(2)).sqrt());
+        }
+        let thresh = max_r * self.radius_factor;
+
+        for i in 0..=n {
+            for j in 0..=(n - i) {
+                let u = i as f64 / n as f64;
+                let v = j as f64 / n as f64;
+                let w = 1.0 - u - v;
+
+                let denom = w * patch.weights[0] + u * patch.weights[1] + v * patch.weights[2];
+                if denom.norm() < self.min_denominator {
+                    return true;
+                }
+
+                let p = patch.eval(u, v).to_point();
+                if !p[0].is_finite() || !p[1].is_finite() || !p[2].is_finite() {
+                    return true;
+                }
+                let d = ((p[0] - cx).powi(2) + (p[1] - cy).powi(2) + (p[2] - cz).powi(2)).sqrt();
+                if d > thresh {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Everything tuned about the curved fitting path, defaulting to the values the
+/// live `remesh_simplified_curved` pipeline ships with.
+#[derive(Debug, Clone)]
+pub struct CurvedFitConfig {
+    /// Inner Gauss-Newton solve for the per-face Möbius `c`.
+    pub c_estimator: CEstimatorConfig,
+    /// Post-fit sanity check; a rejected patch falls back to flat.
+    pub guard: BlowUpGuard,
+    /// Minimum number of projected samples before a face is worth fitting. Below
+    /// this the 4-DOF `c` solve is underdetermined and we keep the flat triangle.
+    pub min_samples: usize,
+    /// Barycentric slack when deciding whether an original-mesh vertex projects
+    /// into a simplified triangle. Slack is needed because QEM collapse moves the
+    /// simplified triangle off the original surface, so strict containment would
+    /// starve boundary faces of samples.
+    pub sample_margin: f64,
+}
+
+impl Default for CurvedFitConfig {
+    fn default() -> Self {
+        Self {
+            c_estimator: CEstimatorConfig::default(),
+            guard: BlowUpGuard::default(),
+            min_samples: 4,
+            sample_margin: 0.05,
+        }
+    }
+}
 
 /// Result of global fitting.
 pub struct GlobalFitResult {
@@ -33,6 +125,8 @@ pub struct GlobalFitResult {
 /// Runs per-face c-estimation, averages weights at shared vertices for continuity,
 /// then optionally refines with global Gauss-Newton (though init-only often works best).
 ///
+/// Research baseline only — the live path is [`per_patch_fit`].
+///
 /// `simp_pos` / `simp_faces` — the simplified (coarse) mesh
 /// `orig_pos` / `orig_normals` — original mesh vertices and normals for fitting
 pub fn global_fit(
@@ -41,6 +135,7 @@ pub fn global_fit(
     orig_pos: &[[f64; 3]],
     orig_normals: &[[f64; 3]],
     max_iterations: usize,
+    config: &CurvedFitConfig,
 ) -> GlobalFitResult {
     let n_verts = simp_pos.len();
     let n_faces = simp_faces.len();
@@ -48,11 +143,11 @@ pub fn global_fit(
     // Collect samples per face: which original vertices project into each simplified triangle
     let face_samples: Vec<FaceSamples> = simp_faces.iter().map(|face| {
         let tri = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
-        collect_face_samples(&tri, orig_pos, orig_normals)
+        collect_face_samples(&tri, orig_pos, orig_normals, config.sample_margin)
     }).collect();
 
     // Initialize weights from per-face c-estimator, averaged at shared vertices.
-    let mut weights = initialize_from_c_estimator(simp_pos, simp_faces, &face_samples);
+    let mut weights = initialize_from_c_estimator(simp_pos, simp_faces, &face_samples, config);
 
     // Gauge fix: vertex 0 is always Quat::ONE — rescale all others relative to it
     if weights[0].norm() > 1e-10 {
@@ -67,7 +162,7 @@ pub fn global_fit(
     let n_params = (n_verts - 1) * 4;
 
     if n_params == 0 {
-        return build_result(simp_pos, simp_faces, &weights, &face_samples);
+        return build_result(simp_pos, simp_faces, &weights, &face_samples, &config.guard);
     }
 
     let eps = 1e-6;
@@ -161,7 +256,13 @@ pub fn global_fit(
         let mut delta = vec![0.0f64; n_params];
         for vi in 1..n_verts {
             let off = (vi - 1) * 4;
-            let d = solve_4x4_from_slice(&jtj, &jtr, off);
+            let mut block = [[0.0f64; 4]; 4];
+            let mut rhs = [0.0f64; 4];
+            for i in 0..4 {
+                for j in 0..4 { block[i][j] = jtj[off + i][off + j]; }
+                rhs[i] = jtr[off + i];
+            }
+            let d = solve_gauss(block, rhs);
             for i in 0..4 { delta[off + i] = d[i]; }
         }
 
@@ -190,7 +291,7 @@ pub fn global_fit(
         }
     }
 
-    build_result(simp_pos, simp_faces, &weights, &face_samples)
+    build_result(simp_pos, simp_faces, &weights, &face_samples, &config.guard)
 }
 
 /// Initialize per-vertex weights using per-face c-estimation, averaged at shared vertices.
@@ -198,6 +299,7 @@ fn initialize_from_c_estimator(
     simp_pos: &[[f64; 3]],
     simp_faces: &[[usize; 3]],
     face_samples: &[FaceSamples],
+    config: &CurvedFitConfig,
 ) -> Vec<Quat> {
     let n_verts = simp_pos.len();
 
@@ -208,11 +310,11 @@ fn initialize_from_c_estimator(
 
     for (fi, face) in simp_faces.iter().enumerate() {
         let samples = &face_samples[fi];
-        if samples.positions.len() < 4 { continue; }
+        if samples.positions.len() < config.min_samples { continue; }
 
         let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
-        let c = crate::roundtrip::estimate_c_parameter(
-            &cp, &samples.positions, &samples.bary, &samples.normals,
+        let c = crate::c_estimator::estimate_c_parameter(
+            &cp, &samples.positions, &samples.bary, &samples.normals, &config.c_estimator,
         );
 
         // Accumulate c (not weights!) at each vertex for averaging
@@ -249,10 +351,14 @@ struct FaceSamples {
     bary: Vec<[f64; 3]>,
 }
 
+/// Collect the original-mesh vertices that project into `tri`, together with
+/// their barycentric coordinates and normals. `margin` is the barycentric slack
+/// allowed outside the triangle (see [`CurvedFitConfig::sample_margin`]).
 fn collect_face_samples(
     tri: &[[f64; 3]; 3],
     orig_pos: &[[f64; 3]],
     orig_normals: &[[f64; 3]],
+    margin: f64,
 ) -> FaceSamples {
     let p0 = tri[0];
     let e1 = geometry::vec3_sub(tri[1], p0);
@@ -276,8 +382,9 @@ fn collect_face_samples(
         let v = (d11 * b2 - d12 * b1) / det;
         let w = 1.0 - u - v;
 
-        let margin = -0.05;
-        if u >= margin && v >= margin && w >= margin && u <= 1.05 && v <= 1.05 {
+        let lo = -margin;
+        let hi = 1.0 + margin;
+        if u >= lo && v >= lo && w >= lo && u <= hi && v <= hi {
             samples.positions.push(*p);
             samples.normals.push(orig_normals[i]);
             samples.bary.push([w, u, v]);
@@ -314,46 +421,19 @@ fn compute_all_residuals(
     residuals
 }
 
-fn solve_4x4_from_slice(jtj: &[Vec<f64>], jtr: &[f64], off: usize) -> [f64; 4] {
-    let mut m = [[0.0; 5]; 4];
-    for i in 0..4 {
-        for j in 0..4 { m[i][j] = jtj[off + i][off + j]; }
-        m[i][4] = jtr[off + i];
-    }
-    // Gaussian elimination with partial pivoting
-    for col in 0..4 {
-        let mut max_row = col;
-        for row in (col + 1)..4 {
-            if m[row][col].abs() > m[max_row][col].abs() { max_row = row; }
-        }
-        m.swap(col, max_row);
-        if m[col][col].abs() < 1e-15 { continue; }
-        for row in (col + 1)..4 {
-            let factor = m[row][col] / m[col][col];
-            for j in col..5 { m[row][j] -= factor * m[col][j]; }
-        }
-    }
-    let mut x = [0.0; 4];
-    for i in (0..4).rev() {
-        x[i] = m[i][4];
-        for j in (i + 1)..4 { x[i] -= m[i][j] * x[j]; }
-        if m[i][i].abs() > 1e-15 { x[i] /= m[i][i]; }
-    }
-    x
-}
-
 /// Per-patch independent fitting: each patch gets its own c parameter.
 /// No vertex sharing, so no continuity guarantee, but each patch is individually stable.
-/// Uses the c-estimator with validation to prevent blow-ups.
+/// Uses the c-estimator with a blow-up guard.
 pub fn per_patch_fit(
     simp_pos: &[[f64; 3]],
     simp_faces: &[[usize; 3]],
     orig_pos: &[[f64; 3]],
     orig_normals: &[[f64; 3]],
+    config: &CurvedFitConfig,
 ) -> GlobalFitResult {
     let face_samples: Vec<FaceSamples> = simp_faces.iter().map(|face| {
         let tri = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
-        collect_face_samples(&tri, orig_pos, orig_normals)
+        collect_face_samples(&tri, orig_pos, orig_normals, config.sample_margin)
     }).collect();
 
     let mut patches = Vec::with_capacity(simp_faces.len());
@@ -362,9 +442,9 @@ pub fn per_patch_fit(
         let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
         let samples = &face_samples[fi];
 
-        if samples.positions.len() >= 4 {
-            let mut fitted = crate::roundtrip::fit_patch_from_samples(
-                cp, &samples.positions, &samples.bary, &samples.normals,
+        if samples.positions.len() >= config.min_samples {
+            let mut fitted = crate::c_estimator::fit_patch_from_samples(
+                cp, &samples.positions, &samples.bary, &samples.normals, &config.c_estimator,
             );
 
             // Normal consistency: check that the patch curves in the right direction
@@ -387,33 +467,8 @@ pub fn per_patch_fit(
                 fitted = fixed;
             }
 
-            // Validate: sample the patch and check for blow-up
-            let mut bad = false;
-            let n = 8; // higher resolution to catch localized blow-ups
-            let cx = (cp[0][0] + cp[1][0] + cp[2][0]) / 3.0;
-            let cy = (cp[0][1] + cp[1][1] + cp[2][1]) / 3.0;
-            let cz = (cp[0][2] + cp[1][2] + cp[2][2]) / 3.0;
-            let mut max_r = 0.0_f64;
-            for c in &cp { max_r = max_r.max(((c[0]-cx).powi(2)+(c[1]-cy).powi(2)+(c[2]-cz).powi(2)).sqrt()); }
-            let thresh = max_r * 1.5; // tight threshold
-
-            'check: for i in 0..=n {
-                for j in 0..=(n-i) {
-                    let u = i as f64 / n as f64;
-                    let v = j as f64 / n as f64;
-                    let w = 1.0 - u - v;
-                    // Check denominator magnitude (Σλᵢwᵢ)
-                    let denom = w * fitted.weights[0] + u * fitted.weights[1] + v * fitted.weights[2];
-                    if denom.norm() < 0.1 {
-                        bad = true; break 'check;
-                    }
-                    let p = fitted.eval(u, v).to_point();
-                    let d = ((p[0]-cx).powi(2)+(p[1]-cy).powi(2)+(p[2]-cz).powi(2)).sqrt();
-                    if d > thresh || !p[0].is_finite() { bad = true; break 'check; }
-                }
-            }
-
-            if bad {
+            // Probe the fitted patch; a blow-up falls back to the flat triangle.
+            if config.guard.rejects(&fitted, &cp) {
                 patches.push(QBTriPatch::flat(cp[0], cp[1], cp[2]));
             } else {
                 patches.push(fitted);
@@ -449,43 +504,25 @@ pub fn per_patch_fit(
     }
 }
 
-/// Validate each patch: if any tessellated point is too far from the control triangle,
-/// reset that patch to flat (identity weights). This prevents visual blow-ups while
-/// keeping the improvement where it works.
-fn validate_and_fix_patches(patches: &mut Vec<QBTriPatch>, simp_pos: &[[f64; 3]], simp_faces: &[[usize; 3]], weights: &mut Vec<Quat>) {
-    let n = 4; // sample resolution for validation
+/// Apply the same blow-up guard [`per_patch_fit`] uses to a globally-fitted patch
+/// set, resetting offenders to flat.
+///
+/// Note the wart inherent to the shared-weight formulation: resetting one patch
+/// also resets the weights at its corners, which silently changes every other
+/// patch touching those vertices.
+fn validate_and_fix_patches(
+    patches: &mut [QBTriPatch],
+    simp_pos: &[[f64; 3]],
+    simp_faces: &[[usize; 3]],
+    weights: &mut [Quat],
+    guard: &BlowUpGuard,
+) {
     for (fi, face) in simp_faces.iter().enumerate() {
         let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
-        // Compute bounding radius of the control triangle
-        let cx = (cp[0][0] + cp[1][0] + cp[2][0]) / 3.0;
-        let cy = (cp[0][1] + cp[1][1] + cp[2][1]) / 3.0;
-        let cz = (cp[0][2] + cp[1][2] + cp[2][2]) / 3.0;
-        let mut max_r = 0.0_f64;
-        for c in &cp {
-            let d = ((c[0]-cx).powi(2) + (c[1]-cy).powi(2) + (c[2]-cz).powi(2)).sqrt();
-            max_r = max_r.max(d);
-        }
-        let threshold = max_r * 3.0; // allow 3x the triangle radius
-
-        let mut bad = false;
-        'check: for i in 0..=n {
-            for j in 0..=(n - i) {
-                let u = i as f64 / n as f64;
-                let v = j as f64 / n as f64;
-                let p = patches[fi].eval(u, v).to_point();
-                let d = ((p[0]-cx).powi(2) + (p[1]-cy).powi(2) + (p[2]-cz).powi(2)).sqrt();
-                if d > threshold || !p[0].is_finite() || !p[1].is_finite() || !p[2].is_finite() {
-                    bad = true;
-                    break 'check;
-                }
-            }
-        }
-
-        if bad {
-            // Reset to flat
+        if guard.rejects(&patches[fi], &cp) {
             patches[fi] = QBTriPatch::flat(cp[0], cp[1], cp[2]);
             for &vi in face {
-                weights[vi] = Quat::ONE; // Note: this affects other patches sharing these vertices
+                weights[vi] = Quat::ONE;
             }
         }
     }
@@ -496,6 +533,7 @@ fn build_result(
     simp_faces: &[[usize; 3]],
     weights: &[Quat],
     face_samples: &[FaceSamples],
+    guard: &BlowUpGuard,
 ) -> GlobalFitResult {
     let mut vertex_weights = weights.to_vec();
     let mut patches: Vec<QBTriPatch> = simp_faces.iter().map(|face| {
@@ -510,7 +548,7 @@ fn build_result(
     }).collect();
 
     // Validate: reset blow-up patches to flat
-    validate_and_fix_patches(&mut patches, simp_pos, simp_faces, &mut vertex_weights);
+    validate_and_fix_patches(&mut patches, simp_pos, simp_faces, &mut vertex_weights, guard);
 
     // Compute error stats
     let mut sum_err = 0.0_f64;
@@ -541,67 +579,93 @@ fn build_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::roundtrip::spherical_patch_via_inversion;
 
-    fn measure_sphere_fit(patches: &[QBTriPatch]) -> (f64, f64) {
-        let mut err = 0.0_f64;
-        let mut max_d = 0.0_f64;
-        let mut count = 0;
-        let n = 5;
-        for patch in patches {
-            for i in 0..=n {
-                for j in 0..=(n - i) {
-                    let u = i as f64 / n as f64;
-                    let v = j as f64 / n as f64;
-                    let p = patch.eval(u, v).to_point();
-                    let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-                    let d = (r - 1.0).abs();
-                    err += d * d;
-                    max_d = max_d.max(d);
-                    count += 1;
-                }
-            }
-        }
-        ((err / count as f64).sqrt(), max_d)
+    fn control_triangle(patch: &QBTriPatch) -> [[f64; 3]; 3] {
+        [
+            patch.positions[0].to_point(),
+            patch.positions[1].to_point(),
+            patch.positions[2].to_point(),
+        ]
     }
 
+    /// A flat patch is the fallback the guard resets to, so it must never be
+    /// rejected — otherwise a rejection would have nowhere safe to land.
     #[test]
-    fn test_global_fit_sphere() {
-        eprintln!("\n{:=<80}", "= GLOBAL FIT EXPERIMENTS ");
-        eprintln!("{:20} {:15} {:>10} {:>10} {:>10}",
-            "config", "approach", "sph_rms", "sph_max", "samp_rms");
-        eprintln!("{:-<80}", "");
+    fn test_guard_accepts_flat_patch() {
+        let cp = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let patch = QBTriPatch::flat(cp[0], cp[1], cp[2]);
+        assert!(!BlowUpGuard::default().rejects(&patch, &cp));
+    }
 
-        for (subdivs, target) in &[(2, 20), (3, 20), (3, 40)] {
-            let (orig_pos, orig_faces) = crate::test_shapes::sphere(*subdivs);
-            let orig_normals = crate::geometry::compute_vertex_normals(&orig_pos, &orig_faces);
-            let (simp_pos, simp_faces) = crate::simplify::simplify(&orig_pos, &orig_faces, *target);
+    /// A genuinely curved, well-behaved patch (spherical inversion of a flat
+    /// triangle) must survive the guard, or curvature would never reach the
+    /// renderer at all.
+    #[test]
+    fn test_guard_accepts_well_behaved_curved_patch() {
+        let (patch, _) = spherical_patch_via_inversion(
+            [0.5, 0.0, 2.0], [0.0, 0.5, 2.0], [-0.5, 0.0, 2.0],
+        );
+        let cp = control_triangle(&patch);
+        assert!(!BlowUpGuard::default().rejects(&patch, &cp),
+            "an inverted-but-tame patch should pass the guard");
+    }
 
-            let label = format!("sph{}→{}", orig_faces.len(), simp_faces.len());
+    /// The pathological case the guard exists for: weights whose barycentric
+    /// combination `Σλᵢwᵢ` passes through zero, so the rational map has a pole
+    /// strictly inside the parameter triangle.
+    #[test]
+    fn test_guard_rejects_vanishing_denominator() {
+        let cp = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let positions = [
+            Quat::from_point(cp[0][0], cp[0][1], cp[0][2]),
+            Quat::from_point(cp[1][0], cp[1][1], cp[1][2]),
+            Quat::from_point(cp[2][0], cp[2][1], cp[2][2]),
+        ];
+        // λ₀ = λ₁ = ½ gives Σλᵢwᵢ = ½(1) + ½(-1) = 0.
+        let pole = QBTriPatch::new(positions, [Quat::ONE, -Quat::ONE, Quat::ONE]);
+        assert!(BlowUpGuard::default().rejects(&pole, &cp),
+            "a patch with an interior pole must be rejected");
+    }
 
-            // Flat baseline
-            let flat_patches: Vec<QBTriPatch> = simp_faces.iter().map(|f| {
-                QBTriPatch::flat(simp_pos[f[0]], simp_pos[f[1]], simp_pos[f[2]])
-            }).collect();
-            let (flat_rms, flat_max) = measure_sphere_fit(&flat_patches);
-            eprintln!("{:20} {:15} {:10.6} {:10.6} {:>10}",
-                label, "flat", flat_rms, flat_max, "—");
+    /// Both thresholds must actually be consulted, not just carried around.
+    #[test]
+    fn test_guard_thresholds_are_wired_up() {
+        let (patch, _) = spherical_patch_via_inversion(
+            [0.5, 0.0, 2.0], [0.0, 0.5, 2.0], [-0.5, 0.0, 2.0],
+        );
+        let cp = control_triangle(&patch);
 
-            // c-init only (0 GN iterations) — tests the initialization quality
-            let init_only = global_fit(&simp_pos, &simp_faces, &orig_pos, &orig_normals, 0);
-            let (init_rms, init_max) = measure_sphere_fit(&init_only.patches);
-            eprintln!("{:20} {:15} {:10.6} {:10.6} {:10.6}",
-                "", "c_init_only", init_rms, init_max, init_only.rms_error);
+        let tight_radius = BlowUpGuard { radius_factor: 0.01, ..Default::default() };
+        assert!(tight_radius.rejects(&patch, &cp), "radius_factor should be honoured");
 
-            // c-init + 10 GN iterations
-            let refined = global_fit(&simp_pos, &simp_faces, &orig_pos, &orig_normals, 10);
-            let (ref_rms, ref_max) = measure_sphere_fit(&refined.patches);
-            eprintln!("{:20} {:15} {:10.6} {:10.6} {:10.6}",
-                "", "c_init+gn10", ref_rms, ref_max, refined.rms_error);
+        let tight_denom = BlowUpGuard { min_denominator: 1e6, ..Default::default() };
+        assert!(tight_denom.rejects(&patch, &cp), "min_denominator should be honoured");
+    }
 
-            if ref_rms < flat_rms {
-                eprintln!("{:20} → {:.1}x BETTER than flat", "", flat_rms / ref_rms);
-            }
+    /// End-to-end on the live path: fitting a simplified sphere should produce
+    /// curvature that survives the guard, and every emitted patch should itself
+    /// pass the guard (nothing pathological escapes into the render).
+    #[test]
+    fn test_per_patch_fit_sphere_curves_without_blowing_up() {
+        let (orig_pos, orig_faces) = crate::test_shapes::sphere(2);
+        let orig_normals = geometry::compute_vertex_normals(&orig_pos, &orig_faces);
+        let (simp_pos, simp_faces) = crate::simplify::simplify(&orig_pos, &orig_faces, 20);
+
+        let config = CurvedFitConfig::default();
+        let result = per_patch_fit(&simp_pos, &simp_faces, &orig_pos, &orig_normals, &config);
+
+        let curved = result.patches.iter()
+            .filter(|p| (p.weights[1] - Quat::ONE).norm() > 1e-6)
+            .count();
+        assert!(curved > 0,
+            "the guard should not flatten every patch on a smooth sphere ({} of {} curved)",
+            curved, result.patches.len());
+
+        for (fi, face) in simp_faces.iter().enumerate() {
+            let cp = [simp_pos[face[0]], simp_pos[face[1]], simp_pos[face[2]]];
+            assert!(!config.guard.rejects(&result.patches[fi], &cp),
+                "patch {} escaped the guard", fi);
         }
-        eprintln!("{:=<80}", "");
     }
 }

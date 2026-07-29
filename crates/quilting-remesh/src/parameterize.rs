@@ -1,4 +1,10 @@
-/// Harmonic parameterization: maps a cluster onto the reference triangle.
+//! Harmonic parameterization: maps a cluster onto the reference triangle.
+//!
+//! RESEARCH BASELINE, NOT ON THE PRODUCT PATH. Reachable only from the test-only
+//! [`crate::remesh`] pipeline, and the sole consumer of [`crate::sparse`]. It
+//! exists to give cluster vertices barycentric coordinates for fitting; the
+//! shipped path gets barycentrics for free by projecting original vertices into
+//! a simplified triangle (`global_fit::collect_face_samples`). Kept as a baseline.
 
 use crate::cluster::Cluster;
 use crate::geometry;

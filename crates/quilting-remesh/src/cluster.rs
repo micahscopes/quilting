@@ -1,4 +1,10 @@
-/// Cluster extraction: boundary loops, junction vertices, and corner selection.
+//! Cluster extraction: boundary loops, junction vertices, and corner selection.
+//!
+//! RESEARCH BASELINE, NOT ON THE PRODUCT PATH. Reachable only from the test-only
+//! [`crate::remesh`] pipeline, which turns VSA clusters into one triangular patch
+//! each. The shipped pipeline gets its patch topology from QEM simplification
+//! ([`crate::simplify`]) instead, so it never needs boundary loops or corner
+//! picking. Kept as a baseline.
 
 use quilting_mesh::HalfEdgeMesh;
 use crate::geometry;

@@ -804,30 +804,6 @@ fn merge_tiny_clusters(labels: &mut [usize], proxies: &[QuadricProxy], min_faces
     }
 }
 
-// ── Convert to planar VsaResult for compatibility with downstream pipeline ──
-
-impl QuadricVsaResult {
-    /// Convert to a planar VsaResult so existing cluster/parameterize/fit code works unchanged.
-    pub fn to_vsa_result(&self) -> crate::vsa::VsaResult {
-        let proxies = self
-            .proxies
-            .iter()
-            .map(|qp| crate::vsa::Proxy {
-                normal: qp.normal,
-                centroid: qp.centroid,
-                area: qp.area,
-            })
-            .collect();
-
-        crate::vsa::VsaResult {
-            face_labels: self.face_labels.clone(),
-            num_clusters: self.num_clusters,
-            proxies,
-            sharp_edges: self.sharp_edges.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,7 +10,9 @@ use quilting_remesh::geometry;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let (positions, faces, normals, uvs) = if args.len() > 1 && args[1] == "--sphere" {
+    // Normals and UVs are read from the source mesh but unused: remesh_simplified
+    // recomputes normals on the simplified mesh and emits zero UVs.
+    let (positions, faces, _normals, _uvs) = if args.len() > 1 && args[1] == "--sphere" {
         let subdivisions = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
         println!("Generating icosphere (subdivisions={})", subdivisions);
         let (p, f) = generate_sphere(subdivisions);
