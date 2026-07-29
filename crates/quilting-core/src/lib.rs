@@ -7,6 +7,7 @@ pub mod delaunay;
 pub mod mesh;
 pub mod permutation;
 pub mod atlas;
+pub mod instance_layout;
 pub mod patch;
 pub mod shapes;
 pub mod evaluate;
