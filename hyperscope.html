@@ -326,7 +326,7 @@ const PARAM_DEFAULTS = {
   mx: '5', my: '0', mz: '0', mr: '20',
   env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
   res: '0', density: '100', atten: '1', minpx: '2',
-  animate: '1', anim: '-1', atlas: '9',
+  animate: '1', anim: '-1', atlas: '7',
   zoom: '3', rx: '0.3', ry: '0.5',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0', fqual: '2',
 };
@@ -716,7 +716,7 @@ const lod = {
   density: signal(100, 'density'),
   screenAtten: signal(true, 'atten'),
   minPx: signal(2, 'minpx'),
-  atlas: signal(9, 'atlas'),
+  atlas: signal(7, 'atlas'),
 };
 bindSlider('res', lod.res, v => v === 0 ? 'auto' : String(1 << v));
 bindSlider('tess-density', lod.density, v => v.toFixed(0));
@@ -834,7 +834,7 @@ applyParams = function(params) {
   lod.density.set(parseInt(params.density) || 100);
   lod.screenAtten.set(params.atten !== '0');
   lod.minPx.set(parseInt(params.minpx) || 2);
-  lod.atlas.set(parseInt(params.atlas) || 9);
+  lod.atlas.set(parseInt(params.atlas) || 7);
   animating_sig.set(params.animate !== '0');
   {
     const pf = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
