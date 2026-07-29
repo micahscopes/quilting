@@ -603,6 +603,7 @@ dependencies = [
  "bincode",
  "cdt",
  "distressed-blue-noise",
+ "quilting-gltf",
  "quilting-mesh",
  "rand",
  "rand_pcg",

@@ -15,7 +15,7 @@
 //! otherwise pure crate — if the LOD pass ever moves off the worker thread,
 //! it should become an explicit argument.
 
-use crate::quaternion::{Quat, Mobius};
+use crate::quaternion::{Quat, Mobius, POLE_PROXIMITY_NORM_SQ};
 use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
 
@@ -399,6 +399,15 @@ pub fn compute_instances_with_uvs(
     // medians to determine per-edge LODs. 3 Möbius evals per face.
     let mut edge_lods_world: Vec<u32> = vec![0; num_half_edges];
 
+    // Faces with a sampled point at the Möbius pole. The medians cannot be
+    // trusted there: rounding cancels the imaginary numerator together with
+    // the denominator (a pole on a vertex maps it to the origin, not to
+    // infinity), which fakes a small median and would starve the most
+    // distorted face of tessellation. These faces saturate to MAX_LOD after
+    // screen attenuation. Mirrors the min_bot_sq check in
+    // lod_compute.vert.glsl so CPU and GPU LOD passes agree.
+    let mut pole_faces: Vec<usize> = Vec::new();
+
     for fi in 0..nf {
         let face = faces[fi];
         let v0 = vertices[face[0]];
@@ -439,6 +448,22 @@ pub fn compute_instances_with_uvs(
         let lod_bc = ((median_b + median_c) * 0.5 / target_size).ceil() as u32;
         let lod_ac = ((median_a + median_c) * 0.5 / target_size).ceil() as u32;
 
+        // Pole proximity check over the same 6 sample points the medians use.
+        // transform_weight(p, 1) is exactly bot = c*p + d, and bot is linear
+        // in p, so edge-midpoint bots are averages of the vertex bots.
+        let b0 = transformed[face[0]].1;
+        let b1 = transformed[face[1]].1;
+        let b2 = transformed[face[2]].1;
+        let min_bot_sq = b0.norm_sq()
+            .min(b1.norm_sq())
+            .min(b2.norm_sq())
+            .min(((b1 + b2) * 0.5).norm_sq())
+            .min(((b0 + b2) * 0.5).norm_sq())
+            .min(((b0 + b1) * 0.5).norm_sq());
+        if min_bot_sq < POLE_PROXIMITY_NORM_SQ {
+            pole_faces.push(fi);
+        }
+
         // Map to half-edge canonical edges, take max across adjacent faces
         let he_base = fi * 3;
         // edge_a (v1→v2 = BC), edge_b (v2→v0 = CA), edge_c (v0→v1 = AB)
@@ -478,6 +503,16 @@ pub fn compute_instances_with_uvs(
                 edge_lods_world[canon]
             };
             edge_lods[canon] = snap_to_power_of_2(lod).clamp(MIN_LOD, MAX_LOD);
+        }
+    }
+
+    // Pole-adjacent faces saturate regardless of screen attenuation — their
+    // collapsed projections would otherwise attenuate exactly the faces that
+    // need the most subdivision. Writing through the canonical edge slots
+    // keeps shared edges matching (no T-junctions).
+    for &fi in &pole_faces {
+        for ei in 0..3 {
+            edge_lods[canonical_edge(fi * 3 + ei)] = MAX_LOD;
         }
     }
 

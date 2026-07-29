@@ -29,6 +29,38 @@ pub const SINGULARITY_NORM_SQ: f64 = 1e-20;
 /// `1 / sqrt(SINGULARITY_NORM_SQ)` so `|q⁻¹|` is continuous across the guard.
 pub const SINGULARITY_SENTINEL: f64 = 1e10;
 
+/// Squared norm of the Möbius denominator `c·x + d` below which a sampled
+/// point counts as pole-adjacent for tessellation purposes and the face LOD
+/// saturates to the maximum. Mirrored by the `min_bot_sq` check in
+/// `quilting-renderer/shaders/lod_compute.vert.glsl`.
+///
+/// This is deliberately far above [`SINGULARITY_NORM_SQ`]: the sentinel keeps
+/// the *arithmetic* finite, but it cannot keep the *geometry* honest. When the
+/// pole lands on a sampled point, rounding cancels the imaginary part of the
+/// numerator together with the denominator (the point and the pole share the
+/// same float bits), so even the sentinel puts the deformed point at the
+/// origin instead of far away. A collapsed point fakes a small deformed
+/// median, which would hand the most conformally stretched face the *least*
+/// tessellation. `|bot|² < 1e-8` means the point maps ≥ 10⁴ model units out —
+/// unconditionally "maximum distortion" — so overriding the median there
+/// changes nothing that the median math was getting right.
+pub const POLE_PROXIMITY_NORM_SQ: f64 = 1e-8;
+
+/// Squared norm of `c` below which a Möbius transform is treated as affine
+/// (no conformal curvature). Mirrors the `dot(u.mob_c, u.mob_c) > 0.001`
+/// predicate in `shaders/vertex/main.wgsl` and `sample_stretch_range` in
+/// quilting-wasm.
+///
+/// The CPU must not disagree with the shader here: `is_affine` gates the
+/// smooth-normal recomputation (with an orientation flip for reflections) for
+/// exactly the geometry the shader shades. The historical CPU threshold of
+/// 1e-20 classified near-identity transforms as reflections and flipped their
+/// normals while the shader rendered them unflipped. All non-affine
+/// constructors in this crate produce `|c|` of order 1, so the band below
+/// 1e-3 only contains transforms that are conformally flat to ~3% per model
+/// unit — visually affine.
+pub const AFFINE_C_NORM_SQ: f64 = 1e-3;
+
 /// Quaternion: q = w + xi + yj + zk
 ///
 /// Following the convention in Krasauskas & Zubė where R³ is identified
@@ -222,8 +254,9 @@ impl Mobius {
 
     /// Check if this is an identity or near-identity transform.
     /// Returns true if c ≈ 0 (no conformal curvature — affine transform).
+    /// The threshold matches the shader's predicate; see [`AFFINE_C_NORM_SQ`].
     pub fn is_affine(&self) -> bool {
-        self.c.norm_sq() < 1e-20
+        self.c.norm_sq() < AFFINE_C_NORM_SQ
     }
 
 

@@ -365,6 +365,8 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     }
     let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
     if has_smooth {
+        // Threshold mirrors AFFINE_C_NORM_SQ in quilting-core: the CPU decides
+        // whether to bake reflected smooth normals with the same predicate.
         let is_mobius = dot(u.mob_c, u.mob_c) > 0.001;
         if is_mobius {
             // Transform each vertex normal through the Möbius differential at that vertex
