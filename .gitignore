@@ -3,6 +3,7 @@
 /pkg/
 /dist/
 /dist-lab/
+/formal/.lake/
 
 # OS
 .DS_Store
