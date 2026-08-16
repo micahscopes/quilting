@@ -19,6 +19,7 @@ quilting-mesh = { path = "../quilting-mesh" }
 quilting-shaders = { path = "../quilting-shaders" }
 
 quilting-gltf = { path = "../quilting-gltf" }
+hyperscape = { path = "../hyperscape" }
 quilting-remesh = { path = "../quilting-remesh" }
 wasm-bindgen = "=0.2.106"
 serde = { version = "1", features = ["derive"] }

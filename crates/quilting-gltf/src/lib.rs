@@ -116,6 +116,22 @@ impl From<hyperscape::HyperscapeGltfError> for GltfError {
     }
 }
 
+/// Parse only the ordinary node array and optional Hyperscape extras. This is
+/// the inexpensive main-thread path; it does not decode images or accessors.
+pub fn load_hyperscape_graph(
+    data: &[u8],
+) -> Result<(Vec<scene::Node>, Option<hyperscape::HyperscapeAsset>), GltfError> {
+    let gltf = gltf::Gltf::from_slice(data)
+        .or_else(|_| gltf::Gltf::from_slice_without_validation(data))?;
+    let nodes = gltf
+        .document
+        .nodes()
+        .map(|node| scene::extract_node(&node))
+        .collect();
+    let asset = hyperscape::extract_asset(&gltf.document)?;
+    Ok((nodes, asset))
+}
+
 /// Load a glTF or GLB file from raw bytes.
 ///
 /// Uses `gltf::import_slice` to resolve embedded buffers and images.

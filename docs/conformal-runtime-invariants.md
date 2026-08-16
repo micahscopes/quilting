@@ -61,6 +61,7 @@ cargo test -p quilting-gltf
 cargo test --workspace
 cargo check --target wasm32-unknown-unknown -p hyperscape
 cargo check --target wasm32-unknown-unknown -p quilting-wasm
+env -u NO_COLOR trunk build
 nix shell nixpkgs#lean4 -c sh -c 'cd formal && lake build'
 ```
 

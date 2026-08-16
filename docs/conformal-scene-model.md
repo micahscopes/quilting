@@ -99,6 +99,14 @@ For each visible entity and view:
 Different entities may therefore use different relative Möbius transforms in
 the same view.  Render extraction, rather than the renderer, owns that choice.
 
+The current browser bridge (`mr_loadHyperscape` / `mr_tickHyperscape`) runs the
+ECS and transfers the first extracted packet into the shipping Hyperscope UBO
+path with explicit orientation parity. This makes the single-subject vertical
+slice executable. Rendering several packets in one view still requires tagging
+GPU batches by glTF node/entity and selecting a packet per batch; until that is
+implemented, `packet_count` is exposed in diagnostics and multi-subject output
+must not be described as complete.
+
 ## glTF interchange v0.1
 
 The Khronos glTF extension registry reserves `KHR` for Khronos extensions and

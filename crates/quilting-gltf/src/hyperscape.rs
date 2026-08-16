@@ -695,5 +695,9 @@ mod tests {
         assert_eq!(runtime.walls.walls().len(), 2);
         assert_eq!(asset.payload.paths.len(), 1);
         assert_eq!(asset.payload.constraints.len(), 2);
+
+        let (nodes, graph_asset) = crate::load_hyperscape_graph(bytes).unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(graph_asset.unwrap(), asset);
     }
 }

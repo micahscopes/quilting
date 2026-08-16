@@ -18,6 +18,8 @@ use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
+use hyperscape::interchange::HyperscapeGltfRuntime;
+use std::time::Duration;
 
 /// Floats per material in the array `mr_setMaterials` receives.
 const MATERIAL_STRIDE: usize = 50;
@@ -40,6 +42,9 @@ struct MainState {
     num_faces: usize,
     render_mode: RenderMode,
     mobius: [f32; 16],
+    /// Explicit parity from the authoring generator word. Legacy direct matrix
+    /// input falls back to the old `c != 0` heuristic.
+    mobius_orientation: i8,
     // Screen-space refraction: framebuffer copy for transmission
     /// Mip-chained scene copy for the transmission/refraction blur pyramid.
     /// Distinct from `fuzzy_scene_*`: this one carries a full mip chain with
@@ -159,6 +164,7 @@ thread_local! {
     static STATE: RefCell<Option<MainState>> = RefCell::new(None);
     static TESS_CACHE: RefCell<std::collections::HashMap<String, TessBuffers>> =
         RefCell::new(std::collections::HashMap::new());
+    static HYPERSCAPE_RUNTIME: RefCell<Option<HyperscapeGltfRuntime>> = RefCell::new(None);
 }
 
 const IDENTITY_MOBIUS: [f32; 16] = [
@@ -219,6 +225,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             num_faces: 0,
             render_mode: RenderMode::Pbr,
             mobius: IDENTITY_MOBIUS,
+            mobius_orientation: 1,
             scene_color_fbo: None,
             scene_color_tex: None,
             scene_color_size: (0, 0),
@@ -279,8 +286,103 @@ pub fn mr_set_mobius(mobius: &[f32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             for (i, &v) in mobius.iter().take(16).enumerate() { st.mobius[i] = v; }
+            let c_len_sq = st.mobius[8..12].iter().map(|value| value * value).sum::<f32>();
+            st.mobius_orientation = if c_len_sq > 0.001 { -1 } else { 1 };
         }
     });
+}
+
+#[wasm_bindgen(js_name = "mr_setMobiusWithParity")]
+pub fn mr_set_mobius_with_parity(mobius: &[f32], orientation_sign: i32) {
+    STATE.with(|state| {
+        if let Some(renderer) = state.borrow_mut().as_mut() {
+            for (index, &value) in mobius.iter().take(16).enumerate() {
+                renderer.mobius[index] = value;
+            }
+            renderer.mobius_orientation = if orientation_sign < 0 { -1 } else { 1 };
+        }
+    });
+}
+
+fn apply_hyperscape_packet(packet: &hyperscape::HyperscopePacket) {
+    STATE.with(|state| {
+        if let Some(renderer) = state.borrow_mut().as_mut() {
+            renderer.mobius = packet.mobius;
+            renderer.mobius_orientation = packet.orientation_sign;
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "mr_loadHyperscape")]
+pub fn mr_load_hyperscape(data: &[u8]) -> bool {
+    let (nodes, asset) = match quilting_gltf::load_hyperscape_graph(data) {
+        Ok(graph) => graph,
+        Err(error) => {
+            web_sys::console::warn_1(&format!("Hyperscape graph: {error}").into());
+            return false;
+        }
+    };
+    let Some(asset) = asset else {
+        HYPERSCAPE_RUNTIME.with(|runtime| *runtime.borrow_mut() = None);
+        return false;
+    };
+    let runtime = match HyperscapeGltfRuntime::new(&nodes, &asset) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            web_sys::console::warn_1(&format!("Hyperscape runtime: {error}").into());
+            return false;
+        }
+    };
+    if let Some(packet) = runtime.packets().first() {
+        apply_hyperscape_packet(packet);
+    }
+    HYPERSCAPE_RUNTIME.with(|slot| *slot.borrow_mut() = Some(runtime));
+    true
+}
+
+#[wasm_bindgen(js_name = "mr_tickHyperscape")]
+pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
+    let delta_seconds = if delta_seconds.is_finite() {
+        delta_seconds.clamp(0.0, 0.25)
+    } else {
+        0.0
+    };
+    let snapshot = HYPERSCAPE_RUNTIME.with(|slot| {
+        let mut runtime = slot.borrow_mut();
+        let runtime = runtime.as_mut()?;
+        runtime.tick(Duration::from_secs_f64(delta_seconds));
+        Some((runtime.packets().first().cloned(), runtime.packets().len(), runtime.diagnostics().to_vec()))
+    });
+    let Some((packet, packet_count, diagnostics)) = snapshot else {
+        return JsValue::NULL;
+    };
+    if let Some(packet) = packet.as_ref() {
+        apply_hyperscape_packet(packet);
+    }
+
+    let result = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &result,
+        &"packet_count".into(),
+        &JsValue::from_f64(packet_count as f64),
+    ).ok();
+    if let Some(packet) = packet {
+        js_sys::Reflect::set(
+            &result,
+            &"orientation_sign".into(),
+            &JsValue::from_f64(packet.orientation_sign as f64),
+        ).ok();
+        let mobius = js_sys::Float32Array::from(packet.mobius.as_slice());
+        let model = js_sys::Float32Array::from(packet.euclidean_model.as_slice());
+        js_sys::Reflect::set(&result, &"mobius".into(), &mobius).ok();
+        js_sys::Reflect::set(&result, &"euclidean_model".into(), &model).ok();
+    }
+    let messages = js_sys::Array::new();
+    for diagnostic in diagnostics {
+        messages.push(&JsValue::from_str(&diagnostic));
+    }
+    js_sys::Reflect::set(&result, &"diagnostics".into(), &messages).ok();
+    result.into()
 }
 
 #[wasm_bindgen(js_name = "mr_setFuzzy")]
@@ -958,9 +1060,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         // Möbius inversion (c≠0) reverses orientation, flipping screen-space winding.
         // Switch front face convention so culling and front_facing stay consistent.
-        let mob_c = &state.mobius[8..12];
-        let mob_c_len2 = mob_c[0] * mob_c[0] + mob_c[1] * mob_c[1] + mob_c[2] * mob_c[2] + mob_c[3] * mob_c[3];
-        let mobius_reverses = mob_c_len2 > 0.001;
+        let mobius_reverses = state.mobius_orientation < 0;
         unsafe {
             gl.front_face(if mobius_reverses { glow::CW } else { glow::CCW });
         }

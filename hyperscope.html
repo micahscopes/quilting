@@ -191,11 +191,13 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
+  <div class="stats" id="hyperscape-diagnostics">Hyperscape: no authored scene</div>
 </div>
 <button id="sidebar-toggle">▶</button>
 <script type="module">
 import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
+  mr_loadHyperscape, mr_tickHyperscape,
   mr_setInstanceData, mr_setFaceMaterials, mr_buildBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_uploadTessPatch, mr_uploadAnimationPose,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
@@ -570,6 +572,18 @@ function computeMobius(type, cx, cy, cz, r) {
 let currentMobius = null;
 let stretchRange = { min: 0.5, max: 0.5 };
 let stretchSamplePending = false;
+let hyperscapeActive = false;
+let previousFrameTs = null;
+let lastHyperscapeDiagnostic = '';
+
+function activateHyperscape(buffer) {
+  hyperscapeActive = mr_loadHyperscape(new Uint8Array(buffer));
+  previousFrameTs = null;
+  $('hyperscape-diagnostics').textContent = hyperscapeActive
+    ? 'Hyperscape: authored ECS scene active'
+    : 'Hyperscape: no authored scene';
+  return hyperscapeActive;
+}
 
 function sampleStretchAsync() {
   if (stretchSamplePending || !currentMobius || !meshInfo) return;
@@ -594,6 +608,10 @@ effect(() => {
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
   if (!wasmOk.get()) return;
+  if (hyperscapeActive) {
+    hyperscapeActive = false;
+    $('hyperscape-diagnostics').textContent = 'Hyperscape: manual Möbius override';
+  }
   mr_setMobius(flat);
   debouncedLodRecompute();
   sampleStretchAsync();
@@ -1323,6 +1341,7 @@ async function loadModel(buffer, filename) {
   const resp = await workerCall('load_gltf_data', { bytes: buffer });
   meshInfo = resp.result;
   await finishModelUpload(resp.result, filename);
+  activateHyperscape(buffer);
 }
 
 // --- Render loop ---
@@ -1331,6 +1350,24 @@ function frame(ts) {
   const w = $('wrap');
   canvas.width = w.clientWidth; canvas.height = w.clientHeight;
   mr_resize(canvas.width, canvas.height);
+
+  const deltaSeconds = previousFrameTs == null ? 0 : Math.min((ts - previousFrameTs) / 1000, 0.25);
+  previousFrameTs = ts;
+  if (hyperscapeActive) {
+    const snapshot = mr_tickHyperscape(deltaSeconds);
+    if (snapshot) {
+      if (snapshot.mobius) currentMobius = new Float32Array(snapshot.mobius);
+      const messages = snapshot.diagnostics || [];
+      const summary = messages.length
+        ? messages.join(' | ')
+        : `${snapshot.packet_count || 0} render packet(s), parity ${snapshot.orientation_sign || 1}`;
+      $('hyperscape-diagnostics').textContent = `Hyperscape: ${summary}`;
+      if (messages.length && summary !== lastHyperscapeDiagnostic) {
+        console.warn('Hyperscape diagnostics:', messages);
+        lastHyperscapeDiagnostic = summary;
+      }
+    }
+  }
 
   if (animating && gpuSkinned && meshInfo) {
     animTime += 1/60;
@@ -1635,7 +1672,7 @@ phase('model', ['workers'], async () => {
   }
   if (!buf) return null;
   const resp = await workerCall('load_gltf_data', { bytes: buf });
-  return { result: resp.result, filename: currentGlb };
+  return { result: resp.result, filename: currentGlb, buffer: buf };
 });
 
 // Phase 5: Upload model + start rendering (depends on atlas + model + wasm)
@@ -1645,6 +1682,7 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
   if (modelData && modelData.result) {
     meshInfo = modelData.result;
     await finishModelUpload(modelData.result, modelData.filename);
+    activateHyperscape(modelData.buffer);
     const animIdx = parseInt(initParams.anim);
     if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
       $('anim-sel').value = animIdx;

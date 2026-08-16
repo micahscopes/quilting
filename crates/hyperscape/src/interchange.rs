@@ -5,12 +5,15 @@ use crate::{
     EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates, PathKeyframe, ProjectionCamera,
     RenderSubject, TrackedCoordinates,
 };
+use bevy_app::App;
 use bevy_ecs::prelude::*;
+use bevy_time::{Time, TimeUpdateStrategy, Virtual};
 use quilting_gltf::hyperscape::{HyperscapeConstraint, HyperscapeGltfError};
 use quilting_gltf::scene::Transform;
 use quilting_gltf::GltfScene;
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 
 /// Stable link back to the ordinary glTF node array.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,10 +30,25 @@ pub fn spawn_gltf_hyperscape(
         .hyperscape
         .as_ref()
         .ok_or(HyperscapeImportError::MissingPayload)?;
+    spawn_hyperscape_asset(world, &scene.nodes, asset)
+}
+
+/// Lower-level form used by the inexpensive main-thread graph loader.
+pub fn spawn_hyperscape_asset(
+    world: &mut World,
+    nodes: &[quilting_gltf::scene::Node],
+    asset: &quilting_gltf::hyperscape::HyperscapeAsset,
+) -> Result<Vec<Entity>, HyperscapeImportError> {
+    if nodes.len() != asset.node_bindings.len() {
+        return Err(HyperscapeImportError::NodeCount {
+            nodes: nodes.len(),
+            bindings: asset.node_bindings.len(),
+        });
+    }
     let runtime = asset.validate()?;
 
-    let mut entities = Vec::with_capacity(scene.nodes.len());
-    for (node_index, node) in scene.nodes.iter().enumerate() {
+    let mut entities = Vec::with_capacity(nodes.len());
+    for (node_index, node) in nodes.iter().enumerate() {
         let matrix_f64 = node.transform.to_matrix();
         let mut matrix = [0.0_f32; 16];
         for (target, source) in matrix.iter_mut().zip(matrix_f64) {
@@ -109,6 +127,59 @@ pub fn spawn_gltf_hyperscape(
     Ok(entities)
 }
 
+/// A self-contained, main-thread-friendly Hyperscape application. It exposes
+/// extracted packets without exposing Bevy to browser bindings.
+pub struct HyperscapeGltfRuntime {
+    app: App,
+    entities: Vec<Entity>,
+}
+
+impl HyperscapeGltfRuntime {
+    pub fn new(
+        nodes: &[quilting_gltf::scene::Node],
+        asset: &quilting_gltf::hyperscape::HyperscapeAsset,
+    ) -> Result<Self, HyperscapeImportError> {
+        let mut app = App::new();
+        app.add_plugins(crate::HyperscapePlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+            .insert_resource(Time::<Virtual>::from_max_delta(Duration::MAX));
+        let entities = spawn_hyperscape_asset(app.world_mut(), nodes, asset)?;
+        // Establish Bevy's real/virtual clock origin at authored time zero.
+        app.update();
+        Ok(Self { app, entities })
+    }
+
+    pub fn tick(&mut self, delta: Duration) {
+        *self.app.world_mut().resource_mut::<TimeUpdateStrategy>() =
+            TimeUpdateStrategy::ManualDuration(delta);
+        self.app.update();
+    }
+
+    pub fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+
+    pub fn packets(&self) -> &[crate::HyperscopePacket] {
+        &self.app.world().resource::<crate::HyperscopeExtraction>().0
+    }
+
+    pub fn diagnostics(&self) -> &[String] {
+        &self
+            .app
+            .world()
+            .resource::<crate::HyperscapeDiagnostics>()
+            .0
+    }
+
+    pub fn app(&self) -> &App {
+        &self.app
+    }
+
+    pub fn app_mut(&mut self) -> &mut App {
+        &mut self.app
+    }
+}
+
 fn node_origin(transform: &Transform) -> [f64; 3] {
     let matrix = transform.to_matrix();
     [matrix[12], matrix[13], matrix[14]]
@@ -117,6 +188,7 @@ fn node_origin(transform: &Transform) -> [f64; 3] {
 #[derive(Debug)]
 pub enum HyperscapeImportError {
     MissingPayload,
+    NodeCount { nodes: usize, bindings: usize },
     InvalidPayload(HyperscapeGltfError),
 }
 
@@ -130,6 +202,10 @@ impl fmt::Display for HyperscapeImportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingPayload => write!(formatter, "glTF scene has no Hyperscape payload"),
+            Self::NodeCount { nodes, bindings } => write!(
+                formatter,
+                "ordinary node count {nodes} does not match binding count {bindings}"
+            ),
             Self::InvalidPayload(error) => error.fmt(formatter),
         }
     }
@@ -139,7 +215,7 @@ impl Error for HyperscapeImportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidPayload(error) => Some(error),
-            Self::MissingPayload => None,
+            Self::MissingPayload | Self::NodeCount { .. } => None,
         }
     }
 }
@@ -184,5 +260,31 @@ mod tests {
         assert_eq!(extraction.0[0].subject, horse);
         assert_eq!(extraction.0[0].camera, camera);
         assert_eq!(extraction.0[0].euclidean_model[12], -2.0);
+    }
+
+    #[test]
+    fn self_contained_runtime_ticks_authored_time() {
+        let bytes = include_bytes!("../../../examples/hyperscape-track.gltf");
+        let (nodes, asset) = quilting_gltf::load_hyperscape_graph(bytes).unwrap();
+        let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset.unwrap()).unwrap();
+        assert_eq!(runtime.packets().len(), 0);
+        let horse = runtime.entities()[0];
+        runtime
+            .app_mut()
+            .world_mut()
+            .entity_mut(horse)
+            .insert(RenderSubject);
+        runtime.tick(Duration::from_secs(1));
+        assert_eq!(runtime.packets().len(), 1);
+        assert!(runtime.diagnostics().is_empty());
+        assert_eq!(
+            runtime
+                .app()
+                .world()
+                .get::<LocalCoordinates>(horse)
+                .unwrap()
+                .0,
+            [-1.0, 0.0, 0.0]
+        );
     }
 }
