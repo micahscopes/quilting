@@ -14,6 +14,8 @@ use quilting_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod interchange;
+
 /// Shared conformal scene topology. Ordinary entity parenting remains in the
 /// caller's entity graph; this resource contains only coordinate-frame and
 /// round-wall structure.
@@ -35,6 +37,19 @@ pub struct LocalCoordinates(pub [f64; 3]);
 /// makes frame entry, exit, and re-anchoring inspectable.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct EuclideanCoordinates(pub [f64; 3]);
+
+/// Ordinary glTF/node-local affine model matrix, kept distinct from the
+/// conformal frame chain. Column-major, matching glTF and Hyperscope.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct EuclideanModelMatrix(pub [f32; 16]);
+
+impl Default for EuclideanModelMatrix {
+    fn default() -> Self {
+        Self([
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ])
+    }
+}
 
 /// Marks geometry that should receive a per-view Hyperscope transform.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -185,6 +200,8 @@ pub struct HyperscopePacket {
     /// Quaternion coefficients `[a, b, c, d]`, each in `(w,x,y,z)` order.
     pub mobius: [f32; 16],
     pub orientation_sign: i8,
+    /// Ordinary affine transform applied before the conformal frame map.
+    pub euclidean_model: [f32; 16],
 }
 
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
@@ -493,11 +510,11 @@ fn extract_hyperscope_packets(
     scene: Res<ConformalScene>,
     mut extraction: ResMut<HyperscopeExtraction>,
     mut diagnostics: ResMut<HyperscapeDiagnostics>,
-    subjects: Query<(Entity, &EntityFrame), With<RenderSubject>>,
+    subjects: Query<(Entity, &EntityFrame, Option<&EuclideanModelMatrix>), With<RenderSubject>>,
     cameras: Query<(Entity, &ProjectionCamera)>,
 ) {
     extraction.0.clear();
-    for (subject, subject_frame) in &subjects {
+    for (subject, subject_frame, model) in &subjects {
         for (camera_entity, camera) in &cameras {
             match scene.frames.relative_chain(subject_frame.0, camera.frame) {
                 Ok(chain) => match chain.to_mobius() {
@@ -506,6 +523,7 @@ fn extract_hyperscope_packets(
                         camera: camera_entity,
                         mobius: mobius_uniform(mobius),
                         orientation_sign: chain.orientation_sign(),
+                        euclidean_model: model.copied().unwrap_or_default().0,
                     }),
                     Err(error) => diagnostics.0.push(format!(
                         "could not collapse render chain for {subject:?}: {error}"

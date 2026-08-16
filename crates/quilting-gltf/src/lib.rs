@@ -3,6 +3,7 @@ pub mod material;
 pub mod animation;
 pub mod scene;
 pub mod evaluator;
+pub mod hyperscape;
 
 use std::fmt;
 
@@ -54,6 +55,8 @@ pub struct GltfScene {
     pub texture_to_image: Vec<usize>,
     /// Index of the default scene, if specified in the glTF.
     pub default_scene: Option<usize>,
+    /// Optional conformal authoring data from `extras.hyperscape`.
+    pub hyperscape: Option<hyperscape::HyperscapeAsset>,
 }
 
 /// Like GltfScene but with raw image blobs instead of decoded pixels.
@@ -71,6 +74,8 @@ pub struct GltfSceneRaw {
     /// Mapping from glTF texture index to raw_textures index.
     pub texture_to_image: Vec<usize>,
     pub default_scene: Option<usize>,
+    /// Optional conformal authoring data from `extras.hyperscape`.
+    pub hyperscape: Option<hyperscape::HyperscapeAsset>,
 }
 
 /// Errors that can occur during glTF loading.
@@ -82,6 +87,8 @@ pub enum GltfError {
     MissingData(String),
     /// An unsupported feature was encountered.
     Unsupported(String),
+    /// Hyperscape extras are present but malformed or inconsistent.
+    Hyperscape(hyperscape::HyperscapeGltfError),
 }
 
 impl fmt::Display for GltfError {
@@ -90,6 +97,7 @@ impl fmt::Display for GltfError {
             GltfError::Parse(e) => write!(f, "glTF parse error: {e}"),
             GltfError::MissingData(s) => write!(f, "missing data: {s}"),
             GltfError::Unsupported(s) => write!(f, "unsupported: {s}"),
+            GltfError::Hyperscape(e) => write!(f, "Hyperscape interchange error: {e}"),
         }
     }
 }
@@ -99,6 +107,12 @@ impl std::error::Error for GltfError {}
 impl From<gltf::Error> for GltfError {
     fn from(e: gltf::Error) -> Self {
         GltfError::Parse(e)
+    }
+}
+
+impl From<hyperscape::HyperscapeGltfError> for GltfError {
+    fn from(e: hyperscape::HyperscapeGltfError) -> Self {
+        GltfError::Hyperscape(e)
     }
 }
 
@@ -156,6 +170,7 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
         .collect();
 
     let default_scene = document.default_scene().map(|s| s.index());
+    let hyperscape = hyperscape::extract_asset(&document)?;
 
     // Convert images to RGBA8
     let images: Vec<ImageData> = raw_images.iter().map(|img| {
@@ -241,6 +256,7 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
         images: tex_images,
         texture_to_image,
         default_scene,
+        hyperscape,
     })
 }
 
@@ -276,6 +292,7 @@ pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
         .map(|s| scene::extract_scene(&s))
         .collect();
     let default_scene = document.default_scene().map(|s| s.index());
+    let hyperscape = hyperscape::extract_asset(document)?;
 
     // Extract raw image blobs from the GLB buffer
     let mut raw_images: Vec<RawImageBlob> = Vec::new();
@@ -334,7 +351,7 @@ pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
 
     Ok(GltfSceneRaw {
         meshes, materials, animations, skins, scenes, nodes,
-        raw_textures, texture_to_image, default_scene,
+        raw_textures, texture_to_image, default_scene, hyperscape,
     })
 }
 

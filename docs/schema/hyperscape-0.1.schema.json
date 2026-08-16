@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyperspectives.org/schemas/hyperscape-0.1.schema.json",
+  "title": "Hyperscape glTF extras payload 0.1",
+  "description": "Value stored at glTF root extras.hyperscape. Node extras.hyperscape uses $defs/nodeBinding.",
+  "type": "object",
+  "required": ["version"],
+  "properties": {
+    "version": { "const": "0.1" },
+    "frames": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/frame" },
+      "default": []
+    },
+    "walls": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/wall" },
+      "default": []
+    },
+    "anchors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/anchor" },
+      "default": []
+    },
+    "paths": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/path" },
+      "default": []
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/constraint" },
+      "default": []
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "finiteNumber": { "type": "number" },
+    "nonnegativeIndex": { "type": "integer", "minimum": 0 },
+    "vec3": {
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/finiteNumber" },
+        { "$ref": "#/$defs/finiteNumber" },
+        { "$ref": "#/$defs/finiteNumber" }
+      ],
+      "items": false
+    },
+    "vec4": {
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/finiteNumber" },
+        { "$ref": "#/$defs/finiteNumber" },
+        { "$ref": "#/$defs/finiteNumber" },
+        { "$ref": "#/$defs/finiteNumber" }
+      ],
+      "items": false
+    },
+    "generator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "offset"],
+          "properties": {
+            "type": { "const": "translation" },
+            "offset": { "$ref": "#/$defs/vec3" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "quaternion_wxyz"],
+          "properties": {
+            "type": { "const": "rotation" },
+            "quaternion_wxyz": { "$ref": "#/$defs/vec4" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "factor"],
+          "properties": {
+            "type": { "const": "uniform_scale" },
+            "factor": { "$ref": "#/$defs/finiteNumber" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "center", "radius"],
+          "properties": {
+            "type": { "const": "sphere_reflection" },
+            "center": { "$ref": "#/$defs/vec3" },
+            "radius": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "frame": {
+      "type": "object",
+      "required": ["name", "parent", "generators"],
+      "properties": {
+        "name": { "type": "string" },
+        "parent": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/nonnegativeIndex" }
+          ]
+        },
+        "generators": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/generator" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "geometry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "center", "radius"],
+          "properties": {
+            "type": { "const": "sphere" },
+            "center": { "$ref": "#/$defs/vec3" },
+            "radius": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "unit_normal", "offset"],
+          "properties": {
+            "type": { "const": "plane" },
+            "unit_normal": { "$ref": "#/$defs/vec3" },
+            "offset": { "$ref": "#/$defs/finiteNumber" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "wall": {
+      "type": "object",
+      "required": ["name", "frame", "geometry"],
+      "properties": {
+        "name": { "type": "string" },
+        "frame": { "$ref": "#/$defs/nonnegativeIndex" },
+        "geometry": { "$ref": "#/$defs/geometry" }
+      },
+      "additionalProperties": false
+    },
+    "anchor": {
+      "type": "object",
+      "required": ["name", "frame"],
+      "properties": {
+        "name": { "type": "string" },
+        "frame": { "$ref": "#/$defs/nonnegativeIndex" },
+        "flipped_walls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonnegativeIndex" },
+          "uniqueItems": true,
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "keyframe": {
+      "type": "object",
+      "required": ["time_seconds", "point"],
+      "properties": {
+        "time_seconds": { "type": "number", "minimum": 0 },
+        "point": { "$ref": "#/$defs/vec3" }
+      },
+      "additionalProperties": false
+    },
+    "path": {
+      "type": "object",
+      "required": ["name", "node", "keyframes"],
+      "properties": {
+        "name": { "type": "string" },
+        "node": { "$ref": "#/$defs/nonnegativeIndex" },
+        "looping": { "type": "boolean", "default": false },
+        "keyframes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/keyframe" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "constraint": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "node", "target_node"],
+          "properties": {
+            "type": { "const": "track" },
+            "node": { "$ref": "#/$defs/nonnegativeIndex" },
+            "target_node": { "$ref": "#/$defs/nonnegativeIndex" },
+            "local_offset": { "$ref": "#/$defs/vec3", "default": [0, 0, 0] }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "node", "frame"],
+          "properties": {
+            "type": { "const": "projection_camera" },
+            "node": { "$ref": "#/$defs/nonnegativeIndex" },
+            "frame": { "$ref": "#/$defs/nonnegativeIndex" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "nodeBinding": {
+      "type": "object",
+      "required": ["frame"],
+      "properties": {
+        "frame": { "$ref": "#/$defs/nonnegativeIndex" },
+        "anchor": { "$ref": "#/$defs/nonnegativeIndex" },
+        "path": { "$ref": "#/$defs/nonnegativeIndex" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

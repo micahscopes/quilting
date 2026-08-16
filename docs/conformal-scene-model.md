@@ -166,6 +166,14 @@ same payload can move under a vendor extension object and be listed in
 `extensionsUsed`.  It is only placed in `extensionsRequired` when omission
 prevents a meaningful fallback rendering.
 
+The machine-readable schema is
+[`schema/hyperscape-0.1.schema.json`](schema/hyperscape-0.1.schema.json), and
+[`../examples/hyperscape-track.gltf`](../examples/hyperscape-track.gltf) is a
+minimal editable interchange fixture. `quilting-gltf` validates root and node
+references and can inject the payload into either JSON glTF or GLB while
+preserving ordinary fallback nodes, unrelated object-valued extras, and binary
+chunks.
+
 ## Vertical-slice event order
 
 1. Load ordinary glTF and Hyperscape extras.

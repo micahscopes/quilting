@@ -1,0 +1,132 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "Hyperscape 0.1 example"
+  },
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "Conformal tracking fallback",
+      "nodes": [0, 1, 2]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "TrackedHorseFallback",
+      "translation": [-2, 0, 0],
+      "extras": {
+        "hyperscape": {
+          "frame": 1,
+          "anchor": 0,
+          "path": 0
+        }
+      }
+    },
+    {
+      "name": "TrackingCameraFallback",
+      "translation": [0, -8, 3],
+      "extras": {
+        "hyperscape": {
+          "frame": 0
+        }
+      }
+    },
+    {
+      "name": "ReflectionSphereGuideFallback",
+      "scale": [3, 3, 3],
+      "extras": {
+        "hyperscape": {
+          "frame": 1
+        }
+      }
+    }
+  ],
+  "extras": {
+    "hyperscape": {
+      "version": "0.1",
+      "frames": [
+        {
+          "name": "world",
+          "parent": null,
+          "generators": []
+        },
+        {
+          "name": "reflection-room",
+          "parent": 0,
+          "generators": [
+            {
+              "type": "translation",
+              "offset": [0, 0, 1]
+            },
+            {
+              "type": "sphere_reflection",
+              "center": [0, 0, 0],
+              "radius": 3
+            }
+          ]
+        }
+      ],
+      "walls": [
+        {
+          "name": "reflection-boundary",
+          "frame": 1,
+          "geometry": {
+            "type": "sphere",
+            "center": [0, 0, 0],
+            "radius": 3
+          }
+        },
+        {
+          "name": "crossing-boundary",
+          "frame": 1,
+          "geometry": {
+            "type": "sphere",
+            "center": [2, 0, 0],
+            "radius": 2
+          }
+        }
+      ],
+      "anchors": [
+        {
+          "name": "inside-out-room",
+          "frame": 1,
+          "flipped_walls": [0]
+        }
+      ],
+      "paths": [
+        {
+          "name": "horse-approach",
+          "node": 0,
+          "looping": true,
+          "keyframes": [
+            {
+              "time_seconds": 0,
+              "point": [-2, 0, 0]
+            },
+            {
+              "time_seconds": 2,
+              "point": [0, 0, 0]
+            },
+            {
+              "time_seconds": 4,
+              "point": [2, 0, 0]
+            }
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "type": "track",
+          "node": 1,
+          "target_node": 0,
+          "local_offset": [0, 0, 0.5]
+        },
+        {
+          "type": "projection_camera",
+          "node": 1,
+          "frame": 0
+        }
+      ]
+    }
+  }
+}
