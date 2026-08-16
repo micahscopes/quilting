@@ -365,39 +365,34 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     }
     let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
     if has_smooth {
-        // Threshold mirrors AFFINE_C_NORM_SQ in quilting-core: the CPU decides
-        // whether to bake reflected smooth normals with the same predicate.
-        let is_mobius = dot(u.mob_c, u.mob_c) > 0.001;
-        if is_mobius {
-            // Transform each vertex normal through the Möbius differential at that vertex
-            let bot0 = qmul(u.mob_c, sp0) + u.mob_d;
-            let M0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(bot0));
-            let a0 = u.mob_a - qmul(M0, u.mob_c);
-            let rn0 = qmul(qmul(a0, vec4<f32>(0.0, sn0)), qinv(bot0)).yzw;
+        // Transform every normal through the Möbius differential. The c=0
+        // branch still contains rotations and negative scales; treating it as
+        // "no transform" gives visibly incorrect lighting and parity.
+        let bot0 = qmul(u.mob_c, sp0) + u.mob_d;
+        let M0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(bot0));
+        let a0 = u.mob_a - qmul(M0, u.mob_c);
+        let rn0 = qmul(qmul(a0, vec4<f32>(0.0, sn0)), qinv(bot0)).yzw;
 
-            let bot1 = qmul(u.mob_c, sp1) + u.mob_d;
-            let M1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(bot1));
-            let a1 = u.mob_a - qmul(M1, u.mob_c);
-            let rn1 = qmul(qmul(a1, vec4<f32>(0.0, sn1)), qinv(bot1)).yzw;
+        let bot1 = qmul(u.mob_c, sp1) + u.mob_d;
+        let M1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(bot1));
+        let a1 = u.mob_a - qmul(M1, u.mob_c);
+        let rn1 = qmul(qmul(a1, vec4<f32>(0.0, sn1)), qinv(bot1)).yzw;
 
-            let bot2 = qmul(u.mob_c, sp2) + u.mob_d;
-            let M2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(bot2));
-            let a2 = u.mob_a - qmul(M2, u.mob_c);
-            let rn2 = qmul(qmul(a2, vec4<f32>(0.0, sn2)), qinv(bot2)).yzw;
+        let bot2 = qmul(u.mob_c, sp2) + u.mob_d;
+        let M2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(bot2));
+        let a2 = u.mob_a - qmul(M2, u.mob_c);
+        let rn2 = qmul(qmul(a2, vec4<f32>(0.0, sn2)), qinv(bot2)).yzw;
 
-            // Each rnᵢ carries ~1/|botᵢ|² of conformal magnitude and reaches
-            // ~1e20 near a Möbius pole, where dot() inside normalize() would
-            // overflow to inf and NaN the normal. Rescale the blend by its
-            // largest component first — a positive scalar, so direction and
-            // blend weights are untouched. If the blend is degenerate, keep
-            // the analytic normal already in nrm.
-            let nsum = bary.x * rn0 + bary.y * rn1 + bary.z * rn2;
-            let nmax = max(max(abs(nsum.x), abs(nsum.y)), abs(nsum.z));
-            if nmax > 1e-20 {
-                nrm = normalize(nsum / nmax);
-            }
-        } else {
-            nrm = normalize(bary.x * sn0 + bary.y * sn1 + bary.z * sn2);
+        // Each rnᵢ carries ~1/|botᵢ|² of conformal magnitude and reaches
+        // ~1e20 near a Möbius pole, where dot() inside normalize() would
+        // overflow to inf and NaN the normal. Rescale the blend by its
+        // largest component first — a positive scalar, so direction and
+        // blend weights are untouched. If the blend is degenerate, keep
+        // the analytic normal already in nrm.
+        let nsum = bary.x * rn0 + bary.y * rn1 + bary.z * rn2;
+        let nmax = max(max(abs(nsum.x), abs(nsum.y)), abs(nsum.z));
+        if nmax > 1e-20 {
+            nrm = normalize(nsum / nmax);
         }
     }
 
@@ -438,23 +433,26 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     out.tess_bary = bary;
     out.instance_id = f32(instance_idx) + u._pad;
 
-    // Möbius conformal stretch.
-    let is_mobius = dot(u.mob_c, u.mob_c) > 0.001;
-    if is_mobius {
-        let b0 = qmul(u.mob_c, sp0) + u.mob_d;
-        let b1 = qmul(u.mob_c, sp1) + u.mob_d;
-        let b2 = qmul(u.mob_c, sp2) + u.mob_d;
-        let s0 = 1.0 / max(dot(b0, b0), 0.001);
-        let s1 = 1.0 / max(dot(b1, b1), 0.001);
-        let s2 = 1.0 / max(dot(b2, b2), 0.001);
-        let stretch = bary.x * s0 + bary.y * s1 + bary.z * s2;
-        // Signed log2, mapped to [0,1] via sigmoid for smooth falloff (no hard cutoff).
-        // 0.5 = no stretch, 0 = max squash, 1 = max expand.
-        let log_s = log2(stretch);
-        out.mobius_stretch = 1.0 / (1.0 + exp(-log_s * 0.25));
-    } else {
-        out.mobius_stretch = 0.5; // neutral = no Möbius
-    }
+    // Möbius conformal scale is |a - F(p)c| / |cp + d|. The historical
+    // 1/|cp+d|² shortcut only holds for normalized inversive generators and
+    // incorrectly reports every c=0 scale as neutral.
+    let mb0 = qmul(u.mob_c, sp0) + u.mob_d;
+    let mb1 = qmul(u.mob_c, sp1) + u.mob_d;
+    let mb2 = qmul(u.mob_c, sp2) + u.mob_d;
+    let mm0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(mb0));
+    let mm1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(mb1));
+    let mm2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(mb2));
+    let ma0 = u.mob_a - qmul(mm0, u.mob_c);
+    let ma1 = u.mob_a - qmul(mm1, u.mob_c);
+    let ma2 = u.mob_a - qmul(mm2, u.mob_c);
+    let s0 = sqrt(max(dot(ma0, ma0), 1e-20) / max(dot(mb0, mb0), 1e-20));
+    let s1 = sqrt(max(dot(ma1, ma1), 1e-20) / max(dot(mb1, mb1), 1e-20));
+    let s2 = sqrt(max(dot(ma2, ma2), 1e-20) / max(dot(mb2, mb2), 1e-20));
+    let stretch = bary.x * s0 + bary.y * s1 + bary.z * s2;
+    // Signed log2, mapped to [0,1] via sigmoid for smooth falloff (no hard cutoff).
+    // 0.5 = no stretch, 0 = max squash, 1 = max expand.
+    let log_s = log2(max(stretch, 1e-20));
+    out.mobius_stretch = 1.0 / (1.0 + exp(-log_s * 0.25));
 
     return out;
 }

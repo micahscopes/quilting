@@ -43,11 +43,17 @@ detail.
 - Runtime quaternion layout is `(w, x, y, z)`. glTF rotation input is
   `(x, y, z, w)` and must be converted at the loader boundary.
 - `ConformalTransformChain.generators` is in application order.
+- Orientation parity counts every reversing generator: sphere reflection and
+  negative uniform scale are odd; positive scale, rotation, and translation
+  are even.
 - A frame's chain maps local coordinates to its parent's coordinates.
 - `Mobius::compose(self, other)` means apply `other`, then `self`.
-- `SINGULARITY_NORM_SQ`, `SINGULARITY_SENTINEL`,
-  `POLE_PROXIMITY_NORM_SQ`, and `AFFINE_C_NORM_SQ` remain shared CPU/GPU
-  contracts.  Their adversarial f32 tests are part of the conformance suite.
+- `SINGULARITY_NORM_SQ`, `SINGULARITY_SENTINEL`, and
+  `POLE_PROXIMITY_NORM_SQ` remain shared CPU/GPU contracts. Their adversarial
+  f32 tests are part of the conformance suite. `AFFINE_C_NORM_SQ` is only a
+  CPU preprocessing threshold; the shader always evaluates the full
+  differential so `c = 0` rotations and signed scales still transform
+  directions and report their actual local stretch.
 - General coefficient matrices are a render representation, not an authoring
   inverse API.  Inverse frame paths are constructed by reversing and inverting
   validated generator words.

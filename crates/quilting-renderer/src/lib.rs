@@ -250,6 +250,19 @@ mod tests {
     }
 
     #[test]
+    fn affine_conformal_maps_still_transform_normals_and_stretch() {
+        let source = include_str!("../../quilting-shaders/shaders/vertex/main.wgsl");
+        assert!(
+            !source.contains("let is_mobius"),
+            "c=0 includes rotations and signed scales, so it cannot bypass the differential"
+        );
+        assert!(
+            source.contains("let ma0 = u.mob_a - qmul(mm0, u.mob_c)"),
+            "stretch must use the full fractional-linear differential"
+        );
+    }
+
+    #[test]
     fn wire_fragment_has_ubo() {
         let sources = compiled_glsl_sources().unwrap();
         let wire = sources.iter().find(|(n, _, _)| *n == "wire").unwrap();

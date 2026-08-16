@@ -134,6 +134,15 @@ pub struct HyperscapeGltfRuntime {
     entities: Vec<Entity>,
 }
 
+/// One extracted renderer packet with stable ordinary glTF identities for
+/// both ends of the subject/view relation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GltfHyperscopePacket {
+    pub subject_node: usize,
+    pub camera_node: usize,
+    pub packet: crate::HyperscopePacket,
+}
+
 impl HyperscapeGltfRuntime {
     pub fn new(
         nodes: &[quilting_gltf::scene::Node],
@@ -161,6 +170,24 @@ impl HyperscapeGltfRuntime {
 
     pub fn packets(&self) -> &[crate::HyperscopePacket] {
         &self.app.world().resource::<crate::HyperscopeExtraction>().0
+    }
+
+    /// Renderer packets keyed by stable ordinary glTF subject and camera node
+    /// indices. Retaining the camera identity prevents multi-view extraction
+    /// from silently overwriting one view with another.
+    pub fn packets_by_node(&self) -> Vec<GltfHyperscopePacket> {
+        self.packets()
+            .iter()
+            .filter_map(|packet| {
+                let subject_node = self.app.world().get::<GltfNodeIndex>(packet.subject)?.0;
+                let camera_node = self.app.world().get::<GltfNodeIndex>(packet.camera)?.0;
+                Some(GltfHyperscopePacket {
+                    subject_node,
+                    camera_node,
+                    packet: packet.clone(),
+                })
+            })
+            .collect()
     }
 
     pub fn diagnostics(&self) -> &[String] {
@@ -274,8 +301,27 @@ mod tests {
             .world_mut()
             .entity_mut(horse)
             .insert(RenderSubject);
+        let second_camera = runtime.entities()[2];
+        runtime
+            .app_mut()
+            .world_mut()
+            .entity_mut(second_camera)
+            .insert(ProjectionCamera {
+                frame: quilting_core::FrameId(1),
+            });
         runtime.tick(Duration::from_secs(1));
-        assert_eq!(runtime.packets().len(), 1);
+        assert_eq!(runtime.packets().len(), 2);
+        let keyed = runtime.packets_by_node();
+        assert_eq!(keyed.len(), 2);
+        assert_eq!(keyed[0].subject_node, 0);
+        assert_eq!(keyed[1].subject_node, 0);
+        assert_eq!(
+            keyed
+                .iter()
+                .map(|packet| packet.camera_node)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([1, 2])
+        );
         assert!(runtime.diagnostics().is_empty());
         assert_eq!(
             runtime

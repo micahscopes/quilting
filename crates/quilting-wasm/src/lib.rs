@@ -310,10 +310,12 @@ pub fn upload_model_to_compute() -> bool {
 #[wasm_bindgen]
 pub fn sample_stretch_range(mobius: &[f32], instances: &[f32], num_faces: u32) -> Vec<f32> {
     if mobius.len() < 16 { return vec![0.5, 0.5]; }
-    let c = [mobius[8], mobius[9], mobius[10], mobius[11]];
-    let d = [mobius[12], mobius[13], mobius[14], mobius[15]];
-    let c_len2 = c[0]*c[0] + c[1]*c[1] + c[2]*c[2] + c[3]*c[3];
-    if c_len2 < 0.001 { return vec![0.5, 0.5]; } // identity Möbius, no stretch
+    let transform = Mobius::new(
+        Quat::new(mobius[0] as f64, mobius[1] as f64, mobius[2] as f64, mobius[3] as f64),
+        Quat::new(mobius[4] as f64, mobius[5] as f64, mobius[6] as f64, mobius[7] as f64),
+        Quat::new(mobius[8] as f64, mobius[9] as f64, mobius[10] as f64, mobius[11] as f64),
+        Quat::new(mobius[12] as f64, mobius[13] as f64, mobius[14] as f64, mobius[15] as f64),
+    );
 
     let stride = instance_layout::STRIDE;
     let nf = num_faces as usize;
@@ -333,14 +335,8 @@ pub fn sample_stretch_range(mobius: &[f32], instances: &[f32], num_faces: u32) -
         let cx = (p0[0] + p1[0] + p2[0]) / 3.0;
         let cy = (p0[1] + p1[1] + p2[1]) / 3.0;
         let cz = (p0[2] + p1[2] + p2[2]) / 3.0;
-        // bot = c*p + d (quaternion multiply, p as pure imaginary (0, cx, cy, cz))
-        // For pure imaginary p: c*p = (c0*0 - c1*cx - c2*cy - c3*cz, c0*cx + c2*cz - c3*cy, c0*cy + c3*cx - c1*cz, c0*cz + c1*cy - c2*cx)
-        let bw = -c[1]*cx - c[2]*cy - c[3]*cz + d[0];
-        let bx = c[0]*cx + c[2]*cz - c[3]*cy + d[1];
-        let by = c[0]*cy + c[3]*cx - c[1]*cz + d[2];
-        let bz = c[0]*cz + c[1]*cy - c[2]*cx + d[3];
-        let bot_len2 = bw*bw + bx*bx + by*by + bz*bz;
-        let stretch = 1.0 / bot_len2.max(0.001);
+        let point = Quat::from_point(cx as f64, cy as f64, cz as f64);
+        let stretch = transform.conformal_scale_at(point) as f32;
         // Sigmoid mapping matching vertex shader
         let log_s = stretch.log2();
         let sig = 1.0 / (1.0 + (-log_s * 0.25_f32).exp());
@@ -1242,6 +1238,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         for (node_idx, node) in scene.nodes.iter().enumerate() {
             if let Some(mi) = node.mesh {
                 mesh_nodes.push(MeshNodeRef {
+                    node_idx,
                     mesh_idx: mi,
                     skin_idx: node.skin,
                     world_transform: world_transforms[node_idx],
@@ -1257,7 +1254,13 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             0.0, 0.0, 0.0, 1.0,
         ];
         for (mi, _) in scene.meshes.iter().enumerate() {
+            let node_idx = scene
+                .nodes
+                .iter()
+                .position(|node| node.mesh == Some(mi))
+                .unwrap_or(0);
             mesh_nodes.push(MeshNodeRef {
+                node_idx,
                 mesh_idx: mi,
                 skin_idx: None,
                 world_transform: identity,
@@ -1273,6 +1276,11 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             0.0, 0.0, 0.0, 1.0,
         ];
         mesh_nodes.push(MeshNodeRef {
+            node_idx: scene
+                .nodes
+                .iter()
+                .position(|node| node.mesh == Some(0))
+                .unwrap_or(0),
             mesh_idx: 0,
             skin_idx: None,
             world_transform: identity,
@@ -1303,25 +1311,37 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights)
     );
 
-    // Track per-triangle material indices across the merged mesh
+    // Track stable ordinary glTF node identity alongside each merged triangle.
+    // The main renderer uses this to select the extracted subject/view chain.
     let mut face_material_indices: Vec<Option<usize>> = Vec::new();
+    let mut face_node_indices: Vec<usize> = Vec::new();
 
     let combined = if has_animation {
         // For animated meshes, merge ALL mesh nodes sharing the primary skin.
         // Many glTF models split a skinned character into multiple meshes
         // (body, fur, wings, etc.) that all reference the same skeleton.
         let target_skin = primary_skin_idx;
-        let skinned_meshes: Vec<usize> = mesh_nodes.iter()
+        let skinned_meshes: Vec<(usize, usize)> = mesh_nodes.iter()
             .filter(|mn| mn.skin_idx == target_skin)
-            .map(|mn| mn.mesh_idx)
+            .map(|mn| (mn.node_idx, mn.mesh_idx))
             .collect();
         web_sys::console::log_1(&format!(
             "load_gltf_data: merging {} skinned meshes for bake", skinned_meshes.len()
         ).into());
-        flatten_multi_mesh_for_bake(&scene.meshes, &skinned_meshes, &mut face_material_indices)
+        flatten_multi_mesh_for_bake(
+            &scene.meshes,
+            &skinned_meshes,
+            &mut face_material_indices,
+            &mut face_node_indices,
+        )
     } else {
         // For static models, merge ALL mesh nodes with world transforms
-        merge_all_mesh_nodes(&scene, &mesh_nodes, &mut face_material_indices)
+        merge_all_mesh_nodes(
+            &scene,
+            &mesh_nodes,
+            &mut face_material_indices,
+            &mut face_node_indices,
+        )
     };
 
     let n_verts = combined.positions.len();
@@ -1496,6 +1516,13 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         .collect();
     js_face_materials.copy_from(&mat_indices);
 
+    let js_face_nodes = js_sys::Int32Array::new_with_length(face_node_indices.len() as u32);
+    let node_indices: Vec<i32> = face_node_indices
+        .iter()
+        .map(|&node| i32::try_from(node).unwrap_or(i32::MAX))
+        .collect();
+    js_face_nodes.copy_from(&node_indices);
+
     // Extract first material as default (backward compat).
     // With raw image blobs (browser-native decode), we use base_color_factor directly.
     let (base_color, metallic, roughness) = if !scene.materials.is_empty() {
@@ -1575,6 +1602,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     js_sys::Reflect::set(&result, &"materials".into(), &js_materials).unwrap();
     js_sys::Reflect::set(&result, &"textures".into(), &js_textures).unwrap();
     js_sys::Reflect::set(&result, &"face_material_indices".into(), &js_face_materials).unwrap();
+    js_sys::Reflect::set(&result, &"face_node_indices".into(), &js_face_nodes).unwrap();
 
     // Backward-compat scalar fields
     let bc_arr = js_sys::Array::new();
@@ -1667,8 +1695,9 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
 /// All meshes should share the same skin/skeleton.
 fn flatten_multi_mesh_for_bake(
     meshes: &[quilting_gltf::mesh::Mesh],
-    mesh_indices: &[usize],
+    mesh_nodes: &[(usize, usize)],
     face_materials: &mut Vec<Option<usize>>,
+    face_nodes: &mut Vec<usize>,
 ) -> quilting_gltf::mesh::Primitive {
     let mut positions = Vec::new();
     let mut normals_all: Option<Vec<[f64; 3]>> = None;
@@ -1677,7 +1706,7 @@ fn flatten_multi_mesh_for_bake(
     let mut joint_indices_all: Option<Vec<[u16; 4]>> = None;
     let mut joint_weights_all: Option<Vec<[f32; 4]>> = None;
 
-    for &mi in mesh_indices {
+    for &(node_idx, mi) in mesh_nodes {
         if mi >= meshes.len() { continue; }
         let mesh = &meshes[mi];
         for prim in &mesh.primitives {
@@ -1688,6 +1717,7 @@ fn flatten_multi_mesh_for_bake(
                 .collect();
             for _ in &new_tris {
                 face_materials.push(prim.material_index);
+                face_nodes.push(node_idx);
             }
             triangles.extend(new_tris);
 
@@ -1707,8 +1737,8 @@ fn flatten_multi_mesh_for_bake(
     }
 
     // Use morph targets from the first mesh's first primitive (if any)
-    let morph_targets = mesh_indices.first()
-        .and_then(|&mi| meshes.get(mi))
+    let morph_targets = mesh_nodes.first()
+        .and_then(|&(_, mi)| meshes.get(mi))
         .and_then(|m| m.primitives.first())
         .map(|p| p.morph_targets.clone())
         .unwrap_or_default();
@@ -1732,6 +1762,7 @@ fn merge_all_mesh_nodes(
     scene: &quilting_gltf::GltfSceneRaw,
     mesh_nodes: &[MeshNodeRef],
     face_materials: &mut Vec<Option<usize>>,
+    face_nodes: &mut Vec<usize>,
 ) -> quilting_gltf::mesh::Primitive {
     let mut positions = Vec::new();
     let mut normals_all: Option<Vec<[f64; 3]>> = None;
@@ -1797,6 +1828,7 @@ fn merge_all_mesh_nodes(
                 .collect();
             for _ in &new_tris {
                 face_materials.push(prim.material_index);
+                face_nodes.push(mn.node_idx);
             }
             triangles.extend(new_tris);
         }
@@ -2379,10 +2411,9 @@ pub fn clear_remeshed_data() {
 
 /// Helper struct to pass mesh node info to merge_all_mesh_nodes.
 struct MeshNodeRef {
+    node_idx: usize,
     mesh_idx: usize,
     #[allow(dead_code)]
     skin_idx: Option<usize>,
     world_transform: [f64; 16],
 }
-
-

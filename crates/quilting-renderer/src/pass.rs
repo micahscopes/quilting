@@ -47,6 +47,32 @@ pub struct RenderBatch<'a> {
     pub wire_color: [f32; 3],
     /// Material index (for PBR rendering).
     pub material_index: usize,
+    /// Per-entity conformal transform selected during render extraction.
+    pub mobius: [f32; 16],
+    /// Explicit orientation parity of the authored generator word.
+    pub orientation_sign: i8,
+}
+
+/// Copy view state while selecting this entity batch's conformal map.
+pub fn camera_for_batch(camera: &Camera, batch: &RenderBatch<'_>) -> Camera {
+    Camera {
+        mvp: camera.mvp,
+        mv: camera.mv,
+        mobius: batch.mobius,
+        camera_pos: camera.camera_pos,
+    }
+}
+
+/// Set winding from semantic orientation parity. Matrix shape (`c != 0`) is
+/// not an orientation test: an even composition can be proper with nonzero c.
+pub fn apply_batch_winding(gl: &glow::Context, orientation_sign: i8) {
+    unsafe {
+        gl.front_face(if orientation_sign < 0 {
+            glow::CW
+        } else {
+            glow::CCW
+        });
+    }
 }
 
 /// Upload vertex UBO for a batch and bind it.
@@ -84,16 +110,30 @@ pub fn render_frame(
     vtx_ubo.bind(gl);
 
     let draw_pbr = mode == RenderMode::Pbr;
-    let draw_matcap = matches!(mode, RenderMode::Matcap | RenderMode::Both | RenderMode::Lod);
+    let draw_matcap = matches!(
+        mode,
+        RenderMode::Matcap | RenderMode::Both | RenderMode::Lod
+    );
     let draw_wire = matches!(mode, RenderMode::Wire | RenderMode::Both);
     let draw_normals = mode == RenderMode::Normals;
 
     // PBR pass (filled triangles with PBR shader)
     if draw_pbr {
-        unsafe { gl.use_program(Some(programs.pbr)); }
+        unsafe {
+            gl.use_program(Some(programs.pbr));
+        }
 
         for batch in batches {
-            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
+            let batch_camera = camera_for_batch(camera, batch);
+            apply_batch_winding(gl, batch.orientation_sign);
+            upload_batch_ubo(
+                gl,
+                vtx_ubo,
+                &batch_camera,
+                batch.perm_parity,
+                batch.perm_index,
+                1,
+            );
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -110,10 +150,21 @@ pub fn render_frame(
 
     // Matcap/LOD pass (filled triangles)
     if draw_matcap {
-        unsafe { gl.use_program(Some(programs.matcap)); }
+        unsafe {
+            gl.use_program(Some(programs.matcap));
+        }
 
         for batch in batches {
-            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
+            let batch_camera = camera_for_batch(camera, batch);
+            apply_batch_winding(gl, batch.orientation_sign);
+            upload_batch_ubo(
+                gl,
+                vtx_ubo,
+                &batch_camera,
+                batch.perm_parity,
+                batch.perm_index,
+                1,
+            );
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -130,11 +181,22 @@ pub fn render_frame(
 
     // Wire pass (lines)
     if draw_wire {
-        unsafe { gl.use_program(Some(programs.wire)); }
+        unsafe {
+            gl.use_program(Some(programs.wire));
+        }
         wire_ubo.bind(gl);
 
         for batch in batches {
-            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
+            let batch_camera = camera_for_batch(camera, batch);
+            apply_batch_winding(gl, batch.orientation_sign);
+            upload_batch_ubo(
+                gl,
+                vtx_ubo,
+                &batch_camera,
+                batch.perm_parity,
+                batch.perm_index,
+                1,
+            );
 
             wire_ubo.upload(gl, batch.wire_color, true);
             wire_ubo.bind(gl);
@@ -154,10 +216,21 @@ pub fn render_frame(
 
     // Normals pass (filled triangles)
     if draw_normals {
-        unsafe { gl.use_program(Some(programs.normals)); }
+        unsafe {
+            gl.use_program(Some(programs.normals));
+        }
 
         for batch in batches {
-            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
+            let batch_camera = camera_for_batch(camera, batch);
+            apply_batch_winding(gl, batch.orientation_sign);
+            upload_batch_ubo(
+                gl,
+                vtx_ubo,
+                &batch_camera,
+                batch.perm_parity,
+                batch.perm_index,
+                1,
+            );
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -174,10 +247,21 @@ pub fn render_frame(
 
     // Stretch heatmap pass (filled triangles)
     if mode == RenderMode::Stretch {
-        unsafe { gl.use_program(Some(programs.stretch)); }
+        unsafe {
+            gl.use_program(Some(programs.stretch));
+        }
 
         for batch in batches {
-            upload_batch_ubo(gl, vtx_ubo, camera, batch.perm_parity, batch.perm_index, 1);
+            let batch_camera = camera_for_batch(camera, batch);
+            apply_batch_winding(gl, batch.orientation_sign);
+            upload_batch_ubo(
+                gl,
+                vtx_ubo,
+                &batch_camera,
+                batch.perm_parity,
+                batch.perm_index,
+                1,
+            );
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -192,15 +276,17 @@ pub fn render_frame(
         }
     }
 
-    unsafe { gl.bind_vertex_array(None); }
+    unsafe {
+        gl.bind_vertex_array(None);
+    }
 }
 
 /// Identity Möbius transform: a=1, b=0, c=0, d=1 (as quaternions).
 const IDENTITY_MOBIUS: [f32; 16] = [
-    1.0, 0.0, 0.0, 0.0,  // a
-    0.0, 0.0, 0.0, 0.0,  // b
-    0.0, 0.0, 0.0, 0.0,  // c
-    1.0, 0.0, 0.0, 0.0,  // d
+    1.0, 0.0, 0.0, 0.0, // a
+    0.0, 0.0, 0.0, 0.0, // b
+    0.0, 0.0, 0.0, 0.0, // c
+    1.0, 0.0, 0.0, 0.0, // d
 ];
 
 /// Render the original (untransformed) mesh wireframe.
@@ -213,7 +299,9 @@ pub fn render_original_wireframe(
     vtx_ubo: &VertexUniformBuf,
     wire_ubo: &WireUniformBuf,
 ) {
-    unsafe { gl.use_program(Some(programs.wire)); }
+    unsafe {
+        gl.use_program(Some(programs.wire));
+    }
 
     vtx_ubo.upload(
         gl,

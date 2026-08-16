@@ -39,6 +39,7 @@ pub enum ConformalGenerator {
     Rotation {
         quaternion_wxyz: [f64; 4],
     },
+    /// Nonzero scale. A negative factor reverses orientation in 3D.
     UniformScale {
         factor: f64,
     },
@@ -160,6 +161,7 @@ impl ConformalGenerator {
 
     pub fn orientation_sign(&self) -> i8 {
         match self {
+            Self::UniformScale { factor } if *factor < 0.0 => -1,
             Self::SphereReflection { .. } => -1,
             _ => 1,
         }
@@ -475,11 +477,15 @@ mod tests {
     }
 
     #[test]
-    fn orientation_parity_counts_sphere_reflections() {
+    fn orientation_parity_counts_all_reversing_generators() {
         let one = chain(vec![ConformalGenerator::sphere_reflection([0.0; 3], 1.0)]);
         let two = one.followed_by(&one);
+        let negative_scale = chain(vec![ConformalGenerator::uniform_scale(-2.0)]);
+        let proper_composition = one.followed_by(&negative_scale);
         assert_eq!(one.orientation_sign(), -1);
         assert_eq!(two.orientation_sign(), 1);
+        assert_eq!(negative_scale.orientation_sign(), -1);
+        assert_eq!(proper_composition.orientation_sign(), 1);
     }
 
     #[test]

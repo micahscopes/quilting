@@ -99,13 +99,22 @@ For each visible entity and view:
 Different entities may therefore use different relative Möbius transforms in
 the same view.  Render extraction, rather than the renderer, owns that choice.
 
-The current browser bridge (`mr_loadHyperscape` / `mr_tickHyperscape`) runs the
-ECS and transfers the first extracted packet into the shipping Hyperscope UBO
-path with explicit orientation parity. This makes the single-subject vertical
-slice executable. Rendering several packets in one view still requires tagging
-GPU batches by glTF node/entity and selecting a packet per batch; until that is
-implemented, `packet_count` is exposed in diagnostics and multi-subject output
-must not be described as complete.
+The browser bridge (`mr_loadHyperscape` / `mr_tickHyperscape`) retains both the
+ordinary glTF subject-node and projection-camera-node identity of every
+extracted packet. The mesh loader carries the subject node per triangle, batch
+construction includes it in the batch key, and every render, pick, and
+highlight draw selects that subject/view packet's Möbius coefficients and
+explicit orientation parity. The lowest projection-camera node is selected
+deterministically by default; `mr_setHyperscapeCameraNode` switches views.
+
+The diagnostic snapshot exposes the complete `packets` array as well as the
+legacy first-packet fields. Two integration pieces remain deliberately visible:
+the ordinary `euclidean_model` is reported but not yet applied as a dynamic
+per-batch matrix (static glTF node transforms are currently baked by the mesh
+loader), and adaptive LOD classification still receives one global Möbius map
+rather than the subject-specific map. Multi-subject drawing is implemented;
+dynamic Euclidean movement and subject-specific tessellation are not yet
+complete.
 
 ## glTF interchange v0.1
 

@@ -47,18 +47,12 @@ pub const SINGULARITY_SENTINEL: f64 = 1e10;
 pub const POLE_PROXIMITY_NORM_SQ: f64 = 1e-8;
 
 /// Squared norm of `c` below which a Möbius transform is treated as affine
-/// (no conformal curvature). Mirrors the `dot(u.mob_c, u.mob_c) > 0.001`
-/// predicate in `shaders/vertex/main.wgsl` and `sample_stretch_range` in
-/// quilting-wasm.
-///
-/// The CPU must not disagree with the shader here: `is_affine` gates the
-/// smooth-normal recomputation (with an orientation flip for reflections) for
-/// exactly the geometry the shader shades. The historical CPU threshold of
-/// 1e-20 classified near-identity transforms as reflections and flipped their
-/// normals while the shader rendered them unflipped. All non-affine
+/// (no conformal curvature) for CPU geometry preprocessing. The live shader
+/// now evaluates the full differential even when `c = 0`, because that branch
+/// still contains rotations and signed uniform scales. All non-affine
 /// constructors in this crate produce `|c|` of order 1, so the band below
 /// 1e-3 only contains transforms that are conformally flat to ~3% per model
-/// unit — visually affine.
+/// unit.
 pub const AFFINE_C_NORM_SQ: f64 = 1e-3;
 
 /// Quaternion: q = w + xi + yj + zk
@@ -281,6 +275,23 @@ impl Mobius {
         (self.a * x + self.b) * (self.c * x + self.d).inv()
     }
 
+    /// Local conformal length scale at `x`.
+    ///
+    /// For `F(x) = (a x + b) (c x + d)⁻¹`, the differential sends a tangent
+    /// vector `v` to `(a - F(x)c) v (c x + d)⁻¹`. Quaternion norms are
+    /// multiplicative, so every direction has scale
+    /// `|a - F(x)c| / |c x + d|`. The value is infinite at an exact pole.
+    pub fn conformal_scale_at(&self, x: Quat) -> f64 {
+        let denominator = self.c * x + self.d;
+        let denominator_norm_sq = denominator.norm_sq();
+        if denominator_norm_sq == 0.0 {
+            return f64::INFINITY;
+        }
+        let mapped = (self.a * x + self.b) * denominator.inv();
+        let left = self.a - mapped * self.c;
+        (left.norm_sq() / denominator_norm_sq).sqrt()
+    }
+
     /// Transform a weight under this Möbius transformation.
     /// w' = (cx + d) * w  (equation 5 from the paper)
     #[inline]
@@ -456,6 +467,17 @@ mod tests {
         let p = Quat::from_point(0.0, 1.0, 0.0);
         let result = m.apply(p);
         assert!(approx_eq(result, Quat::from_point(1.0, 1.0, 0.0)));
+    }
+
+    #[test]
+    fn conformal_scale_covers_affine_and_inversive_generators() {
+        let p = Quat::from_point(2.0, 0.0, 0.0);
+        assert!((Mobius::identity().conformal_scale_at(p) - 1.0).abs() < EPS);
+        assert!((Mobius::translation(Quat::I).conformal_scale_at(p) - 1.0).abs() < EPS);
+        assert!((Mobius::scale(-3.0).conformal_scale_at(p) - 3.0).abs() < EPS);
+        assert!((Mobius::rotation(0.0, 0.0, 1.0, 0.7).conformal_scale_at(p) - 1.0).abs() < EPS);
+        assert!((Mobius::inversion().conformal_scale_at(p) - 0.25).abs() < EPS);
+        assert!(Mobius::inversion().conformal_scale_at(Quat::ZERO).is_infinite());
     }
 
     #[test]

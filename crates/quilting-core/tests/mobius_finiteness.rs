@@ -447,19 +447,18 @@ fn gpu_lod_pass_saturates_at_the_pole() {
     }
 }
 
-/// Regression guard for the CPU/GPU disagreement about what "affine" means:
-/// `Mobius::is_affine` must use the same |c|^2 threshold as the shader
-/// (`dot(u.mob_c, u.mob_c) > 0.001` in main.wgsl), or the CPU flips smooth
-/// normals for near-identity transforms the shader shades unflipped.
+/// Regression guard for the CPU preprocessing boundary. The live shader no
+/// longer uses this as a normal-transform shortcut: rotations and signed
+/// scales have `c = 0` but still act on directions.
 #[test]
-fn affine_predicate_agrees_between_cpu_and_shader() {
+fn affine_predicate_uses_the_documented_cpu_boundary() {
     for k in [1e-1f64, 1e-2, 1e-3, 1e-5, 1e-9] {
         let m = Mobius::new(Quat::ONE, Quat::ZERO,
                             Quat::new(k, 0., 0., 0.), Quat::new(k, 0., 0., 0.));
         let cpu = m.is_affine();
-        let shader = !(m.c.norm_sq() > 0.001); // main.wgsl is_mobius predicate
-        assert_eq!(cpu, shader,
-            "|c|^2={:.3e}: core says affine={cpu}, shader says affine={shader}",
+        let expected = m.c.norm_sq() < quilting_core::quaternion::AFFINE_C_NORM_SQ;
+        assert_eq!(cpu, expected,
+            "|c|^2={:.3e}: core says affine={cpu}, documented boundary says {expected}",
             m.c.norm_sq());
     }
 }

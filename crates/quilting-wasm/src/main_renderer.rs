@@ -13,12 +13,15 @@ use glow::HasContext;
 use quilting_renderer::buffer::{
     MeshBuffers, TessBuffers, PbrParams, EnvironmentMaps, PersistentInstances,
 };
-use quilting_renderer::pass::{Camera, RenderBatch, RenderMode};
+use quilting_renderer::pass::{
+    apply_batch_winding, camera_for_batch, Camera, RenderBatch, RenderMode,
+};
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
-use hyperscape::interchange::HyperscapeGltfRuntime;
+use hyperscape::interchange::{GltfHyperscopePacket, HyperscapeGltfRuntime};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Floats per material in the array `mr_setMaterials` receives.
@@ -38,6 +41,8 @@ struct MainState {
     cached_instances: Vec<f32>,
     persistent_buf: Option<PersistentInstances>,
     face_materials: Vec<usize>,
+    /// Stable ordinary glTF node index for each source triangle.
+    face_nodes: Vec<usize>,
     materials: Vec<PbrParams>,
     num_faces: usize,
     render_mode: RenderMode,
@@ -45,6 +50,9 @@ struct MainState {
     /// Explicit parity from the authoring generator word. Legacy direct matrix
     /// input falls back to the old `c != 0` heuristic.
     mobius_orientation: i8,
+    /// Extracted state keyed by `(projection camera node, subject node)`.
+    hyperscape_packets: BTreeMap<(usize, usize), EntityConformalState>,
+    active_hyperscape_camera: Option<usize>,
     // Screen-space refraction: framebuffer copy for transmission
     /// Mip-chained scene copy for the transmission/refraction blur pyramid.
     /// Distinct from `fuzzy_scene_*`: this one carries a full mip chain with
@@ -93,7 +101,14 @@ struct GpuBatch {
     perm_parity: f32,
     perm_index: i32,
     material_index: usize,
+    node_index: usize,
     lod: [u32; 3],
+}
+
+#[derive(Clone, Copy)]
+struct EntityConformalState {
+    mobius: [f32; 16],
+    orientation_sign: i8,
 }
 
 /// Create a separable Gaussian blur program (GLSL ES 300, not WGSL).
@@ -221,11 +236,14 @@ pub fn mr_init(canvas_id: &str) -> bool {
             cached_instances: Vec::new(),
             persistent_buf: None,
             face_materials: Vec::new(),
+            face_nodes: Vec::new(),
             materials: Vec::new(),
             num_faces: 0,
             render_mode: RenderMode::Pbr,
             mobius: IDENTITY_MOBIUS,
             mobius_orientation: 1,
+            hyperscape_packets: BTreeMap::new(),
+            active_hyperscape_camera: None,
             scene_color_fbo: None,
             scene_color_tex: None,
             scene_color_size: (0, 0),
@@ -285,6 +303,8 @@ pub fn mr_set_render_mode(mode: &str) {
 pub fn mr_set_mobius(mobius: &[f32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
+            st.hyperscape_packets.clear();
+            st.active_hyperscape_camera = None;
             for (i, &v) in mobius.iter().take(16).enumerate() { st.mobius[i] = v; }
             let c_len_sq = st.mobius[8..12].iter().map(|value| value * value).sum::<f32>();
             st.mobius_orientation = if c_len_sq > 0.001 { -1 } else { 1 };
@@ -296,6 +316,8 @@ pub fn mr_set_mobius(mobius: &[f32]) {
 pub fn mr_set_mobius_with_parity(mobius: &[f32], orientation_sign: i32) {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
+            renderer.hyperscape_packets.clear();
+            renderer.active_hyperscape_camera = None;
             for (index, &value) in mobius.iter().take(16).enumerate() {
                 renderer.mobius[index] = value;
             }
@@ -304,13 +326,79 @@ pub fn mr_set_mobius_with_parity(mobius: &[f32], orientation_sign: i32) {
     });
 }
 
-fn apply_hyperscape_packet(packet: &hyperscape::HyperscopePacket) {
+fn clear_hyperscape_packets() {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
-            renderer.mobius = packet.mobius;
-            renderer.mobius_orientation = packet.orientation_sign;
+            renderer.hyperscape_packets.clear();
+            renderer.active_hyperscape_camera = None;
         }
     });
+}
+
+fn apply_hyperscape_packets(packets: &[GltfHyperscopePacket]) {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(renderer) = state.as_mut() else { return };
+
+        renderer.hyperscape_packets.clear();
+        for extracted in packets {
+            renderer.hyperscape_packets.insert(
+                (extracted.camera_node, extracted.subject_node),
+                EntityConformalState {
+                    mobius: extracted.packet.mobius,
+                    orientation_sign: extracted.packet.orientation_sign,
+                },
+            );
+        }
+
+        let retained_camera = renderer.active_hyperscape_camera.filter(|camera| {
+            renderer
+                .hyperscape_packets
+                .keys()
+                .any(|(candidate, _)| candidate == camera)
+        });
+        renderer.active_hyperscape_camera = retained_camera.or_else(|| {
+            renderer
+                .hyperscape_packets
+                .keys()
+                .map(|(camera, _)| *camera)
+                .min()
+        });
+
+        // Preserve legacy global consumers while batches use the complete
+        // subject/view map below.
+        if let Some(camera) = renderer.active_hyperscape_camera {
+            if let Some((_, packet)) = renderer
+                .hyperscape_packets
+                .range((camera, 0)..=(camera, usize::MAX))
+                .next()
+            {
+                renderer.mobius = packet.mobius;
+                renderer.mobius_orientation = packet.orientation_sign;
+            }
+        }
+    });
+}
+
+fn conformal_state_for_node(renderer: &MainState, node_index: usize) -> EntityConformalState {
+    renderer
+        .active_hyperscape_camera
+        .and_then(|camera| renderer.hyperscape_packets.get(&(camera, node_index)))
+        .copied()
+        .unwrap_or(EntityConformalState {
+            mobius: renderer.mobius,
+            orientation_sign: renderer.mobius_orientation,
+        })
+}
+
+fn camera_for_node(camera: &Camera, renderer: &MainState, node_index: usize) -> Camera {
+    let conformal = conformal_state_for_node(renderer, node_index);
+    Camera {
+        mvp: camera.mvp,
+        mv: camera.mv,
+        mobius: conformal.mobius,
+        camera_pos: camera.camera_pos,
+    }
 }
 
 #[wasm_bindgen(js_name = "mr_loadHyperscape")]
@@ -319,25 +407,52 @@ pub fn mr_load_hyperscape(data: &[u8]) -> bool {
         Ok(graph) => graph,
         Err(error) => {
             web_sys::console::warn_1(&format!("Hyperscape graph: {error}").into());
+            HYPERSCAPE_RUNTIME.with(|runtime| *runtime.borrow_mut() = None);
+            clear_hyperscape_packets();
             return false;
         }
     };
     let Some(asset) = asset else {
         HYPERSCAPE_RUNTIME.with(|runtime| *runtime.borrow_mut() = None);
+        clear_hyperscape_packets();
         return false;
     };
     let runtime = match HyperscapeGltfRuntime::new(&nodes, &asset) {
         Ok(runtime) => runtime,
         Err(error) => {
             web_sys::console::warn_1(&format!("Hyperscape runtime: {error}").into());
+            HYPERSCAPE_RUNTIME.with(|runtime| *runtime.borrow_mut() = None);
+            clear_hyperscape_packets();
             return false;
         }
     };
-    if let Some(packet) = runtime.packets().first() {
-        apply_hyperscape_packet(packet);
-    }
+    apply_hyperscape_packets(&runtime.packets_by_node());
     HYPERSCAPE_RUNTIME.with(|slot| *slot.borrow_mut() = Some(runtime));
     true
+}
+
+/// Select which authored projection-camera node supplies subject-relative
+/// conformal chains. Returns false when that camera has no extracted packets.
+#[wasm_bindgen(js_name = "mr_setHyperscapeCameraNode")]
+pub fn mr_set_hyperscape_camera_node(node_index: i32) -> bool {
+    if node_index < 0 {
+        return false;
+    }
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(renderer) = state.as_mut() else { return false };
+        let node_index = node_index as usize;
+        if renderer
+            .hyperscape_packets
+            .keys()
+            .any(|(camera, _)| *camera == node_index)
+        {
+            renderer.active_hyperscape_camera = Some(node_index);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 #[wasm_bindgen(js_name = "mr_tickHyperscape")]
@@ -351,22 +466,37 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         let mut runtime = slot.borrow_mut();
         let runtime = runtime.as_mut()?;
         runtime.tick(Duration::from_secs_f64(delta_seconds));
-        Some((runtime.packets().first().cloned(), runtime.packets().len(), runtime.diagnostics().to_vec()))
+        Some((runtime.packets_by_node(), runtime.diagnostics().to_vec()))
     });
-    let Some((packet, packet_count, diagnostics)) = snapshot else {
+    let Some((packets, diagnostics)) = snapshot else {
         return JsValue::NULL;
     };
-    if let Some(packet) = packet.as_ref() {
-        apply_hyperscape_packet(packet);
-    }
+    apply_hyperscape_packets(&packets);
+    let active_camera = STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .and_then(|renderer| renderer.active_hyperscape_camera)
+    });
 
     let result = js_sys::Object::new();
     js_sys::Reflect::set(
         &result,
         &"packet_count".into(),
-        &JsValue::from_f64(packet_count as f64),
+        &JsValue::from_f64(packets.len() as f64),
     ).ok();
-    if let Some(packet) = packet {
+    if let Some(camera) = active_camera {
+        js_sys::Reflect::set(
+            &result,
+            &"active_camera_node".into(),
+            &JsValue::from_f64(camera as f64),
+        ).ok();
+    }
+    let primary = active_camera
+        .and_then(|camera| packets.iter().find(|packet| packet.camera_node == camera))
+        .or_else(|| packets.first());
+    if let Some(extracted) = primary {
+        let packet = &extracted.packet;
         js_sys::Reflect::set(
             &result,
             &"orientation_sign".into(),
@@ -377,6 +507,31 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         js_sys::Reflect::set(&result, &"mobius".into(), &mobius).ok();
         js_sys::Reflect::set(&result, &"euclidean_model".into(), &model).ok();
     }
+    let packet_snapshots = js_sys::Array::new();
+    for extracted in packets {
+        let packet = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &packet,
+            &"subject_node".into(),
+            &JsValue::from_f64(extracted.subject_node as f64),
+        ).ok();
+        js_sys::Reflect::set(
+            &packet,
+            &"camera_node".into(),
+            &JsValue::from_f64(extracted.camera_node as f64),
+        ).ok();
+        js_sys::Reflect::set(
+            &packet,
+            &"orientation_sign".into(),
+            &JsValue::from_f64(extracted.packet.orientation_sign as f64),
+        ).ok();
+        let mobius = js_sys::Float32Array::from(extracted.packet.mobius.as_slice());
+        let model = js_sys::Float32Array::from(extracted.packet.euclidean_model.as_slice());
+        js_sys::Reflect::set(&packet, &"mobius".into(), &mobius).ok();
+        js_sys::Reflect::set(&packet, &"euclidean_model".into(), &model).ok();
+        packet_snapshots.push(&packet);
+    }
+    js_sys::Reflect::set(&result, &"packets".into(), &packet_snapshots).ok();
     let messages = js_sys::Array::new();
     for diagnostic in diagnostics {
         messages.push(&JsValue::from_str(&diagnostic));
@@ -518,11 +673,14 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
 
             let mut face_offset = 0i32;
             for batch in &state.batches {
+                let batch_camera = camera_for_node(&camera, state, batch.node_index);
+                let conformal = conformal_state_for_node(state, batch.node_index);
+                apply_batch_winding(gl, conformal.orientation_sign);
                 let vtx_ubo = state.renderer.vtx_ubo();
                 vtx_ubo.upload(
-                    gl, &camera.mvp, &camera.mv,
+                    gl, &batch_camera.mvp, &batch_camera.mv,
                     batch.perm_parity, batch.perm_index, 1,
-                    &camera.mobius, &camera.camera_pos,
+                    &batch_camera.mobius, &batch_camera.camera_pos,
                 );
                 vtx_ubo.set_face_offset(gl, face_offset);
                 vtx_ubo.bind(gl);
@@ -578,6 +736,7 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                         info!("  LOD triple: [{}, {}, {}] perm={} parity={:.0}",
                             batch.lod[0], batch.lod[1], batch.lod[2],
                             batch.perm_index, batch.perm_parity);
+                        info!("  glTF node: {}", batch.node_index);
                         break;
                     }
                     fo += bs;
@@ -597,6 +756,9 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces as usize;
+            if st.face_nodes.len() != st.num_faces {
+                st.face_nodes = vec![0; st.num_faces];
+            }
         }
     });
 }
@@ -606,6 +768,28 @@ pub fn mr_set_face_materials(materials: &[i32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.face_materials = materials.iter().map(|&m| if m >= 0 { m as usize } else { 0 }).collect();
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "mr_setFaceNodes")]
+pub fn mr_set_face_nodes(nodes: &[i32]) {
+    STATE.with(|state| {
+        if let Some(renderer) = state.borrow_mut().as_mut() {
+            renderer.face_nodes = nodes
+                .iter()
+                .map(|&node| if node >= 0 { node as usize } else { 0 })
+                .collect();
+            if renderer.face_nodes.len() != renderer.num_faces {
+                web_sys::console::warn_1(
+                    &format!(
+                        "face-node count {} does not match triangle count {}; missing entries use node 0",
+                        renderer.face_nodes.len(), renderer.num_faces
+                    )
+                    .into(),
+                );
+                renderer.face_nodes.resize(renderer.num_faces, 0);
+            }
         }
     });
 }
@@ -895,18 +1079,16 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
         perf_mark("batch-group-start");
-        let num_materials = state.face_materials.iter().copied().max().unwrap_or(0) + 1;
-        let num_buckets = 256 * 6 * num_materials;
         let nf = state.num_faces;
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
+        let mut buckets: BTreeMap<(usize, usize, usize, usize), Vec<u32>> = BTreeMap::new();
         for fi in 0..nf {
             let lo = fi * batch::FACE_LOD_STRIDE;
             if lo + 5 >= face_lods.len() { break; }
             let atlas_idx = face_lods[lo + 5] as usize;
             let perm = face_lods[lo + 3] as usize;
             let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
-            let key = atlas_idx * (6 * num_materials) + perm * num_materials + mat;
-            if key < num_buckets { buckets[key].push(fi as u32); }
+            let node = state.face_nodes.get(fi).copied().unwrap_or(0);
+            buckets.entry((atlas_idx, perm, mat, node)).or_default().push(fi as u32);
         }
         perf_mark("batch-group-end");
         perf_measure("batch-group", "batch-group-start", "batch-group-end");
@@ -943,16 +1125,12 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let stride = instance_layout::STRIDE;
 
         // Pre-allocate a batch-sized CPU staging buffer (reused across batches)
-        let max_batch_size = buckets.iter().map(|b| b.len()).max().unwrap_or(0);
+        let max_batch_size = buckets.values().map(Vec::len).max().unwrap_or(0);
         let mut staging = vec![0.0f32; max_batch_size * stride];
 
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
-            for (key, faces) in buckets.iter().enumerate() {
-                if faces.is_empty() { continue; }
-
-                let mat = key % num_materials;
-                let perm = (key / num_materials) % 6;
+            for (&(_atlas_idx, perm, mat, node_index), faces) in &buckets {
                 let fi0 = faces[0] as usize;
                 let lo = fi0 * batch::FACE_LOD_STRIDE;
                 let ca = face_lods[lo] as u32;
@@ -996,7 +1174,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 state.batches.push(GpuBatch {
                     mesh, shared_buf: true, perm_parity: parity,
                     perm_index: perm as i32,
-                    material_index: mat, lod: [ca, cb, cc],
+                    material_index: mat, node_index, lod: [ca, cb, cc],
                 });
                 built += 1;
                 gpu_offset += batch_floats;
@@ -1005,11 +1183,16 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         perf_mark("batch-upload-end");
         perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
 
-        let mut mat_counts = std::collections::BTreeMap::new();
+        let mut mat_counts = BTreeMap::new();
+        let mut node_counts = BTreeMap::new();
         for b in &state.batches {
             *mat_counts.entry(b.material_index).or_insert(0usize) += b.mesh.num_instances as usize;
+            *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
-        info!("Built {} GPU batches ({} missing), material→faces: {:?}", built, missing, mat_counts);
+        info!(
+            "Built {} GPU batches ({} missing), material→faces: {:?}, node→faces: {:?}",
+            built, missing, mat_counts, node_counts
+        );
     });
 }
 
@@ -1041,9 +1224,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         };
 
         let render_batches: Vec<RenderBatch> = state.batches.iter().map(|b| {
+            let conformal = conformal_state_for_node(state, b.node_index);
             RenderBatch {
                 mesh: &b.mesh, perm_parity: b.perm_parity, perm_index: b.perm_index,
                 wire_color: lod_color(&b.lod), material_index: b.material_index,
+                mobius: conformal.mobius,
+                orientation_sign: conformal.orientation_sign,
             }
         }).collect();
 
@@ -1057,13 +1243,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let white = state.texture_cache.placeholder();
         let black = state.texture_cache.placeholder_black();
         let cube = state.texture_cache.placeholder_cube();
-
-        // Möbius inversion (c≠0) reverses orientation, flipping screen-space winding.
-        // Switch front face convention so culling and front_facing stay consistent.
-        let mobius_reverses = state.mobius_orientation < 0;
-        unsafe {
-            gl.front_face(if mobius_reverses { glow::CW } else { glow::CCW });
-        }
 
         match state.render_mode {
             RenderMode::Pbr => {
@@ -1218,8 +1397,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     bind_tex(4, mat.occlusion_tex_idx);
 
                     // Upload vertex UBO and draw this batch
+                    let batch_camera = camera_for_batch(&camera, batch);
+                    apply_batch_winding(gl, batch.orientation_sign);
                     quilting_renderer::pass::upload_batch_ubo(
-                        gl, state.renderer.vtx_ubo(), &camera,
+                        gl, state.renderer.vtx_ubo(), &batch_camera,
                         batch.perm_parity, batch.perm_index, 1,
                     );
                     unsafe {
@@ -1440,8 +1621,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     bind_tex(4, mat.occlusion_tex_idx);
                     bind_tex(10, mat.transmission_tex_idx);
 
+                    let batch_camera = camera_for_batch(&camera, batch);
+                    apply_batch_winding(gl, batch.orientation_sign);
                     quilting_renderer::pass::upload_batch_ubo(
-                        gl, state.renderer.vtx_ubo(), &camera,
+                        gl, state.renderer.vtx_ubo(), &batch_camera,
                         batch.perm_parity, batch.perm_index, 1,
                     );
                     unsafe {
@@ -1643,8 +1826,11 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
 
         let mut face_offset = 0i32;
         for batch in &state.batches {
+            let batch_camera = camera_for_node(camera, state, batch.node_index);
+            let conformal = conformal_state_for_node(state, batch.node_index);
+            apply_batch_winding(gl, conformal.orientation_sign);
             quilting_renderer::pass::upload_batch_ubo(
-                gl, state.renderer.vtx_ubo(), camera,
+                gl, state.renderer.vtx_ubo(), &batch_camera,
                 batch.perm_parity, batch.perm_index, 1,
             );
             state.renderer.vtx_ubo().set_face_offset(gl, face_offset);
