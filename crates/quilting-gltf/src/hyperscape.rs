@@ -365,10 +365,15 @@ pub fn inject_into_json(
         .and_then(Value::as_array_mut)
         .expect("nodes array checked above");
     for (index, binding) in asset.node_bindings.iter().enumerate() {
-        let Some(binding) = binding else { continue };
         let node = nodes[index]
             .as_object_mut()
             .ok_or_else(|| validation(format!("node {index} must be an object")))?;
+        let Some(binding) = binding else {
+            if let Some(extras) = node.get_mut("extras").and_then(Value::as_object_mut) {
+                extras.remove("hyperscape");
+            }
+            continue;
+        };
         insert_extras_value(
             node,
             serde_json::to_value(binding)
@@ -632,6 +637,22 @@ mod tests {
             runtime.anchors[0].flipped_walls(),
             &std::collections::BTreeSet::from([WallId(0)])
         );
+    }
+
+    #[test]
+    fn json_injection_removes_stale_bindings_from_unbound_nodes() {
+        let mut asset = sample_asset();
+        asset.node_bindings[1] = None;
+        let mut source = minimal_json();
+        source["nodes"][1]["extras"] = serde_json::json!({
+            "hyperscape": { "frame": 99 },
+            "ordinary": "kept"
+        });
+
+        inject_into_json(&mut source, &asset).unwrap();
+
+        assert!(source["nodes"][1]["extras"].get("hyperscape").is_none());
+        assert_eq!(source["nodes"][1]["extras"]["ordinary"], "kept");
     }
 
     #[test]

@@ -29,6 +29,9 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Test Blender interchange boundary
+        run: python -m unittest discover -s tools/blender_hyperscape/tests -p 'test_*.py' -v
+
   wasm:
     name: check (wasm32)
     runs-on: ubuntu-latest

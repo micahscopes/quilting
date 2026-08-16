@@ -1,0 +1,661 @@
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+import tempfile
+from typing import Any
+
+import bpy
+from bpy.props import EnumProperty, StringProperty
+from bpy_extras.io_utils import ExportHelper, ImportHelper
+from mathutils import Vector
+
+from . import codec, conformal
+
+
+IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
+GUIDE_COLLECTION = "Hyperscape Guides"
+
+
+def _generator_dict(generator) -> dict[str, Any]:
+    if generator.kind == "TRANSLATION":
+        return {"type": "translation", "offset": list(generator.offset)}
+    if generator.kind == "ROTATION":
+        return {"type": "rotation", "quaternion_wxyz": list(generator.quaternion_wxyz)}
+    if generator.kind == "UNIFORM_SCALE":
+        return {"type": "uniform_scale", "factor": generator.factor}
+    return {
+        "type": "sphere_reflection",
+        "center": list(generator.center),
+        "radius": generator.radius,
+    }
+
+
+def _set_generator(generator, authored: dict[str, Any]) -> None:
+    kind = authored["type"]
+    generator.kind = kind.upper()
+    if kind == "translation":
+        generator.offset = authored["offset"]
+    elif kind == "rotation":
+        generator.quaternion_wxyz = authored["quaternion_wxyz"]
+    elif kind == "uniform_scale":
+        generator.factor = authored["factor"]
+    else:
+        generator.center = authored["center"]
+        generator.radius = authored["radius"]
+
+
+def _frames_dict(settings) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": frame.name,
+            "parent": None if frame.parent < 0 else frame.parent,
+            "generators": [_generator_dict(generator) for generator in frame.generators],
+        }
+        for frame in settings.frames
+    ]
+
+
+def _parse_indices(value: str) -> list[int]:
+    if not value.strip():
+        return []
+    try:
+        return sorted({int(part.strip()) for part in value.split(",") if part.strip()})
+    except ValueError as error:
+        raise codec.HyperscapeCodecError("flipped wall indices must be comma-separated integers") from error
+
+
+def build_asset(
+    settings,
+    node_indices: dict[str, int],
+    node_count: int,
+) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
+    frames = _frames_dict(settings)
+    walls = []
+    for wall in settings.walls:
+        if wall.geometry == "SPHERE":
+            geometry = {"type": "sphere", "center": list(wall.center), "radius": wall.radius}
+        else:
+            normal = Vector(wall.unit_normal)
+            if normal.length <= 1.0e-12:
+                raise codec.HyperscapeCodecError(f"plane wall {wall.name!r} has a zero normal")
+            normal.normalize()
+            geometry = {"type": "plane", "unit_normal": list(normal), "offset": wall.offset}
+        walls.append({"name": wall.name, "frame": wall.frame, "geometry": geometry})
+    anchors = [
+        {"name": anchor.name, "frame": anchor.frame, "flipped_walls": _parse_indices(anchor.flipped_walls)}
+        for anchor in settings.anchors
+    ]
+    paths = []
+    for path in settings.paths:
+        if path.subject is None or path.subject.name not in node_indices:
+            raise codec.HyperscapeCodecError(f"path {path.name!r} needs an exported subject")
+        paths.append(
+            {
+                "name": path.name,
+                "node": node_indices[path.subject.name],
+                "looping": path.looping,
+                "keyframes": [
+                    {"time_seconds": key.time_seconds, "point": list(key.point)}
+                    for key in path.keyframes
+                ],
+            }
+        )
+    constraints = []
+    for constraint in settings.constraints:
+        if constraint.subject is None or constraint.subject.name not in node_indices:
+            raise codec.HyperscapeCodecError("constraint needs an exported subject")
+        node = node_indices[constraint.subject.name]
+        if constraint.kind == "TRACK":
+            if constraint.target is None or constraint.target.name not in node_indices:
+                raise codec.HyperscapeCodecError("track constraint needs an exported target")
+            constraints.append(
+                {
+                    "type": "track",
+                    "node": node,
+                    "target_node": node_indices[constraint.target.name],
+                    "local_offset": list(constraint.local_offset),
+                }
+            )
+        else:
+            constraints.append({"type": "projection_camera", "node": node, "frame": constraint.frame})
+    payload = {
+        "version": codec.VERSION,
+        "frames": frames,
+        "walls": walls,
+        "anchors": anchors,
+        "paths": paths,
+        "constraints": constraints,
+    }
+    bindings: dict[int, dict[str, Any]] = {}
+    for obj in bpy.context.scene.objects:
+        binding = obj.hyperscape
+        if not binding.enabled or obj.name not in node_indices:
+            continue
+        encoded: dict[str, Any] = {"frame": binding.frame}
+        if binding.anchor >= 0:
+            encoded["anchor"] = binding.anchor
+        if binding.path >= 0:
+            encoded["path"] = binding.path
+        bindings[node_indices[obj.name]] = encoded
+    codec.validate_payload(payload, node_count, None)
+    return payload, bindings
+
+
+def _clear_collection(collection) -> None:
+    while len(collection):
+        collection.remove(len(collection) - 1)
+
+
+def load_asset(settings, payload: dict[str, Any], bindings, node_objects: dict[int, bpy.types.Object]) -> None:
+    for collection in (settings.frames, settings.walls, settings.anchors, settings.paths, settings.constraints):
+        _clear_collection(collection)
+    for authored in payload.get("frames", []):
+        frame = settings.frames.add()
+        frame.name = authored["name"]
+        frame.parent = -1 if authored.get("parent") is None else authored["parent"]
+        for encoded in authored.get("generators", []):
+            _set_generator(frame.generators.add(), encoded)
+    for authored in payload.get("walls", []):
+        wall = settings.walls.add()
+        wall.name = authored["name"]
+        wall.frame = authored["frame"]
+        geometry = authored["geometry"]
+        wall.geometry = geometry["type"].upper()
+        if geometry["type"] == "sphere":
+            wall.center = geometry["center"]
+            wall.radius = geometry["radius"]
+        else:
+            wall.unit_normal = geometry["unit_normal"]
+            wall.offset = geometry["offset"]
+    for authored in payload.get("anchors", []):
+        anchor = settings.anchors.add()
+        anchor.name = authored["name"]
+        anchor.frame = authored["frame"]
+        anchor.flipped_walls = ",".join(str(index) for index in authored.get("flipped_walls", []))
+    for authored in payload.get("paths", []):
+        path = settings.paths.add()
+        path.name = authored["name"]
+        path.subject = node_objects.get(authored["node"])
+        path.looping = authored.get("looping", False)
+        for encoded in authored["keyframes"]:
+            key = path.keyframes.add()
+            key.time_seconds = encoded["time_seconds"]
+            key.point = encoded["point"]
+    for authored in payload.get("constraints", []):
+        constraint = settings.constraints.add()
+        constraint.kind = authored["type"].upper()
+        constraint.subject = node_objects.get(authored["node"])
+        if authored["type"] == "track":
+            constraint.target = node_objects.get(authored["target_node"])
+            constraint.local_offset = authored.get("local_offset", (0.0, 0.0, 0.0))
+        else:
+            constraint.frame = authored["frame"]
+    for node, binding in enumerate(bindings):
+        obj = node_objects.get(node)
+        if obj is None or binding is None:
+            continue
+        obj.hyperscape.enabled = True
+        obj.hyperscape.frame = binding["frame"]
+        obj.hyperscape.anchor = binding.get("anchor", -1)
+        obj.hyperscape.path = binding.get("path", -1)
+    settings.status = f"Loaded Hyperscape {payload['version']}"
+
+
+def _imported_node_objects(
+    document: dict[str, Any],
+    imported: list[bpy.types.Object],
+) -> dict[int, bpy.types.Object]:
+    """Match glTF node names after Blender applies collision suffixes.
+
+    Bound/animated nodes must have unique source names. Blender object names are
+    unique too, but importing into a populated file can turn ``Subject`` into
+    ``Subject.001``. Matching only newly created objects keeps that case safe.
+    """
+
+    unique_names = codec.unique_node_indices_by_name(document)
+    result: dict[int, bpy.types.Object] = {}
+    for source_name, node_index in unique_names.items():
+        matches = [
+            obj
+            for obj in imported
+            if obj.name == source_name
+            or (
+                obj.name.startswith(source_name + ".")
+                and obj.name[len(source_name) + 1 :].isdigit()
+            )
+        ]
+        if len(matches) == 1:
+            result[node_index] = matches[0]
+    return result
+
+
+def _required_object_nodes(payload: dict[str, Any], bindings) -> set[int]:
+    nodes = {index for index, binding in enumerate(bindings) if binding is not None}
+    nodes.update(path["node"] for path in payload.get("paths", []))
+    for constraint in payload.get("constraints", []):
+        nodes.add(constraint["node"])
+        if constraint["type"] == "track":
+            nodes.add(constraint["target_node"])
+    return nodes
+
+
+class HYPERSCAPE_OT_collection_add(bpy.types.Operator):
+    bl_idname = "hyperscape.collection_add"
+    bl_label = "Add Hyperscape Item"
+    bl_options = {"REGISTER", "UNDO"}
+    collection: EnumProperty(
+        items=tuple(
+            (name, name.title(), "")
+            for name in ("frames", "walls", "anchors", "paths", "constraints")
+        )
+    )
+
+    def execute(self, context):
+        values = getattr(context.scene.hyperscape, self.collection)
+        item = values.add()
+        if self.collection == "frames":
+            item.name = f"frame-{len(values) - 1}"
+            item.parent = len(values) - 2
+        elif self.collection == "walls":
+            item.name = f"wall-{len(values) - 1}"
+        elif self.collection == "anchors":
+            item.name = f"anchor-{len(values) - 1}"
+        elif self.collection == "paths":
+            item.name = f"path-{len(values) - 1}"
+            item.keyframes.add()
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_collection_remove(bpy.types.Operator):
+    bl_idname = "hyperscape.collection_remove"
+    bl_label = "Remove Hyperscape Item"
+    bl_options = {"REGISTER", "UNDO"}
+    collection: StringProperty()
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        values = getattr(settings, self.collection)
+        active_name = f"active_{self.collection[:-1] if self.collection.endswith('s') else self.collection}"
+        index = min(getattr(settings, active_name, 0), max(len(values) - 1, 0))
+        if values:
+            values.remove(index)
+            setattr(settings, active_name, min(index, max(len(values) - 1, 0)))
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_generator_add(bpy.types.Operator):
+    bl_idname = "hyperscape.generator_add"
+    bl_label = "Add Generator"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.frames:
+            self.report({"ERROR"}, "Add a frame first")
+            return {"CANCELLED"}
+        frame = settings.frames[min(settings.active_frame, len(settings.frames) - 1)]
+        frame.generators.add()
+        frame.active_generator = len(frame.generators) - 1
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_generator_remove(bpy.types.Operator):
+    bl_idname = "hyperscape.generator_remove"
+    bl_label = "Remove Generator"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if settings.frames:
+            frame = settings.frames[min(settings.active_frame, len(settings.frames) - 1)]
+            if frame.generators:
+                frame.generators.remove(min(frame.active_generator, len(frame.generators) - 1))
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_keyframe_add(bpy.types.Operator):
+    bl_idname = "hyperscape.keyframe_add"
+    bl_label = "Add Path Control Point"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.paths:
+            return {"CANCELLED"}
+        path = settings.paths[min(settings.active_path, len(settings.paths) - 1)]
+        key = path.keyframes.add()
+        if len(path.keyframes) > 1:
+            previous = path.keyframes[-2]
+            key.time_seconds = previous.time_seconds + 1.0
+            key.point = previous.point
+        path.active_keyframe = len(path.keyframes) - 1
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_keyframe_remove(bpy.types.Operator):
+    bl_idname = "hyperscape.keyframe_remove"
+    bl_label = "Remove Path Control Point"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.paths:
+            return {"CANCELLED"}
+        path = settings.paths[min(settings.active_path, len(settings.paths) - 1)]
+        if not path.keyframes:
+            return {"CANCELLED"}
+        index = min(path.active_keyframe, len(path.keyframes) - 1)
+        path.keyframes.remove(index)
+        path.active_keyframe = min(index, max(len(path.keyframes) - 1, 0))
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_preview(bpy.types.Operator):
+    bl_idname = "hyperscape.preview"
+    bl_label = "Evaluate Dual Coordinates"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        frames = _frames_dict(settings)
+        try:
+            for path in settings.paths:
+                if path.subject is None or not path.keyframes:
+                    continue
+                keys = sorted(path.keyframes, key=lambda key: key.time_seconds)
+                time = settings.preview_time
+                if path.looping and keys[-1].time_seconds > 0.0:
+                    time %= keys[-1].time_seconds
+                left = right = keys[-1]
+                for candidate in keys:
+                    if candidate.time_seconds >= time:
+                        right = candidate
+                        break
+                    left = candidate
+                span = right.time_seconds - left.time_seconds
+                alpha = 0.0 if span <= 0.0 else (time - left.time_seconds) / span
+                path.subject.location = Vector(left.point).lerp(Vector(right.point), alpha)
+            for obj in context.scene.objects:
+                binding = obj.hyperscape
+                if not binding.enabled:
+                    continue
+                local = tuple(obj.location)
+                ambient = conformal.apply_word(conformal.world_word(frames, binding.frame), local)
+                binding.local_coordinates = local
+                binding.ambient_coordinates = ambient
+            settings.status = "Preview evaluated in local and ambient coordinates"
+        except (conformal.ConformalPreviewError, IndexError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_reanchor_object(bpy.types.Operator):
+    bl_idname = "hyperscape.reanchor_object"
+    bl_label = "Re-anchor Object, Preserve Ambient Point"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        obj = context.object
+        settings = context.scene.hyperscape
+        if obj is None or not obj.hyperscape.enabled:
+            return {"CANCELLED"}
+        target = settings.frame_reparent_target
+        if target < 0:
+            self.report({"ERROR"}, "Choose a conformal frame index")
+            return {"CANCELLED"}
+        try:
+            point = conformal.convert_point(_frames_dict(settings), obj.location, obj.hyperscape.frame, target)
+        except (conformal.ConformalPreviewError, IndexError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        obj.location = point
+        obj.hyperscape.frame = target
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_reparent_frame(bpy.types.Operator):
+    bl_idname = "hyperscape.reparent_frame"
+    bl_label = "Reparent Frame, Preserve World Map"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.frames:
+            return {"CANCELLED"}
+        index = min(settings.active_frame, len(settings.frames) - 1)
+        new_parent = None if settings.frame_reparent_target < 0 else settings.frame_reparent_target
+        try:
+            word = conformal.preserve_world_reparent_word(_frames_dict(settings), index, new_parent)
+        except (conformal.ConformalPreviewError, IndexError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        frame = settings.frames[index]
+        _clear_collection(frame.generators)
+        for encoded in word:
+            _set_generator(frame.generators.add(), encoded)
+        frame.parent = -1 if new_parent is None else new_parent
+        return {"FINISHED"}
+
+
+def _guide_collection(scene):
+    collection = bpy.data.collections.get(GUIDE_COLLECTION)
+    if collection is None:
+        collection = bpy.data.collections.new(GUIDE_COLLECTION)
+        scene.collection.children.link(collection)
+    for obj in list(collection.objects):
+        if obj.get("hyperscape_guide"):
+            bpy.data.objects.remove(obj, do_unlink=True)
+    return collection
+
+
+def _move_to_collection(obj, collection) -> None:
+    for owner in list(obj.users_collection):
+        owner.objects.unlink(obj)
+    collection.objects.link(obj)
+    obj["hyperscape_guide"] = True
+
+
+class HYPERSCAPE_OT_refresh_guides(bpy.types.Operator):
+    bl_idname = "hyperscape.refresh_guides"
+    bl_label = "Refresh Wall and Path Controls"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        collection = _guide_collection(context.scene)
+        for index, wall in enumerate(settings.walls):
+            if wall.geometry == "SPHERE":
+                bpy.ops.mesh.primitive_uv_sphere_add(segments=32, ring_count=16, location=wall.center)
+                guide = context.object
+                guide.scale = (wall.radius,) * 3
+            else:
+                normal = Vector(wall.unit_normal)
+                if normal.length <= 1.0e-12:
+                    continue
+                normal.normalize()
+                bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=4.0, location=normal * wall.offset)
+                guide = context.object
+                guide.rotation_mode = "QUATERNION"
+                guide.rotation_quaternion = normal.to_track_quat("Z", "Y")
+            guide.name = f"HS_Wall_{index}_{wall.name}"
+            guide.display_type = "WIRE"
+            guide.color = (0.15, 0.45, 1.0, 0.35) if wall.preview_inside else (1.0, 0.25, 0.1, 0.35)
+            guide.show_in_front = True
+            guide["hyperscape_wall_index"] = index
+            _move_to_collection(guide, collection)
+        for path_index, path in enumerate(settings.paths):
+            if not path.keyframes:
+                continue
+            curve = bpy.data.curves.new(f"HS_Path_{path_index}", "CURVE")
+            curve.dimensions = "3D"
+            spline = curve.splines.new("POLY")
+            spline.points.add(len(path.keyframes) - 1)
+            for point, key in zip(spline.points, path.keyframes):
+                point.co = (*key.point, 1.0)
+            guide = bpy.data.objects.new(f"HS_Path_{path_index}_{path.name}", curve)
+            collection.objects.link(guide)
+            guide["hyperscape_guide"] = True
+            guide["hyperscape_path_index"] = path_index
+            guide.show_in_front = True
+            for key_index, key in enumerate(path.keyframes):
+                control = bpy.data.objects.new(f"HS_Control_{path_index}_{key_index}", None)
+                control.empty_display_type = "SPHERE"
+                control.empty_display_size = 0.12
+                control.location = key.point
+                control["hyperscape_guide"] = True
+                control["hyperscape_path_index"] = path_index
+                control["hyperscape_key_index"] = key_index
+                collection.objects.link(control)
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_sync_guides(bpy.types.Operator):
+    bl_idname = "hyperscape.sync_guides"
+    bl_label = "Apply Wall and Path Control Transforms"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        collection = bpy.data.collections.get(GUIDE_COLLECTION)
+        if collection is None:
+            self.report({"ERROR"}, "Create guides first")
+            return {"CANCELLED"}
+
+        changed = 0
+        try:
+            for guide in collection.objects:
+                wall_index = guide.get("hyperscape_wall_index")
+                if wall_index is not None:
+                    wall = settings.walls[int(wall_index)]
+                    if wall.geometry == "SPHERE":
+                        scales = [abs(float(value)) for value in guide.scale]
+                        radius = sum(scales) / 3.0
+                        if radius <= 1.0e-6:
+                            raise codec.HyperscapeCodecError(
+                                f"sphere guide {guide.name!r} has zero scale"
+                            )
+                        wall.center = guide.location
+                        wall.radius = radius
+                        guide.scale = (radius, radius, radius)
+                    else:
+                        normal = guide.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
+                        if normal.length <= 1.0e-12:
+                            raise codec.HyperscapeCodecError(
+                                f"plane guide {guide.name!r} has no usable normal"
+                            )
+                        normal.normalize()
+                        wall.unit_normal = normal
+                        wall.offset = normal.dot(guide.matrix_world.translation)
+                    changed += 1
+
+                path_index = guide.get("hyperscape_path_index")
+                key_index = guide.get("hyperscape_key_index")
+                if path_index is not None and key_index is not None:
+                    settings.paths[int(path_index)].keyframes[int(key_index)].point = (
+                        guide.matrix_world.translation
+                    )
+                    changed += 1
+        except (IndexError, codec.HyperscapeCodecError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+        settings.status = f"Applied {changed} guide transforms"
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_export(bpy.types.Operator, ExportHelper):
+    bl_idname = "hyperscape.export"
+    bl_label = "Export Hyperscape glTF/GLB"
+    filename_ext = ".glb"
+    filter_glob: StringProperty(default="*.glb;*.gltf", options={"HIDDEN"})
+
+    def execute(self, context):
+        destination = Path(self.filepath)
+        is_glb = destination.suffix.lower() == ".glb"
+        try:
+            with tempfile.TemporaryDirectory(prefix="hyperscape-blender-") as directory:
+                temporary = Path(directory) / ("scene.glb" if is_glb else "scene.gltf")
+                result = bpy.ops.export_scene.gltf(
+                    filepath=str(temporary),
+                    export_format="GLB" if is_glb else "GLTF_EMBEDDED",
+                    export_extras=True,
+                )
+                if "FINISHED" not in result:
+                    raise codec.HyperscapeCodecError("Blender glTF export did not finish")
+                raw = temporary.read_bytes()
+                document, _ = codec.decode_gltf(raw)
+                node_indices = codec.unique_node_indices_by_name(document)
+                payload, bindings = build_asset(
+                    context.scene.hyperscape,
+                    node_indices,
+                    len(document.get("nodes", [])),
+                )
+                destination.write_bytes(codec.inject_asset(raw, payload, bindings))
+        except (OSError, codec.HyperscapeCodecError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        context.scene.hyperscape.status = f"Exported {destination.name}"
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_import(bpy.types.Operator, ImportHelper):
+    bl_idname = "hyperscape.import"
+    bl_label = "Import Hyperscape glTF/GLB"
+    filename_ext = ".glb"
+    filter_glob: StringProperty(default="*.glb;*.gltf", options={"HIDDEN"})
+
+    def execute(self, context):
+        source = Path(self.filepath)
+        try:
+            raw = source.read_bytes()
+            document, _ = codec.decode_gltf(raw)
+            payload, bindings = codec.extract_asset(raw)
+            if payload is None:
+                raise codec.HyperscapeCodecError("file has no root extras.hyperscape payload")
+            before = {obj.as_pointer() for obj in bpy.data.objects}
+            result = bpy.ops.import_scene.gltf(filepath=str(source))
+            if "FINISHED" not in result:
+                raise codec.HyperscapeCodecError("Blender glTF import did not finish")
+            imported = [obj for obj in bpy.data.objects if obj.as_pointer() not in before]
+            node_objects = _imported_node_objects(document, imported)
+            missing = sorted(_required_object_nodes(payload, bindings) - node_objects.keys())
+            if missing:
+                raise codec.HyperscapeCodecError(
+                    "could not uniquely match imported objects for glTF nodes "
+                    + ", ".join(str(node) for node in missing)
+                )
+            load_asset(context.scene.hyperscape, payload, bindings, node_objects)
+        except (OSError, codec.HyperscapeCodecError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+CLASSES = (
+    HYPERSCAPE_OT_collection_add,
+    HYPERSCAPE_OT_collection_remove,
+    HYPERSCAPE_OT_generator_add,
+    HYPERSCAPE_OT_generator_remove,
+    HYPERSCAPE_OT_keyframe_add,
+    HYPERSCAPE_OT_keyframe_remove,
+    HYPERSCAPE_OT_preview,
+    HYPERSCAPE_OT_reanchor_object,
+    HYPERSCAPE_OT_reparent_frame,
+    HYPERSCAPE_OT_refresh_guides,
+    HYPERSCAPE_OT_sync_guides,
+    HYPERSCAPE_OT_export,
+    HYPERSCAPE_OT_import,
+)
+
+
+def register() -> None:
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
+
+
+def unregister() -> None:
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)

@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "hyperscape_authoring"
+version = "0.1.0"
+name = "Hyperscape Authoring"
+tagline = "Author conformal frames, walls, anchors, paths, and constraints"
+maintainer = "Hyperspectives contributors"
+type = "add-on"
+
+tags = ["3D View", "Import-Export"]
+blender_version_min = "4.2.0"
+license = ["SPDX:MIT", "SPDX:Apache-2.0"]
+
+[permissions]
+files = "Import and export glTF and GLB scenes"
