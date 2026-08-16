@@ -168,6 +168,29 @@ pub fn compute_world_transforms(nodes: &[Node], scene: &Scene) -> Vec<[f64; 16]>
     world_transforms
 }
 
+/// Compute world transforms for every root in the node forest, independent of
+/// a particular glTF scene selection. Application metadata uses this when its
+/// stable bindings are defined over the ordinary node array.
+pub fn compute_all_world_transforms(nodes: &[Node]) -> Vec<[f64; 16]> {
+    let mut is_child = vec![false; nodes.len()];
+    for node in nodes {
+        for &child in &node.children {
+            if let Some(flag) = is_child.get_mut(child) {
+                *flag = true;
+            }
+        }
+    }
+    let scene = Scene {
+        name: None,
+        root_nodes: is_child
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &child)| (!child).then_some(index))
+            .collect(),
+    };
+    compute_world_transforms(nodes, &scene)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +274,7 @@ mod tests {
         // Child world = parent * child = (10+0, 0+5, 0+0) = (10, 5, 0).
         assert!((world[1][12] - 10.0).abs() < 1e-10);
         assert!((world[1][13] - 5.0).abs() < 1e-10);
+        assert_eq!(compute_all_world_transforms(&nodes), world);
     }
 
     #[test]

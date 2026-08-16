@@ -108,13 +108,24 @@ explicit orientation parity. The lowest projection-camera node is selected
 deterministically by default; `mr_setHyperscapeCameraNode` switches views.
 
 The diagnostic snapshot exposes the complete `packets` array as well as the
-legacy first-packet fields. Two integration pieces remain deliberately visible:
-the ordinary `euclidean_model` is reported but not yet applied as a dynamic
-per-batch matrix (static glTF node transforms are currently baked by the mesh
-loader), and adaptive LOD classification still receives one global Möbius map
-rather than the subject-specific map. Multi-subject drawing is implemented;
-dynamic Euclidean movement and subject-specific tessellation are not yet
-complete.
+legacy first-packet fields. For Hyperscape assets, mesh control points remain
+in authored coordinates: the packet's ordinary affine model and inverse-
+transpose normal matrix act first, followed by the subject/view Möbius map.
+Path and cross-frame tracking systems can update the affine translation each
+tick. Legacy glTF assets keep the historical baked-and-normalized path.
+
+Adaptive LOD uses the same subject state. The worker replays its GPU
+classifier for each extracted `[node, affine model, Möbius map]` record, then
+copies only that node's face records into the final coherent classification;
+unbound legacy faces use the baseline state. This is conservative and exact
+for the current disjoint per-node mesh topology, though the cost scales with
+the number of distinct visible subject states and remains a measurement and
+visibility-culling target.
+
+The selected authored projection camera also exposes its ordinary eye and
+cross-frame tracking target to the browser. The view matrix and LOD projection
+therefore follow the tracked entity without conflating that aim constraint
+with camera translation.
 
 ## glTF interchange v0.1
 

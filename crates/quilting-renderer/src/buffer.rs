@@ -353,7 +353,7 @@ impl PersistentInstances {
 
 /// UBO for vertex shader uniforms (matches WGSL Uniforms struct).
 ///
-/// Layout (std140, 224 bytes):
+/// Layout (std140, 352 bytes):
 ///   mat4x4 mvp        (offset 0, 64 bytes)
 ///   mat4x4 mv         (offset 64, 64 bytes)
 ///   float perm_parity  (offset 128, 4 bytes)
@@ -365,6 +365,8 @@ impl PersistentInstances {
 ///   vec4 mob_c         (offset 176, 16 bytes)
 ///   vec4 mob_d         (offset 192, 16 bytes)
 ///   vec4 camera_pos    (offset 208, 16 bytes)
+///   mat4x4 model       (offset 224, 64 bytes)
+///   mat4x4 normal_model (offset 288, 64 bytes)
 pub struct VertexUniformBuf {
     pub ubo: glow::Buffer,
 }
@@ -378,7 +380,7 @@ impl VertexUniformBuf {
         unsafe {
             let ubo = gl.create_buffer().map_err(|e| format!("vtx ubo: {e}"))?;
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
-            gl.buffer_data_size(glow::UNIFORM_BUFFER, 224, glow::DYNAMIC_DRAW);
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, 352, glow::DYNAMIC_DRAW);
             Ok(VertexUniformBuf { ubo })
         }
     }
@@ -398,8 +400,10 @@ impl VertexUniformBuf {
         use_qb: i32,
         mobius: &[f32; 16],
         camera_pos: &[f32; 3],
+        model: &[f32; 16],
+        normal_model: &[f32; 16],
     ) {
-        let mut data = [0u8; 224];
+        let mut data = [0u8; 352];
         // mvp: offset 0
         data[0..64].copy_from_slice(bytemuck_cast_slice(mvp));
         // mv: offset 64
@@ -417,6 +421,8 @@ impl VertexUniformBuf {
         data[208..212].copy_from_slice(&camera_pos[0].to_le_bytes());
         data[212..216].copy_from_slice(&camera_pos[1].to_le_bytes());
         data[216..220].copy_from_slice(&camera_pos[2].to_le_bytes());
+        data[224..288].copy_from_slice(bytemuck_cast_slice(model));
+        data[288..352].copy_from_slice(bytemuck_cast_slice(normal_model));
 
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));

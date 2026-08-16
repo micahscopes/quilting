@@ -14,7 +14,8 @@ use quilting_renderer::buffer::{
     MeshBuffers, TessBuffers, PbrParams, EnvironmentMaps, PersistentInstances,
 };
 use quilting_renderer::pass::{
-    apply_batch_winding, camera_for_batch, Camera, RenderBatch, RenderMode,
+    affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
+    camera_for_batch, Camera, RenderBatch, RenderMode, IDENTITY_MATRIX,
 };
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
@@ -109,6 +110,7 @@ struct GpuBatch {
 struct EntityConformalState {
     mobius: [f32; 16],
     orientation_sign: i8,
+    euclidean_model: [f32; 16],
 }
 
 /// Create a separable Gaussian blur program (GLSL ES 300, not WGSL).
@@ -347,6 +349,7 @@ fn apply_hyperscape_packets(packets: &[GltfHyperscopePacket]) {
                 EntityConformalState {
                     mobius: extracted.packet.mobius,
                     orientation_sign: extracted.packet.orientation_sign,
+                    euclidean_model: extracted.packet.euclidean_model,
                 },
             );
         }
@@ -381,14 +384,22 @@ fn apply_hyperscape_packets(packets: &[GltfHyperscopePacket]) {
 }
 
 fn conformal_state_for_node(renderer: &MainState, node_index: usize) -> EntityConformalState {
-    renderer
-        .active_hyperscape_camera
-        .and_then(|camera| renderer.hyperscape_packets.get(&(camera, node_index)))
-        .copied()
-        .unwrap_or(EntityConformalState {
+    if let Some(camera) = renderer.active_hyperscape_camera {
+        return renderer
+            .hyperscape_packets
+            .get(&(camera, node_index))
+            .copied()
+            .unwrap_or(EntityConformalState {
+                mobius: IDENTITY_MOBIUS,
+                orientation_sign: 1,
+                euclidean_model: IDENTITY_MATRIX,
+            });
+    }
+    EntityConformalState {
             mobius: renderer.mobius,
             orientation_sign: renderer.mobius_orientation,
-        })
+            euclidean_model: IDENTITY_MATRIX,
+    }
 }
 
 fn camera_for_node(camera: &Camera, renderer: &MainState, node_index: usize) -> Camera {
@@ -504,8 +515,14 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         ).ok();
         let mobius = js_sys::Float32Array::from(packet.mobius.as_slice());
         let model = js_sys::Float32Array::from(packet.euclidean_model.as_slice());
+        let camera_eye = js_sys::Float32Array::from(packet.camera_eye.as_slice());
         js_sys::Reflect::set(&result, &"mobius".into(), &mobius).ok();
         js_sys::Reflect::set(&result, &"euclidean_model".into(), &model).ok();
+        js_sys::Reflect::set(&result, &"camera_eye".into(), &camera_eye).ok();
+        if let Some(target) = packet.camera_target {
+            let target = js_sys::Float32Array::from(target.as_slice());
+            js_sys::Reflect::set(&result, &"camera_target".into(), &target).ok();
+        }
     }
     let packet_snapshots = js_sys::Array::new();
     for extracted in packets {
@@ -527,8 +544,14 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         ).ok();
         let mobius = js_sys::Float32Array::from(extracted.packet.mobius.as_slice());
         let model = js_sys::Float32Array::from(extracted.packet.euclidean_model.as_slice());
+        let camera_eye = js_sys::Float32Array::from(extracted.packet.camera_eye.as_slice());
         js_sys::Reflect::set(&packet, &"mobius".into(), &mobius).ok();
         js_sys::Reflect::set(&packet, &"euclidean_model".into(), &model).ok();
+        js_sys::Reflect::set(&packet, &"camera_eye".into(), &camera_eye).ok();
+        if let Some(target) = extracted.packet.camera_target {
+            let target = js_sys::Float32Array::from(target.as_slice());
+            js_sys::Reflect::set(&packet, &"camera_target".into(), &target).ok();
+        }
         packet_snapshots.push(&packet);
     }
     js_sys::Reflect::set(&result, &"packets".into(), &packet_snapshots).ok();
@@ -675,12 +698,18 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             for batch in &state.batches {
                 let batch_camera = camera_for_node(&camera, state, batch.node_index);
                 let conformal = conformal_state_for_node(state, batch.node_index);
-                apply_batch_winding(gl, conformal.orientation_sign);
+                apply_batch_winding(
+                    gl,
+                    conformal.orientation_sign
+                        * affine_orientation_sign(&conformal.euclidean_model),
+                );
+                let euclidean_normal = affine_normal_matrix(&conformal.euclidean_model);
                 let vtx_ubo = state.renderer.vtx_ubo();
                 vtx_ubo.upload(
                     gl, &batch_camera.mvp, &batch_camera.mv,
                     batch.perm_parity, batch.perm_index, 1,
                     &batch_camera.mobius, &batch_camera.camera_pos,
+                    &conformal.euclidean_model, &euclidean_normal,
                 );
                 vtx_ubo.set_face_offset(gl, face_offset);
                 vtx_ubo.bind(gl);
@@ -1225,11 +1254,14 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         let render_batches: Vec<RenderBatch> = state.batches.iter().map(|b| {
             let conformal = conformal_state_for_node(state, b.node_index);
+            let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
             RenderBatch {
                 mesh: &b.mesh, perm_parity: b.perm_parity, perm_index: b.perm_index,
                 wire_color: lod_color(&b.lod), material_index: b.material_index,
                 mobius: conformal.mobius,
-                orientation_sign: conformal.orientation_sign,
+                orientation_sign: conformal.orientation_sign * euclidean_orientation,
+                euclidean_model: conformal.euclidean_model,
+                euclidean_normal: affine_normal_matrix(&conformal.euclidean_model),
             }
         }).collect();
 
@@ -1402,6 +1434,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     quilting_renderer::pass::upload_batch_ubo(
                         gl, state.renderer.vtx_ubo(), &batch_camera,
                         batch.perm_parity, batch.perm_index, 1,
+                        &batch.euclidean_model, &batch.euclidean_normal,
                     );
                     unsafe {
                         gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -1626,6 +1659,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     quilting_renderer::pass::upload_batch_ubo(
                         gl, state.renderer.vtx_ubo(), &batch_camera,
                         batch.perm_parity, batch.perm_index, 1,
+                        &batch.euclidean_model, &batch.euclidean_normal,
                     );
                     unsafe {
                         gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -1828,10 +1862,16 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
         for batch in &state.batches {
             let batch_camera = camera_for_node(camera, state, batch.node_index);
             let conformal = conformal_state_for_node(state, batch.node_index);
-            apply_batch_winding(gl, conformal.orientation_sign);
+            apply_batch_winding(
+                gl,
+                conformal.orientation_sign
+                    * affine_orientation_sign(&conformal.euclidean_model),
+            );
+            let euclidean_normal = affine_normal_matrix(&conformal.euclidean_model);
             quilting_renderer::pass::upload_batch_ubo(
                 gl, state.renderer.vtx_ubo(), &batch_camera,
                 batch.perm_parity, batch.perm_index, 1,
+                &conformal.euclidean_model, &euclidean_normal,
             );
             state.renderer.vtx_ubo().set_face_offset(gl, face_offset);
             state.renderer.vtx_ubo().bind(gl);

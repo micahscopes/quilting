@@ -202,6 +202,10 @@ pub struct HyperscopePacket {
     pub orientation_sign: i8,
     /// Ordinary affine transform applied before the conformal frame map.
     pub euclidean_model: [f32; 16],
+    /// Ordinary projection-camera eye in the camera frame.
+    pub camera_eye: [f32; 3],
+    /// Optional cross-frame target, expressed in the camera frame.
+    pub camera_target: Option<[f32; 3]>,
 }
 
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
@@ -259,7 +263,9 @@ impl Plugin for HyperscapePlugin {
             )
             .add_systems(
                 Update,
-                track_across_frames.in_set(HyperscapeSet::Constraints),
+                (track_across_frames, sync_authored_model_translations)
+                    .chain()
+                    .in_set(HyperscapeSet::Constraints),
             )
             .add_systems(
                 Update,
@@ -366,6 +372,27 @@ fn track_across_frames(
                 .0
                 .push(format!("could not track target for {entity:?}: {error}")),
         }
+    }
+}
+
+/// Apply authored path coordinates to the ordinary affine transform that acts
+/// before the entity's conformal frame chain. Cross-frame tracking remains a
+/// target/aim constraint; it must not teleport the tracking entity. Rotation
+/// and scale remain ordinary glTF data; only translation is driven here.
+fn sync_authored_model_translations(
+    mut models: Query<(
+        Option<&ConformalPath>,
+        &LocalCoordinates,
+        &mut EuclideanModelMatrix,
+    )>,
+) {
+    for (path, local, mut model) in &mut models {
+        if path.is_none() {
+            continue;
+        }
+        model.0[12] = local.0[0] as f32;
+        model.0[13] = local.0[1] as f32;
+        model.0[14] = local.0[2] as f32;
     }
 }
 
@@ -511,11 +538,16 @@ fn extract_hyperscope_packets(
     mut extraction: ResMut<HyperscopeExtraction>,
     mut diagnostics: ResMut<HyperscapeDiagnostics>,
     subjects: Query<(Entity, &EntityFrame, Option<&EuclideanModelMatrix>), With<RenderSubject>>,
-    cameras: Query<(Entity, &ProjectionCamera)>,
+    cameras: Query<(
+        Entity,
+        &ProjectionCamera,
+        Option<&EuclideanModelMatrix>,
+        Option<&TrackedCoordinates>,
+    )>,
 ) {
     extraction.0.clear();
     for (subject, subject_frame, model) in &subjects {
-        for (camera_entity, camera) in &cameras {
+        for (camera_entity, camera, camera_model, camera_target) in &cameras {
             match scene.frames.relative_chain(subject_frame.0, camera.frame) {
                 Ok(chain) => match chain.to_mobius() {
                     Ok(mobius) => extraction.0.push(HyperscopePacket {
@@ -524,6 +556,14 @@ fn extract_hyperscope_packets(
                         mobius: mobius_uniform(mobius),
                         orientation_sign: chain.orientation_sign(),
                         euclidean_model: model.copied().unwrap_or_default().0,
+                        camera_eye: camera_model
+                            .map(|model| [model.0[12], model.0[13], model.0[14]])
+                            .unwrap_or([0.0; 3]),
+                        camera_target: camera_target.map(|target| [
+                            target.0[0] as f32,
+                            target.0[1] as f32,
+                            target.0[2] as f32,
+                        ]),
                     }),
                     Err(error) => diagnostics.0.push(format!(
                         "could not collapse render chain for {subject:?}: {error}"

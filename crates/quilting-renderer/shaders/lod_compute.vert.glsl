@@ -41,6 +41,7 @@ uniform vec4 mob_a;
 uniform vec4 mob_b;
 uniform vec4 mob_c;
 uniform vec4 mob_d;
+uniform mat4 model_matrix;
 
 uniform float density;
 uniform float mesh_radius;
@@ -159,9 +160,9 @@ void main() {
     float lod_a, lod_b, lod_c;
 
     // Fetch animated vertex positions
-    vec3 p0 = fetch_animated_pos(int(face_indices.x));
-    vec3 p1 = fetch_animated_pos(int(face_indices.y));
-    vec3 p2 = fetch_animated_pos(int(face_indices.z));
+    vec3 p0 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.x)), 1.0)).xyz;
+    vec3 p1 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.y)), 1.0)).xyz;
+    vec3 p2 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.z)), 1.0)).xyz;
 
     // Edge midpoints
     vec3 mid_a = (p1 + p2) * 0.5;

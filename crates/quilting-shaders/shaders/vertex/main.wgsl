@@ -19,6 +19,8 @@ struct Uniforms {
     mob_c: vec4<f32>,
     mob_d: vec4<f32>,
     camera_pos: vec4<f32>,   // world-space camera position (xyz, w unused)
+    model: mat4x4<f32>,      // ordinary affine transform before Möbius
+    normal_model: mat4x4<f32>,
 }
 
 @group(0) @binding(0)
@@ -311,6 +313,9 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         sp1 = vec4<f32>(0.0, in.p1.yzw);
         sp2 = vec4<f32>(0.0, in.p2.yzw);
     }
+    sp0 = vec4<f32>(0.0, (u.model * vec4<f32>(sp0.yzw, 1.0)).xyz);
+    sp1 = vec4<f32>(0.0, (u.model * vec4<f32>(sp1.yzw, 1.0)).xyz);
+    sp2 = vec4<f32>(0.0, (u.model * vec4<f32>(sp2.yzw, 1.0)).xyz);
 
     if u.use_qb == 1 {
         let result = eval_mobius_qb(
@@ -363,6 +368,9 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         sn1 = skin_normal(sn1, vi1);
         sn2 = skin_normal(sn2, vi2);
     }
+    sn0 = (u.normal_model * vec4<f32>(sn0, 0.0)).xyz;
+    sn1 = (u.normal_model * vec4<f32>(sn1, 0.0)).xyz;
+    sn2 = (u.normal_model * vec4<f32>(sn2, 0.0)).xyz;
     let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
     if has_smooth {
         // Transform every normal through the Möbius differential. The c=0

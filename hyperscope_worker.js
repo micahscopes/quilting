@@ -164,7 +164,7 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'compute_animated_lods') {
-    const { t, mobius, density, minPx, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub, skipAnimation } = data;
+    const { t, mobius, subjectStates, density, minPx, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub, skipAnimation } = data;
     const wt0 = performance.now();
     // Set tess params before compute
     if (tessDensity != null) {
@@ -177,6 +177,7 @@ self.onmessage = async function(e) {
       result = wasm.compute_animated_lods(
         skipAnimation ? -1.0 : t,  // t < 0 signals: skip animation, use rest pose
         new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
+        new Float32Array(subjectStates || []),
         density || 20.0,
         minPx || 0.0,
         new Float32Array(vpMatrix || new Array(16).fill(0)),

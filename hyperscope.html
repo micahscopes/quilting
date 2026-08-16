@@ -573,11 +573,16 @@ let currentMobius = null;
 let stretchRange = { min: 0.5, max: 0.5 };
 let stretchSamplePending = false;
 let hyperscapeActive = false;
+let authoredCamera = null;
+let authoredLodStates = [];
+let lastHyperscapeLodAt = 0;
 let previousFrameTs = null;
 let lastHyperscapeDiagnostic = '';
 
 function activateHyperscape(buffer) {
   hyperscapeActive = mr_loadHyperscape(new Uint8Array(buffer));
+  authoredCamera = null;
+  authoredLodStates = [];
   previousFrameTs = null;
   $('hyperscape-diagnostics').textContent = hyperscapeActive
     ? 'Hyperscape: authored ECS scene active'
@@ -610,6 +615,8 @@ effect(() => {
   if (!wasmOk.get()) return;
   if (hyperscapeActive) {
     hyperscapeActive = false;
+    authoredCamera = null;
+    authoredLodStates = [];
     $('hyperscape-diagnostics').textContent = 'Hyperscape: manual Möbius override';
   }
   mr_setMobius(flat);
@@ -1290,10 +1297,13 @@ async function recomputeLods() {
     catch { m = computeMobius('identity', 0.5, 0, 0, 2); }
     const mobFlat = [...m.a, ...m.b, ...m.c, ...m.d];
     const w = canvas.width, h = canvas.height;
-    const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
-    const ey = zoom*Math.sin(rotX)+panY;
-    const ez = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
-    const view = lookAt(ex,ey,ez, panX,panY,panZ, 0,1,0);
+    const ex = authoredCamera ? authoredCamera.eye[0] : zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
+    const ey = authoredCamera ? authoredCamera.eye[1] : zoom*Math.sin(rotX)+panY;
+    const ez = authoredCamera ? authoredCamera.eye[2] : zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
+    const tx = authoredCamera ? authoredCamera.target[0] : panX;
+    const ty = authoredCamera ? authoredCamera.target[1] : panY;
+    const tz = authoredCamera ? authoredCamera.target[2] : panZ;
+    const view = lookAt(ex,ey,ez, tx,ty,tz, 0,1,0);
     const proj = perspective(Math.PI/3, w/h, 0.01, 10000);
     const vp = mulM4(proj, view);
     const tp = getTessParams();
@@ -1303,6 +1313,7 @@ async function recomputeLods() {
     performance.mark('lod-worker-start');
     const resp = await workerCall('compute_animated_lods', {
       t: animating ? animTime : 0, mobius: Array.from(mobFlat), density: tp.density, minPx: tp.minPx,
+      subjectStates: authoredLodStates,
       vpMatrix: Array.from(vp), vpWidth: w, vpHeight: h,
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
       skipAnimation: !animating,
@@ -1367,6 +1378,26 @@ function frame(ts) {
     const snapshot = mr_tickHyperscape(deltaSeconds);
     if (snapshot) {
       if (snapshot.mobius) currentMobius = new Float32Array(snapshot.mobius);
+      if (snapshot.camera_eye && snapshot.camera_target) {
+        authoredCamera = {
+          eye: new Float32Array(snapshot.camera_eye),
+          target: new Float32Array(snapshot.camera_target),
+        };
+      }
+      const activeCamera = snapshot.active_camera_node;
+      authoredLodStates = [];
+      for (const packet of snapshot.packets || []) {
+        if (activeCamera != null && packet.camera_node !== activeCamera) continue;
+        authoredLodStates.push(
+          packet.subject_node,
+          ...Array.from(packet.mobius || []),
+          ...Array.from(packet.euclidean_model || []),
+        );
+      }
+      if (authoredLodStates.length && ts - lastHyperscapeLodAt >= 250) {
+        lastHyperscapeLodAt = ts;
+        debouncedLodRecompute();
+      }
       const messages = snapshot.diagnostics || [];
       const summary = messages.length
         ? messages.join(' | ')
@@ -1388,10 +1419,13 @@ function frame(ts) {
     tickAnimation(animTime);
   }
 
-  const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
-  const ey = zoom*Math.sin(rotX)+panY;
-  const ez = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
-  const view = lookAt(ex,ey,ez, panX,panY,panZ, 0,1,0);
+  const ex = authoredCamera ? authoredCamera.eye[0] : zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
+  const ey = authoredCamera ? authoredCamera.eye[1] : zoom*Math.sin(rotX)+panY;
+  const ez = authoredCamera ? authoredCamera.eye[2] : zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
+  const tx = authoredCamera ? authoredCamera.target[0] : panX;
+  const ty = authoredCamera ? authoredCamera.target[1] : panY;
+  const tz = authoredCamera ? authoredCamera.target[2] : panZ;
+  const view = lookAt(ex,ey,ez, tx,ty,tz, 0,1,0);
   const proj = perspective(Math.PI/3, canvas.width/canvas.height, 0.01, 10000);
   const mvp = mulM4(proj, view);
 

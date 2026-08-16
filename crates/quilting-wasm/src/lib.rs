@@ -3,6 +3,7 @@ pub mod main_renderer;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
+use quilting_core::batch;
 use quilting_renderer::compute::LodCompute;
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -10,7 +11,7 @@ use quilting_core::sampling::PatchConfig;
 use quilting_core::triangle;
 use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Performance.mark/measure helper for profiling in Chrome DevTools.
 /// Works in both Window and Worker contexts.
@@ -56,6 +57,7 @@ struct StoredGltfData {
     nodes: Vec<quilting_gltf::scene::Node>,
     combined: quilting_gltf::mesh::Primitive,
     face_material_indices: Vec<Option<usize>>,
+    face_node_indices: Vec<usize>,
     primary_skin_idx: Option<usize>,
     active_animation: usize,
     /// Per-frame evaluator for GPU skinning (replaces prebake).
@@ -373,12 +375,18 @@ pub fn debug_gpu_compute_state() -> String {
 /// 6. Enforces edge coherence via half-edge mesh (max across shared edges)
 /// 7. Re-canonicalizes to (canonical_lod, perm_index, parity) per face
 ///
-/// Returns Float32Array with 5 floats per face: [canon_a, canon_b, canon_c, perm_index, parity].
+/// `subject_states` is a packed sequence of
+/// `[node_index, mobius(16), euclidean_model(16)]` records. When present, each
+/// node's faces are classified with their own extracted subject/view state.
+///
+/// Returns Float32Array with 6 floats per face:
+/// `[canon_a, canon_b, canon_c, perm_index, parity, atlas_index]`.
 /// Uses mesh_radius computed at upload time (not hardcoded).
 #[wasm_bindgen]
 pub fn compute_animated_lods(
     t: f64,
     mobius: &[f32],
+    subject_states: &[f32],
     density: f32,
     min_px: f32,
     vp_matrix: &[f32],
@@ -398,6 +406,20 @@ pub fn compute_animated_lods(
         let num_faces = data.combined.triangles.len();
         let num_vertices = data.combined.positions.len() as u32;
         let mesh_radius = LOD_MESH_RADIUS.with(|r| *r.borrow()) as f32;
+        const SUBJECT_STATE_STRIDE: usize = 33;
+        let extracted_states: Vec<(usize, [f32; 16], [f32; 16])> = subject_states
+            .chunks_exact(SUBJECT_STATE_STRIDE)
+            .filter_map(|record| {
+                if !record[0].is_finite() || record[0] < 0.0 {
+                    return None;
+                }
+                let mut transform = [0.0; 16];
+                let mut model = [0.0; 16];
+                transform.copy_from_slice(&record[1..17]);
+                model.copy_from_slice(&record[17..33]);
+                Some((record[0] as usize, transform, model))
+            })
+            .collect();
 
         perf_mark("lod-wasm-start");
 
@@ -473,23 +495,58 @@ pub fn compute_animated_lods(
                 compute.upload_morph_weights(gl, &morph_weights);
             }
 
-            let mut mob = [0.0f32; 16];
-            for (i, &v) in mobius.iter().take(16).enumerate() { mob[i] = v; }
+            let mut legacy_mobius = [0.0f32; 16];
+            for (i, &v) in mobius.iter().take(16).enumerate() { legacy_mobius[i] = v; }
             let mut vp = [0.0f32; 16];
             for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
 
             let max_lod = LOD_MAX.with(|m| *m.borrow());
             perf_mark("lod-gpu-dispatch-start");
-            let n = compute.compute_lods(
-                gl, num_faces, num_vertices,
-                num_joints, num_morph,
-                mob, density, mesh_radius, min_px, max_lod,
-                &vp, vp_width, vp_height,
-            );
+            let identity = [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ];
+            let identity_mobius = [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0,
+                1.0, 0.0, 0.0, 0.0,
+            ];
+            let mut run = |transform, model| {
+                let n = compute.compute_lods(
+                    gl, num_faces, num_vertices,
+                    num_joints, num_morph,
+                    transform, model, density, mesh_radius, min_px, max_lod,
+                    &vp, vp_width, vp_height,
+                );
+                compute.read_back(gl, n)
+            };
+            let baseline = if extracted_states.is_empty() {
+                legacy_mobius
+            } else {
+                identity_mobius
+            };
+            let mut result = run(baseline, identity);
+            for (node, transform, model) in &extracted_states {
+                let classified = run(*transform, *model);
+                if classified.len() != result.len() {
+                    continue;
+                }
+                for (face, &face_node) in data.face_node_indices.iter().enumerate() {
+                    if face_node == *node {
+                        let offset = face * batch::FACE_LOD_STRIDE;
+                        let end = offset + batch::FACE_LOD_STRIDE;
+                        if end <= result.len() {
+                            result[offset..end].copy_from_slice(&classified[offset..end]);
+                        }
+                    }
+                }
+            }
             perf_mark("lod-gpu-dispatch-end");
             perf_measure("lod-gpu-dispatch", "lod-gpu-dispatch-start", "lod-gpu-dispatch-end");
             perf_mark("lod-gpu-readback-start");
-            let result = compute.read_back(gl, n);
             perf_mark("lod-gpu-readback-end");
             perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
             result
@@ -506,7 +563,8 @@ pub fn compute_animated_lods(
         }
 
         // GPU pass 2 already did edge coherence + canonicalize + atlas LUT.
-        // Output is 5 floats per face: (canon_a, canon_b, canon_c, perm_index, parity)
+        // Output is 6 floats per face:
+        // (canon_a, canon_b, canon_c, perm_index, parity, atlas_index)
         // — directly consumable by group_into_batches.
 
         perf_mark("lod-wasm-end");
@@ -1310,6 +1368,22 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         primary_skin_idx.is_some() || scene.animations[0].channels.iter()
             .any(|c| c.property == quilting_gltf::animation::AnimationProperty::MorphTargetWeights)
     );
+    // Hyperscape keeps node transforms as an explicit per-entity affine layer
+    // before the conformal map. Legacy assets retain the viewer's historical
+    // bake-and-normalize behavior.
+    let authored_coordinates = scene.hyperscape.is_some();
+    let authored_nodes: HashSet<usize> = scene
+        .hyperscape
+        .as_ref()
+        .map(|asset| {
+            asset
+                .node_bindings
+                .iter()
+                .enumerate()
+                .filter_map(|(node, binding)| binding.as_ref().map(|_| node))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Track stable ordinary glTF node identity alongside each merged triangle.
     // The main renderer uses this to select the extracted subject/view chain.
@@ -1341,6 +1415,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             &mesh_nodes,
             &mut face_material_indices,
             &mut face_node_indices,
+            &authored_nodes,
         )
     };
 
@@ -1549,7 +1624,9 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     } else { None };
 
     // Compute rest-pose bounding box for normalization
-    let (norm_center, norm_scale) = {
+    let (norm_center, norm_scale) = if authored_coordinates {
+        ([0.0; 3], 1.0)
+    } else {
         let mut bb_min = [f64::INFINITY; 3];
         let mut bb_max = [f64::NEG_INFINITY; 3];
         for pos in &combined.positions {
@@ -1572,6 +1649,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             nodes: scene.nodes.clone(),
             combined: combined.clone(),
             face_material_indices: face_material_indices.clone(),
+            face_node_indices: face_node_indices.clone(),
             primary_skin_idx,
             active_animation: 0,
             evaluator,
@@ -1763,6 +1841,7 @@ fn merge_all_mesh_nodes(
     mesh_nodes: &[MeshNodeRef],
     face_materials: &mut Vec<Option<usize>>,
     face_nodes: &mut Vec<usize>,
+    authored_nodes: &HashSet<usize>,
 ) -> quilting_gltf::mesh::Primitive {
     let mut positions = Vec::new();
     let mut normals_all: Option<Vec<[f64; 3]>> = None;
@@ -1771,7 +1850,17 @@ fn merge_all_mesh_nodes(
 
     for mn in mesh_nodes {
         let mesh = &scene.meshes[mn.mesh_idx];
-        let m = &mn.world_transform;
+        let identity = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let m = if authored_nodes.contains(&mn.node_idx) {
+            &identity
+        } else {
+            &mn.world_transform
+        };
 
         // Extract 3x3 normal matrix (inverse transpose of upper-left 3x3)
         // For uniform/no-shear transforms, the upper-left 3x3 works directly

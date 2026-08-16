@@ -46,10 +46,11 @@ pub fn spawn_hyperscape_asset(
         });
     }
     let runtime = asset.validate()?;
+    let world_matrices = quilting_gltf::scene::compute_all_world_transforms(nodes);
 
     let mut entities = Vec::with_capacity(nodes.len());
     for (node_index, node) in nodes.iter().enumerate() {
-        let matrix_f64 = node.transform.to_matrix();
+        let matrix_f64 = world_matrices[node_index];
         let mut matrix = [0.0_f32; 16];
         for (target, source) in matrix.iter_mut().zip(matrix_f64) {
             *target = source as f32;
@@ -287,6 +288,8 @@ mod tests {
         assert_eq!(extraction.0[0].subject, horse);
         assert_eq!(extraction.0[0].camera, camera);
         assert_eq!(extraction.0[0].euclidean_model[12], -2.0);
+        assert_eq!(extraction.0[0].camera_eye, [0.0, -8.0, 3.0]);
+        assert!(extraction.0[0].camera_target.is_some());
     }
 
     #[test]
@@ -331,6 +334,15 @@ mod tests {
                 .unwrap()
                 .0,
             [-1.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            runtime
+                .app()
+                .world()
+                .get::<EuclideanModelMatrix>(horse)
+                .unwrap()
+                .0[12],
+            -1.0
         );
     }
 }

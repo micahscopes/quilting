@@ -51,6 +51,61 @@ pub struct RenderBatch<'a> {
     pub mobius: [f32; 16],
     /// Explicit orientation parity of the authored generator word.
     pub orientation_sign: i8,
+    /// Ordinary affine transform applied before the conformal map.
+    pub euclidean_model: [f32; 16],
+    /// Inverse-transpose linear part of `euclidean_model`.
+    pub euclidean_normal: [f32; 16],
+}
+
+pub const IDENTITY_MATRIX: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+];
+
+fn affine_determinant(model: &[f32; 16]) -> f32 {
+    let (a00, a01, a02) = (model[0], model[4], model[8]);
+    let (a10, a11, a12) = (model[1], model[5], model[9]);
+    let (a20, a21, a22) = (model[2], model[6], model[10]);
+    a00 * (a11 * a22 - a12 * a21)
+        - a01 * (a10 * a22 - a12 * a20)
+        + a02 * (a10 * a21 - a11 * a20)
+}
+
+/// Orientation of the ordinary affine layer. Degenerate matrices are treated
+/// as even because they have no well-defined inverse normal transform.
+pub fn affine_orientation_sign(model: &[f32; 16]) -> i8 {
+    if affine_determinant(model) < 0.0 { -1 } else { 1 }
+}
+
+/// Inverse-transpose of an affine matrix's 3×3 linear part, embedded in a
+/// column-major 4×4 matrix for the shader. Singular inputs fall back to the
+/// identity; their geometry is already degenerate and cannot define normals.
+pub fn affine_normal_matrix(model: &[f32; 16]) -> [f32; 16] {
+    let (a00, a01, a02) = (model[0], model[4], model[8]);
+    let (a10, a11, a12) = (model[1], model[5], model[9]);
+    let (a20, a21, a22) = (model[2], model[6], model[10]);
+    let c00 = a11 * a22 - a12 * a21;
+    let c01 = a12 * a20 - a10 * a22;
+    let c02 = a10 * a21 - a11 * a20;
+    let c10 = a02 * a21 - a01 * a22;
+    let c11 = a00 * a22 - a02 * a20;
+    let c12 = a01 * a20 - a00 * a21;
+    let c20 = a01 * a12 - a02 * a11;
+    let c21 = a02 * a10 - a00 * a12;
+    let c22 = a00 * a11 - a01 * a10;
+    let determinant = a00 * c00 + a01 * c01 + a02 * c02;
+    if !determinant.is_finite() || determinant.abs() <= 1.0e-12 {
+        return IDENTITY_MATRIX;
+    }
+    let inverse = determinant.recip();
+    [
+        c00 * inverse, c10 * inverse, c20 * inverse, 0.0,
+        c01 * inverse, c11 * inverse, c21 * inverse, 0.0,
+        c02 * inverse, c12 * inverse, c22 * inverse, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]
 }
 
 /// Copy view state while selecting this entity batch's conformal map.
@@ -83,6 +138,8 @@ pub fn upload_batch_ubo(
     perm_parity: f32,
     perm_index: i32,
     use_qb: i32,
+    euclidean_model: &[f32; 16],
+    euclidean_normal: &[f32; 16],
 ) {
     vtx_ubo.upload(
         gl,
@@ -93,6 +150,8 @@ pub fn upload_batch_ubo(
         use_qb,
         &camera.mobius,
         &camera.camera_pos,
+        euclidean_model,
+        euclidean_normal,
     );
     vtx_ubo.bind(gl);
 }
@@ -133,6 +192,8 @@ pub fn render_frame(
                 batch.perm_parity,
                 batch.perm_index,
                 1,
+                &batch.euclidean_model,
+                &batch.euclidean_normal,
             );
 
             unsafe {
@@ -164,6 +225,8 @@ pub fn render_frame(
                 batch.perm_parity,
                 batch.perm_index,
                 1,
+                &batch.euclidean_model,
+                &batch.euclidean_normal,
             );
 
             unsafe {
@@ -196,6 +259,8 @@ pub fn render_frame(
                 batch.perm_parity,
                 batch.perm_index,
                 1,
+                &batch.euclidean_model,
+                &batch.euclidean_normal,
             );
 
             wire_ubo.upload(gl, batch.wire_color, true);
@@ -230,6 +295,8 @@ pub fn render_frame(
                 batch.perm_parity,
                 batch.perm_index,
                 1,
+                &batch.euclidean_model,
+                &batch.euclidean_normal,
             );
 
             unsafe {
@@ -261,6 +328,8 @@ pub fn render_frame(
                 batch.perm_parity,
                 batch.perm_index,
                 1,
+                &batch.euclidean_model,
+                &batch.euclidean_normal,
             );
 
             unsafe {
@@ -312,6 +381,8 @@ pub fn render_original_wireframe(
         0, // use_qb=0 for original mesh
         &IDENTITY_MOBIUS,
         &camera.camera_pos,
+        &IDENTITY_MATRIX,
+        &IDENTITY_MATRIX,
     );
     vtx_ubo.bind(gl);
 

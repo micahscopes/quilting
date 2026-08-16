@@ -263,6 +263,21 @@ mod tests {
     }
 
     #[test]
+    fn affine_model_normal_and_orientation_are_explicit() {
+        let model = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            0.0, 0.0, -4.0, 0.0,
+            5.0, 6.0, 7.0, 1.0,
+        ];
+        let normal = pass::affine_normal_matrix(&model);
+        assert!((normal[0] - 0.5).abs() < 1.0e-6);
+        assert!((normal[5] - 1.0 / 3.0).abs() < 1.0e-6);
+        assert!((normal[10] + 0.25).abs() < 1.0e-6);
+        assert_eq!(pass::affine_orientation_sign(&model), -1);
+    }
+
+    #[test]
     fn wire_fragment_has_ubo() {
         let sources = compiled_glsl_sources().unwrap();
         let wire = sources.iter().find(|(n, _, _)| *n == "wire").unwrap();
