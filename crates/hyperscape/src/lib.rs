@@ -7,12 +7,12 @@
 
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
-use bevy_time::{Time, TimePlugin, Virtual};
+use bevy_time::{Time, Virtual};
 use quilting_core::{
     AnchorState, ConformalFrameForest, FrameId, Mobius, OpenRoundSide, RoundSideOrientation,
     RoundWallRelation, RoundWallSet, WallId,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub mod interchange;
 
@@ -168,7 +168,7 @@ pub struct TrackedCoordinates(pub [f64; 3]);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ActiveAnchor(pub AnchorState);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChamberSide {
     Negative,
     OnWall,
@@ -197,6 +197,51 @@ pub struct ContactRecord {
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContactState(pub Vec<ContactRecord>);
+
+pub type ChamberKey = Vec<(WallId, ChamberSide)>;
+
+/// Sparse aggregate maintenance and measurement for chamber-dependent
+/// visibility/LOD hints. Geometric classification is still authoritative;
+/// these counts only avoid rebuilding aggregate state when no sign changed.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ChamberAggregateState {
+    pub epoch: u64,
+    pub counts: BTreeMap<ChamberKey, usize>,
+    pub changed_entities: Vec<Entity>,
+    pub changed_walls: BTreeSet<WallId>,
+    pub contact_frontier: BTreeSet<WallId>,
+    pub classifications_last_tick: usize,
+    pub aggregate_updates_last_tick: usize,
+    memberships: BTreeMap<Entity, ChamberKey>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformHistorySample {
+    pub elapsed_seconds: f64,
+    pub frame: FrameId,
+    pub local: [f64; 3],
+    pub euclidean: [f64; 3],
+    pub anchor_frame: Option<FrameId>,
+    pub flipped_walls: Vec<WallId>,
+}
+
+/// Bounded, change-only coordinate history for browser/editor diagnostics.
+#[derive(Resource, Debug, Clone)]
+pub struct TransformHistory {
+    pub capacity_per_entity: usize,
+    pub epoch: u64,
+    pub samples: BTreeMap<Entity, VecDeque<TransformHistorySample>>,
+}
+
+impl Default for TransformHistory {
+    fn default() -> Self {
+        Self {
+            capacity_per_entity: 32,
+            epoch: 0,
+            samples: BTreeMap::new(),
+        }
+    }
+}
 
 /// Request queue for discontinuity-free frame parenting changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +277,10 @@ pub struct HyperscopePacket {
     pub camera_eye: [f32; 3],
     /// Optional cross-frame target, expressed in the camera frame.
     pub camera_target: Option<[f32; 3]>,
+    /// Squared Möbius denominator at the affine model origin. Values below
+    /// `POLE_PROXIMITY_NORM_SQ` are a diagnostic/maximum-LOD warning, not a
+    /// proof that the entire mesh intersects the pole.
+    pub origin_pole_denominator_norm_sq: f64,
 }
 
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
@@ -257,13 +306,16 @@ pub struct HyperscapePlugin;
 
 impl Plugin for HyperscapePlugin {
     fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<TimePlugin>() {
-            app.add_plugins(TimePlugin);
-        }
-        app.init_resource::<ConformalScene>()
+        // Hyperscape owns a deterministic virtual clock. Embedders advance it
+        // explicitly before `App::update`; this avoids coupling authored time
+        // to a native wall clock and is equally valid in native and wasm apps.
+        app.init_resource::<Time<Virtual>>()
+            .init_resource::<ConformalScene>()
             .init_resource::<FrameReparentRequests>()
             .init_resource::<AnchorFlipRequests>()
             .init_resource::<ContactState>()
+            .init_resource::<ChamberAggregateState>()
+            .init_resource::<TransformHistory>()
             .init_resource::<HyperscopeExtraction>()
             .init_resource::<HyperscapeDiagnostics>()
             .configure_sets(
@@ -306,7 +358,9 @@ impl Plugin for HyperscapePlugin {
             )
             .add_systems(
                 Update,
-                extract_hyperscope_packets.in_set(HyperscapeSet::Extraction),
+                (record_transform_history, extract_hyperscope_packets)
+                    .chain()
+                    .in_set(HyperscapeSet::Extraction),
             );
     }
 }
@@ -526,7 +580,9 @@ fn classify_contacts(
 
 fn classify_chambers(
     scene: Res<ConformalScene>,
+    contacts: Res<ContactState>,
     mut diagnostics: ResMut<HyperscapeDiagnostics>,
+    mut aggregates: ResMut<ChamberAggregateState>,
     mut points: Query<(
         Entity,
         &EntityFrame,
@@ -535,9 +591,17 @@ fn classify_chambers(
         &mut ChamberSignature,
     )>,
 ) {
+    aggregates.changed_entities.clear();
+    aggregates.changed_walls.clear();
+    aggregates.contact_frontier.clear();
+    aggregates.classifications_last_tick = 0;
+    aggregates.aggregate_updates_last_tick = 0;
+    let mut seen = BTreeSet::new();
     for (entity, frame, point, anchor, mut signature) in &mut points {
-        signature.0.clear();
+        seen.insert(entity);
+        let mut next_signature = BTreeMap::new();
         for (index, _) in scene.walls.walls().iter().enumerate() {
+            aggregates.classifications_last_tick += 1;
             let wall = WallId(index);
             let negative = OpenRoundSide {
                 wall,
@@ -586,8 +650,132 @@ fn classify_chambers(
                 }
                 _ => side,
             };
-            signature.0.insert(wall, oriented);
+            next_signature.insert(wall, oriented);
         }
+
+        let next_key = next_signature
+            .iter()
+            .map(|(&wall, &side)| (wall, side))
+            .collect::<ChamberKey>();
+        let old_key = aggregates.memberships.get(&entity).cloned();
+        if old_key.as_ref() != Some(&next_key) {
+            if let Some(old_key) = &old_key {
+                let remove = if let Some(count) = aggregates.counts.get_mut(old_key) {
+                    *count -= 1;
+                    *count == 0
+                } else {
+                    false
+                };
+                aggregates.aggregate_updates_last_tick += 1;
+                if remove {
+                    aggregates.counts.remove(old_key);
+                }
+            }
+            *aggregates.counts.entry(next_key.clone()).or_default() += 1;
+            aggregates.aggregate_updates_last_tick += 1;
+            for wall in 0..scene.walls.walls().len() {
+                let wall = WallId(wall);
+                let old_side = old_key
+                    .as_ref()
+                    .and_then(|key| key.iter().find(|(candidate, _)| *candidate == wall))
+                    .map(|(_, side)| *side);
+                let next_side = next_signature.get(&wall).copied();
+                if old_side != next_side {
+                    aggregates.changed_walls.insert(wall);
+                }
+            }
+            aggregates.memberships.insert(entity, next_key);
+            aggregates.changed_entities.push(entity);
+        }
+        signature.0 = next_signature;
+    }
+
+    let removed = aggregates
+        .memberships
+        .keys()
+        .copied()
+        .filter(|entity| !seen.contains(entity))
+        .collect::<Vec<_>>();
+    for entity in removed {
+        if let Some(old_key) = aggregates.memberships.remove(&entity) {
+            let remove = if let Some(count) = aggregates.counts.get_mut(&old_key) {
+                *count -= 1;
+                *count == 0
+            } else {
+                false
+            };
+            aggregates.aggregate_updates_last_tick += 1;
+            if remove {
+                aggregates.counts.remove(&old_key);
+            }
+            aggregates.changed_entities.push(entity);
+        }
+    }
+    if !aggregates.changed_entities.is_empty() {
+        aggregates.epoch = aggregates.epoch.wrapping_add(1);
+    }
+    aggregates.contact_frontier = aggregates.changed_walls.clone();
+    for contact in &contacts.0 {
+        if aggregates.changed_walls.contains(&contact.first)
+            || aggregates.changed_walls.contains(&contact.second)
+        {
+            aggregates.contact_frontier.insert(contact.first);
+            aggregates.contact_frontier.insert(contact.second);
+        }
+    }
+}
+
+fn record_transform_history(
+    time: Res<Time<Virtual>>,
+    mut history: ResMut<TransformHistory>,
+    points: Query<(
+        Entity,
+        &EntityFrame,
+        &LocalCoordinates,
+        &EuclideanCoordinates,
+        Option<&ActiveAnchor>,
+    )>,
+) {
+    let elapsed_seconds = time.elapsed_secs_f64();
+    let mut seen = BTreeSet::new();
+    for (entity, frame, local, euclidean, anchor) in &points {
+        seen.insert(entity);
+        let sample = TransformHistorySample {
+            elapsed_seconds,
+            frame: frame.0,
+            local: local.0,
+            euclidean: euclidean.0,
+            anchor_frame: anchor.map(|anchor| anchor.0.frame),
+            flipped_walls: anchor
+                .map(|anchor| anchor.0.flipped_walls().iter().copied().collect())
+                .unwrap_or_default(),
+        };
+        let changed = history
+            .samples
+            .get(&entity)
+            .and_then(|samples| samples.back())
+            .is_none_or(|previous| {
+                previous.frame != sample.frame
+                    || previous.local != sample.local
+                    || previous.euclidean != sample.euclidean
+                    || previous.anchor_frame != sample.anchor_frame
+                    || previous.flipped_walls != sample.flipped_walls
+            });
+        if !changed {
+            continue;
+        }
+        let capacity = history.capacity_per_entity.max(1);
+        let samples = history.samples.entry(entity).or_default();
+        samples.push_back(sample);
+        while samples.len() > capacity {
+            samples.pop_front();
+        }
+        history.epoch = history.epoch.wrapping_add(1);
+    }
+    let retained = history.samples.len();
+    history.samples.retain(|entity, _| seen.contains(entity));
+    if history.samples.len() != retained {
+        history.epoch = history.epoch.wrapping_add(1);
     }
 }
 
@@ -629,21 +817,29 @@ fn extract_hyperscope_packets(
         for (camera_entity, camera, camera_model, camera_target) in &cameras {
             match scene.frames.relative_chain(subject_frame.0, camera.frame) {
                 Ok(chain) => match chain.to_mobius() {
-                    Ok(mobius) => extraction.0.push(HyperscopePacket {
-                        subject,
-                        camera: camera_entity,
-                        mobius: mobius_uniform(mobius),
-                        orientation_sign: chain.orientation_sign(),
-                        euclidean_model: model.copied().unwrap_or_default().0,
-                        camera_eye: camera_model
-                            .map(|model| [model.0[12], model.0[13], model.0[14]])
-                            .unwrap_or([0.0; 3]),
-                        camera_target: camera_target.map(|target| [
-                            target.0[0] as f32,
-                            target.0[1] as f32,
-                            target.0[2] as f32,
-                        ]),
-                    }),
+                    Ok(mobius) => {
+                        let euclidean_model = model.copied().unwrap_or_default().0;
+                        let origin = quilting_core::Quat::from_point(
+                            euclidean_model[12] as f64,
+                            euclidean_model[13] as f64,
+                            euclidean_model[14] as f64,
+                        );
+                        let denominator = mobius.c * origin + mobius.d;
+                        extraction.0.push(HyperscopePacket {
+                            subject,
+                            camera: camera_entity,
+                            mobius: mobius_uniform(mobius),
+                            orientation_sign: chain.orientation_sign(),
+                            euclidean_model,
+                            camera_eye: camera_model
+                                .map(|model| [model.0[12], model.0[13], model.0[14]])
+                                .unwrap_or([0.0; 3]),
+                            camera_target: camera_target.map(|target| {
+                                [target.0[0] as f32, target.0[1] as f32, target.0[2] as f32]
+                            }),
+                            origin_pole_denominator_norm_sq: denominator.norm_sq(),
+                        });
+                    }
                     Err(error) => diagnostics.0.push(format!(
                         "could not collapse render chain for {subject:?}: {error}"
                     )),
@@ -662,7 +858,6 @@ fn extract_hyperscope_packets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_time::TimeUpdateStrategy;
     use quilting_core::{
         ConformalGenerator, ConformalTransformChain, Quat, RoundWall, RoundWallGeometry,
     };
@@ -687,9 +882,15 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(HyperscapePlugin)
             .insert_resource(scene)
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)))
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::MAX));
         app
+    }
+
+    fn tick(app: &mut App, delta: Duration) {
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .advance_by(delta);
+        app.update();
     }
 
     #[test]
@@ -757,10 +958,10 @@ mod tests {
             ))
             .id();
 
-        // The first Bevy time update establishes the clock origin; the second
-        // advances by the configured deterministic one-second delta.
+        // Hyperscape's authored clock is advanced explicitly, independently
+        // of wall-clock time.
         app.update();
-        app.update();
+        tick(&mut app, Duration::from_secs(1));
 
         assert_point_close(
             app.world().get::<LocalCoordinates>(target).unwrap().0,
@@ -873,7 +1074,7 @@ mod tests {
             .id();
 
         app.update();
-        app.update();
+        tick(&mut app, Duration::from_secs(1));
         assert_eq!(
             app.world().get::<EntityFrame>(subject),
             Some(&EntityFrame(room))
@@ -891,7 +1092,7 @@ mod tests {
             room_anchor
         );
 
-        app.update();
+        tick(&mut app, Duration::from_secs(1));
         assert_eq!(
             app.world().get::<EntityFrame>(subject),
             Some(&EntityFrame(world))
@@ -976,12 +1177,23 @@ mod tests {
                 },
             )
             .unwrap();
+        let crossing_wall = walls
+            .add_wall(
+                &frames,
+                RoundWall {
+                    name: "crossing sphere".into(),
+                    frame: world,
+                    geometry: RoundWallGeometry::sphere([1.0, 0.0, 0.0], 1.0).unwrap(),
+                },
+            )
+            .unwrap();
         let mut app = test_app(ConformalScene { frames, walls });
         let anchor = app
             .world_mut()
             .spawn((
                 EntityFrame(world),
                 LocalCoordinates([0.0; 3]),
+                EuclideanCoordinates([0.0; 3]),
                 ActiveAnchor(AnchorState::new(world)),
                 ChamberSignature::default(),
             ))
@@ -990,6 +1202,28 @@ mod tests {
         assert_eq!(
             app.world().get::<ChamberSignature>(anchor).unwrap().0[&wall],
             ChamberSide::Negative
+        );
+        let initial_epoch = app.world().resource::<ChamberAggregateState>().epoch;
+        assert_eq!(initial_epoch, 1);
+        assert_eq!(
+            app.world()
+                .resource::<ChamberAggregateState>()
+                .aggregate_updates_last_tick,
+            1
+        );
+        assert_eq!(
+            app.world().resource::<TransformHistory>().samples[&anchor].len(),
+            1
+        );
+
+        app.update();
+        let aggregates = app.world().resource::<ChamberAggregateState>();
+        assert_eq!(aggregates.epoch, initial_epoch);
+        assert_eq!(aggregates.aggregate_updates_last_tick, 0);
+        assert!(aggregates.changed_entities.is_empty());
+        assert_eq!(
+            app.world().resource::<TransformHistory>().samples[&anchor].len(),
+            1
         );
         app.world_mut()
             .resource_mut::<AnchorFlipRequests>()
@@ -1003,6 +1237,19 @@ mod tests {
             app.world().get::<ChamberSignature>(anchor).unwrap().0[&wall],
             ChamberSide::Positive
         );
+        let aggregates = app.world().resource::<ChamberAggregateState>();
+        assert_eq!(aggregates.epoch, initial_epoch + 1);
+        assert_eq!(aggregates.aggregate_updates_last_tick, 2);
+        assert_eq!(aggregates.changed_walls, BTreeSet::from([wall]));
+        assert_eq!(
+            aggregates.contact_frontier,
+            BTreeSet::from([wall, crossing_wall])
+        );
+        assert_eq!(aggregates.counts.values().sum::<usize>(), 1);
+        assert_eq!(
+            app.world().resource::<TransformHistory>().samples[&anchor].len(),
+            2
+        );
         assert_eq!(
             app.world().resource::<ConformalScene>().walls.walls()[0]
                 .geometry
@@ -1010,6 +1257,19 @@ mod tests {
                 .unwrap(),
             -1.0
         );
+
+        let epoch_after_flip = aggregates.epoch;
+        app.world_mut().despawn(anchor);
+        app.update();
+        let aggregates = app.world().resource::<ChamberAggregateState>();
+        assert_eq!(aggregates.epoch, epoch_after_flip + 1);
+        assert!(aggregates.counts.is_empty());
+        assert_eq!(aggregates.aggregate_updates_last_tick, 1);
+        assert!(!app
+            .world()
+            .resource::<TransformHistory>()
+            .samples
+            .contains_key(&anchor));
     }
 
     #[test]

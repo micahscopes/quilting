@@ -1,16 +1,19 @@
 //! Conversion from `quilting-gltf`'s validated extras into ECS entities.
 
 use crate::{
-    ActiveAnchor, ChamberSignature, ConformalPath, ConformalPathTimeline, ConformalScene,
-    CrossFrameTarget, EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates,
-    PathKeyframe, PathTransition, ProjectionCamera, RenderSubject, TrackedCoordinates,
+    ActiveAnchor, ChamberAggregateState, ChamberKey, ChamberSide, ChamberSignature, ConformalPath,
+    ConformalPathTimeline, ConformalScene, ContactRecord, ContactState, CrossFrameTarget,
+    EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates, PathKeyframe,
+    PathTransition, ProjectionCamera, RenderSubject, TrackedCoordinates, TransformHistory,
+    TransformHistorySample,
 };
 use bevy_app::App;
 use bevy_ecs::prelude::*;
-use bevy_time::{Time, TimeUpdateStrategy, Virtual};
+use bevy_time::{Time, Virtual};
 use quilting_gltf::hyperscape::{HyperscapeConstraint, HyperscapeGltfError};
 use quilting_gltf::scene::Transform;
 use quilting_gltf::GltfScene;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
@@ -166,6 +169,7 @@ pub fn spawn_hyperscape_asset(
 pub struct HyperscapeGltfRuntime {
     app: App,
     entities: Vec<Entity>,
+    node_names: Vec<Option<String>>,
 }
 
 /// One extracted renderer packet with stable ordinary glTF identities for
@@ -177,6 +181,64 @@ pub struct GltfHyperscopePacket {
     pub packet: crate::HyperscopePacket,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameDiagnostic {
+    pub frame: usize,
+    pub name: String,
+    pub parent: Option<usize>,
+    pub generator_count: usize,
+    pub local_orientation_sign: i8,
+    pub world_orientation_sign: i8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityDiagnostic {
+    pub node: usize,
+    pub name: Option<String>,
+    pub frame: usize,
+    pub local: [f64; 3],
+    pub euclidean: [f64; 3],
+    pub anchor_frame: Option<usize>,
+    pub flipped_walls: Vec<usize>,
+    pub chamber: Vec<(usize, ChamberSide)>,
+    pub history: Vec<TransformHistorySample>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChamberAggregateDiagnostic {
+    pub epoch: u64,
+    pub counts: Vec<(ChamberKey, usize)>,
+    pub changed_nodes: Vec<usize>,
+    pub changed_walls: Vec<usize>,
+    pub contact_frontier: Vec<usize>,
+    pub classifications_last_tick: usize,
+    pub aggregate_updates_last_tick: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibilityHintDiagnostic {
+    pub subject_node: usize,
+    pub camera_node: usize,
+    pub comparable_chambers: bool,
+    pub same_chamber: bool,
+    pub separating_walls: Vec<usize>,
+    pub contact_frontier: Vec<usize>,
+    /// Chamber/contact information is only a scheduling hint here. It never
+    /// claims that geometry is occluded.
+    pub can_cull: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeDiagnosticSnapshot {
+    pub elapsed_seconds: f64,
+    pub frames: Vec<FrameDiagnostic>,
+    pub entities: Vec<EntityDiagnostic>,
+    pub contacts: Vec<ContactRecord>,
+    pub chamber_aggregates: ChamberAggregateDiagnostic,
+    pub visibility_hints: Vec<VisibilityHintDiagnostic>,
+    pub transform_history_epoch: u64,
+}
+
 impl HyperscapeGltfRuntime {
     pub fn new(
         nodes: &[quilting_gltf::scene::Node],
@@ -184,17 +246,23 @@ impl HyperscapeGltfRuntime {
     ) -> Result<Self, HyperscapeImportError> {
         let mut app = App::new();
         app.add_plugins(crate::HyperscapePlugin)
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::MAX));
         let entities = spawn_hyperscape_asset(app.world_mut(), nodes, asset)?;
-        // Establish Bevy's real/virtual clock origin at authored time zero.
+        // Resolve the authored scene once at deterministic time zero.
         app.update();
-        Ok(Self { app, entities })
+        let node_names = nodes.iter().map(|node| node.name.clone()).collect();
+        Ok(Self {
+            app,
+            entities,
+            node_names,
+        })
     }
 
     pub fn tick(&mut self, delta: Duration) {
-        *self.app.world_mut().resource_mut::<TimeUpdateStrategy>() =
-            TimeUpdateStrategy::ManualDuration(delta);
+        self.app
+            .world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .advance_by(delta);
         self.app.update();
     }
 
@@ -230,6 +298,140 @@ impl HyperscapeGltfRuntime {
             .world()
             .resource::<crate::HyperscapeDiagnostics>()
             .0
+    }
+
+    pub fn diagnostic_snapshot(&self) -> RuntimeDiagnosticSnapshot {
+        let world = self.app.world();
+        let scene = world.resource::<ConformalScene>();
+        let contacts = world.resource::<ContactState>();
+        let aggregates = world.resource::<ChamberAggregateState>();
+        let history = world.resource::<TransformHistory>();
+        let elapsed_seconds = world.resource::<Time<Virtual>>().elapsed_secs_f64();
+
+        let frames = scene
+            .frames
+            .frames()
+            .iter()
+            .enumerate()
+            .map(|(frame, authored)| FrameDiagnostic {
+                frame,
+                name: authored.name.clone(),
+                parent: authored.parent.map(|parent| parent.0),
+                generator_count: authored.local_to_parent.generators.len(),
+                local_orientation_sign: authored.local_to_parent.orientation_sign(),
+                world_orientation_sign: scene
+                    .frames
+                    .world_chain(quilting_core::FrameId(frame))
+                    .map(|chain| chain.orientation_sign())
+                    .unwrap_or(1),
+            })
+            .collect();
+
+        let entities = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(node, &entity)| {
+                let frame = world.get::<EntityFrame>(entity)?;
+                let local = world.get::<LocalCoordinates>(entity)?;
+                let euclidean = world.get::<EuclideanCoordinates>(entity)?;
+                let anchor = world.get::<ActiveAnchor>(entity);
+                let chamber = world
+                    .get::<ChamberSignature>(entity)
+                    .map(|signature| {
+                        signature
+                            .0
+                            .iter()
+                            .map(|(wall, side)| (wall.0, *side))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(EntityDiagnostic {
+                    node,
+                    name: self.node_names.get(node).cloned().flatten(),
+                    frame: frame.0 .0,
+                    local: local.0,
+                    euclidean: euclidean.0,
+                    anchor_frame: anchor.map(|anchor| anchor.0.frame.0),
+                    flipped_walls: anchor
+                        .map(|anchor| anchor.0.flipped_walls().iter().map(|wall| wall.0).collect())
+                        .unwrap_or_default(),
+                    chamber,
+                    history: history
+                        .samples
+                        .get(&entity)
+                        .map(|samples| samples.iter().cloned().collect())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+
+        let entity_node = |entity: Entity| world.get::<GltfNodeIndex>(entity).map(|node| node.0);
+        let chamber_aggregates = ChamberAggregateDiagnostic {
+            epoch: aggregates.epoch,
+            counts: aggregates
+                .counts
+                .iter()
+                .map(|(key, count)| (key.clone(), *count))
+                .collect(),
+            changed_nodes: aggregates
+                .changed_entities
+                .iter()
+                .filter_map(|&entity| entity_node(entity))
+                .collect(),
+            changed_walls: aggregates.changed_walls.iter().map(|wall| wall.0).collect(),
+            contact_frontier: aggregates
+                .contact_frontier
+                .iter()
+                .map(|wall| wall.0)
+                .collect(),
+            classifications_last_tick: aggregates.classifications_last_tick,
+            aggregate_updates_last_tick: aggregates.aggregate_updates_last_tick,
+        };
+
+        let visibility_hints = self
+            .packets_by_node()
+            .into_iter()
+            .map(|packet| {
+                let subject = world.get::<ChamberSignature>(packet.packet.subject);
+                let camera = world.get::<ChamberSignature>(packet.packet.camera);
+                let comparable_chambers = subject.is_some() && camera.is_some();
+                let mut separating = BTreeSet::new();
+                if let (Some(subject), Some(camera)) = (subject, camera) {
+                    for wall in subject.0.keys().chain(camera.0.keys()) {
+                        if subject.0.get(wall) != camera.0.get(wall) {
+                            separating.insert(*wall);
+                        }
+                    }
+                }
+                let mut frontier = separating.clone();
+                for contact in &contacts.0 {
+                    if separating.contains(&contact.first) || separating.contains(&contact.second) {
+                        frontier.insert(contact.first);
+                        frontier.insert(contact.second);
+                    }
+                }
+                VisibilityHintDiagnostic {
+                    subject_node: packet.subject_node,
+                    camera_node: packet.camera_node,
+                    comparable_chambers,
+                    same_chamber: comparable_chambers && separating.is_empty(),
+                    separating_walls: separating.iter().map(|wall| wall.0).collect(),
+                    contact_frontier: frontier.iter().map(|wall| wall.0).collect(),
+                    can_cull: false,
+                }
+            })
+            .collect();
+
+        RuntimeDiagnosticSnapshot {
+            elapsed_seconds,
+            frames,
+            entities,
+            contacts: contacts.0.clone(),
+            chamber_aggregates,
+            visibility_hints,
+            transform_history_epoch: history.epoch,
+        }
     }
 
     pub fn app(&self) -> &App {
@@ -406,6 +608,51 @@ mod tests {
         assert!(runtime.packets_by_node().iter().any(|packet| {
             packet.subject_node == traveler_node && packet.camera_node == camera_node
         }));
+        let initial_diagnostics = runtime.diagnostic_snapshot();
+        assert_eq!(initial_diagnostics.frames.len(), 3);
+        assert!(initial_diagnostics
+            .entities
+            .iter()
+            .any(|entity| { entity.node == traveler_node && entity.local == entity.euclidean }));
+        assert_eq!(initial_diagnostics.contacts.len(), 6);
+        assert_eq!(
+            initial_diagnostics
+                .chamber_aggregates
+                .classifications_last_tick,
+            12
+        );
+        assert_eq!(
+            initial_diagnostics
+                .chamber_aggregates
+                .counts
+                .iter()
+                .map(|(_, count)| count)
+                .sum::<usize>(),
+            3
+        );
+        assert_eq!(
+            initial_diagnostics
+                .chamber_aggregates
+                .aggregate_updates_last_tick,
+            3
+        );
+        assert!(initial_diagnostics
+            .visibility_hints
+            .iter()
+            .all(|hint| !hint.can_cull));
+        assert!(initial_diagnostics.visibility_hints.iter().any(|hint| {
+            hint.comparable_chambers
+                && !hint.same_chamber
+                && !hint.separating_walls.is_empty()
+                && hint
+                    .separating_walls
+                    .iter()
+                    .all(|wall| hint.contact_frontier.contains(wall))
+        }));
+        assert!(runtime
+            .packets()
+            .iter()
+            .all(|packet| packet.origin_pole_denominator_norm_sq.is_finite()));
 
         for (seconds, expected_frame, expected_ambient) in [
             (2, 1, [-1.2, 1.2, 0.8]),
@@ -430,6 +677,14 @@ mod tests {
                 );
             }
         }
+        let final_diagnostics = runtime.diagnostic_snapshot();
+        let traveler_diagnostics = final_diagnostics
+            .entities
+            .iter()
+            .find(|entity| entity.node == traveler_node)
+            .unwrap();
+        assert!(traveler_diagnostics.history.len() >= 4);
+        assert!(final_diagnostics.transform_history_epoch >= 4);
         assert!(runtime.diagnostics().is_empty());
     }
 }

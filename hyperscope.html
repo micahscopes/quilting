@@ -12,6 +12,7 @@
 <link data-trunk rel="copy-file" href="hyperscope_worker.js" />
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
+<link data-trunk rel="copy-file" href="examples/hyperscape-blender-demo.glb" />
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%}
@@ -43,6 +44,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 .toggle-label{font-size:12px}
 .stats{font-size:10px;color:#484f58;line-height:1.6;margin-top:auto;padding-top:10px;border-top:1px solid #30363d}
 .stats .val{color:#58a6ff}
+.hs-diag{font-size:10px;color:#8b949e;border-top:1px solid #30363d;padding-top:8px}
+.hs-diag summary{cursor:pointer;color:#58a6ff;font-size:11px;text-transform:uppercase;letter-spacing:1px}
+.hs-diag h3{font-size:10px;color:#c9d1d9;margin-top:7px;text-transform:uppercase;letter-spacing:.7px}
+.hs-diag pre{font:9px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-word;color:#8b949e;margin-top:2px}
+.hs-warn{color:#f0883e!important}
 #drop-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:10;border:3px dashed #58a6ff;background:rgba(31,111,235,0.08);align-items:center;justify-content:center}
 #drop-overlay.active{display:flex}
 #drop-overlay span{font-size:18px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase;pointer-events:none}
@@ -192,12 +198,24 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="stats" id="stats">Loading WASM...</div>
   <div class="stats" id="hyperscape-diagnostics">Hyperscape: no authored scene</div>
+  <details class="hs-diag" id="hyperscape-inspector" open>
+    <summary>Conformal Scene Inspector</summary>
+    <div class="btns" style="margin-top:6px"><button id="load-hyperscape-demo">Load authored demo</button></div>
+    <label style="margin-top:6px">Projection camera</label>
+    <select id="hyperscape-camera"><option value="">No authored camera</option></select>
+    <h3>Frame graph</h3><pre id="hs-frames">—</pre>
+    <h3>Coordinates / anchors / chambers</h3><pre id="hs-entities">—</pre>
+    <h3>Contacts and sparse invalidation</h3><pre id="hs-contacts">—</pre>
+    <h3>Visibility / LOD hints</h3><pre id="hs-visibility">No topology-based culling</pre>
+    <h3>Transform history</h3><pre id="hs-history">—</pre>
+    <h3>Poles</h3><pre id="hs-poles">—</pre>
+  </details>
 </div>
 <button id="sidebar-toggle">▶</button>
 <script type="module">
 import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
-  mr_loadHyperscape, mr_tickHyperscape,
+  mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_uploadTessPatch, mr_uploadAnimationPose,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
@@ -578,17 +596,118 @@ let authoredLodStates = [];
 let lastHyperscapeLodAt = 0;
 let previousFrameTs = null;
 let lastHyperscapeDiagnostic = '';
+let lastChamberEpoch = -1;
+let authoredLodPending = false;
+let authoredLodReasons = new Set();
+let authoredLodSkipped = 0;
+let lastSceneDiagnosticRenderAt = 0;
 
 function activateHyperscape(buffer) {
   hyperscapeActive = mr_loadHyperscape(new Uint8Array(buffer));
   authoredCamera = null;
   authoredLodStates = [];
+  lastChamberEpoch = -1;
+  authoredLodPending = hyperscapeActive;
+  authoredLodReasons = new Set(hyperscapeActive ? ['scene-load'] : []);
+  authoredLodSkipped = 0;
   previousFrameTs = null;
   $('hyperscape-diagnostics').textContent = hyperscapeActive
     ? 'Hyperscape: authored ECS scene active'
     : 'Hyperscape: no authored scene';
   return hyperscapeActive;
 }
+
+function numericArraysEqual(left, right) {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) if (left[i] !== right[i]) return false;
+  return true;
+}
+
+function fmtPoint(point) {
+  return `[${Array.from(point || []).map(value => Number(value).toFixed(3)).join(', ')}]`;
+}
+
+function renderHyperscapeInspector(snapshot) {
+  const scene = snapshot.scene;
+  if (!scene) return;
+  $('hs-frames').textContent = (scene.frames || []).map(frame =>
+    `#${frame.frame} ${frame.name} ← ${frame.parent == null ? 'ambient' : `#${frame.parent}`} | gens ${frame.generator_count} | parity local/world ${frame.local_orientation_sign}/${frame.world_orientation_sign}`
+  ).join('\n') || '—';
+
+  $('hs-entities').textContent = (scene.entities || []).map(entity => {
+    const chamber = (entity.chamber || []).map(side => `w${side.wall}:${side.side[0]}`).join(' ');
+    const anchor = entity.anchor_frame == null
+      ? 'canonical'
+      : `f${entity.anchor_frame} flip[${(entity.flipped_walls || []).join(',')}]`;
+    return `n${entity.node} ${entity.name || ''} | f${entity.frame} ${anchor}\n  local ${fmtPoint(entity.local)} → ambient ${fmtPoint(entity.euclidean)} | ${chamber}`;
+  }).join('\n') || '—';
+
+  const aggregate = scene.chamber_aggregates || {};
+  const contacts = (scene.contacts || []).map(contact =>
+    `w${contact.first}–w${contact.second}: ${contact.classification}`
+  );
+  contacts.push(
+    `epoch ${aggregate.epoch ?? 0} | classify ${aggregate.classifications_last_tick ?? 0} | sparse updates ${aggregate.aggregate_updates_last_tick ?? 0}`,
+    `changed nodes [${(aggregate.changed_nodes || []).join(',')}] walls [${(aggregate.changed_walls || []).join(',')}] → contact frontier [${(aggregate.contact_frontier || []).join(',')}]`,
+    `occupied chamber signatures ${(aggregate.counts || []).length}`,
+  );
+  $('hs-contacts').textContent = contacts.join('\n') || '—';
+
+  const hints = scene.visibility_hints || [];
+  $('hs-visibility').textContent = [
+    ...hints.map(hint =>
+      `n${hint.subject_node} @ camera n${hint.camera_node}: ${hint.same_chamber ? 'same chamber' : `separated by [${hint.separating_walls.join(',')}]`} | frontier [${hint.contact_frontier.join(',')}] | cull=${hint.can_cull}`
+    ),
+    `LOD invalidation pending=${authoredLodPending} reasons=[${Array.from(authoredLodReasons).join(',')}] unchanged skips=${authoredLodSkipped}`,
+    'Conservative contract: chamber/contact data never proves geometric occlusion.',
+  ].join('\n');
+
+  $('hs-history').textContent = (scene.entities || []).map(entity => {
+    const samples = (entity.history || []).slice(-6).map(sample =>
+      `  t${Number(sample.elapsed_seconds).toFixed(2)} f${sample.frame} ${fmtPoint(sample.local)} → ${fmtPoint(sample.euclidean)}`
+    ).join('\n');
+    return `n${entity.node} ${entity.name || ''} (${(entity.history || []).length} retained)\n${samples}`;
+  }).join('\n') || '—';
+
+  const poleLines = (snapshot.packets || []).map(packet => {
+    const normSq = Number(packet.origin_pole_denominator_norm_sq);
+    const warning = normSq < 1e-8 ? ' NEAR POLE / max LOD' : '';
+    return `n${packet.subject_node} @ camera n${packet.camera_node}: |cx+d|²=${normSq.toExponential(3)}${warning}`;
+  });
+  $('hs-poles').textContent = poleLines.join('\n') || '—';
+  $('hs-poles').classList.toggle('hs-warn', poleLines.some(line => line.includes('NEAR POLE')));
+
+  const cameraNodes = [...new Set((snapshot.packets || []).map(packet => packet.camera_node))].sort((a,b) => a-b);
+  const cameraSelect = $('hyperscape-camera');
+  const cameraKey = cameraNodes.join(',');
+  if (cameraSelect.dataset.nodes !== cameraKey) {
+    cameraSelect.dataset.nodes = cameraKey;
+    cameraSelect.replaceChildren(...cameraNodes.map(node => {
+      const option = document.createElement('option');
+      option.value = String(node); option.textContent = `Node ${node}`;
+      return option;
+    }));
+  }
+  if (snapshot.active_camera_node != null) cameraSelect.value = String(snapshot.active_camera_node);
+}
+
+$('hyperscape-camera').addEventListener('change', () => {
+  const node = Number.parseInt($('hyperscape-camera').value, 10);
+  if (Number.isInteger(node) && mr_setHyperscapeCameraNode(node)) {
+    authoredLodPending = true;
+    authoredLodReasons.add('camera-selection');
+  }
+});
+
+$('load-hyperscape-demo').addEventListener('click', async () => {
+  try {
+    const response = await fetch('hyperscape-blender-demo.glb');
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    await loadModel(await response.arrayBuffer(), 'hyperscape-blender-demo.glb');
+  } catch (error) {
+    $('hyperscape-diagnostics').textContent = `Hyperscape demo load failed: ${error.message}`;
+  }
+});
 
 function sampleStretchAsync() {
   if (stretchSamplePending || !currentMobius || !meshInfo) return;
@@ -617,6 +736,8 @@ effect(() => {
     hyperscapeActive = false;
     authoredCamera = null;
     authoredLodStates = [];
+    authoredLodPending = false;
+    authoredLodReasons.clear();
     $('hyperscape-diagnostics').textContent = 'Hyperscape: manual Möbius override';
   }
   mr_setMobius(flat);
@@ -1321,13 +1442,9 @@ async function recomputeLods() {
     performance.mark('lod-worker-end');
     performance.measure('lod-worker-roundtrip', 'lod-worker-start', 'lod-worker-end');
 
-    // If camera moved while we were computing, skip this stale result and recompute
-    if (lodDirty) {
-      lodInFlight = false;
-      recomputeLods();
-      return;
-    }
-
+    // Apply every completed coherent classification. If state changed while
+    // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
+    // discarding the completed result would starve continuously animated scenes.
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       const tWorkerDone = performance.now();
@@ -1353,7 +1470,7 @@ async function recomputeLods() {
     performance.measure('lod-total', 'lod-start', 'lod-end');
   } catch (e) { console.warn('LOD recompute error:', e); }
   lodInFlight = false;
-  // If camera moved during batch build, fire another recompute
+  // Coalesce any transform, chamber, or camera changes observed in flight.
   if (lodDirty) recomputeLods();
 }
 
@@ -1385,17 +1502,31 @@ function frame(ts) {
         };
       }
       const activeCamera = snapshot.active_camera_node;
-      authoredLodStates = [];
+      const nextAuthoredLodStates = [];
       for (const packet of snapshot.packets || []) {
         if (activeCamera != null && packet.camera_node !== activeCamera) continue;
-        authoredLodStates.push(
+        nextAuthoredLodStates.push(
           packet.subject_node,
           ...Array.from(packet.mobius || []),
           ...Array.from(packet.euclidean_model || []),
         );
       }
-      if (authoredLodStates.length && ts - lastHyperscapeLodAt >= 250) {
+      if (!numericArraysEqual(authoredLodStates, nextAuthoredLodStates)) {
+        authoredLodPending = true;
+        authoredLodReasons.add('transform');
+      } else {
+        authoredLodSkipped += 1;
+      }
+      authoredLodStates = nextAuthoredLodStates;
+      const chamberEpoch = snapshot.scene?.chamber_aggregates?.epoch;
+      if (chamberEpoch != null && chamberEpoch !== lastChamberEpoch) {
+        if (lastChamberEpoch >= 0) authoredLodReasons.add('chamber/contact-frontier');
+        authoredLodPending = true;
+        lastChamberEpoch = chamberEpoch;
+      }
+      if (authoredLodStates.length && authoredLodPending && ts - lastHyperscapeLodAt >= 250) {
         lastHyperscapeLodAt = ts;
+        authoredLodPending = false;
         debouncedLodRecompute();
       }
       const messages = snapshot.diagnostics || [];
@@ -1406,6 +1537,11 @@ function frame(ts) {
       if (messages.length && summary !== lastHyperscapeDiagnostic) {
         console.warn('Hyperscape diagnostics:', messages);
         lastHyperscapeDiagnostic = summary;
+      }
+      if (ts - lastSceneDiagnosticRenderAt >= 250) {
+        lastSceneDiagnosticRenderAt = ts;
+        renderHyperscapeInspector(snapshot);
+        if (!authoredLodPending) authoredLodReasons.clear();
       }
     }
   }

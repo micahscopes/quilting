@@ -9,6 +9,12 @@ features disabled and uses only `bevy_app`, `bevy_ecs`, and `bevy_time`.
 Hyperscope/Quilting remains the renderer; a conformal frame is deliberately not
 represented as Bevy's affine transform component.
 
+Hyperscape advances `Time<Virtual>` explicitly. It does not derive authored
+time from Bevy's real-time clock: native tests, browser frames, replay, and
+offline tools all feed a duration before an ECS update. This also prevents a
+headless or `wasm32-unknown-unknown` runtime from depending on a native
+`std::time::Instant` implementation.
+
 ## Four structures, four jobs
 
 Hyperscape does not overload one parent pointer with four different meanings.
@@ -121,6 +127,50 @@ unbound legacy faces use the baseline state. This is conservative and exact
 for the current disjoint per-node mesh topology, though the cost scales with
 the number of distinct visible subject states and remains a measurement and
 visibility-culling target.
+
+### Chamber-aware invalidation and diagnostics
+
+`ChamberSignature` is still computed geometrically for every participating
+entity against every wall. That full classification is authoritative. A
+`ChamberAggregateState` then maintains counts keyed by the complete oriented
+signature and changes only the old and new count entries when an entity crosses
+a wall, changes anchor, appears, or disappears. Its measurements distinguish
+the two costs:
+
+- `classifications_last_tick` is the full point/wall classification count;
+- `aggregate_updates_last_tick` is the sparse count-table mutation count;
+- `changed_entities` and `changed_walls` identify the invalidated membership;
+- `contact_frontier` expands changed walls by one edge in the wall-contact
+  graph; and
+- `epoch` advances only when a chamber membership changes.
+
+The browser compares each extracted subject's affine/Möbius state and watches
+the chamber epoch. Either change schedules an LOD refresh; identical states are
+counted and skipped, and a pending refresh survives the 250 ms throttle. The
+worker applies every completed coherent classification and coalesces changes
+that arrived in flight into one follow-up, so continuous animation cannot
+starve the renderer of LOD updates. The prototype's visibility records compare
+subject and camera chamber signatures
+and report separating walls plus their contact frontier. They always emit
+`can_cull = false`: chamber separation is a scheduling and prioritization hint,
+not a proof of geometric occlusion. Incidence Möbius inversion can transport
+coarse aggregate payloads, but it does not replace depth, projected bounds, or
+an occlusion query.
+
+The open Conformal Scene Inspector in `hyperscope.html` reports frame parents
+and parity, local versus ambient coordinates, anchors and flipped walls,
+contacts, chamber counts and sparse invalidations, visibility/LOD hints,
+bounded change-only transform histories, and the Möbius denominator norm at
+each affine model origin. The origin value is a pole warning only; the GPU's
+per-sample classifier remains authoritative for a whole mesh.
+
+The checked-in Blender demo is also the browser smoke fixture. At path sample
+times `2.25`, `4.25`, and `6.25`, node 2 is in conformal frames `1`, `2`, and
+`0`, with flipped-wall sets `[0]`, `[0,1]`, and `[]`. Its local coordinates
+change charts while its ambient coordinates follow the same continuous path.
+At `4.25`, the world-frame projection camera targets the traveler's ambient
+point plus the authored `[0,0,0.4]` offset, exercising cross-frame tracking
+rather than merely displaying the exported metadata.
 
 The selected authored projection camera also exposes its ordinary eye and
 cross-frame tracking target to the browser. The view matrix and LOD projection

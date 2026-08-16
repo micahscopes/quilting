@@ -38,6 +38,8 @@ detail.
 | Payload totals are zeta coordinates and chamber payloads are recovered by incidence Möbius inversion without a global bottom | `zetaTransform_mobiusTransform`, `mobiusTransform_zetaTransform` | Integer/rational golden fixtures compare direct chamber accumulation with zeta then Möbius recovery |
 | Honest anchor transport is semantic chamber reassignment, not reversal of wall labels | `ChamberReassignment`, the `Z_new * R * M_old` law, and `honest_reanchor_differs_from_naive` | Preserve the three-wall/four-chamber regression: honest totals `(14,12,8)` differ from the naive `(7,6,4)` result |
 | Laminar incidence inversion is sparse | `mu_eq_identityKernel_sub_coverKernel` | Aggregate invalidation touches changed covers/chambers; geometric occlusion remains separately conservative |
+| Authored animation time is deterministic and platform-independent | No additional Lean claim; time parameterizes the already-defined coordinate maps | Hyperscape advances `Time<Virtual>` explicitly before an ECS update and never needs a native wall-clock instant; native and wasm builds exercise the same tick API |
+| Chamber/contact information is not an occlusion proof | The formal development concerns round-side incidence and payload transport, not projective depth visibility | Runtime visibility hints expose separating walls and a one-contact-edge frontier but always set `can_cull = false`; only transform or chamber-epoch changes invalidate browser LOD work |
 
 ## Numeric conventions
 
@@ -75,5 +77,8 @@ blender --command extension validate tools/blender_hyperscape
 blender --background --factory-startup --python-exit-code 1 --python tools/blender_hyperscape/tests/blender_roundtrip.py -- /tmp/hyperscape-roundtrip.glb
 ```
 
-The final vertical slice must add golden tests for walls, chamber transport,
-glTF interchange, ECS extraction, and Blender round trips to this baseline.
+The checked-in runtime suite now includes wall/contact and chamber transport
+fixtures, glTF/GLB interchange and extraction tests, the animated Blender demo,
+and a real headless Blender round trip. Browser verification additionally loads
+`examples/hyperscape-blender-demo.glb` through Hyperscope and inspects the
+Euclidean → conformal → re-anchored → Euclidean timeline.

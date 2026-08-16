@@ -21,7 +21,11 @@ use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
-use hyperscape::interchange::{GltfHyperscopePacket, HyperscapeGltfRuntime};
+use hyperscape::interchange::{
+    GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
+};
+use hyperscape::{ChamberSide, ContactClassification};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -477,9 +481,13 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         let mut runtime = slot.borrow_mut();
         let runtime = runtime.as_mut()?;
         runtime.tick(Duration::from_secs_f64(delta_seconds));
-        Some((runtime.packets_by_node(), runtime.diagnostics().to_vec()))
+        Some((
+            runtime.packets_by_node(),
+            runtime.diagnostics().to_vec(),
+            runtime.diagnostic_snapshot(),
+        ))
     });
-    let Some((packets, diagnostics)) = snapshot else {
+    let Some((packets, diagnostics, scene_diagnostics)) = snapshot else {
         return JsValue::NULL;
     };
     apply_hyperscape_packets(&packets);
@@ -542,6 +550,11 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
             &"orientation_sign".into(),
             &JsValue::from_f64(extracted.packet.orientation_sign as f64),
         ).ok();
+        js_sys::Reflect::set(
+            &packet,
+            &"origin_pole_denominator_norm_sq".into(),
+            &JsValue::from_f64(extracted.packet.origin_pole_denominator_norm_sq),
+        ).ok();
         let mobius = js_sys::Float32Array::from(extracted.packet.mobius.as_slice());
         let model = js_sys::Float32Array::from(extracted.packet.euclidean_model.as_slice());
         let camera_eye = js_sys::Float32Array::from(extracted.packet.camera_eye.as_slice());
@@ -560,7 +573,139 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         messages.push(&JsValue::from_str(&diagnostic));
     }
     js_sys::Reflect::set(&result, &"diagnostics".into(), &messages).ok();
+    js_sys::Reflect::set(
+        &result,
+        &"scene".into(),
+        &runtime_diagnostic_snapshot_to_js(&scene_diagnostics),
+    ).ok();
     result.into()
+}
+
+fn chamber_side_name(side: ChamberSide) -> &'static str {
+    match side {
+        ChamberSide::Negative => "negative",
+        ChamberSide::OnWall => "on_wall",
+        ChamberSide::Positive => "positive",
+    }
+}
+
+fn runtime_diagnostic_snapshot_to_js(snapshot: &RuntimeDiagnosticSnapshot) -> JsValue {
+    let frames = snapshot
+        .frames
+        .iter()
+        .map(|frame| {
+            serde_json::json!({
+                "frame": frame.frame,
+                "name": frame.name,
+                "parent": frame.parent,
+                "generator_count": frame.generator_count,
+                "local_orientation_sign": frame.local_orientation_sign,
+                "world_orientation_sign": frame.world_orientation_sign,
+            })
+        })
+        .collect::<Vec<_>>();
+    let entities = snapshot
+        .entities
+        .iter()
+        .map(|entity| {
+            let chamber = entity
+                .chamber
+                .iter()
+                .map(|(wall, side)| {
+                    serde_json::json!({ "wall": wall, "side": chamber_side_name(*side) })
+                })
+                .collect::<Vec<_>>();
+            let history = entity
+                .history
+                .iter()
+                .map(|sample| {
+                    serde_json::json!({
+                        "elapsed_seconds": sample.elapsed_seconds,
+                        "frame": sample.frame.0,
+                        "local": sample.local,
+                        "euclidean": sample.euclidean,
+                        "anchor_frame": sample.anchor_frame.map(|frame| frame.0),
+                        "flipped_walls": sample.flipped_walls.iter().map(|wall| wall.0).collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "node": entity.node,
+                "name": entity.name,
+                "frame": entity.frame,
+                "local": entity.local,
+                "euclidean": entity.euclidean,
+                "anchor_frame": entity.anchor_frame,
+                "flipped_walls": entity.flipped_walls,
+                "chamber": chamber,
+                "history": history,
+            })
+        })
+        .collect::<Vec<_>>();
+    let contacts = snapshot
+        .contacts
+        .iter()
+        .map(|contact| {
+            let classification = match contact.classification {
+                ContactClassification::Known(relation) => format!("{relation:?}"),
+                ContactClassification::RequiresCommonChart => "requires_common_chart".into(),
+            };
+            serde_json::json!({
+                "first": contact.first.0,
+                "second": contact.second.0,
+                "classification": classification,
+            })
+        })
+        .collect::<Vec<_>>();
+    let chamber_counts = snapshot
+        .chamber_aggregates
+        .counts
+        .iter()
+        .map(|(key, count)| {
+            let signature = key
+                .iter()
+                .map(|(wall, side)| {
+                    serde_json::json!({ "wall": wall.0, "side": chamber_side_name(*side) })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({ "signature": signature, "count": count })
+        })
+        .collect::<Vec<_>>();
+    let visibility_hints = snapshot
+        .visibility_hints
+        .iter()
+        .map(|hint| {
+            serde_json::json!({
+                "subject_node": hint.subject_node,
+                "camera_node": hint.camera_node,
+                "comparable_chambers": hint.comparable_chambers,
+                "same_chamber": hint.same_chamber,
+                "separating_walls": hint.separating_walls,
+                "contact_frontier": hint.contact_frontier,
+                "can_cull": hint.can_cull,
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "elapsed_seconds": snapshot.elapsed_seconds,
+        "frames": frames,
+        "entities": entities,
+        "contacts": contacts,
+        "chamber_aggregates": {
+            "epoch": snapshot.chamber_aggregates.epoch,
+            "counts": chamber_counts,
+            "changed_nodes": snapshot.chamber_aggregates.changed_nodes,
+            "changed_walls": snapshot.chamber_aggregates.changed_walls,
+            "contact_frontier": snapshot.chamber_aggregates.contact_frontier,
+            "classifications_last_tick": snapshot.chamber_aggregates.classifications_last_tick,
+            "aggregate_updates_last_tick": snapshot.chamber_aggregates.aggregate_updates_last_tick,
+        },
+        "visibility_hints": visibility_hints,
+        "transform_history_epoch": snapshot.transform_history_epoch,
+    });
+    value
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .unwrap_or(JsValue::NULL)
 }
 
 #[wasm_bindgen(js_name = "mr_setFuzzy")]
@@ -809,16 +954,6 @@ pub fn mr_set_face_nodes(nodes: &[i32]) {
                 .iter()
                 .map(|&node| if node >= 0 { node as usize } else { 0 })
                 .collect();
-            if renderer.face_nodes.len() != renderer.num_faces {
-                web_sys::console::warn_1(
-                    &format!(
-                        "face-node count {} does not match triangle count {}; missing entries use node 0",
-                        renderer.face_nodes.len(), renderer.num_faces
-                    )
-                    .into(),
-                );
-                renderer.face_nodes.resize(renderer.num_faces, 0);
-            }
         }
     });
 }
@@ -1109,6 +1244,19 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
         perf_mark("batch-group-start");
         let nf = state.num_faces;
+        // Model metadata can arrive before its instance buffer. Validate at
+        // the consumption boundary so a previous model's face count cannot
+        // destroy a correct node map for the incoming model.
+        if state.face_nodes.len() != nf {
+            web_sys::console::warn_1(
+                &format!(
+                    "face-node count {} does not match triangle count {}; unmatched entries use node 0",
+                    state.face_nodes.len(), nf
+                )
+                .into(),
+            );
+            state.face_nodes.resize(nf, 0);
+        }
         let mut buckets: BTreeMap<(usize, usize, usize, usize), Vec<u32>> = BTreeMap::new();
         for fi in 0..nf {
             let lo = fi * batch::FACE_LOD_STRIDE;
