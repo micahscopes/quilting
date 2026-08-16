@@ -36,6 +36,9 @@ and environment, with a conformal scene graph and composable glTF elements.
 hysteresis rules, the instance data layout, atlas construction, and the known
 limitations.
 
+The formal/runtime trust boundary for the conformal scene work is documented
+in [`docs/conformal-runtime-invariants.md`](docs/conformal-runtime-invariants.md).
+
 ## Status
 
 This is a research codebase under active development. Interfaces move without

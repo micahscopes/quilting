@@ -11,6 +11,9 @@
 //! # Where things live
 //!
 //! - [`quaternion`] — [`Quat`] and [`Mobius`], the arithmetic everything rests on.
+//! - [`conformal`] — serializable generator words and a validated conformal
+//!   frame forest.  Generator words retain the authoring operations needed for
+//!   exact inverse chains and preserve-world re-anchoring.
 //! - [`patch`] — [`QBTriPatch`], the QB surface and its Möbius transform rule.
 //! - [`atlas`] — [`TessellationAtlas`], pre-tessellated sub-meshes keyed by
 //!   edge-LOD triple. WebGL2 has no tessellation shader, so patch geometry is
@@ -33,6 +36,7 @@
 
 pub mod triangle;
 pub mod quaternion;
+pub mod conformal;
 pub mod interpolation;
 pub mod sampling;
 pub mod subdivide;
@@ -51,3 +55,7 @@ pub use evaluate::FaceInstance;
 pub use patch::QBTriPatch;
 pub use permutation::canonical_form;
 pub use quaternion::{Mobius, Quat};
+pub use conformal::{
+    ConformalError, ConformalFrame, ConformalFrameForest, ConformalGenerator,
+    ConformalTransformChain, FrameId,
+};

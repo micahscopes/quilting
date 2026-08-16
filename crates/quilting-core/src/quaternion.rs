@@ -234,7 +234,7 @@ impl Neg for Quat {
 ///
 /// Represented as a 2×2 quaternion matrix `[[a, b], [c, d]]`.
 /// Composition corresponds to matrix multiplication.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Mobius {
     pub a: Quat,
     pub b: Quat,

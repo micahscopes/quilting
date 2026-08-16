@@ -28,3 +28,4 @@ optional = true
 # Dev-only cycle (quilting-gltf depends on quilting-core); cargo permits this.
 # Used by tests/mobius_finiteness.rs to sweep the tracked demo meshes.
 quilting-gltf = { path = "../quilting-gltf" }
+serde_json = "1"

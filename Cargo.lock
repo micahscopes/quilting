@@ -609,6 +609,7 @@ dependencies = [
  "rand_pcg",
  "rayon",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
