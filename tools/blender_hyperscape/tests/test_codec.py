@@ -129,6 +129,25 @@ class CodecTests(unittest.TestCase):
         with self.assertRaisesRegex(codec.HyperscapeCodecError, "strictly increase"):
             codec.validate_payload(payload, 1)
 
+    def test_path_transitions_validate_stable_chart_frame_anchor_and_order(self) -> None:
+        payload = sample_payload()
+        payload["paths"][0]["coordinate_frame"] = 0
+        payload["paths"][0]["transitions"] = [
+            {"time_seconds": 0.5, "frame": 1, "anchor": 0},
+            {"time_seconds": 0.75, "frame": 0},
+        ]
+        codec.validate_payload(payload, 1, [{"frame": 1, "anchor": 0, "path": 0}])
+
+        mismatch = copy.deepcopy(payload)
+        mismatch["paths"][0]["transitions"][0]["frame"] = 0
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "anchor frame"):
+            codec.validate_payload(mismatch, 1)
+
+        unordered = copy.deepcopy(payload)
+        unordered["paths"][0]["transitions"][1]["time_seconds"] = 0.25
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "strictly increase"):
+            codec.validate_payload(unordered, 1)
+
     def test_injection_is_copying_not_aliasing(self) -> None:
         payload = sample_payload()
         encoded = codec.inject_asset(

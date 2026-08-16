@@ -12,6 +12,7 @@ The **Hyperscape** tab in the 3D View sidebar provides:
 - sphere and plane walls with complementary-side previews;
 - anchor bitsets, entity bindings, and local/ambient coordinate inspection;
 - piecewise-linear animation paths with transformable control guides;
+- timed frame/anchor transitions sampled from one stable control-point chart;
 - preserve-world frame reparenting and object re-anchoring;
 - cross-frame tracking and projection-camera constraints; and
 - `.gltf`/`.glb` import/export that preserves ordinary glTF fallback content.
@@ -51,7 +52,9 @@ read and write the selected glTF/GLB file.
 Generator lists are displayed in application order. Sphere reflection at its
 center is a pole and preview evaluation reports it instead of fabricating a
 finite position. Frame reparent and object re-anchor actions preserve the
-represented ambient point/map.
+represented ambient point/map. A path's Control-Point Frame remains fixed as
+timed transitions select other active frames and anchors, preventing jumps at
+Euclidean → conformal → re-anchored → Euclidean boundaries.
 
 ## Automated checks
 
@@ -66,7 +69,7 @@ When Blender is installed, the headless integration script creates the demo,
 exports it, imports it into a fresh file, and checks the authored collections:
 
 ```sh
-blender --background --factory-startup \
+blender --background --factory-startup --python-exit-code 1 \
   --python tools/blender_hyperscape/tests/blender_roundtrip.py -- \
   /tmp/hyperscape-roundtrip.glb
 ```

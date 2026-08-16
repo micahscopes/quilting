@@ -78,9 +78,21 @@ pub struct HyperscapePathKeyframe {
 pub struct HyperscapePath {
     pub name: String,
     pub node: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinate_frame: Option<usize>,
     #[serde(default)]
     pub looping: bool,
     pub keyframes: Vec<HyperscapePathKeyframe>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<HyperscapePathTransition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HyperscapePathTransition {
+    pub time_seconds: f64,
+    pub frame: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -195,6 +207,13 @@ impl HyperscapeAsset {
             if binding.anchor.is_some_and(|anchor| anchor >= anchors.len()) {
                 return Err(validation(format!("node {node} has invalid anchor index")));
             }
+            if let Some(anchor) = binding.anchor {
+                if self.payload.anchors[anchor].frame != binding.frame {
+                    return Err(validation(format!(
+                        "node {node} anchor frame does not match its entity frame"
+                    )));
+                }
+            }
             if binding
                 .path
                 .is_some_and(|path| path >= self.payload.paths.len())
@@ -206,6 +225,68 @@ impl HyperscapeAsset {
         for (index, path) in self.payload.paths.iter().enumerate() {
             require_node(path.node, node_count, &format!("path {index}"))?;
             validate_keyframes(index, &path.keyframes)?;
+            let binding = self.node_bindings[path.node].as_ref().ok_or_else(|| {
+                validation(format!("path {index} node has no Hyperscape binding"))
+            })?;
+            if binding.path != Some(index) {
+                return Err(validation(format!(
+                    "path {index} must be referenced by its authored node binding"
+                )));
+            }
+            if self
+                .node_bindings
+                .iter()
+                .enumerate()
+                .any(|(node, candidate)| {
+                    node != path.node && candidate.as_ref().and_then(|b| b.path) == Some(index)
+                })
+            {
+                return Err(validation(format!(
+                    "path {index} is referenced by more than its authored node"
+                )));
+            }
+            if let Some(frame) = path.coordinate_frame {
+                frames.frame(FrameId(frame)).map_err(|error| {
+                    validation(format!(
+                        "path {index} has invalid coordinate frame: {error}"
+                    ))
+                })?;
+            }
+            let mut previous_transition = None;
+            let last_time = path
+                .keyframes
+                .last()
+                .expect("keyframes validated nonempty")
+                .time_seconds;
+            for (transition_index, transition) in path.transitions.iter().enumerate() {
+                if !transition.time_seconds.is_finite()
+                    || transition.time_seconds < 0.0
+                    || transition.time_seconds > last_time
+                    || previous_transition.is_some_and(|time| time >= transition.time_seconds)
+                {
+                    return Err(validation(format!(
+                        "path {index} transition {transition_index} needs a finite, in-range, strictly increasing time"
+                    )));
+                }
+                frames.frame(FrameId(transition.frame)).map_err(|error| {
+                    validation(format!(
+                        "path {index} transition {transition_index} has invalid frame: {error}"
+                    ))
+                })?;
+                if let Some(anchor) = transition.anchor {
+                    let authored = self.payload.anchors.get(anchor).ok_or_else(|| {
+                        validation(format!(
+                            "path {index} transition {transition_index} has invalid anchor"
+                        ))
+                    })?;
+                    if authored.frame != transition.frame {
+                        return Err(validation(format!(
+                            "path {index} transition {transition_index} anchor frame does not match"
+                        )));
+                    }
+                }
+                previous_transition = Some(transition.time_seconds);
+            }
         }
         for (index, constraint) in self.payload.constraints.iter().enumerate() {
             match *constraint {
@@ -549,6 +630,7 @@ mod tests {
                 paths: vec![HyperscapePath {
                     name: "approach".into(),
                     node: 0,
+                    coordinate_frame: None,
                     looping: false,
                     keyframes: vec![
                         HyperscapePathKeyframe {
@@ -560,6 +642,7 @@ mod tests {
                             point: [2.0, 0.0, 0.0],
                         },
                     ],
+                    transitions: Vec::new(),
                 }],
                 constraints: vec![HyperscapeConstraint::Track {
                     node: 1,
@@ -681,6 +764,32 @@ mod tests {
     }
 
     #[test]
+    fn path_transitions_validate_frames_anchors_and_time_order() {
+        let mut asset = sample_asset();
+        asset.payload.paths[0].coordinate_frame = Some(0);
+        asset.payload.paths[0].transitions = vec![HyperscapePathTransition {
+            time_seconds: 1.0,
+            frame: 1,
+            anchor: Some(0),
+        }];
+        asset.validate().unwrap();
+
+        let mut mismatch = asset.clone();
+        mismatch.payload.paths[0].transitions[0].frame = 0;
+        assert!(mismatch.validate().is_err());
+
+        let mut unordered = asset;
+        unordered.payload.paths[0]
+            .transitions
+            .push(HyperscapePathTransition {
+                time_seconds: 0.5,
+                frame: 0,
+                anchor: None,
+            });
+        assert!(unordered.validate().is_err());
+    }
+
+    #[test]
     fn rootless_node_binding_is_not_silently_accepted() {
         let json = serde_json::json!({
             "asset": { "version": "2.0" },
@@ -720,5 +829,37 @@ mod tests {
         let (nodes, graph_asset) = crate::load_hyperscape_graph(bytes).unwrap();
         assert_eq!(nodes.len(), 3);
         assert_eq!(graph_asset.unwrap(), asset);
+    }
+
+    #[test]
+    fn checked_in_blender_demo_has_renderable_fallback_and_full_timeline() {
+        let bytes = include_bytes!("../../../examples/hyperscape-blender-demo.glb");
+        let scene = crate::load_gltf(bytes).unwrap();
+        assert!(!scene.meshes.is_empty());
+        assert!(scene
+            .nodes
+            .iter()
+            .any(|node| node.name.as_deref() == Some("HS_Traveler") && node.mesh.is_some()));
+        assert!(scene
+            .nodes
+            .iter()
+            .any(|node| node.name.as_deref() == Some("HS_ProjectionCamera")));
+
+        let asset = scene.hyperscape.unwrap();
+        assert_eq!(asset.payload.frames.len(), 3);
+        assert_eq!(asset.payload.walls.len(), 4);
+        assert_eq!(asset.payload.anchors.len(), 2);
+        assert_eq!(asset.payload.paths.len(), 1);
+        assert_eq!(asset.payload.paths[0].coordinate_frame, Some(0));
+        assert_eq!(
+            asset.payload.paths[0]
+                .transitions
+                .iter()
+                .map(|transition| transition.frame)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 0]
+        );
+        assert_eq!(asset.payload.constraints.len(), 2);
+        asset.validate().unwrap();
     }
 }

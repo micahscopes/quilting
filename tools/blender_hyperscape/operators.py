@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
-import math
 from pathlib import Path
+import shutil
 import tempfile
 from typing import Any
 
@@ -100,8 +99,18 @@ def build_asset(
                     {"time_seconds": key.time_seconds, "point": list(key.point)}
                     for key in path.keyframes
                 ],
+                "transitions": [
+                    {
+                        "time_seconds": transition.time_seconds,
+                        "frame": transition.frame,
+                        **({"anchor": transition.anchor} if transition.anchor >= 0 else {}),
+                    }
+                    for transition in path.transitions
+                ],
             }
         )
+        if path.coordinate_frame >= 0:
+            paths[-1]["coordinate_frame"] = path.coordinate_frame
     constraints = []
     for constraint in settings.constraints:
         if constraint.subject is None or constraint.subject.name not in node_indices:
@@ -178,11 +187,17 @@ def load_asset(settings, payload: dict[str, Any], bindings, node_objects: dict[i
         path = settings.paths.add()
         path.name = authored["name"]
         path.subject = node_objects.get(authored["node"])
+        path.coordinate_frame = authored.get("coordinate_frame", -1)
         path.looping = authored.get("looping", False)
         for encoded in authored["keyframes"]:
             key = path.keyframes.add()
             key.time_seconds = encoded["time_seconds"]
             key.point = encoded["point"]
+        for encoded in authored.get("transitions", []):
+            transition = path.transitions.add()
+            transition.time_seconds = encoded["time_seconds"]
+            transition.frame = encoded["frame"]
+            transition.anchor = encoded.get("anchor", -1)
     for authored in payload.get("constraints", []):
         constraint = settings.constraints.add()
         constraint.kind = authored["type"].upper()
@@ -200,6 +215,8 @@ def load_asset(settings, payload: dict[str, Any], bindings, node_objects: dict[i
         obj.hyperscape.frame = binding["frame"]
         obj.hyperscape.anchor = binding.get("anchor", -1)
         obj.hyperscape.path = binding.get("path", -1)
+        obj.hyperscape.preview_frame = binding["frame"]
+        obj.hyperscape.preview_anchor = binding.get("anchor", -1)
     settings.status = f"Loaded Hyperscape {payload['version']}"
 
 
@@ -352,6 +369,41 @@ class HYPERSCAPE_OT_keyframe_remove(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HYPERSCAPE_OT_transition_add(bpy.types.Operator):
+    bl_idname = "hyperscape.transition_add"
+    bl_label = "Add Frame/Anchor Transition"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.paths:
+            return {"CANCELLED"}
+        path = settings.paths[min(settings.active_path, len(settings.paths) - 1)]
+        transition = path.transitions.add()
+        if len(path.transitions) > 1:
+            transition.time_seconds = path.transitions[-2].time_seconds + 1.0
+        path.active_transition = len(path.transitions) - 1
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_transition_remove(bpy.types.Operator):
+    bl_idname = "hyperscape.transition_remove"
+    bl_label = "Remove Frame/Anchor Transition"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.paths:
+            return {"CANCELLED"}
+        path = settings.paths[min(settings.active_path, len(settings.paths) - 1)]
+        if not path.transitions:
+            return {"CANCELLED"}
+        index = min(path.active_transition, len(path.transitions) - 1)
+        path.transitions.remove(index)
+        path.active_transition = min(index, max(len(path.transitions) - 1, 0))
+        return {"FINISHED"}
+
+
 class HYPERSCAPE_OT_preview(bpy.types.Operator):
     bl_idname = "hyperscape.preview"
     bl_label = "Evaluate Dual Coordinates"
@@ -361,6 +413,11 @@ class HYPERSCAPE_OT_preview(bpy.types.Operator):
         settings = context.scene.hyperscape
         frames = _frames_dict(settings)
         try:
+            for obj in context.scene.objects:
+                binding = obj.hyperscape
+                if binding.enabled:
+                    binding.preview_frame = binding.frame
+                    binding.preview_anchor = binding.anchor
             for path in settings.paths:
                 if path.subject is None or not path.keyframes:
                     continue
@@ -368,21 +425,43 @@ class HYPERSCAPE_OT_preview(bpy.types.Operator):
                 time = settings.preview_time
                 if path.looping and keys[-1].time_seconds > 0.0:
                     time %= keys[-1].time_seconds
-                left = right = keys[-1]
-                for candidate in keys:
-                    if candidate.time_seconds >= time:
-                        right = candidate
+                if time <= keys[0].time_seconds:
+                    sampled = Vector(keys[0].point)
+                elif time >= keys[-1].time_seconds:
+                    sampled = Vector(keys[-1].point)
+                else:
+                    left, right = next(
+                        (left, right)
+                        for left, right in zip(keys, keys[1:])
+                        if time <= right.time_seconds
+                    )
+                    span = right.time_seconds - left.time_seconds
+                    alpha = (time - left.time_seconds) / span
+                    sampled = Vector(left.point).lerp(Vector(right.point), alpha)
+                binding = path.subject.hyperscape
+                active_frame = binding.frame
+                active_anchor = binding.anchor
+                for transition in sorted(path.transitions, key=lambda transition: transition.time_seconds):
+                    if transition.time_seconds > time:
                         break
-                    left = candidate
-                span = right.time_seconds - left.time_seconds
-                alpha = 0.0 if span <= 0.0 else (time - left.time_seconds) / span
-                path.subject.location = Vector(left.point).lerp(Vector(right.point), alpha)
+                    active_frame = transition.frame
+                    active_anchor = transition.anchor
+                coordinate_frame = (
+                    binding.frame if path.coordinate_frame < 0 else path.coordinate_frame
+                )
+                path.subject.location = conformal.convert_point(
+                    frames, sampled, coordinate_frame, active_frame
+                )
+                binding.preview_frame = active_frame
+                binding.preview_anchor = active_anchor
             for obj in context.scene.objects:
                 binding = obj.hyperscape
                 if not binding.enabled:
                     continue
                 local = tuple(obj.location)
-                ambient = conformal.apply_word(conformal.world_word(frames, binding.frame), local)
+                ambient = conformal.apply_word(
+                    conformal.world_word(frames, binding.preview_frame), local
+                )
                 binding.local_coordinates = local
                 binding.ambient_coordinates = ambient
             settings.status = "Preview evaluated in local and ambient coordinates"
@@ -577,11 +656,12 @@ class HYPERSCAPE_OT_export(bpy.types.Operator, ExportHelper):
         is_glb = destination.suffix.lower() == ".glb"
         try:
             with tempfile.TemporaryDirectory(prefix="hyperscape-blender-") as directory:
-                temporary = Path(directory) / ("scene.glb" if is_glb else "scene.gltf")
+                temporary = Path(directory) / destination.name
                 result = bpy.ops.export_scene.gltf(
                     filepath=str(temporary),
-                    export_format="GLB" if is_glb else "GLTF_EMBEDDED",
+                    export_format="GLB" if is_glb else "GLTF_SEPARATE",
                     export_extras=True,
+                    export_cameras=True,
                 )
                 if "FINISHED" not in result:
                     raise codec.HyperscapeCodecError("Blender glTF export did not finish")
@@ -593,7 +673,17 @@ class HYPERSCAPE_OT_export(bpy.types.Operator, ExportHelper):
                     node_indices,
                     len(document.get("nodes", [])),
                 )
-                destination.write_bytes(codec.inject_asset(raw, payload, bindings))
+                encoded = codec.inject_asset(raw, payload, bindings)
+                if not is_glb:
+                    for sidecar in Path(directory).iterdir():
+                        if sidecar == temporary:
+                            continue
+                        target = destination.parent / sidecar.name
+                        if sidecar.is_dir():
+                            shutil.copytree(sidecar, target, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(sidecar, target)
+                destination.write_bytes(encoded)
         except (OSError, codec.HyperscapeCodecError) as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
@@ -641,6 +731,8 @@ CLASSES = (
     HYPERSCAPE_OT_generator_remove,
     HYPERSCAPE_OT_keyframe_add,
     HYPERSCAPE_OT_keyframe_remove,
+    HYPERSCAPE_OT_transition_add,
+    HYPERSCAPE_OT_transition_remove,
     HYPERSCAPE_OT_preview,
     HYPERSCAPE_OT_reanchor_object,
     HYPERSCAPE_OT_reparent_frame,

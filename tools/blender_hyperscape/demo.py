@@ -138,6 +138,7 @@ def create_demo_scene(context) -> None:
     path = settings.paths.add()
     path.name = "euclidean-to-conformal-traverse"
     path.subject = traveler
+    path.coordinate_frame = 0
     path.looping = True
     for time, point in (
         (0.0, (-3.0, 1.2, 0.5)),
@@ -149,6 +150,11 @@ def create_demo_scene(context) -> None:
         key = path.keyframes.add()
         key.time_seconds = time
         key.point = point
+    for time, frame, anchor_index in ((2.0, 1, 0), (4.0, 2, 1), (6.0, 0, -1)):
+        transition = path.transitions.add()
+        transition.time_seconds = time
+        transition.frame = frame
+        transition.anchor = anchor_index
 
     track = settings.constraints.add()
     track.kind = "TRACK"
@@ -161,8 +167,8 @@ def create_demo_scene(context) -> None:
     projection.frame = 0
 
     traveler.hyperscape.enabled = True
-    traveler.hyperscape.frame = 1
-    traveler.hyperscape.anchor = 0
+    traveler.hyperscape.frame = 0
+    traveler.hyperscape.anchor = -1
     traveler.hyperscape.path = 0
     nested.hyperscape.enabled = True
     nested.hyperscape.frame = 2

@@ -156,6 +156,8 @@ def validate_payload(
         if not isinstance(path.get("looping", False), bool):
             raise HyperscapeCodecError(f"path {path_index} looping must be a boolean")
         _index(path.get("node"), node_count, f"path {path_index} node")
+        if "coordinate_frame" in path:
+            _index(path["coordinate_frame"], len(frames), f"path {path_index} coordinate frame")
         keyframes = path.get("keyframes")
         if not isinstance(keyframes, list) or not keyframes:
             raise HyperscapeCodecError(f"path {path_index} needs at least one keyframe")
@@ -168,6 +170,39 @@ def validate_payload(
                 raise HyperscapeCodecError(f"path {path_index} keyframe times must strictly increase")
             previous = time
             _vector(keyframe.get("point"), 3, f"path {path_index} key {key_index} point")
+        transitions = path.get("transitions", [])
+        if not isinstance(transitions, list):
+            raise HyperscapeCodecError(f"path {path_index} transitions must be an array")
+        previous_transition = -math.inf
+        for transition_index, transition in enumerate(transitions):
+            if not isinstance(transition, Mapping):
+                raise HyperscapeCodecError(
+                    f"path {path_index} transition {transition_index} must be an object"
+                )
+            time = _finite_number(
+                transition.get("time_seconds"),
+                f"path {path_index} transition {transition_index} time",
+            )
+            if time < 0.0 or time <= previous_transition or time > previous:
+                raise HyperscapeCodecError(
+                    f"path {path_index} transition times must be in-range and strictly increase"
+                )
+            previous_transition = time
+            frame = _index(
+                transition.get("frame"),
+                len(frames),
+                f"path {path_index} transition {transition_index} frame",
+            )
+            if "anchor" in transition:
+                anchor = _index(
+                    transition["anchor"],
+                    len(anchors),
+                    f"path {path_index} transition {transition_index} anchor",
+                )
+                if anchors[anchor]["frame"] != frame:
+                    raise HyperscapeCodecError(
+                        f"path {path_index} transition {transition_index} anchor frame must match"
+                    )
 
     for constraint_index, constraint in enumerate(constraints):
         if not isinstance(constraint, Mapping):
@@ -193,9 +228,26 @@ def validate_payload(
                 raise HyperscapeCodecError(f"node {node} binding must be an object")
             _index(binding.get("frame"), len(frames), f"node {node} frame")
             if "anchor" in binding:
-                _index(binding["anchor"], len(anchors), f"node {node} anchor")
+                anchor = _index(binding["anchor"], len(anchors), f"node {node} anchor")
+                if anchors[anchor]["frame"] != binding["frame"]:
+                    raise HyperscapeCodecError(f"node {node} anchor frame must match entity frame")
             if "path" in binding:
                 _index(binding["path"], len(paths), f"node {node} path")
+        for path_index, path in enumerate(paths):
+            binding = bindings[path["node"]]
+            if binding is None or binding.get("path") != path_index:
+                raise HyperscapeCodecError(
+                    f"path {path_index} must be referenced by its authored node binding"
+                )
+            if any(
+                node != path["node"]
+                and candidate is not None
+                and candidate.get("path") == path_index
+                for node, candidate in enumerate(bindings)
+            ):
+                raise HyperscapeCodecError(
+                    f"path {path_index} is referenced by more than its authored node"
+                )
 
 
 def decode_gltf(data: bytes) -> tuple[dict[str, Any], GltfContainer]:

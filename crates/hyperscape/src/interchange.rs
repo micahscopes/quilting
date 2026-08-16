@@ -1,9 +1,9 @@
 //! Conversion from `quilting-gltf`'s validated extras into ECS entities.
 
 use crate::{
-    ActiveAnchor, ChamberSignature, ConformalPath, ConformalScene, CrossFrameTarget, EntityFrame,
-    EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates, PathKeyframe, ProjectionCamera,
-    RenderSubject, TrackedCoordinates,
+    ActiveAnchor, ChamberSignature, ConformalPath, ConformalPathTimeline, ConformalScene,
+    CrossFrameTarget, EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates,
+    PathKeyframe, PathTransition, ProjectionCamera, RenderSubject, TrackedCoordinates,
 };
 use bevy_app::App;
 use bevy_ecs::prelude::*;
@@ -82,17 +82,50 @@ pub fn spawn_hyperscape_asset(
             }
             if let Some(path) = binding.path {
                 let authored = &asset.payload.paths[path];
-                world.entity_mut(entity).insert(ConformalPath {
-                    keyframes: authored
-                        .keyframes
-                        .iter()
-                        .map(|key| PathKeyframe {
-                            time_seconds: key.time_seconds,
-                            point: key.point,
-                        })
-                        .collect(),
-                    looping: authored.looping,
-                });
+                let initial_anchor = binding
+                    .anchor
+                    .map(|anchor| runtime.anchors[anchor].clone())
+                    .unwrap_or_else(|| {
+                        quilting_core::AnchorState::new(quilting_core::FrameId(binding.frame))
+                    });
+                let transitions = authored
+                    .transitions
+                    .iter()
+                    .map(|transition| PathTransition {
+                        time_seconds: transition.time_seconds,
+                        frame: quilting_core::FrameId(transition.frame),
+                        anchor: transition
+                            .anchor
+                            .map(|anchor| runtime.anchors[anchor].clone())
+                            .unwrap_or_else(|| {
+                                quilting_core::AnchorState::new(quilting_core::FrameId(
+                                    transition.frame,
+                                ))
+                            }),
+                    })
+                    .collect();
+                world.entity_mut(entity).insert((
+                    ConformalPath {
+                        keyframes: authored
+                            .keyframes
+                            .iter()
+                            .map(|key| PathKeyframe {
+                                time_seconds: key.time_seconds,
+                                point: key.point,
+                            })
+                            .collect(),
+                        looping: authored.looping,
+                    },
+                    ConformalPathTimeline {
+                        coordinate_frame: quilting_core::FrameId(
+                            authored.coordinate_frame.unwrap_or(binding.frame),
+                        ),
+                        initial_frame: quilting_core::FrameId(binding.frame),
+                        initial_anchor: initial_anchor.clone(),
+                        transitions,
+                    },
+                    ActiveAnchor(initial_anchor),
+                ));
             }
         }
         entities.push(entity);
@@ -333,6 +366,15 @@ mod tests {
                 .get::<LocalCoordinates>(horse)
                 .unwrap()
                 .0,
+            [-9.0, 0.0, -1.0]
+        );
+        assert_eq!(
+            runtime
+                .app()
+                .world()
+                .get::<EuclideanCoordinates>(horse)
+                .unwrap()
+                .0,
             [-1.0, 0.0, 0.0]
         );
         assert_eq!(
@@ -342,7 +384,52 @@ mod tests {
                 .get::<EuclideanModelMatrix>(horse)
                 .unwrap()
                 .0[12],
-            -1.0
+            -9.0
         );
+    }
+
+    #[test]
+    fn blender_demo_extracts_and_runs_enter_reanchor_exit_timeline() {
+        let bytes = include_bytes!("../../../examples/hyperscape-blender-demo.glb");
+        let (nodes, asset) = quilting_gltf::load_hyperscape_graph(bytes).unwrap();
+        let traveler_node = nodes
+            .iter()
+            .position(|node| node.name.as_deref() == Some("HS_Traveler"))
+            .unwrap();
+        let camera_node = nodes
+            .iter()
+            .position(|node| node.name.as_deref() == Some("HS_ProjectionCamera"))
+            .unwrap();
+        let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset.unwrap()).unwrap();
+        let traveler = runtime.entities()[traveler_node];
+
+        assert!(runtime.packets_by_node().iter().any(|packet| {
+            packet.subject_node == traveler_node && packet.camera_node == camera_node
+        }));
+
+        for (seconds, expected_frame, expected_ambient) in [
+            (2, 1, [-1.2, 1.2, 0.8]),
+            (2, 2, [1.0, 1.2, 0.5]),
+            (2, 0, [3.0, 1.2, 0.7]),
+        ] {
+            runtime.tick(Duration::from_secs(seconds));
+            assert_eq!(
+                runtime.app().world().get::<EntityFrame>(traveler),
+                Some(&EntityFrame(quilting_core::FrameId(expected_frame)))
+            );
+            let actual = runtime
+                .app()
+                .world()
+                .get::<EuclideanCoordinates>(traveler)
+                .unwrap()
+                .0;
+            for axis in 0..3 {
+                assert!(
+                    (actual[axis] - expected_ambient[axis]).abs() < 1.0e-6,
+                    "axis {axis}: actual={actual:?}, expected={expected_ambient:?}"
+                );
+            }
+        }
+        assert!(runtime.diagnostics().is_empty());
     }
 }

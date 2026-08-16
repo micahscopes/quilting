@@ -188,6 +188,34 @@ parenting:
 }
 ```
 
+A path may keep all control points in one stable chart while changing the
+entity's active frame and anchor at discrete times:
+
+```json
+{
+  "name": "enter-reanchor-exit",
+  "node": 0,
+  "coordinate_frame": 0,
+  "keyframes": [
+    { "time_seconds": 0, "point": [-4, 1, 0] },
+    { "time_seconds": 8, "point": [4, 1, 0] }
+  ],
+  "transitions": [
+    { "time_seconds": 2, "frame": 1, "anchor": 0 },
+    { "time_seconds": 4, "frame": 2, "anchor": 1 },
+    { "time_seconds": 6, "frame": 0 }
+  ]
+}
+```
+
+The runtime samples the path in `coordinate_frame` and converts that point to
+the active frame selected by the latest transition. Applying the active frame
+map therefore recovers the same ambient point on both sides of a transition:
+entry, re-anchoring, and exit do not jump. An omitted transition `anchor`
+selects the canonical, unflipped sides in that frame. Transition times are
+strictly increasing and lie within the path interval. This is a deterministic
+timeline, not a second parent edge in the conformal frame forest.
+
 Unknown clients ignore `extras` and render the ordinary node/mesh fallback.
 Once the format has independent implementations and a reserved prefix, the
 same payload can move under a vendor extension object and be listed in
@@ -197,7 +225,12 @@ prevents a meaningful fallback rendering.
 The machine-readable schema is
 [`schema/hyperscape-0.1.schema.json`](schema/hyperscape-0.1.schema.json), and
 [`../examples/hyperscape-track.gltf`](../examples/hyperscape-track.gltf) is a
-minimal editable interchange fixture. `quilting-gltf` validates root and node
+minimal editable interchange fixture. The checked-in
+[`hyperscape-blender-demo.blend`](../examples/hyperscape-blender-demo.blend)
+is the editable Blender source for the nested/overlapping full-flow scene;
+[`hyperscape-blender-demo.glb`](../examples/hyperscape-blender-demo.glb) and
+its separate `.gltf`/`.bin` form are real exports from that file and are loaded
+by the Rust integration tests. `quilting-gltf` validates root and node
 references and can inject the payload into either JSON glTF or GLB while
 preserving ordinary fallback nodes, unrelated object-valued extras, and binary
 chunks.
@@ -206,10 +239,11 @@ chunks.
 
 1. Load ordinary glTF and Hyperscape extras.
 2. Spawn entity nodes, conformal frames, walls, anchors, paths, and constraints.
-3. Advance ordinary and conformal animation.
+3. Select the current path frame/anchor state, then sample control points in
+   their stable coordinate frame and convert them to that state.
 4. Evaluate frame-world chains and reject cycles or invalid generators.
 5. Solve tracking/projection constraints in their declared target frames.
-6. Apply requested preserve-world reparent/re-anchor operations.
+6. Apply requested preserve-world structural reparent operations.
 7. Update side bits, chamber membership, and sparse payload aggregates.
 8. Extract relative Möbius transforms and conservative visibility/LoD hints.
 9. Render with Hyperscope and expose transform/contact/pole diagnostics.

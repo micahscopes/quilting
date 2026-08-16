@@ -102,11 +102,7 @@ impl ConformalPath {
         self.validate()?;
         let first = self.keyframes[0];
         let last = *self.keyframes.last().expect("validated nonempty path");
-        let time = if self.looping && last.time_seconds > 0.0 {
-            elapsed_seconds.rem_euclid(last.time_seconds)
-        } else {
-            elapsed_seconds.clamp(first.time_seconds, last.time_seconds)
-        };
+        let time = self.sample_time(elapsed_seconds)?;
         if time <= first.time_seconds {
             return Ok(first.point);
         }
@@ -123,6 +119,36 @@ impl ConformalPath {
         }
         Ok(last.point)
     }
+
+    pub fn sample_time(&self, elapsed_seconds: f64) -> Result<f64, &'static str> {
+        self.validate()?;
+        let first = self.keyframes[0];
+        let last = *self.keyframes.last().expect("validated nonempty path");
+        Ok(if self.looping && last.time_seconds > 0.0 {
+            elapsed_seconds.rem_euclid(last.time_seconds)
+        } else {
+            elapsed_seconds.clamp(first.time_seconds, last.time_seconds)
+        })
+    }
+}
+
+/// A discrete chart/anchor state change on a path timeline. Path geometry is
+/// sampled in one stable coordinate frame, then converted to this active
+/// frame, so the ambient trajectory stays continuous at the transition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathTransition {
+    pub time_seconds: f64,
+    pub frame: FrameId,
+    pub anchor: AnchorState,
+}
+
+/// Reference chart and deterministic chart/anchor timeline for a path.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct ConformalPathTimeline {
+    pub coordinate_frame: FrameId,
+    pub initial_frame: FrameId,
+    pub initial_anchor: AnchorState,
+    pub transitions: Vec<PathTransition>,
 }
 
 /// Track another entity while expressing the result in the tracker's own
@@ -256,7 +282,12 @@ impl Plugin for HyperscapePlugin {
                 Update,
                 apply_frame_reparents.in_set(HyperscapeSet::FrameMutation),
             )
-            .add_systems(Update, animate_paths.in_set(HyperscapeSet::Animation))
+            .add_systems(
+                Update,
+                (apply_path_timelines, animate_paths)
+                    .chain()
+                    .in_set(HyperscapeSet::Animation),
+            )
             .add_systems(
                 Update,
                 resolve_euclidean_coordinates.in_set(HyperscapeSet::Coordinates),
@@ -300,17 +331,65 @@ fn apply_frame_reparents(
 
 fn animate_paths(
     time: Res<Time<Virtual>>,
+    scene: Res<ConformalScene>,
     mut diagnostics: ResMut<HyperscapeDiagnostics>,
-    mut paths: Query<(Entity, &ConformalPath, &mut LocalCoordinates)>,
+    mut paths: Query<(
+        Entity,
+        &ConformalPath,
+        Option<&ConformalPathTimeline>,
+        &EntityFrame,
+        &mut LocalCoordinates,
+    )>,
 ) {
     let elapsed = time.elapsed_secs_f64();
-    for (entity, path, mut coordinates) in &mut paths {
-        match path.sample(elapsed) {
+    for (entity, path, timeline, active_frame, mut coordinates) in &mut paths {
+        let sampled = path.sample(elapsed).and_then(|point| {
+            timeline.map_or(Ok(point), |timeline| {
+                scene
+                    .frames
+                    .convert_point(point, timeline.coordinate_frame, active_frame.0)
+                    .map_err(|_| "path coordinate conversion failed")
+            })
+        });
+        match sampled {
             Ok(point) => coordinates.0 = point,
             Err(error) => diagnostics
                 .0
                 .push(format!("invalid conformal path on {entity:?}: {error}")),
         }
+    }
+}
+
+fn apply_path_timelines(
+    time: Res<Time<Virtual>>,
+    mut diagnostics: ResMut<HyperscapeDiagnostics>,
+    mut paths: Query<(
+        Entity,
+        &ConformalPath,
+        &ConformalPathTimeline,
+        &mut EntityFrame,
+        &mut ActiveAnchor,
+    )>,
+) {
+    let elapsed = time.elapsed_secs_f64();
+    for (entity, path, timeline, mut frame, mut anchor) in &mut paths {
+        let Ok(sample_time) = path.sample_time(elapsed) else {
+            diagnostics
+                .0
+                .push(format!("invalid conformal path timeline on {entity:?}"));
+            continue;
+        };
+        let mut selected_frame = timeline.initial_frame;
+        let mut selected_anchor = &timeline.initial_anchor;
+        for transition in &timeline.transitions {
+            if transition.time_seconds > sample_time {
+                break;
+            }
+            selected_frame = transition.frame;
+            selected_anchor = &transition.anchor;
+        }
+        frame.0 = selected_frame;
+        anchor.0 = selected_anchor.clone();
     }
 }
 
@@ -729,6 +808,101 @@ mod tests {
         assert_point_close(
             mobius.apply(Quat::from_point(1.0, 0.0, 0.0)).to_point(),
             expected_relative.apply_point([1.0, 0.0, 0.0]).unwrap(),
+        );
+        assert!(app.world().resource::<HyperscapeDiagnostics>().0.is_empty());
+    }
+
+    #[test]
+    fn path_timeline_enters_reanchors_and_exits_without_ambient_jump() {
+        let mut frames = ConformalFrameForest::new();
+        let world = frames
+            .add_frame("world", None, ConformalTransformChain::identity())
+            .unwrap();
+        let room = frames
+            .add_frame(
+                "room",
+                Some(world),
+                chain(vec![ConformalGenerator::translation([10.0, 0.0, 0.0])]),
+            )
+            .unwrap();
+        let mut room_anchor = AnchorState::new(room);
+        room_anchor.flip(WallId(0));
+        let mut app = test_app(ConformalScene {
+            frames,
+            walls: RoundWallSet::new(),
+        });
+        let subject = app
+            .world_mut()
+            .spawn((
+                EntityFrame(world),
+                LocalCoordinates([0.0; 3]),
+                EuclideanCoordinates([0.0; 3]),
+                ActiveAnchor(AnchorState::new(world)),
+                ChamberSignature::default(),
+                ConformalPath {
+                    keyframes: vec![
+                        PathKeyframe {
+                            time_seconds: 0.0,
+                            point: [0.0; 3],
+                        },
+                        PathKeyframe {
+                            time_seconds: 3.0,
+                            point: [3.0, 0.0, 0.0],
+                        },
+                    ],
+                    looping: false,
+                },
+                ConformalPathTimeline {
+                    coordinate_frame: world,
+                    initial_frame: world,
+                    initial_anchor: AnchorState::new(world),
+                    transitions: vec![
+                        PathTransition {
+                            time_seconds: 1.0,
+                            frame: room,
+                            anchor: room_anchor.clone(),
+                        },
+                        PathTransition {
+                            time_seconds: 2.0,
+                            frame: world,
+                            anchor: AnchorState::new(world),
+                        },
+                    ],
+                },
+            ))
+            .id();
+
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<EntityFrame>(subject),
+            Some(&EntityFrame(room))
+        );
+        assert_point_close(
+            app.world().get::<LocalCoordinates>(subject).unwrap().0,
+            [-9.0, 0.0, 0.0],
+        );
+        assert_point_close(
+            app.world().get::<EuclideanCoordinates>(subject).unwrap().0,
+            [1.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            app.world().get::<ActiveAnchor>(subject).unwrap().0,
+            room_anchor
+        );
+
+        app.update();
+        assert_eq!(
+            app.world().get::<EntityFrame>(subject),
+            Some(&EntityFrame(world))
+        );
+        assert_point_close(
+            app.world().get::<LocalCoordinates>(subject).unwrap().0,
+            [2.0, 0.0, 0.0],
+        );
+        assert_point_close(
+            app.world().get::<EuclideanCoordinates>(subject).unwrap().0,
+            [2.0, 0.0, 0.0],
         );
         assert!(app.world().resource::<HyperscapeDiagnostics>().0.is_empty());
     }

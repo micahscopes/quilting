@@ -67,12 +67,26 @@ class HyperscapePathKeyframe(bpy.types.PropertyGroup):
     point: FloatVectorProperty(name="Point", size=3, subtype="XYZ")
 
 
+class HyperscapePathTransition(bpy.types.PropertyGroup):
+    time_seconds: FloatProperty(name="Time", default=0.0, min=0.0, subtype="TIME")
+    frame: IntProperty(name="Enter Frame", default=0, min=0)
+    anchor: IntProperty(name="Select Anchor", default=-1, min=-1)
+
+
 class HyperscapePath(bpy.types.PropertyGroup):
     name: StringProperty(name="Name", default="path")
     subject: PointerProperty(name="Subject", type=bpy.types.Object)
+    coordinate_frame: IntProperty(
+        name="Control-Point Frame",
+        description="Stable frame in which all control points are authored; -1 uses the subject's initial frame",
+        default=-1,
+        min=-1,
+    )
     looping: BoolProperty(name="Loop", default=False)
     keyframes: CollectionProperty(type=HyperscapePathKeyframe)
     active_keyframe: IntProperty(default=0, min=0)
+    transitions: CollectionProperty(type=HyperscapePathTransition)
+    active_transition: IntProperty(default=0, min=0)
 
 
 class HyperscapeConstraint(bpy.types.PropertyGroup):
@@ -94,6 +108,8 @@ class HyperscapeObjectBinding(bpy.types.PropertyGroup):
     frame: IntProperty(name="Frame", default=0, min=0)
     anchor: IntProperty(name="Anchor", default=-1, min=-1)
     path: IntProperty(name="Path", default=-1, min=-1)
+    preview_frame: IntProperty(name="Preview Frame", default=0, min=0)
+    preview_anchor: IntProperty(name="Preview Anchor", default=-1, min=-1)
     local_coordinates: FloatVectorProperty(name="Local", size=3, subtype="XYZ")
     ambient_coordinates: FloatVectorProperty(name="Ambient", size=3, subtype="XYZ")
 
@@ -120,6 +136,7 @@ CLASSES = (
     HyperscapeWall,
     HyperscapeAnchor,
     HyperscapePathKeyframe,
+    HyperscapePathTransition,
     HyperscapePath,
     HyperscapeConstraint,
     HyperscapeObjectBinding,

@@ -40,6 +40,9 @@ The formal/runtime trust boundary for the conformal scene work is documented
 in [`docs/conformal-runtime-invariants.md`](docs/conformal-runtime-invariants.md),
 and the graph/interchange contract is in
 [`docs/conformal-scene-model.md`](docs/conformal-scene-model.md).
+The Blender 4.2+ authoring extension and its reproducible headless round trip
+live in [`tools/blender_hyperscape`](tools/blender_hyperscape); the editable
+full-flow scene is [`examples/hyperscape-blender-demo.blend`](examples/hyperscape-blender-demo.blend).
 
 ## Status
 

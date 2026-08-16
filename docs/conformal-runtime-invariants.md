@@ -31,6 +31,7 @@ detail.
 | Translation, nonzero scale, orthogonal maps, and inversion preserve compactified round sides | `RoundSideAutomorphism.translation`, `.scale`, `.orthogonal`, `.inversion` in `formal/ConformalMereology/SphericalInversion.lean` | Generator unit tests; sphere/plane image golden cases; Blender/glTF round trip |
 | Compactified inversion is total and continuous, including pole and infinity | `continuous_extendedInversion`, `extendedInversionHomeomorph` | Runtime uses a documented finite pole sentinel; CPU/GPU thresholds and bounded-output parity tests must agree. The sentinel approximates, rather than proves, the compactified point at infinity |
 | Generator composition may be used by the renderer | `IsOpenRoundSide.image_extendedInversionEquiv` and the generator preservation results | `ConformalTransformChain` composes in application order and collapses to the same `Mobius` coefficients used by the shader |
+| Changing coordinate charts does not change the represented ambient point | Frame equivalences compose with their inverses; this is the runtime use of the automorphism layer, not a new incidence theorem | Path points stay in one reference frame and are converted to each timed active frame; ECS tests compare ambient coordinates immediately before/after enter, re-anchor, and exit events |
 | Reorientation changes a signed Gram matrix by `D G D` | `gramMatrix_reorient` and `rank_singleWallGramFlip_sub_le_two` in `formal/ConformalMereology.lean` | Wall-orientation tests preserve absolute contact classification; a single flip changes only its row/column |
 | Absolute inversive separation does not select its oriented branch | `inversivelySeparated_iff_externallySeparated_or_nested` | Runtime reports external separation versus nesting only when signed orientation/radius data is available |
 | A finite laminar wall family has an explicit background chamber | `FiniteLaminarFamily.chamberModel` | Chamber fixtures use `WithTop`-style background identity and never silently discard the outside chamber |
@@ -69,6 +70,9 @@ cargo check --target wasm32-unknown-unknown -p hyperscape
 cargo check --target wasm32-unknown-unknown -p quilting-wasm
 env -u NO_COLOR trunk build
 nix shell nixpkgs#lean4 -c sh -c 'cd formal && lake build'
+python -m unittest discover -s tools/blender_hyperscape/tests -p 'test_*.py' -v
+blender --command extension validate tools/blender_hyperscape
+blender --background --factory-startup --python-exit-code 1 --python tools/blender_hyperscape/tests/blender_roundtrip.py -- /tmp/hyperscape-roundtrip.glb
 ```
 
 The final vertical slice must add golden tests for walls, chamber transport,

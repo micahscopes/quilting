@@ -179,12 +179,28 @@
       "properties": {
         "name": { "type": "string" },
         "node": { "$ref": "#/$defs/nonnegativeIndex" },
+        "coordinate_frame": { "$ref": "#/$defs/nonnegativeIndex" },
         "looping": { "type": "boolean", "default": false },
         "keyframes": {
           "type": "array",
           "items": { "$ref": "#/$defs/keyframe" },
           "minItems": 1
+        },
+        "transitions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pathTransition" },
+          "default": []
         }
+      },
+      "additionalProperties": false
+    },
+    "pathTransition": {
+      "type": "object",
+      "required": ["time_seconds", "frame"],
+      "properties": {
+        "time_seconds": { "type": "number", "minimum": 0 },
+        "frame": { "$ref": "#/$defs/nonnegativeIndex" },
+        "anchor": { "$ref": "#/$defs/nonnegativeIndex" }
       },
       "additionalProperties": false
     },

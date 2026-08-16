@@ -53,6 +53,9 @@ class HYPERSCAPE_PT_object(bpy.types.Panel):
         layout.prop(binding, "frame")
         layout.prop(binding, "anchor")
         layout.prop(binding, "path")
+        row = layout.row(align=True)
+        row.prop(binding, "preview_frame")
+        row.prop(binding, "preview_anchor")
         layout.prop(binding, "local_coordinates")
         layout.prop(binding, "ambient_coordinates")
         settings = context.scene.hyperscape
@@ -159,6 +162,7 @@ class HYPERSCAPE_PT_paths(bpy.types.Panel):
         path = settings.paths[min(settings.active_path, len(settings.paths) - 1)]
         layout.prop(path, "name")
         layout.prop(path, "subject")
+        layout.prop(path, "coordinate_frame")
         layout.prop(path, "looping")
         layout.template_list(
             "UI_UL_list", "hyperscape_keys", path, "keyframes", path, "active_keyframe", rows=3
@@ -170,6 +174,24 @@ class HYPERSCAPE_PT_paths(bpy.types.Panel):
             key = path.keyframes[min(path.active_keyframe, len(path.keyframes) - 1)]
             layout.prop(key, "time_seconds")
             layout.prop(key, "point")
+        layout.label(text="Preserve-ambient frame/anchor transitions")
+        layout.template_list(
+            "UI_UL_list",
+            "hyperscape_transitions",
+            path,
+            "transitions",
+            path,
+            "active_transition",
+            rows=3,
+        )
+        row = layout.row(align=True)
+        row.operator("hyperscape.transition_add", text="", icon="ADD")
+        row.operator("hyperscape.transition_remove", text="", icon="REMOVE")
+        if path.transitions:
+            transition = path.transitions[min(path.active_transition, len(path.transitions) - 1)]
+            layout.prop(transition, "time_seconds")
+            layout.prop(transition, "frame")
+            layout.prop(transition, "anchor")
 
 
 class HYPERSCAPE_PT_constraints(bpy.types.Panel):
