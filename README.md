@@ -37,7 +37,9 @@ hysteresis rules, the instance data layout, atlas construction, and the known
 limitations.
 
 The formal/runtime trust boundary for the conformal scene work is documented
-in [`docs/conformal-runtime-invariants.md`](docs/conformal-runtime-invariants.md).
+in [`docs/conformal-runtime-invariants.md`](docs/conformal-runtime-invariants.md),
+and the graph/interchange contract is in
+[`docs/conformal-scene-model.md`](docs/conformal-scene-model.md).
 
 ## Status
 
@@ -110,6 +112,7 @@ scripts/fetch-assets.sh
 
 | Crate | Role |
 | --- | --- |
+| `hyperscape` | Lightweight Bevy ECS/app/time game layer for conformal frames, anchors, paths, cross-frame constraints, chamber state, and Hyperscope extraction (no Bevy renderer) |
 | `quilting-core` | Conformal math, tessellation atlas, LOD selection, QB evaluation, instance layout |
 | `quilting-mesh` | Half-edge mesh structure; source of the shared-edge invariant that makes stitching work |
 | `quilting-shaders` | Modular WGSL shader library, compiled to GLSL ES 300 via naga |

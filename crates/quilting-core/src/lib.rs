@@ -14,6 +14,10 @@
 //! - [`conformal`] — serializable generator words and a validated conformal
 //!   frame forest.  Generator words retain the authoring operations needed for
 //!   exact inverse chains and preserve-world re-anchoring.
+//! - [`mereology`] — framed round walls, complementary open sides, contact
+//!   classification, and sparse anchor-orientation state.
+//! - [`incidence`] — finite-poset zeta/Möbius payload coordinates and sparse
+//!   cover structure, without assuming a global bottom element.
 //! - [`patch`] — [`QBTriPatch`], the QB surface and its Möbius transform rule.
 //! - [`atlas`] — [`TessellationAtlas`], pre-tessellated sub-meshes keyed by
 //!   edge-LOD triple. WebGL2 has no tessellation shader, so patch geometry is
@@ -37,6 +41,8 @@
 pub mod triangle;
 pub mod quaternion;
 pub mod conformal;
+pub mod mereology;
+pub mod incidence;
 pub mod interpolation;
 pub mod sampling;
 pub mod subdivide;
@@ -58,4 +64,11 @@ pub use quaternion::{Mobius, Quat};
 pub use conformal::{
     ConformalError, ConformalFrame, ConformalFrameForest, ConformalGenerator,
     ConformalTransformChain, FrameId,
+};
+pub use mereology::{
+    AnchorState, OpenRoundSide, RoundSideOrientation, RoundWall, RoundWallGeometry,
+    RoundWallRelation, RoundWallSet, TangencyKind, WallId,
+};
+pub use incidence::{
+    honest_three_wall_reanchor, naive_three_wall_reversal, FinitePoset, PosetError,
 };

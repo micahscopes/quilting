@@ -2,6 +2,7 @@
 members = [
     "crates/distressed-blue-noise",
     "crates/fuzzy-vision",
+    "crates/hyperscape",
     "crates/quilting-core",
     "crates/quilting-gltf",
     "crates/quilting-mesh",
@@ -22,6 +23,7 @@ members = [
 default-members = [
     "crates/distressed-blue-noise",
     "crates/fuzzy-vision",
+    "crates/hyperscape",
     "crates/quilting-core",
     "crates/quilting-gltf",
     "crates/quilting-mesh",

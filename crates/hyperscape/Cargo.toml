@@ -1,0 +1,19 @@
+[package]
+name = "hyperscape"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic ECS/game layer for conformal Quilting scenes"
+
+[dependencies]
+quilting-core = { path = "../quilting-core" }
+bevy_app = { version = "=0.18.1", default-features = false, features = ["std"] }
+bevy_ecs = { version = "=0.18.1", default-features = false, features = ["std"] }
+bevy_time = { version = "=0.18.1", default-features = false, features = ["std"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `quilting-core` uses rand; a non-rendering Hyperscape wasm build must enable
+# its browser entropy backend even when `quilting-wasm` is not in the graph.
+getrandom = { version = "0.2", features = ["js"] }

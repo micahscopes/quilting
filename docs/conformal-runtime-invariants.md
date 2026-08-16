@@ -56,8 +56,10 @@ detail.
 
 ```sh
 cargo test -p quilting-core
+cargo test -p hyperscape
 cargo test -p quilting-gltf
 cargo test --workspace
+cargo check --target wasm32-unknown-unknown -p hyperscape
 cargo check --target wasm32-unknown-unknown -p quilting-wasm
 nix shell nixpkgs#lean4 -c sh -c 'cd formal && lake build'
 ```
