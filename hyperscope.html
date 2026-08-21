@@ -446,7 +446,9 @@ function lookAt(ex,ey,ez,tx,ty,tz,ux,uy,uz){let fx=tx-ex,fy=ty-ey,fz=tz-ez,fl=Ma
 function mulM4(a,b){const o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++)o[c*4+r]=a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];return o;}
 
 // --- Worker pool ---
-const ATLAS_WORKERS = navigator.hardwareConcurrency || 8;
+// Each worker instantiates the full WASM runtime. Beyond four workers, startup
+// cost dominates the parallel atlas work (especially on high-core-count hosts).
+const ATLAS_WORKERS = Math.min(navigator.hardwareConcurrency || 4, 4);
 const RUNTIME_WORKERS = 1;
 const workers = [];
 const pending = new Map();

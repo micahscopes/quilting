@@ -44,6 +44,17 @@ repository = "https://github.com/micahscopes/quilting"
 [profile.release]
 opt-level = 2
 
+# Keep fast debug builds for the WASM boundary while optimizing the numeric
+# libraries used by tessellation-atlas generation.
+[profile.dev.package.quilting-core]
+opt-level = 3
+
+[profile.dev.package.distressed-blue-noise]
+opt-level = 3
+
+[profile.dev.package.cdt]
+opt-level = 3
+
 # Fast release builds for iteration — use `cargo build --profile release-fast`
 [profile.release-fast]
 inherits = "release"
