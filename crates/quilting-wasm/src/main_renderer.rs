@@ -1323,11 +1323,28 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
                 // Gather this batch's instance data into staging buffer
                 let batch_floats = faces.len() * stride;
+                let permutation = quilting_core::permutation::S3_PERMUTATIONS[perm.min(5)];
                 for (i, &fi) in faces.iter().enumerate() {
                     let src = fi as usize * stride;
                     let dst = i * stride;
                     staging[dst..dst + stride]
                         .copy_from_slice(&state.cached_instances[src..src + stride]);
+
+                    // The cached instance contains the load-time identity-Mobius
+                    // edge LODs. Refresh them from this computation so density
+                    // visualization follows camera and conformal LOD changes.
+                    let lod_offset = fi as usize * batch::FACE_LOD_STRIDE;
+                    let canonical = [
+                        face_lods[lod_offset],
+                        face_lods[lod_offset + 1],
+                        face_lods[lod_offset + 2],
+                    ];
+                    let instance_lod_offset = dst + instance_layout::offset::EDGE_LODS;
+                    staging[instance_lod_offset..instance_lod_offset + 3].copy_from_slice(&[
+                        canonical[permutation[0]],
+                        canonical[permutation[1]],
+                        canonical[permutation[2]],
+                    ]);
                 }
 
                 // Upload this batch's data to the GPU at the current offset
