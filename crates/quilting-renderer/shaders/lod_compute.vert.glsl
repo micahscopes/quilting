@@ -124,8 +124,11 @@ vec3 apply_morph(vec3 pos, int vertex_id) {
 
 vec3 skin_position(vec3 pos, int vertex_id) {
     if (u_num_joints <= 0) return pos;
-    vec4 ji = texelFetch(u_skinning, ivec2(vertex_id, 0), 0);
-    vec4 jw = texelFetch(u_skinning, ivec2(vertex_id, 1), 0);
+    // Skinning data is tiled 4096 vertices wide, with two rows per tile.
+    int chunk = vertex_id / 4096;
+    int col = vertex_id % 4096;
+    vec4 ji = texelFetch(u_skinning, ivec2(col, chunk * 2), 0);
+    vec4 jw = texelFetch(u_skinning, ivec2(col, chunk * 2 + 1), 0);
 
     vec3 skinned = vec3(0.0);
     vec4 p4 = vec4(pos, 1.0);
