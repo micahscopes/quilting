@@ -100,7 +100,10 @@ impl ScreenInfo {
         let x = m[0]*p[0] + m[4]*p[1] + m[8]*p[2] + m[12];
         let y = m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13];
         let w = m[3]*p[0] + m[7]*p[1] + m[11]*p[2] + m[15];
-        if w.abs() < 1e-10 { return None; } // at infinity or behind camera
+        // Reject anything not strictly in front of the camera. `w.abs()` let
+        // w < 0 through, projecting behind-camera points to mirrored positions
+        // and corrupting screen arc lengths for edges crossing the camera plane.
+        if w < 1e-10 { return None; } // behind camera, on the plane, or at infinity
         let ndc_x = x / w;
         let ndc_y = y / w;
         Some([
@@ -488,14 +491,13 @@ pub fn compute_instances_with_uvs(
                 let (va, vb) = mesh.edge_vertices(he_idx as u32);
                 let pixels = screen_arc_len(va as usize, vb as usize);
                 if pixels > 0.0 {
-                    let world = edge_lods_world[canon];
-                    let px_per_sub = pixels / world.max(1) as f64;
-                    if px_per_sub < min_px {
-                        let reduced = (pixels / min_px).ceil() as u32;
-                        world.min(reduced)
-                    } else {
-                        world
-                    }
+                    // Two-sided screen-space target: drive toward ~min_px pixels
+                    // per subdivision (raise coarse patches, not only cap
+                    // over-tessellated ones), so screen-space triangle density is
+                    // uniform regardless of a mesh's base resolution or scale.
+                    // Mirrors lod_compute.vert.glsl.
+                    let driven = (pixels / min_px).ceil().max(MIN_LOD as f64) as u32;
+                    driven.min(MAX_LOD)
                 } else {
                     edge_lods_world[canon]
                 }

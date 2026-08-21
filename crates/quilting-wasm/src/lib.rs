@@ -514,11 +514,30 @@ pub fn compute_animated_lods(
                 0.0, 0.0, 0.0, 0.0,
                 1.0, 0.0, 0.0, 0.0,
             ];
-            let mut run = |transform, model| {
+            let mut run = |transform: [f32; 16], model: [f32; 16]| {
+                // Derive the conformal pole and power used by the interior-complete
+                // LOD estimate. The transform is packed as quaternion a, b, c, d.
+                let q = |offset: usize| Quat::new(
+                    transform[offset] as f64,
+                    transform[offset + 1] as f64,
+                    transform[offset + 2] as f64,
+                    transform[offset + 3] as f64,
+                );
+                let mobius = Mobius::new(q(0), q(4), q(8), q(12));
+                let (pole, power, c_norm_sq, has_pole) = match mobius.pole() {
+                    Some(h) => (
+                        [h.w as f32, h.x as f32, h.y as f32, h.z as f32],
+                        mobius.power() as f32,
+                        mobius.c.norm_sq() as f32,
+                        1.0,
+                    ),
+                    None => ([0.0; 4], 0.0, mobius.c.norm_sq() as f32, 0.0),
+                };
                 let n = compute.compute_lods(
                     gl, num_faces, num_vertices,
                     num_joints, num_morph,
-                    transform, model, density, mesh_radius, min_px, max_lod,
+                    transform, model, pole, power, c_norm_sq, has_pole,
+                    density, mesh_radius, min_px, max_lod,
                     &vp, vp_width, vp_height,
                 );
                 compute.read_back(gl, n)

@@ -54,6 +54,7 @@ pub mod instance_layout;
 pub mod patch;
 pub mod shapes;
 pub mod evaluate;
+pub mod conformal_lod;
 pub mod batch;
 
 pub use atlas::TessellationAtlas;

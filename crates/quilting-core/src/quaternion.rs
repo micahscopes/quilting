@@ -292,6 +292,30 @@ impl Mobius {
         (left.norm_sq() / denominator_norm_sq).sqrt()
     }
 
+    /// The pole: the point mapping to infinity, `h = -c⁻¹·d` (where `bot = c·q + d`
+    /// vanishes). For every transform this codebase constructs, `h` is a genuine
+    /// R³ point (its real part is 0 to machine precision). Returns `None` for a
+    /// (near-)affine transform (`|c|²` below `1e-12`), where the pole is
+    /// effectively at infinity and no interior conformal dilation occurs.
+    ///
+    /// Because `bot` is affine in `q`, `|bot|²` is convex, so the point of maximum
+    /// conformal dilation over any triangle is the closest point of the triangle
+    /// to `h` — closed-form (see `conformal_lod`).
+    pub fn pole(&self) -> Option<Quat> {
+        if self.c.norm_sq() < 1e-12 {
+            return None;
+        }
+        Some(-(self.c.inv() * self.d))
+    }
+
+    /// Inversion power `k`, such that `|F(x) − F(y)| = k·|x−y| / (|x−h|·|y−h|)`
+    /// (4-D quaternion distances) and the local isotropic conformal scale is
+    /// `λ(x) = k / |x−h|²`. Equals exactly `r²` for [`Mobius::sphere_reflection`].
+    /// Only meaningful when [`Mobius::pole`] is `Some`.
+    pub fn power(&self) -> f64 {
+        (self.a * self.c.inv() * self.d - self.b).norm() / self.c.norm()
+    }
+
     /// Transform a weight under this Möbius transformation.
     /// w' = (cx + d) * w  (equation 5 from the paper)
     #[inline]

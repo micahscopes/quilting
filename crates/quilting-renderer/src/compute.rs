@@ -60,6 +60,10 @@ pub struct LodCompute {
     mob_b_loc: glow::UniformLocation,
     mob_c_loc: glow::UniformLocation,
     mob_d_loc: glow::UniformLocation,
+    u_pole_loc: Option<glow::UniformLocation>,
+    u_mob_k_loc: Option<glow::UniformLocation>,
+    u_c_norm_sq_loc: Option<glow::UniformLocation>,
+    u_has_pole_loc: Option<glow::UniformLocation>,
     model_matrix_loc: glow::UniformLocation,
     density_loc: glow::UniformLocation,
     mesh_radius_loc: glow::UniformLocation,
@@ -111,6 +115,10 @@ impl LodCompute {
             let mob_b_loc = req(program1, "mob_b")?;
             let mob_c_loc = req(program1, "mob_c")?;
             let mob_d_loc = req(program1, "mob_d")?;
+            let u_pole_loc = gl.get_uniform_location(program1, "u_pole");
+            let u_mob_k_loc = gl.get_uniform_location(program1, "u_mob_k");
+            let u_c_norm_sq_loc = gl.get_uniform_location(program1, "u_c_norm_sq");
+            let u_has_pole_loc = gl.get_uniform_location(program1, "u_has_pole");
             let model_matrix_loc = req(program1, "model_matrix")?;
             let density_loc = req(program1, "density")?;
             let mesh_radius_loc = req(program1, "mesh_radius")?;
@@ -165,7 +173,9 @@ impl LodCompute {
                 joints_loc: gl.get_uniform_location(program1, "u_joints"),
                 morph_deltas_loc: gl.get_uniform_location(program1, "u_morph_deltas"),
                 morph_wt_loc: gl.get_uniform_location(program1, "u_morph_wt"),
-                mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc, model_matrix_loc,
+                mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
+                u_pole_loc, u_mob_k_loc, u_c_norm_sq_loc, u_has_pole_loc,
+                model_matrix_loc,
                 density_loc, mesh_radius_loc,
                 min_px_loc, max_lod_loc, vp_matrix_loc, vp_width_loc, vp_height_loc,
                 num_verts_loc, num_joints_loc, num_morph_loc,
@@ -424,6 +434,10 @@ impl LodCompute {
         num_morph_targets: u32,
         mobius: [f32; 16],
         model_matrix: [f32; 16],
+        pole: [f32; 4],
+        mob_k: f32,
+        c_norm_sq: f32,
+        has_pole: f32,
         density: f32,
         mesh_radius: f32,
         min_px: f32,
@@ -500,6 +514,10 @@ impl LodCompute {
             gl.uniform_4_f32(Some(&self.mob_b_loc), mobius[4], mobius[5], mobius[6], mobius[7]);
             gl.uniform_4_f32(Some(&self.mob_c_loc), mobius[8], mobius[9], mobius[10], mobius[11]);
             gl.uniform_4_f32(Some(&self.mob_d_loc), mobius[12], mobius[13], mobius[14], mobius[15]);
+            if let Some(l) = &self.u_pole_loc { gl.uniform_4_f32(Some(l), pole[0], pole[1], pole[2], pole[3]); }
+            if let Some(l) = &self.u_mob_k_loc { gl.uniform_1_f32(Some(l), mob_k); }
+            if let Some(l) = &self.u_c_norm_sq_loc { gl.uniform_1_f32(Some(l), c_norm_sq); }
+            if let Some(l) = &self.u_has_pole_loc { gl.uniform_1_f32(Some(l), has_pole); }
             gl.uniform_matrix_4_f32_slice(Some(&self.model_matrix_loc), false, &model_matrix);
             gl.uniform_1_f32(Some(&self.density_loc), density);
             gl.uniform_1_f32(Some(&self.mesh_radius_loc), mesh_radius);
