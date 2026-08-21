@@ -584,11 +584,15 @@ impl JointMatricesBuf {
         }
     }
 
-    /// Clear joint data (set num_joints = 0).
+    /// Clear all animation state at a model boundary.
+    ///
+    /// Both counts are load-bearing: clearing only `num_joints` leaves a
+    /// previous model's morph-target count active, which makes the next static
+    /// model sample stale animation textures.
     pub fn clear(&self, gl: &glow::Context) {
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
-            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &0i32.to_le_bytes());
+            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &[0u8; 16]);
         }
     }
 

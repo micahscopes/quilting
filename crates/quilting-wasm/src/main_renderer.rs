@@ -1382,6 +1382,21 @@ pub fn mr_upload_animation_pose(matrices: &[f32], morph_weights: &[f32], skin_te
     });
 }
 
+/// Reset skeletal and morph animation state before accepting a new model.
+/// Without this boundary, a static glTF loaded after an animated one is
+/// deformed by the previous model's joint UBO and animation textures.
+#[wasm_bindgen(js_name = "mr_clearAnimationState")]
+pub fn mr_clear_animation_state() {
+    STATE.with(|state| {
+        if let Some(renderer) = state.borrow().as_ref() {
+            renderer
+                .renderer
+                .joint_ubo()
+                .clear(renderer.renderer.gl());
+        }
+    });
+}
+
 #[wasm_bindgen(js_name = "mr_render")]
 pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
     STATE.with(|s| {

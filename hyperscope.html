@@ -217,7 +217,7 @@ import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_setFuzzy, mr_setFuzzyDebug,
-  mr_uploadTessPatch, mr_uploadAnimationPose,
+  mr_uploadTessPatch, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
   mr_pick, mr_highlightFace,
@@ -1572,6 +1572,10 @@ function frame(ts) {
 async function finishModelUpload(info, filename) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   meshInfo = info;
+
+  // A static model must not inherit joint/morph counts or textures from the
+  // animated model that preceded it.
+  mr_clearAnimationState();
 
   // Populate animation selector
   const animSel = $('anim-sel');
