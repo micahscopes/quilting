@@ -5,7 +5,7 @@
 
 use quilting_mesh::HalfEdgeMesh;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
 /// which is the normative definition — do not restate the number here.
@@ -231,46 +231,68 @@ pub fn balance_resident_lods(
         .map(|resident| resident.map(ResidentLod::edge_lods))
         .collect();
 
-    loop {
-        let mut pass_changed = false;
+    // Both constraints are monotone promotions over a small power-of-two
+    // lattice: twins take their maximum, and a face's low edges rise to half
+    // its maximum. A work queue therefore reaches the same least fixed point
+    // while revisiting only faces touched by a promotion. The former global
+    // fixed-point loop rescanned every half-edge and every face per wave; a
+    // localized high-LOD chess piece could make a 95k-face scene stall for
+    // nearly a second after each camera movement.
+    let mut queue = VecDeque::with_capacity(num_faces);
+    let mut queued = vec![false; num_faces];
+    for (face, edge_lods) in face_edges.iter().enumerate() {
+        if edge_lods.is_some() {
+            queue.push_back(face);
+            queued[face] = true;
+        }
+    }
 
-        for half_edge in 0..topology.half_edges.len() as u32 {
+    while let Some(face) = queue.pop_front() {
+        queued[face] = false;
+        if face_edges[face].is_none() {
+            continue;
+        }
+
+        let mut face_changed = false;
+        for half_edge in topology.face_half_edges(face as u32) {
             let Some(twin) = topology.twin(half_edge) else { continue };
-            if half_edge > twin {
-                continue;
-            }
-            let face = topology.half_edges[half_edge as usize].face as usize;
             let twin_face = topology.half_edges[twin as usize].face as usize;
-            if face >= num_faces || twin_face >= num_faces {
+            if twin_face >= num_faces || face_edges[twin_face].is_none() {
                 continue;
             }
             let edge_index = (half_edge as usize % 3 + 2) % 3;
             let twin_edge_index = (twin as usize % 3 + 2) % 3;
-            let (Some(face_lods), Some(twin_lods)) =
-                (face_edges[face], face_edges[twin_face])
-            else {
-                continue;
-            };
-            let shared = face_lods[edge_index].max(twin_lods[twin_edge_index]);
-            pass_changed |= face_lods[edge_index] != shared
-                || twin_lods[twin_edge_index] != shared;
-            face_edges[face].as_mut().unwrap()[edge_index] = shared;
-            face_edges[twin_face].as_mut().unwrap()[twin_edge_index] = shared;
-        }
-
-        for edge_lods in face_edges.iter_mut().flatten() {
-            let maximum = *edge_lods.iter().max().unwrap_or(&1);
-            let minimum_allowed = (maximum / MAX_FACE_EDGE_LOD_RATIO).max(1);
-            for edge_lod in edge_lods {
-                if *edge_lod < minimum_allowed {
-                    *edge_lod = minimum_allowed;
-                    pass_changed = true;
+            let face_lod = face_edges[face].unwrap()[edge_index];
+            let twin_lod = face_edges[twin_face].unwrap()[twin_edge_index];
+            let shared = face_lod.max(twin_lod);
+            if face_lod != shared {
+                face_edges[face].as_mut().unwrap()[edge_index] = shared;
+                face_changed = true;
+            }
+            if twin_lod != shared {
+                face_edges[twin_face].as_mut().unwrap()[twin_edge_index] = shared;
+                if !queued[twin_face] {
+                    queue.push_back(twin_face);
+                    queued[twin_face] = true;
                 }
             }
         }
 
-        if !pass_changed {
-            break;
+        let edge_lods = face_edges[face].as_mut().unwrap();
+        let maximum = *edge_lods.iter().max().unwrap_or(&1);
+        let minimum_allowed = (maximum / MAX_FACE_EDGE_LOD_RATIO).max(1);
+        for edge_lod in edge_lods {
+            if *edge_lod < minimum_allowed {
+                *edge_lod = minimum_allowed;
+                face_changed = true;
+            }
+        }
+
+        // Promotions made by face grading must be copied to twins. Requeueing
+        // the face is enough; any promoted twin then queues its own face.
+        if face_changed && !queued[face] {
+            queue.push_back(face);
+            queued[face] = true;
         }
     }
 
@@ -507,6 +529,70 @@ pub fn face_is_visible(face_lods: &[f32], face_index: usize) -> bool {
 mod tests {
     use super::*;
 
+    fn balance_resident_lods_reference(
+        residents: &mut [Option<ResidentLod>],
+        topology: &HalfEdgeMesh,
+    ) -> usize {
+        let num_faces = residents.len().min(topology.num_faces as usize);
+        let mut face_edges: Vec<Option<[u32; 3]>> = residents[..num_faces]
+            .iter()
+            .map(|resident| resident.map(ResidentLod::edge_lods))
+            .collect();
+
+        loop {
+            let mut pass_changed = false;
+            for half_edge in 0..topology.half_edges.len() as u32 {
+                let Some(twin) = topology.twin(half_edge) else { continue };
+                if half_edge > twin {
+                    continue;
+                }
+                let face = topology.half_edges[half_edge as usize].face as usize;
+                let twin_face = topology.half_edges[twin as usize].face as usize;
+                if face >= num_faces || twin_face >= num_faces {
+                    continue;
+                }
+                let edge_index = (half_edge as usize % 3 + 2) % 3;
+                let twin_edge_index = (twin as usize % 3 + 2) % 3;
+                let (Some(face_lods), Some(twin_lods)) =
+                    (face_edges[face], face_edges[twin_face])
+                else {
+                    continue;
+                };
+                let shared = face_lods[edge_index].max(twin_lods[twin_edge_index]);
+                pass_changed |= face_lods[edge_index] != shared
+                    || twin_lods[twin_edge_index] != shared;
+                face_edges[face].as_mut().unwrap()[edge_index] = shared;
+                face_edges[twin_face].as_mut().unwrap()[twin_edge_index] = shared;
+            }
+
+            for edge_lods in face_edges.iter_mut().flatten() {
+                let maximum = *edge_lods.iter().max().unwrap_or(&1);
+                let minimum_allowed = (maximum / MAX_FACE_EDGE_LOD_RATIO).max(1);
+                for edge_lod in edge_lods {
+                    if *edge_lod < minimum_allowed {
+                        *edge_lod = minimum_allowed;
+                        pass_changed = true;
+                    }
+                }
+            }
+
+            if !pass_changed {
+                break;
+            }
+        }
+
+        let mut changed = 0;
+        for (resident, edge_lods) in residents[..num_faces].iter_mut().zip(face_edges) {
+            let Some(edge_lods) = edge_lods else { continue };
+            let reconciled = ResidentLod::from_edge_lods(edge_lods);
+            if *resident != Some(reconciled) {
+                *resident = Some(reconciled);
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     #[test]
     fn single_face_single_batch() {
         // 6 floats: canon_a=4, canon_b=4, canon_c=4, perm=0, parity=1, atlas_idx=0
@@ -650,6 +736,45 @@ mod tests {
 
         assert_eq!(balance_resident_lods(&mut residents, &topology), 1);
         assert_eq!(residents[0].unwrap().edge_lods(), [64, 64, 128]);
+    }
+
+    #[test]
+    fn resident_work_queue_matches_global_fixed_point_on_a_connected_grid() {
+        const SIDE: u32 = 24;
+        let mut faces = Vec::with_capacity((SIDE * SIDE * 2) as usize);
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let row = SIDE + 1;
+                let a = y * row + x;
+                let b = a + 1;
+                let c = a + row;
+                let d = c + 1;
+                faces.push([a, b, c]);
+                faces.push([b, d, c]);
+            }
+        }
+        let topology = HalfEdgeMesh::from_triangles((SIDE + 1) * (SIDE + 1), &faces);
+        let residents: Vec<Option<ResidentLod>> = (0..faces.len())
+            .map(|face| {
+                if face % 29 == 0 {
+                    None
+                } else {
+                    Some(ResidentLod::from_edge_lods([
+                        1 << ((face * 3) % 8),
+                        1 << ((face * 5 + 1) % 8),
+                        1 << ((face * 7 + 2) % 8),
+                    ]))
+                }
+            })
+            .collect();
+        let mut expected = residents.clone();
+        let mut actual = residents;
+
+        let expected_changed = balance_resident_lods_reference(&mut expected, &topology);
+        let actual_changed = balance_resident_lods(&mut actual, &topology);
+
+        assert_eq!(actual_changed, expected_changed);
+        assert_eq!(actual, expected);
     }
 
     #[test]
