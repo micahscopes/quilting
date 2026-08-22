@@ -896,6 +896,8 @@ function computeMobius(type, cx, cy, cz, r) {
 let currentMobius = null;
 let stretchRange = { min: 0.5, max: 0.5 };
 let stretchSamplePending = false;
+let stretchSampleDirty = false;
+let stretchSamplingEnabled = false;
 let hyperscapeActive = false;
 let authoredCamera = null;
 let authoredLodStates = [];
@@ -1016,19 +1018,33 @@ $('load-hyperscape-demo').addEventListener('click', async () => {
 });
 
 function sampleStretchAsync() {
-  if (stretchSamplePending || !currentMobius || !meshInfo) return;
-  const instances = meshInfo.instances;
-  const numFaces = meshInfo.num_faces;
-  if (!instances || !numFaces) return;
+  if (!stretchSamplingEnabled || !currentMobius || !meshInfo) return;
+  if (stretchSamplePending) {
+    stretchSampleDirty = true;
+    return;
+  }
   stretchSamplePending = true;
+  stretchSampleDirty = false;
   workerCall('sample_stretch_range', {
     mobius: Array.from(currentMobius),
-    instances: Array.from(instances),
-    numFaces,
   }).then(resp => {
     stretchSamplePending = false;
-    if (resp.min != null && resp.max != null) stretchRange = { min: resp.min, max: resp.max };
-  }).catch(() => { stretchSamplePending = false; });
+    if (resp.min != null && resp.max != null) {
+      stretchRange = { min: resp.min, max: resp.max };
+      if (stretchSamplingEnabled && wasmOk.peek()) {
+        mr_setFuzzy(
+          fz.enabled.peek(), fz.radius.peek(), fz.strength.peek() / 10.0,
+          parseInt(fz.mode.peek()), fz.focus.peek() / 100.0, fz.bandwidth.peek() / 100.0,
+          fz.normalize.peek(), stretchRange.min, stretchRange.max, fz.quality.peek(),
+          fz.kawase.peek(), fz.kawaseOff.peek() / 10.0,
+        );
+      }
+    }
+    if (stretchSampleDirty) sampleStretchAsync();
+  }).catch(() => {
+    stretchSamplePending = false;
+    if (stretchSampleDirty) sampleStretchAsync();
+  });
 }
 
 // Möbius effect: any param change → recompute + push to WASM
@@ -1160,8 +1176,13 @@ effect(() => {
   const mode = parseInt(fz.mode.get());
   const focus = fz.focus.get() / 100.0;
   const bw = fz.bandwidth.get() / 100.0;
-  if (wasmOk.get()) mr_setFuzzy(fz.enabled.get(), fz.radius.get(), fz.strength.get() / 10.0,
-    mode, focus, bw, fz.normalize.get(), stretchRange.min, stretchRange.max, fz.quality.get(),
+  const enabled = fz.enabled.get();
+  const normalize = fz.normalize.get();
+  const wasSamplingEnabled = stretchSamplingEnabled;
+  stretchSamplingEnabled = enabled && normalize && mode !== 0;
+  if (stretchSamplingEnabled && !wasSamplingEnabled) sampleStretchAsync();
+  if (wasmOk.get()) mr_setFuzzy(enabled, fz.radius.get(), fz.strength.get() / 10.0,
+    mode, focus, bw, normalize, stretchRange.min, stretchRange.max, fz.quality.get(),
     fz.kawase.get(), fz.kawaseOff.get() / 10.0);
   syncURL();
 });
@@ -2286,8 +2307,6 @@ async function finishModelUpload(info, filename) {
 
   mr_setInstanceData(instances, numFaces);
   mr_buildBatches(faceLods);
-  // Cache for async stretch sampling
-  if (meshInfo) { meshInfo.instances = instances; meshInfo.num_faces = numFaces; }
 
   // Preserve the URL camera during startup; user-initiated model changes reset
   // to a predictable inspection view.

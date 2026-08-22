@@ -329,11 +329,11 @@ pub fn upload_model_to_compute() -> bool {
     })
 }
 
-/// Sample Möbius stretch at the centroid of each face (from instance data).
+/// Sample Möbius stretch at the normalized centroid of each stored source face.
 /// Returns [min_stretch, max_stretch] as sigmoid-mapped values matching the vertex shader.
 /// Runs on CPU, async-safe — call from a worker without blocking rendering.
 #[wasm_bindgen]
-pub fn sample_stretch_range(mobius: &[f32], instances: &[f32], num_faces: u32) -> Vec<f32> {
+pub fn sample_stretch_range(mobius: &[f32]) -> Vec<f32> {
     if mobius.len() < 16 { return vec![0.5, 0.5]; }
     let transform = Mobius::new(
         Quat::new(mobius[0] as f64, mobius[1] as f64, mobius[2] as f64, mobius[3] as f64),
@@ -342,35 +342,32 @@ pub fn sample_stretch_range(mobius: &[f32], instances: &[f32], num_faces: u32) -
         Quat::new(mobius[12] as f64, mobius[13] as f64, mobius[14] as f64, mobius[15] as f64),
     );
 
-    let stride = instance_layout::STRIDE;
-    let nf = num_faces as usize;
-    let mut min_s = f32::INFINITY;
-    let mut max_s = f32::NEG_INFINITY;
+    GLTF_DATA.with(|stored| {
+        let stored = stored.borrow();
+        let Some(data) = stored.as_ref() else { return vec![0.5, 0.5] };
+        let center = data.norm_center;
+        let scale = data.norm_scale;
+        let mut min_s = f32::INFINITY;
+        let mut max_s = f32::NEG_INFINITY;
 
-    for fi in 0..nf {
-        let base = fi * stride + instance_layout::offset::POSITIONS;
-        if base + 12 > instances.len() { break; }
-        // Each position is [vertex_idx, x, y, z] — skip the index in slot 0.
-        let p = |i: usize| {
-            let o = base + i * 4 + 1;
-            [instances[o], instances[o + 1], instances[o + 2]]
-        };
-        let (p0, p1, p2) = (p(0), p(1), p(2));
-        // Centroid
-        let cx = (p0[0] + p1[0] + p2[0]) / 3.0;
-        let cy = (p0[1] + p1[1] + p2[1]) / 3.0;
-        let cz = (p0[2] + p1[2] + p2[2]) / 3.0;
-        let point = Quat::from_point(cx as f64, cy as f64, cz as f64);
-        let stretch = transform.conformal_scale_at(point) as f32;
-        // Sigmoid mapping matching vertex shader
-        let log_s = stretch.log2();
-        let sig = 1.0 / (1.0 + (-log_s * 0.25_f32).exp());
-        min_s = min_s.min(sig);
-        max_s = max_s.max(sig);
-    }
+        for face in &data.combined.triangles {
+            let p0 = data.combined.positions[face[0]];
+            let p1 = data.combined.positions[face[1]];
+            let p2 = data.combined.positions[face[2]];
+            let point = Quat::from_point(
+                ((p0[0] + p1[0] + p2[0]) / 3.0 - center[0]) * scale,
+                ((p0[1] + p1[1] + p2[1]) / 3.0 - center[1]) * scale,
+                ((p0[2] + p1[2] + p2[2]) / 3.0 - center[2]) * scale,
+            );
+            let stretch = transform.conformal_scale_at(point) as f32;
+            let log_s = stretch.log2();
+            let sig = 1.0 / (1.0 + (-log_s * 0.25_f32).exp());
+            min_s = min_s.min(sig);
+            max_s = max_s.max(sig);
+        }
 
-    if min_s.is_infinite() { return vec![0.5, 0.5]; }
-    vec![min_s, max_s]
+        if min_s.is_infinite() { vec![0.5, 0.5] } else { vec![min_s, max_s] }
+    })
 }
 
 #[wasm_bindgen]

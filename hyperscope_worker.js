@@ -156,7 +156,10 @@ self.onmessage = async function(e) {
 
   if (type === 'evaluate_animation_frame') {
     const pose = wasm.evaluate_animation_frame(data.t);
-    self.postMessage({ type: 'animation_pose', id, pose });
+    const transfers = [];
+    if (pose?.matrices?.buffer) transfers.push(pose.matrices.buffer);
+    if (pose?.morph_weights?.buffer) transfers.push(pose.morph_weights.buffer);
+    self.postMessage({ type: 'animation_pose', id, pose }, transfers);
     return;
   }
 
@@ -179,12 +182,7 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'sample_stretch_range') {
-    const { mobius, instances, numFaces } = data;
-    const range = wasm.sample_stretch_range(
-      new Float32Array(mobius),
-      new Float32Array(instances),
-      numFaces,
-    );
+    const range = wasm.sample_stretch_range(new Float32Array(data.mobius));
     self.postMessage({ type: 'stretch_range', id, min: range[0], max: range[1] });
     return;
   }
