@@ -91,6 +91,23 @@ The spherical-inversion layer is now concrete rather than axiomatic:
   sum of two rank-one outer products, hence has rank at most two. The
   single-wall Gram flip is an immediate specialization.
 
+The round-side spatial-index sketch adds the deliberately metric-free runtime
+contract:
+
+- a finite preorder indexes oriented open round-side bounds, with descendant
+  order certified to imply carrier containment;
+- `RoundSideAutomorphism` transports every bound while preserving and
+  reflecting containment and disjointness;
+- a destination-space query can instead be pulled through the inverse and
+  tested against the immutable source-space hierarchy, with an exact theorem
+  relating the two tests; and
+- disjoint parent bounds conservatively prune every contained descendant,
+  both in the transformed chart and against a pulled-back query.
+
+The query may be a round side, a conjunction of transformed frustum sides, or
+a proximity region.  No Möbius-invariant distance, nearest-neighbour order,
+AABB, or space-filling-curve order is claimed.
+
 The incidence-algebra layer also states the coordinate-change formula
 directly: a containment pivot is `Z_new * M_old`, its reverse is
 `Z_old * M_new`, and successive pivots telescope.

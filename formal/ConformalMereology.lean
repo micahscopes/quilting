@@ -9,6 +9,7 @@ import Mathlib.Order.Fin.Basic
 import Mathlib.Order.Preorder.Finite
 import Mathlib.Topology.Sets.Opens
 import ConformalMereology.SphericalInversion
+import ConformalMereology.RoundSideIndex
 
 /-!
 # Conformal mereology: the two Möbius operations
