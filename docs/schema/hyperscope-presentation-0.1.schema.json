@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quilting.dev/schema/hyperscope-presentation-0.1.schema.json",
+  "title": "Hyperscope presentation 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "title", "assets", "scenes", "views", "cues"],
+  "properties": {
+    "version": { "const": "0.1" },
+    "id": { "$ref": "#/$defs/uuid" },
+    "title": { "type": "string", "minLength": 1 },
+    "assets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/asset" }
+    },
+    "scenes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/scene" }
+    },
+    "views": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/view" }
+    },
+    "cues": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/cue" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "not": { "const": "00000000-0000-0000-0000-000000000000" }
+    },
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "number" }
+    },
+    "quaternion": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "number" },
+      "default": [1, 0, 0, 0]
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "uri"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "name": { "type": "string" },
+        "uri": { "type": "string", "minLength": 1 },
+        "load": {
+          "enum": ["preload", "on_cue"],
+          "default": "on_cue"
+        }
+      }
+    },
+    "layerTransform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "translation": { "$ref": "#/$defs/vec3" },
+        "rotation": { "$ref": "#/$defs/quaternion" },
+        "scale": { "$ref": "#/$defs/vec3" }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "asset"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "name": { "type": "string" },
+        "asset": { "$ref": "#/$defs/uuid" },
+        "transform": { "$ref": "#/$defs/layerTransform" },
+        "visible": { "type": "boolean", "default": true },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 1
+        }
+      }
+    },
+    "scene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "name": { "type": "string" },
+        "layers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/layer" },
+          "default": []
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eye", "control_distance"],
+      "properties": {
+        "eye": { "$ref": "#/$defs/vec3" },
+        "orientation": { "$ref": "#/$defs/quaternion" },
+        "control_distance": { "type": "number", "exclusiveMinimum": 0 },
+        "semantic_target": { "$ref": "#/$defs/vec3" },
+        "vertical_fov_radians": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 3.141592653589793
+        },
+        "near": { "type": "number", "exclusiveMinimum": 0 },
+        "far": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "focus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["center", "radius"],
+      "properties": {
+        "center": { "$ref": "#/$defs/vec3" },
+        "radius": { "type": "number", "exclusiveMinimum": 0 },
+        "enabled": { "type": "boolean", "default": false },
+        "inversion_enabled": { "type": "boolean", "default": false },
+        "coordinate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.5
+        },
+        "angular_aperture": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.1
+        }
+      }
+    },
+    "layerOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer"],
+      "properties": {
+        "layer": { "$ref": "#/$defs/uuid" },
+        "visible": { "type": "boolean" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "camera"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "name": { "type": "string" },
+        "camera": { "$ref": "#/$defs/camera" },
+        "focus": { "$ref": "#/$defs/focus" },
+        "layers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/layerOverride" },
+          "default": []
+        }
+      }
+    },
+    "text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heading"],
+      "properties": {
+        "eyebrow": { "type": "string" },
+        "heading": { "type": "string" },
+        "body": { "type": "string", "default": "" }
+      }
+    },
+    "animation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "clip"],
+      "properties": {
+        "layer": { "$ref": "#/$defs/uuid" },
+        "clip": { "type": "string", "minLength": 1 },
+        "time_seconds": { "type": "number", "minimum": 0, "default": 0 },
+        "playing": { "type": "boolean", "default": true },
+        "speed": { "type": "number", "default": 1 }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": { "type": "number", "minimum": 0, "default": 0.7 },
+        "easing": {
+          "enum": ["linear", "smooth_step", "smoother_step"],
+          "default": "smoother_step"
+        }
+      }
+    },
+    "cue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scene", "view"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "scene": { "$ref": "#/$defs/uuid" },
+        "view": { "$ref": "#/$defs/uuid" },
+        "text": { "$ref": "#/$defs/text" },
+        "animations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/animation" },
+          "default": []
+        },
+        "overlays": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "wireframe",
+              "lod",
+              "patch_boundaries",
+              "control_net",
+              "normals",
+              "stretch"
+            ]
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "transition": { "$ref": "#/$defs/transition" }
+      }
+    }
+  }
+}

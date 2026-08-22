@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 pub mod interchange;
 pub mod navigation;
+pub mod presentation;
 
 pub use navigation::{
     map_space_mouse_axes, CameraBasis, CameraError, CameraRig, CameraTransition, FocusAnchor,
@@ -24,6 +25,13 @@ pub use navigation::{
     NavigationAxes, NavigationController, NavigationFrame, NavigationPreset, NavigationRuntime,
     PerspectiveLens, ScheduledNavigationAction, SpaceMouseMapping, SphereReflectionState,
     TransitionEasing,
+};
+pub use presentation::{
+    AssetLoadPolicy, AuthoredCamera, AuthoredFocus, CueAnimation, CueText, LayerTransform,
+    Presentation, PresentationAsset, PresentationCue, PresentationError, PresentationLayer,
+    PresentationLayerState, PresentationOverlay, PresentationRuntime, PresentationScene,
+    PresentationSnapshot, PresentationTransition, PresentationView, ViewLayerOverride,
+    PRESENTATION_VERSION,
 };
 
 /// Shared conformal scene topology. Ordinary entity parenting remains in the

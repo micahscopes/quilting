@@ -1,11 +1,13 @@
 use super::{CameraError, CameraRig, SphereReflectionState};
 use quilting_core::Quat;
+use serde::{Deserialize, Serialize};
 
 const EPSILON: f64 = 1.0e-12;
 
 /// Curves have explicit names so authored presentations and input replays do
 /// not depend on a browser's animation implementation.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransitionEasing {
     Linear,
     SmoothStep,

@@ -845,6 +845,8 @@ dependencies = [
  "getrandom 0.2.17",
  "quilting-core",
  "quilting-gltf",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

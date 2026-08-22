@@ -30,6 +30,11 @@ pub enum NavigationAction {
     DetachFocus,
     /// Replace detached focus geometry without changing focus/inversion mode.
     SetFreeFocusSphere(FocusSphere),
+    TransitionFreeFocusSphere {
+        target: FocusSphere,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
     TranslateFocus([f64; 3]),
     ScaleFocusLog(f64),
     SetFocusEnabled(bool),
@@ -313,6 +318,13 @@ fn apply_action(
             focus.detach();
             focus.sphere = sphere;
         }
+        NavigationAction::TransitionFreeFocusSphere {
+            target,
+            duration_seconds,
+            easing,
+        } => focus
+            .transition_free_to(target, duration_seconds, easing)
+            .map_err(str::to_owned)?,
         NavigationAction::TranslateFocus(delta) => {
             if !focus.translate_free(delta) {
                 return Err("focus sphere cannot be translated while anchored".into());

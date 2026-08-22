@@ -1,0 +1,145 @@
+{
+  "version": "0.1",
+  "id": "10000000-0000-4000-8000-000000000001",
+  "title": "Quilting / Hyperscope hacker night",
+  "assets": [
+    {
+      "id": "a0000000-0000-4000-8000-000000000001",
+      "name": "Animated horse",
+      "uri": "/horse.glb",
+      "load": "preload"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000002",
+      "name": "Authored Hyperscape scene",
+      "uri": "/hyperscape-blender-demo.glb",
+      "load": "on_cue"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "b0000000-0000-4000-8000-000000000001",
+      "name": "Horse",
+      "layers": [
+        {
+          "id": "c0000000-0000-4000-8000-000000000001",
+          "name": "Horse",
+          "asset": "a0000000-0000-4000-8000-000000000001"
+        }
+      ]
+    },
+    {
+      "id": "b0000000-0000-4000-8000-000000000002",
+      "name": "Composed conformal scene",
+      "layers": [
+        {
+          "id": "c0000000-0000-4000-8000-000000000002",
+          "name": "Horse foreground",
+          "asset": "a0000000-0000-4000-8000-000000000001",
+          "transform": {
+            "translation": [-1.5, 0.0, 0.0],
+            "scale": [0.8, 0.8, 0.8]
+          }
+        },
+        {
+          "id": "c0000000-0000-4000-8000-000000000003",
+          "name": "Blender-authored neighborhood",
+          "asset": "a0000000-0000-4000-8000-000000000002",
+          "transform": {
+            "translation": [1.5, 0.0, 0.0],
+            "scale": [0.65, 0.65, 0.65]
+          }
+        }
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "d0000000-0000-4000-8000-000000000001",
+      "name": "Horse overview",
+      "camera": {
+        "eye": [0.0, 0.0, 5.0],
+        "control_distance": 5.0,
+        "semantic_target": [0.0, 0.0, 0.0]
+      },
+      "focus": {
+        "center": [0.0, 0.0, 0.0],
+        "radius": 2.0,
+        "enabled": false,
+        "inversion_enabled": false,
+        "coordinate": 0.5,
+        "angular_aperture": 0.1
+      }
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000002",
+      "name": "Inside-out composition",
+      "camera": {
+        "eye": [0.0, 0.0, 6.0],
+        "control_distance": 6.0
+      },
+      "focus": {
+        "center": [0.0, 0.0, 0.0],
+        "radius": 3.0,
+        "enabled": true,
+        "inversion_enabled": true,
+        "coordinate": 0.5,
+        "angular_aperture": 0.12
+      },
+      "layers": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000003",
+          "opacity": 0.85
+        }
+      ]
+    }
+  ],
+  "cues": [
+    {
+      "id": "e0000000-0000-4000-8000-000000000001",
+      "scene": "b0000000-0000-4000-8000-000000000001",
+      "view": "d0000000-0000-4000-8000-000000000001",
+      "text": {
+        "eyebrow": "Quilting",
+        "heading": "Curved patches, continuously animated",
+        "body": "The renderer evaluates rational quaternionic-Bezier patches while maintaining crack-free screen-space LOD."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000001",
+          "clip": "horse_A_",
+          "playing": true,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["patch_boundaries"],
+      "transition": {
+        "duration_seconds": 0.7,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-000000000002",
+      "scene": "b0000000-0000-4000-8000-000000000002",
+      "view": "d0000000-0000-4000-8000-000000000002",
+      "text": {
+        "eyebrow": "Hyperscape",
+        "heading": "One scene, distinct assets",
+        "body": "The horse and Blender-authored world retain separate identity, materials, animation, and presentation layers."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000002",
+          "clip": "horse_A_",
+          "playing": true,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["lod", "patch_boundaries"],
+      "transition": {
+        "duration_seconds": 1.2,
+        "easing": "smoother_step"
+      }
+    }
+  ]
+}

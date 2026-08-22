@@ -170,6 +170,34 @@ impl FocusNavigation {
         self.transition = None;
     }
 
+    /// Move an unanchored focus/inversion sphere to authored geometry.
+    /// Presentation views use this path because durable cues refer to stable
+    /// scene identity, never to a process-local Bevy entity handle.
+    pub fn transition_free_to(
+        &mut self,
+        target: FocusSphere,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    ) -> Result<(), &'static str> {
+        FocusSphere::new(target.center, target.radius)?;
+        if !duration_seconds.is_finite() || duration_seconds < 0.0 {
+            return Err("focus transition duration must be finite and nonnegative");
+        }
+        self.detach();
+        if duration_seconds == 0.0 {
+            self.sphere = target;
+        } else {
+            self.transition = Some(FocusSphereTransition {
+                start: self.sphere,
+                target,
+                elapsed_seconds: 0.0,
+                duration_seconds,
+                easing,
+            });
+        }
+        Ok(())
+    }
+
     /// Advance the selection fit using linear center and logarithmic radius.
     pub fn advance(&mut self, delta_seconds: f64) -> bool {
         let Some(mut transition) = self.transition else {
