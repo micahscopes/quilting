@@ -135,3 +135,37 @@ zero LOD errors and all startup phases reported `failed: false`.
    scene to the repeatable matrix.
 5. Preserve these counters while browser authority migrates into Rust so a
    refactor cannot hide regressions by renaming or removing telemetry.
+
+## Chess retained-payload follow-up
+
+Commit `0a32e22` removed two browser-only retention paths without changing the
+renderer-owned source buffer: decoded RGBA staging images are released after
+their synchronous WebGL upload, and node-focus spheres use two linear scans
+instead of retaining one JS coordinate array per unique vertex. The worker's
+transferred face material/node arrays are also reused rather than copied.
+
+The installed Chrome DevTools MCP then hard-loaded the same 94,628-face chess
+asset in the disposable test tab. Geometry and materials rendered, object
+selection resolved node 14, every startup phase completed, and the console had
+no warnings or errors. Exact payload telemetry reported:
+
+| Payload | Bytes retained or processed |
+| --- | ---: |
+| Source face instances retained for browser interaction | 19,682,624 |
+| Initial face-LOD transfer | 2,271,072 |
+| Stable face-node identities retained | 378,512 |
+| Avoided duplicate face metadata copies | 757,024 |
+| Decoded texture staging uploaded | 603,979,776 |
+| Decoded texture staging retained after upload | 0 |
+
+The focus pass covered 19 nodes and 54,562 unique vertices in 52.6 ms while
+retaining no per-vertex JS maps or coordinate arrays. `performance.memory`
+reported 24,881,603 bytes of used JS heap after startup, versus 637.5 MB in the
+baseline observation (approximately 96% lower). That browser API is
+garbage-collection-sensitive, but the 603,979,776-to-zero staging counter is
+deterministic and explains the scale of the reduction.
+
+The follow-up page had a user-carried fuzzy-focus URL, so its 6,551 ms model
+phase and 4,653 ms render phase are recorded as a smoke result, not a controlled
+startup comparison. A clean repeatable chess trace is still required for CPU
+timing work.
