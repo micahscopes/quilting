@@ -1199,7 +1199,7 @@ pub fn list_animations() -> JsValue {
     })
 }
 
-/// Switch to a different animation by index. Rebakes the HyperMesh.
+/// Switch to a different animation by index and rebuild the retained evaluator.
 /// Returns a JS object with { time_min, time_max, num_vertices, num_faces }
 /// or null on failure.
 #[wasm_bindgen]
@@ -1223,18 +1223,17 @@ pub fn set_active_animation(index: u32) -> JsValue {
         data.active_animation = index;
         *data.cached_pose.borrow_mut() = None;
 
-        // Rebuild evaluator for the new animation
-        if let Some(si) = data.primary_skin_idx {
-            if si < data.skins.len() {
-                let num_morph = data.combined.morph_targets.len();
-                data.evaluator = Some(quilting_gltf::evaluator::AnimationEvaluator::new(
-                    data.animations[index].clone(),
-                    Some(data.skins[si].clone()),
-                    data.nodes.clone(),
-                    num_morph,
-                ));
-            }
-        }
+        // Skinning is optional: a morph-only model still needs the evaluator
+        // rebuilt or selecting clip N continues to play clip 0's channels.
+        let skin = data.primary_skin_idx
+            .and_then(|skin_index| data.skins.get(skin_index).cloned());
+        let num_morph = data.combined.morph_targets.len();
+        data.evaluator = Some(quilting_gltf::evaluator::AnimationEvaluator::new(
+            data.animations[index].clone(),
+            skin,
+            data.nodes.clone(),
+            num_morph,
+        ));
 
         // Get animation time range from evaluator
         let anim_info = quilting_gltf::evaluator::list_animations(&data.animations);
