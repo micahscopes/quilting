@@ -7,8 +7,13 @@ self.onmessage = async function(e) {
   const { type, data, id } = e.data;
 
   if (type === 'init') {
+    const startedAt = performance.now();
     const mod = await import('./pkg/quilting_wasm.js');
-    await mod.default();
+    const importedAt = performance.now();
+    await mod.default(data.wasmModule
+      ? { module_or_path: data.wasmModule }
+      : undefined);
+    const instantiatedAt = performance.now();
     wasm = mod;
     // Only the retained runtime worker needs LOD compute. Atlas helpers avoid a
     // 4096² OffscreenCanvas, a WebGL context, and 500K-face compute buffers.
@@ -17,7 +22,18 @@ self.onmessage = async function(e) {
     console.log(gpuRequested
       ? `Worker: GPU compute ${gpuOk ? 'OK' : 'UNAVAILABLE'}`
       : 'Worker: atlas helper (GPU compute not requested)');
-    self.postMessage({ type: 'ready', id, gpuCompute: gpuOk });
+    const finishedAt = performance.now();
+    self.postMessage({
+      type: 'ready',
+      id,
+      gpuCompute: gpuOk,
+      timing: {
+        importMs: importedAt - startedAt,
+        instantiateMs: instantiatedAt - importedAt,
+        gpuInitMs: finishedAt - instantiatedAt,
+        sharedCompiledModule: !!data.wasmModule,
+      },
+    });
     return;
   }
 

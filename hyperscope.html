@@ -281,6 +281,8 @@ const phases = {};
 const startupDiagnostics = {
   navigationStart: performance.timeOrigin,
   phases: {},
+  wasm: null,
+  workers: null,
   atlas: null,
 };
 // Deliberately read-only by convention: browser regression checks consume this
@@ -516,6 +518,22 @@ const frameView = new Float32Array(16), frameProj = new Float32Array(16);
 const frameMvp = new Float32Array(16), frameCameraPos = new Float32Array(3);
 const lodView = new Float32Array(16), lodProj = new Float32Array(16);
 const lodVp = new Float32Array(16), lodMobius = new Float32Array(16);
+
+let runtimeWasmModule = null;
+async function compileRuntimeWasm() {
+  const response = await fetch(new URL('./pkg/quilting_wasm_bg.wasm', import.meta.url));
+  if (!response.ok) {
+    throw new Error(`WASM fetch returned HTTP ${response.status}`);
+  }
+  if (WebAssembly.compileStreaming) {
+    try {
+      return await WebAssembly.compileStreaming(Promise.resolve(response.clone()));
+    } catch (error) {
+      console.info('Streaming WASM compilation unavailable; using buffered compilation', error);
+    }
+  }
+  return WebAssembly.compile(await response.arrayBuffer());
+}
 
 // --- Worker pool ---
 // The retained worker owns glTF parsing, animation evaluation, dynamic LOD and
@@ -1910,9 +1928,20 @@ currentGlb = initParams.glb;
 
 // Phase 1: Initialize WASM + renderer
 phase('wasm', [], async () => {
-  await init();
+  const compileStarted = performance.now();
+  runtimeWasmModule = await compileRuntimeWasm();
+  const compileFinished = performance.now();
+  await init({ module_or_path: runtimeWasmModule });
+  const instantiateFinished = performance.now();
   $('stats').textContent = 'Initializing renderer...';
   if (!mr_init('cv')) throw 'renderer init failed';
+  const rendererFinished = performance.now();
+  startupDiagnostics.wasm = {
+    compileMs: compileFinished - compileStarted,
+    instantiateMs: instantiateFinished - compileFinished,
+    rendererInitMs: rendererFinished - instantiateFinished,
+    sharedCompiledModule: true,
+  };
   applyParams(initParams); // Set signal values first
   // Give HDR loading a usable fallback without starting the selected HDR twice.
   if (envMap.peek() !== 'procedural') uploadProceduralEnvMaps();
@@ -1922,7 +1951,11 @@ phase('wasm', [], async () => {
 // Phase 2: Initialize workers (depends on wasm for shader compilation)
 phase('workers', ['wasm'], async () => {
   $('stats').textContent = `Starting ${ATLAS_WORKERS} workers...`;
-  const ready = await Promise.all(workers.map((_, i) => workerCallN(i, 'init', { gpuCompute: i === 0 })));
+  const ready = await Promise.all(workers.map((_, i) => workerCallN(i, 'init', {
+    gpuCompute: i === 0,
+    wasmModule: runtimeWasmModule,
+  })));
+  startupDiagnostics.workers = ready.map(response => response.timing);
   if (!ready[0]?.gpuCompute) {
     console.warn('Runtime LOD worker has no WebGL2 compute; dynamic LOD is unavailable');
   }
