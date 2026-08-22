@@ -423,11 +423,24 @@ const frameTelemetry = {
   averageRenderCpuMs: 0,
   maximumRenderCpuMs: 0,
 };
+const modelPayloadTelemetry = {
+  sourceInstanceBytes: 0,
+  retainedSourceInstanceBytes: 0,
+  initialFaceLodBytes: 0,
+  retainedFaceNodeBytes: 0,
+  uploadedTextureBytes: 0,
+  retainedDecodedTextureBytes: 0,
+  focusNodes: 0,
+  focusUniqueVertices: 0,
+  focusBuildMs: 0,
+  avoidedFaceMetadataCopyBytes: 0,
+};
 let frameDeltaSum = 0;
 let frameRenderCpuSum = 0;
 globalThis.__hyperscopeRuntimeDiagnostics = {
   lod: lodTelemetry,
   frame: frameTelemetry,
+  model: modelPayloadTelemetry,
 };
 const roundShadowDiagnostics = {
   enabled: RUST_ROUND_SHADOW_ENABLED,
@@ -1437,6 +1450,8 @@ let animating = true;
 let meshInfo = null;
 let currentInstances = null;
 let currentFaceNodes = new Int32Array(0);
+let modelFaceNodes = new Int32Array(0);
+let modelFaceMaterials = new Int32Array(0);
 let nodeFocusRecords = new Map();
 let selectedObject = null;
 let cameraFocusTransition = null;
@@ -1449,6 +1464,16 @@ const focusSphere = {
   anchorNode: null,
   anchorRadius: null,
 };
+
+function rebuildNodeFocusRecords(instances, faceNodes) {
+  const started = performance.now();
+  nodeFocusRecords = buildNodeFocusRecords(instances, faceNodes);
+  modelPayloadTelemetry.focusBuildMs = performance.now() - started;
+  modelPayloadTelemetry.focusNodes = nodeFocusRecords.size;
+  modelPayloadTelemetry.focusUniqueVertices = Array.from(nodeFocusRecords.values())
+    .reduce((total, record) => total + record.vertexCount, 0);
+  return nodeFocusRecords;
+}
 
 // --- Pick debugger: ctrl-click to inspect face ---
 const canvas = $('cv');
@@ -2185,8 +2210,8 @@ $('anim-sel').addEventListener('change', async () => {
   const rp = rpResp.data || rpResp;
   if (rp && rp.instances) {
     setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
-    const animationNodes = meshInfo && meshInfo.face_node_indices
-      ? new Int32Array(meshInfo.face_node_indices)
+    const animationNodes = modelFaceNodes.length === rp.num_faces
+      ? modelFaceNodes
       : new Int32Array(rp.num_faces);
     mr_setFaceNodes(animationNodes);
     mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
@@ -2287,7 +2312,7 @@ async function loadTestShape(shape, p1, p2) {
     clearSelectedObject();
     currentInstances = new Float32Array(r.instances.buffer || r.instances);
     currentFaceNodes = new Int32Array(r.num_faces);
-    nodeFocusRecords = buildNodeFocusRecords(currentInstances, currentFaceNodes);
+    rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
     setRendererInstanceData(currentInstances, r.num_faces);
     mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
     mr_setFaceNodes(currentFaceNodes);
@@ -2318,7 +2343,7 @@ $('remesh-btn').addEventListener('click', async () => {
         clearSelectedObject();
         currentInstances = new Float32Array(r.instances.buffer || r.instances);
         currentFaceNodes = new Int32Array(r.num_faces);
-        nodeFocusRecords = buildNodeFocusRecords(currentInstances, currentFaceNodes);
+        rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
         setRendererInstanceData(currentInstances, r.num_faces);
         mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
         mr_setFaceNodes(currentFaceNodes);
@@ -2344,11 +2369,12 @@ $('remesh-clear-btn').addEventListener('click', async () => {
     clearSelectedObject();
     currentInstances = new Float32Array(rp.instances.buffer || rp.instances);
     setRendererInstanceData(currentInstances, rp.num_faces);
-    const restoredNodes = meshInfo && meshInfo.face_node_indices
-      ? new Int32Array(meshInfo.face_node_indices)
+    const restoredNodes = modelFaceNodes.length === rp.num_faces
+      ? modelFaceNodes
       : new Int32Array(rp.num_faces);
     currentFaceNodes = restoredNodes;
-    nodeFocusRecords = buildNodeFocusRecords(currentInstances, currentFaceNodes);
+    rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
+    if (modelFaceMaterials.length === rp.num_faces) mr_setFaceMaterials(modelFaceMaterials);
     mr_setFaceNodes(currentFaceNodes);
     mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
   }
@@ -3497,7 +3523,21 @@ async function finishModelUpload(info, filename) {
   meshInfo = info;
   currentInstances = null;
   currentFaceNodes = new Int32Array(0);
+  modelFaceNodes = new Int32Array(0);
+  modelFaceMaterials = new Int32Array(0);
   nodeFocusRecords = new Map();
+  Object.assign(modelPayloadTelemetry, {
+    sourceInstanceBytes: 0,
+    retainedSourceInstanceBytes: 0,
+    initialFaceLodBytes: 0,
+    retainedFaceNodeBytes: 0,
+    uploadedTextureBytes: 0,
+    retainedDecodedTextureBytes: 0,
+    focusNodes: 0,
+    focusUniqueVertices: 0,
+    focusBuildMs: 0,
+    avoidedFaceMetadataCopyBytes: 0,
+  });
   clearSelectedObject();
 
   // A static model must not inherit joint/morph counts or textures from the
@@ -3527,7 +3567,10 @@ async function finishModelUpload(info, filename) {
   }
 
   if (info.face_material_indices) {
-    const fmi = new Int32Array(info.face_material_indices);
+    const reusedFaceMaterials = info.face_material_indices instanceof Int32Array;
+    const fmi = reusedFaceMaterials
+      ? info.face_material_indices
+      : new Int32Array(info.face_material_indices);
     // Log material distribution
     const counts = {};
     for (let i = 0; i < fmi.length; i++) counts[fmi[i]] = (counts[fmi[i]] || 0) + 1;
@@ -3537,12 +3580,22 @@ async function finishModelUpload(info, filename) {
     const last20 = Array.from(fmi.slice(-20));
     console.log('first 20 materials:', first20.join(','), 'last 20:', last20.join(','));
     mr_setFaceMaterials(fmi);
+    modelFaceMaterials = fmi;
+    if (reusedFaceMaterials) modelPayloadTelemetry.avoidedFaceMetadataCopyBytes += fmi.byteLength;
+    info.face_material_indices = null;
   }
 
+  const reusedFaceNodes = info.face_node_indices instanceof Int32Array;
   const faceNodes = info.face_node_indices
-    ? new Int32Array(info.face_node_indices)
+    ? (reusedFaceNodes
+      ? info.face_node_indices
+      : new Int32Array(info.face_node_indices))
     : new Int32Array(info.num_faces || 0);
   currentFaceNodes = faceNodes;
+  modelFaceNodes = faceNodes;
+  modelPayloadTelemetry.retainedFaceNodeBytes = faceNodes.byteLength;
+  if (reusedFaceNodes) modelPayloadTelemetry.avoidedFaceMetadataCopyBytes += faceNodes.byteLength;
+  info.face_node_indices = null;
   mr_setFaceNodes(faceNodes);
   if (faceNodes.length) {
     const nodeCounts = {};
@@ -3621,6 +3674,8 @@ async function finishModelUpload(info, filename) {
         heights[i] = t.height || 0;
         totalSize += widths[i] * heights[i] * 4;
       }
+      modelPayloadTelemetry.uploadedTextureBytes = totalSize;
+      modelPayloadTelemetry.retainedDecodedTextureBytes = totalSize;
       if (totalSize > 0) {
         const allPixels = new Uint8Array(totalSize);
         const wrapModes = new Uint32Array(info.textures.length * 2);
@@ -3636,7 +3691,19 @@ async function finishModelUpload(info, filename) {
         }
         mr_uploadImages(allPixels, widths, heights, wrapModes);
       }
-    } catch (e) { console.warn('Texture upload error:', e); }
+    } catch (e) {
+      console.warn('Texture upload error:', e);
+    } finally {
+      // WebGL has synchronously consumed the staging pixels. Keeping every
+      // decoded RGBA image reachable through meshInfo dominated chess-scale
+      // JS heap despite serving no later renderer or UI purpose.
+      for (const texture of info.textures) {
+        texture.data = null;
+        texture.pixels = null;
+      }
+      info.textures.length = 0;
+      modelPayloadTelemetry.retainedDecodedTextureBytes = 0;
+    }
   }
 
   // Skinning data
@@ -3676,8 +3743,11 @@ async function finishModelUpload(info, filename) {
 
   const instances = new Float32Array(rp.instances.buffer || rp.instances);
   currentInstances = instances;
-  nodeFocusRecords = buildNodeFocusRecords(instances, currentFaceNodes);
+  modelPayloadTelemetry.sourceInstanceBytes = instances.byteLength;
+  modelPayloadTelemetry.retainedSourceInstanceBytes = instances.byteLength;
+  rebuildNodeFocusRecords(instances, currentFaceNodes);
   const faceLods = new Float32Array(rp.face_lods.buffer || rp.face_lods);
+  modelPayloadTelemetry.initialFaceLodBytes = faceLods.byteLength;
   const numFaces = rp.num_faces;
 
   setRendererInstanceData(instances, numFaces);

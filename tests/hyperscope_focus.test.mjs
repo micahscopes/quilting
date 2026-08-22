@@ -43,6 +43,8 @@ test('node focus records derive stable per-node source spheres from face instanc
   assert.deepEqual(record.center, [0, 0, 0]);
   assert.equal(record.vertexCount, 4);
   assert(Math.abs(record.radius - Math.sqrt(2)) < 1e-6);
+  assert.equal('vertexIds' in record, false);
+  assert.equal('vertices' in record, false);
 });
 
 test('face source centroid ignores packed vertex IDs', () => {

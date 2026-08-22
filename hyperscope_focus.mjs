@@ -33,7 +33,7 @@ export function buildNodeFocusRecords(
         node,
         min: [Infinity, Infinity, Infinity],
         max: [-Infinity, -Infinity, -Infinity],
-        vertices: new Map(),
+        vertexIds: new Set(),
       };
       records.set(node, record);
     }
@@ -49,7 +49,7 @@ export function buildNodeFocusRecords(
       const vertexKey = Number.isFinite(rawVertex)
         ? rawVertex
         : face * 3 + corner;
-      if (!record.vertices.has(vertexKey)) record.vertices.set(vertexKey, [x, y, z]);
+      record.vertexIds.add(vertexKey);
       record.min[0] = Math.min(record.min[0], x);
       record.min[1] = Math.min(record.min[1], y);
       record.min[2] = Math.min(record.min[2], z);
@@ -60,7 +60,7 @@ export function buildNodeFocusRecords(
   }
 
   for (const [node, record] of records) {
-    if (!record.vertices.size) {
+    if (!record.vertexIds.size) {
       records.delete(node);
       continue;
     }
@@ -69,18 +69,41 @@ export function buildNodeFocusRecords(
       (record.min[1] + record.max[1]) * 0.5,
       (record.min[2] + record.max[2]) * 0.5,
     ];
-    let radiusSquared = 0;
-    for (const point of record.vertices.values()) {
-      const dx = point[0] - center[0];
-      const dy = point[1] - center[1];
-      const dz = point[2] - center[2];
-      radiusSquared = Math.max(radiusSquared, dx * dx + dy * dy + dz * dz);
-    }
     record.center = center;
-    record.radius = Math.sqrt(radiusSquared);
-    record.vertexCount = record.vertices.size;
+    record.radiusSquared = 0;
+    record.vertexCount = record.vertexIds.size;
+  }
+
+  // A second linear scan is dramatically cheaper at chess scale than
+  // retaining one JS coordinate array per unique vertex in every node Map.
+  // Duplicate corners cannot change a maximum, so no coordinate cache is
+  // needed to obtain the exact same AABB-centred sphere.
+  for (let face = 0; face < faceCount; face++) {
+    const record = records.get(Number(faceNodes[face]));
+    if (!record) continue;
+    const base = face * stride;
+    for (let corner = 0; corner < 3; corner++) {
+      const offset = base + corner * 4;
+      const x = Number(instances[offset + 1]);
+      const y = Number(instances[offset + 2]);
+      const z = Number(instances[offset + 3]);
+      if (!finitePoint(x, y, z)) continue;
+      const dx = x - record.center[0];
+      const dy = y - record.center[1];
+      const dz = z - record.center[2];
+      record.radiusSquared = Math.max(
+        record.radiusSquared,
+        dx * dx + dy * dy + dz * dz,
+      );
+    }
+  }
+
+  for (const record of records.values()) {
+    record.radius = Math.sqrt(record.radiusSquared);
     delete record.min;
     delete record.max;
+    delete record.radiusSquared;
+    delete record.vertexIds;
   }
   return records;
 }
