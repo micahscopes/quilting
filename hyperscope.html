@@ -222,6 +222,7 @@ import init, {
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
   mr_pick, mr_highlightFace,
+  required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
 
 const $ = id => document.getElementById(id);
@@ -517,10 +518,10 @@ const lodView = new Float32Array(16), lodProj = new Float32Array(16);
 const lodVp = new Float32Array(16), lodMobius = new Float32Array(16);
 
 // --- Worker pool ---
-// Each worker instantiates the full WASM runtime. Beyond four workers, startup
-// cost dominates the parallel atlas work (especially on high-core-count hosts).
-const ATLAS_WORKERS = Math.min(navigator.hardwareConcurrency || 4, 4);
-const RUNTIME_WORKERS = 1;
+// The retained worker owns glTF parsing, animation evaluation, dynamic LOD and
+// the canonical atlas. The reachable 2:1 atlas is three cheap subdivision
+// chains, so extra full-runtime helpers cost more to initialize than they save.
+const ATLAS_WORKERS = 1;
 const workers = [];
 const pending = new Map();
 let msgId = 0;
@@ -548,13 +549,6 @@ const workerCall = (type, data, transfer) => workerCallN(0, type, data, transfer
 async function broadcastCall(type, data) {
   return (await Promise.all(workers.map((_, i) => workerCallN(i, type, data))))[0];
 }
-function dropExtraWorkers() {
-  while (workers.length > RUNTIME_WORKERS) {
-    const w = workers.pop();
-    w.worker.terminate();
-  }
-}
-
 // --- Model state ---
 let gpuSkinned = false;
 let animating = true;
@@ -1937,37 +1931,19 @@ phase('workers', ['wasm'], async () => {
 // Phase 3: Build tessellation atlas (depends on workers)
 phase('atlas', ['workers'], async () => {
   const ATLAS_EXP = parseInt(initParams.atlas);
-  const levels = [];
-  // LOD 1 is generated only when an even runtime patch needs it as a parent.
-  for (let i = 1; i <= ATLAS_EXP; i++) levels.push(1 << i);
+  const flatTriples = required_tessellation_atlas_triples(ATLAS_EXP);
   const allTriples = [];
-  const seen = new Set();
-  for (const a of levels)
-    for (const b of levels)
-      for (const c of levels) {
-        const s = [a,b,c].sort((x,y)=>x-y);
-        const k = s.join(',');
-        if (!seen.has(k)) { seen.add(k); allTriples.push(s); }
-      }
-  allTriples.sort((a,b) => (b[2]+b[1]+b[0]) - (a[2]+a[1]+a[0]));
-
-  $('stats').textContent = `Building ${allTriples.length} patches across ${ATLAS_WORKERS} workers...`;
-  let qi = 0;
-  function dispatchNext(wi) {
-    if (qi >= allTriples.length) return Promise.resolve();
-    const [a, b, c] = allTriples[qi++];
-    return workerCallN(wi, 'generate_single', { a, b, c }).then(() => dispatchNext(wi));
+  for (let offset = 0; offset < flatTriples.length; offset += 3) {
+    allTriples.push([
+      flatTriples[offset],
+      flatTriples[offset + 1],
+      flatTriples[offset + 2],
+    ]);
   }
-  await Promise.all(workers.map((_, i) => dispatchNext(i)));
 
-  // Merge first so worker 0 can emit one deduplicated canonical GPU atlas.
-  if (ATLAS_WORKERS > 1) {
-    const subExports = await Promise.all(
-      workers.slice(1).map((_, i) => workerCallN(i + 1, 'export_atlas_bytes', {}))
-    );
-    for (const exp of subExports) {
-      await workerCallN(0, 'merge_atlas_bytes', { bytes: exp.bytes }, [exp.bytes]);
-    }
+  $('stats').textContent = `Building ${allTriples.length} reachable patches...`;
+  for (const [a, b, c] of allTriples) {
+    await workerCall('generate_single', { a, b, c });
   }
 
   const packedResp = await workerCallN(0, 'export_patches', {});
@@ -1990,7 +1966,6 @@ phase('atlas', ['workers'], async () => {
   if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
     throw new Error('GPU rejected the packed tessellation atlas upload');
   }
-  dropExtraWorkers();
 });
 
 // Phase 4: Load model (depends on workers, runs in parallel with atlas)

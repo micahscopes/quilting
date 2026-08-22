@@ -36,21 +36,34 @@ pub enum BuildMode {
 }
 
 /// Enumerate all canonical (sorted) triples from the given LOD levels.
-fn canonical_triples(lod_levels: &[u32]) -> Vec<[u32; 3]> {
+pub fn canonical_triples(lod_levels: &[u32]) -> Vec<[u32; 3]> {
+    let mut levels = lod_levels.to_vec();
+    levels.sort_unstable();
+    levels.dedup();
+
     let mut triples = Vec::new();
-    for &a in lod_levels {
-        for &b in lod_levels {
-            for &c in lod_levels {
-                let mut key = [a, b, c];
-                key.sort();
-                if !triples.contains(&key) {
-                    triples.push(key);
-                }
+    for (a_index, &a) in levels.iter().enumerate() {
+        for (b_index, &b) in levels.iter().enumerate().skip(a_index) {
+            for &c in levels.iter().skip(b_index) {
+                triples.push([a, b, c]);
             }
         }
     }
-    triples.sort();
     triples
+}
+
+/// Canonical triples reachable after enforcing a maximum within-face edge-LOD
+/// ratio. Keeping this in the backend-neutral atlas contract prevents startup
+/// builders from baking topology that neither WebGL2 nor a future WebGPU
+/// classifier is allowed to submit.
+pub fn ratio_bounded_canonical_triples(
+    lod_levels: &[u32],
+    max_edge_ratio: u32,
+) -> Vec<[u32; 3]> {
+    canonical_triples(lod_levels)
+        .into_iter()
+        .filter(|key| key[2] <= key[0].saturating_mul(max_edge_ratio))
+        .collect()
 }
 
 /// Generate a single patch via sampling + triangulation.
@@ -364,6 +377,20 @@ mod tests {
         assert!(atlas.patches.len() >= 3);
         assert!(atlas.patches.contains_key(&[2, 2, 2]));
         assert!(atlas.patches.contains_key(&[4, 4, 4]));
+    }
+
+    #[test]
+    fn two_to_one_atlas_contains_only_the_three_reachable_families() {
+        let lods: Vec<u32> = (0..=7).map(|exponent| 1 << exponent).collect();
+        let triples = ratio_bounded_canonical_triples(&lods, 2);
+
+        assert_eq!(triples.len(), 22);
+        assert_eq!(triples.first(), Some(&[1, 1, 1]));
+        assert_eq!(triples.last(), Some(&[128, 128, 128]));
+        assert!(triples.contains(&[64, 64, 128]));
+        assert!(triples.contains(&[64, 128, 128]));
+        assert!(!triples.contains(&[1, 1, 128]));
+        assert!(triples.iter().all(|key| key[2] <= key[0] * 2));
     }
 
     #[test]

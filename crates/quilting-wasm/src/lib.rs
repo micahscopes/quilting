@@ -757,6 +757,24 @@ pub fn set_min_px_per_sub(px: f64) {
     quilting_core::evaluate::set_min_px_per_sub(px);
 }
 
+/// Return the canonical atlas triples reachable after the renderer's 2:1
+/// within-face LOD grading. The flat typed array is inexpensive to cross into
+/// JavaScript and keeps browser startup in lockstep with the shared topology
+/// contract used by both current and future backends.
+#[wasm_bindgen]
+pub fn required_tessellation_atlas_triples(max_lod_exp: u32) -> Vec<u32> {
+    let lods: Vec<u32> = (0..=max_lod_exp.min(30))
+        .map(|exponent| 1u32 << exponent)
+        .collect();
+    quilting_core::atlas::ratio_bounded_canonical_triples(
+        &lods,
+        batch::MAX_FACE_EDGE_LOD_RATIO,
+    )
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Export the runtime atlas as three packed canonical GPU buffers plus metadata.
 ///
 /// Each patch contributes seven u32 metadata values:
