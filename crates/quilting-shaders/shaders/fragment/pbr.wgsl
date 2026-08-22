@@ -42,7 +42,7 @@ struct PbrUniforms {
     attenuation_distance: f32,
     selection_tint: vec4<f32>,           // rgb + subtle post-lighting blend amount
     focus_sphere: vec4<f32>,             // source-space center xyz + radius
-    focus_field_params: vec4<f32>,       // x=enabled, y=relative feather
+    focus_field_params: vec4<f32>,       // x=enabled; yzw reserved
 }
 
 @group(0) @binding(1)
@@ -141,12 +141,16 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     let dof_dist = max(length(in.position_vs), 0.001);
     let dof_depth = clamp(log2(dof_dist) / 10.0 + 0.5, 0.0, 1.0);
     let focus_radius = max(pbr.focus_sphere.w, 1e-4);
-    let focus_feather = max(focus_radius * pbr.focus_field_params.y, 1e-4);
-    let focus_signed_distance = distance(in.source_position_ws, pbr.focus_sphere.xyz)
-        - focus_radius;
+    let focus_radius_ratio = distance(in.source_position_ws, pbr.focus_sphere.xyz)
+        / focus_radius;
+    // Exact normalized geodesic polar coordinate of the round S3
+    // compactification under stereographic projection:
+    // origin=0, inversion sphere=1/2, infinity=1. Sphere inversion sends
+    // this coordinate to 1-u.
+    let focus_geodesic = 0.6366197723675814 * atan(focus_radius_ratio);
     let focus_field = select(
         0.0,
-        smoothstep(0.0, focus_feather, focus_signed_distance),
+        focus_geodesic,
         pbr.focus_field_params.x > 0.5,
     );
 

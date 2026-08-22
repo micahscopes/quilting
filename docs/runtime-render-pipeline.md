@@ -44,11 +44,13 @@ off-camera patches without a CPU visibility readback, although WebGL still
 invokes the vertices belonging to their resident atlas topology.
 
 Selection focus adds no CPU geometry pass. The vertex shader carries the posed
-ordinary-space surface point before Möbius transformation, and PBR classifies
-it against one frame-global focus sphere. The normalized outside field occupies
-the B channel of the existing weight MRT. Selection mode bypasses JFA seed
-propagation because its mask is already dense, then reuses the retained
-variable-blur passes. Sphere animation uploads only a few scalar uniforms.
+ordinary-space surface point before Möbius transformation, and PBR maps its
+radius around one frame-global focus sphere to the exact compactified
+coordinate `u = 2/pi atan(distance/radius)`. The origin, sphere, and infinity
+are 0, 1/2, and 1; inversion complements the coordinate. This dense B-channel
+field drives a spheroidal depth-of-field shell and bypasses JFA seed propagation,
+then reuses the retained variable-blur passes. Sphere animation uploads only a
+few scalar uniforms.
 
 The CPU still issues one preparation dispatch and one or more draw calls per
 resident `(material, node, canonical LOD, parity)` bucket. S3 permutation is a

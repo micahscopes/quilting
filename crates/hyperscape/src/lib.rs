@@ -82,6 +82,24 @@ impl FocusSphere {
         }
         Ok(Self { center, radius })
     }
+
+    /// Exact normalized geodesic radius in the round compactification induced
+    /// by this sphere: center=0, sphere=1/2, infinity=1.
+    pub fn compactified_radial_coordinate(
+        &self,
+        point: [f64; 3],
+    ) -> Result<f64, &'static str> {
+        if point.into_iter().any(|value| !value.is_finite()) {
+            return Err("focus query point must be finite");
+        }
+        let distance = point
+            .into_iter()
+            .zip(self.center)
+            .map(|(coordinate, center)| (coordinate - center).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        Ok(std::f64::consts::FRAC_2_PI * (distance / self.radius).atan())
+    }
 }
 
 /// Optional object ownership of the shared focus/inversion sphere.
@@ -110,8 +128,11 @@ pub struct FocusNavigation {
     pub transition: Option<FocusSphereTransition>,
     pub focus_enabled: bool,
     pub inversion_enabled: bool,
-    /// Boundary feather as a fraction of sphere radius.
-    pub relative_feather: f64,
+    /// Focal shell in normalized compactified geodesic radius:
+    /// origin=0, inversion sphere=1/2, infinity=1.
+    pub focus_coordinate: f64,
+    /// Spheroidal depth-of-field aperture in the same angular coordinate.
+    pub angular_aperture: f64,
 }
 
 impl Default for FocusNavigation {
@@ -125,7 +146,8 @@ impl Default for FocusNavigation {
             transition: None,
             focus_enabled: false,
             inversion_enabled: false,
-            relative_feather: 0.1,
+            focus_coordinate: 0.5,
+            angular_aperture: 0.1,
         }
     }
 }
@@ -134,6 +156,20 @@ impl FocusNavigation {
     pub const MIN_RADIUS: f64 = 0.011;
     pub const MIN_ANCHORED_MARGIN: f64 = 1.0;
     pub const MAX_ANCHORED_MARGIN: f64 = 4.0;
+
+    /// Smooth circle-of-confusion response around the configured spheroidal
+    /// focal shell. One aperture away from the shell has 50% defocus.
+    pub fn defocus_at(&self, point: [f64; 3]) -> Result<f64, &'static str> {
+        if !self.focus_coordinate.is_finite()
+            || !self.angular_aperture.is_finite()
+            || self.angular_aperture <= 0.0
+        {
+            return Err("focus coordinate must be finite and aperture must be positive");
+        }
+        let coordinate = self.sphere.compactified_radial_coordinate(point)?;
+        let coc = (coordinate - self.focus_coordinate).abs() / self.angular_aperture;
+        Ok(coc / (1.0 + coc))
+    }
 
     /// Select and smoothly fit around an entity while preserving one sphere.
     pub fn anchor_to(
@@ -1111,6 +1147,28 @@ mod tests {
         assert_eq!(focus.sphere.radius, 8.0);
         assert!(focus.scale_radius(0.001));
         assert_eq!(focus.sphere.radius, 2.0);
+    }
+
+    #[test]
+    fn spheroidal_focus_uses_inversion_symmetric_geodesic_radius() {
+        let sphere = FocusSphere::new([1.0, 0.0, 0.0], 2.0).unwrap();
+        assert_eq!(sphere.compactified_radial_coordinate([1.0, 0.0, 0.0]).unwrap(), 0.0);
+        assert_eq!(sphere.compactified_radial_coordinate([3.0, 0.0, 0.0]).unwrap(), 0.5);
+
+        let outside = sphere.compactified_radial_coordinate([9.0, 0.0, 0.0]).unwrap();
+        let reflected = sphere.compactified_radial_coordinate([1.5, 0.0, 0.0]).unwrap();
+        assert!((outside + reflected - 1.0).abs() < EPS);
+
+        let focus = FocusNavigation {
+            sphere,
+            focus_enabled: true,
+            ..FocusNavigation::default()
+        };
+        assert_eq!(focus.defocus_at([3.0, 0.0, 0.0]).unwrap(), 0.0);
+        let nearer = focus.defocus_at([1.0, 0.0, 0.0]).unwrap();
+        let farther = focus.defocus_at([f64::INFINITY, 0.0, 0.0]);
+        assert!(nearer > 0.0);
+        assert!(farther.is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   applyMobiusPoint,
   buildNodeFocusRecords,
+  compactifiedRadialCoordinate,
   faceSourceCentroid,
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
@@ -14,6 +15,7 @@ import {
   perspectiveNavigationSpeed,
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
+  spheroidalDefocus,
   smootherstep01,
 } from '../hyperscope_focus.mjs';
 
@@ -80,6 +82,29 @@ test('object focus sphere applies a stable margin and rejects invalid bounds', (
   );
   assert.equal(focusSphereFromBound({ center: [1, 2], radius: 2 }), null);
   assert.equal(focusSphereFromBound({ center: [1, 2, 3], radius: -1 }), null);
+});
+
+test('compactified radial focus is exact at the origin, sphere, and infinity', () => {
+  assert.equal(compactifiedRadialCoordinate(0, 3), 0);
+  assert.equal(compactifiedRadialCoordinate(3, 3), 0.5);
+  assert.equal(compactifiedRadialCoordinate(Infinity, 3), 1);
+  assert.equal(compactifiedRadialCoordinate(1, 0), null);
+});
+
+test('sphere reflection complements the compactified focus coordinate', () => {
+  const radius = 2;
+  const distance = 8;
+  const reflectedDistance = radius * radius / distance;
+  const sum = compactifiedRadialCoordinate(distance, radius)
+    + compactifiedRadialCoordinate(reflectedDistance, radius);
+  assert(Math.abs(sum - 1) < 1e-12);
+});
+
+test('spheroidal defocus is symmetric and aperture-normalized', () => {
+  assert.equal(spheroidalDefocus(0.5, 0.5, 0.1), 0);
+  assert(Math.abs(spheroidalDefocus(0.4, 0.5, 0.1) - 0.5) < 1e-12);
+  assert(Math.abs(spheroidalDefocus(0.6, 0.5, 0.1) - 0.5) < 1e-12);
+  assert.equal(spheroidalDefocus(0.5, 0.5, 0), null);
 });
 
 test('selection click policy preserves orbit drags and non-primary buttons', () => {

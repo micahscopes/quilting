@@ -281,11 +281,17 @@ uniform sampler2D u_weight;
 uniform float u_mode;
 
 void main() {
-    // A focus field is already a dense normalized blur mask. Preserve it
-    // directly so JFA cannot bleed outside blur back into the sharp sphere.
+    // Spheroidal DoF: the dense input is normalized geodesic radius on the
+    // round compactification. Defocus is exact angular distance from the
+    // selected focal shell; the rational CoC response is linear near focus
+    // and asymptotically approaches maximum blur without a hard cutoff.
     if (u_mode > 2.5) {
-        float field_weight = texture(u_weight, v_uv).r;
-        o_color = vec4(v_uv, field_weight, 0.0);
+        float radial_coordinate = texture(u_weight, v_uv).r;
+        float angular_distance = abs(radial_coordinate - u_focus);
+        float aperture = max(u_bandwidth, 0.001);
+        float coc = angular_distance / aperture;
+        float defocus = coc / (1.0 + coc);
+        o_color = vec4(v_uv, defocus, 0.0);
         return;
     }
     // Bilinear interpolation from JFA

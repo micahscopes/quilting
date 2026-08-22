@@ -937,7 +937,7 @@ impl PbrUniformBuf {
         // Shared focus/inversion sphere at offset 224 (source-space center + radius).
         f(224, focus_sphere[0]); f(228, focus_sphere[1]);
         f(232, focus_sphere[2]); f(236, focus_sphere[3]);
-        // x=enabled, y=relative boundary feather; z/w reserved.
+        // x=enabled; y/z/w reserved for backend-neutral field parameters.
         f(240, focus_field_params[0]); f(244, focus_field_params[1]);
         f(248, focus_field_params[2]); f(252, focus_field_params[3]);
 

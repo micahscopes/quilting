@@ -66,7 +66,6 @@ fn bind_pbr_material_state(
     selected: bool,
     focus_sphere: [f32; 4],
     focus_field_enabled: bool,
-    focus_field_feather: f32,
 ) {
     let selection_tint = if selected {
         [0.16, 0.78, 1.0, 0.13]
@@ -80,7 +79,7 @@ fn bind_pbr_material_state(
         env_mip_count,
         selection_tint,
         focus_sphere,
-        [if focus_field_enabled { 1.0 } else { 0.0 }, focus_field_feather, 0.0, 0.0],
+        [if focus_field_enabled { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
     );
     renderer.pbr_ubo().bind(gl);
 
@@ -204,7 +203,6 @@ struct MainState {
     /// Persistent posed ordinary-space sphere shared by focus and inversion.
     focus_sphere: [f32; 4],
     focus_field_enabled: bool,
-    focus_field_feather: f32,
     highlight_prog: Option<glow::Program>,
     highlight_vao: Option<glow::VertexArray>,
 }
@@ -532,7 +530,6 @@ pub fn mr_init(canvas_id: &str) -> bool {
             selected_node: -1,
             focus_sphere: [0.5, 0.0, 0.0, 2.0],
             focus_field_enabled: false,
-            focus_field_feather: 0.15,
             highlight_prog: None,
             highlight_vao: None,
         });
@@ -1070,7 +1067,6 @@ pub fn mr_set_focus_sphere(
     center_z: f32,
     radius: f32,
     enabled: bool,
-    relative_feather: f32,
 ) {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
@@ -1079,9 +1075,6 @@ pub fn mr_set_focus_sphere(
                 renderer.focus_sphere = [center_x, center_y, center_z, radius.max(1e-4)];
             }
             renderer.focus_field_enabled = enabled;
-            if relative_feather.is_finite() {
-                renderer.focus_field_feather = relative_feather.clamp(0.001, 4.0);
-            }
         }
     });
 }
@@ -2334,7 +2327,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             selected,
                             state.focus_sphere,
                             state.focus_field_enabled,
-                            state.focus_field_feather,
                         );
                         active_material = Some((material_slot, selected));
                         material_updates += 1;
@@ -2568,7 +2560,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             selected,
                             state.focus_sphere,
                             state.focus_field_enabled,
-                            state.focus_field_feather,
                         );
                         active_material = Some((material_slot, selected));
                         material_updates += 1;

@@ -201,7 +201,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button data-bit="1">X</button><button data-bit="2">Y</button><button data-bit="4">Z</button>
     </div>
     <div id="spacemouse-mode" style="color:#58a6ff;font-size:9px;margin-top:3px">Fly: strafe/lift/forward + local pitch/yaw/roll</div>
-    <div style="color:#484f58;font-size:9px;margin-top:2px">Click or double right: select + focus. Double left: toggle inversion. Hold left: edit the shared sphere. Hold right: edit its focus field.</div>
+    <div style="color:#484f58;font-size:9px;margin-top:2px">Click or double right: select + spheroidal focus. Double left: toggle inversion. Hold left: edit the shared sphere. Hold right: move the focal shell / aperture / blur.</div>
   </div>
 
   <div class="section">
@@ -1067,7 +1067,6 @@ const focusSphere = {
   margin: null,
   anchorNode: null,
   anchorRadius: null,
-  feather: 0.10,
 };
 
 // --- Pick debugger: ctrl-click to inspect face ---
@@ -1159,7 +1158,7 @@ function pushFocusSphereState() {
   const fieldEnabled = focusSphere.active && fz.enabled.peek() && fz.mode.peek() === '3';
   mr_setFocusSphere(
     focusSphere.center[0], focusSphere.center[1], focusSphere.center[2],
-    focusSphere.radius, fieldEnabled, focusSphere.feather,
+    focusSphere.radius, fieldEnabled,
   );
 }
 
@@ -1171,8 +1170,14 @@ function anchorFocusSphereToSelection(nowMs = performance.now()) {
   focusSphere.anchorNode = selectedObject.node;
   focusSphere.anchorRadius = selectedObject.bound.radius;
   focusSphere.margin = target.margin;
+  const enteringSpheroidalFocus = fz.mode.peek() !== '3';
   fz.enabled.set(true);
   fz.mode.set('3');
+  if (enteringSpheroidalFocus) {
+    // The inversion sphere is the equatorial focal shell by default.
+    fz.focus.set(50);
+    fz.bandwidth.set(10);
+  }
   focusSphereTransition = {
     start: { center: focusSphere.center.slice(), radius: focusSphere.radius },
     target,
@@ -1793,8 +1798,8 @@ effect(() => {
     focusLabel.textContent = 'Focus (squash ← → expand)';
     bwLabel.textContent = 'Bandwidth';
   } else if (m === '3') {
-    focusLabel.textContent = 'Focus sphere (shared with inversion)';
-    bwLabel.textContent = 'Boundary feather';
+    focusLabel.textContent = 'Focal shell (origin ← sphere → infinity)';
+    bwLabel.textContent = 'Angular aperture';
   } else {
     focusLabel.textContent = 'Focus (combined)';
     bwLabel.textContent = 'Bandwidth';
@@ -1816,7 +1821,6 @@ effect(() => {
   const bw = fz.bandwidth.get() / 100.0;
   const enabled = fz.enabled.get();
   const normalize = fz.normalize.get();
-  focusSphere.feather = Math.max(bw, 0.001);
   const wasSamplingEnabled = stretchSamplingEnabled;
   stretchSamplingEnabled = enabled && normalize && (mode === 1 || mode === 2);
   if (stretchSamplingEnabled && !wasSamplingEnabled) sampleStretchAsync();
@@ -2761,7 +2765,7 @@ function frame(ts) {
   const spaceMouseModeText = spaceMouseMode === 'camera'
     ? SPACE_MOUSE_CAMERA_MODE_TEXT[navigationMode]
     : editingFocusField
-      ? 'Focus field: push/pull strength; lift feather; twist blur'
+      ? 'Spheroidal DoF: push/pull shell; lift aperture; twist blur'
       : SPACE_MOUSE_MODIFIER_MODE_TEXT[spaceMouseMode];
   if ($('spacemouse-mode').textContent !== spaceMouseModeText) {
     $('spacemouse-mode').textContent = spaceMouseModeText;
@@ -2927,8 +2931,8 @@ function frame(ts) {
         const rotateSensitivity = spaceMouseRotate.peek() / 100;
         if (editingFocusField) {
           fz.mode.set('3');
-          fz.strength.set(Math.max(1, Math.min(30,
-            fz.strength.peek() + flyAxes[2] * moveSensitivity * deltaSeconds * 12)));
+          fz.focus.set(Math.max(0, Math.min(100,
+            fz.focus.peek() + flyAxes[2] * moveSensitivity * deltaSeconds * 25)));
           fz.bandwidth.set(Math.max(1, Math.min(50,
             fz.bandwidth.peek() + flyAxes[1] * moveSensitivity * deltaSeconds * 12)));
           fz.radius.set(Math.max(4, Math.min(128,

@@ -213,6 +213,31 @@ export function focusSphereFromBound(bound, margin = 1.1, minRadius = 0.02) {
   };
 }
 
+/**
+ * Exact radial coordinate of the round S3 compactification induced by a
+ * sphere: origin=0, sphere=1/2, and the pole at infinity=1.
+ *
+ * Sphere reflection sends distance d to radius^2/d, and therefore sends this
+ * coordinate u to 1-u exactly (away from the origin/infinity endpoints).
+ */
+export function compactifiedRadialCoordinate(distance, radius) {
+  const d = Math.max(Number(distance) || 0, 0);
+  const r = Number(radius);
+  if (!(r > 0) || !Number.isFinite(r)) return null;
+  if (!Number.isFinite(d)) return 1;
+  return (2 / Math.PI) * Math.atan(d / r);
+}
+
+/** Smooth circle-of-confusion response around a spheroidal focal shell. */
+export function spheroidalDefocus(coordinate, focus, angularAperture) {
+  const u = Number(coordinate);
+  const focalShell = Number(focus);
+  const aperture = Number(angularAperture);
+  if (![u, focalShell, aperture].every(Number.isFinite) || aperture <= 0) return null;
+  const coc = Math.abs(u - focalShell) / aperture;
+  return coc / (1 + coc);
+}
+
 /** Distinguish an intentional primary-button pick from the orbit gesture. */
 export function isPrimarySelectionClick(button, dragDistance, threshold = 4) {
   const distance = Number(dragDistance);

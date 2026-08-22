@@ -71,6 +71,12 @@ mouse, SpaceMouse, touch, gamepad, and XR mappings remain outside the ECS data
 model and emit semantic interaction actions. The staged migration is specified
 in [`focus-navigation-roadmap.md`](focus-navigation-roadmap.md).
 
+The focus effect uses the sphere's normalized compactified radial coordinate,
+with center 0, sphere 1/2, and infinity 1. A focal-shell coordinate and angular
+aperture define spheroidal depth of field on both sides of that shell. Because
+sphere reflection complements the coordinate exactly, inside/outside focus can
+be exchanged without inventing a second geometric field.
+
 ## Transform conventions
 
 - A generator array is in application order: element zero acts first.

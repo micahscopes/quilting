@@ -23,23 +23,31 @@ Selection focus and spherical inversion share one positive ordinary-space
 
 The sphere is classified before the subject/view Möbius map. Möbius maps send
 spheres to spheres or planes, but source-space classification is both cheaper
-and exact for the boundary used by inversion. The posed pre-Möbius surface
-point is carried to PBR, which writes the spherical field to the spare B
-channel of the existing weight MRT. Inside is sharp, the boundary has a
-relative feather, and outside is blurred. This dense mask bypasses JFA seed
-propagation so exterior seeds cannot bleed blur back into the sharp interior.
+and exact for the sphere used by inversion. The posed pre-Möbius surface point
+is carried to PBR, which writes the compactified radial coordinate
+`u = 2/pi atan(distance/radius)` to the spare B channel of the existing weight
+MRT. This is the normalized round-S3 geodesic radius: the center is 0, the
+sphere is 1/2, and infinity is 1. Sphere reflection sends `u` to `1-u` exactly.
+
+Selection focus is therefore spheroidal depth of field rather than a binary
+inside/outside mask. A focal-shell coordinate chooses what is sharp and an
+angular aperture controls falloff on both sides. The current circle-of-confusion
+response is `c/(1+c)`, where `c = abs(u-focus)/aperture`; one aperture away is
+50% defocused and the response approaches full blur without a hard cutoff.
+This dense field bypasses JFA seed propagation and reuses the retained
+variable-blur passes.
 
 ## Prototype controls
 
 | Input | Anchored selection | Detached sphere |
 | --- | --- | --- |
-| Primary click | Select object, tint it, enable Selection focus, animate fit | Click empty to detach without resetting |
+| Primary click | Select object, tint it, enable spheroidal focus, animate fit | Click empty to detach without resetting |
 | SpaceMouse right double tap | Select at view center; an empty hit reframes the retained selection | Select at view center |
 | SpaceMouse left double tap | Fit shared sphere and toggle inversion | Toggle inversion around retained sphere |
 | SpaceMouse left hold | Center locked; twist edits bounded margin | Translate center; twist edits radius |
-| SpaceMouse right hold | Edit focus strength, boundary feather, and blur radius | Edit the retained focus field |
+| SpaceMouse right hold | Push/pull focal shell, lift aperture, twist blur radius | Edit the retained focus field |
 | `F` + wheel | Edit bounded margin | Edit radius |
-| Shift + `F` + wheel | Edit relative boundary feather | Same |
+| Shift + `F` + wheel | Edit angular aperture | Same |
 | Ctrl/Meta + `F` + wheel | Edit blur radius | Same |
 | Escape / empty click | Detach selection and retain sphere | No reset |
 
@@ -63,7 +71,7 @@ radius policy. The remaining semantic action layer should contain commands
 such as:
 
 - `Select { entity, source_bound }` and `DetachSelection`;
-- `TranslateFocus`, `ScaleFocus`, and `SetFocusFeather`;
+- `TranslateFocus`, `ScaleFocus`, `SetFocalShell`, and `SetAngularAperture`;
 - `SetFocusEnabled` and `ToggleInversion`;
 - `ReframeSelection`; and
 - camera-local translate/rotate actions independent of any device axes.
