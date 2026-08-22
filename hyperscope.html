@@ -998,7 +998,7 @@ const SPACE_MOUSE_CAMERA_MODE_TEXT = Object.freeze({
   drone: 'Blender Drone: level flight with altitude-preserving forward motion',
 });
 const SPACE_MOUSE_MODIFIER_MODE_TEXT = Object.freeze({
-  inversion: 'Inversion: translate center; twist changes radius',
+  inversion: 'Shared sphere: translate when free; twist changes radius',
   'depth-of-field': 'DoF: push/pull focus; lift aperture; twist blur',
 });
 
@@ -1291,6 +1291,7 @@ function selectObjectAtViewCenter() {
 }
 
 let mouseDragDistance = Infinity;
+let focusKeyHeld = false;
 canvas.addEventListener('click', e => {
   if (!isPrimarySelectionClick(e.button, mouseDragDistance)) return;
   const rect = canvas.getBoundingClientRect();
@@ -1340,12 +1341,55 @@ window.addEventListener('mousemove', e => {
   camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
 });
 window.addEventListener('keydown', e => {
-  if (e.key !== 'Escape' || !selectedObject) return;
-  clearSelectedObject('Focus sphere unanchored');
-  mr_highlightFace(-1);
+  const editingText = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target?.tagName);
+  if (e.code === 'KeyF' && !editingText) {
+    focusKeyHeld = true;
+    focusSphere.active = true;
+    fz.enabled.set(true);
+    fz.mode.set('3');
+    selectionLabel(selectedObject
+      ? `Node ${selectedObject.node} · focus edit`
+      : 'Free focus sphere · focus edit');
+    return;
+  }
+  if (e.key === 'Escape' && selectedObject) {
+    clearSelectedObject('Focus sphere unanchored');
+    mr_highlightFace(-1);
+  }
 });
+window.addEventListener('keyup', e => {
+  if (e.code === 'KeyF') focusKeyHeld = false;
+});
+window.addEventListener('blur', () => { focusKeyHeld = false; });
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
+  if (focusKeyHeld) {
+    const direction = e.deltaY > 0 ? 1 : -1;
+    if (e.ctrlKey || e.metaKey) {
+      fz.radius.set(Math.max(4, Math.min(128, fz.radius.peek() + direction * 2)));
+    } else if (e.shiftKey) {
+      fz.bandwidth.set(Math.max(1, Math.min(50, fz.bandwidth.peek() + direction * 2)));
+    } else {
+      const anchored = selectedObject
+        && focusSphere.anchorNode === selectedObject.node
+        && focusSphere.anchorRadius > 0;
+      const nextRadius = anchored
+        ? scaleAnchoredFocusRadius(
+          focusSphere.anchorRadius, focusSphere.radius, direction, 1, 0.15,
+        )
+        : scaleRadiusMultiplicatively(
+          focusSphere.radius, direction, 1, 0.15,
+        );
+      setFocusSphereGeometry({
+        center: anchored ? selectedObject.bound.center : focusSphere.center,
+        radius: nextRadius,
+      });
+      if (anchored) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
+      if (mob.xform.peek() === 'sphere_reflection') debouncedLodRecompute();
+    }
+    syncURL();
+    return;
+  }
   zoom *= e.deltaY > 0 ? 1.1 : 0.9;
   zoom = Math.max(0.1, Math.min(100, zoom));
   clearTimeout(camDebounce);
@@ -2679,7 +2723,10 @@ function frame(ts) {
   const doubleTappedButtons = spaceMouseButtonGestures.update(spaceMouse.buttons, ts);
   if (doubleTappedButtons & SPACEMOUSE_RIGHT_BUTTON) selectObjectAtViewCenter();
   if (doubleTappedButtons & SPACEMOUSE_LEFT_BUTTON) fitOrToggleInversionToSelection(ts);
-  const spaceMouseMode = spaceMouseModifierMode(spaceMouse.buttons);
+  const buttonSpaceMouseMode = spaceMouseModifierMode(spaceMouse.buttons);
+  const spaceMouseMode = focusKeyHeld && buttonSpaceMouseMode === 'camera'
+    ? 'depth-of-field'
+    : buttonSpaceMouseMode;
   if (spaceMouseMode !== previousSpaceMouseMode) {
     spaceMouse.resetSmoothing();
     spaceMouseTranslationActive = false;
@@ -2709,9 +2756,13 @@ function frame(ts) {
   spaceMouseDiagnostics.buttons = spaceMouse.buttons;
   spaceMouseDiagnostics.controlMode = spaceMouseMode;
   spaceMouseDiagnostics.navigationMode = navigationMode;
+  const editingFocusField = spaceMouseMode === 'depth-of-field'
+    && focusSphere.active && fz.mode.peek() === '3';
   const spaceMouseModeText = spaceMouseMode === 'camera'
     ? SPACE_MOUSE_CAMERA_MODE_TEXT[navigationMode]
-    : SPACE_MOUSE_MODIFIER_MODE_TEXT[spaceMouseMode];
+    : editingFocusField
+      ? 'Focus field: push/pull strength; lift feather; twist blur'
+      : SPACE_MOUSE_MODIFIER_MODE_TEXT[spaceMouseMode];
   if ($('spacemouse-mode').textContent !== spaceMouseModeText) {
     $('spacemouse-mode').textContent = spaceMouseModeText;
   }
@@ -2872,15 +2923,25 @@ function frame(ts) {
         if (anchored) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       } else if (spaceMouseMode === 'depth-of-field') {
         fz.enabled.set(true);
-        fz.mode.set('0');
         const moveSensitivity = spaceMouseMove.peek() / 100;
         const rotateSensitivity = spaceMouseRotate.peek() / 100;
-        fz.focus.set(Math.max(0, Math.min(100,
-          fz.focus.peek() + flyAxes[2] * moveSensitivity * deltaSeconds * 25)));
-        fz.bandwidth.set(Math.max(1, Math.min(50,
-          fz.bandwidth.peek() + flyAxes[1] * moveSensitivity * deltaSeconds * 12)));
-        fz.radius.set(Math.max(4, Math.min(128,
-          fz.radius.peek() + flyAxes[5] * rotateSensitivity * deltaSeconds * 30)));
+        if (editingFocusField) {
+          fz.mode.set('3');
+          fz.strength.set(Math.max(1, Math.min(30,
+            fz.strength.peek() + flyAxes[2] * moveSensitivity * deltaSeconds * 12)));
+          fz.bandwidth.set(Math.max(1, Math.min(50,
+            fz.bandwidth.peek() + flyAxes[1] * moveSensitivity * deltaSeconds * 12)));
+          fz.radius.set(Math.max(4, Math.min(128,
+            fz.radius.peek() + flyAxes[5] * rotateSensitivity * deltaSeconds * 30)));
+        } else {
+          fz.mode.set('0');
+          fz.focus.set(Math.max(0, Math.min(100,
+            fz.focus.peek() + flyAxes[2] * moveSensitivity * deltaSeconds * 25)));
+          fz.bandwidth.set(Math.max(1, Math.min(50,
+            fz.bandwidth.peek() + flyAxes[1] * moveSensitivity * deltaSeconds * 12)));
+          fz.radius.set(Math.max(4, Math.min(128,
+            fz.radius.peek() + flyAxes[5] * rotateSensitivity * deltaSeconds * 30)));
+        }
       }
       spaceMouseDiagnostics.motionFrames += 1;
       const lodRelevantMotion = spaceMouseMode !== 'depth-of-field';
