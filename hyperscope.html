@@ -86,6 +86,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0" max="50" step="0.1" value="20"><span class="v" id="mr-v">2.00</span></div>
     </div>
     <div id="selection-status" style="color:#8b949e;font-size:9px;margin-top:5px">No object selected</div>
+    <label style="margin-top:5px">Focus/navigation transition</label>
+    <div class="sr"><input type="range" id="focus-transition" min="5" max="500" step="1" value="70"><span class="v" id="focus-transition-v">0.70 s</span></div>
   </div>
 
   <div class="section">
@@ -607,6 +609,7 @@ const PARAM_DEFAULTS = {
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
   smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
+  interp: '70',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
   fqual: '2', fkaw: '1', fkoff: '15',
 };
@@ -637,6 +640,7 @@ function readParams() {
     smlock: get('smlock'), smswap: get('smswap'),
     smpinv: get('smpinv'), smrinv: get('smrinv'),
     smbpinv: get('smbpinv'), smbrinv: get('smbrinv'),
+    interp: get('interp'),
     fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
     fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
     fqual: get('fqual'), fkaw: get('fkaw'), fkoff: get('fkoff'),
@@ -692,6 +696,7 @@ function syncURL() {
       ss('smrinv', spaceMouseHyperscopeRotateInvert, PARAM_DEFAULTS.smrinv);
       ss('smbpinv', spaceMouseBlenderPanInvert, PARAM_DEFAULTS.smbpinv);
       ss('smbrinv', spaceMouseBlenderRotateInvert, PARAM_DEFAULTS.smbrinv);
+      ss('interp', focusTransitionCentiseconds, PARAM_DEFAULTS.interp);
     } catch { /* signals not yet initialized */ }
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
@@ -728,6 +733,7 @@ let drag = false, lx = 0, ly = 0;
 
 const spaceMouseMove = signal(300, 'smmove');
 const spaceMouseRotate = signal(300, 'smrotate');
+const focusTransitionCentiseconds = signal(70, 'interp');
 const spaceMouseNavigation = signal('hyperscope', 'smnav');
 const spaceMouseLockHorizon = signal(true, 'smlock');
 const spaceMouseSwapYZ = signal(false, 'smswap');
@@ -737,6 +743,8 @@ const spaceMouseBlenderPanInvert = signal(0, 'smbpinv');
 const spaceMouseBlenderRotateInvert = signal(0, 'smbrinv');
 bindSlider('spacemouse-move', spaceMouseMove, value => (value / 100).toFixed(2));
 bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed(2));
+bindSlider('focus-transition', focusTransitionCentiseconds,
+  value => `${(value / 100).toFixed(2)} s`);
 const spaceMouseNavigationSelect = $('spacemouse-navigation');
 spaceMouseNavigationSelect.addEventListener('change', () => {
   spaceMouseNavigation.set(spaceMouseNavigationSelect.value);
@@ -772,6 +780,7 @@ effect(() => {
   spaceMouseHyperscopeRotateInvert.get();
   spaceMouseBlenderPanInvert.get();
   spaceMouseBlenderRotateInvert.get();
+  focusTransitionCentiseconds.get();
   syncURL();
 });
 const spaceMouseStatus = $('spacemouse-status');
@@ -1183,7 +1192,7 @@ function anchorFocusSphereToSelection(nowMs = performance.now()) {
     start: { center: focusSphere.center.slice(), radius: focusSphere.radius },
     target,
     startedAt: nowMs,
-    durationMs: FOCUS_SPHERE_FIT_DURATION_MS,
+    durationMs: focusTransitionCentiseconds.peek() * 10,
     node: selectedObject.node,
   };
   return true;
@@ -1222,7 +1231,7 @@ function beginObjectPivotFocus(target, nowMs = performance.now()) {
     start: [panX, panY, panZ],
     target: target.slice(),
     startedAt: nowMs,
-    durationMs: 450,
+    durationMs: focusTransitionCentiseconds.peek() * 10,
   };
 }
 
@@ -1239,7 +1248,7 @@ function reframeSelectedObject(nowMs = performance.now()) {
       canvas.width / Math.max(canvas.height, 1),
     ))),
     startedAt: nowMs,
-    durationMs: 650,
+    durationMs: focusTransitionCentiseconds.peek() * 10,
     frameSelection: true,
     completionLabel: `Reframed node ${selectedObject.node}`,
   };
@@ -1467,7 +1476,6 @@ function computeMobius(type, cx, cy, cz, r) {
 let currentMobius = null;
 let previousManualReflection = null;
 const FOCUS_SPHERE_MARGIN = 1.10;
-const FOCUS_SPHERE_FIT_DURATION_MS = 700;
 
 function manualReflectionState(type, center, radius) {
   return type === 'sphere_reflection' && radius > 0.01
@@ -2056,6 +2064,7 @@ applyParams = function(params) {
   spaceMouseHyperscopeRotateInvert.set(integer(params.smrinv, 1, 0, 7));
   spaceMouseBlenderPanInvert.set(integer(params.smbpinv, 0, 0, 7));
   spaceMouseBlenderRotateInvert.set(integer(params.smbrinv, 0, 0, 7));
+  focusTransitionCentiseconds.set(integer(params.interp, 70, 5, 500));
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
   fz.radius.set(integer(params.fradius, 11, 4, 128));

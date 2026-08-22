@@ -50,6 +50,7 @@ variable-blur passes.
 | Shift + `F` + wheel | Edit angular aperture | Same |
 | Ctrl/Meta + `F` + wheel | Edit blur radius | Same |
 | Escape / empty click | Detach selection and retain sphere | No reset |
+| Focus/navigation transition slider | Set fit/reframe duration from 0.05–5.00 seconds in 0.01-second increments | Same |
 
 Mouse selection uses a four-pixel drag threshold so an orbit gesture cannot
 become a pick on release. Device mappings are prototype adapters, not domain
