@@ -1610,6 +1610,9 @@ function frame(ts) {
       $('time-v').textContent = animTime.toFixed(2);
     }
     tickAnimation(animTime);
+    // Keep LOD tracking the animated pose. The scheduler retains at most one
+    // in-flight GPU job plus one coalesced follow-up for the newest frame.
+    debouncedLodRecompute();
   }
 
   const ex = authoredCamera ? authoredCamera.eye[0] : zoom*Math.sin(rotY)*Math.cos(rotX)+panX;

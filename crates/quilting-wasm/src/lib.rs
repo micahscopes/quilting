@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
-use quilting_renderer::compute::LodCompute;
+use quilting_renderer::compute::{LodCompute, StagedLodReadback};
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
@@ -12,6 +12,7 @@ use quilting_core::triangle;
 use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use glow::HasContext;
 
 /// Performance.mark/measure helper for profiling in Chrome DevTools.
 /// Works in both Window and Worker contexts.
@@ -67,9 +68,21 @@ struct StoredGltfData {
     norm_scale: f64,
 }
 
+struct PendingLodRun {
+    subject_node: Option<usize>,
+    readback: StagedLodReadback,
+}
+
+struct PendingAnimatedLods {
+    fence: glow::Fence,
+    runs: Vec<PendingLodRun>,
+    face_nodes: Vec<usize>,
+}
+
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
+    static PENDING_ANIMATED_LODS: RefCell<Option<PendingAnimatedLods>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
@@ -365,25 +378,23 @@ pub fn debug_gpu_compute_state() -> String {
     })
 }
 
-/// Per-frame GPU LOD computation with edge coherence reconciliation.
+/// Dispatch per-frame GPU LOD computation without waiting for readback.
 ///
 /// 1. Evaluates animation (morph + skeletal) at time t
 /// 2. Uploads joint matrices + morph weights to worker GPU
 /// 3. Runs transform feedback LOD compute (Möbius + medians + snap)
-/// 4. Reads back raw (atlas_index, perm_index) per face
-/// 5. Inverts permutation to recover unsorted per-edge LODs
-/// 6. Enforces edge coherence via half-edge mesh (max across shared edges)
-/// 7. Re-canonicalizes to (canonical_lod, perm_index, parity) per face
+/// 4. Copies each baseline/per-subject result into GPU staging
+/// 5. Inserts one fence after all staged copies
 ///
 /// `subject_states` is a packed sequence of
 /// `[node_index, mobius(16), euclidean_model(16)]` records. When present, each
 /// node's faces are classified with their own extracted subject/view state.
 ///
-/// Returns Float32Array with 6 floats per face:
-/// `[canon_a, canon_b, canon_c, perm_index, parity, atlas_index]`.
-/// Uses mesh_radius computed at upload time (not hardcoded).
+/// Returns true when a job was dispatched. Call [`poll_animated_lods`] until
+/// it returns a completed Float32Array. Uses mesh_radius computed at upload
+/// time (not hardcoded).
 #[wasm_bindgen]
-pub fn compute_animated_lods(
+pub fn dispatch_animated_lods(
     t: f64,
     mobius: &[f32],
     subject_states: &[f32],
@@ -392,15 +403,18 @@ pub fn compute_animated_lods(
     vp_matrix: &[f32],
     vp_width: f32,
     vp_height: f32,
-) -> JsValue {
+) -> bool {
+    if PENDING_ANIMATED_LODS.with(|pending| pending.borrow().is_some()) {
+        return false;
+    }
     GLTF_DATA.with(|gd| {
         let data = match gd.try_borrow() {
             Ok(d) => d,
-            Err(_) => return JsValue::NULL, // concurrent borrow during model load
+            Err(_) => return false, // concurrent borrow during model load
         };
         let data = match data.as_ref() {
             Some(d) => d,
-            None => return JsValue::NULL,
+            None => return false,
         };
 
         let num_faces = data.combined.triangles.len();
@@ -479,13 +493,13 @@ pub fn compute_animated_lods(
         perf_mark("lod-anim-eval-end");
         perf_measure("lod-anim-eval", "lod-anim-eval-start", "lod-anim-eval-end");
 
-        // 2-3. GPU compute
+        // 2-5. GPU compute, staging copies, and fence insertion.
         perf_mark("lod-gpu-compute-start");
-        let gpu_class = GPU_COMPUTE.with(|gc| {
+        let pending_job = GPU_COMPUTE.with(|gc| {
             let mut gc = gc.borrow_mut();
             let (gl, compute) = match gc.as_mut() {
                 Some(pair) => pair,
-                None => return vec![],
+                None => return None,
             };
 
             perf_mark("lod-gpu-pose-upload-start");
@@ -520,7 +534,11 @@ pub fn compute_animated_lods(
                 0.0, 0.0, 0.0, 0.0,
                 1.0, 0.0, 0.0, 0.0,
             ];
-            let mut run = |transform: [f32; 16], model: [f32; 16]| {
+            let mut run = |
+                subject_node: Option<usize>,
+                transform: [f32; 16],
+                model: [f32; 16],
+            | -> Result<PendingLodRun, String> {
                 // Derive the conformal pole and power used by the interior-complete
                 // LOD estimate. The transform is packed as quaternion a, b, c, d.
                 let q = |offset: usize| Quat::new(
@@ -550,58 +568,169 @@ pub fn compute_animated_lods(
                 perf_mark("lod-gpu-dispatch-end");
                 perf_measure("lod-gpu-dispatch", "lod-gpu-dispatch-start", "lod-gpu-dispatch-end");
 
-                perf_mark("lod-gpu-readback-start");
-                let result = compute.read_back(gl, n);
-                perf_mark("lod-gpu-readback-end");
-                perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
-                result
+                if n == 0 {
+                    return Err("LOD dispatch returned no faces".to_string());
+                }
+                perf_mark("lod-gpu-stage-start");
+                let readback = compute.stage_readback(gl, n)?;
+                perf_mark("lod-gpu-stage-end");
+                perf_measure("lod-gpu-stage", "lod-gpu-stage-start", "lod-gpu-stage-end");
+                Ok(PendingLodRun { subject_node, readback })
             };
             let baseline = if extracted_states.is_empty() {
                 legacy_mobius
             } else {
                 identity_mobius
             };
-            let mut result = run(baseline, identity);
+            let mut runs = Vec::with_capacity(extracted_states.len() + 1);
+            let mut dispatch_error = None;
+            match run(None, baseline, identity) {
+                Ok(staged) => runs.push(staged),
+                Err(error) => dispatch_error = Some(error),
+            }
             for (node, transform, model) in &extracted_states {
-                let classified = run(*transform, *model);
-                if classified.len() != result.len() {
-                    continue;
+                if dispatch_error.is_some() {
+                    break;
                 }
-                for (face, &face_node) in data.face_node_indices.iter().enumerate() {
-                    if face_node == *node {
-                        let offset = face * batch::FACE_LOD_STRIDE;
-                        let end = offset + batch::FACE_LOD_STRIDE;
-                        if end <= result.len() {
-                            result[offset..end].copy_from_slice(&classified[offset..end]);
-                        }
-                    }
+                match run(Some(*node), *transform, *model) {
+                    Ok(staged) => runs.push(staged),
+                    Err(error) => dispatch_error = Some(error),
                 }
             }
-            result
+            drop(run);
+
+            if let Some(error) = dispatch_error {
+                web_sys::console::warn_1(&format!("LOD dispatch failed: {error}").into());
+                for run in runs {
+                    compute.discard_staged_readback(gl, run.readback);
+                }
+                return None;
+            }
+
+            let fence = match unsafe { gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) } {
+                Ok(fence) => fence,
+                Err(error) => {
+                    web_sys::console::warn_1(&format!("LOD fence creation failed: {error}").into());
+                    for run in runs {
+                        compute.discard_staged_readback(gl, run.readback);
+                    }
+                    return None;
+                }
+            };
+            perf_mark("lod-gpu-wait-start");
+            unsafe { gl.flush(); }
+            Some(PendingAnimatedLods {
+                fence,
+                runs,
+                face_nodes: data.face_node_indices.clone(),
+            })
         });
         perf_mark("lod-gpu-compute-end");
         perf_measure("lod-gpu-compute", "lod-gpu-compute-start", "lod-gpu-compute-end");
 
-        if gpu_class.is_empty() {
+        let Some(pending_job) = pending_job else {
             web_sys::console::warn_1(&format!(
-                "LOD compute returned empty: faces={} verts={}",
+                "LOD dispatch returned empty: faces={} verts={}",
                 num_faces, num_vertices
             ).into());
+            return false;
+        };
+
+        PENDING_ANIMATED_LODS.with(|pending| *pending.borrow_mut() = Some(pending_job));
+        true
+    })
+}
+
+/// Poll the current LOD job without blocking.
+///
+/// Returns `undefined` while the fence is unsignaled, `null` on failure or
+/// when no job exists, and a six-float-per-face `Float32Array` when ready.
+#[wasm_bindgen]
+pub fn poll_animated_lods() -> JsValue {
+    let fence = match PENDING_ANIMATED_LODS.with(|pending| {
+        pending.borrow().as_ref().map(|job| job.fence)
+    }) {
+        Some(fence) => fence,
+        None => return JsValue::NULL,
+    };
+
+    GPU_COMPUTE.with(|gc| {
+        let mut gc = gc.borrow_mut();
+        let (gl, compute) = match gc.as_mut() {
+            Some(pair) => pair,
+            None => return JsValue::NULL,
+        };
+        let status = unsafe { gl.client_wait_sync(fence, 0, 0) };
+        if status == glow::TIMEOUT_EXPIRED
+            || (status != glow::ALREADY_SIGNALED
+                && status != glow::CONDITION_SATISFIED
+                && status != glow::WAIT_FAILED)
+        {
+            return JsValue::UNDEFINED;
+        }
+
+        let Some(job) = PENDING_ANIMATED_LODS.with(|pending| pending.borrow_mut().take()) else {
+            return JsValue::NULL;
+        };
+        unsafe { gl.delete_sync(job.fence); }
+        if status == glow::WAIT_FAILED {
+            for run in job.runs {
+                compute.discard_staged_readback(gl, run.readback);
+            }
+            web_sys::console::warn_1(&"LOD fence wait failed".into());
             return JsValue::NULL;
         }
 
-        // GPU pass 2 already did edge coherence + canonicalize + atlas LUT.
-        // Output is 6 floats per face:
-        // (canon_a, canon_b, canon_c, perm_index, parity, atlas_index)
-        // — directly consumable by group_into_batches.
-
+        perf_mark("lod-gpu-wait-end");
+        perf_measure("lod-gpu-wait", "lod-gpu-wait-start", "lod-gpu-wait-end");
+        perf_mark("lod-gpu-readback-start");
+        let mut runs = job.runs.into_iter();
+        let Some(baseline) = runs.next() else {
+            return JsValue::NULL;
+        };
+        let mut gpu_class = compute.finish_staged_readback(gl, baseline.readback);
+        for run in runs {
+            let classified = compute.finish_staged_readback(gl, run.readback);
+            if classified.len() != gpu_class.len() {
+                continue;
+            }
+            let Some(node) = run.subject_node else { continue };
+            for (face, &face_node) in job.face_nodes.iter().enumerate() {
+                if face_node == node {
+                    let offset = face * batch::FACE_LOD_STRIDE;
+                    let end = offset + batch::FACE_LOD_STRIDE;
+                    if end <= gpu_class.len() {
+                        gpu_class[offset..end].copy_from_slice(&classified[offset..end]);
+                    }
+                }
+            }
+        }
+        perf_mark("lod-gpu-readback-end");
+        perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
         perf_mark("lod-wasm-end");
         perf_measure("lod-wasm-total", "lod-wasm-start", "lod-wasm-end");
 
-        let arr = js_sys::Float32Array::new_with_length(gpu_class.len() as u32);
-        arr.copy_from(&gpu_class);
-        arr.into()
+        let array = js_sys::Float32Array::new_with_length(gpu_class.len() as u32);
+        array.copy_from(&gpu_class);
+        array.into()
     })
+}
+
+/// Cancel and release a pending asynchronous LOD job, if any.
+#[wasm_bindgen]
+pub fn cancel_animated_lods() -> bool {
+    let Some(job) = PENDING_ANIMATED_LODS.with(|pending| pending.borrow_mut().take()) else {
+        return false;
+    };
+    GPU_COMPUTE.with(|gc| {
+        if let Some((gl, compute)) = gc.borrow_mut().as_mut() {
+            unsafe { gl.delete_sync(job.fence); }
+            for run in job.runs {
+                compute.discard_staged_readback(gl, run.readback);
+            }
+        }
+    });
+    true
 }
 
 /// Set tessellation parameters.

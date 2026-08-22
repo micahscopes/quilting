@@ -49,6 +49,9 @@ struct MainState {
     /// asynchronous, so an invisible sentinel must not demote a patch that the
     /// current-pose render GPU may need to resurrect in the same frame.
     resident_face_lods: Vec<Option<batch::ResidentLod>>,
+    /// Material/node/atlas changes require a rebuild even when face topology
+    /// classifications are unchanged.
+    batch_layout_dirty: bool,
     persistent_buf: Option<PersistentInstances>,
     face_materials: Vec<usize>,
     /// Stable ordinary glTF node index for each source triangle.
@@ -258,6 +261,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             batches: Vec::new(),
             cached_instances: Vec::new(),
             resident_face_lods: Vec::new(),
+            batch_layout_dirty: true,
             persistent_buf: None,
             face_materials: Vec::new(),
             face_nodes: Vec::new(),
@@ -936,6 +940,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces as usize;
             st.resident_face_lods = vec![None; st.num_faces];
+            st.batch_layout_dirty = true;
             if st.face_nodes.len() != st.num_faces {
                 st.face_nodes = vec![0; st.num_faces];
             }
@@ -948,6 +953,7 @@ pub fn mr_set_face_materials(materials: &[i32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.face_materials = materials.iter().map(|&m| if m >= 0 { m as usize } else { 0 }).collect();
+            st.batch_layout_dirty = true;
         }
     });
 }
@@ -960,6 +966,7 @@ pub fn mr_set_face_nodes(nodes: &[i32]) {
                 .iter()
                 .map(|&node| if node >= 0 { node as usize } else { 0 })
                 .collect();
+            renderer.batch_layout_dirty = true;
         }
     });
 }
@@ -1002,6 +1009,7 @@ pub fn mr_upload_tess_atlas(
         for batch in state.batches.drain(..) {
             batch.destroy(state.renderer.gl());
         }
+        state.batch_layout_dirty = true;
         TESS_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.clear();
@@ -1259,13 +1267,6 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let state = match state.as_mut() { Some(s) => s, None => return };
         let gl = state.renderer.gl();
 
-        perf_mark("batch-destroy-start");
-        for b in state.batches.drain(..) {
-            b.destroy(gl);
-        }
-        perf_mark("batch-destroy-end");
-        perf_measure("batch-destroy-old", "batch-destroy-start", "batch-destroy-end");
-
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
         perf_mark("batch-group-start");
         let nf = state.num_faces;
@@ -1307,6 +1308,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         };
         let mut buckets: BTreeMap<([u32; 3], usize, usize, usize), Vec<u32>> = BTreeMap::new();
         let mut culled = 0usize;
+        let mut topology_changed = state.batch_layout_dirty;
         for fi in 0..nf {
             let lo = fi * batch::FACE_LOD_STRIDE;
             if lo + 5 >= face_lods.len() { break; }
@@ -1314,18 +1316,31 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             if !cpu_visible {
                 culled += 1;
             }
+            let previous = state.resident_face_lods[fi];
             let resident = batch::retain_face_lod(
                 face_lods,
                 fi,
                 &mut state.resident_face_lods[fi],
                 initial_resident,
             );
+            topology_changed |= previous != Some(resident);
             let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
             let node = state.face_nodes.get(fi).copied().unwrap_or(0);
             buckets.entry((resident.canonical, resident.parity_bucket, mat, node)).or_default().push(fi as u32);
         }
         perf_mark("batch-group-end");
         perf_measure("batch-group", "batch-group-start", "batch-group-end");
+
+        if !topology_changed {
+            return;
+        }
+
+        perf_mark("batch-destroy-start");
+        for batch in state.batches.drain(..) {
+            batch.destroy(gl);
+        }
+        perf_mark("batch-destroy-end");
+        perf_measure("batch-destroy-old", "batch-destroy-start", "batch-destroy-end");
 
         // Phase 2: write each batch's instance data contiguously into the persistent GPU buffer
         // and create lightweight VAOs pointing at the right offset
@@ -1472,6 +1487,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
             built, culled, missing, failed, mat_counts, node_counts
         );
+        state.batch_layout_dirty = missing != 0 || failed != 0;
     });
 }
 

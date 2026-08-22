@@ -25,6 +25,14 @@ pub const FLOATS_PER_FACE_PASS1: usize = 4;
 /// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) = 6 floats per face.
 pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
 
+/// GPU-side copy of a completed LOD transform-feedback output. The worker can
+/// fence after staging one or more runs, poll without blocking, then read only
+/// once the shared fence is signaled.
+pub struct StagedLodReadback {
+    buffer: glow::Buffer,
+    num_faces: usize,
+}
+
 const LOD_COMPUTE_VS: &str = include_str!("../shaders/lod_compute.vert.glsl");
 const LOD_COMPUTE_FS: &str = include_str!("../shaders/lod_compute.frag.glsl");
 const LOD_COHERENCE_VS: &str = include_str!("../shaders/lod_coherence.vert.glsl");
@@ -615,17 +623,61 @@ impl LodCompute {
         n
     }
 
-    /// Read back final LOD results (pass 2 output). 6 floats per face.
-    pub fn read_back(&self, gl: &glow::Context, num_faces: usize) -> Vec<f32> {
+    /// Copy the latest transform-feedback result into an independent GPU
+    /// staging buffer. This is GPU-to-GPU and does not wait for completion.
+    pub fn stage_readback(
+        &self,
+        gl: &glow::Context,
+        num_faces: usize,
+    ) -> Result<StagedLodReadback, String> {
         let n = num_faces.min(self.max_faces);
-        let size = n * FLOATS_PER_FACE_OUTPUT;
-        let mut result = vec![0.0f32; size];
+        let byte_size = n
+            .checked_mul(FLOATS_PER_FACE_OUTPUT)
+            .and_then(|size| size.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| "LOD staging buffer size overflow".to_string())?;
+        let byte_size = i32::try_from(byte_size)
+            .map_err(|_| "LOD staging buffer exceeds WebGL2 limits".to_string())?;
         unsafe {
-            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(self.output_buf2));
-            gl.get_buffer_sub_data(glow::TRANSFORM_FEEDBACK_BUFFER, 0,
-                bytemuck_cast_slice_mut(&mut result));
+            let buffer = gl.create_buffer().map_err(|error| format!("LOD staging buffer: {error}"))?;
+            gl.bind_buffer(glow::COPY_READ_BUFFER, Some(self.output_buf2));
+            gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer));
+            gl.buffer_data_size(glow::COPY_WRITE_BUFFER, byte_size, glow::STREAM_READ);
+            gl.copy_buffer_sub_data(
+                glow::COPY_READ_BUFFER,
+                glow::COPY_WRITE_BUFFER,
+                0,
+                0,
+                byte_size,
+            );
+            gl.bind_buffer(glow::COPY_READ_BUFFER, None);
+            gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
+            Ok(StagedLodReadback { buffer, num_faces: n })
+        }
+    }
+
+    /// Read and destroy a staging buffer after its fence has signaled.
+    pub fn finish_staged_readback(
+        &self,
+        gl: &glow::Context,
+        staged: StagedLodReadback,
+    ) -> Vec<f32> {
+        let mut result = vec![0.0f32; staged.num_faces * FLOATS_PER_FACE_OUTPUT];
+        unsafe {
+            gl.bind_buffer(glow::COPY_READ_BUFFER, Some(staged.buffer));
+            gl.get_buffer_sub_data(
+                glow::COPY_READ_BUFFER,
+                0,
+                bytemuck_cast_slice_mut(&mut result),
+            );
+            gl.bind_buffer(glow::COPY_READ_BUFFER, None);
+            gl.delete_buffer(staged.buffer);
         }
         result
+    }
+
+    /// Destroy a staged result that will not be consumed.
+    pub fn discard_staged_readback(&self, gl: &glow::Context, staged: StagedLodReadback) {
+        unsafe { gl.delete_buffer(staged.buffer); }
     }
 
     pub fn destroy(&self, gl: &glow::Context) {

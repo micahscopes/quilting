@@ -1,6 +1,7 @@
 // Hyperscope Worker: loads WASM, handles glTF loading, animation evaluation, and atlas management.
 
 let wasm = null;
+let lodJobGeneration = 0;
 
 self.onmessage = async function(e) {
   const { type, data, id } = e.data;
@@ -84,6 +85,8 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'load_gltf_data') {
+    lodJobGeneration += 1;
+    wasm.cancel_animated_lods();
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
     // Decode raw image blobs using browser-native decoders (parallel, fast)
     if (result && result.textures && result.textures.length > 0) {
@@ -128,6 +131,8 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'set_active_animation') {
+    lodJobGeneration += 1;
+    wasm.cancel_animated_lods();
     const result = wasm.set_active_animation(data.index);
     self.postMessage({ type: 'animation_switched', id, result });
     return;
@@ -169,6 +174,8 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'compute_animated_lods') {
+    const generation = ++lodJobGeneration;
+    wasm.cancel_animated_lods();
     const { t, mobius, subjectStates, density, minPx, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub, skipAnimation } = data;
     const wt0 = performance.now();
     // Set tess params before compute
@@ -177,9 +184,9 @@ self.onmessage = async function(e) {
       if (minPxSub != null) wasm.set_min_px_per_sub(minPxSub);
     }
     const wt1 = performance.now();
-    let result;
+    let dispatched = false;
     try {
-      result = wasm.compute_animated_lods(
+      dispatched = wasm.dispatch_animated_lods(
         skipAnimation ? -1.0 : t,  // t < 0 signals: skip animation, use rest pose
         new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
         new Float32Array(subjectStates || []),
@@ -190,48 +197,63 @@ self.onmessage = async function(e) {
         vpHeight || 0,
       );
     } catch (e) {
-      result = null;
-      console.error('compute_animated_lods threw:', e.message, e.stack);
+      console.error('dispatch_animated_lods threw:', e.message, e.stack);
     }
-    if (result === null || result === undefined) {
-      console.warn('compute_animated_lods returned null/undefined');
-    } else {
-      console.log('compute_animated_lods returned', result.length, 'floats');
+    if (!dispatched) {
+      self.postMessage({ type: 'animated_lods', id, lods: null,
+        timing: { tess_params: wt1-wt0, wasm_total: performance.now()-wt1 },
+        debug: { dispatchFailed: true } });
+      return;
     }
-    const wt2 = performance.now();
-    // Grab WASM-side perf measures (they land in worker's performance context)
-    const wasmMeasures = {};
-    for (const m of performance.getEntriesByType('measure')) {
-      if (m.name.startsWith('lod-')) {
-        if (!wasmMeasures[m.name]) wasmMeasures[m.name] = [];
-        wasmMeasures[m.name].push(Math.round(m.duration * 100) / 100);
+
+    const poll = () => {
+      if (generation !== lodJobGeneration) {
+        self.postMessage({ type: 'animated_lods', id, lods: null,
+          timing: { tess_params: wt1-wt0, wasm_total: performance.now()-wt1 },
+          debug: { canceled: true } });
+        return;
       }
-    }
-    performance.clearMeasures();
-    performance.clearMarks();
-    const timing = { tess_params: wt1-wt0, wasm_total: wt2-wt1, wasm_phases: wasmMeasures };
-    if (result && result.length > 0) {
-      // Debug: sample a few values before transferring buffer
-      const dbgSamples = [];
-      for (const fi of [0, 1, Math.floor(result.length/12), Math.floor(result.length/6)-1]) {
-        const o = fi * 6;
-        if (o+5 < result.length) dbgSamples.push(`f${fi}=[${result[o]},${result[o+1]},${result[o+2]} p${result[o+3]} par${result[o+4]} a${result[o+5]}]`);
+      let result;
+      try {
+        result = wasm.poll_animated_lods();
+      } catch (e) {
+        result = null;
+        console.error('poll_animated_lods threw:', e.message, e.stack);
       }
-      timing.dbgSamples = dbgSamples.join(', ');
-      try { timing.gpuState = wasm.debug_gpu_compute_state(); } catch(e) {}
-      self.postMessage({ type: 'animated_lods', id, lods: result, timing }, [result.buffer]);
-    } else {
-      // Surface worker-side console messages for debugging
-      const workerLogs = [];
+      if (result === undefined) {
+        setTimeout(poll, 1);
+        return;
+      }
+
+      const wt2 = performance.now();
+      // Grab WASM-side perf measures (they land in worker's performance context)
+      const wasmMeasures = {};
       for (const m of performance.getEntriesByType('measure')) {
-        if (m.name.startsWith('INFO') || m.name.startsWith('LOD')) workerLogs.push(m.name);
+        if (m.name.startsWith('lod-')) {
+          if (!wasmMeasures[m.name]) wasmMeasures[m.name] = [];
+          wasmMeasures[m.name].push(Math.round(m.duration * 100) / 100);
+        }
       }
-      // Also try to check GPU compute state
-      let gpuState = 'unknown';
-      try { gpuState = wasm.debug_gpu_compute_state ? wasm.debug_gpu_compute_state() : 'no debug fn'; } catch(e) { gpuState = e.message; }
-      self.postMessage({ type: 'animated_lods', id, lods: null, timing,
-        debug: { resultType: typeof result, resultNull: result === null, workerLogs, gpuState, wt: wt2-wt1 } });
-    }
+      performance.clearMeasures();
+      performance.clearMarks();
+      const timing = { tess_params: wt1-wt0, wasm_total: wt2-wt1, wasm_phases: wasmMeasures };
+      if (result && result.length > 0) {
+        const dbgSamples = [];
+        for (const fi of [0, 1, Math.floor(result.length/12), Math.floor(result.length/6)-1]) {
+          const o = fi * 6;
+          if (o+5 < result.length) dbgSamples.push(`f${fi}=[${result[o]},${result[o+1]},${result[o+2]} p${result[o+3]} par${result[o+4]} a${result[o+5]}]`);
+        }
+        timing.dbgSamples = dbgSamples.join(', ');
+        try { timing.gpuState = wasm.debug_gpu_compute_state(); } catch(e) {}
+        self.postMessage({ type: 'animated_lods', id, lods: result, timing }, [result.buffer]);
+      } else {
+        let gpuState = 'unknown';
+        try { gpuState = wasm.debug_gpu_compute_state ? wasm.debug_gpu_compute_state() : 'no debug fn'; } catch(e) { gpuState = e.message; }
+        self.postMessage({ type: 'animated_lods', id, lods: null, timing,
+          debug: { resultType: typeof result, resultNull: result === null, gpuState, wt: wt2-wt1 } });
+      }
+    };
+    setTimeout(poll, 0);
     return;
   }
 
