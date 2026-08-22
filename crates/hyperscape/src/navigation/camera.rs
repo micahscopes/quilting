@@ -301,9 +301,6 @@ impl CameraRig {
         let pivot = self.view_target();
         if horizon_locked {
             self.rotate_horizon_locked(rotation[0], rotation[1])?;
-            if rotation[2].abs() > EPSILON {
-                self.rotate_local([0.0, 0.0, rotation[2]])?;
-            }
         } else {
             self.rotate_local(rotation)?;
         }
@@ -755,6 +752,24 @@ mod tests {
             .unwrap();
         assert_point_close(orbit.view_target(), pivot);
         assert!((orbit.control_distance - 3.0 * 0.25_f64.exp()).abs() < EPS);
+    }
+
+    #[test]
+    fn horizon_locked_object_mode_suppresses_roll() {
+        let mut orbit = CameraRig::default();
+        orbit
+            .apply_navigation(
+                NavigationPreset::Object,
+                NavigationFrame {
+                    rotation: [0.0, 0.0, 0.5],
+                    horizon_locked: true,
+                    ..NavigationFrame::default()
+                },
+            )
+            .unwrap();
+        assert_point_close(orbit.basis().right, [1.0, 0.0, 0.0]);
+        assert_point_close(orbit.basis().up, [0.0, 1.0, 0.0]);
+        assert_point_close(orbit.basis().forward, [0.0, 0.0, -1.0]);
     }
 
     #[test]

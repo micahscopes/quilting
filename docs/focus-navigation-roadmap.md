@@ -5,9 +5,11 @@ The release-oriented ownership and migration contract is maintained in
 This document remains the detailed behavior oracle for focus and navigation.
 
 Status: the browser prototype is functional, the render contract is GPU-side,
-and the backend-neutral state has been introduced as
-`hyperscape::FocusNavigation`. The prototype remains the behavior oracle while
-ownership moves from `hyperscope.html` into deterministic Rust systems.
+and `hyperscape` now owns `FocusNavigation`, quaternion `CameraRig`, named
+navigation policies, sequence/timestamp-ordered `NavigationAction`s, and
+deterministic camera/focus transitions. The prototype remains the behavior
+oracle while the opt-in WASM shadow path measures parity before authority is
+removed from `hyperscope.html`.
 
 ## One sphere, several meanings
 
@@ -81,10 +83,10 @@ device adapter -> semantic interaction actions -> FocusNavigation + CameraRig
               -> Hyperscope extraction -> WebGL2 or WebGPU backend
 ```
 
-`hyperscape::FocusNavigation` already owns the sphere, optional entity anchor,
+`hyperscape::FocusNavigation` owns the sphere, optional entity anchor,
 transition, focus/inversion enablement, constrained/free translation, and
-radius policy. The remaining semantic action layer should contain commands
-such as:
+radius policy. `NavigationController` and the ECS plugin consume semantic
+actions such as:
 
 - `Select { entity, source_bound }` and `DetachSelection`;
 - `TranslateFocus`, `ScaleFocus`, `SetFocalShell`, and `SetAngularAperture`;
@@ -103,21 +105,25 @@ or sphere state.
 
 1. **State core — complete.** Keep the tested `FocusNavigation` resource and
    GPU focus-field contract backend-neutral.
-2. **WASM bridge.** Map stable glTF node identities to Hyperscape entities,
-   send pick results as semantic selection actions, tick sphere transitions in
-   Rust, and extract one compact focus packet per view. Remove the duplicate
-   JavaScript transition after parity tests pass.
-3. **Camera rig.** Move 6-DoF quaternion camera orientation, conformal camera
-   transport, pivot/orbit focus, scale-relative translation, and reframing into
-   a Rust `CameraRig`. Preserve Hyperscope Fly and Blender-compatible policies
-   as named action mappings.
-4. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
+2. **Camera/action core — complete.** Rust owns the quaternion camera,
+   inversion transport, four navigation policies, explicit easing, virtual
+   time, and frame-rate-independent action replay.
+3. **WASM shadow bridge — active.** `HyperscopeNavigation` exposes the shared
+   controller without a Bevy `App`. Add `navshadow=1` to a Hyperscope URL to
+   mirror SpaceMouse camera actions and inspect
+   `globalThis.__hyperscopeNavigationShadow`. Drift is recorded without
+   changing the rendered camera. Remove duplicate JavaScript authority only
+   after representative all-mode, all-scale parity runs are clean.
+4. **Selection bridge.** Map stable glTF node identities to Hyperscape
+   entities, send pick results as semantic selection actions, tick sphere
+   transitions in Rust, and extract one compact focus packet per view.
+5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-5. **Persistence and replay.** Serialize stable entity references, detached
+6. **Persistence and replay.** Serialize stable entity references, detached
    spheres, camera rig state, and high-level action streams. Network semantic
    actions or authoritative state deltas, never raw HID reports.
-6. **WebGPU backend.** Upload the extracted focus packet as frame/view data,
+7. **WebGPU backend.** Upload the extracted focus packet as frame/view data,
    classify the field in WGSL, and retain the same weight-channel meaning. GPU
    visibility compaction and indirect draws remain independent of interaction
    ownership.

@@ -256,6 +256,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 <button id="sidebar-toggle">▶</button>
 <script type="module">
 import init, {
+  HyperscopeNavigation,
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
@@ -293,6 +294,9 @@ import {
 } from './hyperscope_focus.mjs?rev=conformal-camera-transport-v1';
 
 const $ = id => document.getElementById(id);
+const RUST_NAVIGATION_SHADOW_ENABLED =
+  new URLSearchParams(location.search).get('navshadow') === '1';
+const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 
 // ============================================================
 // Signal system and asynchronous lifecycle gates.
@@ -706,6 +710,7 @@ function syncURL() {
     set('px', panX.toFixed(3), parseFloat(PARAM_DEFAULTS.px).toFixed(3));
     set('py', panY.toFixed(3), parseFloat(PARAM_DEFAULTS.py).toFixed(3));
     set('pz', panZ.toFixed(3), parseFloat(PARAM_DEFAULTS.pz).toFixed(3));
+    if (RUST_NAVIGATION_SHADOW_ENABLED) p.set('navshadow', '1');
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -1001,6 +1006,143 @@ const spaceMouseNavigationOptions = {
   invertPan: 0,
   invertRotate: 0,
 };
+
+let rustNavigationShadow = null;
+let rustNavigationShadowSnapshot = null;
+let rustNavigationShadowCameraActive = false;
+const rustNavigationShadowDiagnostics = {
+  enabled: RUST_NAVIGATION_SHADOW_ENABLED,
+  ready: false,
+  samples: 0,
+  resynchronizations: 0,
+  driftFrames: 0,
+  maxError: 0,
+  lastError: 0,
+  lastDrift: null,
+  error: null,
+};
+globalThis.__hyperscopeNavigationShadow = rustNavigationShadowDiagnostics;
+
+function manualNavigationState() {
+  const basis = manualCameraBasisState;
+  return {
+    eye: [
+      panX - basis[6] * zoom,
+      panY - basis[7] * zoom,
+      panZ - basis[8] * zoom,
+    ],
+    target: [panX, panY, panZ],
+    right: [basis[0], basis[1], basis[2]],
+    up: [basis[3], basis[4], basis[5]],
+    forward: [basis[6], basis[7], basis[8]],
+    controlDistance: zoom,
+    focusCenter: focusSphere.center,
+    focusRadius: focusSphere.radius,
+    focusEnabled: focusSphere.active,
+    inversionEnabled: mob.xform.peek() === 'sphere_reflection',
+  };
+}
+
+function navigationShadowError(snapshot, state = manualNavigationState()) {
+  if (!snapshot?.camera || !snapshot?.focus) return Infinity;
+  let error = Math.abs(snapshot.camera.control_distance - state.controlDistance);
+  const compare = (actual, expected) => {
+    if (!actual || actual.length !== expected.length) {
+      error = Infinity;
+      return;
+    }
+    for (let axis = 0; axis < expected.length; axis++) {
+      error = Math.max(error, Math.abs(actual[axis] - expected[axis]));
+    }
+  };
+  compare(snapshot.camera.eye, state.eye);
+  compare(snapshot.camera.semantic_target, state.target);
+  compare(snapshot.camera.right, state.right);
+  compare(snapshot.camera.up, state.up);
+  compare(snapshot.camera.forward, state.forward);
+  compare(snapshot.focus.center, state.focusCenter);
+  error = Math.max(error, Math.abs(snapshot.focus.radius - state.focusRadius));
+  if (snapshot.focus.focus_enabled !== state.focusEnabled
+      || snapshot.focus.inversion_enabled !== state.inversionEnabled) {
+    error = Infinity;
+  }
+  return error;
+}
+
+function synchronizeRustNavigationShadow() {
+  if (!rustNavigationShadow || authoredCamera) return false;
+  const state = manualNavigationState();
+  try {
+    rustNavigationShadow.synchronizeState(
+      new Float64Array(state.eye),
+      new Float64Array(state.forward),
+      new Float64Array(state.up),
+      state.controlDistance,
+      new Float64Array(state.target),
+      new Float64Array(state.focusCenter),
+      state.focusRadius,
+      state.focusEnabled,
+      state.inversionEnabled,
+      fz.focus.peek() / 100,
+      Math.max(fz.bandwidth.peek() / 100, 1e-6),
+    );
+    rustNavigationShadow.setPreset(spaceMouseNavigation.peek());
+    rustNavigationShadowSnapshot = rustNavigationShadow.tick(0);
+    rustNavigationShadowDiagnostics.resynchronizations += 1;
+    rustNavigationShadowDiagnostics.ready = true;
+    rustNavigationShadowDiagnostics.error = null;
+    return true;
+  } catch (error) {
+    rustNavigationShadowDiagnostics.error = error?.message || String(error);
+    console.warn('Rust navigation shadow synchronization failed:', error);
+    return false;
+  }
+}
+
+function applyRustNavigationShadowFrame({
+  navigationMode,
+  translation,
+  rotation,
+  dollyLog,
+  horizonLocked,
+  deltaSeconds,
+}) {
+  if (!rustNavigationShadow) return;
+  try {
+    rustNavigationShadow.setPreset(navigationMode);
+    rustNavigationShadow.applyFrame(
+      new Float64Array(translation),
+      new Float64Array(rotation),
+      dollyLog,
+      horizonLocked,
+    );
+    rustNavigationShadowSnapshot = rustNavigationShadow.tick(deltaSeconds);
+    const error = navigationShadowError(rustNavigationShadowSnapshot);
+    rustNavigationShadowDiagnostics.samples += 1;
+    rustNavigationShadowDiagnostics.lastError = error;
+    rustNavigationShadowDiagnostics.maxError = Math.max(
+      rustNavigationShadowDiagnostics.maxError,
+      error,
+    );
+    if (error > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+      rustNavigationShadowDiagnostics.driftFrames += 1;
+      rustNavigationShadowDiagnostics.lastDrift = {
+        error,
+        navigationMode,
+        browser: manualNavigationState(),
+        rust: rustNavigationShadowSnapshot,
+      };
+      const count = rustNavigationShadowDiagnostics.driftFrames;
+      if (count === 1 || (count & (count - 1)) === 0) {
+        console.warn('Rust navigation shadow drift:', rustNavigationShadowDiagnostics.lastDrift);
+      }
+    }
+  } catch (error) {
+    rustNavigationShadowDiagnostics.error = error?.message || String(error);
+    rustNavigationShadowCameraActive = false;
+    console.warn('Rust navigation shadow action failed:', error);
+  }
+}
 const SPACE_MOUSE_CAMERA_MODE_TEXT = Object.freeze({
   hyperscope: 'Hyperscope Fly: camera-local translation + pitch/yaw/roll',
   object: 'Blender Object: move/orbit the object; depth changes distance',
@@ -2805,6 +2947,7 @@ function frame(ts) {
       registeredInversionScale = Math.max(focusSphere.radius, 0.011);
     }
     previousSpaceMouseMode = spaceMouseMode;
+    rustNavigationShadowCameraActive = false;
   }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
   const flyAxes = mapSpaceMouseFlyAxes(spaceMouseAxes, spaceMouseFlyAxes);
@@ -2884,6 +3027,15 @@ function frame(ts) {
         const horizonLocked = navigationMode !== 'hyperscope'
           && (navigationPolicy.horizonLocked || spaceMouseLockHorizon.peek());
 
+        if (rustNavigationShadow) {
+          const priorError = navigationShadowError(rustNavigationShadowSnapshot);
+          if (!rustNavigationShadowCameraActive
+              || priorError > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+            synchronizeRustNavigationShadow();
+          }
+          rustNavigationShadowCameraActive = true;
+        }
+
         if (navigationMode === 'hyperscope') {
           // Preserve the established Hyperscope integration order: translate
           // in the current local frame, then rotate while holding that newly
@@ -2957,7 +3109,23 @@ function frame(ts) {
               + navigationAxes[2] * rotated[8]) * moveScale;
           }
         }
+        const objectMode = navigationMode === 'object';
+        applyRustNavigationShadowFrame({
+          navigationMode,
+          translation: [
+            navigationAxes[0] * moveScale,
+            navigationAxes[1] * moveScale,
+            objectMode ? 0 : navigationAxes[2] * moveScale,
+          ],
+          rotation: [pitch, yaw, roll],
+          dollyLog: objectMode
+            ? navigationAxes[2] * (spaceMouseMove.peek() / 100) * deltaSeconds * 1.5
+            : 0,
+          horizonLocked,
+          deltaSeconds,
+        });
       } else if (spaceMouseMode === 'inversion') {
+        rustNavigationShadowCameraActive = false;
         if (mob.xform.peek() !== 'sphere_reflection') mob.xform.set('sphere_reflection');
         focusSphere.active = true;
         focusSphereTransition = null;
@@ -2991,6 +3159,7 @@ function frame(ts) {
         setFocusSphereGeometry({ center: nextCenter, radius: nextRadius });
         if (anchored) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       } else if (spaceMouseMode === 'depth-of-field') {
+        rustNavigationShadowCameraActive = false;
         fz.enabled.set(true);
         const moveSensitivity = spaceMouseMove.peek() / 100;
         const rotateSensitivity = spaceMouseRotate.peek() / 100;
@@ -3030,6 +3199,7 @@ function frame(ts) {
       }
     } else if (spaceMouseMode === 'camera') {
       spaceMouseTranslationActive = false;
+      rustNavigationShadowCameraActive = false;
     }
   }
   if (spaceMouseMotionActive && ts - spaceMouseLastMotionAt >= 150) {
@@ -3320,6 +3490,11 @@ phase('wasm', [], async () => {
   };
   applyParams(initParams); // Set signal values first
   wasmOk.set(true); // THEN fire effects with correct values + WASM ready
+  if (RUST_NAVIGATION_SHADOW_ENABLED) {
+    rustNavigationShadow = new HyperscopeNavigation();
+    globalThis.__hyperscopeNavigationShadowController = rustNavigationShadow;
+    synchronizeRustNavigationShadow();
+  }
 });
 
 // Phase 2: Initialize workers (depends on wasm for shader compilation)
