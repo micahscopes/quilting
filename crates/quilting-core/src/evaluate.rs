@@ -23,7 +23,7 @@ use std::cell::RefCell;
 thread_local! {
     static TESS_DENSITY: RefCell<f64> = RefCell::new(20.0);
     static SCREEN_ATTEN: RefCell<bool> = RefCell::new(true);
-    static MIN_PX_PER_SUB: RefCell<f64> = RefCell::new(2.0);
+    static MIN_PX_PER_SUB: RefCell<f64> = RefCell::new(16.0);
 }
 
 /// Hard ceiling on any edge LOD.
