@@ -63,12 +63,19 @@ fn bind_pbr_material_state(
     has_env_map: bool,
     env_mip_count: f32,
     bind_transmission: bool,
+    selected: bool,
 ) {
-    renderer.pbr_ubo().upload_with_environment(
+    let selection_tint = if selected {
+        [0.16, 0.78, 1.0, 0.13]
+    } else {
+        [0.0; 4]
+    };
+    renderer.pbr_ubo().upload_with_environment_and_selection(
         gl,
         material,
         has_env_map,
         env_mip_count,
+        selection_tint,
     );
     renderer.pbr_ubo().bind(gl);
 
@@ -187,6 +194,8 @@ struct MainState {
     pick_depth: Option<glow::Renderbuffer>,
     pick_size: (i32, i32),
     highlight_face: i32, // -1 = none
+    /// Stable glTF node receiving the lightweight per-patch selection tint.
+    selected_node: i32, // -1 = none
     highlight_prog: Option<glow::Program>,
     highlight_vao: Option<glow::VertexArray>,
 }
@@ -511,6 +520,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             pick_depth: None,
             pick_size: (0, 0),
             highlight_face: -1,
+            selected_node: -1,
             highlight_prog: None,
             highlight_vao: None,
         });
@@ -680,6 +690,7 @@ fn sync_render_batches(renderer: &mut MainState) {
             mesh: MeshDraw::from(&batch.mesh),
             perm_parity: batch.perm_parity,
             material_index: batch.material_index,
+            node_index: batch.node_index,
             mobius: conformal.mobius,
             orientation_sign: conformal.orientation_sign * euclidean_orientation,
             euclidean_model: conformal.euclidean_model,
@@ -1027,6 +1038,15 @@ pub fn mr_highlight_face(face_id: i32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.highlight_face = face_id;
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "mr_setSelectedNode")]
+pub fn mr_set_selected_node(node_id: i32) {
+    STATE.with(|state| {
+        if let Some(renderer) = state.borrow_mut().as_mut() {
+            renderer.selected_node = node_id.max(-1);
         }
     });
 }
@@ -2243,7 +2263,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 let mut pbr_draws = 0u64;
                 let mut material_updates = 0u64;
                 let mut vertex_uniform_updates = 0u64;
-                let mut active_material = None;
+                let mut active_material: Option<(usize, bool)> = None;
                 let mut active_vertex_state: Option<&RenderBatch> = None;
 
                 // Pass 1: opaque non-transmission
@@ -2265,7 +2285,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         }
                     }
 
-                    if active_material != Some(material_slot) {
+                    let selected = state.selected_node >= 0
+                        && batch.node_index == state.selected_node as usize;
+                    if active_material != Some((material_slot, selected)) {
                         bind_pbr_material_state(
                             gl,
                             &state.renderer,
@@ -2275,8 +2297,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             has_env,
                             env_mips,
                             false,
+                            selected,
                         );
-                        active_material = Some(material_slot);
+                        active_material = Some((material_slot, selected));
                         material_updates += 1;
                     }
 
@@ -2493,7 +2516,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         }
                     }
 
-                    if active_material != Some(material_slot) {
+                    let selected = state.selected_node >= 0
+                        && batch.node_index == state.selected_node as usize;
+                    if active_material != Some((material_slot, selected)) {
                         bind_pbr_material_state(
                             gl,
                             &state.renderer,
@@ -2503,8 +2528,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             has_env,
                             env_mips,
                             true,
+                            selected,
                         );
-                        active_material = Some(material_slot);
+                        active_material = Some((material_slot, selected));
                         material_updates += 1;
                     }
 

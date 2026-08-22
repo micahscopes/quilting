@@ -862,6 +862,26 @@ impl PbrUniformBuf {
         has_env_map: bool,
         env_mip_count: f32,
     ) {
+        self.upload_with_environment_and_selection(
+            gl,
+            p,
+            has_env_map,
+            env_mip_count,
+            [0.0; 4],
+        );
+    }
+
+    /// Upload material and frame-owned environment/selection state together.
+    /// The final vec4 occupies the PBR block's existing 16-byte tail padding,
+    /// so adding selection does not enlarge the 224-byte UBO.
+    pub fn upload_with_environment_and_selection(
+        &self,
+        gl: &glow::Context,
+        p: &PbrParams,
+        has_env_map: bool,
+        env_mip_count: f32,
+        selection_tint: [f32; 4],
+    ) {
         let b = |v: bool| -> f32 { if v { 1.0 } else { 0.0 } };
         let mut d = [0u8; 224];
         let mut f = |off: usize, v: f32| { d[off..off+4].copy_from_slice(&v.to_le_bytes()); };
@@ -896,6 +916,9 @@ impl PbrUniformBuf {
         // attenuation_color vec4 at offset 192 (w = attenuation_distance)
         f(192, p.attenuation_color[0]); f(196, p.attenuation_color[1]); f(200, p.attenuation_color[2]);
         f(204, p.attenuation_distance);
+        // Renderer-owned selection tint vec4 at offset 208 (rgb + blend amount).
+        f(208, selection_tint[0]); f(212, selection_tint[1]);
+        f(216, selection_tint[2]); f(220, selection_tint[3]);
 
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));

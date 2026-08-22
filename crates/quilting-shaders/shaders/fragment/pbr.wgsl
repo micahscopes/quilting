@@ -40,6 +40,7 @@ struct PbrUniforms {
     has_transmission_tex: f32,
     attenuation_color: vec3<f32>,
     attenuation_distance: f32,
+    selection_tint: vec4<f32>,           // rgb + subtle post-lighting blend amount
 }
 
 @group(0) @binding(1)
@@ -180,6 +181,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         var unlit_color = base.rgb;
         // Gamma correction (base is already linear from sRGB conversion above)
         unlit_color = pow(unlit_color, vec3<f32>(1.0 / 2.2));
+        unlit_color = mix(unlit_color, pbr.selection_tint.rgb, pbr.selection_tint.a);
         return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
     }
 
@@ -436,6 +438,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     color = clamp((exposed * a) / (exposed * b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
+    color = mix(color, pbr.selection_tint.rgb, pbr.selection_tint.a);
 
     return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
 }

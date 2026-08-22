@@ -44,6 +44,8 @@ pub struct RenderBatch {
     pub perm_parity: f32,
     /// Material index (for PBR rendering).
     pub material_index: usize,
+    /// Stable scene-node identity used by per-object render state such as selection.
+    pub node_index: usize,
     /// Per-entity conformal transform selected during render extraction.
     pub mobius: [f32; 16],
     /// Explicit orientation parity of the authored generator word.

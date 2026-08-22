@@ -242,6 +242,50 @@ export function spaceMouseModifierMode(buttons) {
   return 'camera';
 }
 
+/**
+ * Rising-edge double-tap detector for the two primary puck buttons.
+ *
+ * Button reports are retained between HID events, so gesture recognition must
+ * run on edges rather than animation frames. Returning a bitmask also allows a
+ * caller to dispatch both buttons without coupling camera policy to WebHID.
+ */
+export class SpaceMouseButtonGestureTracker {
+  constructor({ doubleTapMs = 325 } = {}) {
+    this.doubleTapMs = doubleTapMs;
+    this.previousButtons = 0;
+    this.lastPressAt = new Map();
+  }
+
+  reset() {
+    this.previousButtons = 0;
+    this.lastPressAt.clear();
+  }
+
+  update(buttons, nowMs) {
+    const primaryButtons = buttons & (SPACEMOUSE_LEFT_BUTTON | SPACEMOUSE_RIGHT_BUTTON);
+    const previousPrimary = this.previousButtons
+      & (SPACEMOUSE_LEFT_BUTTON | SPACEMOUSE_RIGHT_BUTTON);
+    const pressed = primaryButtons & ~previousPrimary;
+    let doubleTapped = 0;
+
+    for (const button of [SPACEMOUSE_LEFT_BUTTON, SPACEMOUSE_RIGHT_BUTTON]) {
+      if ((pressed & button) === 0) continue;
+      const previousPress = this.lastPressAt.get(button);
+      if (Number.isFinite(previousPress)
+          && nowMs >= previousPress
+          && nowMs - previousPress <= this.doubleTapMs) {
+        doubleTapped |= button;
+        // A third rapid press begins a new pair instead of firing repeatedly.
+        this.lastPressAt.delete(button);
+      } else {
+        this.lastPressAt.set(button, nowMs);
+      }
+    }
+    this.previousButtons = buttons;
+    return doubleTapped;
+  }
+}
+
 export class SpaceMouseController {
   constructor({
     hid = typeof navigator !== 'undefined' ? navigator.hid : null,

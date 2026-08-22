@@ -3,6 +3,9 @@ import test from 'node:test';
 
 import {
   SPACEMOUSE_AXIS_MAX,
+  SPACEMOUSE_LEFT_BUTTON,
+  SPACEMOUSE_RIGHT_BUTTON,
+  SpaceMouseButtonGestureTracker,
   SpaceMouseController,
   createSpaceMouseState,
   decodeSpaceMouseReport,
@@ -57,6 +60,30 @@ test('the two primary buttons select inversion and depth-of-field layers', () =>
   assert.equal(spaceMouseModifierMode(2), 'depth-of-field');
   assert.equal(spaceMouseModifierMode(3), 'depth-of-field');
   assert.equal(spaceMouseModifierMode(0x103), 'depth-of-field');
+});
+
+test('primary button double taps fire once on the second rising edge', () => {
+  const gestures = new SpaceMouseButtonGestureTracker({ doubleTapMs: 300 });
+  assert.equal(gestures.update(SPACEMOUSE_RIGHT_BUTTON, 100), 0);
+  assert.equal(gestures.update(0, 150), 0);
+  assert.equal(
+    gestures.update(SPACEMOUSE_RIGHT_BUTTON, 350),
+    SPACEMOUSE_RIGHT_BUTTON,
+  );
+  assert.equal(gestures.update(SPACEMOUSE_RIGHT_BUTTON, 360), 0);
+  assert.equal(gestures.update(0, 380), 0);
+  assert.equal(gestures.update(SPACEMOUSE_RIGHT_BUTTON, 400), 0);
+});
+
+test('left and right double-tap histories remain independent', () => {
+  const gestures = new SpaceMouseButtonGestureTracker({ doubleTapMs: 300 });
+  gestures.update(SPACEMOUSE_LEFT_BUTTON, 0);
+  gestures.update(0, 20);
+  gestures.update(SPACEMOUSE_RIGHT_BUTTON, 50);
+  gestures.update(0, 70);
+  assert.equal(gestures.update(SPACEMOUSE_LEFT_BUTTON, 200), SPACEMOUSE_LEFT_BUTTON);
+  gestures.update(0, 220);
+  assert.equal(gestures.update(SPACEMOUSE_RIGHT_BUTTON, 250), SPACEMOUSE_RIGHT_BUTTON);
 });
 
 test('Hyperscope fly uses the requested positive Rx and Ry directions', () => {

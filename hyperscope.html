@@ -12,6 +12,7 @@
 <link data-trunk rel="copy-dir" href="local-glbs" />
 <link data-trunk rel="copy-file" href="hyperscope_worker.js" />
 <link data-trunk rel="copy-file" href="spacemouse.mjs" />
+<link data-trunk rel="copy-file" href="hyperscope_focus.mjs" />
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
 <link data-trunk rel="copy-file" href="examples/hyperscape-blender-demo.glb" />
@@ -84,6 +85,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Z</span><input type="range" id="mz" min="-30" max="30" step="0.1" value="0"><span class="v" id="mz-v">0.00</span></div>
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0" max="50" step="0.1" value="20"><span class="v" id="mr-v">2.00</span></div>
     </div>
+    <div id="selection-status" style="color:#8b949e;font-size:9px;margin-top:5px">No object selected</div>
   </div>
 
   <div class="section">
@@ -199,7 +201,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button data-bit="1">X</button><button data-bit="2">Y</button><button data-bit="4">Z</button>
     </div>
     <div id="spacemouse-mode" style="color:#58a6ff;font-size:9px;margin-top:3px">Fly: strafe/lift/forward + local pitch/yaw/roll</div>
-    <div style="color:#484f58;font-size:9px;margin-top:2px">Hold left: move inversion center; twist changes radius. Hold right: push/pull focus, lift aperture, twist blur.</div>
+    <div style="color:#484f58;font-size:9px;margin-top:2px">Double right: select at view center. Double left: smoothly fit/toggle inversion. Hold left: edit inversion. Hold right: edit DoF.</div>
   </div>
 
   <div class="section">
@@ -257,17 +259,29 @@ import init, {
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
-  mr_pick, mr_highlightFace,
+  mr_pick, mr_highlightFace, mr_setSelectedNode,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
 import {
+  SPACEMOUSE_LEFT_BUTTON,
+  SPACEMOUSE_RIGHT_BUTTON,
+  SpaceMouseButtonGestureTracker,
   SpaceMouseController,
   mapSpaceMouseFlyAxes,
   mapSpaceMouseNavigationAxes,
   spaceMouseModifierMode,
   spaceMouseLocalRotationVector,
   spaceMouseNavigationPolicy,
-} from './spacemouse.mjs?rev=blender-ndof-modes-v2';
+} from './spacemouse.mjs?rev=object-focus-v1';
+import {
+  applyMobiusPoint,
+  buildNodeFocusRecords,
+  faceSourceCentroid,
+  interpolateSphereFit,
+  mobiusConformalScaleAt,
+  perspectiveNavigationSpeed,
+  smootherstep01,
+} from './hyperscope_focus.mjs?rev=object-focus-v1';
 
 const $ = id => document.getElementById(id);
 
@@ -279,15 +293,37 @@ const $ = id => document.getElementById(id);
 // phase(name, deps, fn) → async lifecycle phase: waits for deps, runs fn, resolves
 // ============================================================
 let _activeEffect = null;
+let _signalBatchDepth = 0;
+const _batchedEffects = new Set();
 function signal(value, name) {
   const subs = new Set();
   const s = {
     name,
     get() { if (_activeEffect) subs.add(_activeEffect); return value; },
-    set(v) { if (v !== value) { value = v; for (const fn of subs) fn(); } },
+    set(v) {
+      if (v === value) return;
+      value = v;
+      for (const fn of subs) {
+        if (_signalBatchDepth > 0) _batchedEffects.add(fn);
+        else fn();
+      }
+    },
     peek() { return value; },
   };
   return s;
+}
+function batchSignals(fn) {
+  _signalBatchDepth += 1;
+  try {
+    return fn();
+  } finally {
+    _signalBatchDepth -= 1;
+    if (_signalBatchDepth === 0) {
+      const pending = Array.from(_batchedEffects);
+      _batchedEffects.clear();
+      for (const effectFn of pending) effectFn();
+    }
+  }
 }
 function effect(fn) {
   const run = () => { const prev = _activeEffect; _activeEffect = run; try { fn(); } finally { _activeEffect = prev; } };
@@ -697,6 +733,9 @@ bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed
 const spaceMouseNavigationSelect = $('spacemouse-navigation');
 spaceMouseNavigationSelect.addEventListener('change', () => {
   spaceMouseNavigation.set(spaceMouseNavigationSelect.value);
+  if (spaceMouseNavigationSelect.value === 'object' && selectedObject?.outputAnchor) {
+    beginObjectPivotFocus(selectedObject.outputAnchor);
+  }
 });
 effect(() => {
   const mode = spaceMouseNavigation.get();
@@ -743,8 +782,11 @@ const spaceMouseDiagnostics = {
 let spaceMouseLastMotionAt = -Infinity;
 let spaceMouseLastLodAt = -Infinity;
 let spaceMouseMotionActive = false;
+let spaceMouseTranslationActive = false;
+let registeredSpaceMouseSpeed = 1;
 let previousSpaceMouseMode = 'camera';
 globalThis.__hyperscopeInputDiagnostics = { spaceMouse: spaceMouseDiagnostics };
+const spaceMouseButtonGestures = new SpaceMouseButtonGestureTracker();
 const spaceMouse = new SpaceMouseController({
   onStatus: ({ state, message, device }) => {
     spaceMouseDiagnostics.state = state;
@@ -755,6 +797,7 @@ const spaceMouse = new SpaceMouseController({
     spaceMouseStatus.style.color = state === 'error' ? '#f0883e'
       : state === 'connected' ? '#58a6ff' : '#8b949e';
     spaceMouseConnect.textContent = state === 'connected' ? 'SpaceMouse connected' : 'Connect SpaceMouse';
+    if (state !== 'connected') spaceMouseButtonGestures.reset();
   },
 });
 spaceMouseDiagnostics.available = spaceMouse.available;
@@ -926,6 +969,8 @@ function manualCameraBasis(out) {
 // overlap, while each path itself has at most one active invocation.
 const frameView = new Float32Array(16), frameProj = new Float32Array(16);
 const frameMvp = new Float32Array(16), frameCameraPos = new Float32Array(3);
+const pickView = new Float32Array(16), pickProj = new Float32Array(16);
+const pickMvp = new Float32Array(16), pickCameraPos = new Float32Array(3);
 const lodView = new Float32Array(16), lodProj = new Float32Array(16);
 const lodVp = new Float32Array(16), lodMobius = new Float32Array(16);
 const frameCameraBasis = new Float32Array(9), lodCameraBasis = new Float32Array(9);
@@ -1002,6 +1047,13 @@ async function broadcastCall(type, data) {
 let gpuSkinned = false;
 let animating = true;
 let meshInfo = null;
+let currentInstances = null;
+let currentFaceNodes = new Int32Array(0);
+let nodeFocusRecords = new Map();
+let selectedObject = null;
+let cameraFocusTransition = null;
+let inversionFitTransition = null;
+let fittedInversionNode = -1;
 
 // --- Pick debugger: ctrl-click to inspect face ---
 const canvas = $('cv');
@@ -1032,26 +1084,122 @@ function applyPendingCanvasSize() {
   if (changed && meshInfo) debouncedLodRecompute();
 }
 
+function pickFaceAtCanvasPixel(x, y) {
+  if (!wasmOk.peek() || canvas.width <= 0 || canvas.height <= 0) return -1;
+  const basis = manualCameraBasis(pickCameraBasis);
+  const ex = authoredCamera ? authoredCamera.eye[0] : panX - basis[6] * zoom;
+  const ey = authoredCamera ? authoredCamera.eye[1] : panY - basis[7] * zoom;
+  const ez = authoredCamera ? authoredCamera.eye[2] : panZ - basis[8] * zoom;
+  const tx = authoredCamera ? authoredCamera.target[0] : panX;
+  const ty = authoredCamera ? authoredCamera.target[1] : panY;
+  const tz = authoredCamera ? authoredCamera.target[2] : panZ;
+  const upX = authoredCamera ? 0 : basis[3];
+  const upY = authoredCamera ? 1 : basis[4];
+  const upZ = authoredCamera ? 0 : basis[5];
+  lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, pickView);
+  perspective(Math.PI / 3, canvas.width / canvas.height, 0.01, 10000, pickProj);
+  mulM4(pickProj, pickView, pickMvp);
+  pickCameraPos[0] = ex; pickCameraPos[1] = ey; pickCameraPos[2] = ez;
+  return mr_pick(pickMvp, pickView, pickCameraPos, x, y);
+}
+
+function selectionLabel(message = '') {
+  const status = $('selection-status');
+  if (message) {
+    status.textContent = message;
+  } else if (selectedObject) {
+    status.textContent = `Selected node ${selectedObject.node} · source radius ${selectedObject.bound.radius.toFixed(3)}`;
+  } else {
+    status.textContent = 'No object selected';
+  }
+}
+
+function clearSelectedObject(message = '') {
+  selectedObject = null;
+  cameraFocusTransition = null;
+  mr_setSelectedNode(-1);
+  selectionLabel(message);
+}
+
+function refreshSelectedObjectAnchor({ followObjectPivot = false } = {}) {
+  if (!selectedObject) return null;
+  const mapped = applyMobiusPoint(currentMobius, selectedObject.sourceAnchor);
+  if (!mapped) return selectedObject.outputAnchor;
+  const localScale = mobiusConformalScaleAt(currentMobius, selectedObject.sourceAnchor);
+  selectedObject.outputRadius = selectedObject.bound.radius
+    * Math.min(Math.max(localScale || 1, 1e-4), 1e4);
+  const previous = selectedObject.outputAnchor;
+  selectedObject.outputAnchor = mapped;
+  if (cameraFocusTransition) cameraFocusTransition.target = mapped.slice();
+  if (followObjectPivot && previous && spaceMouseNavigation.peek() === 'object'
+      && !cameraFocusTransition) {
+    panX += mapped[0] - previous[0];
+    panY += mapped[1] - previous[1];
+    panZ += mapped[2] - previous[2];
+  }
+  return mapped;
+}
+
+function beginObjectPivotFocus(target, nowMs = performance.now()) {
+  if (!target || spaceMouseNavigation.peek() !== 'object') return;
+  cameraFocusTransition = {
+    start: [panX, panY, panZ],
+    target: target.slice(),
+    startedAt: nowMs,
+    durationMs: 450,
+  };
+}
+
+function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
+  if (faceId < 0 || faceId >= currentFaceNodes.length || !currentInstances) {
+    clearSelectedObject('No object at view center');
+    mr_highlightFace(-1);
+    return false;
+  }
+  const node = Number(currentFaceNodes[faceId]);
+  const bound = nodeFocusRecords.get(node);
+  const sourceAnchor = faceSourceCentroid(currentInstances, faceId);
+  if (!bound || !sourceAnchor) {
+    clearSelectedObject(`Node ${node} has no focus bounds`);
+    mr_highlightFace(-1);
+    return false;
+  }
+  selectedObject = {
+    node,
+    face: faceId,
+    bound,
+    sourceAnchor,
+    outputAnchor: applyMobiusPoint(currentMobius, sourceAnchor) || sourceAnchor.slice(),
+    outputRadius: bound.radius,
+  };
+  refreshSelectedObjectAnchor();
+  mr_setSelectedNode(node);
+  mr_highlightFace(highlightFace ? faceId : -1);
+  beginObjectPivotFocus(selectedObject.outputAnchor);
+  selectionLabel();
+  console.log(
+    `Selected glTF node ${node} from face ${faceId}: source sphere`,
+    bound.center,
+    bound.radius,
+  );
+  return true;
+}
+
+function selectObjectAtViewCenter() {
+  const faceId = pickFaceAtCanvasPixel(
+    Math.floor(canvas.width * 0.5),
+    Math.floor(canvas.height * 0.5),
+  );
+  return selectObjectFromFace(faceId);
+}
+
 canvas.addEventListener('click', e => {
   if (!e.ctrlKey && !e.metaKey) return;
-  if (!wasmOk.peek()) return;
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
-  const basis = manualCameraBasis(pickCameraBasis);
-  const ex = panX - basis[6] * zoom;
-  const ey = panY - basis[7] * zoom;
-  const ez = panZ - basis[8] * zoom;
-  const view = lookAt(ex,ey,ez, panX,panY,panZ, basis[3],basis[4],basis[5]);
-  const proj = perspective(Math.PI/3, canvas.width/canvas.height, 0.01, 10000);
-  const mvp = mulM4(proj, view);
-  const faceId = mr_pick(mvp, view, new Float32Array([ex,ey,ez]), x, y);
-  if (faceId >= 0) {
-    console.log(`Picked face ${faceId}`);
-    mr_highlightFace(faceId);
-  } else {
-    mr_highlightFace(-1);
-  }
+  const faceId = pickFaceAtCanvasPixel(x, y);
+  selectObjectFromFace(faceId, { highlightFace: true });
 });
 
 // --- Mouse: orbit + shift-pan + wheel zoom ---
@@ -1128,6 +1276,11 @@ bindSlider('mx', mob.mx, v => (v/10).toFixed(2));
 bindSlider('my', mob.my, v => (v/10).toFixed(2));
 bindSlider('mz', mob.mz, v => (v/10).toFixed(2));
 bindSlider('mr', mob.mr, v => (v/10).toFixed(2));
+for (const id of ['mx', 'my', 'mz', 'mr']) {
+  $(id).addEventListener('input', () => {
+    if (!inversionFitTransition) fittedInversionNode = -1;
+  });
+}
 
 function computeMobius(type, cx, cy, cz, r) {
   if (type === 'sphere_reflection' && r > 0.01) {
@@ -1138,6 +1291,77 @@ function computeMobius(type, cx, cy, cz, r) {
 }
 
 let currentMobius = null;
+const INVERSION_FIT_MARGIN = 1.10;
+const INVERSION_FIT_DURATION_MS = 700;
+
+function fitOrToggleInversionToSelection(nowMs = performance.now()) {
+  if (!selectedObject) {
+    selectionLabel('Select an object first (double-tap right)');
+    return false;
+  }
+
+  if (!inversionFitTransition && fittedInversionNode === selectedObject.node) {
+    const enable = mob.xform.peek() !== 'sphere_reflection';
+    mob.xform.set(enable ? 'sphere_reflection' : 'identity');
+    selectionLabel(`Node ${selectedObject.node} · inversion ${enable ? 'on' : 'off'}`);
+    return true;
+  }
+
+  const target = {
+    center: selectedObject.bound.center.slice(),
+    radius: Math.max(selectedObject.bound.radius * INVERSION_FIT_MARGIN, 0.02),
+  };
+  inversionFitTransition = {
+    start: {
+      center: [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10],
+      radius: Math.max(mob.mr.peek() / 10, 0.02),
+    },
+    target,
+    startedAt: nowMs,
+    durationMs: INVERSION_FIT_DURATION_MS,
+    node: selectedObject.node,
+  };
+  fittedInversionNode = selectedObject.node;
+  mob.xform.set('sphere_reflection');
+  selectionLabel(`Fitting inversion to node ${selectedObject.node}…`);
+  return true;
+}
+
+function advanceFocusTransitions(nowMs) {
+  if (inversionFitTransition) {
+    const transition = inversionFitTransition;
+    const progress = (nowMs - transition.startedAt) / transition.durationMs;
+    const sphere = interpolateSphereFit(transition.start, transition.target, progress);
+    batchSignals(() => {
+      mob.mx.set(sphere.center[0] * 10);
+      mob.my.set(sphere.center[1] * 10);
+      mob.mz.set(sphere.center[2] * 10);
+      mob.mr.set(sphere.radius * 10);
+    });
+    if (progress >= 1) {
+      inversionFitTransition = null;
+      selectionLabel(`Node ${transition.node} · inversion fitted +10%`);
+    }
+  }
+
+  if (cameraFocusTransition) {
+    const transition = cameraFocusTransition;
+    const progress = (nowMs - transition.startedAt) / transition.durationMs;
+    const t = smootherstep01(progress);
+    panX = transition.start[0] + (transition.target[0] - transition.start[0]) * t;
+    panY = transition.start[1] + (transition.target[1] - transition.start[1]) * t;
+    panZ = transition.start[2] + (transition.target[2] - transition.start[2]) * t;
+    if (progress >= 1) {
+      panX = transition.target[0];
+      panY = transition.target[1];
+      panZ = transition.target[2];
+      cameraFocusTransition = null;
+      debouncedLodRecompute();
+      syncURL();
+    }
+  }
+}
+
 let stretchRange = { min: 0.5, max: 0.5 };
 let stretchSamplePending = false;
 let stretchSampleDirty = false;
@@ -1309,6 +1533,7 @@ effect(() => {
   const m = computeMobius(type, mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10, mob.mr.get()/10);
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
+  refreshSelectedObjectAnchor({ followObjectPivot: true });
   if (!wasmOk.get()) return;
   if (hyperscapeActive) {
     hyperscapeActive = false;
@@ -1467,9 +1692,13 @@ async function loadTestShape(shape, p1, p2) {
   const resp = await workerCall('load_test_shape', { shape, param1: p1, param2: p2 });
   const r = resp.result;
   if (r && r.instances) {
-    mr_setInstanceData(new Float32Array(r.instances.buffer || r.instances), r.num_faces);
+    clearSelectedObject();
+    currentInstances = new Float32Array(r.instances.buffer || r.instances);
+    currentFaceNodes = new Int32Array(r.num_faces);
+    nodeFocusRecords = buildNodeFocusRecords(currentInstances, currentFaceNodes);
+    mr_setInstanceData(currentInstances, r.num_faces);
     mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
-    mr_setFaceNodes(new Int32Array(r.num_faces));
+    mr_setFaceNodes(currentFaceNodes);
     mr_buildBatches(new Float32Array(r.face_lods.buffer || r.face_lods));
     $('remesh-stats').textContent = `${shape}: ${r.num_vertices} verts, ${r.num_faces} faces`;
   }
@@ -1494,9 +1723,13 @@ $('remesh-btn').addEventListener('click', async () => {
       const remeshResp = await workerCall('compute_remeshed', { lod: 4 });
       const r = remeshResp.result;
       if (r && r.instances) {
-        mr_setInstanceData(new Float32Array(r.instances.buffer || r.instances), r.num_faces);
+        clearSelectedObject();
+        currentInstances = new Float32Array(r.instances.buffer || r.instances);
+        currentFaceNodes = new Int32Array(r.num_faces);
+        nodeFocusRecords = buildNodeFocusRecords(currentInstances, currentFaceNodes);
+        mr_setInstanceData(currentInstances, r.num_faces);
         mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
-        mr_setFaceNodes(new Int32Array(r.num_faces));
+        mr_setFaceNodes(currentFaceNodes);
         mr_buildBatches(new Float32Array(r.face_lods.buffer || r.face_lods));
         remeshedMode = true;
       }
@@ -1516,11 +1749,15 @@ $('remesh-clear-btn').addEventListener('click', async () => {
   const rpResp = await workerCall('get_rest_pose_instances', {});
   const rp = rpResp.data || rpResp;
   if (rp && rp.instances) {
-    mr_setInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
+    clearSelectedObject();
+    currentInstances = new Float32Array(rp.instances.buffer || rp.instances);
+    mr_setInstanceData(currentInstances, rp.num_faces);
     const restoredNodes = meshInfo && meshInfo.face_node_indices
       ? new Int32Array(meshInfo.face_node_indices)
       : new Int32Array(rp.num_faces);
-    mr_setFaceNodes(restoredNodes);
+    currentFaceNodes = restoredNodes;
+    nodeFocusRecords = buildNodeFocusRecords(currentInstances, currentFaceNodes);
+    mr_setFaceNodes(currentFaceNodes);
     mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
   }
 });
@@ -2236,6 +2473,7 @@ async function loadModel(buffer, filename) {
 function frame(ts) {
   requestAnimationFrame(frame);
   applyPendingCanvasSize();
+  advanceFocusTransitions(ts);
 
   const deltaSeconds = previousFrameTs == null ? 0 : Math.min((ts - previousFrameTs) / 1000, 0.25);
   previousFrameTs = ts;
@@ -2243,7 +2481,10 @@ function frame(ts) {
     const includeSceneDiagnostics = ts - lastSceneDiagnosticRenderAt >= 250;
     const snapshot = mr_tickHyperscape(deltaSeconds, includeSceneDiagnostics);
     if (snapshot) {
-      if (snapshot.mobius) currentMobius = new Float32Array(snapshot.mobius);
+      if (snapshot.mobius) {
+        currentMobius = new Float32Array(snapshot.mobius);
+        refreshSelectedObjectAnchor({ followObjectPivot: true });
+      }
       if (snapshot.camera_eye && snapshot.camera_target) {
         authoredCamera = {
           eye: new Float32Array(snapshot.camera_eye),
@@ -2317,16 +2558,14 @@ function frame(ts) {
   // exactly once per animation frame. This keeps navigation independent of HID
   // report rate and lets the worker coalesce LOD updates behind the main-GPU
   // current-pose visibility pass. Authored cameras remain authoritative.
+  const doubleTappedButtons = spaceMouseButtonGestures.update(spaceMouse.buttons, ts);
+  if (doubleTappedButtons & SPACEMOUSE_RIGHT_BUTTON) selectObjectAtViewCenter();
+  if (doubleTappedButtons & SPACEMOUSE_LEFT_BUTTON) fitOrToggleInversionToSelection(ts);
   const spaceMouseMode = spaceMouseModifierMode(spaceMouse.buttons);
   if (spaceMouseMode !== previousSpaceMouseMode) {
     spaceMouse.resetSmoothing();
+    spaceMouseTranslationActive = false;
     previousSpaceMouseMode = spaceMouseMode;
-    if (spaceMouseMode === 'inversion' && mob.xform.peek() !== 'sphere_reflection') {
-      mob.xform.set('sphere_reflection');
-    } else if (spaceMouseMode === 'depth-of-field') {
-      fz.enabled.set(true);
-      fz.mode.set('0');
-    }
   }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
   const flyAxes = mapSpaceMouseFlyAxes(spaceMouseAxes, spaceMouseFlyAxes);
@@ -2357,9 +2596,39 @@ function frame(ts) {
     let moving = false;
     for (let axis = 0; axis < 6; axis++) moving ||= spaceMouseAxes[axis] !== 0;
     if (moving) {
-      const moveScale = (spaceMouseMove.peek() / 100) * deltaSeconds * 2.4;
-      const rotateScale = (spaceMouseRotate.peek() / 100) * deltaSeconds * 1.5;
       const basis = manualCameraBasis(inputCameraBasis);
+      const translating = Math.abs(navigationAxes[0]) + Math.abs(navigationAxes[1])
+        + Math.abs(navigationAxes[2]) > 1e-5;
+      if (spaceMouseMode === 'camera' && translating && !spaceMouseTranslationActive) {
+        const eyeX = panX - basis[6] * zoom;
+        const eyeY = panY - basis[7] * zoom;
+        const eyeZ = panZ - basis[8] * zoom;
+        const anchor = selectedObject?.outputAnchor;
+        let referenceDepth = zoom;
+        if (anchor) {
+          const selectedDepth = (anchor[0] - eyeX) * basis[6]
+            + (anchor[1] - eyeY) * basis[7]
+            + (anchor[2] - eyeZ) * basis[8];
+          if (Number.isFinite(selectedDepth) && selectedDepth > 0.01) {
+            referenceDepth = Math.max(
+              selectedDepth,
+              (selectedObject.outputRadius || 0) * 2,
+            );
+          }
+        }
+        registeredSpaceMouseSpeed = perspectiveNavigationSpeed(
+          referenceDepth,
+          canvas.height,
+        );
+        spaceMouseTranslationActive = true;
+      } else if (spaceMouseMode !== 'camera' || !translating) {
+        spaceMouseTranslationActive = false;
+      }
+      const cameraMoveScale = registeredSpaceMouseSpeed
+        * (spaceMouseMove.peek() / 100) * deltaSeconds;
+      const modifierMoveScale = (spaceMouseMove.peek() / 100) * deltaSeconds * 2.4;
+      const moveScale = spaceMouseMode === 'camera' ? cameraMoveScale : modifierMoveScale;
+      const rotateScale = (spaceMouseRotate.peek() / 100) * deltaSeconds * 1.5;
 
       if (spaceMouseMode === 'camera') {
         const pitch = navigationAxes[3] * rotateScale;
@@ -2434,8 +2703,8 @@ function frame(ts) {
             panY += navigationAxes[1] * moveScale;
             panZ += (navigationAxes[0] * rightZ + navigationAxes[2] * forwardZ) * moveScale;
           } else {
-            // Forward is a true translation, not an orbit-radius zoom, and no
-            // translation speed depends on the current target distance.
+            // Forward is a true translation, not an orbit-radius zoom. The
+            // per-gesture screen-relative speed was frozen above.
             panX += (navigationAxes[0] * rotated[0] + navigationAxes[1] * rotated[3]
               + navigationAxes[2] * rotated[6]) * moveScale;
             panY += (navigationAxes[0] * rotated[1] + navigationAxes[1] * rotated[4]
@@ -2445,15 +2714,22 @@ function frame(ts) {
           }
         }
       } else if (spaceMouseMode === 'inversion') {
+        if (mob.xform.peek() !== 'sphere_reflection') mob.xform.set('sphere_reflection');
+        inversionFitTransition = null;
+        fittedInversionNode = -1;
         const dx = (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
         const dy = (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;
         const dz = (flyAxes[0] * basis[2] + flyAxes[1] * basis[5] + flyAxes[2] * basis[8]) * moveScale;
-        mob.mx.set(Math.max(-30, Math.min(30, mob.mx.peek() + dx * 10)));
-        mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
-        mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
-        mob.mr.set(Math.max(0, Math.min(50,
-          mob.mr.peek() + flyAxes[5] * (spaceMouseRotate.peek() / 100) * deltaSeconds * 12)));
+        batchSignals(() => {
+          mob.mx.set(Math.max(-30, Math.min(30, mob.mx.peek() + dx * 10)));
+          mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
+          mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
+          mob.mr.set(Math.max(0, Math.min(50,
+            mob.mr.peek() + flyAxes[5] * (spaceMouseRotate.peek() / 100) * deltaSeconds * 12)));
+        });
       } else if (spaceMouseMode === 'depth-of-field') {
+        fz.enabled.set(true);
+        fz.mode.set('0');
         const moveSensitivity = spaceMouseMove.peek() / 100;
         const rotateSensitivity = spaceMouseRotate.peek() / 100;
         fz.focus.set(Math.max(0, Math.min(100,
@@ -2479,6 +2755,8 @@ function frame(ts) {
         debouncedLodRecompute();
         syncURL();
       }
+    } else if (spaceMouseMode === 'camera') {
+      spaceMouseTranslationActive = false;
     }
   }
   if (spaceMouseMotionActive && ts - spaceMouseLastMotionAt >= 150) {
@@ -2512,6 +2790,12 @@ function frame(ts) {
 async function finishModelUpload(info, filename) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   meshInfo = info;
+  currentInstances = null;
+  currentFaceNodes = new Int32Array(0);
+  nodeFocusRecords = new Map();
+  inversionFitTransition = null;
+  fittedInversionNode = -1;
+  clearSelectedObject();
 
   // A static model must not inherit joint/morph counts or textures from the
   // animated model that preceded it.
@@ -2555,6 +2839,7 @@ async function finishModelUpload(info, filename) {
   const faceNodes = info.face_node_indices
     ? new Int32Array(info.face_node_indices)
     : new Int32Array(info.num_faces || 0);
+  currentFaceNodes = faceNodes;
   mr_setFaceNodes(faceNodes);
   if (faceNodes.length) {
     const nodeCounts = {};
@@ -2680,11 +2965,15 @@ async function finishModelUpload(info, filename) {
   const rp = rpResp.data || rpResp;
 
   if (!rp || !rp.instances) {
+    currentInstances = null;
+    nodeFocusRecords = new Map();
     $('stats').textContent = `${filename}: static model (no animation data path yet)`;
     return;
   }
 
   const instances = new Float32Array(rp.instances.buffer || rp.instances);
+  currentInstances = instances;
+  nodeFocusRecords = buildNodeFocusRecords(instances, currentFaceNodes);
   const faceLods = new Float32Array(rp.face_lods.buffer || rp.face_lods);
   const numFaces = rp.num_faces;
 
