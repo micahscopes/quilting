@@ -1224,6 +1224,9 @@ const rustPresentationDiagnostics = {
   residentAssets: [],
   packedFaces: 0,
   opacityOverridesPending: false,
+  activeVisualization: 'pbr',
+  activeTessellation: null,
+  unsupportedOverlays: [],
   navigation: null,
   error: null,
 };
@@ -1290,6 +1293,46 @@ function presentationLayerMatrix(transform = {}) {
   ];
 }
 
+const PRESENTATION_SURFACE_VISUALIZATIONS = Object.freeze({
+  // Rust validation keeps these diagnostics mutually exclusive per cue.
+  wireframe: 'wire',
+  lod: 'lod',
+  patch_boundaries: 'both',
+  normals: 'normals',
+  stretch: 'stretch',
+});
+
+function applyPresentationVisualization(overlays = []) {
+  const selected = overlays.find(overlay => PRESENTATION_SURFACE_VISUALIZATIONS[overlay]);
+  const mode = selected ? PRESENTATION_SURFACE_VISUALIZATIONS[selected] : 'pbr';
+  const unsupported = overlays.filter(overlay =>
+    !PRESENTATION_SURFACE_VISUALIZATIONS[overlay] && overlay !== 'control_net');
+  if (overlays.includes('control_net')) unsupported.push('control_net');
+  rustPresentationDiagnostics.activeVisualization = mode;
+  rustPresentationDiagnostics.unsupportedOverlays = unsupported;
+  renderMode.set(mode);
+  return mode;
+}
+
+function applyPresentationTessellation(tessellation = {}) {
+  const density = Math.max(1, Math.min(500, Number(tessellation.density) || 100));
+  const minPixels = Math.max(
+    1,
+    Math.min(64, Number(tessellation.min_pixels_per_subdivision) || 16),
+  );
+  const screenAttenuation = tessellation.screen_attenuation !== false;
+  batchSignals(() => {
+    lod.density.set(density);
+    lod.screenAtten.set(screenAttenuation);
+    lod.minPx.set(minPixels);
+  });
+  rustPresentationDiagnostics.activeTessellation = {
+    density,
+    screenAttenuation,
+    minPixelsPerSubdivision: minPixels,
+  };
+}
+
 function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
   if (!RUST_PRESENTATION_ENABLED || !snapshot) return false;
   if (!presentationComposition.ready) {
@@ -1334,10 +1377,8 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     `${presentationComposition.assets.size} resident assets · `
     + `${presentationComposition.totalFaces} packed faces`
     + (opacityPending ? ' · opacity adapter pending' : '');
-  const overlays = new Set(snapshot.overlays || []);
-  if (overlays.has('lod')) renderMode.set('lod');
-  else if (overlays.has('patch_boundaries')) renderMode.set('both');
-  else renderMode.set('pbr');
+  applyPresentationTessellation(snapshot.tessellation);
+  applyPresentationVisualization(snapshot.overlays || []);
   const authoredLayerResident = Array.from(presentationComposition.assets.entries())
     .some(([assetId, resident]) => assetId !== presentationComposition.primaryAssetId
       && activeLayers.get(assetId)?.visible && resident.nodes.length > 0);
@@ -4788,8 +4829,9 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
   syncURL();
 });
 
-// Optional release-demo adapter. It runs after first render so secondary asset
-// parsing and packing never delay the ordinary Hyperscope startup path.
+// Optional release/demo adapter. The manifest is copied beside this module by
+// Trunk. It runs after first render so secondary parsing and packing never
+// delay the ordinary Hyperscope startup path.
 phase('presentation-assets', ['render', 'workers'], async () => {
   if (!RUST_PRESENTATION_ENABLED) return null;
   try {

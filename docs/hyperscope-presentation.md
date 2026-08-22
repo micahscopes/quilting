@@ -67,6 +67,32 @@ The browser exposes asset fetch, resident ranges, hidden-guide counts, packed
 face count, active layers, pending capabilities, and failures at
 `globalThis.__hyperscopePresentation`.
 
+The checked-in story follows the renderer's actual data flow rather than
+embedding the historical demo renderer. Its first five cues step through the
+animated QB surface with PBR patch boundaries, the reused tessellation wire
+topology, shared-edge LOD colors, analytic normals, and conformal stretch. A
+sixth cue returns to PBR and composes the Blender-authored scene. Each surface
+visualization is selected by the Rust-validated cue document and translated to
+one existing Hyperscope render mode; ambiguous combinations are rejected.
+Each cue also resolves an explicit tessellation policy. The checked-in LOD cue
+uses the ordinary screen-attenuation path with a coarse 64-pixel subdivision
+threshold, making projected-size differences readable without inventing a
+presentation-only tessellator. Other cues use the 16-pixel runtime default.
+
+`control_net` remains reserved in the interchange format but is not claimed by
+the browser adapter yet. A faithful version needs explicit source/control
+geometry in the main renderer rather than the historical demo's second bespoke
+draw path. Unsupported overlay requests are visible in
+`__hyperscopePresentation.unsupportedOverlays`.
+
+The six checked-in cues were rehearsed in Chrome against the release build.
+Patch-boundary, wire, normal, conformal-stretch, and final PBR composition
+shots remained recognizable and unobscured. The coarse LOD cue showed a clear
+two-level split between the cyan body and darker legs/underside; it should be
+described as a shared-edge resolution boundary, not as a many-band heatmap.
+The inversion cue used a stable off-mesh sphere, produced a legible red/blue
+stretch gradient, and completed camera transport with no pole diagnostic.
+
 The Tuesday adapter deliberately supports one animated primary asset plus
 static, untextured secondary assets. Animated or textured secondary assets fail
 preflight instead of silently rendering incorrectly. Fractional per-layer

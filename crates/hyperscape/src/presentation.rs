@@ -245,6 +245,8 @@ pub struct PresentationCue {
     #[serde(default)]
     pub overlays: Vec<PresentationOverlay>,
     #[serde(default)]
+    pub tessellation: PresentationTessellation,
+    #[serde(default)]
     pub transition: PresentationTransition,
 }
 
@@ -269,7 +271,7 @@ pub struct CueAnimation {
     pub speed: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresentationOverlay {
     Wireframe,
@@ -278,6 +280,26 @@ pub enum PresentationOverlay {
     ControlNet,
     Normals,
     Stretch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PresentationTessellation {
+    #[serde(default = "default_tessellation_density")]
+    pub density: f64,
+    #[serde(default = "default_true")]
+    pub screen_attenuation: bool,
+    #[serde(default = "default_min_pixels_per_subdivision")]
+    pub min_pixels_per_subdivision: f64,
+}
+
+impl Default for PresentationTessellation {
+    fn default() -> Self {
+        Self {
+            density: default_tessellation_density(),
+            screen_attenuation: true,
+            min_pixels_per_subdivision: default_min_pixels_per_subdivision(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -311,6 +333,7 @@ pub struct PresentationSnapshot {
     pub layers: Vec<PresentationLayerState>,
     pub animations: Vec<CueAnimation>,
     pub overlays: Vec<PresentationOverlay>,
+    pub tessellation: PresentationTessellation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -459,6 +482,15 @@ impl Presentation {
                     "cue {cue_index} transition duration must be finite and nonnegative"
                 )));
             }
+            if !cue.tessellation.density.is_finite()
+                || !(1.0..=500.0).contains(&cue.tessellation.density)
+                || !cue.tessellation.min_pixels_per_subdivision.is_finite()
+                || !(1.0..=64.0).contains(&cue.tessellation.min_pixels_per_subdivision)
+            {
+                return Err(invalid(format!(
+                    "cue {cue_index} tessellation density must be in [1,500] and pixel threshold in [1,64]"
+                )));
+            }
             for animation in &cue.animations {
                 if layer_scenes.get(&animation.layer) != Some(&cue.scene) {
                     return Err(invalid(format!(
@@ -475,6 +507,23 @@ impl Presentation {
                         "cue {cue_index} animation must have a clip, nonnegative time, and finite speed"
                     )));
                 }
+            }
+            let mut overlays = BTreeSet::new();
+            let mut surface_visualizations = 0;
+            for overlay in &cue.overlays {
+                if !overlays.insert(*overlay) {
+                    return Err(invalid(format!(
+                        "cue {cue_index} repeats presentation overlay {overlay:?}"
+                    )));
+                }
+                if !matches!(overlay, PresentationOverlay::ControlNet) {
+                    surface_visualizations += 1;
+                }
+            }
+            if surface_visualizations > 1 {
+                return Err(invalid(format!(
+                    "cue {cue_index} selects more than one exclusive surface visualization"
+                )));
             }
         }
         Ok(())
@@ -727,6 +776,7 @@ impl PresentationRuntime {
             layers,
             animations: cue.animations.clone(),
             overlays: cue.overlays.clone(),
+            tessellation: cue.tessellation,
         })
     }
 }
@@ -841,6 +891,14 @@ const fn default_animation_speed() -> f64 {
     1.0
 }
 
+const fn default_tessellation_density() -> f64 {
+    100.0
+}
+
+const fn default_min_pixels_per_subdivision() -> f64 {
+    16.0
+}
+
 const fn default_transition_duration() -> f64 {
     0.7
 }
@@ -894,23 +952,43 @@ mod tests {
     fn fixture_resolves_distinct_assets_layers_and_cue_text() {
         let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
         let mut navigation = NavigationController::default();
-        let snapshot = runtime.activate_index(1, &mut navigation).unwrap();
+        let composition_index = runtime
+            .presentation()
+            .cues
+            .iter()
+            .position(|cue| {
+                cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000002").unwrap()
+            })
+            .unwrap();
+        let snapshot = runtime
+            .activate_index(composition_index, &mut navigation)
+            .unwrap();
 
         assert_eq!(snapshot.required_assets.len(), 2);
         assert_eq!(snapshot.layers.len(), 2);
         assert_ne!(snapshot.layers[0].asset, snapshot.layers[1].asset);
         assert_eq!(snapshot.text.unwrap().heading, "One scene, distinct assets");
-        assert_eq!(runtime.active_cue_index(), Some(1));
+        assert_eq!(runtime.active_cue_index(), Some(composition_index));
     }
 
     #[test]
-    fn cue_transition_reaches_authored_camera_across_a_moving_inversion() {
+    fn cue_transition_reaches_authored_composition_camera() {
         fn run(steps: &[f64]) -> NavigationController {
             let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
             let mut navigation = NavigationController::default();
             runtime.activate_index(0, &mut navigation).unwrap();
             runtime.tick_navigation(&mut navigation, 0.7).unwrap();
-            runtime.activate_index(1, &mut navigation).unwrap();
+            let composition_index = runtime
+                .presentation()
+                .cues
+                .iter()
+                .position(|cue| {
+                    cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000002").unwrap()
+                })
+                .unwrap();
+            runtime
+                .activate_index(composition_index, &mut navigation)
+                .unwrap();
             for step in steps {
                 runtime.tick_navigation(&mut navigation, *step).unwrap();
             }
@@ -920,8 +998,18 @@ mod tests {
         let single = run(&[1.2]);
         let partitioned = run(&[0.1; 12]);
         let document = Presentation::from_json(FIXTURE).unwrap();
-        let expected_camera = document.views[1].camera.to_camera_rig().unwrap();
-        let expected_focus = document.views[1].focus.to_focus_navigation().unwrap();
+        let composition = document
+            .cues
+            .iter()
+            .find(|cue| cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000002").unwrap())
+            .unwrap();
+        let view = document
+            .views
+            .iter()
+            .find(|view| view.id == composition.view)
+            .unwrap();
+        let expected_camera = view.camera.to_camera_rig().unwrap();
+        let expected_focus = view.focus.to_focus_navigation().unwrap();
         assert_camera_near(single.camera, expected_camera);
         assert_camera_near(partitioned.camera, expected_camera);
         assert_focus_near(&single.focus, &expected_focus);
@@ -929,6 +1017,66 @@ mod tests {
         assert_camera_near(single.camera, partitioned.camera);
         assert!(single.diagnostics.0.is_empty());
         assert!(partitioned.diagnostics.0.is_empty());
+    }
+
+    #[test]
+    fn educational_inversion_cue_crosses_a_safe_stable_sphere() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let mut navigation = NavigationController::default();
+        runtime.activate_index(0, &mut navigation).unwrap();
+        runtime.tick_navigation(&mut navigation, 0.7).unwrap();
+
+        let inversion_index = runtime
+            .presentation()
+            .cues
+            .iter()
+            .position(|cue| {
+                cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000006").unwrap()
+            })
+            .unwrap();
+        runtime
+            .activate_index(inversion_index, &mut navigation)
+            .unwrap();
+        for _ in 0..14 {
+            runtime.tick_navigation(&mut navigation, 0.1).unwrap();
+        }
+
+        let view = runtime
+            .presentation()
+            .views
+            .iter()
+            .find(|view| view.id == runtime.presentation().cues[inversion_index].view)
+            .unwrap();
+        assert_camera_near(navigation.camera, view.camera.to_camera_rig().unwrap());
+        assert_focus_near(
+            &navigation.focus,
+            &view.focus.to_focus_navigation().unwrap(),
+        );
+        assert_eq!(
+            navigation.runtime.reflection,
+            SphereReflectionState::Sphere(navigation.focus.sphere)
+        );
+        assert!(navigation.diagnostics.0.is_empty());
+    }
+
+    #[test]
+    fn educational_lod_cue_resolves_its_tessellation_policy() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let mut navigation = NavigationController::default();
+        let lod_index = runtime
+            .presentation()
+            .cues
+            .iter()
+            .position(|cue| {
+                cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000004").unwrap()
+            })
+            .unwrap();
+        let snapshot = runtime.activate_index(lod_index, &mut navigation).unwrap();
+
+        assert_eq!(snapshot.overlays, vec![PresentationOverlay::Lod]);
+        assert_eq!(snapshot.tessellation.density, 100.0);
+        assert!(snapshot.tessellation.screen_attenuation);
+        assert_eq!(snapshot.tessellation.min_pixels_per_subdivision, 64.0);
     }
 
     #[test]
@@ -966,28 +1114,71 @@ mod tests {
     fn validation_rejects_cross_scene_animation_and_duplicate_identity() {
         let mut document = Presentation::from_json(FIXTURE).unwrap();
         document.cues[0].animations[0].layer = document.scenes[1].layers[1].id;
-        assert!(document
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("is not in its scene"));
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("is not in its scene")
+        );
 
         let mut document = Presentation::from_json(FIXTURE).unwrap();
         document.views[0].id = document.assets[0].id;
-        assert!(document
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("repeats UUID"));
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("repeats UUID")
+        );
 
         let mut document = Presentation::from_json(FIXTURE).unwrap();
         document.views[1].focus.inversion_enabled = true;
         document.views[1].camera.semantic_target = Some(document.views[1].focus.center);
-        assert!(document
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("invalid in its inversion chart"));
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid in its inversion chart")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_ambiguous_or_duplicate_surface_visualizations() {
+        let mut document = Presentation::from_json(FIXTURE).unwrap();
+        document.cues[0].overlays =
+            vec![PresentationOverlay::Wireframe, PresentationOverlay::Normals];
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("more than one exclusive surface visualization")
+        );
+
+        let mut document = Presentation::from_json(FIXTURE).unwrap();
+        document.cues[0].overlays = vec![
+            PresentationOverlay::PatchBoundaries,
+            PresentationOverlay::PatchBoundaries,
+        ];
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("repeats presentation overlay")
+        );
+
+        let mut document = Presentation::from_json(FIXTURE).unwrap();
+        document.cues[0].tessellation.min_pixels_per_subdivision = 65.0;
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("pixel threshold in [1,64]")
+        );
     }
 
     #[test]

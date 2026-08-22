@@ -63,8 +63,8 @@
         "semantic_target": [0.0, 0.0, 0.0]
       },
       "focus": {
-        "center": [0.0, 0.0, 0.0],
-        "radius": 2.0,
+        "center": [1.5, 0.0, 0.0],
+        "radius": 1.5,
         "enabled": false,
         "inversion_enabled": false,
         "coordinate": 0.5,
@@ -93,6 +93,23 @@
           "opacity": 1.0
         }
       ]
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000003",
+      "name": "Horse through a conformal chart",
+      "camera": {
+        "eye": [0.0, 0.0, 2.2],
+        "control_distance": 2.2,
+        "semantic_target": [0.0, 0.0, 0.0]
+      },
+      "focus": {
+        "center": [1.5, 0.0, 0.0],
+        "radius": 1.5,
+        "enabled": false,
+        "inversion_enabled": true,
+        "coordinate": 0.5,
+        "angular_aperture": 0.1
+      }
     }
   ],
   "cues": [
@@ -116,6 +133,103 @@
       "overlays": ["patch_boundaries"],
       "transition": {
         "duration_seconds": 0.7,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-000000000003",
+      "scene": "b0000000-0000-4000-8000-000000000001",
+      "view": "d0000000-0000-4000-8000-000000000001",
+      "text": {
+        "eyebrow": "The atlas",
+        "heading": "One canonical topology, stamped across every face",
+        "body": "WebGL2 cannot generate geometry in the shader. Quilting reuses prebuilt barycentric triangle patterns, then evaluates each face as an instanced curved patch."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000001",
+          "clip": "horse_A_",
+          "playing": true,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["wireframe"],
+      "transition": {
+        "duration_seconds": 0.45,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-000000000004",
+      "scene": "b0000000-0000-4000-8000-000000000001",
+      "view": "d0000000-0000-4000-8000-000000000001",
+      "text": {
+        "eyebrow": "Crack-free LOD",
+        "heading": "A shared edge chooses one resolution",
+        "body": "Each color is a tessellation level. Neighboring faces resolve their common edge together, so the quilt changes density without opening T-junction cracks."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000001",
+          "clip": "horse_A_",
+          "playing": true,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["lod"],
+      "tessellation": {
+        "density": 100.0,
+        "screen_attenuation": true,
+        "min_pixels_per_subdivision": 64.0
+      },
+      "transition": {
+        "duration_seconds": 0.45,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-000000000005",
+      "scene": "b0000000-0000-4000-8000-000000000001",
+      "view": "d0000000-0000-4000-8000-000000000001",
+      "text": {
+        "eyebrow": "QB surfaces",
+        "heading": "Curvature and normals are evaluated analytically",
+        "body": "The vertex shader evaluates the rational quaternionic-Bezier surface and its derivatives. No CPU remeshing is needed when the conformal map changes."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000001",
+          "clip": "horse_A_",
+          "playing": true,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["normals"],
+      "transition": {
+        "duration_seconds": 0.45,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-000000000006",
+      "scene": "b0000000-0000-4000-8000-000000000001",
+      "view": "d0000000-0000-4000-8000-000000000003",
+      "text": {
+        "eyebrow": "Conformal space",
+        "heading": "The Möbius map folds into each patch's weights",
+        "body": "Stretch color reveals the local conformal scale. Moving the inversion changes a few coefficients while the same atlas topology bends through the new chart."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000001",
+          "clip": "horse_A_",
+          "playing": true,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["stretch"],
+      "transition": {
+        "duration_seconds": 1.4,
         "easing": "smoother_step"
       }
     },

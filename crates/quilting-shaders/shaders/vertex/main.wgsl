@@ -741,7 +741,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // Signed log2, mapped to [0,1] via sigmoid for smooth falloff (no hard cutoff).
     // 0.5 = no stretch, 0 = max squash, 1 = max expand.
     let log_s = log2(max(stretch, 1e-20));
-    out.mobius_stretch = 1.0 / (1.0 + exp(-log_s * 0.25));
+    // Stretch is a diagnostic view, so make a one-octave change plainly
+    // visible while retaining a smooth, symmetric response around scale 1.
+    out.mobius_stretch = 1.0 / (1.0 + exp(-log_s));
 
     return out;
 }

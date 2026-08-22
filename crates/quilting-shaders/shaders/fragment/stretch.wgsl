@@ -16,9 +16,10 @@ fn fs_stretch(in: FragInput) -> @location(0) vec4<f32> {
     // Red shift for expansion, blue shift for compression
     let expand = max(s, 0.0);    // 0 to 1
     let squash = max(-s, 0.0);   // 0 to 1
-    // Neutral = dark gray, extremes = saturated
-    let r = 0.15 + expand * 0.85;
-    let g = 0.15 * (1.0 - max(expand, squash) * 0.8);
-    let b = 0.15 + squash * 0.85;
+    // Keep neutral geometry legible against the viewer background while the
+    // two signed extremes approach saturated red and blue.
+    let r = 0.25 + expand * 0.75;
+    let g = 0.25 * (1.0 - max(expand, squash) * 0.7);
+    let b = 0.25 + squash * 0.75;
     return vec4<f32>(r, g, b, in.fade);
 }
