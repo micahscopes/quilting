@@ -6,7 +6,7 @@
 //! are owned here.
 
 use crate::{
-    CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
+    CameraError, CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
     PerspectiveLens, SphereReflectionState, TransitionEasing,
 };
 use bevy_ecs::prelude::Resource;
@@ -327,6 +327,10 @@ pub struct PresentationLayerState {
 pub struct PresentationRuntime {
     presentation: Presentation,
     active_cue_index: Option<usize>,
+    /// A finite target may be the pole of the chart crossed during a cue. In
+    /// that case the transition uses its equivalent sight tangent and restores
+    /// the authored target only after reaching the destination chart.
+    pending_semantic_target: Option<[f64; 3]>,
 }
 
 impl Presentation {
@@ -392,8 +396,21 @@ impl Presentation {
         for (view_index, view) in self.views.iter().enumerate() {
             register_identity(&mut identities, view.id, format!("view {view_index}"))?;
             view_ids.insert(view.id);
-            view.camera.to_camera_rig()?;
-            view.focus.to_focus_navigation()?;
+            let camera = view.camera.to_camera_rig()?;
+            let focus = view.focus.to_focus_navigation()?;
+            if focus.inversion_enabled {
+                let mut source_chart_camera = camera;
+                source_chart_camera
+                    .transport_between_reflections(
+                        SphereReflectionState::Sphere(focus.sphere),
+                        SphereReflectionState::Identity,
+                    )
+                    .map_err(|error| {
+                        invalid(format!(
+                            "view {view_index} camera is invalid in its inversion chart: {error}"
+                        ))
+                    })?;
+            }
             let mut overridden = BTreeSet::new();
             for layer in &view.layers {
                 if !layer_scenes.contains_key(&layer.layer) {
@@ -470,6 +487,7 @@ impl PresentationRuntime {
         Ok(Self {
             presentation,
             active_cue_index: None,
+            pending_semantic_target: None,
         })
     }
 
@@ -507,14 +525,30 @@ impl PresentationRuntime {
         } else {
             SphereReflectionState::Identity
         };
-        let mut camera_in_current_chart = view.camera.to_camera_rig()?;
-        camera_in_current_chart
+        let authored_camera = view.camera.to_camera_rig()?;
+        let mut camera_in_current_chart = authored_camera;
+        let pending_semantic_target = match camera_in_current_chart
             .transport_between_reflections(target_reflection, navigation.runtime.reflection)
-            .map_err(|error| {
-                invalid(format!(
+        {
+            Ok(_) => None,
+            Err(CameraError::ReflectionPole) if authored_camera.semantic_target.is_some() => {
+                camera_in_current_chart = authored_camera;
+                camera_in_current_chart.semantic_target = None;
+                camera_in_current_chart
+                    .transport_between_reflections(target_reflection, navigation.runtime.reflection)
+                    .map_err(|error| {
+                        invalid(format!(
+                            "cue {index} camera intersects a reflection pole: {error}"
+                        ))
+                    })?;
+                authored_camera.semantic_target
+            }
+            Err(error) => {
+                return Err(invalid(format!(
                     "cue {index} camera intersects a reflection pole: {error}"
-                ))
-            })?;
+                )));
+            }
+        };
 
         let transition = cue.transition;
         push_navigation(
@@ -552,8 +586,44 @@ impl PresentationRuntime {
             .tick(0.0)
             .map_err(|error| PresentationError::Navigation(error.to_owned()))?;
 
+        self.pending_semantic_target = pending_semantic_target;
+        self.reconcile_navigation(navigation);
         self.active_cue_index = Some(index);
         self.snapshot(index)
+    }
+
+    /// Advance the shared navigation clock and finish any semantic target that
+    /// had to cross an intermediate chart as a free sight tangent.
+    pub fn tick_navigation(
+        &mut self,
+        navigation: &mut NavigationController,
+        delta_seconds: f64,
+    ) -> Result<(), PresentationError> {
+        navigation
+            .tick(delta_seconds)
+            .map_err(|error| PresentationError::Navigation(error.to_owned()))?;
+        self.reconcile_navigation(navigation);
+        Ok(())
+    }
+
+    pub fn reconcile_navigation(&mut self, navigation: &mut NavigationController) -> bool {
+        let Some(target) = self.pending_semantic_target else {
+            return false;
+        };
+        let desired_reflection = if navigation.focus.inversion_enabled {
+            SphereReflectionState::Sphere(navigation.focus.sphere)
+        } else {
+            SphereReflectionState::Identity
+        };
+        if navigation.runtime.camera_transition.is_some()
+            || navigation.focus.transition.is_some()
+            || navigation.runtime.reflection != desired_reflection
+        {
+            return false;
+        }
+        navigation.camera.semantic_target = Some(target);
+        self.pending_semantic_target = None;
+        true
     }
 
     pub fn jump_to_cue(
@@ -839,10 +909,10 @@ mod tests {
             let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
             let mut navigation = NavigationController::default();
             runtime.activate_index(0, &mut navigation).unwrap();
-            navigation.tick(0.7).unwrap();
+            runtime.tick_navigation(&mut navigation, 0.7).unwrap();
             runtime.activate_index(1, &mut navigation).unwrap();
             for step in steps {
-                navigation.tick(*step).unwrap();
+                runtime.tick_navigation(&mut navigation, *step).unwrap();
             }
             navigation
         }
@@ -862,6 +932,37 @@ mod tests {
     }
 
     #[test]
+    fn finite_target_is_restored_after_leaving_its_inverted_pole_chart() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let mut navigation = NavigationController::default();
+        let sphere = FocusSphere::new([0.0; 3], 3.0).unwrap();
+        navigation.focus.sphere = sphere;
+        navigation.focus.inversion_enabled = true;
+        navigation.runtime.reflection = SphereReflectionState::Sphere(sphere);
+        navigation.camera = CameraRig {
+            eye: [0.0, 0.0, 6.0],
+            semantic_target: None,
+            control_distance: 6.0,
+            ..CameraRig::default()
+        };
+
+        runtime.activate_index(0, &mut navigation).unwrap();
+        runtime.tick_navigation(&mut navigation, 0.7).unwrap();
+
+        let expected = runtime.presentation().views[0]
+            .camera
+            .to_camera_rig()
+            .unwrap();
+        assert_camera_near(navigation.camera, expected);
+        assert_eq!(navigation.camera.semantic_target, Some([0.0; 3]));
+        assert_eq!(
+            navigation.runtime.reflection,
+            SphereReflectionState::Identity
+        );
+        assert!(navigation.diagnostics.0.is_empty());
+    }
+
+    #[test]
     fn validation_rejects_cross_scene_animation_and_duplicate_identity() {
         let mut document = Presentation::from_json(FIXTURE).unwrap();
         document.cues[0].animations[0].layer = document.scenes[1].layers[1].id;
@@ -878,6 +979,14 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("repeats UUID"));
+
+        let mut document = Presentation::from_json(FIXTURE).unwrap();
+        document.views[1].camera.semantic_target = Some(document.views[1].focus.center);
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid in its inversion chart"));
     }
 
     #[test]

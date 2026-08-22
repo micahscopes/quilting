@@ -192,7 +192,13 @@ impl HyperscopeNavigation {
     }
 
     pub fn tick(&mut self, delta_seconds: f64) -> Result<JsValue, JsValue> {
-        self.controller.tick(delta_seconds).map_err(js_error)?;
+        if let Some(presentation) = self.presentation.as_mut() {
+            presentation
+                .tick_navigation(&mut self.controller, delta_seconds)
+                .map_err(js_error)?;
+        } else {
+            self.controller.tick(delta_seconds).map_err(js_error)?;
+        }
         self.snapshot()
     }
 

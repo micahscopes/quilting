@@ -31,6 +31,12 @@ the current output chart and transported with the sphere. Thus the endpoint is
 still the authored view when the transition finishes; the browser must not
 run an independent interpolation.
 
+A finite semantic target can be valid in its authored destination while lying
+at infinity in an intermediate chart. The runtime crosses that chart using the
+equivalent sight tangent and restores the finite target after both camera and
+focus transitions settle. A target that is a pole in its own authored view is
+still rejected during document validation.
+
 JSON Schema checks structure. Rust validation additionally checks global UUID
 uniqueness, references, finite and nondegenerate transforms, lens/focus ranges,
 cue-local animation layers, and reflection-pole failures. A view targeting the
