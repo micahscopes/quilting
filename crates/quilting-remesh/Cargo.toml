@@ -7,9 +7,16 @@ license.workspace = true
 repository.workspace = true
 description = "VSA clustering and QB patch fitting — turns a dense triangle mesh into curved patches"
 
+[features]
+# Experimental only. The core conformal/QB scorer and deterministic connected
+# clusterer do not require C++; this feature adds meshoptimizer's meshlet order
+# as an optional seed order for comparison.
+meshopt-prototype = ["dep:meshopt"]
+
 [dependencies]
 quilting-core = { path = "../quilting-core" }
 quilting-mesh = { path = "../quilting-mesh" }
+meshopt = { version = "0.6.2", optional = true }
 
 # Only the `remesh_glb` / `experiments` example harnesses need these. Keeping them
 # out of [dependencies] keeps quilting-gltf off the wasm build graph.
