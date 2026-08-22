@@ -11,8 +11,11 @@ self.onmessage = async function(e) {
     wasm = mod;
     // Only the retained runtime worker needs LOD compute. Atlas helpers avoid a
     // 4096² OffscreenCanvas, a WebGL context, and 500K-face compute buffers.
-    const gpuOk = data.gpuCompute === false ? false : wasm.init_gpu_compute(500000);
-    console.log(`Worker: GPU compute ${gpuOk ? 'OK' : 'UNAVAILABLE'}`);
+    const gpuRequested = data.gpuCompute !== false;
+    const gpuOk = gpuRequested && wasm.init_gpu_compute(500000);
+    console.log(gpuRequested
+      ? `Worker: GPU compute ${gpuOk ? 'OK' : 'UNAVAILABLE'}`
+      : 'Worker: atlas helper (GPU compute not requested)');
     self.postMessage({ type: 'ready', id, gpuCompute: gpuOk });
     return;
   }

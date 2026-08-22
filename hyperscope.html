@@ -279,22 +279,35 @@ const phases = {};
 function phase(name, depNames, fn) {
   const done = signal(false, `phase:${name}`);
   const result = signal(null, `phase:${name}:result`);
-  phases[name] = { done, result };
+  const error = signal(null, `phase:${name}:error`);
+  phases[name] = { done, result, error };
   (async () => {
     // Wait for all dependency phases
     for (const dep of depNames) {
-      if (!phases[dep]) { console.warn(`phase ${name}: unknown dep ${dep}`); continue; }
+      if (!phases[dep]) {
+        error.set(new Error(`unknown dependency ${dep}`));
+        done.set(true);
+        return;
+      }
       await gate(phases[dep].done);
+      if (phases[dep].error.peek()) {
+        // Propagate the root failure without running dependent work or emitting
+        // a misleading second error (for example, atlas upload after WebGL loss).
+        error.set(phases[dep].error.peek());
+        done.set(true);
+        return;
+      }
     }
     try {
       const r = await fn();
       result.set(r);
     } catch (e) {
+      error.set(e);
       console.error(`phase ${name} failed:`, e);
     }
     done.set(true);
   })();
-  return { done, result };
+  return { done, result, error };
 }
 // Check if a phase completed
 function phaseReady(name) { return phases[name]?.done?.peek() ?? false; }
@@ -1807,7 +1820,10 @@ phase('wasm', [], async () => {
 // Phase 2: Initialize workers (depends on wasm for shader compilation)
 phase('workers', ['wasm'], async () => {
   $('stats').textContent = `Starting ${ATLAS_WORKERS} workers...`;
-  await Promise.all(workers.map((_, i) => workerCallN(i, 'init', { gpuCompute: i === 0 })));
+  const ready = await Promise.all(workers.map((_, i) => workerCallN(i, 'init', { gpuCompute: i === 0 })));
+  if (!ready[0]?.gpuCompute) {
+    console.warn('Runtime LOD worker has no WebGL2 compute; dynamic LOD is unavailable');
+  }
 });
 
 // Phase 3: Build tessellation atlas (depends on workers)
@@ -1850,8 +1866,11 @@ phase('atlas', ['workers'], async () => {
   // Accept the immediately preceding worker envelope too, so a page already in
   // flight during a hot reload fails gracefully instead of dropping the atlas.
   const packed = packedResp.atlas ?? packedResp.patches;
+  if (!packed?.patches || !packed?.bary || !packed?.tris || !packed?.lines) {
+    throw new Error('packed tessellation atlas export was incomplete');
+  }
   if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
-    throw new Error('packed tessellation atlas upload failed');
+    throw new Error('GPU rejected the packed tessellation atlas upload');
   }
   dropExtraWorkers();
 });
@@ -1887,11 +1906,16 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
   }
 });
 
-// Error handling for all phases
-(async () => { try { await gate(phases.render.done); } catch (e) {
-  console.warn(`Startup error:`, e);
-  $('stats').textContent = 'Drop a .glb file to load';
-} })();
+// Surface the root startup error after dependency propagation settles.
+(async () => {
+  await gate(phases.render.done);
+  const error = phases.render.error.peek();
+  if (!error) return;
+  console.warn('Startup error:', error);
+  $('stats').textContent = !wasmOk.peek()
+    ? 'WebGL2 unavailable — restart the browser'
+    : `Startup failed: ${error?.message || String(error)}`;
+})();
 </script>
 </body>
 </html>
