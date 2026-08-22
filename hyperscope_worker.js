@@ -107,6 +107,7 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'load_gltf_data') {
+    const loadStarted = performance.now();
     lodJobGeneration += 1;
     wasm.cancel_animated_lods();
     wasm.reset_animated_lod_delta();
@@ -114,6 +115,8 @@ self.onmessage = async function(e) {
       ? data.bytes
       : data.bytes?.buffer;
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
+    const wasmFinished = performance.now();
+    let textureDecodeMs = 0;
     // Decode raw image blobs using browser-native decoders (parallel, fast)
     if (result && result.textures && result.textures.length > 0) {
       const t0 = performance.now();
@@ -131,7 +134,8 @@ self.onmessage = async function(e) {
         return { width: w, height: h, data: imageData.data, wrap_s: tex.wrap_s, wrap_t: tex.wrap_t };
       }));
       result.textures = decoded;
-      console.log(`Browser-native image decode: ${result.textures.length} textures in ${(performance.now() - t0).toFixed(0)}ms`);
+      textureDecodeMs = performance.now() - t0;
+      console.log(`Browser-native image decode: ${result.textures.length} textures in ${textureDecodeMs.toFixed(0)}ms`);
     }
     // Transfer pixel ArrayBuffers to avoid cloning (prevents OOM on large models)
     const transfers = [];
@@ -153,6 +157,14 @@ self.onmessage = async function(e) {
       ? sourceBytes
       : null;
     if (hyperscapeBytes) transfers.push(hyperscapeBytes);
+    if (result) {
+      result.loader_timing = {
+        wasmLoadMs: wasmFinished - loadStarted,
+        textureDecodeMs,
+        workerTotalMs: performance.now() - loadStarted,
+        sourceBytes: sourceBytes?.byteLength || 0,
+      };
+    }
     self.postMessage({ type: 'gltf_loaded', id, result, hyperscapeBytes }, transfers);
     return;
   }

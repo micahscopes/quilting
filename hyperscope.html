@@ -434,6 +434,7 @@ const modelPayloadTelemetry = {
   focusUniqueVertices: 0,
   focusBuildMs: 0,
   avoidedFaceMetadataCopyBytes: 0,
+  timings: {},
 };
 let frameDeltaSum = 0;
 let frameRenderCpuSum = 0;
@@ -1424,7 +1425,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=required-atlas-v2', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=upload-telemetry-v1', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -3520,6 +3521,8 @@ function frame(ts) {
 // --- Load model ---
 async function finishModelUpload(info, filename) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
+  const uploadStarted = performance.now();
+  const uploadTimings = { worker: info.loader_timing || null };
   meshInfo = info;
   currentInstances = null;
   currentFaceNodes = new Int32Array(0);
@@ -3537,6 +3540,7 @@ async function finishModelUpload(info, filename) {
     focusUniqueVertices: 0,
     focusBuildMs: 0,
     avoidedFaceMetadataCopyBytes: 0,
+    timings: uploadTimings,
   });
   clearSelectedObject();
 
@@ -3604,8 +3608,10 @@ async function finishModelUpload(info, filename) {
     }
     console.log('face_node_indices:', faceNodes.length, 'faces, distribution:', JSON.stringify(nodeCounts));
   }
+  uploadTimings.metadataMs = performance.now() - uploadStarted;
 
   // Upload PBR materials
+  let sectionStarted = performance.now();
   if (info.materials && info.materials.length > 0) {
     const stride = 50; // 36 base + 5 tex indices + 7 ior/transmission/volume + 1 transmission_tex + 1 double_sided
     const matData = new Float32Array(info.materials.length * stride);
@@ -3661,8 +3667,10 @@ async function finishModelUpload(info, filename) {
       has_bc_tex: info.materials[0].base_color_texture_index != null,
     });
   }
+  uploadTimings.materialsMs = performance.now() - sectionStarted;
 
   // Upload glTF images
+  sectionStarted = performance.now();
   if (info.textures && info.textures.length > 0) {
     try {
       let totalSize = 0;
@@ -3705,8 +3713,10 @@ async function finishModelUpload(info, filename) {
       modelPayloadTelemetry.retainedDecodedTextureBytes = 0;
     }
   }
+  uploadTimings.texturesMs = performance.now() - sectionStarted;
 
   // Skinning data
+  sectionStarted = performance.now();
   gpuSkinned = !!(info.animations && info.animations.length > 0);
   const skinResp = await workerCall('get_skinning_data', {});
   const skinData = skinResp.skinData;
@@ -3730,14 +3740,18 @@ async function finishModelUpload(info, filename) {
 
   const tp = getTessParams();
   await workerCall('set_tess_params', { density: tp.density, screenAtten: tp.screen_atten, minPx: tp.minPx });
+  uploadTimings.skinningAndParamsMs = performance.now() - sectionStarted;
 
+  sectionStarted = performance.now();
   const rpResp = await workerCall('get_rest_pose_instances', {});
   const rp = rpResp.data || rpResp;
+  uploadTimings.restPoseMs = performance.now() - sectionStarted;
 
   if (!rp || !rp.instances) {
     currentInstances = null;
     nodeFocusRecords = new Map();
     $('stats').textContent = `${filename}: static model (no animation data path yet)`;
+    uploadTimings.totalMs = performance.now() - uploadStarted;
     return;
   }
 
@@ -3750,8 +3764,12 @@ async function finishModelUpload(info, filename) {
   modelPayloadTelemetry.initialFaceLodBytes = faceLods.byteLength;
   const numFaces = rp.num_faces;
 
+  sectionStarted = performance.now();
   setRendererInstanceData(instances, numFaces);
+  uploadTimings.instanceUploadMs = performance.now() - sectionStarted;
+  sectionStarted = performance.now();
   mr_buildBatches(faceLods);
+  uploadTimings.initialBatchMs = performance.now() - sectionStarted;
 
   // Preserve the URL camera during startup; user-initiated model changes reset
   // to a predictable inspection view.
@@ -3762,8 +3780,11 @@ async function finishModelUpload(info, filename) {
     setManualCameraBasisFromEuler();
   }
 
+  sectionStarted = performance.now();
   await workerCall('upload_model_to_compute', {});
+  uploadTimings.computeUploadMs = performance.now() - sectionStarted;
 
+  sectionStarted = performance.now();
   if (info.animations && info.animations.length > 0) {
     const firstAnimation = info.animations[0];
     animTime = Number(info.time_min ?? firstAnimation.t_min) || 0;
@@ -3775,6 +3796,8 @@ async function finishModelUpload(info, filename) {
     meshInfo.time_min = 0;
     meshInfo.duration = 0;
   }
+  uploadTimings.animationSetupMs = performance.now() - sectionStarted;
+  uploadTimings.totalMs = performance.now() - uploadStarted;
 
   $('stats').innerHTML = `<span class="val">${filename}</span>: ${numFaces} faces`;
 
