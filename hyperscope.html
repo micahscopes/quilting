@@ -16,6 +16,7 @@
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
 <link data-trunk rel="copy-file" href="examples/hyperscape-blender-demo.glb" />
+<link data-trunk rel="copy-file" href="examples/hacker-night.presentation.json" />
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%}
@@ -55,12 +56,33 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 #drop-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:10;border:3px dashed #58a6ff;background:rgba(31,111,235,0.08);align-items:center;justify-content:center}
 #drop-overlay.active{display:flex}
 #drop-overlay span{font-size:18px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase;pointer-events:none}
+#presentation-card{display:none;position:absolute;left:28px;bottom:28px;z-index:8;width:min(520px,calc(100% - 56px));padding:18px 20px;background:rgba(13,17,23,.88);border:1px solid rgba(88,166,255,.5);border-radius:10px;backdrop-filter:blur(12px);box-shadow:0 12px 40px rgba(0,0,0,.35)}
+#presentation-card.active{display:block}
+#presentation-eyebrow{font-size:10px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase}
+#presentation-heading{font-size:22px;line-height:1.15;margin-top:5px;color:#f0f6fc}
+#presentation-body{font-size:13px;line-height:1.5;margin-top:8px;color:#b1bac4}
+#presentation-footer{display:flex;align-items:center;gap:8px;margin-top:14px}
+#presentation-footer button{padding:5px 12px;border:1px solid #30363d;border-radius:4px;background:#21262d;color:#c9d1d9;cursor:pointer}
+#presentation-footer button:hover{border-color:#58a6ff;color:#fff}
+#presentation-progress{font-size:11px;color:#8b949e}
+#presentation-adapter-status{margin-left:auto;font-size:9px;color:#8b949e;text-align:right}
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div id="drop-overlay"><span>Drop .glb / .gltf file here</span></div>
+  <section id="presentation-card" aria-live="polite">
+    <div id="presentation-eyebrow"></div>
+    <h2 id="presentation-heading"></h2>
+    <p id="presentation-body"></p>
+    <div id="presentation-footer">
+      <button id="presentation-previous" type="button" aria-label="Previous cue">←</button>
+      <button id="presentation-next" type="button" aria-label="Next cue">→</button>
+      <span id="presentation-progress"></span>
+      <span id="presentation-adapter-status"></span>
+    </div>
+  </section>
 </div>
 <div id="sidebar">
   <h1>HYPERSCOPE</h1>
@@ -296,6 +318,8 @@ import {
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('navshadow') === '1';
+const RUST_PRESENTATION_ENABLED =
+  new URLSearchParams(location.search).get('presentation') === '1';
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 
 // ============================================================
@@ -711,6 +735,7 @@ function syncURL() {
     set('py', panY.toFixed(3), parseFloat(PARAM_DEFAULTS.py).toFixed(3));
     set('pz', panZ.toFixed(3), parseFloat(PARAM_DEFAULTS.pz).toFixed(3));
     if (RUST_NAVIGATION_SHADOW_ENABLED) p.set('navshadow', '1');
+    if (RUST_PRESENTATION_ENABLED) p.set('presentation', '1');
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -1143,6 +1168,189 @@ function applyRustNavigationShadowFrame({
     console.warn('Rust navigation shadow action failed:', error);
   }
 }
+
+let rustPresentationController = null;
+let rustPresentationManifest = null;
+let rustPresentationSnapshot = null;
+let rustPresentationTransitionActive = false;
+let rustPresentationLastLodAt = 0;
+const rustPresentationDiagnostics = {
+  enabled: RUST_PRESENTATION_ENABLED,
+  ready: false,
+  activeCue: null,
+  desiredAssets: [],
+  desiredLayers: [],
+  multiAssetRendererPending: false,
+  navigation: null,
+  error: null,
+};
+globalThis.__hyperscopePresentation = rustPresentationDiagnostics;
+
+function synchronizeRustPresentationFromBrowser() {
+  if (!rustPresentationController) return;
+  const state = manualNavigationState();
+  rustPresentationController.synchronizeState(
+    new Float64Array(state.eye),
+    new Float64Array(state.forward),
+    new Float64Array(state.up),
+    state.controlDistance,
+    state.inversionEnabled ? new Float64Array() : new Float64Array(state.target),
+    new Float64Array(state.focusCenter),
+    state.focusRadius,
+    state.focusEnabled,
+    state.inversionEnabled,
+    fz.focus.peek() / 100,
+    Math.max(fz.bandwidth.peek() / 100, 1e-6),
+  );
+}
+
+function renderRustPresentationSnapshot(snapshot) {
+  rustPresentationSnapshot = snapshot;
+  const text = snapshot?.text || {};
+  $('presentation-eyebrow').textContent = text.eyebrow || '';
+  $('presentation-heading').textContent = text.heading || '';
+  $('presentation-body').textContent = text.body || '';
+  const count = rustPresentationManifest?.cues?.length || 0;
+  $('presentation-progress').textContent = count
+    ? `${snapshot.cue_index + 1} / ${count}` : '';
+  $('presentation-previous').disabled = snapshot.cue_index <= 0;
+  $('presentation-next').disabled = snapshot.cue_index + 1 >= count;
+  const assets = snapshot.required_assets || [];
+  const layers = snapshot.layers || [];
+  $('presentation-adapter-status').textContent =
+    `${assets.length} desired asset${assets.length === 1 ? '' : 's'} · `
+    + `${layers.length} layer${layers.length === 1 ? '' : 's'}`
+    + (layers.length > 1 ? ' · composition pending' : '');
+  rustPresentationDiagnostics.activeCue = snapshot.cue_id;
+  rustPresentationDiagnostics.desiredAssets = assets;
+  rustPresentationDiagnostics.desiredLayers = layers;
+  rustPresentationDiagnostics.multiAssetRendererPending = layers.length > 1;
+}
+
+function applyRustPresentationNavigation(snapshot) {
+  if (!snapshot?.camera || !snapshot?.focus) return;
+  const focus = snapshot.focus;
+  focusSphere.active = focus.focus_enabled;
+  focusSphere.center = Array.from(focus.center);
+  focusSphere.radius = focus.radius;
+  focusSphere.margin = null;
+  focusSphere.anchorNode = null;
+  focusSphere.anchorRadius = null;
+  focusSphereTransition = null;
+  batchSignals(() => {
+    mob.mx.set(focus.center[0] * 10);
+    mob.my.set(focus.center[1] * 10);
+    mob.mz.set(focus.center[2] * 10);
+    mob.mr.set(focus.radius * 10);
+    mob.xform.set(focus.inversion_enabled ? 'sphere_reflection' : 'identity');
+    fz.enabled.set(focus.focus_enabled);
+    if (focus.focus_enabled) fz.mode.set('3');
+    fz.focus.set(focus.focus_coordinate * 100);
+    fz.bandwidth.set(focus.angular_aperture * 100);
+  });
+  pushFocusSphereState();
+
+  const camera = snapshot.camera;
+  manualCameraBasisState.set(camera.right, 0);
+  manualCameraBasisState.set(camera.up, 3);
+  manualCameraBasisState.set(camera.forward, 6);
+  manualCameraBasisReady = true;
+  zoom = camera.control_distance;
+  const target = camera.semantic_target || [
+    camera.eye[0] + camera.forward[0] * zoom,
+    camera.eye[1] + camera.forward[1] * zoom,
+    camera.eye[2] + camera.forward[2] * zoom,
+  ];
+  panX = target[0];
+  panY = target[1];
+  panZ = target[2];
+  authoredCamera = null;
+  syncManualCameraEuler();
+  rustPresentationDiagnostics.navigation = snapshot;
+}
+
+function tickRustPresentation(deltaSeconds, nowMs) {
+  if (!rustPresentationController || !rustPresentationTransitionActive) return;
+  try {
+    const navigation = rustPresentationController.tick(deltaSeconds);
+    applyRustPresentationNavigation(navigation);
+    const remaining = Math.max(
+      navigation.camera.camera_transition_remaining || 0,
+      navigation.focus.focus_transition_remaining || 0,
+    );
+    rustPresentationTransitionActive = remaining > 0;
+    if (nowMs - rustPresentationLastLodAt >= 100) {
+      rustPresentationLastLodAt = nowMs;
+      debouncedLodRecompute();
+    }
+  } catch (error) {
+    rustPresentationTransitionActive = false;
+    rustPresentationDiagnostics.error = error?.message || String(error);
+    console.warn('Rust presentation transition failed:', error);
+  }
+}
+
+function activateRustPresentation(direction, cueId) {
+  if (!rustPresentationController) return null;
+  try {
+    synchronizeRustPresentationFromBrowser();
+    const snapshot = direction === 'start'
+      ? rustPresentationController.startPresentation()
+      : direction === 'advance'
+        ? rustPresentationController.advancePresentation()
+        : direction === 'reverse'
+          ? rustPresentationController.reversePresentation()
+          : rustPresentationController.jumpToPresentationCue(cueId);
+    renderRustPresentationSnapshot(snapshot);
+    rustPresentationTransitionActive = true;
+    applyRustPresentationNavigation(rustPresentationController.tick(0));
+    rustPresentationDiagnostics.error = null;
+    return snapshot;
+  } catch (error) {
+    rustPresentationDiagnostics.error = error?.message || String(error);
+    console.warn('Rust presentation cue failed:', error);
+    return null;
+  }
+}
+
+async function initializeRustPresentation() {
+  try {
+    const response = await fetch('./hacker-night.presentation.json');
+    if (!response.ok) throw new Error(`presentation fetch returned ${response.status}`);
+    rustPresentationController = new HyperscopeNavigation();
+    rustPresentationManifest = rustPresentationController.loadPresentation(await response.text());
+    globalThis.__hyperscopePresentationController = rustPresentationController;
+    globalThis.__hyperscopePresentationAdvance = () => activateRustPresentation('advance');
+    globalThis.__hyperscopePresentationReverse = () => activateRustPresentation('reverse');
+    globalThis.__hyperscopePresentationJump = cueId => activateRustPresentation('jump', cueId);
+    $('presentation-card').classList.add('active');
+    rustPresentationDiagnostics.ready = true;
+    activateRustPresentation('start');
+  } catch (error) {
+    rustPresentationDiagnostics.error = error?.message || String(error);
+    $('presentation-card').classList.add('active');
+    $('presentation-heading').textContent = 'Presentation unavailable';
+    $('presentation-body').textContent = rustPresentationDiagnostics.error;
+    $('presentation-adapter-status').textContent = 'preflight failed';
+    console.warn('Rust presentation initialization failed:', error);
+  }
+}
+
+$('presentation-previous').addEventListener('click', () => activateRustPresentation('reverse'));
+$('presentation-next').addEventListener('click', () => activateRustPresentation('advance'));
+window.addEventListener('keydown', event => {
+  if (!RUST_PRESENTATION_ENABLED || event.target instanceof HTMLInputElement
+      || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) {
+    return;
+  }
+  if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+    event.preventDefault();
+    activateRustPresentation('advance');
+  } else if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+    event.preventDefault();
+    activateRustPresentation('reverse');
+  }
+});
 const SPACE_MOUSE_CAMERA_MODE_TEXT = Object.freeze({
   hyperscope: 'Hyperscope Fly: camera-local translation + pitch/yaw/roll',
   object: 'Blender Object: move/orbit the object; depth changes distance',
@@ -2909,6 +3117,11 @@ function frame(ts) {
     }
   }
 
+  // Presentation navigation is Rust-authoritative only while a cue transition
+  // is active. Once settled, ordinary controls remain interactive; advancing
+  // first synchronizes that edited view back into the controller.
+  tickRustPresentation(deltaSeconds, ts);
+
   if (animating && gpuSkinned && meshInfo) {
     const duration = Number(meshInfo.duration) || 0;
     const timeMin = Number(meshInfo.time_min) || 0;
@@ -3495,6 +3708,7 @@ phase('wasm', [], async () => {
     globalThis.__hyperscopeNavigationShadowController = rustNavigationShadow;
     synchronizeRustNavigationShadow();
   }
+  if (RUST_PRESENTATION_ENABLED) await initializeRustPresentation();
 });
 
 // Phase 2: Initialize workers (depends on wasm for shader compilation)
