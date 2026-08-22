@@ -1326,28 +1326,9 @@ pub fn get_rest_pose_instances() -> JsValue {
 
         let combined = &data.combined;
         let nf = combined.triangles.len();
+        let n_verts = combined.positions.len();
 
         let mut instances = vec![0.0f32; nf * instance_layout::STRIDE];
-
-        // Compute smooth normals from rest pose
-        let n_verts = combined.positions.len();
-        let mut vn = vec![[0.0f64; 3]; n_verts];
-        for face in &combined.triangles {
-            let v0 = combined.positions[face[0]];
-            let v1 = combined.positions[face[1]];
-            let v2 = combined.positions[face[2]];
-            let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
-            let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
-            let fn_ = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
-            for &vi in face { vn[vi][0] += fn_[0]; vn[vi][1] += fn_[1]; vn[vi][2] += fn_[2]; }
-        }
-        // Normalize
-        for n in &mut vn {
-            let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
-            if len > 1e-10 { n[0] /= len; n[1] /= len; n[2] /= len; }
-        }
-        // Use glTF normals if available
-        let normals = combined.normals.as_ref();
 
         // Normalize positions
         let center = data.norm_center;
@@ -1357,29 +1338,62 @@ pub fn get_rest_pose_instances() -> JsValue {
             [(v[0]-center[0])*norm_scale, (v[1]-center[1])*norm_scale, (v[2]-center[2])*norm_scale]
         }).collect();
 
-        let tris_usize: Vec<[usize; 3]> = combined.triangles.clone();
-
         // Use the REAL LOD computation from evaluate.rs — half-edge coherent,
         // Möbius-deformed medians, screen attenuation, proper snap to power of 2.
         // Identity Möbius for initial load; async recompute handles Möbius-dependent LOD.
         let vertex_uvs_f32: Option<Vec<[f32; 2]>> = combined.uvs.as_ref().map(|uvs| {
             uvs.iter().map(|uv| [uv[0] as f32, uv[1] as f32]).collect()
         });
-        let vertex_normals_f32: Option<Vec<[f32; 3]>> = normals.map(|ns| {
-            ns.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect()
-        }).or_else(|| {
-            // Compute smooth normals if glTF doesn't provide them
-            Some(vn.iter().map(|n| [n[0] as f32, n[1] as f32, n[2] as f32]).collect())
-        });
+        let vertex_normals_f32: Vec<[f32; 3]> = if let Some(normals) = &combined.normals {
+            normals.iter()
+                .map(|normal| [normal[0] as f32, normal[1] as f32, normal[2] as f32])
+                .collect()
+        } else {
+            // Only synthesize smooth normals when the asset omitted them. The
+            // former unconditional pass needlessly revisited every triangle
+            // in normal-bearing meshes such as the 95k-face chess scene.
+            let mut vertex_normals = vec![[0.0f64; 3]; combined.positions.len()];
+            for face in &combined.triangles {
+                let v0 = combined.positions[face[0]];
+                let v1 = combined.positions[face[1]];
+                let v2 = combined.positions[face[2]];
+                let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+                let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
+                let face_normal = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                for &vertex in face {
+                    vertex_normals[vertex][0] += face_normal[0];
+                    vertex_normals[vertex][1] += face_normal[1];
+                    vertex_normals[vertex][2] += face_normal[2];
+                }
+            }
+            vertex_normals.iter_mut().for_each(|normal| {
+                let length = (normal[0] * normal[0]
+                    + normal[1] * normal[1]
+                    + normal[2] * normal[2])
+                    .sqrt();
+                if length > 1e-10 {
+                    normal[0] /= length;
+                    normal[1] /= length;
+                    normal[2] /= length;
+                }
+            });
+            vertex_normals.into_iter()
+                .map(|normal| [normal[0] as f32, normal[1] as f32, normal[2] as f32])
+                .collect()
+        };
 
         let lod_instances = quilting_core::evaluate::compute_instances_with_uvs(
             &norm_positions,
-            &tris_usize,
+            &combined.triangles,
             &Mobius::identity(),
             None, // no screen info for initial load
             None, // will build half-edge mesh internally
             vertex_uvs_f32.as_deref(),
-            vertex_normals_f32.as_deref(),
+            Some(&vertex_normals_f32),
         );
 
         // Pack into the compact instance format for the GPU animation path
@@ -1422,7 +1436,7 @@ pub fn get_rest_pose_instances() -> JsValue {
             let canonical = ck.res;
             let perm_idx = ck.perm_index;
             let parity = quilting_core::permutation::perm_sign(perm_idx);
-            let atlas_idx = atlas_keys.iter().position(|k| *k == canonical).unwrap_or(0);
+            let atlas_idx = atlas_keys.binary_search(&canonical).unwrap_or(0);
             face_lods.push(canonical[0] as f32);
             face_lods.push(canonical[1] as f32);
             face_lods.push(canonical[2] as f32);
