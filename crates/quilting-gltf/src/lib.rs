@@ -282,11 +282,14 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
 pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
     let gltf_obj = gltf::Gltf::from_slice(data)
         .or_else(|_| gltf::Gltf::from_slice_without_validation(data))?;
-
-    let document = &gltf_obj.document;
+    let gltf::Gltf { document, blob } = gltf_obj;
     let mut buffers = Vec::new();
-    if let Some(blob) = &gltf_obj.blob {
-        buffers.push(gltf::buffer::Data(blob.clone()));
+    if let Some(blob) = blob {
+        // The parsed GLB already owns its BIN chunk. Move it into the accessor
+        // backing store instead of cloning the entire embedded payload; large
+        // texture-heavy assets can otherwise transiently duplicate tens of
+        // megabytes before mesh extraction even begins.
+        buffers.push(gltf::buffer::Data(blob));
     }
 
     let meshes = document.meshes()
@@ -308,7 +311,7 @@ pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
         .map(|s| scene::extract_scene(&s))
         .collect();
     let default_scene = document.default_scene().map(|s| s.index());
-    let hyperscape = hyperscape::extract_asset(document)?;
+    let hyperscape = hyperscape::extract_asset(&document)?;
 
     // Extract raw image blobs from the GLB buffer
     let mut raw_images: Vec<RawImageBlob> = Vec::new();

@@ -93,25 +93,34 @@ fn merge_patches(
     };
 
     for (key, positions, triangles) in patch_results {
-        let base_vertex = atlas.positions.len();
-        let base_triangle = atlas.triangles.len();
-        atlas.positions.extend_from_slice(&positions);
-        for t in &triangles {
-            atlas.triangles.push([
-                t[0] + base_vertex,
-                t[1] + base_vertex,
-                t[2] + base_vertex,
-            ]);
-        }
-        atlas.patches.insert(key, PatchEntry {
-            base_vertex,
-            vertex_count: positions.len(),
-            base_triangle,
-            triangle_count: triangles.len(),
-        });
+        insert_patch(&mut atlas, key, positions, triangles);
     }
 
     atlas
+}
+
+fn insert_patch(
+    atlas: &mut TessellationAtlas,
+    key: [u32; 3],
+    positions: Vec<[f64; 2]>,
+    triangles: Vec<[usize; 3]>,
+) {
+    let base_vertex = atlas.positions.len();
+    let base_triangle = atlas.triangles.len();
+    atlas.positions.extend_from_slice(&positions);
+    for triangle in &triangles {
+        atlas.triangles.push([
+            triangle[0] + base_vertex,
+            triangle[1] + base_vertex,
+            triangle[2] + base_vertex,
+        ]);
+    }
+    atlas.patches.insert(key, PatchEntry {
+        base_vertex,
+        vertex_count: positions.len(),
+        base_triangle,
+        triangle_count: triangles.len(),
+    });
 }
 
 impl TessellationAtlas {
@@ -130,6 +139,71 @@ impl TessellationAtlas {
     /// Build atlas using direct generation (backward compatible).
     pub fn build(lod_levels: &[u32], config: &PatchConfig) -> Self {
         Self::build_direct(lod_levels, config)
+    }
+
+    /// Build exactly the requested canonical patches and the ancestors needed
+    /// to derive them by midpoint subdivision.
+    ///
+    /// This is the runtime-atlas path: callers can pass the subset reachable
+    /// under their LOD grading contract instead of generating the full
+    /// combinatorial product of `lod_levels`.
+    pub fn build_hierarchical_for_keys(
+        lod_levels: &[u32],
+        keys: &[[u32; 3]],
+        config: &PatchConfig,
+    ) -> Self {
+        let mut atlas = TessellationAtlas {
+            positions: Vec::new(),
+            triangles: Vec::new(),
+            patches: HashMap::new(),
+            lod_levels: lod_levels.to_vec(),
+        };
+        for &key in keys {
+            atlas.ensure_hierarchical_patch(key, config);
+        }
+        atlas
+    }
+
+    /// Ensure one canonical patch exists, recursively deriving it from its
+    /// half-resolution ancestor when all three edge resolutions are even.
+    pub fn ensure_hierarchical_patch(
+        &mut self,
+        mut key: [u32; 3],
+        config: &PatchConfig,
+    ) -> bool {
+        key.sort_unstable();
+        if self.patches.contains_key(&key) {
+            return true;
+        }
+
+        if key[0] > 0 && key.iter().all(|resolution| resolution % 2 == 0) {
+            let parent = [key[0] / 2, key[1] / 2, key[2] / 2];
+            if self.ensure_hierarchical_patch(parent, config) {
+                let Some(entry) = self.patches.get(&parent).cloned() else {
+                    return false;
+                };
+                let triangles: Vec<[usize; 3]> = self.triangles
+                    [entry.base_triangle..entry.base_triangle + entry.triangle_count]
+                    .iter()
+                    .map(|triangle| [
+                        triangle[0] - entry.base_vertex,
+                        triangle[1] - entry.base_vertex,
+                        triangle[2] - entry.base_vertex,
+                    ])
+                    .collect();
+                let positions = &self.positions
+                    [entry.base_vertex..entry.base_vertex + entry.vertex_count];
+                let (positions, triangles) = subdivide::subdivide(positions, &triangles);
+                insert_patch(self, key, positions, triangles);
+                return true;
+            }
+        }
+
+        let Some((positions, triangles)) = generate_patch(key, config) else {
+            return false;
+        };
+        insert_patch(self, key, positions, triangles);
+        true
     }
 
     fn build_direct(lod_levels: &[u32], config: &PatchConfig) -> Self {
@@ -391,6 +465,62 @@ mod tests {
         assert!(triples.contains(&[64, 128, 128]));
         assert!(!triples.contains(&[1, 1, 128]));
         assert!(triples.iter().all(|key| key[2] <= key[0] * 2));
+    }
+
+    #[test]
+    fn hierarchical_subset_builds_only_reachable_runtime_patches() {
+        let lods: Vec<u32> = (0..=7).map(|exponent| 1 << exponent).collect();
+        let keys = ratio_bounded_canonical_triples(&lods, 2);
+        let atlas = TessellationAtlas::build_hierarchical_for_keys(
+            &lods,
+            &keys,
+            &PatchConfig::default(),
+        );
+
+        assert_eq!(keys.len(), 22);
+        assert_eq!(atlas.patches.len(), keys.len());
+        assert!(keys.iter().all(|key| atlas.patches.contains_key(key)));
+    }
+
+    #[test]
+    fn hierarchical_subset_matches_full_hierarchical_topology() {
+        let config = PatchConfig::default();
+        let lods = [1, 2, 4, 8];
+        let keys = ratio_bounded_canonical_triples(&lods, 2);
+        let subset = TessellationAtlas::build_hierarchical_for_keys(&lods, &keys, &config);
+        let full = TessellationAtlas::build_with_mode(&lods, &config, BuildMode::Hierarchical);
+
+        for key in keys {
+            let subset_patch = subset.get_patch(key).unwrap();
+            let full_patch = full.get_patch(key).unwrap();
+            assert_eq!(subset_patch.positions, full_patch.positions, "patch {key:?}");
+            assert_eq!(subset_patch.triangles, full_patch.triangles, "patch {key:?}");
+        }
+    }
+
+    #[test]
+    fn ensuring_existing_hierarchical_patch_is_idempotent() {
+        let config = PatchConfig::default();
+        let mut atlas = TessellationAtlas::build_hierarchical_for_keys(
+            &[1, 2, 4, 8],
+            &[[8, 8, 8]],
+            &config,
+        );
+        let counts = (
+            atlas.patches.len(),
+            atlas.positions.len(),
+            atlas.triangles.len(),
+        );
+
+        assert!(atlas.ensure_hierarchical_patch([8, 8, 8], &config));
+        assert_eq!(
+            counts,
+            (
+                atlas.patches.len(),
+                atlas.positions.len(),
+                atlas.triangles.len(),
+            ),
+        );
     }
 
     #[test]

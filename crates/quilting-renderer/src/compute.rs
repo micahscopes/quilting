@@ -484,6 +484,9 @@ impl LodCompute {
     // --- Two-pass compute ---
 
     /// Run both LOD compute passes. Returns number of faces processed.
+    ///
+    /// Commands remain queued so callers can stage one or more subject runs,
+    /// append a shared fence, and flush the complete job once.
     pub fn compute_lods(
         &mut self,
         gl: &glow::Context,
@@ -644,7 +647,6 @@ impl LodCompute {
             gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
             gl.bind_vertex_array(None);
             gl.use_program(None);
-            gl.flush();
 
             // Pass 2 clobbers texture units — force rebind on next frame
             self.bound1 = false;

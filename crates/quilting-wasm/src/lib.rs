@@ -193,6 +193,28 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     elapsed
 }
 
+/// Build only the canonical patches reachable under the renderer's 2:1
+/// within-face LOD contract. This keeps the entire build in one WASM call so
+/// browser startup does not schedule one worker message per patch.
+#[wasm_bindgen]
+pub fn build_required_atlas(max_lod_exp: u32) -> f64 {
+    let config = PatchConfig { k_candidates: 30, seed: 42 };
+    let lods: Vec<u32> = (0..=max_lod_exp.min(30))
+        .map(|exponent| 1u32 << exponent)
+        .collect();
+    let keys = quilting_core::atlas::ratio_bounded_canonical_triples(
+        &lods,
+        batch::MAX_FACE_EDGE_LOD_RATIO,
+    );
+
+    let start = js_sys::Date::now();
+    let atlas = TessellationAtlas::build_hierarchical_for_keys(&lods, &keys, &config);
+    let elapsed = js_sys::Date::now() - start;
+    ATLAS.with(|atlas_cell| *atlas_cell.borrow_mut() = Some(atlas));
+    SENT_TESS.with(|sent| sent.borrow_mut().clear());
+    elapsed
+}
+
 /// Initialize GPU compute context using OffscreenCanvas.
 /// Call once per worker — creates a WebGL2 context for transform feedback LOD computation.
 #[wasm_bindgen]
@@ -1047,8 +1069,9 @@ pub fn extend_atlas(new_lod: u32) -> f64 {
                 }
             }
 
+            let config = PatchConfig { k_candidates: 30, seed: 42 };
             for key in &new_triples {
-                ensure_patch(atlas, *key);
+                atlas.ensure_hierarchical_patch(*key, &config);
             }
 
             atlas.lod_levels = levels;
@@ -1075,60 +1098,11 @@ pub fn generate_and_store_patch(res_a: u32, res_b: u32, res_c: u32) {
         });
         let mut key = [res_a, res_b, res_c];
         key.sort();
-        ensure_patch(atlas, key);
+        atlas.ensure_hierarchical_patch(key, &PatchConfig {
+            k_candidates: 30,
+            seed: 42,
+        });
     });
-}
-
-fn insert_patch(atlas: &mut TessellationAtlas, key: [u32; 3], positions: Vec<[f64; 2]>, triangles: Vec<[usize; 3]>) {
-    let base_vertex = atlas.positions.len();
-    let base_triangle = atlas.triangles.len();
-    atlas.positions.extend_from_slice(&positions);
-    for t in &triangles {
-        atlas.triangles.push([t[0] + base_vertex, t[1] + base_vertex, t[2] + base_vertex]);
-    }
-    atlas.patches.insert(key, quilting_core::atlas::PatchEntry {
-        base_vertex,
-        vertex_count: positions.len(),
-        base_triangle,
-        triangle_count: triangles.len(),
-    });
-}
-
-fn get_patch_local(atlas: &TessellationAtlas, key: &[u32; 3]) -> Option<(Vec<[f64; 2]>, Vec<[usize; 3]>)> {
-    let entry = atlas.patches.get(key)?;
-    let positions = atlas.positions[entry.base_vertex..entry.base_vertex + entry.vertex_count].to_vec();
-    let triangles: Vec<[usize; 3]> = atlas.triangles
-        [entry.base_triangle..entry.base_triangle + entry.triangle_count]
-        .iter()
-        .map(|t| [t[0] - entry.base_vertex, t[1] - entry.base_vertex, t[2] - entry.base_vertex])
-        .collect();
-    Some((positions, triangles))
-}
-
-/// Generate a patch: try hierarchical subdivision, fall back to Poisson.
-fn ensure_patch(atlas: &mut TessellationAtlas, key: [u32; 3]) -> bool {
-    if atlas.patches.contains_key(&key) { return true; }
-
-    // Try subdivision if all components are even
-    if key[0] % 2 == 0 && key[1] % 2 == 0 && key[2] % 2 == 0 && key[0] > 0 {
-        let parent = [key[0] / 2, key[1] / 2, key[2] / 2];
-        if ensure_patch(atlas, parent) {
-            if let Some((pos, tris)) = get_patch_local(atlas, &parent) {
-                let (new_pos, new_tris) = quilting_core::subdivide::subdivide(&pos, &tris);
-                insert_patch(atlas, key, new_pos, new_tris);
-                return true;
-            }
-        }
-    }
-
-    // Poisson fallback
-    let config = PatchConfig { k_candidates: 30, seed: 42 };
-    let res = [key[0] as f64, key[1] as f64, key[2] as f64];
-    let sample = quilting_core::sampling::tri_patch(res, &config);
-    if sample.positions.len() < 3 { return false; }
-    let tri = quilting_core::delaunay::triangulate_2d_constrained(&sample.positions, &sample.bary);
-    insert_patch(atlas, key, tri.positions, tri.triangles);
-    true
 }
 
 
@@ -1924,7 +1898,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             animations: scene.animations.clone(),
             skins: scene.skins.clone(),
             nodes: scene.nodes.clone(),
-            combined: combined.clone(),
+            combined,
             face_material_indices: face_material_indices.clone(),
             face_node_indices: face_node_indices.clone(),
             primary_skin_idx,

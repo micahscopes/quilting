@@ -84,7 +84,8 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
    before creating any JavaScript typed array. The first coherent result after
    a model, animation, remesh, or compute-resource boundary transfers all
    faces; later results cross into JavaScript and transfer only changed
-   `(face_index, six-float classification)` records.
+   `(face_index, six-float classification)` records. A classification with no
+   changed records does not enter main-renderer batch bookkeeping.
 6. The main-thread WASM layer retains the last valid topology for invisible
    faces, re-reconciles shared edges (including exact duplicate glTF seam
    vertices), grades each triangle to a 2:1 maximum edge ratio, and compares
@@ -139,7 +140,9 @@ frustum/pose bound and must retain the hidden last-valid topology.
 - glTF parsing, image decode, static face textures, adjacency, and skinning
   data are produced once per model load.
 - The canonical tessellation atlas is restricted to 2:1-reachable triples,
-  packed once, cached in IndexedDB with a versioned key, and uploaded once.
+  generated in one worker transaction, packed once, cached in IndexedDB with
+  a versioned key, and uploaded once. Serialization and cache persistence run
+  after the first model/render startup boundary rather than delaying it.
 - HDR prefilter and irradiance products are cached in IndexedDB and uploaded
   once per selected environment.
 - Batch ownership changes only after a completed LOD classification, material

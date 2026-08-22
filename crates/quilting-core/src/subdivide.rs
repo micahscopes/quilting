@@ -6,9 +6,17 @@ pub fn subdivide(
     positions: &[[f64; 2]],
     triangles: &[[usize; 3]],
 ) -> (Vec<[f64; 2]>, Vec<[usize; 3]>) {
-    let mut new_positions = positions.to_vec();
+    // A closed triangular mesh has roughly 3T/2 unique edges. Reserve the
+    // midpoint storage and lookup table up front: high atlas levels otherwise
+    // repeatedly grow both collections while processing every edge.
+    let midpoint_capacity = triangles.len().saturating_mul(3).div_ceil(2);
+    let mut new_positions = Vec::with_capacity(
+        positions.len().saturating_add(midpoint_capacity),
+    );
+    new_positions.extend_from_slice(positions);
     let mut new_triangles = Vec::with_capacity(triangles.len() * 4);
-    let mut edge_mids: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut edge_mids: HashMap<(usize, usize), usize> =
+        HashMap::with_capacity(midpoint_capacity);
 
     for &[a, b, c] in triangles {
         let ab = get_midpoint(a, b, &mut new_positions, &mut edge_mids);

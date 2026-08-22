@@ -62,6 +62,12 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'build_required_atlas') {
+    const ms = wasm.build_required_atlas(data.maxLodExp);
+    self.postMessage({ type: 'required_atlas_built', id, ms });
+    return;
+  }
+
   if (type === 'build_atlas_subset') {
     const { maxLodExp, mode, workerIndex, numWorkers } = data;
     const ms = wasm.build_atlas_subset(maxLodExp, mode, workerIndex, numWorkers);
@@ -133,6 +139,12 @@ self.onmessage = async function(e) {
       for (const t of result.textures) {
         if (t.data && t.data.buffer) transfers.push(t.data.buffer);
       }
+    }
+    if (result?.face_material_indices?.buffer) {
+      transfers.push(result.face_material_indices.buffer);
+    }
+    if (result?.face_node_indices?.buffer) {
+      transfers.push(result.face_node_indices.buffer);
     }
     // Only authored Hyperscape assets need their source bytes again on the
     // main thread to initialize the ECS graph. Ordinary GLBs stay transferred

@@ -1040,7 +1040,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=canonical-atlas-v1', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=required-atlas-v2', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -2617,43 +2617,49 @@ async function recomputeLods() {
     let batchRetainMs = 0;
     let batchBalanceMs = 0;
     let batchBucketMs = 0;
+    let appliedClassification = false;
 
     // Apply every completed coherent classification. If state changed while
     // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
     // discarding the completed result would starve continuously animated scenes.
     if (resp.lods && !remeshedMode) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
-      clearBatchMeasures();
       if (resp.indices) {
-        mr_updateBatches(
-          new Uint32Array(resp.indices.buffer || resp.indices),
-          faceLods,
-        );
+        const faceIndices = new Uint32Array(resp.indices.buffer || resp.indices);
+        if (faceIndices.length > 0) {
+          clearBatchMeasures();
+          mr_updateBatches(faceIndices, faceLods);
+          appliedClassification = true;
+        }
       } else {
+        clearBatchMeasures();
         mr_buildBatches(faceLods);
+        appliedClassification = true;
       }
       batchDone = performance.now();
-      batchGroupMs = consumeBatchMeasure('batch-group', 'batch-group-start', 'batch-group-end');
-      batchRetainMs = consumeBatchMeasure(
-        'batch-retain',
-        'batch-retain-start',
-        'batch-retain-end',
-      );
-      batchBalanceMs = consumeBatchMeasure(
-        'batch-balance',
-        'batch-balance-start',
-        'batch-balance-end',
-      );
-      batchBucketMs = consumeBatchMeasure(
-        'batch-bucket',
-        'batch-bucket-start',
-        'batch-bucket-end',
-      );
-      batchUploadMs = consumeBatchMeasure(
-        'batch-gpu-upload',
-        'batch-upload-start',
-        'batch-upload-end',
-      );
+      if (appliedClassification) {
+        batchGroupMs = consumeBatchMeasure('batch-group', 'batch-group-start', 'batch-group-end');
+        batchRetainMs = consumeBatchMeasure(
+          'batch-retain',
+          'batch-retain-start',
+          'batch-retain-end',
+        );
+        batchBalanceMs = consumeBatchMeasure(
+          'batch-balance',
+          'batch-balance-start',
+          'batch-balance-end',
+        );
+        batchBucketMs = consumeBatchMeasure(
+          'batch-bucket',
+          'batch-bucket-start',
+          'batch-bucket-end',
+        );
+        batchUploadMs = consumeBatchMeasure(
+          'batch-gpu-upload',
+          'batch-upload-start',
+          'batch-upload-end',
+        );
+      }
     }
     recordLodTiming(
       batchDone - lodT0,
@@ -2672,7 +2678,7 @@ async function recomputeLods() {
       wt.changed_faces,
       (resp.lods?.byteLength || 0) + (resp.indices?.byteLength || 0),
       !!wt.full_snapshot,
-      !!resp.lods,
+      appliedClassification,
       resp.debug,
     );
   } catch (e) {
@@ -3329,6 +3335,38 @@ phase('workers', ['wasm'], async () => {
   }
 });
 
+function cacheGeneratedAtlasAfterStartup(cacheKey, packed) {
+  void (async () => {
+    // Serialization and IndexedDB persistence are not render prerequisites.
+    // Keep them off the startup critical path and wait until the first model
+    // has been uploaded before asking the retained worker for another payload.
+    await gate(phases.render.done);
+    const serializeStartedAt = performance.now();
+    const exported = await workerCall('export_atlas_bytes', {});
+    const serialized = exported.bytes;
+    if (!serialized?.byteLength) return;
+    const serializeFinishedAt = performance.now();
+    if (startupDiagnostics.atlas?.cacheKey === cacheKey) {
+      startupDiagnostics.atlas.serializedBytes = serialized.byteLength;
+      startupDiagnostics.atlas.serializeRoundtripMs =
+        serializeFinishedAt - serializeStartedAt;
+    }
+    await idbPut(IDB_ATLAS_STORE, cacheKey, {
+      format: ATLAS_CACHE_FORMAT,
+      serialized,
+      patches: packed.patches,
+      bary: packed.bary,
+      tris: packed.tris,
+      lines: packed.lines,
+    });
+    if (startupDiagnostics.atlas?.cacheKey === cacheKey) {
+      startupDiagnostics.atlas.cacheWritten = true;
+    }
+  })().catch(error => {
+    console.warn('Tessellation atlas cache write failed', error);
+  });
+}
+
 // Phase 3: Build tessellation atlas (depends on workers)
 phase('atlas', ['workers'], async () => {
   const ATLAS_EXP = parseInt(initParams.atlas);
@@ -3346,8 +3384,15 @@ phase('atlas', ['workers'], async () => {
   let packed = null;
   let source = 'generated';
   let serializedBytes = 0;
+  let generationMs = 0;
+  let generationRoundtripMs = 0;
+  let cacheReadMs = 0;
+  let cacheImportMs = 0;
+  let packRoundtripMs = 0;
   try {
+    const cacheReadStartedAt = performance.now();
     const cached = await idbGet(IDB_ATLAS_STORE, cacheKey);
+    cacheReadMs = performance.now() - cacheReadStartedAt;
     const validPacked = cached?.format === ATLAS_CACHE_FORMAT
       && cached.patches instanceof Uint32Array
       && cached.bary instanceof Float32Array
@@ -3358,11 +3403,13 @@ phase('atlas', ['workers'], async () => {
       && cached.serialized.byteLength > 0;
     if (validPacked) {
       serializedBytes = cached.serialized.byteLength;
+      const importStartedAt = performance.now();
       const imported = await workerCall(
         'import_atlas_bytes',
         { bytes: cached.serialized },
         [cached.serialized],
       );
+      cacheImportMs = performance.now() - importStartedAt;
       if (imported.ok) {
         packed = cached;
         source = 'indexeddb';
@@ -3374,10 +3421,13 @@ phase('atlas', ['workers'], async () => {
 
   if (!packed) {
     $('stats').textContent = `Building ${allTriples.length} reachable patches...`;
-    for (const [a, b, c] of allTriples) {
-      await workerCall('generate_single', { a, b, c });
-    }
+    const buildStartedAt = performance.now();
+    const build = await workerCall('build_required_atlas', { maxLodExp: ATLAS_EXP });
+    generationRoundtripMs = performance.now() - buildStartedAt;
+    generationMs = Number(build.ms) || 0;
+    const packStartedAt = performance.now();
     const packedResp = await workerCall('export_patches', {});
+    packRoundtripMs = performance.now() - packStartedAt;
     // Accept the immediately preceding worker envelope too, so a page already in
     // flight during a hot reload fails gracefully instead of dropping the atlas.
     packed = packedResp.atlas ?? packedResp.patches;
@@ -3386,6 +3436,11 @@ phase('atlas', ['workers'], async () => {
   if (!packed?.patches || !packed?.bary || !packed?.tris || !packed?.lines) {
     throw new Error('packed tessellation atlas export was incomplete');
   }
+  const uploadStartedAt = performance.now();
+  if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
+    throw new Error('GPU rejected the packed tessellation atlas upload');
+  }
+  const uploadMs = performance.now() - uploadStartedAt;
   startupDiagnostics.atlas = {
     requestedPatches: allTriples.length,
     packedPatches: packed.patches.length / 7,
@@ -3397,30 +3452,17 @@ phase('atlas', ['workers'], async () => {
     workers: ATLAS_WORKERS,
     cacheKey,
     source,
+    generationMs,
+    generationRoundtripMs,
+    cacheReadMs,
+    cacheImportMs,
+    packRoundtripMs,
+    uploadMs,
     serializedBytes,
     cacheWritten: source === 'indexeddb',
   };
-  if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
-    throw new Error('GPU rejected the packed tessellation atlas upload');
-  }
   if (source === 'generated') {
-    const exported = await workerCall('export_atlas_bytes', {});
-    const serialized = exported.bytes;
-    if (serialized?.byteLength) {
-      startupDiagnostics.atlas.serializedBytes = serialized.byteLength;
-      idbPut(IDB_ATLAS_STORE, cacheKey, {
-        format: ATLAS_CACHE_FORMAT,
-        serialized,
-        patches: packed.patches,
-        bary: packed.bary,
-        tris: packed.tris,
-        lines: packed.lines,
-      }).then(() => {
-        startupDiagnostics.atlas.cacheWritten = true;
-      }).catch(error => {
-        console.warn('Tessellation atlas cache write failed', error);
-      });
-    }
+    cacheGeneratedAtlasAfterStartup(cacheKey, packed);
   }
 });
 

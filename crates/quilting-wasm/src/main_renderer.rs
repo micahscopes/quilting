@@ -1852,6 +1852,9 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 /// model/animation boundary still uses `mr_buildBatches` as a full snapshot.
 #[wasm_bindgen(js_name = "mr_updateBatches")]
 pub fn mr_update_batches(face_indices: &[u32], face_lods: &[f32]) {
+    if face_indices.is_empty() {
+        return;
+    }
     let Some(required) = face_indices.len().checked_mul(batch::FACE_LOD_STRIDE) else {
         web_sys::console::warn_1(&"Sparse LOD update size overflow".into());
         return;
