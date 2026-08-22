@@ -138,6 +138,7 @@ pub struct SurfaceContact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceDetachReason {
+    Manual,
     InvalidInput,
     SampleUnavailable,
     IllConditioned,
@@ -298,6 +299,7 @@ impl SurfaceWalker {
         let mut edge_crossings = 0;
         let mut projected_output_velocity = [0.0; 3];
         let mut condition_number = 1.0;
+        let mut integration_velocity = desired_output_velocity;
 
         while remaining > FINITE_EPSILON {
             iterations += 1;
@@ -317,8 +319,7 @@ impl SurfaceWalker {
                     edge_crossings,
                 );
             };
-            let Some(solution) =
-                solve_output_velocity(sample, desired_output_velocity, self.config)
+            let Some(solution) = solve_output_velocity(sample, integration_velocity, self.config)
             else {
                 self.detach(SurfaceDetachReason::IllConditioned);
                 return detached_advance(
@@ -379,6 +380,52 @@ impl SurfaceWalker {
                     edge_crossings,
                 );
             }
+            let Some(source_edge_sample) = field.sample(attachment.address) else {
+                self.detach(SurfaceDetachReason::SampleUnavailable);
+                return detached_advance(
+                    SurfaceDetachReason::SampleUnavailable,
+                    substeps,
+                    edge_crossings,
+                );
+            };
+            let Some(source_edge_solution) =
+                solve_output_velocity(source_edge_sample, integration_velocity, self.config)
+            else {
+                self.detach(SurfaceDetachReason::IllConditioned);
+                return detached_advance(
+                    SurfaceDetachReason::IllConditioned,
+                    substeps,
+                    edge_crossings,
+                );
+            };
+            let Some(target_edge_sample) = field.sample(next) else {
+                self.detach(SurfaceDetachReason::SampleUnavailable);
+                return detached_advance(
+                    SurfaceDetachReason::SampleUnavailable,
+                    substeps,
+                    edge_crossings,
+                );
+            };
+            let source_relative_velocity = sub(
+                source_edge_solution.projected_output_velocity,
+                source_edge_sample.surface_velocity,
+            );
+            let Some(target_relative_velocity) = transport_tangent_velocity(
+                source_relative_velocity,
+                source_edge_sample.normal(),
+                target_edge_sample.normal(),
+            ) else {
+                self.detach(SurfaceDetachReason::IllConditioned);
+                return detached_advance(
+                    SurfaceDetachReason::IllConditioned,
+                    substeps,
+                    edge_crossings,
+                );
+            };
+            integration_velocity = add(
+                target_relative_velocity,
+                target_edge_sample.surface_velocity,
+            );
             attachment.address = next;
         }
 
@@ -454,6 +501,37 @@ fn solve_output_velocity(
         projected_output_velocity: add(relative_projected, sample.surface_velocity),
         condition_number,
     })
+}
+
+/// Parallel-transport a tangent direction through the shortest rotation that
+/// aligns the source and target normals. For a folded triangle pair this is
+/// exactly the intrinsic "unfold around the shared edge" continuation; it also
+/// prevents a global output-space direction from bouncing at zero elapsed time
+/// between the same two faces.
+fn transport_tangent_velocity(
+    velocity: [f64; 3],
+    source_normal: Option<[f64; 3]>,
+    target_normal: Option<[f64; 3]>,
+) -> Option<[f64; 3]> {
+    let source_normal = source_normal?;
+    let target_normal = target_normal?;
+    let cosine = dot(source_normal, target_normal).clamp(-1.0, 1.0);
+    let axis = cross(source_normal, target_normal);
+    let sine = dot(axis, axis).sqrt();
+    let rotated = if sine > FINITE_EPSILON {
+        let axis = scale(axis, 1.0 / sine);
+        add(
+            add(scale(velocity, cosine), scale(cross(axis, velocity), sine)),
+            scale(axis, dot(axis, velocity) * (1.0 - cosine)),
+        )
+    } else if cosine > 0.0 {
+        velocity
+    } else {
+        // Antiparallel normals do not define a unique shortest rotation.
+        return None;
+    };
+    let tangent = sub(rotated, scale(target_normal, dot(rotated, target_normal)));
+    finite3(tangent).then_some(tangent)
 }
 
 fn first_edge_crossing(
@@ -754,6 +832,22 @@ mod tests {
         assert_eq!(contact.address.face, 1);
         assert!((contact.output_position[0] - 0.95).abs() < 1.0e-10);
         assert!((contact.output_position[1] - 0.1).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn edge_crossing_unfolds_velocity_onto_a_sharply_folded_neighbor() {
+        let mut field = field(1.0);
+        // Fold the neighboring triangle almost all the way back over the
+        // source triangle. Reusing the source-chart velocity on the target
+        // would project immediately back across the same edge forever.
+        field.positions[3] = [0.0, 0.0, 0.1];
+        let mut walker = walker_at([0.1, 0.8, 0.1]);
+        let step = walker.advance(1.0, [0.15, 0.0, 0.0], &mut field);
+        assert_eq!(step.status, SurfaceWalkerStatus::Attached);
+        assert_eq!(step.edge_crossings, 1);
+        let contact = step.contact.unwrap();
+        assert_eq!(contact.address.face, 1);
+        assert!(contact.address.barycentric[1] > 0.0);
     }
 
     #[test]

@@ -286,7 +286,8 @@ import init, {
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
-  mr_pick, mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
+  mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
+  mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
 import {
@@ -1458,6 +1459,17 @@ let nodeFocusRecords = new Map();
 let selectedObject = null;
 let cameraFocusTransition = null;
 let focusSphereTransition = null;
+const surfaceWalkKeys = new Set();
+const surfaceWalk = {
+  active: false,
+  snapshot: null,
+  speed: 0.2,
+  eyeHeight: 0.035,
+  lastLodAt: 0,
+  error: null,
+  keys: [],
+};
+globalThis.__hyperscopeSurfaceWalk = surfaceWalk;
 const focusSphere = {
   active: false,
   center: [0.5, 0, 0],
@@ -1506,8 +1518,8 @@ function applyPendingCanvasSize() {
   if (changed && meshInfo) debouncedLodRecompute();
 }
 
-function pickFaceAtCanvasPixel(x, y) {
-  if (!wasmOk.peek() || canvas.width <= 0 || canvas.height <= 0) return -1;
+function preparePickCamera() {
+  if (!wasmOk.peek() || canvas.width <= 0 || canvas.height <= 0) return false;
   const basis = manualCameraBasis(pickCameraBasis);
   const ex = authoredCamera ? authoredCamera.eye[0] : panX - basis[6] * zoom;
   const ey = authoredCamera ? authoredCamera.eye[1] : panY - basis[7] * zoom;
@@ -1522,7 +1534,134 @@ function pickFaceAtCanvasPixel(x, y) {
   perspective(Math.PI / 3, canvas.width / canvas.height, 0.01, 10000, pickProj);
   mulM4(pickProj, pickView, pickMvp);
   pickCameraPos[0] = ex; pickCameraPos[1] = ey; pickCameraPos[2] = ez;
+  return true;
+}
+
+function pickFaceAtCanvasPixel(x, y) {
+  if (!preparePickCamera()) return -1;
   return mr_pick(pickMvp, pickView, pickCameraPos, x, y);
+}
+
+function pickSurfaceAtCanvasPixel(x, y) {
+  if (!preparePickCamera()) return null;
+  return mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y);
+}
+
+function surfaceDot(left, right) {
+  return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
+}
+
+function surfaceCross(left, right) {
+  return [
+    left[1] * right[2] - left[2] * right[1],
+    left[2] * right[0] - left[0] * right[2],
+    left[0] * right[1] - left[1] * right[0],
+  ];
+}
+
+function surfaceNormalize(value) {
+  const length = Math.hypot(value[0], value[1], value[2]);
+  return length > 1e-8 && Number.isFinite(length)
+    ? [value[0] / length, value[1] / length, value[2] / length]
+    : null;
+}
+
+function surfaceProjectTangent(value, normal) {
+  const normalPart = surfaceDot(value, normal);
+  return surfaceNormalize([
+    value[0] - normal[0] * normalPart,
+    value[1] - normal[1] * normalPart,
+    value[2] - normal[2] * normalPart,
+  ]);
+}
+
+function applySurfaceWalkCamera(snapshot, orient = true) {
+  if (!snapshot || snapshot.status !== 'attached' || !snapshot.output_normal
+      || !snapshot.output_position) return false;
+  let normal = surfaceNormalize(Array.from(snapshot.output_normal));
+  if (!normal) return false;
+  const previousNormal = surfaceWalk.snapshot?.output_normal;
+  if (previousNormal && surfaceDot(normal, previousNormal) < 0) {
+    normal = normal.map(value => -value);
+  }
+  const position = Array.from(snapshot.output_position);
+  const eye = [
+    position[0] + normal[0] * surfaceWalk.eyeHeight,
+    position[1] + normal[1] * surfaceWalk.eyeHeight,
+    position[2] + normal[2] * surfaceWalk.eyeHeight,
+  ];
+  if (orient) {
+    const basis = manualCameraBasis(inputCameraBasis);
+    const oldForward = [basis[6], basis[7], basis[8]];
+    let tangentForward = surfaceProjectTangent(oldForward, normal);
+    if (!tangentForward) {
+      tangentForward = surfaceProjectTangent([basis[3], basis[4], basis[5]], normal);
+    }
+    if (!tangentForward) {
+      tangentForward = surfaceNormalize(surfaceCross(normal, [1, 0, 0]))
+        || surfaceNormalize(surfaceCross(normal, [0, 0, 1]));
+    }
+    if (!tangentForward) return false;
+    const normalPitch = Math.max(-0.95, Math.min(0.95, surfaceDot(oldForward, normal)));
+    const tangentScale = Math.sqrt(Math.max(0, 1 - normalPitch * normalPitch));
+    const forward = surfaceNormalize([
+      tangentForward[0] * tangentScale + normal[0] * normalPitch,
+      tangentForward[1] * tangentScale + normal[1] * normalPitch,
+      tangentForward[2] * tangentScale + normal[2] * normalPitch,
+    ]) || tangentForward;
+    const right = surfaceNormalize(surfaceCross(forward, normal));
+    const up = right && surfaceNormalize(surfaceCross(right, forward));
+    if (right && up) {
+      manualCameraBasisState.set(right, 0);
+      manualCameraBasisState.set(up, 3);
+      manualCameraBasisState.set(forward, 6);
+      manualCameraBasisReady = true;
+      syncManualCameraEuler();
+    }
+  }
+  const basis = manualCameraBasis(inputCameraBasis);
+  panX = eye[0] + basis[6] * zoom;
+  panY = eye[1] + basis[7] * zoom;
+  panZ = eye[2] + basis[8] * zoom;
+  snapshot.output_normal = normal;
+  snapshot.eye_position = eye;
+  return true;
+}
+
+function updateSurfaceWalkSnapshot(snapshot, { orient = true } = {}) {
+  if (!snapshot || snapshot.status !== 'attached') {
+    surfaceWalk.active = false;
+    surfaceWalk.snapshot = snapshot || null;
+    surfaceWalk.error = snapshot?.error || snapshot?.detach_reason || 'surface unavailable';
+    surfaceWalkKeys.clear();
+    surfaceWalk.keys = [];
+    selectionLabel(`Surface walk detached · ${surfaceWalk.error}`);
+    return false;
+  }
+  if (!applySurfaceWalkCamera(snapshot, orient)) {
+    surfaceWalk.active = false;
+    surfaceWalk.error = 'invalid contact frame';
+    selectionLabel('Surface walk detached · invalid contact frame');
+    return false;
+  }
+  surfaceWalk.active = true;
+  surfaceWalk.snapshot = snapshot;
+  surfaceWalk.error = null;
+  surfaceWalk.keys = Array.from(surfaceWalkKeys).sort();
+  selectionLabel(
+    `Surface walk · node ${snapshot.node} face ${snapshot.face} · WASD · right-click detaches`,
+  );
+  return true;
+}
+
+function detachSurfaceWalk(message = 'Surface walk detached') {
+  if (surfaceWalk.active) mr_detachSurface();
+  surfaceWalk.active = false;
+  surfaceWalk.snapshot = null;
+  surfaceWalk.error = null;
+  surfaceWalkKeys.clear();
+  surfaceWalk.keys = [];
+  selectionLabel(message);
 }
 
 function selectionLabel(message = '') {
@@ -1718,6 +1857,32 @@ canvas.addEventListener('click', e => {
   selectObjectFromFace(faceId, { highlightFace: e.ctrlKey || e.metaKey });
 });
 
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (surfaceWalk.active) {
+    detachSurfaceWalk();
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
+  const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
+  const picked = pickSurfaceAtCanvasPixel(x, y);
+  if (!picked?.barycentric) {
+    selectionLabel('No walkable surface under pointer');
+    return;
+  }
+  authoredCamera = null;
+  const snapshot = mr_attachSurface(
+    picked.face,
+    new Float32Array(picked.barycentric),
+    surfaceWalk.eyeHeight,
+  );
+  if (updateSurfaceWalkSnapshot(snapshot)) {
+    mr_highlightFace(picked.face);
+    debouncedLodRecompute();
+  }
+});
+
 // --- Mouse: orbit + shift-pan + wheel zoom ---
 canvas.addEventListener('mousedown', e => {
   if (e.button !== 0) return;
@@ -1754,6 +1919,14 @@ window.addEventListener('mousemove', e => {
 });
 window.addEventListener('keydown', e => {
   const editingText = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target?.tagName);
+  const walkingKey = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft',
+    'ArrowDown', 'ArrowRight', 'ShiftLeft', 'ShiftRight'].includes(e.code);
+  if (surfaceWalk.active && walkingKey && !editingText) {
+    surfaceWalkKeys.add(e.code);
+    surfaceWalk.keys = Array.from(surfaceWalkKeys).sort();
+    e.preventDefault();
+    return;
+  }
   if (e.code === 'KeyF' && !editingText) {
     focusKeyHeld = true;
     focusSphere.active = true;
@@ -1764,6 +1937,10 @@ window.addEventListener('keydown', e => {
       : 'Free focus sphere · focus edit');
     return;
   }
+  if (e.key === 'Escape' && surfaceWalk.active) {
+    detachSurfaceWalk();
+    return;
+  }
   if (e.key === 'Escape' && selectedObject) {
     clearSelectedObject('Focus sphere unanchored');
     mr_highlightFace(-1);
@@ -1771,8 +1948,14 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => {
   if (e.code === 'KeyF') focusKeyHeld = false;
+  surfaceWalkKeys.delete(e.code);
+  surfaceWalk.keys = Array.from(surfaceWalkKeys).sort();
 });
-window.addEventListener('blur', () => { focusKeyHeld = false; });
+window.addEventListener('blur', () => {
+  focusKeyHeld = false;
+  surfaceWalkKeys.clear();
+  surfaceWalk.keys = [];
+});
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
   if (focusKeyHeld) {
@@ -3499,6 +3682,43 @@ function frame(ts) {
     syncURL();
   }
 
+  if (surfaceWalk.active && deltaSeconds > 0) {
+    const basis = manualCameraBasis(inputCameraBasis);
+    const normal = surfaceNormalize(Array.from(surfaceWalk.snapshot?.output_normal || []));
+    if (!normal) {
+      detachSurfaceWalk('Surface walk detached · invalid normal');
+    } else {
+      const forward = surfaceProjectTangent([basis[6], basis[7], basis[8]], normal)
+        || surfaceProjectTangent([basis[3], basis[4], basis[5]], normal);
+      const right = surfaceProjectTangent([basis[0], basis[1], basis[2]], normal)
+        || (forward && surfaceNormalize(surfaceCross(forward, normal)));
+      if (!forward || !right) {
+        detachSurfaceWalk('Surface walk detached · invalid tangent frame');
+      } else {
+        const forwardAxis = Number(surfaceWalkKeys.has('KeyW') || surfaceWalkKeys.has('ArrowUp'))
+          - Number(surfaceWalkKeys.has('KeyS') || surfaceWalkKeys.has('ArrowDown'));
+        const rightAxis = Number(surfaceWalkKeys.has('KeyD') || surfaceWalkKeys.has('ArrowRight'))
+          - Number(surfaceWalkKeys.has('KeyA') || surfaceWalkKeys.has('ArrowLeft'));
+        const inputLength = Math.hypot(forwardAxis, rightAxis) || 1;
+        const fast = surfaceWalkKeys.has('ShiftLeft') || surfaceWalkKeys.has('ShiftRight');
+        const speed = surfaceWalk.speed * (fast ? 3 : 1);
+        const velocity = new Float32Array([
+          (forward[0] * forwardAxis + right[0] * rightAxis) * speed / inputLength,
+          (forward[1] * forwardAxis + right[1] * rightAxis) * speed / inputLength,
+          (forward[2] * forwardAxis + right[2] * rightAxis) * speed / inputLength,
+        ]);
+        const snapshot = mr_stepSurface(deltaSeconds, velocity);
+        if (updateSurfaceWalkSnapshot(snapshot)) {
+          const moving = forwardAxis !== 0 || rightAxis !== 0;
+          if (moving && ts - surfaceWalk.lastLodAt >= 100) {
+            surfaceWalk.lastLodAt = ts;
+            debouncedLodRecompute();
+          }
+        }
+      }
+    }
+  }
+
   const basis = manualCameraBasis(frameCameraBasis);
   const ex = authoredCamera ? authoredCamera.eye[0] : panX - basis[6] * zoom;
   const ey = authoredCamera ? authoredCamera.eye[1] : panY - basis[7] * zoom;
@@ -3545,6 +3765,7 @@ async function finishModelUpload(info, filename) {
     timings: uploadTimings,
   });
   clearSelectedObject();
+  if (surfaceWalk.active) detachSurfaceWalk('Surface walk detached · model changed');
 
   // A static model must not inherit joint/morph counts or textures from the
   // animated model that preceded it.

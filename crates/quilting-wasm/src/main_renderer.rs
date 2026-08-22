@@ -24,6 +24,7 @@ use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
 use crate::round_shadow::RoundShadowObserver;
+use crate::surface_runtime::{SurfaceRuntime, SurfaceRuntimeSnapshot};
 use hyperscape::interchange::{
     GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
 };
@@ -147,6 +148,9 @@ struct MainState {
     /// Source-mesh adjacency used to keep retained asynchronous topology
     /// crack-free, including exact duplicate vertices at glTF attribute seams.
     lod_topology: Option<quilting_mesh::HalfEdgeMesh>,
+    /// Rust-authoritative stable source address and output-chart walker. The
+    /// adjacency layer is built lazily on first attachment.
+    surface_runtime: SurfaceRuntime,
     /// Material/node/atlas changes require a rebuild even when face topology
     /// classifications are unchanged.
     batch_layout_dirty: bool,
@@ -497,6 +501,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             lod_dirty_faces: Vec::new(),
             lod_balance_scratch: batch::ResidentLodBalanceScratch::default(),
             lod_topology: None,
+            surface_runtime: SurfaceRuntime::default(),
             batch_layout_dirty: true,
             batch_update_stats: BatchUpdateStats::default(),
             face_materials: Vec::new(),
@@ -1327,6 +1332,106 @@ pub fn mr_pick_surface(
     })
 }
 
+fn surface_snapshot_to_js(snapshot: Result<SurfaceRuntimeSnapshot, String>) -> JsValue {
+    match snapshot {
+        Ok(snapshot) => serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL),
+        Err(error) => {
+            warn!("Surface walker: {error}");
+            let result = js_sys::Object::new();
+            js_sys::Reflect::set(&result, &"status".into(), &"error".into()).ok();
+            js_sys::Reflect::set(&result, &"error".into(), &error.into()).ok();
+            result.into()
+        }
+    }
+}
+
+/// Attach the Rust walker to a source face selected by `mr_pickSurface`.
+#[wasm_bindgen(js_name = "mr_attachSurface")]
+pub fn mr_attach_surface(face: u32, barycentric: &[f32], eye_height: f32) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let Some(&node) = state.face_nodes.get(face as usize) else {
+            return surface_snapshot_to_js(Err("surface face has no node".into()));
+        };
+        let conformal = conformal_state_for_node(state, node);
+        let barycentric = [
+            barycentric.first().copied().unwrap_or(0.0) as f64,
+            barycentric.get(1).copied().unwrap_or(0.0) as f64,
+            barycentric.get(2).copied().unwrap_or(0.0) as f64,
+        ];
+        let MainState {
+            surface_runtime,
+            cached_instances,
+            face_nodes,
+            num_faces,
+            ..
+        } = state;
+        surface_snapshot_to_js(surface_runtime.attach(
+            cached_instances,
+            *num_faces,
+            face_nodes,
+            face,
+            barycentric,
+            eye_height as f64,
+            conformal.mobius,
+            conformal.euclidean_model,
+        ))
+    })
+}
+
+/// Advance relative to the current animated surface in the displayed output
+/// chart. The runtime adds measured surface/frame velocity before applying the
+/// Jacobian pseudoinverse, so zero input remains stuck to moving geometry.
+#[wasm_bindgen(js_name = "mr_stepSurface")]
+pub fn mr_step_surface(delta_seconds: f64, relative_output_velocity: &[f32]) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let Some(face) = state.surface_runtime.attachment_face() else {
+            return surface_snapshot_to_js(Err("surface walker is detached".into()));
+        };
+        let Some(&node) = state.face_nodes.get(face as usize) else {
+            return surface_snapshot_to_js(Err("attached face has no node".into()));
+        };
+        let conformal = conformal_state_for_node(state, node);
+        let velocity = [
+            relative_output_velocity.first().copied().unwrap_or(0.0) as f64,
+            relative_output_velocity.get(1).copied().unwrap_or(0.0) as f64,
+            relative_output_velocity.get(2).copied().unwrap_or(0.0) as f64,
+        ];
+        let MainState {
+            surface_runtime,
+            cached_instances,
+            face_nodes,
+            ..
+        } = state;
+        surface_snapshot_to_js(surface_runtime.step_relative(
+            cached_instances,
+            face_nodes,
+            delta_seconds,
+            velocity,
+            conformal.mobius,
+            conformal.euclidean_model,
+        ))
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_detachSurface")]
+pub fn mr_detach_surface() -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        serde_wasm_bindgen::to_value(&state.surface_runtime.detach()).unwrap_or(JsValue::NULL)
+    })
+}
+
 fn build_instance_lod_topology(
     instances: &[f32],
     num_faces: usize,
@@ -1450,6 +1555,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             }
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces;
+            st.surface_runtime.reset_geometry();
             st.batch_groups.clear();
             st.batch_staging.clear();
             st.resident_face_lods = vec![None; st.num_faces];
@@ -1932,7 +2038,10 @@ pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], 
             .map(|row| [row[0], row[1], row[2], row[3]])
             .collect();
         match state.renderer.upload_skinning_texture(&ji, &jw) {
-            Ok(()) => debug!("Skinning texture uploaded: {} vertices", nv),
+            Ok(()) => {
+                state.surface_runtime.set_skinning(&ji, &jw);
+                debug!("Skinning texture uploaded: {} vertices", nv);
+            }
             Err(error) => warn!("Skinning texture upload failed: {}", error),
         }
     });
@@ -1948,7 +2057,10 @@ pub fn mr_upload_morph_texture(deltas: &[f32], num_vertices: u32, num_targets: u
         let nv = num_vertices as usize;
         let nt = num_targets as usize;
         match state.renderer.upload_morph_texture(deltas, nv, nt) {
-            Ok(()) => debug!("Morph texture uploaded: {} vertices × {} targets", nv, nt),
+            Ok(()) => {
+                state.surface_runtime.set_morph_targets(deltas, nv, nt);
+                debug!("Morph texture uploaded: {} vertices × {} targets", nv, nt);
+            }
             Err(error) => warn!("Morph texture upload failed: {}", error),
         }
     });
@@ -2327,8 +2439,9 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
 #[wasm_bindgen(js_name = "mr_uploadAnimationPose")]
 pub fn mr_upload_animation_pose(matrices: &[f32], morph_weights: &[f32], skin_tex_w: i32) {
     STATE.with(|s| {
-        if let Some(ref st) = *s.borrow() {
+        if let Some(ref mut st) = *s.borrow_mut() {
             st.renderer.joint_ubo().upload(st.renderer.gl(), matrices, morph_weights, skin_tex_w);
+            st.surface_runtime.set_pose(matrices, morph_weights);
         }
     });
 }
@@ -2342,6 +2455,7 @@ pub fn mr_clear_animation_state() {
         if let Some(state) = state.borrow_mut().as_mut() {
             state.renderer.joint_ubo().clear(state.renderer.gl());
             state.renderer.clear_animation_textures();
+            state.surface_runtime.clear_animation();
         }
     });
 }

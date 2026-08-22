@@ -1,6 +1,7 @@
 pub mod main_renderer;
 mod navigation;
 mod round_shadow;
+mod surface_runtime;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
