@@ -10,6 +10,7 @@ pub mod shader;
 pub mod buffer;
 pub mod pass;
 pub mod compute;
+pub mod prepare;
 pub mod texture;
 
 use glow::HasContext;
@@ -19,6 +20,7 @@ use buffer::{
     SkinningTexture, MorphTargetTexture,
 };
 use shader::Programs;
+use prepare::PatchPreparer;
 
 /// High-level renderer for the quilting pipeline.
 ///
@@ -31,6 +33,7 @@ pub struct Renderer {
     pbr_ubo: PbrUniformBuf,
     matcap_ubo: MatcapUniformBuf,
     joint_ubo: JointMatricesBuf,
+    patch_preparer: PatchPreparer,
     skinning_texture: Option<SkinningTexture>,
     morph_texture: Option<MorphTargetTexture>,
     width: i32,
@@ -49,6 +52,7 @@ impl Renderer {
         let pbr_ubo = PbrUniformBuf::new(&gl)?;
         let matcap_ubo = MatcapUniformBuf::new(&gl)?;
         let joint_ubo = JointMatricesBuf::new(&gl)?;
+        let patch_preparer = PatchPreparer::new(&gl)?;
 
         Ok(Renderer {
             gl,
@@ -58,6 +62,7 @@ impl Renderer {
             pbr_ubo,
             matcap_ubo,
             joint_ubo,
+            patch_preparer,
             skinning_texture: None,
             morph_texture: None,
             width: 0,
@@ -105,6 +110,34 @@ impl Renderer {
             batches,
             &self.vtx_ubo,
             &self.wire_ubo,
+        );
+    }
+
+    /// Prepare one resident patch batch from the current animation pose and
+    /// entity transform. The destination is consumed directly by later draws.
+    pub fn prepare_patch_batch(
+        &self,
+        camera: &pass::Camera,
+        batch: &pass::RenderBatch<'_>,
+        source_vao: glow::VertexArray,
+        destination: glow::Buffer,
+        byte_offset: i32,
+    ) {
+        let batch_camera = pass::camera_for_batch(camera, batch);
+        pass::upload_batch_ubo(
+            &self.gl,
+            &self.vtx_ubo,
+            &batch_camera,
+            1,
+            &batch.euclidean_model,
+            &batch.euclidean_normal,
+        );
+        self.patch_preparer.prepare_range(
+            &self.gl,
+            source_vao,
+            destination,
+            byte_offset,
+            batch.mesh.num_instances,
         );
     }
 
@@ -224,6 +257,7 @@ impl Drop for Renderer {
         self.pbr_ubo.destroy(&self.gl);
         self.matcap_ubo.destroy(&self.gl);
         self.joint_ubo.destroy(&self.gl);
+        self.patch_preparer.destroy(&self.gl);
         if let Some(texture) = self.skinning_texture.take() {
             texture.destroy(&self.gl);
         }

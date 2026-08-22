@@ -688,27 +688,8 @@ fn build_tf_program(
     varyings: &[&str],
     label: &str,
 ) -> Result<glow::Program, String> {
-    unsafe {
-        let vs = compile_shader(gl, glow::VERTEX_SHADER, vs_src)?;
-        let fs = compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?;
-
-        let program = gl.create_program().map_err(|e| format!("{e}"))?;
-        gl.attach_shader(program, vs);
-        gl.attach_shader(program, fs);
-
-        gl.transform_feedback_varyings(program, varyings, glow::INTERLEAVED_ATTRIBS);
-
-        gl.link_program(program);
-        if !gl.get_program_link_status(program) {
-            let log = gl.get_program_info_log(program);
-            return Err(format!("{label} link: {log}"));
-        }
-        gl.detach_shader(program, vs);
-        gl.detach_shader(program, fs);
-        gl.delete_shader(vs);
-        gl.delete_shader(fs);
-        Ok(program)
-    }
+    crate::shader::create_transform_feedback_program(gl, vs_src, fs_src, varyings)
+        .map_err(|error| format!("{label}: {error}"))
 }
 
 unsafe fn set_nearest(gl: &glow::Context) {

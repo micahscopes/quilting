@@ -15,7 +15,7 @@
 //! | 12..16 | 48    | 7           | edge LODs + permutation index    |
 //! | 16..20 | 64    | 8           | vertex LODs + source face ID     |
 //! | 20..24 | 80    | 9           | uv01 `(u0, v0, u1, v1)`          |
-//! | 24..28 | 96    | 10          | uv2 `(u2, v2, 0, 0)`             |
+//! | 24..28 | 96    | 10          | uv2 + preparation `(u2,v2,visible,prepared)` |
 //! | 28..32 | 112   | 11          | n0 `(x, y, z, 0)`                |
 //! | 32..36 | 128   | 12          | n1                               |
 //! | 36..40 | 144   | 13          | n2                               |
@@ -49,8 +49,12 @@ pub mod offset {
     pub const VERTEX_LODS: usize = 16;
     /// Original source-face index, stored in `vert_lod.w` for picking.
     pub const FACE_ID: usize = VERTEX_LODS + 3;
-    /// Six UV floats: `(u0, v0, u1, v1, u2, v2)`, then two floats of padding.
+    /// Six UV floats: `(u0, v0, u1, v1, u2, v2)`.
     pub const UVS: usize = 20;
+    /// Current-pose conservative visibility written by a GPU preparation pass.
+    pub const PREPARED_VISIBILITY: usize = UVS + 6;
+    /// Nonzero when the record's positions and visibility have been prepared.
+    pub const PREPARED_FLAG: usize = UVS + 7;
     /// Normal `i` occupies `NORMALS + i * 4`, as `(x, y, z, 0)`.
     pub const NORMALS: usize = 28;
 }
@@ -128,6 +132,12 @@ impl<'a> InstanceWriter<'a> {
         }
     }
 
+    /// Mark a record as GPU-prepared and store its current-pose visibility.
+    pub fn set_prepared_visibility(&mut self, visible: bool) {
+        self.slice[offset::PREPARED_VISIBILITY] = if visible { 1.0 } else { 0.0 };
+        self.slice[offset::PREPARED_FLAG] = 1.0;
+    }
+
     /// Smooth normal for corner `i`. Zeroed normals tell the shader to fall
     /// back to analytic QB normals (SPEC invariant 8).
     pub fn set_normal(&mut self, i: usize, n: [f32; 3]) {
@@ -189,6 +199,7 @@ mod tests {
         w.set_vertex_lods([2.0, 3.0, 4.0]);
         w.set_face_id(123);
         w.set_uvs([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]);
+        w.set_prepared_visibility(true);
         w.set_normal(0, [0.0, 1.0, 0.0]);
 
         let b = STRIDE;
@@ -198,6 +209,8 @@ mod tests {
         assert_eq!(&buf[b + offset::VERTEX_LODS..b + offset::VERTEX_LODS + 3], &[2.0, 3.0, 4.0]);
         assert_eq!(buf[b + offset::FACE_ID], 123.0);
         assert_eq!(&buf[b + 20..b + 26], &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        assert_eq!(buf[b + offset::PREPARED_VISIBILITY], 1.0);
+        assert_eq!(buf[b + offset::PREPARED_FLAG], 1.0);
         assert_eq!(&buf[b + 28..b + 31], &[0.0, 1.0, 0.0]);
         // Instance 0 untouched.
         assert!(buf[..STRIDE].iter().all(|&f| f == 0.0));

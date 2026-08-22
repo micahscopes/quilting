@@ -286,6 +286,7 @@ unsafe fn setup_vao(
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
 
     gl.bind_vertex_array(None);
+    gl.bind_buffer(glow::ARRAY_BUFFER, None);
 }
 
 /// Configure a VAO like `setup_vao` but with instance attribs starting at `byte_offset`.
@@ -314,6 +315,7 @@ unsafe fn setup_vao_offset(
 
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
     gl.bind_vertex_array(None);
+    gl.bind_buffer(glow::ARRAY_BUFFER, None);
 }
 
 /// Create a VAO binding tessellation geometry + persistent instance buffer.
@@ -335,10 +337,42 @@ pub fn create_shared_vao(
 /// Instance attribute locations and byte offsets within the instance stride.
 pub use instance_layout::ATTR_MAP as COMPACT_MAP;
 
-/// A single persistent GPU buffer holding all instance data for all faces.
-/// Batches are contiguous ranges — no per-batch copy needed.
+/// Create a VAO that reads one complete instance record per point vertex.
+/// Unlike a render VAO, these attributes have divisor zero: the preparation
+/// pass dispatches one ordinary point per source patch.
+pub fn create_patch_input_vao(
+    gl: &glow::Context,
+    instance_buf: &glow::Buffer,
+    byte_offset: i32,
+) -> Result<glow::VertexArray, String> {
+    unsafe {
+        let vao = gl.create_vertex_array().map_err(|e| format!("patch input vao: {e}"))?;
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
+        for &(loc, attr_offset) in &COMPACT_MAP {
+            gl.enable_vertex_attrib_array(loc);
+            gl.vertex_attrib_pointer_f32(
+                loc,
+                4,
+                glow::FLOAT,
+                false,
+                INSTANCE_STRIDE_BYTES,
+                byte_offset + attr_offset,
+            );
+            gl.vertex_attrib_divisor(loc, 0);
+        }
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        Ok(vao)
+    }
+}
+
+/// Persistent source and prepared GPU records for every resident patch.
+/// Batches are contiguous ranges in both buffers. The source is updated only
+/// when batching changes; the GPU rewrites the prepared buffer every frame.
 pub struct PersistentInstances {
     pub buf: glow::Buffer,
+    pub prepared_buf: glow::Buffer,
     pub capacity: usize, // in bytes
 }
 
@@ -349,7 +383,17 @@ impl PersistentInstances {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(buf));
             let bytes = bytemuck_cast_slice(data);
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
-            Ok(Self { buf, capacity: bytes.len() })
+
+            let prepared_buf = gl.create_buffer().map_err(|error| {
+                gl.delete_buffer(buf);
+                format!("prepared instance buffer: {error}")
+            })?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(prepared_buf));
+            // Seed with source-format records so the render shader's explicit
+            // unprepared fallback remains valid before the first GPU pass.
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_COPY);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            Ok(Self { buf, prepared_buf, capacity: bytes.len() })
         }
     }
 
@@ -382,7 +426,10 @@ impl PersistentInstances {
     }
 
     pub fn destroy(&self, gl: &glow::Context) {
-        unsafe { gl.delete_buffer(self.buf); }
+        unsafe {
+            gl.delete_buffer(self.buf);
+            gl.delete_buffer(self.prepared_buf);
+        }
     }
 }
 

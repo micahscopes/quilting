@@ -104,17 +104,27 @@ fn link_program(
     gl: &glow::Context,
     vert: glow::Shader,
     frag: glow::Shader,
+    transform_feedback_varyings: Option<&[&str]>,
 ) -> Result<glow::Program, String> {
     unsafe {
         let program = gl.create_program()
-            .map_err(|e| format!("create_program: {e}"))?;
+            .map_err(|e| {
+                gl.delete_shader(vert);
+                gl.delete_shader(frag);
+                format!("create_program: {e}")
+            })?;
         gl.attach_shader(program, vert);
         gl.attach_shader(program, frag);
+        if let Some(varyings) = transform_feedback_varyings {
+            gl.transform_feedback_varyings(program, varyings, glow::INTERLEAVED_ATTRIBS);
+        }
         gl.link_program(program);
 
         if !gl.get_program_link_status(program) {
             let log = gl.get_program_info_log(program);
             gl.delete_program(program);
+            gl.delete_shader(vert);
+            gl.delete_shader(frag);
             return Err(format!("program link error: {log}"));
         }
 
@@ -140,7 +150,25 @@ pub fn create_program(
             unsafe { gl.delete_shader(vert); }
             e
         })?;
-    link_program(gl, vert, frag)
+    link_program(gl, vert, frag, None)
+}
+
+/// Create a transform-feedback GL program from GLSL source. Varyings are
+/// interleaved in the supplied order, which therefore defines the destination
+/// buffer's record layout.
+pub fn create_transform_feedback_program(
+    gl: &glow::Context,
+    vertex_src: &str,
+    fragment_src: &str,
+    varyings: &[&str],
+) -> Result<glow::Program, String> {
+    let vert = compile_gl_shader(gl, glow::VERTEX_SHADER, vertex_src)?;
+    let frag = compile_gl_shader(gl, glow::FRAGMENT_SHADER, fragment_src)
+        .map_err(|e| {
+            unsafe { gl.delete_shader(vert); }
+            e
+        })?;
+    link_program(gl, vert, frag, Some(varyings))
 }
 
 /// Bind uniform block indices to known binding points for a program.

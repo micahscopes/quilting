@@ -163,6 +163,13 @@ pub fn compile_vertex_glsl_native() -> Result<String, Box<dyn std::error::Error>
     emit_glsl_native(&module, naga::ShaderStage::Vertex, "vs_main")
 }
 
+/// Compile the backend-neutral prepared-patch entry point for WebGL2 transform
+/// feedback. It shares pose and visibility code with the render vertex shader.
+pub fn compile_patch_prepare_glsl_native() -> Result<String, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::VERTEX_MAIN, HashMap::new())?;
+    emit_glsl_native(&module, naga::ShaderStage::Vertex, "prepare_patches")
+}
+
 /// Compile a fragment shader to GLSL ES 300 for native OpenGL/WebGL
 /// (no coordinate space adjustment).
 pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -196,6 +203,21 @@ mod tests {
         let code = glsl.unwrap();
         assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
         assert!(code.contains("void main()"), "should have main()");
+    }
+
+    #[test]
+    fn compile_patch_prepare_shader_to_glsl() {
+        let glsl = compile_patch_prepare_glsl_native();
+        assert!(glsl.is_ok(), "patch preparation failed: {:?}", glsl.err());
+        let code = glsl.unwrap();
+        assert!(code.contains("#version 300 es"));
+        assert!(code.contains("void main()"));
+        for location in 0..10 {
+            assert!(
+                code.contains(&format!("_vs2fs_location{location}")),
+                "prepared record must expose transform-feedback location {location}",
+            );
+        }
     }
 
     #[test]

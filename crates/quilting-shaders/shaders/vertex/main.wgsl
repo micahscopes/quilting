@@ -183,6 +183,37 @@ struct VertexOutput {
     @location(12) mobius_stretch: f32,
 }
 
+// Backend-neutral prepared-patch record. Locations 0..9 are ten contiguous
+// vec4s, exactly matching quilting_core::instance_layout's 40-float stride.
+// WebGL2 writes it with transform feedback; WebGPU can produce the same logical
+// record from a compute pass without changing render semantics.
+struct PatchPrepareInput {
+    @location(1) p0: vec4<f32>,
+    @location(2) p1: vec4<f32>,
+    @location(3) p2: vec4<f32>,
+    @location(7) lod_info: vec4<f32>,
+    @location(8) vert_lod: vec4<f32>,
+    @location(9) uv01: vec4<f32>,
+    @location(10) uv2_prepare: vec4<f32>,
+    @location(11) smooth_n0: vec4<f32>,
+    @location(12) smooth_n1: vec4<f32>,
+    @location(13) smooth_n2: vec4<f32>,
+}
+
+struct PreparedPatchOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) p0: vec4<f32>,
+    @location(1) p1: vec4<f32>,
+    @location(2) p2: vec4<f32>,
+    @location(3) lod_info: vec4<f32>,
+    @location(4) vert_lod: vec4<f32>,
+    @location(5) uv01: vec4<f32>,
+    @location(6) uv2_prepare: vec4<f32>,
+    @location(7) smooth_n0: vec4<f32>,
+    @location(8) smooth_n1: vec4<f32>,
+    @location(9) smooth_n2: vec4<f32>,
+}
+
 fn culled_vertex_output() -> VertexOutput {
     return VertexOutput(
         vec4<f32>(2.0, 2.0, 2.0, 1.0),
@@ -266,6 +297,40 @@ fn patch_outside_frustum(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>) -> bool {
     let image_center = 0.5 * (plus + minus);
     let image_radius = 0.5 * distance(plus, minus) * 1.05 + 1e-6;
     return sphere_outside_frustum(image_center, image_radius);
+}
+
+fn posed_position(control: vec4<f32>) -> vec3<f32> {
+    let vertex_index = i32(control.x);
+    var position = control.yzw;
+    if joints.num_joints > 0 || joints.num_morph_targets > 0 {
+        position = apply_morph(position, vertex_index);
+        position = skin_position(position, vertex_index);
+    }
+    return (u.model * vec4<f32>(position, 1.0)).xyz;
+}
+
+@vertex
+fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
+    let p0 = vec4<f32>(in.p0.x, posed_position(in.p0));
+    let p1 = vec4<f32>(in.p1.x, posed_position(in.p1));
+    let p2 = vec4<f32>(in.p2.x, posed_position(in.p2));
+    let visible = !patch_outside_frustum(p0.yzw, p1.yzw, p2.yzw);
+    let uv2_prepare = vec4<f32>(
+        in.uv2_prepare.xy,
+        select(0.0, 1.0, visible),
+        1.0,
+    );
+    return PreparedPatchOutput(
+        vec4<f32>(0.0),
+        p0, p1, p2,
+        in.lod_info,
+        in.vert_lod,
+        in.uv01,
+        uv2_prepare,
+        in.smooth_n0,
+        in.smooth_n1,
+        in.smooth_n2,
+    );
 }
 
 // S3 permutation remapping: reorder bary coords so one tessellation
@@ -369,44 +434,27 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var nrm: vec3<f32>;
     out.fade = 1.0;
 
-    // GPU animation: vertex indices packed in p.x, positions in p.yzw.
-    // Apply morph targets first, then skeletal skinning, before Möbius/QB eval.
-    // Animated positions become pure quaternion control points (w=0, xyz=position)
-    // for the fused Möbius-QB surface evaluation.
-    // Instance data: p.x = vertex_index, p.yzw = position.
-    // Always construct pure imaginary quaternions (w=0) for Möbius math.
-    let vi0 = i32(in.p0.x);
-    let vi1 = i32(in.p1.x);
-    let vi2 = i32(in.p2.x);
+    let prepared = in.uv2_pad.w > 0.5;
+    if prepared && in.uv2_pad.z < 0.5 {
+        return culled_vertex_output();
+    }
+
+    // Prepared records already contain posed, affine-transformed control
+    // points. The fallback path preserves rendering when preparation is absent.
     var sp0: vec4<f32>;
     var sp1: vec4<f32>;
     var sp2: vec4<f32>;
-    let has_gpu_anim = joints.num_joints > 0 || joints.num_morph_targets > 0;
-    if has_gpu_anim {
-        var pos0 = apply_morph(in.p0.yzw, vi0);
-        var pos1 = apply_morph(in.p1.yzw, vi1);
-        var pos2 = apply_morph(in.p2.yzw, vi2);
-        pos0 = skin_position(pos0, vi0);
-        pos1 = skin_position(pos1, vi1);
-        pos2 = skin_position(pos2, vi2);
-        sp0 = vec4<f32>(0.0, pos0);
-        sp1 = vec4<f32>(0.0, pos1);
-        sp2 = vec4<f32>(0.0, pos2);
-    } else {
+    if prepared {
         sp0 = vec4<f32>(0.0, in.p0.yzw);
         sp1 = vec4<f32>(0.0, in.p1.yzw);
         sp2 = vec4<f32>(0.0, in.p2.yzw);
-    }
-    sp0 = vec4<f32>(0.0, (u.model * vec4<f32>(sp0.yzw, 1.0)).xyz);
-    sp1 = vec4<f32>(0.0, (u.model * vec4<f32>(sp1.yzw, 1.0)).xyz);
-    sp2 = vec4<f32>(0.0, (u.model * vec4<f32>(sp2.yzw, 1.0)).xyz);
-
-    // Always classify from the current GPU pose. CPU/worker classifications
-    // are allowed to choose LoD, but never to make an animated patch impossible
-    // to resurrect. The future preparation pass will compute this once per
-    // patch; this direct path remains the correctness-preserving fallback.
-    if patch_outside_frustum(sp0.yzw, sp1.yzw, sp2.yzw) {
-        return culled_vertex_output();
+    } else {
+        sp0 = vec4<f32>(0.0, posed_position(in.p0));
+        sp1 = vec4<f32>(0.0, posed_position(in.p1));
+        sp2 = vec4<f32>(0.0, posed_position(in.p2));
+        if patch_outside_frustum(sp0.yzw, sp1.yzw, sp2.yzw) {
+            return culled_vertex_output();
+        }
     }
 
     if u.use_qb == 1 {

@@ -11,7 +11,8 @@ use crate::{perf_mark, perf_measure};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
-    MeshBuffers, TessAtlasBuffers, TessBuffers, PbrParams, EnvironmentMaps, PersistentInstances,
+    create_patch_input_vao, EnvironmentMaps, MeshBuffers, PbrParams, PersistentInstances,
+    TessAtlasBuffers, TessBuffers,
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
@@ -102,11 +103,22 @@ struct MainState {
 
 struct GpuBatch {
     mesh: MeshBuffers,
-    shared_buf: bool, // true = mesh uses shared instance buffer, don't delete instance_buf
+    prepare_vao: glow::VertexArray,
+    instance_byte_offset: i32,
     perm_parity: f32,
     material_index: usize,
     node_index: usize,
     lod: [u32; 3],
+}
+
+impl GpuBatch {
+    fn destroy(self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_vertex_array(self.prepare_vao);
+        }
+        // Both render VAOs reference the persistent prepared-instance buffer.
+        self.mesh.destroy_vaos_only(gl);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -982,11 +994,7 @@ pub fn mr_upload_tess_atlas(
         // Patch VAOs retain element-buffer bindings. Invalidate them before an
         // atlas replacement so no live draw references the retired owner.
         for batch in state.batches.drain(..) {
-            if batch.shared_buf {
-                batch.mesh.destroy_vaos_only(state.renderer.gl());
-            } else {
-                batch.mesh.destroy(state.renderer.gl());
-            }
+            batch.destroy(state.renderer.gl());
         }
         TESS_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -1247,11 +1255,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         perf_mark("batch-destroy-start");
         for b in state.batches.drain(..) {
-            if b.shared_buf {
-                b.mesh.destroy_vaos_only(gl);
-            } else {
-                b.mesh.destroy(gl);
-            }
+            b.destroy(gl);
         }
         perf_mark("batch-destroy-end");
         perf_measure("batch-destroy-old", "batch-destroy-start", "batch-destroy-end");
@@ -1326,6 +1330,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let mut gpu_offset: usize = 0; // current write position in floats
         let mut built = 0;
         let mut missing = 0;
+        let mut failed = 0;
         let stride = instance_layout::STRIDE;
 
         // Pre-allocate a batch-sized CPU staging buffer (reused across batches)
@@ -1404,17 +1409,52 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                         byte_offset as i32,
                         bytemuck_cast_slice(&staging[..batch_floats]),
                     );
+                    // Until the first preparation pass, retain a valid source
+                    // record with prepared=0 so every consumer has a safe
+                    // correctness fallback.
+                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(pb.prepared_buf));
+                    gl.buffer_sub_data_u8_slice(
+                        glow::ARRAY_BUFFER,
+                        byte_offset as i32,
+                        bytemuck_cast_slice(&staging[..batch_floats]),
+                    );
                 }
 
-                // Create VAOs pointing at this offset in the shared buffer
-                let mesh = match MeshBuffers::from_shared(
-                    gl, tess, &pb.buf, byte_offset as i32, faces.len() as i32,
+                // Preparation reads immutable source records. Render and pick
+                // consume the matching GPU-prepared range.
+                let prepare_vao = match create_patch_input_vao(
+                    gl,
+                    &pb.buf,
+                    byte_offset as i32,
                 ) {
-                    Ok(m) => m, Err(_) => continue,
+                    Ok(vao) => vao,
+                    Err(error) => {
+                        warn!("Failed to create patch preparation VAO: {error}");
+                        failed += 1;
+                        continue;
+                    }
+                };
+                let mesh = match MeshBuffers::from_shared(
+                    gl,
+                    tess,
+                    &pb.prepared_buf,
+                    byte_offset as i32,
+                    faces.len() as i32,
+                ) {
+                    Ok(mesh) => mesh,
+                    Err(error) => {
+                        unsafe { gl.delete_vertex_array(prepare_vao); }
+                        warn!("Failed to create prepared-patch render VAOs: {error}");
+                        failed += 1;
+                        continue;
+                    }
                 };
 
                 state.batches.push(GpuBatch {
-                    mesh, shared_buf: true, perm_parity: parity,
+                    mesh,
+                    prepare_vao,
+                    instance_byte_offset: byte_offset as i32,
+                    perm_parity: parity,
                     material_index: mat, node_index, lod: [ca, cb, cc],
                 });
                 built += 1;
@@ -1431,8 +1471,8 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
         info!(
-            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} atlas entries missing), material→faces: {:?}, node→faces: {:?}",
-            built, culled, missing, mat_counts, node_counts
+            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
+            built, culled, missing, failed, mat_counts, node_counts
         );
     });
 }
@@ -1494,6 +1534,24 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.renderer.begin_frame();
         state.renderer.joint_ubo().bind(gl);
         state.renderer.bind_animation_textures();
+
+        // Deform and classify each patch once. Every subsequent material,
+        // wire, normal, and pick draw consumes these prepared records without
+        // CPU visibility readback or repeated position skinning.
+        if let Some(prepared_buffer) = state.persistent_buf.as_ref().map(|pb| pb.prepared_buf) {
+            perf_mark("patch-prepare-start");
+            for (gpu_batch, render_batch) in state.batches.iter().zip(&render_batches) {
+                state.renderer.prepare_patch_batch(
+                    &camera,
+                    render_batch,
+                    gpu_batch.prepare_vao,
+                    prepared_buffer,
+                    gpu_batch.instance_byte_offset,
+                );
+            }
+            perf_mark("patch-prepare-end");
+            perf_measure("patch-prepare", "patch-prepare-start", "patch-prepare-end");
+        }
 
         // Mode-specific UBO setup
         let has_env = state.env_maps.prefiltered.is_some();
