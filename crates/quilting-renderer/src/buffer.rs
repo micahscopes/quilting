@@ -868,6 +868,19 @@ impl PbrUniformBuf {
     }
 
     pub fn upload(&self, gl: &glow::Context, p: &PbrParams) {
+        self.upload_with_environment(gl, p, p.has_env_map, p.env_mip_count);
+    }
+
+    /// Upload authored material parameters while supplying renderer-owned
+    /// environment state separately. This avoids copying an entire material
+    /// merely to change two frame-global fields.
+    pub fn upload_with_environment(
+        &self,
+        gl: &glow::Context,
+        p: &PbrParams,
+        has_env_map: bool,
+        env_mip_count: f32,
+    ) {
         let b = |v: bool| -> f32 { if v { 1.0 } else { 0.0 } };
         let mut d = [0u8; 224];
         let mut f = |off: usize, v: f32| { d[off..off+4].copy_from_slice(&v.to_le_bytes()); };
@@ -883,7 +896,7 @@ impl PbrUniformBuf {
         // occlusion_strength, alpha_cutoff, alpha_mode, unlit at offset 64
         f(64, p.occlusion_strength); f(68, p.alpha_cutoff); f(72, p.alpha_mode); f(76, b(p.unlit));
         // has_env_map, env_mip_count, double_sided, debug_output at offset 80
-        f(80, b(p.has_env_map)); f(84, p.env_mip_count); f(88, b(p.double_sided)); f(92, b(p.debug_output));
+        f(80, b(has_env_map)); f(84, env_mip_count); f(88, b(p.double_sided)); f(92, b(p.debug_output));
         // sheen_color vec4 at offset 96 (w = has_sheen)
         f(96, p.sheen_color[0]); f(100, p.sheen_color[1]); f(104, p.sheen_color[2]); f(108, b(p.has_sheen));
         // sheen_roughness at offset 112

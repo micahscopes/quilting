@@ -39,6 +39,63 @@ fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     }
 }
 
+fn pbr_material_for_index<'a>(
+    materials: &'a [PbrParams],
+    default_material: &'a PbrParams,
+    requested: usize,
+) -> (usize, &'a PbrParams) {
+    if let Some(material) = materials.get(requested) {
+        (requested, material)
+    } else if let Some(material) = materials.first() {
+        (0, material)
+    } else {
+        (usize::MAX, default_material)
+    }
+}
+
+fn bind_pbr_material_state(
+    gl: &glow::Context,
+    renderer: &Renderer,
+    texture_cache: &TextureCache,
+    material: &PbrParams,
+    texture_defaults: &[glow::Texture; 5],
+    has_env_map: bool,
+    env_mip_count: f32,
+    bind_transmission: bool,
+) {
+    renderer.pbr_ubo().upload_with_environment(
+        gl,
+        material,
+        has_env_map,
+        env_mip_count,
+    );
+    renderer.pbr_ubo().bind(gl);
+
+    for (unit, &texture) in texture_defaults.iter().enumerate() {
+        unsafe {
+            gl.active_texture(glow::TEXTURE0 + unit as u32);
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        }
+    }
+    let bind_texture = |unit: u32, index: i32| {
+        if index >= 0 {
+            let texture = texture_cache.get(Some(index as usize));
+            unsafe {
+                gl.active_texture(glow::TEXTURE0 + unit);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            }
+        }
+    };
+    bind_texture(0, material.base_color_tex_idx);
+    bind_texture(1, material.metallic_roughness_tex_idx);
+    bind_texture(2, material.normal_tex_idx);
+    bind_texture(3, material.emissive_tex_idx);
+    bind_texture(4, material.occlusion_tex_idx);
+    if bind_transmission {
+        bind_texture(10, material.transmission_tex_idx);
+    }
+}
+
 struct MainState {
     renderer: Renderer,
     texture_cache: TextureCache,
@@ -50,6 +107,8 @@ struct MainState {
     render_commands_dirty: bool,
     render_command_builds: u64,
     render_calls: u64,
+    pbr_draw_calls: u64,
+    pbr_material_updates: u64,
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
@@ -387,6 +446,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_commands_dirty: true,
             render_command_builds: 0,
             render_calls: 0,
+            pbr_draw_calls: 0,
+            pbr_material_updates: 0,
             batch_groups: BTreeMap::new(),
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
@@ -1349,6 +1410,8 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ),
             ("renderCommandBuilds", state.render_command_builds),
             ("renderCalls", state.render_calls),
+            ("pbrDrawCalls", state.pbr_draw_calls),
+            ("pbrMaterialUpdates", state.pbr_material_updates),
         ] {
             js_sys::Reflect::set(
                 &result,
@@ -2065,25 +2128,18 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 // PBR: two-pass rendering — opaque first, then transparent
                 unsafe { gl.use_program(Some(state.renderer.programs().pbr)); }
                 let default_mat = PbrParams::default();
-
-                let get_mat = |batch: &RenderBatch| -> PbrParams {
-                    let base = if batch.material_index < state.materials.len() {
-                        state.materials[batch.material_index].clone()
-                    } else if !state.materials.is_empty() {
-                        state.materials[0].clone()
-                    } else {
-                        default_mat.clone()
-                    };
-                    let mut m = base;
-                    m.has_env_map = has_env;
-                    m.env_mip_count = env_mips;
-                    // m.debug_output reserved for future normals debug view
-                    m
-                };
+                let texture_defaults = [white, black, black, black, white];
+                let mut pbr_draws = 0u64;
+                let mut material_updates = 0u64;
+                let mut active_material = None;
 
                 // Pass 1: opaque non-transmission
                 for batch in render_batches {
-                    let mat = get_mat(batch);
+                    let (material_slot, mat) = pbr_material_for_index(
+                        &state.materials,
+                        &default_mat,
+                        batch.material_index,
+                    );
                     if mat.alpha_mode > 1.5 || mat.transmission_factor > 0.0 { continue; }
 
                     // glTF spec: cull back faces for single-sided materials
@@ -2096,32 +2152,20 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         }
                     }
 
-                    // Upload per-material PBR UBO
-                    state.renderer.pbr_ubo().upload(gl, &mat);
-                    state.renderer.pbr_ubo().bind(gl);
-
-                    // Bind placeholders first, then override with actual textures
-                    let tex_defaults = [white, black, black, black, white];
-                    for (unit, &tex) in tex_defaults.iter().enumerate() {
-                        unsafe {
-                            gl.active_texture(glow::TEXTURE0 + unit as u32);
-                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                        }
+                    if active_material != Some(material_slot) {
+                        bind_pbr_material_state(
+                            gl,
+                            &state.renderer,
+                            &state.texture_cache,
+                            mat,
+                            &texture_defaults,
+                            has_env,
+                            env_mips,
+                            false,
+                        );
+                        active_material = Some(material_slot);
+                        material_updates += 1;
                     }
-                    let bind_tex = |unit: u32, idx: i32| {
-                        if idx >= 0 {
-                            let tex = state.texture_cache.get(Some(idx as usize));
-                            unsafe {
-                                gl.active_texture(glow::TEXTURE0 + unit);
-                                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                            }
-                        }
-                    };
-                    bind_tex(0, mat.base_color_tex_idx);
-                    bind_tex(1, mat.metallic_roughness_tex_idx);
-                    bind_tex(2, mat.normal_tex_idx);
-                    bind_tex(3, mat.emissive_tex_idx);
-                    bind_tex(4, mat.occlusion_tex_idx);
 
                     // Upload vertex UBO and draw this batch
                     let batch_camera = camera_for_batch(&camera, batch);
@@ -2138,10 +2182,15 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                         );
                     }
+                    pbr_draws += 1;
                 }
                 // --- Blit opaque framebuffer to scene_color texture for refraction ---
                 let has_transmission = render_batches.iter().any(|b| {
-                    let m = get_mat(b);
+                    let (_, m) = pbr_material_for_index(
+                        &state.materials,
+                        &default_mat,
+                        b.material_index,
+                    );
                     m.transmission_factor > 0.0
                 });
                 if has_transmission {
@@ -2295,8 +2344,13 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
 
                 // Pass 2: transmission + transparent
+                active_material = None;
                 for batch in render_batches {
-                    let mat = get_mat(batch);
+                    let (material_slot, mat) = pbr_material_for_index(
+                        &state.materials,
+                        &default_mat,
+                        batch.material_index,
+                    );
                     if mat.alpha_mode < 1.5 && mat.transmission_factor <= 0.0 { continue; }
 
                     let is_blend = mat.alpha_mode > 1.5;
@@ -2323,31 +2377,20 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         }
                     }
 
-                    state.renderer.pbr_ubo().upload(gl, &mat);
-                    state.renderer.pbr_ubo().bind(gl);
-
-                    let tex_defaults = [white, black, black, black, white];
-                    for (unit, &tex) in tex_defaults.iter().enumerate() {
-                        unsafe {
-                            gl.active_texture(glow::TEXTURE0 + unit as u32);
-                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                        }
+                    if active_material != Some(material_slot) {
+                        bind_pbr_material_state(
+                            gl,
+                            &state.renderer,
+                            &state.texture_cache,
+                            mat,
+                            &texture_defaults,
+                            has_env,
+                            env_mips,
+                            true,
+                        );
+                        active_material = Some(material_slot);
+                        material_updates += 1;
                     }
-                    let bind_tex = |unit: u32, idx: i32| {
-                        if idx >= 0 {
-                            let tex = state.texture_cache.get(Some(idx as usize));
-                            unsafe {
-                                gl.active_texture(glow::TEXTURE0 + unit);
-                                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                            }
-                        }
-                    };
-                    bind_tex(0, mat.base_color_tex_idx);
-                    bind_tex(1, mat.metallic_roughness_tex_idx);
-                    bind_tex(2, mat.normal_tex_idx);
-                    bind_tex(3, mat.emissive_tex_idx);
-                    bind_tex(4, mat.occlusion_tex_idx);
-                    bind_tex(10, mat.transmission_tex_idx);
 
                     let batch_camera = camera_for_batch(&camera, batch);
                     apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
@@ -2363,6 +2406,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                         );
                     }
+                    pbr_draws += 1;
                 }
                 unsafe {
                     gl.depth_mask(true);
@@ -2476,6 +2520,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     }
                 }
 
+                state.pbr_draw_calls += pbr_draws;
+                state.pbr_material_updates += material_updates;
                 state.renderer.end_frame();
                 return;
             }
