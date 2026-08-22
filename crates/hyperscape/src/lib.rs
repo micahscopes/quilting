@@ -18,9 +18,10 @@ pub mod interchange;
 pub mod navigation;
 
 pub use navigation::{
-    map_space_mouse_axes, CameraBasis, CameraError, CameraRig, FocusAnchor, FocusNavigation,
-    FocusSphere, FocusSphereTransition, NavigationAxes, NavigationFrame, NavigationPreset,
-    PerspectiveLens, SpaceMouseMapping, SphereReflectionState,
+    map_space_mouse_axes, CameraBasis, CameraError, CameraRig, CameraTransition, FocusAnchor,
+    FocusNavigation, FocusSphere, FocusSphereTransition, NavigationAction, NavigationActionQueue,
+    NavigationAxes, NavigationFrame, NavigationPreset, NavigationRuntime, PerspectiveLens,
+    ScheduledNavigationAction, SpaceMouseMapping, SphereReflectionState, TransitionEasing,
 };
 
 /// Shared conformal scene topology. Ordinary entity parenting remains in the
@@ -300,6 +301,7 @@ pub struct HyperscapeDiagnostics(pub Vec<String>);
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HyperscapeSet {
+    Interaction,
     FrameMutation,
     Animation,
     Coordinates,
@@ -324,11 +326,15 @@ impl Plugin for HyperscapePlugin {
             .init_resource::<ChamberAggregateState>()
             .init_resource::<TransformHistory>()
             .init_resource::<FocusNavigation>()
+            .init_resource::<CameraRig>()
+            .init_resource::<NavigationActionQueue>()
+            .init_resource::<NavigationRuntime>()
             .init_resource::<HyperscopeExtraction>()
             .init_resource::<HyperscapeDiagnostics>()
             .configure_sets(
                 Update,
                 (
+                    HyperscapeSet::Interaction,
                     HyperscapeSet::FrameMutation,
                     HyperscapeSet::Animation,
                     HyperscapeSet::Coordinates,
@@ -337,6 +343,10 @@ impl Plugin for HyperscapePlugin {
                     HyperscapeSet::Extraction,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                navigation::action::apply_navigation_actions.in_set(HyperscapeSet::Interaction),
             )
             .add_systems(
                 Update,
@@ -914,7 +924,13 @@ mod tests {
         assert_eq!(focus.sphere.center, [0.75, 1.0, 1.5]);
         assert!((focus.sphere.radius - (4.4_f64).sqrt()).abs() < EPS);
         assert!(focus.advance(0.5));
-        assert_eq!(focus.sphere, FocusSphere { center: [1.0, 2.0, 3.0], radius: 2.2 });
+        assert_eq!(
+            focus.sphere,
+            FocusSphere {
+                center: [1.0, 2.0, 3.0],
+                radius: 2.2
+            }
+        );
 
         focus.detach();
         let detached = focus.sphere;
@@ -941,11 +957,25 @@ mod tests {
     #[test]
     fn spheroidal_focus_uses_inversion_symmetric_geodesic_radius() {
         let sphere = FocusSphere::new([1.0, 0.0, 0.0], 2.0).unwrap();
-        assert_eq!(sphere.compactified_radial_coordinate([1.0, 0.0, 0.0]).unwrap(), 0.0);
-        assert_eq!(sphere.compactified_radial_coordinate([3.0, 0.0, 0.0]).unwrap(), 0.5);
+        assert_eq!(
+            sphere
+                .compactified_radial_coordinate([1.0, 0.0, 0.0])
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            sphere
+                .compactified_radial_coordinate([3.0, 0.0, 0.0])
+                .unwrap(),
+            0.5
+        );
 
-        let outside = sphere.compactified_radial_coordinate([9.0, 0.0, 0.0]).unwrap();
-        let reflected = sphere.compactified_radial_coordinate([1.5, 0.0, 0.0]).unwrap();
+        let outside = sphere
+            .compactified_radial_coordinate([9.0, 0.0, 0.0])
+            .unwrap();
+        let reflected = sphere
+            .compactified_radial_coordinate([1.5, 0.0, 0.0])
+            .unwrap();
         assert!((outside + reflected - 1.0).abs() < EPS);
 
         let focus = FocusNavigation {

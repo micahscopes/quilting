@@ -1,3 +1,4 @@
+use super::TransitionEasing;
 use bevy_ecs::prelude::{Entity, Resource};
 
 /// A positive ordinary-space sphere used by selection focus and inversion.
@@ -52,6 +53,7 @@ pub struct FocusSphereTransition {
     pub target: FocusSphere,
     pub elapsed_seconds: f64,
     pub duration_seconds: f64,
+    pub easing: TransitionEasing,
 }
 
 /// Deterministic interaction state shared by selection, navigation, focus,
@@ -115,6 +117,23 @@ impl FocusNavigation {
         margin: f64,
         duration_seconds: f64,
     ) -> Result<(), &'static str> {
+        self.anchor_to_with_easing(
+            entity,
+            source_bound,
+            margin,
+            duration_seconds,
+            TransitionEasing::SmootherStep,
+        )
+    }
+
+    pub fn anchor_to_with_easing(
+        &mut self,
+        entity: Entity,
+        source_bound: FocusSphere,
+        margin: f64,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    ) -> Result<(), &'static str> {
         FocusSphere::new(source_bound.center, source_bound.radius)?;
         if !margin.is_finite() || !duration_seconds.is_finite() || duration_seconds < 0.0 {
             return Err("focus margin and transition duration must be finite and nonnegative");
@@ -139,6 +158,7 @@ impl FocusNavigation {
                 target,
                 elapsed_seconds: 0.0,
                 duration_seconds,
+                easing,
             });
         }
         Ok(())
@@ -160,7 +180,7 @@ impl FocusNavigation {
         }
         transition.elapsed_seconds += delta_seconds;
         let linear = (transition.elapsed_seconds / transition.duration_seconds).clamp(0.0, 1.0);
-        let t = linear * linear * linear * (linear * (linear * 6.0 - 15.0) + 10.0);
+        let t = transition.easing.sample(linear);
         self.sphere.center = std::array::from_fn(|axis| {
             transition.start.center[axis]
                 + (transition.target.center[axis] - transition.start.center[axis]) * t

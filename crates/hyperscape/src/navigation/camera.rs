@@ -12,6 +12,7 @@ pub enum CameraError {
     DegenerateBasis,
     InvalidLens,
     InvalidControlDistance,
+    InvalidTransition,
     ReflectionPole,
 }
 
@@ -22,6 +23,7 @@ impl fmt::Display for CameraError {
             Self::DegenerateBasis => "camera basis must contain independent forward and up axes",
             Self::InvalidLens => "camera lens values are invalid",
             Self::InvalidControlDistance => "camera control distance must be finite and positive",
+            Self::InvalidTransition => "camera transition duration must be finite and positive",
             Self::ReflectionPole => "camera transport reached a spherical-reflection pole",
         })
     }
@@ -175,6 +177,22 @@ impl CameraRig {
             semantic_target,
             lens: lens.validate()?,
         })
+    }
+
+    /// Validate state received through an interchange or replay boundary.
+    pub fn validate(&self) -> Result<(), CameraError> {
+        if !finite3(self.eye) || self.semantic_target.is_some_and(|target| !finite3(target)) {
+            return Err(CameraError::NonFinite);
+        }
+        if !self.control_distance.is_finite() || self.control_distance <= 0.0 {
+            return Err(CameraError::InvalidControlDistance);
+        }
+        let orientation_norm = self.orientation.norm();
+        if !orientation_norm.is_finite() || orientation_norm <= EPSILON {
+            return Err(CameraError::DegenerateBasis);
+        }
+        self.lens.validate()?;
+        Ok(())
     }
 
     pub fn basis(&self) -> CameraBasis {
