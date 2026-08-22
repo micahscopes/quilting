@@ -237,12 +237,47 @@ function normalizedCameraBasis(forward, up) {
   return [...right, ...u, ...f];
 }
 
+function transportUpAlongSightline(previousForward, nextForward, previousUp) {
+  const oldLength = Math.hypot(...previousForward);
+  const nextLength = Math.hypot(...nextForward);
+  if (!(oldLength > 1e-12) || !(nextLength > 1e-12)) return null;
+  const from = previousForward.map(value => value / oldLength);
+  const to = nextForward.map(value => value / nextLength);
+  const cosine = Math.max(-1, Math.min(1,
+    from.reduce((sum, value, axis) => sum + value * to[axis], 0)));
+  if (cosine > 1 - 1e-12) return Array.from(previousUp, Number);
+  if (cosine < -1 + 1e-12) {
+    // The previous up axis is perpendicular to the sightline, so a half-turn
+    // around it maps forward to backward while retaining roll.
+    return Array.from(previousUp, Number);
+  }
+  const cross = [
+    from[1] * to[2] - from[2] * to[1],
+    from[2] * to[0] - from[0] * to[2],
+    from[0] * to[1] - from[1] * to[0],
+  ];
+  const firstCross = [
+    cross[1] * previousUp[2] - cross[2] * previousUp[1],
+    cross[2] * previousUp[0] - cross[0] * previousUp[2],
+    cross[0] * previousUp[1] - cross[1] * previousUp[0],
+  ];
+  const secondCross = [
+    cross[1] * firstCross[2] - cross[2] * firstCross[1],
+    cross[2] * firstCross[0] - cross[0] * firstCross[2],
+    cross[0] * firstCross[1] - cross[1] * firstCross[0],
+  ];
+  return previousUp.map(
+    (value, axis) => value + firstCross[axis] + secondCross[axis] / (1 + cosine),
+  );
+}
+
 /**
  * Transport a camera through F_next o inverse(F_previous).
  *
  * A sphere reflection is self-inverse. Its differential is a positive scale
- * times a Householder reflection, so the eye is transported exactly while the
- * camera frame and orbit distance follow the exact local conformal derivative.
+ * times a Householder reflection. The eye and optional look-at target are
+ * transported exactly; roll follows the shortest sightline rotation. A camera
+ * without a target falls back to the exact local conformal differential.
  */
 export function transportCameraAcrossSphereReflections(camera, previous, next) {
   const before = reflectionState(previous);
@@ -250,8 +285,12 @@ export function transportCameraAcrossSphereReflections(camera, previous, next) {
   const eye = Array.from(camera?.eye || [], Number);
   const basis = Array.from(camera?.basis || [], Number);
   const orbitDistance = Number(camera?.orbitDistance);
+  const requestedTarget = camera?.target == null
+    ? null
+    : Array.from(camera.target, Number);
   if (!before || !after || eye.length !== 3 || !finitePoint(...eye)
       || basis.length !== 9 || !basis.every(Number.isFinite)
+      || (requestedTarget && (requestedTarget.length !== 3 || !finitePoint(...requestedTarget)))
       || !(orbitDistance > 0) || !Number.isFinite(orbitDistance)) return null;
 
   const unmap = reflectPointAndFrame(
@@ -262,13 +301,44 @@ export function transportCameraAcrossSphereReflections(camera, previous, next) {
   if (!unmap) return null;
   const remap = reflectPointAndFrame(unmap.point, unmap.directions, after);
   if (!remap) return null;
-  const transportedBasis = normalizedCameraBasis(remap.directions[1], remap.directions[0]);
   const scale = unmap.scale * remap.scale;
-  if (!transportedBasis || !(scale > 0) || !Number.isFinite(scale)) return null;
+  if (!(scale > 0) || !Number.isFinite(scale)) return null;
+
+  let target = null;
+  if (requestedTarget) {
+    const targetUnmap = reflectPointAndFrame(requestedTarget, [], before);
+    const targetRemap = targetUnmap
+      ? reflectPointAndFrame(targetUnmap.point, [], after)
+      : null;
+    if (targetRemap) target = targetRemap.point;
+  }
+  let transportedDistance = orbitDistance * scale;
+  let transportedForward = remap.directions[1];
+  let transportedUp = remap.directions[0];
+  if (target) {
+    transportedForward = target.map((coordinate, axis) => coordinate - remap.point[axis]);
+    transportedDistance = Math.hypot(...transportedForward);
+    if (!(transportedDistance > 1e-12) || !Number.isFinite(transportedDistance)) return null;
+    transportedUp = transportUpAlongSightline(
+      basis.slice(6, 9),
+      transportedForward,
+      basis.slice(3, 6),
+    );
+  }
+  const transportedBasis = transportedUp
+    ? normalizedCameraBasis(transportedForward, transportedUp)
+    : null;
+  if (!transportedBasis) return null;
+  if (!target) {
+    target = remap.point.map(
+      (coordinate, axis) => coordinate + transportedBasis[axis + 6] * transportedDistance,
+    );
+  }
   return {
     eye: remap.point,
+    target,
     basis: transportedBasis,
-    orbitDistance: orbitDistance * scale,
+    orbitDistance: transportedDistance,
     localScale: scale,
   };
 }

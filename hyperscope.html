@@ -1492,6 +1492,7 @@ function transportManualCamera(previous, next) {
   ];
   const transported = transportCameraAcrossSphereReflections({
     eye,
+    target: [panX, panY, panZ],
     basis,
     orbitDistance: zoom,
   }, previous, next);
@@ -1502,10 +1503,10 @@ function transportManualCamera(previous, next) {
 
   manualCameraBasisState.set(transported.basis);
   manualCameraBasisReady = true;
-  zoom = Math.max(0.1, Math.min(100, transported.orbitDistance));
-  panX = transported.eye[0] + transported.basis[6] * zoom;
-  panY = transported.eye[1] + transported.basis[7] * zoom;
-  panZ = transported.eye[2] + transported.basis[8] * zoom;
+  zoom = transported.orbitDistance;
+  panX = transported.target[0];
+  panY = transported.target[1];
+  panZ = transported.target[2];
   syncManualCameraEuler();
   // A transition authored in the previous output chart is no longer valid.
   // Explicit reframe remains available after the sphere edit completes.

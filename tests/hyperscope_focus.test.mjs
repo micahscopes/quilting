@@ -64,23 +64,26 @@ test('sphere reflection maps points and reports its local conformal scale', () =
   assert.equal(applyMobiusPoint(sphereReflection, [0, 0, 0]), null);
 });
 
-test('camera transport follows the exact inversion point and local differential', () => {
+test('camera transport follows the exact eye and line of sight and reports local scale', () => {
   const camera = {
     eye: [2, 0, 0],
-    basis: [0, 0, -1, 0, 1, 0, -1, 0, 0],
+    target: [4, 0, 0],
+    basis: [0, 0, 1, 0, 1, 0, 1, 0, 0],
     orbitDistance: 2,
   };
   const identity = { enabled: false };
   const inversion = { enabled: true, center: [0, 0, 0], radius: 1 };
   const transported = transportCameraAcrossSphereReflections(camera, identity, inversion);
   assert.deepEqual(transported.eye, [0.5, 0, 0]);
+  assert.deepEqual(transported.target, [0.25, 0, 0]);
   assert.equal(transported.localScale, 0.25);
-  assert.equal(transported.orbitDistance, 0.5);
-  assert.deepEqual(transported.basis.slice(6), [1, 0, 0]);
+  assert.equal(transported.orbitDistance, 0.25);
+  assert.deepEqual(transported.basis.slice(6), [-1, 0, 0]);
   assert.deepEqual(transported.basis.slice(3, 6), [0, 1, 0]);
 
   const restored = transportCameraAcrossSphereReflections(transported, inversion, identity);
   assert.deepEqual(restored.eye, camera.eye);
+  assert.deepEqual(restored.target, camera.target);
   assert(Math.abs(restored.orbitDistance - camera.orbitDistance) < 1e-12);
   assert.deepEqual(restored.basis, camera.basis);
 });
@@ -89,6 +92,7 @@ test('camera transport is stable while editing an unchanged inversion sphere', (
   const inversion = { enabled: true, center: [1, -2, 0.5], radius: 3 };
   const camera = {
     eye: [4, 1, 2],
+    target: [4, 1, -3],
     basis: [1, 0, 0, 0, 1, 0, 0, 0, -1],
     orbitDistance: 5,
   };
@@ -105,6 +109,7 @@ test('camera transport round-trips across a moving and resizing sphere', () => {
   const second = { enabled: true, center: [1, -0.5, 0.25], radius: 2.5 };
   const camera = {
     eye: [0.5, 1, -0.25],
+    target: [0.5, 1, -3.25],
     basis: [1, 0, 0, 0, 1, 0, 0, 0, -1],
     orbitDistance: 3,
   };

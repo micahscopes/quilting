@@ -57,12 +57,14 @@ state: keyboard, mouse, SpaceMouse, touch, gamepad, XR, and game code should
 all emit the same semantic actions.
 
 Changing an active inversion sphere transports the manual camera through
-`F_new o inverse(F_old)`. The eye follows the point map exactly; orientation
-and orbit scale follow the exact local conformal differential. This anchors the
-viewpoint to its ordinary-space location without pretending a nonlinear global
-scene change can be cancelled pixel-for-pixel. Selection itself never pans the
-camera. Object-pivot navigation and explicit reframe remain deliberate camera
-actions.
+`F_new o inverse(F_old)`. The eye and look-at target follow the point map
+exactly. Up/roll is parallel-transported by the shortest rotation between the
+old and new sight directions, avoiding path-dependent roll drift when an edit
+is reversed. The rebuilt forward axis therefore keeps the transformed target
+centered while leaving FOV and lens parameters alone. This anchors the
+viewpoint without pretending a nonlinear global scene change can be cancelled
+pixel-for-pixel. Selection itself never pans the camera. Object-pivot navigation
+and explicit reframe remain deliberate camera actions.
 
 ## Target Rust ownership
 
