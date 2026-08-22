@@ -10,7 +10,8 @@ mod focus;
 mod transition;
 
 pub use action::{
-    NavigationAction, NavigationActionQueue, NavigationRuntime, ScheduledNavigationAction,
+    NavigationAction, NavigationActionQueue, NavigationController, NavigationRuntime,
+    ScheduledNavigationAction,
 };
 pub use camera::{
     map_space_mouse_axes, CameraBasis, CameraError, CameraRig, NavigationAxes, NavigationFrame,

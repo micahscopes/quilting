@@ -1,4 +1,5 @@
 pub mod main_renderer;
+mod navigation;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;

@@ -28,6 +28,8 @@ pub enum NavigationAction {
         easing: TransitionEasing,
     },
     DetachFocus,
+    /// Replace detached focus geometry without changing focus/inversion mode.
+    SetFreeFocusSphere(FocusSphere),
     TranslateFocus([f64; 3]),
     ScaleFocusLog(f64),
     SetFocusEnabled(bool),
@@ -52,6 +54,58 @@ pub struct ScheduledNavigationAction {
 pub struct NavigationActionQueue {
     next_sequence: u64,
     pending: VecDeque<ScheduledNavigationAction>,
+}
+
+/// Standalone owner for the same navigation state used by the ECS plugin.
+/// WASM, tests, tools, and future non-Bevy consumers use this instead of
+/// constructing a parallel integration loop.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NavigationController {
+    pub queue: NavigationActionQueue,
+    pub runtime: NavigationRuntime,
+    pub camera: CameraRig,
+    pub focus: FocusNavigation,
+    pub diagnostics: HyperscapeDiagnostics,
+}
+
+impl NavigationController {
+    pub fn elapsed_seconds(&self) -> f64 {
+        self.runtime.integrated_until_seconds
+    }
+
+    pub fn push(&mut self, action: NavigationAction) -> Result<u64, &'static str> {
+        self.queue.push(self.elapsed_seconds(), action)
+    }
+
+    pub fn schedule(
+        &mut self,
+        at_seconds: f64,
+        action: NavigationAction,
+    ) -> Result<u64, &'static str> {
+        self.queue.push(at_seconds, action)
+    }
+
+    pub fn tick(&mut self, delta_seconds: f64) -> Result<(), &'static str> {
+        if !delta_seconds.is_finite() || delta_seconds < 0.0 {
+            return Err("navigation tick must be finite and nonnegative");
+        }
+        self.advance_to(self.elapsed_seconds() + delta_seconds)
+    }
+
+    pub fn advance_to(&mut self, elapsed_seconds: f64) -> Result<(), &'static str> {
+        if !elapsed_seconds.is_finite() || elapsed_seconds < self.elapsed_seconds() {
+            return Err("navigation time must be finite and monotonic");
+        }
+        integrate_navigation_to(
+            elapsed_seconds,
+            &mut self.queue,
+            &mut self.runtime,
+            &mut self.camera,
+            &mut self.focus,
+            &mut self.diagnostics,
+        );
+        Ok(())
+    }
 }
 
 impl NavigationActionQueue {
@@ -142,7 +196,24 @@ pub(crate) fn apply_navigation_actions(
     mut focus: ResMut<FocusNavigation>,
     mut diagnostics: ResMut<HyperscapeDiagnostics>,
 ) {
-    let now = time.elapsed_secs_f64();
+    integrate_navigation_to(
+        time.elapsed_secs_f64(),
+        &mut queue,
+        &mut runtime,
+        &mut camera,
+        &mut focus,
+        &mut diagnostics,
+    );
+}
+
+fn integrate_navigation_to(
+    now: f64,
+    queue: &mut NavigationActionQueue,
+    runtime: &mut NavigationRuntime,
+    camera: &mut CameraRig,
+    focus: &mut FocusNavigation,
+    diagnostics: &mut HyperscapeDiagnostics,
+) {
     if !runtime.integrated_until_seconds.is_finite() || runtime.integrated_until_seconds > now {
         runtime.integrated_until_seconds = now;
     }
@@ -163,28 +234,28 @@ pub(crate) fn apply_navigation_actions(
             .clamp(runtime.integrated_until_seconds, now);
         advance_navigation(
             action_time - runtime.integrated_until_seconds,
-            &mut runtime,
-            &mut camera,
-            &mut focus,
-            &mut diagnostics,
+            runtime,
+            camera,
+            focus,
+            diagnostics,
         );
         runtime.integrated_until_seconds = action_time;
-        if let Err(error) = apply_action(scheduled.action, &mut runtime, &mut camera, &mut focus) {
+        if let Err(error) = apply_action(scheduled.action, runtime, camera, focus) {
             diagnostics.0.push(format!(
                 "navigation action {} failed: {error}",
                 scheduled.sequence
             ));
         }
         runtime.last_applied_sequence = Some(scheduled.sequence);
-        reconcile_reflection(&mut runtime, &mut camera, &focus, &mut diagnostics);
+        reconcile_reflection(runtime, camera, focus, diagnostics);
     }
 
     advance_navigation(
         now - runtime.integrated_until_seconds,
-        &mut runtime,
-        &mut camera,
-        &mut focus,
-        &mut diagnostics,
+        runtime,
+        camera,
+        focus,
+        diagnostics,
     );
     runtime.integrated_until_seconds = now;
 }
@@ -237,6 +308,11 @@ fn apply_action(
             .anchor_to_with_easing(entity, source_bound, margin, duration_seconds, easing)
             .map_err(str::to_owned)?,
         NavigationAction::DetachFocus => focus.detach(),
+        NavigationAction::SetFreeFocusSphere(sphere) => {
+            let sphere = FocusSphere::new(sphere.center, sphere.radius).map_err(str::to_owned)?;
+            focus.detach();
+            focus.sphere = sphere;
+        }
         NavigationAction::TranslateFocus(delta) => {
             if !focus.translate_free(delta) {
                 return Err("focus sphere cannot be translated while anchored".into());
@@ -368,6 +444,34 @@ mod tests {
         assert_eq!(queue.pop_due(1.5).unwrap().sequence, 1);
         assert!(queue.pop_due(1.5).is_none());
         assert_eq!(queue.pop_due(2.0).unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn standalone_controller_and_ecs_use_the_same_integration_path() {
+        let frame = NavigationFrame {
+            translation: [1.0, 2.0, 3.0],
+            rotation: [0.1, -0.2, 0.3],
+            ..NavigationFrame::default()
+        };
+        let mut controller = NavigationController::default();
+        controller
+            .push(NavigationAction::ApplyFrame(frame))
+            .unwrap();
+        controller.tick(0.25).unwrap();
+
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<NavigationActionQueue>()
+            .push(0.0, NavigationAction::ApplyFrame(frame))
+            .unwrap();
+        tick(&mut app, 0.25);
+
+        assert_eq!(controller.camera, *app.world().resource::<CameraRig>());
+        assert_eq!(controller.focus, *app.world().resource::<FocusNavigation>());
+        assert_eq!(
+            controller.runtime,
+            *app.world().resource::<NavigationRuntime>()
+        );
     }
 
     #[test]

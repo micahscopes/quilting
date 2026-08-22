@@ -20,8 +20,9 @@ pub mod navigation;
 pub use navigation::{
     map_space_mouse_axes, CameraBasis, CameraError, CameraRig, CameraTransition, FocusAnchor,
     FocusNavigation, FocusSphere, FocusSphereTransition, NavigationAction, NavigationActionQueue,
-    NavigationAxes, NavigationFrame, NavigationPreset, NavigationRuntime, PerspectiveLens,
-    ScheduledNavigationAction, SpaceMouseMapping, SphereReflectionState, TransitionEasing,
+    NavigationAxes, NavigationController, NavigationFrame, NavigationPreset, NavigationRuntime,
+    PerspectiveLens, ScheduledNavigationAction, SpaceMouseMapping, SphereReflectionState,
+    TransitionEasing,
 };
 
 /// Shared conformal scene topology. Ordinary entity parenting remains in the
