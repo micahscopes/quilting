@@ -42,8 +42,6 @@ pub struct RenderBatch {
     pub mesh: MeshDraw,
     /// Permutation parity (+1 or -1) for raster winding.
     pub perm_parity: f32,
-    /// Wire color for this batch [r, g, b].
-    pub wire_color: [f32; 3],
     /// Material index (for PBR rendering).
     pub material_index: usize,
     /// Per-entity conformal transform selected during render extraction.
@@ -117,6 +115,15 @@ pub fn camera_for_batch(camera: &Camera, batch: &RenderBatch) -> Camera {
     }
 }
 
+/// Whether two commands consume identical per-batch vertex uniforms. Camera
+/// matrices and position are frame-global; winding and material state are
+/// handled separately, so neither belongs in this comparison.
+pub fn same_vertex_uniform_state(a: &RenderBatch, b: &RenderBatch) -> bool {
+    a.mobius == b.mobius
+        && a.euclidean_model == b.euclidean_model
+        && a.euclidean_normal == b.euclidean_normal
+}
+
 /// Combine authored/affine orientation with the canonical atlas permutation.
 /// Odd S3 permutations reflect barycentric space and therefore reverse winding.
 pub fn batch_orientation_sign(orientation_sign: i8, perm_parity: f32) -> i8 {
@@ -159,6 +166,30 @@ pub fn upload_batch_ubo(
     vtx_ubo.bind(gl);
 }
 
+fn upload_batch_ubo_if_changed<'a>(
+    gl: &glow::Context,
+    vtx_ubo: &VertexUniformBuf,
+    camera: &Camera,
+    previous: &mut Option<&'a RenderBatch>,
+    batch: &'a RenderBatch,
+) {
+    if previous
+        .is_some_and(|previous| same_vertex_uniform_state(previous, batch))
+    {
+        return;
+    }
+    let batch_camera = camera_for_batch(camera, batch);
+    upload_batch_ubo(
+        gl,
+        vtx_ubo,
+        &batch_camera,
+        1,
+        &batch.euclidean_model,
+        &batch.euclidean_normal,
+    );
+    *previous = Some(batch);
+}
+
 /// Render a frame with the given mode, camera, and batches.
 pub fn render_frame(
     gl: &glow::Context,
@@ -185,17 +216,10 @@ pub fn render_frame(
             gl.use_program(Some(programs.pbr));
         }
 
+        let mut vertex_state = None;
         for batch in batches {
-            let batch_camera = camera_for_batch(camera, batch);
             apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo(
-                gl,
-                vtx_ubo,
-                &batch_camera,
-                1,
-                &batch.euclidean_model,
-                &batch.euclidean_normal,
-            );
+            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -216,17 +240,10 @@ pub fn render_frame(
             gl.use_program(Some(programs.matcap));
         }
 
+        let mut vertex_state = None;
         for batch in batches {
-            let batch_camera = camera_for_batch(camera, batch);
             apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo(
-                gl,
-                vtx_ubo,
-                &batch_camera,
-                1,
-                &batch.euclidean_model,
-                &batch.euclidean_normal,
-            );
+            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -246,22 +263,15 @@ pub fn render_frame(
         unsafe {
             gl.use_program(Some(programs.wire));
         }
+        // All adaptive wire draws use the density heatmap; the fallback color
+        // is ignored by the shader and therefore frame-global state.
+        wire_ubo.upload(gl, [0.0; 3], true);
         wire_ubo.bind(gl);
 
+        let mut vertex_state = None;
         for batch in batches {
-            let batch_camera = camera_for_batch(camera, batch);
             apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo(
-                gl,
-                vtx_ubo,
-                &batch_camera,
-                1,
-                &batch.euclidean_model,
-                &batch.euclidean_normal,
-            );
-
-            wire_ubo.upload(gl, batch.wire_color, true);
-            wire_ubo.bind(gl);
+            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.line_vao));
@@ -282,17 +292,10 @@ pub fn render_frame(
             gl.use_program(Some(programs.normals));
         }
 
+        let mut vertex_state = None;
         for batch in batches {
-            let batch_camera = camera_for_batch(camera, batch);
             apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo(
-                gl,
-                vtx_ubo,
-                &batch_camera,
-                1,
-                &batch.euclidean_model,
-                &batch.euclidean_normal,
-            );
+            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -313,17 +316,10 @@ pub fn render_frame(
             gl.use_program(Some(programs.stretch));
         }
 
+        let mut vertex_state = None;
         for batch in batches {
-            let batch_camera = camera_for_batch(camera, batch);
             apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo(
-                gl,
-                vtx_ubo,
-                &batch_camera,
-                1,
-                &batch.euclidean_model,
-                &batch.euclidean_normal,
-            );
+            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
             unsafe {
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));

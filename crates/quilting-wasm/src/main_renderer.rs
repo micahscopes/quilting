@@ -16,7 +16,8 @@ use quilting_renderer::buffer::{
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
-    camera_for_batch, Camera, RenderBatch, RenderMode, IDENTITY_MATRIX,
+    camera_for_batch, same_vertex_uniform_state, Camera, RenderBatch, RenderMode,
+    IDENTITY_MATRIX,
 };
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
@@ -109,6 +110,7 @@ struct MainState {
     render_calls: u64,
     pbr_draw_calls: u64,
     pbr_material_updates: u64,
+    pbr_vertex_uniform_updates: u64,
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
@@ -198,7 +200,6 @@ struct GpuBatch {
     perm_parity: f32,
     material_index: usize,
     node_index: usize,
-    lod: [u32; 3],
 }
 
 impl GpuBatch {
@@ -307,7 +308,6 @@ fn create_gpu_batch(
         perm_parity: key.parity(),
         material_index: key.material_index,
         node_index: key.node_index,
-        lod: key.lod,
     })
 }
 
@@ -448,6 +448,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_calls: 0,
             pbr_draw_calls: 0,
             pbr_material_updates: 0,
+            pbr_vertex_uniform_updates: 0,
             batch_groups: BTreeMap::new(),
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
@@ -655,7 +656,6 @@ fn sync_render_batches(renderer: &mut MainState) {
         render_batches.push(RenderBatch {
             mesh: MeshDraw::from(&batch.mesh),
             perm_parity: batch.perm_parity,
-            wire_color: lod_color(&batch.lod),
             material_index: batch.material_index,
             mobius: conformal.mobius,
             orientation_sign: conformal.orientation_sign * euclidean_orientation,
@@ -1412,6 +1412,10 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ("renderCalls", state.render_calls),
             ("pbrDrawCalls", state.pbr_draw_calls),
             ("pbrMaterialUpdates", state.pbr_material_updates),
+            (
+                "pbrVertexUniformUpdates",
+                state.pbr_vertex_uniform_updates,
+            ),
         ] {
             js_sys::Reflect::set(
                 &result,
@@ -2131,7 +2135,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 let texture_defaults = [white, black, black, black, white];
                 let mut pbr_draws = 0u64;
                 let mut material_updates = 0u64;
+                let mut vertex_uniform_updates = 0u64;
                 let mut active_material = None;
+                let mut active_vertex_state: Option<&RenderBatch> = None;
 
                 // Pass 1: opaque non-transmission
                 for batch in render_batches {
@@ -2167,14 +2173,19 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         material_updates += 1;
                     }
 
-                    // Upload vertex UBO and draw this batch
-                    let batch_camera = camera_for_batch(&camera, batch);
                     apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-                    quilting_renderer::pass::upload_batch_ubo(
-                        gl, state.renderer.vtx_ubo(), &batch_camera,
-                        1,
-                        &batch.euclidean_model, &batch.euclidean_normal,
-                    );
+                    if active_vertex_state
+                        .is_none_or(|previous| !same_vertex_uniform_state(previous, batch))
+                    {
+                        let batch_camera = camera_for_batch(&camera, batch);
+                        quilting_renderer::pass::upload_batch_ubo(
+                            gl, state.renderer.vtx_ubo(), &batch_camera,
+                            1,
+                            &batch.euclidean_model, &batch.euclidean_normal,
+                        );
+                        active_vertex_state = Some(batch);
+                        vertex_uniform_updates += 1;
+                    }
                     unsafe {
                         gl.bind_vertex_array(Some(batch.mesh.tri_vao));
                         gl.draw_elements_instanced(
@@ -2345,6 +2356,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
                 // Pass 2: transmission + transparent
                 active_material = None;
+                active_vertex_state = None;
                 for batch in render_batches {
                     let (material_slot, mat) = pbr_material_for_index(
                         &state.materials,
@@ -2392,13 +2404,19 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         material_updates += 1;
                     }
 
-                    let batch_camera = camera_for_batch(&camera, batch);
                     apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-                    quilting_renderer::pass::upload_batch_ubo(
-                        gl, state.renderer.vtx_ubo(), &batch_camera,
-                        1,
-                        &batch.euclidean_model, &batch.euclidean_normal,
-                    );
+                    if active_vertex_state
+                        .is_none_or(|previous| !same_vertex_uniform_state(previous, batch))
+                    {
+                        let batch_camera = camera_for_batch(&camera, batch);
+                        quilting_renderer::pass::upload_batch_ubo(
+                            gl, state.renderer.vtx_ubo(), &batch_camera,
+                            1,
+                            &batch.euclidean_model, &batch.euclidean_normal,
+                        );
+                        active_vertex_state = Some(batch);
+                        vertex_uniform_updates += 1;
+                    }
                     unsafe {
                         gl.bind_vertex_array(Some(batch.mesh.tri_vao));
                         gl.draw_elements_instanced(
@@ -2522,6 +2540,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
                 state.pbr_draw_calls += pbr_draws;
                 state.pbr_material_updates += material_updates;
+                state.pbr_vertex_uniform_updates += vertex_uniform_updates;
                 state.renderer.end_frame();
                 return;
             }
@@ -2644,11 +2663,4 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
         gl.disable(glow::BLEND);
         gl.enable(glow::DEPTH_TEST);
     }
-}
-
-fn lod_color(lod: &[u32; 3]) -> [f32; 3] {
-    let max_lod = *lod.iter().max().unwrap_or(&1) as f32;
-    let t = (max_lod.log2() / 8.0).clamp(0.0, 1.0);
-    if t < 0.5 { let s = t * 2.0; [0.0, s, 1.0 - s] }
-    else { let s = (t - 0.5) * 2.0; [s, 1.0 - s, 0.0] }
 }
