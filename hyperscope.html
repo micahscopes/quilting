@@ -418,7 +418,12 @@ function readParams() {
 }
 
 let syncTimer = null;
+let urlSyncReady = false;
 function syncURL() {
+  // Module-level effects run once while controls still contain defaults. Do
+  // not let those initial reactions erase explicit startup parameters before
+  // the model and animation selector have been populated from the URL.
+  if (!urlSyncReady) return;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
     const p = new URLSearchParams();
@@ -2054,6 +2059,8 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
   }
+  urlSyncReady = true;
+  syncURL();
 });
 
 // Surface the root startup error after dependency propagation settles.
