@@ -191,6 +191,50 @@ pub fn image_ball(m: &Mobius, v0: [f64; 3], v1: [f64; 3], v2: [f64; 3]) -> Image
     ImageBound::Ball { center, radius }
 }
 
+/// Return true only when a world-space ball lies wholly outside one clip plane.
+///
+/// `vp` is a column-major WebGL view-projection matrix. The six homogeneous
+/// clip planes are `row3 ± row{0,1,2}`; scaling each plane by the radius of its
+/// spatial normal makes the test independent of plane normalization.
+pub fn ball_outside_frustum(vp: &[f64; 16], center: [f64; 3], radius: f64) -> bool {
+    if radius < 0.0
+        || !radius.is_finite()
+        || center.iter().any(|component| !component.is_finite())
+        || vp.iter().any(|component| !component.is_finite())
+    {
+        return false;
+    }
+
+    let row = |index: usize| [vp[index], vp[4 + index], vp[8 + index], vp[12 + index]];
+    let r0 = row(0);
+    let r1 = row(1);
+    let r2 = row(2);
+    let r3 = row(3);
+    let plane = |axis: [f64; 4], sign: f64| {
+        [
+            r3[0] + sign * axis[0],
+            r3[1] + sign * axis[1],
+            r3[2] + sign * axis[2],
+            r3[3] + sign * axis[3],
+        ]
+    };
+
+    [
+        plane(r0, 1.0),
+        plane(r0, -1.0),
+        plane(r1, 1.0),
+        plane(r1, -1.0),
+        plane(r2, 1.0),
+        plane(r2, -1.0),
+    ]
+    .into_iter()
+    .any(|p| {
+        let signed = p[0] * center[0] + p[1] * center[1] + p[2] * center[2] + p[3];
+        let normal_len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        normal_len > 0.0 && signed < -radius * normal_len
+    })
+}
+
 #[inline]
 fn q_from(p: [f64; 3]) -> Quat {
     Quat::from_point(p[0], p[1], p[2])

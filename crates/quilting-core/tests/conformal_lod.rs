@@ -5,7 +5,9 @@
 //! Ported from Fable's verification harness; every identity below was checked to
 //! machine precision across single reflections and 2-/3-fold compositions.
 
-use quilting_core::conformal_lod::{closest_point_triangle, image_ball, ConformalPatch, ImageBound};
+use quilting_core::conformal_lod::{
+    ball_outside_frustum, closest_point_triangle, image_ball, ConformalPatch, ImageBound,
+};
 use quilting_core::quaternion::{Mobius, Quat};
 
 /// Deterministic xorshift PRNG so failures reproduce exactly.
@@ -241,6 +243,36 @@ fn image_ball_never_culls_when_pole_is_inside() {
     let m = Mobius::sphere_reflection(Quat::from_point(0.0, 0.0, 0.0), 1.0);
     let bound = image_ball(&m, [1.0, 0.0, 0.0], [-0.5, 0.87, 0.0], [-0.5, -0.87, 0.0]);
     assert!(matches!(bound, ImageBound::NeverCull), "pole-straddling face must never cull");
+}
+
+#[test]
+fn ball_frustum_test_is_conservative_at_clip_boundaries() {
+    let identity = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+
+    assert!(!ball_outside_frustum(&identity, [0.0, 0.0, 0.0], 0.25));
+    assert!(!ball_outside_frustum(&identity, [1.4, 0.0, 0.0], 0.5));
+    assert!(ball_outside_frustum(&identity, [1.6, 0.0, 0.0], 0.5));
+    assert!(ball_outside_frustum(&identity, [0.0, -2.0, 0.0], 0.25));
+    assert!(ball_outside_frustum(&identity, [0.0, 0.0, 2.0], 0.25));
+
+    // Column-major translation: x=3 maps to the clip origin, while x=0 is left.
+    let translated = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        -3.0, 0.0, 0.0, 1.0,
+    ];
+    assert!(!ball_outside_frustum(&translated, [3.0, 0.0, 0.0], 0.25));
+    assert!(ball_outside_frustum(&translated, [0.0, 0.0, 0.0], 0.25));
+
+    // Invalid bounds disable culling rather than risking a false negative.
+    assert!(!ball_outside_frustum(&identity, [f64::NAN, 0.0, 0.0], 0.5));
+    assert!(!ball_outside_frustum(&identity, [10.0, 0.0, 0.0], f64::INFINITY));
 }
 
 // ---- Acceptance oracle: build the real atlas patch, map it through the Möbius

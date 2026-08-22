@@ -840,7 +840,6 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 ],
             };
 
-            let mut face_offset = 0i32;
             for batch in &state.batches {
                 let batch_camera = camera_for_node(&camera, state, batch.node_index);
                 let conformal = conformal_state_for_node(state, batch.node_index);
@@ -858,7 +857,6 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                     &batch_camera.mobius, &batch_camera.camera_pos,
                     &conformal.euclidean_model, &euclidean_normal,
                 );
-                vtx_ubo.set_face_offset(gl, face_offset);
                 vtx_ubo.bind(gl);
 
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
@@ -866,7 +864,6 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                     glow::TRIANGLES, batch.mesh.num_tri_indices,
                     glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                 );
-                face_offset += batch.mesh.num_instances;
             }
 
             // Read pixel (flip Y for framebuffer coords)
@@ -904,19 +901,8 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 info!("  medians: a={:.4} b={:.4} c={:.4}", ma, mb, mc);
                 info!("  bary at click: ({:.2}, {:.2})", px[2] as f32 / 255.0, px[3] as f32 / 255.0);
 
-                // Find batch and report LOD triple
-                let mut fo = 0i32;
-                for batch in &state.batches {
-                    let bs = batch.mesh.num_instances;
-                    if face_id >= fo && face_id < fo + bs {
-                        info!("  LOD triple: [{}, {}, {}] per-instance permutations, parity={:.0}",
-                            batch.lod[0], batch.lod[1], batch.lod[2],
-                            batch.perm_parity);
-                        info!("  glTF node: {}", batch.node_index);
-                        break;
-                    }
-                    fo += bs;
-                }
+                let node = state.face_nodes.get(face_id as usize).copied().unwrap_or(0);
+                info!("  glTF node: {}", node);
             }
 
             // Set highlight
@@ -1310,9 +1296,14 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             state.face_nodes.resize(nf, 0);
         }
         let mut buckets: BTreeMap<(usize, usize, usize, usize), Vec<u32>> = BTreeMap::new();
+        let mut culled = 0usize;
         for fi in 0..nf {
             let lo = fi * batch::FACE_LOD_STRIDE;
             if lo + 5 >= face_lods.len() { break; }
+            if !batch::face_is_visible(face_lods, fi) {
+                culled += 1;
+                continue;
+            }
             let atlas_idx = face_lods[lo + 5] as usize;
             let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
             let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
@@ -1397,6 +1388,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                         canonical[permutation[2]],
                     ]);
                     staging[dst + instance_layout::offset::PERM_INDEX] = perm as f32;
+                    staging[dst + instance_layout::offset::FACE_ID] = fi as f32;
                 }
 
                 // Upload this batch's data to the GPU at the current offset
@@ -1435,8 +1427,8 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
         info!(
-            "Built {} GPU batches ({} missing), material→faces: {:?}, node→faces: {:?}",
-            built, missing, mat_counts, node_counts
+            "Built {} GPU batches ({} faces culled, {} atlas entries missing), material→faces: {:?}, node→faces: {:?}",
+            built, culled, missing, mat_counts, node_counts
         );
     });
 }
@@ -2089,7 +2081,6 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
         gl.disable(glow::BLEND);
         gl.use_program(Some(state.renderer.programs().pick));
 
-        let mut face_offset = 0i32;
         for batch in &state.batches {
             let batch_camera = camera_for_node(camera, state, batch.node_index);
             let conformal = conformal_state_for_node(state, batch.node_index);
@@ -2105,16 +2096,12 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
                 1,
                 &conformal.euclidean_model, &euclidean_normal,
             );
-            state.renderer.vtx_ubo().set_face_offset(gl, face_offset);
             state.renderer.vtx_ubo().bind(gl);
 
             gl.bind_vertex_array(Some(batch.mesh.tri_vao));
             gl.draw_elements_instanced(glow::TRIANGLES, batch.mesh.num_tri_indices,
                 glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances);
-            face_offset += batch.mesh.num_instances;
         }
-
-        state.renderer.vtx_ubo().set_face_offset(gl, 0);
 
         // Fullscreen overlay: cyan where pick matches target face
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);

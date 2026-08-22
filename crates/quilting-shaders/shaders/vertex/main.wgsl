@@ -12,7 +12,7 @@ struct Uniforms {
     _reserved_winding_parity: f32,
     _reserved_perm_index: i32,
     use_qb: i32,
-    _pad: f32,
+    _reserved_face_offset: f32,
     // Möbius transform: p' = (a*p + b) * (c*p + d)^{-1}
     mob_a: vec4<f32>,
     mob_b: vec4<f32>,
@@ -272,7 +272,7 @@ fn eval_mobius_qb(
 }
 
 @vertex
-fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> VertexOutput {
+fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     // The atlas stores only canonical tessellations. Map their barycentrics back
@@ -436,7 +436,7 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
     out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
     out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
     out.tess_bary = bary;
-    out.instance_id = f32(instance_idx) + u._pad;
+    out.instance_id = in.vert_lod.w;
 
     // Möbius conformal scale is |a - F(p)c| / |cp + d|. The historical
     // 1/|cp+d|² shortcut only holds for normalized inversive generators and

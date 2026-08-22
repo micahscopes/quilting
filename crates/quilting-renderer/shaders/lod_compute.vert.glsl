@@ -57,8 +57,8 @@ uniform float u_mob_k;       // inversion power k (|F(x)-F(y)| = k|x-y|/(|x-h||y
 uniform float u_c_norm_sq;   // |c|^2
 uniform float u_has_pole;    // 1.0 if the transform has a finite pole
 
-// Pass LOD exponents to fragment shader for FBO render (pass 2 reads as texture)
-flat out vec3 v_lods;
+// Pass LOD exponents + conservative visibility to the FBO texture.
+flat out vec4 v_lods;
 
 uniform int u_fbo_width;
 uniform int u_fbo_height;
@@ -213,6 +213,83 @@ vec2 project_screen(vec3 world) {
     return (c.xy / max(c.w, 0.001)) * vec2(vp_width, vp_height) * 0.5;
 }
 
+bool finite_vec3(vec3 value) {
+    return !any(isnan(value)) && !any(isinf(value));
+}
+
+// Homogeneous clip-plane test for a world-space ball. The plane evaluations
+// are clip.w ± clip.{x,y,z}; multiplying radius by the corresponding world
+// normal length avoids normalizing the planes. X/Y use an overscan guard so
+// asynchronous camera classification remains a visibility superset while a
+// newer result is in flight; near/far stay exact.
+bool sphere_outside_frustum(vec3 center, float radius) {
+    if (!finite_vec3(center) || isnan(radius) || isinf(radius) || radius < 0.0) {
+        return false;
+    }
+    vec4 clip = vp_matrix * vec4(center, 1.0);
+    vec3 r0 = vec3(vp_matrix[0][0], vp_matrix[1][0], vp_matrix[2][0]);
+    vec3 r1 = vec3(vp_matrix[0][1], vp_matrix[1][1], vp_matrix[2][1]);
+    vec3 r2 = vec3(vp_matrix[0][2], vp_matrix[1][2], vp_matrix[2][2]);
+    vec3 r3 = vec3(vp_matrix[0][3], vp_matrix[1][3], vp_matrix[2][3]);
+    const float guard = 1.25;
+    float guarded_w = guard * clip.w;
+    vec3 guarded_r3 = guard * r3;
+    return guarded_w + clip.x < -radius * length(guarded_r3 + r0)
+        || guarded_w - clip.x < -radius * length(guarded_r3 - r0)
+        || guarded_w + clip.y < -radius * length(guarded_r3 + r1)
+        || guarded_w - clip.y < -radius * length(guarded_r3 - r1)
+        || clip.w + clip.z < -radius * length(r3 + r2)
+        || clip.w - clip.z < -radius * length(r3 - r2);
+}
+
+// Conservative bound on the complete Möbius image of a triangle. A ball
+// enclosing the source triangle maps to a ball when the pole is outside it;
+// the two points on its pole-centre diameter map to image-ball antipodes.
+// If the pole is inside/near the source ball, the image is unbounded and the
+// face must never be culled.
+bool image_ball_outside_frustum(vec3 p0, vec3 p1, vec3 p2) {
+    vec3 center = (p0 + p1 + p2) / 3.0;
+    float source_radius = sqrt(max(
+        dot(p0 - center, p0 - center),
+        max(dot(p1 - center, p1 - center), dot(p2 - center, p2 - center))
+    ));
+    vec3 direction = vec3(1.0, 0.0, 0.0);
+
+    if (u_has_pole > 0.5) {
+        vec3 delta = center - u_pole.yzw;
+        float pole_distance_sq = u_pole.x * u_pole.x + dot(delta, delta);
+        float guarded_radius = 1.05 * source_radius;
+        if (pole_distance_sq <= guarded_radius * guarded_radius) {
+            return false;
+        }
+        float delta_len = length(delta);
+        if (delta_len <= 1e-20) {
+            return false;
+        }
+        direction = delta / delta_len;
+    }
+
+    vec3 plus = mobius_pure(center + source_radius * direction);
+    vec3 minus = mobius_pure(center - source_radius * direction);
+    if (!finite_vec3(plus) || !finite_vec3(minus)) {
+        return false;
+    }
+    vec3 image_center = 0.5 * (plus + minus);
+    float image_radius = 0.5 * distance(plus, minus) * 1.05 + 1e-6;
+    return sphere_outside_frustum(image_center, image_radius);
+}
+
+void emit_face(vec4 payload) {
+    v_lods = payload;
+    int face_id = gl_VertexID;
+    int px = face_id % u_fbo_width;
+    int py = face_id / u_fbo_width;
+    float ndc_x = (float(px) + 0.5) / float(u_fbo_width) * 2.0 - 1.0;
+    float ndc_y = (float(py) + 0.5) / float(u_fbo_height) * 2.0 - 1.0;
+    gl_Position = vec4(ndc_x, ndc_y, 0.0, 1.0);
+    gl_PointSize = 1.0;
+}
+
 void main() {
     float lod_a, lod_b, lod_c;
 
@@ -220,6 +297,13 @@ void main() {
     vec3 p0 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.x)), 1.0)).xyz;
     vec3 p1 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.y)), 1.0)).xyz;
     vec3 p2 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.z)), 1.0)).xyz;
+
+    // Cull before the more expensive density work, but only with a bound on the
+    // complete transformed patch. Pole-containing bounds deliberately survive.
+    if (image_ball_outside_frustum(p0, p1, p2)) {
+        emit_face(vec4(1.0, 1.0, 1.0, 0.0));
+        return;
+    }
 
     // Edge midpoints
     vec3 mid_a = (p1 + p2) * 0.5;
@@ -359,47 +443,5 @@ void main() {
         lod_c = max_lod;
     }
 
-    // Frustum cull. Geometric LOD is camera-independent, so a far-offscreen
-    // (Möbius-inflated) face still demands — and builds — a huge patch it
-    // contributes zero pixels to. Test the 6 already-deformed sample points
-    // (corners + edge midpoints): if all lie past one frustum plane, or all sit
-    // behind the camera, pin the face to MIN LOD so it is never tessellated.
-    {
-        vec3 pts[6] = vec3[6](d0, d1, d2, dm_a, dm_b, dm_c);
-        bool allBehind = true, allR = true, allL = true, allT = true, allB = true, allFront = true;
-        for (int i = 0; i < 6; i++) {
-            vec4 cp = vp_matrix * vec4(pts[i], 1.0);
-            allBehind = allBehind && (cp.w <= 0.0);
-            allFront  = allFront  && (cp.w >  0.0);
-            allR = allR && (cp.x >  cp.w);
-            allL = allL && (cp.x < -cp.w);
-            allT = allT && (cp.y >  cp.w);
-            allB = allB && (cp.y < -cp.w);
-        }
-        // Only cull faces that are NOT conformally inflated. A near-pole patch
-        // bulges far beyond these corner/midpoint samples (the inversion
-        // spheroid), so its rendered surface can be on-screen even when every
-        // sample is off — culling on the samples alone drops it. Keying on the
-        // EXACT min_bot_true (not the sampled min_bot_sq, which can read large when
-        // no sample happens to land near an interior pole) means a pole-inflated
-        // face is never culled even if all six samples fall off-screen: large
-        // min_bot_true ⇒ tame patch whose samples bound its true extent ⇒ safe.
-        bool off = allBehind || (allFront && (allR || allL || allT || allB));
-        if (off && min_bot_true > 0.25) {
-            lod_a = 2.0; lod_b = 2.0; lod_c = 2.0;
-        }
-    }
-
-    // Output raw LOD exponents to fragment shader for FBO write
-    v_lods = vec3(log2(lod_a), log2(lod_b), log2(lod_c));
-
-    // Position this face's point at its corresponding pixel in the FBO
-    int face_id = gl_VertexID;
-    int px = face_id % u_fbo_width;
-    int py = face_id / u_fbo_width;
-    // Map pixel center to NDC: (px + 0.5) / width * 2 - 1
-    float ndc_x = (float(px) + 0.5) / float(u_fbo_width) * 2.0 - 1.0;
-    float ndc_y = (float(py) + 0.5) / float(u_fbo_height) * 2.0 - 1.0;
-    gl_Position = vec4(ndc_x, ndc_y, 0.0, 1.0);
-    gl_PointSize = 1.0;
+    emit_face(vec4(log2(lod_a), log2(lod_b), log2(lod_c), 1.0));
 }

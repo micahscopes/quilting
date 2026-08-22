@@ -44,7 +44,8 @@ pub struct DrawBatch {
 /// Group faces into draw batches using O(n) bucket sort.
 ///
 /// # Arguments
-/// - `face_lods`: 6 floats per face: [canon_a, canon_b, canon_c, perm_index, parity, atlas_index]
+/// - `face_lods`: 6 floats per face: [canon_a, canon_b, canon_c, perm_index, parity, atlas_index].
+///   A negative/non-finite atlas index is the visibility-cull sentinel.
 /// - `all_instances`: flat f32 array, INSTANCE_STRIDE floats per face
 /// - `face_materials`: per-face material index (len == num_faces)
 /// - `num_faces`: number of faces
@@ -72,6 +73,7 @@ pub fn group_into_batches(
     // Single pass: distribute faces into buckets
     for fi in 0..num_faces {
         let lo = fi * FACE_LOD_STRIDE;
+        if !face_is_visible(face_lods, fi) { continue; }
         let atlas_idx = face_lods[lo + 5] as usize;
         let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
         let mat = if fi < face_materials.len() { face_materials[fi] } else { 0 };
@@ -107,6 +109,7 @@ pub fn group_into_batches(
             let lod_offset = fi as usize * FACE_LOD_STRIDE;
             instance_data[dst + crate::instance_layout::offset::PERM_INDEX] =
                 face_lods[lod_offset + 3];
+            instance_data[dst + crate::instance_layout::offset::FACE_ID] = fi as f32;
         }
 
         result.push(DrawBatch {
@@ -159,6 +162,7 @@ pub fn sort_into_ranges(
     let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
     for fi in 0..num_faces {
         let lo = fi * FACE_LOD_STRIDE;
+        if !face_is_visible(face_lods, fi) { continue; }
         let atlas_idx = face_lods[lo + 5] as usize;
         let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
         let mat = if fi < face_materials.len() { face_materials[fi] } else { 0 };
@@ -208,10 +212,19 @@ pub fn sort_into_ranges(
         let lod_offset = src_fi as usize * FACE_LOD_STRIDE;
         sorted[dst_off + crate::instance_layout::offset::PERM_INDEX] =
             face_lods[lod_offset + 3];
+        sorted[dst_off + crate::instance_layout::offset::FACE_ID] = src_fi as f32;
     }
     all_instances[..num_faces * INSTANCE_STRIDE].copy_from_slice(&sorted[..num_faces * INSTANCE_STRIDE]);
 
     ranges
+}
+
+/// Pass 2 encodes conservative visibility by reserving negative atlas indices.
+#[inline]
+pub fn face_is_visible(face_lods: &[f32], face_index: usize) -> bool {
+    face_lods
+        .get(face_index * FACE_LOD_STRIDE + 5)
+        .is_some_and(|atlas_index| atlas_index.is_finite() && *atlas_index >= 0.0)
 }
 
 #[cfg(test)]
@@ -301,5 +314,27 @@ mod tests {
     fn empty_input() {
         let batches = group_into_batches(&[], &[], &[], 0);
         assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn visibility_sentinel_omits_faces_and_preserves_source_ids() {
+        let face_lods = vec![
+            4.0, 4.0, 4.0, 0.0, 1.0, 0.0,
+            4.0, 4.0, 4.0, 0.0, 1.0, -1.0,
+            4.0, 4.0, 4.0, 0.0, 1.0, 0.0,
+        ];
+        let all_instances = vec![0.0f32; 3 * INSTANCE_STRIDE];
+        let batches = group_into_batches(&face_lods, &all_instances, &[0, 0, 0], 3);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].face_indices, vec![0, 2]);
+        assert_eq!(
+            batches[0].instance_data[crate::instance_layout::offset::FACE_ID],
+            0.0,
+        );
+        assert_eq!(
+            batches[0].instance_data[INSTANCE_STRIDE + crate::instance_layout::offset::FACE_ID],
+            2.0,
+        );
     }
 }

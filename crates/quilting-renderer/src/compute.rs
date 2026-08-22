@@ -1,11 +1,11 @@
 //! GPU compute via transform feedback (WebGL2 GPGPU).
 //!
 //! Two-pass pipeline — one "vertex" per face:
-//!   Pass 1: animated positions → Möbius → medians → raw LOD exponents per edge
+//!   Pass 1: animated positions → conservative image bound + raw LOD exponents
 //!   Pass 2: edge coherence (via adjacency texture) + canonical sort + atlas LUT
 //!
-//! Pass 1 output is copied to a texture (via PBO) for pass 2 to read.
-//! Final output: 5 floats per face (canon_a, canon_b, canon_c, perm_index, parity),
+//! Pass 1 renders directly to a texture for pass 2 to read.
+//! Final output: 6 floats per face (canon_a, canon_b, canon_c, perm_index, parity, atlas_index),
 //! directly consumable by group_into_batches.
 
 use glow::HasContext;
@@ -19,8 +19,8 @@ fn log_info(msg: &str) {
     eprintln!("{}", msg);
 }
 
-/// Pass 1: raw LOD exponents (lod_a, lod_b, lod_c) = 3 floats per face.
-pub const FLOATS_PER_FACE_PASS1: usize = 3;
+/// Pass 1 FBO payload: raw LOD exponents plus conservative visibility.
+pub const FLOATS_PER_FACE_PASS1: usize = 4;
 
 /// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) = 6 floats per face.
 pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
@@ -81,7 +81,7 @@ pub struct LodCompute {
     // --- Pass 2: TF edge coherence + canonicalize ---
     program2: glow::Program,
     vao2: glow::VertexArray,
-    output_buf2: glow::Buffer,      // TF output: 5 floats per face (final)
+    output_buf2: glow::Buffer,      // TF output: 6 floats per face (final)
     tf2: glow::TransformFeedback,
 
     // Static adjacency texture (uploaded once per model)
@@ -716,4 +716,19 @@ fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
 
 fn bytemuck_cast_slice_mut(data: &mut [f32]) -> &mut [u8] {
     unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, data.len() * 4) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visibility_payload_survives_both_gpu_passes() {
+        assert_eq!(FLOATS_PER_FACE_PASS1, 4);
+        assert!(LOD_COMPUTE_VS.contains("flat out vec4 v_lods"));
+        assert!(LOD_COMPUTE_FS.contains("frag_color = v_lods"));
+        assert!(LOD_COHERENCE_VS.contains("face.w < 0.5"));
+        assert!(LOD_COHERENCE_VS.contains("out_atlas_index = -1.0"));
+    }
+
 }

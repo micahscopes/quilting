@@ -7,8 +7,8 @@ precision highp float;
 // data (static texture), enforces shared-edge LOD agreement via max,
 // then sorts to canonical form and looks up the atlas index.
 
-// Pass 1 output: LOD exponents per face.
-// Tiled 4096-wide RGBA32F: texel at (face_id % 4096, face_id / 4096) = (lod_a, lod_b, lod_c, 0)
+// Pass 1 output: LOD exponents + visibility per face.
+// Tiled 4096-wide RGBA32F: texel = (lod_a, lod_b, lod_c, visible).
 uniform highp sampler2D u_pass1_lods;
 
 // Adjacency: for each face × 3 edges, (neighbor_face, neighbor_lod_idx, 0, 0).
@@ -30,10 +30,10 @@ out float out_parity;
 out float out_atlas_index;
 
 // Read pass 1 LODs for a face (tiled 4096-wide)
-vec3 read_lods(int face_id) {
+vec4 read_face(int face_id) {
     int tx = face_id % 4096;
     int ty = face_id / 4096;
-    return texelFetch(u_pass1_lods, ivec2(tx, ty), 0).xyz;
+    return texelFetch(u_pass1_lods, ivec2(tx, ty), 0);
 }
 
 // Read adjacency for face_id, edge (0-2).
@@ -49,16 +49,21 @@ void main() {
     int fi = gl_VertexID;
     if (fi >= u_num_faces) {
         out_canon_a = 1.0; out_canon_b = 1.0; out_canon_c = 1.0;
-        out_perm_index = 0.0; out_parity = 1.0;
+        out_perm_index = 0.0; out_parity = 1.0; out_atlas_index = -1.0;
         gl_Position = vec4(0.0);
         return;
     }
 
-    // Read this face's LOD exponents from pass 1
-    vec3 lods = read_lods(fi);
-    float ea = lods.x;
-    float eb = lods.y;
-    float ec = lods.z;
+    vec4 face = read_face(fi);
+    if (face.w < 0.5) {
+        out_canon_a = 1.0; out_canon_b = 1.0; out_canon_c = 1.0;
+        out_perm_index = 0.0; out_parity = 1.0; out_atlas_index = -1.0;
+        gl_Position = vec4(0.0);
+        return;
+    }
+    float ea = face.x;
+    float eb = face.y;
+    float ec = face.z;
 
     // Edge coherence: for each of this face's 3 edges, if there's a neighbor,
     // take max of our LOD exponent and the neighbor's corresponding exponent.
@@ -68,11 +73,12 @@ void main() {
         if (neighbor < 0) continue; // boundary edge
 
         int neighbor_lod_idx = int(adj.y);
-        vec3 nlods = read_lods(neighbor);
+        vec4 neighbor_face = read_face(neighbor);
+        if (neighbor_face.w < 0.5) continue;
 
-        float neighbor_exp = (neighbor_lod_idx == 0) ? nlods.x
-                           : (neighbor_lod_idx == 1) ? nlods.y
-                           : nlods.z;
+        float neighbor_exp = (neighbor_lod_idx == 0) ? neighbor_face.x
+                           : (neighbor_lod_idx == 1) ? neighbor_face.y
+                           : neighbor_face.z;
 
         if (edge == 0) ea = max(ea, neighbor_exp);
         else if (edge == 1) eb = max(eb, neighbor_exp);

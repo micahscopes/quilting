@@ -394,7 +394,7 @@ impl PersistentInstances {
 ///   float reserved      (offset 128, 4 bytes)
 ///   int reserved        (offset 132, 4 bytes)
 ///   int use_qb         (offset 136, 4 bytes)
-///   float _pad         (offset 140, 4 bytes) -- the pick pass's face offset
+///   float reserved     (offset 140, 4 bytes)
 ///   vec4 mob_a         (offset 144, 16 bytes)
 ///   vec4 mob_b         (offset 160, 16 bytes)
 ///   vec4 mob_c         (offset 176, 16 bytes)
@@ -405,10 +405,6 @@ impl PersistentInstances {
 pub struct VertexUniformBuf {
     pub ubo: glow::Buffer,
 }
-
-/// Byte offset of the `_pad` slot. Despite the name it is load-bearing — the
-/// vertex shader computes `instance_id = instance_idx + u._pad`.
-const FACE_OFFSET_BYTES: i32 = 140;
 
 impl VertexUniformBuf {
     pub fn new(gl: &glow::Context) -> Result<Self, String> {
@@ -444,7 +440,7 @@ impl VertexUniformBuf {
         // Offsets 128..136 are reserved. Permutations are per-instance now.
         // use_qb: offset 136
         data[136..140].copy_from_slice(&use_qb.to_le_bytes());
-        // _pad: offset 140 (zeroed)
+        // reserved: offset 140 (zeroed)
         // mob_a/b/c/d: offset 144-207
         data[144..208].copy_from_slice(bytemuck_cast_slice(mobius));
         // camera_pos: offset 208 (vec4, w=0)
@@ -457,22 +453,6 @@ impl VertexUniformBuf {
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
             gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
-        }
-    }
-
-    /// Overwrite the `_pad` slot with the base face ID of the batch about to be
-    /// drawn. The vertex shader adds the instance index to it, so the pick pass
-    /// gets a global face ID; set it per batch and reset it to 0 afterwards.
-    ///
-    /// `upload` zeroes the slot, so call this after it.
-    pub fn set_face_offset(&self, gl: &glow::Context, face_offset: i32) {
-        unsafe {
-            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
-            gl.buffer_sub_data_u8_slice(
-                glow::UNIFORM_BUFFER,
-                FACE_OFFSET_BYTES,
-                &(face_offset as f32).to_le_bytes(),
-            );
         }
     }
 

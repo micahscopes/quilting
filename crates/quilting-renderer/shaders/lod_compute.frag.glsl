@@ -1,9 +1,9 @@
 #version 300 es
 precision highp float;
 
-flat in vec3 v_lods;
+flat in vec4 v_lods;
 out vec4 frag_color;
 
 void main() {
-    frag_color = vec4(v_lods, 0.0);
+    frag_color = v_lods;
 }
