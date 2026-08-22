@@ -12,6 +12,16 @@ export const SPACEMOUSE_AXIS_MAX = 350;
 export const SPACEMOUSE_LEFT_BUTTON = 1 << 0;
 export const SPACEMOUSE_RIGHT_BUTTON = 1 << 1;
 
+// Semantic camera axes produced by mapSpaceMouseFlyAxes. The HID report uses
+// desktop coordinates (X right, Y forward/back, Z lift/press) followed by
+// rotations about those same physical axes (Rx pitch, Ry roll, Rz yaw).
+export const SPACEMOUSE_FLY_RIGHT = 0;
+export const SPACEMOUSE_FLY_UP = 1;
+export const SPACEMOUSE_FLY_FORWARD = 2;
+export const SPACEMOUSE_FLY_PITCH = 3;
+export const SPACEMOUSE_FLY_YAW = 4;
+export const SPACEMOUSE_FLY_ROLL = 5;
+
 export function createSpaceMouseState() {
   return {
     axes: new Float32Array(6),
@@ -68,13 +78,33 @@ export function shapeSpaceMouseAxis(value, deadzone = 0.08) {
   return Math.sign(value) * normalized * normalized;
 }
 
+/**
+ * Convert raw HID X/Y/Z/Rx/Ry/Rz into a right/up/forward +
+ * pitch/yaw/roll camera-local velocity vector.
+ *
+ * HID Y points opposite camera-forward for the SpaceMouse convention, while
+ * positive camera pitch/yaw use the opposite handedness from HID Rx/Rz. Ry is
+ * rotation about the physical forward axis, hence local camera roll.
+ */
+export function mapSpaceMouseFlyAxes(axes, out = new Float32Array(6)) {
+  out[SPACEMOUSE_FLY_RIGHT] = axes[0];
+  out[SPACEMOUSE_FLY_UP] = axes[2];
+  out[SPACEMOUSE_FLY_FORWARD] = -axes[1];
+  out[SPACEMOUSE_FLY_PITCH] = -axes[3];
+  out[SPACEMOUSE_FLY_YAW] = -axes[5];
+  out[SPACEMOUSE_FLY_ROLL] = axes[4];
+  return out;
+}
+
 /** Select the interaction layer encoded by the two primary puck buttons. */
 export function spaceMouseModifierMode(buttons) {
   const left = (buttons & SPACEMOUSE_LEFT_BUTTON) !== 0;
   const right = (buttons & SPACEMOUSE_RIGHT_BUTTON) !== 0;
-  if (left && right) return 'inversion-center-radius';
-  if (left) return 'inversion-center';
-  if (right) return 'inversion-radius';
+  // Right wins when both are held: changing camera/transform state and DoF in
+  // the same frame is surprising, while releasing it naturally returns to the
+  // still-held inversion layer.
+  if (right) return 'depth-of-field';
+  if (left) return 'inversion';
   return 'camera';
 }
 

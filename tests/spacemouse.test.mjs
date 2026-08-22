@@ -6,6 +6,7 @@ import {
   SpaceMouseController,
   createSpaceMouseState,
   decodeSpaceMouseReport,
+  mapSpaceMouseFlyAxes,
   shapeSpaceMouseAxis,
   spaceMouseModifierMode,
 } from '../spacemouse.mjs';
@@ -46,12 +47,17 @@ test('button reports preserve the complete bitmask', () => {
   assert.equal(state.buttons, 0x0103);
 });
 
-test('the two primary buttons select inversion edit layers', () => {
+test('the two primary buttons select inversion and depth-of-field layers', () => {
   assert.equal(spaceMouseModifierMode(0), 'camera');
-  assert.equal(spaceMouseModifierMode(1), 'inversion-center');
-  assert.equal(spaceMouseModifierMode(2), 'inversion-radius');
-  assert.equal(spaceMouseModifierMode(3), 'inversion-center-radius');
-  assert.equal(spaceMouseModifierMode(0x103), 'inversion-center-radius');
+  assert.equal(spaceMouseModifierMode(1), 'inversion');
+  assert.equal(spaceMouseModifierMode(2), 'depth-of-field');
+  assert.equal(spaceMouseModifierMode(3), 'depth-of-field');
+  assert.equal(spaceMouseModifierMode(0x103), 'depth-of-field');
+});
+
+test('fly mapping follows physical SpaceMouse axes in camera-local space', () => {
+  const mapped = mapSpaceMouseFlyAxes([1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(Array.from(mapped), [1, 3, -2, -4, -6, 5]);
 });
 
 test('unknown and truncated reports do not mutate state', () => {

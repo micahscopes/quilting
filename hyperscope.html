@@ -175,8 +175,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="spacemouse-move" min="10" max="900" step="1" value="300"><span class="v" id="spacemouse-move-v">3.00</span></div>
     <label>Rotate sensitivity</label>
     <div class="sr"><input type="range" id="spacemouse-rotate" min="10" max="900" step="1" value="300"><span class="v" id="spacemouse-rotate-v">3.00</span></div>
-    <div id="spacemouse-mode" style="color:#58a6ff;font-size:9px;margin-top:3px">Fly: X/Y/Z + pitch/yaw/roll</div>
-    <div style="color:#484f58;font-size:9px;margin-top:2px">Hold left: move inversion center. Hold right + lift/press: radius. Hold both: center X/Z + radius Y.</div>
+    <div id="spacemouse-mode" style="color:#58a6ff;font-size:9px;margin-top:3px">Fly: strafe/lift/forward + local pitch/yaw/roll</div>
+    <div style="color:#484f58;font-size:9px;margin-top:2px">Hold left: move inversion center; twist changes radius. Hold right: push/pull focus, lift aperture, twist blur.</div>
   </div>
 
   <div class="section">
@@ -237,7 +237,11 @@ import init, {
   mr_pick, mr_highlightFace,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
-import { SpaceMouseController, spaceMouseModifierMode } from './spacemouse.mjs';
+import {
+  SpaceMouseController,
+  mapSpaceMouseFlyAxes,
+  spaceMouseModifierMode,
+} from './spacemouse.mjs';
 
 const $ = id => document.getElementById(id);
 
@@ -697,24 +701,95 @@ function mulM4(a, b, out = new Float32Array(16)) {
   return out;
 }
 
-// Camera-local right/up/forward vectors. Roll rotates the screen plane while
-// preserving the forward axis. Callers supply scratch storage to keep the hot
-// paths allocation-free.
-function manualCameraBasis(out) {
+// The mouse UI persists an orbit-style Euler triple in the URL, but actual
+// navigation lives in this orthonormal right/up/forward frame. SpaceMouse
+// rotations update the frame directly, avoiding Euler gimbal coupling and
+// keeping pitch, yaw, and roll local after arbitrary six-axis motion.
+const manualCameraBasisState = new Float64Array(9);
+let manualCameraBasisReady = false;
+
+function setManualCameraBasisFromEuler() {
   const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
   const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
   const cosR = Math.cos(cameraRoll), sinR = Math.sin(cameraRoll);
   const baseRightX = cosY, baseRightY = 0, baseRightZ = -sinY;
   const baseUpX = -sinY * sinX, baseUpY = cosX, baseUpZ = -cosY * sinX;
-  out[0] = baseRightX * cosR + baseUpX * sinR;
-  out[1] = baseRightY * cosR + baseUpY * sinR;
-  out[2] = baseRightZ * cosR + baseUpZ * sinR;
-  out[3] = baseUpX * cosR - baseRightX * sinR;
-  out[4] = baseUpY * cosR - baseRightY * sinR;
-  out[5] = baseUpZ * cosR - baseRightZ * sinR;
-  out[6] = -sinY * cosX;
-  out[7] = -sinX;
-  out[8] = -cosY * cosX;
+  manualCameraBasisState[0] = baseRightX * cosR + baseUpX * sinR;
+  manualCameraBasisState[1] = baseRightY * cosR + baseUpY * sinR;
+  manualCameraBasisState[2] = baseRightZ * cosR + baseUpZ * sinR;
+  manualCameraBasisState[3] = baseUpX * cosR - baseRightX * sinR;
+  manualCameraBasisState[4] = baseUpY * cosR - baseRightY * sinR;
+  manualCameraBasisState[5] = baseUpZ * cosR - baseRightZ * sinR;
+  manualCameraBasisState[6] = -sinY * cosX;
+  manualCameraBasisState[7] = -sinX;
+  manualCameraBasisState[8] = -cosY * cosX;
+  manualCameraBasisReady = true;
+}
+
+function syncManualCameraEuler() {
+  const fx = manualCameraBasisState[6], fy = manualCameraBasisState[7], fz = manualCameraBasisState[8];
+  rotX = Math.asin(Math.max(-1, Math.min(1, -fy)));
+  if (Math.abs(Math.cos(rotX)) > 1e-6) rotY = Math.atan2(-fx, -fz);
+  const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+  const sinX = Math.sin(rotX), cosX = Math.cos(rotX);
+  const baseRightX = cosY, baseRightZ = -sinY;
+  const baseUpX = -sinY * sinX, baseUpY = cosX, baseUpZ = -cosY * sinX;
+  const cosR = manualCameraBasisState[0] * baseRightX
+    + manualCameraBasisState[2] * baseRightZ;
+  const sinR = manualCameraBasisState[0] * baseUpX
+    + manualCameraBasisState[1] * baseUpY
+    + manualCameraBasisState[2] * baseUpZ;
+  cameraRoll = Math.atan2(sinR, cosR);
+}
+
+function rotateManualCameraAboutAxis(axisX, axisY, axisZ, angle) {
+  const axisLength = Math.hypot(axisX, axisY, axisZ);
+  if (axisLength < 1e-12 || Math.abs(angle) < 1e-12) return;
+  const x = axisX / axisLength, y = axisY / axisLength, z = axisZ / axisLength;
+  const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
+  const m00 = t*x*x+c,   m01 = t*x*y-s*z, m02 = t*x*z+s*y;
+  const m10 = t*x*y+s*z, m11 = t*y*y+c,   m12 = t*y*z-s*x;
+  const m20 = t*x*z-s*y, m21 = t*y*z+s*x, m22 = t*z*z+c;
+  for (let offset = 0; offset < 9; offset += 3) {
+    const vx = manualCameraBasisState[offset];
+    const vy = manualCameraBasisState[offset + 1];
+    const vz = manualCameraBasisState[offset + 2];
+    manualCameraBasisState[offset] = m00*vx + m01*vy + m02*vz;
+    manualCameraBasisState[offset + 1] = m10*vx + m11*vy + m12*vz;
+    manualCameraBasisState[offset + 2] = m20*vx + m21*vy + m22*vz;
+  }
+
+  // Suppress accumulated floating-point drift while preserving forward.
+  let fx = manualCameraBasisState[6], fy = manualCameraBasisState[7], fz = manualCameraBasisState[8];
+  let inv = 1 / Math.hypot(fx, fy, fz); fx *= inv; fy *= inv; fz *= inv;
+  const oldUx = manualCameraBasisState[3], oldUy = manualCameraBasisState[4], oldUz = manualCameraBasisState[5];
+  let rx = fy*oldUz - fz*oldUy, ry = fz*oldUx - fx*oldUz, rz = fx*oldUy - fy*oldUx;
+  inv = 1 / Math.hypot(rx, ry, rz); rx *= inv; ry *= inv; rz *= inv;
+  const ux = ry*fz - rz*fy, uy = rz*fx - rx*fz, uz = rx*fy - ry*fx;
+  manualCameraBasisState[0] = rx; manualCameraBasisState[1] = ry; manualCameraBasisState[2] = rz;
+  manualCameraBasisState[3] = ux; manualCameraBasisState[4] = uy; manualCameraBasisState[5] = uz;
+  manualCameraBasisState[6] = fx; manualCameraBasisState[7] = fy; manualCameraBasisState[8] = fz;
+}
+
+function rotateManualCameraLocal(pitch, yaw, roll) {
+  const rightX = manualCameraBasisState[0], rightY = manualCameraBasisState[1], rightZ = manualCameraBasisState[2];
+  const upX = manualCameraBasisState[3], upY = manualCameraBasisState[4], upZ = manualCameraBasisState[5];
+  const forwardX = manualCameraBasisState[6], forwardY = manualCameraBasisState[7], forwardZ = manualCameraBasisState[8];
+  const angle = Math.hypot(pitch, yaw, roll);
+  if (angle > 0) {
+    rotateManualCameraAboutAxis(
+      rightX * pitch + upX * yaw + forwardX * roll,
+      rightY * pitch + upY * yaw + forwardY * roll,
+      rightZ * pitch + upZ * yaw + forwardZ * roll,
+      angle,
+    );
+    syncManualCameraEuler();
+  }
+}
+
+function manualCameraBasis(out) {
+  if (!manualCameraBasisReady) setManualCameraBasisFromEuler();
+  out.set(manualCameraBasisState);
   return out;
 }
 
@@ -726,6 +801,7 @@ const lodView = new Float32Array(16), lodProj = new Float32Array(16);
 const lodVp = new Float32Array(16), lodMobius = new Float32Array(16);
 const frameCameraBasis = new Float32Array(9), lodCameraBasis = new Float32Array(9);
 const inputCameraBasis = new Float32Array(9), pickCameraBasis = new Float32Array(9);
+const spaceMouseFlyAxes = new Float32Array(6);
 
 let runtimeWasmModule = null;
 async function compileRuntimeWasm() {
@@ -815,10 +891,10 @@ canvas.addEventListener('click', e => {
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
-  const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
-  const ey = zoom*Math.sin(rotX)+panY;
-  const ez = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
   const basis = manualCameraBasis(pickCameraBasis);
+  const ex = panX - basis[6] * zoom;
+  const ey = panY - basis[7] * zoom;
+  const ez = panZ - basis[8] * zoom;
   const view = lookAt(ex,ey,ez, panX,panY,panZ, basis[3],basis[4],basis[5]);
   const proj = perspective(Math.PI/3, canvas.width/canvas.height, 0.01, 10000);
   const mvp = mulM4(proj, view);
@@ -847,9 +923,13 @@ window.addEventListener('mousemove', e => {
     panY -= (dx * basis[1] + dy * basis[4]) * s;
     panZ -= (dx * basis[2] + dy * basis[5]) * s;
   } else {
-    rotY += dx * 0.005;
-    rotX += dy * 0.005;
-    rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
+    // Mouse drag remains an orbit about the target: world-up yaw followed by
+    // camera-local pitch. The persistent basis keeps working after SpaceMouse
+    // roll instead of snapping back to an Euler horizon.
+    rotateManualCameraAboutAxis(0, 1, 0, dx * 0.005);
+    const basis = manualCameraBasis(inputCameraBasis);
+    rotateManualCameraAboutAxis(basis[0], basis[1], basis[2], -dy * 0.005);
+    syncManualCameraEuler();
   }
   clearTimeout(camDebounce);
   camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
@@ -871,8 +951,10 @@ canvas.addEventListener('touchmove', e => {
   if (!drag || e.touches.length !== 1) return;
   const dx = e.touches[0].clientX - lx, dy = e.touches[0].clientY - ly;
   lx = e.touches[0].clientX; ly = e.touches[0].clientY;
-  rotY += dx * 0.005; rotX += dy * 0.005;
-  rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
+  rotateManualCameraAboutAxis(0, 1, 0, dx * 0.005);
+  const basis = manualCameraBasis(inputCameraBasis);
+  rotateManualCameraAboutAxis(basis[0], basis[1], basis[2], -dy * 0.005);
+  syncManualCameraEuler();
 }, { passive: true });
 
 // --- Button group helper ---
@@ -1363,6 +1445,7 @@ applyParams = function(params) {
   panX = finite(params.px, 0, -1e6, 1e6);
   panY = finite(params.py, 0, -1e6, 1e6);
   panZ = finite(params.pz, 0, -1e6, 1e6);
+  setManualCameraBasisFromEuler();
   spaceMouseMove.set(finite(params.smmove, 300, 10, 900));
   spaceMouseRotate.set(finite(params.smrotate, 300, 10, 900));
   fz.enabled.set(params.fuzzy === '1');
@@ -1886,13 +1969,13 @@ async function recomputeLods() {
     lodMobius.set(m.a, 0); lodMobius.set(m.b, 4);
     lodMobius.set(m.c, 8); lodMobius.set(m.d, 12);
     const w = canvas.width, h = canvas.height;
-    const ex = authoredCamera ? authoredCamera.eye[0] : zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
-    const ey = authoredCamera ? authoredCamera.eye[1] : zoom*Math.sin(rotX)+panY;
-    const ez = authoredCamera ? authoredCamera.eye[2] : zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
+    const basis = manualCameraBasis(lodCameraBasis);
+    const ex = authoredCamera ? authoredCamera.eye[0] : panX - basis[6] * zoom;
+    const ey = authoredCamera ? authoredCamera.eye[1] : panY - basis[7] * zoom;
+    const ez = authoredCamera ? authoredCamera.eye[2] : panZ - basis[8] * zoom;
     const tx = authoredCamera ? authoredCamera.target[0] : panX;
     const ty = authoredCamera ? authoredCamera.target[1] : panY;
     const tz = authoredCamera ? authoredCamera.target[2] : panZ;
-    const basis = manualCameraBasis(lodCameraBasis);
     const upX = authoredCamera ? 0 : basis[3];
     const upY = authoredCamera ? 1 : basis[4];
     const upZ = authoredCamera ? 0 : basis[5];
@@ -2083,15 +2166,21 @@ function frame(ts) {
   if (spaceMouseMode !== previousSpaceMouseMode) {
     spaceMouse.resetSmoothing();
     previousSpaceMouseMode = spaceMouseMode;
+    if (spaceMouseMode === 'inversion' && mob.xform.peek() !== 'sphere_reflection') {
+      mob.xform.set('sphere_reflection');
+    } else if (spaceMouseMode === 'depth-of-field') {
+      fz.enabled.set(true);
+      fz.mode.set('0');
+    }
   }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
+  const flyAxes = mapSpaceMouseFlyAxes(spaceMouseAxes, spaceMouseFlyAxes);
   spaceMouseDiagnostics.buttons = spaceMouse.buttons;
   spaceMouseDiagnostics.controlMode = spaceMouseMode;
   const spaceMouseModeText = {
-    camera: 'Fly: X/Y/Z + pitch/yaw/roll',
-    'inversion-center': 'Inversion: move center (X/Y/Z)',
-    'inversion-radius': 'Inversion: lift/press changes radius',
-    'inversion-center-radius': 'Inversion: center X/Z + radius Y',
+    camera: 'Fly: strafe/lift/forward + local pitch/yaw/roll',
+    inversion: 'Inversion: translate center; twist changes radius',
+    'depth-of-field': 'DoF: push/pull focus; lift aperture; twist blur',
   }[spaceMouseMode];
   if ($('spacemouse-mode').textContent !== spaceMouseModeText) {
     $('spacemouse-mode').textContent = spaceMouseModeText;
@@ -2105,53 +2194,57 @@ function frame(ts) {
       const basis = manualCameraBasis(inputCameraBasis);
 
       if (spaceMouseMode === 'camera') {
-        // Translation is camera-local and independent of orbit radius. Rotate
-        // around the eye, not the target, so the puck behaves like a flight
-        // controller while mouse drag can remain a conventional orbit tool.
-        panX += (spaceMouseAxes[0] * basis[0] + spaceMouseAxes[1] * basis[3] + spaceMouseAxes[2] * basis[6]) * moveScale;
-        panY += (spaceMouseAxes[0] * basis[1] + spaceMouseAxes[1] * basis[4] + spaceMouseAxes[2] * basis[7]) * moveScale;
-        panZ += (spaceMouseAxes[0] * basis[2] + spaceMouseAxes[1] * basis[5] + spaceMouseAxes[2] * basis[8]) * moveScale;
+        // Physical HID Y is push/pull and Z is lift/press; flyAxes has already
+        // converted these into camera-local forward and up. Translation moves
+        // eye and target together and never depends on orbit radius.
+        panX += (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
+        panY += (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;
+        panZ += (flyAxes[0] * basis[2] + flyAxes[1] * basis[5] + flyAxes[2] * basis[8]) * moveScale;
 
-        const eyeX = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
-        const eyeY = zoom*Math.sin(rotX)+panY;
-        const eyeZ = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
-        rotX += spaceMouseAxes[3] * rotateScale;
-        rotY -= spaceMouseAxes[4] * rotateScale;
-        cameraRoll -= spaceMouseAxes[5] * rotateScale;
-        rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
-        cameraRoll = Math.atan2(Math.sin(cameraRoll), Math.cos(cameraRoll));
-        // Preserve the translated eye while changing its view direction.
-        panX = eyeX - zoom*Math.sin(rotY)*Math.cos(rotX);
-        panY = eyeY - zoom*Math.sin(rotX);
-        panZ = eyeZ - zoom*Math.cos(rotY)*Math.cos(rotX);
-      } else {
-        if (mob.xform.peek() !== 'sphere_reflection') mob.xform.set('sphere_reflection');
-        const editCenter = spaceMouseMode === 'inversion-center'
-          || spaceMouseMode === 'inversion-center-radius';
-        const editRadius = spaceMouseMode === 'inversion-radius'
-          || spaceMouseMode === 'inversion-center-radius';
-        if (editCenter) {
-          const centerY = spaceMouseMode === 'inversion-center' ? spaceMouseAxes[1] : 0;
-          const dx = (spaceMouseAxes[0] * basis[0] + centerY * basis[3] + spaceMouseAxes[2] * basis[6]) * moveScale;
-          const dy = (spaceMouseAxes[0] * basis[1] + centerY * basis[4] + spaceMouseAxes[2] * basis[7]) * moveScale;
-          const dz = (spaceMouseAxes[0] * basis[2] + centerY * basis[5] + spaceMouseAxes[2] * basis[8]) * moveScale;
-          mob.mx.set(Math.max(-30, Math.min(30, mob.mx.peek() + dx * 10)));
-          mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
-          mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
-        }
-        if (editRadius) {
-          mob.mr.set(Math.max(0, Math.min(50, mob.mr.peek() + spaceMouseAxes[1] * moveScale * 10)));
-        }
+        const eyeX = panX - basis[6] * zoom;
+        const eyeY = panY - basis[7] * zoom;
+        const eyeZ = panZ - basis[8] * zoom;
+        rotateManualCameraLocal(
+          flyAxes[3] * rotateScale,
+          flyAxes[4] * rotateScale,
+          flyAxes[5] * rotateScale,
+        );
+        const rotated = manualCameraBasis(inputCameraBasis);
+        // Preserve the translated eye while the local frame rotates.
+        panX = eyeX + rotated[6] * zoom;
+        panY = eyeY + rotated[7] * zoom;
+        panZ = eyeZ + rotated[8] * zoom;
+      } else if (spaceMouseMode === 'inversion') {
+        const dx = (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
+        const dy = (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;
+        const dz = (flyAxes[0] * basis[2] + flyAxes[1] * basis[5] + flyAxes[2] * basis[8]) * moveScale;
+        mob.mx.set(Math.max(-30, Math.min(30, mob.mx.peek() + dx * 10)));
+        mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
+        mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
+        mob.mr.set(Math.max(0, Math.min(50,
+          mob.mr.peek() + flyAxes[4] * (spaceMouseRotate.peek() / 100) * deltaSeconds * 12)));
+      } else if (spaceMouseMode === 'depth-of-field') {
+        const moveSensitivity = spaceMouseMove.peek() / 100;
+        const rotateSensitivity = spaceMouseRotate.peek() / 100;
+        fz.focus.set(Math.max(0, Math.min(100,
+          fz.focus.peek() + flyAxes[2] * moveSensitivity * deltaSeconds * 25)));
+        fz.bandwidth.set(Math.max(1, Math.min(50,
+          fz.bandwidth.peek() + flyAxes[1] * moveSensitivity * deltaSeconds * 12)));
+        fz.radius.set(Math.max(4, Math.min(128,
+          fz.radius.peek() + flyAxes[4] * rotateSensitivity * deltaSeconds * 30)));
       }
       spaceMouseDiagnostics.motionFrames += 1;
-      spaceMouseMotionActive = true;
-      spaceMouseLastMotionAt = ts;
+      const lodRelevantMotion = spaceMouseMode !== 'depth-of-field';
+      if (lodRelevantMotion) {
+        spaceMouseMotionActive = true;
+        spaceMouseLastMotionAt = ts;
+      }
       // Main-GPU current-pose culling follows the camera every render frame.
       // Adaptive tessellation changes much less often during continuous 6-axis
       // navigation, then receives one final classification after the controller
       // settles. This avoids turning HID report smoothing into worker/readback
       // pressure while keeping visible topology responsive.
-      if (ts - spaceMouseLastLodAt >= 100) {
+      if (lodRelevantMotion && ts - spaceMouseLastLodAt >= 100) {
         spaceMouseLastLodAt = ts;
         debouncedLodRecompute();
         syncURL();
@@ -2165,13 +2258,13 @@ function frame(ts) {
     syncURL();
   }
 
-  const ex = authoredCamera ? authoredCamera.eye[0] : zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
-  const ey = authoredCamera ? authoredCamera.eye[1] : zoom*Math.sin(rotX)+panY;
-  const ez = authoredCamera ? authoredCamera.eye[2] : zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
+  const basis = manualCameraBasis(frameCameraBasis);
+  const ex = authoredCamera ? authoredCamera.eye[0] : panX - basis[6] * zoom;
+  const ey = authoredCamera ? authoredCamera.eye[1] : panY - basis[7] * zoom;
+  const ez = authoredCamera ? authoredCamera.eye[2] : panZ - basis[8] * zoom;
   const tx = authoredCamera ? authoredCamera.target[0] : panX;
   const ty = authoredCamera ? authoredCamera.target[1] : panY;
   const tz = authoredCamera ? authoredCamera.target[2] : panZ;
-  const basis = manualCameraBasis(frameCameraBasis);
   const upX = authoredCamera ? 0 : basis[3];
   const upY = authoredCamera ? 1 : basis[4];
   const upZ = authoredCamera ? 0 : basis[5];
@@ -2374,6 +2467,7 @@ async function finishModelUpload(info, filename) {
     zoom = 3.0;
     rotX = 0.15; rotY = 0; cameraRoll = 0;
     panX = 0; panY = 0; panZ = 0;
+    setManualCameraBasisFromEuler();
   }
 
   await workerCall('upload_model_to_compute', {});
@@ -2410,6 +2504,7 @@ currentGlb = initParams.glb;
   panX = pf(initParams.px, 0);
   panY = pf(initParams.py, 0);
   panZ = pf(initParams.pz, 0);
+  setManualCameraBasisFromEuler();
 }
 
 // ============================================================
