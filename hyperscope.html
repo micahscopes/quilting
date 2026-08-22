@@ -1133,32 +1133,44 @@ applyParams = function(params) {
   fz.kawaseOff.set(parseInt(params.fkoff ?? '15'));
 };
 
-// --- IndexedDB for persisting dropped GLB files ---
-const IDB_NAME = 'hyperscope', IDB_STORE = 'glb';
+// --- IndexedDB for dropped GLBs and versioned generated assets ---
+const IDB_NAME = 'hyperscope', IDB_VERSION = 2;
+const IDB_GLB_STORE = 'glb', IDB_ATLAS_STORE = 'atlas';
+const ATLAS_CACHE_FORMAT = 'balanced-hierarchical-v1-ratio2-k30-seed42';
 function idbOpen() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => resolve(req.result);
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(IDB_GLB_STORE)) {
+        req.result.createObjectStore(IDB_GLB_STORE);
+      }
+      if (!req.result.objectStoreNames.contains(IDB_ATLAS_STORE)) {
+        req.result.createObjectStore(IDB_ATLAS_STORE);
+      }
+    };
+    req.onsuccess = () => {
+      req.result.onversionchange = () => req.result.close();
+      resolve(req.result);
+    };
     req.onerror = () => reject(req.error);
   });
 }
-async function idbPut(name, buf) {
+async function idbPut(store, name, value) {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).put(buf, name);
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(value, name);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
   });
 }
-async function idbGet(name) {
+async function idbGet(store, name) {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readonly');
-    const req = tx.objectStore(IDB_STORE).get(name);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).get(name);
+    req.onsuccess = () => { db.close(); resolve(req.result); };
+    req.onerror = () => { db.close(); reject(req.error); };
   });
 }
 
@@ -1180,7 +1192,7 @@ wrapEl.addEventListener('drop', async e => {
     return;
   }
   const buf = await file.arrayBuffer();
-  await idbPut(file.name, buf);
+  await idbPut(IDB_GLB_STORE, file.name, buf);
   currentGlb = file.name;
   await loadModel(buf, file.name);
   syncURL();
@@ -1979,15 +1991,47 @@ phase('atlas', ['workers'], async () => {
     ]);
   }
 
-  $('stats').textContent = `Building ${allTriples.length} reachable patches...`;
-  for (const [a, b, c] of allTriples) {
-    await workerCall('generate_single', { a, b, c });
+  const cacheKey = `${ATLAS_CACHE_FORMAT}:exp${ATLAS_EXP}`;
+  let packed = null;
+  let source = 'generated';
+  let serializedBytes = 0;
+  try {
+    const cached = await idbGet(IDB_ATLAS_STORE, cacheKey);
+    const validPacked = cached?.format === ATLAS_CACHE_FORMAT
+      && cached.patches instanceof Uint32Array
+      && cached.bary instanceof Float32Array
+      && cached.tris instanceof Uint32Array
+      && cached.lines instanceof Uint32Array
+      && cached.patches.length === allTriples.length * 7
+      && cached.serialized instanceof ArrayBuffer
+      && cached.serialized.byteLength > 0;
+    if (validPacked) {
+      serializedBytes = cached.serialized.byteLength;
+      const imported = await workerCall(
+        'import_atlas_bytes',
+        { bytes: cached.serialized },
+        [cached.serialized],
+      );
+      if (imported.ok) {
+        packed = cached;
+        source = 'indexeddb';
+      }
+    }
+  } catch (error) {
+    console.warn('Tessellation atlas cache read failed; rebuilding', error);
   }
 
-  const packedResp = await workerCallN(0, 'export_patches', {});
-  // Accept the immediately preceding worker envelope too, so a page already in
-  // flight during a hot reload fails gracefully instead of dropping the atlas.
-  const packed = packedResp.atlas ?? packedResp.patches;
+  if (!packed) {
+    $('stats').textContent = `Building ${allTriples.length} reachable patches...`;
+    for (const [a, b, c] of allTriples) {
+      await workerCall('generate_single', { a, b, c });
+    }
+    const packedResp = await workerCall('export_patches', {});
+    // Accept the immediately preceding worker envelope too, so a page already in
+    // flight during a hot reload fails gracefully instead of dropping the atlas.
+    packed = packedResp.atlas ?? packedResp.patches;
+  }
+
   if (!packed?.patches || !packed?.bary || !packed?.tris || !packed?.lines) {
     throw new Error('packed tessellation atlas export was incomplete');
   }
@@ -2000,15 +2044,38 @@ phase('atlas', ['workers'], async () => {
     transferBytes: packed.patches.byteLength + packed.bary.byteLength
       + packed.tris.byteLength + packed.lines.byteLength,
     workers: ATLAS_WORKERS,
+    cacheKey,
+    source,
+    serializedBytes,
+    cacheWritten: source === 'indexeddb',
   };
   if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
     throw new Error('GPU rejected the packed tessellation atlas upload');
+  }
+  if (source === 'generated') {
+    const exported = await workerCall('export_atlas_bytes', {});
+    const serialized = exported.bytes;
+    if (serialized?.byteLength) {
+      startupDiagnostics.atlas.serializedBytes = serialized.byteLength;
+      idbPut(IDB_ATLAS_STORE, cacheKey, {
+        format: ATLAS_CACHE_FORMAT,
+        serialized,
+        patches: packed.patches,
+        bary: packed.bary,
+        tris: packed.tris,
+        lines: packed.lines,
+      }).then(() => {
+        startupDiagnostics.atlas.cacheWritten = true;
+      }).catch(error => {
+        console.warn('Tessellation atlas cache write failed', error);
+      });
+    }
   }
 });
 
 // Phase 4: Load model (depends on workers, runs in parallel with atlas)
 phase('model', ['workers'], async () => {
-  let buf = await idbGet(currentGlb);
+  let buf = await idbGet(IDB_GLB_STORE, currentGlb);
   if (!buf) {
     const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
     const urls = [url];
