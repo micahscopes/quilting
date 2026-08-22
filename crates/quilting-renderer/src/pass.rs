@@ -190,6 +190,51 @@ fn upload_batch_ubo_if_changed<'a>(
     *previous = Some(batch);
 }
 
+#[derive(Clone, Copy)]
+enum BatchGeometry {
+    Triangles,
+    Lines,
+}
+
+fn draw_batches(
+    gl: &glow::Context,
+    camera: &Camera,
+    batches: &[RenderBatch],
+    vtx_ubo: &VertexUniformBuf,
+    geometry: BatchGeometry,
+) {
+    let mut vertex_state = None;
+    for batch in batches {
+        apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
+        upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
+
+        let (vertex_array, primitive, count, offset) = match geometry {
+            BatchGeometry::Triangles => (
+                batch.mesh.tri_vao,
+                glow::TRIANGLES,
+                batch.mesh.num_tri_indices,
+                batch.mesh.tri_index_offset,
+            ),
+            BatchGeometry::Lines => (
+                batch.mesh.line_vao,
+                glow::LINES,
+                batch.mesh.num_line_indices,
+                batch.mesh.line_index_offset,
+            ),
+        };
+        unsafe {
+            gl.bind_vertex_array(Some(vertex_array));
+            gl.draw_elements_instanced(
+                primitive,
+                count,
+                glow::UNSIGNED_INT,
+                offset,
+                batch.mesh.num_instances,
+            );
+        }
+    }
+}
+
 /// Render a frame with the given mode, camera, and batches.
 pub fn render_frame(
     gl: &glow::Context,
@@ -215,23 +260,7 @@ pub fn render_frame(
         unsafe {
             gl.use_program(Some(programs.pbr));
         }
-
-        let mut vertex_state = None;
-        for batch in batches {
-            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
-
-            unsafe {
-                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
-                gl.draw_elements_instanced(
-                    glow::TRIANGLES,
-                    batch.mesh.num_tri_indices,
-                    glow::UNSIGNED_INT,
-                    batch.mesh.tri_index_offset,
-                    batch.mesh.num_instances,
-                );
-            }
-        }
+        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
     }
 
     // Matcap/LOD pass (filled triangles)
@@ -240,22 +269,7 @@ pub fn render_frame(
             gl.use_program(Some(programs.matcap));
         }
 
-        let mut vertex_state = None;
-        for batch in batches {
-            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
-
-            unsafe {
-                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
-                gl.draw_elements_instanced(
-                    glow::TRIANGLES,
-                    batch.mesh.num_tri_indices,
-                    glow::UNSIGNED_INT,
-                    batch.mesh.tri_index_offset,
-                    batch.mesh.num_instances,
-                );
-            }
-        }
+        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
     }
 
     // Wire pass (lines)
@@ -268,22 +282,7 @@ pub fn render_frame(
         wire_ubo.upload(gl, [0.0; 3], true);
         wire_ubo.bind(gl);
 
-        let mut vertex_state = None;
-        for batch in batches {
-            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
-
-            unsafe {
-                gl.bind_vertex_array(Some(batch.mesh.line_vao));
-                gl.draw_elements_instanced(
-                    glow::LINES,
-                    batch.mesh.num_line_indices,
-                    glow::UNSIGNED_INT,
-                    batch.mesh.line_index_offset,
-                    batch.mesh.num_instances,
-                );
-            }
-        }
+        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Lines);
     }
 
     // Normals pass (filled triangles)
@@ -292,22 +291,7 @@ pub fn render_frame(
             gl.use_program(Some(programs.normals));
         }
 
-        let mut vertex_state = None;
-        for batch in batches {
-            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
-
-            unsafe {
-                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
-                gl.draw_elements_instanced(
-                    glow::TRIANGLES,
-                    batch.mesh.num_tri_indices,
-                    glow::UNSIGNED_INT,
-                    batch.mesh.tri_index_offset,
-                    batch.mesh.num_instances,
-                );
-            }
-        }
+        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
     }
 
     // Stretch heatmap pass (filled triangles)
@@ -316,22 +300,7 @@ pub fn render_frame(
             gl.use_program(Some(programs.stretch));
         }
 
-        let mut vertex_state = None;
-        for batch in batches {
-            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-            upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
-
-            unsafe {
-                gl.bind_vertex_array(Some(batch.mesh.tri_vao));
-                gl.draw_elements_instanced(
-                    glow::TRIANGLES,
-                    batch.mesh.num_tri_indices,
-                    glow::UNSIGNED_INT,
-                    batch.mesh.tri_index_offset,
-                    batch.mesh.num_instances,
-                );
-            }
-        }
+        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
     }
 
     unsafe {

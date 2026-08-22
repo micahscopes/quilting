@@ -114,8 +114,9 @@ pub struct MeshBuffers {
     pub num_instances: i32,
 }
 
-/// Copyable, non-owning draw view. This is the backend-neutral portion of a
-/// render command; resource owners remain in [`MeshBuffers`].
+/// Copyable, non-owning WebGL draw view; resource owners remain in
+/// [`MeshBuffers`]. Backend-neutral batch identity lives in
+/// [`quilting_core::batch::RenderBatchKey`].
 #[derive(Clone, Copy)]
 pub struct MeshDraw {
     pub tri_vao: glow::VertexArray,

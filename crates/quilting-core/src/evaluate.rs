@@ -623,8 +623,8 @@ impl FaceInstance {
     /// Möbius uniforms, and puts a skinning vertex index in each position's
     /// scalar slot.
     ///
-    /// Kept for the callers that still build their own buffers against the old
-    /// shape: `quilting-remesh`, `quilting-wasm`, and the `web_demo` example.
+    /// Kept for tests and examples that still inspect the old shape. Production
+    /// renderer and WASM paths use the compact writer.
     /// New code should pack through
     /// [`crate::instance_layout::InstanceWriter`].
     pub fn to_f32_array(&self) -> [f32; 52] {
