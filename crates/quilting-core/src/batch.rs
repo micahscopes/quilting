@@ -210,6 +210,47 @@ pub fn retain_face_lod(
 /// to decay by one power-of-two level per face away from a detail peak.
 pub const MAX_FACE_EDGE_LOD_RATIO: u32 = 2;
 
+/// Reusable work storage for sparse resident-LOD reconciliation.
+///
+/// Queue membership is reset as entries are consumed, while changed-face
+/// flags are cleared through the sparse `changed_faces` list. Reusing this
+/// storage avoids allocating and zeroing mesh-sized vectors after every
+/// asynchronous classification.
+#[derive(Default)]
+pub struct ResidentLodBalanceScratch {
+    queue: VecDeque<usize>,
+    queued: Vec<bool>,
+    changed: Vec<bool>,
+    changed_faces: Vec<usize>,
+}
+
+impl ResidentLodBalanceScratch {
+    fn begin(&mut self, num_faces: usize) {
+        self.queue.clear();
+        self.queued.resize(num_faces, false);
+        for face in self.changed_faces.drain(..) {
+            if let Some(changed) = self.changed.get_mut(face) {
+                *changed = false;
+            }
+        }
+        self.changed.resize(num_faces, false);
+    }
+
+    fn enqueue(&mut self, face: usize) {
+        if !self.queued[face] {
+            self.queue.push_back(face);
+            self.queued[face] = true;
+        }
+    }
+
+    fn mark_changed(&mut self, face: usize) {
+        if !self.changed[face] {
+            self.changed[face] = true;
+            self.changed_faces.push(face);
+        }
+    }
+}
+
 /// Reconcile and grade topology retained across asynchronous visibility results.
 ///
 /// The worker's GPU pass guarantees agreement when both neighboring faces are
@@ -226,10 +267,37 @@ pub fn balance_resident_lods(
     topology: &HalfEdgeMesh,
 ) -> usize {
     let num_faces = residents.len().min(topology.num_faces as usize);
-    let mut face_edges: Vec<Option<[u32; 3]>> = residents[..num_faces]
-        .iter()
-        .map(|resident| resident.map(ResidentLod::edge_lods))
-        .collect();
+    let mut scratch = ResidentLodBalanceScratch::default();
+    balance_resident_lods_seeded(residents, topology, 0..num_faces, &mut scratch)
+}
+
+/// Restore crack-free, 2:1-graded topology from a sparse set of changed faces.
+///
+/// The resident topology must already satisfy the invariants before the listed
+/// faces are changed. Promotions are propagated through twin adjacency until
+/// the same least fixed point as [`balance_resident_lods`] is reached.
+pub fn balance_resident_lods_from_faces(
+    residents: &mut [Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    dirty_faces: &[usize],
+    scratch: &mut ResidentLodBalanceScratch,
+) -> usize {
+    balance_resident_lods_seeded(
+        residents,
+        topology,
+        dirty_faces.iter().copied(),
+        scratch,
+    )
+}
+
+fn balance_resident_lods_seeded(
+    residents: &mut [Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    dirty_faces: impl IntoIterator<Item = usize>,
+    scratch: &mut ResidentLodBalanceScratch,
+) -> usize {
+    let num_faces = residents.len().min(topology.num_faces as usize);
+    scratch.begin(num_faces);
 
     // Both constraints are monotone promotions over a small power-of-two
     // lattice: twins take their maximum, and a face's low edges rise to half
@@ -238,50 +306,55 @@ pub fn balance_resident_lods(
     // fixed-point loop rescanned every half-edge and every face per wave; a
     // localized high-LOD chess piece could make a 95k-face scene stall for
     // nearly a second after each camera movement.
-    let mut queue = VecDeque::with_capacity(num_faces);
-    let mut queued = vec![false; num_faces];
-    for (face, edge_lods) in face_edges.iter().enumerate() {
-        if edge_lods.is_some() {
-            queue.push_back(face);
-            queued[face] = true;
+    for face in dirty_faces {
+        if face < num_faces && residents[face].is_some() {
+            scratch.enqueue(face);
         }
     }
 
-    while let Some(face) = queue.pop_front() {
-        queued[face] = false;
-        if face_edges[face].is_none() {
-            continue;
-        }
+    while let Some(face) = scratch.queue.pop_front() {
+        scratch.queued[face] = false;
+        let Some(resident) = residents[face] else { continue };
+        let mut face_lods = resident.edge_lods();
 
         let mut face_changed = false;
         for half_edge in topology.face_half_edges(face as u32) {
             let Some(twin) = topology.twin(half_edge) else { continue };
             let twin_face = topology.half_edges[twin as usize].face as usize;
-            if twin_face >= num_faces || face_edges[twin_face].is_none() {
+            if twin_face >= num_faces || residents[twin_face].is_none() {
                 continue;
             }
             let edge_index = (half_edge as usize % 3 + 2) % 3;
             let twin_edge_index = (twin as usize % 3 + 2) % 3;
-            let face_lod = face_edges[face].unwrap()[edge_index];
-            let twin_lod = face_edges[twin_face].unwrap()[twin_edge_index];
+            if twin_face == face {
+                let shared = face_lods[edge_index].max(face_lods[twin_edge_index]);
+                if face_lods[edge_index] != shared || face_lods[twin_edge_index] != shared {
+                    face_lods[edge_index] = shared;
+                    face_lods[twin_edge_index] = shared;
+                    face_changed = true;
+                }
+                continue;
+            }
+
+            let mut twin_lods = residents[twin_face].unwrap().edge_lods();
+            let face_lod = face_lods[edge_index];
+            let twin_lod = twin_lods[twin_edge_index];
             let shared = face_lod.max(twin_lod);
             if face_lod != shared {
-                face_edges[face].as_mut().unwrap()[edge_index] = shared;
+                face_lods[edge_index] = shared;
                 face_changed = true;
             }
             if twin_lod != shared {
-                face_edges[twin_face].as_mut().unwrap()[twin_edge_index] = shared;
-                if !queued[twin_face] {
-                    queue.push_back(twin_face);
-                    queued[twin_face] = true;
-                }
+                twin_lods[twin_edge_index] = shared;
+                residents[twin_face] = Some(ResidentLod::from_edge_lods(twin_lods));
+                scratch.mark_changed(twin_face);
+                scratch.enqueue(twin_face);
             }
         }
 
-        let edge_lods = face_edges[face].as_mut().unwrap();
-        let maximum = *edge_lods.iter().max().unwrap_or(&1);
+        let maximum = *face_lods.iter().max().unwrap_or(&1);
         let minimum_allowed = (maximum / MAX_FACE_EDGE_LOD_RATIO).max(1);
-        for edge_lod in edge_lods {
+        for edge_lod in &mut face_lods {
             if *edge_lod < minimum_allowed {
                 *edge_lod = minimum_allowed;
                 face_changed = true;
@@ -290,22 +363,17 @@ pub fn balance_resident_lods(
 
         // Promotions made by face grading must be copied to twins. Requeueing
         // the face is enough; any promoted twin then queues its own face.
-        if face_changed && !queued[face] {
-            queue.push_back(face);
-            queued[face] = true;
+        if face_changed {
+            let reconciled = ResidentLod::from_edge_lods(face_lods);
+            if residents[face] != Some(reconciled) {
+                residents[face] = Some(reconciled);
+                scratch.mark_changed(face);
+            }
+            scratch.enqueue(face);
         }
     }
 
-    let mut changed = 0;
-    for (resident, edge_lods) in residents[..num_faces].iter_mut().zip(face_edges) {
-        let Some(edge_lods) = edge_lods else { continue };
-        let reconciled = ResidentLod::from_edge_lods(edge_lods);
-        if *resident != Some(reconciled) {
-            *resident = Some(reconciled);
-            changed += 1;
-        }
-    }
-    changed
+    scratch.changed_faces.len()
 }
 
 /// A tessellation key identifying one canonical atlas patch.
@@ -773,6 +841,63 @@ mod tests {
         let expected_changed = balance_resident_lods_reference(&mut expected, &topology);
         let actual_changed = balance_resident_lods(&mut actual, &topology);
 
+        assert_eq!(actual_changed, expected_changed);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sparse_resident_frontier_matches_global_reconciliation() {
+        const SIDE: u32 = 12;
+        let mut faces = Vec::with_capacity((SIDE * SIDE * 2) as usize);
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let row = SIDE + 1;
+                let a = y * row + x;
+                let b = a + 1;
+                let c = a + row;
+                let d = c + 1;
+                faces.push([a, b, c]);
+                faces.push([b, d, c]);
+            }
+        }
+        let topology = HalfEdgeMesh::from_triangles((SIDE + 1) * (SIDE + 1), &faces);
+        let mut expected = vec![Some(ResidentLod::uniform(2)); faces.len()];
+        let mut actual = expected.clone();
+        let dirty_faces = [0, faces.len() / 2, faces.len() - 1];
+        let replacements = [
+            ResidentLod::from_edge_lods([128, 1, 1]),
+            ResidentLod::from_edge_lods([1, 64, 2]),
+            ResidentLod::from_edge_lods([2, 1, 32]),
+        ];
+        for (&face, &resident) in dirty_faces.iter().zip(&replacements) {
+            expected[face] = Some(resident);
+            actual[face] = Some(resident);
+        }
+
+        let expected_changed = balance_resident_lods_reference(&mut expected, &topology);
+        let mut scratch = ResidentLodBalanceScratch::default();
+        let actual_changed = balance_resident_lods_from_faces(
+            &mut actual,
+            &topology,
+            &dirty_faces,
+            &mut scratch,
+        );
+        assert_eq!(actual_changed, expected_changed);
+        assert_eq!(actual, expected);
+
+        // A later classifier may lower a face that was previously promoted by
+        // its neighborhood. Sparse reconciliation must restore that edge from
+        // the unchanged twin just as a new global pass would.
+        let demoted_face = faces.len() / 2;
+        expected[demoted_face] = Some(ResidentLod::uniform(1));
+        actual[demoted_face] = Some(ResidentLod::uniform(1));
+        let expected_changed = balance_resident_lods_reference(&mut expected, &topology);
+        let actual_changed = balance_resident_lods_from_faces(
+            &mut actual,
+            &topology,
+            &[demoted_face],
+            &mut scratch,
+        );
         assert_eq!(actual_changed, expected_changed);
         assert_eq!(actual, expected);
     }

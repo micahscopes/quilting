@@ -118,6 +118,10 @@ struct MainState {
     /// asynchronous, so an invisible sentinel must not demote a patch that the
     /// current-pose render GPU may need to resurrect in the same frame.
     resident_face_lods: Vec<Option<batch::ResidentLod>>,
+    /// Faces whose latest asynchronous classification changed. This sparse
+    /// frontier seeds half-edge reconciliation without rescanning every edge.
+    lod_dirty_faces: Vec<usize>,
+    lod_balance_scratch: batch::ResidentLodBalanceScratch,
     /// Source-mesh adjacency used to keep retained asynchronous topology
     /// crack-free, including exact duplicate vertices at glTF attribute seams.
     lod_topology: Option<quilting_mesh::HalfEdgeMesh>,
@@ -457,6 +461,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
             resident_face_lods: Vec::new(),
+            lod_dirty_faces: Vec::new(),
+            lod_balance_scratch: batch::ResidentLodBalanceScratch::default(),
             lod_topology: None,
             batch_layout_dirty: true,
             batch_update_stats: BatchUpdateStats::default(),
@@ -1248,6 +1254,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.batch_groups.clear();
             st.batch_staging.clear();
             st.resident_face_lods = vec![None; st.num_faces];
+            st.lod_dirty_faces.clear();
+            st.lod_balance_scratch = batch::ResidentLodBalanceScratch::default();
             st.lod_topology = build_instance_lod_topology(&st.cached_instances, st.num_faces);
             st.batch_update_stats = BatchUpdateStats::default();
             if let Some(topology) = st.lod_topology.as_ref() {
@@ -1824,6 +1832,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         };
         let mut culled = 0usize;
         let mut topology_changed = state.batch_layout_dirty;
+        state.lod_dirty_faces.clear();
         for fi in 0..nf {
             let cpu_visible = batch::face_is_visible(face_lods, fi);
             if !cpu_visible {
@@ -1836,15 +1845,25 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 &mut state.resident_face_lods[fi],
                 initial_resident,
             );
-            topology_changed |= previous != Some(resident);
+            if previous != Some(resident) {
+                topology_changed = true;
+                state.lod_dirty_faces.push(fi);
+            }
         }
         perf_mark("batch-retain-end");
         perf_measure("batch-retain", "batch-retain-start", "batch-retain-end");
 
         perf_mark("batch-balance-start");
-        let lod_corrections = state.lod_topology.as_ref().map_or(0, |topology| {
-            batch::balance_resident_lods(&mut state.resident_face_lods, topology)
-        });
+        let lod_corrections = if let Some(topology) = state.lod_topology.as_ref() {
+            batch::balance_resident_lods_from_faces(
+                &mut state.resident_face_lods,
+                topology,
+                &state.lod_dirty_faces,
+                &mut state.lod_balance_scratch,
+            )
+        } else {
+            0
+        };
         perf_mark("batch-balance-end");
         perf_measure(
             "batch-balance",
