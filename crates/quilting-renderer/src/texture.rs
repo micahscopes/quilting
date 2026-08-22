@@ -41,6 +41,34 @@ impl TextureCache {
         }).collect();
     }
 
+    /// Upload browser-decoded image bitmaps without materializing an RGBA copy
+    /// in JavaScript or WASM memory. Missing entries retain their glTF texture
+    /// index and resolve through the normal placeholder path.
+    #[cfg(target_arch = "wasm32")]
+    pub fn upload_image_bitmaps(
+        &mut self,
+        gl: &glow::Context,
+        images: &[Option<(web_sys::ImageBitmap, u32, u32)>],
+    ) -> u32 {
+        for tex in self.textures.drain(..) {
+            if let Some(t) = tex {
+                unsafe { gl.delete_texture(t); }
+            }
+        }
+
+        let mut uploaded = 0;
+        self.textures = images
+            .iter()
+            .map(|image| {
+                let (bitmap, wrap_s, wrap_t) = image.as_ref()?;
+                let texture = upload_image_bitmap(gl, bitmap, *wrap_s, *wrap_t).ok();
+                uploaded += u32::from(texture.is_some());
+                texture
+            })
+            .collect();
+        uploaded
+    }
+
     /// Resolve an image index to a GPU texture handle, with placeholder fallback.
     pub fn get(&self, index: Option<usize>) -> glow::Texture {
         index
@@ -183,6 +211,41 @@ fn upload_rgba8(
             glow::TEXTURE_WRAP_T,
             wrap_t as i32,
         );
+        Ok(tex)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn upload_image_bitmap(
+    gl: &glow::Context,
+    bitmap: &web_sys::ImageBitmap,
+    wrap_s: u32,
+    wrap_t: u32,
+) -> Result<glow::Texture, String> {
+    unsafe {
+        let tex = gl.create_texture().map_err(|e| format!("bitmap texture upload: {e}"))?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        gl.tex_image_2d_with_image_bitmap(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            bitmap,
+        );
+        gl.generate_mipmap(glow::TEXTURE_2D);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR_MIPMAP_LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, wrap_s as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap_t as i32);
         Ok(tex)
     }
 }

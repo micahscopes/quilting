@@ -1784,6 +1784,52 @@ pub fn mr_upload_images(pixels: &[u8], widths: &[u32], heights: &[u32], wrap_mod
     });
 }
 
+/// Upload transferable browser-decoded images directly to WebGL. This avoids
+/// a 4-byte-per-pixel canvas readback, cross-thread transfer, and WASM staging
+/// allocation for large glTF texture sets.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "mr_uploadImageBitmaps")]
+pub fn mr_upload_image_bitmaps(
+    bitmaps: &js_sys::Array,
+    wrap_modes: &[u32],
+) -> Result<u32, JsValue> {
+    let mut images = Vec::with_capacity(bitmaps.length() as usize);
+    for index in 0..bitmaps.length() {
+        let bitmap = bitmaps.get(index);
+        let wrap_s = wrap_modes
+            .get(index as usize * 2)
+            .copied()
+            .unwrap_or(glow::REPEAT);
+        let wrap_t = wrap_modes
+            .get(index as usize * 2 + 1)
+            .copied()
+            .unwrap_or(glow::REPEAT);
+        if bitmap.is_null() || bitmap.is_undefined() {
+            images.push(None);
+        } else {
+            images.push(Some((
+                bitmap.dyn_into::<web_sys::ImageBitmap>().map_err(|_| {
+                    JsValue::from_str(&format!("texture {index} is not an ImageBitmap"))
+                })?,
+                wrap_s,
+                wrap_t,
+            )));
+        }
+    }
+
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let uploaded = state
+            .texture_cache
+            .upload_image_bitmaps(state.renderer.gl(), &images);
+        info!("Uploaded {uploaded}/{} ImageBitmap textures directly to WebGL", images.len());
+        Ok(uploaded)
+    })
+}
+
 /// Upload skinning texture (joint indices + weights) to main-thread GL.
 /// `joint_indices`: flat f32 array [j0,j1,j2,j3] × num_vertices
 /// `joint_weights`: flat f32 array [w0,w1,w2,w3] × num_vertices

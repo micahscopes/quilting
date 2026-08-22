@@ -117,31 +117,27 @@ self.onmessage = async function(e) {
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
     const wasmFinished = performance.now();
     let textureDecodeMs = 0;
-    // Decode raw image blobs using browser-native decoders (parallel, fast)
+    // Decode raw image blobs using browser-native decoders. ImageBitmap is
+    // transferable, so the main thread can upload it directly to WebGL without
+    // a canvas readback or a four-byte-per-pixel staging buffer.
     if (result && result.textures && result.textures.length > 0) {
       const t0 = performance.now();
       const decoded = await Promise.all(result.textures.map(async (tex) => {
         const raw = tex.raw_data;
-        if (!raw || raw.length === 0) return { width: 0, height: 0, pixels: null, wrap_s: tex.wrap_s, wrap_t: tex.wrap_t };
+        if (!raw || raw.length === 0) return { width: 0, height: 0, bitmap: null, wrap_s: tex.wrap_s, wrap_t: tex.wrap_t };
         const blob = new Blob([raw], { type: tex.mime_type });
         const bitmap = await createImageBitmap(blob);
-        const w = bitmap.width, h = bitmap.height;
-        const canvas = new OffscreenCanvas(w, h);
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(bitmap, 0, 0);
-        const imageData = ctx.getImageData(0, 0, w, h);
-        bitmap.close();
-        return { width: w, height: h, data: imageData.data, wrap_s: tex.wrap_s, wrap_t: tex.wrap_t };
+        return { width: bitmap.width, height: bitmap.height, bitmap, wrap_s: tex.wrap_s, wrap_t: tex.wrap_t };
       }));
       result.textures = decoded;
       textureDecodeMs = performance.now() - t0;
       console.log(`Browser-native image decode: ${result.textures.length} textures in ${textureDecodeMs.toFixed(0)}ms`);
     }
-    // Transfer pixel ArrayBuffers to avoid cloning (prevents OOM on large models)
+    // Transfer browser image handles and mesh metadata instead of cloning.
     const transfers = [];
     if (result && result.textures) {
       for (const t of result.textures) {
-        if (t.data && t.data.buffer) transfers.push(t.data.buffer);
+        if (t.bitmap) transfers.push(t.bitmap);
       }
     }
     if (result?.face_material_indices?.buffer) {

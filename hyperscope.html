@@ -285,7 +285,7 @@ import init, {
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
-  mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
+  mr_setMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
   mr_pick, mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
@@ -430,6 +430,7 @@ const modelPayloadTelemetry = {
   retainedFaceNodeBytes: 0,
   uploadedTextureBytes: 0,
   retainedDecodedTextureBytes: 0,
+  textureUploadPath: 'none',
   focusNodes: 0,
   focusUniqueVertices: 0,
   focusBuildMs: 0,
@@ -1425,7 +1426,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=upload-telemetry-v1', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=image-bitmap-upload-v1', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -3536,6 +3537,7 @@ async function finishModelUpload(info, filename) {
     retainedFaceNodeBytes: 0,
     uploadedTextureBytes: 0,
     retainedDecodedTextureBytes: 0,
+    textureUploadPath: 'none',
     focusNodes: 0,
     focusUniqueVertices: 0,
     focusBuildMs: 0,
@@ -3685,19 +3687,46 @@ async function finishModelUpload(info, filename) {
       modelPayloadTelemetry.uploadedTextureBytes = totalSize;
       modelPayloadTelemetry.retainedDecodedTextureBytes = totalSize;
       if (totalSize > 0) {
-        const allPixels = new Uint8Array(totalSize);
         const wrapModes = new Uint32Array(info.textures.length * 2);
-        let off = 0;
         for (let i = 0; i < info.textures.length; i++) {
           const t = info.textures[i];
-          const raw = t.data || t.pixels;
-          const pixels = raw ? new Uint8Array(raw.buffer || raw) : new Uint8Array(0);
-          allPixels.set(pixels, off);
-          off += widths[i] * heights[i] * 4;
           wrapModes[i * 2] = t.wrap_s ?? 0x2901;     // default REPEAT
           wrapModes[i * 2 + 1] = t.wrap_t ?? 0x2901;
         }
-        mr_uploadImages(allPixels, widths, heights, wrapModes);
+        const bitmaps = info.textures.map(texture => texture.bitmap || null);
+        const bitmapCount = bitmaps.reduce((count, bitmap) => count + (bitmap ? 1 : 0), 0);
+        let directUpload = false;
+        if (bitmapCount > 0) {
+          try {
+            const uploaded = mr_uploadImageBitmaps(bitmaps, wrapModes);
+            if (uploaded !== bitmapCount) {
+              throw new Error(`direct bitmap upload accepted ${uploaded}/${bitmapCount} textures`);
+            }
+            directUpload = true;
+            modelPayloadTelemetry.textureUploadPath = 'image-bitmap';
+          } catch (error) {
+            console.warn('Direct ImageBitmap upload unavailable; using RGBA fallback:', error);
+          }
+        }
+        if (!directUpload) {
+          const allPixels = new Uint8Array(totalSize);
+          let offset = 0;
+          for (let i = 0; i < info.textures.length; i++) {
+            const texture = info.textures[i];
+            let raw = texture.data || texture.pixels;
+            if (!raw && texture.bitmap) {
+              const canvas = new OffscreenCanvas(widths[i], heights[i]);
+              const context = canvas.getContext('2d');
+              context.drawImage(texture.bitmap, 0, 0);
+              raw = context.getImageData(0, 0, widths[i], heights[i]).data;
+            }
+            const pixels = raw ? new Uint8Array(raw.buffer || raw) : new Uint8Array(0);
+            allPixels.set(pixels, offset);
+            offset += widths[i] * heights[i] * 4;
+          }
+          mr_uploadImages(allPixels, widths, heights, wrapModes);
+          modelPayloadTelemetry.textureUploadPath = 'rgba-fallback';
+        }
       }
     } catch (e) {
       console.warn('Texture upload error:', e);
@@ -3706,6 +3735,8 @@ async function finishModelUpload(info, filename) {
       // decoded RGBA image reachable through meshInfo dominated chess-scale
       // JS heap despite serving no later renderer or UI purpose.
       for (const texture of info.textures) {
+        texture.bitmap?.close();
+        texture.bitmap = null;
         texture.data = null;
         texture.pixels = null;
       }

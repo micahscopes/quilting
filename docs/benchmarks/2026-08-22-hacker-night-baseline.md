@@ -169,3 +169,30 @@ The follow-up page had a user-carried fuzzy-focus URL, so its 6,551 ms model
 phase and 4,653 ms render phase are recorded as a smoke result, not a controlled
 startup comparison. A clean repeatable chess trace is still required for CPU
 timing work.
+
+## Chess direct browser-image upload follow-up
+
+Commit `5bd1223` subdivided the retained worker/model phases. The next measured
+change transferred nine decoded `ImageBitmap` handles from the loader worker
+and uploaded them directly through the Rust WebGL texture cache. The existing
+RGBA upload remains as a compatibility fallback. This removes worker canvas
+readback, the 603,979,776-byte cross-thread RGBA transfer, the equally large
+main-thread concatenation, and the WASM slice staging path without changing
+texture dimensions or sampling quality.
+
+On the first completed 94,628-face chess reload after the change, telemetry
+reported `textureUploadPath: image-bitmap` and:
+
+| Measured phase | RGBA staging trace | Direct ImageBitmap trace |
+| --- | ---: | ---: |
+| Worker browser texture decode | 3,381.1 ms | 2,134.4 ms |
+| Main texture upload | 2,273.5 ms | 1,516.3 ms |
+| Model finalization total | 6,968.0 ms | 3,283.0 ms |
+| Settled observed JS heap | 25.0 MB | 30.4 MB |
+
+These are single browser observations rather than a statistical benchmark;
+the total includes unrelated noisy phases. The direct-path identity and exact
+texture byte count are deterministic. A second warm crisp-view reload took
+1,937.7 ms total, including 928.0 ms browser image decode and 916.1 ms texture
+upload. Chrome DevTools inspection found sharp chess geometry, plausible wood
+grain and UV orientation, no corruption, and no console warnings or errors.
