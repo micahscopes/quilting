@@ -7,8 +7,10 @@ import {
   createSpaceMouseState,
   decodeSpaceMouseReport,
   mapSpaceMouseFlyAxes,
+  mapSpaceMouseNavigationAxes,
   shapeSpaceMouseAxis,
   spaceMouseModifierMode,
+  spaceMouseNavigationPolicy,
 } from '../spacemouse.mjs';
 
 function report(values) {
@@ -58,6 +60,40 @@ test('the two primary buttons select inversion and depth-of-field layers', () =>
 test('fly mapping preserves the original gestures in camera-local space', () => {
   const mapped = mapSpaceMouseFlyAxes([1, 2, 3, 4, 5, 6]);
   assert.deepEqual(Array.from(mapped), [1, 2, 3, -4, -5, 6]);
+});
+
+test('Blender Object reverses all navigation axes relative to Fly', () => {
+  const fly = mapSpaceMouseNavigationAxes([1, 2, 3, 4, 5, 6], { mode: 'fly' });
+  const object = mapSpaceMouseNavigationAxes([1, 2, 3, 4, 5, 6], { mode: 'object' });
+  assert.deepEqual(Array.from(fly), [1, 2, 3, -4, -5, 6]);
+  assert.deepEqual(Array.from(object), [-1, -2, -3, 4, 5, -6]);
+});
+
+test('Blender Y/Z swap and independent inversion masks match NDOF preferences', () => {
+  const mapped = mapSpaceMouseNavigationAxes(
+    [1, 2, 3, 4, 5, 6],
+    { mode: 'fly', swapYZ: true, invertPan: 0b101, invertRotate: 0b010 },
+  );
+  assert.deepEqual(Array.from(mapped), [-1, -3, -2, -4, 6, -5]);
+});
+
+test('navigation policies distinguish pivot orbit, free flight, and drone', () => {
+  assert.deepEqual(
+    spaceMouseNavigationPolicy('object'),
+    { mode: 'object', orbit: true, drone: false, horizonLocked: false },
+  );
+  assert.deepEqual(
+    spaceMouseNavigationPolicy('fly'),
+    { mode: 'fly', orbit: false, drone: false, horizonLocked: false },
+  );
+  assert.deepEqual(
+    spaceMouseNavigationPolicy('drone'),
+    { mode: 'drone', orbit: false, drone: true, horizonLocked: true },
+  );
+  assert.deepEqual(
+    spaceMouseNavigationPolicy('future-mode'),
+    { mode: 'hyperscope', orbit: false, drone: false, horizonLocked: false },
+  );
 });
 
 test('unknown and truncated reports do not mutate state', () => {

@@ -171,10 +171,33 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <label>3D Mouse</label>
     <div class="btns"><button id="spacemouse-connect">Connect SpaceMouse</button></div>
     <div id="spacemouse-status" style="color:#8b949e;font-size:10px;margin-top:4px">Checking WebHID…</div>
+    <label style="margin-top:5px">Navigation</label>
+    <select id="spacemouse-navigation">
+      <option value="hyperscope">Hyperscope Fly</option>
+      <option value="object">Blender Object</option>
+      <option value="fly">Blender Fly</option>
+      <option value="drone">Blender Drone</option>
+    </select>
     <label style="margin-top:5px">Move sensitivity</label>
     <div class="sr"><input type="range" id="spacemouse-move" min="10" max="900" step="1" value="300"><span class="v" id="spacemouse-move-v">3.00</span></div>
     <label>Rotate sensitivity</label>
     <div class="sr"><input type="range" id="spacemouse-rotate" min="10" max="900" step="1" value="300"><span class="v" id="spacemouse-rotate-v">3.00</span></div>
+    <div class="toggle-row" style="margin-top:5px">
+      <div class="toggle" id="spacemouse-horizon-toggle"></div>
+      <span class="toggle-label">Lock horizon (Drone: always)</span>
+    </div>
+    <div class="toggle-row" style="margin-top:4px">
+      <div class="toggle" id="spacemouse-swap-toggle"></div>
+      <span class="toggle-label">Swap Y/Z axes</span>
+    </div>
+    <label style="margin-top:5px">Invert movement</label>
+    <div class="btns" id="spacemouse-pan-invert">
+      <button data-bit="1">X</button><button data-bit="2">Y</button><button data-bit="4">Z</button>
+    </div>
+    <label style="margin-top:4px">Invert rotation</label>
+    <div class="btns" id="spacemouse-rotate-invert">
+      <button data-bit="1">X</button><button data-bit="2">Y</button><button data-bit="4">Z</button>
+    </div>
     <div id="spacemouse-mode" style="color:#58a6ff;font-size:9px;margin-top:3px">Fly: strafe/lift/forward + local pitch/yaw/roll</div>
     <div style="color:#484f58;font-size:9px;margin-top:2px">Hold left: move inversion center; twist changes radius. Hold right: push/pull focus, lift aperture, twist blur.</div>
   </div>
@@ -240,8 +263,10 @@ import init, {
 import {
   SpaceMouseController,
   mapSpaceMouseFlyAxes,
+  mapSpaceMouseNavigationAxes,
   spaceMouseModifierMode,
-} from './spacemouse.mjs';
+  spaceMouseNavigationPolicy,
+} from './spacemouse.mjs?rev=blender-ndof-modes-v1';
 
 const $ = id => document.getElementById(id);
 
@@ -504,6 +529,19 @@ function bindBtnGroup(id, sig) {
   });
 }
 
+// Bind three independent axis-inversion buttons to an XYZ bitmask signal.
+function bindAxisMask(id, sig) {
+  const btns = document.querySelectorAll(`#${id} button`);
+  btns.forEach(button => {
+    const bit = Number(button.dataset.bit);
+    button.addEventListener('click', () => sig.set(sig.peek() ^ bit));
+  });
+  effect(() => {
+    const mask = sig.get();
+    btns.forEach(button => button.classList.toggle('a', (mask & Number(button.dataset.bit)) !== 0));
+  });
+}
+
 // ============================================================
 // URL Router — bidirectional sync between controls and URL params.
 // Reads on load, writes on change (debounced replaceState).
@@ -515,7 +553,8 @@ const PARAM_DEFAULTS = {
   res: '0', density: '100', atten: '1', minpx: '2',
   animate: '1', anim: '-1', atlas: '7',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
-  smmove: '300', smrotate: '300',
+  smmove: '300', smrotate: '300', smnav: 'hyperscope',
+  smlock: '0', smswap: '0', smpinv: '0', smrinv: '0',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
   fqual: '2', fkaw: '1', fkoff: '15',
 };
@@ -542,7 +581,9 @@ function readParams() {
     ry: get('ry'),
     rz: get('rz'),
     px: get('px'), py: get('py'), pz: get('pz'),
-    smmove: get('smmove'), smrotate: get('smrotate'),
+    smmove: get('smmove'), smrotate: get('smrotate'), smnav: get('smnav'),
+    smlock: get('smlock'), smswap: get('smswap'),
+    smpinv: get('smpinv'), smrinv: get('smrinv'),
     fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
     fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
     fqual: get('fqual'), fkaw: get('fkaw'), fkoff: get('fkoff'),
@@ -591,6 +632,11 @@ function syncURL() {
       ss('fkoff', fz.kawaseOff, PARAM_DEFAULTS.fkoff);
       ss('smmove', spaceMouseMove, PARAM_DEFAULTS.smmove);
       ss('smrotate', spaceMouseRotate, PARAM_DEFAULTS.smrotate);
+      ss('smnav', spaceMouseNavigation, PARAM_DEFAULTS.smnav);
+      set('smlock', spaceMouseLockHorizon.peek() ? '1' : '0', PARAM_DEFAULTS.smlock);
+      set('smswap', spaceMouseSwapYZ.peek() ? '1' : '0', PARAM_DEFAULTS.smswap);
+      ss('smpinv', spaceMousePanInvert, PARAM_DEFAULTS.smpinv);
+      ss('smrinv', spaceMouseRotateInvert, PARAM_DEFAULTS.smrinv);
     } catch { /* signals not yet initialized */ }
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
@@ -627,8 +673,35 @@ let drag = false, lx = 0, ly = 0;
 
 const spaceMouseMove = signal(300, 'smmove');
 const spaceMouseRotate = signal(300, 'smrotate');
+const spaceMouseNavigation = signal('hyperscope', 'smnav');
+const spaceMouseLockHorizon = signal(false, 'smlock');
+const spaceMouseSwapYZ = signal(false, 'smswap');
+const spaceMousePanInvert = signal(0, 'smpinv');
+const spaceMouseRotateInvert = signal(0, 'smrinv');
 bindSlider('spacemouse-move', spaceMouseMove, value => (value / 100).toFixed(2));
 bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed(2));
+const spaceMouseNavigationSelect = $('spacemouse-navigation');
+spaceMouseNavigationSelect.addEventListener('change', () => {
+  spaceMouseNavigation.set(spaceMouseNavigationSelect.value);
+});
+effect(() => {
+  const mode = spaceMouseNavigation.get();
+  if (spaceMouseNavigationSelect.value !== mode) spaceMouseNavigationSelect.value = mode;
+});
+bindToggle('spacemouse-horizon-toggle', spaceMouseLockHorizon);
+bindToggle('spacemouse-swap-toggle', spaceMouseSwapYZ);
+bindAxisMask('spacemouse-pan-invert', spaceMousePanInvert);
+bindAxisMask('spacemouse-rotate-invert', spaceMouseRotateInvert);
+effect(() => {
+  spaceMouseMove.get();
+  spaceMouseRotate.get();
+  spaceMouseNavigation.get();
+  spaceMouseLockHorizon.get();
+  spaceMouseSwapYZ.get();
+  spaceMousePanInvert.get();
+  spaceMouseRotateInvert.get();
+  syncURL();
+});
 const spaceMouseStatus = $('spacemouse-status');
 const spaceMouseConnect = $('spacemouse-connect');
 const spaceMouseDiagnostics = {
@@ -787,6 +860,37 @@ function rotateManualCameraLocal(pitch, yaw, roll) {
   }
 }
 
+function levelManualCameraHorizon() {
+  const fx = manualCameraBasisState[6], fy = manualCameraBasisState[7], fz = manualCameraBasisState[8];
+  let rx = -fz, ry = 0, rz = fx;
+  let length = Math.hypot(rx, rz);
+  if (length < 1e-6) {
+    // Looking almost vertically: retain the previous horizontal heading.
+    rx = manualCameraBasisState[0];
+    ry = 0;
+    rz = manualCameraBasisState[2];
+    length = Math.hypot(rx, rz);
+  }
+  if (length < 1e-6) { rx = 1; ry = 0; rz = 0; length = 1; }
+  rx /= length; rz /= length;
+  const ux = ry*fz - rz*fy;
+  const uy = rz*fx - rx*fz;
+  const uz = rx*fy - ry*fx;
+  manualCameraBasisState[0] = rx; manualCameraBasisState[1] = ry; manualCameraBasisState[2] = rz;
+  manualCameraBasisState[3] = ux; manualCameraBasisState[4] = uy; manualCameraBasisState[5] = uz;
+  syncManualCameraEuler();
+}
+
+function rotateManualCameraHorizonLocked(pitch, yaw) {
+  levelManualCameraHorizon();
+  const rightX = manualCameraBasisState[0];
+  const rightY = manualCameraBasisState[1];
+  const rightZ = manualCameraBasisState[2];
+  rotateManualCameraAboutAxis(rightX, rightY, rightZ, pitch);
+  rotateManualCameraAboutAxis(0, 1, 0, yaw);
+  levelManualCameraHorizon();
+}
+
 function manualCameraBasis(out) {
   if (!manualCameraBasisReady) setManualCameraBasisFromEuler();
   out.set(manualCameraBasisState);
@@ -802,6 +906,23 @@ const lodVp = new Float32Array(16), lodMobius = new Float32Array(16);
 const frameCameraBasis = new Float32Array(9), lodCameraBasis = new Float32Array(9);
 const inputCameraBasis = new Float32Array(9), pickCameraBasis = new Float32Array(9);
 const spaceMouseFlyAxes = new Float32Array(6);
+const spaceMouseNavigationAxes = new Float32Array(6);
+const spaceMouseNavigationOptions = {
+  mode: 'hyperscope',
+  swapYZ: false,
+  invertPan: 0,
+  invertRotate: 0,
+};
+const SPACE_MOUSE_CAMERA_MODE_TEXT = Object.freeze({
+  hyperscope: 'Hyperscope Fly: camera-local translation + pitch/yaw/roll',
+  object: 'Blender Object: move/orbit the object; depth changes distance',
+  fly: 'Blender Fly: move and rotate the viewpoint freely',
+  drone: 'Blender Drone: level flight with altitude-preserving forward motion',
+});
+const SPACE_MOUSE_MODIFIER_MODE_TEXT = Object.freeze({
+  inversion: 'Inversion: translate center; twist changes radius',
+  'depth-of-field': 'DoF: push/pull focus; lift aperture; twist blur',
+});
 
 let runtimeWasmModule = null;
 async function compileRuntimeWasm() {
@@ -1448,6 +1569,12 @@ applyParams = function(params) {
   setManualCameraBasisFromEuler();
   spaceMouseMove.set(finite(params.smmove, 300, 10, 900));
   spaceMouseRotate.set(finite(params.smrotate, 300, 10, 900));
+  spaceMouseNavigation.set(['hyperscope', 'object', 'fly', 'drone'].includes(params.smnav)
+    ? params.smnav : 'hyperscope');
+  spaceMouseLockHorizon.set(params.smlock === '1');
+  spaceMouseSwapYZ.set(params.smswap === '1');
+  spaceMousePanInvert.set(integer(params.smpinv, 0, 0, 7));
+  spaceMouseRotateInvert.set(integer(params.smrinv, 0, 0, 7));
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
   fz.radius.set(integer(params.fradius, 11, 4, 128));
@@ -2175,13 +2302,23 @@ function frame(ts) {
   }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
   const flyAxes = mapSpaceMouseFlyAxes(spaceMouseAxes, spaceMouseFlyAxes);
+  const navigationMode = spaceMouseNavigation.peek();
+  const navigationPolicy = spaceMouseNavigationPolicy(navigationMode);
+  spaceMouseNavigationOptions.mode = navigationMode;
+  spaceMouseNavigationOptions.swapYZ = spaceMouseSwapYZ.peek();
+  spaceMouseNavigationOptions.invertPan = spaceMousePanInvert.peek();
+  spaceMouseNavigationOptions.invertRotate = spaceMouseRotateInvert.peek();
+  const navigationAxes = mapSpaceMouseNavigationAxes(
+    spaceMouseAxes,
+    spaceMouseNavigationOptions,
+    spaceMouseNavigationAxes,
+  );
   spaceMouseDiagnostics.buttons = spaceMouse.buttons;
   spaceMouseDiagnostics.controlMode = spaceMouseMode;
-  const spaceMouseModeText = {
-    camera: 'Fly: strafe/lift/forward + local pitch/yaw/roll',
-    inversion: 'Inversion: translate center; twist changes radius',
-    'depth-of-field': 'DoF: push/pull focus; lift aperture; twist blur',
-  }[spaceMouseMode];
+  spaceMouseDiagnostics.navigationMode = navigationMode;
+  const spaceMouseModeText = spaceMouseMode === 'camera'
+    ? SPACE_MOUSE_CAMERA_MODE_TEXT[navigationMode]
+    : SPACE_MOUSE_MODIFIER_MODE_TEXT[spaceMouseMode];
   if ($('spacemouse-mode').textContent !== spaceMouseModeText) {
     $('spacemouse-mode').textContent = spaceMouseModeText;
   }
@@ -2194,26 +2331,84 @@ function frame(ts) {
       const basis = manualCameraBasis(inputCameraBasis);
 
       if (spaceMouseMode === 'camera') {
-        // Preserve the original X/Y/Z gestures as right/up/forward, but make
-        // forward a true translation rather than orbit-radius zoom. Translation
-        // moves eye and target together and never depends on orbit radius.
-        panX += (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
-        panY += (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;
-        panZ += (flyAxes[0] * basis[2] + flyAxes[1] * basis[5] + flyAxes[2] * basis[8]) * moveScale;
+        const pitch = navigationAxes[3] * rotateScale;
+        const yaw = navigationAxes[4] * rotateScale;
+        const roll = navigationAxes[5] * rotateScale;
+        const horizonLocked = navigationPolicy.horizonLocked || spaceMouseLockHorizon.peek();
 
-        const eyeX = panX - basis[6] * zoom;
-        const eyeY = panY - basis[7] * zoom;
-        const eyeZ = panZ - basis[8] * zoom;
-        rotateManualCameraLocal(
-          flyAxes[3] * rotateScale,
-          flyAxes[4] * rotateScale,
-          flyAxes[5] * rotateScale,
-        );
-        const rotated = manualCameraBasis(inputCameraBasis);
-        // Preserve the translated eye while the local frame rotates.
-        panX = eyeX + rotated[6] * zoom;
-        panY = eyeY + rotated[7] * zoom;
-        panZ = eyeZ + rotated[8] * zoom;
+        if (navigationMode === 'hyperscope') {
+          // Preserve the established Hyperscope integration order: translate
+          // in the current local frame, then rotate while holding that newly
+          // translated eye fixed.
+          panX += (navigationAxes[0] * basis[0] + navigationAxes[1] * basis[3]
+            + navigationAxes[2] * basis[6]) * moveScale;
+          panY += (navigationAxes[0] * basis[1] + navigationAxes[1] * basis[4]
+            + navigationAxes[2] * basis[7]) * moveScale;
+          panZ += (navigationAxes[0] * basis[2] + navigationAxes[1] * basis[5]
+            + navigationAxes[2] * basis[8]) * moveScale;
+          const eyeX = panX - basis[6] * zoom;
+          const eyeY = panY - basis[7] * zoom;
+          const eyeZ = panZ - basis[8] * zoom;
+          if (horizonLocked) rotateManualCameraHorizonLocked(pitch, yaw);
+          else rotateManualCameraLocal(pitch, yaw, roll);
+          const rotated = manualCameraBasis(inputCameraBasis);
+          panX = eyeX + rotated[6] * zoom;
+          panY = eyeY + rotated[7] * zoom;
+          panZ = eyeZ + rotated[8] * zoom;
+        } else if (navigationPolicy.orbit) {
+          if (horizonLocked) rotateManualCameraHorizonLocked(pitch, yaw);
+          else rotateManualCameraLocal(pitch, yaw, roll);
+          const rotated = manualCameraBasis(inputCameraBasis);
+          // Object mode keeps the orbit pivot fixed during rotation. Its depth
+          // axis changes distance instead of dollying the viewpoint.
+          panX += (navigationAxes[0] * rotated[0] + navigationAxes[1] * rotated[3]) * moveScale;
+          panY += (navigationAxes[0] * rotated[1] + navigationAxes[1] * rotated[4]) * moveScale;
+          panZ += (navigationAxes[0] * rotated[2] + navigationAxes[1] * rotated[5]) * moveScale;
+          zoom *= Math.exp(navigationAxes[2] * (spaceMouseMove.peek() / 100) * deltaSeconds * 1.5);
+          zoom = Math.max(0.1, Math.min(100, zoom));
+        } else {
+          const eyeX = panX - basis[6] * zoom;
+          const eyeY = panY - basis[7] * zoom;
+          const eyeZ = panZ - basis[8] * zoom;
+          if (horizonLocked) rotateManualCameraHorizonLocked(pitch, yaw);
+          else rotateManualCameraLocal(pitch, yaw, roll);
+          const rotated = manualCameraBasis(inputCameraBasis);
+          // Fly and Drone rotate at the viewpoint, so reconstruct the target
+          // after rotation to keep the eye fixed before applying translation.
+          panX = eyeX + rotated[6] * zoom;
+          panY = eyeY + rotated[7] * zoom;
+          panZ = eyeZ + rotated[8] * zoom;
+
+          if (navigationPolicy.drone) {
+            let rightX = rotated[0], rightZ = rotated[2];
+            let rightLength = Math.hypot(rightX, rightZ);
+            if (rightLength < 1e-6) { rightX = 1; rightZ = 0; rightLength = 1; }
+            rightX /= rightLength; rightZ /= rightLength;
+
+            let forwardX = rotated[6], forwardZ = rotated[8];
+            let forwardLength = Math.hypot(forwardX, forwardZ);
+            if (forwardLength < 1e-6) {
+              // At a vertical view, continue along the last level heading.
+              forwardX = -rotated[3]; forwardZ = -rotated[5];
+              forwardLength = Math.hypot(forwardX, forwardZ);
+            }
+            if (forwardLength < 1e-6) { forwardX = 0; forwardZ = -1; forwardLength = 1; }
+            forwardX /= forwardLength; forwardZ /= forwardLength;
+
+            panX += (navigationAxes[0] * rightX + navigationAxes[2] * forwardX) * moveScale;
+            panY += navigationAxes[1] * moveScale;
+            panZ += (navigationAxes[0] * rightZ + navigationAxes[2] * forwardZ) * moveScale;
+          } else {
+            // Forward is a true translation, not an orbit-radius zoom, and no
+            // translation speed depends on the current target distance.
+            panX += (navigationAxes[0] * rotated[0] + navigationAxes[1] * rotated[3]
+              + navigationAxes[2] * rotated[6]) * moveScale;
+            panY += (navigationAxes[0] * rotated[1] + navigationAxes[1] * rotated[4]
+              + navigationAxes[2] * rotated[7]) * moveScale;
+            panZ += (navigationAxes[0] * rotated[2] + navigationAxes[1] * rotated[5]
+              + navigationAxes[2] * rotated[8]) * moveScale;
+          }
+        }
       } else if (spaceMouseMode === 'inversion') {
         const dx = (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
         const dy = (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;

@@ -22,6 +22,42 @@ export const SPACEMOUSE_FLY_PITCH = 3;
 export const SPACEMOUSE_FLY_YAW = 4;
 export const SPACEMOUSE_FLY_ROLL = 5;
 
+export const SPACEMOUSE_NAVIGATION_HYPERSCOPE = 'hyperscope';
+export const SPACEMOUSE_NAVIGATION_OBJECT = 'object';
+export const SPACEMOUSE_NAVIGATION_FLY = 'fly';
+export const SPACEMOUSE_NAVIGATION_DRONE = 'drone';
+
+const SPACEMOUSE_NAVIGATION_MODES = new Set([
+  SPACEMOUSE_NAVIGATION_HYPERSCOPE,
+  SPACEMOUSE_NAVIGATION_OBJECT,
+  SPACEMOUSE_NAVIGATION_FLY,
+  SPACEMOUSE_NAVIGATION_DRONE,
+]);
+const SPACEMOUSE_HYPERSCOPE_POLICY = Object.freeze({
+  mode: SPACEMOUSE_NAVIGATION_HYPERSCOPE,
+  orbit: false,
+  drone: false,
+  horizonLocked: false,
+});
+const SPACEMOUSE_OBJECT_POLICY = Object.freeze({
+  mode: SPACEMOUSE_NAVIGATION_OBJECT,
+  orbit: true,
+  drone: false,
+  horizonLocked: false,
+});
+const SPACEMOUSE_FLY_POLICY = Object.freeze({
+  mode: SPACEMOUSE_NAVIGATION_FLY,
+  orbit: false,
+  drone: false,
+  horizonLocked: false,
+});
+const SPACEMOUSE_DRONE_POLICY = Object.freeze({
+  mode: SPACEMOUSE_NAVIGATION_DRONE,
+  orbit: false,
+  drone: true,
+  horizonLocked: true,
+});
+
 export function createSpaceMouseState() {
   return {
     axes: new Float32Array(6),
@@ -94,6 +130,69 @@ export function mapSpaceMouseFlyAxes(axes, out = new Float32Array(6)) {
   out[SPACEMOUSE_FLY_YAW] = -axes[4];
   out[SPACEMOUSE_FLY_ROLL] = axes[5];
   return out;
+}
+
+/**
+ * Apply Blender-style NDOF navigation preferences to Hyperscope's semantic
+ * right/up/forward + pitch/yaw/roll axes.
+ *
+ * Blender's Object mode reverses all six axes relative to Fly/Drone. Its
+ * "Swap Y and Z Axes" option maps `{x, y, z}` to `{x, -z, y}` for both
+ * translation and rotation before the per-axis inversion preferences.
+ * Hyperscope mode deliberately retains the established mapping unchanged.
+ */
+export function mapSpaceMouseNavigationAxes(
+  axes,
+  {
+    mode = SPACEMOUSE_NAVIGATION_HYPERSCOPE,
+    swapYZ = false,
+    invertPan = 0,
+    invertRotate = 0,
+  } = {},
+  out = new Float32Array(6),
+) {
+  if (!SPACEMOUSE_NAVIGATION_MODES.has(mode)) {
+    mode = SPACEMOUSE_NAVIGATION_HYPERSCOPE;
+  }
+
+  let right = axes[0];
+  let up = axes[1];
+  let forward = axes[2];
+  let pitch = -axes[3];
+  let yaw = -axes[4];
+  let roll = axes[5];
+
+  if (swapYZ) {
+    const previousUp = up;
+    const previousYaw = yaw;
+    up = -forward;
+    forward = previousUp;
+    yaw = -roll;
+    roll = previousYaw;
+  }
+
+  const navigationSign = mode === SPACEMOUSE_NAVIGATION_OBJECT ? -1 : 1;
+  out[SPACEMOUSE_FLY_RIGHT] = right * navigationSign * ((invertPan & 1) ? -1 : 1);
+  out[SPACEMOUSE_FLY_UP] = up * navigationSign * ((invertPan & 2) ? -1 : 1);
+  out[SPACEMOUSE_FLY_FORWARD] = forward * navigationSign * ((invertPan & 4) ? -1 : 1);
+  out[SPACEMOUSE_FLY_PITCH] = pitch * navigationSign * ((invertRotate & 1) ? -1 : 1);
+  out[SPACEMOUSE_FLY_YAW] = yaw * navigationSign * ((invertRotate & 2) ? -1 : 1);
+  out[SPACEMOUSE_FLY_ROLL] = roll * navigationSign * ((invertRotate & 4) ? -1 : 1);
+  return out;
+}
+
+/** Camera integration policy for each supported navigation preset. */
+export function spaceMouseNavigationPolicy(mode) {
+  switch (mode) {
+    case SPACEMOUSE_NAVIGATION_OBJECT:
+      return SPACEMOUSE_OBJECT_POLICY;
+    case SPACEMOUSE_NAVIGATION_FLY:
+      return SPACEMOUSE_FLY_POLICY;
+    case SPACEMOUSE_NAVIGATION_DRONE:
+      return SPACEMOUSE_DRONE_POLICY;
+    default:
+      return SPACEMOUSE_HYPERSCOPE_POLICY;
+  }
 }
 
 /** Select the interaction layer encoded by the two primary puck buttons. */
