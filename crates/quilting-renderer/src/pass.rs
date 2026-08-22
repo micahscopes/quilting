@@ -39,10 +39,8 @@ pub struct Camera {
 /// A single draw batch with per-batch state.
 pub struct RenderBatch<'a> {
     pub mesh: &'a MeshBuffers,
-    /// Permutation parity (+1 or -1) for normal flipping.
+    /// Permutation parity (+1 or -1) for raster winding.
     pub perm_parity: f32,
-    /// S3 permutation index (0-5) for bary remapping.
-    pub perm_index: i32,
     /// Wire color for this batch [r, g, b].
     pub wire_color: [f32; 3],
     /// Material index (for PBR rendering).
@@ -118,11 +116,19 @@ pub fn camera_for_batch(camera: &Camera, batch: &RenderBatch<'_>) -> Camera {
     }
 }
 
-/// Set winding from semantic orientation parity. Matrix shape (`c != 0`) is
-/// not an orientation test: an even composition can be proper with nonzero c.
-pub fn apply_batch_winding(gl: &glow::Context, orientation_sign: i8) {
+/// Combine authored/affine orientation with the canonical atlas permutation.
+/// Odd S3 permutations reflect barycentric space and therefore reverse winding.
+pub fn batch_orientation_sign(orientation_sign: i8, perm_parity: f32) -> i8 {
+    orientation_sign * if perm_parity < 0.0 { -1 } else { 1 }
+}
+
+/// Set winding from semantic orientation and permutation parity. Matrix shape
+/// (`c != 0`) is not an orientation test: an even composition can be proper
+/// with nonzero c.
+pub fn apply_batch_winding(gl: &glow::Context, orientation_sign: i8, perm_parity: f32) {
+    let sign = batch_orientation_sign(orientation_sign, perm_parity);
     unsafe {
-        gl.front_face(if orientation_sign < 0 {
+        gl.front_face(if sign < 0 {
             glow::CW
         } else {
             glow::CCW
@@ -135,8 +141,6 @@ pub fn upload_batch_ubo(
     gl: &glow::Context,
     vtx_ubo: &VertexUniformBuf,
     camera: &Camera,
-    perm_parity: f32,
-    perm_index: i32,
     use_qb: i32,
     euclidean_model: &[f32; 16],
     euclidean_normal: &[f32; 16],
@@ -145,8 +149,6 @@ pub fn upload_batch_ubo(
         gl,
         &camera.mvp,
         &camera.mv,
-        perm_parity,
-        perm_index,
         use_qb,
         &camera.mobius,
         &camera.camera_pos,
@@ -184,13 +186,11 @@ pub fn render_frame(
 
         for batch in batches {
             let batch_camera = camera_for_batch(camera, batch);
-            apply_batch_winding(gl, batch.orientation_sign);
+            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
             upload_batch_ubo(
                 gl,
                 vtx_ubo,
                 &batch_camera,
-                batch.perm_parity,
-                batch.perm_index,
                 1,
                 &batch.euclidean_model,
                 &batch.euclidean_normal,
@@ -202,7 +202,7 @@ pub fn render_frame(
                     glow::TRIANGLES,
                     batch.mesh.num_tri_indices,
                     glow::UNSIGNED_INT,
-                    0,
+                    batch.mesh.tri_index_offset,
                     batch.mesh.num_instances,
                 );
             }
@@ -217,13 +217,11 @@ pub fn render_frame(
 
         for batch in batches {
             let batch_camera = camera_for_batch(camera, batch);
-            apply_batch_winding(gl, batch.orientation_sign);
+            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
             upload_batch_ubo(
                 gl,
                 vtx_ubo,
                 &batch_camera,
-                batch.perm_parity,
-                batch.perm_index,
                 1,
                 &batch.euclidean_model,
                 &batch.euclidean_normal,
@@ -235,7 +233,7 @@ pub fn render_frame(
                     glow::TRIANGLES,
                     batch.mesh.num_tri_indices,
                     glow::UNSIGNED_INT,
-                    0,
+                    batch.mesh.tri_index_offset,
                     batch.mesh.num_instances,
                 );
             }
@@ -251,13 +249,11 @@ pub fn render_frame(
 
         for batch in batches {
             let batch_camera = camera_for_batch(camera, batch);
-            apply_batch_winding(gl, batch.orientation_sign);
+            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
             upload_batch_ubo(
                 gl,
                 vtx_ubo,
                 &batch_camera,
-                batch.perm_parity,
-                batch.perm_index,
                 1,
                 &batch.euclidean_model,
                 &batch.euclidean_normal,
@@ -272,7 +268,7 @@ pub fn render_frame(
                     glow::LINES,
                     batch.mesh.num_line_indices,
                     glow::UNSIGNED_INT,
-                    0,
+                    batch.mesh.line_index_offset,
                     batch.mesh.num_instances,
                 );
             }
@@ -287,13 +283,11 @@ pub fn render_frame(
 
         for batch in batches {
             let batch_camera = camera_for_batch(camera, batch);
-            apply_batch_winding(gl, batch.orientation_sign);
+            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
             upload_batch_ubo(
                 gl,
                 vtx_ubo,
                 &batch_camera,
-                batch.perm_parity,
-                batch.perm_index,
                 1,
                 &batch.euclidean_model,
                 &batch.euclidean_normal,
@@ -305,7 +299,7 @@ pub fn render_frame(
                     glow::TRIANGLES,
                     batch.mesh.num_tri_indices,
                     glow::UNSIGNED_INT,
-                    0,
+                    batch.mesh.tri_index_offset,
                     batch.mesh.num_instances,
                 );
             }
@@ -320,13 +314,11 @@ pub fn render_frame(
 
         for batch in batches {
             let batch_camera = camera_for_batch(camera, batch);
-            apply_batch_winding(gl, batch.orientation_sign);
+            apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
             upload_batch_ubo(
                 gl,
                 vtx_ubo,
                 &batch_camera,
-                batch.perm_parity,
-                batch.perm_index,
                 1,
                 &batch.euclidean_model,
                 &batch.euclidean_normal,
@@ -338,7 +330,7 @@ pub fn render_frame(
                     glow::TRIANGLES,
                     batch.mesh.num_tri_indices,
                     glow::UNSIGNED_INT,
-                    0,
+                    batch.mesh.tri_index_offset,
                     batch.mesh.num_instances,
                 );
             }
@@ -376,8 +368,6 @@ pub fn render_original_wireframe(
         gl,
         &camera.mvp,
         &camera.mv,
-        1.0,
-        0,
         0, // use_qb=0 for original mesh
         &IDENTITY_MOBIUS,
         &camera.camera_pos,
@@ -395,7 +385,7 @@ pub fn render_original_wireframe(
             glow::LINES,
             mesh.num_line_indices,
             glow::UNSIGNED_INT,
-            0,
+            mesh.line_index_offset,
             mesh.num_instances,
         );
         gl.bind_vertex_array(None);

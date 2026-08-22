@@ -11,7 +11,7 @@ use crate::{perf_mark, perf_measure};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
-    MeshBuffers, TessBuffers, PbrParams, EnvironmentMaps, PersistentInstances,
+    MeshBuffers, TessAtlasBuffers, TessBuffers, PbrParams, EnvironmentMaps, PersistentInstances,
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
@@ -104,7 +104,6 @@ struct GpuBatch {
     mesh: MeshBuffers,
     shared_buf: bool, // true = mesh uses shared instance buffer, don't delete instance_buf
     perm_parity: f32,
-    perm_index: i32,
     material_index: usize,
     node_index: usize,
     lod: [u32; 3],
@@ -183,8 +182,10 @@ fn create_blur_program(gl: &glow::Context) -> Result<(glow::Program, glow::Verte
 
 thread_local! {
     static STATE: RefCell<Option<MainState>> = RefCell::new(None);
-    static TESS_CACHE: RefCell<std::collections::HashMap<String, TessBuffers>> =
+    static TESS_CACHE: RefCell<std::collections::HashMap<[u32; 3], TessBuffers>> =
         RefCell::new(std::collections::HashMap::new());
+    /// Owns the immutable buffers referenced by `TESS_CACHE` patch slices.
+    static TESS_ATLAS: RefCell<Option<TessAtlasBuffers>> = RefCell::new(None);
     static HYPERSCAPE_RUNTIME: RefCell<Option<HyperscapeGltfRuntime>> = RefCell::new(None);
 }
 
@@ -847,12 +848,13 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                     gl,
                     conformal.orientation_sign
                         * affine_orientation_sign(&conformal.euclidean_model),
+                    batch.perm_parity,
                 );
                 let euclidean_normal = affine_normal_matrix(&conformal.euclidean_model);
                 let vtx_ubo = state.renderer.vtx_ubo();
                 vtx_ubo.upload(
                     gl, &batch_camera.mvp, &batch_camera.mv,
-                    batch.perm_parity, batch.perm_index, 1,
+                    1,
                     &batch_camera.mobius, &batch_camera.camera_pos,
                     &conformal.euclidean_model, &euclidean_normal,
                 );
@@ -862,7 +864,7 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 gl.bind_vertex_array(Some(batch.mesh.tri_vao));
                 gl.draw_elements_instanced(
                     glow::TRIANGLES, batch.mesh.num_tri_indices,
-                    glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
+                    glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                 );
                 face_offset += batch.mesh.num_instances;
             }
@@ -907,9 +909,9 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 for batch in &state.batches {
                     let bs = batch.mesh.num_instances;
                     if face_id >= fo && face_id < fo + bs {
-                        info!("  LOD triple: [{}, {}, {}] perm={} parity={:.0}",
+                        info!("  LOD triple: [{}, {}, {}] per-instance permutations, parity={:.0}",
                             batch.lod[0], batch.lod[1], batch.lod[2],
-                            batch.perm_index, batch.perm_parity);
+                            batch.perm_parity);
                         info!("  glTF node: {}", batch.node_index);
                         break;
                     }
@@ -958,15 +960,65 @@ pub fn mr_set_face_nodes(nodes: &[i32]) {
     });
 }
 
-#[wasm_bindgen(js_name = "mr_uploadTessPatch")]
-pub fn mr_upload_tess_patch(key: &str, bary: &[f32], tri_idx: &[u32], line_idx: &[u32]) {
-    STATE.with(|s| {
-        let state = s.borrow();
-        let state = match state.as_ref() { Some(s) => s, None => return };
-        if let Ok(tess) = TessBuffers::new(state.renderer.gl(), bary, tri_idx, line_idx) {
-            TESS_CACHE.with(|tc| { tc.borrow_mut().insert(key.to_string(), tess); });
-        }
+/// Upload one packed canonical atlas. `patches` contains seven u32s per patch:
+/// `[lod_a, lod_b, lod_c, tri_start, tri_count, line_start, line_count]`.
+#[wasm_bindgen(js_name = "mr_uploadTessAtlas")]
+pub fn mr_upload_tess_atlas(
+    patches: &[u32],
+    bary: &[f32],
+    tri_idx: &[u32],
+    line_idx: &[u32],
+) -> bool {
+    if patches.len() % 7 != 0 || bary.len() % 3 != 0 {
+        web_sys::console::error_1(&"packed tessellation metadata has an invalid length".into());
+        return false;
+    }
+    let ranges_valid = patches.chunks_exact(7).all(|patch| {
+        patch[3].checked_add(patch[4]).is_some_and(|end| end as usize <= tri_idx.len())
+            && patch[5].checked_add(patch[6]).is_some_and(|end| end as usize <= line_idx.len())
     });
+    if !ranges_valid {
+        web_sys::console::error_1(&"packed tessellation metadata has an invalid index range".into());
+        return false;
+    }
+
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let state = match state.as_mut() { Some(s) => s, None => return false };
+        let atlas = match TessAtlasBuffers::new(state.renderer.gl(), bary, tri_idx, line_idx) {
+            Ok(atlas) => atlas,
+            Err(error) => {
+                web_sys::console::error_1(&format!("tessellation atlas upload: {error}").into());
+                return false;
+            }
+        };
+
+        // Patch VAOs retain element-buffer bindings. Invalidate them before an
+        // atlas replacement so no live draw references the retired owner.
+        for batch in state.batches.drain(..) {
+            if batch.shared_buf {
+                batch.mesh.destroy_vaos_only(state.renderer.gl());
+            } else {
+                batch.mesh.destroy(state.renderer.gl());
+            }
+        }
+        TESS_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.clear();
+            for patch in patches.chunks_exact(7) {
+                cache.insert(
+                    [patch[0], patch[1], patch[2]],
+                    atlas.patch(patch[3], patch[4], patch[5], patch[6]),
+                );
+            }
+        });
+        TESS_ATLAS.with(|owner| {
+            if let Some(old) = owner.borrow_mut().replace(atlas) {
+                old.destroy(state.renderer.gl());
+            }
+        });
+        true
+    })
 }
 
 /// Set PBR material parameters from JS material objects.
@@ -1262,10 +1314,10 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             let lo = fi * batch::FACE_LOD_STRIDE;
             if lo + 5 >= face_lods.len() { break; }
             let atlas_idx = face_lods[lo + 5] as usize;
-            let perm = face_lods[lo + 3] as usize;
+            let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
             let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
             let node = state.face_nodes.get(fi).copied().unwrap_or(0);
-            buckets.entry((atlas_idx, perm, mat, node)).or_default().push(fi as u32);
+            buckets.entry((atlas_idx, parity_bucket, mat, node)).or_default().push(fi as u32);
         }
         perf_mark("batch-group-end");
         perf_measure("batch-group", "batch-group-start", "batch-group-end");
@@ -1307,23 +1359,20 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
-            for (&(_atlas_idx, perm, mat, node_index), faces) in &buckets {
+            for (&(_atlas_idx, parity_bucket, mat, node_index), faces) in &buckets {
                 let fi0 = faces[0] as usize;
                 let lo = fi0 * batch::FACE_LOD_STRIDE;
                 let ca = face_lods[lo] as u32;
                 let cb = face_lods[lo + 1] as u32;
                 let cc = face_lods[lo + 2] as u32;
-                let parity = face_lods[lo + 4];
-                let tess_key = batch::TessKey { lod: [ca, cb, cc], perm_index: perm as u32 };
-
-                let tess = match tc.get(&tess_key.as_string()) {
+                let parity = if parity_bucket == 0 { 1.0 } else { -1.0 };
+                let tess = match tc.get(&[ca, cb, cc]) {
                     Some(t) => t,
                     None => { missing += 1; continue; }
                 };
 
                 // Gather this batch's instance data into staging buffer
                 let batch_floats = faces.len() * stride;
-                let permutation = quilting_core::permutation::S3_PERMUTATIONS[perm.min(5)];
                 for (i, &fi) in faces.iter().enumerate() {
                     let src = fi as usize * stride;
                     let dst = i * stride;
@@ -1339,12 +1388,15 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                         face_lods[lod_offset + 1],
                         face_lods[lod_offset + 2],
                     ];
+                    let perm = face_lods[lod_offset + 3].round().clamp(0.0, 5.0) as usize;
+                    let permutation = quilting_core::permutation::S3_PERMUTATIONS[perm];
                     let instance_lod_offset = dst + instance_layout::offset::EDGE_LODS;
                     staging[instance_lod_offset..instance_lod_offset + 3].copy_from_slice(&[
                         canonical[permutation[0]],
                         canonical[permutation[1]],
                         canonical[permutation[2]],
                     ]);
+                    staging[dst + instance_layout::offset::PERM_INDEX] = perm as f32;
                 }
 
                 // Upload this batch's data to the GPU at the current offset
@@ -1367,7 +1419,6 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
                 state.batches.push(GpuBatch {
                     mesh, shared_buf: true, perm_parity: parity,
-                    perm_index: perm as i32,
                     material_index: mat, node_index, lod: [ca, cb, cc],
                 });
                 built += 1;
@@ -1436,7 +1487,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             let conformal = conformal_state_for_node(state, b.node_index);
             let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
             RenderBatch {
-                mesh: &b.mesh, perm_parity: b.perm_parity, perm_index: b.perm_index,
+                mesh: &b.mesh, perm_parity: b.perm_parity,
                 wire_color: lod_color(&b.lod), material_index: b.material_index,
                 mobius: conformal.mobius,
                 orientation_sign: conformal.orientation_sign * euclidean_orientation,
@@ -1610,17 +1661,17 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
                     // Upload vertex UBO and draw this batch
                     let batch_camera = camera_for_batch(&camera, batch);
-                    apply_batch_winding(gl, batch.orientation_sign);
+                    apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
                     quilting_renderer::pass::upload_batch_ubo(
                         gl, state.renderer.vtx_ubo(), &batch_camera,
-                        batch.perm_parity, batch.perm_index, 1,
+                        1,
                         &batch.euclidean_model, &batch.euclidean_normal,
                     );
                     unsafe {
                         gl.bind_vertex_array(Some(batch.mesh.tri_vao));
                         gl.draw_elements_instanced(
                             glow::TRIANGLES, batch.mesh.num_tri_indices,
-                            glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
+                            glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                         );
                     }
                 }
@@ -1835,17 +1886,17 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     bind_tex(10, mat.transmission_tex_idx);
 
                     let batch_camera = camera_for_batch(&camera, batch);
-                    apply_batch_winding(gl, batch.orientation_sign);
+                    apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
                     quilting_renderer::pass::upload_batch_ubo(
                         gl, state.renderer.vtx_ubo(), &batch_camera,
-                        batch.perm_parity, batch.perm_index, 1,
+                        1,
                         &batch.euclidean_model, &batch.euclidean_normal,
                     );
                     unsafe {
                         gl.bind_vertex_array(Some(batch.mesh.tri_vao));
                         gl.draw_elements_instanced(
                             glow::TRIANGLES, batch.mesh.num_tri_indices,
-                            glow::UNSIGNED_INT, 0, batch.mesh.num_instances,
+                            glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                         );
                     }
                 }
@@ -2046,11 +2097,12 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
                 gl,
                 conformal.orientation_sign
                     * affine_orientation_sign(&conformal.euclidean_model),
+                batch.perm_parity,
             );
             let euclidean_normal = affine_normal_matrix(&conformal.euclidean_model);
             quilting_renderer::pass::upload_batch_ubo(
                 gl, state.renderer.vtx_ubo(), &batch_camera,
-                batch.perm_parity, batch.perm_index, 1,
+                1,
                 &conformal.euclidean_model, &euclidean_normal,
             );
             state.renderer.vtx_ubo().set_face_offset(gl, face_offset);
@@ -2058,7 +2110,7 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
 
             gl.bind_vertex_array(Some(batch.mesh.tri_vao));
             gl.draw_elements_instanced(glow::TRIANGLES, batch.mesh.num_tri_indices,
-                glow::UNSIGNED_INT, 0, batch.mesh.num_instances);
+                glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances);
             face_offset += batch.mesh.num_instances;
         }
 

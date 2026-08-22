@@ -9,8 +9,8 @@
 struct Uniforms {
     mvp: mat4x4<f32>,
     mv: mat4x4<f32>,
-    perm_parity: f32,
-    perm_index: i32,
+    _reserved_winding_parity: f32,
+    _reserved_perm_index: i32,
     use_qb: i32,
     _pad: f32,
     // Möbius transform: p' = (a*p + b) * (c*p + d)^{-1}
@@ -149,7 +149,8 @@ fn skin_normal(nrm: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
 
 struct VertexInput {
     @location(0) bary: vec3<f32>,
-    // Per-instance QB control points (13 vec4s = 52 floats per instance)
+    // Per-instance QB control data. lod_info.w carries the S3 permutation index
+    // so all six orientations share one canonical tessellation buffer.
     @location(1) p0: vec4<f32>,
     @location(2) p1: vec4<f32>,
     @location(3) p2: vec4<f32>,
@@ -215,7 +216,6 @@ fn eval_mobius_qb(
     bary: vec3<f32>,
     p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>,
     w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>,
-    perm_parity: f32,
 ) -> MobiusQBResult {
     // Möbius-fused numerator: (a*pᵢ+b)*wᵢ
     let pw0 = qmul(qmul(u.mob_a, p0) + u.mob_b, w0);
@@ -268,8 +268,6 @@ fn eval_mobius_qb(
     } else {
         n = vec3<f32>(0.0, 0.0, 1.0);
     }
-    n = n * perm_parity;
-
     return MobiusQBResult(q_to_point(X), n, fade);
 }
 
@@ -277,9 +275,10 @@ fn eval_mobius_qb(
 fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    // Bary coords are already permuted by the WASM batch assembly.
-    // Do NOT re-permute here — that was a double-application bug.
-    let bary = in.bary;
+    // The atlas stores only canonical tessellations. Map their barycentrics back
+    // to this face using the permutation packed beside its edge LODs.
+    let perm_index = clamp(i32(round(in.lod_info.w)), 0, 5);
+    let bary = perm_bary(in.bary, perm_index);
 
     var pos: vec3<f32>;
     var nrm: vec3<f32>;
@@ -322,7 +321,6 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
             bary,
             sp0, sp1, sp2,
             in.w0, in.w1, in.w2,
-            u.perm_parity,
         );
         pos = result.position;
         nrm = result.normal;
@@ -347,7 +345,6 @@ fn vs_main(@builtin(instance_index) instance_idx: u32, in: VertexInput) -> Verte
         } else {
             nrm = vec3<f32>(0.0, 0.0, 1.0);
         }
-        nrm = nrm * u.perm_parity;
     }
 
     // Backstop against Möbius-pole blow-ups; see POSITION_CLAMP.

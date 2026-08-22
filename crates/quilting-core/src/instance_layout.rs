@@ -12,7 +12,7 @@
 //! | 0..4   | 0     | 1           | p0: `[vertex_idx, x, y, z]`      |
 //! | 4..8   | 16    | 2           | p1                               |
 //! | 8..12  | 32    | 3           | p2                               |
-//! | 12..16 | 48    | 7           | edge LODs + pad                  |
+//! | 12..16 | 48    | 7           | edge LODs + permutation index    |
 //! | 16..20 | 64    | 8           | vertex LODs + pad                |
 //! | 20..24 | 80    | 9           | uv01 `(u0, v0, u1, v1)`          |
 //! | 24..28 | 96    | 10          | uv2 `(u2, v2, 0, 0)`             |
@@ -41,8 +41,10 @@ pub const STRIDE_BYTES: usize = STRIDE * 4;
 pub mod offset {
     /// Position `i` occupies `POSITIONS + i * 4`, as `[vertex_idx, x, y, z]`.
     pub const POSITIONS: usize = 0;
-    /// Three edge LODs, fourth float is padding.
+    /// Three edge LODs followed by the per-instance S3 permutation index.
     pub const EDGE_LODS: usize = 12;
+    /// Per-instance S3 permutation index, stored in `lod_info.w`.
+    pub const PERM_INDEX: usize = EDGE_LODS + 3;
     /// Three vertex LODs, fourth float is padding.
     pub const VERTEX_LODS: usize = 16;
     /// Six UV floats: `(u0, v0, u1, v1, u2, v2)`, then two floats of padding.
@@ -98,6 +100,12 @@ impl<'a> InstanceWriter<'a> {
 
     pub fn set_edge_lods(&mut self, lods: [f32; 3]) {
         self.slice[offset::EDGE_LODS..offset::EDGE_LODS + 3].copy_from_slice(&lods);
+    }
+
+    /// Select how the canonical tessellation's barycentrics map back to this face.
+    pub fn set_perm_index(&mut self, perm_index: u32) {
+        debug_assert!(perm_index < 6);
+        self.slice[offset::PERM_INDEX] = perm_index as f32;
     }
 
     pub fn set_vertex_lods(&mut self, lods: [f32; 3]) {
@@ -170,12 +178,14 @@ mod tests {
         let mut w = InstanceWriter::new(&mut buf, 1);
         w.set_position(2, 7, [1.0, 2.0, 3.0]);
         w.set_edge_lods([4.0, 8.0, 16.0]);
+        w.set_perm_index(5);
         w.set_uvs([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]);
         w.set_normal(0, [0.0, 1.0, 0.0]);
 
         let b = STRIDE;
         assert_eq!(&buf[b + 8..b + 12], &[7.0, 1.0, 2.0, 3.0]);
         assert_eq!(&buf[b + 12..b + 15], &[4.0, 8.0, 16.0]);
+        assert_eq!(buf[b + offset::PERM_INDEX], 5.0);
         assert_eq!(&buf[b + 20..b + 26], &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
         assert_eq!(&buf[b + 28..b + 31], &[0.0, 1.0, 0.0]);
         // Instance 0 untouched.

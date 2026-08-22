@@ -9,8 +9,9 @@ self.onmessage = async function(e) {
     const mod = await import('./pkg/quilting_wasm.js');
     await mod.default();
     wasm = mod;
-    // Try to init GPU compute (OffscreenCanvas + WebGL2 for transform feedback)
-    const gpuOk = wasm.init_gpu_compute(500000); // up to 500K faces
+    // Only the retained runtime worker needs LOD compute. Atlas helpers avoid a
+    // 4096² OffscreenCanvas, a WebGL context, and 500K-face compute buffers.
+    const gpuOk = data.gpuCompute === false ? false : wasm.init_gpu_compute(500000);
     console.log(`Worker: GPU compute ${gpuOk ? 'OK' : 'UNAVAILABLE'}`);
     self.postMessage({ type: 'ready', id, gpuCompute: gpuOk });
     return;
@@ -67,8 +68,9 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'export_patches') {
-    const patches = wasm.export_all_patches();
-    self.postMessage({ type: 'patches_exported', id, patches });
+    const atlas = wasm.export_all_patches();
+    const transfers = [atlas.patches.buffer, atlas.bary.buffer, atlas.tris.buffer, atlas.lines.buffer];
+    self.postMessage({ type: 'patches_exported', id, atlas }, transfers);
     return;
   }
 

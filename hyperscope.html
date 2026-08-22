@@ -217,7 +217,7 @@ import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_setFuzzy, mr_setFuzzyDebug,
-  mr_uploadTessPatch, mr_uploadAnimationPose, mr_clearAnimationState,
+  mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
   mr_pick, mr_highlightFace,
@@ -455,7 +455,9 @@ const pending = new Map();
 let msgId = 0;
 
 function spawnWorker() {
-  const w = new Worker('./hyperscope_worker.js', { type: 'module' });
+  // Keep the worker protocol in lockstep with this page. Browsers may otherwise
+  // reuse an older module worker after a hot reload while serving local builds.
+  const w = new Worker('./hyperscope_worker.js?rev=canonical-atlas-v1', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -1805,14 +1807,15 @@ phase('wasm', [], async () => {
 // Phase 2: Initialize workers (depends on wasm for shader compilation)
 phase('workers', ['wasm'], async () => {
   $('stats').textContent = `Starting ${ATLAS_WORKERS} workers...`;
-  await Promise.all(workers.map((_, i) => workerCallN(i, 'init', {})));
+  await Promise.all(workers.map((_, i) => workerCallN(i, 'init', { gpuCompute: i === 0 })));
 });
 
 // Phase 3: Build tessellation atlas (depends on workers)
 phase('atlas', ['workers'], async () => {
   const ATLAS_EXP = parseInt(initParams.atlas);
   const levels = [];
-  for (let i = 0; i <= ATLAS_EXP; i++) levels.push(1 << i);
+  // LOD 1 is generated only when an even runtime patch needs it as a parent.
+  for (let i = 1; i <= ATLAS_EXP; i++) levels.push(1 << i);
   const allTriples = [];
   const seen = new Set();
   for (const a of levels)
@@ -1833,29 +1836,22 @@ phase('atlas', ['workers'], async () => {
   }
   await Promise.all(workers.map((_, i) => dispatchNext(i)));
 
-  // Export patches from all workers in parallel
-  const allPatchResps = await Promise.all(
-    workers.map((_, i) => workerCallN(i, 'export_patches', {}))
-  );
-  for (const resp of allPatchResps) {
-    for (const p of resp.patches) {
-      const key = p.key.join(',') + '/' + p.perm;
-      const bary = new Float32Array(p.bary);
-      const tris = new Uint32Array(p.tris);
-      const lines = [];
-      for (let i = 0; i < tris.length; i += 3) {
-        lines.push(tris[i], tris[i+1], tris[i+1], tris[i+2], tris[i+2], tris[i]);
-      }
-      mr_uploadTessPatch(key, bary, tris, new Uint32Array(lines));
-    }
-  }
-
-  // Merge atlas into worker 0 for runtime
+  // Merge first so worker 0 can emit one deduplicated canonical GPU atlas.
   if (ATLAS_WORKERS > 1) {
     const subExports = await Promise.all(
       workers.slice(1).map((_, i) => workerCallN(i + 1, 'export_atlas_bytes', {}))
     );
-    for (const exp of subExports) await workerCallN(0, 'merge_atlas_bytes', { bytes: exp.bytes });
+    for (const exp of subExports) {
+      await workerCallN(0, 'merge_atlas_bytes', { bytes: exp.bytes }, [exp.bytes]);
+    }
+  }
+
+  const packedResp = await workerCallN(0, 'export_patches', {});
+  // Accept the immediately preceding worker envelope too, so a page already in
+  // flight during a hot reload fails gracefully instead of dropping the atlas.
+  const packed = packedResp.atlas ?? packedResp.patches;
+  if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
+    throw new Error('packed tessellation atlas upload failed');
   }
   dropExtraWorkers();
 });

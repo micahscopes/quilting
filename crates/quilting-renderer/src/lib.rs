@@ -278,6 +278,26 @@ mod tests {
     }
 
     #[test]
+    fn canonical_atlas_permutation_controls_winding() {
+        assert_eq!(pass::batch_orientation_sign(1, 1.0), 1);
+        assert_eq!(pass::batch_orientation_sign(1, -1.0), -1);
+        assert_eq!(pass::batch_orientation_sign(-1, 1.0), -1);
+        assert_eq!(pass::batch_orientation_sign(-1, -1.0), 1);
+
+        let source = include_str!("../../quilting-shaders/shaders/vertex/main.wgsl");
+        assert!(
+            source.contains("let bary = perm_bary(in.bary, perm_index)"),
+            "canonical atlas barycentrics must be permuted per instance",
+        );
+        assert!(
+            !source.contains("normal * perm_parity")
+                && !source.contains("nrm * u.perm_parity")
+                && !source.contains("n = n * perm_parity"),
+            "permutation parity belongs in raster winding, not authored surface normals",
+        );
+    }
+
+    #[test]
     fn wire_fragment_has_ubo() {
         let sources = compiled_glsl_sources().unwrap();
         let wire = sources.iter().find(|(n, _, _)| *n == "wire").unwrap();

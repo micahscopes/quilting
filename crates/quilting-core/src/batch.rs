@@ -1,7 +1,7 @@
-//! Batch grouping: group faces by (atlas index, permutation, material) for instanced draw.
+//! Batch grouping: group faces by (atlas index, permutation parity, material) for instanced draw.
 //!
 //! Uses O(n) bucket sort with direct indexing — the key space is bounded
-//! (atlas 0-255 × perm 0-5 × materials) and small enough for a flat Vec.
+//! (atlas 0-255 × two winding parities × materials) and small enough for a flat Vec.
 
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
 /// which is the normative definition — do not restate the number here.
@@ -10,29 +10,25 @@ pub use crate::instance_layout::STRIDE as INSTANCE_STRIDE;
 /// Per-face LOD stride: 6 floats from GPU pass 2.
 pub const FACE_LOD_STRIDE: usize = 6;
 
-/// A tessellation key identifying a unique atlas patch + permutation.
+/// A tessellation key identifying one canonical atlas patch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TessKey {
     /// Canonical LOD triple (sorted ascending).
     pub lod: [u32; 3],
-    /// S3 permutation index (0-5).
-    pub perm_index: u32,
 }
 
 impl TessKey {
     pub fn as_string(&self) -> String {
-        format!("{},{},{}/{}", self.lod[0], self.lod[1], self.lod[2], self.perm_index)
+        format!("{},{},{}", self.lod[0], self.lod[1], self.lod[2])
     }
 }
 
-/// A logical draw batch — faces grouped by (LOD, permutation, material).
+/// A logical draw batch — faces grouped by (LOD, permutation parity, material).
 /// Contains packed instance data ready for GPU upload.
 #[derive(Debug)]
 pub struct DrawBatch {
     /// Canonical LOD triple.
     pub lod: [u32; 3],
-    /// S3 permutation index (0-5).
-    pub perm_index: u32,
     /// Permutation parity (+1.0 or -1.0).
     pub parity: f32,
     /// Material index.
@@ -68,19 +64,19 @@ pub fn group_into_batches(
     // Find max material index for bucket array sizing
     let num_materials = face_materials.iter().copied().max().unwrap_or(0) + 1;
 
-    // Bucket array: key = atlas_idx * (6 * num_materials) + perm * num_materials + material
-    // Max atlas_idx = 255, max perm = 5, so max buckets = 256 * 6 * num_materials
-    let num_buckets = 256 * 6 * num_materials;
+    // Permutation itself is carried per instance. Hardware front-face winding is
+    // draw state, so only odd/even parity has to split batches.
+    let num_buckets = 256 * 2 * num_materials;
     let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
 
     // Single pass: distribute faces into buckets
     for fi in 0..num_faces {
         let lo = fi * FACE_LOD_STRIDE;
         let atlas_idx = face_lods[lo + 5] as usize;
-        let perm = face_lods[lo + 3] as usize;
+        let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
         let mat = if fi < face_materials.len() { face_materials[fi] } else { 0 };
 
-        let key = atlas_idx * (6 * num_materials) + perm * num_materials + mat;
+        let key = atlas_idx * (2 * num_materials) + parity_bucket * num_materials + mat;
         if key < num_buckets {
             buckets[key].push(fi as u32);
         }
@@ -92,7 +88,7 @@ pub fn group_into_batches(
         if faces.is_empty() { continue; }
 
         let mat = key % num_materials;
-        let perm = (key / num_materials) % 6;
+        let parity_bucket = (key / num_materials) % 2;
 
         // Read canonical LODs and parity from first face in bucket
         let fi0 = faces[0] as usize;
@@ -100,21 +96,24 @@ pub fn group_into_batches(
         let ca = face_lods[lo] as u32;
         let cb = face_lods[lo + 1] as u32;
         let cc = face_lods[lo + 2] as u32;
-        let parity = face_lods[lo + 4];
+        let parity = if parity_bucket == 0 { 1.0 } else { -1.0 };
 
         // Pack instance data
         let mut instance_data = Vec::with_capacity(faces.len() * INSTANCE_STRIDE);
         for &fi in &faces {
             let start = fi as usize * INSTANCE_STRIDE;
             instance_data.extend_from_slice(&all_instances[start..start + INSTANCE_STRIDE]);
+            let dst = instance_data.len() - INSTANCE_STRIDE;
+            let lod_offset = fi as usize * FACE_LOD_STRIDE;
+            instance_data[dst + crate::instance_layout::offset::PERM_INDEX] =
+                face_lods[lod_offset + 3];
         }
 
         result.push(DrawBatch {
             lod: [ca, cb, cc],
-            perm_index: perm as u32,
             parity,
             material_index: mat,
-            tess_key: TessKey { lod: [ca, cb, cc], perm_index: perm as u32 },
+            tess_key: TessKey { lod: [ca, cb, cc] },
             face_indices: faces,
             instance_data,
         });
@@ -128,7 +127,6 @@ pub fn group_into_batches(
 #[derive(Debug)]
 pub struct BatchRange {
     pub lod: [u32; 3],
-    pub perm_index: u32,
     pub parity: f32,
     pub material_index: usize,
     pub tess_key: TessKey,
@@ -155,16 +153,16 @@ pub fn sort_into_ranges(
     assert!(all_instances.len() >= num_faces * INSTANCE_STRIDE);
 
     let num_materials = face_materials.iter().copied().max().unwrap_or(0) + 1;
-    let num_buckets = 256 * 6 * num_materials;
+    let num_buckets = 256 * 2 * num_materials;
 
     // Phase 1: bucket sort to get face ordering
     let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
     for fi in 0..num_faces {
         let lo = fi * FACE_LOD_STRIDE;
         let atlas_idx = face_lods[lo + 5] as usize;
-        let perm = face_lods[lo + 3] as usize;
+        let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
         let mat = if fi < face_materials.len() { face_materials[fi] } else { 0 };
-        let key = atlas_idx * (6 * num_materials) + perm * num_materials + mat;
+        let key = atlas_idx * (2 * num_materials) + parity_bucket * num_materials + mat;
         if key < num_buckets {
             buckets[key].push(fi as u32);
         }
@@ -177,24 +175,23 @@ pub fn sort_into_ranges(
     for (key, faces) in buckets.into_iter().enumerate() {
         if faces.is_empty() { continue; }
         let mat = key % num_materials;
-        let perm = (key / num_materials) % 6;
+        let parity_bucket = (key / num_materials) % 2;
 
         let fi0 = faces[0] as usize;
         let lo = fi0 * FACE_LOD_STRIDE;
         let ca = face_lods[lo] as u32;
         let cb = face_lods[lo + 1] as u32;
         let cc = face_lods[lo + 2] as u32;
-        let parity = face_lods[lo + 4];
+        let parity = if parity_bucket == 0 { 1.0 } else { -1.0 };
 
         let offset = sorted_order.len();
         sorted_order.extend_from_slice(&faces);
 
         ranges.push(BatchRange {
             lod: [ca, cb, cc],
-            perm_index: perm as u32,
             parity,
             material_index: mat,
-            tess_key: TessKey { lod: [ca, cb, cc], perm_index: perm as u32 },
+            tess_key: TessKey { lod: [ca, cb, cc] },
             instance_offset: offset * crate::instance_layout::STRIDE_BYTES,
             instance_count: faces.len(),
         });
@@ -208,6 +205,9 @@ pub fn sort_into_ranges(
         let dst_off = dst * INSTANCE_STRIDE;
         sorted[dst_off..dst_off + INSTANCE_STRIDE]
             .copy_from_slice(&all_instances[src..src + INSTANCE_STRIDE]);
+        let lod_offset = src_fi as usize * FACE_LOD_STRIDE;
+        sorted[dst_off + crate::instance_layout::offset::PERM_INDEX] =
+            face_lods[lod_offset + 3];
     }
     all_instances[..num_faces * INSTANCE_STRIDE].copy_from_slice(&sorted[..num_faces * INSTANCE_STRIDE]);
 
@@ -267,6 +267,34 @@ mod tests {
         let face_materials = vec![0, 1];
         let batches = group_into_batches(&face_lods, &all_instances, &face_materials, 2);
         assert_eq!(batches.len(), 2);
+    }
+
+    #[test]
+    fn merges_permutations_with_the_same_parity() {
+        let face_lods = vec![
+            4.0, 8.0, 16.0, 0.0, 1.0, 7.0,
+            4.0, 8.0, 16.0, 3.0, 1.0, 7.0,
+            4.0, 8.0, 16.0, 1.0, -1.0, 7.0,
+        ];
+        let all_instances = vec![0.0f32; 3 * INSTANCE_STRIDE];
+        let batches = group_into_batches(&face_lods, &all_instances, &[0, 0, 0], 3);
+
+        assert_eq!(batches.len(), 2, "only winding parity should split draws");
+        let even = batches.iter().find(|batch| batch.parity > 0.0).unwrap();
+        assert_eq!(even.face_indices, vec![0, 1]);
+        assert_eq!(
+            even.instance_data[crate::instance_layout::offset::PERM_INDEX],
+            0.0,
+        );
+        assert_eq!(
+            even.instance_data[INSTANCE_STRIDE + crate::instance_layout::offset::PERM_INDEX],
+            3.0,
+        );
+        let odd = batches.iter().find(|batch| batch.parity < 0.0).unwrap();
+        assert_eq!(
+            odd.instance_data[crate::instance_layout::offset::PERM_INDEX],
+            1.0,
+        );
     }
 
     #[test]

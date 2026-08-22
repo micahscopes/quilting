@@ -609,10 +609,12 @@ pub fn set_min_px_per_sub(px: f64) {
     quilting_core::evaluate::set_min_px_per_sub(px);
 }
 
-/// Export all atlas patches as pre-computed bary data for GPU upload.
-/// Returns a JS array of { key: [a,b,c], perm: n, bary: Float64Array, tris: Uint32Array }.
-/// Call once after atlas build — JS creates GPU buffers from this, then
-/// the rendering pipeline never needs to send tessellation data again.
+/// Export the runtime atlas as three packed canonical GPU buffers plus metadata.
+///
+/// Each patch contributes seven u32 metadata values:
+/// `[lod_a, lod_b, lod_c, tri_start, tri_count, line_start, line_count]`.
+/// Indices are global into the packed barycentric buffer, so every LOD and all
+/// six S3 permutations share the same three WebGL buffers.
 #[wasm_bindgen]
 pub fn export_all_patches() -> JsValue {
     ATLAS.with(|atlas_cell| {
@@ -622,59 +624,76 @@ pub fn export_all_patches() -> JsValue {
             None => return JsValue::NULL,
         };
 
-        let result = js_sys::Array::new();
-        for &key in atlas.patches.keys() {
-            // get_patch with a sorted key returns canonical (unpermuted) mesh
-            let mesh = match atlas.get_patch(key) {
-                Some(m) => m,
-                None => continue,
-            };
+        let mut keys: Vec<[u32; 3]> = atlas
+            .patches
+            .keys()
+            .copied()
+            // LOD 1 is an internal subdivision ancestor; the renderer clamps to 2.
+            .filter(|key| key[0] >= 2)
+            .collect();
+        keys.sort_unstable();
 
-            // Convert cartesian to bary once (canonical, perm 0)
-            let base_bary: Vec<[f64; 3]> = mesh.positions.iter().map(|p| {
-                let mut b = triangle::cartesian_to_bary(p[0], p[1]);
-                for c in &mut b { if c.abs() < 1e-10 { *c = 0.0; } }
+        let mut bary = Vec::<f32>::new();
+        let mut tris = Vec::<u32>::new();
+        let mut lines = Vec::<u32>::new();
+        let mut patches = Vec::<u32>::with_capacity(keys.len() * 7);
+
+        for key in keys {
+            let Some(entry) = atlas.patches.get(&key) else { continue };
+            let base_vertex = (bary.len() / 3) as u32;
+
+            for position in &atlas.positions
+                [entry.base_vertex..entry.base_vertex + entry.vertex_count]
+            {
+                let mut b = triangle::cartesian_to_bary(position[0], position[1]);
+                for component in &mut b {
+                    if component.abs() < 1e-10 { *component = 0.0; }
+                }
                 let sum = b[0] + b[1] + b[2];
-                if sum > 0.0 { b[0] /= sum; b[1] /= sum; b[2] /= sum; }
-                b
-            }).collect();
-
-            // Emit all 6 permutations
-            for perm in 0u32..6 {
-                let bary: Vec<f64> = base_bary.iter().map(|b| {
-                    match perm {
-                        1 => [b[0], b[2], b[1]],
-                        2 => [b[1], b[0], b[2]],
-                        3 => [b[1], b[2], b[0]],
-                        4 => [b[2], b[0], b[1]],
-                        5 => [b[2], b[1], b[0]],
-                        _ => *b,
-                    }
-                }).flat_map(|b| [b[0], b[1], b[2]]).collect();
-
-                // Odd permutations (1,2,5) reverse 2D winding of barycentric coords.
-                // Swap two indices per triangle to restore consistent CCW screen winding.
-                let is_odd_perm = matches!(perm, 1 | 2 | 5);
-                let tris: Vec<u32> = mesh.triangles.iter()
-                    .flat_map(|t| {
-                        if is_odd_perm {
-                            [t[0] as u32, t[2] as u32, t[1] as u32]
-                        } else {
-                            [t[0] as u32, t[1] as u32, t[2] as u32]
-                        }
-                    }).collect();
-
-                let obj = js_sys::Object::new();
-                let s = |k: &str, v: JsValue| { js_sys::Reflect::set(&obj, &k.into(), &v).ok(); };
-                s("key", serde_wasm_bindgen::to_value(&key).unwrap());
-                s("perm", JsValue::from(perm));
-                s("bary", js_sys::Float64Array::from(&bary[..]).into());
-                s("tris", js_sys::Uint32Array::from(&tris[..]).into());
-                s("n_verts", JsValue::from(base_bary.len() as u32));
-                s("n_tris", JsValue::from(mesh.triangles.len() as u32));
-                result.push(&obj);
+                if sum > 0.0 {
+                    b[0] /= sum;
+                    b[1] /= sum;
+                    b[2] /= sum;
+                }
+                bary.extend_from_slice(&[b[0] as f32, b[1] as f32, b[2] as f32]);
             }
+
+            let tri_start = tris.len() as u32;
+            let line_start = lines.len() as u32;
+            for triangle in &atlas.triangles
+                [entry.base_triangle..entry.base_triangle + entry.triangle_count]
+            {
+                let local = [
+                    triangle[0] - entry.base_vertex,
+                    triangle[1] - entry.base_vertex,
+                    triangle[2] - entry.base_vertex,
+                ];
+                let index = [
+                    base_vertex + local[0] as u32,
+                    base_vertex + local[1] as u32,
+                    base_vertex + local[2] as u32,
+                ];
+                tris.extend_from_slice(&index);
+                lines.extend_from_slice(&[
+                    index[0], index[1], index[1], index[2], index[2], index[0],
+                ]);
+            }
+
+            patches.extend_from_slice(&[
+                key[0], key[1], key[2],
+                tri_start, tris.len() as u32 - tri_start,
+                line_start, lines.len() as u32 - line_start,
+            ]);
         }
+
+        let result = js_sys::Object::new();
+        let set = |name: &str, value: JsValue| {
+            js_sys::Reflect::set(&result, &name.into(), &value).ok();
+        };
+        set("patches", js_sys::Uint32Array::from(&patches[..]).into());
+        set("bary", js_sys::Float32Array::from(&bary[..]).into());
+        set("tris", js_sys::Uint32Array::from(&tris[..]).into());
+        set("lines", js_sys::Uint32Array::from(&lines[..]).into());
         result.into()
     })
 }

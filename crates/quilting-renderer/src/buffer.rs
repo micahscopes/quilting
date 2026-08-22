@@ -10,18 +10,29 @@
 use glow::HasContext;
 use quilting_core::instance_layout;
 
-/// Per-batch tessellation geometry (bary coords + indices).
+/// A non-owning slice of the packed canonical tessellation atlas.
 /// Cached by LOD triple -- these never change, only instance data changes per frame.
+#[derive(Clone, Copy)]
 pub struct TessBuffers {
     pub bary_buf: glow::Buffer,
     pub tri_index_buf: glow::Buffer,
     pub line_index_buf: glow::Buffer,
     pub num_tri_indices: i32,
     pub num_line_indices: i32,
+    /// Byte offsets into the shared element buffers.
+    pub tri_index_offset: i32,
+    pub line_index_offset: i32,
 }
 
-impl TessBuffers {
-    /// Upload tessellation geometry from flat arrays.
+/// Owns the three immutable GPU buffers shared by every canonical LOD patch.
+pub struct TessAtlasBuffers {
+    bary_buf: glow::Buffer,
+    tri_index_buf: glow::Buffer,
+    line_index_buf: glow::Buffer,
+}
+
+impl TessAtlasBuffers {
+    /// Upload one packed canonical atlas.
     pub fn new(
         gl: &glow::Context,
         bary_data: &[f32],
@@ -53,13 +64,31 @@ impl TessBuffers {
                 glow::STATIC_DRAW,
             );
 
-            Ok(TessBuffers {
+            Ok(Self {
                 bary_buf,
                 tri_index_buf,
                 line_index_buf,
-                num_tri_indices: tri_indices.len() as i32,
-                num_line_indices: line_indices.len() as i32,
             })
+        }
+    }
+
+    /// Create a lightweight view into this atlas. Offsets and counts are in
+    /// index elements; WebGL draw calls consume byte offsets.
+    pub fn patch(
+        &self,
+        tri_start: u32,
+        tri_count: u32,
+        line_start: u32,
+        line_count: u32,
+    ) -> TessBuffers {
+        TessBuffers {
+            bary_buf: self.bary_buf,
+            tri_index_buf: self.tri_index_buf,
+            line_index_buf: self.line_index_buf,
+            num_tri_indices: tri_count as i32,
+            num_line_indices: line_count as i32,
+            tri_index_offset: (tri_start * 4) as i32,
+            line_index_offset: (line_start * 4) as i32,
         }
     }
 
@@ -80,6 +109,8 @@ pub struct MeshBuffers {
     pub instance_buf_capacity: usize,
     pub num_tri_indices: i32,
     pub num_line_indices: i32,
+    pub tri_index_offset: i32,
+    pub line_index_offset: i32,
     pub num_instances: i32,
 }
 
@@ -124,6 +155,8 @@ impl MeshBuffers {
                 instance_buf_capacity: capacity,
                 num_tri_indices: tess.num_tri_indices,
                 num_line_indices: tess.num_line_indices,
+                tri_index_offset: tess.tri_index_offset,
+                line_index_offset: tess.line_index_offset,
                 num_instances,
             })
         }
@@ -154,6 +187,8 @@ impl MeshBuffers {
                 instance_buf_capacity: 0,  // 0 signals "shared, don't delete"
                 num_tri_indices: tess.num_tri_indices,
                 num_line_indices: tess.num_line_indices,
+                tri_index_offset: tess.tri_index_offset,
+                line_index_offset: tess.line_index_offset,
                 num_instances,
             })
         }
@@ -356,8 +391,8 @@ impl PersistentInstances {
 /// Layout (std140, 352 bytes):
 ///   mat4x4 mvp        (offset 0, 64 bytes)
 ///   mat4x4 mv         (offset 64, 64 bytes)
-///   float perm_parity  (offset 128, 4 bytes)
-///   int perm_index     (offset 132, 4 bytes)
+///   float reserved      (offset 128, 4 bytes)
+///   int reserved        (offset 132, 4 bytes)
 ///   int use_qb         (offset 136, 4 bytes)
 ///   float _pad         (offset 140, 4 bytes) -- the pick pass's face offset
 ///   vec4 mob_a         (offset 144, 16 bytes)
@@ -395,8 +430,6 @@ impl VertexUniformBuf {
         gl: &glow::Context,
         mvp: &[f32; 16],
         mv: &[f32; 16],
-        perm_parity: f32,
-        perm_index: i32,
         use_qb: i32,
         mobius: &[f32; 16],
         camera_pos: &[f32; 3],
@@ -408,10 +441,7 @@ impl VertexUniformBuf {
         data[0..64].copy_from_slice(bytemuck_cast_slice(mvp));
         // mv: offset 64
         data[64..128].copy_from_slice(bytemuck_cast_slice(mv));
-        // perm_parity: offset 128
-        data[128..132].copy_from_slice(&perm_parity.to_le_bytes());
-        // perm_index: offset 132
-        data[132..136].copy_from_slice(&perm_index.to_le_bytes());
+        // Offsets 128..136 are reserved. Permutations are per-instance now.
         // use_qb: offset 136
         data[136..140].copy_from_slice(&use_qb.to_le_bytes());
         // _pad: offset 140 (zeroed)
