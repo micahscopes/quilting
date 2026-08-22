@@ -118,6 +118,10 @@ struct MainState {
     /// asynchronous, so an invisible sentinel must not demote a patch that the
     /// current-pose render GPU may need to resurrect in the same frame.
     resident_face_lods: Vec<Option<batch::ResidentLod>>,
+    /// Visibility from the latest worker classification, retained separately
+    /// from topology because invisible faces deliberately keep their last LOD.
+    classified_face_visibility: Vec<bool>,
+    classified_culled_faces: usize,
     /// Faces whose latest asynchronous classification changed. This sparse
     /// frontier seeds half-edge reconciliation without rescanning every edge.
     lod_dirty_faces: Vec<usize>,
@@ -461,6 +465,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
             resident_face_lods: Vec::new(),
+            classified_face_visibility: Vec::new(),
+            classified_culled_faces: 0,
             lod_dirty_faces: Vec::new(),
             lod_balance_scratch: batch::ResidentLodBalanceScratch::default(),
             lod_topology: None,
@@ -1254,6 +1260,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.batch_groups.clear();
             st.batch_staging.clear();
             st.resident_face_lods = vec![None; st.num_faces];
+            st.classified_face_visibility = vec![false; st.num_faces];
+            st.classified_culled_faces = st.num_faces;
             st.lod_dirty_faces.clear();
             st.lod_balance_scratch = batch::ResidentLodBalanceScratch::default();
             st.lod_topology = build_instance_lod_topology(&st.cached_instances, st.num_faces);
@@ -1784,6 +1792,33 @@ pub fn mr_upload_env_maps(
 
 #[wasm_bindgen(js_name = "mr_buildBatches")]
 pub fn mr_build_batches(face_lods: &[f32]) {
+    update_batches(face_lods, None);
+}
+
+/// Apply changed worker classifications without copying or scanning a full
+/// six-float record for every source face. The first classification after a
+/// model/animation boundary still uses `mr_buildBatches` as a full snapshot.
+#[wasm_bindgen(js_name = "mr_updateBatches")]
+pub fn mr_update_batches(face_indices: &[u32], face_lods: &[f32]) {
+    let Some(required) = face_indices.len().checked_mul(batch::FACE_LOD_STRIDE) else {
+        web_sys::console::warn_1(&"Sparse LOD update size overflow".into());
+        return;
+    };
+    if face_lods.len() < required {
+        web_sys::console::warn_1(
+            &format!(
+                "Sparse LOD update has {} floats for {} face records",
+                face_lods.len(),
+                face_indices.len(),
+            )
+            .into(),
+        );
+        return;
+    }
+    update_batches(face_lods, Some(face_indices));
+}
+
+fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         let state = match state.as_mut() { Some(s) => s, None => return };
@@ -1810,6 +1845,10 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         if state.resident_face_lods.len() != nf {
             state.resident_face_lods.resize(nf, None);
         }
+        if state.classified_face_visibility.len() != nf {
+            state.classified_face_visibility = vec![false; nf];
+            state.classified_culled_faces = nf;
+        }
         // Use LOD 2 for faces that have never had a visible classification if
         // the atlas provides it. This preserves the historical safe fallback
         // while allowing genuinely visible, sub-pixel faces to select LOD 1.
@@ -1830,26 +1869,47 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             perm_index: 0,
             parity_bucket: 0,
         };
-        let mut culled = 0usize;
+        let full_snapshot = face_indices.is_none();
+        let mut culled = if full_snapshot {
+            0
+        } else {
+            state.classified_culled_faces
+        };
         let mut topology_changed = state.batch_layout_dirty;
         state.lod_dirty_faces.clear();
-        for fi in 0..nf {
-            let cpu_visible = batch::face_is_visible(face_lods, fi);
-            if !cpu_visible {
-                culled += 1;
+        let record_count = face_indices.map_or(nf, <[u32]>::len);
+        for record_index in 0..record_count {
+            let fi = face_indices
+                .map_or(record_index, |indices| indices[record_index] as usize);
+            if fi >= nf {
+                continue;
+            }
+            let cpu_visible = batch::face_is_visible(face_lods, record_index);
+            if full_snapshot {
+                state.classified_face_visibility[fi] = cpu_visible;
+                culled += usize::from(!cpu_visible);
+            } else {
+                let previously_visible = state.classified_face_visibility[fi];
+                if previously_visible != cpu_visible {
+                    if cpu_visible {
+                        culled = culled.saturating_sub(1);
+                    } else {
+                        culled = culled.saturating_add(1).min(nf);
+                    }
+                    state.classified_face_visibility[fi] = cpu_visible;
+                }
             }
             let previous = state.resident_face_lods[fi];
-            let resident = batch::retain_face_lod(
-                face_lods,
-                fi,
-                &mut state.resident_face_lods[fi],
-                initial_resident,
-            );
+            let resident = batch::ResidentLod::from_visible_payload(face_lods, record_index)
+                .or(previous)
+                .unwrap_or(initial_resident);
+            state.resident_face_lods[fi] = Some(resident);
             if previous != Some(resident) {
                 topology_changed = true;
                 state.lod_dirty_faces.push(fi);
             }
         }
+        state.classified_culled_faces = culled;
         perf_mark("batch-retain-end");
         perf_measure("batch-retain", "batch-retain-start", "batch-retain-end");
 

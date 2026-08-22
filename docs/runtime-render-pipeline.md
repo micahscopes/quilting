@@ -60,19 +60,27 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
    six floats per face.
 4. The output is copied into staging, fenced, and polled without blocking the
    worker. Only after the fence signals is the compact topology payload read
-   back and transferred to the main thread.
-5. The main-thread WASM layer retains the last valid topology for invisible
+   back into the worker.
+5. The worker compares that snapshot with its previous completed result. The
+   first coherent result after a model, animation, remesh, or compute-resource
+   boundary transfers all faces; later results transfer only changed
+   `(face_index, six-float classification)` records.
+6. The main-thread WASM layer retains the last valid topology for invisible
    faces, re-reconciles shared edges (including exact duplicate glTF seam
    vertices), grades each triangle to a 2:1 maximum edge ratio, and compares
-   memberships with retained buckets.
-6. Only changed buckets repack and upload their eight-float topology records;
+   memberships with retained buckets. Reconciliation starts from the changed
+   face frontier and propagates through half-edge twins instead of rescanning
+   every mesh edge.
+7. Only changed buckets repack and upload their eight-float topology records;
    unchanged GPU buffers and VAOs survive untouched.
 
 The unavoidable current synchronization boundary is step 4: WebGL2 cannot
 generate indirect draws or compact instance lists for later draws. The
-readback is 24 bytes per source face per completed classification, not a
-readback of animated vertices or tessellated geometry. Current-pose visibility
-does not cross that boundary at all.
+worker-side GPU readback is 24 bytes per source face per completed
+classification, not a readback of animated vertices or tessellated geometry.
+After the initial full snapshot, the worker-to-main transfer is 28 bytes per
+changed face (a four-byte face ID plus the six-float record). Current-pose
+visibility does not cross that boundary at all.
 
 An off-camera face intentionally retains its last crack-free topology. Making
 it coarser is safe only when a conservative conformal bound proves that the

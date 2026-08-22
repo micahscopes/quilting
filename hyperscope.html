@@ -230,7 +230,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
-  mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_setFuzzy, mr_setFuzzyDebug,
+  mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_uploadImages, mr_uploadEnvMaps,
@@ -290,6 +290,7 @@ const lodMetricNames = [
   'totalMs', 'workerMs', 'batchMs', 'batchGroupMs', 'batchUploadMs',
   'batchRetainMs', 'batchBalanceMs', 'batchBucketMs',
   'wasmMs', 'gpuComputeMs', 'gpuWaitMs', 'gpuReadbackMs',
+  'changedFaces', 'lodTransferBytes',
 ];
 const lodTelemetry = {
   submitted: 0,
@@ -298,6 +299,7 @@ const lodTelemetry = {
   empty: 0,
   canceled: 0,
   errors: 0,
+  fullSnapshots: 0,
   inFlight: false,
   dirty: false,
   lastSummaryAtMs: performance.now(),
@@ -348,12 +350,14 @@ function updateLodMetric(name, value) {
 function recordLodTiming(
   totalMs, workerMs, batchMs, batchGroupMs, batchUploadMs,
   batchRetainMs, batchBalanceMs, batchBucketMs,
-  wasmMs, gpuComputeMs, gpuWaitMs, gpuReadbackMs, applied, debug,
+  wasmMs, gpuComputeMs, gpuWaitMs, gpuReadbackMs,
+  changedFaces, lodTransferBytes, fullSnapshot, applied, debug,
 ) {
   lodTelemetry.completed += 1;
   if (applied) lodTelemetry.applied += 1;
   else lodTelemetry.empty += 1;
   if (debug?.canceled) lodTelemetry.canceled += 1;
+  if (fullSnapshot) lodTelemetry.fullSnapshots += 1;
   updateLodMetric('totalMs', totalMs);
   updateLodMetric('workerMs', workerMs);
   updateLodMetric('batchMs', batchMs);
@@ -366,6 +370,8 @@ function recordLodTiming(
   updateLodMetric('gpuComputeMs', gpuComputeMs);
   updateLodMetric('gpuWaitMs', gpuWaitMs);
   updateLodMetric('gpuReadbackMs', gpuReadbackMs);
+  updateLodMetric('changedFaces', changedFaces);
+  updateLodMetric('lodTransferBytes', lodTransferBytes);
 
   const now = performance.now();
   if (now - lodTelemetry.lastSummaryAtMs >= 10000) {
@@ -1917,7 +1923,14 @@ async function recomputeLods() {
     if (resp.lods && !remeshedMode) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       clearBatchMeasures();
-      mr_buildBatches(faceLods);
+      if (resp.indices) {
+        mr_updateBatches(
+          new Uint32Array(resp.indices.buffer || resp.indices),
+          faceLods,
+        );
+      } else {
+        mr_buildBatches(faceLods);
+      }
       batchDone = performance.now();
       batchGroupMs = consumeBatchMeasure('batch-group', 'batch-group-start', 'batch-group-end');
       batchRetainMs = consumeBatchMeasure(
@@ -1954,6 +1967,9 @@ async function recomputeLods() {
       workerPhases['lod-gpu-compute'],
       workerPhases['lod-gpu-wait'],
       workerPhases['lod-gpu-readback'],
+      wt.changed_faces,
+      (resp.lods?.byteLength || 0) + (resp.indices?.byteLength || 0),
+      !!wt.full_snapshot,
       !!resp.lods,
       resp.debug,
     );

@@ -2,6 +2,47 @@
 
 let wasm = null;
 let lodJobGeneration = 0;
+let previousLods = null;
+
+function encodeLodDelta(result) {
+  if (!(previousLods instanceof Float32Array) || previousLods.length !== result.length) {
+    previousLods = result.slice();
+    return { lods: result, indices: null, fullSnapshot: true };
+  }
+
+  const stride = 6;
+  const numFaces = result.length / stride;
+  let changedCount = 0;
+  for (let face = 0; face < numFaces; face++) {
+    const offset = face * stride;
+    for (let field = 0; field < stride; field++) {
+      if (result[offset + field] !== previousLods[offset + field]) {
+        changedCount += 1;
+        break;
+      }
+    }
+  }
+
+  const indices = new Uint32Array(changedCount);
+  const lods = new Float32Array(changedCount * stride);
+  let changed = 0;
+  for (let face = 0; face < numFaces; face++) {
+    const source = face * stride;
+    let differs = false;
+    for (let field = 0; field < stride; field++) {
+      if (result[source + field] !== previousLods[source + field]) {
+        differs = true;
+        break;
+      }
+    }
+    if (!differs) continue;
+    indices[changed] = face;
+    lods.set(result.subarray(source, source + stride), changed * stride);
+    changed += 1;
+  }
+  previousLods.set(result);
+  return { lods, indices, fullSnapshot: false };
+}
 
 self.onmessage = async function(e) {
   const { type, data, id } = e.data;
@@ -103,6 +144,7 @@ self.onmessage = async function(e) {
   if (type === 'load_gltf_data') {
     lodJobGeneration += 1;
     wasm.cancel_animated_lods();
+    previousLods = null;
     const sourceBytes = data.bytes instanceof ArrayBuffer
       ? data.bytes
       : data.bytes?.buffer;
@@ -159,6 +201,7 @@ self.onmessage = async function(e) {
   if (type === 'set_active_animation') {
     lodJobGeneration += 1;
     wasm.cancel_animated_lods();
+    previousLods = null;
     const result = wasm.set_active_animation(data.index);
     self.postMessage({ type: 'animation_switched', id, result });
     return;
@@ -186,6 +229,7 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'upload_model_to_compute') {
+    previousLods = null;
     const ok = wasm.upload_model_to_compute();
     self.postMessage({ type: 'model_uploaded_to_compute', id, ok });
     return;
@@ -261,7 +305,15 @@ self.onmessage = async function(e) {
       performance.clearMarks();
       const timing = { tess_params: wt1-wt0, wasm_total: wt2-wt1, wasm_phases: wasmMeasures };
       if (result && result.length > 0) {
-        self.postMessage({ type: 'animated_lods', id, lods: result, timing }, [result.buffer]);
+        const delta = encodeLodDelta(result);
+        timing.changed_faces = delta.indices?.length ?? (result.length / 6);
+        timing.full_snapshot = delta.fullSnapshot;
+        const transfers = [delta.lods.buffer];
+        if (delta.indices) transfers.push(delta.indices.buffer);
+        self.postMessage({
+          type: 'animated_lods', id,
+          lods: delta.lods, indices: delta.indices, timing,
+        }, transfers);
       } else {
         let gpuState = 'unknown';
         try { gpuState = wasm.debug_gpu_compute_state ? wasm.debug_gpu_compute_state() : 'no debug fn'; } catch(e) { gpuState = e.message; }
@@ -318,6 +370,7 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'clear_remesh') {
+    previousLods = null;
     wasm.clear_remeshed_data();
     self.postMessage({ type: 'remesh_cleared', id });
     return;
