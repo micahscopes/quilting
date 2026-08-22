@@ -857,6 +857,8 @@ mod tests {
         assert_focus_near(&single.focus, &expected_focus);
         assert_focus_near(&partitioned.focus, &expected_focus);
         assert_camera_near(single.camera, partitioned.camera);
+        assert!(single.diagnostics.0.is_empty());
+        assert!(partitioned.diagnostics.0.is_empty());
     }
 
     #[test]

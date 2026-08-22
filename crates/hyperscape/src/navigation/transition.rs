@@ -40,7 +40,7 @@ pub struct CameraTransition {
 
 impl CameraTransition {
     pub fn new(
-        start: CameraRig,
+        mut start: CameraRig,
         target: CameraRig,
         duration_seconds: f64,
         easing: TransitionEasing,
@@ -49,6 +49,11 @@ impl CameraTransition {
         target.validate()?;
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return Err(CameraError::InvalidTransition);
+        }
+        if target.semantic_target.is_none() {
+            // The pose is unchanged; only the representation of its sight line
+            // switches from a finite point to the orientation's tangent.
+            start.semantic_target = None;
         }
         Ok(Self {
             start,
@@ -87,9 +92,16 @@ impl CameraTransition {
                 self.target.control_distance,
                 t,
             ),
-            semantic_target: (self.start.semantic_target.is_some()
-                || self.target.semantic_target.is_some())
-            .then(|| lerp3(start_target, target_target, t)),
+            // Semantic ownership follows the destination view. A transition
+            // into free-flight must become tangent-driven immediately; keeping
+            // a finite start target can otherwise manufacture a pole when an
+            // inversion sphere moves across that point. A transition toward a
+            // semantic target acquires it smoothly from the start sight line.
+            semantic_target: self
+                .target
+                .semantic_target
+                .is_some()
+                .then(|| lerp3(start_target, target_target, t)),
             lens: super::PerspectiveLens {
                 vertical_fov_radians: self.start.lens.vertical_fov_radians
                     + (self.target.lens.vertical_fov_radians
@@ -183,5 +195,24 @@ mod tests {
         assert!((midpoint.control_distance - 6.0).abs() < 1.0e-10);
         assert!((midpoint.orientation.norm() - 1.0).abs() < 1.0e-10);
         assert_eq!(transition.sample(1.0), target);
+    }
+
+    #[test]
+    fn target_free_transition_does_not_retain_a_finite_start_target() {
+        let start = CameraRig {
+            semantic_target: Some([0.0, 0.0, 0.0]),
+            ..CameraRig::default()
+        };
+        let target = CameraRig {
+            eye: [1.0, 2.0, 4.0],
+            semantic_target: None,
+            ..CameraRig::default()
+        };
+        let transition =
+            CameraTransition::new(start, target, 1.0, TransitionEasing::Linear).unwrap();
+
+        assert_eq!(transition.sample(0.0).semantic_target, None);
+        assert_eq!(transition.sample(0.5).semantic_target, None);
+        assert_eq!(transition.sample(1.0).semantic_target, None);
     }
 }

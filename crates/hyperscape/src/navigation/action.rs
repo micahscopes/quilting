@@ -297,10 +297,13 @@ fn apply_action(
                 runtime.camera_transition = None;
                 *camera = target;
             } else {
-                runtime.camera_transition = Some(
-                    CameraTransition::new(*camera, target, duration_seconds, easing)
-                        .map_err(|error| error.to_string())?,
-                );
+                let transition = CameraTransition::new(*camera, target, duration_seconds, easing)
+                    .map_err(|error| error.to_string())?;
+                // `CameraTransition::new` may intentionally convert the start
+                // from a finite semantic target to an equivalent free tangent.
+                // Make the live state match before a same-timestamp reflection.
+                *camera = transition.start;
+                runtime.camera_transition = Some(transition);
             }
         }
         NavigationAction::AnchorFocus {
