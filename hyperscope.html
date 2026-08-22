@@ -504,6 +504,33 @@ let meshInfo = null;
 
 // --- Pick debugger: ctrl-click to inspect face ---
 const canvas = $('cv');
+let pendingCanvasSize = null;
+let canvasSizeApplied = false;
+const canvasResizeObserver = new ResizeObserver(entries => {
+  const entry = entries[entries.length - 1];
+  if (!entry) return;
+  pendingCanvasSize = [
+    Math.max(1, Math.round(entry.contentRect.width)),
+    Math.max(1, Math.round(entry.contentRect.height)),
+  ];
+});
+canvasResizeObserver.observe($('wrap'));
+
+function applyPendingCanvasSize() {
+  if (!pendingCanvasSize) return;
+  const [width, height] = pendingCanvasSize;
+  pendingCanvasSize = null;
+  const changed = canvas.width !== width || canvas.height !== height;
+  if (!changed && canvasSizeApplied) return;
+  if (changed) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  mr_resize(width, height);
+  canvasSizeApplied = true;
+  if (changed && meshInfo) debouncedLodRecompute();
+}
+
 canvas.addEventListener('click', e => {
   if (!e.ctrlKey && !e.metaKey) return;
   if (!wasmOk.peek()) return;
@@ -979,15 +1006,19 @@ $('envmap-sel').addEventListener('change', () => envMap.set($('envmap-sel').valu
 $('matcap-sel').value = matcap.peek();
 $('matcap-sel').addEventListener('change', () => matcap.set($('matcap-sel').value));
 
+let envLoadGeneration = 0;
+let envAbortController = null;
 effect(() => {
   const v = envMap.get();
   if (!wasmOk.get()) return;
+  const generation = ++envLoadGeneration;
+  if (envAbortController) envAbortController.abort();
+  envAbortController = null;
   if (v === 'procedural') {
-    const pf = generateProceduralEnvFaces(64);
-    const ir = generateProceduralEnvFaces(16);
-    mr_uploadEnvMaps(pf, 64, ir, 16);
+    uploadProceduralEnvMaps();
   } else {
-    loadEnvMap(`/envmaps/${v}.hdr`);
+    envAbortController = new AbortController();
+    loadEnvMap(`/envmaps/${v}.hdr`, generation, envAbortController.signal);
   }
   syncURL();
 });
@@ -1342,20 +1373,24 @@ function prefilterEnvMips(sourceSampler, faceSize) {
   return allData;
 }
 
-async function loadEnvMap(url) {
+async function loadEnvMap(url, generation = envLoadGeneration, signal = undefined) {
   console.log('Loading environment map:', url);
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(url, { signal });
     if (!resp.ok) { console.warn('Env map fetch failed:', url); return; }
     const buffer = await resp.arrayBuffer();
+    if (generation !== envLoadGeneration) return;
     const hdr = parseHDR(buffer);
     console.log(`HDR parsed: ${hdr.width}x${hdr.height}`);
     const sampler = (dx, dy, dz) => sampleEquirect(hdr, dx, dy, dz);
     const pf = prefilterEnvMips(sampler, 256);
     const ir = convolveIrradianceFaces(hdr, 32);
+    if (generation !== envLoadGeneration) return;
     mr_uploadEnvMaps(pf, 256, ir, 32);
     console.log('HDR env maps uploaded (prefiltered)');
-  } catch (e) { console.warn('Env map load error:', e); }
+  } catch (e) {
+    if (e.name !== 'AbortError') console.warn('Env map load error:', e);
+  }
 }
 
 // Procedural sky sampler for prefiltering
@@ -1374,17 +1409,16 @@ function proceduralSkySample(dx, dy, dz) {
   return [r, g, b];
 }
 
-function initEnvMaps() {
-  // Procedural placeholder with proper GGX prefiltering
-  const pf = prefilterEnvMips(proceduralSkySample, 64);
-  const ir = generateProceduralEnvFaces(16); // irradiance doesn't need prefiltering
-  mr_uploadEnvMaps(pf, 64, ir, 16);
-  console.log('Procedural env maps uploaded (prefiltered)');
-  // Load HDR async
-  const envName = $('envmap-sel').value;
-  if (envName !== 'procedural') {
-    loadEnvMap(`/envmaps/${envName}.hdr`);
+let proceduralEnvCache = null;
+function uploadProceduralEnvMaps() {
+  if (!proceduralEnvCache) {
+    proceduralEnvCache = {
+      prefiltered: prefilterEnvMips(proceduralSkySample, 64),
+      irradiance: generateProceduralEnvFaces(16),
+    };
   }
+  mr_uploadEnvMaps(proceduralEnvCache.prefiltered, 64, proceduralEnvCache.irradiance, 16);
+  console.log('Procedural env maps uploaded (prefiltered)');
 }
 
 // --- Animation + LOD ---
@@ -1393,6 +1427,8 @@ let lodInFlight = false;
 let lodDebounceTimer = null;
 let skinTexW = 0;
 let animInFlight = false;
+let lastAnimationUiAt = -Infinity;
+const ANIMATION_UI_INTERVAL_MS = 50;
 
 async function tickAnimation(t) {
   if (!gpuSkinned || !meshInfo || animInFlight) return;
@@ -1502,9 +1538,7 @@ async function loadModel(buffer, filename) {
 // --- Render loop ---
 function frame(ts) {
   requestAnimationFrame(frame);
-  const w = $('wrap');
-  canvas.width = w.clientWidth; canvas.height = w.clientHeight;
-  mr_resize(canvas.width, canvas.height);
+  applyPendingCanvasSize();
 
   const deltaSeconds = previousFrameTs == null ? 0 : Math.min((ts - previousFrameTs) / 1000, 0.25);
   previousFrameTs = ts;
@@ -1564,11 +1598,17 @@ function frame(ts) {
   }
 
   if (animating && gpuSkinned && meshInfo) {
-    animTime += 1/60;
-    if (meshInfo.duration > 0) animTime = animTime % meshInfo.duration;
-    // Update time slider
-    $('time').value = animTime;
-    $('time-v').textContent = animTime.toFixed(2);
+    const duration = Number(meshInfo.duration) || 0;
+    const timeMin = Number(meshInfo.time_min) || 0;
+    if (duration > 0) {
+      const offset = (animTime - timeMin + deltaSeconds) % duration;
+      animTime = timeMin + (offset < 0 ? offset + duration : offset);
+    }
+    if (ts - lastAnimationUiAt >= ANIMATION_UI_INTERVAL_MS) {
+      lastAnimationUiAt = ts;
+      $('time').value = animTime;
+      $('time-v').textContent = animTime.toFixed(2);
+    }
     tickAnimation(animTime);
   }
 
@@ -1776,11 +1816,15 @@ async function finishModelUpload(info, filename) {
 
   await workerCall('upload_model_to_compute', {});
 
-  animTime = 0;
   if (info.animations && info.animations.length > 0) {
+    const firstAnimation = info.animations[0];
+    animTime = Number(info.time_min ?? firstAnimation.t_min) || 0;
     await workerCall('set_active_animation', { index: 0 });
-    meshInfo.duration = info.animations[0].duration || 0;
+    meshInfo.time_min = animTime;
+    meshInfo.duration = firstAnimation.duration || 0;
   } else {
+    animTime = 0;
+    meshInfo.time_min = 0;
     meshInfo.duration = 0;
   }
 
@@ -1813,8 +1857,9 @@ phase('wasm', [], async () => {
   $('stats').textContent = 'Initializing renderer...';
   if (!mr_init('cv')) throw 'renderer init failed';
   applyParams(initParams); // Set signal values first
+  // Give HDR loading a usable fallback without starting the selected HDR twice.
+  if (envMap.peek() !== 'procedural') uploadProceduralEnvMaps();
   wasmOk.set(true); // THEN fire effects with correct values + WASM ready
-  initEnvMaps();
 });
 
 // Phase 2: Initialize workers (depends on wasm for shader compilation)
