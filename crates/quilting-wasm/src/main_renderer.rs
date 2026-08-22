@@ -11,8 +11,8 @@ use crate::{perf_mark, perf_measure};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
-    create_patch_input_vao, EnvironmentMaps, MeshBuffers, PbrParams, PersistentInstances,
-    TessAtlasBuffers, TessBuffers,
+    create_patch_input_vao, EnvironmentMaps, MeshBuffers, PbrParams,
+    PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
@@ -43,7 +43,7 @@ struct MainState {
     renderer: Renderer,
     texture_cache: TextureCache,
     env_maps: EnvironmentMaps,
-    batches: Vec<GpuBatch>,
+    batches: BTreeMap<batch::RenderBatchKey, GpuBatch>,
     cached_instances: Vec<f32>,
     /// Last valid topology uploaded for each face. Worker visibility is
     /// asynchronous, so an invisible sentinel must not demote a patch that the
@@ -55,7 +55,7 @@ struct MainState {
     /// Material/node/atlas changes require a rebuild even when face topology
     /// classifications are unchanged.
     batch_layout_dirty: bool,
-    persistent_buf: Option<PersistentInstances>,
+    batch_update_stats: BatchUpdateStats,
     face_materials: Vec<usize>,
     /// Stable ordinary glTF node index for each source triangle.
     face_nodes: Vec<usize>,
@@ -111,10 +111,23 @@ struct MainState {
     highlight_vao: Option<glow::VertexArray>,
 }
 
+#[derive(Default)]
+struct BatchUpdateStats {
+    calls: u64,
+    unchanged_calls: u64,
+    retained_buckets: u64,
+    updated_buckets: u64,
+    created_buckets: u64,
+    reallocated_buckets: u64,
+    retired_buckets: u64,
+    uploaded_instances: u64,
+}
+
 struct GpuBatch {
+    instances: PersistentBatchInstances,
     mesh: MeshBuffers,
     prepare_vao: glow::VertexArray,
-    instance_byte_offset: i32,
+    members: Vec<batch::RenderBatchMember>,
     perm_parity: f32,
     material_index: usize,
     node_index: usize,
@@ -128,7 +141,112 @@ impl GpuBatch {
         }
         // Both render VAOs reference the persistent prepared-instance buffer.
         self.mesh.destroy_vaos_only(gl);
+        self.instances.destroy(gl);
     }
+
+    fn can_fit(&self, instance_count: usize) -> bool {
+        instance_count
+            .checked_mul(instance_layout::STRIDE_BYTES)
+            .is_some_and(|bytes| bytes <= self.instances.capacity)
+    }
+
+    fn upload_members(
+        &mut self,
+        gl: &glow::Context,
+        members: &[batch::RenderBatchMember],
+        instance_data: &[f32],
+    ) -> Result<(), String> {
+        self.instances.upload_active(gl, instance_data)?;
+        self.mesh.num_instances = members.len() as i32;
+        self.members.clear();
+        self.members.extend_from_slice(members);
+        Ok(())
+    }
+}
+
+fn fill_batch_instance_data(
+    cached_instances: &[f32],
+    residents: &[Option<batch::ResidentLod>],
+    key: batch::RenderBatchKey,
+    members: &[batch::RenderBatchMember],
+    staging: &mut [f32],
+) -> Result<usize, String> {
+    let stride = instance_layout::STRIDE;
+    let required = members.len().checked_mul(stride)
+        .ok_or_else(|| "batch instance size overflow".to_string())?;
+    if staging.len() < required {
+        return Err("batch staging buffer is too small".to_string());
+    }
+
+    for (instance_index, member) in members.iter().enumerate() {
+        let face = member.face_index as usize;
+        let source = face.checked_mul(stride)
+            .ok_or_else(|| format!("face {face} source offset overflow"))?;
+        let source_record = cached_instances.get(source..source + stride)
+            .ok_or_else(|| format!("face {face} has no cached instance record"))?;
+        let resident = residents.get(face).and_then(|resident| *resident)
+            .ok_or_else(|| format!("face {face} has no resident LOD"))?;
+        if resident.canonical != key.lod
+            || resident.parity_bucket.min(1) as u8 != key.parity_bucket
+            || resident.perm_index.min(5) as u8 != member.permutation_index
+        {
+            return Err(format!("face {face} no longer matches its batch key"));
+        }
+
+        let destination = instance_index * stride;
+        staging[destination..destination + stride].copy_from_slice(source_record);
+        let edge_lods = resident.edge_lods().map(|lod| lod as f32);
+        let lod_offset = destination + instance_layout::offset::EDGE_LODS;
+        staging[lod_offset..lod_offset + 3].copy_from_slice(&edge_lods);
+        staging[destination + instance_layout::offset::PERM_INDEX] =
+            member.permutation_index as f32;
+        staging[destination + instance_layout::offset::FACE_ID] = member.face_index as f32;
+    }
+    Ok(required)
+}
+
+fn create_gpu_batch(
+    gl: &glow::Context,
+    tess: &TessBuffers,
+    key: batch::RenderBatchKey,
+    members: &[batch::RenderBatchMember],
+    instance_data: &[f32],
+) -> Result<GpuBatch, String> {
+    let capacity_instances = members.len().max(1).next_power_of_two();
+    let capacity_bytes = capacity_instances.checked_mul(instance_layout::STRIDE_BYTES)
+        .ok_or_else(|| "batch buffer capacity overflow".to_string())?;
+    let instances = PersistentBatchInstances::with_capacity(gl, instance_data, capacity_bytes)?;
+    let prepare_vao = match create_patch_input_vao(gl, &instances.buf, 0) {
+        Ok(vao) => vao,
+        Err(error) => {
+            instances.destroy(gl);
+            return Err(error);
+        }
+    };
+    let mesh = match MeshBuffers::from_shared(
+        gl,
+        tess,
+        &instances.prepared_buf,
+        0,
+        members.len() as i32,
+    ) {
+        Ok(mesh) => mesh,
+        Err(error) => {
+            unsafe { gl.delete_vertex_array(prepare_vao); }
+            instances.destroy(gl);
+            return Err(error);
+        }
+    };
+    Ok(GpuBatch {
+        instances,
+        mesh,
+        prepare_vao,
+        members: members.to_vec(),
+        perm_parity: key.parity(),
+        material_index: key.material_index,
+        node_index: key.node_index,
+        lod: key.lod,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -261,12 +379,12 @@ pub fn mr_init(canvas_id: &str) -> bool {
         *s.borrow_mut() = Some(MainState {
             renderer, texture_cache,
             env_maps: EnvironmentMaps::default(),
-            batches: Vec::new(),
+            batches: BTreeMap::new(),
             cached_instances: Vec::new(),
             resident_face_lods: Vec::new(),
             lod_topology: None,
             batch_layout_dirty: true,
-            persistent_buf: None,
+            batch_update_stats: BatchUpdateStats::default(),
             face_materials: Vec::new(),
             face_nodes: Vec::new(),
             materials: Vec::new(),
@@ -865,7 +983,7 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 ],
             };
 
-            for batch in &state.batches {
+            for batch in state.batches.values() {
                 let batch_camera = camera_for_node(&camera, state, batch.node_index);
                 let conformal = conformal_state_for_node(state, batch.node_index);
                 apply_batch_winding(
@@ -995,6 +1113,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.num_faces = num_faces as usize;
             st.resident_face_lods = vec![None; st.num_faces];
             st.lod_topology = build_instance_lod_topology(&st.cached_instances, st.num_faces);
+            st.batch_update_stats = BatchUpdateStats::default();
             if let Some(topology) = st.lod_topology.as_ref() {
                 info!(
                     "LOD topology: {} faces, {} boundary half-edges after exact seam welding",
@@ -1137,6 +1256,28 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
         set_number("sameMaxDensityJumps", same_max_density_jumps);
         js_sys::Reflect::set(
             &result,
+            &"activeBatches".into(),
+            &JsValue::from(state.batches.len() as f64),
+        ).ok();
+        let batch_stats = &state.batch_update_stats;
+        for (name, value) in [
+            ("batchBuildCalls", batch_stats.calls),
+            ("unchangedBatchBuildCalls", batch_stats.unchanged_calls),
+            ("retainedBatchBuckets", batch_stats.retained_buckets),
+            ("updatedBatchBuckets", batch_stats.updated_buckets),
+            ("createdBatchBuckets", batch_stats.created_buckets),
+            ("reallocatedBatchBuckets", batch_stats.reallocated_buckets),
+            ("retiredBatchBuckets", batch_stats.retired_buckets),
+            ("uploadedBatchInstances", batch_stats.uploaded_instances),
+        ] {
+            js_sys::Reflect::set(
+                &result,
+                &name.into(),
+                &JsValue::from(value as f64),
+            ).ok();
+        }
+        js_sys::Reflect::set(
+            &result,
             &"maxSameMaxAdjacentTriangleRatio".into(),
             &JsValue::from(max_adjacent_triangle_ratio),
         ).ok();
@@ -1218,7 +1359,7 @@ pub fn mr_upload_tess_atlas(
 
         // Patch VAOs retain element-buffer bindings. Invalidate them before an
         // atlas replacement so no live draw references the retired owner.
-        for batch in state.batches.drain(..) {
+        for (_, batch) in std::mem::take(&mut state.batches) {
             batch.destroy(state.renderer.gl());
         }
         state.batch_layout_dirty = true;
@@ -1478,6 +1619,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let mut state = s.borrow_mut();
         let state = match state.as_mut() { Some(s) => s, None => return };
         let gl = state.renderer.gl();
+        state.batch_update_stats.calls += 1;
 
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
         perf_mark("batch-group-start");
@@ -1539,171 +1681,137 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         });
         topology_changed |= lod_corrections != 0;
 
-        let mut buckets: BTreeMap<([u32; 3], usize, usize, usize), Vec<u32>> = BTreeMap::new();
-        for fi in 0..nf {
-            let resident = state.resident_face_lods[fi].unwrap_or(initial_resident);
-            let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
-            let node = state.face_nodes.get(fi).copied().unwrap_or(0);
-            buckets.entry((resident.canonical, resident.parity_bucket, mat, node)).or_default().push(fi as u32);
-        }
-        perf_mark("batch-group-end");
-        perf_measure("batch-group", "batch-group-start", "batch-group-end");
-
         if !topology_changed {
+            state.batch_update_stats.unchanged_calls += 1;
+            perf_mark("batch-group-end");
+            perf_measure("batch-group", "batch-group-start", "batch-group-end");
             return;
         }
 
-        perf_mark("batch-destroy-start");
-        for batch in state.batches.drain(..) {
-            batch.destroy(gl);
-        }
-        perf_mark("batch-destroy-end");
-        perf_measure("batch-destroy-old", "batch-destroy-start", "batch-destroy-end");
+        let force_upload = state.batch_layout_dirty;
+        let buckets = batch::group_resident_faces(
+            &state.resident_face_lods,
+            &state.face_materials,
+            &state.face_nodes,
+            initial_resident,
+        );
+        perf_mark("batch-group-end");
+        perf_measure("batch-group", "batch-group-start", "batch-group-end");
 
-        // Phase 2: write each batch's instance data contiguously into the persistent GPU buffer
-        // and create lightweight VAOs pointing at the right offset
+        // Phase 2: retain batches whose key and ordered (face, permutation)
+        // membership remain valid. Only changed buckets repack or upload their
+        // source streams; capacity growth rebuilds that bucket alone.
         perf_mark("batch-upload-start");
-
-        // Ensure persistent buffer is large enough
-        let total_bytes = nf * instance_layout::STRIDE * 4;
-        match state.persistent_buf {
-            Some(ref pb) => {
-                if total_bytes > pb.capacity {
-                    // Reallocate
-                    pb.destroy(gl);
-                    state.persistent_buf = None;
-                }
-            }
-            None => {}
-        }
-        if state.persistent_buf.is_none() {
-            let dummy = vec![0.0f32; nf * instance_layout::STRIDE];
-            match PersistentInstances::new(gl, &dummy) {
-                Ok(pb) => state.persistent_buf = Some(pb),
-                Err(e) => { info!("Failed to create persistent buf: {e}"); return; }
-            }
-        }
-        let pb = state.persistent_buf.as_ref().unwrap();
-
-        // Stream each batch's instance data into contiguous regions of the GPU buffer
-        let mut gpu_offset: usize = 0; // current write position in floats
-        let mut built = 0;
+        let mut previous_batches = std::mem::take(&mut state.batches);
+        let mut next_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();
+        let mut retained = 0usize;
+        let mut updated = 0usize;
+        let mut created = 0usize;
+        let mut reallocated = 0usize;
+        let mut retired = 0usize;
+        let mut uploaded_instances = 0usize;
         let mut missing = 0;
         let mut failed = 0;
         let stride = instance_layout::STRIDE;
 
-        // Pre-allocate a batch-sized CPU staging buffer (reused across batches)
+        // One reusable CPU scratch allocation serves only buckets whose
+        // membership actually changed.
         let max_batch_size = buckets.values().map(Vec::len).max().unwrap_or(0);
         let mut staging = vec![0.0f32; max_batch_size * stride];
 
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
-            for (&([ca, cb, cc], parity_bucket, mat, node_index), faces) in &buckets {
-                let parity = if parity_bucket == 0 { 1.0 } else { -1.0 };
-                let tess = match tc.get(&[ca, cb, cc]) {
+            for (&key, members) in &buckets {
+                let tess = match tc.get(&key.lod) {
                     Some(t) => t,
                     None => { missing += 1; continue; }
                 };
-
-                // Gather this batch's instance data into staging buffer
-                let batch_floats = faces.len() * stride;
-                for (i, &fi) in faces.iter().enumerate() {
-                    let src = fi as usize * stride;
-                    let dst = i * stride;
-                    staging[dst..dst + stride]
-                        .copy_from_slice(&state.cached_instances[src..src + stride]);
-
-                    // The cached instance contains the load-time identity-Mobius
-                    // edge LODs. Refresh them from this computation so density
-                    // visualization follows camera and conformal LOD changes.
-                    let resident = state.resident_face_lods[fi as usize]
-                        .unwrap_or(initial_resident);
-                    let canonical = resident.canonical.map(|lod| lod as f32);
-                    let perm = resident.perm_index;
-                    let permutation = quilting_core::permutation::S3_PERMUTATIONS[perm];
-                    let instance_lod_offset = dst + instance_layout::offset::EDGE_LODS;
-                    staging[instance_lod_offset..instance_lod_offset + 3].copy_from_slice(&[
-                        canonical[permutation[0]],
-                        canonical[permutation[1]],
-                        canonical[permutation[2]],
-                    ]);
-                    staging[dst + instance_layout::offset::PERM_INDEX] = perm as f32;
-                    staging[dst + instance_layout::offset::FACE_ID] = fi as f32;
+                let previous = previous_batches.remove(&key);
+                let membership_changed = previous.as_ref()
+                    .is_none_or(|batch| batch.members != *members);
+                if !force_upload && !membership_changed {
+                    retained += 1;
+                    next_batches.insert(key, previous.unwrap());
+                    continue;
                 }
 
-                // Upload this batch's data to the GPU at the current offset
-                let byte_offset = gpu_offset * 4;
-                unsafe {
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(pb.buf));
-                    gl.buffer_sub_data_u8_slice(
-                        glow::ARRAY_BUFFER,
-                        byte_offset as i32,
-                        bytemuck_cast_slice(&staging[..batch_floats]),
-                    );
-                    // Until the first preparation pass, retain a valid source
-                    // record with prepared=0 so every consumer has a safe
-                    // correctness fallback.
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(pb.prepared_buf));
-                    gl.buffer_sub_data_u8_slice(
-                        glow::ARRAY_BUFFER,
-                        byte_offset as i32,
-                        bytemuck_cast_slice(&staging[..batch_floats]),
-                    );
-                }
-
-                // Preparation reads immutable source records. Render and pick
-                // consume the matching GPU-prepared range.
-                let prepare_vao = match create_patch_input_vao(
-                    gl,
-                    &pb.buf,
-                    byte_offset as i32,
+                let batch_floats = match fill_batch_instance_data(
+                    &state.cached_instances,
+                    &state.resident_face_lods,
+                    key,
+                    members,
+                    &mut staging,
                 ) {
-                    Ok(vao) => vao,
+                    Ok(floats) => floats,
                     Err(error) => {
-                        warn!("Failed to create patch preparation VAO: {error}");
+                        warn!("Failed to pack retained batch {:?}: {error}", key);
+                        if let Some(batch) = previous { batch.destroy(gl); retired += 1; }
                         failed += 1;
                         continue;
                     }
                 };
-                let mesh = match MeshBuffers::from_shared(
-                    gl,
-                    tess,
-                    &pb.prepared_buf,
-                    byte_offset as i32,
-                    faces.len() as i32,
-                ) {
-                    Ok(mesh) => mesh,
-                    Err(error) => {
-                        unsafe { gl.delete_vertex_array(prepare_vao); }
-                        warn!("Failed to create prepared-patch render VAOs: {error}");
-                        failed += 1;
+                let instance_data = &staging[..batch_floats];
+
+                if let Some(mut gpu_batch) = previous {
+                    if gpu_batch.can_fit(members.len()) {
+                        match gpu_batch.upload_members(gl, members, instance_data) {
+                            Ok(()) => {
+                                updated += 1;
+                                uploaded_instances += members.len();
+                                next_batches.insert(key, gpu_batch);
+                            }
+                            Err(error) => {
+                                warn!("Failed to update retained batch {:?}: {error}", key);
+                                gpu_batch.destroy(gl);
+                                retired += 1;
+                                failed += 1;
+                            }
+                        }
                         continue;
                     }
-                };
+                    gpu_batch.destroy(gl);
+                    retired += 1;
+                    reallocated += 1;
+                }
 
-                state.batches.push(GpuBatch {
-                    mesh,
-                    prepare_vao,
-                    instance_byte_offset: byte_offset as i32,
-                    perm_parity: parity,
-                    material_index: mat, node_index, lod: [ca, cb, cc],
-                });
-                built += 1;
-                gpu_offset += batch_floats;
+                match create_gpu_batch(gl, tess, key, members, instance_data) {
+                    Ok(gpu_batch) => {
+                        created += 1;
+                        uploaded_instances += members.len();
+                        next_batches.insert(key, gpu_batch);
+                    }
+                    Err(error) => {
+                        warn!("Failed to create retained batch {:?}: {error}", key);
+                        failed += 1;
+                    }
+                }
             }
         });
+
+        for (_, batch) in previous_batches {
+            batch.destroy(gl);
+            retired += 1;
+        }
+        state.batches = next_batches;
+        state.batch_update_stats.retained_buckets += retained as u64;
+        state.batch_update_stats.updated_buckets += updated as u64;
+        state.batch_update_stats.created_buckets += created as u64;
+        state.batch_update_stats.reallocated_buckets += reallocated as u64;
+        state.batch_update_stats.retired_buckets += retired as u64;
+        state.batch_update_stats.uploaded_instances += uploaded_instances as u64;
         perf_mark("batch-upload-end");
         perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
 
         let mut mat_counts = BTreeMap::new();
         let mut node_counts = BTreeMap::new();
-        for b in &state.batches {
+        for b in state.batches.values() {
             *mat_counts.entry(b.material_index).or_insert(0usize) += b.mesh.num_instances as usize;
             *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
         info!(
-            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} resident LOD balance corrections, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
-            built, culled, lod_corrections, missing, failed, mat_counts, node_counts
+            "Updated {} GPU batches ({} unchanged, {} uploaded in place, {} created, {} capacity reallocations, {} retired; {} CPU-culled faces retained for current-pose GPU culling, {} resident LOD balance corrections, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
+            state.batches.len(), retained, updated, created, reallocated, retired,
+            culled, lod_corrections, missing, failed, mat_counts, node_counts
         );
         state.batch_layout_dirty = missing != 0 || failed != 0;
     });
@@ -1749,7 +1857,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             ],
         };
 
-        let render_batches: Vec<RenderBatch> = state.batches.iter().map(|b| {
+        let render_batches: Vec<RenderBatch> = state.batches.values().map(|b| {
             let conformal = conformal_state_for_node(state, b.node_index);
             let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
             RenderBatch {
@@ -1770,20 +1878,18 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         // Deform and classify each patch once. Every subsequent material,
         // wire, normal, and pick draw consumes these prepared records without
         // CPU visibility readback or repeated position skinning.
-        if let Some(prepared_buffer) = state.persistent_buf.as_ref().map(|pb| pb.prepared_buf) {
-            perf_mark("patch-prepare-start");
-            for (gpu_batch, render_batch) in state.batches.iter().zip(&render_batches) {
-                state.renderer.prepare_patch_batch(
-                    &camera,
-                    render_batch,
-                    gpu_batch.prepare_vao,
-                    prepared_buffer,
-                    gpu_batch.instance_byte_offset,
-                );
-            }
-            perf_mark("patch-prepare-end");
-            perf_measure("patch-prepare", "patch-prepare-start", "patch-prepare-end");
+        perf_mark("patch-prepare-start");
+        for (gpu_batch, render_batch) in state.batches.values().zip(&render_batches) {
+            state.renderer.prepare_patch_batch(
+                &camera,
+                render_batch,
+                gpu_batch.prepare_vao,
+                gpu_batch.instances.prepared_buf,
+                0,
+            );
         }
+        perf_mark("patch-prepare-end");
+        perf_measure("patch-prepare", "patch-prepare-start", "patch-prepare-end");
 
         // Mode-specific UBO setup
         let has_env = state.env_maps.prefiltered.is_some();
@@ -2374,7 +2480,7 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
         gl.disable(glow::BLEND);
         gl.use_program(Some(state.renderer.programs().pick));
 
-        for batch in &state.batches {
+        for batch in state.batches.values() {
             let batch_camera = camera_for_node(camera, state, batch.node_index);
             let conformal = conformal_state_for_node(state, batch.node_index);
             apply_batch_winding(

@@ -367,22 +367,35 @@ pub fn create_patch_input_vao(
     }
 }
 
-/// Persistent source and prepared GPU records for every resident patch.
-/// Batches are contiguous ranges in both buffers. The source is updated only
-/// when batching changes; the GPU rewrites the prepared buffer every frame.
-pub struct PersistentInstances {
+/// Persistent source and prepared GPU records owned by one logical batch.
+/// Membership changes update only the active prefix; the GPU rewrites that
+/// prefix with current-pose records every frame.
+pub struct PersistentBatchInstances {
     pub buf: glow::Buffer,
     pub prepared_buf: glow::Buffer,
     pub capacity: usize, // in bytes
 }
 
-impl PersistentInstances {
-    pub fn new(gl: &glow::Context, data: &[f32]) -> Result<Self, String> {
+impl PersistentBatchInstances {
+    /// Allocate reusable source/prepared streams with explicit byte capacity.
+    /// The active prefix is initialized in both buffers so picking and other
+    /// consumers have a correct fallback before the next preparation pass.
+    pub fn with_capacity(
+        gl: &glow::Context,
+        data: &[f32],
+        capacity: usize,
+    ) -> Result<Self, String> {
         unsafe {
+            let bytes = bytemuck_cast_slice(data);
+            let capacity = capacity.max(bytes.len());
+            let capacity_i32 = i32::try_from(capacity)
+                .map_err(|_| format!("instance buffer capacity {capacity} exceeds WebGL limits"))?;
             let buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(buf));
-            let bytes = bytemuck_cast_slice(data);
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+            gl.buffer_data_size(glow::ARRAY_BUFFER, capacity_i32, glow::DYNAMIC_DRAW);
+            if !bytes.is_empty() {
+                gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+            }
 
             let prepared_buf = gl.create_buffer().map_err(|error| {
                 gl.delete_buffer(buf);
@@ -391,38 +404,34 @@ impl PersistentInstances {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(prepared_buf));
             // Seed with source-format records so the render shader's explicit
             // unprepared fallback remains valid before the first GPU pass.
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_COPY);
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            Ok(Self { buf, prepared_buf, capacity: bytes.len() })
-        }
-    }
-
-    /// Re-upload the entire sorted buffer.
-    pub fn upload(&self, gl: &glow::Context, data: &[f32]) {
-        unsafe {
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buf));
-            let bytes = bytemuck_cast_slice(data);
-            if bytes.len() <= self.capacity {
+            gl.buffer_data_size(glow::ARRAY_BUFFER, capacity_i32, glow::DYNAMIC_COPY);
+            if !bytes.is_empty() {
                 gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
-            } else {
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
             }
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            Ok(Self { buf, prepared_buf, capacity })
         }
     }
 
-    /// Bind instance attributes at a byte offset into this buffer.
-    /// Call before each batch's draw call.
-    pub fn bind_at_offset(&self, gl: &glow::Context, byte_offset: i32) {
+    /// Refresh the active prefix of a retained batch without reallocating its
+    /// buffers or VAOs. Both streams receive the source-format fallback; the
+    /// current-pose preparation pass overwrites the prepared prefix each frame.
+    pub fn upload_active(&self, gl: &glow::Context, data: &[f32]) -> Result<(), String> {
+        let bytes = bytemuck_cast_slice(data);
+        if bytes.len() > self.capacity {
+            return Err(format!(
+                "instance upload {} exceeds retained capacity {}",
+                bytes.len(), self.capacity,
+            ));
+        }
         unsafe {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buf));
-            for &(loc, attr_offset) in &COMPACT_MAP {
-                gl.vertex_attrib_pointer_f32(
-                    loc, 4, glow::FLOAT, false,
-                    INSTANCE_STRIDE_BYTES,
-                    byte_offset + attr_offset,
-                );
-            }
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.prepared_buf));
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
         }
+        Ok(())
     }
 
     pub fn destroy(&self, gl: &glow::Context) {

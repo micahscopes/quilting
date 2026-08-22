@@ -4,6 +4,7 @@
 //! (atlas 0-255 × two winding parities × materials) and small enough for a flat Vec.
 
 use quilting_mesh::HalfEdgeMesh;
+use std::collections::BTreeMap;
 
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
 /// which is the normative definition — do not restate the number here.
@@ -71,6 +72,72 @@ impl ResidentLod {
             parity_bucket: usize::from(payload[4] < 0.0),
         })
     }
+}
+
+/// Backend-neutral identity of one hardware draw/compaction bucket.
+///
+/// WebGL2 uses this key to retain per-bucket attribute buffers and VAOs.
+/// A future WebGPU compute pass can emit the same key beside compacted face
+/// indices before indirect draw generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RenderBatchKey {
+    pub lod: [u32; 3],
+    pub parity_bucket: u8,
+    pub material_index: usize,
+    pub node_index: usize,
+}
+
+impl RenderBatchKey {
+    pub fn from_resident(
+        resident: ResidentLod,
+        material_index: usize,
+        node_index: usize,
+    ) -> Self {
+        Self {
+            lod: resident.canonical,
+            parity_bucket: resident.parity_bucket.min(1) as u8,
+            material_index,
+            node_index,
+        }
+    }
+
+    pub fn parity(self) -> f32 {
+        if self.parity_bucket == 0 { 1.0 } else { -1.0 }
+    }
+}
+
+/// Minimal per-face record needed to detect whether a retained batch's source
+/// instance stream is still valid. Canonical LOD, parity, material, and node
+/// are already represented by [`RenderBatchKey`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderBatchMember {
+    pub face_index: u32,
+    pub permutation_index: u8,
+}
+
+/// Deterministically group resident faces into backend-neutral draw buckets.
+/// Faces are visited in source order, so equal memberships compare byte-for-
+/// byte across LOD updates without sorting or hashing each bucket afterward.
+pub fn group_resident_faces(
+    residents: &[Option<ResidentLod>],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    initial: ResidentLod,
+) -> BTreeMap<RenderBatchKey, Vec<RenderBatchMember>> {
+    let mut groups = BTreeMap::<RenderBatchKey, Vec<RenderBatchMember>>::new();
+    for (face_index, resident) in residents.iter().enumerate() {
+        let resident = resident.unwrap_or(initial);
+        let key = RenderBatchKey::from_resident(
+            resident,
+            face_materials.get(face_index).copied().unwrap_or(0),
+            face_nodes.get(face_index).copied().unwrap_or(0),
+        );
+        groups.entry(key).or_default().push(RenderBatchMember {
+            face_index: face_index as u32,
+            permutation_index: resident.perm_index.min(5) as u8,
+        });
+    }
+    groups
 }
 
 /// Update a face's resident topology from a visible payload, or retain its
@@ -418,6 +485,43 @@ mod tests {
             resident,
         );
         assert_eq!(stored, Some(resident));
+    }
+
+    #[test]
+    fn resident_groups_have_stable_backend_neutral_membership() {
+        let residents = [
+            Some(ResidentLod::from_edge_lods([2, 4, 8])),
+            Some(ResidentLod::from_edge_lods([8, 2, 4])),
+            Some(ResidentLod::uniform(4)),
+        ];
+        let groups = group_resident_faces(
+            &residents,
+            &[3, 3, 7],
+            &[11, 11, 12],
+            ResidentLod::uniform(1),
+        );
+
+        assert_eq!(groups.len(), 2);
+        let anisotropic = groups.iter()
+            .find(|(key, _)| key.lod == [2, 4, 8])
+            .unwrap();
+        assert_eq!(anisotropic.0.material_index, 3);
+        assert_eq!(anisotropic.0.node_index, 11);
+        assert_eq!(anisotropic.1.iter().map(|member| member.face_index).collect::<Vec<_>>(), vec![0, 1]);
+        assert_ne!(anisotropic.1[0].permutation_index, anisotropic.1[1].permutation_index);
+    }
+
+    #[test]
+    fn resident_group_membership_detects_even_permutation_changes() {
+        let a = ResidentLod::from_edge_lods([2, 4, 8]);
+        let b = ResidentLod::from_edge_lods([8, 2, 4]);
+        assert_eq!(a.canonical, b.canonical);
+        assert_eq!(a.parity_bucket, b.parity_bucket);
+
+        let first = group_resident_faces(&[Some(a)], &[0], &[0], ResidentLod::uniform(1));
+        let second = group_resident_faces(&[Some(b)], &[0], &[0], ResidentLod::uniform(1));
+        assert_eq!(first.keys().next(), second.keys().next());
+        assert_ne!(first.values().next(), second.values().next());
     }
 
     #[test]
