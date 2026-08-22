@@ -332,6 +332,21 @@ mod tests {
     }
 
     #[test]
+    fn current_pose_culling_precedes_surface_evaluation() {
+        let source = include_str!("../../quilting-shaders/shaders/vertex/main.wgsl");
+        let cull = source.find("if patch_outside_frustum(sp0.yzw, sp1.yzw, sp2.yzw)")
+            .expect("vertex shader must cull from current posed control points");
+        let evaluate = source[cull..].find("eval_mobius_qb(")
+            .expect("QB evaluation must follow current-pose culling");
+        assert!(evaluate > 0);
+        assert_eq!(
+            quilting_core::instance_layout::CONSTANT_WEIGHT_LOCATIONS,
+            [4, 5, 6],
+            "the flat-patch image bound must be upgraded when curved QB weights become resident",
+        );
+    }
+
+    #[test]
     fn affine_model_normal_and_orientation_are_explicit() {
         let model = [
             2.0, 0.0, 0.0, 0.0,

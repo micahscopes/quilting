@@ -183,6 +183,91 @@ struct VertexOutput {
     @location(12) mobius_stretch: f32,
 }
 
+fn culled_vertex_output() -> VertexOutput {
+    return VertexOutput(
+        vec4<f32>(2.0, 2.0, 2.0, 1.0),
+        vec3<f32>(0.0),
+        0.0,
+        vec2<f32>(0.0),
+        vec3<f32>(0.0),
+        vec3<f32>(0.0),
+        vec3<f32>(0.0),
+        vec3<f32>(0.0),
+        vec3<f32>(0.0),
+        vec3<f32>(0.0),
+        0.0,
+        vec3<f32>(0.0),
+        0.0,
+        0.5,
+    );
+}
+
+fn finite_vec3(value: vec3<f32>) -> bool {
+    // Comparisons with NaN are false; infinities exceed the finite guard.
+    return all(abs(value) < vec3<f32>(1e30));
+}
+
+fn mobius_point(p: vec3<f32>) -> vec3<f32> {
+    let q = vec4<f32>(0.0, p);
+    return qmul(qmul(u.mob_a, q) + u.mob_b, qinv(qmul(u.mob_c, q) + u.mob_d)).yzw;
+}
+
+// Return true only when a world-space ball lies wholly outside one homogeneous
+// clip plane. Invalid bounds survive, preserving conservative visibility.
+fn sphere_outside_frustum(center: vec3<f32>, radius: f32) -> bool {
+    if !finite_vec3(center) || !(radius >= 0.0 && radius < 1e30) {
+        return false;
+    }
+    let clip = u.mvp * vec4<f32>(center, 1.0);
+    let r0 = vec3<f32>(u.mvp[0][0], u.mvp[1][0], u.mvp[2][0]);
+    let r1 = vec3<f32>(u.mvp[0][1], u.mvp[1][1], u.mvp[2][1]);
+    let r2 = vec3<f32>(u.mvp[0][2], u.mvp[1][2], u.mvp[2][2]);
+    let r3 = vec3<f32>(u.mvp[0][3], u.mvp[1][3], u.mvp[2][3]);
+    return clip.w + clip.x < -radius * length(r3 + r0)
+        || clip.w - clip.x < -radius * length(r3 - r0)
+        || clip.w + clip.y < -radius * length(r3 + r1)
+        || clip.w - clip.y < -radius * length(r3 - r1)
+        || clip.w + clip.z < -radius * length(r3 + r2)
+        || clip.w - clip.z < -radius * length(r3 - r2);
+}
+
+// Conservative bound on the complete Möbius image of this flat QB patch.
+// A source ball maps to a ball when the pole is outside it. Pole-containing,
+// singular, and non-finite cases deliberately survive. Genuine curved QB
+// weights must extend this bound when they replace today's identity weights.
+fn patch_outside_frustum(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>) -> bool {
+    let center = (p0 + p1 + p2) / 3.0;
+    let source_radius = sqrt(max(
+        dot(p0 - center, p0 - center),
+        max(dot(p1 - center, p1 - center), dot(p2 - center, p2 - center)),
+    ));
+    var direction = vec3<f32>(1.0, 0.0, 0.0);
+    let c_norm_sq = dot(u.mob_c, u.mob_c);
+    if c_norm_sq > 1e-20 {
+        let pole = -qmul(qinv(u.mob_c), u.mob_d);
+        let delta = center - pole.yzw;
+        let pole_distance_sq = pole.x * pole.x + dot(delta, delta);
+        let guarded_radius = 1.05 * source_radius;
+        if pole_distance_sq <= guarded_radius * guarded_radius {
+            return false;
+        }
+        let delta_len = length(delta);
+        if delta_len <= 1e-20 {
+            return false;
+        }
+        direction = delta / delta_len;
+    }
+
+    let plus = mobius_point(center + source_radius * direction);
+    let minus = mobius_point(center - source_radius * direction);
+    if !finite_vec3(plus) || !finite_vec3(minus) {
+        return false;
+    }
+    let image_center = 0.5 * (plus + minus);
+    let image_radius = 0.5 * distance(plus, minus) * 1.05 + 1e-6;
+    return sphere_outside_frustum(image_center, image_radius);
+}
+
 // S3 permutation remapping: reorder bary coords so one tessellation
 // buffer can serve all 6 permutations of a canonical LOD triple.
 fn perm_bary(b: vec3<f32>, p: i32) -> vec3<f32> {
@@ -315,6 +400,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     sp0 = vec4<f32>(0.0, (u.model * vec4<f32>(sp0.yzw, 1.0)).xyz);
     sp1 = vec4<f32>(0.0, (u.model * vec4<f32>(sp1.yzw, 1.0)).xyz);
     sp2 = vec4<f32>(0.0, (u.model * vec4<f32>(sp2.yzw, 1.0)).xyz);
+
+    // Always classify from the current GPU pose. CPU/worker classifications
+    // are allowed to choose LoD, but never to make an animated patch impossible
+    // to resurrect. The future preparation pass will compute this once per
+    // patch; this direct path remains the correctness-preserving fallback.
+    if patch_outside_frustum(sp0.yzw, sp1.yzw, sp2.yzw) {
+        return culled_vertex_output();
+    }
 
     if u.use_qb == 1 {
         let result = eval_mobius_qb(

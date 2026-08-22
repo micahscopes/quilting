@@ -1277,11 +1277,18 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         for fi in 0..nf {
             let lo = fi * batch::FACE_LOD_STRIDE;
             if lo + 5 >= face_lods.len() { break; }
-            if !batch::face_is_visible(face_lods, fi) {
+            let cpu_visible = batch::face_is_visible(face_lods, fi);
+            if !cpu_visible {
                 culled += 1;
-                continue;
             }
-            let atlas_idx = face_lods[lo + 5] as usize;
+            // Keep CPU-culled faces resident at their emitted [1,1,1] fallback.
+            // The render shader classifies the current GPU animation pose and
+            // can therefore resurrect a patch without a CPU readback/rebuild.
+            let atlas_idx = if cpu_visible {
+                face_lods[lo + 5] as usize
+            } else {
+                usize::MAX
+            };
             let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
             let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
             let node = state.face_nodes.get(fi).copied().unwrap_or(0);
@@ -1327,12 +1334,23 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
-            for (&(_atlas_idx, parity_bucket, mat, node_index), faces) in &buckets {
+            let fallback_lod = tc.keys().min_by_key(|lod| {
+                (
+                    lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]),
+                    lod[0], lod[1], lod[2],
+                )
+            }).copied();
+            for (&(atlas_bucket, parity_bucket, mat, node_index), faces) in &buckets {
                 let fi0 = faces[0] as usize;
                 let lo = fi0 * batch::FACE_LOD_STRIDE;
-                let ca = face_lods[lo] as u32;
-                let cb = face_lods[lo + 1] as u32;
-                let cc = face_lods[lo + 2] as u32;
+                let [ca, cb, cc] = if atlas_bucket == usize::MAX {
+                    match fallback_lod {
+                        Some(lod) => lod,
+                        None => { missing += 1; continue; }
+                    }
+                } else {
+                    [face_lods[lo] as u32, face_lods[lo + 1] as u32, face_lods[lo + 2] as u32]
+                };
                 let parity = if parity_bucket == 0 { 1.0 } else { -1.0 };
                 let tess = match tc.get(&[ca, cb, cc]) {
                     Some(t) => t,
@@ -1351,12 +1369,21 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                     // edge LODs. Refresh them from this computation so density
                     // visualization follows camera and conformal LOD changes.
                     let lod_offset = fi as usize * batch::FACE_LOD_STRIDE;
-                    let canonical = [
-                        face_lods[lod_offset],
-                        face_lods[lod_offset + 1],
-                        face_lods[lod_offset + 2],
-                    ];
-                    let perm = face_lods[lod_offset + 3].round().clamp(0.0, 5.0) as usize;
+                    let retained_for_gpu_cull = atlas_bucket == usize::MAX;
+                    let canonical = if retained_for_gpu_cull {
+                        [ca as f32, cb as f32, cc as f32]
+                    } else {
+                        [
+                            face_lods[lod_offset],
+                            face_lods[lod_offset + 1],
+                            face_lods[lod_offset + 2],
+                        ]
+                    };
+                    let perm = if retained_for_gpu_cull {
+                        0
+                    } else {
+                        face_lods[lod_offset + 3].round().clamp(0.0, 5.0) as usize
+                    };
                     let permutation = quilting_core::permutation::S3_PERMUTATIONS[perm];
                     let instance_lod_offset = dst + instance_layout::offset::EDGE_LODS;
                     staging[instance_lod_offset..instance_lod_offset + 3].copy_from_slice(&[
@@ -1404,7 +1431,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
         info!(
-            "Built {} GPU batches ({} faces culled, {} atlas entries missing), material→faces: {:?}, node→faces: {:?}",
+            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} atlas entries missing), material→faces: {:?}, node→faces: {:?}",
             built, culled, missing, mat_counts, node_counts
         );
     });
