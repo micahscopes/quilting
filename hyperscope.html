@@ -285,7 +285,8 @@ import init, {
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
-  mr_setMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
+  mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
+  mr_setPresentationNodeStates,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
   required_tessellation_atlas_triples,
@@ -1214,10 +1215,15 @@ let rustPresentationLastLodAt = 0;
 const rustPresentationDiagnostics = {
   enabled: RUST_PRESENTATION_ENABLED,
   ready: false,
+  assetsReady: false,
+  assetPreflight: [],
   activeCue: null,
   desiredAssets: [],
   desiredLayers: [],
   multiAssetRendererPending: false,
+  residentAssets: [],
+  packedFaces: 0,
+  opacityOverridesPending: false,
   navigation: null,
   error: null,
 };
@@ -1262,6 +1268,85 @@ function renderRustPresentationSnapshot(snapshot) {
   rustPresentationDiagnostics.desiredAssets = assets;
   rustPresentationDiagnostics.desiredLayers = layers;
   rustPresentationDiagnostics.multiAssetRendererPending = layers.length > 1;
+  applyPresentationLayerState(snapshot);
+}
+
+function presentationLayerMatrix(transform = {}) {
+  const translation = transform.translation || [0, 0, 0];
+  const scale = transform.scale || [1, 1, 1];
+  const rotation = transform.rotation || [1, 0, 0, 0];
+  let [w, x, y, z] = rotation.map(Number);
+  const norm = Math.hypot(w, x, y, z) || 1;
+  w /= norm; x /= norm; y /= norm; z /= norm;
+  const xx = x * x, yy = y * y, zz = z * z;
+  const xy = x * y, xz = x * z, yz = y * z;
+  const wx = w * x, wy = w * y, wz = w * z;
+  const sx = Number(scale[0]), sy = Number(scale[1]), sz = Number(scale[2]);
+  return [
+    (1 - 2 * (yy + zz)) * sx, 2 * (xy + wz) * sx, 2 * (xz - wy) * sx, 0,
+    2 * (xy - wz) * sy, (1 - 2 * (xx + zz)) * sy, 2 * (yz + wx) * sy, 0,
+    2 * (xz + wy) * sz, 2 * (yz - wx) * sz, (1 - 2 * (xx + yy)) * sz, 0,
+    Number(translation[0]), Number(translation[1]), Number(translation[2]), 1,
+  ];
+}
+
+function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
+  if (!RUST_PRESENTATION_ENABLED || !snapshot) return false;
+  if (!presentationComposition.ready) {
+    rustPresentationDiagnostics.multiAssetRendererPending = (snapshot.layers || []).length > 1;
+    return false;
+  }
+  const activeLayers = new Map((snapshot.layers || []).map(layer => [layer.asset, layer]));
+  const renderRecords = [];
+  const lodRecords = [];
+  const identityMobius = [
+    1, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 1, 0, 0, 0,
+  ];
+  const mobius = Array.from(currentMobius || identityMobius);
+  let opacityPending = false;
+  for (const [assetId, resident] of presentationComposition.assets) {
+    const layer = activeLayers.get(assetId);
+    const visible = !!layer?.visible;
+    const opacity = visible ? Math.max(0, Math.min(1, Number(layer.opacity) || 0)) : 0;
+    const matrix = presentationLayerMatrix(layer?.transform);
+    opacityPending ||= opacity > 0 && opacity < 1;
+    for (const node of resident.nodes) {
+      const nodeVisible = visible && !resident.hiddenNodes?.has(node);
+      renderRecords.push(node, nodeVisible ? 1 : 0, nodeVisible ? opacity : 0, ...matrix);
+      if (assetId === presentationComposition.primaryAssetId) {
+        lodRecords.push(node, ...mobius, ...matrix);
+      }
+    }
+  }
+  const applied = mr_setPresentationNodeStates(new Float32Array(renderRecords));
+  if (!applied) {
+    rustPresentationDiagnostics.error = 'renderer rejected presentation node state';
+    return false;
+  }
+  authoredLodStates = lodRecords;
+  authoredLodPending = true;
+  authoredLodReasons.add('presentation-layer');
+  rustPresentationDiagnostics.opacityOverridesPending = opacityPending;
+  rustPresentationDiagnostics.multiAssetRendererPending = false;
+  rustPresentationDiagnostics.activeLayers = Array.from(activeLayers.keys());
+  $('presentation-adapter-status').textContent =
+    `${presentationComposition.assets.size} resident assets · `
+    + `${presentationComposition.totalFaces} packed faces`
+    + (opacityPending ? ' · opacity adapter pending' : '');
+  const overlays = new Set(snapshot.overlays || []);
+  if (overlays.has('lod')) renderMode.set('lod');
+  else if (overlays.has('patch_boundaries')) renderMode.set('both');
+  else renderMode.set('pbr');
+  const authoredLayerResident = Array.from(presentationComposition.assets.entries())
+    .some(([assetId, resident]) => assetId !== presentationComposition.primaryAssetId
+      && activeLayers.get(assetId)?.visible && resident.nodes.length > 0);
+  if (authoredLayerResident && !hyperscapeActive) {
+    $('hyperscape-diagnostics').textContent =
+      'Hyperscape: authored presentation geometry resident · ECS sync pending';
+  }
+  debouncedLodRecompute();
+  return true;
 }
 
 function applyRustPresentationNavigation(snapshot) {
@@ -1420,6 +1505,8 @@ async function compileRuntimeWasm() {
 // the canonical atlas. The reachable 2:1 atlas is three cheap subdivision
 // chains, so extra full-runtime helpers cost more to initialize than they save.
 const ATLAS_WORKERS = 1;
+const PRESENTATION_WORKER_INDEX = RUST_PRESENTATION_ENABLED ? ATLAS_WORKERS : -1;
+const WORKER_COUNT = ATLAS_WORKERS + (RUST_PRESENTATION_ENABLED ? 1 : 0);
 const workers = [];
 const pending = new Map();
 let msgId = 0;
@@ -1434,7 +1521,7 @@ function spawnWorker() {
   };
   workers.push({ worker: w, busy: false });
 }
-for (let i = 0; i < ATLAS_WORKERS; i++) spawnWorker();
+for (let i = 0; i < WORKER_COUNT; i++) spawnWorker();
 
 function workerCallN(i, type, data, transfer) {
   const id = ++msgId;
@@ -1445,7 +1532,9 @@ function workerCallN(i, type, data, transfer) {
 }
 const workerCall = (type, data, transfer) => workerCallN(0, type, data, transfer);
 async function broadcastCall(type, data) {
-  return (await Promise.all(workers.map((_, i) => workerCallN(i, type, data))))[0];
+  return (await Promise.all(
+    workers.slice(0, ATLAS_WORKERS).map((_, i) => workerCallN(i, type, data)),
+  ))[0];
 }
 // --- Model state ---
 let gpuSkinned = false;
@@ -1455,6 +1544,17 @@ let currentInstances = null;
 let currentFaceNodes = new Int32Array(0);
 let modelFaceNodes = new Int32Array(0);
 let modelFaceMaterials = new Int32Array(0);
+let currentInitialFaceLods = new Float32Array(0);
+let currentSkinData = null;
+let currentMaterialCount = 0;
+let currentTextureCount = 0;
+let currentPrimaryFaceCount = 0;
+const presentationComposition = {
+  ready: false,
+  assets: new Map(),
+  primaryAssetId: null,
+  totalFaces: 0,
+};
 let nodeFocusRecords = new Map();
 let selectedObject = null;
 let cameraFocusTransition = null;
@@ -2342,7 +2442,11 @@ effect(() => {
     $('hyperscape-diagnostics').textContent = 'Hyperscape: manual Möbius override';
   }
   mr_setMobius(flat);
-  debouncedLodRecompute();
+  if (presentationComposition.ready && rustPresentationSnapshot) {
+    applyPresentationLayerState(rustPresentationSnapshot);
+  } else {
+    debouncedLodRecompute();
+  }
   sampleStretchAsync();
   syncURL();
 });
@@ -3222,6 +3326,21 @@ async function recomputeLods() {
           mr_updateBatches(faceIndices, faceLods);
           appliedClassification = true;
         }
+      } else if (presentationComposition.ready) {
+        // The retained compute worker owns the animated primary asset only.
+        // Convert its occasional full snapshot into a primary-range sparse
+        // update so static presentation layers keep their resident topology.
+        const count = Math.min(
+          currentPrimaryFaceCount,
+          Math.floor(faceLods.length / 6),
+        );
+        if (count > 0) {
+          const faceIndices = new Uint32Array(count);
+          for (let face = 0; face < count; face++) faceIndices[face] = face;
+          clearBatchMeasures();
+          mr_updateBatches(faceIndices, faceLods);
+          appliedClassification = true;
+        }
       } else {
         clearBatchMeasures();
         mr_buildBatches(faceLods);
@@ -3740,6 +3859,78 @@ function frame(ts) {
 }
 
 // --- Load model ---
+const PBR_MATERIAL_STRIDE = 50;
+
+function packPbrMaterials(materials, textureOffset = 0) {
+  const packed = new Float32Array(materials.length * PBR_MATERIAL_STRIDE);
+  const textureIndex = index => index != null ? index + textureOffset : -1;
+  for (let i = 0; i < materials.length; i++) {
+    const material = materials[i];
+    const offset = i * PBR_MATERIAL_STRIDE;
+    const baseColor = material.base_color || [1, 1, 1, 1];
+    const emissive = material.emissive_factor || [0, 0, 0];
+    const sheen = material.sheen_color || [0, 0, 0];
+    const specular = material.specular_color || [1, 1, 1];
+    const normalScale = material.normal_uv_scale || [1, 1];
+    const normalOffset = material.normal_uv_offset || [0, 0];
+    const baseScale = material.base_uv_scale || [1, 1];
+    const alphaMode = material.alpha_mode === 'MASK'
+      ? 1 : (material.alpha_mode === 'BLEND' ? 2 : 0);
+    packed[offset + 0] = baseColor[0];
+    packed[offset + 1] = baseColor[1];
+    packed[offset + 2] = baseColor[2];
+    packed[offset + 3] = baseColor[3];
+    packed[offset + 4] = material.metallic ?? 0;
+    packed[offset + 5] = material.roughness ?? 1;
+    packed[offset + 6] = material.normal_scale ?? 1;
+    packed[offset + 7] = material.occlusion_strength ?? 1;
+    packed[offset + 8] = material.alpha_cutoff ?? 0.5;
+    packed[offset + 9] = alphaMode;
+    packed[offset + 10] = material.unlit ? 1 : 0;
+    packed[offset + 11] = emissive[0];
+    packed[offset + 12] = emissive[1];
+    packed[offset + 13] = emissive[2];
+    packed[offset + 14] = material.base_color_texture_index != null ? 1 : 0;
+    packed[offset + 15] = material.metallic_roughness_texture_index != null ? 1 : 0;
+    packed[offset + 16] = material.normal_texture_index != null ? 1 : 0;
+    packed[offset + 17] = material.emissive_texture_index != null ? 1 : 0;
+    packed[offset + 18] = material.occlusion_texture_index != null ? 1 : 0;
+    packed[offset + 19] = sheen[0];
+    packed[offset + 20] = sheen[1];
+    packed[offset + 21] = sheen[2];
+    packed[offset + 22] = sheen[0] + sheen[1] + sheen[2] > 0 ? 1 : 0;
+    packed[offset + 23] = material.sheen_roughness ?? 0;
+    packed[offset + 24] = specular[0];
+    packed[offset + 25] = specular[1];
+    packed[offset + 26] = specular[2];
+    packed[offset + 27] = specular[0] + specular[1] + specular[2] < 3 ? 1 : 0;
+    packed[offset + 28] = normalScale[0];
+    packed[offset + 29] = normalScale[1];
+    packed[offset + 30] = normalOffset[0];
+    packed[offset + 31] = normalOffset[1];
+    packed[offset + 32] = material.normal_uv_rotation ?? 0;
+    packed[offset + 33] = baseScale[0];
+    packed[offset + 34] = baseScale[1];
+    packed[offset + 35] = material.base_uv_rotation ?? 0;
+    packed[offset + 36] = textureIndex(material.base_color_texture_index);
+    packed[offset + 37] = textureIndex(material.metallic_roughness_texture_index);
+    packed[offset + 38] = textureIndex(material.normal_texture_index);
+    packed[offset + 39] = textureIndex(material.emissive_texture_index);
+    packed[offset + 40] = textureIndex(material.occlusion_texture_index);
+    packed[offset + 41] = material.ior ?? 1.5;
+    packed[offset + 42] = material.transmission_factor ?? 0;
+    packed[offset + 43] = material.thickness_factor ?? 0;
+    const attenuation = material.attenuation_color || [1, 1, 1];
+    packed[offset + 44] = attenuation[0];
+    packed[offset + 45] = attenuation[1];
+    packed[offset + 46] = attenuation[2];
+    packed[offset + 47] = material.attenuation_distance || 1e10;
+    packed[offset + 48] = textureIndex(material.transmission_texture_index);
+    packed[offset + 49] = material.double_sided ? 1 : 0;
+  }
+  return packed;
+}
+
 async function finishModelUpload(info, filename) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   const uploadStarted = performance.now();
@@ -3749,6 +3940,16 @@ async function finishModelUpload(info, filename) {
   currentFaceNodes = new Int32Array(0);
   modelFaceNodes = new Int32Array(0);
   modelFaceMaterials = new Int32Array(0);
+  currentInitialFaceLods = new Float32Array(0);
+  currentSkinData = null;
+  currentMaterialCount = 0;
+  currentTextureCount = 0;
+  currentPrimaryFaceCount = 0;
+  presentationComposition.ready = false;
+  presentationComposition.assets.clear();
+  presentationComposition.primaryAssetId = null;
+  presentationComposition.totalFaces = 0;
+  mr_setPresentationNodeStates(new Float32Array());
   nodeFocusRecords = new Map();
   Object.assign(modelPayloadTelemetry, {
     sourceInstanceBytes: 0,
@@ -3836,53 +4037,11 @@ async function finishModelUpload(info, filename) {
   // Upload PBR materials
   let sectionStarted = performance.now();
   if (info.materials && info.materials.length > 0) {
-    const stride = 50; // 36 base + 5 tex indices + 7 ior/transmission/volume + 1 transmission_tex + 1 double_sided
-    const matData = new Float32Array(info.materials.length * stride);
     for (let i = 0; i < info.materials.length; i++) {
       const m = info.materials[i];
-      const o = i * stride;
-      const bc = m.base_color || [1,1,1,1];
       console.log(`Mat${i}: rough=${m.roughness} trans=${m.transmission_factor} thick=${m.thickness_factor} ior=${m.ior} mr_tex=${m.metallic_roughness_texture_index} alpha=${m.alpha_mode} ds=${m.double_sided}`);
-      const em = m.emissive_factor || [0,0,0];
-      const sc = m.sheen_color || [0,0,0];
-      const sp = m.specular_color || [1,1,1];
-      const nus = m.normal_uv_scale || [1,1];
-      const nuo = m.normal_uv_offset || [0,0];
-      const bus = m.base_uv_scale || [1,1];
-      const am = m.alpha_mode === 'MASK' ? 1 : (m.alpha_mode === 'BLEND' ? 2 : 0);
-      matData[o+0] = bc[0]; matData[o+1] = bc[1]; matData[o+2] = bc[2]; matData[o+3] = bc[3];
-      matData[o+4] = m.metallic ?? 0; matData[o+5] = m.roughness ?? 1;
-      matData[o+6] = m.normal_scale ?? 1; matData[o+7] = m.occlusion_strength ?? 1;
-      matData[o+8] = m.alpha_cutoff ?? 0.5; matData[o+9] = am; matData[o+10] = m.unlit ? 1 : 0;
-      matData[o+11] = em[0]; matData[o+12] = em[1]; matData[o+13] = em[2];
-      matData[o+14] = m.base_color_texture_index != null ? 1 : 0;
-      matData[o+15] = m.metallic_roughness_texture_index != null ? 1 : 0;
-      matData[o+16] = m.normal_texture_index != null ? 1 : 0;
-      matData[o+17] = m.emissive_texture_index != null ? 1 : 0;
-      matData[o+18] = m.occlusion_texture_index != null ? 1 : 0;
-      matData[o+19] = sc[0]; matData[o+20] = sc[1]; matData[o+21] = sc[2];
-      matData[o+22] = (sc[0]+sc[1]+sc[2]) > 0 ? 1 : 0; matData[o+23] = m.sheen_roughness ?? 0;
-      matData[o+24] = sp[0]; matData[o+25] = sp[1]; matData[o+26] = sp[2];
-      matData[o+27] = (sp[0]+sp[1]+sp[2]) < 3 ? 1 : 0;
-      matData[o+28] = nus[0]; matData[o+29] = nus[1]; matData[o+30] = nuo[0]; matData[o+31] = nuo[1];
-      matData[o+32] = m.normal_uv_rotation ?? 0;
-      matData[o+33] = bus[0]; matData[o+34] = bus[1]; matData[o+35] = m.base_uv_rotation ?? 0;
-      // Texture image indices (float-encoded, -1 = none)
-      matData[o+36] = m.base_color_texture_index != null ? m.base_color_texture_index : -1;
-      matData[o+37] = m.metallic_roughness_texture_index != null ? m.metallic_roughness_texture_index : -1;
-      matData[o+38] = m.normal_texture_index != null ? m.normal_texture_index : -1;
-      matData[o+39] = m.emissive_texture_index != null ? m.emissive_texture_index : -1;
-      matData[o+40] = m.occlusion_texture_index != null ? m.occlusion_texture_index : -1;
-      // IOR / transmission / volume
-      matData[o+41] = m.ior ?? 1.5;
-      matData[o+42] = m.transmission_factor ?? 0;
-      matData[o+43] = m.thickness_factor ?? 0;
-      const ac = m.attenuation_color || [1,1,1];
-      matData[o+44] = ac[0]; matData[o+45] = ac[1]; matData[o+46] = ac[2];
-      matData[o+47] = m.attenuation_distance || 1e10;
-      matData[o+48] = m.transmission_texture_index != null ? m.transmission_texture_index : -1;
-      matData[o+49] = m.double_sided ? 1 : 0;
     }
+    const matData = packPbrMaterials(info.materials);
     mr_setMaterials(matData, info.materials.length);
     console.info('PBR material 0:', {
       base_color: info.materials[0].base_color, metallic: info.materials[0].metallic,
@@ -3890,10 +4049,12 @@ async function finishModelUpload(info, filename) {
       has_bc_tex: info.materials[0].base_color_texture_index != null,
     });
   }
+  currentMaterialCount = info.materials?.length || 0;
   uploadTimings.materialsMs = performance.now() - sectionStarted;
 
   // Upload glTF images
   sectionStarted = performance.now();
+  currentTextureCount = info.textures?.length || 0;
   if (info.textures && info.textures.length > 0) {
     try {
       let totalSize = 0;
@@ -3975,16 +4136,30 @@ async function finishModelUpload(info, filename) {
   const nv = skinData ? (skinData.num_vertices || 0) : 0;
   skinTexW = Math.min(nv, 4096);
 
+  currentSkinData = skinData ? {
+    numVertices: nv,
+    numMorphTargets: skinData.num_morph_targets || 0,
+    jointIndices: skinData.joint_indices
+      ? new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices)
+      : null,
+    jointWeights: skinData.joint_weights
+      ? new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights)
+      : null,
+    morphDeltas: skinData.morph_deltas
+      ? new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas)
+      : null,
+  } : null;
+
   if (skinData && skinData.joint_indices) {
     mr_uploadSkinningTexture(
-      new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
-      new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights),
+      currentSkinData.jointIndices,
+      currentSkinData.jointWeights,
       skinData.num_vertices,
     );
   }
   if (skinData && skinData.morph_deltas) {
     mr_uploadMorphTexture(
-      new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
+      currentSkinData.morphDeltas,
       skinData.num_vertices,
       skinData.num_morph_targets,
     );
@@ -4013,8 +4188,10 @@ async function finishModelUpload(info, filename) {
   modelPayloadTelemetry.retainedSourceInstanceBytes = instances.byteLength;
   rebuildNodeFocusRecords(instances, currentFaceNodes);
   const faceLods = new Float32Array(rp.face_lods.buffer || rp.face_lods);
+  currentInitialFaceLods = faceLods;
   modelPayloadTelemetry.initialFaceLodBytes = faceLods.byteLength;
   const numFaces = rp.num_faces;
+  currentPrimaryFaceCount = numFaces;
 
   sectionStarted = performance.now();
   setRendererInstanceData(instances, numFaces);
@@ -4055,6 +4232,306 @@ async function finishModelUpload(info, filename) {
 
   // Trigger GPU LOD recompute with current tess params (screen attenuation, density)
   debouncedLodRecompute();
+}
+
+function presentationAssetMatchesFilename(asset, filename) {
+  const assetName = String(asset?.uri || '').split('/').filter(Boolean).pop();
+  const filenameName = String(filename || '').split('/').filter(Boolean).pop();
+  return !!assetName && assetName === filenameName;
+}
+
+function uniqueNodeIds(faceNodes) {
+  return Array.from(new Set(Array.from(faceNodes, Number))).sort((left, right) => left - right);
+}
+
+function maximumNodeId(faceNodes) {
+  let maximum = -1;
+  for (const node of faceNodes) maximum = Math.max(maximum, Number(node));
+  return maximum;
+}
+
+async function fetchPresentationGlb(asset) {
+  const startedAt = performance.now();
+  const response = await fetch(asset.uri);
+  if (!response.ok) throw new Error(`${asset.name}: HTTP ${response.status} for ${asset.uri}`);
+  const buffer = await response.arrayBuffer();
+  const magic = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
+  if (magic.length !== 4 || magic[0] !== 0x67 || magic[1] !== 0x6c
+      || magic[2] !== 0x54 || magic[3] !== 0x46) {
+    throw new Error(`${asset.name}: ${asset.uri} is not a GLB`);
+  }
+  return { buffer, fetchMs: performance.now() - startedAt };
+}
+
+function presentationGlbNodeMetadata(buffer) {
+  const view = new DataView(buffer);
+  let offset = 12;
+  while (offset + 8 <= buffer.byteLength) {
+    const length = view.getUint32(offset, true);
+    const type = view.getUint32(offset + 4, true);
+    offset += 8;
+    if (offset + length > buffer.byteLength) break;
+    if (type === 0x4e4f534a) {
+      const json = JSON.parse(
+        new TextDecoder().decode(new Uint8Array(buffer, offset, length)).replace(/\0+$/g, ''),
+      );
+      return (json.nodes || []).map((node, index) => ({
+        index,
+        name: node.name || `node-${index}`,
+        guide: node.extras?.hyperscape_guide === true,
+      }));
+    }
+    offset += length;
+  }
+  return [];
+}
+
+async function loadStaticPresentationAsset(asset, fetched) {
+  if (PRESENTATION_WORKER_INDEX < 0) throw new Error('presentation loader worker is unavailable');
+  const nodeMetadata = presentationGlbNodeMetadata(fetched.buffer);
+  const loaded = await workerCallN(
+    PRESENTATION_WORKER_INDEX,
+    'load_gltf_data',
+    { bytes: fetched.buffer },
+    [fetched.buffer],
+  );
+  const info = loaded.result;
+  if (!info) throw new Error(`${asset.name}: glTF parse returned no model`);
+  if ((info.animations || []).length > 0) {
+    throw new Error(`${asset.name}: animated secondary presentation assets are not supported yet`);
+  }
+  if ((info.textures || []).length > 0) {
+    for (const texture of info.textures) texture.bitmap?.close();
+    throw new Error(`${asset.name}: textured secondary presentation assets are not supported yet`);
+  }
+  const [restResponse, skinResponse] = await Promise.all([
+    workerCallN(PRESENTATION_WORKER_INDEX, 'get_rest_pose_instances', {}),
+    workerCallN(PRESENTATION_WORKER_INDEX, 'get_skinning_data', {}),
+  ]);
+  const rest = restResponse.data || restResponse;
+  const skin = skinResponse.skinData;
+  if (!rest?.instances || !rest?.face_lods) {
+    throw new Error(`${asset.name}: rest-pose surface payload is incomplete`);
+  }
+  if (skin?.joint_indices || skin?.morph_deltas) {
+    throw new Error(`${asset.name}: deforming secondary presentation assets are not supported yet`);
+  }
+  const faceCount = Number(rest.num_faces) || 0;
+  const instances = new Float32Array(rest.instances.buffer || rest.instances);
+  const faceLods = new Float32Array(rest.face_lods.buffer || rest.face_lods);
+  const faceMaterials = info.face_material_indices
+    ? new Int32Array(info.face_material_indices.buffer || info.face_material_indices)
+    : new Int32Array(faceCount);
+  const faceNodes = info.face_node_indices
+    ? new Int32Array(info.face_node_indices.buffer || info.face_node_indices)
+    : new Int32Array(faceCount);
+  const numVertices = Number(skin?.num_vertices || info.num_vertices) || 0;
+  if (instances.length !== faceCount * 52 || faceLods.length < faceCount * 6
+      || faceMaterials.length !== faceCount || faceNodes.length !== faceCount
+      || numVertices <= 0) {
+    throw new Error(`${asset.name}: presentation payload dimensions are inconsistent`);
+  }
+  return {
+    asset,
+    info,
+    instances,
+    faceLods: faceLods.slice(0, faceCount * 6),
+    faceMaterials,
+    faceNodes,
+    faceCount,
+    numVertices,
+    nodeMetadata,
+    fetchMs: fetched.fetchMs,
+  };
+}
+
+function extendPrimaryAnimationTextures(totalVertices) {
+  if (!currentSkinData || totalVertices <= currentSkinData.numVertices) return;
+  const primaryVertices = currentSkinData.numVertices;
+  if (currentSkinData.jointIndices && currentSkinData.jointWeights) {
+    const jointIndices = new Float32Array(totalVertices * 4);
+    const jointWeights = new Float32Array(totalVertices * 4);
+    jointIndices.set(currentSkinData.jointIndices.subarray(0, primaryVertices * 4));
+    jointWeights.set(currentSkinData.jointWeights.subarray(0, primaryVertices * 4));
+    mr_uploadSkinningTexture(jointIndices, jointWeights, totalVertices);
+    currentSkinData.jointIndices = jointIndices;
+    currentSkinData.jointWeights = jointWeights;
+  }
+  const targets = currentSkinData.numMorphTargets || 0;
+  if (currentSkinData.morphDeltas && targets > 0) {
+    const morphDeltas = new Float32Array(targets * totalVertices * 3);
+    for (let target = 0; target < targets; target++) {
+      const sourceStart = target * primaryVertices * 3;
+      const targetStart = target * totalVertices * 3;
+      morphDeltas.set(
+        currentSkinData.morphDeltas.subarray(sourceStart, sourceStart + primaryVertices * 3),
+        targetStart,
+      );
+    }
+    mr_uploadMorphTexture(morphDeltas, totalVertices, targets);
+    currentSkinData.morphDeltas = morphDeltas;
+  }
+  currentSkinData.numVertices = totalVertices;
+  skinTexW = Math.min(totalVertices, 4096);
+}
+
+async function initializePresentationComposition() {
+  if (!RUST_PRESENTATION_ENABLED || !rustPresentationManifest || !currentInstances) return false;
+  const primaryAsset = rustPresentationManifest.assets.find(asset =>
+    presentationAssetMatchesFilename(asset, currentGlb));
+  if (!primaryAsset) {
+    throw new Error(`loaded model ${currentGlb} is not a presentation asset`);
+  }
+  rustPresentationDiagnostics.assetPreflight.push({
+    id: primaryAsset.id,
+    uri: primaryAsset.uri,
+    ok: true,
+    source: 'primary-runtime',
+  });
+  const secondaryAssets = rustPresentationManifest.assets.filter(asset => asset.id !== primaryAsset.id);
+  const fetched = await Promise.all(secondaryAssets.map(async asset => {
+    try {
+      const result = await fetchPresentationGlb(asset);
+      rustPresentationDiagnostics.assetPreflight.push({
+        id: asset.id, uri: asset.uri, ok: true, bytes: result.buffer.byteLength,
+        fetchMs: result.fetchMs,
+      });
+      return { asset, result };
+    } catch (error) {
+      rustPresentationDiagnostics.assetPreflight.push({
+        id: asset.id, uri: asset.uri, ok: false, error: error.message,
+      });
+      throw error;
+    }
+  }));
+  const secondary = [];
+  for (const entry of fetched) {
+    secondary.push(await loadStaticPresentationAsset(entry.asset, entry.result));
+  }
+
+  const primaryInstances = currentInstances;
+  const primaryFaceLods = currentInitialFaceLods;
+  const primaryFaces = currentPrimaryFaceCount;
+  const primaryVertices = currentSkinData?.numVertices || Number(meshInfo?.num_vertices) || 0;
+  if (primaryInstances.length !== primaryFaces * 52
+      || primaryFaceLods.length < primaryFaces * 6 || primaryVertices <= 0) {
+    throw new Error('primary presentation asset payload is incomplete');
+  }
+
+  let totalFaces = primaryFaces;
+  let totalVertices = primaryVertices;
+  let nextNode = maximumNodeId(modelFaceNodes) + 1;
+  let materialCount = currentMaterialCount;
+  for (const resident of secondary) {
+    totalFaces += resident.faceCount;
+    resident.vertexOffset = totalVertices;
+    resident.faceOffset = totalFaces - resident.faceCount;
+    resident.nodeOffset = nextNode;
+    resident.materialOffset = materialCount;
+    totalVertices += resident.numVertices;
+    nextNode += maximumNodeId(resident.faceNodes) + 1;
+    materialCount += resident.info.materials?.length || 0;
+  }
+
+  const instances = new Float32Array(totalFaces * 52);
+  const faceLods = new Float32Array(totalFaces * 6);
+  const faceMaterials = new Int32Array(totalFaces);
+  const faceNodes = new Int32Array(totalFaces);
+  instances.set(primaryInstances);
+  faceLods.set(primaryFaceLods.subarray(0, primaryFaces * 6));
+  faceMaterials.set(modelFaceMaterials);
+  faceNodes.set(modelFaceNodes);
+
+  presentationComposition.assets.clear();
+  presentationComposition.assets.set(primaryAsset.id, {
+    id: primaryAsset.id,
+    name: primaryAsset.name,
+    nodes: uniqueNodeIds(modelFaceNodes),
+    faceOffset: 0,
+    faceCount: primaryFaces,
+  });
+  for (const resident of secondary) {
+    const instanceStart = resident.faceOffset * 52;
+    instances.set(resident.instances, instanceStart);
+    for (let face = 0; face < resident.faceCount; face++) {
+      const base = instanceStart + face * 52;
+      for (let corner = 0; corner < 3; corner++) {
+        instances[base + corner * 4] += resident.vertexOffset;
+      }
+      instances[base + 31] = resident.faceOffset + face;
+    }
+    faceLods.set(resident.faceLods, resident.faceOffset * 6);
+    for (let face = 0; face < resident.faceCount; face++) {
+      faceMaterials[resident.faceOffset + face] =
+        resident.faceMaterials[face] + resident.materialOffset;
+      faceNodes[resident.faceOffset + face] = resident.faceNodes[face] + resident.nodeOffset;
+    }
+    if (resident.info.materials?.length) {
+      const actualBase = mr_appendMaterials(
+        packPbrMaterials(resident.info.materials, currentTextureCount),
+        resident.info.materials.length,
+      );
+      if (actualBase !== resident.materialOffset) {
+        throw new Error(
+          `${resident.asset.name}: material base ${actualBase} did not match ${resident.materialOffset}`,
+        );
+      }
+    }
+    presentationComposition.assets.set(resident.asset.id, {
+      id: resident.asset.id,
+      name: resident.asset.name,
+      nodes: uniqueNodeIds(faceNodes.subarray(
+        resident.faceOffset,
+        resident.faceOffset + resident.faceCount,
+      )),
+      hiddenNodes: new Set(
+        resident.nodeMetadata
+          .filter(node => node.guide)
+          .map(node => node.index + resident.nodeOffset),
+      ),
+      faceOffset: resident.faceOffset,
+      faceCount: resident.faceCount,
+    });
+  }
+
+  extendPrimaryAnimationTextures(totalVertices);
+  currentInstances = instances;
+  currentInitialFaceLods = faceLods;
+  currentFaceNodes = faceNodes;
+  modelFaceNodes = faceNodes;
+  modelFaceMaterials = faceMaterials;
+  currentMaterialCount = materialCount;
+  nodeFocusRecords = rebuildNodeFocusRecords(instances, faceNodes);
+  mr_setFaceMaterials(faceMaterials);
+  mr_setFaceNodes(faceNodes);
+  setRendererInstanceData(instances, totalFaces);
+  mr_buildBatches(faceLods);
+
+  presentationComposition.ready = true;
+  presentationComposition.primaryAssetId = primaryAsset.id;
+  presentationComposition.totalFaces = totalFaces;
+  rustPresentationDiagnostics.assetsReady = true;
+  rustPresentationDiagnostics.residentAssets = Array.from(
+    presentationComposition.assets.values(),
+    resident => ({
+      id: resident.id,
+      name: resident.name,
+      nodes: resident.nodes,
+      faces: resident.faceCount,
+      hiddenGuideNodes: resident.hiddenNodes?.size || 0,
+    }),
+  );
+  rustPresentationDiagnostics.packedFaces = totalFaces;
+  modelPayloadTelemetry.retainedSourceInstanceBytes = instances.byteLength;
+  modelPayloadTelemetry.retainedFaceNodeBytes = faceNodes.byteLength;
+  applyPresentationLayerState();
+  $('presentation-adapter-status').textContent =
+    `${presentationComposition.assets.size} resident assets · ${totalFaces} packed faces`;
+  console.info(
+    `Presentation composition ready: ${presentationComposition.assets.size} assets, `
+    + `${totalFaces} faces, ${totalVertices} vertices`,
+  );
+  return true;
 }
 
 // --- Init ---
@@ -4309,6 +4786,22 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
   }
   urlSyncReady = true;
   syncURL();
+});
+
+// Optional release-demo adapter. It runs after first render so secondary asset
+// parsing and packing never delay the ordinary Hyperscope startup path.
+phase('presentation-assets', ['render', 'workers'], async () => {
+  if (!RUST_PRESENTATION_ENABLED) return null;
+  try {
+    return await initializePresentationComposition();
+  } catch (error) {
+    rustPresentationDiagnostics.assetsReady = false;
+    rustPresentationDiagnostics.multiAssetRendererPending = true;
+    rustPresentationDiagnostics.error = error?.message || String(error);
+    $('presentation-adapter-status').textContent = 'asset preflight failed';
+    console.warn('Presentation asset composition failed:', error);
+    return null;
+  }
 });
 
 // Surface the root startup error after dependency propagation settles.

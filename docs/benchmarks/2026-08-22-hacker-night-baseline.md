@@ -221,3 +221,25 @@ The active foreground fence wait is therefore much lower than the earlier
 one 50.1 ms hitch, and the console remained clean. This does not establish GPU
 time—the worker fence includes queueing—but it bounds the current CPU and
 transfer costs for the representative 984-face animation.
+
+## Two-asset presentation follow-up
+
+The opt-in `?presentation=1` adapter loaded the 984-face animated horse as its
+primary asset and the 3,280-face Blender-authored Hyperscape fixture as a static
+secondary asset. Both remained semantically distinct while the WebGL backend
+packed 4,264 face records for depth-correct shared submission. The secondary
+fetch returned 258,432 bytes in 14.6 ms in the observed local run.
+
+Chrome DevTools inspection verified both cues. Cue one retained a recognizable
+animated horse while hiding the resident secondary layer. Cue two showed the
+horse separately above-left and the authored ground, traveler, and landmarks
+to the right with plausible depth ordering. Ten authored guide nodes were
+suppressed from presentation rendering, including the diagnostic wall spheres
+that otherwise obscured the shot. The text card did not cover essential
+geometry. Diagnostics reported two resident assets, 4,264 packed faces, both
+active layer identities, no pending composition, no pending opacity, and no
+error; the console contained no warnings or errors.
+
+This establishes the checked-in fixture path, not general multi-model parity.
+Secondary animation, secondary textures, per-layer fractional opacity, and a
+second live authored ECS runtime remain explicit adapter limitations.

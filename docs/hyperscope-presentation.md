@@ -43,7 +43,34 @@ cue-local animation layers, and reflection-pole failures. A view targeting the
 center of an enabled inversion sphere is invalid because that point maps to
 infinity; omit `semantic_target` to preserve a free line-of-sight tangent.
 
-The current fixture and Rust state machine are an interchange/runtime
-foundation. Browser multi-asset residency and draw submission remain a
-separate adapter milestone and should consume snapshots without changing this
-ownership model.
+## Browser adapter
+
+Open `hyperscope.html?presentation=1&glb=horse.glb` to run the checked-in
+fixture. Presentation sequencing, cue validation, camera/focus transitions,
+and resolved layer state remain Rust-authoritative. The browser adapter fetches
+assets and translates the resolved snapshot into renderer commands.
+
+The WebGL backend keeps each asset and layer semantically distinct while
+packing their face records into shared immutable GPU buffers. Stable node
+ranges retain per-layer visibility and affine transforms, materials keep
+asset-local indices through an explicit base offset, picking retains one
+scene-wide face ID, and the animation worker continues to update only the
+animated primary asset. Occasional full primary LOD snapshots are converted to
+sparse primary-range updates so static layers never lose resident topology.
+This is ordinary backend packing, not a merge of the source GLBs or their
+presentation identities.
+
+Authored nodes marked `extras.hyperscape_guide: true` are hidden in presentation
+composition. They remain in the source Blender/GLB asset for diagnostics, but
+large wall spheres and path controls therefore do not occlude the staged scene.
+The browser exposes asset fetch, resident ranges, hidden-guide counts, packed
+face count, active layers, pending capabilities, and failures at
+`globalThis.__hyperscopePresentation`.
+
+The Tuesday adapter deliberately supports one animated primary asset plus
+static, untextured secondary assets. Animated or textured secondary assets fail
+preflight instead of silently rendering incorrectly. Fractional per-layer
+opacity is reported as pending; zero opacity and ordinary visibility are fully
+applied. A secondary asset's authored Hyperscape ECS graph is not yet ticked as
+a second runtime—the geometry is resident and transformed by presentation
+state, while multi-runtime ECS synchronization remains follow-up work.

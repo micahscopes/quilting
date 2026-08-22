@@ -108,6 +108,7 @@ fn skin_position(pos: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
     let jw = skin_data[1];
 
     var skinned = vec3<f32>(0.0);
+    var applied_weight = 0.0;
     let p4 = vec4<f32>(pos, 1.0);
 
     for (var k = 0u; k < 4u; k = k + 1u) {
@@ -116,8 +117,10 @@ fn skin_position(pos: vec3<f32>, vertex_idx: i32) -> vec3<f32> {
         let idx = i32(ji[k]);
         if idx >= joints.num_joints { continue; }
         let m = joints.matrices[idx];
+        applied_weight = applied_weight + w;
         skinned = skinned + w * (m * p4).xyz;
     }
+    if applied_weight <= 1e-6 { return pos; }
     return skinned;
 }
 

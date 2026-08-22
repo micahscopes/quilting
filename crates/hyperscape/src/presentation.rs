@@ -981,6 +981,7 @@ mod tests {
             .contains("repeats UUID"));
 
         let mut document = Presentation::from_json(FIXTURE).unwrap();
+        document.views[1].focus.inversion_enabled = true;
         document.views[1].camera.semantic_target = Some(document.views[1].focus.center);
         assert!(document
             .validate()

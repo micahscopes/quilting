@@ -107,7 +107,7 @@ impl SurfaceRuntime {
             return Err("surface face is outside the current model".into());
         }
         if self.adjacency.is_none() {
-            self.adjacency = Some(build_adjacency(instances, num_faces)?);
+            self.adjacency = Some(build_adjacency(instances, num_faces, face_nodes)?);
         }
         let node = face_nodes[face as usize];
         let entity = runtime_entity_id(node);
@@ -312,12 +312,14 @@ impl RuntimeSurfaceField<'_> {
         let indices = *self.joint_indices.get(vertex)?;
         let weights = *self.joint_weights.get(vertex)?;
         let mut skinned = [0.0; 3];
+        let mut applied_weight = 0.0;
         for influence in 0..4 {
             let weight = weights[influence] as f64;
             let joint = indices[influence] as usize;
             if weight < 1.0e-6 || joint >= num_joints {
                 continue;
             }
+            applied_weight += weight;
             let matrix = self.joint_matrices.get(joint * 16..joint * 16 + 16)?;
             let transformed = [
                 matrix[0] as f64 * position[0]
@@ -337,19 +339,28 @@ impl RuntimeSurfaceField<'_> {
                 skinned[axis] += weight * transformed[axis];
             }
         }
-        finite3(skinned).then_some(skinned)
+        let output = if applied_weight > 1.0e-6 {
+            skinned
+        } else {
+            position
+        };
+        finite3(output).then_some(output)
     }
 }
 
-fn build_adjacency(instances: &[f32], num_faces: usize) -> Result<TriangleAdjacency, String> {
+fn build_adjacency(
+    instances: &[f32],
+    num_faces: usize,
+    face_nodes: &[usize],
+) -> Result<TriangleAdjacency, String> {
     let required = num_faces
         .checked_mul(instance_layout::STRIDE)
         .ok_or_else(|| "surface topology size overflow".to_string())?;
-    if instances.len() < required {
+    if instances.len() < required || face_nodes.len() != num_faces {
         return Err("surface instance data is truncated".into());
     }
     let mut faces = Vec::with_capacity(num_faces);
-    let mut welded_vertices = BTreeMap::<[u32; 3], u64>::new();
+    let mut welded_vertices = BTreeMap::<(usize, [u32; 3]), u64>::new();
     let mut next_welded_vertex = 0_u64;
     for face in 0..num_faces {
         let base = face * instance_layout::STRIDE + instance_layout::offset::POSITIONS;
@@ -378,11 +389,13 @@ fn build_adjacency(instances: &[f32], num_faces: usize) -> Result<TriangleAdjace
                     component.to_bits()
                 }
             });
-            vertices[corner] = *welded_vertices.entry(key).or_insert_with(|| {
-                let identity = next_welded_vertex;
-                next_welded_vertex += 1;
-                identity
-            });
+            vertices[corner] = *welded_vertices
+                .entry((face_nodes[face], key))
+                .or_insert_with(|| {
+                    let identity = next_welded_vertex;
+                    next_welded_vertex += 1;
+                    identity
+                });
         }
         faces.push(vertices);
     }

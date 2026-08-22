@@ -168,6 +168,10 @@ struct MainState {
     /// Extracted state keyed by `(projection camera node, subject node)`.
     hyperscape_packets: BTreeMap<(usize, usize), EntityConformalState>,
     active_hyperscape_camera: Option<usize>,
+    /// Presentation-layer state is independent of authored Hyperscape frames.
+    /// It keeps distinct asset/node identity while the WebGL backend packs all
+    /// resident faces into shared buffers.
+    presentation_nodes: BTreeMap<usize, PresentationNodeState>,
     // Screen-space refraction: framebuffer copy for transmission
     /// Mip-chained scene copy for the transmission/refraction blur pyramid.
     /// Distinct from `fuzzy_scene_*`: this one carries a full mip chain with
@@ -359,6 +363,13 @@ struct EntityConformalState {
     euclidean_model: [f32; 16],
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct PresentationNodeState {
+    euclidean_model: [f32; 16],
+    visible: bool,
+    opacity: f32,
+}
+
 /// Create a separable Gaussian blur program (GLSL ES 300, not WGSL).
 fn create_blur_program(gl: &glow::Context) -> Result<(glow::Program, glow::VertexArray), String> {
     unsafe {
@@ -513,6 +524,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             mobius_orientation: 1,
             hyperscape_packets: BTreeMap::new(),
             active_hyperscape_camera: None,
+            presentation_nodes: BTreeMap::new(),
             scene_color_fbo: None,
             scene_color_tex: None,
             scene_color_size: (0, 0),
@@ -605,6 +617,54 @@ pub fn mr_set_mobius_with_parity(mobius: &[f32], orientation_sign: i32) {
     });
 }
 
+/// Apply resolved presentation-layer state to stable renderer node IDs.
+/// Records are `[node, visible, opacity, column_major_model_matrix x16]`.
+/// Opacity is retained for the material adapter; zero opacity already behaves
+/// as hidden. The global Möbius map remains shared presentation view state.
+#[wasm_bindgen(js_name = "mr_setPresentationNodeStates")]
+pub fn mr_set_presentation_node_states(records: &[f32]) -> bool {
+    const STRIDE: usize = 19;
+    if records.len() % STRIDE != 0 {
+        warn!("Presentation node-state payload has an invalid length");
+        return false;
+    }
+    let mut next = BTreeMap::new();
+    for record in records.chunks_exact(STRIDE) {
+        let node = record[0];
+        let opacity = record[2];
+        if !node.is_finite()
+            || node < 0.0
+            || node.fract() != 0.0
+            || !opacity.is_finite()
+            || !record[3..19].iter().all(|value| value.is_finite())
+        {
+            warn!("Presentation node-state payload contains invalid values");
+            return false;
+        }
+        let mut euclidean_model = [0.0; 16];
+        euclidean_model.copy_from_slice(&record[3..19]);
+        next.insert(
+            node as usize,
+            PresentationNodeState {
+                euclidean_model,
+                visible: record[1] > 0.5 && opacity > 0.0,
+                opacity: opacity.clamp(0.0, 1.0),
+            },
+        );
+    }
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        if state.presentation_nodes != next {
+            state.presentation_nodes = next;
+            state.render_commands_dirty = true;
+        }
+        true
+    })
+}
+
 fn clear_hyperscape_packets() {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
@@ -688,10 +748,14 @@ fn conformal_state_for_node(renderer: &MainState, node_index: usize) -> EntityCo
                 euclidean_model: IDENTITY_MATRIX,
             });
     }
+    let euclidean_model = renderer
+        .presentation_nodes
+        .get(&node_index)
+        .map_or(IDENTITY_MATRIX, |state| state.euclidean_model);
     EntityConformalState {
             mobius: renderer.mobius,
             orientation_sign: renderer.mobius_orientation,
-            euclidean_model: IDENTITY_MATRIX,
+            euclidean_model,
     }
 }
 
@@ -709,8 +773,16 @@ fn sync_render_batches(renderer: &mut MainState) {
     for batch in renderer.batches.values() {
         let conformal = conformal_state_for_node(renderer, batch.node_index);
         let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
+        let mut mesh = MeshDraw::from(&batch.mesh);
+        if renderer
+            .presentation_nodes
+            .get(&batch.node_index)
+            .is_some_and(|state| !state.visible || state.opacity <= 0.0)
+        {
+            mesh.num_instances = 0;
+        }
         render_batches.push(RenderBatch {
-            mesh: MeshDraw::from(&batch.mesh),
+            mesh,
             perm_parity: batch.perm_parity,
             material_index: batch.material_index,
             node_index: batch.node_index,
@@ -1435,16 +1507,19 @@ pub fn mr_detach_surface() -> JsValue {
 fn build_instance_lod_topology(
     instances: &[f32],
     num_faces: usize,
+    face_nodes: &[usize],
 ) -> Option<quilting_mesh::HalfEdgeMesh> {
     let required = num_faces.checked_mul(instance_layout::STRIDE)?;
-    if instances.len() < required {
+    if instances.len() < required || face_nodes.len() != num_faces {
         return None;
     }
 
-    let mut source_vertices = HashMap::<u32, u32>::new();
-    let mut positions = Vec::<[f64; 3]>::new();
+    type PositionKey = [u32; 3];
+    let mut source_positions = HashMap::<(usize, u32), PositionKey>::new();
+    let mut welded_vertices = HashMap::<(usize, PositionKey), u32>::new();
     let mut faces = Vec::<[u32; 3]>::with_capacity(num_faces);
     for face in 0..num_faces {
+        let node = face_nodes[face];
         let base = face * instance_layout::STRIDE + instance_layout::offset::POSITIONS;
         let mut compact_face = [0u32; 3];
         for corner in 0..3 {
@@ -1459,25 +1534,29 @@ fn build_instance_lod_topology(
                 return None;
             }
             let source = source as u32;
-            let position = [xyz[0] as f64, xyz[1] as f64, xyz[2] as f64];
-            let compact = if let Some(&compact) = source_vertices.get(&source) {
-                if positions[compact as usize] != position {
+            let position = xyz.map(|coordinate| {
+                if coordinate == 0.0 {
+                    0.0_f32.to_bits()
+                } else {
+                    coordinate.to_bits()
+                }
+            });
+            if let Some(previous) = source_positions.insert((node, source), position) {
+                if previous != position {
                     return None;
                 }
-                compact
-            } else {
-                let compact = positions.len() as u32;
-                positions.push(position);
-                source_vertices.insert(source, compact);
-                compact
-            };
+            }
+            let next_vertex = welded_vertices.len() as u32;
+            let compact = *welded_vertices
+                .entry((node, position))
+                .or_insert(next_vertex);
             compact_face[corner] = compact;
         }
         faces.push(compact_face);
     }
 
-    Some(quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
-        &positions,
+    Some(quilting_mesh::HalfEdgeMesh::from_triangles(
+        welded_vertices.len() as u32,
         &faces,
     ))
 }
@@ -1555,6 +1634,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             }
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces;
+            st.presentation_nodes.clear();
             st.surface_runtime.reset_geometry();
             st.batch_groups.clear();
             st.batch_staging.clear();
@@ -1563,7 +1643,14 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.classified_culled_faces = st.num_faces;
             st.lod_dirty_faces.clear();
             st.lod_balance_scratch = batch::ResidentLodBalanceScratch::default();
-            st.lod_topology = build_instance_lod_topology(&st.cached_instances, st.num_faces);
+            if st.face_nodes.len() != st.num_faces {
+                st.face_nodes = vec![0; st.num_faces];
+            }
+            st.lod_topology = build_instance_lod_topology(
+                &st.cached_instances,
+                st.num_faces,
+                &st.face_nodes,
+            );
             st.batch_update_stats = BatchUpdateStats::default();
             if let Some(topology) = st.lod_topology.as_ref() {
                 info!(
@@ -1582,9 +1669,6 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             } = st;
             round_shadow.rebuild(cached_instances, *num_faces);
             st.batch_layout_dirty = true;
-            if st.face_nodes.len() != st.num_faces {
-                st.face_nodes = vec![0; st.num_faces];
-            }
         }
     });
 }
@@ -1881,59 +1965,95 @@ pub fn mr_upload_tess_atlas(
 ///  transmission_tex_idx, double_sided]
 ///
 /// `hyperscope.html` packs the matching array.
+fn decode_pbr_material(d: &[f32]) -> Option<PbrParams> {
+    (d.len() >= MATERIAL_STRIDE).then(|| PbrParams {
+        base_color: [d[0], d[1], d[2], d[3]],
+        metallic: d[4],
+        roughness: d[5],
+        normal_scale: d[6],
+        occlusion_strength: d[7],
+        alpha_cutoff: d[8],
+        alpha_mode: d[9],
+        unlit: d[10] > 0.5,
+        emissive_factor: [d[11], d[12], d[13]],
+        has_base_color_tex: d[14] > 0.5,
+        has_metallic_roughness_tex: d[15] > 0.5,
+        has_normal_tex: d[16] > 0.5,
+        has_emissive_tex: d[17] > 0.5,
+        has_occlusion_tex: d[18] > 0.5,
+        sheen_color: [d[19], d[20], d[21]],
+        has_sheen: d[22] > 0.5,
+        sheen_roughness: d[23],
+        specular_color: [d[24], d[25], d[26]],
+        has_specular: d[27] > 0.5,
+        normal_uv_scale: [d[28], d[29]],
+        normal_uv_offset: [d[30], d[31]],
+        normal_uv_rotation: d[32],
+        base_uv_scale: [d[33], d[34]],
+        base_uv_rotation: d[35],
+        base_color_tex_idx: d[36] as i32,
+        metallic_roughness_tex_idx: d[37] as i32,
+        normal_tex_idx: d[38] as i32,
+        emissive_tex_idx: d[39] as i32,
+        occlusion_tex_idx: d[40] as i32,
+        ior: d[41],
+        transmission_factor: d[42],
+        thickness_factor: d[43],
+        attenuation_color: [d[44], d[45], d[46]],
+        attenuation_distance: d[47],
+        transmission_tex_idx: d[48] as i32,
+        double_sided: d[49] > 0.5,
+        ..PbrParams::default()
+    })
+}
+
 #[wasm_bindgen(js_name = "mr_setMaterials")]
 pub fn mr_set_materials(data: &[f32], num_materials: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.materials.clear();
-            let stride = MATERIAL_STRIDE;
             for i in 0..num_materials as usize {
-                let o = i * stride;
-                if o + stride > data.len() { break; }
-                let d = &data[o..o + stride];
-                st.materials.push(PbrParams {
-                    base_color: [d[0], d[1], d[2], d[3]],
-                    metallic: d[4],
-                    roughness: d[5],
-                    normal_scale: d[6],
-                    occlusion_strength: d[7],
-                    alpha_cutoff: d[8],
-                    alpha_mode: d[9],
-                    unlit: d[10] > 0.5,
-                    emissive_factor: [d[11], d[12], d[13]],
-                    has_base_color_tex: d[14] > 0.5,
-                    has_metallic_roughness_tex: d[15] > 0.5,
-                    has_normal_tex: d[16] > 0.5,
-                    has_emissive_tex: d[17] > 0.5,
-                    has_occlusion_tex: d[18] > 0.5,
-                    sheen_color: [d[19], d[20], d[21]],
-                    has_sheen: d[22] > 0.5,
-                    sheen_roughness: d[23],
-                    specular_color: [d[24], d[25], d[26]],
-                    has_specular: d[27] > 0.5,
-                    normal_uv_scale: [d[28], d[29]],
-                    normal_uv_offset: [d[30], d[31]],
-                    normal_uv_rotation: d[32],
-                    base_uv_scale: [d[33], d[34]],
-                    base_uv_rotation: d[35],
-                    base_color_tex_idx: d[36] as i32,
-                    metallic_roughness_tex_idx: d[37] as i32,
-                    normal_tex_idx: d[38] as i32,
-                    emissive_tex_idx: d[39] as i32,
-                    occlusion_tex_idx: d[40] as i32,
-                    ior: d[41],
-                    transmission_factor: d[42],
-                    thickness_factor: d[43],
-                    attenuation_color: [d[44], d[45], d[46]],
-                    attenuation_distance: d[47],
-                    transmission_tex_idx: d[48] as i32,
-                    double_sided: d[49] > 0.5,
-                    ..PbrParams::default()
-                });
+                let offset = i * MATERIAL_STRIDE;
+                let Some(record) = data.get(offset..offset + MATERIAL_STRIDE) else {
+                    break;
+                };
+                let Some(material) = decode_pbr_material(record) else {
+                    break;
+                };
+                st.materials.push(material);
             }
             info!("Set {} PBR materials", st.materials.len());
         }
     });
+}
+
+/// Append materials for an additional presentation asset. Texture indices in
+/// the records must already be offset into the shared texture cache.
+#[wasm_bindgen(js_name = "mr_appendMaterials")]
+pub fn mr_append_materials(data: &[f32], num_materials: u32) -> u32 {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return 0;
+        };
+        let base = state.materials.len() as u32;
+        for index in 0..num_materials as usize {
+            let offset = index * MATERIAL_STRIDE;
+            let Some(record) = data.get(offset..offset + MATERIAL_STRIDE) else {
+                break;
+            };
+            let Some(material) = decode_pbr_material(record) else {
+                break;
+            };
+            state.materials.push(material);
+        }
+        info!(
+            "Appended {} PBR materials at base {}",
+            state.materials.len() as u32 - base,
+            base,
+        );
+        base
+    })
 }
 
 /// Upload glTF images to main-thread GL texture cache.
