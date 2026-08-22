@@ -41,6 +41,8 @@ struct PbrUniforms {
     attenuation_color: vec3<f32>,
     attenuation_distance: f32,
     selection_tint: vec4<f32>,           // rgb + subtle post-lighting blend amount
+    focus_sphere: vec4<f32>,             // source-space center xyz + radius
+    focus_field_params: vec4<f32>,       // x=enabled, y=relative feather
 }
 
 @group(0) @binding(1)
@@ -119,6 +121,7 @@ struct FragInput {
     @location(8) camera_pos_ws: vec3<f32>,
     @location(9) fade: f32,
     @location(12) mobius_stretch: f32,
+    @location(13) source_position_ws: vec3<f32>,
 }
 
 struct PbrOutput {
@@ -137,6 +140,15 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     // 0.5 = 1 unit distance. Matches the log-space of stretch encoding.
     let dof_dist = max(length(in.position_vs), 0.001);
     let dof_depth = clamp(log2(dof_dist) / 10.0 + 0.5, 0.0, 1.0);
+    let focus_radius = max(pbr.focus_sphere.w, 1e-4);
+    let focus_feather = max(focus_radius * pbr.focus_field_params.y, 1e-4);
+    let focus_signed_distance = distance(in.source_position_ws, pbr.focus_sphere.xyz)
+        - focus_radius;
+    let focus_field = select(
+        0.0,
+        smoothstep(0.0, focus_feather, focus_signed_distance),
+        pbr.focus_field_params.x > 0.5,
+    );
 
     var n = normalize(in.normal_vs);
     // Double-sided materials: flip normal for back-facing fragments so they light correctly.
@@ -182,7 +194,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         // Gamma correction (base is already linear from sRGB conversion above)
         unlit_color = pow(unlit_color, vec3<f32>(1.0 / 2.2));
         unlit_color = mix(unlit_color, pbr.selection_tint.rgb, pbr.selection_tint.a);
-        return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
+        return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, dof_depth, focus_field, 1.0));
     }
 
     // --- Metallic / Roughness ---
@@ -248,9 +260,9 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         let dbg = n * 0.5 + 0.5;
         // Tint back-faces slightly red so winding issues are visible
         if !front_facing {
-            return PbrOutput(vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
+            return PbrOutput(vec4<f32>(dbg.r * 0.3 + 0.7, dbg.g * 0.3, dbg.b * 0.3, in.fade), vec4<f32>(in.mobius_stretch, dof_depth, focus_field, 1.0));
         }
-        return PbrOutput(vec4<f32>(dbg, in.fade), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
+        return PbrOutput(vec4<f32>(dbg, in.fade), vec4<f32>(in.mobius_stretch, dof_depth, focus_field, 1.0));
     }
 
     // --- KHR_materials_specular: modify F0 before BRDF ---
@@ -440,5 +452,5 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     color = pow(color, vec3<f32>(1.0 / 2.2));
     color = mix(color, pbr.selection_tint.rgb, pbr.selection_tint.a);
 
-    return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, dof_depth, 0.0, 1.0));
+    return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, dof_depth, focus_field, 1.0));
 }

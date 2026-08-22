@@ -3,7 +3,7 @@
 // Compiles to GLSL ES 300 via naga for WebGL2.
 
 #import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
-#import quilting::surface::qb_eval::{eval_qb_with_normal, QBResult}
+#import quilting::surface::qb_eval::eval_qb
 #import quilting::viz::density::edge_density
 
 struct Uniforms {
@@ -187,6 +187,9 @@ struct VertexOutput {
     @location(10) tess_bary: vec3<f32>,
     @location(11) instance_id: f32,
     @location(12) mobius_stretch: f32,
+    // Posed ordinary-space point before the Möbius map. The focus sphere is
+    // classified here so it is the same geometric sphere inversion consumes.
+    @location(13) source_position_ws: vec3<f32>,
 }
 
 // Backend-neutral prepared-patch record. Locations 0..12 are thirteen
@@ -232,6 +235,7 @@ fn culled_vertex_output() -> VertexOutput {
         vec3<f32>(0.0),
         0.0,
         0.5,
+        vec3<f32>(0.0),
     );
 }
 
@@ -585,6 +589,12 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         ) {
             return culled_vertex_output();
         }
+    }
+
+    if u.use_qb == 1 {
+        out.source_position_ws = eval_qb(bary, sp0, sp1, sp2, in.w0, in.w1, in.w2);
+    } else {
+        out.source_position_ws = eval_flat(bary, sp0, sp1, sp2);
     }
 
     if u.use_qb == 1 {

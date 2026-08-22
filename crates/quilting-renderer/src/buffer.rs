@@ -831,7 +831,7 @@ impl Default for PbrParams {
     }
 }
 
-/// UBO for PBR material uniforms (binding 2, 224 bytes).
+/// UBO for PBR material and frame-global focus uniforms (binding 2, 256 bytes).
 ///
 /// Matches WGSL PbrUniforms struct in fragment/pbr.wgsl.
 pub struct PbrUniformBuf {
@@ -843,7 +843,7 @@ impl PbrUniformBuf {
         unsafe {
             let ubo = gl.create_buffer().map_err(|e| format!("pbr ubo: {e}"))?;
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(ubo));
-            gl.buffer_data_size(glow::UNIFORM_BUFFER, 224, glow::DYNAMIC_DRAW);
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, 256, glow::DYNAMIC_DRAW);
             Ok(PbrUniformBuf { ubo })
         }
     }
@@ -872,8 +872,6 @@ impl PbrUniformBuf {
     }
 
     /// Upload material and frame-owned environment/selection state together.
-    /// The final vec4 occupies the PBR block's existing 16-byte tail padding,
-    /// so adding selection does not enlarge the 224-byte UBO.
     pub fn upload_with_environment_and_selection(
         &self,
         gl: &glow::Context,
@@ -882,8 +880,25 @@ impl PbrUniformBuf {
         env_mip_count: f32,
         selection_tint: [f32; 4],
     ) {
+        self.upload_with_frame_state(
+            gl, p, has_env_map, env_mip_count, selection_tint,
+            [0.0; 4], [0.0; 4],
+        );
+    }
+
+    /// Upload material state plus the persistent source-space focus sphere.
+    pub fn upload_with_frame_state(
+        &self,
+        gl: &glow::Context,
+        p: &PbrParams,
+        has_env_map: bool,
+        env_mip_count: f32,
+        selection_tint: [f32; 4],
+        focus_sphere: [f32; 4],
+        focus_field_params: [f32; 4],
+    ) {
         let b = |v: bool| -> f32 { if v { 1.0 } else { 0.0 } };
-        let mut d = [0u8; 224];
+        let mut d = [0u8; 256];
         let mut f = |off: usize, v: f32| { d[off..off+4].copy_from_slice(&v.to_le_bytes()); };
 
         // base_color vec4 at offset 0
@@ -919,6 +934,12 @@ impl PbrUniformBuf {
         // Renderer-owned selection tint vec4 at offset 208 (rgb + blend amount).
         f(208, selection_tint[0]); f(212, selection_tint[1]);
         f(216, selection_tint[2]); f(220, selection_tint[3]);
+        // Shared focus/inversion sphere at offset 224 (source-space center + radius).
+        f(224, focus_sphere[0]); f(228, focus_sphere[1]);
+        f(232, focus_sphere[2]); f(236, focus_sphere[3]);
+        // x=enabled, y=relative boundary feather; z/w reserved.
+        f(240, focus_field_params[0]); f(244, focus_field_params[1]);
+        f(248, focus_field_params[2]); f(252, focus_field_params[3]);
 
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));

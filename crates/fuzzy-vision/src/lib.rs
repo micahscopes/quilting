@@ -49,7 +49,7 @@ pub struct JfaConfig {
     pub downsample: u32,
     /// Number of blur passes (1=standard, 2-3=smoother, higher=silkier)
     pub blur_passes: u32,
-    /// Blur mode: 0=DoF(depth), 1=Conformal(stretch), 2=Hybrid(max)
+    /// Blur mode: 0=DoF(depth), 1=Conformal(stretch), 2=Hybrid(max), 3=Focus field
     pub blur_mode: u32,
     /// Use mip-chain blur instead of multi-pass Gaussian (smoother, no boundary artifacts)
     pub use_mip_blur: bool,
@@ -167,13 +167,14 @@ void main() {
 "#;
 
 /// Conformal/DoF weight: select signal for JFA based on mode.
-/// Mode 0 = DoF (depth), Mode 1 = Conformal (stretch), Mode 2 = Hybrid (max).
+/// Mode 0 = DoF (depth), Mode 1 = Conformal (stretch), Mode 2 = Hybrid (max),
+/// Mode 3 = source-space spherical focus field.
 const FS_WEIGHT_CONFORMAL: &str = r#"#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o_color;
-uniform sampler2D u_stretch; // MRT: R=stretch, G=depth
-uniform float u_mode; // 0=dof, 1=conformal, 2=hybrid
+uniform sampler2D u_stretch; // MRT: R=stretch, G=depth, B=focus field
+uniform float u_mode; // 0=dof, 1=conformal, 2=hybrid, 3=focus field
 
 void main() {
     vec4 data = texture(u_stretch, v_uv);
@@ -184,8 +185,10 @@ void main() {
         w = depth;           // DoF: use depth directly (dense, every pixel)
     } else if (u_mode < 1.5) {
         w = stretch;         // Conformal: use stretch (sparse, needs JFA)
-    } else {
+    } else if (u_mode < 2.5) {
         w = max(stretch, depth); // Hybrid: both signals
+    } else {
+        w = data.b;         // Selection field: inside sharp, outside blurred
     }
     o_color = vec4(w, 0.0, 0.0, 1.0);
 }
@@ -274,8 +277,17 @@ uniform vec2 u_dims;
 uniform float u_max_distance;
 uniform float u_focus;     // applied post-JFA
 uniform float u_bandwidth; // applied post-JFA
+uniform sampler2D u_weight;
+uniform float u_mode;
 
 void main() {
+    // A focus field is already a dense normalized blur mask. Preserve it
+    // directly so JFA cannot bleed outside blur back into the sharp sphere.
+    if (u_mode > 2.5) {
+        float field_weight = texture(u_weight, v_uv).r;
+        o_color = vec4(v_uv, field_weight, 0.0);
+        return;
+    }
     // Bilinear interpolation from JFA
     vec2 texel = 1.0 / u_dims;
     vec2 sp = v_uv * u_dims - 0.5;
@@ -679,6 +691,13 @@ impl JfaPipeline {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
 
+            // The selection field is already dense and normalized. It bypasses
+            // seed propagation entirely; other modes retain the JFA path.
+            let direct_focus_field = self.config.blur_mode == 3;
+            let jfa_result_tex = if direct_focus_field {
+                self.jfa_result_in_ping = true;
+                self.ping_tex
+            } else {
             // --- Stage 1: Init seeds from weight texture (into ping, at JFA resolution) ---
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.ping_fbo));
             gl.viewport(0, 0, jw, jh);
@@ -740,7 +759,8 @@ impl JfaPipeline {
             // JFA result is in whichever buffer was last written to. Which one that is
             // depends on the step-count parity, so record it for debug_blit().
             self.jfa_result_in_ping = read_from_ping;
-            let jfa_result_tex = if read_from_ping { self.ping_tex } else { self.pong_tex };
+            if read_from_ping { self.ping_tex } else { self.pong_tex }
+            };
 
             // --- Stage 3: Firmness blend (full resolution) ---
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.firmness_fbo));
@@ -762,6 +782,14 @@ impl JfaPipeline {
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_bandwidth") {
                 gl.uniform_1_f32(Some(&loc), self.config.bandwidth);
+            }
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(weight_tex));
+            if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_weight") {
+                gl.uniform_1_i32(Some(&loc), 1);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_mode") {
+                gl.uniform_1_f32(Some(&loc), self.config.blur_mode as f32);
             }
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
@@ -969,7 +997,7 @@ impl JfaPipeline {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vao));
 
-            if self.config.normalize {
+            if self.config.normalize && self.config.blur_mode != 3 {
                 // --- Step 1: Mode selection → firmness_fbo (temporary, overwritten by JFA later) ---
                 // This extracts the correct channel (depth/stretch/hybrid) into a single R value.
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.firmness_fbo));

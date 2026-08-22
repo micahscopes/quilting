@@ -64,18 +64,23 @@ fn bind_pbr_material_state(
     env_mip_count: f32,
     bind_transmission: bool,
     selected: bool,
+    focus_sphere: [f32; 4],
+    focus_field_enabled: bool,
+    focus_field_feather: f32,
 ) {
     let selection_tint = if selected {
         [0.16, 0.78, 1.0, 0.13]
     } else {
         [0.0; 4]
     };
-    renderer.pbr_ubo().upload_with_environment_and_selection(
+    renderer.pbr_ubo().upload_with_frame_state(
         gl,
         material,
         has_env_map,
         env_mip_count,
         selection_tint,
+        focus_sphere,
+        [if focus_field_enabled { 1.0 } else { 0.0 }, focus_field_feather, 0.0, 0.0],
     );
     renderer.pbr_ubo().bind(gl);
 
@@ -183,7 +188,7 @@ struct MainState {
     // Fuzzy-vision JFA blur pipeline
     fuzzy: Option<fuzzy_vision::JfaPipeline>,
     fuzzy_enabled: bool,
-    fuzzy_mode: u32, // 0=radial, 1=conformal
+    fuzzy_mode: u32, // 0=DoF, 1=conformal, 2=hybrid, 3=selection field
     fuzzy_debug: u32, // 0=off, 1=smoothed weight, 2=jfa, 3=firmness
     fuzzy_weight_fbo: Option<glow::Framebuffer>,
     fuzzy_weight_tex: Option<glow::Texture>,
@@ -196,6 +201,10 @@ struct MainState {
     highlight_face: i32, // -1 = none
     /// Stable glTF node receiving the lightweight per-patch selection tint.
     selected_node: i32, // -1 = none
+    /// Persistent posed ordinary-space sphere shared by focus and inversion.
+    focus_sphere: [f32; 4],
+    focus_field_enabled: bool,
+    focus_field_feather: f32,
     highlight_prog: Option<glow::Program>,
     highlight_vao: Option<glow::VertexArray>,
 }
@@ -521,6 +530,9 @@ pub fn mr_init(canvas_id: &str) -> bool {
             pick_size: (0, 0),
             highlight_face: -1,
             selected_node: -1,
+            focus_sphere: [0.5, 0.0, 0.0, 2.0],
+            focus_field_enabled: false,
+            focus_field_feather: 0.15,
             highlight_prog: None,
             highlight_vao: None,
         });
@@ -1047,6 +1059,29 @@ pub fn mr_set_selected_node(node_id: i32) {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
             renderer.selected_node = node_id.max(-1);
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "mr_setFocusSphere")]
+pub fn mr_set_focus_sphere(
+    center_x: f32,
+    center_y: f32,
+    center_z: f32,
+    radius: f32,
+    enabled: bool,
+    relative_feather: f32,
+) {
+    STATE.with(|state| {
+        if let Some(renderer) = state.borrow_mut().as_mut() {
+            let center = [center_x, center_y, center_z];
+            if center.iter().all(|value| value.is_finite()) && radius.is_finite() {
+                renderer.focus_sphere = [center_x, center_y, center_z, radius.max(1e-4)];
+            }
+            renderer.focus_field_enabled = enabled;
+            if relative_feather.is_finite() {
+                renderer.focus_field_feather = relative_feather.clamp(0.001, 4.0);
+            }
         }
     });
 }
@@ -2245,11 +2280,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::NONE]);
                         gl.clear_color(0.2, 0.2, 0.3, 1.0);
                         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-                        // Clear weight attachment: R=0.5 (neutral stretch), G=0.5 (neutral depth)
-                        // Both channels at 0.5 = "no effect" for JFA — background pixels
-                        // won't bias toward blur or sharpness in either mode.
+                        // Clear weight attachment: R/G remain neutral for conformal/DoF.
+                        // B=1 places the empty scene outside the spherical focus field.
                         gl.draw_buffers(&[glow::NONE, glow::COLOR_ATTACHMENT1]);
-                        gl.clear_color(0.5, 0.5, 0.0, 1.0);
+                        gl.clear_color(0.5, 0.5, 1.0, 1.0);
                         gl.clear(glow::COLOR_BUFFER_BIT);
                         // Re-enable both for rendering
                         gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
@@ -2298,6 +2332,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             env_mips,
                             false,
                             selected,
+                            state.focus_sphere,
+                            state.focus_field_enabled,
+                            state.focus_field_feather,
                         );
                         active_material = Some((material_slot, selected));
                         material_updates += 1;
@@ -2529,6 +2566,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             env_mips,
                             true,
                             selected,
+                            state.focus_sphere,
+                            state.focus_field_enabled,
+                            state.focus_field_feather,
                         );
                         active_material = Some((material_slot, selected));
                         material_updates += 1;
