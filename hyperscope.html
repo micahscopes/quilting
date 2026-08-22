@@ -289,7 +289,7 @@ globalThis.__hyperscopeStartupDiagnostics = startupDiagnostics;
 const lodMetricNames = [
   'totalMs', 'workerMs', 'batchMs', 'batchGroupMs', 'batchUploadMs',
   'batchRetainMs', 'batchBalanceMs', 'batchBucketMs',
-  'wasmMs', 'gpuComputeMs', 'gpuWaitMs', 'gpuReadbackMs',
+  'wasmMs', 'animEvalMs', 'gpuComputeMs', 'gpuWaitMs', 'gpuReadbackMs',
   'changedFaces', 'lodTransferBytes',
 ];
 const lodTelemetry = {
@@ -350,7 +350,7 @@ function updateLodMetric(name, value) {
 function recordLodTiming(
   totalMs, workerMs, batchMs, batchGroupMs, batchUploadMs,
   batchRetainMs, batchBalanceMs, batchBucketMs,
-  wasmMs, gpuComputeMs, gpuWaitMs, gpuReadbackMs,
+  wasmMs, animEvalMs, gpuComputeMs, gpuWaitMs, gpuReadbackMs,
   changedFaces, lodTransferBytes, fullSnapshot, applied, debug,
 ) {
   lodTelemetry.completed += 1;
@@ -367,6 +367,7 @@ function recordLodTiming(
   updateLodMetric('batchBalanceMs', batchBalanceMs);
   updateLodMetric('batchBucketMs', batchBucketMs);
   updateLodMetric('wasmMs', wasmMs);
+  updateLodMetric('animEvalMs', animEvalMs);
   updateLodMetric('gpuComputeMs', gpuComputeMs);
   updateLodMetric('gpuWaitMs', gpuWaitMs);
   updateLodMetric('gpuReadbackMs', gpuReadbackMs);
@@ -1964,6 +1965,7 @@ async function recomputeLods() {
       batchBalanceMs,
       batchBucketMs,
       wt.wasm_total,
+      workerPhases['lod-anim-eval'],
       workerPhases['lod-gpu-compute'],
       workerPhases['lod-gpu-wait'],
       workerPhases['lod-gpu-readback'],

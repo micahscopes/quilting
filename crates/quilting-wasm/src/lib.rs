@@ -10,7 +10,7 @@ use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
 use quilting_core::triangle;
 use quilting_mesh::HalfEdgeMesh;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use glow::HasContext;
 
@@ -66,6 +66,79 @@ struct StoredGltfData {
     /// Normalization: center and 1/extent for rest-pose bounding box.
     norm_center: [f64; 3],
     norm_scale: f64,
+    /// The main renderer pose upload and worker-side LOD dispatch normally ask
+    /// for the same animation time in adjacent messages. Retain the normalized
+    /// result so joint evaluation and matrix normalization happen once.
+    cached_pose: RefCell<Option<CachedAnimationPose>>,
+}
+
+struct CachedAnimationPose {
+    time_bits: u64,
+    pose: quilting_gltf::evaluator::AnimationPose,
+}
+
+fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = a[row] * b[col * 4]
+                + a[4 + row] * b[col * 4 + 1]
+                + a[8 + row] * b[col * 4 + 2]
+                + a[12 + row] * b[col * 4 + 3];
+        }
+    }
+    out
+}
+
+fn normalize_animation_pose(
+    pose: &mut quilting_gltf::evaluator::AnimationPose,
+    center: [f64; 3],
+    scale: f64,
+) {
+    if pose.joint_matrices.is_empty() {
+        return;
+    }
+
+    let inverse_scale = if scale.abs() > 1e-10 { 1.0 / scale } else { 1.0 };
+    let sf = scale as f32;
+    let isf = inverse_scale as f32;
+    let cx = center[0] as f32;
+    let cy = center[1] as f32;
+    let cz = center[2] as f32;
+    let norm = [
+        sf, 0.0, 0.0, 0.0, 0.0, sf, 0.0, 0.0,
+        0.0, 0.0, sf, 0.0, -cx * sf, -cy * sf, -cz * sf, 1.0,
+    ];
+    let unnorm = [
+        isf, 0.0, 0.0, 0.0, 0.0, isf, 0.0, 0.0,
+        0.0, 0.0, isf, 0.0, cx, cy, cz, 1.0,
+    ];
+
+    for matrix in pose.joint_matrices.chunks_exact_mut(16) {
+        let source: [f32; 16] = matrix.try_into().expect("16-float joint matrix");
+        let normalized = mat4_mul_f32(&norm, &mat4_mul_f32(&source, &unnorm));
+        matrix.copy_from_slice(&normalized);
+    }
+}
+
+fn normalized_animation_pose(
+    data: &StoredGltfData,
+    t: f64,
+) -> Option<Ref<'_, quilting_gltf::evaluator::AnimationPose>> {
+    let evaluator = data.evaluator.as_ref()?;
+    let time_bits = t.to_bits();
+    {
+        let mut cached = data.cached_pose.borrow_mut();
+        if cached.as_ref().map(|entry| entry.time_bits) != Some(time_bits) {
+            let mut pose = evaluator.evaluate(t);
+            normalize_animation_pose(&mut pose, data.norm_center, data.norm_scale);
+            *cached = Some(CachedAnimationPose { time_bits, pose });
+        }
+    }
+
+    Some(Ref::map(data.cached_pose.borrow(), |cached| {
+        &cached.as_ref().expect("animation pose was cached").pose
+    }))
 }
 
 struct PendingLodRun {
@@ -449,53 +522,20 @@ pub fn dispatch_animated_lods(
         // the uninitialized rendering state when animation is paused.
         perf_mark("lod-anim-eval-start");
         let use_anim = t >= 0.0;
-        let (joint_matrices, morph_weights, num_joints, num_morph) =
-            if use_anim {
-                if let Some(ref eval) = data.evaluator {
-                    let pose = eval.evaluate(t.max(0.0));
-
-                    let c = data.norm_center;
-                    let s = data.norm_scale;
-                    let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
-                    let sf = s as f32; let sif = si as f32;
-                    let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
-                    let norm: [f32; 16] = [
-                        sf, 0.0, 0.0, 0.0, 0.0, sf, 0.0, 0.0,
-                        0.0, 0.0, sf, 0.0, -cx*sf, -cy*sf, -cz*sf, 1.0,
-                    ];
-                    let unnorm: [f32; 16] = [
-                        sif, 0.0, 0.0, 0.0, 0.0, sif, 0.0, 0.0,
-                        0.0, 0.0, sif, 0.0, cx, cy, cz, 1.0,
-                    ];
-                    fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-                        let mut out = [0.0f32; 16];
-                        for col in 0..4 {
-                            for row in 0..4 {
-                                out[col * 4 + row] = a[row] * b[col * 4]
-                                    + a[4 + row] * b[col * 4 + 1]
-                                    + a[8 + row] * b[col * 4 + 2]
-                                    + a[12 + row] * b[col * 4 + 3];
-                            }
-                        }
-                        out
-                    }
-
-                    let mut normalized_mats = Vec::with_capacity(pose.joint_matrices.len());
-                    let nj = pose.joint_matrices.len() / 16;
-                    for ji in 0..nj {
-                        let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
-                        let nmu = mat4_mul_f32(&norm, &mat4_mul_f32(&m, &unnorm));
-                        normalized_mats.extend_from_slice(&nmu);
-                    }
-
-                    let nm = pose.morph_weights.len() as u32;
-                    (normalized_mats, pose.morph_weights, nj as u32, nm)
-                } else {
-                    (vec![], vec![], 0u32, 0u32)
-                }
-            } else {
-                (vec![], vec![], 0u32, 0u32)
-            };
+        let pose = if use_anim {
+            normalized_animation_pose(data, t.max(0.0))
+        } else {
+            None
+        };
+        let (joint_matrices, morph_weights, num_joints, num_morph) = match pose.as_deref() {
+            Some(pose) => (
+                pose.joint_matrices.as_slice(),
+                pose.morph_weights.as_slice(),
+                pose.num_joints as u32,
+                pose.morph_weights.len() as u32,
+            ),
+            None => (&[][..], &[][..], 0, 0),
+        };
 
         perf_mark("lod-anim-eval-end");
         perf_measure("lod-anim-eval", "lod-anim-eval-start", "lod-anim-eval-end");
@@ -511,10 +551,10 @@ pub fn dispatch_animated_lods(
 
             perf_mark("lod-gpu-pose-upload-start");
             if !joint_matrices.is_empty() {
-                compute.upload_joint_matrices(gl, &joint_matrices);
+                compute.upload_joint_matrices(gl, joint_matrices);
             }
             if !morph_weights.is_empty() {
-                compute.upload_morph_weights(gl, &morph_weights);
+                compute.upload_morph_weights(gl, morph_weights);
             }
             perf_mark("lod-gpu-pose-upload-end");
             perf_measure(
@@ -1121,6 +1161,7 @@ pub fn set_active_animation(index: u32) -> JsValue {
         }
 
         data.active_animation = index;
+        *data.cached_pose.borrow_mut() = None;
 
         // Rebuild evaluator for the new animation
         if let Some(si) = data.primary_skin_idx {
@@ -1171,56 +1212,17 @@ pub fn evaluate_animation_frame(t: f64) -> JsValue {
             Some(d) => d,
             None => return JsValue::NULL,
         };
-        let evaluator = match data.evaluator.as_ref() {
-            Some(e) => e,
+        let pose = match normalized_animation_pose(data, t) {
+            Some(pose) => pose,
             None => return JsValue::NULL,
         };
-        let pose = evaluator.evaluate(t);
 
         let result = js_sys::Object::new();
 
         // Joint matrices (skeletal skinning)
         if !pose.joint_matrices.is_empty() {
-            // Sandwich each joint matrix with normalization:
-            //   norm_M = norm * M * unnorm
-            let c = data.norm_center;
-            let s = data.norm_scale;
-            let si = if s.abs() > 1e-10 { 1.0 / s } else { 1.0 };
-            let sf = s as f32;
-            let sif = si as f32;
-            let cx = c[0] as f32; let cy = c[1] as f32; let cz = c[2] as f32;
-            let norm: [f32; 16] = [
-                sf, 0.0, 0.0, 0.0, 0.0, sf, 0.0, 0.0,
-                0.0, 0.0, sf, 0.0, -cx*sf, -cy*sf, -cz*sf, 1.0,
-            ];
-            let unnorm: [f32; 16] = [
-                sif, 0.0, 0.0, 0.0, 0.0, sif, 0.0, 0.0,
-                0.0, 0.0, sif, 0.0, cx, cy, cz, 1.0,
-            ];
-
-            fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-                let mut out = [0.0f32; 16];
-                for col in 0..4 {
-                    for row in 0..4 {
-                        out[col * 4 + row] = a[row] * b[col * 4]
-                            + a[4 + row] * b[col * 4 + 1]
-                            + a[8 + row] * b[col * 4 + 2]
-                            + a[12 + row] * b[col * 4 + 3];
-                    }
-                }
-                out
-            }
-
-            let num_joints = pose.joint_matrices.len() / 16;
-            let mut result_mats = Vec::with_capacity(pose.joint_matrices.len());
-            for ji in 0..num_joints {
-                let m: [f32; 16] = pose.joint_matrices[ji*16..(ji+1)*16].try_into().unwrap();
-                let mu = mat4_mul_f32(&m, &unnorm);
-                let nmu = mat4_mul_f32(&norm, &mu);
-                result_mats.extend_from_slice(&nmu);
-            }
-            let arr = js_sys::Float32Array::new_with_length(result_mats.len() as u32);
-            arr.copy_from(&result_mats);
+            let arr = js_sys::Float32Array::new_with_length(pose.joint_matrices.len() as u32);
+            arr.copy_from(&pose.joint_matrices);
             js_sys::Reflect::set(&result, &"matrices".into(), &arr).unwrap();
         }
 
@@ -1871,6 +1873,7 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             evaluator,
             norm_center,
             norm_scale,
+            cached_pose: RefCell::new(None),
         });
     });
 

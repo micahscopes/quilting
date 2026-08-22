@@ -52,7 +52,9 @@ is fixed per WebGL draw.
 LOD selection runs on a dedicated worker with its own WebGL2 context:
 
 1. The worker evaluates the requested animation pose on the CPU and uploads
-   only joint matrices and morph weights.
+   only joint matrices and morph weights. The normalized pose is retained by
+   exact animation time, so the adjacent visible-pose request and LOD dispatch
+   share one joint/morph evaluation and one normalization pass.
 2. GPU pass 1 classifies one source face per output pixel. It computes posed
    geometry, conservative image extent, conformal interior demand, pole safety,
    and screen capacity.
