@@ -277,16 +277,34 @@ function gate(sig) {
 }
 // Lifecycle phase: async step that depends on other phases
 const phases = {};
+const startupDiagnostics = {
+  navigationStart: performance.timeOrigin,
+  phases: {},
+  atlas: null,
+};
+// Deliberately read-only by convention: browser regression checks consume this
+// without reaching into module-scoped signals or worker state.
+globalThis.__hyperscopeStartupDiagnostics = startupDiagnostics;
 function phase(name, depNames, fn) {
   const done = signal(false, `phase:${name}`);
   const result = signal(null, `phase:${name}:result`);
   const error = signal(null, `phase:${name}:error`);
+  const timing = {
+    waitingSinceMs: performance.now(),
+    startedAtMs: null,
+    finishedAtMs: null,
+    durationMs: null,
+    failed: false,
+  };
+  startupDiagnostics.phases[name] = timing;
   phases[name] = { done, result, error };
   (async () => {
     // Wait for all dependency phases
     for (const dep of depNames) {
       if (!phases[dep]) {
         error.set(new Error(`unknown dependency ${dep}`));
+        timing.failed = true;
+        timing.finishedAtMs = performance.now();
         done.set(true);
         return;
       }
@@ -295,17 +313,23 @@ function phase(name, depNames, fn) {
         // Propagate the root failure without running dependent work or emitting
         // a misleading second error (for example, atlas upload after WebGL loss).
         error.set(phases[dep].error.peek());
+        timing.failed = true;
+        timing.finishedAtMs = performance.now();
         done.set(true);
         return;
       }
     }
+    timing.startedAtMs = performance.now();
     try {
       const r = await fn();
       result.set(r);
     } catch (e) {
       error.set(e);
+      timing.failed = true;
       console.error(`phase ${name} failed:`, e);
     }
+    timing.finishedAtMs = performance.now();
+    timing.durationMs = timing.finishedAtMs - timing.startedAtMs;
     done.set(true);
   })();
   return { done, result, error };
@@ -1953,6 +1977,16 @@ phase('atlas', ['workers'], async () => {
   if (!packed?.patches || !packed?.bary || !packed?.tris || !packed?.lines) {
     throw new Error('packed tessellation atlas export was incomplete');
   }
+  startupDiagnostics.atlas = {
+    requestedPatches: allTriples.length,
+    packedPatches: packed.patches.length / 7,
+    vertices: packed.bary.length / 3,
+    triangleIndices: packed.tris.length,
+    lineIndices: packed.lines.length,
+    transferBytes: packed.patches.byteLength + packed.bary.byteLength
+      + packed.tris.byteLength + packed.lines.byteLength,
+    workers: ATLAS_WORKERS,
+  };
   if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
     throw new Error('GPU rejected the packed tessellation atlas upload');
   }
