@@ -263,7 +263,17 @@ pub fn upload_model_to_compute() -> bool {
             let faces_u32: Vec<[u32; 3]> = combined.triangles.iter()
                 .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
                 .collect();
-            let he_mesh = HalfEdgeMesh::from_triangles(nv as u32, &faces_u32);
+            // glTF duplicates render vertices at UV/normal/material seams. Keep
+            // those attributes distinct, but weld exact coincident boundary
+            // positions for the topology used by edge-LOD reconciliation.
+            let topology_positions: Vec<[f64; 3]> = pos_f32
+                .chunks_exact(3)
+                .map(|position| [position[0] as f64, position[1] as f64, position[2] as f64])
+                .collect();
+            let he_mesh = HalfEdgeMesh::from_triangles_welded_exact(
+                &topology_positions,
+                &faces_u32,
+            );
             {
                 // Build adjacency data: 4 floats per entry, 3 entries per face
                 // (neighbor_face, neighbor_lod_idx, 0, 0) per edge

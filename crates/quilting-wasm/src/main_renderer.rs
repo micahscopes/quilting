@@ -27,7 +27,7 @@ use hyperscape::interchange::{
 };
 use hyperscape::{ChamberSide, ContactClassification};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 /// Floats per material in the array `mr_setMaterials` receives.
@@ -49,6 +49,9 @@ struct MainState {
     /// asynchronous, so an invisible sentinel must not demote a patch that the
     /// current-pose render GPU may need to resurrect in the same frame.
     resident_face_lods: Vec<Option<batch::ResidentLod>>,
+    /// Source-mesh adjacency used to keep retained asynchronous topology
+    /// crack-free, including exact duplicate vertices at glTF attribute seams.
+    lod_topology: Option<quilting_mesh::HalfEdgeMesh>,
     /// Material/node/atlas changes require a rebuild even when face topology
     /// classifications are unchanged.
     batch_layout_dirty: bool,
@@ -261,6 +264,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             batches: Vec::new(),
             cached_instances: Vec::new(),
             resident_face_lods: Vec::new(),
+            lod_topology: None,
             batch_layout_dirty: true,
             persistent_buf: None,
             face_materials: Vec::new(),
@@ -933,6 +937,56 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
     })
 }
 
+fn build_instance_lod_topology(
+    instances: &[f32],
+    num_faces: usize,
+) -> Option<quilting_mesh::HalfEdgeMesh> {
+    let required = num_faces.checked_mul(instance_layout::STRIDE)?;
+    if instances.len() < required {
+        return None;
+    }
+
+    let mut source_vertices = HashMap::<u32, u32>::new();
+    let mut positions = Vec::<[f64; 3]>::new();
+    let mut faces = Vec::<[u32; 3]>::with_capacity(num_faces);
+    for face in 0..num_faces {
+        let base = face * instance_layout::STRIDE + instance_layout::offset::POSITIONS;
+        let mut compact_face = [0u32; 3];
+        for corner in 0..3 {
+            let offset = base + corner * 4;
+            let source = instances[offset];
+            let xyz = [instances[offset + 1], instances[offset + 2], instances[offset + 3]];
+            if !source.is_finite()
+                || source < 0.0
+                || source.fract() != 0.0
+                || !xyz.iter().all(|coordinate| coordinate.is_finite())
+            {
+                return None;
+            }
+            let source = source as u32;
+            let position = [xyz[0] as f64, xyz[1] as f64, xyz[2] as f64];
+            let compact = if let Some(&compact) = source_vertices.get(&source) {
+                if positions[compact as usize] != position {
+                    return None;
+                }
+                compact
+            } else {
+                let compact = positions.len() as u32;
+                positions.push(position);
+                source_vertices.insert(source, compact);
+                compact
+            };
+            compact_face[corner] = compact;
+        }
+        faces.push(compact_face);
+    }
+
+    Some(quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+        &positions,
+        &faces,
+    ))
+}
+
 #[wasm_bindgen(js_name = "mr_setInstanceData")]
 pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
     STATE.with(|s| {
@@ -940,12 +994,100 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces as usize;
             st.resident_face_lods = vec![None; st.num_faces];
+            st.lod_topology = build_instance_lod_topology(&st.cached_instances, st.num_faces);
+            if let Some(topology) = st.lod_topology.as_ref() {
+                info!(
+                    "LOD topology: {} faces, {} boundary half-edges after exact seam welding",
+                    topology.num_faces,
+                    topology.num_boundary_edges(),
+                );
+            } else {
+                warn!("Could not construct resident LOD topology from instance data");
+            }
             st.batch_layout_dirty = true;
             if st.face_nodes.len() != st.num_faces {
                 st.face_nodes = vec![0; st.num_faces];
             }
         }
     });
+}
+
+/// Read-only topology diagnostics for browser regression checks.
+#[wasm_bindgen(js_name = "mr_debugResidentLodEdges")]
+pub fn mr_debug_resident_lod_edges() -> JsValue {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else { return JsValue::NULL };
+        let Some(topology) = state.lod_topology.as_ref() else { return JsValue::NULL };
+
+        let mut shared_edges = 0u32;
+        let mut mismatched_edges = 0u32;
+        let mut missing_residents = 0u32;
+        let mut roundtrip_failures = 0u32;
+        let mut examples = Vec::<String>::new();
+        for resident in &state.resident_face_lods {
+            match resident {
+                Some(resident) => {
+                    if batch::ResidentLod::from_edge_lods(resident.edge_lods()) != *resident {
+                        roundtrip_failures += 1;
+                    }
+                }
+                None => missing_residents += 1,
+            }
+        }
+        for half_edge in 0..topology.half_edges.len() as u32 {
+            let Some(twin) = topology.twin(half_edge) else { continue };
+            if half_edge > twin {
+                continue;
+            }
+            shared_edges += 1;
+            let face = topology.half_edges[half_edge as usize].face as usize;
+            let twin_face = topology.half_edges[twin as usize].face as usize;
+            let Some(face_lods) = state
+                .resident_face_lods
+                .get(face)
+                .and_then(|resident| resident.map(batch::ResidentLod::edge_lods))
+            else {
+                continue;
+            };
+            let Some(twin_lods) = state
+                .resident_face_lods
+                .get(twin_face)
+                .and_then(|resident| resident.map(batch::ResidentLod::edge_lods))
+            else {
+                continue;
+            };
+            let edge_index = (half_edge as usize % 3 + 2) % 3;
+            let twin_edge_index = (twin as usize % 3 + 2) % 3;
+            if face_lods[edge_index] != twin_lods[twin_edge_index] {
+                mismatched_edges += 1;
+                if examples.len() < 8 {
+                    examples.push(format!(
+                        "f{face}:e{edge_index}={} != f{twin_face}:e{twin_edge_index}={}",
+                        face_lods[edge_index],
+                        twin_lods[twin_edge_index],
+                    ));
+                }
+            }
+        }
+
+        let result = js_sys::Object::new();
+        let set_number = |name: &str, value: u32| {
+            js_sys::Reflect::set(&result, &name.into(), &JsValue::from(value)).ok();
+        };
+        set_number("faces", state.num_faces as u32);
+        set_number("sharedEdges", shared_edges);
+        set_number("boundaryHalfEdges", topology.num_boundary_edges() as u32);
+        set_number("mismatchedEdges", mismatched_edges);
+        set_number("missingResidents", missing_residents);
+        set_number("roundtripFailures", roundtrip_failures);
+        js_sys::Reflect::set(
+            &result,
+            &"examples".into(),
+            &serde_wasm_bindgen::to_value(&examples).unwrap_or(JsValue::NULL),
+        ).ok();
+        result.into()
+    })
 }
 
 #[wasm_bindgen(js_name = "mr_setFaceMaterials")]
@@ -1306,12 +1448,9 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             perm_index: 0,
             parity_bucket: 0,
         };
-        let mut buckets: BTreeMap<([u32; 3], usize, usize, usize), Vec<u32>> = BTreeMap::new();
         let mut culled = 0usize;
         let mut topology_changed = state.batch_layout_dirty;
         for fi in 0..nf {
-            let lo = fi * batch::FACE_LOD_STRIDE;
-            if lo + 5 >= face_lods.len() { break; }
             let cpu_visible = batch::face_is_visible(face_lods, fi);
             if !cpu_visible {
                 culled += 1;
@@ -1324,6 +1463,15 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 initial_resident,
             );
             topology_changed |= previous != Some(resident);
+        }
+        let seam_corrections = state.lod_topology.as_ref().map_or(0, |topology| {
+            batch::reconcile_resident_edges(&mut state.resident_face_lods, topology)
+        });
+        topology_changed |= seam_corrections != 0;
+
+        let mut buckets: BTreeMap<([u32; 3], usize, usize, usize), Vec<u32>> = BTreeMap::new();
+        for fi in 0..nf {
+            let resident = state.resident_face_lods[fi].unwrap_or(initial_resident);
             let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
             let node = state.face_nodes.get(fi).copied().unwrap_or(0);
             buckets.entry((resident.canonical, resident.parity_bucket, mat, node)).or_default().push(fi as u32);
@@ -1484,8 +1632,8 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
         info!(
-            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
-            built, culled, missing, failed, mat_counts, node_counts
+            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} resident seam corrections, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
+            built, culled, seam_corrections, missing, failed, mat_counts, node_counts
         );
         state.batch_layout_dirty = missing != 0 || failed != 0;
     });

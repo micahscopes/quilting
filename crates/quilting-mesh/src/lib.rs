@@ -117,6 +117,79 @@ impl HalfEdgeMesh {
         }
     }
 
+    /// Build indexed topology, then join pairs of boundary edges whose endpoint
+    /// positions are bit-for-bit identical but whose vertex indices differ.
+    ///
+    /// glTF primitives duplicate vertices at UV, normal, material, and skinning
+    /// seams. Those duplicates must remain distinct render vertices, but they
+    /// still describe one geometric edge for tessellation LOD negotiation. We
+    /// therefore add only half-edge twins; faces and vertex indices are never
+    /// rewritten. A geometric edge is joined only when exactly two oppositely
+    /// directed boundary half-edges use it. Coincident/non-manifold stacks are
+    /// deliberately left as boundaries.
+    pub fn from_triangles_welded_exact(
+        positions: &[[f64; 3]],
+        faces: &[[u32; 3]],
+    ) -> Self {
+        let mut mesh = Self::from_triangles(positions.len() as u32, faces);
+
+        type PositionKey = [u64; 3];
+        #[derive(Clone, Copy)]
+        struct BoundaryEdge {
+            half_edge: u32,
+            from: PositionKey,
+            to: PositionKey,
+        }
+
+        #[inline]
+        fn position_key(position: [f64; 3]) -> Option<PositionKey> {
+            if !position.iter().all(|coordinate| coordinate.is_finite()) {
+                return None;
+            }
+            // Treat signed zero as one position without introducing an epsilon
+            // that could join genuinely separate, very close geometry.
+            Some(position.map(|coordinate| {
+                if coordinate == 0.0 { 0.0f64.to_bits() } else { coordinate.to_bits() }
+            }))
+        }
+
+        use rustc_hash::FxHashMap;
+        let mut geometric_boundaries: FxHashMap<(PositionKey, PositionKey), Vec<BoundaryEdge>> =
+            FxHashMap::default();
+
+        for half_edge in 0..mesh.half_edges.len() as u32 {
+            if mesh.twin(half_edge).is_some() {
+                continue;
+            }
+            let face = mesh.half_edges[half_edge as usize].face as usize;
+            let local = half_edge as usize % 3;
+            let from_index = faces[face][local] as usize;
+            let to_index = faces[face][(local + 1) % 3] as usize;
+            let (Some(from), Some(to)) = (
+                positions.get(from_index).copied().and_then(position_key),
+                positions.get(to_index).copied().and_then(position_key),
+            ) else {
+                continue;
+            };
+            let undirected = if from <= to { (from, to) } else { (to, from) };
+            geometric_boundaries
+                .entry(undirected)
+                .or_default()
+                .push(BoundaryEdge { half_edge, from, to });
+        }
+
+        for edges in geometric_boundaries.values() {
+            if let [a, b] = edges.as_slice() {
+                if a.from == b.to && a.to == b.from {
+                    mesh.half_edges[a.half_edge as usize].twin = pack_twin(b.half_edge);
+                    mesh.half_edges[b.half_edge as usize].twin = pack_twin(a.half_edge);
+                }
+            }
+        }
+
+        mesh
+    }
+
     pub fn face_vertices(&self, face: u32) -> [u32; 3] {
         let he0 = self.face_half_edge[face as usize] as usize;
         let he1 = self.half_edges[he0].next as usize;
@@ -220,6 +293,59 @@ mod tests {
         let shared = mesh.half_edges.iter().filter(|he| he.twin.is_some()).count();
         assert_eq!(shared, 2, "shared edge should have 2 twin half-edges");
         assert_eq!(mesh.num_boundary_edges(), 4);
+    }
+
+    #[test]
+    fn exact_duplicate_vertices_are_welded_for_adjacency_only() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0], // duplicate of 2
+            [1.0, 0.0, 0.0], // duplicate of 1
+            [1.0, 1.0, 0.0],
+        ];
+        let faces = [[0, 1, 2], [3, 4, 5]];
+
+        let indexed = HalfEdgeMesh::from_triangles(positions.len() as u32, &faces);
+        assert_eq!(indexed.num_boundary_edges(), 6);
+
+        let welded = HalfEdgeMesh::from_triangles_welded_exact(&positions, &faces);
+        assert_eq!(welded.num_vertices, positions.len() as u32);
+        assert_eq!(welded.face_vertices(0), faces[0]);
+        assert_eq!(welded.face_vertices(1), faces[1]);
+        assert_eq!(welded.num_boundary_edges(), 4);
+        assert_eq!(
+            welded.half_edges.iter().filter(|edge| edge.twin.is_some()).count(),
+            2,
+        );
+    }
+
+    #[test]
+    fn nearby_vertices_are_not_welded() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0 + 1.0e-12, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let faces = [[0, 1, 2], [3, 4, 5]];
+        let mesh = HalfEdgeMesh::from_triangles_welded_exact(&positions, &faces);
+        assert_eq!(mesh.num_boundary_edges(), 6);
+    }
+
+    #[test]
+    fn non_manifold_coincident_boundaries_are_not_welded() {
+        let positions = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0],
+        ];
+        let faces = [[0, 1, 2], [3, 4, 5], [6, 7, 8]];
+        let mesh = HalfEdgeMesh::from_triangles_welded_exact(&positions, &faces);
+        assert_eq!(mesh.num_boundary_edges(), 9);
     }
 
     #[test]

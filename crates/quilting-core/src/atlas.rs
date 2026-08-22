@@ -416,6 +416,51 @@ mod tests {
     }
 
     #[test]
+    fn every_s3_permutation_preserves_exact_edge_subdivisions() {
+        use crate::permutation::S3_PERMUTATIONS;
+        use crate::triangle;
+
+        let atlas = TessellationAtlas::build(&[2, 4, 8], &PatchConfig::default());
+        let canonical = [2u32, 4, 8];
+        for (permutation_index, permutation) in S3_PERMUTATIONS.iter().enumerate() {
+            let requested = [
+                canonical[permutation[0]],
+                canonical[permutation[1]],
+                canonical[permutation[2]],
+            ];
+            let patch = atlas.get_patch(requested).unwrap();
+            let barycentrics: Vec<[f64; 3]> = patch.positions.iter()
+                .map(|position| triangle::cartesian_to_bary(position[0], position[1]))
+                .collect();
+
+            for edge in 0..3 {
+                let parameter_component = (edge + 2) % 3;
+                let mut parameters: Vec<f64> = barycentrics.iter()
+                    .filter(|bary| bary[edge].abs() < 1.0e-9)
+                    .map(|bary| bary[parameter_component])
+                    .collect();
+                parameters.sort_by(|a, b| a.total_cmp(b));
+                parameters.dedup_by(|a, b| (*a - *b).abs() < 1.0e-9);
+
+                let subdivisions = requested[edge] as usize;
+                assert_eq!(
+                    parameters.len(),
+                    subdivisions + 1,
+                    "permutation {permutation_index}, edge {edge} requested {} subdivisions",
+                    requested[edge],
+                );
+                for (sample, parameter) in parameters.iter().enumerate() {
+                    let expected = sample as f64 / subdivisions as f64;
+                    assert!(
+                        (*parameter - expected).abs() < 1.0e-9,
+                        "permutation {permutation_index}, edge {edge}, sample {sample}: {parameter} != {expected}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn get_patch_positions_in_triangle() {
         use crate::triangle;
         let config = PatchConfig::default();

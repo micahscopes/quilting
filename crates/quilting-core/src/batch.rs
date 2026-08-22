@@ -3,6 +3,8 @@
 //! Uses O(n) bucket sort with direct indexing — the key space is bounded
 //! (atlas 0-255 × two winding parities × materials) and small enough for a flat Vec.
 
+use quilting_mesh::HalfEdgeMesh;
+
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
 /// which is the normative definition — do not restate the number here.
 pub use crate::instance_layout::STRIDE as INSTANCE_STRIDE;
@@ -29,6 +31,26 @@ impl ResidentLod {
             perm_index: 0,
             parity_bucket: 0,
         }
+    }
+
+    /// Construct resident topology from face-local edge resolutions.
+    pub fn from_edge_lods(edge_lods: [u32; 3]) -> Self {
+        let key = crate::permutation::canonical_form(edge_lods);
+        Self {
+            canonical: key.res,
+            perm_index: key.perm_index,
+            parity_bucket: usize::from(crate::permutation::perm_sign(key.perm_index) < 0),
+        }
+    }
+
+    /// Recover face-local edge resolutions from canonical atlas order.
+    pub fn edge_lods(self) -> [u32; 3] {
+        let permutation = crate::permutation::S3_PERMUTATIONS[self.perm_index.min(5)];
+        [
+            self.canonical[permutation[0]],
+            self.canonical[permutation[1]],
+            self.canonical[permutation[2]],
+        ]
     }
 
     /// Decode a valid, visible six-float GPU classification payload.
@@ -64,6 +86,58 @@ pub fn retain_face_lod(
         .unwrap_or(initial);
     *resident = Some(selected);
     selected
+}
+
+/// Reconcile the topology retained across asynchronous visibility results.
+///
+/// The worker's GPU pass guarantees agreement when both neighboring faces are
+/// visible in that classification. An invisible face intentionally keeps its
+/// previous resident topology, however, so a visible neighbor may otherwise
+/// change one side of their shared edge alone. Taking the maximum on every
+/// resident shared edge restores the same crack-free invariant without ever
+/// reducing a visible face's requested resolution.
+pub fn reconcile_resident_edges(
+    residents: &mut [Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+) -> usize {
+    let num_faces = residents.len().min(topology.num_faces as usize);
+    let mut face_edges: Vec<Option<[u32; 3]>> = residents[..num_faces]
+        .iter()
+        .map(|resident| resident.map(ResidentLod::edge_lods))
+        .collect();
+
+    for half_edge in 0..topology.half_edges.len() as u32 {
+        let Some(twin) = topology.twin(half_edge) else { continue };
+        if half_edge > twin {
+            continue;
+        }
+        let face = topology.half_edges[half_edge as usize].face as usize;
+        let twin_face = topology.half_edges[twin as usize].face as usize;
+        if face >= num_faces || twin_face >= num_faces {
+            continue;
+        }
+        let edge_index = (half_edge as usize % 3 + 2) % 3;
+        let twin_edge_index = (twin as usize % 3 + 2) % 3;
+        let (Some(face_lods), Some(twin_lods)) =
+            (face_edges[face], face_edges[twin_face])
+        else {
+            continue;
+        };
+        let shared = face_lods[edge_index].max(twin_lods[twin_edge_index]);
+        face_edges[face].as_mut().unwrap()[edge_index] = shared;
+        face_edges[twin_face].as_mut().unwrap()[twin_edge_index] = shared;
+    }
+
+    let mut changed = 0;
+    for (resident, edge_lods) in residents[..num_faces].iter_mut().zip(face_edges) {
+        let Some(edge_lods) = edge_lods else { continue };
+        let reconciled = ResidentLod::from_edge_lods(edge_lods);
+        if *resident != Some(reconciled) {
+            *resident = Some(reconciled);
+            changed += 1;
+        }
+    }
+    changed
 }
 
 /// A tessellation key identifying one canonical atlas patch.
@@ -315,6 +389,24 @@ mod tests {
             resident,
         );
         assert_eq!(stored, Some(resident));
+    }
+
+    #[test]
+    fn retained_topology_reconciles_across_welded_attribute_seams() {
+        let positions = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0],
+        ];
+        let faces = [[0, 1, 2], [3, 4, 5]];
+        let topology = HalfEdgeMesh::from_triangles_welded_exact(&positions, &faces);
+        let mut residents = [
+            Some(ResidentLod::from_edge_lods([8, 2, 2])),
+            Some(ResidentLod::from_edge_lods([2, 2, 32])),
+        ];
+
+        assert_eq!(reconcile_resident_edges(&mut residents, &topology), 1);
+        assert_eq!(residents[0].unwrap().edge_lods(), [32, 2, 2]);
+        assert_eq!(residents[1].unwrap().edge_lods(), [2, 2, 32]);
     }
 
     #[test]

@@ -333,7 +333,7 @@ pub fn compute_instances_with_uvs(
             let faces_u32: Vec<[u32; 3]> = faces.iter()
                 .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
                 .collect();
-            owned_mesh = HalfEdgeMesh::from_triangles(vertices.len() as u32, &faces_u32);
+            owned_mesh = HalfEdgeMesh::from_triangles_welded_exact(vertices, &faces_u32);
             &owned_mesh
         }
     };
