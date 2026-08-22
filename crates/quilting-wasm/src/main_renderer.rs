@@ -1024,12 +1024,38 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
         let mut mismatched_edges = 0u32;
         let mut missing_residents = 0u32;
         let mut roundtrip_failures = 0u32;
+        let mut anisotropic_faces = 0u32;
+        let mut max_edge_ratio = 1u32;
+        let mut same_max_density_jumps = 0u32;
+        let mut max_adjacent_triangle_ratio = 1.0f64;
+        let mut lod_histogram = BTreeMap::<String, u32>::new();
         let mut examples = Vec::<String>::new();
+        let resident_triangle_counts = TESS_CACHE.with(|cache| {
+            let cache = cache.borrow();
+            state.resident_face_lods.iter().map(|resident| {
+                resident.and_then(|resident| cache.get(&resident.canonical))
+                    .map(|patch| patch.num_tri_indices as u32 / 3)
+            }).collect::<Vec<_>>()
+        });
+        let resident_triangles: u64 = resident_triangle_counts
+            .iter()
+            .flatten()
+            .map(|&count| count as u64)
+            .sum();
         for resident in &state.resident_face_lods {
             match resident {
                 Some(resident) => {
                     if batch::ResidentLod::from_edge_lods(resident.edge_lods()) != *resident {
                         roundtrip_failures += 1;
+                    }
+                    let [minimum, middle, maximum] = resident.canonical;
+                    *lod_histogram
+                        .entry(format!("{minimum}/{middle}/{maximum}"))
+                        .or_default() += 1;
+                    let ratio = maximum / minimum.max(1);
+                    max_edge_ratio = max_edge_ratio.max(ratio);
+                    if ratio > 1 {
+                        anisotropic_faces += 1;
                     }
                 }
                 None => missing_residents += 1,
@@ -1069,6 +1095,31 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
                     ));
                 }
             }
+            let face_resident = state.resident_face_lods[face].unwrap();
+            let twin_resident = state.resident_face_lods[twin_face].unwrap();
+            let face_max = *face_resident.canonical.iter().max().unwrap_or(&1);
+            let twin_max = *twin_resident.canonical.iter().max().unwrap_or(&1);
+            if face_max == twin_max {
+                if let (Some(face_triangles), Some(twin_triangles)) = (
+                    resident_triangle_counts[face],
+                    resident_triangle_counts[twin_face],
+                ) {
+                    let smaller = face_triangles.min(twin_triangles).max(1);
+                    let larger = face_triangles.max(twin_triangles);
+                    let ratio = larger as f64 / smaller as f64;
+                    max_adjacent_triangle_ratio = max_adjacent_triangle_ratio.max(ratio);
+                    if ratio >= 4.0 {
+                        same_max_density_jumps += 1;
+                        if examples.len() < 8 {
+                            examples.push(format!(
+                                "same-max f{face} {:?} ({face_triangles} tris) vs f{twin_face} {:?} ({twin_triangles} tris)",
+                                face_resident.canonical,
+                                twin_resident.canonical,
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         let result = js_sys::Object::new();
@@ -1081,6 +1132,25 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
         set_number("mismatchedEdges", mismatched_edges);
         set_number("missingResidents", missing_residents);
         set_number("roundtripFailures", roundtrip_failures);
+        set_number("anisotropicFaces", anisotropic_faces);
+        set_number("maxEdgeRatio", max_edge_ratio);
+        set_number("sameMaxDensityJumps", same_max_density_jumps);
+        js_sys::Reflect::set(
+            &result,
+            &"maxSameMaxAdjacentTriangleRatio".into(),
+            &JsValue::from(max_adjacent_triangle_ratio),
+        ).ok();
+        js_sys::Reflect::set(
+            &result,
+            &"residentTriangles".into(),
+            &JsValue::from(resident_triangles as f64),
+        ).ok();
+        js_sys::Reflect::set(
+            &result,
+            &"lodHistogram".into(),
+            &serde_wasm_bindgen::to_value(&lod_histogram.into_iter().collect::<Vec<_>>())
+                .unwrap_or(JsValue::NULL),
+        ).ok();
         js_sys::Reflect::set(
             &result,
             &"examples".into(),
@@ -1464,10 +1534,10 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             );
             topology_changed |= previous != Some(resident);
         }
-        let seam_corrections = state.lod_topology.as_ref().map_or(0, |topology| {
-            batch::reconcile_resident_edges(&mut state.resident_face_lods, topology)
+        let lod_corrections = state.lod_topology.as_ref().map_or(0, |topology| {
+            batch::balance_resident_lods(&mut state.resident_face_lods, topology)
         });
-        topology_changed |= seam_corrections != 0;
+        topology_changed |= lod_corrections != 0;
 
         let mut buckets: BTreeMap<([u32; 3], usize, usize, usize), Vec<u32>> = BTreeMap::new();
         for fi in 0..nf {
@@ -1632,8 +1702,8 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
         }
         info!(
-            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} resident seam corrections, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
-            built, culled, seam_corrections, missing, failed, mat_counts, node_counts
+            "Built {} GPU batches ({} CPU-culled faces retained for current-pose GPU culling, {} resident LOD balance corrections, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
+            built, culled, lod_corrections, missing, failed, mat_counts, node_counts
         );
         state.batch_layout_dirty = missing != 0 || failed != 0;
     });

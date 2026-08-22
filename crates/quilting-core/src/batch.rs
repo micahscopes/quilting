@@ -88,15 +88,23 @@ pub fn retain_face_lod(
     selected
 }
 
-/// Reconcile the topology retained across asynchronous visibility results.
+/// Maximum edge-resolution ratio allowed inside one resident source triangle.
+/// A 2:1 balance prevents needle/fan atlas patches while still permitting LOD
+/// to decay by one power-of-two level per face away from a detail peak.
+pub const MAX_FACE_EDGE_LOD_RATIO: u32 = 2;
+
+/// Reconcile and grade topology retained across asynchronous visibility results.
 ///
 /// The worker's GPU pass guarantees agreement when both neighboring faces are
 /// visible in that classification. An invisible face intentionally keeps its
 /// previous resident topology, however, so a visible neighbor may otherwise
 /// change one side of their shared edge alone. Taking the maximum on every
-/// resident shared edge restores the same crack-free invariant without ever
-/// reducing a visible face's requested resolution.
-pub fn reconcile_resident_edges(
+/// resident shared edge restores the same crack-free invariant. A second 2:1
+/// face-balance constraint prevents extreme anisotropic atlas patches such as
+/// `[1, 1, 128]`. Promotions are iterated to a fixed point because grading one
+/// face can raise an edge shared with its neighbor. No requested resolution is
+/// ever reduced, and a peak decays by one LOD level per neighboring face.
+pub fn balance_resident_lods(
     residents: &mut [Option<ResidentLod>],
     topology: &HalfEdgeMesh,
 ) -> usize {
@@ -106,26 +114,47 @@ pub fn reconcile_resident_edges(
         .map(|resident| resident.map(ResidentLod::edge_lods))
         .collect();
 
-    for half_edge in 0..topology.half_edges.len() as u32 {
-        let Some(twin) = topology.twin(half_edge) else { continue };
-        if half_edge > twin {
-            continue;
+    loop {
+        let mut pass_changed = false;
+
+        for half_edge in 0..topology.half_edges.len() as u32 {
+            let Some(twin) = topology.twin(half_edge) else { continue };
+            if half_edge > twin {
+                continue;
+            }
+            let face = topology.half_edges[half_edge as usize].face as usize;
+            let twin_face = topology.half_edges[twin as usize].face as usize;
+            if face >= num_faces || twin_face >= num_faces {
+                continue;
+            }
+            let edge_index = (half_edge as usize % 3 + 2) % 3;
+            let twin_edge_index = (twin as usize % 3 + 2) % 3;
+            let (Some(face_lods), Some(twin_lods)) =
+                (face_edges[face], face_edges[twin_face])
+            else {
+                continue;
+            };
+            let shared = face_lods[edge_index].max(twin_lods[twin_edge_index]);
+            pass_changed |= face_lods[edge_index] != shared
+                || twin_lods[twin_edge_index] != shared;
+            face_edges[face].as_mut().unwrap()[edge_index] = shared;
+            face_edges[twin_face].as_mut().unwrap()[twin_edge_index] = shared;
         }
-        let face = topology.half_edges[half_edge as usize].face as usize;
-        let twin_face = topology.half_edges[twin as usize].face as usize;
-        if face >= num_faces || twin_face >= num_faces {
-            continue;
+
+        for edge_lods in face_edges.iter_mut().flatten() {
+            let maximum = *edge_lods.iter().max().unwrap_or(&1);
+            let minimum_allowed = (maximum / MAX_FACE_EDGE_LOD_RATIO).max(1);
+            for edge_lod in edge_lods {
+                if *edge_lod < minimum_allowed {
+                    *edge_lod = minimum_allowed;
+                    pass_changed = true;
+                }
+            }
         }
-        let edge_index = (half_edge as usize % 3 + 2) % 3;
-        let twin_edge_index = (twin as usize % 3 + 2) % 3;
-        let (Some(face_lods), Some(twin_lods)) =
-            (face_edges[face], face_edges[twin_face])
-        else {
-            continue;
-        };
-        let shared = face_lods[edge_index].max(twin_lods[twin_edge_index]);
-        face_edges[face].as_mut().unwrap()[edge_index] = shared;
-        face_edges[twin_face].as_mut().unwrap()[twin_edge_index] = shared;
+
+        if !pass_changed {
+            break;
+        }
     }
 
     let mut changed = 0;
@@ -404,9 +433,20 @@ mod tests {
             Some(ResidentLod::from_edge_lods([2, 2, 32])),
         ];
 
-        assert_eq!(reconcile_resident_edges(&mut residents, &topology), 1);
-        assert_eq!(residents[0].unwrap().edge_lods(), [32, 2, 2]);
-        assert_eq!(residents[1].unwrap().edge_lods(), [2, 2, 32]);
+        assert_eq!(balance_resident_lods(&mut residents, &topology), 2);
+        assert_eq!(residents[0].unwrap().edge_lods(), [32, 16, 16]);
+        assert_eq!(residents[1].unwrap().edge_lods(), [16, 16, 32]);
+    }
+
+    #[test]
+    fn resident_topology_limits_face_anisotropy_to_two_to_one() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let faces = [[0, 1, 2]];
+        let topology = HalfEdgeMesh::from_triangles(positions.len() as u32, &faces);
+        let mut residents = [Some(ResidentLod::from_edge_lods([1, 1, 128]))];
+
+        assert_eq!(balance_resident_lods(&mut residents, &topology), 1);
+        assert_eq!(residents[0].unwrap().edge_lods(), [64, 64, 128]);
     }
 
     #[test]
