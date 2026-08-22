@@ -199,8 +199,10 @@ struct MainState {
     // Pick buffer for face inspection
     pick_fbo: Option<glow::Framebuffer>,
     pick_tex: Option<glow::Texture>,
+    pick_bary_tex: Option<glow::Texture>,
     pick_depth: Option<glow::Renderbuffer>,
     pick_size: (i32, i32),
+    last_pick_barycentric: Option<[f32; 3]>,
     highlight_face: i32, // -1 = none
     /// Stable glTF node receiving the lightweight per-patch selection tint.
     selected_node: i32, // -1 = none
@@ -529,8 +531,10 @@ pub fn mr_init(canvas_id: &str) -> bool {
             fuzzy_weight_size: (0, 0),
             pick_fbo: None,
             pick_tex: None,
+            pick_bary_tex: None,
             pick_depth: None,
             pick_size: (0, 0),
+            last_pick_barycentric: None,
             highlight_face: -1,
             selected_node: -1,
             focus_sphere: [0.5, 0.0, 0.0, 2.0],
@@ -1123,10 +1127,18 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             if state.pick_fbo.is_none() || state.pick_size != (vw, vh) {
                 if let Some(f) = state.pick_fbo { gl.delete_framebuffer(f); }
                 if let Some(t) = state.pick_tex { gl.delete_texture(t); }
+                if let Some(t) = state.pick_bary_tex { gl.delete_texture(t); }
                 if let Some(r) = state.pick_depth { gl.delete_renderbuffer(r); }
 
                 let tex = gl.create_texture().unwrap();
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
+                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+
+                let bary_tex = gl.create_texture().unwrap();
+                gl.bind_texture(glow::TEXTURE_2D, Some(bary_tex));
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
                     glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
@@ -1140,11 +1152,15 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
                     glow::TEXTURE_2D, Some(tex), 0);
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT1,
+                    glow::TEXTURE_2D, Some(bary_tex), 0);
                 gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT,
                     glow::RENDERBUFFER, Some(depth));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
 
                 state.pick_fbo = Some(fbo);
                 state.pick_tex = Some(tex);
+                state.pick_bary_tex = Some(bary_tex);
                 state.pick_depth = Some(depth);
                 state.pick_size = (vw, vh);
             }
@@ -1210,17 +1226,38 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             // Read pixel (flip Y for framebuffer coords)
             let fy = vh - 1 - y;
             let mut px = [0u8; 4];
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
             gl.read_pixels(x, fy, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE,
                 glow::PixelPackData::Slice(Some(&mut px)));
+            let mut bary_px = [0u8; 4];
+            gl.read_buffer(glow::COLOR_ATTACHMENT1);
+            gl.read_pixels(x, fy, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut bary_px)));
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
 
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.viewport(0, 0, vw, vh);
 
             // Decode 24-bit face ID from RGB
             if px[3] == 0 {
+                state.last_pick_barycentric = None;
                 return -1; // no geometry (alpha=0 from clear)
             }
             let face_id = (px[0] as i32) | ((px[1] as i32) << 8) | ((px[2] as i32) << 16);
+            let mut barycentric = [
+                bary_px[0] as f32 / 255.0,
+                bary_px[1] as f32 / 255.0,
+                bary_px[2] as f32 / 255.0,
+            ];
+            let barycentric_sum = barycentric.iter().sum::<f32>();
+            if bary_px[3] == 0 || !barycentric_sum.is_finite() || barycentric_sum <= 1e-6 {
+                state.last_pick_barycentric = None;
+            } else {
+                for coordinate in &mut barycentric {
+                    *coordinate /= barycentric_sum;
+                }
+                state.last_pick_barycentric = Some(barycentric);
+            }
 
             // Log face info
             let base = face_id as usize * instance_layout::STRIDE
@@ -1240,7 +1277,10 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 let ma = d(p0, &mid(p1, p2)); let mb = d(p1, &mid(p0, p2)); let mc = d(p2, &mid(p0, p1));
                 info!("  edges: a={:.4} b={:.4} c={:.4}", ea, eb, ec);
                 info!("  medians: a={:.4} b={:.4} c={:.4}", ma, mb, mc);
-                info!("  bary at click: ({:.2}, {:.2})", px[2] as f32 / 255.0, px[3] as f32 / 255.0);
+                if let Some(barycentric) = state.last_pick_barycentric {
+                    info!("  bary at click: ({:.3}, {:.3}, {:.3})",
+                        barycentric[0], barycentric[1], barycentric[2]);
+                }
 
                 let node = state.face_nodes.get(face_id as usize).copied().unwrap_or(0);
                 info!("  glTF node: {}", node);
@@ -1250,6 +1290,40 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             state.highlight_face = face_id;
             face_id
         }
+    })
+}
+
+/// Pick a stable source-surface address. The face ID and barycentric seed are
+/// captured by the same depth-tested pass, so animated or conformally mapped
+/// geometry cannot produce a face/coordinate mismatch.
+#[wasm_bindgen(js_name = "mr_pickSurface")]
+pub fn mr_pick_surface(
+    mvp: &[f32],
+    mv: &[f32],
+    camera_pos: &[f32],
+    x: i32,
+    y: i32,
+) -> JsValue {
+    let face = mr_pick(mvp, mv, camera_pos, x, y);
+    if face < 0 {
+        return JsValue::NULL;
+    }
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else {
+            return JsValue::NULL;
+        };
+        let Some(barycentric) = state.last_pick_barycentric else {
+            return JsValue::NULL;
+        };
+        let result = js_sys::Object::new();
+        let barycentric_array = js_sys::Float32Array::new_with_length(3);
+        barycentric_array.copy_from(&barycentric);
+        let node = state.face_nodes.get(face as usize).copied().unwrap_or(0);
+        js_sys::Reflect::set(&result, &"face".into(), &JsValue::from_f64(face as f64)).ok();
+        js_sys::Reflect::set(&result, &"node".into(), &JsValue::from_f64(node as f64)).ok();
+        js_sys::Reflect::set(&result, &"barycentric".into(), &barycentric_array).ok();
+        result.into()
     })
 }
 
