@@ -78,10 +78,10 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button data-v="translation">Translate</button>
     </div>
     <div style="margin-top:6px">
-      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">X</span><input type="range" id="mx" min="-30" max="30" value="5"><span class="v" id="mx-v">0.5</span></div>
-      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Y</span><input type="range" id="my" min="-30" max="30" value="0"><span class="v" id="my-v">0.0</span></div>
-      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Z</span><input type="range" id="mz" min="-30" max="30" value="0"><span class="v" id="mz-v">0.0</span></div>
-      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0" max="50" value="20"><span class="v" id="mr-v">2.0</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">X</span><input type="range" id="mx" min="-30" max="30" step="0.1" value="5"><span class="v" id="mx-v">0.50</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Y</span><input type="range" id="my" min="-30" max="30" step="0.1" value="0"><span class="v" id="my-v">0.00</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Z</span><input type="range" id="mz" min="-30" max="30" step="0.1" value="0"><span class="v" id="mz-v">0.00</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0" max="50" step="0.1" value="20"><span class="v" id="mr-v">2.00</span></div>
     </div>
   </div>
 
@@ -136,7 +136,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <span class="toggle-label">Screen-space attenuation</span>
     </div>
     <label>Min px/subdivision</label>
-    <div class="sr"><input type="range" id="min-px-sub" min="1" max="16" value="2" step="1"><span class="v" id="min-px-sub-v">2</span></div>
+    <div class="sr"><input type="range" id="min-px-sub" min="1" max="16" value="2" step="0.1"><span class="v" id="min-px-sub-v">2.0</span></div>
     <label>Atlas resolution (reload to apply)</label>
     <div class="sr"><input type="range" id="atlas-exp" min="3" max="9" value="7" step="1"><span class="v" id="atlas-exp-v">7</span></div>
   </div>
@@ -180,21 +180,21 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <label>Blur radius</label>
     <div class="sr"><input type="range" id="fuzzy-radius" min="4" max="128" value="48"><span class="v" id="fuzzy-radius-v">48</span></div>
     <label>Blur strength</label>
-    <div class="sr"><input type="range" id="fuzzy-strength" min="1" max="30" value="10"><span class="v" id="fuzzy-strength-v">1.0</span></div>
+    <div class="sr"><input type="range" id="fuzzy-strength" min="1" max="30" step="0.1" value="10"><span class="v" id="fuzzy-strength-v">1.00</span></div>
     <div class="toggle-row">
       <div class="toggle" id="fuzzy-norm-toggle"></div>
       <span class="toggle-label">Normalize range</span>
     </div>
     <label id="fuzzy-focus-label">Focus (squash ← → expand)</label>
-    <div class="sr"><input type="range" id="fuzzy-focus" min="0" max="100" value="50"><span class="v" id="fuzzy-focus-v">0.0</span></div>
+    <div class="sr"><input type="range" id="fuzzy-focus" min="0" max="100" step="0.1" value="50"><span class="v" id="fuzzy-focus-v">0.000</span></div>
     <label id="fuzzy-bw-label">Bandwidth</label>
-    <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" value="15"><span class="v" id="fuzzy-bw-v">0.15</span></div>
+    <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" step="0.1" value="15"><span class="v" id="fuzzy-bw-v">0.150</span></div>
     <label>Quality (blur passes)</label>
     <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="2"><span class="v" id="fuzzy-quality-v">2</span></div>
     <label>Mask smooth (kawase passes)</label>
     <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="1"><span class="v" id="fuzzy-kawase-v">1</span></div>
     <label>Mask smooth offset</label>
-    <div class="sr"><input type="range" id="fuzzy-kawase-off" min="1" max="30" value="15"><span class="v" id="fuzzy-kawase-off-v">1.50</span></div>
+    <div class="sr"><input type="range" id="fuzzy-kawase-off" min="1" max="30" step="0.1" value="15"><span class="v" id="fuzzy-kawase-off-v">1.50</span></div>
   </div>
 
   <div class="stats" id="stats">Loading WASM...</div>
@@ -449,17 +449,23 @@ const wasmOk = signal(false, 'wasmOk');
 function bindSlider(id, sig, displayFn) {
   const el = $(id);
   const label = $(id + '-v');
+  const updateDisplay = value => {
+    if (!label || !displayFn) return;
+    const text = displayFn(value);
+    label.textContent = text;
+    el.setAttribute('aria-valuetext', text);
+  };
   el.value = sig.peek();
-  if (label && displayFn) label.textContent = displayFn(sig.peek());
+  updateDisplay(sig.peek());
   el.addEventListener('input', () => {
     sig.set(parseFloat(el.value));
-    if (label && displayFn) label.textContent = displayFn(sig.peek());
+    updateDisplay(sig.peek());
   });
   // Keep slider in sync if signal is set programmatically
   effect(() => {
     const v = sig.get();
     if (parseFloat(el.value) !== v) el.value = v;
-    if (label && displayFn) label.textContent = displayFn(v);
+    updateDisplay(v);
   });
 }
 // Bind a signal to a toggle (click toggles boolean)
@@ -493,7 +499,8 @@ const PARAM_DEFAULTS = {
   res: '0', density: '100', atten: '1', minpx: '2',
   animate: '1', anim: '-1', atlas: '7',
   zoom: '3', rx: '0.3', ry: '0.5',
-  fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0', fqual: '2',
+  fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
+  fqual: '2', fkaw: '1', fkoff: '15',
 };
 
 function readParams() {
@@ -518,6 +525,7 @@ function readParams() {
     ry: get('ry'),
     fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
     fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
+    fqual: get('fqual'), fkaw: get('fkaw'), fkoff: get('fkoff'),
   };
 }
 
@@ -559,8 +567,8 @@ function syncURL() {
       ss('fbw', fz.bandwidth, PARAM_DEFAULTS.fbw);
       set('fnorm', fz.normalize.peek() ? '1' : '0', PARAM_DEFAULTS.fnorm);
       ss('fqual', fz.quality, PARAM_DEFAULTS.fqual);
-      ss('fkaw', fz.kawase, '0');
-      ss('fkoff', fz.kawaseOff, '8');
+      ss('fkaw', fz.kawase, PARAM_DEFAULTS.fkaw);
+      ss('fkoff', fz.kawaseOff, PARAM_DEFAULTS.fkoff);
     } catch { /* signals not yet initialized */ }
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
@@ -797,10 +805,10 @@ const mob = {
   mx: signal(5, 'mx'), my: signal(0, 'my'), mz: signal(0, 'mz'), mr: signal(20, 'mr'),
 };
 bindBtnGroup('xform-btns', mob.xform);
-bindSlider('mx', mob.mx, v => (v/10).toFixed(1));
-bindSlider('my', mob.my, v => (v/10).toFixed(1));
-bindSlider('mz', mob.mz, v => (v/10).toFixed(1));
-bindSlider('mr', mob.mr, v => (v/10).toFixed(1));
+bindSlider('mx', mob.mx, v => (v/10).toFixed(2));
+bindSlider('my', mob.my, v => (v/10).toFixed(2));
+bindSlider('mz', mob.mz, v => (v/10).toFixed(2));
+bindSlider('mr', mob.mr, v => (v/10).toFixed(2));
 
 function computeMobius(type, cx, cy, cz, r) {
   if (type === 'sphere_reflection' && r > 0.01) {
@@ -1064,9 +1072,9 @@ effect(() => {
   }
 });
 bindSlider('fuzzy-radius', fz.radius, v => v.toFixed(0));
-bindSlider('fuzzy-strength', fz.strength, v => (v / 10).toFixed(1));
-bindSlider('fuzzy-focus', fz.focus, v => ((v / 100 - 0.5) * 2).toFixed(2));
-bindSlider('fuzzy-bw', fz.bandwidth, v => (v / 100).toFixed(2));
+bindSlider('fuzzy-strength', fz.strength, v => (v / 10).toFixed(2));
+bindSlider('fuzzy-focus', fz.focus, v => ((v / 100 - 0.5) * 2).toFixed(3));
+bindSlider('fuzzy-bw', fz.bandwidth, v => (v / 100).toFixed(3));
 bindToggle('fuzzy-norm-toggle', fz.normalize);
 bindSlider('fuzzy-quality', fz.quality, v => v.toFixed(0));
 bindSlider('fuzzy-kawase', fz.kawase, v => v.toFixed(0));
@@ -1093,7 +1101,7 @@ const lod = {
 };
 bindSlider('res', lod.res, v => v === 0 ? 'auto' : String(1 << v));
 bindSlider('tess-density', lod.density, v => v.toFixed(0));
-bindSlider('min-px-sub', lod.minPx, v => v.toFixed(0));
+bindSlider('min-px-sub', lod.minPx, v => v.toFixed(1));
 bindToggle('screen-atten-toggle', lod.screenAtten);
 bindSlider('atlas-exp', lod.atlas, v => v.toFixed(0));
 
@@ -1205,36 +1213,40 @@ effect(() => { matcap.get(); syncURL(); });
 
 // --- applyParams: set all signals from URL params (defined after all signals exist) ---
 applyParams = function(params) {
+  const finite = (value, fallback, minimum, maximum) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(maximum, Math.max(minimum, parsed));
+  };
+  const integer = (value, fallback, minimum, maximum) =>
+    Math.round(finite(value, fallback, minimum, maximum));
   renderMode.set(params.mode || 'pbr');
   mob.xform.set(params.xform || 'identity');
-  mob.mx.set(parseInt(params.mx) || 5);
-  mob.my.set(parseInt(params.my) || 0);
-  mob.mz.set(parseInt(params.mz) || 0);
-  mob.mr.set(parseInt(params.mr) || 20);
+  mob.mx.set(finite(params.mx, 5, -30, 30));
+  mob.my.set(finite(params.my, 0, -30, 30));
+  mob.mz.set(finite(params.mz, 0, -30, 30));
+  mob.mr.set(finite(params.mr, 20, 0, 50));
   envMap.set(params.env || 'rosendal_plains_1_1k');
   matcap.set(params.matcap || 'citric-acid');
-  lod.res.set(parseInt(params.res) || 0);
-  lod.density.set(parseInt(params.density) || 100);
+  lod.res.set(integer(params.res, 0, 0, 6));
+  lod.density.set(integer(params.density, 100, 1, 500));
   lod.screenAtten.set(params.atten !== '0');
-  lod.minPx.set(parseInt(params.minpx) || 2);
-  lod.atlas.set(parseInt(params.atlas) || 7);
+  lod.minPx.set(finite(params.minpx, 2, 1, 16));
+  lod.atlas.set(integer(params.atlas, 7, 3, 9));
   animating_sig.set(params.animate !== '0');
-  {
-    const pf = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
-    zoom = pf(params.zoom, 3);
-    rotX = pf(params.rx, 0.3);
-    rotY = pf(params.ry, 0.5);
-  }
+  zoom = finite(params.zoom, 3, 0.1, 1000);
+  rotX = finite(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
+  rotY = finite(params.ry, 0.5, -1e6, 1e6);
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
-  fz.radius.set(parseFloat(params.fradius) || 48);
-  fz.strength.set(parseFloat(params.fstr) || 10);
-  fz.focus.set(parseFloat(params.ffocus) || 50);
-  fz.bandwidth.set(parseFloat(params.fbw) || 15);
+  fz.radius.set(integer(params.fradius, 11, 4, 128));
+  fz.strength.set(finite(params.fstr, 30, 1, 30));
+  fz.focus.set(finite(params.ffocus, 62, 0, 100));
+  fz.bandwidth.set(finite(params.fbw, 10, 1, 50));
   fz.normalize.set(params.fnorm === '1');
-  fz.quality.set(parseInt(params.fqual) || 2);
-  fz.kawase.set(parseInt(params.fkaw ?? '1'));
-  fz.kawaseOff.set(parseInt(params.fkoff ?? '15'));
+  fz.quality.set(integer(params.fqual, 2, 1, 4));
+  fz.kawase.set(integer(params.fkaw, 1, 0, 4));
+  fz.kawaseOff.set(finite(params.fkoff, 15, 1, 30));
 };
 
 // --- IndexedDB for dropped GLBs and versioned generated assets ---
