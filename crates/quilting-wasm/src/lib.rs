@@ -633,13 +633,7 @@ pub fn export_all_patches() -> JsValue {
             None => return JsValue::NULL,
         };
 
-        let mut keys: Vec<[u32; 3]> = atlas
-            .patches
-            .keys()
-            .copied()
-            // LOD 1 is an internal subdivision ancestor; the renderer clamps to 2.
-            .filter(|key| key[0] >= 2)
-            .collect();
+        let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
         keys.sort_unstable();
 
         let mut bary = Vec::<f32>::new();

@@ -20,7 +20,7 @@
 //!
 //! Run with:  cargo test -p quilting-core --test mobius_finiteness
 
-use quilting_core::evaluate::{compute_instances_with_uvs, MAX_LOD};
+use quilting_core::evaluate::{compute_instances_with_uvs, MAX_LOD, MIN_LOD};
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_mesh::HalfEdgeMesh;
 
@@ -259,7 +259,7 @@ fn glsl_lod_pass(
         ];
         let med = d3(dv[0], dm[0]).max(d3(dv[1], dm[1])).max(d3(dv[2], dm[2]));
         let target = mesh_radius / density;
-        let lod = snap_pow2(med / target).clamp(2.0, max_lod);
+        let lod = snap_pow2(med / target).clamp(1.0, max_lod);
         // Pole proximity saturation (mirrors the min_bot_sq check in the GLSL).
         if mb < 1e-8 { max_lod } else { lod }
     }).collect()
@@ -362,7 +362,7 @@ fn check_model(name: &str, pos: &[[f64; 3]], faces: &[[usize; 3]]) -> Vec<String
         // fake a small median on the most distorted face.
         for (fi, i) in inst.iter().enumerate() {
             for &l in &i.edge_lods {
-                if !l.is_power_of_two() || l < 2 || l > MAX_LOD {
+                if !l.is_power_of_two() || l < MIN_LOD || l > MAX_LOD {
                     failures.push(format!("{name}: bad LOD {l} on face {fi} (pole {pole:?})"));
                 }
             }

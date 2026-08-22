@@ -34,9 +34,11 @@ thread_local! {
 /// same 512 clamp so the two paths agree.
 pub const MAX_LOD: u32 = 512;
 
-/// Floor on any edge LOD. LOD 1 would mean an untessellated face, which cannot
-/// represent QB curvature at all.
-pub const MIN_LOD: u32 = 2;
+/// Floor on any edge LOD. LOD 1 is the source triangle itself: it is the right
+/// fallback for sub-pixel source geometry and conservatively culled patches.
+/// Curved or magnified patches are promoted by the same world/screen-space
+/// error metrics used for every higher atlas level.
+pub const MIN_LOD: u32 = 1;
 
 /// Get current tessellation density.
 pub fn get_tess_density() -> f64 {
@@ -198,8 +200,8 @@ pub fn compute_instances_xform_only(
         FaceInstance {
             positions: [p0, p1, p2],
             weights: [w0, w1, w2],
-            edge_lods: [2, 2, 2], // placeholder, GPU fills in
-            vertex_lods: [2, 2, 2],
+            edge_lods: [MIN_LOD; 3], // placeholder, GPU fills in
+            vertex_lods: [MIN_LOD; 3],
             uvs,
             normals,
         }
@@ -723,6 +725,45 @@ mod tests {
                 assert!(l >= 1 && l <= 256, "LOD {} out of range", l);
             }
         }
+    }
+
+    #[test]
+    fn screen_attenuation_can_select_source_triangle_lod() {
+        let old_density = get_tess_density();
+        let old_screen_atten = get_screen_atten();
+        let old_min_px = get_min_px_per_sub();
+        let vertices = vec![
+            [-0.005, -0.005, 0.0],
+            [0.005, -0.005, 0.0],
+            [0.0, 0.005, 0.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+        let screen = ScreenInfo {
+            vp_matrix: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            width: 1000.0,
+            height: 1000.0,
+        };
+
+        set_tess_params(20.0, true);
+        set_min_px_per_sub(16.0);
+        let instances = compute_instances(
+            &vertices,
+            &faces,
+            &Mobius::identity(),
+            Some(&screen),
+            None,
+        );
+
+        assert_eq!(instances[0].edge_lods, [1, 1, 1]);
+        assert_eq!(instances[0].vertex_lods, [1, 1, 1]);
+
+        set_tess_params(old_density, old_screen_atten);
+        set_min_px_per_sub(old_min_px);
     }
 
     #[test]

@@ -45,6 +45,10 @@ struct MainState {
     env_maps: EnvironmentMaps,
     batches: Vec<GpuBatch>,
     cached_instances: Vec<f32>,
+    /// Last valid topology uploaded for each face. Worker visibility is
+    /// asynchronous, so an invisible sentinel must not demote a patch that the
+    /// current-pose render GPU may need to resurrect in the same frame.
+    resident_face_lods: Vec<Option<batch::ResidentLod>>,
     persistent_buf: Option<PersistentInstances>,
     face_materials: Vec<usize>,
     /// Stable ordinary glTF node index for each source triangle.
@@ -253,6 +257,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             env_maps: EnvironmentMaps::default(),
             batches: Vec::new(),
             cached_instances: Vec::new(),
+            resident_face_lods: Vec::new(),
             persistent_buf: None,
             face_materials: Vec::new(),
             face_nodes: Vec::new(),
@@ -930,6 +935,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces as usize;
+            st.resident_face_lods = vec![None; st.num_faces];
             if st.face_nodes.len() != st.num_faces {
                 st.face_nodes = vec![0; st.num_faces];
             }
@@ -1276,7 +1282,30 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             );
             state.face_nodes.resize(nf, 0);
         }
-        let mut buckets: BTreeMap<(usize, usize, usize, usize), Vec<u32>> = BTreeMap::new();
+        if state.resident_face_lods.len() != nf {
+            state.resident_face_lods.resize(nf, None);
+        }
+        // Use LOD 2 for faces that have never had a visible classification if
+        // the atlas provides it. This preserves the historical safe fallback
+        // while allowing genuinely visible, sub-pixel faces to select LOD 1.
+        let initial_resident_lod = TESS_CACHE.with(|tc| {
+            let tc = tc.borrow();
+            tc.keys()
+                .filter(|lod| lod[0] >= 2)
+                .min_by_key(|lod| {
+                    (lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]), **lod)
+                })
+                .or_else(|| tc.keys().min_by_key(|lod| {
+                    (lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]), **lod)
+                }))
+                .copied()
+        }).unwrap_or([1; 3]);
+        let initial_resident = batch::ResidentLod {
+            canonical: initial_resident_lod,
+            perm_index: 0,
+            parity_bucket: 0,
+        };
+        let mut buckets: BTreeMap<([u32; 3], usize, usize, usize), Vec<u32>> = BTreeMap::new();
         let mut culled = 0usize;
         for fi in 0..nf {
             let lo = fi * batch::FACE_LOD_STRIDE;
@@ -1285,18 +1314,15 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             if !cpu_visible {
                 culled += 1;
             }
-            // Keep CPU-culled faces resident at their emitted [1,1,1] fallback.
-            // The render shader classifies the current GPU animation pose and
-            // can therefore resurrect a patch without a CPU readback/rebuild.
-            let atlas_idx = if cpu_visible {
-                face_lods[lo + 5] as usize
-            } else {
-                usize::MAX
-            };
-            let parity_bucket = usize::from(face_lods[lo + 4] < 0.0);
+            let resident = batch::retain_face_lod(
+                face_lods,
+                fi,
+                &mut state.resident_face_lods[fi],
+                initial_resident,
+            );
             let mat = if fi < state.face_materials.len() { state.face_materials[fi] } else { 0 };
             let node = state.face_nodes.get(fi).copied().unwrap_or(0);
-            buckets.entry((atlas_idx, parity_bucket, mat, node)).or_default().push(fi as u32);
+            buckets.entry((resident.canonical, resident.parity_bucket, mat, node)).or_default().push(fi as u32);
         }
         perf_mark("batch-group-end");
         perf_measure("batch-group", "batch-group-start", "batch-group-end");
@@ -1339,23 +1365,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
-            let fallback_lod = tc.keys().min_by_key(|lod| {
-                (
-                    lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]),
-                    lod[0], lod[1], lod[2],
-                )
-            }).copied();
-            for (&(atlas_bucket, parity_bucket, mat, node_index), faces) in &buckets {
-                let fi0 = faces[0] as usize;
-                let lo = fi0 * batch::FACE_LOD_STRIDE;
-                let [ca, cb, cc] = if atlas_bucket == usize::MAX {
-                    match fallback_lod {
-                        Some(lod) => lod,
-                        None => { missing += 1; continue; }
-                    }
-                } else {
-                    [face_lods[lo] as u32, face_lods[lo + 1] as u32, face_lods[lo + 2] as u32]
-                };
+            for (&([ca, cb, cc], parity_bucket, mat, node_index), faces) in &buckets {
                 let parity = if parity_bucket == 0 { 1.0 } else { -1.0 };
                 let tess = match tc.get(&[ca, cb, cc]) {
                     Some(t) => t,
@@ -1373,22 +1383,10 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                     // The cached instance contains the load-time identity-Mobius
                     // edge LODs. Refresh them from this computation so density
                     // visualization follows camera and conformal LOD changes.
-                    let lod_offset = fi as usize * batch::FACE_LOD_STRIDE;
-                    let retained_for_gpu_cull = atlas_bucket == usize::MAX;
-                    let canonical = if retained_for_gpu_cull {
-                        [ca as f32, cb as f32, cc as f32]
-                    } else {
-                        [
-                            face_lods[lod_offset],
-                            face_lods[lod_offset + 1],
-                            face_lods[lod_offset + 2],
-                        ]
-                    };
-                    let perm = if retained_for_gpu_cull {
-                        0
-                    } else {
-                        face_lods[lod_offset + 3].round().clamp(0.0, 5.0) as usize
-                    };
+                    let resident = state.resident_face_lods[fi as usize]
+                        .unwrap_or(initial_resident);
+                    let canonical = resident.canonical.map(|lod| lod as f32);
+                    let perm = resident.perm_index;
                     let permutation = quilting_core::permutation::S3_PERMUTATIONS[perm];
                     let instance_lod_offset = dst + instance_layout::offset::EDGE_LODS;
                     staging[instance_lod_offset..instance_lod_offset + 3].copy_from_slice(&[

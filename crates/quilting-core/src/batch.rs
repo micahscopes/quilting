@@ -10,6 +10,62 @@ pub use crate::instance_layout::STRIDE as INSTANCE_STRIDE;
 /// Per-face LOD stride: 6 floats from GPU pass 2.
 pub const FACE_LOD_STRIDE: usize = 6;
 
+/// Tessellation topology kept resident for a face between asynchronous LOD
+/// classifications. Invisible payloads must retain this topology: the render
+/// GPU may classify a newer animated pose as visible before the worker result
+/// catches up, and resurrecting it with a minimum-LOD fallback causes a coarse
+/// one-frame flash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentLod {
+    pub canonical: [u32; 3],
+    pub perm_index: usize,
+    pub parity_bucket: usize,
+}
+
+impl ResidentLod {
+    pub fn uniform(lod: u32) -> Self {
+        Self {
+            canonical: [lod; 3],
+            perm_index: 0,
+            parity_bucket: 0,
+        }
+    }
+
+    /// Decode a valid, visible six-float GPU classification payload.
+    pub fn from_visible_payload(face_lods: &[f32], face_index: usize) -> Option<Self> {
+        if !face_is_visible(face_lods, face_index) {
+            return None;
+        }
+        let offset = face_index.checked_mul(FACE_LOD_STRIDE)?;
+        let payload = face_lods.get(offset..offset + FACE_LOD_STRIDE)?;
+        if !payload[..5].iter().all(|value| value.is_finite())
+            || payload[..3].iter().any(|lod| *lod < 1.0)
+        {
+            return None;
+        }
+        Some(Self {
+            canonical: [payload[0] as u32, payload[1] as u32, payload[2] as u32],
+            perm_index: payload[3].round().clamp(0.0, 5.0) as usize,
+            parity_bucket: usize::from(payload[4] < 0.0),
+        })
+    }
+}
+
+/// Update a face's resident topology from a visible payload, or retain its
+/// previous topology when the asynchronous classifier reports it invisible.
+pub fn retain_face_lod(
+    face_lods: &[f32],
+    face_index: usize,
+    resident: &mut Option<ResidentLod>,
+    initial: ResidentLod,
+) -> ResidentLod {
+    let selected = ResidentLod::from_visible_payload(face_lods, face_index)
+        .or(*resident)
+        .unwrap_or(initial);
+    *resident = Some(selected);
+    selected
+}
+
 /// A tessellation key identifying one canonical atlas patch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TessKey {
@@ -242,6 +298,23 @@ mod tests {
         assert_eq!(batches[0].lod, [4, 4, 4]);
         assert_eq!(batches[0].face_indices, vec![0]);
         assert_eq!(batches[0].instance_data.len(), INSTANCE_STRIDE);
+    }
+
+    #[test]
+    fn invisible_payload_does_not_replace_resident_topology() {
+        let visible = [16.0, 32.0, 64.0, 4.0, 1.0, 17.0];
+        let invisible = [1.0, 1.0, 1.0, 0.0, 1.0, -1.0];
+        let resident = ResidentLod::from_visible_payload(&visible, 0).unwrap();
+
+        assert_eq!(resident.canonical, [16, 32, 64]);
+        assert_eq!(resident.perm_index, 4);
+        assert_eq!(ResidentLod::from_visible_payload(&invisible, 0), None);
+        let mut stored = Some(resident);
+        assert_eq!(
+            retain_face_lod(&invisible, 0, &mut stored, ResidentLod::uniform(2)),
+            resident,
+        );
+        assert_eq!(stored, Some(resident));
     }
 
     #[test]

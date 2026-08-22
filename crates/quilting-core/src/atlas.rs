@@ -367,6 +367,14 @@ mod tests {
     }
 
     #[test]
+    fn lod_one_is_exactly_the_source_triangle() {
+        let atlas = TessellationAtlas::build(&[1], &PatchConfig::default());
+        let patch = atlas.get_patch([1, 1, 1]).unwrap();
+        assert_eq!(patch.vertex_count(), 3);
+        assert_eq!(patch.triangle_count(), 1);
+    }
+
+    #[test]
     fn build_hierarchical_matches_direct() {
         let config = PatchConfig::default();
         let lods = &[1, 2, 4];

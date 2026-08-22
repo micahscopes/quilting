@@ -734,4 +734,11 @@ mod tests {
         assert!(LOD_COHERENCE_VS.contains("out_atlas_index = -1.0"));
     }
 
+    #[test]
+    fn gpu_lod_pass_allows_the_source_triangle_level() {
+        assert_eq!(LOD_COMPUTE_VS.matches("clamp(snap_pow2").count(), 4);
+        assert_eq!(LOD_COMPUTE_VS.matches(", 1.0, max_lod)").count(), 4);
+        assert!(!LOD_COMPUTE_VS.contains(", 2.0, max_lod)"));
+    }
+
 }

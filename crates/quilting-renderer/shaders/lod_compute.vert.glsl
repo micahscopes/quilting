@@ -355,7 +355,7 @@ void main() {
     // Max prevents small-median sabotage on skinny triangles.
     // Uniform prevents anisotropic tessellation artifacts.
     float max_med = max(med_a, max(med_b, med_c)) / target_size;
-    lod_a = clamp(snap_pow2(max_med), 2.0, max_lod);
+    lod_a = clamp(snap_pow2(max_med), 1.0, max_lod);
     lod_b = lod_a;
     lod_c = lod_a;
 
@@ -426,9 +426,9 @@ void main() {
                 px_int = lambda_star * rho * l_max;
             }
         }
-        lod_a = clamp(snap_pow2(max(px_a, px_int) / min_px), 2.0, max_lod);
-        lod_b = clamp(snap_pow2(max(px_b, px_int) / min_px), 2.0, max_lod);
-        lod_c = clamp(snap_pow2(max(px_c, px_int) / min_px), 2.0, max_lod);
+        lod_a = clamp(snap_pow2(max(px_a, px_int) / min_px), 1.0, max_lod);
+        lod_b = clamp(snap_pow2(max(px_b, px_int) / min_px), 1.0, max_lod);
+        lod_c = clamp(snap_pow2(max(px_c, px_int) / min_px), 1.0, max_lod);
     }
 
     // Pole proximity overrides everything. For a valid patch min_bot_true is the
