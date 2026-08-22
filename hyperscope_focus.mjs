@@ -181,6 +181,98 @@ export function mobiusConformalScaleAt(matrix, point) {
   return Number.isFinite(scale) ? scale : null;
 }
 
+function reflectionState(state) {
+  if (!state?.enabled) return { enabled: false, center: [0, 0, 0], radius: 1 };
+  const center = Array.from(state.center || [], Number);
+  const radius = Number(state.radius);
+  if (center.length !== 3 || !finitePoint(center[0], center[1], center[2])
+      || !(radius > 0) || !Number.isFinite(radius)) return null;
+  return { enabled: true, center, radius };
+}
+
+function reflectPointAndFrame(point, directions, state) {
+  if (!state.enabled) {
+    return {
+      point: Array.from(point, Number),
+      directions: directions.map(direction => Array.from(direction, Number)),
+      scale: 1,
+    };
+  }
+  const delta = point.map((coordinate, axis) => coordinate - state.center[axis]);
+  const distanceSquared = delta.reduce((sum, coordinate) => sum + coordinate * coordinate, 0);
+  if (!Number.isFinite(distanceSquared) || distanceSquared <= MOBIUS_EPSILON) return null;
+  const inverseDistance = 1 / Math.sqrt(distanceSquared);
+  const normal = delta.map(coordinate => coordinate * inverseDistance);
+  const scale = state.radius * state.radius / distanceSquared;
+  return {
+    point: delta.map((coordinate, axis) => state.center[axis] + scale * coordinate),
+    directions: directions.map(direction => {
+      const projection = direction.reduce(
+        (sum, coordinate, axis) => sum + coordinate * normal[axis],
+        0,
+      );
+      return direction.map((coordinate, axis) => coordinate - 2 * projection * normal[axis]);
+    }),
+    scale,
+  };
+}
+
+function normalizedCameraBasis(forward, up) {
+  let forwardLength = Math.hypot(...forward);
+  if (!(forwardLength > 1e-12) || !Number.isFinite(forwardLength)) return null;
+  const f = forward.map(value => value / forwardLength);
+  let right = [
+    f[1] * up[2] - f[2] * up[1],
+    f[2] * up[0] - f[0] * up[2],
+    f[0] * up[1] - f[1] * up[0],
+  ];
+  const rightLength = Math.hypot(...right);
+  if (!(rightLength > 1e-12) || !Number.isFinite(rightLength)) return null;
+  right = right.map(value => value / rightLength);
+  const u = [
+    right[1] * f[2] - right[2] * f[1],
+    right[2] * f[0] - right[0] * f[2],
+    right[0] * f[1] - right[1] * f[0],
+  ];
+  return [...right, ...u, ...f];
+}
+
+/**
+ * Transport a camera through F_next o inverse(F_previous).
+ *
+ * A sphere reflection is self-inverse. Its differential is a positive scale
+ * times a Householder reflection, so the eye is transported exactly while the
+ * camera frame and orbit distance follow the exact local conformal derivative.
+ */
+export function transportCameraAcrossSphereReflections(camera, previous, next) {
+  const before = reflectionState(previous);
+  const after = reflectionState(next);
+  const eye = Array.from(camera?.eye || [], Number);
+  const basis = Array.from(camera?.basis || [], Number);
+  const orbitDistance = Number(camera?.orbitDistance);
+  if (!before || !after || eye.length !== 3 || !finitePoint(...eye)
+      || basis.length !== 9 || !basis.every(Number.isFinite)
+      || !(orbitDistance > 0) || !Number.isFinite(orbitDistance)) return null;
+
+  const unmap = reflectPointAndFrame(
+    eye,
+    [basis.slice(3, 6), basis.slice(6, 9)],
+    before,
+  );
+  if (!unmap) return null;
+  const remap = reflectPointAndFrame(unmap.point, unmap.directions, after);
+  if (!remap) return null;
+  const transportedBasis = normalizedCameraBasis(remap.directions[1], remap.directions[0]);
+  const scale = unmap.scale * remap.scale;
+  if (!transportedBasis || !(scale > 0) || !Number.isFinite(scale)) return null;
+  return {
+    eye: remap.point,
+    basis: transportedBasis,
+    orbitDistance: orbitDistance * scale,
+    localScale: scale,
+  };
+}
+
 /** Quintic easing with zero velocity and acceleration at both endpoints. */
 export function smootherstep01(value) {
   const t = Math.max(0, Math.min(1, Number(value) || 0));

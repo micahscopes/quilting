@@ -17,7 +17,9 @@ ordinary glTF scene:
 3. Sample retained mouse/SpaceMouse state once and update the camera and shared
    focus/inversion sphere. The browser currently adapts device axes directly;
    the accepted ownership target is deterministic `hyperscape::FocusNavigation`
-   plus a Rust camera rig. Camera matrices reuse preallocated typed arrays.
+   plus a Rust camera rig. An inversion-sphere edit transports the camera eye
+   exactly with the conformal point map and its frame/scale with the local
+   differential. Camera matrices reuse preallocated typed arrays.
 4. Schedule adaptive LOD. The scheduler permits one worker job plus one
    coalesced follow-up, so animation or continuous input cannot create an
    unbounded queue.

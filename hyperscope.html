@@ -287,7 +287,8 @@ import {
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
   smootherstep01,
-} from './hyperscope_focus.mjs?rev=scale-aware-focus-v1';
+  transportCameraAcrossSphereReflections,
+} from './hyperscope_focus.mjs?rev=conformal-camera-transport-v1';
 
 const $ = id => document.getElementById(id);
 
@@ -1272,7 +1273,6 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   mr_setSelectedNode(node);
   mr_highlightFace(highlightFace ? faceId : -1);
   anchorFocusSphereToSelection();
-  beginObjectPivotFocus(selectedObject.outputAnchor);
   selectionLabel();
   console.log(
     `Selected glTF node ${node} from face ${faceId}: source sphere`,
@@ -1465,8 +1465,53 @@ function computeMobius(type, cx, cy, cz, r) {
 }
 
 let currentMobius = null;
+let previousManualReflection = null;
 const FOCUS_SPHERE_MARGIN = 1.10;
 const FOCUS_SPHERE_FIT_DURATION_MS = 700;
+
+function manualReflectionState(type, center, radius) {
+  return type === 'sphere_reflection' && radius > 0.01
+    ? { enabled: true, center: center.slice(), radius }
+    : { enabled: false };
+}
+
+function sameManualReflection(first, second) {
+  if (!first || !second || first.enabled !== second.enabled) return false;
+  if (!first.enabled) return true;
+  return first.radius === second.radius
+    && first.center.every((coordinate, axis) => coordinate === second.center[axis]);
+}
+
+function transportManualCamera(previous, next) {
+  if (!previous || sameManualReflection(previous, next) || authoredCamera) return false;
+  const basis = manualCameraBasis(inputCameraBasis);
+  const eye = [
+    panX - basis[6] * zoom,
+    panY - basis[7] * zoom,
+    panZ - basis[8] * zoom,
+  ];
+  const transported = transportCameraAcrossSphereReflections({
+    eye,
+    basis,
+    orbitDistance: zoom,
+  }, previous, next);
+  if (!transported) {
+    console.warn('Camera transport skipped: viewpoint reached the inversion pole');
+    return false;
+  }
+
+  manualCameraBasisState.set(transported.basis);
+  manualCameraBasisReady = true;
+  zoom = Math.max(0.1, Math.min(100, transported.orbitDistance));
+  panX = transported.eye[0] + transported.basis[6] * zoom;
+  panY = transported.eye[1] + transported.basis[7] * zoom;
+  panZ = transported.eye[2] + transported.basis[8] * zoom;
+  syncManualCameraEuler();
+  // A transition authored in the previous output chart is no longer valid.
+  // Explicit reframe remains available after the sphere edit completes.
+  cameraFocusTransition = null;
+  return true;
+}
 
 function fitOrToggleInversionToSelection(nowMs = performance.now()) {
   if (!selectedObject && !focusSphere.active) {
@@ -1689,10 +1734,15 @@ function sampleStretchAsync() {
 // Möbius effect: any param change → recompute + push to WASM
 effect(() => {
   const type = mob.xform.get();
-  const m = computeMobius(type, mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10, mob.mr.get()/10);
+  const center = [mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10];
+  const radius = mob.mr.get()/10;
+  const m = computeMobius(type, center[0], center[1], center[2], radius);
+  const nextReflection = manualReflectionState(type, center, radius);
+  const cameraTransported = transportManualCamera(previousManualReflection, nextReflection);
+  previousManualReflection = nextReflection;
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
-  refreshSelectedObjectAnchor({ followObjectPivot: true });
+  refreshSelectedObjectAnchor({ followObjectPivot: !cameraTransported });
   if (!wasmOk.get()) return;
   if (hyperscapeActive) {
     hyperscapeActive = false;

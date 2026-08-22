@@ -41,7 +41,7 @@ variable-blur passes.
 
 | Input | Anchored selection | Detached sphere |
 | --- | --- | --- |
-| Primary click | Select object, tint it, enable spheroidal focus, animate fit | Click empty to detach without resetting |
+| Primary click | Select object, tint it, enable spheroidal focus, animate fit without moving the camera | Click empty to detach without resetting |
 | SpaceMouse right double tap | Select at view center; an empty hit reframes the retained selection | Select at view center |
 | SpaceMouse left double tap | Fit shared sphere and toggle inversion | Toggle inversion around retained sphere |
 | SpaceMouse left hold | Center locked; twist edits bounded margin | Translate center; twist edits radius |
@@ -55,6 +55,14 @@ Mouse selection uses a four-pixel drag threshold so an orbit gesture cannot
 become a pick on release. Device mappings are prototype adapters, not domain
 state: keyboard, mouse, SpaceMouse, touch, gamepad, XR, and game code should
 all emit the same semantic actions.
+
+Changing an active inversion sphere transports the manual camera through
+`F_new o inverse(F_old)`. The eye follows the point map exactly; orientation
+and orbit scale follow the exact local conformal differential. This anchors the
+viewpoint to its ordinary-space location without pretending a nonlinear global
+scene change can be cancelled pixel-for-pixel. Selection itself never pans the
+camera. Object-pivot navigation and explicit reframe remain deliberate camera
+actions.
 
 ## Target Rust ownership
 
@@ -91,9 +99,10 @@ or sphere state.
    send pick results as semantic selection actions, tick sphere transitions in
    Rust, and extract one compact focus packet per view. Remove the duplicate
    JavaScript transition after parity tests pass.
-3. **Camera rig.** Move 6-DoF quaternion camera orientation, pivot/orbit focus,
-   scale-relative translation, and reframing into a Rust `CameraRig`. Preserve
-   Hyperscope Fly and Blender-compatible policies as named action mappings.
+3. **Camera rig.** Move 6-DoF quaternion camera orientation, conformal camera
+   transport, pivot/orbit focus, scale-relative translation, and reframing into
+   a Rust `CameraRig`. Preserve Hyperscope Fly and Blender-compatible policies
+   as named action mappings.
 4. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.

@@ -17,6 +17,7 @@ import {
   scaleAnchoredFocusRadius,
   spheroidalDefocus,
   smootherstep01,
+  transportCameraAcrossSphereReflections,
 } from '../hyperscope_focus.mjs';
 
 const STRIDE = 52;
@@ -61,6 +62,59 @@ test('sphere reflection maps points and reports its local conformal scale', () =
   assert.deepEqual(applyMobiusPoint(sphereReflection, [2, 0, 0]), [0.5, 0, 0]);
   assert(Math.abs(mobiusConformalScaleAt(sphereReflection, [2, 0, 0]) - 0.25) < 1e-9);
   assert.equal(applyMobiusPoint(sphereReflection, [0, 0, 0]), null);
+});
+
+test('camera transport follows the exact inversion point and local differential', () => {
+  const camera = {
+    eye: [2, 0, 0],
+    basis: [0, 0, -1, 0, 1, 0, -1, 0, 0],
+    orbitDistance: 2,
+  };
+  const identity = { enabled: false };
+  const inversion = { enabled: true, center: [0, 0, 0], radius: 1 };
+  const transported = transportCameraAcrossSphereReflections(camera, identity, inversion);
+  assert.deepEqual(transported.eye, [0.5, 0, 0]);
+  assert.equal(transported.localScale, 0.25);
+  assert.equal(transported.orbitDistance, 0.5);
+  assert.deepEqual(transported.basis.slice(6), [1, 0, 0]);
+  assert.deepEqual(transported.basis.slice(3, 6), [0, 1, 0]);
+
+  const restored = transportCameraAcrossSphereReflections(transported, inversion, identity);
+  assert.deepEqual(restored.eye, camera.eye);
+  assert(Math.abs(restored.orbitDistance - camera.orbitDistance) < 1e-12);
+  assert.deepEqual(restored.basis, camera.basis);
+});
+
+test('camera transport is stable while editing an unchanged inversion sphere', () => {
+  const inversion = { enabled: true, center: [1, -2, 0.5], radius: 3 };
+  const camera = {
+    eye: [4, 1, 2],
+    basis: [1, 0, 0, 0, 1, 0, 0, 0, -1],
+    orbitDistance: 5,
+  };
+  const transported = transportCameraAcrossSphereReflections(camera, inversion, inversion);
+  camera.eye.forEach((value, axis) => assert(Math.abs(transported.eye[axis] - value) < 1e-12));
+  camera.basis.forEach((value, axis) => {
+    assert(Math.abs(transported.basis[axis] - value) < 1e-12);
+  });
+  assert(Math.abs(transported.orbitDistance - camera.orbitDistance) < 1e-12);
+});
+
+test('camera transport round-trips across a moving and resizing sphere', () => {
+  const first = { enabled: true, center: [0, 0, 0], radius: 1 };
+  const second = { enabled: true, center: [1, -0.5, 0.25], radius: 2.5 };
+  const camera = {
+    eye: [0.5, 1, -0.25],
+    basis: [1, 0, 0, 0, 1, 0, 0, 0, -1],
+    orbitDistance: 3,
+  };
+  const moved = transportCameraAcrossSphereReflections(camera, first, second);
+  const restored = transportCameraAcrossSphereReflections(moved, second, first);
+  camera.eye.forEach((value, axis) => assert(Math.abs(restored.eye[axis] - value) < 1e-12));
+  camera.basis.forEach((value, axis) => {
+    assert(Math.abs(restored.basis[axis] - value) < 1e-12);
+  });
+  assert(Math.abs(restored.orbitDistance - camera.orbitDistance) < 1e-12);
 });
 
 test('sphere fitting eases endpoints and interpolates radius without crossing zero', () => {
