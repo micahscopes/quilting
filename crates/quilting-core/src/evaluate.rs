@@ -362,6 +362,16 @@ pub fn compute_instances_with_uvs(
     // Target triangle edge length in deformed world units.
     let target_size = mesh_radius / tess_density;
 
+    // A finite-pole Möbius map's power is a global similarity multiplier on
+    // all image distances (r² for sphere reflection). Radius should resize the
+    // complete inverted image without changing its intrinsic tessellation
+    // demand; screen attenuation below still uses the actual projected image.
+    let intrinsic_similarity = if transform.pole().is_some() {
+        transform.power().max(1e-12)
+    } else {
+        1.0
+    };
+
     let dist3 = |a: [f64;3], b: [f64;3]| -> f64 {
         ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt()
     };
@@ -416,13 +426,16 @@ pub fn compute_instances_with_uvs(
         // median, lifted by the exact interior conformal dilation where a
         // finite pole exists. This is density-driven world/curvature demand,
         // not screen attenuation.
-        let mut world_demand = median_a.max(median_b).max(median_c) / target_size;
+        let mut world_demand = median_a.max(median_b).max(median_c)
+            / (target_size * intrinsic_similarity);
         if let Some(patch) = ConformalPatch::new(transform, v0, v1, v2) {
             if patch.min_bot_sq < POLE_PROXIMITY_NORM_SQ {
                 pole_faces.push(fi);
             } else {
                 let l_max = dist3(v1, v2).max(dist3(v0, v2)).max(dist3(v0, v1));
-                world_demand = world_demand.max(patch.lambda_star * l_max / target_size);
+                world_demand = world_demand.max(
+                    (patch.lambda_star / intrinsic_similarity) * l_max / target_size,
+                );
             }
         }
         let world_lod = snap_f64_to_power_of_2(world_demand).clamp(MIN_LOD, MAX_LOD);
@@ -837,6 +850,44 @@ mod tests {
             .max()
             .unwrap();
         assert!(max_lod > 1, "sphere reflection should increase LOD, got max={}", max_lod);
+    }
+
+    #[test]
+    fn sphere_reflection_radius_does_not_change_intrinsic_lod() {
+        let old_density = get_tess_density();
+        let old_screen_atten = get_screen_atten();
+        let (verts, faces) = shapes::icosahedron();
+        let center = Quat::from_point(3.0, 0.2, -0.1);
+
+        set_tess_params(100.0, false);
+        let small = compute_instances(
+            &verts,
+            &faces,
+            &Mobius::sphere_reflection(center, 0.25),
+            None,
+            None,
+        );
+        let large = compute_instances(
+            &verts,
+            &faces,
+            &Mobius::sphere_reflection(center, 2.0),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            small
+                .iter()
+                .map(|face| face.edge_lods)
+                .collect::<Vec<_>>(),
+            large
+                .iter()
+                .map(|face| face.edge_lods)
+                .collect::<Vec<_>>(),
+            "sphere radius's global r² scale leaked into intrinsic LOD",
+        );
+
+        set_tess_params(old_density, old_screen_atten);
     }
 
     #[test]

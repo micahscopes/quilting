@@ -357,19 +357,25 @@ void main() {
     }
 
     float target_size = mesh_radius / density;
+    // A finite-pole Möbius map has a global similarity power k multiplying
+    // every pairwise distance (k = r² for sphere reflection). That factor
+    // changes the size of the complete image, not its intrinsic conformal
+    // complexity. Remove it from world/curvature demand; the screen-capacity
+    // path below still sees the true projected size and can attenuate it.
+    float intrinsic_similarity = u_has_pole > 0.5 ? max(u_mob_k, 1e-12) : 1.0;
 
     // Uniform per-face density demand from the largest median. Max prevents
     // small-median sabotage on skinny triangles. A finite-pole patch also gets
     // an exact interior conformal-curvature demand: this is world-space demand
     // controlled by `density`, not screen attenuation.
-    float max_med = max(med_a, max(med_b, med_c)) / target_size;
+    float max_med = max(med_a, max(med_b, med_c)) / (target_size * intrinsic_similarity);
     float source_l_max = 0.0;
     float lambda_star = 0.0;
     float interior_world_demand = 0.0;
     if (patch_valid && min_bot_true >= 1e-8) {
         source_l_max = max(distance(p1, p2), max(distance(p0, p2), distance(p0, p1)));
         lambda_star = u_mob_k / max(dT2, 1e-30);
-        interior_world_demand = lambda_star * source_l_max / target_size;
+        interior_world_demand = (lambda_star / intrinsic_similarity) * source_l_max / target_size;
     }
     lod_a = clamp(snap_pow2(max(max_med, interior_world_demand)), 1.0, max_lod);
     lod_b = lod_a;

@@ -866,4 +866,13 @@ mod tests {
         assert_eq!(LOD_COMPUTE_VS.matches("floor_pow2(max(px_").count(), 3);
     }
 
+    #[test]
+    fn gpu_intrinsic_lod_removes_global_mobius_similarity() {
+        assert!(LOD_COMPUTE_VS.contains(
+            "float intrinsic_similarity = u_has_pole > 0.5 ? max(u_mob_k, 1e-12) : 1.0"
+        ));
+        assert!(LOD_COMPUTE_VS.contains("target_size * intrinsic_similarity"));
+        assert!(LOD_COMPUTE_VS.contains("lambda_star / intrinsic_similarity"));
+    }
+
 }
