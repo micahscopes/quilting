@@ -103,6 +103,9 @@ self.onmessage = async function(e) {
   if (type === 'load_gltf_data') {
     lodJobGeneration += 1;
     wasm.cancel_animated_lods();
+    const sourceBytes = data.bytes instanceof ArrayBuffer
+      ? data.bytes
+      : data.bytes?.buffer;
     const result = wasm.load_gltf_data(new Uint8Array(data.bytes));
     // Decode raw image blobs using browser-native decoders (parallel, fast)
     if (result && result.textures && result.textures.length > 0) {
@@ -130,7 +133,14 @@ self.onmessage = async function(e) {
         if (t.data && t.data.buffer) transfers.push(t.data.buffer);
       }
     }
-    self.postMessage({ type: 'gltf_loaded', id, result }, transfers);
+    // Only authored Hyperscape assets need their source bytes again on the
+    // main thread to initialize the ECS graph. Ordinary GLBs stay transferred
+    // to the retained loader worker instead of being cloned across both heaps.
+    const hyperscapeBytes = result?.has_hyperscape && sourceBytes instanceof ArrayBuffer
+      ? sourceBytes
+      : null;
+    if (hyperscapeBytes) transfers.push(hyperscapeBytes);
+    self.postMessage({ type: 'gltf_loaded', id, result, hyperscapeBytes }, transfers);
     return;
   }
 

@@ -919,6 +919,18 @@ let authoredLodSkipped = 0;
 let lastSceneDiagnosticRenderAt = 0;
 
 function activateHyperscape(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
+    hyperscapeActive = false;
+    authoredCamera = null;
+    authoredLodStates = [];
+    lastChamberEpoch = -1;
+    authoredLodPending = false;
+    authoredLodReasons = new Set();
+    authoredLodSkipped = 0;
+    previousFrameTs = null;
+    $('hyperscape-diagnostics').textContent = 'Hyperscape: no authored scene';
+    return false;
+  }
   hyperscapeActive = mr_loadHyperscape(new Uint8Array(buffer));
   authoredCamera = null;
   authoredLodStates = [];
@@ -1958,10 +1970,10 @@ async function recomputeLods() {
 async function loadModel(buffer, filename) {
   remeshedMode = false;
   $('stats').textContent = `Loading ${filename}...`;
-  const resp = await workerCall('load_gltf_data', { bytes: buffer });
+  const resp = await workerCall('load_gltf_data', { bytes: buffer }, [buffer]);
   meshInfo = resp.result;
   await finishModelUpload(resp.result, filename);
-  activateHyperscape(buffer);
+  activateHyperscape(resp.hyperscapeBytes);
 }
 
 // --- Render loop ---
@@ -2548,8 +2560,12 @@ phase('model', ['workers'], async () => {
     }
   }
   if (!buf) return null;
-  const resp = await workerCall('load_gltf_data', { bytes: buf });
-  return { result: resp.result, filename: currentGlb, buffer: buf };
+  const resp = await workerCall('load_gltf_data', { bytes: buf }, [buf]);
+  return {
+    result: resp.result,
+    filename: currentGlb,
+    buffer: resp.hyperscapeBytes,
+  };
 });
 
 // Phase 5: Upload model + start rendering (depends on atlas + model + wasm)

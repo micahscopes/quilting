@@ -629,7 +629,14 @@ pub fn dispatch_animated_lods(
             Some(PendingAnimatedLods {
                 fence,
                 runs,
-                face_nodes: data.face_node_indices.clone(),
+                // Ordinary glTF dispatches only the baseline run and never
+                // consults node ownership. Avoid cloning a mesh-sized face map
+                // after every camera or animation update in that common path.
+                face_nodes: if extracted_states.is_empty() {
+                    Vec::new()
+                } else {
+                    data.face_node_indices.clone()
+                },
             })
         });
         perf_mark("lod-gpu-compute-end");
@@ -1874,6 +1881,11 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(n_tris as f64)).unwrap();
     js_sys::Reflect::set(&result, &"materials".into(), &js_materials).unwrap();
     js_sys::Reflect::set(&result, &"textures".into(), &js_textures).unwrap();
+    js_sys::Reflect::set(
+        &result,
+        &"has_hyperscape".into(),
+        &JsValue::from_bool(authored_coordinates),
+    ).unwrap();
     js_sys::Reflect::set(&result, &"face_material_indices".into(), &js_face_materials).unwrap();
     js_sys::Reflect::set(&result, &"face_node_indices".into(), &js_face_nodes).unwrap();
 
