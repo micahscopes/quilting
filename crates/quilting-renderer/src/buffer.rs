@@ -114,6 +114,33 @@ pub struct MeshBuffers {
     pub num_instances: i32,
 }
 
+/// Copyable, non-owning draw view. This is the backend-neutral portion of a
+/// render command; resource owners remain in [`MeshBuffers`].
+#[derive(Clone, Copy)]
+pub struct MeshDraw {
+    pub tri_vao: glow::VertexArray,
+    pub line_vao: glow::VertexArray,
+    pub num_tri_indices: i32,
+    pub num_line_indices: i32,
+    pub tri_index_offset: i32,
+    pub line_index_offset: i32,
+    pub num_instances: i32,
+}
+
+impl From<&MeshBuffers> for MeshDraw {
+    fn from(mesh: &MeshBuffers) -> Self {
+        Self {
+            tri_vao: mesh.tri_vao,
+            line_vao: mesh.line_vao,
+            num_tri_indices: mesh.num_tri_indices,
+            num_line_indices: mesh.num_line_indices,
+            tri_index_offset: mesh.tri_index_offset,
+            line_index_offset: mesh.line_index_offset,
+            num_instances: mesh.num_instances,
+        }
+    }
+}
+
 impl MeshBuffers {
     /// Create VAOs for triangle and line rendering, sharing tessellation + instance buffers.
     ///

@@ -120,7 +120,7 @@ impl Renderer {
     pub fn prepare_patch_batch(
         &self,
         camera: &pass::Camera,
-        batch: &pass::RenderBatch<'_>,
+        batch: &pass::RenderBatch,
         source_vao: glow::VertexArray,
         destination: glow::Buffer,
         byte_offset: i32,

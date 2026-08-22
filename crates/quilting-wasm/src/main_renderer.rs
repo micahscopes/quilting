@@ -11,7 +11,7 @@ use crate::{perf_mark, perf_measure};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
-    create_patch_input_vao, EnvironmentMaps, MeshBuffers, PbrParams,
+    create_patch_input_vao, EnvironmentMaps, MeshBuffers, MeshDraw, PbrParams,
     PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
 };
 use quilting_renderer::pass::{
@@ -44,6 +44,7 @@ struct MainState {
     texture_cache: TextureCache,
     env_maps: EnvironmentMaps,
     batches: BTreeMap<batch::RenderBatchKey, GpuBatch>,
+    render_batches: Vec<RenderBatch>,
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
@@ -377,6 +378,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             renderer, texture_cache,
             env_maps: EnvironmentMaps::default(),
             batches: BTreeMap::new(),
+            render_batches: Vec::new(),
             batch_groups: BTreeMap::new(),
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
@@ -988,7 +990,7 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             for batch in state.batches.values() {
                 let conformal = conformal_state_for_node(state, batch.node_index);
                 let render_batch = RenderBatch {
-                    mesh: &batch.mesh,
+                    mesh: MeshDraw::from(&batch.mesh),
                     perm_parity: batch.perm_parity,
                     wire_color: lod_color(&batch.lod),
                     material_index: batch.material_index,
@@ -1898,18 +1900,21 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             ],
         };
 
-        let render_batches: Vec<RenderBatch> = state.batches.values().map(|b| {
+        state.render_batches.clear();
+        state.render_batches.reserve(state.batches.len());
+        for b in state.batches.values() {
             let conformal = conformal_state_for_node(state, b.node_index);
             let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
-            RenderBatch {
-                mesh: &b.mesh, perm_parity: b.perm_parity,
+            state.render_batches.push(RenderBatch {
+                mesh: MeshDraw::from(&b.mesh), perm_parity: b.perm_parity,
                 wire_color: lod_color(&b.lod), material_index: b.material_index,
                 mobius: conformal.mobius,
                 orientation_sign: conformal.orientation_sign * euclidean_orientation,
                 euclidean_model: conformal.euclidean_model,
                 euclidean_normal: affine_normal_matrix(&conformal.euclidean_model),
-            }
-        }).collect();
+            });
+        }
+        let render_batches = state.render_batches.as_slice();
 
         let gl = state.renderer.gl();
         state.renderer.begin_frame();
@@ -1920,7 +1925,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         // wire, normal, and pick draw consumes these prepared records without
         // CPU visibility readback or repeated position skinning.
         perf_mark("patch-prepare-start");
-        for (gpu_batch, render_batch) in state.batches.values().zip(&render_batches) {
+        for (gpu_batch, render_batch) in state.batches.values().zip(render_batches) {
             state.renderer.prepare_patch_batch(
                 &camera,
                 render_batch,
@@ -2050,7 +2055,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 };
 
                 // Pass 1: opaque non-transmission
-                for batch in &render_batches {
+                for batch in render_batches {
                     let mat = get_mat(batch);
                     if mat.alpha_mode > 1.5 || mat.transmission_factor > 0.0 { continue; }
 
@@ -2263,7 +2268,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
 
                 // Pass 2: transmission + transparent
-                for batch in &render_batches {
+                for batch in render_batches {
                     let mat = get_mat(batch);
                     if mat.alpha_mode < 1.5 && mat.transmission_factor <= 0.0 { continue; }
 
@@ -2457,7 +2462,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
 
-        state.renderer.render(state.render_mode, &camera, &render_batches);
+        state.renderer.render(state.render_mode, &camera, render_batches);
 
         // Highlight pass: overlay picked QB patch with cyan
         if state.highlight_face >= 0 && state.highlight_prog.is_some() {

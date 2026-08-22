@@ -2,7 +2,7 @@
 
 use glow::HasContext;
 
-use crate::buffer::{MeshBuffers, VertexUniformBuf, WireUniformBuf};
+use crate::buffer::{MeshBuffers, MeshDraw, VertexUniformBuf, WireUniformBuf};
 use crate::shader::Programs;
 
 /// Rendering modes supported by the quilting pipeline.
@@ -37,8 +37,9 @@ pub struct Camera {
 }
 
 /// A single draw batch with per-batch state.
-pub struct RenderBatch<'a> {
-    pub mesh: &'a MeshBuffers,
+#[derive(Clone, Copy)]
+pub struct RenderBatch {
+    pub mesh: MeshDraw,
     /// Permutation parity (+1 or -1) for raster winding.
     pub perm_parity: f32,
     /// Wire color for this batch [r, g, b].
@@ -107,7 +108,7 @@ pub fn affine_normal_matrix(model: &[f32; 16]) -> [f32; 16] {
 }
 
 /// Copy view state while selecting this entity batch's conformal map.
-pub fn camera_for_batch(camera: &Camera, batch: &RenderBatch<'_>) -> Camera {
+pub fn camera_for_batch(camera: &Camera, batch: &RenderBatch) -> Camera {
     Camera {
         mvp: camera.mvp,
         mv: camera.mv,
