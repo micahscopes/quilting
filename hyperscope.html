@@ -530,15 +530,22 @@ function bindBtnGroup(id, sig) {
   });
 }
 
-// Bind three independent axis-inversion buttons to an XYZ bitmask signal.
-function bindAxisMask(id, sig) {
+// Bind three independent inversion buttons to the active navigation profile.
+function bindNavigationAxisMask(id, hyperscopeSig, blenderSig, navigationSig) {
   const btns = document.querySelectorAll(`#${id} button`);
+  const activeSignal = () => navigationSig.peek() === 'hyperscope' ? hyperscopeSig : blenderSig;
   btns.forEach(button => {
     const bit = Number(button.dataset.bit);
-    button.addEventListener('click', () => sig.set(sig.peek() ^ bit));
+    button.addEventListener('click', () => {
+      const sig = activeSignal();
+      sig.set(sig.peek() ^ bit);
+    });
   });
   effect(() => {
-    const mask = sig.get();
+    const mode = navigationSig.get();
+    const hyperscopeMask = hyperscopeSig.get();
+    const blenderMask = blenderSig.get();
+    const mask = mode === 'hyperscope' ? hyperscopeMask : blenderMask;
     btns.forEach(button => button.classList.toggle('a', (mask & Number(button.dataset.bit)) !== 0));
   });
 }
@@ -555,7 +562,8 @@ const PARAM_DEFAULTS = {
   animate: '1', anim: '-1', atlas: '7',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
-  smlock: '1', smswap: '0', smpinv: '0', smrinv: '0',
+  smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
+  smbpinv: '0', smbrinv: '0',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
   fqual: '2', fkaw: '1', fkoff: '15',
 };
@@ -585,6 +593,7 @@ function readParams() {
     smmove: get('smmove'), smrotate: get('smrotate'), smnav: get('smnav'),
     smlock: get('smlock'), smswap: get('smswap'),
     smpinv: get('smpinv'), smrinv: get('smrinv'),
+    smbpinv: get('smbpinv'), smbrinv: get('smbrinv'),
     fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
     fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
     fqual: get('fqual'), fkaw: get('fkaw'), fkoff: get('fkoff'),
@@ -636,8 +645,10 @@ function syncURL() {
       ss('smnav', spaceMouseNavigation, PARAM_DEFAULTS.smnav);
       set('smlock', spaceMouseLockHorizon.peek() ? '1' : '0', PARAM_DEFAULTS.smlock);
       set('smswap', spaceMouseSwapYZ.peek() ? '1' : '0', PARAM_DEFAULTS.smswap);
-      ss('smpinv', spaceMousePanInvert, PARAM_DEFAULTS.smpinv);
-      ss('smrinv', spaceMouseRotateInvert, PARAM_DEFAULTS.smrinv);
+      ss('smpinv', spaceMouseHyperscopePanInvert, PARAM_DEFAULTS.smpinv);
+      ss('smrinv', spaceMouseHyperscopeRotateInvert, PARAM_DEFAULTS.smrinv);
+      ss('smbpinv', spaceMouseBlenderPanInvert, PARAM_DEFAULTS.smbpinv);
+      ss('smbrinv', spaceMouseBlenderRotateInvert, PARAM_DEFAULTS.smbrinv);
     } catch { /* signals not yet initialized */ }
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
@@ -677,8 +688,10 @@ const spaceMouseRotate = signal(300, 'smrotate');
 const spaceMouseNavigation = signal('hyperscope', 'smnav');
 const spaceMouseLockHorizon = signal(true, 'smlock');
 const spaceMouseSwapYZ = signal(false, 'smswap');
-const spaceMousePanInvert = signal(0, 'smpinv');
-const spaceMouseRotateInvert = signal(0, 'smrinv');
+const spaceMouseHyperscopePanInvert = signal(2, 'smpinv');
+const spaceMouseHyperscopeRotateInvert = signal(1, 'smrinv');
+const spaceMouseBlenderPanInvert = signal(0, 'smbpinv');
+const spaceMouseBlenderRotateInvert = signal(0, 'smbrinv');
 bindSlider('spacemouse-move', spaceMouseMove, value => (value / 100).toFixed(2));
 bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed(2));
 const spaceMouseNavigationSelect = $('spacemouse-navigation');
@@ -691,16 +704,28 @@ effect(() => {
 });
 bindToggle('spacemouse-horizon-toggle', spaceMouseLockHorizon);
 bindToggle('spacemouse-swap-toggle', spaceMouseSwapYZ);
-bindAxisMask('spacemouse-pan-invert', spaceMousePanInvert);
-bindAxisMask('spacemouse-rotate-invert', spaceMouseRotateInvert);
+bindNavigationAxisMask(
+  'spacemouse-pan-invert',
+  spaceMouseHyperscopePanInvert,
+  spaceMouseBlenderPanInvert,
+  spaceMouseNavigation,
+);
+bindNavigationAxisMask(
+  'spacemouse-rotate-invert',
+  spaceMouseHyperscopeRotateInvert,
+  spaceMouseBlenderRotateInvert,
+  spaceMouseNavigation,
+);
 effect(() => {
   spaceMouseMove.get();
   spaceMouseRotate.get();
   spaceMouseNavigation.get();
   spaceMouseLockHorizon.get();
   spaceMouseSwapYZ.get();
-  spaceMousePanInvert.get();
-  spaceMouseRotateInvert.get();
+  spaceMouseHyperscopePanInvert.get();
+  spaceMouseHyperscopeRotateInvert.get();
+  spaceMouseBlenderPanInvert.get();
+  spaceMouseBlenderRotateInvert.get();
   syncURL();
 });
 const spaceMouseStatus = $('spacemouse-status');
@@ -1574,8 +1599,10 @@ applyParams = function(params) {
     ? params.smnav : 'hyperscope');
   spaceMouseLockHorizon.set(params.smlock === '1');
   spaceMouseSwapYZ.set(params.smswap === '1');
-  spaceMousePanInvert.set(integer(params.smpinv, 0, 0, 7));
-  spaceMouseRotateInvert.set(integer(params.smrinv, 0, 0, 7));
+  spaceMouseHyperscopePanInvert.set(integer(params.smpinv, 2, 0, 7));
+  spaceMouseHyperscopeRotateInvert.set(integer(params.smrinv, 1, 0, 7));
+  spaceMouseBlenderPanInvert.set(integer(params.smbpinv, 0, 0, 7));
+  spaceMouseBlenderRotateInvert.set(integer(params.smbrinv, 0, 0, 7));
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
   fz.radius.set(integer(params.fradius, 11, 4, 128));
@@ -2307,8 +2334,11 @@ function frame(ts) {
   const navigationPolicy = spaceMouseNavigationPolicy(navigationMode);
   spaceMouseNavigationOptions.mode = navigationMode;
   spaceMouseNavigationOptions.swapYZ = spaceMouseSwapYZ.peek();
-  spaceMouseNavigationOptions.invertPan = spaceMousePanInvert.peek();
-  spaceMouseNavigationOptions.invertRotate = spaceMouseRotateInvert.peek();
+  const hyperscopeNavigation = navigationMode === 'hyperscope';
+  spaceMouseNavigationOptions.invertPan = hyperscopeNavigation
+    ? spaceMouseHyperscopePanInvert.peek() : spaceMouseBlenderPanInvert.peek();
+  spaceMouseNavigationOptions.invertRotate = hyperscopeNavigation
+    ? spaceMouseHyperscopeRotateInvert.peek() : spaceMouseBlenderRotateInvert.peek();
   const navigationAxes = mapSpaceMouseNavigationAxes(
     spaceMouseAxes,
     spaceMouseNavigationOptions,

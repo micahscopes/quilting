@@ -64,6 +64,14 @@ test('Hyperscope fly uses the requested positive Rx and Ry directions', () => {
   assert.deepEqual(Array.from(mapped), [1, 2, 3, 4, 5, 6]);
 });
 
+test('Hyperscope ergonomic defaults invert movement Y and rotation X', () => {
+  const mapped = mapSpaceMouseNavigationAxes(
+    [1, 2, 3, 4, 5, 6],
+    { mode: 'hyperscope', invertPan: 0b010, invertRotate: 0b001 },
+  );
+  assert.deepEqual(Array.from(mapped), [1, -2, 3, -4, 5, 6]);
+});
+
 test('Blender device normalization matches the c63a backend transform', () => {
   const mapped = mapSpaceMouseBlenderAxes([1, 2, 3, 4, 5, 6]);
   assert.deepEqual(Array.from(mapped), [1, -3, 2, -4, 6, -5]);
