@@ -129,33 +129,24 @@ glTF file
 quilting-gltf: parse meshes, materials, textures, animations, skins
   |
   v
-quilting-core: compute FaceInstance data
-               - apply Mobius transform to positions
-               - compute conformal weights: w' = (c*x + d) * w
-               - compute per-edge LOD from deformed medians + screen attenuation
-               - pack one instance per face (layout: quilting-core::instance_layout)
+renderer-owned source textures + immutable canonical atlas
+  |                                      |
+  | each render frame                    | asynchronous LOD job
+  v                                      v
+GPU patch preparation                 worker GPU classification + edge coherence
+  - current animation pose              - fence, then 6-float/face readback
+  - ordinary + conformal state           - retain/reconcile/grade topology
+  - conservative frustum result          - upload only changed 8-float records
   |
   v
-quilting-renderer: upload to GPU
-                   - tessellation atlas VBO (static, built once)
-                   - instance buffer (per face, updated on transform/slice change)
-                   - UBOs: vertex uniforms (binding 0), PBR uniforms (binding 1)
-                   - textures: 5 PBR maps (base color, metallic-roughness, normal, emissive, occlusion)
+retained prepared patch buffers
   |
   v
-GPU vertex shader: fused Mobius + QB evaluation
-                   - reads per-instance positions + weights
-                   - reads Mobius (a,b,c,d) from uniforms
-                   - evaluates rational Bezier surface at each bary coord
-                   - computes analytic normal via quotient rule
-                   - outputs view-space position, normal, UV, tangent frame
-  |
-  v
-GPU fragment shader: PBR Cook-Torrance
-                     - 5 texture maps (sRGB conversion, normal mapping)
-                     - SH diffuse irradiance + analytical specular environment
-                     - Reinhard tone mapping + gamma correction
+GPU vertex/fragment draws: fused Mobius-QB evaluation + PBR/debug shading
 ```
+
+The exact per-frame and asynchronous responsibilities, including the WebGPU
+backend boundary, are maintained in `docs/runtime-render-pipeline.md`.
 
 ### Shader Compilation
 
@@ -237,12 +228,15 @@ This folds the Mobius transform directly into the rational Bezier form. Only one
 The vertex UBO (binding 0) contains:
 - `mvp`: 4x4 model-view-projection matrix
 - `mv`: 4x4 model-view matrix (for view-space normals/positions)
-- `perm_parity`: +1 or -1 (normal flip for odd permutations)
-- `perm_index`: which S3 permutation to apply to bary coords
 - `use_qb`: 1 for QB evaluation, 0 for flat (linear) interpolation
 - `mob_a, mob_b, mob_c, mob_d`: the four Mobius quaternions as vec4
+- camera position plus the ordinary model and inverse-normal matrices
 
-When the user drags a Mobius slider, only the uniform quaternions change — no CPU work, no buffer re-upload. The worker thread only runs when the geometry itself changes.
+Permutation index is per instance and parity selects WebGL raster winding per
+batch; neither is a frame UBO field. A Möbius or camera change immediately
+updates uniforms and current-pose GPU preparation, and asynchronously requests
+a new topology classification. Unchanged classifications do not rebuild or
+re-upload batches.
 
 ### Instance Data Layout
 
@@ -273,16 +267,17 @@ not moved to `InstanceWriter`.
 
 ### LOD Computation
 
-Currently done on the CPU (WASM), with the intent to move to GPU later
-(`quilting-renderer::compute` already implements the GPU pass; see §10):
+The numerical classifier runs in two worker-GPU passes; CPU WASM derives pole
+parameters, polls the fence, and applies the retained-topology invariants after
+the compact readback:
 
 1. Compute a target edge size: mesh bounding-sphere radius / tessellation density
 2. Per face, push the three edge midpoints through the Mobius transform and
    measure the three deformed medians (vertex to deformed opposite midpoint)
 3. Use the largest median for a uniform face demand, then snap to the nearest
    power of two
-4. Store that demand per canonical edge index, taking the max across the two
-   adjacent faces (this is what makes invariant 1 hold)
+4. Reconcile the demand across each canonical shared edge in the second GPU
+   pass (this is what makes invariant 1 hold)
 5. Include the exact interior conformal-dilation demand in the density-driven
    world LOD; a true pole intersection remains an explicit maximum-LOD safety
    case
@@ -295,7 +290,9 @@ Currently done on the CPU (WASM), with the intent to move to GPU later
 LOD is computed even for the identity Mobius: the atlas still supplies the
 sub-triangle sampling that QB evaluation needs.
 
-LOD budget: 500K total tessellated triangles max (enforced in the frontend).
+The completed payload is six floats per source face. Main-thread WASM retains
+off-camera topology, reconciles exact duplicated seam vertices, enforces a 2:1
+within-face ratio, and updates only changed draw buckets.
 
 ### Conformal Fade
 
@@ -451,9 +448,13 @@ All produced artifacts: desaturation on metallic models, orientation issues, NaN
 
 The tangent frame is approximated from UV edge vectors of the original (pre-Mobius) mesh vertices. On coarsely tessellated faces, the screen-space derivative TBN can produce artifacts. Using glTF tangent attributes would improve this.
 
-### GC Pressure
+### WebGL Topology Readback
 
-Instance data serialization creates ~100MB of ArrayBuffer churn per frame, causing 20ms GC stalls. The typed array view approach was attempted but reverted due to data corruption issues.
+Current-pose visibility and patch preparation stay on the render GPU, but
+WebGL2 cannot compact instances and emit indirect draw commands. Each completed
+adaptive classification therefore reads back 24 bytes per source face. The
+readback is fenced and asynchronous, yet it remains the principal scaling
+boundary for very large animated source meshes.
 
 ### RefCell Panic Cascade
 
@@ -463,43 +464,29 @@ After a WASM panic (e.g., from an unexpected glTF format), RefCell borrows in th
 
 LOD changes cause tessellation pattern changes, which can produce visual flickering. Mitigated by:
 - Power-of-2 snapping plus fenced asynchronous results
-- Fixed resolution during drag (debounced LOD recomputation)
+- One in-flight job plus one coalesced newest-state follow-up
+- Retaining the previous valid topology for temporarily invisible faces
+- Exact seam reconciliation and 2:1 within-face grading before batching
 - Clamping to the largest LOD the atlas was actually built with
 
 ### UV Permutation
 
 UV/normal permutation was removed because it causes visible orientation jumps when perm_index changes. This means the S3 permutation optimization only applies to the tessellation geometry, not to material coordinates.
 
-### IBL Quality
-
-No real environment maps — only analytical approximations (SH + gradient reflection). This is the biggest visual gap vs reference glTF viewers. Cubemap support would require texture loading infrastructure.
-
 ### Missing glTF Features
 
-- KHR_materials_specular (F0/specular color control)
-- KHR_materials_transmission (transparent/refractive materials)
 - KHR_lights_punctual (point/spot/directional lights from glTF)
 - Draco mesh compression
 
 ## 10. Future Direction
 
-### GPU LOD Compute (Phase 2)
+### GPU-resident topology
 
-Move LOD computation from CPU WASM to GPU fragment shader GPGPU:
-
-- **Pass 0**: render one pixel per face to an `RGBA32F` offscreen texture. Fragment shader computes screen-space error from face positions + Mobius params + camera. Outputs LOD as float. Requires `EXT_color_buffer_float`.
-- **Pass 1**: vertex shader reads LOD from LOD texture via `texelFetch`. Single tessellation pattern at max LOD for ALL faces. Vertex shader snaps bary coords to coarser grid for low-LOD faces. Degenerate triangles auto-culled by rasterizer. Single instanced draw call for entire mesh.
-
-This eliminates the tessellation atlas entirely, the CPU LOD computation, batch grouping, and per-frame instance rebuild. Per-frame CPU cost drops to essentially zero.
-
-### Single Draw Call Architecture
-
-Using WebGL2 extensions:
-- `WEBGL_multi_draw` — batch draw calls
-- `WEBGL_draw_instanced_base_vertex_base_instance` — base vertex/instance offsets
-- `WEBGL_multi_draw_instanced_base_vertex_base_instance` — one call for everything
-
-Pack all tessellation + instance data into shared buffers. Zero VAO switches, zero uniform updates per batch.
+The remaining geometry bottleneck is not LOD arithmetic—it is returning the
+worker-GPU result to the CPU so WebGL can form draw buckets. The next backend
+should keep reconciliation, resident topology, visibility compaction, and
+indirect draw generation in GPU storage buffers. A universal maximum-density
+mesh with degenerate vertices would waste vertex work and is not the target.
 
 ### Spacetime FX Roadmap
 
@@ -512,12 +499,15 @@ Parked but planned:
 
 ### WebGPU Migration
 
-Shaders are already in WGSL. The naga compilation step (WGSL -> GLSL ES 300) is for WebGL2 compatibility. When WebGPU is broadly available, the shaders can be used directly. WebGPU compute shaders would replace the fragment-shader-as-GPGPU hack for LOD computation.
+Surface and material shaders are already WGSL and compile through naga for
+WebGL2. The LOD passes, blur, and a few utility programs remain handwritten
+GLSL and must be ported. WebGPU compute should emit the same topology and
+prepared-patch records already defined in `quilting-core`, then generate
+indirect draws without a steady-state CPU readback. See
+`docs/runtime-render-pipeline.md` for the staged migration contract.
 
 ### Production Rendering Gaps
 
-1. Real IBL with cubemap/SH probes from the scene
-2. KHR_materials_specular, KHR_materials_transmission
-3. KHR_lights_punctual
-4. glTF tangent attributes for better normal mapping
-5. Draco mesh compression support
+1. Scene-authored IBL/light probes and `KHR_lights_punctual`
+2. glTF tangent attributes for better normal mapping
+3. Draco mesh compression support
