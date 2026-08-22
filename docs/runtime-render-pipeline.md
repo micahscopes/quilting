@@ -14,8 +14,10 @@ ordinary glTF scene:
 2. Advance animation time. At most one worker pose request is in flight; its
    returned joint matrices and morph weights are uploaded to retained GPU
    resources. Source vertices are not sent back per frame.
-3. Sample retained mouse/SpaceMouse state once and update the camera. Camera
-   matrices reuse preallocated typed arrays.
+3. Sample retained mouse/SpaceMouse state once and update the camera and shared
+   focus/inversion sphere. The browser currently adapts device axes directly;
+   the accepted ownership target is deterministic `hyperscape::FocusNavigation`
+   plus a Rust camera rig. Camera matrices reuse preallocated typed arrays.
 4. Schedule adaptive LOD. The scheduler permits one worker job plus one
    coalesced follow-up, so animation or continuous input cannot create an
    unbounded queue.
@@ -40,6 +42,13 @@ prepared record. An invisible prepared patch returns an out-of-clip vertex
 from the main vertex shader. This avoids fragment work and rasterization for
 off-camera patches without a CPU visibility readback, although WebGL still
 invokes the vertices belonging to their resident atlas topology.
+
+Selection focus adds no CPU geometry pass. The vertex shader carries the posed
+ordinary-space surface point before Möbius transformation, and PBR classifies
+it against one frame-global focus sphere. The normalized outside field occupies
+the B channel of the existing weight MRT. Selection mode bypasses JFA seed
+propagation because its mask is already dense, then reuses the retained
+variable-blur passes. Sphere animation uploads only a few scalar uniforms.
 
 The CPU still issues one preparation dispatch and one or more draw calls per
 resident `(material, node, canonical LOD, parity)` bucket. S3 permutation is a
@@ -106,6 +115,7 @@ separate:
 | Conservative visibility | Prepared flag makes later vertices degenerate | Visibility bit participates in prefix-sum/atomic compaction |
 | Resident topology | CPU retains the last valid crack-free LOD and sparse bucket membership | Storage buffers retain per-face edge LOD and reconcile it in compute |
 | Submission | Instanced draw per non-empty material/node/LOD/parity bucket | Compacted visible instances plus indirect arguments per `RenderBatchKey` |
+| Selection focus | Source-space sphere in the PBR UBO and MRT B-channel mask | Same logical view packet and WGSL field classification |
 
 A negative visibility result must mean “the complete posed rational patch is
 outside the current guarded frustum.” Invalid bounds, a denominator region
@@ -175,3 +185,7 @@ reintroduce into the deterministic adaptive runtime.
 Meshoptimizer opportunities and the boundary between ordinary triangle
 clustering and conformal QB fitting are tracked in
 [`meshoptimizer-roadmap.md`](meshoptimizer-roadmap.md).
+
+Selection, inversion, device mappings, Rust ownership, Blender live sync, and
+game-facing interaction migration are tracked in
+[`focus-navigation-roadmap.md`](focus-navigation-roadmap.md).

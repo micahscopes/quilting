@@ -57,6 +57,20 @@ They do not create entity or frame parents.  A deterministic schedule evaluates
 animation, frame worlds, constraint targets, anchors/chambers, and render
 extraction in that order.
 
+## Focus and navigation are runtime interaction state
+
+`FocusNavigation` is a deterministic Hyperscape resource rather than another
+scene-graph parent or conformal frame. It owns one positive ordinary-space
+sphere shared by selection focus and spherical inversion, an optional entity
+anchor, smooth fit state, and independent focus/inversion enablement.
+
+An anchor constrains the sphere to an entity's source bound; detaching retains
+the sphere and makes it freely editable. Render extraction will eventually
+carry this state per view alongside camera and subject packets. Device-specific
+mouse, SpaceMouse, touch, gamepad, and XR mappings remain outside the ECS data
+model and emit semantic interaction actions. The staged migration is specified
+in [`focus-navigation-roadmap.md`](focus-navigation-roadmap.md).
+
 ## Transform conventions
 
 - A generator array is in application order: element zero acts first.

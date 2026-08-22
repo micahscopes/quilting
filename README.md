@@ -132,6 +132,13 @@ scripts/fetch-assets.sh
 | `fuzzy-vision` | **Standalone.** JFA-based variable per-pixel blur for WebGL2/OpenGL — depth of field, conformal blur, transmission roughness, bloom. No dependency on the rest of the workspace. |
 | `distressed-blue-noise` | **Standalone.** Variable-density Poisson-disk sampling over triangles and rectangles. No dependency on the rest of the workspace. |
 
+## Architecture notes
+
+- [Runtime render pipeline](docs/runtime-render-pipeline.md)
+- [Hyperscape conformal scene model](docs/conformal-scene-model.md)
+- [Focus, selection, and navigation roadmap](docs/focus-navigation-roadmap.md)
+- [Meshoptimizer integration roadmap](docs/meshoptimizer-roadmap.md)
+
 ## License
 
 Dual-licensed under either of

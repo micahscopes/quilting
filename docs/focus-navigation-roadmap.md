@@ -1,0 +1,129 @@
+# Focus, selection, and navigation roadmap
+
+Status: the browser prototype is functional, the render contract is GPU-side,
+and the backend-neutral state has been introduced as
+`hyperscape::FocusNavigation`. The prototype remains the behavior oracle while
+ownership moves from `hyperscope.html` into deterministic Rust systems.
+
+## One sphere, several meanings
+
+Selection focus and spherical inversion share one positive ordinary-space
+`FocusSphere`. They must not acquire parallel center/radius state.
+
+- Selecting an object attaches an optional `FocusAnchor` and smoothly fits the
+  sphere to the object's source bound with a default 10% margin.
+- Detaching selection removes ownership only. The sphere, focus effect, and
+  inversion state persist and the sphere becomes freely editable.
+- An anchored sphere keeps the object's center and edits only a 1x–4x margin.
+  A detached sphere accepts translation and scale edits.
+- Focus and inversion can be enabled independently, but both consume the exact
+  same sphere.
+- Center interpolation is linear with smootherstep timing; positive radius is
+  logarithmic so transitions remain smooth across very different scales.
+
+The sphere is classified before the subject/view Möbius map. Möbius maps send
+spheres to spheres or planes, but source-space classification is both cheaper
+and exact for the boundary used by inversion. The posed pre-Möbius surface
+point is carried to PBR, which writes the spherical field to the spare B
+channel of the existing weight MRT. Inside is sharp, the boundary has a
+relative feather, and outside is blurred. This dense mask bypasses JFA seed
+propagation so exterior seeds cannot bleed blur back into the sharp interior.
+
+## Prototype controls
+
+| Input | Anchored selection | Detached sphere |
+| --- | --- | --- |
+| Primary click | Select object, tint it, enable Selection focus, animate fit | Click empty to detach without resetting |
+| SpaceMouse right double tap | Select at view center; an empty hit reframes the retained selection | Select at view center |
+| SpaceMouse left double tap | Fit shared sphere and toggle inversion | Toggle inversion around retained sphere |
+| SpaceMouse left hold | Center locked; twist edits bounded margin | Translate center; twist edits radius |
+| SpaceMouse right hold | Edit focus strength, boundary feather, and blur radius | Edit the retained focus field |
+| `F` + wheel | Edit bounded margin | Edit radius |
+| Shift + `F` + wheel | Edit relative boundary feather | Same |
+| Ctrl/Meta + `F` + wheel | Edit blur radius | Same |
+| Escape / empty click | Detach selection and retain sphere | No reset |
+
+Mouse selection uses a four-pixel drag threshold so an orbit gesture cannot
+become a pick on release. Device mappings are prototype adapters, not domain
+state: keyboard, mouse, SpaceMouse, touch, gamepad, XR, and game code should
+all emit the same semantic actions.
+
+## Target Rust ownership
+
+The intended flow is:
+
+```text
+device adapter -> semantic interaction actions -> FocusNavigation + CameraRig
+              -> Hyperscope extraction -> WebGL2 or WebGPU backend
+```
+
+`hyperscape::FocusNavigation` already owns the sphere, optional entity anchor,
+transition, focus/inversion enablement, constrained/free translation, and
+radius policy. The remaining semantic action layer should contain commands
+such as:
+
+- `Select { entity, source_bound }` and `DetachSelection`;
+- `TranslateFocus`, `ScaleFocus`, and `SetFocusFeather`;
+- `SetFocusEnabled` and `ToggleInversion`;
+- `ReframeSelection`; and
+- camera-local translate/rotate actions independent of any device axes.
+
+Actions should be timestamped against `Time<Virtual>` and consumed in a fixed
+system set before constraints and extraction. This makes input recordable,
+replayable, networkable, and testable without a browser or HID device. Rust
+quaternions should own camera orientation; Euler values remain UI projections
+only. The browser should eventually retain no authoritative camera, selection,
+or sphere state.
+
+## Migration stages
+
+1. **State core — complete.** Keep the tested `FocusNavigation` resource and
+   GPU focus-field contract backend-neutral.
+2. **WASM bridge.** Map stable glTF node identities to Hyperscape entities,
+   send pick results as semantic selection actions, tick sphere transitions in
+   Rust, and extract one compact focus packet per view. Remove the duplicate
+   JavaScript transition after parity tests pass.
+3. **Camera rig.** Move 6-DoF quaternion camera orientation, pivot/orbit focus,
+   scale-relative translation, and reframing into a Rust `CameraRig`. Preserve
+   Hyperscope Fly and Blender-compatible policies as named action mappings.
+4. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
+   focus-aware interaction range, and explicit visualization policies. The
+   selection tint remains presentation; selection identity belongs to ECS.
+5. **Persistence and replay.** Serialize stable entity references, detached
+   spheres, camera rig state, and high-level action streams. Network semantic
+   actions or authoritative state deltas, never raw HID reports.
+6. **WebGPU backend.** Upload the extracted focus packet as frame/view data,
+   classify the field in WGSL, and retain the same weight-channel meaning. GPU
+   visibility compaction and indirect draws remain independent of interaction
+   ownership.
+
+## Blender / HHHS 0.4 live editing
+
+The simplified Blender bridge should treat stable object identity and source
+bounds as authored scene facts. Blender selection may emit `Select`, but it
+must not own a second runtime focus sphere. Hyperscape remains authoritative
+for the live sphere, camera, inversion, and interaction state.
+
+The first live-sync slice should exchange versioned transactions for ordinary
+node transforms, mesh/material revisions, conformal frame generators, camera
+constraints, and stable IDs. A changed selected-object bound retargets the
+existing anchored transition; deleting the object detaches the sphere in
+place. Runtime-only focus edits should not dirty the Blender file unless the
+user explicitly promotes them to authored data.
+
+## Game-readiness constraints
+
+- Input mappings must be remappable and scale-independent.
+- Selection and focus transitions must be deterministic under fixed deltas.
+- Picking must report stable entity identity, not transient draw-batch IDs.
+- Animated bounds need a declared policy: conservative authored/rest bounds
+  first, optional current-pose GPU bounds later.
+- Focus/inversion state changes must never synchronously read GPU geometry.
+- Transparent materials and focus blur retain authored PBR sidedness and alpha
+  semantics; selection does not silently enable OIT or double-sided rendering.
+- Rendering may interpolate presentation, but authoritative gameplay queries
+  use the current Rust sphere and entity anchor.
+
+This turns the prototype into a primary navigation and interaction mechanism
+rather than a collection of UI shortcuts, while keeping the WebGL2 and future
+WebGPU renderers as consumers of the same game-layer state.
