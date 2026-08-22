@@ -18,6 +18,7 @@ use uuid::Uuid;
 pub mod interchange;
 pub mod navigation;
 pub mod presentation;
+pub mod surface;
 
 pub use navigation::{
     map_space_mouse_axes, CameraBasis, CameraError, CameraRig, CameraTransition, FocusAnchor,
@@ -32,6 +33,11 @@ pub use presentation::{
     PresentationLayerState, PresentationOverlay, PresentationRuntime, PresentationScene,
     PresentationSnapshot, PresentationTransition, PresentationView, ViewLayerOverride,
     PRESENTATION_VERSION,
+};
+pub use surface::{
+    SurfaceAddress, SurfaceAddressError, SurfaceAdvance, SurfaceAttachment, SurfaceContact,
+    SurfaceDetachReason, SurfaceField, SurfaceSample, SurfaceWalker, SurfaceWalkerConfig,
+    SurfaceWalkerStatus, TriangleAdjacency, TriangleAdjacencyReport,
 };
 
 /// Shared conformal scene topology. Ordinary entity parenting remains in the
