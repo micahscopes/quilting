@@ -9,6 +9,7 @@ import {
   focusRelativeNavigationSpeed,
   framedSphereDistance,
   interpolateSphereFit,
+  isPrimarySelectionClick,
   mobiusConformalScaleAt,
   perspectiveNavigationSpeed,
   scaleRadiusMultiplicatively,
@@ -79,6 +80,13 @@ test('object focus sphere applies a stable margin and rejects invalid bounds', (
   );
   assert.equal(focusSphereFromBound({ center: [1, 2], radius: 2 }), null);
   assert.equal(focusSphereFromBound({ center: [1, 2, 3], radius: -1 }), null);
+});
+
+test('selection click policy preserves orbit drags and non-primary buttons', () => {
+  assert.equal(isPrimarySelectionClick(0, 0), true);
+  assert.equal(isPrimarySelectionClick(0, 4), true);
+  assert.equal(isPrimarySelectionClick(0, 4.01), false);
+  assert.equal(isPrimarySelectionClick(2, 0), false);
 });
 
 test('perspective navigation speed is screen-relative and linear in depth', () => {

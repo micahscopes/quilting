@@ -213,6 +213,14 @@ export function focusSphereFromBound(bound, margin = 1.1, minRadius = 0.02) {
   };
 }
 
+/** Distinguish an intentional primary-button pick from the orbit gesture. */
+export function isPrimarySelectionClick(button, dragDistance, threshold = 4) {
+  const distance = Number(dragDistance);
+  return Number(button) === 0
+    && Number.isFinite(distance)
+    && distance <= Math.max(Number(threshold) || 0, 0);
+}
+
 /**
  * Radius editing while object-anchored changes only the margin around the
  * object. It cannot shrink through the selected object or grow without bound.

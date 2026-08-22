@@ -281,6 +281,7 @@ import {
   focusRelativeNavigationSpeed,
   framedSphereDistance,
   interpolateSphereFit,
+  isPrimarySelectionClick,
   mobiusConformalScaleAt,
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
@@ -1275,22 +1276,35 @@ function selectObjectAtViewCenter() {
   return selectObjectFromFace(faceId);
 }
 
+let mouseDragDistance = Infinity;
 canvas.addEventListener('click', e => {
-  if (!e.ctrlKey && !e.metaKey) return;
+  if (!isPrimarySelectionClick(e.button, mouseDragDistance)) return;
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
   const faceId = pickFaceAtCanvasPixel(x, y);
-  selectObjectFromFace(faceId, { highlightFace: true });
+  if (faceId < 0) {
+    clearSelectedObject('Focus sphere unanchored');
+    mr_highlightFace(-1);
+    return;
+  }
+  selectObjectFromFace(faceId, { highlightFace: e.ctrlKey || e.metaKey });
 });
 
 // --- Mouse: orbit + shift-pan + wheel zoom ---
-canvas.addEventListener('mousedown', e => { drag = true; lx = e.clientX; ly = e.clientY; });
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  drag = true;
+  mouseDragDistance = 0;
+  lx = e.clientX;
+  ly = e.clientY;
+});
 window.addEventListener('mouseup', () => drag = false);
 let camDebounce = null;
 window.addEventListener('mousemove', e => {
   if (!drag) return;
   const dx = e.clientX - lx, dy = e.clientY - ly;
+  mouseDragDistance += Math.hypot(dx, dy);
   lx = e.clientX; ly = e.clientY;
   if (e.shiftKey) {
     // Pan in screen plane
@@ -1310,6 +1324,11 @@ window.addEventListener('mousemove', e => {
   }
   clearTimeout(camDebounce);
   camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
+});
+window.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !selectedObject) return;
+  clearSelectedObject('Focus sphere unanchored');
+  mr_highlightFace(-1);
 });
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
