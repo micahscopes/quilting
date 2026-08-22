@@ -18,6 +18,11 @@ the resulting `RoundQuery` back through the conformal generator word, and then
 traverse the source index. The API intentionally provides no source-Euclidean
 nearest-neighbour or distance query.
 
+`RoundQuery::from_view_projection` converts a column-major WebGL
+view-projection matrix directly into those six output-chart half-spaces.
+Invalid or degenerate matrices fail closed (no query) rather than manufacturing
+a culling proof.
+
 The crate intentionally returns `IntersectsOrUnknown` whenever a numerical or
 geometric case is not proved safe to prune. See the crate-level Rust
 documentation and `formal/ConformalMereology/RoundSideIndex.lean` for the

@@ -221,6 +221,56 @@ impl RoundQuery {
             .try_fold(true, |inside, side| Ok(inside && side.contains(point)?))
     }
 
+    /// Construct the six open half-spaces of a WebGL-style clip frustum.
+    ///
+    /// `view_projection` is column-major and maps ordinary output-chart points
+    /// to the clip inequalities `-w < x,y,z < w`. The returned query therefore
+    /// lives after the conformal map and is suitable for
+    /// [`RoundIndex::query_output_chart`]. Degenerate/non-finite matrices are
+    /// rejected rather than producing a side that might prune geometry.
+    pub fn from_view_projection(view_projection: &[f64; 16]) -> Result<Self, RoundIndexError> {
+        if view_projection.iter().any(|value| !value.is_finite()) {
+            return Err(RoundIndexError::InvalidViewProjection);
+        }
+        let row = |index: usize| {
+            [
+                view_projection[index],
+                view_projection[4 + index],
+                view_projection[8 + index],
+                view_projection[12 + index],
+            ]
+        };
+        let r0 = row(0);
+        let r1 = row(1);
+        let r2 = row(2);
+        let r3 = row(3);
+        let mut sides = Vec::with_capacity(6);
+        for (axis, sign) in [
+            (r0, 1.0),
+            (r0, -1.0),
+            (r1, 1.0),
+            (r1, -1.0),
+            (r2, 1.0),
+            (r2, -1.0),
+        ] {
+            let coefficients = [
+                r3[0] + sign * axis[0],
+                r3[1] + sign * axis[1],
+                r3[2] + sign * axis[2],
+            ];
+            let normal_length = norm(coefficients);
+            if !normal_length.is_finite() || normal_length == 0.0 {
+                return Err(RoundIndexError::InvalidViewProjection);
+            }
+            sides.push(RoundSide::plane(
+                scale(coefficients, normal_length.recip()),
+                -(r3[3] + sign * axis[3]) / normal_length,
+                RoundSideOrientation::Positive,
+            )?);
+        }
+        Self::new(sides)
+    }
+
     /// Pull a destination-space query into an automorphism's source chart.
     pub fn pullback<A: RoundSideAutomorphism>(
         &self,
@@ -1146,6 +1196,7 @@ impl Error for TransformError {}
 pub enum RoundIndexError {
     InvalidSide(String),
     InvalidClearance,
+    InvalidViewProjection,
     DuplicateNode(NodeId),
     UnknownNode(NodeId),
     UnknownParent { child: NodeId, parent: NodeId },
@@ -1169,6 +1220,9 @@ impl fmt::Display for RoundIndexError {
         match self {
             Self::InvalidSide(message) => write!(f, "invalid round side: {message}"),
             Self::InvalidClearance => write!(f, "predicate clearance must be finite and nonnegative"),
+            Self::InvalidViewProjection => {
+                write!(f, "view-projection matrix must define six finite clip planes")
+            }
             Self::DuplicateNode(id) => write!(f, "duplicate round-index node {}", id.0),
             Self::UnknownNode(id) => write!(f, "unknown round-index node {}", id.0),
             Self::UnknownParent { child, parent } => {

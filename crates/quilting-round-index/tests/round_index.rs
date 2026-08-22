@@ -22,6 +22,30 @@ fn plane(normal: [f64; 3], offset: f64, orientation: RoundSideOrientation) -> Ro
     RoundSide::plane(normal, offset, orientation).unwrap()
 }
 
+#[test]
+fn view_projection_builds_the_output_clip_cube_as_round_sides() {
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let frustum = RoundQuery::from_view_projection(&identity).unwrap();
+    assert_eq!(frustum.sides().len(), 6);
+    assert!(frustum.contains([0.0; 3]).unwrap());
+    assert!(frustum.contains([0.999, -0.999, 0.5]).unwrap());
+    assert!(!frustum.contains([1.001, 0.0, 0.0]).unwrap());
+    assert!(!frustum.contains([0.0, -2.0, 0.0]).unwrap());
+
+    let mut non_finite = identity;
+    non_finite[0] = f64::NAN;
+    assert_eq!(
+        RoundQuery::from_view_projection(&non_finite),
+        Err(RoundIndexError::InvalidViewProjection)
+    );
+    assert_eq!(
+        RoundQuery::from_view_projection(&[0.0; 16]),
+        Err(RoundIndexError::InvalidViewProjection)
+    );
+}
+
 fn assert_close(a: f64, b: f64) {
     assert!((a - b).abs() < EPS, "{a} != {b}");
 }
