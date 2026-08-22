@@ -233,6 +233,7 @@
       "type": "object",
       "required": ["frame"],
       "properties": {
+        "stable_id": { "type": "string", "format": "uuid" },
         "frame": { "$ref": "#/$defs/nonnegativeIndex" },
         "anchor": { "$ref": "#/$defs/nonnegativeIndex" },
         "path": { "$ref": "#/$defs/nonnegativeIndex" }

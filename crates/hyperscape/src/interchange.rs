@@ -4,8 +4,8 @@ use crate::{
     ActiveAnchor, ChamberAggregateState, ChamberKey, ChamberSide, ChamberSignature, ConformalPath,
     ConformalPathTimeline, ConformalScene, ContactRecord, ContactState, CrossFrameTarget,
     EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates, PathKeyframe,
-    PathTransition, ProjectionCamera, RenderSubject, TrackedCoordinates, TransformHistory,
-    TransformHistorySample,
+    PathTransition, ProjectionCamera, RenderSubject, StableEntityId, TrackedCoordinates,
+    TransformHistory, TransformHistorySample,
 };
 use bevy_app::App;
 use bevy_ecs::prelude::*;
@@ -66,6 +66,9 @@ pub fn spawn_hyperscape_asset(
         }
 
         if let Some(binding) = &asset.node_bindings[node_index] {
+            if let Some(stable_id) = binding.stable_id {
+                world.entity_mut(entity).insert(StableEntityId(stable_id));
+            }
             let local_point = binding
                 .path
                 .and_then(|path| asset.payload.paths.get(path))
@@ -268,6 +271,21 @@ impl HyperscapeGltfRuntime {
 
     pub fn entities(&self) -> &[Entity] {
         &self.entities
+    }
+
+    pub fn entity_by_stable_id(&self, stable_id: uuid::Uuid) -> Option<Entity> {
+        self.entities.iter().copied().find(|&entity| {
+            self.app.world().get::<StableEntityId>(entity).copied()
+                == Some(StableEntityId(stable_id))
+        })
+    }
+
+    pub fn stable_id_for_node(&self, node: usize) -> Option<uuid::Uuid> {
+        let entity = *self.entities.get(node)?;
+        self.app
+            .world()
+            .get::<StableEntityId>(entity)
+            .map(|stable| stable.0)
     }
 
     pub fn packets(&self) -> &[crate::HyperscopePacket] {
@@ -501,6 +519,11 @@ mod tests {
 
         let horse = entities[0];
         let camera = entities[1];
+        let horse_id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        assert_eq!(
+            app.world().get::<StableEntityId>(horse),
+            Some(&StableEntityId(horse_id))
+        );
         assert!(app.world().get::<ConformalPath>(horse).is_some());
         assert!(app.world().get::<ActiveAnchor>(horse).is_some());
         assert_eq!(
@@ -534,6 +557,10 @@ mod tests {
         let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset.unwrap()).unwrap();
         assert_eq!(runtime.packets().len(), 0);
         let horse = runtime.entities()[0];
+        let horse_id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        assert_eq!(runtime.entity_by_stable_id(horse_id), Some(horse));
+        assert_eq!(runtime.stable_id_for_node(0), Some(horse_id));
+        assert_eq!(runtime.stable_id_for_node(99), None);
         runtime
             .app_mut()
             .world_mut()

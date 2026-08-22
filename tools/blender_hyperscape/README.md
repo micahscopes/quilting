@@ -10,7 +10,7 @@ The **Hyperscape** tab in the 3D View sidebar provides:
 
 - a single-parent conformal frame forest and ordered generator words;
 - sphere and plane walls with complementary-side previews;
-- anchor bitsets, entity bindings, and local/ambient coordinate inspection;
+- anchor bitsets, UUID-backed entity bindings, and local/ambient coordinate inspection;
 - piecewise-linear animation paths with transformable control guides;
 - timed frame/anchor transitions sampled from one stable control-point chart;
 - preserve-world frame reparenting and object re-anchoring;

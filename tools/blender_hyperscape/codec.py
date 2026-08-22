@@ -11,6 +11,7 @@ import copy
 import json
 import math
 import struct
+import uuid
 from typing import Any, Iterable, Mapping
 
 VERSION = "0.1"
@@ -221,11 +222,26 @@ def validate_payload(
         bindings = list(bindings)
         if len(bindings) != node_count:
             raise HyperscapeCodecError("node binding count must match the glTF node array")
+        stable_ids: set[uuid.UUID] = set()
         for node, binding in enumerate(bindings):
             if binding is None:
                 continue
             if not isinstance(binding, Mapping):
                 raise HyperscapeCodecError(f"node {node} binding must be an object")
+            if "stable_id" in binding:
+                try:
+                    stable_id = uuid.UUID(binding["stable_id"])
+                except (AttributeError, TypeError, ValueError) as error:
+                    raise HyperscapeCodecError(
+                        f"node {node} stable_id must be a UUID"
+                    ) from error
+                if stable_id.int == 0:
+                    raise HyperscapeCodecError(f"node {node} stable_id must not be nil")
+                if stable_id in stable_ids:
+                    raise HyperscapeCodecError(
+                        f"node {node} repeats stable UUID {stable_id}"
+                    )
+                stable_ids.add(stable_id)
             _index(binding.get("frame"), len(frames), f"node {node} frame")
             if "anchor" in binding:
                 anchor = _index(binding["anchor"], len(anchors), f"node {node} anchor")

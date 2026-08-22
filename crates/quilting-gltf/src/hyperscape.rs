@@ -11,8 +11,10 @@ use quilting_core::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+use uuid::Uuid;
 
 pub const HYPERSCAPE_INTERCHANGE_VERSION: &str = "0.1";
 const GLB_JSON_CHUNK: u32 = 0x4e4f_534a;
@@ -112,6 +114,11 @@ pub enum HyperscapeConstraint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HyperscapeNodeBinding {
+    /// Durable identity shared by Blender, Hyperscape, presentations, and
+    /// replicated authored operations. Array position remains a container
+    /// detail and must not become a persistent reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_id: Option<Uuid>,
     pub frame: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<usize>,
@@ -144,6 +151,20 @@ impl HyperscapeAsset {
                 "unsupported version {:?}; expected {:?}",
                 self.payload.version, HYPERSCAPE_INTERCHANGE_VERSION
             )));
+        }
+        let mut stable_ids = BTreeSet::new();
+        for (node, binding) in self.node_bindings.iter().enumerate() {
+            let Some(stable_id) = binding.as_ref().and_then(|binding| binding.stable_id) else {
+                continue;
+            };
+            if stable_id.is_nil() {
+                return Err(validation(format!("node {node} has the nil stable UUID")));
+            }
+            if !stable_ids.insert(stable_id) {
+                return Err(validation(format!(
+                    "node {node} repeats stable UUID {stable_id}"
+                )));
+            }
         }
 
         let mut frames = ConformalFrameForest::new();
@@ -652,11 +673,13 @@ mod tests {
             },
             node_bindings: vec![
                 Some(HyperscapeNodeBinding {
+                    stable_id: Some(Uuid::from_u128(1)),
                     frame: 1,
                     anchor: Some(0),
                     path: Some(0),
                 }),
                 Some(HyperscapeNodeBinding {
+                    stable_id: Some(Uuid::from_u128(2)),
                     frame: 0,
                     anchor: None,
                     path: None,
@@ -709,6 +732,10 @@ mod tests {
         let value: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(value["nodes"][0]["name"], "horse");
         assert_eq!(value["nodes"][0]["extras"]["author"], "kept");
+        assert_eq!(
+            value["nodes"][0]["extras"]["hyperscape"]["stable_id"],
+            Uuid::from_u128(1).to_string()
+        );
         assert_eq!(value["extras"]["application"], "also kept");
         let document = gltf::Gltf::from_slice(&encoded).unwrap().document;
         let recovered = extract_asset(&document).unwrap().unwrap();
@@ -761,6 +788,17 @@ mod tests {
         assert!(inject_into_json(&mut root, &asset).is_err());
         asset.node_bindings.pop();
         assert!(inject_into_json(&mut minimal_json(), &asset).is_err());
+    }
+
+    #[test]
+    fn stable_node_ids_must_be_non_nil_and_unique() {
+        let mut duplicate = sample_asset();
+        duplicate.node_bindings[1].as_mut().unwrap().stable_id = Some(Uuid::from_u128(1));
+        assert!(duplicate.validate().is_err());
+
+        let mut nil = sample_asset();
+        nil.node_bindings[0].as_mut().unwrap().stable_id = Some(Uuid::nil());
+        assert!(nil.validate().is_err());
     }
 
     #[test]

@@ -845,6 +845,7 @@ dependencies = [
  "getrandom 0.2.17",
  "quilting-core",
  "quilting-gltf",
+ "uuid",
 ]
 
 [[package]]
@@ -1186,6 +1187,7 @@ dependencies = [
  "quilting-mesh",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

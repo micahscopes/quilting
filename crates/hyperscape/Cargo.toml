@@ -13,6 +13,7 @@ quilting-gltf = { path = "../quilting-gltf" }
 bevy_app = { version = "=0.18.1", default-features = false, features = ["std"] }
 bevy_ecs = { version = "=0.18.1", default-features = false, features = ["std"] }
 bevy_time = { version = "=0.18.1", default-features = false, features = ["std"] }
+uuid = { version = "1", features = ["serde"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `quilting-core` uses rand; a non-rendering Hyperscape wasm build must enable

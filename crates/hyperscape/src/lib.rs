@@ -13,6 +13,7 @@ use quilting_core::{
     RoundWallRelation, RoundWallSet, WallId,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use uuid::Uuid;
 
 pub mod interchange;
 pub mod navigation;
@@ -37,6 +38,12 @@ pub struct ConformalScene {
 /// An entity's point coordinates are expressed in this conformal frame.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntityFrame(pub FrameId);
+
+/// Durable authored identity. Bevy [`Entity`] values and glTF node indices are
+/// runtime/container handles and must never be written into HHHS history or a
+/// presentation manifest as identity.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StableEntityId(pub Uuid);
 
 /// Editable coordinates in [`EntityFrame`].
 #[derive(Component, Debug, Clone, Copy, PartialEq)]

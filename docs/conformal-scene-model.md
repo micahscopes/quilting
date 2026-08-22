@@ -133,6 +133,12 @@ highlight draw selects that subject/view packet's Möbius coefficients and
 explicit orientation parity. The lowest projection-camera node is selected
 deterministically by default; `mr_setHyperscapeCameraNode` switches views.
 
+An entity binding may also carry `stable_id`, a non-nil UUID unique within the
+asset. Hyperscape installs it as `StableEntityId` and provides UUID-to-entity
+lookup while retaining the glTF node index only as a container handle. Blender,
+presentation cues, and future HHHS operations should store this UUID rather
+than a Bevy entity value, face index, draw-batch index, or glTF array position.
+
 The diagnostic snapshot exposes the complete `packets` array as well as the
 legacy first-packet fields. For Hyperscape assets, mesh control points remain
 in authored coordinates: the packet's ordinary affine model and inverse-

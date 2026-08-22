@@ -69,7 +69,12 @@ class CodecTests(unittest.TestCase):
             ],
         }
         raw = json.dumps(document).encode()
-        encoded = codec.inject_asset(raw, sample_payload(), {0: {"frame": 1, "anchor": 0, "path": 0}})
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        encoded = codec.inject_asset(
+            raw,
+            sample_payload(),
+            {0: {"stable_id": stable_id, "frame": 1, "anchor": 0, "path": 0}},
+        )
         decoded, container = codec.decode_gltf(encoded)
         payload, bindings = codec.extract_asset(encoded)
 
@@ -78,7 +83,31 @@ class CodecTests(unittest.TestCase):
         self.assertEqual(decoded["nodes"][0]["extras"]["ordinary"], 17)
         self.assertEqual(decoded["nodes"][1]["extras"], {"ordinary": "also kept"})
         self.assertEqual(payload, sample_payload())
-        self.assertEqual(bindings, [{"frame": 1, "anchor": 0, "path": 0}, None])
+        self.assertEqual(
+            bindings,
+            [{"stable_id": stable_id, "frame": 1, "anchor": 0, "path": 0}, None],
+        )
+
+    def test_stable_node_ids_must_be_uuid_non_nil_and_unique(self) -> None:
+        valid = "11111111-1111-4111-8111-111111111111"
+        codec.validate_payload(sample_payload(), 2, [
+            {"stable_id": valid, "frame": 1, "anchor": 0, "path": 0},
+            {"stable_id": "22222222-2222-4222-8222-222222222222", "frame": 0},
+        ])
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "must be a UUID"):
+            codec.validate_payload(sample_payload(), 1, [
+                {"stable_id": "not-a-uuid", "frame": 1, "anchor": 0, "path": 0},
+            ])
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "must not be nil"):
+            codec.validate_payload(sample_payload(), 1, [
+                {"stable_id": "00000000-0000-0000-0000-000000000000", "frame": 1,
+                 "anchor": 0, "path": 0},
+            ])
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "repeats stable UUID"):
+            codec.validate_payload(sample_payload(), 2, [
+                {"stable_id": valid, "frame": 1, "anchor": 0, "path": 0},
+                {"stable_id": valid, "frame": 0},
+            ])
 
     def test_glb_roundtrip_preserves_non_json_chunks_byte_for_byte(self) -> None:
         document = {"asset": {"version": "2.0"}, "nodes": [{"name": "subject"}]}
