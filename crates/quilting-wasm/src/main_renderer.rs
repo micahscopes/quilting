@@ -1784,6 +1784,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
         perf_mark("batch-group-start");
+        perf_mark("batch-retain-start");
         let nf = state.num_faces;
         // Model metadata can arrive before its instance buffer. Validate at
         // the consumption boundary so a previous model's face count cannot
@@ -1837,9 +1838,19 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             );
             topology_changed |= previous != Some(resident);
         }
+        perf_mark("batch-retain-end");
+        perf_measure("batch-retain", "batch-retain-start", "batch-retain-end");
+
+        perf_mark("batch-balance-start");
         let lod_corrections = state.lod_topology.as_ref().map_or(0, |topology| {
             batch::balance_resident_lods(&mut state.resident_face_lods, topology)
         });
+        perf_mark("batch-balance-end");
+        perf_measure(
+            "batch-balance",
+            "batch-balance-start",
+            "batch-balance-end",
+        );
         topology_changed |= lod_corrections != 0;
         state.batch_update_stats.last_culled_faces = culled as u64;
         state.batch_update_stats.last_lod_corrections = lod_corrections as u64;
@@ -1848,12 +1859,16 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         if !topology_changed {
             state.batch_update_stats.unchanged_calls += 1;
+            perf_mark("batch-bucket-start");
+            perf_mark("batch-bucket-end");
+            perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
             perf_mark("batch-group-end");
             perf_measure("batch-group", "batch-group-start", "batch-group-end");
             return;
         }
 
         let force_upload = state.batch_layout_dirty;
+        perf_mark("batch-bucket-start");
         batch::group_resident_faces_into(
             &state.resident_face_lods,
             &state.face_materials,
@@ -1861,6 +1876,8 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             initial_resident,
             &mut state.batch_groups,
         );
+        perf_mark("batch-bucket-end");
+        perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
         perf_mark("batch-group-end");
         perf_measure("batch-group", "batch-group-start", "batch-group-end");
 

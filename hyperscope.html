@@ -288,6 +288,7 @@ const startupDiagnostics = {
 globalThis.__hyperscopeStartupDiagnostics = startupDiagnostics;
 const lodMetricNames = [
   'totalMs', 'workerMs', 'batchMs', 'batchGroupMs', 'batchUploadMs',
+  'batchRetainMs', 'batchBalanceMs', 'batchBucketMs',
   'wasmMs', 'gpuComputeMs', 'gpuWaitMs', 'gpuReadbackMs',
 ];
 const lodTelemetry = {
@@ -346,6 +347,7 @@ function updateLodMetric(name, value) {
 
 function recordLodTiming(
   totalMs, workerMs, batchMs, batchGroupMs, batchUploadMs,
+  batchRetainMs, batchBalanceMs, batchBucketMs,
   wasmMs, gpuComputeMs, gpuWaitMs, gpuReadbackMs, applied, debug,
 ) {
   lodTelemetry.completed += 1;
@@ -357,6 +359,9 @@ function recordLodTiming(
   updateLodMetric('batchMs', batchMs);
   updateLodMetric('batchGroupMs', batchGroupMs);
   updateLodMetric('batchUploadMs', batchUploadMs);
+  updateLodMetric('batchRetainMs', batchRetainMs);
+  updateLodMetric('batchBalanceMs', batchBalanceMs);
+  updateLodMetric('batchBucketMs', batchBucketMs);
   updateLodMetric('wasmMs', wasmMs);
   updateLodMetric('gpuComputeMs', gpuComputeMs);
   updateLodMetric('gpuWaitMs', gpuWaitMs);
@@ -387,6 +392,9 @@ function consumeBatchMeasure(name, startMark, endMark) {
 
 function clearBatchMeasures() {
   consumeBatchMeasure('batch-group', 'batch-group-start', 'batch-group-end');
+  consumeBatchMeasure('batch-retain', 'batch-retain-start', 'batch-retain-end');
+  consumeBatchMeasure('batch-balance', 'batch-balance-start', 'batch-balance-end');
+  consumeBatchMeasure('batch-bucket', 'batch-bucket-start', 'batch-bucket-end');
   consumeBatchMeasure('batch-gpu-upload', 'batch-upload-start', 'batch-upload-end');
 }
 function phase(name, depNames, fn) {
@@ -1887,6 +1895,9 @@ async function recomputeLods() {
     let batchDone = tWorkerDone;
     let batchGroupMs = 0;
     let batchUploadMs = 0;
+    let batchRetainMs = 0;
+    let batchBalanceMs = 0;
+    let batchBucketMs = 0;
 
     // Apply every completed coherent classification. If state changed while
     // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
@@ -1897,6 +1908,21 @@ async function recomputeLods() {
       mr_buildBatches(faceLods);
       batchDone = performance.now();
       batchGroupMs = consumeBatchMeasure('batch-group', 'batch-group-start', 'batch-group-end');
+      batchRetainMs = consumeBatchMeasure(
+        'batch-retain',
+        'batch-retain-start',
+        'batch-retain-end',
+      );
+      batchBalanceMs = consumeBatchMeasure(
+        'batch-balance',
+        'batch-balance-start',
+        'batch-balance-end',
+      );
+      batchBucketMs = consumeBatchMeasure(
+        'batch-bucket',
+        'batch-bucket-start',
+        'batch-bucket-end',
+      );
       batchUploadMs = consumeBatchMeasure(
         'batch-gpu-upload',
         'batch-upload-start',
@@ -1909,6 +1935,9 @@ async function recomputeLods() {
       batchDone - tWorkerDone,
       batchGroupMs,
       batchUploadMs,
+      batchRetainMs,
+      batchBalanceMs,
+      batchBucketMs,
       wt.wasm_total,
       workerPhases['lod-gpu-compute'],
       workerPhases['lod-gpu-wait'],
