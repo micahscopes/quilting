@@ -5,9 +5,12 @@ import {
   applyMobiusPoint,
   buildNodeFocusRecords,
   faceSourceCentroid,
+  focusRelativeNavigationSpeed,
+  framedSphereDistance,
   interpolateSphereFit,
   mobiusConformalScaleAt,
   perspectiveNavigationSpeed,
+  scaleRadiusMultiplicatively,
   smootherstep01,
 } from '../hyperscope_focus.mjs';
 
@@ -73,4 +76,24 @@ test('perspective navigation speed is screen-relative and linear in depth', () =
   assert(near > 0);
   assert(Math.abs(far / near - 4) < 1e-12);
   assert(Math.abs(perspectiveNavigationSpeed(2, 2000) / near - 0.5) < 1e-12);
+});
+
+test('focus-relative navigation caps tiny selections without accelerating large ones', () => {
+  const screenSpeed = perspectiveNavigationSpeed(4, 1000);
+  assert.equal(focusRelativeNavigationSpeed(4, 1000, null), screenSpeed);
+  assert.equal(focusRelativeNavigationSpeed(4, 1000, 0.1), 0.2);
+  assert.equal(focusRelativeNavigationSpeed(4, 1000, 100), screenSpeed);
+});
+
+test('multiplicative radius control applies the same ratio at every scale', () => {
+  const small = scaleRadiusMultiplicatively(0.1, 0.5, 3, 0.2);
+  const large = scaleRadiusMultiplicatively(2, 0.5, 3, 0.2);
+  assert(Math.abs(small / 0.1 - large / 2) < 1e-12);
+  assert.equal(scaleRadiusMultiplicatively(5, 1, 3, 1), 5);
+});
+
+test('sphere framing respects the narrower viewport axis and requested margin', () => {
+  const landscape = framedSphereDistance(2, 16 / 9);
+  assert(Math.abs(landscape - 4.6) < 1e-12);
+  assert(framedSphereDistance(2, 0.5) > landscape);
 });

@@ -201,7 +201,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button data-bit="1">X</button><button data-bit="2">Y</button><button data-bit="4">Z</button>
     </div>
     <div id="spacemouse-mode" style="color:#58a6ff;font-size:9px;margin-top:3px">Fly: strafe/lift/forward + local pitch/yaw/roll</div>
-    <div style="color:#484f58;font-size:9px;margin-top:2px">Double right: select at view center. Double left: smoothly fit/toggle inversion. Hold left: edit inversion. Hold right: edit DoF.</div>
+    <div style="color:#484f58;font-size:9px;margin-top:2px">Double right: select at center; if empty, reframe the last selection. Double left: fit/toggle inversion. Hold left: edit inversion. Hold right: edit DoF.</div>
   </div>
 
   <div class="section">
@@ -277,11 +277,13 @@ import {
   applyMobiusPoint,
   buildNodeFocusRecords,
   faceSourceCentroid,
+  focusRelativeNavigationSpeed,
+  framedSphereDistance,
   interpolateSphereFit,
   mobiusConformalScaleAt,
-  perspectiveNavigationSpeed,
+  scaleRadiusMultiplicatively,
   smootherstep01,
-} from './hyperscope_focus.mjs?rev=object-focus-v1';
+} from './hyperscope_focus.mjs?rev=scale-aware-focus-v1';
 
 const $ = id => document.getElementById(id);
 
@@ -784,6 +786,7 @@ let spaceMouseLastLodAt = -Infinity;
 let spaceMouseMotionActive = false;
 let spaceMouseTranslationActive = false;
 let registeredSpaceMouseSpeed = 1;
+let registeredInversionScale = 2;
 let previousSpaceMouseMode = 'camera';
 globalThis.__hyperscopeInputDiagnostics = { spaceMouse: spaceMouseDiagnostics };
 const spaceMouseButtonGestures = new SpaceMouseButtonGestureTracker();
@@ -1130,7 +1133,15 @@ function refreshSelectedObjectAnchor({ followObjectPivot = false } = {}) {
     * Math.min(Math.max(localScale || 1, 1e-4), 1e4);
   const previous = selectedObject.outputAnchor;
   selectedObject.outputAnchor = mapped;
-  if (cameraFocusTransition) cameraFocusTransition.target = mapped.slice();
+  if (cameraFocusTransition) {
+    cameraFocusTransition.target = mapped.slice();
+    if (cameraFocusTransition.frameSelection) {
+      cameraFocusTransition.targetZoom = Math.max(0.1, Math.min(100, framedSphereDistance(
+        selectedObject.outputRadius,
+        canvas.width / Math.max(canvas.height, 1),
+      )));
+    }
+  }
   if (followObjectPivot && previous && spaceMouseNavigation.peek() === 'object'
       && !cameraFocusTransition) {
     panX += mapped[0] - previous[0];
@@ -1148,6 +1159,27 @@ function beginObjectPivotFocus(target, nowMs = performance.now()) {
     startedAt: nowMs,
     durationMs: 450,
   };
+}
+
+function reframeSelectedObject(nowMs = performance.now()) {
+  const target = refreshSelectedObjectAnchor();
+  if (!selectedObject || !target) return false;
+  const radius = Math.max(selectedObject.outputRadius || 0, 0.001);
+  cameraFocusTransition = {
+    start: [panX, panY, panZ],
+    target: target.slice(),
+    startZoom: zoom,
+    targetZoom: Math.max(0.1, Math.min(100, framedSphereDistance(
+      radius,
+      canvas.width / Math.max(canvas.height, 1),
+    ))),
+    startedAt: nowMs,
+    durationMs: 650,
+    frameSelection: true,
+    completionLabel: `Reframed node ${selectedObject.node}`,
+  };
+  selectionLabel(`Reframing node ${selectedObject.node}…`);
+  return true;
 }
 
 function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
@@ -1190,6 +1222,11 @@ function selectObjectAtViewCenter() {
     Math.floor(canvas.width * 0.5),
     Math.floor(canvas.height * 0.5),
   );
+  if (faceId < 0 && selectedObject) return reframeSelectedObject();
+  if (faceId < 0) {
+    selectionLabel('No object at view center · no recovery selection');
+    return false;
+  }
   return selectObjectFromFace(faceId);
 }
 
@@ -1351,11 +1388,20 @@ function advanceFocusTransitions(nowMs) {
     panX = transition.start[0] + (transition.target[0] - transition.start[0]) * t;
     panY = transition.start[1] + (transition.target[1] - transition.start[1]) * t;
     panZ = transition.start[2] + (transition.target[2] - transition.start[2]) * t;
+    if (Number.isFinite(transition.startZoom) && Number.isFinite(transition.targetZoom)) {
+      zoom = Math.exp(
+        Math.log(Math.max(transition.startZoom, 0.001))
+        + (Math.log(Math.max(transition.targetZoom, 0.001))
+          - Math.log(Math.max(transition.startZoom, 0.001))) * t,
+      );
+    }
     if (progress >= 1) {
       panX = transition.target[0];
       panY = transition.target[1];
       panZ = transition.target[2];
+      if (Number.isFinite(transition.targetZoom)) zoom = transition.targetZoom;
       cameraFocusTransition = null;
+      if (transition.completionLabel) selectionLabel(transition.completionLabel);
       debouncedLodRecompute();
       syncURL();
     }
@@ -2565,6 +2611,11 @@ function frame(ts) {
   if (spaceMouseMode !== previousSpaceMouseMode) {
     spaceMouse.resetSmoothing();
     spaceMouseTranslationActive = false;
+    if (spaceMouseMode === 'inversion') {
+      // Keep gesture-relative motion above computeMobius' r > 0.01 guard so
+      // twisting smaller cannot abruptly turn an active inversion into identity.
+      registeredInversionScale = Math.max(mob.mr.peek() / 10, 0.011);
+    }
     previousSpaceMouseMode = spaceMouseMode;
   }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
@@ -2604,21 +2655,21 @@ function frame(ts) {
         const eyeY = panY - basis[7] * zoom;
         const eyeZ = panZ - basis[8] * zoom;
         const anchor = selectedObject?.outputAnchor;
+        const focusRadius = selectedObject?.outputRadius
+          ?? (mob.xform.peek() === 'sphere_reflection' ? mob.mr.peek() / 10 : null);
         let referenceDepth = zoom;
         if (anchor) {
           const selectedDepth = (anchor[0] - eyeX) * basis[6]
             + (anchor[1] - eyeY) * basis[7]
             + (anchor[2] - eyeZ) * basis[8];
           if (Number.isFinite(selectedDepth) && selectedDepth > 0.01) {
-            referenceDepth = Math.max(
-              selectedDepth,
-              (selectedObject.outputRadius || 0) * 2,
-            );
+            referenceDepth = selectedDepth;
           }
         }
-        registeredSpaceMouseSpeed = perspectiveNavigationSpeed(
+        registeredSpaceMouseSpeed = focusRelativeNavigationSpeed(
           referenceDepth,
           canvas.height,
+          focusRadius,
         );
         spaceMouseTranslationActive = true;
       } else if (spaceMouseMode !== 'camera' || !translating) {
@@ -2626,8 +2677,9 @@ function frame(ts) {
       }
       const cameraMoveScale = registeredSpaceMouseSpeed
         * (spaceMouseMove.peek() / 100) * deltaSeconds;
-      const modifierMoveScale = (spaceMouseMove.peek() / 100) * deltaSeconds * 2.4;
-      const moveScale = spaceMouseMode === 'camera' ? cameraMoveScale : modifierMoveScale;
+      const inversionMoveScale = registeredInversionScale
+        * 1.2 * (spaceMouseMove.peek() / 100) * deltaSeconds;
+      const moveScale = spaceMouseMode === 'camera' ? cameraMoveScale : inversionMoveScale;
       const rotateScale = (spaceMouseRotate.peek() / 100) * deltaSeconds * 1.5;
 
       if (spaceMouseMode === 'camera') {
@@ -2720,12 +2772,17 @@ function frame(ts) {
         const dx = (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
         const dy = (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;
         const dz = (flyAxes[0] * basis[2] + flyAxes[1] * basis[5] + flyAxes[2] * basis[8]) * moveScale;
+        const nextRadius = scaleRadiusMultiplicatively(
+          mob.mr.peek() / 10,
+          flyAxes[5],
+          spaceMouseRotate.peek() / 100,
+          deltaSeconds,
+        );
         batchSignals(() => {
           mob.mx.set(Math.max(-30, Math.min(30, mob.mx.peek() + dx * 10)));
           mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
           mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
-          mob.mr.set(Math.max(0, Math.min(50,
-            mob.mr.peek() + flyAxes[5] * (spaceMouseRotate.peek() / 100) * deltaSeconds * 12)));
+          mob.mr.set(nextRadius * 10);
         });
       } else if (spaceMouseMode === 'depth-of-field') {
         fz.enabled.set(true);

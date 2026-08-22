@@ -214,3 +214,66 @@ export function perspectiveNavigationSpeed(
   const height = Math.max(Number(viewportHeight) || 0, 1);
   return 2 * depth * Math.tan(fovY * 0.5) * pixelsPerSecond / height;
 }
+
+/**
+ * Screen-relative navigation speed capped by the selected object's diameter.
+ *
+ * Depth alone is appropriate for an unbounded scene, but it makes a tiny
+ * object at that depth traversable in a fraction of a gesture. The cap keeps
+ * motion proportional to the current focus scale without accelerating large
+ * objects beyond the familiar screen-space rate.
+ */
+export function focusRelativeNavigationSpeed(
+  referenceDepth,
+  viewportHeight,
+  focusRadius = null,
+  fovY = Math.PI / 3,
+  pixelsPerSecond = 600,
+  focusDiametersPerSecond = 1,
+) {
+  const screenSpeed = perspectiveNavigationSpeed(
+    referenceDepth,
+    viewportHeight,
+    fovY,
+    pixelsPerSecond,
+  );
+  const radius = Number(focusRadius);
+  if (!(radius > 0) || !Number.isFinite(radius)) return screenSpeed;
+  const diameterSpeed = 2 * radius * Math.max(Number(focusDiametersPerSecond) || 0, 0);
+  return Math.min(screenSpeed, diameterSpeed);
+}
+
+/** Scale-independent radius editing: equal puck motion produces equal ratios. */
+export function scaleRadiusMultiplicatively(
+  radius,
+  input,
+  sensitivity,
+  deltaSeconds,
+  rate = 0.6,
+  minRadius = 0.011,
+  maxRadius = 5,
+) {
+  const lower = Math.max(Number(minRadius) || 0, 1e-6);
+  const upper = Math.max(Number(maxRadius) || 0, lower);
+  const current = Math.min(Math.max(Number(radius) || lower, lower), upper);
+  const exponent = (Number(input) || 0)
+    * (Number(sensitivity) || 0)
+    * Math.max(Number(deltaSeconds) || 0, 0)
+    * (Number(rate) || 0);
+  return Math.min(Math.max(current * Math.exp(exponent), lower), upper);
+}
+
+/** Camera distance that contains a sphere in the narrower perspective axis. */
+export function framedSphereDistance(
+  radius,
+  aspect,
+  fovY = Math.PI / 3,
+  margin = 1.15,
+) {
+  const safeRadius = Math.max(Number(radius) || 0, 1e-4);
+  const safeAspect = Math.max(Number(aspect) || 0, 1e-4);
+  const halfY = Math.max(Math.min(Number(fovY) * 0.5, Math.PI * 0.49), 1e-4);
+  const halfX = Math.atan(Math.tan(halfY) * safeAspect);
+  const limitingHalfAngle = Math.min(halfX, halfY);
+  return safeRadius * Math.max(Number(margin) || 0, 1) / Math.sin(limitingHalfAngle);
+}
