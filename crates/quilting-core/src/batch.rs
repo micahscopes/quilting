@@ -4,6 +4,7 @@
 //! (atlas 0-255 × two winding parities × materials) and small enough for a flat Vec.
 
 use quilting_mesh::HalfEdgeMesh;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
@@ -79,12 +80,39 @@ impl ResidentLod {
 /// WebGL2 uses this key to retain per-bucket attribute buffers and VAOs.
 /// A future WebGPU compute pass can emit the same key beside compacted face
 /// indices before indirect draw generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RenderBatchKey {
     pub lod: [u32; 3],
     pub parity_bucket: u8,
     pub material_index: usize,
     pub node_index: usize,
+}
+
+impl Ord for RenderBatchKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Submission order is deliberately state-major. Batch identity still
+        // contains the exact same fields, but grouping material and authored
+        // node before atlas topology lets both WebGL2 and future backends retain
+        // expensive pipeline/resource state across adjacent draws.
+        (
+            self.material_index,
+            self.node_index,
+            self.lod,
+            self.parity_bucket,
+        )
+            .cmp(&(
+                other.material_index,
+                other.node_index,
+                other.lod,
+                other.parity_bucket,
+            ))
+    }
+}
+
+impl PartialOrd for RenderBatchKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl RenderBatchKey {
@@ -531,6 +559,31 @@ mod tests {
         assert_eq!(anisotropic.0.node_index, 11);
         assert_eq!(anisotropic.1.iter().map(|member| member.face_index).collect::<Vec<_>>(), vec![0, 1]);
         assert_ne!(anisotropic.1[0].permutation_index, anisotropic.1[1].permutation_index);
+    }
+
+    #[test]
+    fn resident_batch_submission_order_is_material_then_node_major() {
+        let high_lod_first_material = RenderBatchKey {
+            lod: [64, 64, 64],
+            parity_bucket: 1,
+            material_index: 2,
+            node_index: 9,
+        };
+        let low_lod_later_material = RenderBatchKey {
+            lod: [1, 1, 1],
+            parity_bucket: 0,
+            material_index: 3,
+            node_index: 0,
+        };
+        let same_material_later_node = RenderBatchKey {
+            lod: [1, 1, 1],
+            parity_bucket: 0,
+            material_index: 2,
+            node_index: 10,
+        };
+
+        assert!(high_lod_first_material < low_lod_later_material);
+        assert!(high_lod_first_material < same_material_later_node);
     }
 
     #[test]
