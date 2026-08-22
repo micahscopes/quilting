@@ -101,10 +101,19 @@ theorem map_carrier_disjoint_iff_pullQuery
     (i : ι) (query : Set (OnePoint E)) :
     Disjoint ((I.map A).carrier i) query ↔
       Disjoint (I.carrier i) (pullQuery A query) := by
-  rw [show query = A.toEquiv '' pullQuery A query by
-    ext x
-    simp [pullQuery]]
-  exact Set.disjoint_image_iff A.toEquiv.injective
+  constructor
+  · intro hpushed
+    refine Set.disjoint_left.2 ?_
+    intro x hxCarrier hxQuery
+    exact Set.disjoint_left.1 hpushed
+      (by exact ⟨x, hxCarrier, rfl⟩)
+      ((mem_pullQuery_iff A query x).1 hxQuery)
+  · intro hpulled
+    refine Set.disjoint_left.2 ?_
+    intro y hyCarrier hyQuery
+    obtain ⟨x, hxCarrier, rfl⟩ := hyCarrier
+    exact Set.disjoint_left.1 hpulled hxCarrier
+      ((mem_pullQuery_iff A query x).2 hyQuery)
 
 /-- The equivalent positive form of the query law: a pushed carrier hits a
 destination query exactly when its source carrier hits the pulled query. -/
@@ -123,8 +132,11 @@ theorem descendant_pruned
     {child parent : ι} (hchild : child ≤ parent)
     {query : Set (OnePoint E)}
     (hparent : Disjoint ((I.map A).carrier parent) query) :
-    Disjoint ((I.map A).carrier child) query :=
-  hparent.mono (I.map A).carrier_mono hchild le_rfl
+    Disjoint ((I.map A).carrier child) query := by
+  refine Set.disjoint_left.2 ?_
+  intro x hxChild hxQuery
+  exact Set.disjoint_left.1 hparent
+    ((I.map A).carrier_mono hchild hxChild) hxQuery
 
 /-- Source-space version of conservative pruning.  Combined with
 `map_carrier_disjoint_iff_pullQuery`, this is the form used when the immutable
@@ -136,7 +148,9 @@ theorem descendant_pruned_against_pullQuery
     (hparent : Disjoint (I.carrier parent) (pullQuery A query)) :
     Disjoint ((I.map A).carrier child) query := by
   apply (map_carrier_disjoint_iff_pullQuery I A child query).2
-  exact hparent.mono (I.carrier_mono hchild) le_rfl
+  refine Set.disjoint_left.2 ?_
+  intro x hxChild hxQuery
+  exact Set.disjoint_left.1 hparent (I.carrier_mono hchild hxChild) hxQuery
 
 end RoundSideIndex
 
