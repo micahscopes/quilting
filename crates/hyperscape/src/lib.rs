@@ -61,6 +61,188 @@ pub struct ProjectionCamera {
     pub frame: FrameId,
 }
 
+/// A positive ordinary-space sphere used by selection focus and inversion.
+///
+/// The sphere lives before the entity/view Möbius map. This keeps object
+/// selection, the sharp focus field, and spherical inversion on one exact
+/// geometric boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusSphere {
+    pub center: [f64; 3],
+    pub radius: f64,
+}
+
+impl FocusSphere {
+    pub fn new(center: [f64; 3], radius: f64) -> Result<Self, &'static str> {
+        if center.into_iter().any(|value| !value.is_finite()) {
+            return Err("focus sphere center must be finite");
+        }
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err("focus sphere radius must be finite and positive");
+        }
+        Ok(Self { center, radius })
+    }
+}
+
+/// Optional object ownership of the shared focus/inversion sphere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusAnchor {
+    pub entity: Entity,
+    pub source_bound: FocusSphere,
+    pub margin: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusSphereTransition {
+    pub start: FocusSphere,
+    pub target: FocusSphere,
+    pub elapsed_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+/// Deterministic interaction state shared by selection, navigation, focus,
+/// and spherical inversion. Device-specific mappings emit edits into this
+/// resource rather than owning another camera or sphere representation.
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct FocusNavigation {
+    pub sphere: FocusSphere,
+    pub anchor: Option<FocusAnchor>,
+    pub transition: Option<FocusSphereTransition>,
+    pub focus_enabled: bool,
+    pub inversion_enabled: bool,
+    /// Boundary feather as a fraction of sphere radius.
+    pub relative_feather: f64,
+}
+
+impl Default for FocusNavigation {
+    fn default() -> Self {
+        Self {
+            sphere: FocusSphere {
+                center: [0.5, 0.0, 0.0],
+                radius: 2.0,
+            },
+            anchor: None,
+            transition: None,
+            focus_enabled: false,
+            inversion_enabled: false,
+            relative_feather: 0.1,
+        }
+    }
+}
+
+impl FocusNavigation {
+    pub const MIN_RADIUS: f64 = 0.011;
+    pub const MIN_ANCHORED_MARGIN: f64 = 1.0;
+    pub const MAX_ANCHORED_MARGIN: f64 = 4.0;
+
+    /// Select and smoothly fit around an entity while preserving one sphere.
+    pub fn anchor_to(
+        &mut self,
+        entity: Entity,
+        source_bound: FocusSphere,
+        margin: f64,
+        duration_seconds: f64,
+    ) -> Result<(), &'static str> {
+        FocusSphere::new(source_bound.center, source_bound.radius)?;
+        if !margin.is_finite() || !duration_seconds.is_finite() || duration_seconds < 0.0 {
+            return Err("focus margin and transition duration must be finite and nonnegative");
+        }
+        let margin = margin.clamp(Self::MIN_ANCHORED_MARGIN, Self::MAX_ANCHORED_MARGIN);
+        let target = FocusSphere {
+            center: source_bound.center,
+            radius: (source_bound.radius * margin).max(Self::MIN_RADIUS),
+        };
+        self.anchor = Some(FocusAnchor {
+            entity,
+            source_bound,
+            margin,
+        });
+        self.focus_enabled = true;
+        if duration_seconds == 0.0 {
+            self.sphere = target;
+            self.transition = None;
+        } else {
+            self.transition = Some(FocusSphereTransition {
+                start: self.sphere,
+                target,
+                elapsed_seconds: 0.0,
+                duration_seconds,
+            });
+        }
+        Ok(())
+    }
+
+    /// Remove object ownership without destroying or resetting the sphere.
+    pub fn detach(&mut self) {
+        self.anchor = None;
+        self.transition = None;
+    }
+
+    /// Advance the selection fit using linear center and logarithmic radius.
+    pub fn advance(&mut self, delta_seconds: f64) -> bool {
+        let Some(mut transition) = self.transition else {
+            return false;
+        };
+        if !delta_seconds.is_finite() || delta_seconds <= 0.0 {
+            return false;
+        }
+        transition.elapsed_seconds += delta_seconds;
+        let linear = (transition.elapsed_seconds / transition.duration_seconds).clamp(0.0, 1.0);
+        let t = linear * linear * linear * (linear * (linear * 6.0 - 15.0) + 10.0);
+        self.sphere.center = std::array::from_fn(|axis| {
+            transition.start.center[axis]
+                + (transition.target.center[axis] - transition.start.center[axis]) * t
+        });
+        self.sphere.radius = (transition.start.radius.ln()
+            + (transition.target.radius.ln() - transition.start.radius.ln()) * t)
+            .exp();
+        if linear >= 1.0 {
+            self.transition = None;
+        } else {
+            self.transition = Some(transition);
+        }
+        true
+    }
+
+    /// Translate only a detached sphere. Anchored controls cannot drift it
+    /// away from the selected object's bound.
+    pub fn translate_free(&mut self, delta: [f64; 3]) -> bool {
+        if self.anchor.is_some() || delta.into_iter().any(|value| !value.is_finite()) {
+            return false;
+        }
+        for (coordinate, delta) in self.sphere.center.iter_mut().zip(delta) {
+            *coordinate += delta;
+        }
+        self.transition = None;
+        true
+    }
+
+    /// Scale by a ratio. An anchor converts this into a bounded object margin.
+    pub fn scale_radius(&mut self, ratio: f64) -> bool {
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return false;
+        }
+        self.transition = None;
+        if let Some(mut anchor) = self.anchor {
+            self.sphere.center = anchor.source_bound.center;
+            self.sphere.radius = (self.sphere.radius * ratio).clamp(
+                anchor.source_bound.radius * Self::MIN_ANCHORED_MARGIN,
+                anchor.source_bound.radius * Self::MAX_ANCHORED_MARGIN,
+            );
+            anchor.margin = self.sphere.radius / anchor.source_bound.radius;
+            self.anchor = Some(anchor);
+        } else {
+            self.sphere.radius = (self.sphere.radius * ratio).clamp(Self::MIN_RADIUS, 5.0);
+        }
+        true
+    }
+
+    pub fn toggle_inversion(&mut self) -> bool {
+        self.inversion_enabled = !self.inversion_enabled;
+        self.inversion_enabled
+    }
+}
+
 /// A path control point in an entity's local conformal frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PathKeyframe {
@@ -316,6 +498,7 @@ impl Plugin for HyperscapePlugin {
             .init_resource::<ContactState>()
             .init_resource::<ChamberAggregateState>()
             .init_resource::<TransformHistory>()
+            .init_resource::<FocusNavigation>()
             .init_resource::<HyperscopeExtraction>()
             .init_resource::<HyperscapeDiagnostics>()
             .configure_sets(
@@ -891,6 +1074,43 @@ mod tests {
             .resource_mut::<Time<Virtual>>()
             .advance_by(delta);
         app.update();
+    }
+
+    #[test]
+    fn focus_navigation_anchors_animates_and_detaches_without_losing_the_sphere() {
+        let entity = Entity::from_bits(7);
+        let bound = FocusSphere::new([1.0, 2.0, 3.0], 2.0).unwrap();
+        let mut focus = FocusNavigation::default();
+        focus.anchor_to(entity, bound, 1.1, 1.0).unwrap();
+        assert_eq!(focus.anchor.unwrap().entity, entity);
+        assert!(focus.focus_enabled);
+
+        assert!(focus.advance(0.5));
+        assert_eq!(focus.sphere.center, [0.75, 1.0, 1.5]);
+        assert!((focus.sphere.radius - (4.4_f64).sqrt()).abs() < EPS);
+        assert!(focus.advance(0.5));
+        assert_eq!(focus.sphere, FocusSphere { center: [1.0, 2.0, 3.0], radius: 2.2 });
+
+        focus.detach();
+        let detached = focus.sphere;
+        assert!(focus.translate_free([1.0, 0.0, -1.0]));
+        assert_eq!(focus.sphere.center, [2.0, 2.0, 2.0]);
+        assert_eq!(focus.sphere.radius, detached.radius);
+        assert!(focus.focus_enabled);
+    }
+
+    #[test]
+    fn anchored_focus_edits_only_a_bounded_margin() {
+        let entity = Entity::from_bits(11);
+        let bound = FocusSphere::new([3.0, 4.0, 5.0], 2.0).unwrap();
+        let mut focus = FocusNavigation::default();
+        focus.anchor_to(entity, bound, 1.1, 0.0).unwrap();
+        assert!(!focus.translate_free([1.0, 0.0, 0.0]));
+        assert_eq!(focus.sphere.center, bound.center);
+        assert!(focus.scale_radius(100.0));
+        assert_eq!(focus.sphere.radius, 8.0);
+        assert!(focus.scale_radius(0.001));
+        assert_eq!(focus.sphere.radius, 2.0);
     }
 
     #[test]
