@@ -88,6 +88,23 @@ test('camera transport follows the exact eye and line of sight and reports local
   assert.deepEqual(restored.basis, camera.basis);
 });
 
+test('target-free camera transport maps the sight tangent without inventing an aim point', () => {
+  const camera = {
+    eye: [2, 0, 0],
+    basis: [0, 0, -1, 0, 1, 0, -1, 0, 0],
+    orbitDistance: 2,
+  };
+  const transported = transportCameraAcrossSphereReflections(
+    camera,
+    { enabled: false },
+    { enabled: true, center: [0, 0, 0], radius: 1 },
+  );
+  assert.deepEqual(transported.eye, [0.5, 0, 0]);
+  assert.deepEqual(transported.basis.slice(6), [1, 0, 0]);
+  assert.equal(transported.orbitDistance, 0.5);
+  assert.deepEqual(transported.target, [1, 0, 0]);
+});
+
 test('camera transport is stable while editing an unchanged inversion sphere', () => {
   const inversion = { enabled: true, center: [1, -2, 0.5], radius: 3 };
   const camera = {

@@ -18,9 +18,10 @@ ordinary glTF scene:
    focus/inversion sphere. The browser currently adapts device axes directly;
    the accepted ownership target is deterministic `hyperscape::FocusNavigation`
    plus a Rust camera rig. An inversion-sphere edit transports the camera eye
-   and look-at target exactly with the conformal point map, then transports
-   up/roll along the changed sight direction without changing FOV or lens
-   parameters. Camera matrices reuse preallocated typed arrays.
+   exactly with the conformal point map. An unanchored camera transports its
+   sight tangent and frame with the local differential; an explicit semantic
+   target may use exact two-point transport. FOV and lens parameters stay
+   unchanged. Camera matrices reuse preallocated typed arrays.
 4. Schedule adaptive LOD. The scheduler permits one worker job plus one
    coalesced follow-up, so animation or continuous input cannot create an
    unbounded queue.
