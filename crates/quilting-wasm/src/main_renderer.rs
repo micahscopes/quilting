@@ -147,9 +147,7 @@ impl GpuBatch {
     }
 
     fn can_fit(&self, instance_count: usize) -> bool {
-        instance_count
-            .checked_mul(instance_layout::STRIDE_BYTES)
-            .is_some_and(|bytes| bytes <= self.instances.capacity)
+        instance_count <= self.instances.capacity_instances
     }
 
     fn upload_members(
@@ -167,13 +165,12 @@ impl GpuBatch {
 }
 
 fn fill_batch_instance_data(
-    cached_instances: &[f32],
     residents: &[Option<batch::ResidentLod>],
     key: batch::RenderBatchKey,
     members: &[batch::RenderBatchMember],
     staging: &mut [f32],
 ) -> Result<usize, String> {
-    let stride = instance_layout::STRIDE;
+    let stride = instance_layout::BATCH_TOPOLOGY_STRIDE;
     let required = members.len().checked_mul(stride)
         .ok_or_else(|| "batch instance size overflow".to_string())?;
     if staging.len() < required {
@@ -182,10 +179,6 @@ fn fill_batch_instance_data(
 
     for (instance_index, member) in members.iter().enumerate() {
         let face = member.face_index as usize;
-        let source = face.checked_mul(stride)
-            .ok_or_else(|| format!("face {face} source offset overflow"))?;
-        let source_record = cached_instances.get(source..source + stride)
-            .ok_or_else(|| format!("face {face} has no cached instance record"))?;
         let resident = residents.get(face).and_then(|resident| *resident)
             .ok_or_else(|| format!("face {face} has no resident LOD"))?;
         if resident.canonical != key.lod
@@ -196,13 +189,17 @@ fn fill_batch_instance_data(
         }
 
         let destination = instance_index * stride;
-        staging[destination..destination + stride].copy_from_slice(source_record);
         let edge_lods = resident.edge_lods().map(|lod| lod as f32);
-        let lod_offset = destination + instance_layout::offset::EDGE_LODS;
-        staging[lod_offset..lod_offset + 3].copy_from_slice(&edge_lods);
-        staging[destination + instance_layout::offset::PERM_INDEX] =
-            member.permutation_index as f32;
-        staging[destination + instance_layout::offset::FACE_ID] = member.face_index as f32;
+        staging[destination..destination + stride].copy_from_slice(&[
+            edge_lods[0],
+            edge_lods[1],
+            edge_lods[2],
+            member.permutation_index as f32,
+            member.face_index as f32,
+            0.0,
+            0.0,
+            0.0,
+        ]);
     }
     Ok(required)
 }
@@ -215,10 +212,8 @@ fn create_gpu_batch(
     instance_data: &[f32],
 ) -> Result<GpuBatch, String> {
     let capacity_instances = members.len().max(1).next_power_of_two();
-    let capacity_bytes = capacity_instances.checked_mul(instance_layout::STRIDE_BYTES)
-        .ok_or_else(|| "batch buffer capacity overflow".to_string())?;
-    let instances = PersistentBatchInstances::with_capacity(gl, instance_data, capacity_bytes)?;
-    let prepare_vao = match create_patch_input_vao(gl, &instances.buf, 0) {
+    let instances = PersistentBatchInstances::with_capacity(gl, instance_data, capacity_instances)?;
+    let prepare_vao = match create_patch_input_vao(gl, &instances.topology_buf, 0) {
         Ok(vao) => vao,
         Err(error) => {
             instances.destroy(gl);
@@ -974,8 +969,6 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
             gl.enable(glow::DEPTH_TEST);
             gl.disable(glow::BLEND);
 
-            gl.use_program(Some(state.renderer.programs().pick));
-
             let camera = quilting_renderer::pass::Camera {
                 mvp: mvp[..16].try_into().unwrap_or([0.0; 16]),
                 mv: mv[..16].try_into().unwrap_or([0.0; 16]),
@@ -986,6 +979,34 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                     camera_pos.get(2).copied().unwrap_or(0.0),
                 ],
             };
+
+            // Picking can run between an LOD membership update and the next
+            // animation frame. Expand the compact topology stream here so it
+            // never consumes stale prepared records.
+            state.renderer.joint_ubo().bind(gl);
+            state.renderer.bind_vertex_textures();
+            for batch in state.batches.values() {
+                let conformal = conformal_state_for_node(state, batch.node_index);
+                let render_batch = RenderBatch {
+                    mesh: &batch.mesh,
+                    perm_parity: batch.perm_parity,
+                    wire_color: lod_color(&batch.lod),
+                    material_index: batch.material_index,
+                    mobius: conformal.mobius,
+                    orientation_sign: conformal.orientation_sign
+                        * affine_orientation_sign(&conformal.euclidean_model),
+                    euclidean_model: conformal.euclidean_model,
+                    euclidean_normal: affine_normal_matrix(&conformal.euclidean_model),
+                };
+                state.renderer.prepare_patch_batch(
+                    &camera,
+                    &render_batch,
+                    batch.prepare_vao,
+                    batch.instances.prepared_buf,
+                    0,
+                );
+            }
+            gl.use_program(Some(state.renderer.programs().pick));
 
             for batch in state.batches.values() {
                 let batch_camera = camera_for_node(&camera, state, batch.node_index);
@@ -1113,8 +1134,13 @@ fn build_instance_lod_topology(
 pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
+            let num_faces = num_faces as usize;
+            if let Err(error) = st.renderer.upload_face_data_texture(instances, num_faces) {
+                warn!("Could not upload immutable source-face data: {error}");
+                return;
+            }
             st.cached_instances = instances.to_vec();
-            st.num_faces = num_faces as usize;
+            st.num_faces = num_faces;
             st.batch_groups.clear();
             st.batch_staging.clear();
             st.resident_face_lods = vec![None; st.num_faces];
@@ -1275,6 +1301,15 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ("reallocatedBatchBuckets", batch_stats.reallocated_buckets),
             ("retiredBatchBuckets", batch_stats.retired_buckets),
             ("uploadedBatchInstances", batch_stats.uploaded_instances),
+            (
+                "uploadedBatchBytes",
+                batch_stats.uploaded_instances
+                    * instance_layout::BATCH_TOPOLOGY_STRIDE_BYTES as u64,
+            ),
+            (
+                "sourceFaceTextureBytes",
+                state.num_faces as u64 * instance_layout::STRIDE_BYTES as u64,
+            ),
         ] {
             js_sys::Reflect::set(
                 &result,
@@ -1719,7 +1754,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         let mut uploaded_instances = 0usize;
         let mut missing = 0;
         let mut failed = 0;
-        let stride = instance_layout::STRIDE;
+        let stride = instance_layout::BATCH_TOPOLOGY_STRIDE;
 
         // One reusable CPU scratch allocation serves only buckets whose
         // membership actually changed.
@@ -1743,7 +1778,6 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                 }
 
                 let batch_floats = match fill_batch_instance_data(
-                    &state.cached_instances,
                     &state.resident_face_lods,
                     key,
                     members,
@@ -1880,7 +1914,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let gl = state.renderer.gl();
         state.renderer.begin_frame();
         state.renderer.joint_ubo().bind(gl);
-        state.renderer.bind_animation_textures();
+        state.renderer.bind_vertex_textures();
 
         // Deform and classify each patch once. Every subsequent material,
         // wire, normal, and pick draw consumes these prepared records without

@@ -218,6 +218,10 @@ mod tests {
                 "prepared record must expose transform-feedback location {location}",
             );
         }
+        assert!(
+            code.contains("_group_0_binding_4_vs"),
+            "patch preparation must fetch immutable source-face data",
+        );
     }
 
     #[test]

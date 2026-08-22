@@ -1,8 +1,9 @@
 //! Backend-neutral patch preparation implemented with WebGL2 transform feedback.
 //!
-//! One point invocation consumes one source instance record and emits one
-//! prepared record with current-pose control points and conservative visibility.
-//! A future WebGPU backend can populate the same record from a compute pass.
+//! One point invocation consumes a compact topology record, fetches immutable
+//! source-face data by ID, and emits one prepared record with current-pose
+//! control points and conservative visibility. A future WebGPU backend can
+//! populate the same record from a compute pass.
 
 use glow::HasContext;
 use quilting_core::instance_layout;

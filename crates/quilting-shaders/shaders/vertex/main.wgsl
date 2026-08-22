@@ -66,6 +66,12 @@ var skinning_tex: texture_2d<f32>;
 @group(0) @binding(3)
 var morph_tex: texture_2d<f32>;
 
+// Immutable source-face records, packed as ten RGBA32F texels per face in the
+// normative 40-float instance layout. Animated LOD updates stream only a
+// topology record containing edge LODs, permutation, and source face ID.
+@group(0) @binding(4)
+var face_data_tex: texture_2d<f32>;
+
 // Apply skeletal skinning to a position.
 // vertex_idx indexes into the skinning texture.
 // Apply morph target deltas to a position.
@@ -188,16 +194,8 @@ struct VertexOutput {
 // WebGL2 writes it with transform feedback; WebGPU can produce the same logical
 // record from a compute pass without changing render semantics.
 struct PatchPrepareInput {
-    @location(1) p0: vec4<f32>,
-    @location(2) p1: vec4<f32>,
-    @location(3) p2: vec4<f32>,
     @location(7) lod_info: vec4<f32>,
-    @location(8) vert_lod: vec4<f32>,
-    @location(9) uv01: vec4<f32>,
-    @location(10) uv2_prepare: vec4<f32>,
-    @location(11) smooth_n0: vec4<f32>,
-    @location(12) smooth_n1: vec4<f32>,
-    @location(13) smooth_n2: vec4<f32>,
+    @location(8) face_info: vec4<f32>,
 }
 
 struct PreparedPatchOutput {
@@ -309,27 +307,41 @@ fn posed_position(control: vec4<f32>) -> vec3<f32> {
     return (u.model * vec4<f32>(position, 1.0)).xyz;
 }
 
+fn face_data_load(face_index: i32, slot: i32) -> vec4<f32> {
+    let dimensions = textureDimensions(face_data_tex, 0);
+    let width = i32(dimensions.x);
+    let texel = face_index * 10 + slot;
+    return textureLoad(face_data_tex, vec2<i32>(texel % width, texel / width), 0);
+}
+
 @vertex
 fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
-    let p0 = vec4<f32>(in.p0.x, posed_position(in.p0));
-    let p1 = vec4<f32>(in.p1.x, posed_position(in.p1));
-    let p2 = vec4<f32>(in.p2.x, posed_position(in.p2));
+    let face_index = max(i32(round(in.face_info.x)), 0);
+    let source_p0 = face_data_load(face_index, 0);
+    let source_p1 = face_data_load(face_index, 1);
+    let source_p2 = face_data_load(face_index, 2);
+    let p0 = vec4<f32>(source_p0.x, posed_position(source_p0));
+    let p1 = vec4<f32>(source_p1.x, posed_position(source_p1));
+    let p2 = vec4<f32>(source_p2.x, posed_position(source_p2));
     let visible = !patch_outside_frustum(p0.yzw, p1.yzw, p2.yzw);
+    let source_uv2 = face_data_load(face_index, 6);
     let uv2_prepare = vec4<f32>(
-        in.uv2_prepare.xy,
+        source_uv2.xy,
         select(0.0, 1.0, visible),
         1.0,
     );
+    var vert_lod = face_data_load(face_index, 4);
+    vert_lod.w = f32(face_index);
     return PreparedPatchOutput(
         vec4<f32>(0.0),
         p0, p1, p2,
         in.lod_info,
-        in.vert_lod,
-        in.uv01,
+        vert_lod,
+        face_data_load(face_index, 5),
         uv2_prepare,
-        in.smooth_n0,
-        in.smooth_n1,
-        in.smooth_n2,
+        face_data_load(face_index, 7),
+        face_data_load(face_index, 8),
+        face_data_load(face_index, 9),
     );
 }
 

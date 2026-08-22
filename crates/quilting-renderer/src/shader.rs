@@ -232,6 +232,9 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_3_vs") {
             gl.uniform_1_i32(Some(&loc), MORPH_TEX_UNIT as i32);
         }
+        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_4_vs") {
+            gl.uniform_1_i32(Some(&loc), FACE_DATA_TEX_UNIT as i32);
+        }
         // Fragment shader textures — bind to texture units matching prototype layout
         // Matcap: binding 2/3 → unit 0
         // PBR: bindings 2-17 → units 0-7 (base_color, mr, normal, emissive, occlusion, env, irrad, sheen)
@@ -286,6 +289,7 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
 /// Texture units matching the prototype's GL texture binding.
 pub const SKINNING_TEX_UNIT: u32 = 15;
 pub const MORPH_TEX_UNIT: u32 = 14;
+pub const FACE_DATA_TEX_UNIT: u32 = 13;
 
 /// Compile all WGSL shaders to GLSL, create GL programs, and bind uniform blocks.
 pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {

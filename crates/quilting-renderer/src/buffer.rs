@@ -337,26 +337,27 @@ pub fn create_shared_vao(
 /// Instance attribute locations and byte offsets within the instance stride.
 pub use instance_layout::ATTR_MAP as COMPACT_MAP;
 
-/// Create a VAO that reads one complete instance record per point vertex.
-/// Unlike a render VAO, these attributes have divisor zero: the preparation
-/// pass dispatches one ordinary point per source patch.
+/// Create a VAO that reads one topology-only record per point vertex. Static
+/// face data is fetched by source face ID in the preparation shader. Unlike a
+/// render VAO, these attributes have divisor zero because the pass dispatches
+/// one ordinary point per source patch.
 pub fn create_patch_input_vao(
     gl: &glow::Context,
-    instance_buf: &glow::Buffer,
+    topology_buf: &glow::Buffer,
     byte_offset: i32,
 ) -> Result<glow::VertexArray, String> {
     unsafe {
         let vao = gl.create_vertex_array().map_err(|e| format!("patch input vao: {e}"))?;
         gl.bind_vertex_array(Some(vao));
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
-        for &(loc, attr_offset) in &COMPACT_MAP {
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(*topology_buf));
+        for &(loc, attr_offset) in &instance_layout::BATCH_TOPOLOGY_ATTR_MAP {
             gl.enable_vertex_attrib_array(loc);
             gl.vertex_attrib_pointer_f32(
                 loc,
                 4,
                 glow::FLOAT,
                 false,
-                INSTANCE_STRIDE_BYTES,
+                instance_layout::BATCH_TOPOLOGY_STRIDE_BYTES as i32,
                 byte_offset + attr_offset,
             );
             gl.vertex_attrib_divisor(loc, 0);
@@ -367,67 +368,73 @@ pub fn create_patch_input_vao(
     }
 }
 
-/// Persistent source and prepared GPU records owned by one logical batch.
-/// Membership changes update only the active prefix; the GPU rewrites that
-/// prefix with current-pose records every frame.
+/// Persistent topology and prepared GPU records owned by one logical batch.
+/// Membership changes update only the compact topology prefix; the GPU writes
+/// complete current-pose records into the prepared buffer every frame.
 pub struct PersistentBatchInstances {
-    pub buf: glow::Buffer,
+    pub topology_buf: glow::Buffer,
     pub prepared_buf: glow::Buffer,
-    pub capacity: usize, // in bytes
+    pub capacity_instances: usize,
 }
 
 impl PersistentBatchInstances {
-    /// Allocate reusable source/prepared streams with explicit byte capacity.
-    /// The active prefix is initialized in both buffers so picking and other
-    /// consumers have a correct fallback before the next preparation pass.
+    /// Allocate compact source records and full prepared records for an
+    /// explicit number of instances.
     pub fn with_capacity(
         gl: &glow::Context,
         data: &[f32],
-        capacity: usize,
+        capacity_instances: usize,
     ) -> Result<Self, String> {
+        let active_instances = data.len()
+            .checked_div(instance_layout::BATCH_TOPOLOGY_STRIDE)
+            .ok_or_else(|| "invalid topology stride".to_string())?;
+        if active_instances * instance_layout::BATCH_TOPOLOGY_STRIDE != data.len() {
+            return Err(format!("topology stream has {} trailing floats", data.len()));
+        }
+        let capacity_instances = capacity_instances.max(active_instances).max(1);
+        let topology_capacity = capacity_instances
+            .checked_mul(instance_layout::BATCH_TOPOLOGY_STRIDE_BYTES)
+            .ok_or_else(|| "topology buffer capacity overflow".to_string())?;
+        let prepared_capacity = capacity_instances
+            .checked_mul(instance_layout::STRIDE_BYTES)
+            .ok_or_else(|| "prepared buffer capacity overflow".to_string())?;
+        let topology_capacity_i32 = i32::try_from(topology_capacity)
+            .map_err(|_| format!("topology buffer capacity {topology_capacity} exceeds WebGL limits"))?;
+        let prepared_capacity_i32 = i32::try_from(prepared_capacity)
+            .map_err(|_| format!("prepared buffer capacity {prepared_capacity} exceeds WebGL limits"))?;
         unsafe {
             let bytes = bytemuck_cast_slice(data);
-            let capacity = capacity.max(bytes.len());
-            let capacity_i32 = i32::try_from(capacity)
-                .map_err(|_| format!("instance buffer capacity {capacity} exceeds WebGL limits"))?;
-            let buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(buf));
-            gl.buffer_data_size(glow::ARRAY_BUFFER, capacity_i32, glow::DYNAMIC_DRAW);
+            let topology_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(topology_buf));
+            gl.buffer_data_size(glow::ARRAY_BUFFER, topology_capacity_i32, glow::DYNAMIC_DRAW);
             if !bytes.is_empty() {
                 gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
             }
 
             let prepared_buf = gl.create_buffer().map_err(|error| {
-                gl.delete_buffer(buf);
+                gl.delete_buffer(topology_buf);
                 format!("prepared instance buffer: {error}")
             })?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(prepared_buf));
-            // Seed with source-format records so the render shader's explicit
-            // unprepared fallback remains valid before the first GPU pass.
-            gl.buffer_data_size(glow::ARRAY_BUFFER, capacity_i32, glow::DYNAMIC_COPY);
-            if !bytes.is_empty() {
-                gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
-            }
+            gl.buffer_data_size(glow::ARRAY_BUFFER, prepared_capacity_i32, glow::DYNAMIC_COPY);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            Ok(Self { buf, prepared_buf, capacity })
+            Ok(Self { topology_buf, prepared_buf, capacity_instances })
         }
     }
 
-    /// Refresh the active prefix of a retained batch without reallocating its
-    /// buffers or VAOs. Both streams receive the source-format fallback; the
-    /// current-pose preparation pass overwrites the prepared prefix each frame.
+    /// Refresh only the compact topology prefix of a retained batch. The next
+    /// preparation pass expands it into complete current-pose records.
     pub fn upload_active(&self, gl: &glow::Context, data: &[f32]) -> Result<(), String> {
         let bytes = bytemuck_cast_slice(data);
-        if bytes.len() > self.capacity {
+        let capacity = self.capacity_instances * instance_layout::BATCH_TOPOLOGY_STRIDE_BYTES;
+        if bytes.len() > capacity {
             return Err(format!(
                 "instance upload {} exceeds retained capacity {}",
-                bytes.len(), self.capacity,
+                bytes.len(), capacity,
             ));
         }
         unsafe {
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buf));
-            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.prepared_buf));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.topology_buf));
             gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
         }
@@ -436,7 +443,7 @@ impl PersistentBatchInstances {
 
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
-            gl.delete_buffer(self.buf);
+            gl.delete_buffer(self.topology_buf);
             gl.delete_buffer(self.prepared_buf);
         }
     }
@@ -919,6 +926,56 @@ impl Default for EnvironmentMaps {
     }
 }
 
+/// Immutable source-face records used by the patch preparation pass. Records
+/// retain the normative 10-texel/40-float layout so upload is a one-time copy
+/// and shader field offsets stay aligned with [`instance_layout`].
+pub struct FaceDataTexture {
+    pub texture: glow::Texture,
+    pub num_faces: usize,
+}
+
+impl FaceDataTexture {
+    pub fn new(
+        gl: &glow::Context,
+        instances: &[f32],
+        num_faces: usize,
+    ) -> Result<Self, String> {
+        let max_texture_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(0) as usize };
+        let (width, height, data) = pack_face_data_texture(instances, num_faces, max_texture_size)?;
+        unsafe {
+            let texture = gl.create_texture().map_err(|error| format!("face-data tex: {error}"))?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA32F as i32,
+                width as i32,
+                height as i32,
+                0,
+                glow::RGBA,
+                glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&data))),
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            Ok(Self { texture, num_faces })
+        }
+    }
+
+    pub fn bind(&self, gl: &glow::Context, unit: u32) {
+        unsafe {
+            gl.active_texture(glow::TEXTURE0 + unit);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe { gl.delete_texture(self.texture); }
+    }
+}
+
 /// GPU texture storing per-vertex skinning data (joint indices + weights).
 ///
 /// Layout: RGBA32F texture, width = num_vertices, height = 2.
@@ -1094,6 +1151,41 @@ fn pack_morph_target_deltas(
     Ok(rgba)
 }
 
+fn pack_face_data_texture(
+    instances: &[f32],
+    num_faces: usize,
+    max_texture_size: usize,
+) -> Result<(usize, usize, Vec<f32>), String> {
+    if num_faces == 0 || max_texture_size == 0 {
+        return Err("face-data texture requires faces and a nonzero GL limit".into());
+    }
+    let required_floats = num_faces.checked_mul(instance_layout::STRIDE)
+        .ok_or_else(|| "face-data float count overflow".to_string())?;
+    if instances.len() < required_floats {
+        return Err(format!(
+            "face-data texture needs {required_floats} floats, received {}",
+            instances.len()
+        ));
+    }
+    let texels_per_face = instance_layout::STRIDE / 4;
+    debug_assert_eq!(texels_per_face * 4, instance_layout::STRIDE);
+    let texel_count = num_faces.checked_mul(texels_per_face)
+        .ok_or_else(|| "face-data texel count overflow".to_string())?;
+    let width = texel_count.min(max_texture_size);
+    let height = texel_count.div_ceil(width);
+    if height > max_texture_size {
+        return Err(format!(
+            "{num_faces} face records require a {width}x{height} texture, exceeding GL limit {max_texture_size}"
+        ));
+    }
+    let padded_floats = width.checked_mul(height)
+        .and_then(|texels| texels.checked_mul(4))
+        .ok_or_else(|| "face-data texture size overflow".to_string())?;
+    let mut data = vec![0.0; padded_floats];
+    data[..required_floats].copy_from_slice(&instances[..required_floats]);
+    Ok((width, height, data))
+}
+
 /// Safe cast from &[T] to &[u8] without pulling in the bytemuck dependency.
 fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe {
@@ -1106,7 +1198,25 @@ fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::pack_morph_target_deltas;
+    use super::{pack_face_data_texture, pack_morph_target_deltas};
+
+    #[test]
+    fn face_data_texture_preserves_records_and_pads_the_last_row() {
+        let records = (0..quilting_core::instance_layout::STRIDE * 2)
+            .map(|value| value as f32)
+            .collect::<Vec<_>>();
+        let (width, height, packed) = pack_face_data_texture(&records, 2, 16).unwrap();
+        assert_eq!((width, height), (16, 2));
+        assert_eq!(&packed[..records.len()], records.as_slice());
+        assert!(packed[records.len()..].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn face_data_texture_validates_source_and_gl_capacity() {
+        assert!(pack_face_data_texture(&[], 1, 16).is_err());
+        let record = vec![0.0; quilting_core::instance_layout::STRIDE];
+        assert!(pack_face_data_texture(&record, 1, 2).is_err());
+    }
 
     #[test]
     fn morph_deltas_are_packed_target_major_with_zero_alpha() {

@@ -17,7 +17,7 @@ use glow::HasContext;
 
 use buffer::{
     VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf,
-    SkinningTexture, MorphTargetTexture,
+    FaceDataTexture, SkinningTexture, MorphTargetTexture,
 };
 use shader::Programs;
 use prepare::PatchPreparer;
@@ -34,6 +34,7 @@ pub struct Renderer {
     matcap_ubo: MatcapUniformBuf,
     joint_ubo: JointMatricesBuf,
     patch_preparer: PatchPreparer,
+    face_data_texture: Option<FaceDataTexture>,
     skinning_texture: Option<SkinningTexture>,
     morph_texture: Option<MorphTargetTexture>,
     width: i32,
@@ -63,6 +64,7 @@ impl Renderer {
             matcap_ubo,
             joint_ubo,
             patch_preparer,
+            face_data_texture: None,
             skinning_texture: None,
             morph_texture: None,
             width: 0,
@@ -192,6 +194,21 @@ impl Renderer {
         &self.joint_ubo
     }
 
+    /// Replace the immutable source-face resource used to expand compact LOD
+    /// topology records during the current-pose preparation pass.
+    pub fn upload_face_data_texture(
+        &mut self,
+        instances: &[f32],
+        num_faces: usize,
+    ) -> Result<(), String> {
+        let texture = FaceDataTexture::new(&self.gl, instances, num_faces)?;
+        texture.bind(&self.gl, shader::FACE_DATA_TEX_UNIT);
+        if let Some(previous) = self.face_data_texture.replace(texture) {
+            previous.destroy(&self.gl);
+        }
+        Ok(())
+    }
+
     /// Replace the renderer's persistent per-vertex skinning resource.
     pub fn upload_skinning_texture(
         &mut self,
@@ -221,8 +238,8 @@ impl Renderer {
         Ok(())
     }
 
-    /// Re-establish animation sampler bindings after arbitrary render passes.
-    pub fn bind_animation_textures(&self) {
+    /// Re-establish vertex-stage sampler bindings after arbitrary render passes.
+    pub fn bind_vertex_textures(&self) {
         unsafe {
             self.gl.active_texture(glow::TEXTURE0 + shader::SKINNING_TEX_UNIT);
             self.gl.bind_texture(
@@ -233,6 +250,11 @@ impl Renderer {
             self.gl.bind_texture(
                 glow::TEXTURE_2D,
                 self.morph_texture.as_ref().map(|texture| texture.texture),
+            );
+            self.gl.active_texture(glow::TEXTURE0 + shader::FACE_DATA_TEX_UNIT);
+            self.gl.bind_texture(
+                glow::TEXTURE_2D,
+                self.face_data_texture.as_ref().map(|texture| texture.texture),
             );
         }
     }
@@ -245,7 +267,7 @@ impl Renderer {
         if let Some(texture) = self.morph_texture.take() {
             texture.destroy(&self.gl);
         }
-        self.bind_animation_textures();
+        self.bind_vertex_textures();
     }
 }
 
@@ -258,6 +280,9 @@ impl Drop for Renderer {
         self.matcap_ubo.destroy(&self.gl);
         self.joint_ubo.destroy(&self.gl);
         self.patch_preparer.destroy(&self.gl);
+        if let Some(texture) = self.face_data_texture.take() {
+            texture.destroy(&self.gl);
+        }
         if let Some(texture) = self.skinning_texture.take() {
             texture.destroy(&self.gl);
         }

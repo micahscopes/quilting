@@ -37,6 +37,20 @@ pub const STRIDE: usize = 40;
 /// Bytes per face instance.
 pub const STRIDE_BYTES: usize = STRIDE * 4;
 
+/// Floats in the topology-only record streamed when a face changes draw
+/// bucket. Static control points, UVs, and normals live in a renderer-owned
+/// per-face texture and are fetched by `FACE_ID` during patch preparation.
+pub const BATCH_TOPOLOGY_STRIDE: usize = 8;
+
+/// Bytes per topology-only batch record.
+pub const BATCH_TOPOLOGY_STRIDE_BYTES: usize = BATCH_TOPOLOGY_STRIDE * 4;
+
+/// Preparation-pass attributes as `(location, byte_offset)`.
+pub const BATCH_TOPOLOGY_ATTR_MAP: [(u32, i32); 2] = [
+    (7, 0),  // edge LODs + permutation
+    (8, 16), // source face ID + reserved
+];
+
 /// Float offsets of each field within one instance.
 pub mod offset {
     /// Position `i` occupies `POSITIONS + i * 4`, as `[vertex_idx, x, y, z]`.
@@ -57,6 +71,14 @@ pub mod offset {
     pub const PREPARED_FLAG: usize = UVS + 7;
     /// Normal `i` occupies `NORMALS + i * 4`, as `(x, y, z, 0)`.
     pub const NORMALS: usize = 28;
+}
+
+/// Float offsets in a topology-only batch record.
+pub mod batch_offset {
+    /// Three face-local edge LODs followed by the S3 permutation index.
+    pub const EDGE_LODS: usize = 0;
+    /// Stable source face ID; the remaining three components are reserved.
+    pub const FACE_ID: usize = 4;
 }
 
 /// Instanced vertex attributes as `(location, byte_offset)`.
@@ -175,6 +197,15 @@ mod tests {
         for w in CONSTANT_WEIGHT_LOCATIONS {
             assert!(!locs.contains(&w), "location {w} is both buffered and constant");
         }
+    }
+
+    #[test]
+    fn topology_record_is_two_aligned_vec4s() {
+        assert_eq!(BATCH_TOPOLOGY_STRIDE, 8);
+        assert_eq!(BATCH_TOPOLOGY_STRIDE_BYTES, 32);
+        assert_eq!(batch_offset::EDGE_LODS, 0);
+        assert_eq!(batch_offset::FACE_ID, 4);
+        assert_eq!(BATCH_TOPOLOGY_ATTR_MAP, [(7, 0), (8, 16)]);
     }
 
     #[test]
