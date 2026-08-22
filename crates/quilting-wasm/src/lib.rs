@@ -152,10 +152,19 @@ struct PendingAnimatedLods {
     face_nodes: Vec<usize>,
 }
 
+#[derive(Default)]
+struct AnimatedLodDeltaState {
+    previous: Vec<f32>,
+    changed_faces: Vec<u32>,
+    changed_lods: Vec<f32>,
+}
+
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     static PENDING_ANIMATED_LODS: RefCell<Option<PendingAnimatedLods>> = RefCell::new(None);
+    static ANIMATED_LOD_DELTA: RefCell<AnimatedLodDeltaState> =
+        RefCell::new(AnimatedLodDeltaState::default());
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
@@ -475,8 +484,8 @@ pub fn debug_gpu_compute_state() -> String {
 /// node's faces are classified with their own extracted subject/view state.
 ///
 /// Returns true when a job was dispatched. Call [`poll_animated_lods`] until
-/// it returns a completed Float32Array. Uses mesh_radius computed at upload
-/// time (not hardcoded).
+/// it returns a completed sparse/full classification object. Uses mesh_radius
+/// computed at upload time (not hardcoded).
 #[wasm_bindgen]
 pub fn dispatch_animated_lods(
     t: f64,
@@ -702,7 +711,9 @@ pub fn dispatch_animated_lods(
 /// Poll the current LOD job without blocking.
 ///
 /// Returns `undefined` while the fence is unsignaled, `null` on failure or
-/// when no job exists, and a six-float-per-face `Float32Array` when ready.
+/// when no job exists, and `{ lods, indices?, changed_faces, full_snapshot }`
+/// when ready. `lods` contains all records only for a full snapshot; otherwise
+/// it contains one six-float record per entry in `indices`.
 #[wasm_bindgen]
 pub fn poll_animated_lods() -> JsValue {
     let fence = match PENDING_ANIMATED_LODS.with(|pending| {
@@ -767,14 +778,56 @@ pub fn poll_animated_lods() -> JsValue {
         }
         perf_mark("lod-gpu-readback-end");
         perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
+        let result = ANIMATED_LOD_DELTA.with(|delta| {
+            let mut delta = delta.borrow_mut();
+            let AnimatedLodDeltaState { previous, changed_faces, changed_lods } = &mut *delta;
+            let full_snapshot = batch::encode_face_lod_delta(
+                &gpu_class,
+                previous,
+                changed_faces,
+                changed_lods,
+            );
+            let lods = js_sys::Float32Array::new_with_length(changed_lods.len() as u32);
+            lods.copy_from(changed_lods);
+            let indices = if full_snapshot {
+                None
+            } else {
+                let indices = js_sys::Uint32Array::new_with_length(changed_faces.len() as u32);
+                indices.copy_from(changed_faces);
+                Some(indices)
+            };
+            let result = js_sys::Object::new();
+            js_sys::Reflect::set(&result, &"lods".into(), &lods).ok();
+            if let Some(indices) = indices {
+                js_sys::Reflect::set(&result, &"indices".into(), &indices).ok();
+            }
+            js_sys::Reflect::set(
+                &result,
+                &"changed_faces".into(),
+                &JsValue::from_f64(if full_snapshot {
+                    gpu_class.len() as f64 / batch::FACE_LOD_STRIDE as f64
+                } else {
+                    changed_faces.len() as f64
+                }),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"full_snapshot".into(),
+                &JsValue::from_bool(full_snapshot),
+            ).ok();
+            result
+        });
+        compute.recycle_readback_vector(gpu_class);
         perf_mark("lod-wasm-end");
         perf_measure("lod-wasm-total", "lod-wasm-start", "lod-wasm-end");
-
-        let array = js_sys::Float32Array::new_with_length(gpu_class.len() as u32);
-        array.copy_from(&gpu_class);
-        compute.recycle_readback_vector(gpu_class);
-        array.into()
+        result.into()
     })
+}
+
+/// Reset the retained classification snapshot at a model/topology boundary.
+#[wasm_bindgen]
+pub fn reset_animated_lod_delta() {
+    ANIMATED_LOD_DELTA.with(|delta| delta.borrow_mut().previous.clear());
 }
 
 /// Cancel and release a pending asynchronous LOD job, if any.

@@ -14,6 +14,40 @@ pub use crate::instance_layout::STRIDE as INSTANCE_STRIDE;
 /// Per-face LOD stride: 6 floats from GPU pass 2.
 pub const FACE_LOD_STRIDE: usize = 6;
 
+/// Compare a completed GPU classification with the previous snapshot and
+/// retain only changed face records. Returns `true` when the current payload
+/// must be treated as a full snapshot (initial result or a size change).
+///
+/// Keeping this below the WASM boundary avoids copying and scanning a full
+/// mesh-sized typed array in JavaScript before the sparse worker transfer.
+pub fn encode_face_lod_delta(
+    current: &[f32],
+    previous: &mut Vec<f32>,
+    changed_faces: &mut Vec<u32>,
+    changed_lods: &mut Vec<f32>,
+) -> bool {
+    changed_faces.clear();
+    changed_lods.clear();
+
+    if previous.len() != current.len() || current.len() % FACE_LOD_STRIDE != 0 {
+        previous.clear();
+        previous.extend_from_slice(current);
+        changed_lods.extend_from_slice(current);
+        return true;
+    }
+
+    for (face_index, record) in current.chunks_exact(FACE_LOD_STRIDE).enumerate() {
+        let offset = face_index * FACE_LOD_STRIDE;
+        let prior = &mut previous[offset..offset + FACE_LOD_STRIDE];
+        if record.iter().zip(prior.iter()).any(|(next, old)| next != old) {
+            changed_faces.push(face_index as u32);
+            changed_lods.extend_from_slice(record);
+            prior.copy_from_slice(record);
+        }
+    }
+    false
+}
+
 /// Tessellation topology kept resident for a face between asynchronous LOD
 /// classifications. Invisible payloads must retain this topology: the render
 /// GPU may classify a newer animated pose as visible before the worker result
@@ -596,6 +630,38 @@ pub fn face_is_visible(face_lods: &[f32], face_index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn face_lod_delta_emits_full_then_only_changed_records() {
+        let initial = [
+            2.0, 2.0, 2.0, 0.0, 1.0, 3.0,
+            4.0, 4.0, 8.0, 2.0, -1.0, 7.0,
+        ];
+        let mut previous = Vec::new();
+        let mut faces = Vec::new();
+        let mut lods = Vec::new();
+
+        assert!(encode_face_lod_delta(
+            &initial, &mut previous, &mut faces, &mut lods,
+        ));
+        assert!(faces.is_empty());
+        assert_eq!(lods, initial);
+
+        assert!(!encode_face_lod_delta(
+            &initial, &mut previous, &mut faces, &mut lods,
+        ));
+        assert!(faces.is_empty());
+        assert!(lods.is_empty());
+
+        let mut changed = initial;
+        changed[6..12].copy_from_slice(&[8.0, 8.0, 8.0, 0.0, 1.0, 9.0]);
+        assert!(!encode_face_lod_delta(
+            &changed, &mut previous, &mut faces, &mut lods,
+        ));
+        assert_eq!(faces, [1]);
+        assert_eq!(lods, changed[6..12]);
+        assert_eq!(previous, changed);
+    }
 
     fn balance_resident_lods_reference(
         residents: &mut [Option<ResidentLod>],

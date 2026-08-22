@@ -65,9 +65,10 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
    back into the worker. Staging buffers and mesh-sized CPU readback vectors
    are retained and reused across jobs; the steady-state path does not create
    or resize either resource.
-5. The worker compares that snapshot with its previous completed result. The
-   first coherent result after a model, animation, remesh, or compute-resource
-   boundary transfers all faces; later results transfer only changed
+5. The WASM worker compares that snapshot with its retained previous result
+   before creating any JavaScript typed array. The first coherent result after
+   a model, animation, remesh, or compute-resource boundary transfers all
+   faces; later results cross into JavaScript and transfer only changed
    `(face_index, six-float classification)` records.
 6. The main-thread WASM layer retains the last valid topology for invisible
    faces, re-reconciles shared edges (including exact duplicate glTF seam
