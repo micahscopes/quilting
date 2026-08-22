@@ -99,6 +99,9 @@ fn bind_pbr_material_state(
 
 struct MainState {
     renderer: Renderer,
+    /// Authoritative drawable size, updated with the GL viewport by mr_resize.
+    /// Optional passes consume this instead of synchronously querying GL state.
+    viewport_size: (i32, i32),
     texture_cache: TextureCache,
     env_maps: EnvironmentMaps,
     batches: BTreeMap<batch::RenderBatchKey, GpuBatch>,
@@ -451,6 +454,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
 
     STATE.with(|s| {
         *s.borrow_mut() = Some(MainState {
+            viewport_size: (canvas.width() as i32, canvas.height() as i32),
             renderer, texture_cache,
             env_maps: EnvironmentMaps::default(),
             batches: BTreeMap::new(),
@@ -518,7 +522,10 @@ pub fn mr_init(canvas_id: &str) -> bool {
 #[wasm_bindgen(js_name = "mr_resize")]
 pub fn mr_resize(width: i32, height: i32) {
     STATE.with(|s| {
-        if let Some(ref mut st) = *s.borrow_mut() { st.renderer.resize(width, height); }
+        if let Some(ref mut st) = *s.borrow_mut() {
+            st.viewport_size = (width.max(1), height.max(1));
+            st.renderer.resize(width, height);
+        }
     });
 }
 
@@ -1057,10 +1064,7 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
         let gl = state.renderer.gl();
 
         unsafe {
-            let mut vp = [0i32; 4];
-            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);
-            let vw = vp[2].max(1);
-            let vh = vp[3].max(1);
+            let (vw, vh) = state.viewport_size;
 
             // Create/resize pick FBO
             if state.pick_fbo.is_none() || state.pick_size != (vw, vh) {
@@ -2162,10 +2166,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 // Only for conformal mode (mode 1) — radial mode blits from default FB.
                 if state.fuzzy_enabled && true /* all fuzzy modes use MRT */ {
                     unsafe {
-                        let mut vp = [0i32; 4];
-                        gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);
-                        let vw = vp[2].max(1);
-                        let vh = vp[3].max(1);
+                        let (vw, vh) = state.viewport_size;
 
                         if state.pbr_fbo.is_none() || state.pbr_fbo_size != (vw, vh) {
                             // Clean up old
@@ -2313,10 +2314,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 if has_transmission {
                     unsafe {
                         // Get canvas size from viewport
-                        let mut vp_buf = [0i32; 4];
-                        gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp_buf);
-                        let vw = vp_buf[2].max(1);
-                        let vh = vp_buf[3].max(1);
+                        let (vw, vh) = state.viewport_size;
 
                         // Create/resize scene color texture with mip chain
                         if state.scene_color_size != (vw, vh) {
@@ -2542,10 +2540,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 if state.fuzzy_enabled {
                     if let Some(ref mut fv) = state.fuzzy {
                         unsafe {
-                            let mut vp = [0i32; 4];
-                            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);
-                            let vw = vp[2].max(1);
-                            let vh = vp[3].max(1);
+                            let (vw, vh) = state.viewport_size;
                             fv.resize(gl, vw, vh);
 
                             // When MRT is active (conformal mode), PBR rendered to pbr_fbo.

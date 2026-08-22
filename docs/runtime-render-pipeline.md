@@ -105,6 +105,9 @@ not such a proof.
   or node reassignment, atlas replacement, or conformal packet change.
 - Stretch-range sampling, picking, remeshing, and fuzzy-vision postprocessing
   are opt-in paths rather than baseline per-frame CPU work.
+- Drawable dimensions are renderer-owned resize state. Optional framebuffer
+  paths consume that state rather than synchronously querying the WebGL
+  viewport during rendering.
 
 ## Backend-neutral contract
 
