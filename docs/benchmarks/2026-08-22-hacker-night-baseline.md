@@ -196,3 +196,28 @@ texture byte count are deterministic. A second warm crisp-view reload took
 1,937.7 ms total, including 928.0 ms browser image decode and 916.1 ms texture
 upload. Chrome DevTools inspection found sharp chess geometry, plausible wood
 grain and UV orientation, no corruption, and no console warnings or errors.
+
+## Foreground animated-horse follow-up
+
+After the upload changes, the installed Chrome DevTools MCP kept the animated
+horse tab selected and visible for ten seconds. The retained counters included
+1,254 foreground frames and 1,248 completed LOD jobs (the page was already
+running while the timed observation was prepared):
+
+| Measurement | Value |
+| --- | ---: |
+| Average / maximum frame delta | 16.67 / 50.1 ms |
+| Average / maximum main render CPU submission | 0.156 / 0.6 ms |
+| Average / maximum LOD round trip | 7.16 / 35.4 ms |
+| Average worker portion | 6.82 ms |
+| Average GPU fence wait | 6.10 ms |
+| Average changed faces | 8.03 |
+| Average sparse transfer | 221.6 bytes |
+| LOD errors / cancellations | 0 / 0 |
+
+There were 43 coherent classifications with no changed records, not failures.
+The active foreground fence wait is therefore much lower than the earlier
+17.38 ms background-lifetime observation. The renderer held 60 fps apart from
+one 50.1 ms hitch, and the console remained clean. This does not establish GPU
+time—the worker fence includes queueing—but it bounds the current CPU and
+transfer costs for the representative 984-face animation.
