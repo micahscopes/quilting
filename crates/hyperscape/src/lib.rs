@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 pub mod interchange;
 pub mod navigation;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod preflight;
 pub mod presentation;
 pub mod surface;
 
@@ -27,12 +29,16 @@ pub use navigation::{
     PerspectiveLens, ScheduledNavigationAction, SpaceMouseMapping, SphereReflectionState,
     TransitionEasing,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use preflight::{
+    run_offline_preflight, BundleFileCheck, OfflinePreflightOptions, OfflinePreflightReport,
+};
 pub use presentation::{
     AssetLoadPolicy, AuthoredCamera, AuthoredFocus, CueAnimation, CueText, LayerTransform,
     Presentation, PresentationAsset, PresentationCue, PresentationError, PresentationLayer,
     PresentationLayerState, PresentationOverlay, PresentationRuntime, PresentationScene,
-    PresentationSnapshot, PresentationTransition, PresentationView, ViewLayerOverride,
-    PRESENTATION_VERSION,
+    PresentationSnapshot, PresentationTessellation, PresentationTransition, PresentationView,
+    ViewLayerOverride, PRESENTATION_VERSION,
 };
 pub use surface::{
     SurfaceAddress, SurfaceAddressError, SurfaceAdvance, SurfaceAttachment, SurfaceContact,

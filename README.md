@@ -89,6 +89,13 @@ trunk serve
 
 then open <http://localhost:8093>.
 
+The checked-in six-cue presentation is available at
+`http://127.0.0.1:8093/?presentation=1&glb=horse.glb`. For a reproducible
+offline release build, filesystem preflight, browser rehearsal, and recovery
+steps, follow the [hacker-night runbook](docs/hacker-night-runbook.md). Bundled
+third-party asset provenance and the remaining public-redistribution blockers
+are recorded in [ASSET_ATTRIBUTION.md](ASSET_ATTRIBUTION.md).
+
 The Remesh Lab, a workbench for the mesh-to-QB-patch fitting pipeline:
 
 ```sh

@@ -45,8 +45,10 @@ infinity; omit `semantic_target` to preserve a free line-of-sight tangent.
 
 ## Browser adapter
 
-Open `hyperscope.html?presentation=1&glb=horse.glb` to run the checked-in
-fixture. Presentation sequencing, cue validation, camera/focus transitions,
+After `trunk serve`, open `/?presentation=1&glb=horse.glb` to run the checked-in
+fixture. For the exact offline build, rehearsal, and recovery procedure, see
+the [hacker-night runbook](hacker-night-runbook.md). Presentation sequencing,
+cue validation, camera/focus transitions,
 and resolved layer state remain Rust-authoritative. The browser adapter fetches
 assets and translates the resolved snapshot into renderer commands.
 
