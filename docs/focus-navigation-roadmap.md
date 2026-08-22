@@ -1,5 +1,9 @@
 # Focus, selection, and navigation roadmap
 
+The release-oriented ownership and migration contract is maintained in
+[`hacker-night-release-architecture.md`](hacker-night-release-architecture.md).
+This document remains the detailed behavior oracle for focus and navigation.
+
 Status: the browser prototype is functional, the render contract is GPU-side,
 and the backend-neutral state has been introduced as
 `hyperscape::FocusNavigation`. The prototype remains the behavior oracle while

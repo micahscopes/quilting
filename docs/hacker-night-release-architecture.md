@@ -1,0 +1,266 @@
+# Hyperscope hacker-night release architecture
+
+Target: Tuesday, 2026-08-25.
+
+This document is the execution contract for turning the current browser
+prototype into a rehearsable Quilting/Hyperscope presentation without losing
+the longer-term Hyperscape architecture. It consolidates the repository
+roadmaps, the `61106329-8039-4e62-853b-8bf6c86005e5` Claude session, the
+conformal-mereology work, and the HHHS/Hyperscape integration review.
+
+The release is not a rewrite. The current application is the behavioral oracle
+until a Rust subsystem has parity tests and a thin browser adapter consuming
+it. Each migration must leave a runnable, committed checkpoint.
+
+## Product boundary
+
+The names describe layers, not competing applications:
+
+- **Quilting** owns quaternionic-Bezier surface evaluation, tessellation,
+  conformal LOD, mesh topology, and reusable rendering algorithms.
+- **Hyperscape** owns stable scene identity, ECS state, conformal frames,
+  constraints, camera/navigation state, semantic interaction, presentation
+  state, and authored interchange.
+- **Hyperscope** is a browser presentation and rendering client. It adapts DOM,
+  WebHID, files, WebGL2, and eventually WebGPU to Rust-owned state.
+- **Blender** is an authoring peer. Ordinary geometry and PBR remain ordinary
+  glTF; Hyperscape metadata is versioned glTF data.
+- **HHHS** is durable replicated history and reconciliation. It is not a frame
+  loop, renderer, input event bus, or authority policy.
+
+Hyperscape uses Bevy ECS without depending on Bevy's renderer. WebGL2 and
+WebGPU consume the same extracted logical view and render-command data.
+
+## Three graphs, never one overloaded hierarchy
+
+1. The **ownership graph** describes entities, ordinary node parenting,
+   assets, and presentation grouping.
+2. The **conformal frame forest** describes charts and composable Möbius maps.
+   A subject/view pair receives one relative map; shared ancestry cancels.
+3. The **constraint graph** describes tracking, paths, focus anchors, surface
+   attachment, and authored relationships between entities or frames.
+
+An ordinary non-uniform glTF scale is a leaf deformation, not a conformal frame
+edge. Möbius transitions animate meaningful generators, control geometry, or
+versors; they never linearly interpolate the 16 raw matrix coefficients.
+
+## State ownership
+
+### Rust-authoritative
+
+- stable entity and asset identity;
+- ordinary scene topology and conformal frame topology;
+- quaternion camera orientation, eye, semantic target or free sight tangent;
+- scale-independent fly, orbit, drone, and surface-walk policies;
+- selection identity and the shared focus/inversion sphere;
+- deterministic transitions and their clocks;
+- semantic input actions and recorded/replayed action streams;
+- presentation deck, cue, view, layer, and transition state;
+- current animation pose identity and backend-neutral render extraction;
+- conservative spatial-index queries and surface attachment state.
+
+### Browser-adapter state
+
+- DOM controls and accessibility;
+- WebHID permission/device acquisition and raw report delivery;
+- drag/drop, file handles, IndexedDB, and network fetches;
+- canvas sizing and browser scheduling;
+- WebGL2 resource handles and backend implementation details.
+
+JavaScript may cache a projection of Rust state for display, but it must not
+silently own a second camera, selection, focus sphere, or transition timeline.
+
+## Semantic action boundary
+
+Device adapters produce timestamped actions. Examples include:
+
+```text
+SelectEntity { stable_id, source_bound }
+DetachSelection
+TranslateCameraLocal { right, up, forward }
+RotateCameraLocal { pitch, yaw, roll }
+OrbitSelection { pitch, yaw }
+TranslateFocusLocal { right, up, forward }
+ScaleFocus { log_delta }
+SetFocalShell { coordinate }
+SetAngularAperture { aperture }
+ToggleInversion
+ReframeSelection
+AttachToSurface { entity, face, barycentric }
+AdvancePresentation | ReversePresentation | JumpToCue { cue }
+```
+
+Mouse, keyboard, SpaceMouse, touch, gamepad, XR, replay, networking, and game
+code all target this vocabulary. Device-specific axis normalization is policy
+at the adapter edge; integration and camera geometry live in Rust.
+
+## Durable and ephemeral lanes
+
+Durable authored state uses stable UUIDs and small atomic scene operations.
+Vectors, quaternions, generator words, and keyframes are atomic values so
+concurrent edits cannot produce torn transforms. A completed authored gesture
+may become one HHHS commit.
+
+Pointer hover, live camera motion, SpaceMouse reports, transient selection,
+physics snapshots, and interpolation samples are ephemeral. They do not enter
+permanent history unless explicitly promoted to an authored cue or scene edit.
+
+The first Blender/Hyperscope slice must work without HHHS: export or reload a
+versioned scene/presentation description with stable IDs. HHHS 0.4 then adds
+offline-repairable replication to the same operation vocabulary; it does not
+replace it.
+
+## Presentation model
+
+A presentation is data consumed by Hyperscape, not imperative JavaScript. The
+minimum logical model is:
+
+```text
+Presentation
+  assets[]       stable ID, URI or embedded reference, load policy
+  scenes[]       entity composition and authored conformal frames
+  views[]        camera rig, focus sphere, visibility/layer state
+  cues[]         text, active scene/view, animation and diagnostic state
+  transitions[]  duration, easing, semantic camera/frame/focus edits
+```
+
+A cue can display text while the 3-D view remains interactive. A transition may
+move the camera, change a conformal frame generator, fit a focus sphere, cross
+fade scene layers, or combine those operations. A Möbius transition is used
+when it explains the material or improves continuity, not as a mandatory slide
+effect.
+
+Multiple GLBs remain distinct scene entities. They are not merged merely to
+satisfy the renderer. This preserves material, animation, node, selection,
+frame, and presentation identity.
+
+## Surface walking
+
+The walker keeps a stable source address `(entity, face, barycentric)` while
+motion is evaluated in the displayed output chart:
+
+```text
+Y(q,t) = F_t(X(q,t))
+J = [dY/du dY/dv]
+q_dot = (J^T J)^-1 J^T v_output
+```
+
+Speed, gravity, eye height, and contact are Euclidean in that output chart.
+Animation and conformal-frame motion contribute surface velocity. Adjacency is
+the ordinary local path; the conformal round index is recovery, reattachment,
+and broad-phase support. Near poles or ill-conditioned parameterizations the
+walker takes conservative substeps or detaches explicitly rather than
+teleporting.
+
+## Spatial index and culling rollout
+
+`quilting-round-index` begins as a shadow oracle:
+
+1. derive conservative bounds for complete posed rational QB patches;
+2. refit animated leaves while retaining stable topology;
+3. pull a finite output-chart frustum query into the source index;
+4. compare indexed results to a conservative brute-force/reference path;
+5. record false negatives, unknowns, traversal cost, and surviving patches;
+6. enable culling only for certified-disjoint results after zero-false-negative
+   evidence on static, animated, affine, inversion, and pole-adjacent cases.
+
+Unknown, tangent, pole-touching, and uncertified bulge cases remain visible.
+WebGL2 vertex rejection saves raster/fragment work but not vertex invocation;
+WebGPU later performs visible-instance compaction and indirect submission.
+
+## Conformal QB optimization boundary
+
+The new optimizer prototype is an offline research input, not a live-renderer
+dependency. The next useful stages are coarse boundary construction,
+fit-driven connected clustering, animation-pose envelopes, shared boundary
+constraints, and trustworthy denominator/bulge bounds. Existing historical
+fitters are evidence and test material, not an architecture to preserve.
+
+Any optimized output must retain stable source provenance, material and
+attribute domains, watertight boundaries, and a measurable advantage over the
+flat baseline under representative conformal views.
+
+## Backend-neutral rendering boundary
+
+Shared Rust data describes pose, prepared patch records, visibility state,
+resident LOD, atlas keys, material/node keys, and logical render commands.
+Backend code owns actual buffers, textures, VAOs, transform feedback, storage
+buffers, pipelines, bind groups, framebuffers, and submission.
+
+WebGL2 keeps asynchronous classification and resident crack-free topology.
+WebGPU will replace transform feedback with compute preparation, reconcile LOD
+in storage, compact visible instances, and emit indirect draw arguments. CPU
+readback becomes optional telemetry rather than a frame dependency.
+
+## Tuesday cut
+
+### Release gates
+
+- drag/drop, URL, bundled, and Blender-exported GLB loading all work;
+- static and animated models retain materials, selection, picking, and
+  crack-free LOD behavior;
+- camera, focus, and transition behavior has deterministic Rust tests before
+  JavaScript authority is removed;
+- presentation data can compose at least two model assets, named views,
+  authored transitions, and textual cues;
+- at least one walk/attach path is demonstrable, with a safe detach fallback;
+- selected legacy Quilting examples or modes run through the current renderer;
+- a preflight reports missing assets and unavailable optional capabilities;
+- the demo has an offline-friendly launch path and a checked-in runbook;
+- every accepted milestone is committed and the release worktree is clean.
+
+### Strong stretch goals
+
+- Blender live reload or one-way edit sync during the presentation;
+- shadow-index visualization and measured culling comparison;
+- a conformal transition between presentation sections;
+- an educational patch/tessellation inspector tied to the selected face;
+- deterministic input recording and presentation replay.
+
+### Explicitly deferred unless the gates are already safe
+
+- full HHHS peer-to-peer browser/Blender replication;
+- a production WebGPU backend;
+- replacing all WebGL2 submission with compacted indirect draws;
+- higher-order QB surfaces;
+- making the experimental conformal optimizer part of asset loading;
+- general rigid-body physics in transformed space.
+
+## Measurements and evidence
+
+For each performance change, record the relevant subset of:
+
+- model parse, texture decode, atlas topology, atlas packing/transfer, upload,
+  and time-to-first-render;
+- frame CPU time, GPU time when available, and frame-time percentiles;
+- source faces, prepared patches, visible patches, submitted instances,
+  atlas vertices, triangles, and draw calls;
+- LOD classification frequency, readback bytes, sparse update bytes, and batch
+  rebuild count;
+- spatial-index visited nodes, certified rejects, unknowns, reference mismatch,
+  and animated refit time;
+- interaction-to-visible latency and transition determinism;
+- asset bytes, peak transient bytes where observable, and offline cache hits.
+
+The representative matrix is horse animation, chess-scale high face count,
+one small static asset, a pole-adjacent inversion, a mixed-material scene, and
+a two-GLB presentation scene. A result is not generalized beyond the path and
+browser actually measured.
+
+## Migration sequence
+
+1. Preserve the green baseline and add presentation/demo fixtures.
+2. Split `hyperscape` into focused modules without changing its public behavior.
+3. Add `CameraRig`, semantic actions, and deterministic transition clocks.
+4. expose one compact Rust runtime packet through the WASM boundary;
+5. switch browser camera/focus integration to that packet, retaining a parity
+   diagnostic until the duplicate JavaScript path is deleted;
+6. add presentation state and multi-asset scene composition;
+7. add surface attachment/walking and shadow round-index queries;
+8. port the chosen legacy examples and educational views;
+9. optimize only measured bottlenecks and rehearse the exact release path;
+10. freeze the demo, document recovery paths, and tag the release candidate.
+
+This order intentionally creates a useful presentation before finishing the
+long-term networking or WebGPU work, while ensuring the presentation itself is
+built on the Rust ownership model rather than becoming another disposable UI.
