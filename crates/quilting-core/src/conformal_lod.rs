@@ -248,21 +248,25 @@ fn s2(a: [f64; 2], b: [f64; 2]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 #[inline]
-fn snap_pow2(v: f64) -> f64 {
-    2f64.powf(v.max(1.0).log2().round())
+fn floor_pow2(v: f64) -> f64 {
+    2f64.powf(v.max(1.0).log2().floor())
 }
 
-/// Interior-complete per-edge LoDs for triangle `(v0,v1,v2)` under `m`, projected
-/// to screen pixels by `project` (a *deformed* world point → screen px, or `None`
-/// if behind the camera), targeting ~`min_px` on screen per subdivision.
+/// Interior-complete per-edge screen-space LOD capacities for triangle
+/// `(v0,v1,v2)` under `m`, projected to screen pixels by `project` (a
+/// *deformed* world point → screen px, or `None` if behind the camera).
+///
+/// A capacity is the greatest power-of-two subdivision count that still leaves
+/// at least `min_px` pixels per subdivision. It is therefore an upper bound:
+/// callers must take `min(world_or_curvature_demand, screen_capacity)`. This is
+/// deliberately not a two-sided screen-space target; attenuation must never
+/// add tessellation or erase the density control.
 ///
 /// Returns three edge LoDs in canonical order `[a=(v1,v2), b=(v0,v2), c=(v0,v1)]`.
-/// On top of the rim screen-arcs (corner→deformed-midpoint→corner), it adds:
-///  - a per-edge **peak boost** `max(1, (k/d_e²)·L_e / warc_e)` so uniform-in-t
-///    seeds don't overshoot min_px where an edge grazes the pole, and
-///  - a gated **interior floor** at the max-dilation point `x*` (all three edges,
-///    since the atlas grades interior density as the geometric mean of the edges),
-///  - and the exact pole guard `|c|²·d_T² < POLE_PROXIMITY_NORM_SQ ⇒ max_lod`.
+/// On top of the rim screen-arcs (corner→deformed-midpoint→corner), it adds
+/// an **interior extent** at the max-dilation point `x*` to all three edges
+/// (the atlas grades interior density as their geometric mean), plus the exact
+/// pole guard `|c|²·d_T² < POLE_PROXIMITY_NORM_SQ ⇒ max_lod`.
 ///
 /// The GLSL twin in `lod_compute.vert.glsl` mirrors this; `min_lod`/`max_lod` are
 /// the clamp bounds (`max_lod` = the built atlas cap on the GPU path).
@@ -276,7 +280,7 @@ pub fn conformal_edge_lods(
     min_lod: u32,
     max_lod: u32,
 ) -> [u32; 3] {
-    let clampl = |v: f64| (snap_pow2(v) as u32).clamp(min_lod, max_lod);
+    let clampl = |v: f64| (floor_pow2(v) as u32).clamp(min_lod, max_lod);
     let mid = |a: [f64; 3], b: [f64; 3]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
 
     let d0 = m.apply(q_from(v0));
@@ -297,7 +301,7 @@ pub fn conformal_edge_lods(
     let patch = match ConformalPatch::new(m, v0, v1, v2) {
         Some(p) => p,
         None => {
-            // Affine (no finite pole): rim drive only.
+            // Affine (no finite pole): the rim bounds screen-space capacity.
             let f = |px: Option<f64>| px.map(|p| clampl(p / min_px)).unwrap_or(min_lod);
             return [f(px_a), f(px_b), f(px_c)];
         }
@@ -309,17 +313,18 @@ pub fn conformal_edge_lods(
     let le = [d3(v1, v2), d3(v0, v2), d3(v0, v1)];
     let l_max = le[0].max(le[1]).max(le[2]);
 
-    // Interior floor — robust form, replacing the ill-conditioned gate +
-    // finite-difference-of-F. The LoD that makes the tessellated sub-edge at the
-    // max-dilation point x* about min_px on screen is  λ* · ρ · L_max, where:
+    // Interior extent — robust form, replacing the ill-conditioned gate +
+    // finite-difference-of-F. The screen-space span at the max-dilation point
+    // x* is  λ* · ρ · L_max, where:
     //   • λ* = patch.lambda_star = k / d_T²  is the CLOSED-FORM peak conformal
     //     scale (no differencing of the near-singular map — this was the source of
     //     the patchy, per-face-inconsistent LoD), and
     //   • ρ is the projection Jacobian at the well-conditioned IMAGE point
     //     y* = F(x*), found by finite differences there (a benign point, not the
     //     pole).
-    // Applied to all three edges via `max`: the peak point needs them all, and
-    // faces far from the pole have a tiny λ* so it stays inert (no gate needed).
+    // Applied to all three capacities via `max`: the peak point needs them all,
+    // and faces far from the pole have a tiny λ* so it stays inert (no gate
+    // needed).
     // If y* falls behind the camera the face wraps past the near plane — leave it
     // to the rim + the cull rather than emit a spurious spike.
     let mut px_int = 0.0;

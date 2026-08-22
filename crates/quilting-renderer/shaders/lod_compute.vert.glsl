@@ -118,6 +118,13 @@ float snap_pow2(float v) {
     return exp2(round(log2(max(v, 1.0))));
 }
 
+// Screen attenuation is a capacity, so round down: rounding to the nearest
+// level can select a subdivision count whose sub-edges are smaller than
+// min_px. World/curvature demand keeps the nearest-level rule above.
+float floor_pow2(float v) {
+    return exp2(floor(log2(max(v, 1.0))));
+}
+
 // --- Position fetch with animation ---
 
 vec3 fetch_rest_pos(int vertex_id) {
@@ -351,15 +358,27 @@ void main() {
 
     float target_size = mesh_radius / density;
 
-    // Uniform per-face LOD from the largest median.
-    // Max prevents small-median sabotage on skinny triangles.
-    // Uniform prevents anisotropic tessellation artifacts.
+    // Uniform per-face density demand from the largest median. Max prevents
+    // small-median sabotage on skinny triangles. A finite-pole patch also gets
+    // an exact interior conformal-curvature demand: this is world-space demand
+    // controlled by `density`, not screen attenuation.
     float max_med = max(med_a, max(med_b, med_c)) / target_size;
-    lod_a = clamp(snap_pow2(max_med), 1.0, max_lod);
+    float source_l_max = 0.0;
+    float lambda_star = 0.0;
+    float interior_world_demand = 0.0;
+    if (patch_valid && min_bot_true >= 1e-8) {
+        source_l_max = max(distance(p1, p2), max(distance(p0, p2), distance(p0, p1)));
+        lambda_star = u_mob_k / max(dT2, 1e-30);
+        interior_world_demand = lambda_star * source_l_max / target_size;
+    }
+    lod_a = clamp(snap_pow2(max(max_med, interior_world_demand)), 1.0, max_lod);
     lod_b = lod_a;
     lod_c = lod_a;
 
-    // Screen-space attenuation
+    // Screen-space attenuation. This computes the greatest subdivision count
+    // that still leaves at least min_px pixels per sub-edge, then caps the
+    // density/curvature demand above. It must never raise LOD or replace the
+    // tessellation-density control.
     if (min_px > 0.0) {
         vec4 c0 = vp_matrix * vec4(d0, 1.0);
         vec4 c1 = vp_matrix * vec4(d1, 1.0);
@@ -390,9 +409,9 @@ void main() {
         float px_b = distance(s0, smb) + distance(smb, s2);
         float px_c = distance(s0, smc) + distance(smc, s1);
 
-        // Interior floor — robust analytic form (mirrors conformal_edge_lods).
-        // The LoD that makes the tessellated sub-edge at the max-dilation point x*
-        // about min_px on screen is  λ*·ρ·L_max, where:
+        // Interior screen extent — robust analytic form (mirrors
+        // conformal_edge_lods). The projected span at the max-dilation point x*
+        // is  λ*·ρ·L_max, where:
         //   • λ* = k / d_T²  is the CLOSED-FORM peak conformal scale. The old code
         //     estimated the peak by a per-edge boost and a finite-difference of F
         //     itself; both are near-singular next to the pole, so on animated
@@ -400,14 +419,12 @@ void main() {
         //     high-LoD starbursts. This form never differences the singular map.
         //   • ρ is the projection Jacobian at the well-conditioned IMAGE point
         //     y* = F(x*) — a benign point, not the pole — by finite differences.
-        // Applied to all three edges via max (the atlas grades interior density as
-        // the geometric mean of the edges); far-from-pole faces have a tiny λ* so it
-        // stays inert with no gate. If y* is behind the near plane the face wraps
-        // past it — leave it to the rim + cull rather than emit a spurious spike.
+        // Applied to all three capacities via max (the atlas grades interior
+        // density as the geometric mean of the edges); far-from-pole faces have
+        // a tiny λ* so it stays inert with no gate. If y* is behind the near
+        // plane the face wraps past it — leave it to the rim + cull.
         float px_int = 0.0;
         if (patch_valid && min_bot_true >= 1e-8) {
-            float l_max = max(distance(p1, p2), max(distance(p0, p2), distance(p0, p1)));
-            float lambda_star = u_mob_k / max(dT2, 1e-30);
             vec3 y_star = mobius_pure(x_star);
             vec4 cy = vp_matrix * vec4(y_star, 1.0);
             if (cy.w > 0.001) {
@@ -423,12 +440,12 @@ void main() {
                         rho = max(rho, distance(sp, s0) / eps);
                     }
                 }
-                px_int = lambda_star * rho * l_max;
+                px_int = lambda_star * rho * source_l_max;
             }
         }
-        lod_a = clamp(snap_pow2(max(px_a, px_int) / min_px), 1.0, max_lod);
-        lod_b = clamp(snap_pow2(max(px_b, px_int) / min_px), 1.0, max_lod);
-        lod_c = clamp(snap_pow2(max(px_c, px_int) / min_px), 1.0, max_lod);
+        lod_a = min(lod_a, clamp(floor_pow2(max(px_a, px_int) / min_px), 1.0, max_lod));
+        lod_b = min(lod_b, clamp(floor_pow2(max(px_b, px_int) / min_px), 1.0, max_lod));
+        lod_c = min(lod_c, clamp(floor_pow2(max(px_c, px_int) / min_px), 1.0, max_lod));
     }
 
     // Pole proximity overrides everything. For a valid patch min_bot_true is the

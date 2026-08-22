@@ -788,9 +788,23 @@ mod tests {
 
     #[test]
     fn gpu_lod_pass_allows_the_source_triangle_level() {
-        assert_eq!(LOD_COMPUTE_VS.matches("clamp(snap_pow2").count(), 4);
-        assert_eq!(LOD_COMPUTE_VS.matches(", 1.0, max_lod)").count(), 4);
+        assert!(LOD_COMPUTE_VS.contains(
+            "lod_a = min(lod_a, clamp(floor_pow2"
+        ));
+        assert!(LOD_COMPUTE_VS.contains(
+            "lod_b = min(lod_b, clamp(floor_pow2"
+        ));
+        assert!(LOD_COMPUTE_VS.contains(
+            "lod_c = min(lod_c, clamp(floor_pow2"
+        ));
         assert!(!LOD_COMPUTE_VS.contains(", 2.0, max_lod)"));
+    }
+
+    #[test]
+    fn screen_attenuation_caps_instead_of_driving_lod() {
+        assert!(LOD_COMPUTE_VS.contains("density/curvature demand above"));
+        assert_eq!(LOD_COMPUTE_VS.matches("= min(lod_").count(), 3);
+        assert_eq!(LOD_COMPUTE_VS.matches("floor_pow2(max(px_").count(), 3);
     }
 
 }

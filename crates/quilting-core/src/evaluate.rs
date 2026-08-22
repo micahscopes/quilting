@@ -15,6 +15,7 @@
 //! otherwise pure crate — if the LOD pass ever moves off the worker thread,
 //! it should become an explicit argument.
 
+use crate::conformal_lod::{conformal_edge_lods, ConformalPatch};
 use crate::quaternion::{Quat, Mobius, POLE_PROXIMITY_NORM_SQ};
 use quilting_mesh::HalfEdgeMesh;
 use std::cell::RefCell;
@@ -344,41 +345,6 @@ pub fn compute_instances_with_uvs(
         mesh.canonical_edge(he_idx as u32) as usize
     };
 
-    let screen_arc_len = |va: usize, vb: usize| -> f64 {
-        match screen {
-            Some(s) => {
-                let n_samples = 9;
-                let mut total = 0.0;
-                let mut any_visible = false;
-                let mut prev = s.project(transformed[va].0.to_point());
-                for i in 1..=n_samples {
-                    let t = i as f64 / n_samples as f64;
-                    let orig = [
-                        vertices[va][0]*(1.0-t) + vertices[vb][0]*t,
-                        vertices[va][1]*(1.0-t) + vertices[vb][1]*t,
-                        vertices[va][2]*(1.0-t) + vertices[vb][2]*t,
-                    ];
-                    let tp = transform.apply(Quat::from_point(orig[0], orig[1], orig[2])).to_point();
-                    let curr = s.project(tp);
-                    if let (Some(p1), Some(p2)) = (prev, curr) {
-                        total += ((p2[0]-p1[0]).powi(2) + (p2[1]-p1[1]).powi(2)).sqrt();
-                        any_visible = true;
-                    }
-                    // Skip unprojectable segments (behind camera) instead of
-                    // returning MAX — offscreen edges should get min LOD, not max.
-                    prev = curr;
-                }
-                if any_visible { total } else { 0.0 }
-            }
-            None => {
-                let pa = transformed[va].0.to_point();
-                let pb = transformed[vb].0.to_point();
-                let dx = pa[0]-pb[0]; let dy = pa[1]-pb[1]; let dz = pa[2]-pb[2];
-                (dx*dx + dy*dy + dz*dz).sqrt() * 100.0
-            }
-        }
-    };
-
     let mut edge_lods: Vec<u32> = vec![0; num_half_edges];
 
     // Compute mesh scale: bounding sphere radius (for edge length normalization)
@@ -403,14 +369,16 @@ pub fn compute_instances_with_uvs(
     // Per-face: transform edge midpoints through Möbius, compute deformed
     // medians to determine per-edge LODs. 3 Möbius evals per face.
     let mut edge_lods_world: Vec<u32> = vec![0; num_half_edges];
+    // Screen attenuation is an upper bound, kept separately from world and
+    // conformal-curvature demand so it can never raise LOD. A shared edge takes
+    // the larger capacity reported by either incident patch before the final
+    // min(), preserving both interior conformal extent and seam coherence.
+    let mut edge_lod_screen_caps: Vec<u32> = vec![0; num_half_edges];
 
-    // Faces with a sampled point at the Möbius pole. The medians cannot be
-    // trusted there: rounding cancels the imaginary numerator together with
-    // the denominator (a pole on a vertex maps it to the origin, not to
-    // infinity), which fakes a small median and would starve the most
-    // distorted face of tessellation. These faces saturate to MAX_LOD after
-    // screen attenuation. Mirrors the min_bot_sq check in
-    // lod_compute.vert.glsl so CPU and GPU LOD passes agree.
+    // Faces whose complete source triangle reaches the Möbius pole. The
+    // medians cannot be trusted there, and screen attenuation must not reduce
+    // a truly unbounded patch. Exact closest-point classification below keeps
+    // this safety exception aligned with the GPU pass.
     let mut pole_faces: Vec<usize> = Vec::new();
 
     for fi in 0..nf {
@@ -444,69 +412,69 @@ pub fn compute_instances_with_uvs(
         let median_b = dist3(d1, dm_b);
         let median_c = dist3(d2, dm_c);
 
-        // Each edge's LOD is driven by the medians from its two endpoints.
-        // Edge AB: median_a (from A across BC) + median_b (from B across AC)
-        //   → both tell us how much AB's face extends, so average them.
-        // Edge BC: median_b + median_c
-        // Edge AC: median_a + median_c
-        let lod_ab = ((median_a + median_b) * 0.5 / target_size).ceil() as u32;
-        let lod_bc = ((median_b + median_c) * 0.5 / target_size).ceil() as u32;
-        let lod_ac = ((median_a + median_c) * 0.5 / target_size).ceil() as u32;
-
-        // Pole proximity check over the same 6 sample points the medians use.
-        // transform_weight(p, 1) is exactly bot = c*p + d, and bot is linear
-        // in p, so edge-midpoint bots are averages of the vertex bots.
-        let b0 = transformed[face[0]].1;
-        let b1 = transformed[face[1]].1;
-        let b2 = transformed[face[2]].1;
-        let min_bot_sq = b0.norm_sq()
-            .min(b1.norm_sq())
-            .min(b2.norm_sq())
-            .min(((b1 + b2) * 0.5).norm_sq())
-            .min(((b0 + b2) * 0.5).norm_sq())
-            .min(((b0 + b1) * 0.5).norm_sq());
-        if min_bot_sq < POLE_PROXIMITY_NORM_SQ {
-            pole_faces.push(fi);
+        // Match the GPU pass: a uniform face demand from the largest deformed
+        // median, lifted by the exact interior conformal dilation where a
+        // finite pole exists. This is density-driven world/curvature demand,
+        // not screen attenuation.
+        let mut world_demand = median_a.max(median_b).max(median_c) / target_size;
+        if let Some(patch) = ConformalPatch::new(transform, v0, v1, v2) {
+            if patch.min_bot_sq < POLE_PROXIMITY_NORM_SQ {
+                pole_faces.push(fi);
+            } else {
+                let l_max = dist3(v1, v2).max(dist3(v0, v2)).max(dist3(v0, v1));
+                world_demand = world_demand.max(patch.lambda_star * l_max / target_size);
+            }
         }
+        let world_lod = snap_f64_to_power_of_2(world_demand).clamp(MIN_LOD, MAX_LOD);
 
         // Map to half-edge canonical edges, take max across adjacent faces
         let he_base = fi * 3;
         // edge_a (v1→v2 = BC), edge_b (v2→v0 = CA), edge_c (v0→v1 = AB)
         edge_lods_world[canonical_edge(he_base + 1)] =
-            edge_lods_world[canonical_edge(he_base + 1)].max(lod_bc);
+            edge_lods_world[canonical_edge(he_base + 1)].max(world_lod);
         edge_lods_world[canonical_edge(he_base + 2)] =
-            edge_lods_world[canonical_edge(he_base + 2)].max(lod_ac);
+            edge_lods_world[canonical_edge(he_base + 2)].max(world_lod);
         edge_lods_world[canonical_edge(he_base)] =
-            edge_lods_world[canonical_edge(he_base)].max(lod_ab);
+            edge_lods_world[canonical_edge(he_base)].max(world_lod);
+
+        if screen_atten_enabled {
+            if let Some(screen) = screen {
+                let caps = conformal_edge_lods(
+                    v0,
+                    v1,
+                    v2,
+                    transform,
+                    |q| screen.project(q.to_point()),
+                    min_px,
+                    MIN_LOD,
+                    MAX_LOD,
+                );
+                edge_lod_screen_caps[canonical_edge(he_base + 1)] =
+                    edge_lod_screen_caps[canonical_edge(he_base + 1)].max(caps[0]);
+                edge_lod_screen_caps[canonical_edge(he_base + 2)] =
+                    edge_lod_screen_caps[canonical_edge(he_base + 2)].max(caps[1]);
+                edge_lod_screen_caps[canonical_edge(he_base)] =
+                    edge_lod_screen_caps[canonical_edge(he_base)].max(caps[2]);
+            }
+        }
     }
 
-    // Apply screen attenuation and snap to power of 2.
-    // Skip screen_arc_len entirely when attenuation is off — it's the
-    // most expensive part (9 Möbius evals per edge).
+    // Apply the screen capacity only as an upper bound. Screen attenuation is
+    // allowed to remove unnecessary subdivisions, never to add them or replace
+    // the density-driven world/curvature demand.
     for fi in 0..nf {
         for ei in 0..3u32 {
             let he_idx = fi * 3 + ei as usize;
             let canon = canonical_edge(he_idx);
             if edge_lods[canon] != 0 { continue; }
 
-            let lod = if screen_atten_enabled {
-                let (va, vb) = mesh.edge_vertices(he_idx as u32);
-                let pixels = screen_arc_len(va as usize, vb as usize);
-                if pixels > 0.0 {
-                    // Two-sided screen-space target: drive toward ~min_px pixels
-                    // per subdivision (raise coarse patches, not only cap
-                    // over-tessellated ones), so screen-space triangle density is
-                    // uniform regardless of a mesh's base resolution or scale.
-                    // Mirrors lod_compute.vert.glsl.
-                    let driven = (pixels / min_px).ceil().max(MIN_LOD as f64) as u32;
-                    driven.min(MAX_LOD)
-                } else {
-                    edge_lods_world[canon]
-                }
+            let world = edge_lods_world[canon].clamp(MIN_LOD, MAX_LOD);
+            let cap = edge_lod_screen_caps[canon];
+            edge_lods[canon] = if screen_atten_enabled && cap > 0 {
+                world.min(cap)
             } else {
-                edge_lods_world[canon]
+                world
             };
-            edge_lods[canon] = snap_to_power_of_2(lod).clamp(MIN_LOD, MAX_LOD);
         }
     }
 
@@ -611,23 +579,20 @@ pub fn compute_instances_with_uvs(
 }
 
 
-/// Snap to the nearest power of 2 with hysteresis bias toward lower LOD.
-/// Only snaps UP when the value exceeds 1.3x the lower power of 2.
-/// This prevents oscillation at boundaries (e.g., 15.9 vs 16.1 pixels
-/// alternating between LOD 16 and LOD 32).
+/// Snap an integer demand to the nearest power of two, matching the GPU's
+/// `exp2(round(log2(v)))` rule.
 pub fn snap_to_power_of_2(v: u32) -> u32 {
-    if v <= 1 { return 1; }
-    if v >= (1 << 30) { return 1 << 30; } // prevent overflow
-    let mut p = 1u32;
-    while p < v { p *= 2; }
-    // p is now the next power of 2 >= v. p/2 is the one below.
-    // Use the lower one unless v significantly exceeds it.
-    let lower = p / 2;
-    if lower > 0 && (v as f32) < (lower as f32) * 1.3 {
-        lower
-    } else {
-        p
+    snap_f64_to_power_of_2(v as f64)
+}
+
+fn snap_f64_to_power_of_2(v: f64) -> u32 {
+    if !v.is_finite() || v >= (1u32 << 30) as f64 {
+        return 1u32 << 30;
     }
+    if v <= 1.0 {
+        return 1;
+    }
+    2f64.powf(v.log2().round()) as u32
 }
 
 
@@ -761,6 +726,105 @@ mod tests {
 
         assert_eq!(instances[0].edge_lods, [1, 1, 1]);
         assert_eq!(instances[0].vertex_lods, [1, 1, 1]);
+
+        set_tess_params(old_density, old_screen_atten);
+        set_min_px_per_sub(old_min_px);
+    }
+
+    #[test]
+    fn screen_attenuation_never_raises_density_lod() {
+        let old_density = get_tess_density();
+        let old_screen_atten = get_screen_atten();
+        let old_min_px = get_min_px_per_sub();
+        let vertices = vec![
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+        let screen = ScreenInfo {
+            vp_matrix: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            width: 10_000.0,
+            height: 10_000.0,
+        };
+
+        set_tess_params(1.0, false);
+        set_min_px_per_sub(1.0);
+        let world = compute_instances(
+            &vertices,
+            &faces,
+            &Mobius::identity(),
+            Some(&screen),
+            None,
+        );
+        set_tess_params(1.0, true);
+        let attenuated = compute_instances(
+            &vertices,
+            &faces,
+            &Mobius::identity(),
+            Some(&screen),
+            None,
+        );
+
+        for (world, attenuated) in world[0].edge_lods.iter().zip(attenuated[0].edge_lods) {
+            assert!(attenuated <= *world, "attenuation raised LOD: {world} -> {attenuated}");
+        }
+
+        set_tess_params(old_density, old_screen_atten);
+        set_min_px_per_sub(old_min_px);
+    }
+
+    #[test]
+    fn density_remains_effective_with_screen_attenuation() {
+        let old_density = get_tess_density();
+        let old_screen_atten = get_screen_atten();
+        let old_min_px = get_min_px_per_sub();
+        let vertices = vec![
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+        let screen = ScreenInfo {
+            vp_matrix: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            width: 10_000.0,
+            height: 10_000.0,
+        };
+
+        set_tess_params(4.0, true);
+        set_min_px_per_sub(1.0);
+        let low_density = compute_instances(
+            &vertices,
+            &faces,
+            &Mobius::identity(),
+            Some(&screen),
+            None,
+        );
+        set_tess_params(32.0, true);
+        let high_density = compute_instances(
+            &vertices,
+            &faces,
+            &Mobius::identity(),
+            Some(&screen),
+            None,
+        );
+
+        assert!(
+            high_density[0].edge_lods[0] > low_density[0].edge_lods[0],
+            "density was suppressed by attenuation: low={:?}, high={:?}",
+            low_density[0].edge_lods,
+            high_density[0].edge_lods,
+        );
 
         set_tess_params(old_density, old_screen_atten);
         set_min_px_per_sub(old_min_px);

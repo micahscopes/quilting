@@ -169,14 +169,16 @@ The tessellation atlas is a dictionary of pre-computed triangle sub-meshes, keye
 
 ### Power-of-2 LODs
 
-Edge LODs are always powers of 2, snapped with hysteresis to prevent oscillation:
+Edge LODs are always powers of 2:
 
-- Raw LOD computed from the Mobius-deformed median lengths of the two faces
-  meeting at the edge, divided by a target edge size (mesh radius / density)
-- Optionally attenuated so a subdivision never falls below `min_px_per_sub`
-  screen pixels
-- Snapped to nearest power of 2 with 1.3x hysteresis bias toward lower LOD
-- Clamped to [2, 512] (`evaluate::MAX_LOD`)
+- Density/curvature demand is computed from the largest Mobius-deformed face
+  median plus the exact interior conformal scale, divided by a target edge size
+  (mesh radius / density), then snapped to the nearest power of two
+- Optional screen attenuation computes a power-of-two capacity rounded down so
+  a subdivision never falls below `min_px_per_sub` screen pixels, then caps the
+  density/curvature demand; it never adds tessellation
+- A true pole intersection explicitly saturates to the atlas ceiling
+- Results are clamped to [1, 512] (`evaluate::MAX_LOD`)
 
 The practical ceiling is usually lower than 512: `quilting-wasm` clamps to the
 largest LOD actually present in the built atlas, and the atlas is normally
@@ -277,13 +279,18 @@ Currently done on the CPU (WASM), with the intent to move to GPU later
 1. Compute a target edge size: mesh bounding-sphere radius / tessellation density
 2. Per face, push the three edge midpoints through the Mobius transform and
    measure the three deformed medians (vertex to deformed opposite midpoint)
-3. Each edge's raw LOD is `ceil(mean of its two endpoint medians / target size)`
-4. Store per canonical edge index, taking the max across the two adjacent faces
-   (this is what makes invariant 1 hold)
-5. If screen attenuation is on, sample the deformed edge at 9 points to get its
-   screen arc length and reduce the LOD so each subdivision spans at least
-   `min_px_per_sub` pixels
-6. Snap to a power of 2 with hysteresis, clamp to [2, `MAX_LOD` = 512]
+3. Use the largest median for a uniform face demand, then snap to the nearest
+   power of two
+4. Store that demand per canonical edge index, taking the max across the two
+   adjacent faces (this is what makes invariant 1 hold)
+5. Include the exact interior conformal-dilation demand in the density-driven
+   world LOD; a true pole intersection remains an explicit maximum-LOD safety
+   case
+6. If screen attenuation is on, derive a power-of-two screen capacity from the
+   deformed rim plus interior extent, then take `min(world_demand, capacity)` so
+   every added subdivision spans at least `min_px_per_sub` pixels; attenuation
+   never raises LOD or replaces the tessellation-density control
+7. Clamp to [1, `MAX_LOD` = 512], where LOD 1 is the source triangle itself
 
 LOD is computed even for the identity Mobius: the atlas still supplies the
 sub-triangle sampling that QB evaluation needs.
@@ -455,7 +462,7 @@ After a WASM panic (e.g., from an unexpected glTF format), RefCell borrows in th
 ### LOD Flickering During Interaction
 
 LOD changes cause tessellation pattern changes, which can produce visual flickering. Mitigated by:
-- Power-of-2 snapping with 1.3x hysteresis
+- Power-of-2 snapping plus fenced asynchronous results
 - Fixed resolution during drag (debounced LOD recomputation)
 - Clamping to the largest LOD the atlas was actually built with
 
