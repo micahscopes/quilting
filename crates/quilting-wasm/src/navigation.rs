@@ -1,8 +1,10 @@
 use hyperscape::{
     CameraBasis, CameraRig, FocusSphere, NavigationAction, NavigationController, NavigationFrame,
-    NavigationPreset, PerspectiveLens, SphereReflectionState, TransitionEasing,
+    NavigationPreset, PerspectiveLens, PresentationRuntime, PresentationSnapshot,
+    SphereReflectionState, TransitionEasing,
 };
 use serde::Serialize;
+use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 /// Thin WASM adapter for Rust-authoritative Hyperscope navigation.
@@ -14,6 +16,8 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct HyperscopeNavigation {
     controller: NavigationController,
+    presentation: Option<PresentationRuntime>,
+    active_presentation: Option<PresentationSnapshot>,
 }
 
 #[wasm_bindgen]
@@ -22,6 +26,8 @@ impl HyperscopeNavigation {
     pub fn new() -> Self {
         Self {
             controller: NavigationController::default(),
+            presentation: None,
+            active_presentation: None,
         }
     }
 
@@ -195,6 +201,57 @@ impl HyperscopeNavigation {
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
+    /// Validate and retain a complete presentation document. Loading data does
+    /// not activate a cue or mutate the camera.
+    #[wasm_bindgen(js_name = loadPresentation)]
+    pub fn load_presentation(&mut self, json: &str) -> Result<JsValue, JsValue> {
+        let presentation = PresentationRuntime::from_json(json).map_err(js_error)?;
+        let normalized = serde_wasm_bindgen::to_value(presentation.presentation())
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.presentation = Some(presentation);
+        self.active_presentation = None;
+        Ok(normalized)
+    }
+
+    #[wasm_bindgen(js_name = startPresentation)]
+    pub fn start_presentation(&mut self) -> Result<JsValue, JsValue> {
+        self.activate_presentation(|presentation, navigation| {
+            presentation.activate_index(0, navigation)
+        })
+    }
+
+    #[wasm_bindgen(js_name = advancePresentation)]
+    pub fn advance_presentation(&mut self) -> Result<JsValue, JsValue> {
+        self.activate_presentation(PresentationRuntime::advance)
+    }
+
+    #[wasm_bindgen(js_name = reversePresentation)]
+    pub fn reverse_presentation(&mut self) -> Result<JsValue, JsValue> {
+        self.activate_presentation(PresentationRuntime::reverse)
+    }
+
+    #[wasm_bindgen(js_name = jumpToPresentationCue)]
+    pub fn jump_to_presentation_cue(&mut self, cue_id: &str) -> Result<JsValue, JsValue> {
+        let cue_id = Uuid::parse_str(cue_id).map_err(|error| {
+            JsValue::from_str(&format!("invalid presentation cue UUID: {error}"))
+        })?;
+        self.activate_presentation(|presentation, navigation| {
+            presentation.jump_to_cue(cue_id, navigation)
+        })
+    }
+
+    #[wasm_bindgen(js_name = presentationSnapshot)]
+    pub fn presentation_snapshot(&self) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.active_presentation)
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = clearPresentation)]
+    pub fn clear_presentation(&mut self) {
+        self.presentation = None;
+        self.active_presentation = None;
+    }
+
     #[wasm_bindgen(js_name = clearDiagnostics)]
     pub fn clear_diagnostics(&mut self) {
         self.controller.diagnostics.0.clear();
@@ -210,6 +267,24 @@ impl Default for HyperscopeNavigation {
 impl HyperscopeNavigation {
     fn push(&mut self, action: NavigationAction) -> Result<u64, JsValue> {
         self.controller.push(action).map_err(js_error)
+    }
+
+    fn activate_presentation(
+        &mut self,
+        activate: impl FnOnce(
+            &mut PresentationRuntime,
+            &mut NavigationController,
+        ) -> Result<PresentationSnapshot, hyperscape::PresentationError>,
+    ) -> Result<JsValue, JsValue> {
+        let presentation = self
+            .presentation
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("no presentation is loaded"))?;
+        let snapshot = activate(presentation, &mut self.controller).map_err(js_error)?;
+        let value = serde_wasm_bindgen::to_value(&snapshot)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.active_presentation = Some(snapshot);
+        Ok(value)
     }
 }
 
