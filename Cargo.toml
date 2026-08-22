@@ -8,6 +8,7 @@ members = [
     "crates/quilting-mesh",
     "crates/quilting-remesh",
     "crates/quilting-renderer",
+    "crates/quilting-round-index",
     "crates/quilting-shaders",
     "crates/quilting-wasm",
     "crates/trunk-stub",
@@ -29,6 +30,7 @@ default-members = [
     "crates/quilting-mesh",
     "crates/quilting-remesh",
     "crates/quilting-renderer",
+    "crates/quilting-round-index",
     "crates/quilting-shaders",
 ]
 resolver = "2"

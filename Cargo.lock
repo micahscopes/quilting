@@ -1196,6 +1196,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quilting-round-index"
+version = "0.1.0"
+dependencies = [
+ "quilting-core",
+ "serde",
+]
+
+[[package]]
 name = "quilting-shaders"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,13 @@
+[package]
+name = "quilting-round-index"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Conformally equivariant round-side spatial queries for Quilting"
+readme = "README.md"
+
+[dependencies]
+quilting-core = { path = "../quilting-core" }
+serde = { version = "1", features = ["derive"] }

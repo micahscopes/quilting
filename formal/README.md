@@ -108,6 +108,14 @@ The query may be a round side, a conjunction of transformed frustum sides, or
 a proximity region.  No Möbius-invariant distance, nearest-neighbour order,
 AABB, or space-filling-curve order is claimed.
 
+The executable counterpart is the backend-neutral
+[`quilting-round-index`](../crates/quilting-round-index/README.md) crate. Its
+stable hierarchy topology carries a separately refittable, pose-keyed bounds
+layer for animated source geometry. Euclidean frusta, proximity balls, and
+physical distances belong to the active rendered chart; only their conformal
+pullbacks are compared with source-space carriers. Runtime classifiers expose
+uncertainty and prune only when disjointness is certified.
+
 The incidence-algebra layer also states the coordinate-change formula
 directly: a containment pivot is `Z_new * M_old`, its reverse is
 `Z_old * M_new`, and successive pivots telescope.

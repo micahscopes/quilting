@@ -125,6 +125,7 @@ scripts/fetch-assets.sh
 | `quilting-mesh` | Half-edge mesh structure; source of the shared-edge invariant that makes stitching work |
 | `quilting-shaders` | Modular WGSL shader library, compiled to GLSL ES 300 via naga |
 | `quilting-renderer` | WebGL2/OpenGL renderer over `glow` — buffers, UBOs, VAO cache, draw calls |
+| `quilting-round-index` | Backend-neutral oriented sphere/plane hierarchy with conservative conformal query pullback and animated bound refits |
 | `quilting-gltf` | glTF 2.0 loading: meshes, materials, textures, animations, skins |
 | `quilting-remesh` | VSA clustering and QB patch fitting — turns a dense mesh into curved patches |
 | `quilting-wasm` | WASM entry point and JS interop; wasm32-only |
