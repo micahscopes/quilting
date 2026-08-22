@@ -172,10 +172,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="btns"><button id="spacemouse-connect">Connect SpaceMouse</button></div>
     <div id="spacemouse-status" style="color:#8b949e;font-size:10px;margin-top:4px">Checking WebHID…</div>
     <label style="margin-top:5px">Move sensitivity</label>
-    <div class="sr"><input type="range" id="spacemouse-move" min="10" max="300" step="1" value="100"><span class="v" id="spacemouse-move-v">1.00</span></div>
+    <div class="sr"><input type="range" id="spacemouse-move" min="10" max="900" step="1" value="300"><span class="v" id="spacemouse-move-v">3.00</span></div>
     <label>Rotate sensitivity</label>
-    <div class="sr"><input type="range" id="spacemouse-rotate" min="10" max="300" step="1" value="100"><span class="v" id="spacemouse-rotate-v">1.00</span></div>
-    <div style="color:#484f58;font-size:9px;margin-top:3px">Horizon locked; roll is reserved for a future 6-DoF camera.</div>
+    <div class="sr"><input type="range" id="spacemouse-rotate" min="10" max="900" step="1" value="300"><span class="v" id="spacemouse-rotate-v">3.00</span></div>
+    <div id="spacemouse-mode" style="color:#58a6ff;font-size:9px;margin-top:3px">Fly: X/Y/Z + pitch/yaw/roll</div>
+    <div style="color:#484f58;font-size:9px;margin-top:2px">Hold left: move inversion center. Hold right + lift/press: radius. Hold both: center X/Z + radius Y.</div>
   </div>
 
   <div class="section">
@@ -236,15 +237,14 @@ import init, {
   mr_pick, mr_highlightFace,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
-import { SpaceMouseController } from './spacemouse.mjs';
+import { SpaceMouseController, spaceMouseModifierMode } from './spacemouse.mjs';
 
 const $ = id => document.getElementById(id);
 
 // ============================================================
-// Signal system with async support.
+// Signal system and asynchronous lifecycle gates.
 // signal(value) → sync reactive state
 // effect(fn) → runs fn when dependencies change (sync)
-// asyncEffect(fn) → like effect but fn can be async; re-runs on dep change
 // gate(sig) → returns a promise that resolves when sig becomes truthy
 // phase(name, deps, fn) → async lifecycle phase: waits for deps, runs fn, resolves
 // ============================================================
@@ -259,31 +259,15 @@ function signal(value, name) {
   };
   return s;
 }
-function computed(fn) {
-  const c = signal(undefined);
-  effect(() => { c.set(fn()); });
-  return { get: () => c.get(), peek: () => c.peek() };
-}
 function effect(fn) {
   const run = () => { const prev = _activeEffect; _activeEffect = run; try { fn(); } finally { _activeEffect = prev; } };
   run();
-}
-// Async effect: re-runs when deps change, cancels previous run
-function asyncEffect(fn) {
-  let cancel = false;
-  effect(() => {
-    cancel = true; // cancel previous
-    cancel = false;
-    const token = { cancelled: false };
-    const prev = cancel;
-    fn(token).catch(e => { if (!token.cancelled) console.warn('asyncEffect error:', e); });
-  });
 }
 // Gate: resolves when signal becomes truthy
 function gate(sig) {
   if (sig.peek()) return Promise.resolve(sig.peek());
   return new Promise(resolve => {
-    const unsub = effect(() => {
+    effect(() => {
       const v = sig.get();
       if (v) { resolve(v); }
     });
@@ -511,8 +495,8 @@ const PARAM_DEFAULTS = {
   env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
   res: '0', density: '100', atten: '1', minpx: '2',
   animate: '1', anim: '-1', atlas: '7',
-  zoom: '3', rx: '0.3', ry: '0.5',
-  smmove: '100', smrotate: '100',
+  zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
+  smmove: '300', smrotate: '300',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
   fqual: '2', fkaw: '1', fkoff: '15',
 };
@@ -537,6 +521,8 @@ function readParams() {
     zoom: get('zoom'),
     rx: get('rx'),
     ry: get('ry'),
+    rz: get('rz'),
+    px: get('px'), py: get('py'), pz: get('pz'),
     smmove: get('smmove'), smrotate: get('smrotate'),
     fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
     fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
@@ -591,6 +577,10 @@ function syncURL() {
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
     set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
     set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
+    set('rz', cameraRoll.toFixed(3), parseFloat(PARAM_DEFAULTS.rz).toFixed(3));
+    set('px', panX.toFixed(3), parseFloat(PARAM_DEFAULTS.px).toFixed(3));
+    set('py', panY.toFixed(3), parseFloat(PARAM_DEFAULTS.py).toFixed(3));
+    set('pz', panZ.toFixed(3), parseFloat(PARAM_DEFAULTS.pz).toFixed(3));
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -612,12 +602,12 @@ $('sidebar-toggle').onclick = () => {
 };
 
 // --- Camera ---
-let rotX = 0.3, rotY = 0.5, zoom = 3.0;
+let rotX = 0.3, rotY = 0.5, cameraRoll = 0, zoom = 3.0;
 let panX = 0, panY = 0, panZ = 0;
 let drag = false, lx = 0, ly = 0;
 
-const spaceMouseMove = signal(100, 'smmove');
-const spaceMouseRotate = signal(100, 'smrotate');
+const spaceMouseMove = signal(300, 'smmove');
+const spaceMouseRotate = signal(300, 'smrotate');
 bindSlider('spacemouse-move', spaceMouseMove, value => (value / 100).toFixed(2));
 bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed(2));
 const spaceMouseStatus = $('spacemouse-status');
@@ -628,11 +618,14 @@ const spaceMouseDiagnostics = {
   state: 'initializing',
   message: 'Checking WebHID…',
   motionFrames: 0,
+  buttons: 0,
+  controlMode: 'camera',
   axes: null,
 };
 let spaceMouseLastMotionAt = -Infinity;
 let spaceMouseLastLodAt = -Infinity;
 let spaceMouseMotionActive = false;
+let previousSpaceMouseMode = 'camera';
 globalThis.__hyperscopeInputDiagnostics = { spaceMouse: spaceMouseDiagnostics };
 const spaceMouse = new SpaceMouseController({
   onStatus: ({ state, message, device }) => {
@@ -689,12 +682,35 @@ function mulM4(a, b, out = new Float32Array(16)) {
   return out;
 }
 
+// Camera-local right/up/forward vectors. Roll rotates the screen plane while
+// preserving the forward axis. Callers supply scratch storage to keep the hot
+// paths allocation-free.
+function manualCameraBasis(out) {
+  const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+  const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+  const cosR = Math.cos(cameraRoll), sinR = Math.sin(cameraRoll);
+  const baseRightX = cosY, baseRightY = 0, baseRightZ = -sinY;
+  const baseUpX = -sinY * sinX, baseUpY = cosX, baseUpZ = -cosY * sinX;
+  out[0] = baseRightX * cosR + baseUpX * sinR;
+  out[1] = baseRightY * cosR + baseUpY * sinR;
+  out[2] = baseRightZ * cosR + baseUpZ * sinR;
+  out[3] = baseUpX * cosR - baseRightX * sinR;
+  out[4] = baseUpY * cosR - baseRightY * sinR;
+  out[5] = baseUpZ * cosR - baseRightZ * sinR;
+  out[6] = -sinY * cosX;
+  out[7] = -sinX;
+  out[8] = -cosY * cosX;
+  return out;
+}
+
 // Independent scratch sets: the frame loop and the asynchronous LOD job can
 // overlap, while each path itself has at most one active invocation.
 const frameView = new Float32Array(16), frameProj = new Float32Array(16);
 const frameMvp = new Float32Array(16), frameCameraPos = new Float32Array(3);
 const lodView = new Float32Array(16), lodProj = new Float32Array(16);
 const lodVp = new Float32Array(16), lodMobius = new Float32Array(16);
+const frameCameraBasis = new Float32Array(9), lodCameraBasis = new Float32Array(9);
+const inputCameraBasis = new Float32Array(9), pickCameraBasis = new Float32Array(9);
 
 let runtimeWasmModule = null;
 async function compileRuntimeWasm() {
@@ -787,7 +803,8 @@ canvas.addEventListener('click', e => {
   const ex = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
   const ey = zoom*Math.sin(rotX)+panY;
   const ez = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
-  const view = lookAt(ex,ey,ez, panX,panY,panZ, 0,1,0);
+  const basis = manualCameraBasis(pickCameraBasis);
+  const view = lookAt(ex,ey,ez, panX,panY,panZ, basis[3],basis[4],basis[5]);
   const proj = perspective(Math.PI/3, canvas.width/canvas.height, 0.01, 10000);
   const mvp = mulM4(proj, view);
   const faceId = mr_pick(mvp, view, new Float32Array([ex,ey,ez]), x, y);
@@ -809,13 +826,11 @@ window.addEventListener('mousemove', e => {
   lx = e.clientX; ly = e.clientY;
   if (e.shiftKey) {
     // Pan in screen plane
-    const right = [Math.cos(rotY), 0, -Math.sin(rotY)];
-    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-    const up = [-Math.sin(rotY)*sinX, cosX, -Math.cos(rotY)*sinX];
+    const basis = manualCameraBasis(inputCameraBasis);
     const s = 0.003 * zoom;
-    panX -= (dx * right[0] + dy * up[0]) * s;
-    panY -= (dx * right[1] + dy * up[1]) * s;
-    panZ -= (dx * right[2] + dy * up[2]) * s;
+    panX -= (dx * basis[0] + dy * basis[3]) * s;
+    panY -= (dx * basis[1] + dy * basis[4]) * s;
+    panZ -= (dx * basis[2] + dy * basis[5]) * s;
   } else {
     rotY += dx * 0.005;
     rotX += dy * 0.005;
@@ -1297,8 +1312,12 @@ applyParams = function(params) {
   zoom = finite(params.zoom, 3, 0.1, 1000);
   rotX = finite(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
   rotY = finite(params.ry, 0.5, -1e6, 1e6);
-  spaceMouseMove.set(finite(params.smmove, 100, 10, 300));
-  spaceMouseRotate.set(finite(params.smrotate, 100, 10, 300));
+  cameraRoll = finite(params.rz, 0, -Math.PI, Math.PI);
+  panX = finite(params.px, 0, -1e6, 1e6);
+  panY = finite(params.py, 0, -1e6, 1e6);
+  panZ = finite(params.pz, 0, -1e6, 1e6);
+  spaceMouseMove.set(finite(params.smmove, 300, 10, 900));
+  spaceMouseRotate.set(finite(params.smrotate, 300, 10, 900));
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
   fz.radius.set(integer(params.fradius, 11, 4, 128));
@@ -1825,7 +1844,11 @@ async function recomputeLods() {
     const tx = authoredCamera ? authoredCamera.target[0] : panX;
     const ty = authoredCamera ? authoredCamera.target[1] : panY;
     const tz = authoredCamera ? authoredCamera.target[2] : panZ;
-    const view = lookAt(ex, ey, ez, tx, ty, tz, 0, 1, 0, lodView);
+    const basis = manualCameraBasis(lodCameraBasis);
+    const upX = authoredCamera ? 0 : basis[3];
+    const upY = authoredCamera ? 1 : basis[4];
+    const upZ = authoredCamera ? 0 : basis[5];
+    const view = lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, lodView);
     const proj = perspective(Math.PI / 3, w / h, 0.01, 10000, lodProj);
     const vp = mulM4(proj, view, lodVp);
     const tp = getTessParams();
@@ -1898,7 +1921,8 @@ function frame(ts) {
   const deltaSeconds = previousFrameTs == null ? 0 : Math.min((ts - previousFrameTs) / 1000, 0.25);
   previousFrameTs = ts;
   if (hyperscapeActive) {
-    const snapshot = mr_tickHyperscape(deltaSeconds);
+    const includeSceneDiagnostics = ts - lastSceneDiagnosticRenderAt >= 250;
+    const snapshot = mr_tickHyperscape(deltaSeconds, includeSceneDiagnostics);
     if (snapshot) {
       if (snapshot.mobius) currentMobius = new Float32Array(snapshot.mobius);
       if (snapshot.camera_eye && snapshot.camera_target) {
@@ -1944,9 +1968,9 @@ function frame(ts) {
         console.warn('Hyperscape diagnostics:', messages);
         lastHyperscapeDiagnostic = summary;
       }
-      if (ts - lastSceneDiagnosticRenderAt >= 250) {
+      if (includeSceneDiagnostics) {
         lastSceneDiagnosticRenderAt = ts;
-        renderHyperscapeInspector(snapshot);
+        if (snapshot.scene) renderHyperscapeInspector(snapshot);
         if (!authoredLodPending) authoredLodReasons.clear();
       }
     }
@@ -1974,25 +1998,70 @@ function frame(ts) {
   // exactly once per animation frame. This keeps navigation independent of HID
   // report rate and lets the worker coalesce LOD updates behind the main-GPU
   // current-pose visibility pass. Authored cameras remain authoritative.
+  const spaceMouseMode = spaceMouseModifierMode(spaceMouse.buttons);
+  if (spaceMouseMode !== previousSpaceMouseMode) {
+    spaceMouse.resetSmoothing();
+    previousSpaceMouseMode = spaceMouseMode;
+  }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
+  spaceMouseDiagnostics.buttons = spaceMouse.buttons;
+  spaceMouseDiagnostics.controlMode = spaceMouseMode;
+  const spaceMouseModeText = {
+    camera: 'Fly: X/Y/Z + pitch/yaw/roll',
+    'inversion-center': 'Inversion: move center (X/Y/Z)',
+    'inversion-radius': 'Inversion: lift/press changes radius',
+    'inversion-center-radius': 'Inversion: center X/Z + radius Y',
+  }[spaceMouseMode];
+  if ($('spacemouse-mode').textContent !== spaceMouseModeText) {
+    $('spacemouse-mode').textContent = spaceMouseModeText;
+  }
   if (!authoredCamera && deltaSeconds > 0) {
     let moving = false;
     for (let axis = 0; axis < 6; axis++) moving ||= spaceMouseAxes[axis] !== 0;
     if (moving) {
-      const moveScale = (spaceMouseMove.peek() / 100) * zoom * deltaSeconds * 0.8;
+      const moveScale = (spaceMouseMove.peek() / 100) * deltaSeconds * 2.4;
       const rotateScale = (spaceMouseRotate.peek() / 100) * deltaSeconds * 1.5;
-      const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-      const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-      const rightX = cosY, rightZ = -sinY;
-      const upX = -sinY * sinX, upY = cosX, upZ = -cosY * sinX;
-      panX += (spaceMouseAxes[0] * rightX + spaceMouseAxes[2] * upX) * moveScale;
-      panY += spaceMouseAxes[2] * upY * moveScale;
-      panZ += (spaceMouseAxes[0] * rightZ + spaceMouseAxes[2] * upZ) * moveScale;
-      zoom *= Math.exp(spaceMouseAxes[1] * (spaceMouseMove.peek() / 100) * deltaSeconds * 1.5);
-      zoom = Math.max(0.1, Math.min(100, zoom));
-      rotX += spaceMouseAxes[3] * rotateScale;
-      rotY -= spaceMouseAxes[5] * rotateScale;
-      rotX = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, rotX));
+      const basis = manualCameraBasis(inputCameraBasis);
+
+      if (spaceMouseMode === 'camera') {
+        // Translation is camera-local and independent of orbit radius. Rotate
+        // around the eye, not the target, so the puck behaves like a flight
+        // controller while mouse drag can remain a conventional orbit tool.
+        panX += (spaceMouseAxes[0] * basis[0] + spaceMouseAxes[1] * basis[3] + spaceMouseAxes[2] * basis[6]) * moveScale;
+        panY += (spaceMouseAxes[0] * basis[1] + spaceMouseAxes[1] * basis[4] + spaceMouseAxes[2] * basis[7]) * moveScale;
+        panZ += (spaceMouseAxes[0] * basis[2] + spaceMouseAxes[1] * basis[5] + spaceMouseAxes[2] * basis[8]) * moveScale;
+
+        const eyeX = zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
+        const eyeY = zoom*Math.sin(rotX)+panY;
+        const eyeZ = zoom*Math.cos(rotY)*Math.cos(rotX)+panZ;
+        rotX += spaceMouseAxes[3] * rotateScale;
+        rotY -= spaceMouseAxes[4] * rotateScale;
+        cameraRoll -= spaceMouseAxes[5] * rotateScale;
+        rotX = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, rotX));
+        cameraRoll = Math.atan2(Math.sin(cameraRoll), Math.cos(cameraRoll));
+        // Preserve the translated eye while changing its view direction.
+        panX = eyeX - zoom*Math.sin(rotY)*Math.cos(rotX);
+        panY = eyeY - zoom*Math.sin(rotX);
+        panZ = eyeZ - zoom*Math.cos(rotY)*Math.cos(rotX);
+      } else {
+        if (mob.xform.peek() !== 'sphere_reflection') mob.xform.set('sphere_reflection');
+        const editCenter = spaceMouseMode === 'inversion-center'
+          || spaceMouseMode === 'inversion-center-radius';
+        const editRadius = spaceMouseMode === 'inversion-radius'
+          || spaceMouseMode === 'inversion-center-radius';
+        if (editCenter) {
+          const centerY = spaceMouseMode === 'inversion-center' ? spaceMouseAxes[1] : 0;
+          const dx = (spaceMouseAxes[0] * basis[0] + centerY * basis[3] + spaceMouseAxes[2] * basis[6]) * moveScale;
+          const dy = (spaceMouseAxes[0] * basis[1] + centerY * basis[4] + spaceMouseAxes[2] * basis[7]) * moveScale;
+          const dz = (spaceMouseAxes[0] * basis[2] + centerY * basis[5] + spaceMouseAxes[2] * basis[8]) * moveScale;
+          mob.mx.set(Math.max(-30, Math.min(30, mob.mx.peek() + dx * 10)));
+          mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
+          mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
+        }
+        if (editRadius) {
+          mob.mr.set(Math.max(0, Math.min(50, mob.mr.peek() + spaceMouseAxes[1] * moveScale * 10)));
+        }
+      }
       spaceMouseDiagnostics.motionFrames += 1;
       spaceMouseMotionActive = true;
       spaceMouseLastMotionAt = ts;
@@ -2021,7 +2090,11 @@ function frame(ts) {
   const tx = authoredCamera ? authoredCamera.target[0] : panX;
   const ty = authoredCamera ? authoredCamera.target[1] : panY;
   const tz = authoredCamera ? authoredCamera.target[2] : panZ;
-  const view = lookAt(ex, ey, ez, tx, ty, tz, 0, 1, 0, frameView);
+  const basis = manualCameraBasis(frameCameraBasis);
+  const upX = authoredCamera ? 0 : basis[3];
+  const upY = authoredCamera ? 1 : basis[4];
+  const upZ = authoredCamera ? 0 : basis[5];
+  const view = lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, frameView);
   const proj = perspective(Math.PI / 3, canvas.width / canvas.height, 0.01, 10000, frameProj);
   const mvp = mulM4(proj, view, frameMvp);
   frameCameraPos[0] = ex; frameCameraPos[1] = ey; frameCameraPos[2] = ez;
@@ -2216,9 +2289,13 @@ async function finishModelUpload(info, filename) {
   // Cache for async stretch sampling
   if (meshInfo) { meshInfo.instances = instances; meshInfo.num_faces = numFaces; }
 
-  zoom = 3.0;
-  rotX = 0.15; rotY = 0;
-  panX = 0; panY = 0; panZ = 0;
+  // Preserve the URL camera during startup; user-initiated model changes reset
+  // to a predictable inspection view.
+  if (urlSyncReady) {
+    zoom = 3.0;
+    rotX = 0.15; rotY = 0; cameraRoll = 0;
+    panX = 0; panY = 0; panZ = 0;
+  }
 
   await workerCall('upload_model_to_compute', {});
 
@@ -2250,6 +2327,10 @@ currentGlb = initParams.glb;
   zoom = pf(initParams.zoom, 3);
   rotX = pf(initParams.rx, 0.3);
   rotY = pf(initParams.ry, 0.5);
+  cameraRoll = pf(initParams.rz, 0);
+  panX = pf(initParams.px, 0);
+  panY = pf(initParams.py, 0);
+  panZ = pf(initParams.pz, 0);
 }
 
 // ============================================================

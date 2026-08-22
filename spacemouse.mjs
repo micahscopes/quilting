@@ -9,6 +9,8 @@
 export const SPACEMOUSE_VENDOR_ID = 0x256f;
 export const SPACEMOUSE_WIRELESS_BT_PRODUCT_ID = 0xc63a;
 export const SPACEMOUSE_AXIS_MAX = 350;
+export const SPACEMOUSE_LEFT_BUTTON = 1 << 0;
+export const SPACEMOUSE_RIGHT_BUTTON = 1 << 1;
 
 export function createSpaceMouseState() {
   return {
@@ -66,6 +68,16 @@ export function shapeSpaceMouseAxis(value, deadzone = 0.08) {
   return Math.sign(value) * normalized * normalized;
 }
 
+/** Select the interaction layer encoded by the two primary puck buttons. */
+export function spaceMouseModifierMode(buttons) {
+  const left = (buttons & SPACEMOUSE_LEFT_BUTTON) !== 0;
+  const right = (buttons & SPACEMOUSE_RIGHT_BUTTON) !== 0;
+  if (left && right) return 'inversion-center-radius';
+  if (left) return 'inversion-center';
+  if (right) return 'inversion-radius';
+  return 'camera';
+}
+
 export class SpaceMouseController {
   constructor({
     hid = typeof navigator !== 'undefined' ? navigator.hid : null,
@@ -92,6 +104,10 @@ export class SpaceMouseController {
 
   get connected() {
     return !!this.device?.opened;
+  }
+
+  get buttons() {
+    return this.state.buttons;
   }
 
   describeDevice(device = this.device) {
@@ -173,8 +189,13 @@ export class SpaceMouseController {
     }
     this.device = null;
     this.state.axes.fill(0);
+    this.state.buttons = 0;
     this.filteredAxes.fill(0);
     this.lastAxisReportAt = -Infinity;
+  }
+
+  resetSmoothing() {
+    this.filteredAxes.fill(0);
   }
 
   handleDisconnect(event) {

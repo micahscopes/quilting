@@ -102,8 +102,8 @@ struct MainState {
     texture_cache: TextureCache,
     env_maps: EnvironmentMaps,
     batches: BTreeMap<batch::RenderBatchKey, GpuBatch>,
-    /// Retained backend-neutral draw commands. Rebuilt only when batch
-    /// membership or per-node conformal state changes.
+    /// Retained WebGL draw views derived from backend-neutral batch keys.
+    /// Rebuilt only when membership or per-node conformal state changes.
     render_batches: Vec<RenderBatch>,
     render_commands_dirty: bool,
     render_command_builds: u64,
@@ -730,7 +730,7 @@ pub fn mr_set_hyperscape_camera_node(node_index: i32) -> bool {
 }
 
 #[wasm_bindgen(js_name = "mr_tickHyperscape")]
-pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
+pub fn mr_tick_hyperscape(delta_seconds: f64, include_scene_diagnostics: bool) -> JsValue {
     let delta_seconds = if delta_seconds.is_finite() {
         delta_seconds.clamp(0.0, 0.25)
     } else {
@@ -743,7 +743,7 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         Some((
             runtime.packets_by_node(),
             runtime.diagnostics().to_vec(),
-            runtime.diagnostic_snapshot(),
+            include_scene_diagnostics.then(|| runtime.diagnostic_snapshot()),
         ))
     });
     let Some((packets, diagnostics, scene_diagnostics)) = snapshot else {
@@ -832,11 +832,13 @@ pub fn mr_tick_hyperscape(delta_seconds: f64) -> JsValue {
         messages.push(&JsValue::from_str(&diagnostic));
     }
     js_sys::Reflect::set(&result, &"diagnostics".into(), &messages).ok();
-    js_sys::Reflect::set(
-        &result,
-        &"scene".into(),
-        &runtime_diagnostic_snapshot_to_js(&scene_diagnostics),
-    ).ok();
+    if let Some(scene_diagnostics) = scene_diagnostics {
+        js_sys::Reflect::set(
+            &result,
+            &"scene".into(),
+            &runtime_diagnostic_snapshot_to_js(&scene_diagnostics),
+        ).ok();
+    }
     result.into()
 }
 

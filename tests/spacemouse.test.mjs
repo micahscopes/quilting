@@ -7,6 +7,7 @@ import {
   createSpaceMouseState,
   decodeSpaceMouseReport,
   shapeSpaceMouseAxis,
+  spaceMouseModifierMode,
 } from '../spacemouse.mjs';
 
 function report(values) {
@@ -43,6 +44,14 @@ test('button reports preserve the complete bitmask', () => {
   const data = new DataView(new Uint8Array([0x03, 0x01]).buffer);
   assert.equal(decodeSpaceMouseReport(3, data, state), true);
   assert.equal(state.buttons, 0x0103);
+});
+
+test('the two primary buttons select inversion edit layers', () => {
+  assert.equal(spaceMouseModifierMode(0), 'camera');
+  assert.equal(spaceMouseModifierMode(1), 'inversion-center');
+  assert.equal(spaceMouseModifierMode(2), 'inversion-radius');
+  assert.equal(spaceMouseModifierMode(3), 'inversion-center-radius');
+  assert.equal(spaceMouseModifierMode(0x103), 'inversion-center-radius');
 });
 
 test('unknown and truncated reports do not mutate state', () => {
