@@ -6,7 +6,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use std::cell::RefCell;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 use crate::{perf_mark, perf_measure};
 
 use glow::HasContext;
@@ -1112,22 +1112,30 @@ pub fn mr_upload_images(pixels: &[u8], widths: &[u32], heights: &[u32], wrap_mod
 #[wasm_bindgen(js_name = "mr_uploadSkinningTexture")]
 pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], num_vertices: u32) {
     STATE.with(|s| {
-        let state = s.borrow();
-        let state = match state.as_ref() { Some(s) => s, None => return };
-        let gl = state.renderer.gl();
+        let mut state = s.borrow_mut();
+        let state = match state.as_mut() { Some(s) => s, None => return };
         let nv = num_vertices as usize;
+        let Some(component_count) = nv.checked_mul(4) else {
+            warn!("Skinning texture dimensions overflow: {} vertices", nv);
+            return;
+        };
+        if joint_indices.len() < component_count || joint_weights.len() < component_count {
+            warn!(
+                "Skinning texture input is truncated: expected {} components, got {} indices and {} weights",
+                component_count, joint_indices.len(), joint_weights.len()
+            );
+            return;
+        }
         // Convert flat f32 arrays to the format SkinningTexture expects
-        let ji: Vec<[u16; 4]> = (0..nv).map(|i| {
-            [joint_indices[i*4] as u16, joint_indices[i*4+1] as u16,
-             joint_indices[i*4+2] as u16, joint_indices[i*4+3] as u16]
-        }).collect();
-        let jw: Vec<[f32; 4]> = (0..nv).map(|i| {
-            [joint_weights[i*4], joint_weights[i*4+1], joint_weights[i*4+2], joint_weights[i*4+3]]
-        }).collect();
-        if let Ok(tex) = quilting_renderer::buffer::SkinningTexture::new(gl, &ji, &jw) {
-            // Bind to texture unit 15 (matches prototype)
-            tex.bind(gl, 15);
-            debug!("Skinning texture uploaded: {} vertices", nv);
+        let ji: Vec<[u16; 4]> = joint_indices[..component_count].chunks_exact(4)
+            .map(|row| [row[0] as u16, row[1] as u16, row[2] as u16, row[3] as u16])
+            .collect();
+        let jw: Vec<[f32; 4]> = joint_weights[..component_count].chunks_exact(4)
+            .map(|row| [row[0], row[1], row[2], row[3]])
+            .collect();
+        match state.renderer.upload_skinning_texture(&ji, &jw) {
+            Ok(()) => debug!("Skinning texture uploaded: {} vertices", nv),
+            Err(error) => warn!("Skinning texture upload failed: {}", error),
         }
     });
 }
@@ -1137,44 +1145,13 @@ pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], 
 #[wasm_bindgen(js_name = "mr_uploadMorphTexture")]
 pub fn mr_upload_morph_texture(deltas: &[f32], num_vertices: u32, num_targets: u32) {
     STATE.with(|s| {
-        let state = s.borrow();
-        let state = match state.as_ref() { Some(s) => s, None => return };
-        let gl = state.renderer.gl();
+        let mut state = s.borrow_mut();
+        let state = match state.as_mut() { Some(s) => s, None => return };
         let nv = num_vertices as usize;
         let nt = num_targets as usize;
-        // Pack into RGBA32F texture: width=num_vertices, height=num_targets
-        let mut rgba = vec![0.0f32; nv * nt * 4];
-        for t in 0..nt {
-            for v in 0..nv {
-                let src = (t * nv + v) * 3;
-                let dst = (t * nv + v) * 4;
-                if src + 2 < deltas.len() {
-                    rgba[dst] = deltas[src];
-                    rgba[dst+1] = deltas[src+1];
-                    rgba[dst+2] = deltas[src+2];
-                }
-            }
-        }
-        unsafe {
-            let tex = match gl.create_texture() {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
-                nv as i32, nt as i32, 0,
-                glow::RGBA, glow::FLOAT,
-                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))),
-            );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-            // Bind to texture unit 14 (matches prototype)
-            gl.active_texture(glow::TEXTURE0 + 14);
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            debug!("Morph texture uploaded: {} vertices × {} targets", nv, nt);
+        match state.renderer.upload_morph_texture(deltas, nv, nt) {
+            Ok(()) => debug!("Morph texture uploaded: {} vertices × {} targets", nv, nt),
+            Err(error) => warn!("Morph texture upload failed: {}", error),
         }
     });
 }
@@ -1448,11 +1425,9 @@ pub fn mr_upload_animation_pose(matrices: &[f32], morph_weights: &[f32], skin_te
 #[wasm_bindgen(js_name = "mr_clearAnimationState")]
 pub fn mr_clear_animation_state() {
     STATE.with(|state| {
-        if let Some(renderer) = state.borrow().as_ref() {
-            renderer
-                .renderer
-                .joint_ubo()
-                .clear(renderer.renderer.gl());
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.renderer.joint_ubo().clear(state.renderer.gl());
+            state.renderer.clear_animation_textures();
         }
     });
 }
@@ -1491,6 +1466,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let gl = state.renderer.gl();
         state.renderer.begin_frame();
         state.renderer.joint_ubo().bind(gl);
+        state.renderer.bind_animation_textures();
 
         // Mode-specific UBO setup
         let has_env = state.env_maps.prefiltered.is_some();

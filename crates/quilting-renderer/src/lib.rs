@@ -14,7 +14,10 @@ pub mod texture;
 
 use glow::HasContext;
 
-use buffer::{VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf};
+use buffer::{
+    VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf,
+    SkinningTexture, MorphTargetTexture,
+};
 use shader::Programs;
 
 /// High-level renderer for the quilting pipeline.
@@ -28,6 +31,8 @@ pub struct Renderer {
     pbr_ubo: PbrUniformBuf,
     matcap_ubo: MatcapUniformBuf,
     joint_ubo: JointMatricesBuf,
+    skinning_texture: Option<SkinningTexture>,
+    morph_texture: Option<MorphTargetTexture>,
     width: i32,
     height: i32,
 }
@@ -53,6 +58,8 @@ impl Renderer {
             pbr_ubo,
             matcap_ubo,
             joint_ubo,
+            skinning_texture: None,
+            morph_texture: None,
             width: 0,
             height: 0,
         })
@@ -151,6 +158,62 @@ impl Renderer {
     pub fn joint_ubo(&self) -> &JointMatricesBuf {
         &self.joint_ubo
     }
+
+    /// Replace the renderer's persistent per-vertex skinning resource.
+    pub fn upload_skinning_texture(
+        &mut self,
+        joint_indices: &[[u16; 4]],
+        joint_weights: &[[f32; 4]],
+    ) -> Result<(), String> {
+        let texture = SkinningTexture::new(&self.gl, joint_indices, joint_weights)?;
+        texture.bind(&self.gl, shader::SKINNING_TEX_UNIT);
+        if let Some(previous) = self.skinning_texture.replace(texture) {
+            previous.destroy(&self.gl);
+        }
+        Ok(())
+    }
+
+    /// Replace the renderer's persistent morph-target delta resource.
+    pub fn upload_morph_texture(
+        &mut self,
+        deltas: &[f32],
+        num_vertices: usize,
+        num_targets: usize,
+    ) -> Result<(), String> {
+        let texture = MorphTargetTexture::new(&self.gl, deltas, num_vertices, num_targets)?;
+        texture.bind(&self.gl, shader::MORPH_TEX_UNIT);
+        if let Some(previous) = self.morph_texture.replace(texture) {
+            previous.destroy(&self.gl);
+        }
+        Ok(())
+    }
+
+    /// Re-establish animation sampler bindings after arbitrary render passes.
+    pub fn bind_animation_textures(&self) {
+        unsafe {
+            self.gl.active_texture(glow::TEXTURE0 + shader::SKINNING_TEX_UNIT);
+            self.gl.bind_texture(
+                glow::TEXTURE_2D,
+                self.skinning_texture.as_ref().map(|texture| texture.texture),
+            );
+            self.gl.active_texture(glow::TEXTURE0 + shader::MORPH_TEX_UNIT);
+            self.gl.bind_texture(
+                glow::TEXTURE_2D,
+                self.morph_texture.as_ref().map(|texture| texture.texture),
+            );
+        }
+    }
+
+    /// Delete animation textures and leave their reserved sampler units empty.
+    pub fn clear_animation_textures(&mut self) {
+        if let Some(texture) = self.skinning_texture.take() {
+            texture.destroy(&self.gl);
+        }
+        if let Some(texture) = self.morph_texture.take() {
+            texture.destroy(&self.gl);
+        }
+        self.bind_animation_textures();
+    }
 }
 
 impl Drop for Renderer {
@@ -161,6 +224,12 @@ impl Drop for Renderer {
         self.pbr_ubo.destroy(&self.gl);
         self.matcap_ubo.destroy(&self.gl);
         self.joint_ubo.destroy(&self.gl);
+        if let Some(texture) = self.skinning_texture.take() {
+            texture.destroy(&self.gl);
+        }
+        if let Some(texture) = self.morph_texture.take() {
+            texture.destroy(&self.gl);
+        }
     }
 }
 

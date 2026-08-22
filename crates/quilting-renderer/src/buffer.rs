@@ -884,7 +884,15 @@ impl SkinningTexture {
         joint_weights: &[[f32; 4]],
     ) -> Result<Self, String> {
         let num_vertices = joint_indices.len();
-        assert_eq!(num_vertices, joint_weights.len());
+        if num_vertices == 0 {
+            return Err("skinning texture requires at least one vertex".into());
+        }
+        if num_vertices != joint_weights.len() {
+            return Err(format!(
+                "skinning texture has {num_vertices} joint-index rows but {} weight rows",
+                joint_weights.len()
+            ));
+        }
 
         unsafe {
             let texture = gl.create_texture().map_err(|e| format!("skinning tex: {e}"))?;
@@ -944,6 +952,92 @@ impl SkinningTexture {
     }
 }
 
+/// GPU texture storing morph-target position deltas.
+///
+/// Layout: RGBA32F texture, width = num_vertices, height = num_targets.
+/// Each texel stores one XYZ delta with zero in the unused alpha channel.
+pub struct MorphTargetTexture {
+    pub texture: glow::Texture,
+    pub num_vertices: usize,
+    pub num_targets: usize,
+}
+
+impl MorphTargetTexture {
+    /// Upload target-major `[dx, dy, dz]` deltas.
+    pub fn new(
+        gl: &glow::Context,
+        deltas: &[f32],
+        num_vertices: usize,
+        num_targets: usize,
+    ) -> Result<Self, String> {
+        if num_vertices == 0 || num_targets == 0 {
+            return Err("morph texture requires at least one vertex and target".into());
+        }
+        let max_texture_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(0) as usize };
+        if num_vertices > max_texture_size || num_targets > max_texture_size {
+            return Err(format!(
+                "morph texture {num_vertices}x{num_targets} exceeds GL limit {max_texture_size}"
+            ));
+        }
+        let rgba = pack_morph_target_deltas(deltas, num_vertices, num_targets)?;
+
+        unsafe {
+            let texture = gl.create_texture()
+                .map_err(|e| format!("morph-target tex: {e}"))?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                num_vertices as i32, num_targets as i32, 0,
+                glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))),
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+
+            Ok(Self { texture, num_vertices, num_targets })
+        }
+    }
+
+    pub fn bind(&self, gl: &glow::Context, unit: u32) {
+        unsafe {
+            gl.active_texture(glow::TEXTURE0 + unit);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe { gl.delete_texture(self.texture); }
+    }
+}
+
+fn pack_morph_target_deltas(
+    deltas: &[f32],
+    num_vertices: usize,
+    num_targets: usize,
+) -> Result<Vec<f32>, String> {
+    if num_vertices == 0 || num_targets == 0 {
+        return Err("morph texture requires at least one vertex and target".into());
+    }
+    let texel_count = num_vertices.checked_mul(num_targets)
+        .ok_or_else(|| "morph texture dimensions overflow".to_string())?;
+    let delta_count = texel_count.checked_mul(3)
+        .ok_or_else(|| "morph delta count overflows".to_string())?;
+    if deltas.len() < delta_count {
+        return Err(format!(
+            "morph texture needs {delta_count} delta components, received {}",
+            deltas.len()
+        ));
+    }
+
+    let mut rgba = vec![0.0; texel_count * 4];
+    for (source, target) in deltas[..delta_count].chunks_exact(3).zip(rgba.chunks_exact_mut(4)) {
+        target[..3].copy_from_slice(source);
+    }
+    Ok(rgba)
+}
+
 /// Safe cast from &[T] to &[u8] without pulling in the bytemuck dependency.
 fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe {
@@ -951,5 +1045,35 @@ fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
             data.as_ptr() as *const u8,
             data.len() * std::mem::size_of::<T>(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_morph_target_deltas;
+
+    #[test]
+    fn morph_deltas_are_packed_target_major_with_zero_alpha() {
+        let packed = pack_morph_target_deltas(
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, // target 0
+                7.0, 8.0, 9.0, 10.0, 11.0, 12.0, // target 1
+            ],
+            2,
+            2,
+        ).unwrap();
+        assert_eq!(
+            packed,
+            vec![
+                1.0, 2.0, 3.0, 0.0, 4.0, 5.0, 6.0, 0.0,
+                7.0, 8.0, 9.0, 0.0, 10.0, 11.0, 12.0, 0.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn morph_delta_dimensions_are_validated() {
+        assert!(pack_morph_target_deltas(&[], 0, 1).is_err());
+        assert!(pack_morph_target_deltas(&[1.0, 2.0], 1, 1).is_err());
     }
 }
