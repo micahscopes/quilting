@@ -2194,9 +2194,9 @@ function frame(ts) {
       const basis = manualCameraBasis(inputCameraBasis);
 
       if (spaceMouseMode === 'camera') {
-        // Physical HID Y is push/pull and Z is lift/press; flyAxes has already
-        // converted these into camera-local forward and up. Translation moves
-        // eye and target together and never depends on orbit radius.
+        // Preserve the original X/Y/Z gestures as right/up/forward, but make
+        // forward a true translation rather than orbit-radius zoom. Translation
+        // moves eye and target together and never depends on orbit radius.
         panX += (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
         panY += (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;
         panZ += (flyAxes[0] * basis[2] + flyAxes[1] * basis[5] + flyAxes[2] * basis[8]) * moveScale;
@@ -2222,7 +2222,7 @@ function frame(ts) {
         mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
         mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
         mob.mr.set(Math.max(0, Math.min(50,
-          mob.mr.peek() + flyAxes[4] * (spaceMouseRotate.peek() / 100) * deltaSeconds * 12)));
+          mob.mr.peek() + flyAxes[5] * (spaceMouseRotate.peek() / 100) * deltaSeconds * 12)));
       } else if (spaceMouseMode === 'depth-of-field') {
         const moveSensitivity = spaceMouseMove.peek() / 100;
         const rotateSensitivity = spaceMouseRotate.peek() / 100;
@@ -2231,7 +2231,7 @@ function frame(ts) {
         fz.bandwidth.set(Math.max(1, Math.min(50,
           fz.bandwidth.peek() + flyAxes[1] * moveSensitivity * deltaSeconds * 12)));
         fz.radius.set(Math.max(4, Math.min(128,
-          fz.radius.peek() + flyAxes[4] * rotateSensitivity * deltaSeconds * 30)));
+          fz.radius.peek() + flyAxes[5] * rotateSensitivity * deltaSeconds * 30)));
       }
       spaceMouseDiagnostics.motionFrames += 1;
       const lodRelevantMotion = spaceMouseMode !== 'depth-of-field';

@@ -12,9 +12,9 @@ export const SPACEMOUSE_AXIS_MAX = 350;
 export const SPACEMOUSE_LEFT_BUTTON = 1 << 0;
 export const SPACEMOUSE_RIGHT_BUTTON = 1 << 1;
 
-// Semantic camera axes produced by mapSpaceMouseFlyAxes. The HID report uses
-// desktop coordinates (X right, Y forward/back, Z lift/press) followed by
-// rotations about those same physical axes (Rx pitch, Ry roll, Rz yaw).
+// Semantic camera axes produced by mapSpaceMouseFlyAxes. Hyperscope preserves
+// its established physical gesture mapping here; the camera integration then
+// applies all three rotations in the current local frame.
 export const SPACEMOUSE_FLY_RIGHT = 0;
 export const SPACEMOUSE_FLY_UP = 1;
 export const SPACEMOUSE_FLY_FORWARD = 2;
@@ -82,17 +82,17 @@ export function shapeSpaceMouseAxis(value, deadzone = 0.08) {
  * Convert raw HID X/Y/Z/Rx/Ry/Rz into a right/up/forward +
  * pitch/yaw/roll camera-local velocity vector.
  *
- * HID Y points opposite camera-forward for the SpaceMouse convention, while
- * positive camera pitch/yaw use the opposite handedness from HID Rx/Rz. Ry is
- * rotation about the physical forward axis, hence local camera roll.
+ * This intentionally preserves Hyperscope's original gestures and signs:
+ * X/Y/Z drive right/up/forward, while Rx/Ry/Rz drive pitch/yaw/roll. The
+ * forward component is translation, never orbit-radius zoom.
  */
 export function mapSpaceMouseFlyAxes(axes, out = new Float32Array(6)) {
   out[SPACEMOUSE_FLY_RIGHT] = axes[0];
-  out[SPACEMOUSE_FLY_UP] = axes[2];
-  out[SPACEMOUSE_FLY_FORWARD] = -axes[1];
+  out[SPACEMOUSE_FLY_UP] = axes[1];
+  out[SPACEMOUSE_FLY_FORWARD] = axes[2];
   out[SPACEMOUSE_FLY_PITCH] = -axes[3];
-  out[SPACEMOUSE_FLY_YAW] = -axes[5];
-  out[SPACEMOUSE_FLY_ROLL] = axes[4];
+  out[SPACEMOUSE_FLY_YAW] = -axes[4];
+  out[SPACEMOUSE_FLY_ROLL] = axes[5];
   return out;
 }
 
