@@ -9,6 +9,7 @@
 <link data-trunk rel="copy-dir" href="pkg" />
 <link data-trunk rel="copy-dir" href="envmaps" />
 <link data-trunk rel="copy-dir" href="matcaps" />
+<link data-trunk rel="copy-dir" href="local-glbs" />
 <link data-trunk rel="copy-file" href="hyperscope_worker.js" />
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
@@ -1928,8 +1929,32 @@ phase('model', ['workers'], async () => {
   let buf = await idbGet(currentGlb);
   if (!buf) {
     const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
-    const resp = await fetch(url);
-    if (resp.ok) buf = await resp.arrayBuffer();
+    const urls = [url];
+    if (/^[^/]+\.glb$/i.test(currentGlb)) {
+      urls.push(`/local-glbs/${encodeURIComponent(currentGlb)}`);
+    }
+    const failures = [];
+    for (const candidate of urls) {
+      const resp = await fetch(candidate);
+      if (!resp.ok) {
+        failures.push(`${candidate} returned HTTP ${resp.status}`);
+        continue;
+      }
+      const candidateBuf = await resp.arrayBuffer();
+      const magic = new Uint8Array(candidateBuf, 0, Math.min(4, candidateBuf.byteLength));
+      const isGlb = magic.length === 4
+        && magic[0] === 0x67 && magic[1] === 0x6c
+        && magic[2] === 0x54 && magic[3] === 0x46;
+      if (/\.glb$/i.test(currentGlb) && !isGlb) {
+        failures.push(`${candidate} returned ${resp.headers.get('content-type') || 'unknown content type'}, not a GLB`);
+        continue;
+      }
+      buf = candidateBuf;
+      break;
+    }
+    if (!buf) {
+      throw new Error(`${currentGlb} is not in IndexedDB; ${failures.join('; ')}`);
+    }
   }
   if (!buf) return null;
   const resp = await workerCall('load_gltf_data', { bytes: buf });

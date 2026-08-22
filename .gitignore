@@ -36,3 +36,8 @@ screenshot_*.png
 /food_cans.glb
 /sardine_tin.glb
 /violin.glb
+
+# Local heavyweight models used for browser testing. Keep the directory itself
+# so Trunk's copy-dir directive also works in a clean checkout.
+/local-glbs/*
+!/local-glbs/.gitkeep
