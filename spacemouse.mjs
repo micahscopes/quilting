@@ -126,20 +126,35 @@ export function mapSpaceMouseFlyAxes(axes, out = new Float32Array(6)) {
   out[SPACEMOUSE_FLY_RIGHT] = axes[0];
   out[SPACEMOUSE_FLY_UP] = axes[1];
   out[SPACEMOUSE_FLY_FORWARD] = axes[2];
-  out[SPACEMOUSE_FLY_PITCH] = -axes[3];
-  out[SPACEMOUSE_FLY_YAW] = -axes[4];
+  out[SPACEMOUSE_FLY_PITCH] = axes[3];
+  out[SPACEMOUSE_FLY_YAW] = axes[4];
   out[SPACEMOUSE_FLY_ROLL] = axes[5];
   return out;
 }
 
 /**
- * Apply Blender-style NDOF navigation preferences to Hyperscope's semantic
- * right/up/forward + pitch/yaw/roll axes.
+ * Normalize the c63a HID X/Y/Z/Rx/Ry/Rz report into Blender view axes.
+ * This is the same device-coordinate conversion used by Blender's Windows and
+ * macOS backends; spacenavd plus Blender's Unix backend produce the same result.
+ */
+export function mapSpaceMouseBlenderAxes(axes, out = new Float32Array(6)) {
+  out[SPACEMOUSE_FLY_RIGHT] = axes[0];
+  out[SPACEMOUSE_FLY_UP] = -axes[2];
+  out[SPACEMOUSE_FLY_FORWARD] = axes[1];
+  out[SPACEMOUSE_FLY_PITCH] = -axes[3];
+  out[SPACEMOUSE_FLY_YAW] = axes[5];
+  out[SPACEMOUSE_FLY_ROLL] = -axes[4];
+  return out;
+}
+
+/**
+ * Apply navigation-mode and Blender-style NDOF preferences to a raw HID report.
  *
  * Blender's Object mode reverses all six axes relative to Fly/Drone. Its
  * "Swap Y and Z Axes" option maps `{x, y, z}` to `{x, -z, y}` for both
  * translation and rotation before the per-axis inversion preferences.
- * Hyperscope mode deliberately retains the established mapping unchanged.
+ * Hyperscope mode deliberately retains its established physical gestures.
+ * Blender modes first apply Blender's platform-level device normalization.
  */
 export function mapSpaceMouseNavigationAxes(
   axes,
@@ -155,12 +170,13 @@ export function mapSpaceMouseNavigationAxes(
     mode = SPACEMOUSE_NAVIGATION_HYPERSCOPE;
   }
 
+  const blenderMode = mode !== SPACEMOUSE_NAVIGATION_HYPERSCOPE;
   let right = axes[0];
-  let up = axes[1];
-  let forward = axes[2];
-  let pitch = -axes[3];
-  let yaw = -axes[4];
-  let roll = axes[5];
+  let up = blenderMode ? -axes[2] : axes[1];
+  let forward = blenderMode ? axes[1] : axes[2];
+  let pitch = blenderMode ? -axes[3] : axes[3];
+  let yaw = blenderMode ? axes[5] : axes[4];
+  let roll = blenderMode ? -axes[4] : axes[5];
 
   if (swapYZ) {
     const previousUp = up;
@@ -178,6 +194,25 @@ export function mapSpaceMouseNavigationAxes(
   out[SPACEMOUSE_FLY_PITCH] = pitch * navigationSign * ((invertRotate & 1) ? -1 : 1);
   out[SPACEMOUSE_FLY_YAW] = yaw * navigationSign * ((invertRotate & 2) ? -1 : 1);
   out[SPACEMOUSE_FLY_ROLL] = roll * navigationSign * ((invertRotate & 4) ? -1 : 1);
+  return out;
+}
+
+/**
+ * Compose pitch/yaw/roll in the current camera-local frame. Basis vectors are
+ * stored as right, up, forward triples. This makes both pitch and yaw follow
+ * any accumulated roll instead of silently falling back to world axes.
+ */
+export function spaceMouseLocalRotationVector(
+  basis,
+  pitch,
+  yaw,
+  roll,
+  out = new Float64Array(4),
+) {
+  out[0] = basis[0] * pitch + basis[3] * yaw + basis[6] * roll;
+  out[1] = basis[1] * pitch + basis[4] * yaw + basis[7] * roll;
+  out[2] = basis[2] * pitch + basis[5] * yaw + basis[8] * roll;
+  out[3] = Math.hypot(pitch, yaw, roll);
   return out;
 }
 

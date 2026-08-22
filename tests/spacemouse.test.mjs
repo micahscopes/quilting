@@ -6,9 +6,11 @@ import {
   SpaceMouseController,
   createSpaceMouseState,
   decodeSpaceMouseReport,
+  mapSpaceMouseBlenderAxes,
   mapSpaceMouseFlyAxes,
   mapSpaceMouseNavigationAxes,
   shapeSpaceMouseAxis,
+  spaceMouseLocalRotationVector,
   spaceMouseModifierMode,
   spaceMouseNavigationPolicy,
 } from '../spacemouse.mjs';
@@ -57,16 +59,21 @@ test('the two primary buttons select inversion and depth-of-field layers', () =>
   assert.equal(spaceMouseModifierMode(0x103), 'depth-of-field');
 });
 
-test('fly mapping preserves the original gestures in camera-local space', () => {
+test('Hyperscope fly uses the requested positive Rx and Ry directions', () => {
   const mapped = mapSpaceMouseFlyAxes([1, 2, 3, 4, 5, 6]);
-  assert.deepEqual(Array.from(mapped), [1, 2, 3, -4, -5, 6]);
+  assert.deepEqual(Array.from(mapped), [1, 2, 3, 4, 5, 6]);
 });
 
-test('Blender Object reverses all navigation axes relative to Fly', () => {
+test('Blender device normalization matches the c63a backend transform', () => {
+  const mapped = mapSpaceMouseBlenderAxes([1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(Array.from(mapped), [1, -3, 2, -4, 6, -5]);
+});
+
+test('Blender Object reverses all normalized navigation axes relative to Fly', () => {
   const fly = mapSpaceMouseNavigationAxes([1, 2, 3, 4, 5, 6], { mode: 'fly' });
   const object = mapSpaceMouseNavigationAxes([1, 2, 3, 4, 5, 6], { mode: 'object' });
-  assert.deepEqual(Array.from(fly), [1, 2, 3, -4, -5, 6]);
-  assert.deepEqual(Array.from(object), [-1, -2, -3, 4, 5, -6]);
+  assert.deepEqual(Array.from(fly), [1, -3, 2, -4, 6, -5]);
+  assert.deepEqual(Array.from(object), [-1, 3, -2, 4, -6, 5]);
 });
 
 test('Blender Y/Z swap and independent inversion masks match NDOF preferences', () => {
@@ -74,7 +81,20 @@ test('Blender Y/Z swap and independent inversion masks match NDOF preferences', 
     [1, 2, 3, 4, 5, 6],
     { mode: 'fly', swapYZ: true, invertPan: 0b101, invertRotate: 0b010 },
   );
-  assert.deepEqual(Array.from(mapped), [-1, -3, -2, -4, 6, -5]);
+  assert.deepEqual(Array.from(mapped), [-1, -2, 3, -4, -5, 6]);
+});
+
+test('Hyperscope pitch and yaw both follow the rolled local camera frame', () => {
+  // right=(0,-1,0), up=(1,0,0) is a 90-degree rolled camera frame.
+  const rolledBasis = [0, -1, 0, 1, 0, 0, 0, 0, -1];
+  assert.deepEqual(
+    Array.from(spaceMouseLocalRotationVector(rolledBasis, 1, 0, 0)),
+    [0, -1, 0, 1],
+  );
+  assert.deepEqual(
+    Array.from(spaceMouseLocalRotationVector(rolledBasis, 0, 1, 0)),
+    [1, 0, 0, 1],
+  );
 });
 
 test('navigation policies distinguish pivot orbit, free flight, and drone', () => {

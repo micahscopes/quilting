@@ -184,7 +184,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="spacemouse-rotate" min="10" max="900" step="1" value="300"><span class="v" id="spacemouse-rotate-v">3.00</span></div>
     <div class="toggle-row" style="margin-top:5px">
       <div class="toggle" id="spacemouse-horizon-toggle"></div>
-      <span class="toggle-label">Lock horizon (Drone: always)</span>
+      <span class="toggle-label">Blender lock horizon (Drone: always)</span>
     </div>
     <div class="toggle-row" style="margin-top:4px">
       <div class="toggle" id="spacemouse-swap-toggle"></div>
@@ -265,8 +265,9 @@ import {
   mapSpaceMouseFlyAxes,
   mapSpaceMouseNavigationAxes,
   spaceMouseModifierMode,
+  spaceMouseLocalRotationVector,
   spaceMouseNavigationPolicy,
-} from './spacemouse.mjs?rev=blender-ndof-modes-v1';
+} from './spacemouse.mjs?rev=blender-ndof-modes-v2';
 
 const $ = id => document.getElementById(id);
 
@@ -554,7 +555,7 @@ const PARAM_DEFAULTS = {
   animate: '1', anim: '-1', atlas: '7',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
-  smlock: '0', smswap: '0', smpinv: '0', smrinv: '0',
+  smlock: '1', smswap: '0', smpinv: '0', smrinv: '0',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
   fqual: '2', fkaw: '1', fkoff: '15',
 };
@@ -674,7 +675,7 @@ let drag = false, lx = 0, ly = 0;
 const spaceMouseMove = signal(300, 'smmove');
 const spaceMouseRotate = signal(300, 'smrotate');
 const spaceMouseNavigation = signal('hyperscope', 'smnav');
-const spaceMouseLockHorizon = signal(false, 'smlock');
+const spaceMouseLockHorizon = signal(true, 'smlock');
 const spaceMouseSwapYZ = signal(false, 'smswap');
 const spaceMousePanInvert = signal(0, 'smpinv');
 const spaceMouseRotateInvert = signal(0, 'smrinv');
@@ -845,17 +846,16 @@ function rotateManualCameraAboutAxis(axisX, axisY, axisZ, angle) {
 }
 
 function rotateManualCameraLocal(pitch, yaw, roll) {
-  const rightX = manualCameraBasisState[0], rightY = manualCameraBasisState[1], rightZ = manualCameraBasisState[2];
-  const upX = manualCameraBasisState[3], upY = manualCameraBasisState[4], upZ = manualCameraBasisState[5];
-  const forwardX = manualCameraBasisState[6], forwardY = manualCameraBasisState[7], forwardZ = manualCameraBasisState[8];
-  const angle = Math.hypot(pitch, yaw, roll);
+  const rotation = spaceMouseLocalRotationVector(
+    manualCameraBasisState,
+    pitch,
+    yaw,
+    roll,
+    spaceMouseLocalRotation,
+  );
+  const angle = rotation[3];
   if (angle > 0) {
-    rotateManualCameraAboutAxis(
-      rightX * pitch + upX * yaw + forwardX * roll,
-      rightY * pitch + upY * yaw + forwardY * roll,
-      rightZ * pitch + upZ * yaw + forwardZ * roll,
-      angle,
-    );
+    rotateManualCameraAboutAxis(rotation[0], rotation[1], rotation[2], angle);
     syncManualCameraEuler();
   }
 }
@@ -907,6 +907,7 @@ const frameCameraBasis = new Float32Array(9), lodCameraBasis = new Float32Array(
 const inputCameraBasis = new Float32Array(9), pickCameraBasis = new Float32Array(9);
 const spaceMouseFlyAxes = new Float32Array(6);
 const spaceMouseNavigationAxes = new Float32Array(6);
+const spaceMouseLocalRotation = new Float64Array(4);
 const spaceMouseNavigationOptions = {
   mode: 'hyperscope',
   swapYZ: false,
@@ -2334,7 +2335,11 @@ function frame(ts) {
         const pitch = navigationAxes[3] * rotateScale;
         const yaw = navigationAxes[4] * rotateScale;
         const roll = navigationAxes[5] * rotateScale;
-        const horizonLocked = navigationPolicy.horizonLocked || spaceMouseLockHorizon.peek();
+        // Hyperscope is intentionally unrestricted 6-DoF. Blender enables
+        // horizon lock by default (and Drone forces it), matching its standard
+        // pitch + twist-yaw navigation with no roll.
+        const horizonLocked = navigationMode !== 'hyperscope'
+          && (navigationPolicy.horizonLocked || spaceMouseLockHorizon.peek());
 
         if (navigationMode === 'hyperscope') {
           // Preserve the established Hyperscope integration order: translate
