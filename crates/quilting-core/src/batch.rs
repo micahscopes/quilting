@@ -125,6 +125,28 @@ pub fn group_resident_faces(
     initial: ResidentLod,
 ) -> BTreeMap<RenderBatchKey, Vec<RenderBatchMember>> {
     let mut groups = BTreeMap::<RenderBatchKey, Vec<RenderBatchMember>>::new();
+    group_resident_faces_into(
+        residents,
+        face_materials,
+        face_nodes,
+        initial,
+        &mut groups,
+    );
+    groups
+}
+
+/// Rebuild draw-bucket memberships while retaining the map and vector
+/// allocations from the previous classification.
+pub fn group_resident_faces_into(
+    residents: &[Option<ResidentLod>],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    initial: ResidentLod,
+    groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+) {
+    for members in groups.values_mut() {
+        members.clear();
+    }
     for (face_index, resident) in residents.iter().enumerate() {
         let resident = resident.unwrap_or(initial);
         let key = RenderBatchKey::from_resident(
@@ -137,7 +159,7 @@ pub fn group_resident_faces(
             permutation_index: resident.perm_index.min(5) as u8,
         });
     }
-    groups
+    groups.retain(|_, members| !members.is_empty());
 }
 
 /// Update a face's resident topology from a visible payload, or retain its
@@ -522,6 +544,30 @@ mod tests {
         let second = group_resident_faces(&[Some(b)], &[0], &[0], ResidentLod::uniform(1));
         assert_eq!(first.keys().next(), second.keys().next());
         assert_ne!(first.values().next(), second.values().next());
+    }
+
+    #[test]
+    fn resident_group_scratch_reuses_member_capacity() {
+        let resident = ResidentLod::uniform(4);
+        let mut groups = BTreeMap::new();
+        group_resident_faces_into(
+            &[Some(resident); 8],
+            &[0; 8],
+            &[0; 8],
+            ResidentLod::uniform(1),
+            &mut groups,
+        );
+        let capacity = groups.values().next().unwrap().capacity();
+
+        group_resident_faces_into(
+            &[Some(resident); 2],
+            &[0; 2],
+            &[0; 2],
+            ResidentLod::uniform(1),
+            &mut groups,
+        );
+        assert_eq!(groups.values().next().unwrap().len(), 2);
+        assert!(groups.values().next().unwrap().capacity() >= capacity);
     }
 
     #[test]

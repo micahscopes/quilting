@@ -44,6 +44,8 @@ struct MainState {
     texture_cache: TextureCache,
     env_maps: EnvironmentMaps,
     batches: BTreeMap<batch::RenderBatchKey, GpuBatch>,
+    batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
     /// Last valid topology uploaded for each face. Worker visibility is
     /// asynchronous, so an invisible sentinel must not demote a patch that the
@@ -380,6 +382,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             renderer, texture_cache,
             env_maps: EnvironmentMaps::default(),
             batches: BTreeMap::new(),
+            batch_groups: BTreeMap::new(),
+            batch_staging: Vec::new(),
             cached_instances: Vec::new(),
             resident_face_lods: Vec::new(),
             lod_topology: None,
@@ -1111,6 +1115,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces as usize;
+            st.batch_groups.clear();
+            st.batch_staging.clear();
             st.resident_face_lods = vec![None; st.num_faces];
             st.lod_topology = build_instance_lod_topology(&st.cached_instances, st.num_faces);
             st.batch_update_stats = BatchUpdateStats::default();
@@ -1689,11 +1695,12 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         }
 
         let force_upload = state.batch_layout_dirty;
-        let buckets = batch::group_resident_faces(
+        batch::group_resident_faces_into(
             &state.resident_face_lods,
             &state.face_materials,
             &state.face_nodes,
             initial_resident,
+            &mut state.batch_groups,
         );
         perf_mark("batch-group-end");
         perf_measure("batch-group", "batch-group-start", "batch-group-end");
@@ -1716,12 +1723,12 @@ pub fn mr_build_batches(face_lods: &[f32]) {
 
         // One reusable CPU scratch allocation serves only buckets whose
         // membership actually changed.
-        let max_batch_size = buckets.values().map(Vec::len).max().unwrap_or(0);
-        let mut staging = vec![0.0f32; max_batch_size * stride];
+        let max_batch_size = state.batch_groups.values().map(Vec::len).max().unwrap_or(0);
+        state.batch_staging.resize(max_batch_size * stride, 0.0);
 
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
-            for (&key, members) in &buckets {
+            for (&key, members) in &state.batch_groups {
                 let tess = match tc.get(&key.lod) {
                     Some(t) => t,
                     None => { missing += 1; continue; }
@@ -1740,7 +1747,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                     &state.resident_face_lods,
                     key,
                     members,
-                    &mut staging,
+                    &mut state.batch_staging,
                 ) {
                     Ok(floats) => floats,
                     Err(error) => {
@@ -1750,7 +1757,7 @@ pub fn mr_build_batches(face_lods: &[f32]) {
                         continue;
                     }
                 };
-                let instance_data = &staging[..batch_floats];
+                let instance_data = &state.batch_staging[..batch_floats];
 
                 if let Some(mut gpu_batch) = previous {
                     if gpu_batch.can_fit(members.len()) {
