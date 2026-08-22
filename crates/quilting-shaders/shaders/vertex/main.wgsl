@@ -66,8 +66,8 @@ var skinning_tex: texture_2d<f32>;
 @group(0) @binding(3)
 var morph_tex: texture_2d<f32>;
 
-// Immutable source-face records, packed as ten RGBA32F texels per face in the
-// normative 40-float instance layout. Animated LOD updates stream only a
+// Immutable source-face records, packed as thirteen RGBA32F texels per face in
+// the normative 52-float instance layout. Animated LOD updates stream only a
 // topology record containing edge LODs, permutation, and source face ID.
 @group(0) @binding(4)
 var face_data_tex: texture_2d<f32>;
@@ -189,8 +189,9 @@ struct VertexOutput {
     @location(12) mobius_stretch: f32,
 }
 
-// Backend-neutral prepared-patch record. Locations 0..9 are ten contiguous
-// vec4s, exactly matching quilting_core::instance_layout's 40-float stride.
+// Backend-neutral prepared-patch record. Locations 0..12 are thirteen
+// contiguous vec4s, exactly matching quilting_core::instance_layout's
+// 52-float stride.
 // WebGL2 writes it with transform feedback; WebGPU can produce the same logical
 // record from a compute pass without changing render semantics.
 struct PatchPrepareInput {
@@ -203,13 +204,16 @@ struct PreparedPatchOutput {
     @location(0) p0: vec4<f32>,
     @location(1) p1: vec4<f32>,
     @location(2) p2: vec4<f32>,
-    @location(3) lod_info: vec4<f32>,
-    @location(4) vert_lod: vec4<f32>,
-    @location(5) uv01: vec4<f32>,
-    @location(6) uv2_prepare: vec4<f32>,
-    @location(7) smooth_n0: vec4<f32>,
-    @location(8) smooth_n1: vec4<f32>,
-    @location(9) smooth_n2: vec4<f32>,
+    @location(3) w0: vec4<f32>,
+    @location(4) w1: vec4<f32>,
+    @location(5) w2: vec4<f32>,
+    @location(6) lod_info: vec4<f32>,
+    @location(7) vert_lod: vec4<f32>,
+    @location(8) uv01: vec4<f32>,
+    @location(9) uv2_prepare: vec4<f32>,
+    @location(10) smooth_n0: vec4<f32>,
+    @location(11) smooth_n1: vec4<f32>,
+    @location(12) smooth_n2: vec4<f32>,
 }
 
 fn culled_vertex_output() -> VertexOutput {
@@ -236,6 +240,10 @@ fn finite_vec3(value: vec3<f32>) -> bool {
     return all(abs(value) < vec3<f32>(1e30));
 }
 
+fn finite_vec4(value: vec4<f32>) -> bool {
+    return all(abs(value) < vec4<f32>(1e30));
+}
+
 fn mobius_point(p: vec3<f32>) -> vec3<f32> {
     let q = vec4<f32>(0.0, p);
     return qmul(qmul(u.mob_a, q) + u.mob_b, qinv(qmul(u.mob_c, q) + u.mob_d)).yzw;
@@ -260,11 +268,10 @@ fn sphere_outside_frustum(center: vec3<f32>, radius: f32) -> bool {
         || clip.w - clip.z < -radius * length(r3 - r2);
 }
 
-// Conservative bound on the complete Möbius image of this flat QB patch.
-// A source ball maps to a ball when the pole is outside it. Pole-containing,
-// singular, and non-finite cases deliberately survive. Genuine curved QB
-// weights must extend this bound when they replace today's identity weights.
-fn patch_outside_frustum(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>) -> bool {
+// Conservative bound on the complete Möbius image of a flat source patch. A
+// source ball maps to a ball when the pole is outside it. Pole-containing,
+// singular, and non-finite cases deliberately survive.
+fn flat_patch_outside_frustum(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>) -> bool {
     let center = (p0 + p1 + p2) / 3.0;
     let source_radius = sqrt(max(
         dot(p0 - center, p0 - center),
@@ -297,6 +304,107 @@ fn patch_outside_frustum(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>) -> bool {
     return sphere_outside_frustum(image_center, image_radius);
 }
 
+// Exact Euclidean distance from the origin to a triangle embedded in R4.
+// Checking its vertices, edges, and (when non-degenerate) interior gives the
+// minimum over the closed barycentric simplex without assuming 3D geometry.
+fn origin_to_quaternion_triangle(a: vec4<f32>, b: vec4<f32>, c: vec4<f32>) -> f32 {
+    var distance_sq = min(dot(a, a), min(dot(b, b), dot(c, c)));
+
+    let ab = b - a;
+    let ab_len_sq = dot(ab, ab);
+    if ab_len_sq > 1e-20 {
+        let t = clamp(-dot(a, ab) / ab_len_sq, 0.0, 1.0);
+        let closest = a + t * ab;
+        distance_sq = min(distance_sq, dot(closest, closest));
+    }
+
+    let ac = c - a;
+    let ac_len_sq = dot(ac, ac);
+    if ac_len_sq > 1e-20 {
+        let t = clamp(-dot(a, ac) / ac_len_sq, 0.0, 1.0);
+        let closest = a + t * ac;
+        distance_sq = min(distance_sq, dot(closest, closest));
+    }
+
+    let bc = c - b;
+    let bc_len_sq = dot(bc, bc);
+    if bc_len_sq > 1e-20 {
+        let t = clamp(-dot(b, bc) / bc_len_sq, 0.0, 1.0);
+        let closest = b + t * bc;
+        distance_sq = min(distance_sq, dot(closest, closest));
+    }
+
+    let g00 = ab_len_sq;
+    let g01 = dot(ab, ac);
+    let g11 = ac_len_sq;
+    let determinant = g00 * g11 - g01 * g01;
+    if determinant > 1e-20 {
+        let rhs0 = -dot(a, ab);
+        let rhs1 = -dot(a, ac);
+        let s = (rhs0 * g11 - g01 * rhs1) / determinant;
+        let t = (g00 * rhs1 - g01 * rhs0) / determinant;
+        if s >= 0.0 && t >= 0.0 && s + t <= 1.0 {
+            let closest = a + s * ab + t * ac;
+            distance_sq = min(distance_sq, dot(closest, closest));
+        }
+    }
+    return sqrt(max(distance_sq, 0.0));
+}
+
+// Conservative bound for a genuine rational QB patch after the current
+// Möbius transform. For barycentric lambda, the fused evaluator is N/D where
+// N and D each range over a quaternion triangle. Triangle inequality bounds
+// |N| by the largest numerator control norm; the exact distance from the
+// denominator triangle to zero lower-bounds |D|. Therefore the whole patch is
+// inside an origin-centred ball of radius max|N_i|/min|D|. A denominator
+// triangle touching zero is a possible pole and deliberately remains visible.
+fn rational_patch_outside_frustum(
+    p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>,
+    w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>,
+) -> bool {
+    let qp0 = vec4<f32>(0.0, p0);
+    let qp1 = vec4<f32>(0.0, p1);
+    let qp2 = vec4<f32>(0.0, p2);
+    let numerator0 = qmul(qmul(u.mob_a, qp0) + u.mob_b, w0);
+    let numerator1 = qmul(qmul(u.mob_a, qp1) + u.mob_b, w1);
+    let numerator2 = qmul(qmul(u.mob_a, qp2) + u.mob_b, w2);
+    let denominator0 = qmul(qmul(u.mob_c, qp0) + u.mob_d, w0);
+    let denominator1 = qmul(qmul(u.mob_c, qp1) + u.mob_d, w1);
+    let denominator2 = qmul(qmul(u.mob_c, qp2) + u.mob_d, w2);
+    if !finite_vec4(numerator0) || !finite_vec4(numerator1) || !finite_vec4(numerator2)
+        || !finite_vec4(denominator0) || !finite_vec4(denominator1)
+        || !finite_vec4(denominator2) {
+        return false;
+    }
+    let denominator_distance = origin_to_quaternion_triangle(
+        denominator0, denominator1, denominator2,
+    );
+    if !(denominator_distance > 1e-8) {
+        return false;
+    }
+    let numerator_radius = max(
+        length(numerator0),
+        max(length(numerator1), length(numerator2)),
+    );
+    // Rendering clamps evaluated positions to POSITION_CLAMP, so the smaller
+    // of the analytic radius and that clamp remains conservative.
+    let radius = min(POSITION_CLAMP, numerator_radius / denominator_distance * 1.01 + 1e-6);
+    return sphere_outside_frustum(vec3<f32>(0.0), radius);
+}
+
+fn patch_outside_frustum(
+    p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>,
+    w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>,
+) -> bool {
+    let common_weight = length(w0) > 1e-10
+        && all(w1 == w0)
+        && all(w2 == w0);
+    if u.use_qb != 1 || common_weight {
+        return flat_patch_outside_frustum(p0, p1, p2);
+    }
+    return rational_patch_outside_frustum(p0, p1, p2, w0, w1, w2);
+}
+
 fn posed_position(control: vec4<f32>) -> vec3<f32> {
     let vertex_index = i32(control.x);
     var position = control.yzw;
@@ -310,7 +418,7 @@ fn posed_position(control: vec4<f32>) -> vec3<f32> {
 fn face_data_load(face_index: i32, slot: i32) -> vec4<f32> {
     let dimensions = textureDimensions(face_data_tex, 0);
     let width = i32(dimensions.x);
-    let texel = face_index * 10 + slot;
+    let texel = face_index * 13 + slot;
     return textureLoad(face_data_tex, vec2<i32>(texel % width, texel / width), 0);
 }
 
@@ -323,25 +431,32 @@ fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
     let p0 = vec4<f32>(source_p0.x, posed_position(source_p0));
     let p1 = vec4<f32>(source_p1.x, posed_position(source_p1));
     let p2 = vec4<f32>(source_p2.x, posed_position(source_p2));
-    let visible = !patch_outside_frustum(p0.yzw, p1.yzw, p2.yzw);
-    let source_uv2 = face_data_load(face_index, 6);
+    let source_w0 = face_data_load(face_index, 3);
+    let source_w1 = face_data_load(face_index, 4);
+    let source_w2 = face_data_load(face_index, 5);
+    let visible = !patch_outside_frustum(
+        p0.yzw, p1.yzw, p2.yzw,
+        source_w0, source_w1, source_w2,
+    );
+    let source_uv2 = face_data_load(face_index, 9);
     let uv2_prepare = vec4<f32>(
         source_uv2.xy,
         select(0.0, 1.0, visible),
         1.0,
     );
-    var vert_lod = face_data_load(face_index, 4);
+    var vert_lod = face_data_load(face_index, 7);
     vert_lod.w = f32(face_index);
     return PreparedPatchOutput(
         vec4<f32>(0.0),
         p0, p1, p2,
+        source_w0, source_w1, source_w2,
         in.lod_info,
         vert_lod,
-        face_data_load(face_index, 5),
-        uv2_prepare,
-        face_data_load(face_index, 7),
         face_data_load(face_index, 8),
-        face_data_load(face_index, 9),
+        uv2_prepare,
+        face_data_load(face_index, 10),
+        face_data_load(face_index, 11),
+        face_data_load(face_index, 12),
     );
 }
 
@@ -464,7 +579,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         sp0 = vec4<f32>(0.0, posed_position(in.p0));
         sp1 = vec4<f32>(0.0, posed_position(in.p1));
         sp2 = vec4<f32>(0.0, posed_position(in.p2));
-        if patch_outside_frustum(sp0.yzw, sp1.yzw, sp2.yzw) {
+        if patch_outside_frustum(
+            sp0.yzw, sp1.yzw, sp2.yzw,
+            in.w0, in.w1, in.w2,
+        ) {
             return culled_vertex_output();
         }
     }

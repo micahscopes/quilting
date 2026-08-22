@@ -613,20 +613,15 @@ fn face_normal_f32(v: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
 }
 
 impl FaceInstance {
-    /// Pack as the **legacy** 52-float (13 vec4, 208-byte) record:
+    /// Pack in the canonical 52-float (13 vec4, 208-byte) field order:
     /// `[p0, p1, p2, w0, w1, w2, edgeLods+pad, vertexLods+pad, uv01, uv2+pad,
     /// n0+pad, n1+pad, n2+pad]`.
     ///
-    /// This is not the layout the renderer binds. Production uses
-    /// [`crate::instance_layout`] (40 floats), which drops the explicit weight
-    /// quaternions because the fused Möbius-QB shader derives them from the
-    /// Möbius uniforms, and puts a skinning vertex index in each position's
-    /// scalar slot.
-    ///
-    /// Kept for tests and examples that still inspect the old shape. Production
-    /// renderer and WASM paths use the compact writer.
-    /// New code should pack through
-    /// [`crate::instance_layout::InstanceWriter`].
+    /// `FaceInstance` has no source vertex indices, so this helper retains each
+    /// position quaternion's scalar component. Production glTF packing uses
+    /// [`crate::instance_layout::InstanceWriter`] to put the skinning vertex
+    /// index in that slot; unskinned rational patches use pure positions and
+    /// therefore have zero there either way.
     pub fn to_f32_array(&self) -> [f32; 52] {
         let mut out = [0.0f32; 52];
         for (i, p) in self.positions.iter().enumerate() {

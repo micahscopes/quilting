@@ -1,8 +1,7 @@
 //! GPU buffer management: VAO, VBO, IBO, instance buffers, and UBOs.
 //!
 //! - Vertex attribute 0: bary coords (vec3, per-vertex)
-//! - Attributes 1-3 and 7-13: per-instance vec4s read from the instance buffer
-//! - Attributes 4-6: constant weight quaternions, not backed by the buffer
+//! - Attributes 1-13: per-instance vec4s read from the instance buffer
 //!
 //! The instance stride and per-attribute offsets come from
 //! [`quilting_core::instance_layout`] — never hardcode them here.
@@ -145,10 +144,9 @@ impl From<&MeshBuffers> for MeshDraw {
 impl MeshBuffers {
     /// Create VAOs for triangle and line rendering, sharing tessellation + instance buffers.
     ///
-    /// Compact vertex layout:
+    /// Canonical patch-record layout:
     /// - location 0: vec3 bary (per-vertex from tess buffer)
-    /// - locations 1-3, 7-13: vec4 (per-instance, 160-byte stride, divisor=1)
-    /// - locations 4-6: constant [1,0,0,0] (unused weight slots)
+    /// - locations 1-13: vec4 (per-instance, 208-byte stride, divisor=1)
     pub fn new(
         gl: &glow::Context,
         tess: &TessBuffers,
@@ -268,24 +266,10 @@ impl MeshBuffers {
 
 const INSTANCE_STRIDE_BYTES: i32 = instance_layout::STRIDE_BYTES as i32;
 
-/// Identity quaternion fed to the constant weight attributes.
-const IDENTITY_WEIGHT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
-
-/// Point the weight-quaternion attributes at a constant instead of the buffer.
-unsafe fn set_constant_weights(gl: &glow::Context) {
-    for loc in instance_layout::CONSTANT_WEIGHT_LOCATIONS {
-        gl.vertex_attrib_4_f32(
-            loc,
-            IDENTITY_WEIGHT[0], IDENTITY_WEIGHT[1], IDENTITY_WEIGHT[2], IDENTITY_WEIGHT[3],
-        );
-    }
-}
-
-/// Configure a VAO with the quilting compact vertex layout.
+/// Configure a VAO with the canonical patch-record vertex layout.
 ///
 /// Attribute 0: vec3 bary coords (per-vertex from tess buffer)
 /// Instanced attributes: one vec4 per `instance_layout::ATTR_MAP` entry
-/// Weight attributes: constant [1,0,0,0], see `CONSTANT_WEIGHT_LOCATIONS`
 unsafe fn setup_vao(
     gl: &glow::Context,
     vao: glow::VertexArray,
@@ -300,15 +284,13 @@ unsafe fn setup_vao(
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 0, 0);
 
-    // Instanced attributes from the compact stride.
+    // Instanced attributes from the canonical stride.
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(*instance_buf));
     for &(loc, offset) in &COMPACT_MAP {
         gl.enable_vertex_attrib_array(loc);
         gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, INSTANCE_STRIDE_BYTES, offset);
         gl.vertex_attrib_divisor(loc, 1);
     }
-
-    set_constant_weights(gl);
 
     // Index buffer
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
@@ -338,8 +320,6 @@ unsafe fn setup_vao_offset(
         gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, INSTANCE_STRIDE_BYTES, byte_offset + attr_offset);
         gl.vertex_attrib_divisor(loc, 1);
     }
-
-    set_constant_weights(gl);
 
     gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(*index_buf));
     gl.bind_vertex_array(None);
@@ -968,7 +948,7 @@ impl Default for EnvironmentMaps {
 }
 
 /// Immutable source-face records used by the patch preparation pass. Records
-/// retain the normative 10-texel/40-float layout so upload is a one-time copy
+/// retain the normative 13-texel/52-float layout so upload is a one-time copy
 /// and shader field offsets stay aligned with [`instance_layout`].
 pub struct FaceDataTexture {
     pub texture: glow::Texture,

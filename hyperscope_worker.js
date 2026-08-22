@@ -293,11 +293,8 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'compute_remeshed') {
-    const { mobius, lod } = data;
-    const result = wasm.compute_remeshed_instances(
-      new Float32Array(mobius),
-      lod || 4,
-    );
+    const { lod } = data;
+    const result = wasm.compute_remeshed_instances(lod || 4);
     if (result) {
       const transfers = [];
       if (result.instances?.buffer) transfers.push(result.instances.buffer);

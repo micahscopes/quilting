@@ -46,7 +46,7 @@ fn f32q(q: Quat) -> Q { [q.w as f32, q.x as f32, q.y as f32, q.z as f32] }
 fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
 }
-const IDENTITY_WEIGHT: Q = [1.0, 0.0, 0.0, 0.0]; // instance_layout constant weights
+const IDENTITY_WEIGHT: Q = [1.0, 0.0, 0.0, 0.0]; // ordinary source-triangle weight
 
 // Mirror of qinv in shaders/math/quaternion.wgsl (sentinel convention).
 fn qinv(q: Q) -> Q {
@@ -126,8 +126,8 @@ fn worst_sample(
             <= 3.0 * max_edge;
         let g = if near { grid } else { 1 };
 
-        // The live instance buffer supplies identity weights; the conformal
-        // weight is derived in-shader from the Möbius uniforms.
+        // Ordinary source triangles carry identity weights; the shader fuses
+        // those with the current Möbius uniforms.
         let pw: [Q; 3] = std::array::from_fn(|i| qmul(qadd(qmul(a, p[i]), b), IDENTITY_WEIGHT));
         let bw: [Q; 3] = std::array::from_fn(|i| qmul(qadd(qmul(c, p[i]), d), IDENTITY_WEIGHT));
 

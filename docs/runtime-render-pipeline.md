@@ -29,11 +29,11 @@ being serialized at display refresh rate.
 `mr_render` retains semantic batch membership and draw commands across frames.
 For each resident batch it runs one transform-feedback preparation dispatch:
 
-- fetch immutable source-face positions, UVs, normals, skinning indices, and
-  morph data from renderer-owned textures;
+- fetch immutable source-face positions, rational QB weights, UVs, normals,
+  skinning indices, and morph data from renderer-owned textures;
 - evaluate the current pose and ordinary node transform;
 - compute a conservative current-pose frustum result; and
-- write the canonical 40-float prepared-patch record into a persistent buffer.
+- write the canonical 52-float prepared-patch record into a persistent buffer.
 
 All later PBR, matcap, wire, normal, stretch, and pick draws consume that
 prepared record. An invisible prepared patch returns an out-of-clip vertex
@@ -99,7 +99,7 @@ The backend-independent pieces already live below the WebGL renderer:
 
 - `quilting_core::batch::{ResidentLod, RenderBatchKey, RenderBatchMember}`;
 - `quilting_core::instance_layout`, including the eight-float topology record
-  and 40-float prepared-patch record;
+  and 52-float prepared-patch record;
 - canonical atlas keys and S3 permutation semantics; and
 - WGSL surface, preparation, and material shader logic.
 
@@ -112,7 +112,7 @@ into a shared scene or command model.
 1. Port the two handwritten GLSL LOD passes to WGSL and test their payloads
    against the CPU conformance suite.
 2. Implement patch preparation as a compute pass writing the same logical
-   40-float record. Keep the WebGL transform-feedback implementation as the
+   52-float record. Keep the WebGL transform-feedback implementation as the
    compatibility backend.
 3. Move edge reconciliation, 2:1 grading, resident-topology selection, and
    visible-instance compaction into storage buffers.

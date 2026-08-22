@@ -393,16 +393,19 @@ mod tests {
     #[test]
     fn current_pose_culling_precedes_surface_evaluation() {
         let source = include_str!("../../quilting-shaders/shaders/vertex/main.wgsl");
-        let cull = source.find("if patch_outside_frustum(sp0.yzw, sp1.yzw, sp2.yzw)")
+        let main = source.find("fn vs_main").expect("main vertex entry point");
+        let cull = source[main..].find("if patch_outside_frustum(")
             .expect("vertex shader must cull from current posed control points");
-        let evaluate = source[cull..].find("eval_mobius_qb(")
+        let evaluate = source[main + cull..].find("eval_mobius_qb(")
             .expect("QB evaluation must follow current-pose culling");
         assert!(evaluate > 0);
         assert_eq!(
-            quilting_core::instance_layout::CONSTANT_WEIGHT_LOCATIONS,
-            [4, 5, 6],
-            "the flat-patch image bound must be upgraded when curved QB weights become resident",
+            &quilting_core::instance_layout::ATTR_MAP[3..6],
+            &[(4, 48), (5, 64), (6, 80)],
+            "rational QB weights must be resident patch attributes",
         );
+        assert!(source.contains("origin_to_quaternion_triangle"));
+        assert!(source.contains("rational_patch_outside_frustum"));
     }
 
     #[test]

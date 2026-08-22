@@ -16,7 +16,7 @@ out vec4 color;
 void main() { color = vec4(0.0); }
 "#;
 
-const PREPARED_VARYINGS: [&str; 10] = [
+const PREPARED_VARYINGS: [&str; 13] = [
     "_vs2fs_location0",
     "_vs2fs_location1",
     "_vs2fs_location2",
@@ -27,6 +27,9 @@ const PREPARED_VARYINGS: [&str; 10] = [
     "_vs2fs_location7",
     "_vs2fs_location8",
     "_vs2fs_location9",
+    "_vs2fs_location10",
+    "_vs2fs_location11",
+    "_vs2fs_location12",
 ];
 
 /// Reusable WebGL2 preparation pipeline. Batch VAOs and destination buffers

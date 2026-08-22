@@ -246,24 +246,25 @@ packs a record without anyone rediscovering offsets. Read it rather than
 trusting a table; this section only sketches the shape so the pipeline
 description reads coherently.
 
-One face instance is **40 floats / 160 bytes / 10 instanced vec4 attributes**,
-all with a divisor of 1: three positions, edge LODs, vertex LODs, three UV
-pairs packed into two vec4s, and three smooth normals.
+One face instance is **52 floats / 208 bytes / 13 instanced vec4 attributes**,
+all with a divisor of 1: three positions, three rational QB weights, edge
+LODs, vertex LODs, three UV pairs packed into two vec4s, and three smooth
+normals.
 
 Two things about this layout are not guessable:
 
 - The `.x` component of each position vec4 is a **vertex index** used by GPU
   skinning, not the quaternion scalar part. Everywhere else in the codebase a
   quaternion is `(w, x, y, z)`; this is the one deliberate exception.
-- The QB weight quaternions (`@location` 4, 5, 6) are **not in the buffer at
-  all**. They are bound as the constant `[1, 0, 0, 0]`, because the fused
-  Mobius-QB vertex shader derives the conformal weight `(c*p + d)` from the
-  Mobius uniforms per vertex. There is nothing per-instance left to upload.
+- QB weight quaternions (`@location` 4, 5, 6) are explicit source-patch data.
+  Ordinary triangle meshes store identity weights. Fitted/remeshed rational
+  patches retain their non-identity weights, which the fused Mobius-QB shader
+  combines with `(c*p + d)` during evaluation. Replacing these fields with
+  constant identity weights silently flattens every fitted rational patch.
 
-The earlier 52-float / 208-byte layout — which did carry explicit weight
-quaternions — was retired when that fusion landed. `FaceInstance::to_f32_array`
-still emits the old 52-float record and is kept only for the callers that have
-not moved to `InstanceWriter`.
+The briefly used 40-float / 160-byte compact layout omitted source weights. It
+was valid for ordinary linear triangles but not as the canonical production
+record because it destroyed fitted/remeshed QB geometry.
 
 ### LOD Computation
 
@@ -302,7 +303,7 @@ This is a *visual* fade and is deliberately much wider than the *numeric* pole g
 
 ### What Becomes Static (Updated Only When Geometry Changes)
 
-- Instance buffer with original positions and identity weights
+- Source-patch resource with original positions and rational QB weights
 - Tessellation atlas VBO
 - Texture uploads
 
@@ -422,7 +423,7 @@ These must always hold. Violating any of them produces visible artifacts.
 
 5. **Mobius weight formula**: `w' = (c*x + d) * w`, NOT `w' = (c*x + d)^{-1} * w`. The inverse form is wrong and produces inside-out geometry.
 
-6. **Instance data alignment**: the packer, the renderer's VAO setup, and the WGSL vertex shader must all agree on the instance stride and field offsets, and every instanced attribute must have a divisor of 1. Misalignment silently shifts every subsequent field, so it produces garbled geometry rather than an error. `quilting-core::instance_layout` is the normative definition (currently 40 floats / 160 bytes / 10 attributes) and carries tests that the attributes tile the stride exactly. Anything that hardcodes a stride or offset instead of using those constants is a silent-corruption hazard, and restating them in prose is how this section came to describe a layout that had not shipped since commit `3628c4f` (2026-03-24).
+6. **Instance data alignment**: the packer, the renderer's VAO setup, and the WGSL vertex shader must all agree on the instance stride and field offsets, and every instanced attribute must have a divisor of 1. Misalignment silently shifts every subsequent field, so it produces garbled geometry rather than an error. `quilting-core::instance_layout` is the normative definition (currently 52 floats / 208 bytes / 13 attributes) and carries tests that the attributes tile the stride exactly. Anything that hardcodes a stride or offset instead of using those constants is a silent-corruption hazard.
 
 7. **UVs and normals are NOT permuted**: only tessellation bary coords go through S3 permutation. Permuting UVs/normals causes visible orientation jumps when LOD redistribution changes the perm_index.
 

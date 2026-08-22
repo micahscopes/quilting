@@ -1235,8 +1235,7 @@ $('remesh-btn').addEventListener('click', async () => {
         `pos err: ${s.rms_position_error.toFixed(4)}, norm: ${s.rms_normal_error.toFixed(1)}°`;
 
       // Now compute remeshed instances and render them
-      const mobius = currentMobius ? Array.from(currentMobius) : [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0];
-      const remeshResp = await workerCall('compute_remeshed', { mobius, lod: 4 });
+      const remeshResp = await workerCall('compute_remeshed', { lod: 4 });
       const r = remeshResp.result;
       if (r && r.instances) {
         mr_setInstanceData(new Float32Array(r.instances.buffer || r.instances), r.num_faces);
@@ -1835,6 +1834,7 @@ async function tickAnimation(t) {
 let lodDirty = false; // set true when camera moves while LOD is in flight
 
 function debouncedLodRecompute() {
+  if (remeshedMode) return;
   if (lodInFlight) {
     lodDirty = true;
     lodTelemetry.dirty = true;
@@ -1845,7 +1845,7 @@ function debouncedLodRecompute() {
 }
 
 async function recomputeLods() {
-  if (lodInFlight || !meshInfo) return;
+  if (lodInFlight || !meshInfo || remeshedMode) return;
   lodInFlight = true;
   lodTelemetry.inFlight = true;
   lodTelemetry.submitted += 1;
@@ -1891,7 +1891,7 @@ async function recomputeLods() {
     // Apply every completed coherent classification. If state changed while
     // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
     // discarding the completed result would starve continuously animated scenes.
-    if (resp.lods) {
+    if (resp.lods && !remeshedMode) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       clearBatchMeasures();
       mr_buildBatches(faceLods);
@@ -1927,6 +1927,7 @@ async function recomputeLods() {
 }
 
 async function loadModel(buffer, filename) {
+  remeshedMode = false;
   $('stats').textContent = `Loading ${filename}...`;
   const resp = await workerCall('load_gltf_data', { bytes: buffer });
   meshInfo = resp.result;

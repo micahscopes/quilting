@@ -1305,7 +1305,7 @@ pub fn get_skinning_data() -> JsValue {
 
 /// Build rest-pose instance data for GPU skinning (static, uploaded once).
 /// LODs are computed from skinned positions at time `lod_time` for accuracy.
-/// Returns a Float32Array with 40 floats per face (compact stride).
+/// Returns a Float32Array with 52 floats per face (canonical patch stride).
 /// Vertex indices are packed in p0.x/p1.x/p2.x for skinning texture lookup.
 /// Returns null if no skinned model is loaded.
 #[wasm_bindgen]
@@ -2595,7 +2595,6 @@ pub fn remesh_current_model(target_patches: u32) -> JsValue {
 /// per-face LOD data, and per-face material indices.
 #[wasm_bindgen]
 pub fn compute_remeshed_instances(
-    mobius: &[f32],
     lod: u32,
 ) -> JsValue {
     REMESH_DATA.with(|rd| {
@@ -2605,21 +2604,13 @@ pub fn compute_remeshed_instances(
             None => return JsValue::NULL,
         };
 
-        let transform = if mobius.len() >= 16 {
-            let a = Quat::new(mobius[0] as f64, mobius[1] as f64, mobius[2] as f64, mobius[3] as f64);
-            let b = Quat::new(mobius[4] as f64, mobius[5] as f64, mobius[6] as f64, mobius[7] as f64);
-            let c = Quat::new(mobius[8] as f64, mobius[9] as f64, mobius[10] as f64, mobius[11] as f64);
-            let d = Quat::new(mobius[12] as f64, mobius[13] as f64, mobius[14] as f64, mobius[15] as f64);
-            Mobius { a, b, c, d }
-        } else {
-            Mobius::identity()
-        };
-
+        // Preserve fitted patches in base space. The render shader combines
+        // their source weights with the current Möbius uniforms exactly once.
         let instances = quilting_core::evaluate::compute_instances_from_patches(
             &data.patches,
             &data.patch_uvs,
             &data.patch_normals,
-            &transform,
+            &Mobius::identity(),
             lod,
         );
 
@@ -2633,6 +2624,13 @@ pub fn compute_remeshed_instances(
             for vi in 0..3 {
                 let p = inst.positions[vi].to_point();
                 w.set_position(vi, 0, [p[0] as f32, p[1] as f32, p[2] as f32]);
+                let weight = inst.weights[vi];
+                w.set_weight(vi, [
+                    weight.w as f32,
+                    weight.x as f32,
+                    weight.y as f32,
+                    weight.z as f32,
+                ]);
                 w.set_normal(vi, inst.normals[vi]);
             }
             w.set_edge_lods([
