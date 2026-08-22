@@ -93,6 +93,31 @@ entire patch, including pole-driven ballooning between its corners, remains
 outside a guarded frustum. Visibility of the three source vertices alone is
 not such a proof.
 
+## Visibility and submission contract
+
+Visibility is a current-pose fact, while resident topology is state carried
+between asynchronous classifications. Backends must keep those concepts
+separate:
+
+| Contract | WebGL2 implementation | Future WebGPU implementation |
+|---|---|---|
+| Pose source | Retained joint/morph textures in each context | Shared logical pose buffers, uploaded once per device |
+| Patch preparation | Transform feedback writes the 52-float prepared record | Compute writes the same logical record to storage |
+| Conservative visibility | Prepared flag makes later vertices degenerate | Visibility bit participates in prefix-sum/atomic compaction |
+| Resident topology | CPU retains the last valid crack-free LOD and sparse bucket membership | Storage buffers retain per-face edge LOD and reconcile it in compute |
+| Submission | Instanced draw per non-empty material/node/LOD/parity bucket | Compacted visible instances plus indirect arguments per `RenderBatchKey` |
+
+A negative visibility result must mean “the complete posed rational patch is
+outside the current guarded frustum.” Invalid bounds, a denominator region
+touching zero, or a source bound containing the Möbius pole all survive. The
+WebGL vertex rejection therefore saves raster and fragment work but is not
+true draw compaction: atlas vertices are still invoked. Demoting asynchronous
+off-camera faces to LOD 1 would reduce that work but can expose a coarse flash
+when a newer camera/pose makes the patch visible before the worker catches up.
+The correct WebGPU solution is same-pose compaction, not weakening this
+residency rule. A future predictive WebGL policy would need a proven swept
+frustum/pose bound and must retain the hidden last-valid topology.
+
 ## Work outside the frame loop
 
 - glTF parsing, image decode, static face textures, adjacency, and skinning
@@ -146,3 +171,7 @@ and prepared meshes. The retained atlas, versioned browser cache, and stable
 batch buffers already implement that principle more completely. Its random
 Poisson/Delaunay generation and per-patch regl commands are not appropriate to
 reintroduce into the deterministic adaptive runtime.
+
+Meshoptimizer opportunities and the boundary between ordinary triangle
+clustering and conformal QB fitting are tracked in
+[`meshoptimizer-roadmap.md`](meshoptimizer-roadmap.md).

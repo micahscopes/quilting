@@ -43,6 +43,8 @@ and the graph/interchange contract is in
 The current CPU/GPU hot path and the backend boundary for a future WebGPU
 implementation are mapped in
 [`docs/runtime-render-pipeline.md`](docs/runtime-render-pipeline.md).
+The measured, deliberately staged meshoptimizer opportunities are recorded in
+[`docs/meshoptimizer-roadmap.md`](docs/meshoptimizer-roadmap.md).
 The Blender 4.2+ authoring extension and its reproducible headless round trip
 live in [`tools/blender_hyperscape`](tools/blender_hyperscape); the editable
 full-flow scene is [`examples/hyperscape-blender-demo.blend`](examples/hyperscape-blender-demo.blend).
