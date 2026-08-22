@@ -38,6 +38,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
+mod patch;
+
+pub use patch::{
+    conservative_patch_source_bound, PatchControl, PatchIndexBuildReport, PatchQueryResult,
+    StaticPatchIndex,
+};
+
 const DEFAULT_CLEARANCE: f64 = 1.0e-12;
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -1197,6 +1204,7 @@ pub enum RoundIndexError {
     InvalidSide(String),
     InvalidClearance,
     InvalidViewProjection,
+    DuplicatePatchFace(u32),
     DuplicateNode(NodeId),
     UnknownNode(NodeId),
     UnknownParent { child: NodeId, parent: NodeId },
@@ -1222,6 +1230,9 @@ impl fmt::Display for RoundIndexError {
             Self::InvalidClearance => write!(f, "predicate clearance must be finite and nonnegative"),
             Self::InvalidViewProjection => {
                 write!(f, "view-projection matrix must define six finite clip planes")
+            }
+            Self::DuplicatePatchFace(face) => {
+                write!(f, "duplicate patch face {face}")
             }
             Self::DuplicateNode(id) => write!(f, "duplicate round-index node {}", id.0),
             Self::UnknownNode(id) => write!(f, "unknown round-index node {}", id.0),

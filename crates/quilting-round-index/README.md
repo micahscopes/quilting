@@ -23,6 +23,20 @@ view-projection matrix directly into those six output-chart half-spaces.
 Invalid or degenerate matrices fail closed (no query) rather than manufacturing
 a culling proof.
 
+`StaticPatchIndex` is the first renderer-facing adapter. It builds a balanced
+hierarchy over conservative source-space bounds for three-control QB patches.
+Ordinary patches with one common quaternion weight use a tight sphere around
+their control triangle. Rational patches use a finite norm bound only when the
+convex hull of their denominator controls is proved clear of zero. Invalid or
+potentially singular patches enter an explicit `always_candidates` lane: an
+uncertain bound can cost performance, but cannot make a patch disappear.
+
+This adapter is intentionally rest-pose only. Do not use it to cull active
+animation until the caller supplies conservative pose envelopes or refits leaf
+bounds for the current `PoseKey`. A renderer should first run it as shadow
+telemetry against its authoritative visibility path and require zero false
+negatives before allowing it to affect drawing.
+
 The crate intentionally returns `IntersectsOrUnknown` whenever a numerical or
 geometric case is not proved safe to prune. See the crate-level Rust
 documentation and `formal/ConformalMereology/RoundSideIndex.lean` for the
