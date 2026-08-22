@@ -11,6 +11,7 @@
 <link data-trunk rel="copy-dir" href="matcaps" />
 <link data-trunk rel="copy-dir" href="local-glbs" />
 <link data-trunk rel="copy-file" href="hyperscope_worker.js" />
+<link data-trunk rel="copy-file" href="spacemouse.mjs" />
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
 <link data-trunk rel="copy-file" href="examples/hyperscape-blender-demo.glb" />
@@ -167,6 +168,17 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section">
+    <label>3D Mouse</label>
+    <div class="btns"><button id="spacemouse-connect">Connect SpaceMouse</button></div>
+    <div id="spacemouse-status" style="color:#8b949e;font-size:10px;margin-top:4px">Checking WebHID…</div>
+    <label style="margin-top:5px">Move sensitivity</label>
+    <div class="sr"><input type="range" id="spacemouse-move" min="10" max="300" step="1" value="100"><span class="v" id="spacemouse-move-v">1.00</span></div>
+    <label>Rotate sensitivity</label>
+    <div class="sr"><input type="range" id="spacemouse-rotate" min="10" max="300" step="1" value="100"><span class="v" id="spacemouse-rotate-v">1.00</span></div>
+    <div style="color:#484f58;font-size:9px;margin-top:3px">Horizon locked; roll is reserved for a future 6-DoF camera.</div>
+  </div>
+
+  <div class="section">
     <label>Fuzzy Vision</label>
     <div class="toggle-row">
       <div class="toggle" id="fuzzy-toggle"></div>
@@ -224,6 +236,7 @@ import init, {
   mr_pick, mr_highlightFace,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
+import { SpaceMouseController } from './spacemouse.mjs';
 
 const $ = id => document.getElementById(id);
 
@@ -499,6 +512,7 @@ const PARAM_DEFAULTS = {
   res: '0', density: '100', atten: '1', minpx: '2',
   animate: '1', anim: '-1', atlas: '7',
   zoom: '3', rx: '0.3', ry: '0.5',
+  smmove: '100', smrotate: '100',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
   fqual: '2', fkaw: '1', fkoff: '15',
 };
@@ -523,6 +537,7 @@ function readParams() {
     zoom: get('zoom'),
     rx: get('rx'),
     ry: get('ry'),
+    smmove: get('smmove'), smrotate: get('smrotate'),
     fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
     fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
     fqual: get('fqual'), fkaw: get('fkaw'), fkoff: get('fkoff'),
@@ -569,6 +584,8 @@ function syncURL() {
       ss('fqual', fz.quality, PARAM_DEFAULTS.fqual);
       ss('fkaw', fz.kawase, PARAM_DEFAULTS.fkaw);
       ss('fkoff', fz.kawaseOff, PARAM_DEFAULTS.fkoff);
+      ss('smmove', spaceMouseMove, PARAM_DEFAULTS.smmove);
+      ss('smrotate', spaceMouseRotate, PARAM_DEFAULTS.smrotate);
     } catch { /* signals not yet initialized */ }
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
@@ -598,6 +615,49 @@ $('sidebar-toggle').onclick = () => {
 let rotX = 0.3, rotY = 0.5, zoom = 3.0;
 let panX = 0, panY = 0, panZ = 0;
 let drag = false, lx = 0, ly = 0;
+
+const spaceMouseMove = signal(100, 'smmove');
+const spaceMouseRotate = signal(100, 'smrotate');
+bindSlider('spacemouse-move', spaceMouseMove, value => (value / 100).toFixed(2));
+bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed(2));
+const spaceMouseStatus = $('spacemouse-status');
+const spaceMouseConnect = $('spacemouse-connect');
+const spaceMouseDiagnostics = {
+  available: false,
+  connected: false,
+  state: 'initializing',
+  message: 'Checking WebHID…',
+  motionFrames: 0,
+  axes: null,
+};
+let spaceMouseLastMotionAt = -Infinity;
+let spaceMouseLastLodAt = -Infinity;
+let spaceMouseMotionActive = false;
+globalThis.__hyperscopeInputDiagnostics = { spaceMouse: spaceMouseDiagnostics };
+const spaceMouse = new SpaceMouseController({
+  onStatus: ({ state, message, device }) => {
+    spaceMouseDiagnostics.state = state;
+    spaceMouseDiagnostics.message = message;
+    spaceMouseDiagnostics.connected = state === 'connected';
+    spaceMouseDiagnostics.productName = device?.productName || null;
+    spaceMouseStatus.textContent = message;
+    spaceMouseStatus.style.color = state === 'error' ? '#f0883e'
+      : state === 'connected' ? '#58a6ff' : '#8b949e';
+    spaceMouseConnect.textContent = state === 'connected' ? 'SpaceMouse connected' : 'Connect SpaceMouse';
+  },
+});
+spaceMouseDiagnostics.available = spaceMouse.available;
+spaceMouseDiagnostics.axes = spaceMouse.filteredAxes;
+spaceMouseConnect.disabled = !spaceMouse.available;
+spaceMouseConnect.addEventListener('click', () => spaceMouse.requestDevice());
+if (spaceMouse.available) {
+  spaceMouse.restoreGrantedDevice().catch(error => {
+    spaceMouseStatus.textContent = `SpaceMouse restore failed: ${error.message}`;
+    spaceMouseStatus.style.color = '#f0883e';
+  });
+} else {
+  spaceMouseStatus.textContent = 'WebHID unavailable (Chrome/Edge and a secure context are required)';
+}
 
 function perspective(fov, a, n, f, out = new Float32Array(16)) {
   const t = 1 / Math.tan(fov * 0.5), r = 1 / (n - f);
@@ -1237,6 +1297,8 @@ applyParams = function(params) {
   zoom = finite(params.zoom, 3, 0.1, 1000);
   rotX = finite(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
   rotY = finite(params.ry, 0.5, -1e6, 1e6);
+  spaceMouseMove.set(finite(params.smmove, 100, 10, 300));
+  spaceMouseRotate.set(finite(params.smrotate, 100, 10, 300));
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
   fz.radius.set(integer(params.fradius, 11, 4, 128));
@@ -1906,6 +1968,51 @@ function frame(ts) {
     // Keep LOD tracking the animated pose. The scheduler retains at most one
     // in-flight GPU job plus one coalesced follow-up for the newest frame.
     debouncedLodRecompute();
+  }
+
+  // WebHID reports update a retained target state; camera integration happens
+  // exactly once per animation frame. This keeps navigation independent of HID
+  // report rate and lets the worker coalesce LOD updates behind the main-GPU
+  // current-pose visibility pass. Authored cameras remain authoritative.
+  const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
+  if (!authoredCamera && deltaSeconds > 0) {
+    let moving = false;
+    for (let axis = 0; axis < 6; axis++) moving ||= spaceMouseAxes[axis] !== 0;
+    if (moving) {
+      const moveScale = (spaceMouseMove.peek() / 100) * zoom * deltaSeconds * 0.8;
+      const rotateScale = (spaceMouseRotate.peek() / 100) * deltaSeconds * 1.5;
+      const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+      const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+      const rightX = cosY, rightZ = -sinY;
+      const upX = -sinY * sinX, upY = cosX, upZ = -cosY * sinX;
+      panX += (spaceMouseAxes[0] * rightX + spaceMouseAxes[2] * upX) * moveScale;
+      panY += spaceMouseAxes[2] * upY * moveScale;
+      panZ += (spaceMouseAxes[0] * rightZ + spaceMouseAxes[2] * upZ) * moveScale;
+      zoom *= Math.exp(spaceMouseAxes[1] * (spaceMouseMove.peek() / 100) * deltaSeconds * 1.5);
+      zoom = Math.max(0.1, Math.min(100, zoom));
+      rotX += spaceMouseAxes[3] * rotateScale;
+      rotY -= spaceMouseAxes[5] * rotateScale;
+      rotX = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, rotX));
+      spaceMouseDiagnostics.motionFrames += 1;
+      spaceMouseMotionActive = true;
+      spaceMouseLastMotionAt = ts;
+      // Main-GPU current-pose culling follows the camera every render frame.
+      // Adaptive tessellation changes much less often during continuous 6-axis
+      // navigation, then receives one final classification after the controller
+      // settles. This avoids turning HID report smoothing into worker/readback
+      // pressure while keeping visible topology responsive.
+      if (ts - spaceMouseLastLodAt >= 100) {
+        spaceMouseLastLodAt = ts;
+        debouncedLodRecompute();
+        syncURL();
+      }
+    }
+  }
+  if (spaceMouseMotionActive && ts - spaceMouseLastMotionAt >= 150) {
+    spaceMouseMotionActive = false;
+    spaceMouseLastLodAt = ts;
+    debouncedLodRecompute();
+    syncURL();
   }
 
   const ex = authoredCamera ? authoredCamera.eye[0] : zoom*Math.sin(rotY)*Math.cos(rotX)+panX;
