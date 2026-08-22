@@ -1252,6 +1252,7 @@ dependencies = [
  "quilting-mesh",
  "quilting-remesh",
  "quilting-renderer",
+ "quilting-round-index",
  "quilting-shaders",
  "rustc-hash 2.1.1",
  "serde",

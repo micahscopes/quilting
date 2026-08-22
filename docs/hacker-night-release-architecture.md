@@ -168,6 +168,18 @@ Unknown, tangent, pole-touching, and uncertified bulge cases remain visible.
 WebGL2 vertex rejection saves raster/fragment work but not vertex invocation;
 WebGPU later performs visible-instance compaction and indirect submission.
 
+The browser's first observer is opt-in with `roundshadow=1`. It builds a
+rest-pose `StaticPatchIndex`, compares its candidates with coherent completed
+GPU LOD classifications, and exposes build/query counts at
+`globalThis.__hyperscopeRoundShadow`. GPU-only survivors measure how much more
+conservative the current classifier is; they are not mislabeled as visible
+geometry. A separate seven-point rational-QB sample check records a red-alert
+false negative only when a rejected patch has a point strictly inside the clip
+frustum. The observer never changes a draw call.
+Active animation and authored per-node transforms currently report
+`unsupported`; advancing those cases requires conservative pose envelopes and
+structured frame chains, respectively.
+
 ## Conformal QB optimization boundary
 
 The new optimizer prototype is an offline research input, not a live-renderer

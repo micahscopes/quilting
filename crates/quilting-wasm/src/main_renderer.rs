@@ -23,6 +23,7 @@ use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
+use crate::round_shadow::RoundShadowObserver;
 use hyperscape::interchange::{
     GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
 };
@@ -136,6 +137,9 @@ struct MainState {
     /// from topology because invisible faces deliberately keep their last LOD.
     classified_face_visibility: Vec<bool>,
     classified_culled_faces: usize,
+    /// Opt-in observer for the conservative CPU round hierarchy. It never
+    /// changes batch membership or draw calls.
+    round_shadow: RoundShadowObserver,
     /// Faces whose latest asynchronous classification changed. This sparse
     /// frontier seeds half-edge reconciliation without rescanning every edge.
     lod_dirty_faces: Vec<usize>,
@@ -487,6 +491,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             resident_face_lods: Vec::new(),
             classified_face_visibility: Vec::new(),
             classified_culled_faces: 0,
+            round_shadow: RoundShadowObserver::default(),
             lod_dirty_faces: Vec::new(),
             lod_balance_scratch: batch::ResidentLodBalanceScratch::default(),
             lod_topology: None,
@@ -1298,6 +1303,68 @@ fn build_instance_lod_topology(
     ))
 }
 
+#[wasm_bindgen(js_name = "mr_setRoundShadowEnabled")]
+pub fn mr_set_round_shadow_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let MainState {
+            round_shadow,
+            cached_instances,
+            num_faces,
+            ..
+        } = state;
+        round_shadow.set_enabled(enabled, cached_instances, *num_faces)
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_roundShadowDiagnostics")]
+pub fn mr_round_shadow_diagnostics() -> JsValue {
+    STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map_or(JsValue::NULL, |state| state.round_shadow.to_js())
+    })
+}
+
+/// Compare the conservative CPU hierarchy with the authoritative GPU
+/// visibility classification for the same completed LOD request. This is
+/// telemetry only: candidate membership never changes renderer state.
+#[wasm_bindgen(js_name = "mr_compareRoundShadow")]
+pub fn mr_compare_round_shadow(
+    view_projection: &[f32],
+    transform_kind: &str,
+    transform_center: &[f32],
+    transform_radius: f32,
+    animated: bool,
+    authored_scene: bool,
+    authoritative_full_snapshot: bool,
+) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let MainState {
+            round_shadow,
+            classified_face_visibility,
+            ..
+        } = state;
+        round_shadow.compare(
+            view_projection,
+            transform_kind,
+            transform_center,
+            transform_radius,
+            animated,
+            authored_scene,
+            authoritative_full_snapshot,
+            classified_face_visibility,
+        )
+    })
+}
 #[wasm_bindgen(js_name = "mr_setInstanceData")]
 pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
     STATE.with(|s| {
@@ -1327,6 +1394,13 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             } else {
                 warn!("Could not construct resident LOD topology from instance data");
             }
+            let MainState {
+                round_shadow,
+                cached_instances,
+                num_faces,
+                ..
+            } = st;
+            round_shadow.rebuild(cached_instances, *num_faces);
             st.batch_layout_dirty = true;
             if st.face_nodes.len() != st.num_faces {
                 st.face_nodes = vec![0; st.num_faces];
