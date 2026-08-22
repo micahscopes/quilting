@@ -284,6 +284,7 @@ const startupDiagnostics = {
   wasm: null,
   workers: null,
   atlas: null,
+  environment: null,
 };
 // Deliberately read-only by convention: browser regression checks consume this
 // without reaching into module-scoped signals or worker state.
@@ -1237,9 +1238,10 @@ applyParams = function(params) {
 };
 
 // --- IndexedDB for dropped GLBs and versioned generated assets ---
-const IDB_NAME = 'hyperscope', IDB_VERSION = 2;
-const IDB_GLB_STORE = 'glb', IDB_ATLAS_STORE = 'atlas';
+const IDB_NAME = 'hyperscope', IDB_VERSION = 3;
+const IDB_GLB_STORE = 'glb', IDB_ATLAS_STORE = 'atlas', IDB_ENV_STORE = 'environment';
 const ATLAS_CACHE_FORMAT = 'balanced-hierarchical-v1-ratio2-k30-seed42';
+const ENV_CACHE_FORMAT = 'cpu-ggx-v1-pf256-ir32-s64-firefly64';
 function idbOpen() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_NAME, IDB_VERSION);
@@ -1249,6 +1251,9 @@ function idbOpen() {
       }
       if (!req.result.objectStoreNames.contains(IDB_ATLAS_STORE)) {
         req.result.createObjectStore(IDB_ATLAS_STORE);
+      }
+      if (!req.result.objectStoreNames.contains(IDB_ENV_STORE)) {
+        req.result.createObjectStore(IDB_ENV_STORE);
       }
     };
     req.onsuccess = () => {
@@ -1564,20 +1569,93 @@ function prefilterEnvMips(sourceSampler, faceSize) {
 }
 
 async function loadEnvMap(url, generation = envLoadGeneration, signal = undefined) {
-  console.log('Loading environment map:', url);
+  const startedAt = performance.now();
+  const cacheKey = `${ENV_CACHE_FORMAT}:${url}`;
+  const pfSize = 256;
+  const irSize = 32;
+  let expectedPrefilterFloats = 0;
+  for (let mipSize = pfSize; mipSize >= 1; mipSize >>= 1) {
+    expectedPrefilterFloats += 6 * mipSize * mipSize * 4;
+  }
+  const expectedIrradianceFloats = 6 * irSize * irSize * 4;
+
   try {
+    try {
+      const cacheReadAt = performance.now();
+      const cached = await idbGet(IDB_ENV_STORE, cacheKey);
+      const cacheReadyAt = performance.now();
+      const valid = cached?.format === ENV_CACHE_FORMAT
+        && cached.prefiltered instanceof Float32Array
+        && cached.prefiltered.length === expectedPrefilterFloats
+        && cached.irradiance instanceof Float32Array
+        && cached.irradiance.length === expectedIrradianceFloats;
+      if (valid) {
+        if (generation !== envLoadGeneration) return;
+        const uploadAt = performance.now();
+        mr_uploadEnvMaps(cached.prefiltered, pfSize, cached.irradiance, irSize);
+        const finishedAt = performance.now();
+        startupDiagnostics.environment = {
+          url,
+          source: 'indexeddb',
+          cacheKey,
+          cacheReadMs: cacheReadyAt - cacheReadAt,
+          uploadMs: finishedAt - uploadAt,
+          totalMs: finishedAt - startedAt,
+          transferBytes: cached.prefiltered.byteLength + cached.irradiance.byteLength,
+          cacheWritten: true,
+        };
+        console.info(`Environment cache hit: ${url} in ${(finishedAt - startedAt).toFixed(1)}ms`);
+        return;
+      }
+    } catch (error) {
+      console.warn('Environment cache read failed; rebuilding', error);
+    }
+
+    const fetchAt = performance.now();
     const resp = await fetch(url, { signal });
     if (!resp.ok) { console.warn('Env map fetch failed:', url); return; }
     const buffer = await resp.arrayBuffer();
+    const fetchedAt = performance.now();
     if (generation !== envLoadGeneration) return;
     const hdr = parseHDR(buffer);
-    console.log(`HDR parsed: ${hdr.width}x${hdr.height}`);
+    const parsedAt = performance.now();
     const sampler = (dx, dy, dz) => sampleEquirect(hdr, dx, dy, dz);
-    const pf = prefilterEnvMips(sampler, 256);
-    const ir = convolveIrradianceFaces(hdr, 32);
+    const pf = prefilterEnvMips(sampler, pfSize);
+    const prefilteredAt = performance.now();
+    const ir = convolveIrradianceFaces(hdr, irSize);
+    const irradianceAt = performance.now();
     if (generation !== envLoadGeneration) return;
-    mr_uploadEnvMaps(pf, 256, ir, 32);
-    console.log('HDR env maps uploaded (prefiltered)');
+    mr_uploadEnvMaps(pf, pfSize, ir, irSize);
+    const finishedAt = performance.now();
+    startupDiagnostics.environment = {
+      url,
+      source: 'generated',
+      cacheKey,
+      fetchMs: fetchedAt - fetchAt,
+      parseMs: parsedAt - fetchedAt,
+      prefilterMs: prefilteredAt - parsedAt,
+      irradianceMs: irradianceAt - prefilteredAt,
+      uploadMs: finishedAt - irradianceAt,
+      totalMs: finishedAt - startedAt,
+      transferBytes: pf.byteLength + ir.byteLength,
+      cacheWritten: false,
+    };
+    idbPut(IDB_ENV_STORE, cacheKey, {
+      format: ENV_CACHE_FORMAT,
+      prefiltered: pf,
+      irradiance: ir,
+    }).then(() => {
+      if (startupDiagnostics.environment?.cacheKey === cacheKey) {
+        startupDiagnostics.environment.cacheWritten = true;
+      }
+    }).catch(error => {
+      console.warn('Environment cache write failed', error);
+    });
+    console.info(
+      `Environment generated: ${url} in ${(finishedAt - startedAt).toFixed(1)}ms ` +
+      `(prefilter ${(prefilteredAt - parsedAt).toFixed(1)}ms, ` +
+      `irradiance ${(irradianceAt - prefilteredAt).toFixed(1)}ms)`,
+    );
   } catch (e) {
     if (e.name !== 'AbortError') console.warn('Env map load error:', e);
   }
@@ -2077,8 +2155,6 @@ phase('wasm', [], async () => {
     sharedCompiledModule: true,
   };
   applyParams(initParams); // Set signal values first
-  // Give HDR loading a usable fallback without starting the selected HDR twice.
-  if (envMap.peek() !== 'procedural') uploadProceduralEnvMaps();
   wasmOk.set(true); // THEN fire effects with correct values + WASM ready
 });
 
