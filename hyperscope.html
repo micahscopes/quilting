@@ -1509,8 +1509,8 @@ async function recomputeLods() {
       const wt = resp.timing || {};
       const phases = wt.wasm_phases || {};
       const ph = Object.entries(phases).map(([k, v]) => {
-        const last = v[v.length - 1];
-        return `${k.replace('lod-','')}=${last}ms`;
+        const total = v.reduce((sum, duration) => sum + duration, 0);
+        return `${k.replace('lod-','')}=${Math.round(total * 100) / 100}ms`;
       }).join(' ');
       console.log(
         `LOD: total=${(tBuildDone-lodT0).toFixed(1)}ms | ` +

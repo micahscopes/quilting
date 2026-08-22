@@ -488,12 +488,19 @@ pub fn compute_animated_lods(
                 None => return vec![],
             };
 
+            perf_mark("lod-gpu-pose-upload-start");
             if !joint_matrices.is_empty() {
                 compute.upload_joint_matrices(gl, &joint_matrices);
             }
             if !morph_weights.is_empty() {
                 compute.upload_morph_weights(gl, &morph_weights);
             }
+            perf_mark("lod-gpu-pose-upload-end");
+            perf_measure(
+                "lod-gpu-pose-upload",
+                "lod-gpu-pose-upload-start",
+                "lod-gpu-pose-upload-end",
+            );
 
             let mut legacy_mobius = [0.0f32; 16];
             for (i, &v) in mobius.iter().take(16).enumerate() { legacy_mobius[i] = v; }
@@ -501,7 +508,6 @@ pub fn compute_animated_lods(
             for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
 
             let max_lod = LOD_MAX.with(|m| *m.borrow());
-            perf_mark("lod-gpu-dispatch-start");
             let identity = [
                 1.0, 0.0, 0.0, 0.0,
                 0.0, 1.0, 0.0, 0.0,
@@ -533,6 +539,7 @@ pub fn compute_animated_lods(
                     ),
                     None => ([0.0; 4], 0.0, mobius.c.norm_sq() as f32, 0.0),
                 };
+                perf_mark("lod-gpu-dispatch-start");
                 let n = compute.compute_lods(
                     gl, num_faces, num_vertices,
                     num_joints, num_morph,
@@ -540,7 +547,14 @@ pub fn compute_animated_lods(
                     density, mesh_radius, min_px, max_lod,
                     &vp, vp_width, vp_height,
                 );
-                compute.read_back(gl, n)
+                perf_mark("lod-gpu-dispatch-end");
+                perf_measure("lod-gpu-dispatch", "lod-gpu-dispatch-start", "lod-gpu-dispatch-end");
+
+                perf_mark("lod-gpu-readback-start");
+                let result = compute.read_back(gl, n);
+                perf_mark("lod-gpu-readback-end");
+                perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
+                result
             };
             let baseline = if extracted_states.is_empty() {
                 legacy_mobius
@@ -563,11 +577,6 @@ pub fn compute_animated_lods(
                     }
                 }
             }
-            perf_mark("lod-gpu-dispatch-end");
-            perf_measure("lod-gpu-dispatch", "lod-gpu-dispatch-start", "lod-gpu-dispatch-end");
-            perf_mark("lod-gpu-readback-start");
-            perf_mark("lod-gpu-readback-end");
-            perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
             result
         });
         perf_mark("lod-gpu-compute-end");

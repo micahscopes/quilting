@@ -47,8 +47,10 @@ pub struct LodCompute {
     pos_texture: Option<glow::Texture>,
     skinning_texture: Option<glow::Texture>,
     joints_texture: Option<glow::Texture>,
+    joints_texture_capacity: usize,
     morph_texture: Option<glow::Texture>,
     morph_wt_texture: Option<glow::Texture>,
+    morph_wt_texture_capacity: usize,
 
     // Pass 1 uniform locations
     pos_loc: Option<glow::UniformLocation>,
@@ -167,7 +169,9 @@ impl LodCompute {
                 program1, vao1, input_buf, pass1_fbo,
                 pass1_texture: None, pass1_tex_w: 0, pass1_tex_h: 0,
                 pos_texture: None, skinning_texture: None, joints_texture: None,
+                joints_texture_capacity: 0,
                 morph_texture: None, morph_wt_texture: None,
+                morph_wt_texture_capacity: 0,
                 pos_loc: gl.get_uniform_location(program1, "u_positions"),
                 skinning_loc: gl.get_uniform_location(program1, "u_skinning"),
                 joints_loc: gl.get_uniform_location(program1, "u_joints"),
@@ -388,37 +392,55 @@ impl LodCompute {
         let num_joints = matrices.len() / 16;
         if num_joints == 0 { return; }
         unsafe {
-            if let Some(old) = self.joints_texture { gl.delete_texture(old); }
-            let tex = gl.create_texture().unwrap();
+            let needs_allocation = self.joints_texture.is_none()
+                || self.joints_texture_capacity < num_joints;
+            if needs_allocation {
+                if let Some(old) = self.joints_texture { gl.delete_texture(old); }
+                self.joints_texture = Some(gl.create_texture().unwrap());
+                self.joints_texture_capacity = num_joints;
+            }
+            let tex = self.joints_texture.unwrap();
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
-                4, num_joints as i32, 0,
-                glow::RGBA, glow::FLOAT,
-                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(matrices))));
-            set_nearest(gl);
-            self.joints_texture = Some(tex);
-            self.bound1 = false;
+            if needs_allocation {
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
+                    4, self.joints_texture_capacity as i32, 0,
+                    glow::RGBA, glow::FLOAT,
+                    glow::PixelUnpackData::Slice(None));
+                set_nearest(gl);
+                self.bound1 = false;
+            }
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0,
+                4, num_joints as i32, glow::RGBA, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(
+                    &matrices[..num_joints * 16]
+                ))));
         }
     }
 
     /// Upload morph weights for the current frame.
     pub fn upload_morph_weights(&mut self, gl: &glow::Context, weights: &[f32]) {
         if weights.is_empty() { return; }
-        let mut rgba = vec![0.0f32; weights.len() * 4];
-        for (i, &w) in weights.iter().enumerate() {
-            rgba[i * 4] = w;
-        }
         unsafe {
-            if let Some(old) = self.morph_wt_texture { gl.delete_texture(old); }
-            let tex = gl.create_texture().unwrap();
+            let needs_allocation = self.morph_wt_texture.is_none()
+                || self.morph_wt_texture_capacity < weights.len();
+            if needs_allocation {
+                if let Some(old) = self.morph_wt_texture { gl.delete_texture(old); }
+                self.morph_wt_texture = Some(gl.create_texture().unwrap());
+                self.morph_wt_texture_capacity = weights.len();
+            }
+            let tex = self.morph_wt_texture.unwrap();
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32,
-                weights.len() as i32, 1, 0,
-                glow::RGBA, glow::FLOAT,
-                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&rgba))));
-            set_nearest(gl);
-            self.morph_wt_texture = Some(tex);
-            self.bound1 = false;
+            if needs_allocation {
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R32F as i32,
+                    self.morph_wt_texture_capacity as i32, 1, 0,
+                    glow::RED, glow::FLOAT,
+                    glow::PixelUnpackData::Slice(None));
+                set_nearest(gl);
+                self.bound1 = false;
+            }
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0,
+                weights.len() as i32, 1, glow::RED, glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(weights))));
         }
     }
 
