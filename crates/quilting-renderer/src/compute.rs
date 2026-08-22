@@ -29,8 +29,13 @@ pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
 /// fence after staging one or more runs, poll without blocking, then read only
 /// once the shared fence is signaled.
 pub struct StagedLodReadback {
-    buffer: glow::Buffer,
+    buffer: ReadbackBuffer,
     num_faces: usize,
+}
+
+struct ReadbackBuffer {
+    handle: glow::Buffer,
+    capacity_bytes: usize,
 }
 
 const LOD_COMPUTE_VS: &str = include_str!("../shaders/lod_compute.vert.glsl");
@@ -108,6 +113,15 @@ pub struct LodCompute {
 
     max_faces: usize,
     bound1: bool,
+
+    // A completed LOD job is always consumed or canceled before the next one
+    // is accepted. Recycle its GPU staging buffers and CPU readback vectors
+    // instead of allocating mesh-sized resources every classification.
+    readback_buffers: Vec<ReadbackBuffer>,
+    readback_vectors: Vec<Vec<f32>>,
+    readback_buffer_creations: u64,
+    readback_buffer_reallocations: u64,
+    readback_vector_creations: u64,
 }
 
 impl LodCompute {
@@ -203,12 +217,27 @@ impl LodCompute {
 
                 max_faces,
                 bound1: false,
+                readback_buffers: Vec::new(),
+                readback_vectors: Vec::new(),
+                readback_buffer_creations: 0,
+                readback_buffer_reallocations: 0,
+                readback_vector_creations: 0,
             })
         }
     }
 
     pub fn has_pass1_texture(&self) -> bool { self.pass1_texture.is_some() }
     pub fn has_adjacency_texture(&self) -> bool { self.adjacency_texture.is_some() }
+
+    pub fn readback_pool_stats(&self) -> (usize, usize, u64, u64, u64) {
+        (
+            self.readback_buffers.len(),
+            self.readback_vectors.len(),
+            self.readback_buffer_creations,
+            self.readback_buffer_reallocations,
+            self.readback_vector_creations,
+        )
+    }
 
     // --- Static data uploads (called once on model load) ---
 
@@ -626,7 +655,7 @@ impl LodCompute {
     /// Copy the latest transform-feedback result into an independent GPU
     /// staging buffer. This is GPU-to-GPU and does not wait for completion.
     pub fn stage_readback(
-        &self,
+        &mut self,
         gl: &glow::Context,
         num_faces: usize,
     ) -> Result<StagedLodReadback, String> {
@@ -635,19 +664,33 @@ impl LodCompute {
             .checked_mul(FLOATS_PER_FACE_OUTPUT)
             .and_then(|size| size.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| "LOD staging buffer size overflow".to_string())?;
-        let byte_size = i32::try_from(byte_size)
+        let byte_size_i32 = i32::try_from(byte_size)
             .map_err(|_| "LOD staging buffer exceeds WebGL2 limits".to_string())?;
         unsafe {
-            let buffer = gl.create_buffer().map_err(|error| format!("LOD staging buffer: {error}"))?;
+            let mut buffer = match self.readback_buffers.pop() {
+                Some(buffer) => buffer,
+                None => {
+                    let handle = gl.create_buffer()
+                        .map_err(|error| format!("LOD staging buffer: {error}"))?;
+                    gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(handle));
+                    gl.buffer_data_size(glow::COPY_WRITE_BUFFER, byte_size_i32, glow::STREAM_READ);
+                    self.readback_buffer_creations += 1;
+                    ReadbackBuffer { handle, capacity_bytes: byte_size }
+                }
+            };
             gl.bind_buffer(glow::COPY_READ_BUFFER, Some(self.output_buf2));
-            gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer));
-            gl.buffer_data_size(glow::COPY_WRITE_BUFFER, byte_size, glow::STREAM_READ);
+            gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer.handle));
+            if buffer.capacity_bytes < byte_size {
+                gl.buffer_data_size(glow::COPY_WRITE_BUFFER, byte_size_i32, glow::STREAM_READ);
+                buffer.capacity_bytes = byte_size;
+                self.readback_buffer_reallocations += 1;
+            }
             gl.copy_buffer_sub_data(
                 glow::COPY_READ_BUFFER,
                 glow::COPY_WRITE_BUFFER,
                 0,
                 0,
-                byte_size,
+                byte_size_i32,
             );
             gl.bind_buffer(glow::COPY_READ_BUFFER, None);
             gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
@@ -657,27 +700,40 @@ impl LodCompute {
 
     /// Read and destroy a staging buffer after its fence has signaled.
     pub fn finish_staged_readback(
-        &self,
+        &mut self,
         gl: &glow::Context,
         staged: StagedLodReadback,
     ) -> Vec<f32> {
-        let mut result = vec![0.0f32; staged.num_faces * FLOATS_PER_FACE_OUTPUT];
+        let mut result = match self.readback_vectors.pop() {
+            Some(result) => result,
+            None => {
+                self.readback_vector_creations += 1;
+                Vec::new()
+            }
+        };
+        result.resize(staged.num_faces * FLOATS_PER_FACE_OUTPUT, 0.0);
         unsafe {
-            gl.bind_buffer(glow::COPY_READ_BUFFER, Some(staged.buffer));
+            gl.bind_buffer(glow::COPY_READ_BUFFER, Some(staged.buffer.handle));
             gl.get_buffer_sub_data(
                 glow::COPY_READ_BUFFER,
                 0,
                 bytemuck_cast_slice_mut(&mut result),
             );
             gl.bind_buffer(glow::COPY_READ_BUFFER, None);
-            gl.delete_buffer(staged.buffer);
         }
+        self.readback_buffers.push(staged.buffer);
         result
     }
 
-    /// Destroy a staged result that will not be consumed.
-    pub fn discard_staged_readback(&self, gl: &glow::Context, staged: StagedLodReadback) {
-        unsafe { gl.delete_buffer(staged.buffer); }
+    /// Return a staged result that will not be consumed to the retained pool.
+    pub fn discard_staged_readback(&mut self, _gl: &glow::Context, staged: StagedLodReadback) {
+        self.readback_buffers.push(staged.buffer);
+    }
+
+    /// Return a completed CPU payload after its JS transfer has been copied.
+    pub fn recycle_readback_vector(&mut self, mut result: Vec<f32>) {
+        result.clear();
+        self.readback_vectors.push(result);
     }
 
     pub fn destroy(&self, gl: &glow::Context) {
@@ -691,6 +747,9 @@ impl LodCompute {
             gl.delete_vertex_array(self.vao2);
             gl.delete_buffer(self.output_buf2);
             gl.delete_transform_feedback(self.tf2);
+            for buffer in &self.readback_buffers {
+                gl.delete_buffer(buffer.handle);
+            }
 
             if let Some(t) = self.pos_texture { gl.delete_texture(t); }
             if let Some(t) = self.lut_texture { gl.delete_texture(t); }

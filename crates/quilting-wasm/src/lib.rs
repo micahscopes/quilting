@@ -449,11 +449,15 @@ pub fn debug_gpu_compute_state() -> String {
         let gc = gc.borrow();
         match gc.as_ref() {
             None => "GPU_COMPUTE is None".to_string(),
-            Some((_gl, compute)) => format!(
-                "pass1_tex={} adj_tex={}",
+            Some((_gl, compute)) => {
+                let (gpu_pool, cpu_pool, gpu_created, gpu_resized, cpu_created) =
+                    compute.readback_pool_stats();
+                format!(
+                "pass1_tex={} adj_tex={} readback_pool=gpu:{} cpu:{} created_gpu:{} resized_gpu:{} created_cpu:{}",
                 compute.has_pass1_texture(),
                 compute.has_adjacency_texture(),
-            ),
+                gpu_pool, cpu_pool, gpu_created, gpu_resized, cpu_created,
+            )},
         }
     })
 }
@@ -745,19 +749,21 @@ pub fn poll_animated_lods() -> JsValue {
         let mut gpu_class = compute.finish_staged_readback(gl, baseline.readback);
         for run in runs {
             let classified = compute.finish_staged_readback(gl, run.readback);
-            if classified.len() != gpu_class.len() {
-                continue;
-            }
-            let Some(node) = run.subject_node else { continue };
-            for (face, &face_node) in job.face_nodes.iter().enumerate() {
-                if face_node == node {
-                    let offset = face * batch::FACE_LOD_STRIDE;
-                    let end = offset + batch::FACE_LOD_STRIDE;
-                    if end <= gpu_class.len() {
-                        gpu_class[offset..end].copy_from_slice(&classified[offset..end]);
+            if classified.len() == gpu_class.len() {
+                if let Some(node) = run.subject_node {
+                    for (face, &face_node) in job.face_nodes.iter().enumerate() {
+                        if face_node == node {
+                            let offset = face * batch::FACE_LOD_STRIDE;
+                            let end = offset + batch::FACE_LOD_STRIDE;
+                            if end <= gpu_class.len() {
+                                gpu_class[offset..end]
+                                    .copy_from_slice(&classified[offset..end]);
+                            }
+                        }
                     }
                 }
             }
+            compute.recycle_readback_vector(classified);
         }
         perf_mark("lod-gpu-readback-end");
         perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
@@ -766,6 +772,7 @@ pub fn poll_animated_lods() -> JsValue {
 
         let array = js_sys::Float32Array::new_with_length(gpu_class.len() as u32);
         array.copy_from(&gpu_class);
+        compute.recycle_readback_vector(gpu_class);
         array.into()
     })
 }

@@ -62,7 +62,9 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
    six floats per face.
 4. The output is copied into staging, fenced, and polled without blocking the
    worker. Only after the fence signals is the compact topology payload read
-   back into the worker.
+   back into the worker. Staging buffers and mesh-sized CPU readback vectors
+   are retained and reused across jobs; the steady-state path does not create
+   or resize either resource.
 5. The worker compares that snapshot with its previous completed result. The
    first coherent result after a model, animation, remesh, or compute-resource
    boundary transfers all faces; later results transfer only changed
