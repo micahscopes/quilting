@@ -246,21 +246,13 @@ self.onmessage = async function(e) {
       const wasmMeasures = {};
       for (const m of performance.getEntriesByType('measure')) {
         if (m.name.startsWith('lod-')) {
-          if (!wasmMeasures[m.name]) wasmMeasures[m.name] = [];
-          wasmMeasures[m.name].push(Math.round(m.duration * 100) / 100);
+          wasmMeasures[m.name] = (wasmMeasures[m.name] || 0) + m.duration;
         }
       }
       performance.clearMeasures();
       performance.clearMarks();
       const timing = { tess_params: wt1-wt0, wasm_total: wt2-wt1, wasm_phases: wasmMeasures };
       if (result && result.length > 0) {
-        const dbgSamples = [];
-        for (const fi of [0, 1, Math.floor(result.length/12), Math.floor(result.length/6)-1]) {
-          const o = fi * 6;
-          if (o+5 < result.length) dbgSamples.push(`f${fi}=[${result[o]},${result[o+1]},${result[o+2]} p${result[o+3]} par${result[o+4]} a${result[o+5]}]`);
-        }
-        timing.dbgSamples = dbgSamples.join(', ');
-        try { timing.gpuState = wasm.debug_gpu_compute_state(); } catch(e) {}
         self.postMessage({ type: 'animated_lods', id, lods: result, timing }, [result.buffer]);
       } else {
         let gpuState = 'unknown';

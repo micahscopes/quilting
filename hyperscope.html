@@ -288,6 +288,109 @@ const startupDiagnostics = {
 // Deliberately read-only by convention: browser regression checks consume this
 // without reaching into module-scoped signals or worker state.
 globalThis.__hyperscopeStartupDiagnostics = startupDiagnostics;
+const lodMetricNames = [
+  'totalMs', 'workerMs', 'batchMs', 'batchGroupMs', 'batchUploadMs',
+  'wasmMs', 'gpuComputeMs', 'gpuWaitMs', 'gpuReadbackMs',
+];
+const lodTelemetry = {
+  submitted: 0,
+  completed: 0,
+  applied: 0,
+  empty: 0,
+  canceled: 0,
+  errors: 0,
+  inFlight: false,
+  dirty: false,
+  lastSummaryAtMs: performance.now(),
+  last: Object.fromEntries(lodMetricNames.map(name => [name, 0])),
+  average: Object.fromEntries(lodMetricNames.map(name => [name, 0])),
+  maximum: Object.fromEntries(lodMetricNames.map(name => [name, 0])),
+};
+const lodMetricSums = Object.fromEntries(lodMetricNames.map(name => [name, 0]));
+const frameTelemetry = {
+  frames: 0,
+  lastDeltaMs: 0,
+  averageDeltaMs: 0,
+  maximumDeltaMs: 0,
+  lastRenderCpuMs: 0,
+  averageRenderCpuMs: 0,
+  maximumRenderCpuMs: 0,
+};
+let frameDeltaSum = 0;
+let frameRenderCpuSum = 0;
+globalThis.__hyperscopeRuntimeDiagnostics = {
+  lod: lodTelemetry,
+  frame: frameTelemetry,
+};
+
+function recordFrameTiming(deltaMs, renderCpuMs) {
+  frameTelemetry.frames += 1;
+  frameTelemetry.lastDeltaMs = deltaMs;
+  frameTelemetry.lastRenderCpuMs = renderCpuMs;
+  frameDeltaSum += deltaMs;
+  frameRenderCpuSum += renderCpuMs;
+  frameTelemetry.averageDeltaMs = frameDeltaSum / frameTelemetry.frames;
+  frameTelemetry.averageRenderCpuMs = frameRenderCpuSum / frameTelemetry.frames;
+  frameTelemetry.maximumDeltaMs = Math.max(frameTelemetry.maximumDeltaMs, deltaMs);
+  frameTelemetry.maximumRenderCpuMs = Math.max(
+    frameTelemetry.maximumRenderCpuMs,
+    renderCpuMs,
+  );
+}
+
+function updateLodMetric(name, value) {
+  const finite = Number.isFinite(value) ? value : 0;
+  lodTelemetry.last[name] = finite;
+  lodMetricSums[name] += finite;
+  lodTelemetry.average[name] = lodMetricSums[name] / lodTelemetry.completed;
+  lodTelemetry.maximum[name] = Math.max(lodTelemetry.maximum[name], finite);
+}
+
+function recordLodTiming(
+  totalMs, workerMs, batchMs, batchGroupMs, batchUploadMs,
+  wasmMs, gpuComputeMs, gpuWaitMs, gpuReadbackMs, applied, debug,
+) {
+  lodTelemetry.completed += 1;
+  if (applied) lodTelemetry.applied += 1;
+  else lodTelemetry.empty += 1;
+  if (debug?.canceled) lodTelemetry.canceled += 1;
+  updateLodMetric('totalMs', totalMs);
+  updateLodMetric('workerMs', workerMs);
+  updateLodMetric('batchMs', batchMs);
+  updateLodMetric('batchGroupMs', batchGroupMs);
+  updateLodMetric('batchUploadMs', batchUploadMs);
+  updateLodMetric('wasmMs', wasmMs);
+  updateLodMetric('gpuComputeMs', gpuComputeMs);
+  updateLodMetric('gpuWaitMs', gpuWaitMs);
+  updateLodMetric('gpuReadbackMs', gpuReadbackMs);
+
+  const now = performance.now();
+  if (now - lodTelemetry.lastSummaryAtMs >= 10000) {
+    lodTelemetry.lastSummaryAtMs = now;
+    console.info(
+      `LOD summary: ${lodTelemetry.applied}/${lodTelemetry.completed} applied | ` +
+      `avg total=${lodTelemetry.average.totalMs.toFixed(1)}ms ` +
+      `worker=${lodTelemetry.average.workerMs.toFixed(1)}ms ` +
+      `batch=${lodTelemetry.average.batchMs.toFixed(1)}ms | ` +
+      `last GPU compute/wait/readback=${lodTelemetry.last.gpuComputeMs.toFixed(1)}/` +
+      `${lodTelemetry.last.gpuWaitMs.toFixed(1)}/${lodTelemetry.last.gpuReadbackMs.toFixed(1)}ms`,
+    );
+  }
+}
+
+function consumeBatchMeasure(name, startMark, endMark) {
+  const entries = performance.getEntriesByName(name, 'measure');
+  const duration = entries.length ? entries[entries.length - 1].duration : 0;
+  performance.clearMeasures(name);
+  performance.clearMarks(startMark);
+  performance.clearMarks(endMark);
+  return duration;
+}
+
+function clearBatchMeasures() {
+  consumeBatchMeasure('batch-group', 'batch-group-start', 'batch-group-end');
+  consumeBatchMeasure('batch-gpu-upload', 'batch-upload-start', 'batch-upload-end');
+}
 function phase(name, depNames, fn) {
   const done = signal(false, `phase:${name}`);
   const result = signal(null, `phase:${name}:result`);
@@ -1540,7 +1643,11 @@ async function tickAnimation(t) {
 let lodDirty = false; // set true when camera moves while LOD is in flight
 
 function debouncedLodRecompute() {
-  if (lodInFlight) { lodDirty = true; return; } // mark dirty, don't queue
+  if (lodInFlight) {
+    lodDirty = true;
+    lodTelemetry.dirty = true;
+    return;
+  } // mark dirty, don't queue
   clearTimeout(lodDebounceTimer);
   lodDebounceTimer = setTimeout(recomputeLods, 0);
 }
@@ -1548,11 +1655,12 @@ function debouncedLodRecompute() {
 async function recomputeLods() {
   if (lodInFlight || !meshInfo) return;
   lodInFlight = true;
+  lodTelemetry.inFlight = true;
+  lodTelemetry.submitted += 1;
   lodDirty = false;
-  performance.mark('lod-start');
+  lodTelemetry.dirty = false;
   const lodT0 = performance.now();
   try {
-    performance.mark('lod-setup-start');
     let m;
     try { m = computeMobius(mob.xform.peek(), mob.mx.peek()/10, mob.my.peek()/10, mob.mz.peek()/10, mob.mr.peek()/10); }
     catch { m = computeMobius('identity', 0.5, 0, 0, 2); }
@@ -1569,10 +1677,7 @@ async function recomputeLods() {
     const proj = perspective(Math.PI / 3, w / h, 0.01, 10000, lodProj);
     const vp = mulM4(proj, view, lodVp);
     const tp = getTessParams();
-    performance.mark('lod-setup-end');
-    performance.measure('lod-setup', 'lod-setup-start', 'lod-setup-end');
 
-    performance.mark('lod-worker-start');
     const resp = await workerCall('compute_animated_lods', {
       t: animating ? animTime : 0, mobius: lodMobius, density: tp.density, minPx: tp.minPx,
       subjectStates: authoredLodStates,
@@ -1580,37 +1685,47 @@ async function recomputeLods() {
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
       skipAnimation: !animating,
     });
-    performance.mark('lod-worker-end');
-    performance.measure('lod-worker-roundtrip', 'lod-worker-start', 'lod-worker-end');
+    const tWorkerDone = performance.now();
+    const wt = resp.timing || {};
+    const workerPhases = wt.wasm_phases || {};
+    let batchDone = tWorkerDone;
+    let batchGroupMs = 0;
+    let batchUploadMs = 0;
 
     // Apply every completed coherent classification. If state changed while
     // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
     // discarding the completed result would starve continuously animated scenes.
     if (resp.lods) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
-      const tWorkerDone = performance.now();
-      performance.mark('lod-build-start');
+      clearBatchMeasures();
       mr_buildBatches(faceLods);
-      performance.mark('lod-build-end');
-      performance.measure('lod-batch-build', 'lod-build-start', 'lod-build-end');
-      const tBuildDone = performance.now();
-      const wt = resp.timing || {};
-      const phases = wt.wasm_phases || {};
-      const ph = Object.entries(phases).map(([k, v]) => {
-        const total = v.reduce((sum, duration) => sum + duration, 0);
-        return `${k.replace('lod-','')}=${Math.round(total * 100) / 100}ms`;
-      }).join(' ');
-      console.log(
-        `LOD: total=${(tBuildDone-lodT0).toFixed(1)}ms | ` +
-        `worker-roundtrip=${(tWorkerDone-lodT0).toFixed(1)}ms | ` +
-        `batch-build=${(tBuildDone-tWorkerDone).toFixed(1)}ms | ` +
-        `wasm=${wt.wasm_total?.toFixed(1) ?? '?'}ms [${ph}]`
+      batchDone = performance.now();
+      batchGroupMs = consumeBatchMeasure('batch-group', 'batch-group-start', 'batch-group-end');
+      batchUploadMs = consumeBatchMeasure(
+        'batch-gpu-upload',
+        'batch-upload-start',
+        'batch-upload-end',
       );
     }
-    performance.mark('lod-end');
-    performance.measure('lod-total', 'lod-start', 'lod-end');
-  } catch (e) { console.warn('LOD recompute error:', e); }
+    recordLodTiming(
+      batchDone - lodT0,
+      tWorkerDone - lodT0,
+      batchDone - tWorkerDone,
+      batchGroupMs,
+      batchUploadMs,
+      wt.wasm_total,
+      workerPhases['lod-gpu-compute'],
+      workerPhases['lod-gpu-wait'],
+      workerPhases['lod-gpu-readback'],
+      !!resp.lods,
+      resp.debug,
+    );
+  } catch (e) {
+    lodTelemetry.errors += 1;
+    console.warn('LOD recompute error:', e);
+  }
   lodInFlight = false;
+  lodTelemetry.inFlight = false;
   // Coalesce any transform, chamber, or camera changes observed in flight.
   if (lodDirty) recomputeLods();
 }
@@ -1714,7 +1829,9 @@ function frame(ts) {
   const mvp = mulM4(proj, view, frameMvp);
   frameCameraPos[0] = ex; frameCameraPos[1] = ey; frameCameraPos[2] = ez;
 
+  const renderStarted = performance.now();
   mr_render(mvp, view, frameCameraPos);
+  recordFrameTiming(deltaSeconds * 1000, performance.now() - renderStarted);
 }
 
 // --- Load model ---

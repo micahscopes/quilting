@@ -190,6 +190,10 @@ struct BatchUpdateStats {
     reallocated_buckets: u64,
     retired_buckets: u64,
     uploaded_instances: u64,
+    last_culled_faces: u64,
+    last_lod_corrections: u64,
+    last_missing_atlas_entries: u64,
+    last_gpu_failures: u64,
 }
 
 struct GpuBatch {
@@ -1408,6 +1412,13 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
                 "sourceFaceTextureBytes",
                 state.num_faces as u64 * instance_layout::STRIDE_BYTES as u64,
             ),
+            ("lastCulledFaces", batch_stats.last_culled_faces),
+            ("lastLodCorrections", batch_stats.last_lod_corrections),
+            (
+                "lastMissingAtlasEntries",
+                batch_stats.last_missing_atlas_entries,
+            ),
+            ("lastGpuBatchFailures", batch_stats.last_gpu_failures),
             ("renderCommandBuilds", state.render_command_builds),
             ("renderCalls", state.render_calls),
             ("pbrDrawCalls", state.pbr_draw_calls),
@@ -1828,6 +1839,10 @@ pub fn mr_build_batches(face_lods: &[f32]) {
             batch::balance_resident_lods(&mut state.resident_face_lods, topology)
         });
         topology_changed |= lod_corrections != 0;
+        state.batch_update_stats.last_culled_faces = culled as u64;
+        state.batch_update_stats.last_lod_corrections = lod_corrections as u64;
+        state.batch_update_stats.last_missing_atlas_entries = 0;
+        state.batch_update_stats.last_gpu_failures = 0;
 
         if !topology_changed {
             state.batch_update_stats.unchanged_calls += 1;
@@ -1948,19 +1963,15 @@ pub fn mr_build_batches(face_lods: &[f32]) {
         state.batch_update_stats.reallocated_buckets += reallocated as u64;
         state.batch_update_stats.retired_buckets += retired as u64;
         state.batch_update_stats.uploaded_instances += uploaded_instances as u64;
+        state.batch_update_stats.last_missing_atlas_entries = missing as u64;
+        state.batch_update_stats.last_gpu_failures = failed as u64;
         perf_mark("batch-upload-end");
         perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
 
-        let mut mat_counts = BTreeMap::new();
-        let mut node_counts = BTreeMap::new();
-        for b in state.batches.values() {
-            *mat_counts.entry(b.material_index).or_insert(0usize) += b.mesh.num_instances as usize;
-            *node_counts.entry(b.node_index).or_insert(0usize) += b.mesh.num_instances as usize;
-        }
-        info!(
-            "Updated {} GPU batches ({} unchanged, {} uploaded in place, {} created, {} capacity reallocations, {} retired; {} CPU-culled faces retained for current-pose GPU culling, {} resident LOD balance corrections, {} atlas entries missing, {} GPU batch failures), material→faces: {:?}, node→faces: {:?}",
+        debug!(
+            "Updated {} GPU batches ({} unchanged, {} uploaded in place, {} created, {} capacity reallocations, {} retired; {} CPU-culled faces, {} LOD corrections, {} atlas entries missing, {} failures)",
             state.batches.len(), retained, updated, created, reallocated, retired,
-            culled, lod_corrections, missing, failed, mat_counts, node_counts
+            culled, lod_corrections, missing, failed,
         );
         state.batch_layout_dirty = missing != 0 || failed != 0;
     });
@@ -2018,7 +2029,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         // Deform and classify each patch once. Every subsequent material,
         // wire, normal, and pick draw consumes these prepared records without
         // CPU visibility readback or repeated position skinning.
-        perf_mark("patch-prepare-start");
         for (gpu_batch, render_batch) in state.batches.values().zip(render_batches) {
             state.renderer.prepare_patch_batch(
                 &camera,
@@ -2028,8 +2038,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 0,
             );
         }
-        perf_mark("patch-prepare-end");
-        perf_measure("patch-prepare", "patch-prepare-start", "patch-prepare-end");
 
         // Mode-specific UBO setup
         let has_env = state.env_maps.prefiltered.is_some();
