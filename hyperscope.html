@@ -277,11 +277,13 @@ import {
   applyMobiusPoint,
   buildNodeFocusRecords,
   faceSourceCentroid,
+  focusSphereFromBound,
   focusRelativeNavigationSpeed,
   framedSphereDistance,
   interpolateSphereFit,
   mobiusConformalScaleAt,
   scaleRadiusMultiplicatively,
+  scaleAnchoredFocusRadius,
   smootherstep01,
 } from './hyperscope_focus.mjs?rev=scale-aware-focus-v1';
 
@@ -1055,8 +1057,15 @@ let currentFaceNodes = new Int32Array(0);
 let nodeFocusRecords = new Map();
 let selectedObject = null;
 let cameraFocusTransition = null;
-let inversionFitTransition = null;
-let fittedInversionNode = -1;
+let focusSphereTransition = null;
+const focusSphere = {
+  active: false,
+  center: [0.5, 0, 0],
+  radius: 2,
+  margin: null,
+  anchorNode: null,
+  anchorRadius: null,
+};
 
 // --- Pick debugger: ctrl-click to inspect face ---
 const canvas = $('cv');
@@ -1120,8 +1129,43 @@ function selectionLabel(message = '') {
 function clearSelectedObject(message = '') {
   selectedObject = null;
   cameraFocusTransition = null;
+  focusSphereTransition = null;
+  // Selection is an optional anchor, not ownership of the sphere. Dropping
+  // selection leaves the current field/inversion exactly where it is.
+  focusSphere.anchorNode = null;
+  focusSphere.anchorRadius = null;
+  focusSphere.margin = null;
   mr_setSelectedNode(-1);
   selectionLabel(message);
+}
+
+function setFocusSphereGeometry(sphere) {
+  focusSphere.center = sphere.center.slice();
+  focusSphere.radius = Math.max(Number(sphere.radius) || 0, 0.011);
+  batchSignals(() => {
+    mob.mx.set(focusSphere.center[0] * 10);
+    mob.my.set(focusSphere.center[1] * 10);
+    mob.mz.set(focusSphere.center[2] * 10);
+    mob.mr.set(focusSphere.radius * 10);
+  });
+}
+
+function anchorFocusSphereToSelection(nowMs = performance.now()) {
+  if (!selectedObject) return false;
+  const target = focusSphereFromBound(selectedObject.bound, FOCUS_SPHERE_MARGIN, 0.02);
+  if (!target) return false;
+  focusSphere.active = true;
+  focusSphere.anchorNode = selectedObject.node;
+  focusSphere.anchorRadius = selectedObject.bound.radius;
+  focusSphere.margin = target.margin;
+  focusSphereTransition = {
+    start: { center: focusSphere.center.slice(), radius: focusSphere.radius },
+    target,
+    startedAt: nowMs,
+    durationMs: FOCUS_SPHERE_FIT_DURATION_MS,
+    node: selectedObject.node,
+  };
+  return true;
 }
 
 function refreshSelectedObjectAnchor({ followObjectPivot = false } = {}) {
@@ -1207,6 +1251,7 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   refreshSelectedObjectAnchor();
   mr_setSelectedNode(node);
   mr_highlightFace(highlightFace ? faceId : -1);
+  anchorFocusSphereToSelection();
   beginObjectPivotFocus(selectedObject.outputAnchor);
   selectionLabel();
   console.log(
@@ -1315,7 +1360,17 @@ bindSlider('mz', mob.mz, v => (v/10).toFixed(2));
 bindSlider('mr', mob.mr, v => (v/10).toFixed(2));
 for (const id of ['mx', 'my', 'mz', 'mr']) {
   $(id).addEventListener('input', () => {
-    if (!inversionFitTransition) fittedInversionNode = -1;
+    focusSphereTransition = null;
+    focusSphere.center = [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10];
+    focusSphere.radius = Math.max(mob.mr.peek() / 10, 0.011);
+    focusSphere.active = true;
+    if (id !== 'mr') {
+      focusSphere.anchorNode = null;
+      focusSphere.anchorRadius = null;
+      focusSphere.margin = null;
+    } else if (focusSphere.anchorRadius) {
+      focusSphere.margin = focusSphere.radius / focusSphere.anchorRadius;
+    }
   });
 }
 
@@ -1328,56 +1383,32 @@ function computeMobius(type, cx, cy, cz, r) {
 }
 
 let currentMobius = null;
-const INVERSION_FIT_MARGIN = 1.10;
-const INVERSION_FIT_DURATION_MS = 700;
+const FOCUS_SPHERE_MARGIN = 1.10;
+const FOCUS_SPHERE_FIT_DURATION_MS = 700;
 
 function fitOrToggleInversionToSelection(nowMs = performance.now()) {
-  if (!selectedObject) {
-    selectionLabel('Select an object first (double-tap right)');
+  if (!selectedObject && !focusSphere.active) {
+    selectionLabel('Select an object first (click or double-tap right)');
     return false;
   }
 
-  if (!inversionFitTransition && fittedInversionNode === selectedObject.node) {
-    const enable = mob.xform.peek() !== 'sphere_reflection';
-    mob.xform.set(enable ? 'sphere_reflection' : 'identity');
-    selectionLabel(`Node ${selectedObject.node} · inversion ${enable ? 'on' : 'off'}`);
-    return true;
-  }
-
-  const target = {
-    center: selectedObject.bound.center.slice(),
-    radius: Math.max(selectedObject.bound.radius * INVERSION_FIT_MARGIN, 0.02),
-  };
-  inversionFitTransition = {
-    start: {
-      center: [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10],
-      radius: Math.max(mob.mr.peek() / 10, 0.02),
-    },
-    target,
-    startedAt: nowMs,
-    durationMs: INVERSION_FIT_DURATION_MS,
-    node: selectedObject.node,
-  };
-  fittedInversionNode = selectedObject.node;
-  mob.xform.set('sphere_reflection');
-  selectionLabel(`Fitting inversion to node ${selectedObject.node}…`);
+  if (selectedObject) anchorFocusSphereToSelection(nowMs);
+  const enable = mob.xform.peek() !== 'sphere_reflection';
+  mob.xform.set(enable ? 'sphere_reflection' : 'identity');
+  const subject = selectedObject ? `Node ${selectedObject.node}` : 'Free focus sphere';
+  selectionLabel(`${subject} · inversion ${enable ? 'on' : 'off'}`);
   return true;
 }
 
 function advanceFocusTransitions(nowMs) {
-  if (inversionFitTransition) {
-    const transition = inversionFitTransition;
+  if (focusSphereTransition) {
+    const transition = focusSphereTransition;
     const progress = (nowMs - transition.startedAt) / transition.durationMs;
     const sphere = interpolateSphereFit(transition.start, transition.target, progress);
-    batchSignals(() => {
-      mob.mx.set(sphere.center[0] * 10);
-      mob.my.set(sphere.center[1] * 10);
-      mob.mz.set(sphere.center[2] * 10);
-      mob.mr.set(sphere.radius * 10);
-    });
+    setFocusSphereGeometry(sphere);
     if (progress >= 1) {
-      inversionFitTransition = null;
-      selectionLabel(`Node ${transition.node} · inversion fitted +10%`);
+      focusSphereTransition = null;
+      selectionLabel(`Node ${transition.node} · focus sphere fitted +10%`);
     }
   }
 
@@ -1860,6 +1891,9 @@ applyParams = function(params) {
   mob.my.set(finite(params.my, 0, -30, 30));
   mob.mz.set(finite(params.mz, 0, -30, 30));
   mob.mr.set(finite(params.mr, 20, 0, 50));
+  focusSphere.center = [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10];
+  focusSphere.radius = Math.max(mob.mr.peek() / 10, 0.011);
+  focusSphere.active = mob.xform.peek() === 'sphere_reflection';
   envMap.set(params.env || 'rosendal_plains_1_1k');
   matcap.set(params.matcap || 'citric-acid');
   lod.res.set(integer(params.res, 0, 0, 6));
@@ -2614,7 +2648,7 @@ function frame(ts) {
     if (spaceMouseMode === 'inversion') {
       // Keep gesture-relative motion above computeMobius' r > 0.01 guard so
       // twisting smaller cannot abruptly turn an active inversion into identity.
-      registeredInversionScale = Math.max(mob.mr.peek() / 10, 0.011);
+      registeredInversionScale = Math.max(focusSphere.radius, 0.011);
     }
     previousSpaceMouseMode = spaceMouseMode;
   }
@@ -2767,23 +2801,37 @@ function frame(ts) {
         }
       } else if (spaceMouseMode === 'inversion') {
         if (mob.xform.peek() !== 'sphere_reflection') mob.xform.set('sphere_reflection');
-        inversionFitTransition = null;
-        fittedInversionNode = -1;
+        focusSphere.active = true;
+        focusSphereTransition = null;
         const dx = (flyAxes[0] * basis[0] + flyAxes[1] * basis[3] + flyAxes[2] * basis[6]) * moveScale;
         const dy = (flyAxes[0] * basis[1] + flyAxes[1] * basis[4] + flyAxes[2] * basis[7]) * moveScale;
         const dz = (flyAxes[0] * basis[2] + flyAxes[1] * basis[5] + flyAxes[2] * basis[8]) * moveScale;
-        const nextRadius = scaleRadiusMultiplicatively(
-          mob.mr.peek() / 10,
-          flyAxes[5],
-          spaceMouseRotate.peek() / 100,
-          deltaSeconds,
-        );
-        batchSignals(() => {
-          mob.mx.set(Math.max(-30, Math.min(30, mob.mx.peek() + dx * 10)));
-          mob.my.set(Math.max(-30, Math.min(30, mob.my.peek() + dy * 10)));
-          mob.mz.set(Math.max(-30, Math.min(30, mob.mz.peek() + dz * 10)));
-          mob.mr.set(nextRadius * 10);
-        });
+        const anchored = selectedObject
+          && focusSphere.anchorNode === selectedObject.node
+          && focusSphere.anchorRadius > 0;
+        const nextRadius = anchored
+          ? scaleAnchoredFocusRadius(
+            focusSphere.anchorRadius,
+            focusSphere.radius,
+            flyAxes[5],
+            spaceMouseRotate.peek() / 100,
+            deltaSeconds,
+          )
+          : scaleRadiusMultiplicatively(
+            focusSphere.radius,
+            flyAxes[5],
+            spaceMouseRotate.peek() / 100,
+            deltaSeconds,
+          );
+        const nextCenter = anchored
+          ? selectedObject.bound.center.slice()
+          : [
+            Math.max(-3, Math.min(3, focusSphere.center[0] + dx)),
+            Math.max(-3, Math.min(3, focusSphere.center[1] + dy)),
+            Math.max(-3, Math.min(3, focusSphere.center[2] + dz)),
+          ];
+        setFocusSphereGeometry({ center: nextCenter, radius: nextRadius });
+        if (anchored) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       } else if (spaceMouseMode === 'depth-of-field') {
         fz.enabled.set(true);
         fz.mode.set('0');
@@ -2850,8 +2898,6 @@ async function finishModelUpload(info, filename) {
   currentInstances = null;
   currentFaceNodes = new Int32Array(0);
   nodeFocusRecords = new Map();
-  inversionFitTransition = null;
-  fittedInversionNode = -1;
   clearSelectedObject();
 
   // A static model must not inherit joint/morph counts or textures from the

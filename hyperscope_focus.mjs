@@ -199,6 +199,47 @@ export function interpolateSphereFit(start, target, progress) {
   };
 }
 
+/** Build the persistent focus/inversion sphere around an object bound. */
+export function focusSphereFromBound(bound, margin = 1.1, minRadius = 0.02) {
+  const center = Array.from(bound?.center || [], Number);
+  if (center.length !== 3 || !finitePoint(center[0], center[1], center[2])) return null;
+  const sourceRadius = Number(bound?.radius);
+  if (!(sourceRadius >= 0) || !Number.isFinite(sourceRadius)) return null;
+  const safeMargin = Math.max(Number(margin) || 0, 1);
+  return {
+    center,
+    radius: Math.max(sourceRadius * safeMargin, Math.max(Number(minRadius) || 0, 1e-4)),
+    margin: safeMargin,
+  };
+}
+
+/**
+ * Radius editing while object-anchored changes only the margin around the
+ * object. It cannot shrink through the selected object or grow without bound.
+ */
+export function scaleAnchoredFocusRadius(
+  boundRadius,
+  radius,
+  input,
+  sensitivity,
+  deltaSeconds,
+  minMargin = 1,
+  maxMargin = 4,
+) {
+  const base = Math.max(Number(boundRadius) || 0, 1e-4);
+  const lowerMargin = Math.max(Number(minMargin) || 0, 1);
+  const upperMargin = Math.max(Number(maxMargin) || 0, lowerMargin);
+  return scaleRadiusMultiplicatively(
+    radius,
+    input,
+    sensitivity,
+    deltaSeconds,
+    0.6,
+    base * lowerMargin,
+    base * upperMargin,
+  );
+}
+
 /**
  * Blender-style perspective pan speed in world units per second per unit input.
  * The reference depth is captured when motion begins so speed cannot feed back

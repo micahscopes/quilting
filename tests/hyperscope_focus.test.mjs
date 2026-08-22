@@ -5,12 +5,14 @@ import {
   applyMobiusPoint,
   buildNodeFocusRecords,
   faceSourceCentroid,
+  focusSphereFromBound,
   focusRelativeNavigationSpeed,
   framedSphereDistance,
   interpolateSphereFit,
   mobiusConformalScaleAt,
   perspectiveNavigationSpeed,
   scaleRadiusMultiplicatively,
+  scaleAnchoredFocusRadius,
   smootherstep01,
 } from '../hyperscope_focus.mjs';
 
@@ -70,6 +72,15 @@ test('sphere fitting eases endpoints and interpolates radius without crossing ze
   assert(Math.abs(halfway.radius - 2) < 1e-12);
 });
 
+test('object focus sphere applies a stable margin and rejects invalid bounds', () => {
+  assert.deepEqual(
+    focusSphereFromBound({ center: [1, 2, 3], radius: 2 }),
+    { center: [1, 2, 3], radius: 2.2, margin: 1.1 },
+  );
+  assert.equal(focusSphereFromBound({ center: [1, 2], radius: 2 }), null);
+  assert.equal(focusSphereFromBound({ center: [1, 2, 3], radius: -1 }), null);
+});
+
 test('perspective navigation speed is screen-relative and linear in depth', () => {
   const near = perspectiveNavigationSpeed(2, 1000);
   const far = perspectiveNavigationSpeed(8, 1000);
@@ -90,6 +101,11 @@ test('multiplicative radius control applies the same ratio at every scale', () =
   const large = scaleRadiusMultiplicatively(2, 0.5, 3, 0.2);
   assert(Math.abs(small / 0.1 - large / 2) < 1e-12);
   assert.equal(scaleRadiusMultiplicatively(5, 1, 3, 1), 5);
+});
+
+test('anchored radius editing preserves the selected object and caps its margin', () => {
+  assert.equal(scaleAnchoredFocusRadius(2, 2.2, -1, 3, 1), 2);
+  assert.equal(scaleAnchoredFocusRadius(2, 2.2, 1, 30, 1), 8);
 });
 
 test('sphere framing respects the narrower viewport axis and requested margin', () => {
