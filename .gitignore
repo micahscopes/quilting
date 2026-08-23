@@ -3,6 +3,7 @@
 /pkg/
 /dist/
 /dist-lab/
+/dist-release/
 /formal/.lake/
 __pycache__/
 *.py[cod]
@@ -38,6 +39,6 @@ screenshot_*.png
 /violin.glb
 
 # Local heavyweight models used for browser testing. Keep the directory itself
-# so Trunk's copy-dir directive also works in a clean checkout.
+# so the development build's copy-dir directive also works in a clean checkout.
 /local-glbs/*
 !/local-glbs/.gitkeep

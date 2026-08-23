@@ -33,6 +33,22 @@ copies of the retired PNGs left by a non-clean build. See
 [`ASSET_ATTRIBUTION.md`](../ASSET_ATTRIBUTION.md). Do not publish `dist/` as an
 MIT/Apache-only or commercial-use asset bundle until the strict gate is green.
 
+For the noncommercial hacker-night presentation, make the policy choice
+explicit and stage a bundle that excludes `local-glbs/` and any stale retired
+matcaps:
+
+```sh
+scripts/stage-hyperscope-release.sh dist-release
+cargo run -p hyperscape --bin hyperscope-preflight -- \
+  --dist dist-release \
+  --distribution-policy noncommercial-mixed \
+  --strict
+```
+
+The staging command refuses to overwrite an existing directory. Remove or
+rename an older `dist-release/` yourself before preparing a new archive. Under
+the default `permissive-only` policy, the horse remains a hard warning.
+
 The preflight has `--json` for an archival or scripted report. It is
 filesystem-only and cannot certify browser GPU/HID behavior.
 

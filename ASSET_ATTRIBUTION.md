@@ -62,7 +62,8 @@ the attribution and license link with redistributed copies, do not include it
 in a commercial-use or MIT/Apache-only asset bundle, and follow the license's
 ShareAlike terms for adaptations. The strict preflight remains red until a
 release deliberately chooses a compatible noncommercial mixed-license bundle
-or replaces/excludes this model.
+with `--distribution-policy noncommercial-mixed`, or replaces/excludes this
+model.
 
 ## Untracked local assets
 

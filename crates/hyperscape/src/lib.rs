@@ -31,7 +31,8 @@ pub use navigation::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{
-    run_offline_preflight, BundleFileCheck, OfflinePreflightOptions, OfflinePreflightReport,
+    run_offline_preflight, BundleFileCheck, DistributionPolicy, OfflinePreflightOptions,
+    OfflinePreflightReport,
 };
 pub use presentation::{
     AssetLoadPolicy, AuthoredCamera, AuthoredFocus, CueAnimation, CueText, LayerTransform,

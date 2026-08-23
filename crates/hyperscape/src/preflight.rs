@@ -30,10 +30,6 @@ const REQUIRED_RUNTIME_FILES: &[&str] = &[
     "LICENSE-APACHE",
 ];
 
-const UNCLEARED_DISTRIBUTION_WARNINGS: &[&str] = &[
-    "horse.glb is Mirada's ROME model under CC BY-NC-SA 3.0; explicitly choose a compatible noncommercial mixed-license bundle or replace/exclude it before an MIT/Apache-only or commercial-use release",
-];
-
 const RETIRED_DISTRIBUTION_FILES: &[&str] = &[
     "matcaps/aqua.png",
     "matcaps/citric-acid.png",
@@ -41,10 +37,31 @@ const RETIRED_DISTRIBUTION_FILES: &[&str] = &[
     "matcaps/soft-studio.png",
 ];
 
+const HORSE_RESTRICTED_WARNING: &str = "horse.glb is Mirada's ROME model under CC BY-NC-SA 3.0; explicitly choose --distribution-policy noncommercial-mixed or replace/exclude it before a permissive-only or commercial-use release";
+const HORSE_NONCOMMERCIAL_NOTE: &str = "distribution policy explicitly admits horse.glb under CC BY-NC-SA 3.0; retain its Mirada/ROME attribution and license notice, keep the bundle noncommercial, and apply ShareAlike to adaptations";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DistributionPolicy {
+    #[default]
+    PermissiveOnly,
+    NoncommercialMixed,
+}
+
+impl DistributionPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PermissiveOnly => "permissive-only",
+            Self::NoncommercialMixed => "noncommercial-mixed",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OfflinePreflightOptions {
     pub source_manifest: PathBuf,
     pub dist_dir: PathBuf,
+    pub distribution_policy: DistributionPolicy,
 }
 
 impl Default for OfflinePreflightOptions {
@@ -52,6 +69,7 @@ impl Default for OfflinePreflightOptions {
         Self {
             source_manifest: PathBuf::from("examples/hacker-night.presentation.json"),
             dist_dir: PathBuf::from("dist"),
+            distribution_policy: DistributionPolicy::default(),
         }
     }
 }
@@ -69,6 +87,7 @@ pub struct OfflinePreflightReport {
     pub ok: bool,
     pub source_manifest: String,
     pub dist_dir: String,
+    pub distribution_policy: DistributionPolicy,
     pub presentation_title: Option<String>,
     pub cue_count: usize,
     pub asset_count: usize,
@@ -85,6 +104,7 @@ impl OfflinePreflightReport {
             ok: false,
             source_manifest: options.source_manifest.display().to_string(),
             dist_dir: options.dist_dir.display().to_string(),
+            distribution_policy: options.distribution_policy,
             presentation_title: None,
             cue_count: 0,
             asset_count: 0,
@@ -240,11 +260,14 @@ pub fn run_offline_preflight(options: &OfflinePreflightOptions) -> OfflinePrefli
             retired_files.join(", ")
         ));
     }
-    report.warnings.extend(
-        UNCLEARED_DISTRIBUTION_WARNINGS
-            .iter()
-            .map(|warning| (*warning).to_owned()),
-    );
+    match options.distribution_policy {
+        DistributionPolicy::PermissiveOnly => {
+            report.warnings.push(HORSE_RESTRICTED_WARNING.to_owned());
+        }
+        DistributionPolicy::NoncommercialMixed => {
+            report.notes.push(HORSE_NONCOMMERCIAL_NOTE.to_owned());
+        }
+    }
 
     report
         .files
@@ -413,7 +436,7 @@ fn path_for_report(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_uri_to_relative_path, validate_glb_header};
+    use super::{local_uri_to_relative_path, validate_glb_header, DistributionPolicy};
     use std::path::PathBuf;
 
     #[test]
@@ -451,5 +474,14 @@ mod tests {
 
         let wrong_length = b"glTF\x02\0\0\0\x10\0\0\0";
         assert!(validate_glb_header(wrong_length).is_err());
+    }
+
+    #[test]
+    fn distribution_policy_names_are_stable() {
+        assert_eq!(DistributionPolicy::default().as_str(), "permissive-only");
+        assert_eq!(
+            DistributionPolicy::NoncommercialMixed.as_str(),
+            "noncommercial-mixed"
+        );
     }
 }

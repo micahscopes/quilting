@@ -1,4 +1,6 @@
-use hyperscape::{run_offline_preflight, OfflinePreflightOptions, OfflinePreflightReport};
+use hyperscape::{
+    run_offline_preflight, DistributionPolicy, OfflinePreflightOptions, OfflinePreflightReport,
+};
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,6 +23,20 @@ fn main() -> ExitCode {
                     return usage_error("--dist requires a path");
                 };
                 options.dist_dir = PathBuf::from(path);
+            }
+            "--distribution-policy" => {
+                let Some(policy) = args.next() else {
+                    return usage_error("--distribution-policy requires a value");
+                };
+                options.distribution_policy = match policy.as_str() {
+                    "permissive-only" => DistributionPolicy::PermissiveOnly,
+                    "noncommercial-mixed" => DistributionPolicy::NoncommercialMixed,
+                    _ => {
+                        return usage_error(
+                            "--distribution-policy must be permissive-only or noncommercial-mixed",
+                        );
+                    }
+                };
             }
             "--json" => json = true,
             "--strict" => strict = true,
@@ -67,6 +83,10 @@ fn print_human_report(report: &OfflinePreflightReport, strict: bool) {
         report.cue_count, report.asset_count
     );
     println!(
+        "Distribution policy: {}",
+        report.distribution_policy.as_str()
+    );
+    println!(
         "Bundle: {} checked file(s), {}",
         report.files.len(),
         format_bytes(report.essential_bytes)
@@ -98,8 +118,9 @@ fn usage_error(message: &str) -> ExitCode {
 
 fn print_usage() {
     println!(
-        "Usage: hyperscope-preflight [--manifest PATH] [--dist PATH] [--json] [--strict]\n\
+        "Usage: hyperscope-preflight [--manifest PATH] [--dist PATH] [--distribution-policy POLICY] [--json] [--strict]\n\
          Defaults: --manifest examples/hacker-night.presentation.json --dist dist\n\
-         --strict also fails on uncleared distribution assets and local GLBs"
+         Policies: permissive-only (default), noncommercial-mixed\n\
+         --strict also fails on assets incompatible with the selected policy and local GLBs"
     );
 }
