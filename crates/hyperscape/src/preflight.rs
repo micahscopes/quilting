@@ -5,7 +5,7 @@
 //! available; those checks belong to the rehearsal documented in the runbook.
 
 use crate::Presentation;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -29,6 +29,28 @@ const REQUIRED_RUNTIME_FILES: &[&str] = &[
     "LICENSE-MIT",
     "LICENSE-APACHE",
 ];
+
+const BUILD_INPUT_ROOT_FILES: &[&str] = &[
+    "Cargo.lock",
+    "Cargo.toml",
+    "Trunk.toml",
+    "hyperscope.html",
+    "hyperscope_worker.js",
+    "hyperscope_focus.mjs",
+    "spacemouse.mjs",
+    "horse.glb",
+    "ant.glb",
+    "examples/hyperscape-blender-demo.glb",
+    "examples/hacker-night.presentation.json",
+    "ASSET_ATTRIBUTION.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+];
+const BUILD_INPUT_ROOT_DIRS: &[&str] = &["crates", "envmaps"];
+const BUILD_RECEIPT_VERSION: &str = "hyperscope-build-inputs/0.1";
+const BUILD_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-path-length-content";
+const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
 
 const RETIRED_DISTRIBUTION_FILES: &[&str] = &[
     "matcaps/aqua.png",
@@ -59,6 +81,7 @@ impl DistributionPolicy {
 
 #[derive(Debug, Clone)]
 pub struct OfflinePreflightOptions {
+    pub source_root: PathBuf,
     pub source_manifest: PathBuf,
     pub dist_dir: PathBuf,
     pub distribution_policy: DistributionPolicy,
@@ -67,6 +90,7 @@ pub struct OfflinePreflightOptions {
 impl Default for OfflinePreflightOptions {
     fn default() -> Self {
         Self {
+            source_root: PathBuf::from("."),
             source_manifest: PathBuf::from("examples/hacker-night.presentation.json"),
             dist_dir: PathBuf::from("dist"),
             distribution_policy: DistributionPolicy::default(),
@@ -92,6 +116,8 @@ pub struct OfflinePreflightReport {
     pub cue_count: usize,
     pub asset_count: usize,
     pub essential_bytes: u64,
+    pub source_build_fingerprint: Option<String>,
+    pub bundle_build_fingerprint: Option<String>,
     pub files: Vec<BundleFileCheck>,
     pub warnings: Vec<String>,
     pub notes: Vec<String>,
@@ -109,6 +135,8 @@ impl OfflinePreflightReport {
             cue_count: 0,
             asset_count: 0,
             essential_bytes: 0,
+            source_build_fingerprint: None,
+            bundle_build_fingerprint: None,
             files: Vec::new(),
             warnings: Vec::new(),
             notes: vec![
@@ -126,6 +154,133 @@ impl OfflinePreflightReport {
             kind: kind.to_owned(),
         });
     }
+}
+
+/// Deterministic receipt for the exact source inputs consumed by the release
+/// build. This detects stale local bundles; it is not a cryptographic signature
+/// and makes no tamper-resistance claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HyperscopeBuildReceipt {
+    pub version: String,
+    pub algorithm: String,
+    pub fingerprint: String,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+/// Fingerprint the checked-in runtime sources and copied release assets.
+pub fn hyperscope_build_receipt(source_root: &Path) -> Result<HyperscopeBuildReceipt, String> {
+    let mut paths = BUILD_INPUT_ROOT_FILES
+        .iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    for directory in BUILD_INPUT_ROOT_DIRS {
+        collect_build_input_files(source_root, Path::new(directory), &mut paths)?;
+    }
+    paths.sort();
+    paths.dedup();
+
+    let mut fingerprint = FNV1A_128_OFFSET;
+    let mut bytes = 0_u64;
+    update_fingerprint(&mut fingerprint, BUILD_RECEIPT_VERSION.as_bytes());
+    for relative in &paths {
+        let path = source_root.join(relative);
+        let content = fs::read(&path)
+            .map_err(|error| format!("cannot read build input {}: {error}", path.display()))?;
+        let relative = path_for_report(relative);
+        update_build_input_fingerprint(&mut fingerprint, &relative, &content);
+        bytes = bytes.saturating_add(content.len() as u64);
+    }
+    Ok(HyperscopeBuildReceipt {
+        version: BUILD_RECEIPT_VERSION.to_owned(),
+        algorithm: BUILD_FINGERPRINT_ALGORITHM.to_owned(),
+        fingerprint: format!("{fingerprint:032x}"),
+        files: paths.len(),
+        bytes,
+    })
+}
+
+/// Write a pretty, deterministic receipt for Trunk to copy into the bundle.
+pub fn write_hyperscope_build_receipt(
+    source_root: &Path,
+    output: &Path,
+) -> Result<HyperscopeBuildReceipt, String> {
+    let receipt = hyperscope_build_receipt(source_root)?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "cannot create build receipt directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let mut encoded = serde_json::to_string_pretty(&receipt)
+        .map_err(|error| format!("cannot serialize build receipt: {error}"))?;
+    encoded.push('\n');
+    fs::write(output, encoded)
+        .map_err(|error| format!("cannot write build receipt {}: {error}", output.display()))?;
+    Ok(receipt)
+}
+
+fn collect_build_input_files(
+    source_root: &Path,
+    relative: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let directory = source_root.join(relative);
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|error| {
+            format!(
+                "cannot read build input directory {}: {error}",
+                directory.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "cannot enumerate build input directory {}: {error}",
+                directory.display()
+            )
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "cannot inspect build input {}: {error}",
+                entry.path().display()
+            )
+        })?;
+        let child = relative.join(entry.file_name());
+        if file_type.is_dir() {
+            collect_build_input_files(source_root, &child, paths)?;
+        } else if file_type.is_file() {
+            paths.push(child);
+        } else {
+            return Err(format!(
+                "build input {} is neither a regular file nor directory",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn update_fingerprint(fingerprint: &mut u128, bytes: &[u8]) {
+    for byte in bytes {
+        *fingerprint ^= u128::from(*byte);
+        *fingerprint = fingerprint.wrapping_mul(FNV1A_128_PRIME);
+    }
+}
+
+fn update_build_input_fingerprint(fingerprint: &mut u128, path: &str, content: &[u8]) {
+    update_fingerprint(fingerprint, &(path.len() as u64).to_le_bytes());
+    update_fingerprint(fingerprint, path.as_bytes());
+    update_fingerprint(fingerprint, &(content.len() as u64).to_le_bytes());
+    update_fingerprint(fingerprint, content);
 }
 
 /// Validate a completed Trunk distribution without starting a browser.
@@ -193,6 +348,8 @@ pub fn run_offline_preflight(options: &OfflinePreflightOptions) -> OfflinePrefli
             ));
         }
     }
+
+    check_build_receipt(options, &mut report, &mut checked);
 
     for relative in REQUIRED_RUNTIME_FILES {
         let relative = Path::new(relative);
@@ -274,6 +431,61 @@ pub fn run_offline_preflight(options: &OfflinePreflightOptions) -> OfflinePrefli
         .sort_by(|left, right| left.path.cmp(&right.path));
     report.ok = report.errors.is_empty();
     report
+}
+
+fn check_build_receipt(
+    options: &OfflinePreflightOptions,
+    report: &mut OfflinePreflightReport,
+    checked: &mut BTreeSet<PathBuf>,
+) {
+    let source_receipt = match hyperscope_build_receipt(&options.source_root) {
+        Ok(receipt) => {
+            report.source_build_fingerprint = Some(receipt.fingerprint.clone());
+            receipt
+        }
+        Err(error) => {
+            report
+                .errors
+                .push(format!("cannot fingerprint current build inputs: {error}"));
+            return;
+        }
+    };
+    let relative = Path::new("pkg/hyperscope-build.json");
+    let Some(bytes) = check_bundle_file(
+        &options.dist_dir,
+        relative,
+        "build receipt",
+        report,
+        checked,
+    ) else {
+        return;
+    };
+    let bundle_receipt: HyperscopeBuildReceipt = match serde_json::from_slice(&bytes) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            report.errors.push(format!(
+                "bundle build receipt {} is invalid: {error}",
+                options.dist_dir.join(relative).display()
+            ));
+            return;
+        }
+    };
+    report.bundle_build_fingerprint = Some(bundle_receipt.fingerprint.clone());
+    if bundle_receipt.version != BUILD_RECEIPT_VERSION
+        || bundle_receipt.algorithm != BUILD_FINGERPRINT_ALGORITHM
+    {
+        report.errors.push(format!(
+            "bundle build receipt uses unsupported version {:?} or algorithm {:?}",
+            bundle_receipt.version, bundle_receipt.algorithm,
+        ));
+        return;
+    }
+    if bundle_receipt != source_receipt {
+        report.errors.push(format!(
+            "bundle is stale: build fingerprint {} does not match current source {}",
+            bundle_receipt.fingerprint, source_receipt.fingerprint,
+        ));
+    }
 }
 
 fn check_bundle_file(
@@ -436,7 +648,10 @@ fn path_for_report(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_uri_to_relative_path, validate_glb_header, DistributionPolicy};
+    use super::{
+        local_uri_to_relative_path, update_build_input_fingerprint, validate_glb_header,
+        DistributionPolicy, FNV1A_128_OFFSET,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -463,6 +678,24 @@ mod tests {
         ] {
             assert!(local_uri_to_relative_path(uri).is_err(), "accepted {uri:?}");
         }
+    }
+
+    #[test]
+    fn build_fingerprint_commits_to_paths_lengths_and_content() {
+        let fingerprint = |path: &str, content: &[u8]| {
+            let mut value = FNV1A_128_OFFSET;
+            update_build_input_fingerprint(&mut value, path, content);
+            value
+        };
+        let baseline = fingerprint("crates/example.rs", b"same bytes");
+        assert_eq!(baseline, fingerprint("crates/example.rs", b"same bytes"));
+        assert_ne!(baseline, fingerprint("crates/renamed.rs", b"same bytes"));
+        assert_ne!(baseline, fingerprint("crates/example.rs", b"changed bytes"));
+        assert_ne!(
+            fingerprint("ab", b"c"),
+            fingerprint("a", b"bc"),
+            "length prefixes must prevent path/content boundary ambiguity",
+        );
     }
 
     #[test]

@@ -32,7 +32,8 @@ pub use navigation::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{
-    run_offline_preflight, BundleFileCheck, DistributionPolicy, OfflinePreflightOptions,
+    hyperscope_build_receipt, run_offline_preflight, write_hyperscope_build_receipt,
+    BundleFileCheck, DistributionPolicy, HyperscopeBuildReceipt, OfflinePreflightOptions,
     OfflinePreflightReport,
 };
 pub use presentation::{

@@ -30,3 +30,8 @@ watch = [
 stage = "pre_build"
 command = "wasm-pack"
 command_arguments = ["build", "--target", "web", "--out-dir", "../../pkg", "crates/quilting-wasm"]
+
+[[hooks]]
+stage = "pre_build"
+command = "cargo"
+command_arguments = ["run", "--quiet", "-p", "hyperscape", "--bin", "hyperscope-build-receipt"]

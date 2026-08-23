@@ -12,6 +12,12 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
+            "--source-root" => {
+                let Some(path) = args.next() else {
+                    return usage_error("--source-root requires a path");
+                };
+                options.source_root = PathBuf::from(path);
+            }
             "--manifest" => {
                 let Some(path) = args.next() else {
                     return usage_error("--manifest requires a path");
@@ -91,6 +97,12 @@ fn print_human_report(report: &OfflinePreflightReport, strict: bool) {
         report.files.len(),
         format_bytes(report.essential_bytes)
     );
+    if let (Some(source), Some(bundle)) = (
+        &report.source_build_fingerprint,
+        &report.bundle_build_fingerprint,
+    ) {
+        println!("Build fingerprint: {bundle} (current source: {source})");
+    }
     for warning in &report.warnings {
         println!("WARN: {warning}");
     }
@@ -118,8 +130,8 @@ fn usage_error(message: &str) -> ExitCode {
 
 fn print_usage() {
     println!(
-        "Usage: hyperscope-preflight [--manifest PATH] [--dist PATH] [--distribution-policy POLICY] [--json] [--strict]\n\
-         Defaults: --manifest examples/hacker-night.presentation.json --dist dist\n\
+        "Usage: hyperscope-preflight [--source-root PATH] [--manifest PATH] [--dist PATH] [--distribution-policy POLICY] [--json] [--strict]\n\
+         Defaults: --source-root . --manifest examples/hacker-night.presentation.json --dist dist\n\
          Policies: permissive-only (default), noncommercial-mixed\n\
          --strict also fails on assets incompatible with the selected policy and local GLBs"
     );

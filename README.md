@@ -95,6 +95,9 @@ offline release build, filesystem preflight, browser rehearsal, and recovery
 steps, follow the [hacker-night runbook](docs/hacker-night-runbook.md). Bundled
 third-party asset provenance and the remaining public-redistribution blockers
 are recorded in [ASSET_ATTRIBUTION.md](ASSET_ATTRIBUTION.md).
+The preflight includes a deterministic source/build receipt, so an older but
+otherwise coherent `dist/` is rejected instead of being mistaken for the
+current checkout.
 
 The sidebar's **Patch Lab** opens a single curved QB triangle, a shared-edge
 plane, or a twelve-triangle cube in the production renderer. Its direct edge

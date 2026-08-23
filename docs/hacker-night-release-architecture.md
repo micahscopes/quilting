@@ -80,6 +80,13 @@ This layer is not yet the browser authority. It is the target behind the same
 shadow-and-rollback policy used for navigation; browser loading and URL state
 move only after adapters can compare existing behavior against reducer traces.
 
+The offline release gate also has source provenance now. A Trunk pre-build hook
+uses Rust to fingerprint the authoritative crate/shader, HTML/module, manifest,
+and copied-asset inputs into `pkg/hyperscope-build.json`. Filesystem preflight
+recomputes that bounded receipt and rejects missing, malformed, unsupported, or
+stale fingerprints before considering the bundle releasable. The deterministic
+FNV-1a-128 receipt is drift detection, not signing or adversarial integrity.
+
 ## Three graphs, never one overloaded hierarchy
 
 1. The **ownership graph** describes entities, ordinary node parenting,

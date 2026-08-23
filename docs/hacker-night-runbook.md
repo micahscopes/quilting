@@ -16,7 +16,10 @@ cargo run -p hyperscape --bin hyperscope-preflight
 The ordinary preflight must print `PASS`. It validates the Rust presentation
 document, byte-for-byte manifest freshness, every presentation GLB, the runtime
 JS/WASM pairs, environment maps, licenses, and generated Trunk
-bootstrap. It also reports the checked bundle size.
+bootstrap. Trunk also embeds a deterministic receipt for the Rust, shader,
+HTML/module, and copied-asset inputs; preflight recomputes it and rejects a
+coherent but stale `dist/`. It reports the matching fingerprints and checked
+bundle size.
 
 For a public downloadable archive, use the stricter gate:
 
