@@ -24,11 +24,13 @@ For a public downloadable archive, use the stricter gate:
 cargo run -p hyperscape --bin hyperscope-preflight -- --strict
 ```
 
-`--strict` currently fails intentionally: the horse and matcaps still need
-explicit redistribution clearance or replacement. It also catches accidental
-untracked files copied from `local-glbs/`. See
+`--strict` currently fails intentionally: the horse has a known CC BY-NC-SA
+3.0 license that requires an explicit noncommercial mixed-license release
+decision (or replacement/exclusion), while the user-supplied matcaps still
+have no recorded source or license. It also catches accidental untracked files
+copied from `local-glbs/`. See
 [`ASSET_ATTRIBUTION.md`](../ASSET_ATTRIBUTION.md). Do not publish `dist/` as an
-asset bundle until the strict gate is green.
+MIT/Apache-only or commercial-use asset bundle until the strict gate is green.
 
 The preflight has `--json` for an archival or scripted report. It is
 filesystem-only and cannot certify browser GPU/HID behavior.
@@ -121,6 +123,9 @@ destinations is informational; a renderer initialization or asset error is not.
 
 The presentation bundle and the source-code release are different artifacts.
 The code can be released under the repository licenses while third-party model
-and image provenance is resolved. Exclude `local-glbs/` and any test downloads
-from every archive. A public bundle is ready only when the strict preflight has
-no errors or warnings and the browser smoke check passes on the target machine.
+and image policy is resolved. The horse has documented CC BY-NC-SA 3.0 terms;
+it is not part of the MIT/Apache grant and cannot be included in a commercial
+or permissive-only bundle. The matcaps remain unverified. Exclude `local-glbs/`
+and any test downloads from every archive. A public bundle under the intended
+policy is ready only when the strict preflight has no errors or warnings and
+the browser smoke check passes on the target machine.

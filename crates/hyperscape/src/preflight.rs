@@ -35,8 +35,8 @@ const REQUIRED_RUNTIME_FILES: &[&str] = &[
 ];
 
 const UNCLEARED_DISTRIBUTION_WARNINGS: &[&str] = &[
-    "horse.glb is traceable to the three.js Horse example (model credited to Mirada, from ROME), but no explicit model-asset license is recorded; clear or replace it before public redistribution",
-    "the four matcaps have no source or license metadata in the files or repository history; clear or replace them before public redistribution",
+    "horse.glb is Mirada's ROME model under CC BY-NC-SA 3.0; explicitly choose a compatible noncommercial mixed-license bundle or replace/exclude it before an MIT/Apache-only or commercial-use release",
+    "the four user-supplied matcaps have no recorded source or license; clear or replace them before public redistribution",
 ];
 
 #[derive(Debug, Clone)]

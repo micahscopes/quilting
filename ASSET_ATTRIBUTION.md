@@ -36,31 +36,54 @@ See the [Poly Haven asset license](https://polyhaven.com/license).
 presentation fixture. It is covered by the repository's `MIT OR Apache-2.0`
 license.
 
-## Unresolved before public asset redistribution
+## Known restricted assets
 
 ### Animated horse
 
-Repository history traces `horse.glb` to the three.js Horse example. The
-three.js example credits the model to [Mirada](https://mirada.com/) from
-[ROME](https://rome.mrdoob.com/), and the local file is a normalized,
-GLB-converted derivative. The GLB itself contains only a
-`THREE.GLTFExporter` generator tag. Although the three.js code repository is
-MIT-licensed, no explicit license for this model asset has been located in the
-file, this repository's history, or the upstream example page.
+`horse.glb` is the three.js Horse example model, credited to
+[Mirada](https://mirada.com/) for
+[ROME — 3 Dreams of Black](https://rome.mrdoob.com/). The repository copy is
+byte-for-byte identical to three.js's
+[`Horse.glb` at commit `db75a3b`](https://github.com/mrdoob/three.js/blob/db75a3b38f940ffdd367bba42db943d0bb9ba4a5/examples/models/gltf/Horse.glb):
 
-Do not treat the horse as cleared for a public downloadable bundle. Obtain the
-model license or replace it with an explicitly redistributable animated
-fixture. Local demonstration and code testing are a separate release decision.
+```text
+SHA-256  bebaa4a60ba373317e25bf20f049f26ad0f5c86d4731ab67d46eb8c93c920947
+```
+
+The model's earlier ROME source records the asset license as
+[Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported](https://creativecommons.org/licenses/by-nc-sa/3.0/).
+That statement is preserved in
+[`horse.js` before three.js converted it to GLB](https://github.com/mrdoob/three.js/blob/4a4123206826429d154d1df9e9ef74560ae13dcd/examples/models/animated/horse.js),
+and three.js continues to show the Mirada/ROME credit on its
+[Horse example](https://github.com/mrdoob/three.js/blob/dev/examples/webgl_morphtargets_horse.html).
+
+This license applies to the horse asset, not to Quilting's source code. Keep
+the attribution and license link with redistributed copies, do not include it
+in a commercial-use or MIT/Apache-only asset bundle, and follow the license's
+ShareAlike terms for adaptations. The strict preflight remains red until a
+release deliberately chooses a compatible noncommercial mixed-license bundle
+or replaces/excludes this model.
+
+## Unresolved before public asset redistribution
 
 ### Matcaps
 
 The following images contain no author, source, copyright, or license metadata,
-and their introducing commit records no provenance:
+and their introducing commit records no provenance. The original Claude
+session records that these files already existed when the user asked the agent
+to add a dropdown for the images in the `matcaps` folder; the agent only wired
+them into the renderer. No earlier local session or shell-history entry found
+by the audit records how they were created or obtained. They are therefore
+user-supplied assets with unrecorded source/license, not agent-generated assets:
 
-- `matcaps/aqua.png`
-- `matcaps/citric-acid.png`
-- `matcaps/golden-soft.png`
-- `matcaps/soft-studio.png`
+- `matcaps/aqua.png` — SHA-256
+  `c004b5b5c55a1fc5663c2b75168301c4ee3b269858299aed9b9eda9c98792483`
+- `matcaps/citric-acid.png` — SHA-256
+  `10993506abf888aa339b174a0862bd3229d8bba02853977db0d8974c0f698fe7`
+- `matcaps/golden-soft.png` — SHA-256
+  `c53d27ce80180c20e88f451e6346fc86f56ea7abdbb6d82131a85011d91b651e`
+- `matcaps/soft-studio.png` — SHA-256
+  `04de93e8794c3d45161745044e354b5ee4ecd8a639e846f7e6381c29057f6ed6`
 
 Clear or replace them before publishing a bundle that contains them. The
 renderer has a procedural matcap fallback, so these files are not necessary to
