@@ -8,7 +8,6 @@
 <!-- trunk asset directives -->
 <link data-trunk rel="copy-dir" href="pkg" />
 <link data-trunk rel="copy-dir" href="envmaps" />
-<link data-trunk rel="copy-dir" href="matcaps" />
 <link data-trunk rel="copy-dir" href="local-glbs" />
 <link data-trunk rel="copy-file" href="hyperscope_worker.js" />
 <link data-trunk rel="copy-file" href="spacemouse.mjs" />
@@ -282,7 +281,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 <script type="module">
 import init, {
   HyperscopeNavigation,
-  mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMobius,
+  mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
@@ -2757,7 +2756,11 @@ effect(() => {
   }
   syncURL();
 });
-effect(() => { matcap.get(); syncURL(); });
+effect(() => {
+  const style = matcap.get();
+  if (wasmOk.get()) mr_setMatcapStyle(style);
+  syncURL();
+});
 
 // --- applyParams: set all signals from URL params (defined after all signals exist) ---
 applyParams = function(params) {

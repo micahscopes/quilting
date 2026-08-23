@@ -697,8 +697,9 @@ impl JointMatricesBuf {
 /// UBO for matcap fragment uniforms (binding 1, shared with wire UBO).
 ///
 /// Layout (std140, 16 bytes):
-///   float has_matcap_tex  (offset 0)
-///   pad                   (offset 4, 12 bytes)
+///   float mode            (offset 0)
+///   float style           (offset 4)
+///   pad                   (offset 8, 8 bytes)
 pub struct MatcapUniformBuf {
     pub ubo: glow::Buffer,
 }
@@ -713,11 +714,13 @@ impl MatcapUniformBuf {
         }
     }
 
-    /// mode: 0.0 = LOD heatmap, 1.0 = texture matcap, 2.0 = procedural matcap
-    pub fn upload(&self, gl: &glow::Context, mode: f32) {
+    /// mode: 0.0 = LOD heatmap, otherwise procedural matcap.
+    /// style: 0.0 = aqua, 1.0 = citric acid, 2.0 = golden soft,
+    /// 3.0 = soft studio.
+    pub fn upload(&self, gl: &glow::Context, mode: f32, style: f32) {
         let mut data = [0u8; 16];
-        let val: f32 = mode;
-        data[0..4].copy_from_slice(&val.to_le_bytes());
+        data[0..4].copy_from_slice(&mode.to_le_bytes());
+        data[4..8].copy_from_slice(&style.to_le_bytes());
         unsafe {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.ubo));
             gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);

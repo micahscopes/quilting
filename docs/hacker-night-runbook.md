@@ -15,7 +15,7 @@ cargo run -p hyperscape --bin hyperscope-preflight
 
 The ordinary preflight must print `PASS`. It validates the Rust presentation
 document, byte-for-byte manifest freshness, every presentation GLB, the runtime
-JS/WASM pairs, environment maps, matcaps, licenses, and generated Trunk
+JS/WASM pairs, environment maps, licenses, and generated Trunk
 bootstrap. It also reports the checked bundle size.
 
 For a public downloadable archive, use the stricter gate:
@@ -26,9 +26,10 @@ cargo run -p hyperscape --bin hyperscope-preflight -- --strict
 
 `--strict` currently fails intentionally: the horse has a known CC BY-NC-SA
 3.0 license that requires an explicit noncommercial mixed-license release
-decision (or replacement/exclusion), while the user-supplied matcaps still
-have no recorded source or license. It also catches accidental untracked files
-copied from `local-glbs/`. See
+decision (or replacement/exclusion). It also catches accidental untracked files
+copied from `local-glbs/`. The four matcap looks are now analytic WGSL profiles,
+so they add no separately licensed image payload; preflight also rejects stale
+copies of the retired PNGs left by a non-clean build. See
 [`ASSET_ATTRIBUTION.md`](../ASSET_ATTRIBUTION.md). Do not publish `dist/` as an
 MIT/Apache-only or commercial-use asset bundle until the strict gate is green.
 
@@ -125,7 +126,7 @@ The presentation bundle and the source-code release are different artifacts.
 The code can be released under the repository licenses while third-party model
 and image policy is resolved. The horse has documented CC BY-NC-SA 3.0 terms;
 it is not part of the MIT/Apache grant and cannot be included in a commercial
-or permissive-only bundle. The matcaps remain unverified. Exclude `local-glbs/`
-and any test downloads from every archive. A public bundle under the intended
+or permissive-only bundle. Exclude `local-glbs/` and any test downloads from
+every archive. A public bundle under the intended
 policy is ready only when the strict preflight has no errors or warnings and
 the browser smoke check passes on the target machine.

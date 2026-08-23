@@ -64,31 +64,6 @@ ShareAlike terms for adaptations. The strict preflight remains red until a
 release deliberately chooses a compatible noncommercial mixed-license bundle
 or replaces/excludes this model.
 
-## Unresolved before public asset redistribution
-
-### Matcaps
-
-The following images contain no author, source, copyright, or license metadata,
-and their introducing commit records no provenance. The original Claude
-session records that these files already existed when the user asked the agent
-to add a dropdown for the images in the `matcaps` folder; the agent only wired
-them into the renderer. No earlier local session or shell-history entry found
-by the audit records how they were created or obtained. They are therefore
-user-supplied assets with unrecorded source/license, not agent-generated assets:
-
-- `matcaps/aqua.png` — SHA-256
-  `c004b5b5c55a1fc5663c2b75168301c4ee3b269858299aed9b9eda9c98792483`
-- `matcaps/citric-acid.png` — SHA-256
-  `10993506abf888aa339b174a0862bd3229d8bba02853977db0d8974c0f698fe7`
-- `matcaps/golden-soft.png` — SHA-256
-  `c53d27ce80180c20e88f451e6346fc86f56ea7abdbb6d82131a85011d91b651e`
-- `matcaps/soft-studio.png` — SHA-256
-  `04de93e8794c3d45161745044e354b5ee4ecd8a639e846f7e6381c29057f6ed6`
-
-Clear or replace them before publishing a bundle that contains them. The
-renderer has a procedural matcap fallback, so these files are not necessary to
-demonstrate the rendering technique.
-
 ## Untracked local assets
 
 `local-glbs/` is intentionally ignored except for `.gitkeep`. Files copied from

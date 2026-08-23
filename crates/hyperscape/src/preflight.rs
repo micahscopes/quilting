@@ -24,10 +24,6 @@ const REQUIRED_RUNTIME_FILES: &[&str] = &[
     "envmaps/rosendal_plains_1_1k.hdr",
     "envmaps/rogland_clear_night_2k.hdr",
     "envmaps/ticknock_04_1k.hdr",
-    "matcaps/aqua.png",
-    "matcaps/citric-acid.png",
-    "matcaps/golden-soft.png",
-    "matcaps/soft-studio.png",
     "ant.glb",
     "ASSET_ATTRIBUTION.md",
     "LICENSE-MIT",
@@ -36,7 +32,13 @@ const REQUIRED_RUNTIME_FILES: &[&str] = &[
 
 const UNCLEARED_DISTRIBUTION_WARNINGS: &[&str] = &[
     "horse.glb is Mirada's ROME model under CC BY-NC-SA 3.0; explicitly choose a compatible noncommercial mixed-license bundle or replace/exclude it before an MIT/Apache-only or commercial-use release",
-    "the four user-supplied matcaps have no recorded source or license; clear or replace them before public redistribution",
+];
+
+const RETIRED_DISTRIBUTION_FILES: &[&str] = &[
+    "matcaps/aqua.png",
+    "matcaps/citric-acid.png",
+    "matcaps/golden-soft.png",
+    "matcaps/soft-studio.png",
 ];
 
 #[derive(Debug, Clone)]
@@ -226,6 +228,17 @@ pub fn run_offline_preflight(options: &OfflinePreflightOptions) -> OfflinePrefli
                 bytes
             ));
         }
+    }
+    let retired_files = RETIRED_DISTRIBUTION_FILES
+        .iter()
+        .filter(|relative| options.dist_dir.join(relative).is_file())
+        .copied()
+        .collect::<Vec<_>>();
+    if !retired_files.is_empty() {
+        report.warnings.push(format!(
+            "dist contains retired unlicensed matcap image(s): {}; make a clean build before release",
+            retired_files.join(", ")
+        ));
     }
     report.warnings.extend(
         UNCLEARED_DISTRIBUTION_WARNINGS

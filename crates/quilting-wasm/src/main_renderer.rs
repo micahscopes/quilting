@@ -161,6 +161,8 @@ struct MainState {
     materials: Vec<PbrParams>,
     num_faces: usize,
     render_mode: RenderMode,
+    /// Analytic character-matcap profile selected by the browser shell.
+    matcap_style: f32,
     mobius: [f32; 16],
     /// Explicit parity from the authoring generator word. Legacy direct matrix
     /// input falls back to the old `c != 0` heuristic.
@@ -520,6 +522,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             materials: Vec::new(),
             num_faces: 0,
             render_mode: RenderMode::Pbr,
+            matcap_style: 1.0,
             mobius: IDENTITY_MOBIUS,
             mobius_orientation: 1,
             hyperscape_packets: BTreeMap::new(),
@@ -583,6 +586,21 @@ pub fn mr_set_render_mode(mode: &str) {
                 "wire" => RenderMode::Wire, "normals" => RenderMode::Normals,
                 "both" => RenderMode::Both, "lod" => RenderMode::Lod, "stretch" => RenderMode::Stretch,
                 _ => RenderMode::Pbr,
+            };
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "mr_setMatcapStyle")]
+pub fn mr_set_matcap_style(style: &str) {
+    STATE.with(|state| {
+        if let Some(renderer) = state.borrow_mut().as_mut() {
+            renderer.matcap_style = match style {
+                "aqua" => 0.0,
+                "citric-acid" => 1.0,
+                "golden-soft" => 2.0,
+                "soft-studio" => 3.0,
+                _ => 1.0,
             };
         }
     });
@@ -3162,11 +3180,14 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 return;
             }
             RenderMode::Lod => {
-                state.renderer.matcap_ubo().upload(gl, 0.0); // heatmap
+                state
+                    .renderer
+                    .matcap_ubo()
+                    .upload(gl, 0.0, state.matcap_style); // heatmap
                 state.renderer.matcap_ubo().bind(gl);
             }
             _ => {
-                state.renderer.matcap_ubo().upload(gl, 2.0); // procedural matcap
+                state.renderer.matcap_ubo().upload(gl, 1.0, state.matcap_style);
                 state.renderer.matcap_ubo().bind(gl);
             }
         }

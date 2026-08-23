@@ -235,12 +235,11 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_4_vs") {
             gl.uniform_1_i32(Some(&loc), FACE_DATA_TEX_UNIT as i32);
         }
-        // Fragment shader textures — bind to texture units matching prototype layout
-        // Matcap: binding 2/3 → unit 0
+        // Fragment shader textures — bind to texture units matching the PBR layout.
         // PBR: bindings 2-17 → units 0-7 (base_color, mr, normal, emissive, occlusion, env, irrad, sheen)
         let fs_sampler_bindings: &[(u32, i32)] = &[
-            (2, 0),   // base_color_tex / matcap_tex
-            (3, 0),   // base_color_sampler / matcap_sampler
+            (2, 0),   // base_color_tex
+            (3, 0),   // base_color_sampler
             (4, 1),   // metallic_roughness_tex
             (5, 1),   // metallic_roughness_sampler
             (6, 2),   // normal_tex
