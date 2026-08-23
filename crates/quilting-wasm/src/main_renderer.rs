@@ -23,7 +23,12 @@ use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
-use quilting_core::render::{RenderGeometry, RenderSubmissionStats};
+use quilting_core::render::{
+    FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform,
+    RenderFrameOptions, RenderGeometry, RenderSceneSnapshot, RenderStyle,
+    RenderSubmissionStats, RenderView,
+};
+use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{SurfaceRuntime, SurfaceRuntimeSnapshot};
 use hyperscape::interchange::{
@@ -134,6 +139,10 @@ struct MainState {
     last_render_submission: RenderSubmissionStats,
     /// Saturating session totals for explicit diagnostic queries.
     render_submission_totals: RenderSubmissionStats,
+    /// Opt-in comparison between backend-neutral frame commands and actual
+    /// indexed WebGL patch submissions.
+    render_shadow: RenderShadowObserver,
+    render_shadow_scene_dirty: bool,
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
@@ -517,6 +526,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             pbr_vertex_uniform_updates: 0,
             last_render_submission: RenderSubmissionStats::default(),
             render_submission_totals: RenderSubmissionStats::default(),
+            render_shadow: RenderShadowObserver::default(),
+            render_shadow_scene_dirty: true,
             batch_groups: BTreeMap::new(),
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
@@ -827,7 +838,121 @@ fn sync_render_batches(renderer: &mut MainState) {
     }
     renderer.render_batches = render_batches;
     renderer.render_commands_dirty = false;
+    renderer.render_shadow_scene_dirty = true;
     renderer.render_command_builds += 1;
+}
+
+fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, String> {
+    if renderer.batches.len() != renderer.render_batches.len() {
+        return Err(format!(
+            "retained GPU batches ({}) do not match render views ({})",
+            renderer.batches.len(),
+            renderer.render_batches.len(),
+        ));
+    }
+    let default_material = PbrParams::default();
+    let mut batches = Vec::with_capacity(renderer.batches.len());
+    for ((&key, gpu_batch), render_batch) in
+        renderer.batches.iter().zip(&renderer.render_batches)
+    {
+        if gpu_batch.material_index != render_batch.material_index
+            || gpu_batch.node_index != render_batch.node_index
+        {
+            return Err("retained GPU batch metadata does not match its render view".to_string());
+        }
+        let triangle_index_count = u32::try_from(render_batch.mesh.num_tri_indices)
+            .map_err(|_| "render batch has a negative triangle index count".to_string())?;
+        let line_index_count = u32::try_from(render_batch.mesh.num_line_indices)
+            .map_err(|_| "render batch has a negative line index count".to_string())?;
+        let (_, material) = pbr_material_for_index(
+            &renderer.materials,
+            &default_material,
+            render_batch.material_index,
+        );
+        let pbr_class = if material.transmission_factor > 0.0 {
+            PbrDrawClass::Transmission
+        } else if material.alpha_mode > 1.5 {
+            PbrDrawClass::Blend
+        } else {
+            PbrDrawClass::Opaque
+        };
+        batches.push(RenderBatchSnapshot {
+            key,
+            members: gpu_batch.members.clone(),
+            triangle_index_count,
+            line_index_count,
+            transform: RenderEntityTransform {
+                mobius: render_batch.mobius,
+                orientation_sign: render_batch.orientation_sign,
+                euclidean_model: render_batch.euclidean_model,
+                euclidean_normal: render_batch.euclidean_normal,
+            },
+            enabled: render_batch.mesh.num_instances > 0,
+            pbr_class,
+        });
+    }
+    Ok(RenderSceneSnapshot {
+        revision: 0,
+        batches,
+    })
+}
+
+fn refresh_render_shadow_scene(renderer: &mut MainState) {
+    if !renderer.render_shadow.is_enabled() || !renderer.render_shadow_scene_dirty {
+        return;
+    }
+    let extracted = extract_render_scene(renderer);
+    renderer.render_shadow_scene_dirty = false;
+    match extracted {
+        Ok(scene) => renderer.render_shadow.replace_scene(scene),
+        Err(error) => renderer.render_shadow.record_extraction_error(error),
+    }
+}
+
+fn render_style(mode: RenderMode) -> RenderStyle {
+    match mode {
+        RenderMode::Pbr => RenderStyle::Pbr,
+        RenderMode::Matcap => RenderStyle::Matcap,
+        RenderMode::Wire => RenderStyle::Wire,
+        RenderMode::Normals => RenderStyle::Normals,
+        RenderMode::Both => RenderStyle::MatcapWire,
+        RenderMode::Lod => RenderStyle::Lod,
+        RenderMode::Stretch => RenderStyle::Stretch,
+    }
+}
+
+fn observe_render_submission(
+    renderer: &mut MainState,
+    camera: &Camera,
+    actual: RenderSubmissionStats,
+) {
+    if !renderer.render_shadow.is_enabled() {
+        return;
+    }
+    let selected_node = usize::try_from(renderer.selected_node).ok();
+    let highlight_face = u32::try_from(renderer.highlight_face).ok();
+    renderer.render_shadow.observe(
+        render_style(renderer.render_mode),
+        RenderView {
+            viewport: [
+                renderer.viewport_size.0.max(0) as u32,
+                renderer.viewport_size.1.max(0) as u32,
+            ],
+            mvp: camera.mvp,
+            model_view: camera.mv,
+            camera_position: camera.camera_pos,
+            selected_node,
+            focus: FocusFieldPacket {
+                sphere: renderer.focus_sphere,
+                enabled: renderer.focus_field_enabled,
+            },
+        },
+        RenderFrameOptions {
+            focus_postprocess: renderer.fuzzy_enabled,
+            highlight_face,
+        },
+        actual,
+    );
 }
 
 #[wasm_bindgen(js_name = "mr_loadHyperscape")]
@@ -1628,6 +1753,34 @@ pub fn mr_set_round_shadow_enabled(enabled: bool) -> JsValue {
     })
 }
 
+#[wasm_bindgen(js_name = "mr_setRenderShadowEnabled")]
+pub fn mr_set_render_shadow_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let changed = state.render_shadow.is_enabled() != enabled;
+        state.render_shadow.set_enabled(enabled);
+        if enabled && changed {
+            state.render_shadow_scene_dirty = true;
+            sync_render_batches(state);
+            refresh_render_shadow_scene(state);
+        }
+        state.render_shadow.to_js()
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_renderShadowDiagnostics")]
+pub fn mr_render_shadow_diagnostics() -> JsValue {
+    STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map_or(JsValue::NULL, |state| state.render_shadow.to_js())
+    })
+}
+
 #[wasm_bindgen(js_name = "mr_roundShadowDiagnostics")]
 pub fn mr_round_shadow_diagnostics() -> JsValue {
     STATE.with(|state| {
@@ -1712,6 +1865,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             }
             st.cached_instances = instances.to_vec();
             st.num_faces = num_faces;
+            st.render_shadow.asset_changed();
+            st.render_shadow_scene_dirty = true;
             st.presentation_nodes.clear();
             st.surface_runtime.reset_geometry();
             st.batch_groups.clear();
@@ -2151,6 +2306,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
                 st.materials.push(material);
             }
             info!("Set {} PBR materials", st.materials.len());
+            st.render_shadow_scene_dirty = true;
         }
     });
 }
@@ -2180,6 +2336,7 @@ pub fn mr_append_materials(data: &[f32], num_materials: u32) -> u32 {
             state.materials.len() as u32 - base,
             base,
         );
+        state.render_shadow_scene_dirty = true;
         base
     })
 }
@@ -2712,6 +2869,7 @@ pub fn mr_upload_animation_pose(matrices: &[f32], morph_weights: &[f32], skin_te
         if let Some(ref mut st) = *s.borrow_mut() {
             st.renderer.joint_ubo().upload(st.renderer.gl(), matrices, morph_weights, skin_tex_w);
             st.surface_runtime.set_pose(matrices, morph_weights);
+            st.render_shadow.pose_changed();
         }
     });
 }
@@ -2726,6 +2884,7 @@ pub fn mr_clear_animation_state() {
             state.renderer.joint_ubo().clear(state.renderer.gl());
             state.renderer.clear_animation_textures();
             state.surface_runtime.clear_animation();
+            state.render_shadow.pose_changed();
         }
     });
 }
@@ -2750,6 +2909,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         };
 
         sync_render_batches(state);
+        refresh_render_shadow_scene(state);
         let render_batches = state.render_batches.as_slice();
 
         let gl = state.renderer.gl();
@@ -3294,6 +3454,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.pbr_vertex_uniform_updates += vertex_uniform_updates;
                 state.last_render_submission = submission_stats;
                 state.render_submission_totals.merge(submission_stats);
+                observe_render_submission(state, &camera, submission_stats);
                 state.renderer.end_frame();
                 return;
             }
@@ -3313,6 +3474,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let submission_stats = state
             .renderer
             .render(state.render_mode, &camera, render_batches);
+        observe_render_submission(state, &camera, submission_stats);
 
         // Highlight pass: overlay picked QB patch with cyan
         if state.highlight_face >= 0 && state.highlight_prog.is_some() {

@@ -74,7 +74,7 @@ browser's first-value behavior for duplicate query keys while diagnosing the
 duplicate, malformed known values, and unknown keys.
 
 The checked-in `scripts/smoke-hyperscope-route-shadow.mjs` oracle verifies that
-the Rust registry exactly matches the browser serializer's 65-key order, then
+the Rust registry exactly matches the browser serializer's 66-key order, then
 checks default omission, canonical ordering, duplicates, invalid toggles,
 non-finite numbers, and unknown keys through generated WASM. The opt-in
 `routeshadow=1` browser path compares bounded-rate browser and Rust query
@@ -85,6 +85,36 @@ This route adapter increased the optimized main WASM from 5,905,317 to
 to 2,073,745 bytes. The full protocol/app/asset/route migration shadow is now
 80,136 raw bytes above the 5,843,798-byte pre-app binary (about 1.37%). Chrome
 runtime comparison remains pending while the remote-debug browser is closed.
+
+## Backend-neutral render-submission shadow follow-up
+
+The 2026-08-24 renderer slice introduced a backend-neutral retained scene,
+frame-command stream, exact indexed-submission counters, and bounded parity
+observer in `quilting-core`. WebGL2 now records patch draw calls, zero-instance
+draws, invalid signed counts, instances, triangles, and lines immediately next
+to each actual indexed submission in both its shared non-PBR path and custom
+two-pass PBR path. Picking, highlighting, and fullscreen post-processing remain
+explicit auxiliary work rather than being conflated with patch submission.
+
+The observer is disabled by default and retains no cloned scene while disabled.
+With `rendershadow=1`, a scene snapshot is extracted only when retained batch,
+transform, visibility, or material classification changes. Each frame is then
+compared entirely inside WASM; JavaScript receives only the bounded aggregate
+and last comparison when `globalThis.__hyperscopeRenderShadow.refresh()` is
+called. Asset, pose, scene, and frame revisions remain distinct.
+
+`scripts/smoke-render-shadow.mjs` verified the generated exports, the route
+smoke verified all 66 controls and browser serializer order, and the native
+workspace suite (excluding the target-specific WASM crate), `wasm32` check,
+strict touched-code clippy, app/route smokes, and 40 browser-independent tests
+passed. The combined render-contract/submission/shadow slice increased the
+optimized WASM from 5,923,934 to 5,944,514 bytes (20,580 raw bytes, about
+0.35%); gzip increased from 2,073,745 to 2,083,582 bytes.
+
+Live parity remains pending. The Chrome DevTools MCP was available, but the
+only service on port 8888 was an unrelated `Walkie Songie` application and no
+Quilting Trunk process was running. No server was started, stopped, or replaced
+to manufacture a runtime result.
 
 ## Canonical atlas
 

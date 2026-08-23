@@ -132,6 +132,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("roundshadow", "0", Toggle),
     spec!("appshadow", "0", Toggle),
     spec!("routeshadow", "0", Toggle),
+    spec!("rendershadow", "0", Toggle),
 ];
 
 pub fn hyperscope_control_spec(key: &str) -> Option<&'static ControlSpec> {

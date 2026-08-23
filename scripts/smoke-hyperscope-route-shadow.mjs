@@ -16,6 +16,7 @@ const specs = hyperscopeControlSpecs();
 assert.equal(new Set(specs.map(spec => spec.key)).size, specs.length);
 assert.equal(specs.find(spec => spec.key === 'minpx').defaultValue, '16');
 assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
+assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 const syncSource = browserSource.match(

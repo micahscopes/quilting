@@ -1,6 +1,7 @@
 mod app_shadow;
 pub mod main_renderer;
 mod navigation;
+mod render_shadow;
 mod round_shadow;
 mod route_shadow;
 mod surface_runtime;

@@ -52,12 +52,18 @@ The first application boundary is now explicit:
   Bounded diagnostics are exposed at
   `globalThis.__hyperscopeAppShadowDiagnostics` until this lane earns browser
   authority.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 65 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 66 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. With `routeshadow=1`, the browser still writes
   its URL but compares every bounded-rate serialization against Rust at
   `globalThis.__hyperscopeRouteShadowDiagnostics`.
+- `quilting-core::render` owns retained scene snapshots, logical frame
+  commands, indexed submission accounting, and the bounded backend-parity
+  observer. `rendershadow=1` extracts WebGL state only when the retained scene
+  changes and compares every subsequent frame inside WASM; the browser can
+  explicitly query `globalThis.__hyperscopeRenderShadow` but receives no
+  per-frame diagnostic traffic.
 - High-rate frame, navigation, and presence events advance authoritative state
   without forcing DOM-rate notifications. `SignalVec` asset/diagnostic views
   are published as a batch and an `AppSummary` revision is set last as the

@@ -350,6 +350,7 @@ import init, {
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
+  mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
@@ -403,6 +404,8 @@ const RUST_APP_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('appshadow') === '1';
 const RUST_ROUTE_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('routeshadow') === '1';
+const RUST_RENDER_SHADOW_ENABLED =
+  new URLSearchParams(location.search).get('rendershadow') === '1';
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 const rustRouteShadowDiagnostics = {
   enabled: RUST_ROUTE_SHADOW_ENABLED,
@@ -572,6 +575,16 @@ const roundShadowDiagnostics = {
 };
 let roundShadowUnsupportedKey = null;
 globalThis.__hyperscopeRoundShadow = roundShadowDiagnostics;
+
+const renderShadowDiagnostics = {
+  enabled: RUST_RENDER_SHADOW_ENABLED,
+  snapshot: null,
+  refresh() {
+    this.snapshot = mr_renderShadowDiagnostics();
+    return this.snapshot;
+  },
+};
+globalThis.__hyperscopeRenderShadow = renderShadowDiagnostics;
 
 function updateRoundShadowDiagnostics(snapshot = mr_roundShadowDiagnostics()) {
   roundShadowDiagnostics.snapshot = snapshot;
@@ -932,6 +945,7 @@ function syncURL() {
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
     if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
     if (RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
+    if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
     compareRustRouteShadow(p);
 
     const qs = p.toString();
@@ -5755,6 +5769,7 @@ phase('wasm', [], async () => {
   $('stats').textContent = 'Initializing renderer...';
   if (!mr_init('cv')) throw 'renderer init failed';
   updateRoundShadowDiagnostics(mr_setRoundShadowEnabled(RUST_ROUND_SHADOW_ENABLED));
+  renderShadowDiagnostics.snapshot = mr_setRenderShadowEnabled(RUST_RENDER_SHADOW_ENABLED);
   const rendererFinished = performance.now();
   startupDiagnostics.wasm = {
     compileMs: compileFinished - compileStarted,
