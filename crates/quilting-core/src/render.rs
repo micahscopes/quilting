@@ -43,6 +43,10 @@ pub enum PbrDrawClass {
 pub struct RenderBatchSnapshot {
     pub key: RenderBatchKey,
     pub members: Vec<RenderBatchMember>,
+    /// Backend-neutral cardinality of the resident tessellation entry. Both
+    /// WebGL2 and WebGPU consume the same indexed atlas topology.
+    pub triangle_index_count: u32,
+    pub line_index_count: u32,
     pub transform: RenderEntityTransform,
     /// Presentation/layer visibility. Disabled batches remain resident and
     /// therefore keep their member list while commands carry zero instances.
@@ -86,6 +90,12 @@ impl RenderSceneSnapshot {
                     .any(|lod| lod == 0 || !lod.is_power_of_two())
             {
                 return Err(RenderContractError::InvalidBatchKey { batch_index });
+            }
+            if batch.triangle_index_count == 0
+                || !batch.triangle_index_count.is_multiple_of(3)
+                || !batch.line_index_count.is_multiple_of(2)
+            {
+                return Err(RenderContractError::InvalidBatchGeometry { batch_index });
             }
             batch.transform.validate()?;
             batch.active_instance_count()?;
@@ -339,6 +349,38 @@ impl RenderFrame {
         }
         Ok(())
     }
+
+    /// Derive the indexed patch work implied by this validated frame. This is
+    /// the backend-independent side of render shadowing; concrete renderers
+    /// record an actual [`RenderSubmissionStats`] at their draw boundary.
+    pub fn expected_submission_stats(
+        &self,
+        scene: &RenderSceneSnapshot,
+    ) -> Result<RenderSubmissionStats, RenderContractError> {
+        self.validate(scene)?;
+        let mut stats = RenderSubmissionStats::default();
+        for command in &self.commands {
+            let RenderCommand::DrawPatches {
+                batch_index,
+                instance_count,
+                geometry,
+                ..
+            } = *command
+            else {
+                continue;
+            };
+            let batch = scene
+                .batches
+                .get(batch_index as usize)
+                .ok_or(RenderContractError::CommandBatchMissing { batch_index })?;
+            let index_count = match geometry {
+                RenderGeometry::Triangles => batch.triangle_index_count,
+                RenderGeometry::Lines => batch.line_index_count,
+            };
+            stats.record_indexed_draw(geometry, index_count, instance_count);
+        }
+        Ok(stats)
+    }
 }
 
 fn expected_commands(
@@ -471,6 +513,7 @@ pub enum RenderContractError {
     InvalidTransform,
     InvalidView,
     InvalidBatchKey { batch_index: usize },
+    InvalidBatchGeometry { batch_index: usize },
     InvalidBatchMember { batch_index: usize, face_index: u32 },
     BatchOrder { batch_index: usize },
     DuplicateFace(u32),
@@ -478,6 +521,7 @@ pub enum RenderContractError {
     InstanceCountOverflow,
     SceneRevisionMismatch { frame: u64, scene: u64 },
     CommandSequenceMismatch,
+    CommandBatchMissing { batch_index: u32 },
 }
 
 impl fmt::Display for RenderContractError {
@@ -488,6 +532,10 @@ impl fmt::Display for RenderContractError {
             Self::InvalidBatchKey { batch_index } => {
                 write!(formatter, "render batch {batch_index} has an invalid key")
             }
+            Self::InvalidBatchGeometry { batch_index } => write!(
+                formatter,
+                "render batch {batch_index} has invalid index cardinalities"
+            ),
             Self::InvalidBatchMember {
                 batch_index,
                 face_index,
@@ -513,6 +561,12 @@ impl fmt::Display for RenderContractError {
             ),
             Self::CommandSequenceMismatch => {
                 formatter.write_str("render command sequence is not canonical")
+            }
+            Self::CommandBatchMissing { batch_index } => {
+                write!(
+                    formatter,
+                    "render command references missing batch {batch_index}"
+                )
             }
         }
     }
@@ -562,6 +616,8 @@ mod tests {
                 permutation_index: 0,
                 vertex_lods: [2; 3],
             }],
+            triangle_index_count: 6,
+            line_index_count: 6,
             transform: transform(),
             enabled,
             pbr_class,
@@ -637,6 +693,17 @@ mod tests {
             .commands
             .iter()
             .any(|command| matches!(command, RenderCommand::HighlightFace { .. })));
+        assert_eq!(
+            frame.expected_submission_stats(&scene).unwrap(),
+            RenderSubmissionStats {
+                draw_calls: 3,
+                zero_instance_draw_calls: 1,
+                invalid_draw_calls: 0,
+                submitted_instances: 2,
+                triangles: 4,
+                lines: 0,
+            }
+        );
         frame.validate(&scene).unwrap();
     }
 
@@ -677,6 +744,17 @@ mod tests {
         assert_eq!(
             frame.commands[6],
             RenderCommand::HighlightFace { face_index: 4 }
+        );
+        assert_eq!(
+            frame.expected_submission_stats(&scene).unwrap(),
+            RenderSubmissionStats {
+                draw_calls: 4,
+                zero_instance_draw_calls: 2,
+                invalid_draw_calls: 0,
+                submitted_instances: 2,
+                triangles: 2,
+                lines: 3,
+            }
         );
     }
 
