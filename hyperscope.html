@@ -121,6 +121,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="walk-smoothing" min="0" max="150" step="1" value="18"><span class="v" id="walk-smoothing-v">0.18 s</span></div>
     <label>Walk frame pull</label>
     <div class="sr"><input type="range" id="walk-align" min="0" max="100" step="1" value="70"><span class="v" id="walk-align-v">70%</span></div>
+    <label>Walk speed</label>
+    <div class="sr"><input type="range" id="walk-speed" min="-400" max="400" step="1" value="0"><span class="v" id="walk-speed-v">0.20 R/s</span></div>
     <label>Walk scale</label>
     <div class="sr"><input type="range" id="walk-scale" min="-800" max="800" step="1" value="0"><span class="v" id="walk-scale-v">1.00×</span></div>
     <label>Walk eye height</label>
@@ -367,7 +369,7 @@ import {
 } from './spacemouse.mjs?rev=object-focus-v1';
 import {
   applyMobiusPoint,
-  buildNodeFocusRecords,
+  buildFocusBounds,
   composeSurfaceRelativeForward,
   decomposeSurfaceRelativeForward,
   faceSourceCentroid,
@@ -380,10 +382,11 @@ import {
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
   scaleRelativeNearPlane,
+  sceneRelativeWalkSpeed,
   smootherstep01,
   transportCameraAcrossSphereReflections,
   transportPointAndDirectionsAcrossSphereReflections,
-} from './hyperscope_focus.mjs?rev=conformal-surface-transport-v2';
+} from './hyperscope_focus.mjs?rev=scene-relative-walk-speed-v1';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -502,6 +505,7 @@ const modelPayloadTelemetry = {
   textureUploadPath: 'none',
   focusNodes: 0,
   focusUniqueVertices: 0,
+  focusSceneRadius: 0,
   focusBuildMs: 0,
   avoidedFaceMetadataCopyBytes: 0,
   timings: {},
@@ -742,7 +746,7 @@ const PARAM_DEFAULTS = {
   smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
-  walkscale: '0', walkheight: '0',
+  walkspeed: '0', walkscale: '0', walkheight: '0',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
@@ -776,7 +780,8 @@ function readParams() {
     smpinv: get('smpinv'), smrinv: get('smrinv'),
     smbpinv: get('smbpinv'), smbrinv: get('smbrinv'),
     fov: get('fov'), interp: get('interp'), walksmooth: get('walksmooth'),
-    walkalign: get('walkalign'), walkscale: get('walkscale'), walkheight: get('walkheight'),
+    walkalign: get('walkalign'), walkspeed: get('walkspeed'),
+    walkscale: get('walkscale'), walkheight: get('walkheight'),
     lab: get('lab'), labfield: get('labfield'),
     laba: get('laba'), labb: get('labb'), labc: get('labc'),
     labmin: get('labmin'), labmax: get('labmax'), labphase: get('labphase'),
@@ -844,6 +849,7 @@ function syncURL() {
       ss('interp', focusTransitionCentiseconds, PARAM_DEFAULTS.interp);
       ss('walksmooth', walkSmoothingCentiseconds, PARAM_DEFAULTS.walksmooth);
       ss('walkalign', walkTangentPullPercent, PARAM_DEFAULTS.walkalign);
+      ss('walkspeed', walkSpeedSteps, PARAM_DEFAULTS.walkspeed);
       ss('walkscale', walkScaleSteps, PARAM_DEFAULTS.walkscale);
       ss('walkheight', walkHeightSteps, PARAM_DEFAULTS.walkheight);
       if (patchLab.active) {
@@ -899,6 +905,7 @@ $('sidebar-toggle').onclick = () => {
 let rotX = 0.3, rotY = 0.5, cameraRoll = 0, zoom = 3.0;
 let panX = 0, panY = 0, panZ = 0;
 let drag = false, lx = 0, ly = 0;
+const DEFAULT_WALK_RADII_PER_SECOND = 0.2;
 
 const spaceMouseMove = signal(300, 'smmove');
 const spaceMouseRotate = signal(300, 'smrotate');
@@ -906,6 +913,7 @@ const cameraFovDegrees = signal(75, 'fov');
 const focusTransitionCentiseconds = signal(70, 'interp');
 const walkSmoothingCentiseconds = signal(18, 'walksmooth');
 const walkTangentPullPercent = signal(70, 'walkalign');
+const walkSpeedSteps = signal(0, 'walkspeed');
 const walkScaleSteps = signal(0, 'walkscale');
 const walkHeightSteps = signal(0, 'walkheight');
 const spaceMouseNavigation = signal('hyperscope', 'smnav');
@@ -923,6 +931,8 @@ bindSlider('focus-transition', focusTransitionCentiseconds,
 bindSlider('walk-smoothing', walkSmoothingCentiseconds,
   value => `${(value / 100).toFixed(2)} s`);
 bindSlider('walk-align', walkTangentPullPercent, value => `${value.toFixed(0)}%`);
+bindSlider('walk-speed', walkSpeedSteps,
+  value => `${(DEFAULT_WALK_RADII_PER_SECOND * Math.pow(2, value / 100)).toFixed(2)} R/s`);
 bindSlider('walk-scale', walkScaleSteps,
   value => `${Math.pow(2, value / 100).toFixed(2)}×`);
 bindSlider('walk-height', walkHeightSteps,
@@ -970,6 +980,7 @@ effect(() => {
   focusTransitionCentiseconds.get();
   walkSmoothingCentiseconds.get();
   walkTangentPullPercent.get();
+  walkSpeedSteps.get();
   walkScaleSteps.get();
   walkHeightSteps.get();
   syncURL();
@@ -1750,6 +1761,7 @@ const patchLab = {
 };
 globalThis.__hyperscopePatchLab = patchLab;
 let nodeFocusRecords = new Map();
+let sceneSourceBound = null;
 let selectedObject = null;
 let cameraFocusTransition = null;
 let focusSphereTransition = null;
@@ -1764,7 +1776,6 @@ const surfaceWalk = {
   inputRevision: null,
   controllerRight: 0,
   controllerForward: 0,
-  baseSpeed: 0.2,
   baseEyeHeight: 0.035,
   lastLodAt: 0,
   error: null,
@@ -1777,7 +1788,11 @@ function surfaceWalkScale() {
 }
 
 function surfaceWalkSpeed() {
-  return surfaceWalk.baseSpeed * surfaceWalkScale();
+  const sceneRadius = sceneSourceBound?.radius;
+  const radiiPerSecond = DEFAULT_WALK_RADII_PER_SECOND
+    * Math.pow(2, walkSpeedSteps.peek() / 100);
+  return sceneRelativeWalkSpeed(sceneRadius, radiiPerSecond, surfaceWalkScale())
+    ?? DEFAULT_WALK_RADII_PER_SECOND;
 }
 
 function surfaceWalkEyeHeight() {
@@ -1796,11 +1811,14 @@ const focusSphere = {
 
 function rebuildNodeFocusRecords(instances, faceNodes) {
   const started = performance.now();
-  nodeFocusRecords = buildNodeFocusRecords(instances, faceNodes);
+  const bounds = buildFocusBounds(instances, faceNodes);
+  nodeFocusRecords = bounds.nodes;
+  sceneSourceBound = bounds.scene;
   modelPayloadTelemetry.focusBuildMs = performance.now() - started;
   modelPayloadTelemetry.focusNodes = nodeFocusRecords.size;
   modelPayloadTelemetry.focusUniqueVertices = Array.from(nodeFocusRecords.values())
     .reduce((total, record) => total + record.vertexCount, 0);
+  modelPayloadTelemetry.focusSceneRadius = sceneSourceBound?.radius || 0;
   return nodeFocusRecords;
 }
 
@@ -3357,6 +3375,7 @@ applyParams = function(params) {
   focusTransitionCentiseconds.set(integer(params.interp, 70, 5, 500));
   walkSmoothingCentiseconds.set(integer(params.walksmooth, 18, 0, 150));
   walkTangentPullPercent.set(integer(params.walkalign, 70, 0, 100));
+  walkSpeedSteps.set(finite(params.walkspeed, 0, -400, 400));
   walkScaleSteps.set(finite(params.walkscale, 0, -800, 800));
   walkHeightSteps.set(finite(params.walkheight, 0, -400, 400));
   patchLab.shape = patchLabShape(params.lab) || 'triangle';
@@ -4656,6 +4675,7 @@ async function finishModelUpload(info, filename) {
   presentationComposition.totalFaces = 0;
   mr_setPresentationNodeStates(new Float32Array());
   nodeFocusRecords = new Map();
+  sceneSourceBound = null;
   Object.assign(modelPayloadTelemetry, {
     sourceInstanceBytes: 0,
     retainedSourceInstanceBytes: 0,
@@ -4666,6 +4686,7 @@ async function finishModelUpload(info, filename) {
     textureUploadPath: 'none',
     focusNodes: 0,
     focusUniqueVertices: 0,
+    focusSceneRadius: 0,
     focusBuildMs: 0,
     avoidedFaceMetadataCopyBytes: 0,
     timings: uploadTimings,
@@ -4882,6 +4903,7 @@ async function finishModelUpload(info, filename) {
   if (!rp || !rp.instances) {
     currentInstances = null;
     nodeFocusRecords = new Map();
+    sceneSourceBound = null;
     $('stats').textContent = `${filename}: static model (no animation data path yet)`;
     uploadTimings.totalMs = performance.now() - uploadStarted;
     return;

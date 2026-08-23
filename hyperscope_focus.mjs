@@ -15,14 +15,21 @@ function finitePoint(x, y, z) {
  * The instance stream stores three `[vertex_id, x, y, z]` records per face.
  * Vertex IDs deduplicate shared corners without requiring another mesh export.
  */
-export function buildNodeFocusRecords(
+export function buildFocusBounds(
   instances,
   faceNodes,
   stride = HYPERSCOPE_INSTANCE_STRIDE,
 ) {
   const records = new Map();
-  if (!instances || !faceNodes || stride < 12) return records;
+  if (!instances || !faceNodes || stride < 12) {
+    return { nodes: records, scene: null };
+  }
   const faceCount = Math.min(faceNodes.length, Math.floor(instances.length / stride));
+  const sceneScratch = {
+    min: [Infinity, Infinity, Infinity],
+    max: [-Infinity, -Infinity, -Infinity],
+    vertexCount: 0,
+  };
 
   for (let face = 0; face < faceCount; face++) {
     const node = Number(faceNodes[face]);
@@ -56,6 +63,12 @@ export function buildNodeFocusRecords(
       record.max[0] = Math.max(record.max[0], x);
       record.max[1] = Math.max(record.max[1], y);
       record.max[2] = Math.max(record.max[2], z);
+      sceneScratch.min[0] = Math.min(sceneScratch.min[0], x);
+      sceneScratch.min[1] = Math.min(sceneScratch.min[1], y);
+      sceneScratch.min[2] = Math.min(sceneScratch.min[2], z);
+      sceneScratch.max[0] = Math.max(sceneScratch.max[0], x);
+      sceneScratch.max[1] = Math.max(sceneScratch.max[1], y);
+      sceneScratch.max[2] = Math.max(sceneScratch.max[2], z);
     }
   }
 
@@ -72,7 +85,18 @@ export function buildNodeFocusRecords(
     record.center = center;
     record.radiusSquared = 0;
     record.vertexCount = record.vertexIds.size;
+    sceneScratch.vertexCount += record.vertexCount;
   }
+
+  const scene = sceneScratch.vertexCount > 0 ? {
+    center: [
+      (sceneScratch.min[0] + sceneScratch.max[0]) * 0.5,
+      (sceneScratch.min[1] + sceneScratch.max[1]) * 0.5,
+      (sceneScratch.min[2] + sceneScratch.max[2]) * 0.5,
+    ],
+    radiusSquared: 0,
+    vertexCount: sceneScratch.vertexCount,
+  } : null;
 
   // A second linear scan is dramatically cheaper at chess scale than
   // retaining one JS coordinate array per unique vertex in every node Map.
@@ -95,6 +119,15 @@ export function buildNodeFocusRecords(
         record.radiusSquared,
         dx * dx + dy * dy + dz * dz,
       );
+      if (scene) {
+        const sceneDx = x - scene.center[0];
+        const sceneDy = y - scene.center[1];
+        const sceneDz = z - scene.center[2];
+        scene.radiusSquared = Math.max(
+          scene.radiusSquared,
+          sceneDx * sceneDx + sceneDy * sceneDy + sceneDz * sceneDz,
+        );
+      }
     }
   }
 
@@ -105,7 +138,29 @@ export function buildNodeFocusRecords(
     delete record.radiusSquared;
     delete record.vertexIds;
   }
-  return records;
+  if (scene) {
+    scene.radius = Math.sqrt(scene.radiusSquared);
+    delete scene.radiusSquared;
+  }
+  return { nodes: records, scene };
+}
+
+/** Backward-compatible node-only view of the shared source-bound pass. */
+export function buildNodeFocusRecords(
+  instances,
+  faceNodes,
+  stride = HYPERSCOPE_INSTANCE_STRIDE,
+) {
+  return buildFocusBounds(instances, faceNodes, stride).nodes;
+}
+
+/** Convert a scene-relative walking pace to source/output-chart units per second. */
+export function sceneRelativeWalkSpeed(sceneRadius, radiiPerSecond, bodyScale = 1) {
+  if (![sceneRadius, radiiPerSecond, bodyScale].every(Number.isFinite)
+      || !(sceneRadius > 0) || radiiPerSecond < 0 || !(bodyScale > 0)) {
+    return null;
+  }
+  return sceneRadius * radiiPerSecond * bodyScale;
 }
 
 /** Return the normalized source-space centroid of a source face. */

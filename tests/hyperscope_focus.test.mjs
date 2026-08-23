@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   applyMobiusPoint,
+  buildFocusBounds,
   buildNodeFocusRecords,
   compactifiedRadialCoordinate,
   composeSurfaceRelativeForward,
@@ -18,6 +19,7 @@ import {
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
   scaleRelativeNearPlane,
+  sceneRelativeWalkSpeed,
   spheroidalDefocus,
   smootherstep01,
   transportCameraAcrossSphereReflections,
@@ -49,6 +51,27 @@ test('node focus records derive stable per-node source spheres from face instanc
   assert(Math.abs(record.radius - Math.sqrt(2)) < 1e-6);
   assert.equal('vertexIds' in record, false);
   assert.equal('vertices' in record, false);
+});
+
+test('focus bound pass also encloses the complete untransformed source scene', () => {
+  const first = instanceFace([[-2, -1, 0], [0, -1, 0], [0, 1, 0]], [0, 1, 2]);
+  const second = instanceFace([[2, -1, 0], [4, -1, 0], [4, 1, 0]], [0, 1, 2]);
+  const instances = new Float32Array(STRIDE * 2);
+  instances.set(first, 0);
+  instances.set(second, STRIDE);
+  const bounds = buildFocusBounds(instances, new Int32Array([3, 8]));
+
+  assert.equal(bounds.nodes.size, 2);
+  assert.deepEqual(bounds.scene.center, [1, 0, 0]);
+  assert.equal(bounds.scene.vertexCount, 6);
+  assert(Math.abs(bounds.scene.radius - Math.sqrt(10)) < 1e-6);
+});
+
+test('walking pace is normalized by scene radius and avatar scale', () => {
+  assert.equal(sceneRelativeWalkSpeed(2, 0.25), 0.5);
+  assert.equal(sceneRelativeWalkSpeed(2, 0.25, 0.125), 0.0625);
+  assert.equal(sceneRelativeWalkSpeed(Number.NaN, 0.25), null);
+  assert.equal(sceneRelativeWalkSpeed(0, 0.25), null);
 });
 
 test('face source centroid ignores packed vertex IDs', () => {
