@@ -27,7 +27,7 @@ pub use navigation::{
     FocusNavigation, FocusSphere, FocusSphereTransition, NavigationAction, NavigationActionQueue,
     NavigationAxes, NavigationController, NavigationFrame, NavigationPreset, NavigationRuntime,
     PerspectiveLens, ScheduledNavigationAction, SpaceMouseMapping, SphereReflectionState,
-    TransitionEasing,
+    SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{

@@ -1,6 +1,6 @@
 use super::{
     CameraRig, CameraTransition, FocusNavigation, FocusSphere, NavigationFrame, NavigationPreset,
-    SphereReflectionState, TransitionEasing,
+    SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,
 };
 use crate::HyperscapeDiagnostics;
 use bevy_ecs::prelude::{Entity, Res, ResMut, Resource};
@@ -20,6 +20,16 @@ pub enum NavigationAction {
         duration_seconds: f64,
         easing: TransitionEasing,
     },
+    /// Begin a minimum-jerk glide to a newly attached surface address.
+    BeginSurfaceAnchorTransition {
+        target: SurfaceAnchorTarget,
+        scene_radius: f64,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
+    /// Refresh the destination pose while its animated surface moves.
+    UpdateSurfaceAnchorTarget(SurfaceAnchorTarget),
+    CancelSurfaceAnchorTransition,
     AnchorFocus {
         entity: Entity,
         source_bound: FocusSphere,
@@ -177,6 +187,7 @@ pub struct NavigationRuntime {
     pub preset: NavigationPreset,
     pub reflection: SphereReflectionState,
     pub camera_transition: Option<CameraTransition>,
+    pub surface_anchor_transition: Option<SurfaceAnchorTransition>,
     pub integrated_until_seconds: f64,
     pub last_applied_sequence: Option<u64>,
 }
@@ -187,6 +198,7 @@ impl Default for NavigationRuntime {
             preset: NavigationPreset::Hyperscope,
             reflection: SphereReflectionState::Identity,
             camera_transition: None,
+            surface_anchor_transition: None,
             integrated_until_seconds: 0.0,
             last_applied_sequence: None,
         }
@@ -275,6 +287,7 @@ fn apply_action(
         NavigationAction::SetPreset(preset) => runtime.preset = preset,
         NavigationAction::ApplyFrame(frame) => {
             runtime.camera_transition = None;
+            runtime.surface_anchor_transition = None;
             camera
                 .apply_navigation(runtime.preset, frame)
                 .map_err(|error| error.to_string())?;
@@ -282,6 +295,7 @@ fn apply_action(
         NavigationAction::SetCamera(target) => {
             target.validate().map_err(|error| error.to_string())?;
             runtime.camera_transition = None;
+            runtime.surface_anchor_transition = None;
             *camera = target;
         }
         NavigationAction::TransitionCamera {
@@ -295,6 +309,7 @@ fn apply_action(
             }
             if duration_seconds == 0.0 {
                 runtime.camera_transition = None;
+                runtime.surface_anchor_transition = None;
                 *camera = target;
             } else {
                 let transition = CameraTransition::new(*camera, target, duration_seconds, easing)
@@ -304,7 +319,50 @@ fn apply_action(
                 // Make the live state match before a same-timestamp reflection.
                 *camera = transition.start;
                 runtime.camera_transition = Some(transition);
+                runtime.surface_anchor_transition = None;
             }
+        }
+        NavigationAction::BeginSurfaceAnchorTransition {
+            target,
+            scene_radius,
+            duration_seconds,
+            easing,
+        } => {
+            if !duration_seconds.is_finite() || duration_seconds < 0.0 {
+                return Err(
+                    "surface anchor transition duration must be finite and nonnegative".into(),
+                );
+            }
+            let target = SurfaceAnchorTarget::new(target.camera, target.normal)
+                .map_err(|error| error.to_string())?;
+            runtime.camera_transition = None;
+            if duration_seconds == 0.0 {
+                runtime.surface_anchor_transition = None;
+                *camera = target.camera;
+            } else {
+                let transition = SurfaceAnchorTransition::new(
+                    *camera,
+                    target,
+                    scene_radius,
+                    duration_seconds,
+                    easing,
+                )
+                .map_err(|error| error.to_string())?;
+                *camera = transition.start;
+                runtime.surface_anchor_transition = Some(transition);
+            }
+        }
+        NavigationAction::UpdateSurfaceAnchorTarget(target) => {
+            let transition = runtime
+                .surface_anchor_transition
+                .as_mut()
+                .ok_or_else(|| "surface anchor transition is not active".to_owned())?;
+            transition
+                .retarget(target)
+                .map_err(|error| error.to_string())?;
+        }
+        NavigationAction::CancelSurfaceAnchorTransition => {
+            runtime.surface_anchor_transition = None;
         }
         NavigationAction::AnchorFocus {
             entity,
@@ -373,7 +431,11 @@ fn advance_navigation(
     if !delta_seconds.is_finite() || delta_seconds <= 0.0 {
         return;
     }
-    if let Some(transition) = runtime.camera_transition.as_mut() {
+    if let Some(transition) = runtime.surface_anchor_transition.as_mut() {
+        if transition.advance(delta_seconds, camera) {
+            runtime.surface_anchor_transition = None;
+        }
+    } else if let Some(transition) = runtime.camera_transition.as_mut() {
         if transition.advance(delta_seconds, camera) {
             runtime.camera_transition = None;
         }
@@ -396,6 +458,10 @@ fn reconcile_reflection(
     if desired == runtime.reflection {
         return;
     }
+    // A surface target is expressed in the prior displayed chart. The browser
+    // behavior oracle cancels re-anchor glides on chart edits and asks the
+    // attached walker for a fresh frame; preserve that safety rule here.
+    runtime.surface_anchor_transition = None;
     let mut transported_camera = *camera;
     let mut transported_transition = runtime.camera_transition;
     let result = transported_camera
@@ -576,5 +642,108 @@ mod tests {
         assert!((app.world().resource::<CameraRig>().eye[0] - 7.0 / 6.0).abs() < 1.0e-10);
         tick(&mut app, 0.5);
         assert_eq!(app.world().resource::<CameraRig>().eye, [2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn surface_anchor_transition_is_cadence_independent() {
+        fn run(steps: &[f64]) -> CameraRig {
+            let mut controller = NavigationController::default();
+            let target = SurfaceAnchorTarget::new(
+                CameraRig {
+                    eye: [4.0, 0.0, 3.0],
+                    ..CameraRig::default()
+                },
+                [0.0, 1.0, 0.0],
+            )
+            .unwrap();
+            controller
+                .push(NavigationAction::BeginSurfaceAnchorTransition {
+                    target,
+                    scene_radius: 10.0,
+                    duration_seconds: 1.0,
+                    easing: TransitionEasing::SmootherStep,
+                })
+                .unwrap();
+            for seconds in steps {
+                controller.tick(*seconds).unwrap();
+            }
+            controller.camera
+        }
+
+        let single = run(&[1.0]);
+        let partitioned = run(&[0.1; 10]);
+        assert_eq!(single, partitioned);
+        assert_eq!(single.eye, [4.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn animated_surface_target_updates_without_restarting_glide() {
+        let mut controller = NavigationController::default();
+        let target = |eye| {
+            SurfaceAnchorTarget::new(
+                CameraRig {
+                    eye,
+                    ..CameraRig::default()
+                },
+                [0.0, 1.0, 0.0],
+            )
+            .unwrap()
+        };
+        controller
+            .push(NavigationAction::BeginSurfaceAnchorTransition {
+                target: target([2.0, 0.0, 3.0]),
+                scene_radius: 10.0,
+                duration_seconds: 1.0,
+                easing: TransitionEasing::Linear,
+            })
+            .unwrap();
+        controller.tick(0.5).unwrap();
+        let elapsed = controller
+            .runtime
+            .surface_anchor_transition
+            .unwrap()
+            .elapsed_seconds;
+        controller
+            .push(NavigationAction::UpdateSurfaceAnchorTarget(target([
+                4.0, 0.0, 3.0,
+            ])))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(
+            controller
+                .runtime
+                .surface_anchor_transition
+                .unwrap()
+                .elapsed_seconds,
+            elapsed
+        );
+        controller.tick(0.5).unwrap();
+        assert_eq!(controller.camera.eye, [4.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn manual_navigation_and_reflection_cancel_surface_anchor_glides() {
+        let mut controller = NavigationController::default();
+        let target = SurfaceAnchorTarget::new(CameraRig::default(), [0.0, 1.0, 0.0]).unwrap();
+        let begin = NavigationAction::BeginSurfaceAnchorTransition {
+            target,
+            scene_radius: 1.0,
+            duration_seconds: 1.0,
+            easing: TransitionEasing::Linear,
+        };
+        controller.push(begin.clone()).unwrap();
+        controller.tick(0.0).unwrap();
+        controller
+            .push(NavigationAction::ApplyFrame(NavigationFrame::default()))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+        assert!(controller.runtime.surface_anchor_transition.is_none());
+
+        controller.push(begin).unwrap();
+        controller.tick(0.0).unwrap();
+        controller.push(NavigationAction::ToggleInversion).unwrap();
+        controller.tick(0.0).unwrap();
+        assert!(controller.runtime.surface_anchor_transition.is_none());
     }
 }

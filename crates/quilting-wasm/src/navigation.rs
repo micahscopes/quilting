@@ -1,7 +1,7 @@
 use hyperscape::{
     CameraBasis, CameraRig, FocusSphere, NavigationAction, NavigationController, NavigationFrame,
     NavigationPreset, PerspectiveLens, PresentationRuntime, PresentationSnapshot,
-    SphereReflectionState, TransitionEasing,
+    SphereReflectionState, SurfaceAnchorTarget, TransitionEasing,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -144,6 +144,46 @@ impl HyperscopeNavigation {
         })
     }
 
+    #[wasm_bindgen(js_name = beginSurfaceAnchorTransition)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_surface_anchor_transition(
+        &mut self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        normal: &[f64],
+        scene_radius: f64,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        let target = self.surface_anchor_target(eye, forward, up, control_distance, normal)?;
+        self.push(NavigationAction::BeginSurfaceAnchorTransition {
+            target,
+            scene_radius,
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
+    #[wasm_bindgen(js_name = updateSurfaceAnchorTarget)]
+    pub fn update_surface_anchor_target(
+        &mut self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        normal: &[f64],
+    ) -> Result<u64, JsValue> {
+        let target = self.surface_anchor_target(eye, forward, up, control_distance, normal)?;
+        self.push(NavigationAction::UpdateSurfaceAnchorTarget(target))
+    }
+
+    #[wasm_bindgen(js_name = cancelSurfaceAnchorTransition)]
+    pub fn cancel_surface_anchor_transition(&mut self) -> Result<u64, JsValue> {
+        self.push(NavigationAction::CancelSurfaceAnchorTransition)
+    }
+
     #[wasm_bindgen(js_name = setFreeFocusSphere)]
     pub fn set_free_focus_sphere(&mut self, center: &[f64], radius: f64) -> Result<u64, JsValue> {
         let sphere =
@@ -275,6 +315,30 @@ impl HyperscopeNavigation {
         self.controller.push(action).map_err(js_error)
     }
 
+    fn surface_anchor_target(
+        &self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        normal: &[f64],
+    ) -> Result<SurfaceAnchorTarget, JsValue> {
+        let camera = CameraRig::new(
+            vector3(eye, "surface anchor eye")?,
+            CameraBasis::from_forward_up(
+                vector3(forward, "surface anchor forward")?,
+                vector3(up, "surface anchor up")?,
+            )
+            .map_err(js_error)?,
+            control_distance,
+            None,
+            self.controller.camera.lens,
+        )
+        .map_err(js_error)?;
+        SurfaceAnchorTarget::new(camera, vector3(normal, "surface anchor normal")?)
+            .map_err(js_error)
+    }
+
     fn activate_presentation(
         &mut self,
         activate: impl FnOnce(
@@ -312,6 +376,14 @@ impl<'a> From<&'a NavigationController> for NavigationSnapshot<'a> {
             .runtime
             .camera_transition
             .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
+        let surface_anchor_transition_remaining = controller
+            .runtime
+            .surface_anchor_transition
+            .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
+        let surface_anchor_hop_height = controller
+            .runtime
+            .surface_anchor_transition
+            .map(|transition| transition.hop_height);
         let focus_transition_remaining = controller
             .focus
             .transition
@@ -338,6 +410,8 @@ impl<'a> From<&'a NavigationController> for NavigationSnapshot<'a> {
                 control_distance: controller.camera.control_distance,
                 semantic_target: controller.camera.semantic_target,
                 camera_transition_remaining,
+                surface_anchor_transition_remaining,
+                surface_anchor_hop_height,
             },
             focus: FocusSnapshot {
                 center: controller.focus.sphere.center,
@@ -364,6 +438,8 @@ struct CameraSnapshot {
     control_distance: f64,
     semantic_target: Option<[f64; 3]>,
     camera_transition_remaining: Option<f64>,
+    surface_anchor_transition_remaining: Option<f64>,
+    surface_anchor_hop_height: Option<f64>,
 }
 
 #[derive(Serialize)]

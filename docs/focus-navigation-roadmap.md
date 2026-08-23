@@ -7,9 +7,11 @@ This document remains the detailed behavior oracle for focus and navigation.
 Status: the browser prototype is functional, the render contract is GPU-side,
 and `hyperscape` now owns `FocusNavigation`, quaternion `CameraRig`, named
 navigation policies, sequence/timestamp-ordered `NavigationAction`s, and
-deterministic camera/focus transitions. The prototype remains the behavior
-oracle while the opt-in WASM shadow path measures parity before authority is
-removed from `hyperscope.html`.
+deterministic camera/focus transitions. This includes the surface re-anchor
+glide: Hyperscape owns its virtual clock, quaternion interpolation, bounded
+scene-scale hop, animated destination refresh, and cancellation policy. The
+prototype remains the behavior oracle while the opt-in WASM shadow path
+measures parity before authority is removed from `hyperscope.html`.
 
 ## One sphere, several meanings
 
@@ -56,7 +58,7 @@ variable-blur passes.
 | Shift + `F` + wheel | Edit angular aperture | Same |
 | Ctrl/Meta + `F` + wheel | Edit blur radius | Same |
 | Escape / empty click | Detach selection and retain sphere | No reset |
-| Focus/navigation transition slider | Set fit/reframe duration from 0.05–5.00 seconds in 0.01-second increments | Same |
+| Focus/navigation transition slider | Set fit/reframe/surface re-anchor duration from 0.05–5.00 seconds in 0.01-second increments | Same |
 
 Mouse selection uses a four-pixel drag threshold so an orbit gesture cannot
 become a pick on release. Device mappings are prototype adapters, not domain
@@ -110,10 +112,13 @@ or sphere state.
    time, and frame-rate-independent action replay.
 3. **WASM shadow bridge — active.** `HyperscopeNavigation` exposes the shared
    controller without a Bevy `App`. Add `navshadow=1` to a Hyperscope URL to
-   mirror SpaceMouse camera actions and inspect
-   `globalThis.__hyperscopeNavigationShadow`. Drift is recorded without
-   changing the rendered camera. Remove duplicate JavaScript authority only
-   after representative all-mode, all-scale parity runs are clean.
+   mirror SpaceMouse camera actions and surface re-anchor glides, then inspect
+   `globalThis.__hyperscopeNavigationShadow`. The surface observer separately
+   reports samples, drift frames, maximum error, and the last Rust/browser
+   pose pair. Drift is recorded without changing the rendered camera;
+   removing `navshadow=1` is the immediate rollback. Remove duplicate
+   JavaScript authority only after representative all-mode, all-scale parity
+   runs are clean.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere
    transitions in Rust, and extract one compact focus packet per view.

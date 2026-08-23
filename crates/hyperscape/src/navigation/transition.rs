@@ -38,6 +38,104 @@ pub struct CameraTransition {
     pub easing: TransitionEasing,
 }
 
+/// A camera target sampled from an attached surface in the active output
+/// chart. The unit normal is kept beside the camera because it controls the
+/// direction of the re-anchor hop, but it is not part of the camera pose.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceAnchorTarget {
+    pub camera: CameraRig,
+    pub normal: [f64; 3],
+}
+
+impl SurfaceAnchorTarget {
+    pub fn new(mut camera: CameraRig, normal: [f64; 3]) -> Result<Self, CameraError> {
+        camera.validate()?;
+        camera.semantic_target = None;
+        let normal = normalize3(normal).ok_or(CameraError::DegenerateBasis)?;
+        Ok(Self { camera, normal })
+    }
+}
+
+/// Deterministic camera glide used when a surface walker is attached to a new
+/// address. The destination may be refreshed while an animated surface moves;
+/// elapsed time, the starting pose, and hop height remain stable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceAnchorTransition {
+    pub start: CameraRig,
+    pub target: SurfaceAnchorTarget,
+    pub elapsed_seconds: f64,
+    pub duration_seconds: f64,
+    pub easing: TransitionEasing,
+    pub hop_height: f64,
+}
+
+impl SurfaceAnchorTransition {
+    pub fn new(
+        mut start: CameraRig,
+        target: SurfaceAnchorTarget,
+        scene_radius: f64,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    ) -> Result<Self, CameraError> {
+        start.validate()?;
+        if !scene_radius.is_finite()
+            || scene_radius <= 0.0
+            || !duration_seconds.is_finite()
+            || duration_seconds <= 0.0
+        {
+            return Err(CameraError::InvalidTransition);
+        }
+        let target = SurfaceAnchorTarget::new(target.camera, target.normal)?;
+        start.semantic_target = None;
+        let hop_height = (distance3(start.eye, target.camera.eye) * 0.22).min(scene_radius * 0.12);
+        Ok(Self {
+            start,
+            target,
+            elapsed_seconds: 0.0,
+            duration_seconds,
+            easing,
+            hop_height,
+        })
+    }
+
+    /// Refresh the animated destination without restarting the glide.
+    pub fn retarget(&mut self, target: SurfaceAnchorTarget) -> Result<(), CameraError> {
+        self.target = SurfaceAnchorTarget::new(target.camera, target.normal)?;
+        Ok(())
+    }
+
+    pub fn advance(&mut self, delta_seconds: f64, camera: &mut CameraRig) -> bool {
+        if !delta_seconds.is_finite() || delta_seconds <= 0.0 {
+            return false;
+        }
+        self.elapsed_seconds += delta_seconds;
+        let linear = transition_progress(self.elapsed_seconds, self.duration_seconds);
+        if linear >= 1.0 {
+            self.elapsed_seconds = self.duration_seconds;
+        }
+        *camera = self.sample(linear);
+        linear >= 1.0
+    }
+
+    pub fn sample(&self, linear: f64) -> CameraRig {
+        if linear >= 1.0 {
+            return self.target.camera;
+        }
+        if linear <= 0.0 {
+            return self.start;
+        }
+        let t = self.easing.sample(linear);
+        let mut camera = interpolate_camera(self.start, self.target.camera, t);
+        let hop = (std::f64::consts::PI * t).sin() * self.hop_height;
+        camera.eye = add3(
+            lerp3(self.start.eye, self.target.camera.eye, t),
+            scale3(self.target.normal, hop),
+        );
+        camera.semantic_target = None;
+        camera
+    }
+}
+
 impl CameraTransition {
     pub fn new(
         mut start: CameraRig,
@@ -69,7 +167,10 @@ impl CameraTransition {
             return false;
         }
         self.elapsed_seconds += delta_seconds;
-        let linear = (self.elapsed_seconds / self.duration_seconds).clamp(0.0, 1.0);
+        let linear = transition_progress(self.elapsed_seconds, self.duration_seconds);
+        if linear >= 1.0 {
+            self.elapsed_seconds = self.duration_seconds;
+        }
         *camera = self.sample(linear);
         linear >= 1.0
     }
@@ -84,33 +185,13 @@ impl CameraTransition {
         let t = self.easing.sample(linear);
         let start_target = self.start.view_target();
         let target_target = self.target.view_target();
-        CameraRig {
-            eye: lerp3(self.start.eye, self.target.eye, t),
-            orientation: quaternion_slerp(self.start.orientation, self.target.orientation, t),
-            control_distance: log_lerp(
-                self.start.control_distance,
-                self.target.control_distance,
-                t,
-            ),
-            // Semantic ownership follows the destination view. A transition
-            // into free-flight must become tangent-driven immediately; keeping
-            // a finite start target can otherwise manufacture a pole when an
-            // inversion sphere moves across that point. A transition toward a
-            // semantic target acquires it smoothly from the start sight line.
-            semantic_target: self
-                .target
-                .semantic_target
-                .is_some()
-                .then(|| lerp3(start_target, target_target, t)),
-            lens: super::PerspectiveLens {
-                vertical_fov_radians: self.start.lens.vertical_fov_radians
-                    + (self.target.lens.vertical_fov_radians
-                        - self.start.lens.vertical_fov_radians)
-                        * t,
-                near: log_lerp(self.start.lens.near, self.target.lens.near, t),
-                far: log_lerp(self.start.lens.far, self.target.lens.far, t),
-            },
-        }
+        let mut camera = interpolate_camera(self.start, self.target, t);
+        camera.semantic_target = self
+            .target
+            .semantic_target
+            .is_some()
+            .then(|| lerp3(start_target, target_target, t));
+        camera
     }
 
     /// Keep both endpoints in the same output chart when an active inversion
@@ -130,12 +211,65 @@ impl CameraTransition {
     }
 }
 
+fn interpolate_camera(start: CameraRig, target: CameraRig, t: f64) -> CameraRig {
+    CameraRig {
+        eye: lerp3(start.eye, target.eye, t),
+        orientation: quaternion_slerp(start.orientation, target.orientation, t),
+        control_distance: log_lerp(start.control_distance, target.control_distance, t),
+        semantic_target: None,
+        lens: super::PerspectiveLens {
+            vertical_fov_radians: start.lens.vertical_fov_radians
+                + (target.lens.vertical_fov_radians - start.lens.vertical_fov_radians) * t,
+            near: log_lerp(start.lens.near, target.lens.near, t),
+            far: log_lerp(start.lens.far, target.lens.far, t),
+        },
+    }
+}
+
+fn transition_progress(elapsed_seconds: f64, duration_seconds: f64) -> f64 {
+    let linear = (elapsed_seconds / duration_seconds).clamp(0.0, 1.0);
+    if linear >= 1.0 - EPSILON {
+        1.0
+    } else {
+        linear
+    }
+}
+
 fn lerp3(start: [f64; 3], target: [f64; 3], t: f64) -> [f64; 3] {
     std::array::from_fn(|axis| start[axis] + (target[axis] - start[axis]) * t)
 }
 
 fn log_lerp(start: f64, target: f64, t: f64) -> f64 {
     (start.ln() + (target.ln() - start.ln()) * t).exp()
+}
+
+fn add3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|axis| left[axis] + right[axis])
+}
+
+fn scale3(value: [f64; 3], amount: f64) -> [f64; 3] {
+    std::array::from_fn(|axis| value[axis] * amount)
+}
+
+fn distance3(left: [f64; 3], right: [f64; 3]) -> f64 {
+    (left
+        .into_iter()
+        .zip(right)
+        .map(|(left, right)| (right - left).powi(2))
+        .sum::<f64>())
+    .sqrt()
+}
+
+fn normalize3(value: [f64; 3]) -> Option<[f64; 3]> {
+    if value.into_iter().any(|component| !component.is_finite()) {
+        return None;
+    }
+    let length = value
+        .into_iter()
+        .map(|component| component * component)
+        .sum::<f64>()
+        .sqrt();
+    (length > EPSILON).then(|| scale3(value, length.recip()))
 }
 
 fn quaternion_slerp(start: Quat, target: Quat, t: f64) -> Quat {
@@ -214,5 +348,61 @@ mod tests {
         assert_eq!(transition.sample(0.0).semantic_target, None);
         assert_eq!(transition.sample(0.5).semantic_target, None);
         assert_eq!(transition.sample(1.0).semantic_target, None);
+    }
+
+    #[test]
+    fn surface_anchor_glide_matches_the_browser_endpoints_and_hop() {
+        let start = CameraRig {
+            eye: [0.0, 0.0, 0.0],
+            ..CameraRig::default()
+        };
+        let target = SurfaceAnchorTarget::new(
+            CameraRig {
+                eye: [10.0, 0.0, 0.0],
+                ..CameraRig::default()
+            },
+            [0.0, 2.0, 0.0],
+        )
+        .unwrap();
+        let transition =
+            SurfaceAnchorTransition::new(start, target, 100.0, 1.0, TransitionEasing::SmootherStep)
+                .unwrap();
+
+        assert_eq!(transition.sample(0.0).eye, [0.0, 0.0, 0.0]);
+        assert_eq!(transition.sample(0.5).eye, [5.0, 2.2, 0.0]);
+        assert!((transition.sample(1.0).eye[0] - 10.0).abs() < 1.0e-12);
+        assert!(transition.sample(1.0).eye[1].abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn surface_anchor_retarget_preserves_start_time_and_hop_height() {
+        let start = CameraRig::default();
+        let first = SurfaceAnchorTarget::new(
+            CameraRig {
+                eye: [3.0, 0.0, 3.0],
+                ..start
+            },
+            [0.0, 1.0, 0.0],
+        )
+        .unwrap();
+        let mut transition =
+            SurfaceAnchorTransition::new(start, first, 10.0, 2.0, TransitionEasing::Linear)
+                .unwrap();
+        let hop_height = transition.hop_height;
+        let second = SurfaceAnchorTarget::new(
+            CameraRig {
+                eye: [5.0, 0.0, 3.0],
+                ..start
+            },
+            [0.0, 0.0, 2.0],
+        )
+        .unwrap();
+        transition.retarget(second).unwrap();
+
+        assert_eq!(transition.elapsed_seconds, 0.0);
+        assert_eq!(transition.hop_height, hop_height);
+        let midpoint = transition.sample(0.5);
+        assert!((midpoint.eye[0] - 2.5).abs() < 1.0e-12);
+        assert!((midpoint.eye[2] - (3.0 + hop_height)).abs() < 1.0e-12);
     }
 }

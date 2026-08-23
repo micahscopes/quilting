@@ -18,4 +18,6 @@ pub use camera::{
     NavigationPreset, PerspectiveLens, SpaceMouseMapping, SphereReflectionState,
 };
 pub use focus::{FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition};
-pub use transition::{CameraTransition, TransitionEasing};
+pub use transition::{
+    CameraTransition, SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,
+};
