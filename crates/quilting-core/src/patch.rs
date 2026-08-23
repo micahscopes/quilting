@@ -26,6 +26,14 @@ pub struct SurfacePoint {
     pub normal: [f64; 3],
 }
 
+/// Exact first-order parameter frame of a rational QB triangle.
+#[derive(Debug, Clone, Copy)]
+pub struct PatchDifferential {
+    pub position: [f64; 3],
+    pub tangent_u: [f64; 3],
+    pub tangent_v: [f64; 3],
+}
+
 impl QBTriPatch {
     pub fn new(positions: [Quat; 3], weights: [Quat; 3]) -> Self {
         Self { positions, weights }
@@ -55,6 +63,30 @@ impl QBTriPatch {
         let bottom = w * w0 + u * w1 + v * w2;
 
         top * bottom.inv()
+    }
+
+    /// Evaluate the patch and its exact quotient-rule derivatives.
+    ///
+    /// The parameter directions match [`Self::eval`]: `u` moves from control
+    /// 0 toward control 1 and `v` moves from control 0 toward control 2.
+    pub fn eval_differential(&self, u: f64, v: f64) -> PatchDifferential {
+        let bary_0 = 1.0 - u - v;
+        let [p0, p1, p2] = self.positions;
+        let [w0, w1, w2] = self.weights;
+        let pw0 = p0 * w0;
+        let pw1 = p1 * w1;
+        let pw2 = p2 * w2;
+        let top = bary_0 * pw0 + u * pw1 + v * pw2;
+        let bottom = bary_0 * w0 + u * w1 + v * w2;
+        let bottom_inverse = bottom.inv();
+        let point = top * bottom_inverse;
+        let tangent_u = (pw1 - pw0 - point * (w1 - w0)) * bottom_inverse;
+        let tangent_v = (pw2 - pw0 - point * (w2 - w0)) * bottom_inverse;
+        PatchDifferential {
+            position: point.to_point(),
+            tangent_u: tangent_u.to_point(),
+            tangent_v: tangent_v.to_point(),
+        }
     }
 
     /// Evaluate surface point with normal (via finite differences).
@@ -279,5 +311,44 @@ mod tests {
                 "control point {i} misplaced"
             );
         }
+    }
+
+    #[test]
+    fn analytic_differential_matches_inverted_patch_finite_differences() {
+        let patch = QBTriPatch::new(
+            [
+                Quat::from_point(0.2, -0.1, 1.5),
+                Quat::from_point(1.1, 0.2, 1.8),
+                Quat::from_point(-0.3, 1.0, 2.1),
+            ],
+            [
+                Quat::new(1.0, 0.1, 0.0, 0.0),
+                Quat::new(0.8, 0.0, -0.2, 0.1),
+                Quat::new(1.2, -0.1, 0.1, 0.0),
+            ],
+        )
+        .transform(&Mobius::inversion());
+        let (u, v) = (0.31, 0.27);
+        let differential = patch.eval_differential(u, v);
+        let epsilon = 1.0e-6;
+        let point = patch.eval(u, v).to_point();
+        let finite_u = patch
+            .eval(u + epsilon, v)
+            .to_point()
+            .map(|value| value / epsilon);
+        let finite_v = patch
+            .eval(u, v + epsilon)
+            .to_point()
+            .map(|value| value / epsilon);
+        let point_rate = point.map(|value| value / epsilon);
+        assert!(approx_eq_3(differential.position, point));
+        assert!(approx_eq_3(
+            differential.tangent_u,
+            std::array::from_fn(|axis| finite_u[axis] - point_rate[axis]),
+        ));
+        assert!(approx_eq_3(
+            differential.tangent_v,
+            std::array::from_fn(|axis| finite_v[axis] - point_rate[axis]),
+        ));
     }
 }

@@ -50,6 +50,7 @@ impl SurfaceAddress {
 pub enum SurfaceAddressError {
     NonFinite,
     OutsideFace,
+    InvalidNormalSign,
 }
 
 /// A posed surface sample in the displayed Euclidean output chart.
@@ -114,6 +115,10 @@ pub trait SurfaceField {
 pub struct SurfaceAttachment {
     pub address: SurfaceAddress,
     pub eye_height: f64,
+    /// Which side of the currently sampled oriented surface carries the eye.
+    /// This is always `+1` or `-1` and is explicitly flipped by a runtime when
+    /// its output coordinate frame reverses orientation.
+    pub normal_sign: i8,
 }
 
 impl SurfaceAttachment {
@@ -124,7 +129,21 @@ impl SurfaceAttachment {
         Ok(Self {
             address,
             eye_height,
+            normal_sign: 1,
         })
+    }
+
+    pub fn with_normal_sign(
+        address: SurfaceAddress,
+        eye_height: f64,
+        normal_sign: i8,
+    ) -> Result<Self, SurfaceAddressError> {
+        let mut attachment = Self::new(address, eye_height)?;
+        if !matches!(normal_sign, -1 | 1) {
+            return Err(SurfaceAddressError::InvalidNormalSign);
+        }
+        attachment.normal_sign = normal_sign;
+        Ok(attachment)
     }
 }
 
@@ -225,6 +244,14 @@ impl SurfaceWalker {
         self.last_detach_reason = None;
     }
 
+    /// Preserve the physical attachment side when an output chart changes
+    /// orientation (for example when sphere inversion is toggled).
+    pub fn flip_normal_side(&mut self) {
+        if let Some(attachment) = self.attachment.as_mut() {
+            attachment.normal_sign = -attachment.normal_sign;
+        }
+    }
+
     pub fn detach(&mut self, reason: SurfaceDetachReason) {
         self.attachment = None;
         self.last_detach_reason = Some(reason);
@@ -263,6 +290,7 @@ impl SurfaceWalker {
         self.attach(SurfaceAttachment {
             address,
             eye_height,
+            normal_sign: 1,
         });
         true
     }
@@ -557,7 +585,7 @@ fn contact_from_sample(
     attachment: SurfaceAttachment,
     sample: SurfaceSample,
 ) -> Option<SurfaceContact> {
-    let output_normal = sample.normal()?;
+    let output_normal = scale(sample.normal()?, attachment.normal_sign as f64);
     Some(SurfaceContact {
         address: attachment.address,
         output_position: sample.output_position,
@@ -819,6 +847,28 @@ mod tests {
         assert!((contact.address.barycentric[1] - 0.3).abs() < 1.0e-12);
         assert!((contact.output_position[0] - 0.3).abs() < 1.0e-12);
         assert!((contact.eye_position[2] - 0.25).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn attachment_normal_sign_selects_and_flips_the_eye_side() {
+        let address = SurfaceAddress::new(entity(), 0, [0.6, 0.2, 0.2]).unwrap();
+        let mut walker = SurfaceWalker {
+            config: SurfaceWalkerConfig {
+                maximum_substep_seconds: 1.0,
+                ..SurfaceWalkerConfig::default()
+            },
+            ..SurfaceWalker::default()
+        };
+        walker.attach(SurfaceAttachment::with_normal_sign(address, 0.25, -1).unwrap());
+        let mut field = field(1.0);
+        let below = walker.advance(0.0, [0.0; 3], &mut field).contact.unwrap();
+        assert!(below.output_normal[2] < -0.999);
+        assert!((below.eye_position[2] + 0.25).abs() < 1.0e-12);
+
+        walker.flip_normal_side();
+        let above = walker.advance(0.0, [0.0; 3], &mut field).contact.unwrap();
+        assert!(above.output_normal[2] > 0.999);
+        assert!((above.eye_position[2] - 0.25).abs() < 1.0e-12);
     }
 
     #[test]

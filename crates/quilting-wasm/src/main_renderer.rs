@@ -1443,7 +1443,12 @@ fn surface_snapshot_to_js(snapshot: Result<SurfaceRuntimeSnapshot, String>) -> J
 
 /// Attach the Rust walker to a source face selected by `mr_pickSurface`.
 #[wasm_bindgen(js_name = "mr_attachSurface")]
-pub fn mr_attach_surface(face: u32, barycentric: &[f32], eye_height: f32) -> JsValue {
+pub fn mr_attach_surface(
+    face: u32,
+    barycentric: &[f32],
+    eye_height: f32,
+    camera_position: &[f32],
+) -> JsValue {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let Some(state) = state.as_mut() else {
@@ -1458,6 +1463,13 @@ pub fn mr_attach_surface(face: u32, barycentric: &[f32], eye_height: f32) -> JsV
             barycentric.get(1).copied().unwrap_or(0.0) as f64,
             barycentric.get(2).copied().unwrap_or(0.0) as f64,
         ];
+        let camera_position = [
+            camera_position.first().copied().unwrap_or(0.0) as f64,
+            camera_position.get(1).copied().unwrap_or(0.0) as f64,
+            camera_position.get(2).copied().unwrap_or(0.0) as f64,
+        ];
+        let orientation_sign = conformal.orientation_sign
+            * affine_orientation_sign(&conformal.euclidean_model);
         let MainState {
             surface_runtime,
             cached_instances,
@@ -1472,6 +1484,8 @@ pub fn mr_attach_surface(face: u32, barycentric: &[f32], eye_height: f32) -> JsV
             face,
             barycentric,
             eye_height as f64,
+            camera_position,
+            orientation_sign,
             conformal.mobius,
             conformal.euclidean_model,
         ))
@@ -1495,6 +1509,8 @@ pub fn mr_step_surface(delta_seconds: f64, relative_output_velocity: &[f32]) -> 
             return surface_snapshot_to_js(Err("attached face has no node".into()));
         };
         let conformal = conformal_state_for_node(state, node);
+        let orientation_sign = conformal.orientation_sign
+            * affine_orientation_sign(&conformal.euclidean_model);
         let velocity = [
             relative_output_velocity.first().copied().unwrap_or(0.0) as f64,
             relative_output_velocity.get(1).copied().unwrap_or(0.0) as f64,
@@ -1511,6 +1527,7 @@ pub fn mr_step_surface(delta_seconds: f64, relative_output_velocity: &[f32]) -> 
             face_nodes,
             delta_seconds,
             velocity,
+            orientation_sign,
             conformal.mobius,
             conformal.euclidean_model,
         ))

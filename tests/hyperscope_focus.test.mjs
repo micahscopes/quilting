@@ -5,6 +5,8 @@ import {
   applyMobiusPoint,
   buildNodeFocusRecords,
   compactifiedRadialCoordinate,
+  composeSurfaceRelativeForward,
+  decomposeSurfaceRelativeForward,
   faceSourceCentroid,
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
@@ -18,6 +20,7 @@ import {
   spheroidalDefocus,
   smootherstep01,
   transportCameraAcrossSphereReflections,
+  transportPointAndDirectionsAcrossSphereReflections,
 } from '../hyperscope_focus.mjs';
 
 const STRIDE = 52;
@@ -88,6 +91,38 @@ test('camera transport follows the exact eye and line of sight and reports local
   assert.deepEqual(restored.target, camera.target);
   assert(Math.abs(restored.orbitDistance - camera.orbitDistance) < 1e-12);
   assert.deepEqual(restored.basis, camera.basis);
+});
+
+test('surface point and tangent use the differential at the contact point', () => {
+  const transported = transportPointAndDirectionsAcrossSphereReflections(
+    [2, 0, 0],
+    [[0, 1, 0], [1, 0, 0]],
+    { enabled: false },
+    { enabled: true, center: [0, 0, 0], radius: 1 },
+  );
+  assert.deepEqual(transported.point, [0.5, 0, 0]);
+  assert.deepEqual(transported.directions[0], [0, 1, 0]);
+  assert.deepEqual(transported.directions[1], [-1, 0, 0]);
+  assert.equal(transported.localScale, 0.25);
+});
+
+test('surface-relative view pitch survives a changing walk normal', () => {
+  const pitch = Math.PI / 6;
+  const initialForward = [0, Math.sin(pitch), -Math.cos(pitch)];
+  const relative = decomposeSurfaceRelativeForward(
+    initialForward,
+    [0, 1, 0],
+    [0, 0, -1],
+  );
+  assert.ok(relative);
+  assert.ok(Math.abs(relative.pitch - pitch) < 1e-12);
+  assert.deepEqual(relative.tangent, [0, 0, -1]);
+
+  const carried = composeSurfaceRelativeForward(relative.tangent, [1, 0, 0], relative.pitch);
+  assert.ok(carried);
+  assert.ok(Math.abs(carried[0] - Math.sin(pitch)) < 1e-12);
+  assert.ok(Math.abs(carried[1]) < 1e-12);
+  assert.ok(Math.abs(carried[2] + Math.cos(pitch)) < 1e-12);
 });
 
 test('target-free camera transport maps the sight tangent without inventing an aim point', () => {

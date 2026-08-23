@@ -96,6 +96,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   <div class="section">
     <label>Animation Time</label>
     <div class="sr"><span style="font-size:10px;color:#8b949e;width:50px">Time</span><input type="range" id="time" min="0" max="2" step="any" value="0"><span class="v" id="time-v">0.00</span></div>
+    <label style="margin-top:5px">Vertical field of view</label>
+    <div class="sr"><input type="range" id="camera-fov" min="35" max="110" step="1" value="75"><span class="v" id="camera-fov-v">75°</span></div>
   </div>
 
   <div class="section">
@@ -115,6 +117,14 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div id="selection-status" style="color:#8b949e;font-size:9px;margin-top:5px">No object selected</div>
     <label style="margin-top:5px">Focus/navigation transition</label>
     <div class="sr"><input type="range" id="focus-transition" min="5" max="500" step="1" value="70"><span class="v" id="focus-transition-v">0.70 s</span></div>
+    <label style="margin-top:5px">Walk frame smoothing</label>
+    <div class="sr"><input type="range" id="walk-smoothing" min="0" max="150" step="1" value="18"><span class="v" id="walk-smoothing-v">0.18 s</span></div>
+    <label>Walk frame pull</label>
+    <div class="sr"><input type="range" id="walk-align" min="0" max="100" step="1" value="70"><span class="v" id="walk-align-v">70%</span></div>
+    <label>Walk scale</label>
+    <div class="sr"><input type="range" id="walk-scale" min="-800" max="800" step="1" value="0"><span class="v" id="walk-scale-v">1.00×</span></div>
+    <label>Walk eye height</label>
+    <div class="sr"><input type="range" id="walk-height" min="-400" max="400" step="1" value="0"><span class="v" id="walk-height-v">1.00×</span></div>
   </div>
 
   <div class="section">
@@ -358,6 +368,8 @@ import {
 import {
   applyMobiusPoint,
   buildNodeFocusRecords,
+  composeSurfaceRelativeForward,
+  decomposeSurfaceRelativeForward,
   faceSourceCentroid,
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
@@ -369,7 +381,8 @@ import {
   scaleAnchoredFocusRadius,
   smootherstep01,
   transportCameraAcrossSphereReflections,
-} from './hyperscope_focus.mjs?rev=conformal-camera-transport-v1';
+  transportPointAndDirectionsAcrossSphereReflections,
+} from './hyperscope_focus.mjs?rev=conformal-surface-transport-v2';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -727,7 +740,8 @@ const PARAM_DEFAULTS = {
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
   smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
-  interp: '70',
+  fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
+  walkscale: '0', walkheight: '0',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
   fqual: '2', fkaw: '1', fkoff: '15',
 };
@@ -758,7 +772,8 @@ function readParams() {
     smlock: get('smlock'), smswap: get('smswap'),
     smpinv: get('smpinv'), smrinv: get('smrinv'),
     smbpinv: get('smbpinv'), smbrinv: get('smbrinv'),
-    interp: get('interp'),
+    fov: get('fov'), interp: get('interp'), walksmooth: get('walksmooth'),
+    walkalign: get('walkalign'), walkscale: get('walkscale'), walkheight: get('walkheight'),
     fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
     fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
     fqual: get('fqual'), fkaw: get('fkaw'), fkoff: get('fkoff'),
@@ -814,7 +829,12 @@ function syncURL() {
       ss('smrinv', spaceMouseHyperscopeRotateInvert, PARAM_DEFAULTS.smrinv);
       ss('smbpinv', spaceMouseBlenderPanInvert, PARAM_DEFAULTS.smbpinv);
       ss('smbrinv', spaceMouseBlenderRotateInvert, PARAM_DEFAULTS.smbrinv);
+      ss('fov', cameraFovDegrees, PARAM_DEFAULTS.fov);
       ss('interp', focusTransitionCentiseconds, PARAM_DEFAULTS.interp);
+      ss('walksmooth', walkSmoothingCentiseconds, PARAM_DEFAULTS.walksmooth);
+      ss('walkalign', walkTangentPullPercent, PARAM_DEFAULTS.walkalign);
+      ss('walkscale', walkScaleSteps, PARAM_DEFAULTS.walkscale);
+      ss('walkheight', walkHeightSteps, PARAM_DEFAULTS.walkheight);
     } catch { /* signals not yet initialized */ }
     // Camera
     set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
@@ -854,7 +874,12 @@ let drag = false, lx = 0, ly = 0;
 
 const spaceMouseMove = signal(300, 'smmove');
 const spaceMouseRotate = signal(300, 'smrotate');
+const cameraFovDegrees = signal(75, 'fov');
 const focusTransitionCentiseconds = signal(70, 'interp');
+const walkSmoothingCentiseconds = signal(18, 'walksmooth');
+const walkTangentPullPercent = signal(70, 'walkalign');
+const walkScaleSteps = signal(0, 'walkscale');
+const walkHeightSteps = signal(0, 'walkheight');
 const spaceMouseNavigation = signal('hyperscope', 'smnav');
 const spaceMouseLockHorizon = signal(true, 'smlock');
 const spaceMouseSwapYZ = signal(false, 'smswap');
@@ -864,8 +889,21 @@ const spaceMouseBlenderPanInvert = signal(0, 'smbpinv');
 const spaceMouseBlenderRotateInvert = signal(0, 'smbrinv');
 bindSlider('spacemouse-move', spaceMouseMove, value => (value / 100).toFixed(2));
 bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed(2));
+bindSlider('camera-fov', cameraFovDegrees, value => `${value.toFixed(0)}°`);
 bindSlider('focus-transition', focusTransitionCentiseconds,
   value => `${(value / 100).toFixed(2)} s`);
+bindSlider('walk-smoothing', walkSmoothingCentiseconds,
+  value => `${(value / 100).toFixed(2)} s`);
+bindSlider('walk-align', walkTangentPullPercent, value => `${value.toFixed(0)}%`);
+bindSlider('walk-scale', walkScaleSteps,
+  value => `${Math.pow(2, value / 100).toFixed(2)}×`);
+bindSlider('walk-height', walkHeightSteps,
+  value => `${Math.pow(2, value / 100).toFixed(2)}×`);
+effect(() => {
+  cameraFovDegrees.get();
+  if (wasmOk.get()) debouncedLodRecompute();
+  syncURL();
+});
 const spaceMouseNavigationSelect = $('spacemouse-navigation');
 spaceMouseNavigationSelect.addEventListener('change', () => {
   spaceMouseNavigation.set(spaceMouseNavigationSelect.value);
@@ -902,6 +940,10 @@ effect(() => {
   spaceMouseBlenderPanInvert.get();
   spaceMouseBlenderRotateInvert.get();
   focusTransitionCentiseconds.get();
+  walkSmoothingCentiseconds.get();
+  walkTangentPullPercent.get();
+  walkScaleSteps.get();
+  walkHeightSteps.get();
   syncURL();
 });
 const spaceMouseStatus = $('spacemouse-status');
@@ -958,6 +1000,9 @@ function perspective(fov, a, n, f, out = new Float32Array(16)) {
   out[11] = -1; out[14] = n * f * r * 2;
   return out;
 }
+function cameraFovRadians() {
+  return cameraFovDegrees.peek() * Math.PI / 180;
+}
 function lookAt(ex, ey, ez, tx, ty, tz, ux, uy, uz, out = new Float32Array(16)) {
   let fx = tx - ex, fy = ty - ey, fz = tz - ez, fl = Math.hypot(fx, fy, fz);
   fx /= fl; fy /= fl; fz /= fl;
@@ -987,6 +1032,7 @@ function mulM4(a, b, out = new Float32Array(16)) {
 // keeping pitch, yaw, and roll local after arbitrary six-axis motion.
 const manualCameraBasisState = new Float64Array(9);
 let manualCameraBasisReady = false;
+let manualCameraInputRevision = 0;
 
 function setManualCameraBasisFromEuler() {
   const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
@@ -1025,6 +1071,7 @@ function syncManualCameraEuler() {
 function rotateManualCameraAboutAxis(axisX, axisY, axisZ, angle) {
   const axisLength = Math.hypot(axisX, axisY, axisZ);
   if (axisLength < 1e-12 || Math.abs(angle) < 1e-12) return;
+  manualCameraInputRevision += 1;
   const x = axisX / axisLength, y = axisY / axisLength, z = axisZ / axisLength;
   const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
   const m00 = t*x*x+c,   m01 = t*x*y-s*z, m02 = t*x*z+s*y;
@@ -1115,8 +1162,15 @@ const frameCameraBasis = new Float32Array(9), lodCameraBasis = new Float32Array(
 const inputCameraBasis = new Float32Array(9), pickCameraBasis = new Float32Array(9);
 const spaceMouseFlyAxes = new Float32Array(6);
 const spaceMouseNavigationAxes = new Float32Array(6);
+const spaceMouseWalkAxes = new Float32Array(6);
 const spaceMouseLocalRotation = new Float64Array(4);
 const spaceMouseNavigationOptions = {
+  mode: 'hyperscope',
+  swapYZ: false,
+  invertPan: 0,
+  invertRotate: 0,
+};
+const spaceMouseWalkOptions = {
   mode: 'hyperscope',
   swapYZ: false,
   invertPan: 0,
@@ -1667,13 +1721,34 @@ const surfaceWalkKeys = new Set();
 const surfaceWalk = {
   active: false,
   snapshot: null,
-  speed: 0.2,
-  eyeHeight: 0.035,
+  filteredPosition: null,
+  filteredNormal: null,
+  tangentForward: null,
+  relativePitch: null,
+  inputRevision: null,
+  controllerRight: 0,
+  controllerForward: 0,
+  baseSpeed: 0.2,
+  baseEyeHeight: 0.035,
   lastLodAt: 0,
   error: null,
   keys: [],
 };
 globalThis.__hyperscopeSurfaceWalk = surfaceWalk;
+
+function surfaceWalkScale() {
+  return Math.pow(2, walkScaleSteps.peek() / 100);
+}
+
+function surfaceWalkSpeed() {
+  return surfaceWalk.baseSpeed * surfaceWalkScale();
+}
+
+function surfaceWalkEyeHeight() {
+  return surfaceWalk.baseEyeHeight
+    * surfaceWalkScale()
+    * Math.pow(2, walkHeightSteps.peek() / 100);
+}
 const focusSphere = {
   active: false,
   center: [0.5, 0, 0],
@@ -1735,7 +1810,7 @@ function preparePickCamera() {
   const upY = authoredCamera ? 1 : basis[4];
   const upZ = authoredCamera ? 0 : basis[5];
   lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, pickView);
-  perspective(Math.PI / 3, canvas.width / canvas.height, 0.01, 10000, pickProj);
+  perspective(cameraFovRadians(), canvas.width / canvas.height, 0.01, 10000, pickProj);
   mulM4(pickProj, pickView, pickMvp);
   pickCameraPos[0] = ex; pickCameraPos[1] = ey; pickCameraPos[2] = ez;
   return true;
@@ -1779,25 +1854,75 @@ function surfaceProjectTangent(value, normal) {
   ]);
 }
 
-function applySurfaceWalkCamera(snapshot, orient = true) {
+function surfaceSmoothDirection(from, to, amount) {
+  if (!from || amount >= 1) return to.slice();
+  if (amount <= 0) return from.slice();
+  const cosine = Math.max(-1, Math.min(1, surfaceDot(from, to)));
+  if (cosine > 0.9995) {
+    return surfaceNormalize(from.map((value, axis) => value + (to[axis] - value) * amount))
+      || to.slice();
+  }
+  let destination = to;
+  let angle = Math.acos(cosine);
+  if (cosine < -0.9995) {
+    const orthogonal = surfaceNormalize(surfaceCross(from, [1, 0, 0]))
+      || surfaceNormalize(surfaceCross(from, [0, 1, 0]));
+    if (!orthogonal) return to.slice();
+    return surfaceNormalize(from.map(
+      (value, axis) => value * Math.cos(Math.PI * amount)
+        + orthogonal[axis] * Math.sin(Math.PI * amount),
+    )) || to.slice();
+  }
+  const sine = Math.sin(angle);
+  if (Math.abs(sine) < 1e-8) return destination.slice();
+  const firstWeight = Math.sin((1 - amount) * angle) / sine;
+  const secondWeight = Math.sin(amount * angle) / sine;
+  return surfaceNormalize(from.map(
+    (value, axis) => value * firstWeight + destination[axis] * secondWeight,
+  )) || to.slice();
+}
+
+function applySurfaceWalkCamera(snapshot, orient = true, deltaSeconds = 0) {
   if (!snapshot || snapshot.status !== 'attached' || !snapshot.output_normal
       || !snapshot.output_position) return false;
-  let normal = surfaceNormalize(Array.from(snapshot.output_normal));
-  if (!normal) return false;
-  const previousNormal = surfaceWalk.snapshot?.output_normal;
-  if (previousNormal && surfaceDot(normal, previousNormal) < 0) {
-    normal = normal.map(value => -value);
-  }
-  const position = Array.from(snapshot.output_position);
+  const targetNormal = surfaceNormalize(Array.from(snapshot.output_normal));
+  const targetPosition = Array.from(snapshot.output_position);
+  if (!targetNormal || !targetPosition.every(Number.isFinite)) return false;
+  const smoothingSeconds = walkSmoothingCentiseconds.peek() / 100;
+  const filterAmount = !surfaceWalk.active || !(deltaSeconds > 0) || smoothingSeconds <= 0
+    ? 1
+    : 1 - Math.exp(-deltaSeconds / smoothingSeconds);
+  const priorPosition = surfaceWalk.filteredPosition;
+  const position = priorPosition
+    ? priorPosition.map((value, axis) => value + (targetPosition[axis] - value) * filterAmount)
+    : targetPosition;
+  const normal = surfaceSmoothDirection(
+    surfaceWalk.filteredNormal,
+    targetNormal,
+    filterAmount,
+  );
+  surfaceWalk.filteredPosition = position;
+  surfaceWalk.filteredNormal = normal;
   const eye = [
-    position[0] + normal[0] * surfaceWalk.eyeHeight,
-    position[1] + normal[1] * surfaceWalk.eyeHeight,
-    position[2] + normal[2] * surfaceWalk.eyeHeight,
+    position[0] + normal[0] * surfaceWalkEyeHeight(),
+    position[1] + normal[1] * surfaceWalkEyeHeight(),
+    position[2] + normal[2] * surfaceWalkEyeHeight(),
   ];
   if (orient) {
     const basis = manualCameraBasis(inputCameraBasis);
     const oldForward = [basis[6], basis[7], basis[8]];
-    let tangentForward = surfaceProjectTangent(oldForward, normal);
+    const inputChanged = surfaceWalk.inputRevision !== manualCameraInputRevision;
+    const captureRelativeView = !surfaceWalk.active || inputChanged
+      || !Number.isFinite(surfaceWalk.relativePitch) || !surfaceWalk.tangentForward;
+    const relativeView = captureRelativeView
+      ? decomposeSurfaceRelativeForward(
+        oldForward,
+        normal,
+        surfaceWalk.tangentForward || [basis[3], basis[4], basis[5]],
+      )
+      : null;
+    let tangentForward = relativeView?.tangent
+      || surfaceProjectTangent(surfaceWalk.tangentForward, normal);
     if (!tangentForward) {
       tangentForward = surfaceProjectTangent([basis[3], basis[4], basis[5]], normal);
     }
@@ -1806,13 +1931,18 @@ function applySurfaceWalkCamera(snapshot, orient = true) {
         || surfaceNormalize(surfaceCross(normal, [0, 0, 1]));
     }
     if (!tangentForward) return false;
-    const normalPitch = Math.max(-0.95, Math.min(0.95, surfaceDot(oldForward, normal)));
-    const tangentScale = Math.sqrt(Math.max(0, 1 - normalPitch * normalPitch));
-    const forward = surfaceNormalize([
-      tangentForward[0] * tangentScale + normal[0] * normalPitch,
-      tangentForward[1] * tangentScale + normal[1] * normalPitch,
-      tangentForward[2] * tangentScale + normal[2] * normalPitch,
-    ]) || tangentForward;
+    if (relativeView) surfaceWalk.relativePitch = relativeView.pitch;
+    surfaceWalk.inputRevision = manualCameraInputRevision;
+    const targetForward = composeSurfaceRelativeForward(
+      tangentForward,
+      normal,
+      surfaceWalk.relativePitch || 0,
+    ) || tangentForward;
+    const framePullRate = walkTangentPullPercent.peek() / 100 * 8;
+    const framePullAmount = !surfaceWalk.active || !(deltaSeconds > 0)
+      ? 1
+      : 1 - Math.exp(-framePullRate * deltaSeconds);
+    const forward = surfaceSmoothDirection(oldForward, targetForward, framePullAmount);
     const right = surfaceNormalize(surfaceCross(forward, normal));
     const up = right && surfaceNormalize(surfaceCross(right, forward));
     if (right && up) {
@@ -1821,6 +1951,7 @@ function applySurfaceWalkCamera(snapshot, orient = true) {
       manualCameraBasisState.set(forward, 6);
       manualCameraBasisReady = true;
       syncManualCameraEuler();
+      surfaceWalk.tangentForward = tangentForward;
     }
   }
   const basis = manualCameraBasis(inputCameraBasis);
@@ -1832,17 +1963,24 @@ function applySurfaceWalkCamera(snapshot, orient = true) {
   return true;
 }
 
-function updateSurfaceWalkSnapshot(snapshot, { orient = true } = {}) {
+function updateSurfaceWalkSnapshot(snapshot, { orient = true, deltaSeconds = 0 } = {}) {
   if (!snapshot || snapshot.status !== 'attached') {
     surfaceWalk.active = false;
     surfaceWalk.snapshot = snapshot || null;
     surfaceWalk.error = snapshot?.error || snapshot?.detach_reason || 'surface unavailable';
     surfaceWalkKeys.clear();
     surfaceWalk.keys = [];
+    surfaceWalk.filteredPosition = null;
+    surfaceWalk.filteredNormal = null;
+    surfaceWalk.tangentForward = null;
+    surfaceWalk.relativePitch = null;
+    surfaceWalk.inputRevision = null;
+    surfaceWalk.controllerRight = 0;
+    surfaceWalk.controllerForward = 0;
     selectionLabel(`Surface walk detached · ${surfaceWalk.error}`);
     return false;
   }
-  if (!applySurfaceWalkCamera(snapshot, orient)) {
+  if (!applySurfaceWalkCamera(snapshot, orient, deltaSeconds)) {
     surfaceWalk.active = false;
     surfaceWalk.error = 'invalid contact frame';
     selectionLabel('Surface walk detached · invalid contact frame');
@@ -1865,6 +2003,13 @@ function detachSurfaceWalk(message = 'Surface walk detached') {
   surfaceWalk.error = null;
   surfaceWalkKeys.clear();
   surfaceWalk.keys = [];
+  surfaceWalk.filteredPosition = null;
+  surfaceWalk.filteredNormal = null;
+  surfaceWalk.tangentForward = null;
+  surfaceWalk.relativePitch = null;
+  surfaceWalk.inputRevision = null;
+  surfaceWalk.controllerRight = 0;
+  surfaceWalk.controllerForward = 0;
   selectionLabel(message);
 }
 
@@ -2079,7 +2224,8 @@ canvas.addEventListener('contextmenu', e => {
   const snapshot = mr_attachSurface(
     picked.face,
     new Float32Array(picked.barycentric),
-    surfaceWalk.eyeHeight,
+    surfaceWalkEyeHeight(),
+    pickCameraPos,
   );
   if (updateSurfaceWalkSnapshot(snapshot)) {
     mr_highlightFace(picked.face);
@@ -2293,6 +2439,35 @@ function transportManualCamera(previous, next) {
     return false;
   }
 
+  if (surfaceWalk.active && surfaceWalk.snapshot?.output_position
+      && surfaceWalk.snapshot?.output_normal) {
+    const contactPosition = surfaceWalk.filteredPosition
+      || Array.from(surfaceWalk.snapshot.output_position);
+    const contactNormal = surfaceWalk.filteredNormal
+      || surfaceNormalize(Array.from(surfaceWalk.snapshot.output_normal));
+    const contactTangent = surfaceWalk.tangentForward
+      || (contactNormal && surfaceProjectTangent(basis.slice(6, 9), contactNormal));
+    const contactFrame = contactNormal && contactTangent
+      ? transportPointAndDirectionsAcrossSphereReflections(
+        contactPosition,
+        [contactNormal, contactTangent],
+        previous,
+        next,
+      )
+      : null;
+    if (contactFrame) {
+      const mappedNormal = surfaceNormalize(contactFrame.directions[0]);
+      const mappedTangent = surfaceNormalize(contactFrame.directions[1]);
+      if (mappedNormal && mappedTangent) {
+        surfaceWalk.filteredPosition = contactFrame.point;
+        surfaceWalk.filteredNormal = mappedNormal;
+        surfaceWalk.tangentForward = mappedTangent;
+        surfaceWalk.snapshot.output_position = contactFrame.point.slice();
+        surfaceWalk.snapshot.output_normal = mappedNormal.slice();
+      }
+    }
+  }
+
   manualCameraBasisState.set(transported.basis);
   manualCameraBasisReady = true;
   zoom = transported.orbitDistance;
@@ -2300,6 +2475,7 @@ function transportManualCamera(previous, next) {
   panY = transported.target[1];
   panZ = transported.target[2];
   syncManualCameraEuler();
+  if (surfaceWalk.active) applySurfaceWalkCamera(surfaceWalk.snapshot, false, 0);
   // A transition authored in the previous output chart is no longer valid.
   // Explicit reframe remains available after the sphere edit completes.
   cameraFocusTransition = null;
@@ -3076,7 +3252,12 @@ applyParams = function(params) {
   spaceMouseHyperscopeRotateInvert.set(integer(params.smrinv, 1, 0, 7));
   spaceMouseBlenderPanInvert.set(integer(params.smbpinv, 0, 0, 7));
   spaceMouseBlenderRotateInvert.set(integer(params.smbrinv, 0, 0, 7));
+  cameraFovDegrees.set(integer(params.fov, 75, 35, 110));
   focusTransitionCentiseconds.set(integer(params.interp, 70, 5, 500));
+  walkSmoothingCentiseconds.set(integer(params.walksmooth, 18, 0, 150));
+  walkTangentPullPercent.set(integer(params.walkalign, 70, 0, 100));
+  walkScaleSteps.set(finite(params.walkscale, 0, -800, 800));
+  walkHeightSteps.set(finite(params.walkheight, 0, -400, 400));
   fz.enabled.set(params.fuzzy === '1');
   fz.mode.set(params.fmode || '0');
   fz.radius.set(integer(params.fradius, 11, 4, 128));
@@ -3618,7 +3799,7 @@ async function recomputeLods() {
     const upY = authoredCamera ? 1 : basis[4];
     const upZ = authoredCamera ? 0 : basis[5];
     const view = lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, lodView);
-    const proj = perspective(Math.PI / 3, w / h, 0.01, 10000, lodProj);
+    const proj = perspective(cameraFovRadians(), w / h, 0.01, 10000, lodProj);
     const vp = mulM4(proj, view, lodVp);
     const tp = getTessParams();
 
@@ -3904,13 +4085,25 @@ function frame(ts) {
     spaceMouseNavigationOptions,
     spaceMouseNavigationAxes,
   );
+  spaceMouseWalkOptions.invertPan = spaceMouseHyperscopePanInvert.peek();
+  spaceMouseWalkOptions.invertRotate = spaceMouseHyperscopeRotateInvert.peek();
+  const walkAxes = mapSpaceMouseNavigationAxes(
+    spaceMouseAxes,
+    spaceMouseWalkOptions,
+    spaceMouseWalkAxes,
+  );
+  const walkingSpaceMouse = surfaceWalk.active && spaceMouseMode === 'camera';
+  surfaceWalk.controllerRight = walkingSpaceMouse ? walkAxes[0] : 0;
+  surfaceWalk.controllerForward = walkingSpaceMouse ? walkAxes[2] : 0;
   spaceMouseDiagnostics.buttons = spaceMouse.buttons;
   spaceMouseDiagnostics.controlMode = spaceMouseMode;
-  spaceMouseDiagnostics.navigationMode = navigationMode;
+  spaceMouseDiagnostics.navigationMode = walkingSpaceMouse ? 'surface-walk' : navigationMode;
   const editingFocusField = spaceMouseMode === 'depth-of-field'
     && focusSphere.active && fz.mode.peek() === '3';
-  const spaceMouseModeText = spaceMouseMode === 'camera'
-    ? SPACE_MOUSE_CAMERA_MODE_TEXT[navigationMode]
+  const spaceMouseModeText = walkingSpaceMouse
+    ? 'Surface walk: slide/lift/walk · pitch/yaw · twist scale'
+    : spaceMouseMode === 'camera'
+      ? SPACE_MOUSE_CAMERA_MODE_TEXT[navigationMode]
     : editingFocusField
       ? 'Spheroidal DoF: push/pull shell; lift aperture; twist blur'
       : SPACE_MOUSE_MODIFIER_MODE_TEXT[spaceMouseMode];
@@ -3956,7 +4149,38 @@ function frame(ts) {
       const moveScale = spaceMouseMode === 'camera' ? cameraMoveScale : inversionMoveScale;
       const rotateScale = (spaceMouseRotate.peek() / 100) * deltaSeconds * 1.5;
 
-      if (spaceMouseMode === 'camera') {
+      if (walkingSpaceMouse) {
+        // Walking owns the unmodified SpaceMouse layer while attached. Its
+        // frame is surface-local: X/Z provide strafe/walk, Y changes the eye
+        // offset, Rx/Ry provide relative pitch/yaw, and twist changes both
+        // body height and walking speed multiplicatively.
+        rustNavigationShadowCameraActive = false;
+        spaceMouseTranslationActive = false;
+        const walkNormal = surfaceWalk.filteredNormal
+          || surfaceNormalize(Array.from(surfaceWalk.snapshot?.output_normal || []));
+        if (walkNormal) {
+          const yaw = walkAxes[4] * rotateScale;
+          rotateManualCameraAboutAxis(walkNormal[0], walkNormal[1], walkNormal[2], yaw);
+          const walkBasis = manualCameraBasis(inputCameraBasis);
+          const pitch = walkAxes[3] * rotateScale;
+          rotateManualCameraAboutAxis(walkBasis[0], walkBasis[1], walkBasis[2], pitch);
+          syncManualCameraEuler();
+        }
+        const heightDelta = walkAxes[1]
+          * (spaceMouseMove.peek() / 100) * deltaSeconds * 120;
+        if (heightDelta !== 0) {
+          walkHeightSteps.set(Math.max(-400, Math.min(400,
+            Math.round((walkHeightSteps.peek() + heightDelta) * 100) / 100,
+          )));
+        }
+        const scaleDelta = walkAxes[5]
+          * (spaceMouseRotate.peek() / 100) * deltaSeconds * 120;
+        if (scaleDelta !== 0) {
+          walkScaleSteps.set(Math.max(-800, Math.min(800,
+            Math.round((walkScaleSteps.peek() + scaleDelta) * 100) / 100,
+          )));
+        }
+      } else if (spaceMouseMode === 'camera') {
         const pitch = navigationAxes[3] * rotateScale;
         const yaw = navigationAxes[4] * rotateScale;
         const roll = navigationAxes[5] * rotateScale;
@@ -4161,21 +4385,23 @@ function frame(ts) {
       if (!forward || !right) {
         detachSurfaceWalk('Surface walk detached · invalid tangent frame');
       } else {
-        const forwardAxis = Number(surfaceWalkKeys.has('KeyW') || surfaceWalkKeys.has('ArrowUp'))
+        const forwardAxis = surfaceWalk.controllerForward
+          + Number(surfaceWalkKeys.has('KeyW') || surfaceWalkKeys.has('ArrowUp'))
           - Number(surfaceWalkKeys.has('KeyS') || surfaceWalkKeys.has('ArrowDown'));
-        const rightAxis = Number(surfaceWalkKeys.has('KeyD') || surfaceWalkKeys.has('ArrowRight'))
+        const rightAxis = surfaceWalk.controllerRight
+          + Number(surfaceWalkKeys.has('KeyD') || surfaceWalkKeys.has('ArrowRight'))
           - Number(surfaceWalkKeys.has('KeyA') || surfaceWalkKeys.has('ArrowLeft'));
-        const inputLength = Math.hypot(forwardAxis, rightAxis) || 1;
+        const inputLength = Math.max(1, Math.hypot(forwardAxis, rightAxis));
         const fast = surfaceWalkKeys.has('ShiftLeft') || surfaceWalkKeys.has('ShiftRight');
-        const speed = surfaceWalk.speed * (fast ? 3 : 1);
+        const speed = surfaceWalkSpeed() * (fast ? 3 : 1);
         const velocity = new Float32Array([
           (forward[0] * forwardAxis + right[0] * rightAxis) * speed / inputLength,
           (forward[1] * forwardAxis + right[1] * rightAxis) * speed / inputLength,
           (forward[2] * forwardAxis + right[2] * rightAxis) * speed / inputLength,
         ]);
         const snapshot = mr_stepSurface(deltaSeconds, velocity);
-        if (updateSurfaceWalkSnapshot(snapshot)) {
-          const moving = forwardAxis !== 0 || rightAxis !== 0;
+        if (updateSurfaceWalkSnapshot(snapshot, { deltaSeconds })) {
+          const moving = Math.abs(forwardAxis) > 1e-5 || Math.abs(rightAxis) > 1e-5;
           if (moving && ts - surfaceWalk.lastLodAt >= 100) {
             surfaceWalk.lastLodAt = ts;
             debouncedLodRecompute();
@@ -4196,7 +4422,13 @@ function frame(ts) {
   const upY = authoredCamera ? 1 : basis[4];
   const upZ = authoredCamera ? 0 : basis[5];
   const view = lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, frameView);
-  const proj = perspective(Math.PI / 3, canvas.width / canvas.height, 0.01, 10000, frameProj);
+  const proj = perspective(
+    cameraFovRadians(),
+    canvas.width / canvas.height,
+    0.01,
+    10000,
+    frameProj,
+  );
   const mvp = mulM4(proj, view, frameMvp);
   frameCameraPos[0] = ex; frameCameraPos[1] = ey; frameCameraPos[2] = ez;
 

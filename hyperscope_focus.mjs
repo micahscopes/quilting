@@ -240,6 +240,84 @@ function reflectPointAndFrame(point, directions, state) {
   };
 }
 
+/** Transport a point and attached directions through F_next o inverse(F_previous). */
+export function transportPointAndDirectionsAcrossSphereReflections(
+  point,
+  directions,
+  previous,
+  next,
+) {
+  const before = reflectionState(previous);
+  const after = reflectionState(next);
+  const sourcePoint = Array.from(point || [], Number);
+  const sourceDirections = Array.from(directions || [], direction => Array.from(direction || [], Number));
+  if (!before || !after || sourcePoint.length !== 3 || !finitePoint(...sourcePoint)
+      || sourceDirections.some(direction => direction.length !== 3 || !finitePoint(...direction))) {
+    return null;
+  }
+  const unmapped = reflectPointAndFrame(sourcePoint, sourceDirections, before);
+  if (!unmapped) return null;
+  const remapped = reflectPointAndFrame(unmapped.point, unmapped.directions, after);
+  if (!remapped) return null;
+  return {
+    point: remapped.point,
+    directions: remapped.directions,
+    localScale: unmapped.scale * remapped.scale,
+  };
+}
+
+function normalizedDirection(direction) {
+  const values = Array.from(direction || [], Number);
+  if (values.length !== 3 || !finitePoint(...values)) return null;
+  const length = Math.hypot(...values);
+  if (!(length > MOBIUS_EPSILON) || !Number.isFinite(length)) return null;
+  return values.map(value => value / length);
+}
+
+/** Split a view direction into a surface tangent heading and relative pitch. */
+export function decomposeSurfaceRelativeForward(forward, normal, tangentHint = null) {
+  const view = normalizedDirection(forward);
+  const surfaceNormal = normalizedDirection(normal);
+  if (!view || !surfaceNormal) return null;
+  const pitchSine = Math.max(-1, Math.min(1, view.reduce(
+    (sum, value, axis) => sum + value * surfaceNormal[axis],
+    0,
+  )));
+  let tangent = normalizedDirection(
+    view.map((value, axis) => value - surfaceNormal[axis] * pitchSine),
+  );
+  if (!tangent && tangentHint) {
+    const hint = normalizedDirection(tangentHint);
+    if (hint) {
+      const projection = hint.reduce(
+        (sum, value, axis) => sum + value * surfaceNormal[axis],
+        0,
+      );
+      tangent = normalizedDirection(
+        hint.map((value, axis) => value - surfaceNormal[axis] * projection),
+      );
+    }
+  }
+  if (!tangent) return null;
+  return { tangent, pitch: Math.asin(pitchSine) };
+}
+
+/** Rebuild a view direction at the same pitch relative to a new surface frame. */
+export function composeSurfaceRelativeForward(tangent, normal, pitch) {
+  const surfaceNormal = normalizedDirection(normal);
+  if (!surfaceNormal || !Number.isFinite(pitch)) return null;
+  const heading = normalizedDirection(tangent);
+  if (!heading) return null;
+  const projected = decomposeSurfaceRelativeForward(heading, surfaceNormal);
+  if (!projected) return null;
+  const limitedPitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+  const tangentScale = Math.cos(limitedPitch);
+  const normalScale = Math.sin(limitedPitch);
+  return normalizedDirection(projected.tangent.map(
+    (value, axis) => value * tangentScale + surfaceNormal[axis] * normalScale,
+  ));
+}
+
 function normalizedCameraBasis(forward, up) {
   let forwardLength = Math.hypot(...forward);
   if (!(forwardLength > 1e-12) || !Number.isFinite(forwardLength)) return null;

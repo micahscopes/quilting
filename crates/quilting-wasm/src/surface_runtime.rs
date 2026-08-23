@@ -30,6 +30,7 @@ pub(crate) struct SurfaceRuntime {
     joint_matrices: Vec<f32>,
     morph_weights: Vec<f32>,
     previous_output_position: Option<[f64; 3]>,
+    attachment_orientation_sign: i8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +54,7 @@ impl SurfaceRuntime {
         self.walker = SurfaceWalker::default();
         self.adjacency = None;
         self.previous_output_position = None;
+        self.attachment_orientation_sign = 1;
     }
 
     pub fn set_skinning(&mut self, joint_indices: &[[u16; 4]], joint_weights: &[[f32; 4]]) {
@@ -85,6 +87,7 @@ impl SurfaceRuntime {
         self.joint_matrices.clear();
         self.morph_weights.clear();
         self.previous_output_position = None;
+        self.attachment_orientation_sign = 1;
     }
 
     pub fn attachment_face(&self) -> Option<u32> {
@@ -162,6 +165,8 @@ impl SurfaceRuntime {
         face: u32,
         barycentric: [f64; 3],
         eye_height: f64,
+        camera_position: [f64; 3],
+        orientation_sign: i8,
         mobius: [f32; 16],
         euclidean_model: [f32; 16],
     ) -> Result<SurfaceRuntimeSnapshot, String> {
@@ -175,15 +180,51 @@ impl SurfaceRuntime {
         let entity = runtime_entity_id(node);
         let address = SurfaceAddress::new(entity, face, barycentric)
             .map_err(|error| format!("invalid surface address: {error:?}"))?;
-        let attachment = SurfaceAttachment::new(address, eye_height)
+        let normal_sign = {
+            let adjacency = self
+                .adjacency
+                .as_ref()
+                .ok_or_else(|| "surface topology is unavailable".to_string())?;
+            let mut field = RuntimeSurfaceField {
+                instances,
+                face_nodes,
+                adjacency,
+                pose: PoseData {
+                    joint_indices: &self.joint_indices,
+                    joint_weights: &self.joint_weights,
+                    morph_deltas: &self.morph_deltas,
+                    morph_num_vertices: self.morph_num_vertices,
+                    morph_num_targets: self.morph_num_targets,
+                    joint_matrices: &self.joint_matrices,
+                    morph_weights: &self.morph_weights,
+                },
+                mobius: mobius_from_array(mobius),
+                euclidean_model,
+                surface_velocity: [0.0; 3],
+            };
+            let sample = field
+                .sample(address)
+                .ok_or_else(|| "could not sample attached surface".to_string())?;
+            let normal = sample
+                .normal()
+                .ok_or_else(|| "attached surface has no stable normal".to_string())?;
+            if dot(sub(camera_position, sample.output_position), normal) < 0.0 {
+                -1
+            } else {
+                1
+            }
+        };
+        let attachment = SurfaceAttachment::with_normal_sign(address, eye_height, normal_sign)
             .map_err(|error| format!("invalid surface attachment: {error:?}"))?;
         self.walker.attach(attachment);
         self.previous_output_position = None;
+        self.attachment_orientation_sign = normalize_orientation_sign(orientation_sign);
         self.step_relative(
             instances,
             face_nodes,
             0.0,
             [0.0; 3],
+            orientation_sign,
             mobius,
             euclidean_model,
         )
@@ -192,6 +233,7 @@ impl SurfaceRuntime {
     pub fn detach(&mut self) -> SurfaceRuntimeSnapshot {
         self.walker.detach(SurfaceDetachReason::Manual);
         self.previous_output_position = None;
+        self.attachment_orientation_sign = 1;
         detached_snapshot(SurfaceDetachReason::Manual)
     }
 
@@ -201,9 +243,15 @@ impl SurfaceRuntime {
         face_nodes: &[usize],
         delta_seconds: f64,
         relative_output_velocity: [f64; 3],
+        orientation_sign: i8,
         mobius: [f32; 16],
         euclidean_model: [f32; 16],
     ) -> Result<SurfaceRuntimeSnapshot, String> {
+        let next_orientation_sign = normalize_orientation_sign(orientation_sign);
+        if self.attachment_orientation_sign != next_orientation_sign {
+            self.walker.flip_normal_side();
+            self.attachment_orientation_sign = next_orientation_sign;
+        }
         let attachment = self
             .walker
             .attachment()
@@ -269,12 +317,10 @@ impl SurfaceField for RuntimeSurfaceField<'_> {
         let patch = self.patch(address.face as usize)?;
         let u = address.barycentric[1];
         let v = address.barycentric[2];
-        let epsilon = 1.0e-5;
-        let point = patch.eval(u, v).to_point();
-        let point_u = patch.eval(u + epsilon, v).to_point();
-        let point_v = patch.eval(u, v + epsilon).to_point();
-        let tangent_u = scale(sub(point_u, point), 1.0 / epsilon);
-        let tangent_v = scale(sub(point_v, point), 1.0 / epsilon);
+        let differential = patch.eval_differential(u, v);
+        let point = differential.position;
+        let tangent_u = differential.tangent_u;
+        let tangent_v = differential.tangent_v;
         [point, tangent_u, tangent_v]
             .into_iter()
             .flatten()
@@ -572,6 +618,10 @@ fn finite3(value: [f64; 3]) -> bool {
     value.into_iter().all(f64::is_finite)
 }
 
+fn normalize_orientation_sign(sign: i8) -> i8 {
+    if sign < 0 { -1 } else { 1 }
+}
+
 fn add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
 }
@@ -582,6 +632,10 @@ fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 
 fn scale(value: [f64; 3], factor: f64) -> [f64; 3] {
     [value[0] * factor, value[1] * factor, value[2] * factor]
+}
+
+fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
 fn length(value: [f64; 3]) -> f64 {
@@ -614,6 +668,18 @@ mod tests {
         instances
     }
 
+    fn identity_matrix() -> [f32; 16] {
+        [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ]
+    }
+
+    fn identity_mobius() -> [f32; 16] {
+        [
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        ]
+    }
+
     #[test]
     fn runtime_samples_affine_and_mobius_output_chart() {
         let instances = triangle_instances();
@@ -632,6 +698,8 @@ mod tests {
                 0,
                 [0.5, 0.25, 0.25],
                 0.1,
+                [2.75, 0.25, 1.0],
+                1,
                 mobius_translation,
                 translation,
             )
@@ -661,6 +729,8 @@ mod tests {
                 0,
                 [0.5, 0.25, 0.25],
                 0.1,
+                [0.25, 0.25, 3.0],
+                1,
                 [
                     1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
                 ],
@@ -670,6 +740,77 @@ mod tests {
             )
             .unwrap();
         assert!((snapshot.output_position.unwrap()[2] - 2.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn attachment_chooses_camera_side_and_preserves_it_through_inversion_parity() {
+        let mut instances = triangle_instances();
+        for corner in 0..3 {
+            instances[instance_layout::offset::POSITIONS + corner * 4 + 3] = 2.0;
+        }
+        let barycentric = [0.5, 0.25, 0.25];
+        let source_point = Quat::from_point(0.25, 0.25, 2.0);
+
+        let mut below = SurfaceRuntime::default();
+        let below_snapshot = below
+            .attach(
+                &instances,
+                1,
+                &[0],
+                0,
+                barycentric,
+                0.1,
+                [0.25, 0.25, 1.0],
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        assert!(below_snapshot.output_normal.unwrap()[2] < -0.999);
+
+        let mut runtime = SurfaceRuntime::default();
+        let attached = runtime
+            .attach(
+                &instances,
+                1,
+                &[0],
+                0,
+                barycentric,
+                0.1,
+                [0.25, 0.25, 3.0],
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        assert!(attached.output_normal.unwrap()[2] > 0.999);
+
+        let inverted = runtime
+            .step_relative(
+                &instances,
+                &[0],
+                0.0,
+                [0.0; 3],
+                -1,
+                [
+                    0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                identity_matrix(),
+            )
+            .unwrap();
+        let expected_point = Mobius::inversion().apply(source_point).to_point();
+        let actual_point = inverted.output_position.unwrap();
+        assert!(length(sub(actual_point, expected_point)) < 1.0e-9);
+
+        let epsilon = 1.0e-6;
+        let mapped_above = Mobius::inversion()
+            .apply(source_point + Quat::from_point(0.0, 0.0, epsilon))
+            .to_point();
+        let expected_side = scale(sub(mapped_above, expected_point), 1.0 / epsilon);
+        let expected_side = scale(expected_side, 1.0 / length(expected_side));
+        let actual_side = inverted.output_normal.unwrap();
+        assert!(dot(expected_side, actual_side) > 1.0 - 1.0e-8);
     }
 
     #[test]
