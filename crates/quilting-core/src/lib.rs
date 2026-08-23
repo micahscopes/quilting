@@ -29,6 +29,8 @@
 //!   The Rust packer, the renderer's VAO setup and the WGSL shader must all
 //!   agree with it; nothing should restate a stride or offset.
 //! - [`batch`] — grouping faces into instanced draw calls.
+//! - [`render`] — backend-neutral scene snapshots and frame commands shared by
+//!   WebGL2 and WebGPU implementations.
 //!
 //! # Invariants worth knowing before editing
 //!
@@ -57,6 +59,7 @@ pub mod evaluate;
 pub mod conformal_lod;
 pub mod batch;
 pub mod educational;
+pub mod render;
 
 pub use atlas::TessellationAtlas;
 pub use evaluate::FaceInstance;
