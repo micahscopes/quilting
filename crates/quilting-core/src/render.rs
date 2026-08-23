@@ -7,6 +7,7 @@
 
 use crate::batch::{RenderBatchKey, RenderBatchMember};
 use crate::permutation::perm_sign;
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
@@ -199,7 +200,8 @@ pub enum RenderGeometry {
 /// renderer. Logical [`RenderCommand`]s predict this work; WebGL2 and WebGPU
 /// implementations populate the counters at their submission boundary so a
 /// shadow observer can compare intent with execution without a GPU readback.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RenderSubmissionStats {
     /// Indexed patch draw calls issued to the backend, including zero-instance
     /// and invalid calls.
@@ -217,6 +219,153 @@ pub struct RenderSubmissionStats {
     pub triangles: u64,
     /// Line primitives implied by valid index and instance counts.
     pub lines: u64,
+}
+
+/// Field-level difference between expected and actual submission work. Keeping
+/// this bounded avoids retaining per-frame command streams or copying them to
+/// a platform adapter just to diagnose parity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderSubmissionMismatch {
+    pub draw_calls: bool,
+    pub zero_instance_draw_calls: bool,
+    pub invalid_draw_calls: bool,
+    pub submitted_instances: bool,
+    pub triangles: bool,
+    pub lines: bool,
+}
+
+impl RenderSubmissionMismatch {
+    pub fn between(expected: RenderSubmissionStats, actual: RenderSubmissionStats) -> Self {
+        Self {
+            draw_calls: expected.draw_calls != actual.draw_calls,
+            zero_instance_draw_calls: expected.zero_instance_draw_calls
+                != actual.zero_instance_draw_calls,
+            invalid_draw_calls: expected.invalid_draw_calls != actual.invalid_draw_calls,
+            submitted_instances: expected.submitted_instances != actual.submitted_instances,
+            triangles: expected.triangles != actual.triangles,
+            lines: expected.lines != actual.lines,
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderParityComparison {
+    pub frame_revision: u64,
+    pub scene_revision: u64,
+    pub expected: RenderSubmissionStats,
+    pub actual: RenderSubmissionStats,
+    pub mismatch: RenderSubmissionMismatch,
+}
+
+impl RenderParityComparison {
+    pub fn is_match(self) -> bool {
+        self.mismatch.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderParityDiagnostics {
+    pub enabled: bool,
+    pub scene_revision: Option<u64>,
+    pub scene_rebuilds: u64,
+    pub frames_observed: u64,
+    pub matching_frames: u64,
+    pub mismatching_frames: u64,
+    pub last: Option<RenderParityComparison>,
+}
+
+/// Opt-in bounded observer shared by concrete renderer backends. Disabled
+/// observers retain no scene clone and perform no per-frame work.
+#[derive(Debug, Default)]
+pub struct RenderParityObserver {
+    enabled: bool,
+    scene: Option<RenderSceneSnapshot>,
+    scene_rebuilds: u64,
+    frames_observed: u64,
+    matching_frames: u64,
+    mismatching_frames: u64,
+    last: Option<RenderParityComparison>,
+}
+
+impl RenderParityObserver {
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        *self = Self {
+            enabled,
+            ..Self::default()
+        };
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Validate before replacing the retained scene, so a failed extraction
+    /// never destroys the last comparison oracle.
+    pub fn replace_scene(&mut self, scene: RenderSceneSnapshot) -> Result<(), RenderContractError> {
+        if !self.enabled {
+            return Err(RenderContractError::ObserverDisabled);
+        }
+        scene.validate()?;
+        self.scene = Some(scene);
+        self.scene_rebuilds = self.scene_rebuilds.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn scene(&self) -> Option<&RenderSceneSnapshot> {
+        self.scene.as_ref()
+    }
+
+    pub fn observe(
+        &mut self,
+        frame: &RenderFrame,
+        actual: RenderSubmissionStats,
+    ) -> Result<RenderParityComparison, RenderContractError> {
+        if !self.enabled {
+            return Err(RenderContractError::ObserverDisabled);
+        }
+        let scene = self
+            .scene
+            .as_ref()
+            .ok_or(RenderContractError::ObserverSceneUnavailable)?;
+        let expected = frame.expected_submission_stats(scene)?;
+        let comparison = RenderParityComparison {
+            frame_revision: frame.revision,
+            scene_revision: scene.revision,
+            expected,
+            actual,
+            mismatch: RenderSubmissionMismatch::between(expected, actual),
+        };
+        self.frames_observed = self.frames_observed.saturating_add(1);
+        if comparison.is_match() {
+            self.matching_frames = self.matching_frames.saturating_add(1);
+        } else {
+            self.mismatching_frames = self.mismatching_frames.saturating_add(1);
+        }
+        self.last = Some(comparison);
+        Ok(comparison)
+    }
+
+    pub fn diagnostics(&self) -> RenderParityDiagnostics {
+        RenderParityDiagnostics {
+            enabled: self.enabled,
+            scene_revision: self.scene.as_ref().map(|scene| scene.revision),
+            scene_rebuilds: self.scene_rebuilds,
+            frames_observed: self.frames_observed,
+            matching_frames: self.matching_frames,
+            mismatching_frames: self.mismatching_frames,
+            last: self.last,
+        }
+    }
 }
 
 impl RenderSubmissionStats {
@@ -522,6 +671,8 @@ pub enum RenderContractError {
     SceneRevisionMismatch { frame: u64, scene: u64 },
     CommandSequenceMismatch,
     CommandBatchMissing { batch_index: u32 },
+    ObserverDisabled,
+    ObserverSceneUnavailable,
 }
 
 impl fmt::Display for RenderContractError {
@@ -567,6 +718,10 @@ impl fmt::Display for RenderContractError {
                     formatter,
                     "render command references missing batch {batch_index}"
                 )
+            }
+            Self::ObserverDisabled => formatter.write_str("render parity observer is disabled"),
+            Self::ObserverSceneUnavailable => {
+                formatter.write_str("render parity observer has no scene snapshot")
             }
         }
     }
@@ -826,5 +981,62 @@ mod tests {
         total.merge(stats);
         assert_eq!(total.draw_calls, u64::MAX);
         assert_eq!(total.triangles, 6);
+    }
+
+    #[test]
+    fn parity_observer_retains_only_valid_scenes_and_bounded_diagnostics() {
+        let scene = scene();
+        let frame = RenderFrame::build(
+            21,
+            RenderPoseIdentity {
+                asset_revision: 3,
+                pose_revision: 5,
+            },
+            RenderStyle::Pbr,
+            view(),
+            RenderFrameOptions::default(),
+            &scene,
+        )
+        .unwrap();
+        let expected = frame.expected_submission_stats(&scene).unwrap();
+        let mut observer = RenderParityObserver::default();
+        assert_eq!(
+            observer.observe(&frame, expected),
+            Err(RenderContractError::ObserverDisabled)
+        );
+
+        observer.set_enabled(true);
+        assert_eq!(
+            observer.observe(&frame, expected),
+            Err(RenderContractError::ObserverSceneUnavailable)
+        );
+        observer.replace_scene(scene.clone()).unwrap();
+        assert!(observer.observe(&frame, expected).unwrap().is_match());
+
+        let mut actual = expected;
+        actual.submitted_instances += 1;
+        let mismatch = observer.observe(&frame, actual).unwrap();
+        assert!(mismatch.mismatch.submitted_instances);
+        assert!(!mismatch.mismatch.draw_calls);
+        assert_eq!(
+            observer.diagnostics(),
+            RenderParityDiagnostics {
+                enabled: true,
+                scene_revision: Some(7),
+                scene_rebuilds: 1,
+                frames_observed: 2,
+                matching_frames: 1,
+                mismatching_frames: 1,
+                last: Some(mismatch),
+            }
+        );
+
+        let mut invalid = scene;
+        invalid.batches[0].triangle_index_count = 4;
+        assert!(observer.replace_scene(invalid).is_err());
+        assert_eq!(observer.diagnostics().scene_revision, Some(7));
+
+        observer.set_enabled(false);
+        assert_eq!(observer.diagnostics(), RenderParityDiagnostics::default());
     }
 }
