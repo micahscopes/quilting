@@ -51,7 +51,7 @@ pub const BATCH_TOPOLOGY_STRIDE_BYTES: usize = BATCH_TOPOLOGY_STRIDE * 4;
 /// Preparation-pass attributes as `(location, byte_offset)`.
 pub const BATCH_TOPOLOGY_ATTR_MAP: [(u32, i32); 2] = [
     (7, 0),  // edge LODs + permutation
-    (8, 16), // source face ID + reserved
+    (8, 16), // source face ID + current per-vertex visualization LODs
 ];
 
 /// Float offsets of each field within one instance.
@@ -82,8 +82,9 @@ pub mod offset {
 pub mod batch_offset {
     /// Three face-local edge LODs followed by the S3 permutation index.
     pub const EDGE_LODS: usize = 0;
-    /// Stable source face ID; the remaining three components are reserved.
+    /// Stable source face ID followed by current per-vertex visualization LODs.
     pub const FACE_ID: usize = 4;
+    pub const VERTEX_LODS: usize = 5;
 }
 
 /// Instanced vertex attributes as `(location, byte_offset)`.

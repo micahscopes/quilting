@@ -175,6 +175,43 @@ impl RenderBatchKey {
 pub struct RenderBatchMember {
     pub face_index: u32,
     pub permutation_index: u8,
+    /// Current resident LOD at each source-face vertex. Keeping this in the
+    /// retained membership makes visualization-only changes invalidate the
+    /// affected GPU stream even when its atlas key and permutation do not.
+    pub vertex_lods: [u32; 3],
+}
+
+/// Rebuild the C0-continuous resident LOD field used by diagnostic shading.
+///
+/// Each compact topology vertex receives the maximum resolution of every
+/// incident edge. Faces sharing that vertex consequently upload the same value
+/// at the shared corner, so barycentric log interpolation has no face seams.
+/// The work vectors are retained by the caller to avoid mesh-sized allocation
+/// churn after asynchronous classifications.
+pub fn rebuild_resident_vertex_lods(
+    residents: &[Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    initial: ResidentLod,
+    vertex_max: &mut Vec<u32>,
+    face_vertex_lods: &mut Vec<[u32; 3]>,
+) {
+    let num_faces = residents.len().min(topology.num_faces as usize);
+    vertex_max.clear();
+    vertex_max.resize(topology.num_vertices as usize, 1);
+    face_vertex_lods.clear();
+    face_vertex_lods.resize(residents.len(), [1; 3]);
+
+    for face in 0..num_faces {
+        let [v0, v1, v2] = topology.face_vertices(face as u32).map(|vertex| vertex as usize);
+        let [edge_a, edge_b, edge_c] = residents[face].unwrap_or(initial).edge_lods();
+        vertex_max[v0] = vertex_max[v0].max(edge_b).max(edge_c);
+        vertex_max[v1] = vertex_max[v1].max(edge_a).max(edge_c);
+        vertex_max[v2] = vertex_max[v2].max(edge_a).max(edge_b);
+    }
+    for (face, output) in face_vertex_lods.iter_mut().take(num_faces).enumerate() {
+        let vertices = topology.face_vertices(face as u32).map(|vertex| vertex as usize);
+        *output = vertices.map(|vertex| vertex_max[vertex]);
+    }
 }
 
 /// Deterministically group resident faces into backend-neutral draw buckets.
@@ -182,6 +219,7 @@ pub struct RenderBatchMember {
 /// byte across LOD updates without sorting or hashing each bucket afterward.
 pub fn group_resident_faces(
     residents: &[Option<ResidentLod>],
+    face_vertex_lods: &[[u32; 3]],
     face_materials: &[usize],
     face_nodes: &[usize],
     initial: ResidentLod,
@@ -189,6 +227,7 @@ pub fn group_resident_faces(
     let mut groups = BTreeMap::<RenderBatchKey, Vec<RenderBatchMember>>::new();
     group_resident_faces_into(
         residents,
+        face_vertex_lods,
         face_materials,
         face_nodes,
         initial,
@@ -201,6 +240,7 @@ pub fn group_resident_faces(
 /// allocations from the previous classification.
 pub fn group_resident_faces_into(
     residents: &[Option<ResidentLod>],
+    face_vertex_lods: &[[u32; 3]],
     face_materials: &[usize],
     face_nodes: &[usize],
     initial: ResidentLod,
@@ -219,6 +259,7 @@ pub fn group_resident_faces_into(
         groups.entry(key).or_default().push(RenderBatchMember {
             face_index: face_index as u32,
             permutation_index: resident.perm_index.min(5) as u8,
+            vertex_lods: face_vertex_lods.get(face_index).copied().unwrap_or([1; 3]),
         });
     }
     groups.retain(|_, members| !members.is_empty());
@@ -766,6 +807,7 @@ mod tests {
         ];
         let groups = group_resident_faces(
             &residents,
+            &[[8, 8, 8], [8, 8, 8], [4, 4, 4]],
             &[3, 3, 7],
             &[11, 11, 12],
             ResidentLod::uniform(1),
@@ -813,8 +855,20 @@ mod tests {
         assert_eq!(a.canonical, b.canonical);
         assert_eq!(a.parity_bucket, b.parity_bucket);
 
-        let first = group_resident_faces(&[Some(a)], &[0], &[0], ResidentLod::uniform(1));
-        let second = group_resident_faces(&[Some(b)], &[0], &[0], ResidentLod::uniform(1));
+        let first = group_resident_faces(
+            &[Some(a)],
+            &[[8, 8, 8]],
+            &[0],
+            &[0],
+            ResidentLod::uniform(1),
+        );
+        let second = group_resident_faces(
+            &[Some(b)],
+            &[[8, 8, 8]],
+            &[0],
+            &[0],
+            ResidentLod::uniform(1),
+        );
         assert_eq!(first.keys().next(), second.keys().next());
         assert_ne!(first.values().next(), second.values().next());
     }
@@ -825,6 +879,7 @@ mod tests {
         let mut groups = BTreeMap::new();
         group_resident_faces_into(
             &[Some(resident); 8],
+            &[[4, 4, 4]; 8],
             &[0; 8],
             &[0; 8],
             ResidentLod::uniform(1),
@@ -834,6 +889,7 @@ mod tests {
 
         group_resident_faces_into(
             &[Some(resident); 2],
+            &[[4, 4, 4]; 2],
             &[0; 2],
             &[0; 2],
             ResidentLod::uniform(1),
@@ -841,6 +897,44 @@ mod tests {
         );
         assert_eq!(groups.values().next().unwrap().len(), 2);
         assert!(groups.values().next().unwrap().capacity() >= capacity);
+    }
+
+    #[test]
+    fn resident_vertex_lods_are_shared_and_detect_visualization_changes() {
+        let topology = HalfEdgeMesh::from_triangles(4, &[[0, 1, 2], [2, 1, 3]]);
+        let residents = [
+            Some(ResidentLod::from_edge_lods([2, 4, 8])),
+            Some(ResidentLod::from_edge_lods([16, 2, 4])),
+        ];
+        let mut vertex_max = Vec::new();
+        let mut face_vertex_lods = Vec::new();
+        rebuild_resident_vertex_lods(
+            &residents,
+            &topology,
+            ResidentLod::uniform(1),
+            &mut vertex_max,
+            &mut face_vertex_lods,
+        );
+
+        assert_eq!(face_vertex_lods[0][1], face_vertex_lods[1][1]);
+        assert_eq!(face_vertex_lods[0][2], face_vertex_lods[1][0]);
+
+        let first = group_resident_faces(
+            &residents,
+            &face_vertex_lods,
+            &[0, 0],
+            &[0, 0],
+            ResidentLod::uniform(1),
+        );
+        face_vertex_lods[0][0] *= 2;
+        let second = group_resident_faces(
+            &residents,
+            &face_vertex_lods,
+            &[0, 0],
+            &[0, 0],
+            ResidentLod::uniform(1),
+        );
+        assert_ne!(first, second);
     }
 
     #[test]

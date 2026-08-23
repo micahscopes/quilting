@@ -4,7 +4,6 @@
 
 #import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
 #import quilting::surface::qb_eval::eval_qb
-#import quilting::viz::density::edge_density
 
 struct Uniforms {
     mvp: mat4x4<f32>,
@@ -451,8 +450,7 @@ fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
         select(0.0, 1.0, visible),
         1.0,
     );
-    var vert_lod = face_data_load(face_index, 7);
-    vert_lod.w = f32(face_index);
+    let vert_lod = vec4<f32>(in.face_info.yzw, f32(face_index));
     return PreparedPatchOutput(
         vec4<f32>(0.0),
         p0, p1, p2,
@@ -687,8 +685,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
 
-    let d = edge_density(bary, in.lod_info.xyz);
-    out.density = log2(max(d, 1.0)) / 10.0;
+    // Current resident per-vertex LODs are max-reconciled over the welded
+    // topology. Log interpolation is therefore smooth inside a face and C0
+    // continuous across every shared edge, independent of atlas permutation.
+    let log_vertex_lod = log2(max(in.vert_lod.xyz, vec3<f32>(1.0)));
+    out.density = dot(bary, log_vertex_lod) / 10.0;
 
     let uv0 = in.uv01.xy;
     let uv1 = in.uv01.zw;

@@ -134,6 +134,9 @@ struct MainState {
     /// asynchronous, so an invisible sentinel must not demote a patch that the
     /// current-pose render GPU may need to resurrect in the same frame.
     resident_face_lods: Vec<Option<batch::ResidentLod>>,
+    /// Current C0-continuous visualization LODs, indexed by source face.
+    resident_vertex_lods: Vec<[u32; 3]>,
+    resident_vertex_lod_scratch: Vec<u32>,
     /// Visibility from the latest worker classification, retained separately
     /// from topology because invisible faces deliberately keep their last LOD.
     classified_face_visibility: Vec<bool>,
@@ -303,15 +306,16 @@ fn fill_batch_instance_data(
 
         let destination = instance_index * stride;
         let edge_lods = resident.edge_lods().map(|lod| lod as f32);
+        let vertex_lods = member.vertex_lods.map(|lod| lod as f32);
         staging[destination..destination + stride].copy_from_slice(&[
             edge_lods[0],
             edge_lods[1],
             edge_lods[2],
             member.permutation_index as f32,
             member.face_index as f32,
-            0.0,
-            0.0,
-            0.0,
+            vertex_lods[0],
+            vertex_lods[1],
+            vertex_lods[2],
         ]);
     }
     Ok(required)
@@ -508,6 +512,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
             resident_face_lods: Vec::new(),
+            resident_vertex_lods: Vec::new(),
+            resident_vertex_lod_scratch: Vec::new(),
             classified_face_visibility: Vec::new(),
             classified_culled_faces: 0,
             round_shadow: RoundShadowObserver::default(),
@@ -1685,6 +1691,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.batch_groups.clear();
             st.batch_staging.clear();
             st.resident_face_lods = vec![None; st.num_faces];
+            st.resident_vertex_lods = vec![[1; 3]; st.num_faces];
+            st.resident_vertex_lod_scratch.clear();
             st.classified_face_visibility = vec![false; st.num_faces];
             st.classified_culled_faces = st.num_faces;
             st.lod_dirty_faces.clear();
@@ -2475,8 +2483,30 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
 
         let force_upload = state.batch_layout_dirty;
         perf_mark("batch-bucket-start");
+        if let Some(topology) = state.lod_topology.as_ref() {
+            batch::rebuild_resident_vertex_lods(
+                &state.resident_face_lods,
+                topology,
+                initial_resident,
+                &mut state.resident_vertex_lod_scratch,
+                &mut state.resident_vertex_lods,
+            );
+        } else {
+            state.resident_vertex_lods.resize(nf, [1; 3]);
+            for (face, vertex_lods) in state.resident_vertex_lods.iter_mut().enumerate() {
+                let edges = state.resident_face_lods[face]
+                    .unwrap_or(initial_resident)
+                    .edge_lods();
+                *vertex_lods = [
+                    edges[1].max(edges[2]),
+                    edges[0].max(edges[2]),
+                    edges[0].max(edges[1]),
+                ];
+            }
+        }
         batch::group_resident_faces_into(
             &state.resident_face_lods,
+            &state.resident_vertex_lods,
             &state.face_materials,
             &state.face_nodes,
             initial_resident,
