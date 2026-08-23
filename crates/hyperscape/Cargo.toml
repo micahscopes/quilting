@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Deterministic ECS/game layer for conformal Quilting scenes"
 
 [dependencies]
+hyperscape-protocol = { path = "../hyperscape-protocol" }
 quilting-core = { path = "../quilting-core" }
 quilting-gltf = { path = "../quilting-gltf" }
 bevy_app = { version = "=0.18.1", default-features = false, features = ["std"] }

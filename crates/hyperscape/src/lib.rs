@@ -8,6 +8,7 @@
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use bevy_time::{Time, Virtual};
+use hyperscape_protocol::{EntityId, WireError};
 use quilting_core::{
     AnchorState, ConformalFrameForest, FrameId, Mobius, OpenRoundSide, RoundSideOrientation,
     RoundWallRelation, RoundWallSet, WallId,
@@ -65,6 +66,23 @@ pub struct EntityFrame(pub FrameId);
 /// presentation manifest as identity.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StableEntityId(pub Uuid);
+
+/// Wire and ECS identities carry the same UUID. The protocol wrapper rejects
+/// nil values at interchange boundaries; the runtime wrapper remains backward
+/// compatible with existing internal fixtures while conversion is explicit.
+impl From<EntityId> for StableEntityId {
+    fn from(value: EntityId) -> Self {
+        Self(value.as_uuid())
+    }
+}
+
+impl TryFrom<StableEntityId> for EntityId {
+    type Error = WireError;
+
+    fn try_from(value: StableEntityId) -> Result<Self, Self::Error> {
+        Self::new(value.0)
+    }
+}
 
 /// Editable coordinates in [`EntityFrame`].
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -909,6 +927,14 @@ mod tests {
         ConformalGenerator, ConformalTransformChain, Quat, RoundWall, RoundWallGeometry,
     };
     use std::time::Duration;
+
+    #[test]
+    fn runtime_identity_round_trips_the_validated_wire_identity() {
+        let wire = EntityId::from_u128(42).unwrap();
+        let runtime = StableEntityId::from(wire);
+        assert_eq!(EntityId::try_from(runtime).unwrap(), wire);
+        assert!(EntityId::try_from(StableEntityId(Uuid::nil())).is_err());
+    }
 
     const EPS: f64 = 1.0e-7;
 

@@ -31,6 +31,32 @@ The names describe layers, not competing applications:
 Hyperscape uses Bevy ECS without depending on Bevy's renderer. WebGL2 and
 WebGPU consume the same extracted logical view and render-command data.
 
+## Rust application migration status
+
+The first application boundary is now explicit:
+
+- `hyperscape-protocol` owns version `0.1` wire headers, validated stable IDs,
+  asset descriptors, ordinary authored transform commands, and a distinct
+  TTL-bounded presence envelope. Only `AuthoredEnvelope` is eligible for a
+  future HHHS admission adapter; camera, selection, focus, cue, and animation
+  presence have no conversion into the durable lane.
+- `hyperscope-app` owns `AppEvent -> AppCommit + AppEffect`, deterministic
+  navigation scheduling, asset job generations, stale completion rejection,
+  local presence expiry, diagnostics, and futures-signals read models.
+  Effect-producing future inputs are rejected until a real application event
+  scheduler exists rather than being executed at the wrong time.
+- High-rate frame, navigation, and presence events advance authoritative state
+  without forcing DOM-rate notifications. `SignalVec` asset/diagnostic views
+  are published as a batch and an `AppSummary` revision is set last as the
+  consumer commit fence; adapters explicitly flush at their UI cadence.
+- `hyperscape::StableEntityId` converts explicitly to the validated wire
+  `EntityId`, so the protocol wrapper is an interchange type rather than a
+  second identity authority.
+
+This layer is not yet the browser authority. It is the target behind the same
+shadow-and-rollback policy used for navigation; browser loading and URL state
+move only after adapters can compare existing behavior against reducer traces.
+
 ## Three graphs, never one overloaded hierarchy
 
 1. The **ownership graph** describes entities, ordinary node parenting,

@@ -1,0 +1,14 @@
+[package]
+name = "hyperscope-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust-authoritative application reducer and FRP read models for Hyperscope"
+
+[dependencies]
+futures-signals = { version = "0.3.34", default-features = false }
+hyperscape = { path = "../hyperscape" }
+hyperscape-protocol = { path = "../hyperscape-protocol" }
+

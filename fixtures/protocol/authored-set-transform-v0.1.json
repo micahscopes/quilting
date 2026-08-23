@@ -1,0 +1,33 @@
+{
+  "header": {
+    "version": {
+      "major": 0,
+      "minor": 1
+    },
+    "message_id": "00000000-0000-0000-0000-000000000001",
+    "sender": "00000000-0000-0000-0000-000000000002",
+    "sequence": 3
+  },
+  "command": {
+    "type": "set_entity_transform",
+    "entity": "00000000-0000-0000-0000-000000000004",
+    "transform": {
+      "translation": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "rotation_wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  }
+}
