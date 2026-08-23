@@ -7,6 +7,10 @@
 //! not publish UI signals automatically. A view adapter calls
 //! [`AppStore::flush_read_models`] at its chosen cadence.
 
+mod settings;
+
+pub use settings::*;
+
 use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{

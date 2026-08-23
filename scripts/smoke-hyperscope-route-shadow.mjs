@@ -1,0 +1,71 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const repository = fileURLToPath(new URL('..', import.meta.url));
+const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
+const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
+const {
+  default: init,
+  canonicalizeHyperscopeRoute,
+  hyperscopeControlSpecs,
+} = await import(packageUrl);
+await init({ module_or_path: readFileSync(wasmPath) });
+
+const specs = hyperscopeControlSpecs();
+assert.equal(new Set(specs.map(spec => spec.key)).size, specs.length);
+assert.equal(specs.find(spec => spec.key === 'minpx').defaultValue, '16');
+assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
+
+const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
+const syncSource = browserSource.match(
+  /function syncURL\(\) \{([\s\S]*?)\/\/ Apply URL params to controls on load/,
+)?.[1];
+assert.ok(syncSource, 'could not locate browser URL serializer');
+const browserKeyOrder = Array.from(
+  syncSource.matchAll(/(?:set|ss)\(\s*'([^']+)'/g),
+  match => match[1],
+);
+assert.deepEqual(
+  specs.map(spec => spec.key),
+  browserKeyOrder,
+  'Rust route order/default registry drifted from the browser oracle',
+);
+
+const canonical = canonicalizeHyperscopeRoute([
+  ['routeshadow', '1'],
+  ['zoom', '3.00'],
+  ['rx', '0.125'],
+  ['mode', 'lod'],
+  ['glb', 'horse.glb'],
+  ['minpx', '16.0'],
+]);
+assert.deepEqual(canonical.pairs, [
+  ['mode', 'lod'],
+  ['rx', '0.125'],
+  ['routeshadow', '1'],
+]);
+assert.deepEqual(canonical.diagnostics, []);
+
+const malformed = canonicalizeHyperscopeRoute([
+  ['mode', 'wire'],
+  ['mode', 'pbr'],
+  ['atten', 'yes'],
+  ['rx', 'NaN'],
+  ['mystery', '1'],
+]);
+assert.deepEqual(
+  malformed.diagnostics.map(diagnostic => diagnostic.code),
+  ['duplicate_key', 'invalid_value', 'invalid_value', 'unknown_key'],
+);
+assert.deepEqual(malformed.pairs, [
+  ['mode', 'wire'],
+  ['atten', 'yes'],
+  ['rx', 'NaN'],
+]);
+
+console.log(JSON.stringify({
+  specs: specs.length,
+  canonicalPairs: canonical.pairs,
+  diagnosticCodes: malformed.diagnostics.map(diagnostic => diagnostic.code),
+}));

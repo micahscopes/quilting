@@ -344,6 +344,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 import init, {
   HyperscopeAppShadow,
   HyperscopeNavigation,
+  canonicalizeHyperscopeRoute,
+  hyperscopeControlSpecs,
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
@@ -399,7 +401,50 @@ const RUST_ROUND_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('roundshadow') === '1';
 const RUST_APP_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('appshadow') === '1';
+const RUST_ROUTE_SHADOW_ENABLED =
+  new URLSearchParams(location.search).get('routeshadow') === '1';
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
+const rustRouteShadowDiagnostics = {
+  enabled: RUST_ROUTE_SHADOW_ENABLED,
+  state: RUST_ROUTE_SHADOW_ENABLED ? 'awaiting-wasm' : 'disabled',
+  comparisons: 0,
+  mismatches: [],
+  rustDiagnostics: [],
+  specs: null,
+  lastBrowserQuery: null,
+  lastRustQuery: null,
+};
+globalThis.__hyperscopeRouteShadowDiagnostics = rustRouteShadowDiagnostics;
+
+function compareRustRouteShadow(params) {
+  if (!RUST_ROUTE_SHADOW_ENABLED || !wasmOk.peek()) return;
+  try {
+    const result = canonicalizeHyperscopeRoute(Array.from(params.entries()));
+    const browserQuery = params.toString();
+    const rustQuery = new URLSearchParams(result.pairs).toString();
+    rustRouteShadowDiagnostics.comparisons += 1;
+    rustRouteShadowDiagnostics.rustDiagnostics = result.diagnostics;
+    rustRouteShadowDiagnostics.lastBrowserQuery = browserQuery;
+    rustRouteShadowDiagnostics.lastRustQuery = rustQuery;
+    if (browserQuery !== rustQuery || result.diagnostics.length) {
+      const mismatches = rustRouteShadowDiagnostics.mismatches;
+      if (mismatches.length === 64) mismatches.shift();
+      mismatches.push({
+        browserQuery,
+        rustQuery,
+        diagnostics: result.diagnostics,
+        atMs: performance.now(),
+      });
+    }
+  } catch (error) {
+    const mismatches = rustRouteShadowDiagnostics.mismatches;
+    if (mismatches.length === 64) mismatches.shift();
+    mismatches.push({
+      error: error?.message || String(error),
+      atMs: performance.now(),
+    });
+  }
+}
 
 // ============================================================
 // Signal system and asynchronous lifecycle gates.
@@ -886,6 +931,8 @@ function syncURL() {
     if (RUST_PRESENTATION_ENABLED) p.set('presentation', '1');
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
     if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
+    if (RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
+    compareRustRouteShadow(p);
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -5722,6 +5769,10 @@ phase('wasm', [], async () => {
     globalThis.__hyperscopeAppShadowController = rustAppShadow;
     rustAppShadowDiagnostics.state = 'observing';
     refreshAppShadowSnapshot();
+  }
+  if (RUST_ROUTE_SHADOW_ENABLED) {
+    rustRouteShadowDiagnostics.specs = hyperscopeControlSpecs();
+    rustRouteShadowDiagnostics.state = 'observing';
   }
   if (RUST_NAVIGATION_SHADOW_ENABLED) {
     rustNavigationShadow = new HyperscopeNavigation();

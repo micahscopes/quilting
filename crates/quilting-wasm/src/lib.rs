@@ -2,9 +2,11 @@ mod app_shadow;
 pub mod main_renderer;
 mod navigation;
 mod round_shadow;
+mod route_shadow;
 mod surface_runtime;
 
 pub use app_shadow::HyperscopeAppShadow;
+pub use route_shadow::{canonicalize_hyperscope_route, hyperscope_control_specs};
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;

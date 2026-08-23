@@ -64,6 +64,28 @@ the shadow gate but must be measured again before a Leptos view or additional
 application adapters are linked. Chrome runtime inspection remains pending
 because no remote-debug Chrome process was running for this checkpoint.
 
+## Rust canonical-route shadow follow-up
+
+The next 2026-08-24 slice moved all 65 current Hyperscope URL keys, defaults,
+value classes, and serialization order into `hyperscope-app::ControlSpec`.
+`HyperscopeRoute` now uses numeric default equivalence, so alternate spellings
+such as `3`, `3.0`, and `3.00` do not create distinct links. It retains the
+browser's first-value behavior for duplicate query keys while diagnosing the
+duplicate, malformed known values, and unknown keys.
+
+The checked-in `scripts/smoke-hyperscope-route-shadow.mjs` oracle verifies that
+the Rust registry exactly matches the browser serializer's 65-key order, then
+checks default omission, canonical ordering, duplicates, invalid toggles,
+non-finite numbers, and unknown keys through generated WASM. The opt-in
+`routeshadow=1` browser path compares bounded-rate browser and Rust query
+strings but does not yet write the Rust result.
+
+This route adapter increased the optimized main WASM from 5,905,317 to
+5,923,934 bytes (18,617 raw bytes, about 0.32%); gzip increased from 2,065,554
+to 2,073,745 bytes. The full protocol/app/asset/route migration shadow is now
+80,136 raw bytes above the 5,843,798-byte pre-app binary (about 1.37%). Chrome
+runtime comparison remains pending while the remote-debug browser is closed.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:
