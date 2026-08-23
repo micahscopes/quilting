@@ -1,6 +1,7 @@
 //! Render passes: configure GL state and issue draw calls per render mode.
 
 use glow::HasContext;
+use quilting_core::render::{RenderGeometry, RenderSubmissionStats};
 
 use crate::buffer::{MeshBuffers, MeshDraw, VertexUniformBuf, WireUniformBuf};
 use crate::shader::Programs;
@@ -192,32 +193,27 @@ fn upload_batch_ubo_if_changed<'a>(
     *previous = Some(batch);
 }
 
-#[derive(Clone, Copy)]
-enum BatchGeometry {
-    Triangles,
-    Lines,
-}
-
 fn draw_batches(
     gl: &glow::Context,
     camera: &Camera,
     batches: &[RenderBatch],
     vtx_ubo: &VertexUniformBuf,
-    geometry: BatchGeometry,
-) {
+    geometry: RenderGeometry,
+) -> RenderSubmissionStats {
+    let mut stats = RenderSubmissionStats::default();
     let mut vertex_state = None;
     for batch in batches {
         apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
         upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
         let (vertex_array, primitive, count, offset) = match geometry {
-            BatchGeometry::Triangles => (
+            RenderGeometry::Triangles => (
                 batch.mesh.tri_vao,
                 glow::TRIANGLES,
                 batch.mesh.num_tri_indices,
                 batch.mesh.tri_index_offset,
             ),
-            BatchGeometry::Lines => (
+            RenderGeometry::Lines => (
                 batch.mesh.line_vao,
                 glow::LINES,
                 batch.mesh.num_line_indices,
@@ -234,6 +230,26 @@ fn draw_batches(
                 batch.mesh.num_instances,
             );
         }
+        record_indexed_submission(&mut stats, geometry, count, batch.mesh.num_instances);
+    }
+    stats
+}
+
+/// Account for one indexed backend submission while preserving invalid signed
+/// GL counts as diagnostics instead of reinterpreting them as large unsigned
+/// workloads. The GL call itself remains adjacent to this recorder at each
+/// submission site.
+pub fn record_indexed_submission(
+    stats: &mut RenderSubmissionStats,
+    geometry: RenderGeometry,
+    index_count: i32,
+    instance_count: i32,
+) {
+    match (u32::try_from(index_count), u32::try_from(instance_count)) {
+        (Ok(index_count), Ok(instance_count)) => {
+            stats.record_indexed_draw(geometry, index_count, instance_count);
+        }
+        _ => stats.record_invalid_draw(),
     }
 }
 
@@ -246,7 +262,8 @@ pub fn render_frame(
     batches: &[RenderBatch],
     vtx_ubo: &VertexUniformBuf,
     wire_ubo: &WireUniformBuf,
-) {
+) -> RenderSubmissionStats {
+    let mut stats = RenderSubmissionStats::default();
     vtx_ubo.bind(gl);
 
     let draw_pbr = mode == RenderMode::Pbr;
@@ -262,7 +279,13 @@ pub fn render_frame(
         unsafe {
             gl.use_program(Some(programs.pbr));
         }
-        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
+        stats.merge(draw_batches(
+            gl,
+            camera,
+            batches,
+            vtx_ubo,
+            RenderGeometry::Triangles,
+        ));
     }
 
     // Matcap/LOD pass (filled triangles)
@@ -271,7 +294,13 @@ pub fn render_frame(
             gl.use_program(Some(programs.matcap));
         }
 
-        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
+        stats.merge(draw_batches(
+            gl,
+            camera,
+            batches,
+            vtx_ubo,
+            RenderGeometry::Triangles,
+        ));
     }
 
     // Wire pass (lines)
@@ -284,7 +313,13 @@ pub fn render_frame(
         wire_ubo.upload(gl, [0.0; 3], true);
         wire_ubo.bind(gl);
 
-        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Lines);
+        stats.merge(draw_batches(
+            gl,
+            camera,
+            batches,
+            vtx_ubo,
+            RenderGeometry::Lines,
+        ));
     }
 
     // Normals pass (filled triangles)
@@ -293,7 +328,13 @@ pub fn render_frame(
             gl.use_program(Some(programs.normals));
         }
 
-        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
+        stats.merge(draw_batches(
+            gl,
+            camera,
+            batches,
+            vtx_ubo,
+            RenderGeometry::Triangles,
+        ));
     }
 
     // Stretch heatmap pass (filled triangles)
@@ -302,12 +343,19 @@ pub fn render_frame(
             gl.use_program(Some(programs.stretch));
         }
 
-        draw_batches(gl, camera, batches, vtx_ubo, BatchGeometry::Triangles);
+        stats.merge(draw_batches(
+            gl,
+            camera,
+            batches,
+            vtx_ubo,
+            RenderGeometry::Triangles,
+        ));
     }
 
     unsafe {
         gl.bind_vertex_array(None);
     }
+    stats
 }
 
 /// Identity Möbius transform: a=1, b=0, c=0, d=1 (as quaternions).
@@ -357,5 +405,26 @@ pub fn render_original_wireframe(
             mesh.num_instances,
         );
         gl.bind_vertex_array(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_submission_counts_are_validated_before_accounting() {
+        let mut stats = RenderSubmissionStats::default();
+        record_indexed_submission(&mut stats, RenderGeometry::Triangles, 12, 2);
+        record_indexed_submission(&mut stats, RenderGeometry::Lines, 8, 0);
+        record_indexed_submission(&mut stats, RenderGeometry::Triangles, -1, 2);
+        record_indexed_submission(&mut stats, RenderGeometry::Triangles, 12, -1);
+
+        assert_eq!(stats.draw_calls, 4);
+        assert_eq!(stats.zero_instance_draw_calls, 1);
+        assert_eq!(stats.invalid_draw_calls, 2);
+        assert_eq!(stats.submitted_instances, 2);
+        assert_eq!(stats.triangles, 8);
+        assert_eq!(stats.lines, 0);
     }
 }

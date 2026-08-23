@@ -16,13 +16,14 @@ use quilting_renderer::buffer::{
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
-    camera_for_batch, same_vertex_uniform_state, Camera, RenderBatch, RenderMode,
-    IDENTITY_MATRIX,
+    camera_for_batch, record_indexed_submission, same_vertex_uniform_state, Camera, RenderBatch,
+    RenderMode, IDENTITY_MATRIX,
 };
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
+use quilting_core::render::{RenderGeometry, RenderSubmissionStats};
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{SurfaceRuntime, SurfaceRuntimeSnapshot};
 use hyperscape::interchange::{
@@ -127,6 +128,12 @@ struct MainState {
     pbr_draw_calls: u64,
     pbr_material_updates: u64,
     pbr_vertex_uniform_updates: u64,
+    /// Actual indexed patch work submitted by the most recent scene render.
+    /// Picking, highlighting, and fullscreen post-processing are separate
+    /// auxiliary passes and are deliberately excluded.
+    last_render_submission: RenderSubmissionStats,
+    /// Saturating session totals for explicit diagnostic queries.
+    render_submission_totals: RenderSubmissionStats,
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
@@ -508,6 +515,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             pbr_draw_calls: 0,
             pbr_material_updates: 0,
             pbr_vertex_uniform_updates: 0,
+            last_render_submission: RenderSubmissionStats::default(),
+            render_submission_totals: RenderSubmissionStats::default(),
             batch_groups: BTreeMap::new(),
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
@@ -1906,6 +1915,54 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
                 "pbrVertexUniformUpdates",
                 state.pbr_vertex_uniform_updates,
             ),
+            (
+                "lastPatchDrawCalls",
+                state.last_render_submission.draw_calls,
+            ),
+            (
+                "lastZeroInstancePatchDrawCalls",
+                state.last_render_submission.zero_instance_draw_calls,
+            ),
+            (
+                "lastInvalidPatchDrawCalls",
+                state.last_render_submission.invalid_draw_calls,
+            ),
+            (
+                "lastSubmittedPatchInstances",
+                state.last_render_submission.submitted_instances,
+            ),
+            (
+                "lastSubmittedPatchTriangles",
+                state.last_render_submission.triangles,
+            ),
+            (
+                "lastSubmittedPatchLines",
+                state.last_render_submission.lines,
+            ),
+            (
+                "patchDrawCalls",
+                state.render_submission_totals.draw_calls,
+            ),
+            (
+                "zeroInstancePatchDrawCalls",
+                state.render_submission_totals.zero_instance_draw_calls,
+            ),
+            (
+                "invalidPatchDrawCalls",
+                state.render_submission_totals.invalid_draw_calls,
+            ),
+            (
+                "submittedPatchInstances",
+                state.render_submission_totals.submitted_instances,
+            ),
+            (
+                "submittedPatchTriangles",
+                state.render_submission_totals.triangles,
+            ),
+            (
+                "submittedPatchLines",
+                state.render_submission_totals.lines,
+            ),
         ] {
             js_sys::Reflect::set(
                 &result,
@@ -2811,7 +2868,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 unsafe { gl.use_program(Some(state.renderer.programs().pbr)); }
                 let default_mat = PbrParams::default();
                 let texture_defaults = [white, black, black, black, white];
-                let mut pbr_draws = 0u64;
+                let mut submission_stats = RenderSubmissionStats::default();
                 let mut material_updates = 0u64;
                 let mut vertex_uniform_updates = 0u64;
                 let mut active_material: Option<(usize, bool)> = None;
@@ -2876,7 +2933,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                         );
                     }
-                    pbr_draws += 1;
+                    record_indexed_submission(
+                        &mut submission_stats,
+                        RenderGeometry::Triangles,
+                        batch.mesh.num_tri_indices,
+                        batch.mesh.num_instances,
+                    );
                 }
                 // --- Blit opaque framebuffer to scene_color texture for refraction ---
                 let has_transmission = render_batches.iter().any(|b| {
@@ -3109,7 +3171,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             glow::UNSIGNED_INT, batch.mesh.tri_index_offset, batch.mesh.num_instances,
                         );
                     }
-                    pbr_draws += 1;
+                    record_indexed_submission(
+                        &mut submission_stats,
+                        RenderGeometry::Triangles,
+                        batch.mesh.num_tri_indices,
+                        batch.mesh.num_instances,
+                    );
                 }
                 unsafe {
                     gl.depth_mask(true);
@@ -3220,9 +3287,13 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     }
                 }
 
-                state.pbr_draw_calls += pbr_draws;
+                state.pbr_draw_calls = state
+                    .pbr_draw_calls
+                    .saturating_add(submission_stats.draw_calls);
                 state.pbr_material_updates += material_updates;
                 state.pbr_vertex_uniform_updates += vertex_uniform_updates;
+                state.last_render_submission = submission_stats;
+                state.render_submission_totals.merge(submission_stats);
                 state.renderer.end_frame();
                 return;
             }
@@ -3239,13 +3310,17 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
 
-        state.renderer.render(state.render_mode, &camera, render_batches);
+        let submission_stats = state
+            .renderer
+            .render(state.render_mode, &camera, render_batches);
 
         // Highlight pass: overlay picked QB patch with cyan
         if state.highlight_face >= 0 && state.highlight_prog.is_some() {
             render_highlight(state.renderer.gl(), state, &camera);
         }
 
+        state.last_render_submission = submission_stats;
+        state.render_submission_totals.merge(submission_stats);
         state.renderer.end_frame();
     });
 }

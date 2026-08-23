@@ -185,6 +185,86 @@ pub enum RenderGeometry {
     Lines,
 }
 
+/// Backend-neutral accounting for indexed patch draws actually submitted by a
+/// renderer. Logical [`RenderCommand`]s predict this work; WebGL2 and WebGPU
+/// implementations populate the counters at their submission boundary so a
+/// shadow observer can compare intent with execution without a GPU readback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderSubmissionStats {
+    /// Indexed patch draw calls issued to the backend, including zero-instance
+    /// and invalid calls.
+    pub draw_calls: u64,
+    /// Draws whose instance count is zero. These issue no primitives and are
+    /// tracked separately because retained hidden batches should eventually be
+    /// skipped before reaching the backend.
+    pub zero_instance_draw_calls: u64,
+    /// Draws rejected by the recorder because a backend count was negative or
+    /// otherwise could not be represented by the shared contract.
+    pub invalid_draw_calls: u64,
+    /// Sum of non-zero instances supplied to valid indexed draws.
+    pub submitted_instances: u64,
+    /// Triangle primitives implied by valid index and instance counts.
+    pub triangles: u64,
+    /// Line primitives implied by valid index and instance counts.
+    pub lines: u64,
+}
+
+impl RenderSubmissionStats {
+    /// Record one valid indexed patch draw. Incomplete trailing indices do not
+    /// form a primitive, matching indexed triangle/line assembly.
+    pub fn record_indexed_draw(
+        &mut self,
+        geometry: RenderGeometry,
+        index_count: u32,
+        instance_count: u32,
+    ) {
+        self.draw_calls = self.draw_calls.saturating_add(1);
+        if instance_count == 0 {
+            self.zero_instance_draw_calls = self.zero_instance_draw_calls.saturating_add(1);
+            return;
+        }
+        let instances = u64::from(instance_count);
+        self.submitted_instances = self.submitted_instances.saturating_add(instances);
+        let primitive_width = match geometry {
+            RenderGeometry::Triangles => 3,
+            RenderGeometry::Lines => 2,
+        };
+        let primitives = u64::from(index_count / primitive_width).saturating_mul(instances);
+        match geometry {
+            RenderGeometry::Triangles => {
+                self.triangles = self.triangles.saturating_add(primitives);
+            }
+            RenderGeometry::Lines => {
+                self.lines = self.lines.saturating_add(primitives);
+            }
+        }
+    }
+
+    /// Record a draw call whose signed backend counts could not be represented
+    /// by the shared non-negative contract.
+    pub fn record_invalid_draw(&mut self) {
+        self.draw_calls = self.draw_calls.saturating_add(1);
+        self.invalid_draw_calls = self.invalid_draw_calls.saturating_add(1);
+    }
+
+    /// Accumulate another submission interval without allowing diagnostic
+    /// counters to wrap during a long-running session.
+    pub fn merge(&mut self, other: Self) {
+        self.draw_calls = self.draw_calls.saturating_add(other.draw_calls);
+        self.zero_instance_draw_calls = self
+            .zero_instance_draw_calls
+            .saturating_add(other.zero_instance_draw_calls);
+        self.invalid_draw_calls = self
+            .invalid_draw_calls
+            .saturating_add(other.invalid_draw_calls);
+        self.submitted_instances = self
+            .submitted_instances
+            .saturating_add(other.submitted_instances);
+        self.triangles = self.triangles.saturating_add(other.triangles);
+        self.lines = self.lines.saturating_add(other.lines);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderCommand {
     PreparePatches {
@@ -639,5 +719,34 @@ mod tests {
             frame.validate(&scene),
             Err(RenderContractError::SceneRevisionMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn submission_stats_distinguish_work_zero_instances_and_invalid_draws() {
+        let mut stats = RenderSubmissionStats::default();
+        stats.record_indexed_draw(RenderGeometry::Triangles, 7, 3);
+        stats.record_indexed_draw(RenderGeometry::Lines, 8, 2);
+        stats.record_indexed_draw(RenderGeometry::Triangles, 12, 0);
+        stats.record_invalid_draw();
+
+        assert_eq!(
+            stats,
+            RenderSubmissionStats {
+                draw_calls: 4,
+                zero_instance_draw_calls: 1,
+                invalid_draw_calls: 1,
+                submitted_instances: 5,
+                triangles: 6,
+                lines: 8,
+            }
+        );
+
+        let mut total = RenderSubmissionStats {
+            draw_calls: u64::MAX,
+            ..RenderSubmissionStats::default()
+        };
+        total.merge(stats);
+        assert_eq!(total.draw_calls, u64::MAX);
+        assert_eq!(total.triangles, 6);
     }
 }

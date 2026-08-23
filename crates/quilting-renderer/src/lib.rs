@@ -103,7 +103,7 @@ impl Renderer {
         mode: pass::RenderMode,
         camera: &pass::Camera,
         batches: &[pass::RenderBatch],
-    ) {
+    ) -> quilting_core::render::RenderSubmissionStats {
         pass::render_frame(
             &self.gl,
             &self.programs,
@@ -112,7 +112,7 @@ impl Renderer {
             batches,
             &self.vtx_ubo,
             &self.wire_ubo,
-        );
+        )
     }
 
     /// Prepare one resident patch batch from the current animation pose and
