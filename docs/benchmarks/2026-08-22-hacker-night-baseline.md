@@ -37,6 +37,33 @@ The first exact Lean run found that commit `4531409` did not compile despite
 its reported validation. The query and descendant-pruning proofs were repaired
 in `dbb67dd`; this table records the repaired baseline.
 
+## Rust application asset-effect shadow follow-up
+
+On 2026-08-24, the opt-in `appshadow=1` adapter began mirroring actual browser
+asset acquisition into `hyperscope-app` without changing fetch, file, parsing,
+or renderer authority. Startup, IndexedDB, drag/drop, the authored Blender
+demo, and presentation GLBs now produce typed request/completion traces.
+Replacing an in-flight request emits `cancel_asset_load` before the new
+`fetch_asset`; a late completion is retained as a bounded diagnostic and does
+not replace the active generation.
+
+The checked-in `scripts/smoke-hyperscope-app-shadow.mjs` oracle exercised the
+generated WASM boundary and observed:
+
+- one fetch effect for the initial request;
+- cancel-then-fetch for a replacement;
+- `ignored_stale` for the first completion while the replacement stayed
+  loading;
+- an exact 181,808-byte ready projection for the active completion; and
+- rejection of a future-timestamped effect input.
+
+The optimized main WASM grew from 5,843,798 to 5,905,317 bytes (61,519 raw
+bytes, about 1.05%) when the app reducer/FRP dependency and adapter entered the
+browser graph. The current gzip stream is 2,065,554 bytes. This is accepted for
+the shadow gate but must be measured again before a Leptos view or additional
+application adapters are linked. Chrome runtime inspection remains pending
+because no remote-debug Chrome process was running for this checkpoint.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:

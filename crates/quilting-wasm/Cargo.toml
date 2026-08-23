@@ -20,6 +20,8 @@ quilting-shaders = { path = "../quilting-shaders" }
 
 quilting-gltf = { path = "../quilting-gltf" }
 hyperscape = { path = "../hyperscape" }
+hyperscape-protocol = { path = "../hyperscape-protocol" }
+hyperscope-app = { path = "../hyperscope-app" }
 quilting-remesh = { path = "../quilting-remesh" }
 quilting-round-index = { path = "../quilting-round-index" }
 wasm-bindgen = "=0.2.106"

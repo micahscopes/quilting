@@ -263,6 +263,19 @@ impl AppState {
                         asset
                             .validate()
                             .map_err(|error| ReduceError::Wire(error.to_string()))?;
+                        if let Some(AssetRecord {
+                            status:
+                                AssetStatus::Loading {
+                                    request_id: previous_request,
+                                },
+                            ..
+                        }) = self.assets.get(&asset.id)
+                        {
+                            effects.push(AppEffect::CancelAssetLoad {
+                                request_id: *previous_request,
+                                asset_id: asset.id,
+                            });
+                        }
                         self.assets.insert(
                             asset.id,
                             AssetRecord {
@@ -638,7 +651,20 @@ mod tests {
                 asset: horse.clone(),
             }]
         );
-        dispatch_request(&store, 2, second, horse.clone());
+        let replacement = dispatch_request(&store, 2, second, horse.clone());
+        assert_eq!(
+            replacement.effects,
+            vec![
+                AppEffect::CancelAssetLoad {
+                    request_id: first,
+                    asset_id: horse.id,
+                },
+                AppEffect::FetchAsset {
+                    request_id: second,
+                    asset: horse.clone(),
+                },
+            ]
+        );
 
         let stale = store
             .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(

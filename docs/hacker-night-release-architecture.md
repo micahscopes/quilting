@@ -45,6 +45,13 @@ The first application boundary is now explicit:
   local presence expiry, diagnostics, and futures-signals read models.
   Effect-producing future inputs are rejected until a real application event
   scheduler exists rather than being executed at the wrong time.
+- `appshadow=1` now feeds real startup, IndexedDB, drag/drop, authored-demo,
+  and presentation asset acquisition into that reducer without changing the
+  browser loader or renderer. Superseding a load emits cancel-then-fetch;
+  late completions remain observable but cannot replace the active request.
+  Bounded diagnostics are exposed at
+  `globalThis.__hyperscopeAppShadowDiagnostics` until this lane earns browser
+  authority.
 - High-rate frame, navigation, and presence events advance authoritative state
   without forcing DOM-rate notifications. `SignalVec` asset/diagnostic views
   are published as a batch and an `AppSummary` revision is set last as the

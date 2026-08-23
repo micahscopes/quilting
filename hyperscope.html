@@ -342,6 +342,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 <button id="sidebar-toggle">▶</button>
 <script type="module">
 import init, {
+  HyperscopeAppShadow,
   HyperscopeNavigation,
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
@@ -396,6 +397,8 @@ const RUST_PRESENTATION_ENABLED =
   new URLSearchParams(location.search).get('presentation') === '1';
 const RUST_ROUND_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('roundshadow') === '1';
+const RUST_APP_SHADOW_ENABLED =
+  new URLSearchParams(location.search).get('appshadow') === '1';
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 
 // ============================================================
@@ -882,6 +885,7 @@ function syncURL() {
     if (RUST_NAVIGATION_SHADOW_ENABLED) p.set('navshadow', '1');
     if (RUST_PRESENTATION_ENABLED) p.set('presentation', '1');
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
+    if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
 
     const qs = p.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -1752,6 +1756,147 @@ async function broadcastCall(type, data) {
   return (await Promise.all(
     workers.slice(0, ATLAS_WORKERS).map((_, i) => workerCallN(i, type, data)),
   ))[0];
+}
+
+// Opt-in observer for the Rust application reducer's asset-effect lane. The
+// browser still performs every fetch/file read and remains renderer authority;
+// this records whether the same request, cancellation, completion, and stale
+// result decisions are represented by AppEvent -> AppEffect.
+let rustAppShadow = null;
+let rustAppShadowSequence = 0;
+let rustAppShadowRequestOrdinal = 0;
+let rustAppShadowAssetOrdinal = 0;
+const rustAppShadowAssetIds = new Map();
+const rustAppShadowDiagnostics = {
+  enabled: RUST_APP_SHADOW_ENABLED,
+  state: RUST_APP_SHADOW_ENABLED ? 'awaiting-wasm' : 'disabled',
+  requests: 0,
+  loaded: 0,
+  failed: 0,
+  requestedCancellations: 0,
+  staleCompletions: 0,
+  mismatches: [],
+  lastCommit: null,
+  snapshot: null,
+};
+globalThis.__hyperscopeAppShadowDiagnostics = rustAppShadowDiagnostics;
+
+function appShadowUuid(prefix, ordinal) {
+  const suffix = Math.trunc(ordinal).toString(16).padStart(12, '0');
+  return `${prefix}0000000-0000-4000-8000-${suffix}`;
+}
+
+function appShadowAssetId(uri, explicitId) {
+  if (explicitId) return String(explicitId).toLowerCase();
+  const key = String(uri);
+  let assetId = rustAppShadowAssetIds.get(key);
+  if (!assetId) {
+    assetId = appShadowUuid('f', ++rustAppShadowAssetOrdinal);
+    rustAppShadowAssetIds.set(key, assetId);
+  }
+  return assetId;
+}
+
+function recordAppShadowMismatch(code, message) {
+  const mismatches = rustAppShadowDiagnostics.mismatches;
+  if (mismatches.length === 64) mismatches.shift();
+  mismatches.push({ code, message, atMs: performance.now() });
+}
+
+function refreshAppShadowSnapshot() {
+  if (!rustAppShadow) return null;
+  const snapshot = rustAppShadow.snapshot();
+  rustAppShadowDiagnostics.snapshot = snapshot;
+  return snapshot;
+}
+
+function beginAppAssetShadow(uri, source, explicitAssetId = null) {
+  if (!rustAppShadow) return null;
+  const requestId = appShadowUuid('e', ++rustAppShadowRequestOrdinal);
+  const assetId = appShadowAssetId(uri, explicitAssetId);
+  const token = { requestId, assetId, uri: String(uri), source, completed: false };
+  try {
+    const commit = rustAppShadow.requestAsset(
+      ++rustAppShadowSequence,
+      0,
+      requestId,
+      assetId,
+      token.uri,
+      /\.gltf$/i.test(token.uri) ? 'model/gltf+json' : 'model/gltf-binary',
+    );
+    const fetchEffect = commit.effects.find(effect => effect.type === 'fetch_asset');
+    const cancellations = commit.effects.filter(effect => effect.type === 'cancel_asset_load');
+    rustAppShadowDiagnostics.requestedCancellations += cancellations.length;
+    rustAppShadowDiagnostics.requests += 1;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (!fetchEffect || fetchEffect.request_id !== requestId
+        || fetchEffect.asset_id !== assetId || fetchEffect.uri !== token.uri) {
+      recordAppShadowMismatch('request_effect', `Rust request effect diverged for ${token.uri}`);
+    }
+    refreshAppShadowSnapshot();
+    return token;
+  } catch (error) {
+    recordAppShadowMismatch(
+      'request_exception',
+      `${token.uri}: ${error?.message || String(error)}`,
+    );
+    return null;
+  }
+}
+
+function completeAppAssetShadow(token, buffer) {
+  if (!token || token.completed || !rustAppShadow) return 'unobserved';
+  token.completed = true;
+  const byteLength = Number(buffer?.byteLength ?? 0);
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > 0xffffffff) {
+    recordAppShadowMismatch('byte_length', `${token.uri}: unsupported byte length ${byteLength}`);
+    return 'invalid';
+  }
+  try {
+    const commit = rustAppShadow.completeAssetLoaded(token.requestId, token.assetId, byteLength);
+    rustAppShadowDiagnostics.loaded += 1;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
+    const snapshot = refreshAppShadowSnapshot();
+    const asset = snapshot?.assets.find(candidate => candidate.id === token.assetId);
+    if (commit.disposition === 'applied'
+        && (asset?.status?.state !== 'ready' || asset.status.byte_length !== byteLength)) {
+      recordAppShadowMismatch('loaded_projection', `Rust ready projection diverged for ${token.uri}`);
+    }
+    return commit.disposition;
+  } catch (error) {
+    recordAppShadowMismatch(
+      'completion_exception',
+      `${token.uri}: ${error?.message || String(error)}`,
+    );
+    return 'error';
+  }
+}
+
+function failAppAssetShadow(token, code, error, retryable = false) {
+  if (!token || token.completed || !rustAppShadow) return 'unobserved';
+  token.completed = true;
+  const message = error?.message || String(error);
+  try {
+    const commit = rustAppShadow.completeAssetFailed(
+      token.requestId,
+      token.assetId,
+      code,
+      message,
+      retryable,
+    );
+    rustAppShadowDiagnostics.failed += 1;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
+    refreshAppShadowSnapshot();
+    return commit.disposition;
+  } catch (shadowError) {
+    recordAppShadowMismatch(
+      'failure_exception',
+      `${token.uri}: ${shadowError?.message || String(shadowError)}`,
+    );
+    return 'error';
+  }
 }
 // --- Model state ---
 let gpuSkinned = false;
@@ -2969,11 +3114,16 @@ $('hyperscape-camera').addEventListener('change', () => {
 });
 
 $('load-hyperscape-demo').addEventListener('click', async () => {
+  const uri = 'hyperscape-blender-demo.glb';
+  const assetShadow = beginAppAssetShadow(uri, 'authored-demo');
   try {
-    const response = await fetch('hyperscape-blender-demo.glb');
+    const response = await fetch(uri);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    await loadModel(await response.arrayBuffer(), 'hyperscape-blender-demo.glb');
+    const buffer = await response.arrayBuffer();
+    completeAppAssetShadow(assetShadow, buffer);
+    await loadModel(buffer, uri);
   } catch (error) {
+    failAppAssetShadow(assetShadow, 'demo_fetch_failed', error, true);
     $('hyperscape-diagnostics').textContent = `Hyperscape demo load failed: ${error.message}`;
   }
 });
@@ -3725,11 +3875,19 @@ wrapEl.addEventListener('drop', async e => {
     $('stats').textContent = 'Drop a .glb or .gltf file';
     return;
   }
-  const buf = await file.arrayBuffer();
-  await idbPut(IDB_GLB_STORE, file.name, buf);
-  currentGlb = file.name;
-  await loadModel(buf, file.name);
-  syncURL();
+  const assetShadow = beginAppAssetShadow(file.name, 'drop');
+  try {
+    const buf = await file.arrayBuffer();
+    completeAppAssetShadow(assetShadow, buf);
+    await idbPut(IDB_GLB_STORE, file.name, buf);
+    currentGlb = file.name;
+    await loadModel(buf, file.name);
+    syncURL();
+  } catch (error) {
+    failAppAssetShadow(assetShadow, 'drop_read_failed', error);
+    $('stats').textContent = `Could not load ${file.name}: ${error?.message || String(error)}`;
+    console.warn('Dropped model load failed:', error);
+  }
 });
 
 // --- Environment maps (IBL) ---
@@ -5227,9 +5385,17 @@ function maximumNodeId(faceNodes) {
 
 async function fetchPresentationGlb(asset) {
   const startedAt = performance.now();
-  const response = await fetch(asset.uri);
-  if (!response.ok) throw new Error(`${asset.name}: HTTP ${response.status} for ${asset.uri}`);
-  const buffer = await response.arrayBuffer();
+  const assetShadow = beginAppAssetShadow(asset.uri, 'presentation', asset.id);
+  let buffer;
+  try {
+    const response = await fetch(asset.uri);
+    if (!response.ok) throw new Error(`${asset.name}: HTTP ${response.status} for ${asset.uri}`);
+    buffer = await response.arrayBuffer();
+    completeAppAssetShadow(assetShadow, buffer);
+  } catch (error) {
+    failAppAssetShadow(assetShadow, 'presentation_fetch_failed', error, true);
+    throw error;
+  }
   const magic = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
   if (magic.length !== 4 || magic[0] !== 0x67 || magic[1] !== 0x6c
       || magic[2] !== 0x54 || magic[3] !== 0x46) {
@@ -5551,6 +5717,12 @@ phase('wasm', [], async () => {
   };
   applyParams(initParams); // Set signal values first
   wasmOk.set(true); // THEN fire effects with correct values + WASM ready
+  if (RUST_APP_SHADOW_ENABLED) {
+    rustAppShadow = new HyperscopeAppShadow();
+    globalThis.__hyperscopeAppShadowController = rustAppShadow;
+    rustAppShadowDiagnostics.state = 'observing';
+    refreshAppShadowSnapshot();
+  }
   if (RUST_NAVIGATION_SHADOW_ENABLED) {
     rustNavigationShadow = new HyperscopeNavigation();
     globalThis.__hyperscopeNavigationShadowController = rustNavigationShadow;
@@ -5706,43 +5878,50 @@ phase('atlas', ['workers'], async () => {
 // Phase 4: Load model (depends on workers, runs in parallel with atlas)
 phase('model', ['workers'], async () => {
   if (initialPatchLabShape) return null;
-  let buf = await idbGet(IDB_GLB_STORE, currentGlb);
-  if (!buf) {
-    const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
-    const urls = [url];
-    if (/^[^/]+\.glb$/i.test(currentGlb)) {
-      urls.push(`/local-glbs/${encodeURIComponent(currentGlb)}`);
-    }
-    const failures = [];
-    for (const candidate of urls) {
-      const resp = await fetch(candidate);
-      if (!resp.ok) {
-        failures.push(`${candidate} returned HTTP ${resp.status}`);
-        continue;
-      }
-      const candidateBuf = await resp.arrayBuffer();
-      const magic = new Uint8Array(candidateBuf, 0, Math.min(4, candidateBuf.byteLength));
-      const isGlb = magic.length === 4
-        && magic[0] === 0x67 && magic[1] === 0x6c
-        && magic[2] === 0x54 && magic[3] === 0x46;
-      if (/\.glb$/i.test(currentGlb) && !isGlb) {
-        failures.push(`${candidate} returned ${resp.headers.get('content-type') || 'unknown content type'}, not a GLB`);
-        continue;
-      }
-      buf = candidateBuf;
-      break;
-    }
+  const assetShadow = beginAppAssetShadow(currentGlb, 'startup');
+  try {
+    let buf = await idbGet(IDB_GLB_STORE, currentGlb);
     if (!buf) {
-      throw new Error(`${currentGlb} is not in IndexedDB; ${failures.join('; ')}`);
+      const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
+      const urls = [url];
+      if (/^[^/]+\.glb$/i.test(currentGlb)) {
+        urls.push(`/local-glbs/${encodeURIComponent(currentGlb)}`);
+      }
+      const failures = [];
+      for (const candidate of urls) {
+        const resp = await fetch(candidate);
+        if (!resp.ok) {
+          failures.push(`${candidate} returned HTTP ${resp.status}`);
+          continue;
+        }
+        const candidateBuf = await resp.arrayBuffer();
+        const magic = new Uint8Array(candidateBuf, 0, Math.min(4, candidateBuf.byteLength));
+        const isGlb = magic.length === 4
+          && magic[0] === 0x67 && magic[1] === 0x6c
+          && magic[2] === 0x54 && magic[3] === 0x46;
+        if (/\.glb$/i.test(currentGlb) && !isGlb) {
+          failures.push(`${candidate} returned ${resp.headers.get('content-type') || 'unknown content type'}, not a GLB`);
+          continue;
+        }
+        buf = candidateBuf;
+        break;
+      }
+      if (!buf) {
+        throw new Error(`${currentGlb} is not in IndexedDB; ${failures.join('; ')}`);
+      }
     }
+    if (!buf) return null;
+    completeAppAssetShadow(assetShadow, buf);
+    const resp = await workerCall('load_gltf_data', { bytes: buf }, [buf]);
+    return {
+      result: resp.result,
+      filename: currentGlb,
+      buffer: resp.hyperscapeBytes,
+    };
+  } catch (error) {
+    failAppAssetShadow(assetShadow, 'startup_fetch_failed', error, true);
+    throw error;
   }
-  if (!buf) return null;
-  const resp = await workerCall('load_gltf_data', { bytes: buf }, [buf]);
-  return {
-    result: resp.result,
-    filename: currentGlb,
-    buffer: resp.hyperscapeBytes,
-  };
 });
 
 // Phase 5: Upload model + start rendering (depends on atlas + model + wasm)
