@@ -379,6 +379,7 @@ import {
   mobiusConformalScaleAt,
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
+  scaleRelativeNearPlane,
   smootherstep01,
   transportCameraAcrossSphereReflections,
   transportPointAndDirectionsAcrossSphereReflections,
@@ -1002,6 +1003,11 @@ function perspective(fov, a, n, f, out = new Float32Array(16)) {
 }
 function cameraFovRadians() {
   return cameraFovDegrees.peek() * Math.PI / 180;
+}
+function cameraNearPlane() {
+  return surfaceWalk.active
+    ? scaleRelativeNearPlane(surfaceWalkEyeHeight())
+    : 0.01;
 }
 function lookAt(ex, ey, ez, tx, ty, tz, ux, uy, uz, out = new Float32Array(16)) {
   let fx = tx - ex, fy = ty - ey, fz = tz - ez, fl = Math.hypot(fx, fy, fz);
@@ -1810,7 +1816,13 @@ function preparePickCamera() {
   const upY = authoredCamera ? 1 : basis[4];
   const upZ = authoredCamera ? 0 : basis[5];
   lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, pickView);
-  perspective(cameraFovRadians(), canvas.width / canvas.height, 0.01, 10000, pickProj);
+  perspective(
+    cameraFovRadians(),
+    canvas.width / canvas.height,
+    cameraNearPlane(),
+    10000,
+    pickProj,
+  );
   mulM4(pickProj, pickView, pickMvp);
   pickCameraPos[0] = ex; pickCameraPos[1] = ey; pickCameraPos[2] = ez;
   return true;
@@ -3799,7 +3811,7 @@ async function recomputeLods() {
     const upY = authoredCamera ? 1 : basis[4];
     const upZ = authoredCamera ? 0 : basis[5];
     const view = lookAt(ex, ey, ez, tx, ty, tz, upX, upY, upZ, lodView);
-    const proj = perspective(cameraFovRadians(), w / h, 0.01, 10000, lodProj);
+    const proj = perspective(cameraFovRadians(), w / h, cameraNearPlane(), 10000, lodProj);
     const vp = mulM4(proj, view, lodVp);
     const tp = getTessParams();
 
@@ -4425,7 +4437,7 @@ function frame(ts) {
   const proj = perspective(
     cameraFovRadians(),
     canvas.width / canvas.height,
-    0.01,
+    cameraNearPlane(),
     10000,
     frameProj,
   );

@@ -318,6 +318,20 @@ export function composeSurfaceRelativeForward(tangent, normal, pitch) {
   ));
 }
 
+/** Keep the walk near plane below the eye-to-surface offset at every body scale. */
+export function scaleRelativeNearPlane(
+  eyeHeight,
+  defaultNear = 0.01,
+  minimumNear = 1e-7,
+) {
+  const height = Math.abs(Number(eyeHeight));
+  const fallback = Number(defaultNear);
+  const minimum = Number(minimumNear);
+  if (!(fallback > 0) || !(minimum > 0)) return null;
+  if (!(height > 0) || !Number.isFinite(height)) return fallback;
+  return Math.max(minimum, Math.min(fallback, height * 0.08));
+}
+
 function normalizedCameraBasis(forward, up) {
   let forwardLength = Math.hypot(...forward);
   if (!(forwardLength > 1e-12) || !Number.isFinite(forwardLength)) return null;

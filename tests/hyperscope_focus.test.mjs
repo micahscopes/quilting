@@ -17,6 +17,7 @@ import {
   perspectiveNavigationSpeed,
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
+  scaleRelativeNearPlane,
   spheroidalDefocus,
   smootherstep01,
   transportCameraAcrossSphereReflections,
@@ -123,6 +124,13 @@ test('surface-relative view pitch survives a changing walk normal', () => {
   assert.ok(Math.abs(carried[0] - Math.sin(pitch)) < 1e-12);
   assert.ok(Math.abs(carried[1]) < 1e-12);
   assert.ok(Math.abs(carried[2] + Math.cos(pitch)) < 1e-12);
+});
+
+test('walk near plane follows tiny eye heights without exceeding the ordinary plane', () => {
+  assert.equal(scaleRelativeNearPlane(1), 0.01);
+  assert.ok(Math.abs(scaleRelativeNearPlane(0.035) - 0.0028) < 1e-12);
+  assert.equal(scaleRelativeNearPlane(1e-8), 1e-7);
+  assert.equal(scaleRelativeNearPlane(Number.NaN), 0.01);
 });
 
 test('target-free camera transport maps the sight tangent without inventing an aim point', () => {
