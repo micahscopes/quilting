@@ -23,7 +23,7 @@ use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
-use crate::round_shadow::RoundShadowObserver;
+use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{SurfaceRuntime, SurfaceRuntimeSnapshot};
 use hyperscape::interchange::{
     GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
@@ -1591,6 +1591,7 @@ pub fn mr_round_shadow_diagnostics() -> JsValue {
 /// Compare the conservative CPU hierarchy with the authoritative GPU
 /// visibility classification for the same completed LOD request. This is
 /// telemetry only: candidate membership never changes renderer state.
+#[allow(clippy::too_many_arguments)] // Flat arrays form the browser/WASM ABI.
 #[wasm_bindgen(js_name = "mr_compareRoundShadow")]
 pub fn mr_compare_round_shadow(
     view_projection: &[f32],
@@ -1600,6 +1601,9 @@ pub fn mr_compare_round_shadow(
     animated: bool,
     authored_scene: bool,
     authoritative_full_snapshot: bool,
+    pose_time: f64,
+    pose_joint_matrices: &[f32],
+    pose_morph_weights: &[f32],
 ) -> JsValue {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -1609,8 +1613,29 @@ pub fn mr_compare_round_shadow(
         let MainState {
             round_shadow,
             classified_face_visibility,
+            surface_runtime,
+            cached_instances,
+            num_faces,
             ..
         } = state;
+        let pose_reconstruct_started = browser_now_ms();
+        let posed_patches = if animated {
+            surface_runtime
+                .patch_controls_for_pose(
+                    cached_instances,
+                    *num_faces,
+                    pose_joint_matrices,
+                    pose_morph_weights,
+                )
+                .map(Some)
+        } else {
+            Ok(None)
+        };
+        let pose_reconstruct_ms = if animated {
+            browser_now_ms() - pose_reconstruct_started
+        } else {
+            0.0
+        };
         round_shadow.compare(
             view_projection,
             transform_kind,
@@ -1620,6 +1645,9 @@ pub fn mr_compare_round_shadow(
             authored_scene,
             authoritative_full_snapshot,
             classified_face_visibility,
+            pose_time,
+            pose_reconstruct_ms,
+            posed_patches,
         )
     })
 }

@@ -153,6 +153,13 @@ struct PendingAnimatedLods {
     fence: glow::Fence,
     runs: Vec<PendingLodRun>,
     face_nodes: Vec<usize>,
+    pose: Option<PendingLodPose>,
+}
+
+struct PendingLodPose {
+    time: f64,
+    joint_matrices: Vec<f32>,
+    morph_weights: Vec<f32>,
 }
 
 #[derive(Default)]
@@ -511,6 +518,7 @@ pub fn debug_gpu_compute_state() -> String {
 /// Returns true when a job was dispatched. Call [`poll_animated_lods`] until
 /// it returns a completed sparse/full classification object. Uses mesh_radius
 /// computed at upload time (not hardcoded).
+#[allow(clippy::too_many_arguments)] // Flat arrays form the worker/WASM ABI.
 #[wasm_bindgen]
 pub fn dispatch_animated_lods(
     t: f64,
@@ -521,6 +529,7 @@ pub fn dispatch_animated_lods(
     vp_matrix: &[f32],
     vp_width: f32,
     vp_height: f32,
+    capture_pose: bool,
 ) -> bool {
     if PENDING_ANIMATED_LODS.with(|pending| pending.borrow().is_some()) {
         return false;
@@ -574,6 +583,14 @@ pub fn dispatch_animated_lods(
             ),
             None => (&[][..], &[][..], 0, 0),
         };
+        // Shadow validation needs the exact small pose payload that produced
+        // this asynchronous GPU classification. Capture it only on request;
+        // the normal renderer path keeps its existing zero-clone behavior.
+        let captured_pose = capture_pose.then(|| PendingLodPose {
+            time: t,
+            joint_matrices: joint_matrices.to_vec(),
+            morph_weights: morph_weights.to_vec(),
+        });
 
         perf_mark("lod-anim-eval-end");
         perf_measure("lod-anim-eval", "lod-anim-eval-start", "lod-anim-eval-end");
@@ -715,6 +732,7 @@ pub fn dispatch_animated_lods(
                 } else {
                     data.face_node_indices.clone()
                 },
+                pose: captured_pose,
             })
         });
         perf_mark("lod-gpu-compute-end");
@@ -766,9 +784,15 @@ pub fn poll_animated_lods() -> JsValue {
         let Some(job) = PENDING_ANIMATED_LODS.with(|pending| pending.borrow_mut().take()) else {
             return JsValue::NULL;
         };
-        unsafe { gl.delete_sync(job.fence); }
+        let PendingAnimatedLods {
+            fence,
+            runs: pending_runs,
+            face_nodes,
+            pose,
+        } = job;
+        unsafe { gl.delete_sync(fence); }
         if status == glow::WAIT_FAILED {
-            for run in job.runs {
+            for run in pending_runs {
                 compute.discard_staged_readback(gl, run.readback);
             }
             web_sys::console::warn_1(&"LOD fence wait failed".into());
@@ -778,7 +802,7 @@ pub fn poll_animated_lods() -> JsValue {
         perf_mark("lod-gpu-wait-end");
         perf_measure("lod-gpu-wait", "lod-gpu-wait-start", "lod-gpu-wait-end");
         perf_mark("lod-gpu-readback-start");
-        let mut runs = job.runs.into_iter();
+        let mut runs = pending_runs.into_iter();
         let Some(baseline) = runs.next() else {
             return JsValue::NULL;
         };
@@ -787,7 +811,7 @@ pub fn poll_animated_lods() -> JsValue {
             let classified = compute.finish_staged_readback(gl, run.readback);
             if classified.len() == gpu_class.len() {
                 if let Some(node) = run.subject_node {
-                    for (face, &face_node) in job.face_nodes.iter().enumerate() {
+                    for (face, &face_node) in face_nodes.iter().enumerate() {
                         if face_node == node {
                             let offset = face * batch::FACE_LOD_STRIDE;
                             let end = offset + batch::FACE_LOD_STRIDE;
@@ -840,6 +864,28 @@ pub fn poll_animated_lods() -> JsValue {
                 &"full_snapshot".into(),
                 &JsValue::from_bool(full_snapshot),
             ).ok();
+            if let Some(pose) = pose {
+                js_sys::Reflect::set(
+                    &result,
+                    &"pose_time".into(),
+                    &JsValue::from_f64(pose.time),
+                )
+                .ok();
+                let matrices = js_sys::Float32Array::new_with_length(
+                    pose.joint_matrices.len() as u32,
+                );
+                matrices.copy_from(&pose.joint_matrices);
+                js_sys::Reflect::set(&result, &"pose_matrices".into(), &matrices).ok();
+                let morph_weights =
+                    js_sys::Float32Array::new_with_length(pose.morph_weights.len() as u32);
+                morph_weights.copy_from(&pose.morph_weights);
+                js_sys::Reflect::set(
+                    &result,
+                    &"pose_morph_weights".into(),
+                    &morph_weights,
+                )
+                .ok();
+            }
             result
         });
         compute.recycle_readback_vector(gpu_class);

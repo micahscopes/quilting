@@ -31,11 +31,17 @@ convex hull of their denominator controls is proved clear of zero. Invalid or
 potentially singular patches enter an explicit `always_candidates` lane: an
 uncertain bound can cost performance, but cannot make a patch disappear.
 
-This adapter is intentionally rest-pose only. Do not use it to cull active
-animation until the caller supplies conservative pose envelopes or refits leaf
-bounds for the current `PoseKey`. A renderer should first run it as shadow
-telemetry against its authoritative visibility path and require zero false
-negatives before allowing it to affect drawing.
+`StaticPatchIndex` retains static topology and face identity, not static bounds.
+Call `refit` with the complete controls for one exact `PoseKey` to atomically
+replace every finite leaf and rebuild affected parents. A mismatched face set
+or a formerly finite patch becoming unbounded rejects the whole refit, leaving
+the previous pose intact; patches that began in `always_candidates` remain
+unconditional. The caller owns animation evaluation and must keep the pose
+snapshot coherent with any asynchronous visibility result it compares.
+
+A renderer should first run this adapter as shadow telemetry against its
+authoritative visibility path and require zero false negatives before allowing
+it to affect drawing.
 
 The crate intentionally returns `IntersectsOrUnknown` whenever a numerical or
 geometric case is not proved safe to prune. See the crate-level Rust

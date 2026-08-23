@@ -14,6 +14,7 @@ use hyperscape::{
 use quilting_core::instance_layout;
 use quilting_core::patch::QBTriPatch;
 use quilting_core::{Mobius, Quat};
+use quilting_round_index::PatchControl;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -92,6 +93,67 @@ impl SurfaceRuntime {
             .map(|attachment| attachment.address.face)
     }
 
+    /// Reconstruct the exact posed source controls used by the GPU animation
+    /// path, without applying an ordinary model matrix or Möbius map. This is
+    /// the shared CPU boundary for surface walking and animated spatial-index
+    /// refits; callers provide the pose captured with their own GPU job so an
+    /// asynchronous result is never compared against a newer render pose.
+    pub fn patch_controls_for_pose(
+        &self,
+        instances: &[f32],
+        num_faces: usize,
+        joint_matrices: &[f32],
+        morph_weights: &[f32],
+    ) -> Result<Vec<PatchControl>, String> {
+        let required = num_faces
+            .checked_mul(instance_layout::STRIDE)
+            .ok_or_else(|| "posed patch buffer size overflow".to_string())?;
+        if instances.len() < required {
+            return Err(format!(
+                "posed patch buffer has {} floats; expected at least {required}",
+                instances.len()
+            ));
+        }
+        let pose = PoseData {
+            joint_indices: &self.joint_indices,
+            joint_weights: &self.joint_weights,
+            morph_deltas: &self.morph_deltas,
+            morph_num_vertices: self.morph_num_vertices,
+            morph_num_targets: self.morph_num_targets,
+            joint_matrices,
+            morph_weights,
+        };
+        (0..num_faces)
+            .map(|face| {
+                let record = &instances
+                    [face * instance_layout::STRIDE..(face + 1) * instance_layout::STRIDE];
+                let mut positions = [[0.0; 3]; 3];
+                let mut weights = [[0.0; 4]; 3];
+                for corner in 0..3 {
+                    let position_offset = instance_layout::offset::POSITIONS + corner * 4;
+                    let vertex = checked_vertex_index(record[position_offset])?;
+                    let rest = [
+                        record[position_offset + 1] as f64,
+                        record[position_offset + 2] as f64,
+                        record[position_offset + 3] as f64,
+                    ];
+                    positions[corner] = pose
+                        .posed_position(vertex, rest)
+                        .ok_or_else(|| format!("could not pose face {face} corner {corner}"))?;
+                    let weight_offset = instance_layout::offset::WEIGHTS + corner * 4;
+                    weights[corner] = std::array::from_fn(|component| {
+                        f64::from(record[weight_offset + component])
+                    });
+                }
+                Ok(PatchControl {
+                    face: face as u32,
+                    positions,
+                    weights,
+                })
+            })
+            .collect()
+    }
+
     pub fn attach(
         &mut self,
         instances: &[f32],
@@ -159,13 +221,15 @@ impl SurfaceRuntime {
             instances,
             face_nodes,
             adjacency,
-            joint_indices: &self.joint_indices,
-            joint_weights: &self.joint_weights,
-            morph_deltas: &self.morph_deltas,
-            morph_num_vertices: self.morph_num_vertices,
-            morph_num_targets: self.morph_num_targets,
-            joint_matrices: &self.joint_matrices,
-            morph_weights: &self.morph_weights,
+            pose: PoseData {
+                joint_indices: &self.joint_indices,
+                joint_weights: &self.joint_weights,
+                morph_deltas: &self.morph_deltas,
+                morph_num_vertices: self.morph_num_vertices,
+                morph_num_targets: self.morph_num_targets,
+                joint_matrices: &self.joint_matrices,
+                morph_weights: &self.morph_weights,
+            },
             mobius: mobius_from_array(mobius),
             euclidean_model,
             surface_velocity: [0.0; 3],
@@ -194,13 +258,7 @@ struct RuntimeSurfaceField<'a> {
     instances: &'a [f32],
     face_nodes: &'a [usize],
     adjacency: &'a TriangleAdjacency,
-    joint_indices: &'a [[u16; 4]],
-    joint_weights: &'a [[f32; 4]],
-    morph_deltas: &'a [f32],
-    morph_num_vertices: usize,
-    morph_num_targets: usize,
-    joint_matrices: &'a [f32],
-    morph_weights: &'a [f32],
+    pose: PoseData<'a>,
     mobius: Mobius,
     euclidean_model: [f32; 16],
     surface_velocity: [f64; 3],
@@ -262,16 +320,13 @@ impl RuntimeSurfaceField<'_> {
         let mut weights = [Quat::ZERO; 3];
         for corner in 0..3 {
             let position_offset = instance_layout::offset::POSITIONS + corner * 4;
-            let vertex = record[position_offset];
-            if !vertex.is_finite() || vertex < 0.0 || vertex.fract() != 0.0 {
-                return None;
-            }
+            let vertex = checked_vertex_index(record[position_offset]).ok()?;
             let rest = [
                 record[position_offset + 1] as f64,
                 record[position_offset + 2] as f64,
                 record[position_offset + 3] as f64,
             ];
-            let posed = self.posed_position(vertex as usize, rest)?;
+            let posed = self.pose.posed_position(vertex, rest)?;
             let modeled = apply_affine(self.euclidean_model, posed)?;
             positions[corner] = Quat::from_point(modeled[0], modeled[1], modeled[2]);
 
@@ -285,7 +340,20 @@ impl RuntimeSurfaceField<'_> {
         }
         Some(QBTriPatch::new(positions, weights).transform(&self.mobius))
     }
+}
 
+#[derive(Clone, Copy)]
+struct PoseData<'a> {
+    joint_indices: &'a [[u16; 4]],
+    joint_weights: &'a [[f32; 4]],
+    morph_deltas: &'a [f32],
+    morph_num_vertices: usize,
+    morph_num_targets: usize,
+    joint_matrices: &'a [f32],
+    morph_weights: &'a [f32],
+}
+
+impl PoseData<'_> {
     fn posed_position(&self, vertex: usize, rest: [f64; 3]) -> Option<[f64; 3]> {
         let mut position = rest;
         if self.morph_num_targets > 0
@@ -345,6 +413,14 @@ impl RuntimeSurfaceField<'_> {
             position
         };
         finite3(output).then_some(output)
+    }
+}
+
+fn checked_vertex_index(vertex: f32) -> Result<usize, String> {
+    if vertex.is_finite() && vertex >= 0.0 && vertex.fract() == 0.0 {
+        Ok(vertex as usize)
+    } else {
+        Err("patch has an invalid vertex identity".to_string())
     }
 }
 
@@ -594,5 +670,24 @@ mod tests {
             )
             .unwrap();
         assert!((snapshot.output_position.unwrap()[2] - 2.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn exact_external_pose_reconstructs_patch_controls_without_mutating_walk_pose() {
+        let instances = triangle_instances();
+        let mut runtime = SurfaceRuntime::default();
+        runtime.set_skinning(&[[0; 4]; 3], &[[1.0, 0.0, 0.0, 0.0]; 3]);
+        let joint_matrices = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 1.0,
+        ];
+        let controls = runtime
+            .patch_controls_for_pose(&instances, 1, &joint_matrices, &[])
+            .unwrap();
+        assert_eq!(controls.len(), 1);
+        assert!(controls[0]
+            .positions
+            .iter()
+            .all(|position| (position[2] - 2.0).abs() < 1.0e-9));
+        assert_eq!(controls[0].weights, [[1.0, 0.0, 0.0, 0.0]; 3]);
     }
 }

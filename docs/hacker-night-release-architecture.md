@@ -169,16 +169,22 @@ WebGL2 vertex rejection saves raster/fragment work but not vertex invocation;
 WebGPU later performs visible-instance compaction and indirect submission.
 
 The browser's first observer is opt-in with `roundshadow=1`. It builds a
-rest-pose `StaticPatchIndex`, compares its candidates with coherent completed
-GPU LOD classifications, and exposes build/query counts at
-`globalThis.__hyperscopeRoundShadow`. GPU-only survivors measure how much more
-conservative the current classifier is; they are not mislabeled as visible
-geometry. A separate seven-point rational-QB sample check records a red-alert
-false negative only when a rejected patch has a point strictly inside the clip
-frustum. The observer never changes a draw call.
-Active animation and authored per-node transforms currently report
-`unsupported`; advancing those cases requires conservative pose envelopes and
-structured frame chains, respectively.
+stable-topology `StaticPatchIndex`, compares its candidates with coherent
+completed GPU LOD classifications, and exposes build, refit, and query counts
+at `globalThis.__hyperscopeRoundShadow`. For ordinary animated glTF scenes, the
+worker optionally captures the exact joint matrices and morph weights used by
+that asynchronous LOD job. Rust reconstructs the posed source controls and
+atomically refits all bounded leaves before comparing the result; this adds no
+mesh-sized readback and is disabled with the observer. Returning to a static
+pose explicitly refits the rest controls so animated bounds cannot linger.
+
+GPU-only survivors measure how much more conservative the current classifier
+is; they are not mislabeled as visible geometry. A separate seven-point
+rational-QB sample check records a red-alert false negative only when a
+rejected patch has a point strictly inside the clip frustum. The observer never
+changes a draw call. Authored per-node transforms still report `unsupported`;
+advancing those cases requires structured frame chains coherent with each
+classification.
 
 ## Conformal QB optimization boundary
 

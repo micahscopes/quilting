@@ -1,14 +1,16 @@
 //! Opt-in correctness observer for conservative round-side patch queries.
 //!
 //! This module never owns visibility or mutates draw membership. It builds a
-//! rest-pose hierarchy from the renderer's immutable source records and
-//! compares candidates with a completed authoritative GPU classification.
+//! stable-topology hierarchy from the renderer's immutable source records,
+//! refits it from the exact pose captured with an asynchronous GPU job, and
+//! compares candidates with that completed authoritative classification.
 
 use quilting_core::conformal::{ConformalGenerator, ConformalTransformChain};
 use quilting_core::instance_layout;
 use quilting_core::Quat;
 use quilting_round_index::{
-    PatchControl, PatchIndexBuildReport, PredicateConfig, RoundQuery, StaticPatchIndex, TopologyKey,
+    PatchControl, PatchIndexBuildReport, PoseKey, PredicateConfig, RoundQuery, StaticPatchIndex,
+    TopologyKey,
 };
 use serde::Serialize;
 use wasm_bindgen::JsValue;
@@ -18,7 +20,9 @@ pub(crate) struct RoundShadowObserver {
     enabled: bool,
     topology_revision: u64,
     index: Option<StaticPatchIndex>,
+    rest_patches: Vec<PatchControl>,
     patches: Vec<PatchControl>,
+    index_has_animated_pose: bool,
     build: BuildSnapshot,
     comparisons: u64,
     last: Option<ComparisonSnapshot>,
@@ -46,6 +50,11 @@ struct ComparisonSnapshot {
     transform_kind: String,
     animated: bool,
     authored_scene: bool,
+    pose_time: Option<f64>,
+    pose_reconstruct_ms: f64,
+    pose_refit_ms: f64,
+    refit_leaves: usize,
+    refit_internal_nodes: usize,
     query_ms: f64,
     faces: usize,
     candidate_faces: usize,
@@ -82,7 +91,9 @@ impl RoundShadowObserver {
 
     pub(crate) fn rebuild(&mut self, instances: &[f32], num_faces: usize) {
         self.index = None;
+        self.rest_patches.clear();
         self.patches.clear();
+        self.index_has_animated_pose = false;
         self.last = None;
         self.comparisons = 0;
         self.authoritative_complete = false;
@@ -140,6 +151,7 @@ impl RoundShadowObserver {
                     hierarchy_nodes,
                 };
                 self.index = Some(index);
+                self.rest_patches = patch_controls.clone();
                 self.patches = patch_controls;
             }
             Err(reason) => {
@@ -176,22 +188,15 @@ impl RoundShadowObserver {
         authored_scene: bool,
         authoritative_full_snapshot: bool,
         classified_visibility: &[bool],
+        pose_time: f64,
+        pose_reconstruct_ms: f64,
+        posed_patches: Result<Option<Vec<PatchControl>>, String>,
     ) -> JsValue {
         self.authoritative_complete |= authoritative_full_snapshot;
         if !self.enabled {
             return self.skip(
                 "disabled",
                 "round shadow is not enabled",
-                transform_kind,
-                animated,
-                authored_scene,
-                classified_visibility,
-            );
-        }
-        if animated {
-            return self.skip(
-                "unsupported",
-                "active animation has no conservative pose envelope yet",
                 transform_kind,
                 animated,
                 authored_scene,
@@ -242,6 +247,108 @@ impl RoundShadowObserver {
                 authored_scene,
                 classified_visibility,
             );
+        }
+        let mut pose_refit_ms = 0.0;
+        let mut refit_leaves = 0;
+        let mut refit_internal_nodes = 0;
+        let pose_time = animated.then_some(pose_time);
+        if animated {
+            if !pose_time.is_some_and(f64::is_finite) {
+                return self.skip(
+                    "error",
+                    "animated classification did not carry its exact finite pose time",
+                    transform_kind,
+                    animated,
+                    authored_scene,
+                    classified_visibility,
+                );
+            }
+            let patches = match posed_patches {
+                Ok(Some(patches)) => patches,
+                Ok(None) => {
+                    return self.skip(
+                        "error",
+                        "animated classification did not carry a posed patch snapshot",
+                        transform_kind,
+                        animated,
+                        authored_scene,
+                        classified_visibility,
+                    );
+                }
+                Err(reason) => {
+                    return self.skip_owned(
+                        "error",
+                        reason,
+                        transform_kind,
+                        animated,
+                        authored_scene,
+                        classified_visibility,
+                    );
+                }
+            };
+            let started = browser_now_ms();
+            let refit = self
+                .index
+                .as_mut()
+                .expect("checked round shadow index")
+                .refit(
+                    PoseKey {
+                        clip_revision: self.topology_revision,
+                        sample: pose_time.expect("validated animated pose time").to_bits(),
+                    },
+                    &patches,
+                );
+            pose_refit_ms = browser_now_ms() - started;
+            match refit {
+                Ok(report) => {
+                    refit_leaves = report.updated_leaves;
+                    refit_internal_nodes = report.refit_internal_nodes;
+                    self.patches = patches;
+                    self.index_has_animated_pose = true;
+                }
+                Err(error) => {
+                    return self.skip_owned(
+                        "error",
+                        format!("animated round-index refit failed: {error}"),
+                        transform_kind,
+                        animated,
+                        authored_scene,
+                        classified_visibility,
+                    );
+                }
+            }
+        } else if self.index_has_animated_pose {
+            let started = browser_now_ms();
+            let refit = self
+                .index
+                .as_mut()
+                .expect("checked round shadow index")
+                .refit(
+                    PoseKey {
+                        clip_revision: self.topology_revision,
+                        sample: 0,
+                    },
+                    &self.rest_patches,
+                );
+            pose_refit_ms = browser_now_ms() - started;
+            match refit {
+                Ok(report) => {
+                    refit_leaves = report.updated_leaves;
+                    refit_internal_nodes = report.refit_internal_nodes;
+                    self.patches.clone_from(&self.rest_patches);
+                    self.index_has_animated_pose = false;
+                }
+                Err(error) => {
+                    return self.skip_owned(
+                        "error",
+                        format!("rest-pose round-index refit failed: {error}"),
+                        transform_kind,
+                        animated,
+                        authored_scene,
+                        classified_visibility,
+                    );
+                }
+            }
         }
         if view_projection.len() < 16 {
             return self.skip(
@@ -342,6 +449,11 @@ impl RoundShadowObserver {
             transform_kind: transform_kind.to_string(),
             animated,
             authored_scene,
+            pose_time,
+            pose_reconstruct_ms,
+            pose_refit_ms,
+            refit_leaves,
+            refit_internal_nodes,
             query_ms,
             faces: classified_visibility.len(),
             candidate_faces: query_result.candidate_faces.len(),
@@ -541,7 +653,7 @@ fn patch_controls_from_instances(
     Ok(patches)
 }
 
-fn browser_now_ms() -> f64 {
+pub(crate) fn browser_now_ms() -> f64 {
     web_sys::window()
         .and_then(|window| window.performance())
         .map_or(0.0, |performance| performance.now())

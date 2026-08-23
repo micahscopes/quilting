@@ -1,7 +1,7 @@
 use crate::{
-    enclose_negative_spheres, ContainmentCertificate, NodeId, NodeSpec, PredicateConfig,
-    QueryResult, RoundIndex, RoundIndexError, RoundQuery, RoundSide, RoundSideAutomorphism,
-    TopologyKey, TransformError,
+    enclose_negative_spheres, ContainmentCertificate, NodeId, NodeSpec, PoseKey, PredicateConfig,
+    QueryResult, RefitBound, RoundIndex, RoundIndexError, RoundQuery, RoundSide,
+    RoundSideAutomorphism, TopologyKey, TransformError,
 };
 use quilting_core::{Quat, RoundSideOrientation, RoundWallGeometry};
 use serde::{Deserialize, Serialize};
@@ -18,12 +18,14 @@ pub struct PatchControl {
     pub weights: [[f64; 4]; 3],
 }
 
-/// A static/rest-pose patch hierarchy plus an explicit lane for patches whose
+/// A stable-topology patch hierarchy plus an explicit lane for patches whose
 /// complete source image cannot be enclosed by a finite sphere.
 #[derive(Debug, Clone)]
 pub struct StaticPatchIndex {
     index: Option<RoundIndex<Option<u32>>>,
+    bounded_leaf_nodes: std::collections::BTreeMap<u32, NodeId>,
     always_candidates: Vec<u32>,
+    faces: Vec<u32>,
     report: PatchIndexBuildReport,
 }
 
@@ -33,6 +35,14 @@ pub struct PatchIndexBuildReport {
     pub bounded_patches: usize,
     pub always_candidate_patches: usize,
     pub hierarchy_nodes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchIndexRefitReport {
+    pub pose: PoseKey,
+    pub updated_leaves: usize,
+    pub refit_internal_nodes: usize,
+    pub always_candidate_patches: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,14 +77,24 @@ impl StaticPatchIndex {
         always_candidates.sort_unstable();
         always_candidates.dedup();
 
-        let index = if leaves.is_empty() {
-            None
+        let (index, bounded_leaf_nodes) = if leaves.is_empty() {
+            (None, std::collections::BTreeMap::new())
         } else {
             let root = build_hierarchy(leaves)?;
             let mut specs = Vec::new();
+            let mut bounded_leaf_nodes = std::collections::BTreeMap::new();
             let mut next_id = 0;
-            flatten_hierarchy(&root, None, &mut next_id, &mut specs);
-            Some(RoundIndex::build_for(topology, specs, predicates)?)
+            flatten_hierarchy(
+                &root,
+                None,
+                &mut next_id,
+                &mut specs,
+                &mut bounded_leaf_nodes,
+            );
+            (
+                Some(RoundIndex::build_for(topology, specs, predicates)?),
+                bounded_leaf_nodes,
+            )
         };
         let hierarchy_nodes = index.as_ref().map_or(0, |index| index.nodes().count());
         let report = PatchIndexBuildReport {
@@ -85,13 +105,72 @@ impl StaticPatchIndex {
         };
         Ok(Self {
             index,
+            bounded_leaf_nodes,
             always_candidates,
+            faces: faces.into_iter().collect(),
             report,
         })
     }
 
     pub fn report(&self) -> PatchIndexBuildReport {
         self.report
+    }
+
+    /// Update every finite leaf from one exact animation pose while retaining
+    /// immutable hierarchy topology and face identity.
+    ///
+    /// Faces that were already in the unconditional-candidate lane remain
+    /// there. If a previously bounded face becomes invalid or unbounded, or
+    /// if the supplied face set differs from the build topology, the update is
+    /// rejected atomically and the preceding pose remains queryable.
+    pub fn refit(
+        &mut self,
+        pose: PoseKey,
+        patches: &[PatchControl],
+    ) -> Result<PatchIndexRefitReport, RoundIndexError> {
+        let mut patch_faces = std::collections::BTreeSet::new();
+        for patch in patches {
+            if !patch_faces.insert(patch.face) {
+                return Err(RoundIndexError::DuplicatePatchFace(patch.face));
+            }
+        }
+        let supplied_faces = patch_faces.into_iter().collect::<Vec<_>>();
+        if supplied_faces != self.faces {
+            return Err(RoundIndexError::PatchTopologyMismatch {
+                expected: self.faces.len(),
+                actual: supplied_faces.len(),
+            });
+        }
+
+        let mut leaf_updates = Vec::with_capacity(self.bounded_leaf_nodes.len());
+        for patch in patches {
+            let Some(&leaf) = self.bounded_leaf_nodes.get(&patch.face) else {
+                continue;
+            };
+            let bound = conservative_patch_source_bound(patch)
+                .ok_or(RoundIndexError::UnboundedAnimatedPatch(patch.face))?;
+            leaf_updates.push((leaf, bound));
+        }
+        leaf_updates.sort_unstable_by_key(|(leaf, _)| *leaf);
+
+        let (updated_leaves, refit_internal_nodes) = match self.index.as_mut() {
+            Some(index) => {
+                let report = index.refit(pose, &leaf_updates, |_, _, children| {
+                    Ok(RefitBound {
+                        bound: enclose_negative_spheres(children, SOURCE_BOUND_PADDING)?,
+                        child_containment: ContainmentCertificate::Computed,
+                    })
+                })?;
+                (report.updated_leaves, report.refit_internal_nodes)
+            }
+            None => (0, 0),
+        };
+        Ok(PatchIndexRefitReport {
+            pose,
+            updated_leaves,
+            refit_internal_nodes,
+            always_candidate_patches: self.always_candidates.len(),
+        })
     }
 
     pub fn query(&self, pulled_back_query: &RoundQuery) -> PatchQueryResult {
@@ -255,6 +334,7 @@ fn flatten_hierarchy(
     parent: Option<NodeId>,
     next_id: &mut u64,
     specs: &mut Vec<NodeSpec<Option<u32>>>,
+    bounded_leaf_nodes: &mut std::collections::BTreeMap<u32, NodeId>,
 ) {
     let id = NodeId(*next_id);
     *next_id += 1;
@@ -265,8 +345,11 @@ fn flatten_hierarchy(
         bound: node.bound,
         payload: node.face,
     });
+    if let Some(face) = node.face {
+        bounded_leaf_nodes.insert(face, id);
+    }
     for child in &node.children {
-        flatten_hierarchy(child, Some(id), next_id, specs);
+        flatten_hierarchy(child, Some(id), next_id, specs, bounded_leaf_nodes);
     }
 }
 
@@ -418,6 +501,66 @@ mod tests {
                 PredicateConfig::default(),
             ),
             Err(RoundIndexError::DuplicatePatchFace(7))
+        ));
+    }
+
+    #[test]
+    fn animated_refit_moves_bounds_without_changing_topology() {
+        let mut index = StaticPatchIndex::build(
+            TopologyKey::default(),
+            &[flat(1, -8.0), flat(2, 8.0)],
+            PredicateConfig::default(),
+        )
+        .unwrap();
+        let hierarchy_nodes = index.report().hierarchy_nodes;
+        let query = RoundQuery::from_view_projection(&IDENTITY_VIEW_PROJECTION).unwrap();
+        assert!(index.query(&query).candidate_faces.is_empty());
+
+        let pose = PoseKey {
+            clip_revision: 4,
+            sample: 12,
+        };
+        let report = index.refit(pose, &[flat(1, -0.5), flat(2, 0.5)]).unwrap();
+        assert_eq!(report.pose, pose);
+        assert_eq!(report.updated_leaves, 2);
+        assert_eq!(report.refit_internal_nodes, 1);
+        assert_eq!(index.report().hierarchy_nodes, hierarchy_nodes);
+        assert_eq!(index.query(&query).candidate_faces, vec![1, 2]);
+    }
+
+    #[test]
+    fn failed_animated_refit_keeps_the_previous_pose_bounds() {
+        let mut index = StaticPatchIndex::build(
+            TopologyKey::default(),
+            &[flat(1, -8.0), flat(2, 8.0)],
+            PredicateConfig::default(),
+        )
+        .unwrap();
+        let query = RoundQuery::from_view_projection(&IDENTITY_VIEW_PROJECTION).unwrap();
+        let before = index.query(&query);
+        let mut invalid = flat(2, 0.0);
+        invalid.positions[0][0] = f64::NAN;
+        assert!(matches!(
+            index.refit(PoseKey::default(), &[flat(1, 0.0), invalid]),
+            Err(RoundIndexError::UnboundedAnimatedPatch(2))
+        ));
+        assert_eq!(index.query(&query), before);
+    }
+
+    #[test]
+    fn animated_refit_requires_the_original_face_set() {
+        let mut index = StaticPatchIndex::build(
+            TopologyKey::default(),
+            &[flat(1, 0.0)],
+            PredicateConfig::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            index.refit(PoseKey::default(), &[flat(2, 0.0)]),
+            Err(RoundIndexError::PatchTopologyMismatch {
+                expected: 1,
+                actual: 1
+            })
         ));
     }
 }

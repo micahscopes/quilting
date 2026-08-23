@@ -2498,7 +2498,16 @@ effect(() => {
 // --- Animation controls ---
 const animating_sig = signal(true, 'animate');
 bindToggle('animate-toggle', animating_sig);
-effect(() => { animating = animating_sig.get(); syncURL(); });
+effect(() => {
+  const nextAnimating = animating_sig.get();
+  const changed = animating !== nextAnimating;
+  animating = nextAnimating;
+  // Pausing must submit one final rest-pose classification. Otherwise the
+  // resident LODs (and opt-in round-index shadow bounds) remain stamped with
+  // the last animated pose until some unrelated camera change occurs.
+  if (changed && meshInfo) debouncedLodRecompute();
+  syncURL();
+});
 
 $('anim-sel').addEventListener('change', async () => {
   const idx = parseInt($('anim-sel').value);
@@ -3346,6 +3355,7 @@ async function recomputeLods() {
       vpMatrix: vp, vpWidth: w, vpHeight: h,
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
       skipAnimation: !lodAnimated,
+      capturePose: RUST_ROUND_SHADOW_ENABLED && lodAnimated && !roundAuthoredScene,
     });
     const tWorkerDone = performance.now();
     const wt = resp.timing || {};
@@ -3416,7 +3426,7 @@ async function recomputeLods() {
       }
     }
     if (RUST_ROUND_SHADOW_ENABLED && appliedClassification) {
-      const unsupportedKey = lodAnimated ? 'animation' : (roundAuthoredScene ? 'authored' : null);
+      const unsupportedKey = roundAuthoredScene ? 'authored' : null;
       if (unsupportedKey === null || unsupportedKey !== roundShadowUnsupportedKey) {
         try {
           updateRoundShadowDiagnostics(mr_compareRoundShadow(
@@ -3427,6 +3437,13 @@ async function recomputeLods() {
             lodAnimated,
             roundAuthoredScene,
             !!wt.full_snapshot,
+            Number.isFinite(resp.pose_time) ? resp.pose_time : Number.NaN,
+            resp.pose_matrices
+              ? new Float32Array(resp.pose_matrices.buffer || resp.pose_matrices)
+              : new Float32Array(0),
+            resp.pose_morph_weights
+              ? new Float32Array(resp.pose_morph_weights.buffer || resp.pose_morph_weights)
+              : new Float32Array(0),
           ));
           roundShadowUnsupportedKey = unsupportedKey;
         } catch (error) {

@@ -41,8 +41,8 @@ use std::fmt;
 mod patch;
 
 pub use patch::{
-    conservative_patch_source_bound, PatchControl, PatchIndexBuildReport, PatchQueryResult,
-    StaticPatchIndex,
+    conservative_patch_source_bound, PatchControl, PatchIndexBuildReport, PatchIndexRefitReport,
+    PatchQueryResult, StaticPatchIndex,
 };
 
 const DEFAULT_CLEARANCE: f64 = 1.0e-12;
@@ -1205,6 +1205,8 @@ pub enum RoundIndexError {
     InvalidClearance,
     InvalidViewProjection,
     DuplicatePatchFace(u32),
+    PatchTopologyMismatch { expected: usize, actual: usize },
+    UnboundedAnimatedPatch(u32),
     DuplicateNode(NodeId),
     UnknownNode(NodeId),
     UnknownParent { child: NodeId, parent: NodeId },
@@ -1234,6 +1236,14 @@ impl fmt::Display for RoundIndexError {
             Self::DuplicatePatchFace(face) => {
                 write!(f, "duplicate patch face {face}")
             }
+            Self::PatchTopologyMismatch { expected, actual } => write!(
+                f,
+                "animated patch identities do not match the indexed topology ({actual} supplied, {expected} expected)"
+            ),
+            Self::UnboundedAnimatedPatch(face) => write!(
+                f,
+                "animated patch {face} has no finite conservative source bound"
+            ),
             Self::DuplicateNode(id) => write!(f, "duplicate round-index node {}", id.0),
             Self::UnknownNode(id) => write!(f, "unknown round-index node {}", id.0),
             Self::UnknownParent { child, parent } => {

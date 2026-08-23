@@ -223,7 +223,10 @@ self.onmessage = async function(e) {
   if (type === 'compute_animated_lods') {
     const generation = ++lodJobGeneration;
     wasm.cancel_animated_lods();
-    const { t, mobius, subjectStates, density, minPx, vpMatrix, vpWidth, vpHeight, tessDensity, screenAtten, minPxSub, skipAnimation } = data;
+    const {
+      t, mobius, subjectStates, density, minPx, vpMatrix, vpWidth, vpHeight,
+      tessDensity, screenAtten, minPxSub, skipAnimation, capturePose,
+    } = data;
     const wt0 = performance.now();
     // Set tess params before compute
     if (tessDensity != null) {
@@ -242,6 +245,7 @@ self.onmessage = async function(e) {
         new Float32Array(vpMatrix || new Array(16).fill(0)),
         vpWidth || 0,
         vpHeight || 0,
+        !!capturePose,
       );
     } catch (e) {
       console.error('dispatch_animated_lods threw:', e.message, e.stack);
@@ -288,9 +292,14 @@ self.onmessage = async function(e) {
         timing.full_snapshot = !!result.full_snapshot;
         const transfers = [result.lods.buffer];
         if (result.indices) transfers.push(result.indices.buffer);
+        if (result.pose_matrices) transfers.push(result.pose_matrices.buffer);
+        if (result.pose_morph_weights) transfers.push(result.pose_morph_weights.buffer);
         self.postMessage({
           type: 'animated_lods', id,
           lods: result.lods, indices: result.indices || null, timing,
+          pose_time: result.pose_time,
+          pose_matrices: result.pose_matrices || null,
+          pose_morph_weights: result.pose_morph_weights || null,
         }, transfers);
       } else {
         let gpuState = 'unknown';

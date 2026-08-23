@@ -243,3 +243,52 @@ error; the console contained no warnings or errors.
 This establishes the checked-in fixture path, not general multi-model parity.
 Secondary animation, secondary textures, per-layer fractional opacity, and a
 second live authored ECS runtime remain explicit adapter limitations.
+
+## Animated round-index shadow follow-up
+
+On 2026-08-23, the opt-in `roundshadow=1` observer was extended to capture the
+exact joint matrices and morph weights associated with each asynchronous worker
+LOD result. The main Rust renderer reconstructed the corresponding 984 posed
+source patches, atomically refit 984 leaves and 983 internal nodes, and only
+then compared the index query with that completed classification. The ordinary
+path does not clone or transfer this pose payload when the observer is off.
+
+The installed Chrome DevTools MCP observed these release-build cases on the
+animated horse tab:
+
+| View / transform | Index candidates | GPU survivors | Visited / pruned nodes | Sampled false negatives |
+| --- | ---: | ---: | ---: | ---: |
+| Centered identity, 8 changing poses | 984 | 984 | 1,967 / 0 | 0 |
+| Partially clipped identity, changing poses | 539–645 | 984 | 1,159–1,357 / 34–41 | 0 |
+| Partially clipped inversion, pose 1.316 | 374 | 389 | 783 / 18 | 0 |
+| Partially clipped inversion, pose 0.730 | 307 | 367 | 685 / 36 | 0 |
+| Fully off-camera identity | 0 | 0 | 1 / 1 | 0 |
+| Fully off-camera inversion | 0 | 0 | 17 / 9 | 0 |
+
+The centered identity sample advanced from comparison 1,138 to 1,273 while
+pose time changed and wrapped normally. Two later partial-identity observations
+advanced from comparison 9,229 to 9,633 while candidate membership changed
+from 539 to 645 with the pose. Warm observed refits were usually about
+7–11 ms, with a 6.4–18.7 ms range in the retained samples; queries were about
+0.7–2.7 ms. After separating pose reconstruction from refitting in telemetry,
+one final partial-identity sample measured 0.3 ms to reconstruct 984 morph-posed
+controls, 5.7 ms to refit the hierarchy, and 0.5 ms to query it. This single
+sample is a boundary check rather than a new distribution. These are opt-in
+main-thread validation costs, not costs paid by the normal renderer and not yet
+an optimized production culling path.
+
+Pausing initially exposed a lifecycle bug: the UI stopped animation without
+submitting a final rest-pose LOD classification. After scheduling one
+coalesced recompute on the animation signal transition, the same live observer
+changed from `animated: true` to `animated: false`, refit all 984 leaves and
+983 parents to the rest pose in 9 ms, retained partial-frustum pruning, and
+reported zero sampled false negatives. The final console was clean.
+
+`falseNegativeFaces` is deliberately a red-alert sample test over seven points
+of each rejected rational QB patch; it is evidence against integration errors,
+not a numerical proof by itself. Conservativeness instead comes from the
+complete-patch source bound, certified parent containment, fail-closed query
+predicates, and atomic-refit tests. The observer still never changes WebGL draw
+membership. WebGL already performs current-pose vertex rejection; eliminating
+rejected instance invocation is reserved for a compacted/indirect WebGPU path
+or another measured submission strategy.
