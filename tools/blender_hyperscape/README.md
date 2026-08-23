@@ -17,6 +17,13 @@ The **Hyperscape** tab in the 3D View sidebar provides:
 - cross-frame tracking and projection-camera constraints; and
 - `.gltf`/`.glb` import/export that preserves ordinary glTF fallback content.
 
+The dependency-free `protocol.py` module also validates the same checked-in
+v0.1 authored/presence JSON fixtures as Rust. It supplies sender-local presence
+ordering with receipt-relative TTL and bounded authored-message echo
+suppression, but deliberately supplies no transport. A future Blender bridge
+can therefore choose IPC/WebSocket/WebRTC independently, and HHHS 0.4 can wrap
+only authored envelopes without receiving viewport presence.
+
 ## Install or build
 
 Install the directory as an extension from Blender's Preferences, or build a

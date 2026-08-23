@@ -52,6 +52,10 @@ The first application boundary is now explicit:
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
+- Blender's dependency-free `protocol.py` validates and canonically roundtrips
+  the same checked-in Rust fixtures. It implements only receipt-relative
+  presence expiry/order and bounded authored-message echo suppression; it does
+  not yet select a transport or admit ephemeral state to HHHS.
 
 This layer is not yet the browser authority. It is the target behind the same
 shadow-and-rollback policy used for navigation; browser loading and URL state
