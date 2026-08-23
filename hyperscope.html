@@ -376,6 +376,7 @@ import {
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
   framedSphereDistance,
+  interpolateWalkAnchorEye,
   interpolateSphereFit,
   isPrimarySelectionClick,
   mobiusConformalScaleAt,
@@ -386,7 +387,7 @@ import {
   smootherstep01,
   transportCameraAcrossSphereReflections,
   transportPointAndDirectionsAcrossSphereReflections,
-} from './hyperscope_focus.mjs?rev=scene-relative-walk-speed-v1';
+} from './hyperscope_focus.mjs?rev=walk-anchor-glide-v1';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -1776,6 +1777,7 @@ const surfaceWalk = {
   inputRevision: null,
   controllerRight: 0,
   controllerForward: 0,
+  anchorTransition: null,
   baseEyeHeight: 0.035,
   lastLodAt: 0,
   error: null,
@@ -1942,6 +1944,135 @@ function surfaceSmoothDirection(from, to, amount) {
   )) || to.slice();
 }
 
+function activeCameraFrame() {
+  if (authoredCamera?.eye && authoredCamera?.target) {
+    const eye = Array.from(authoredCamera.eye, Number);
+    const target = Array.from(authoredCamera.target, Number);
+    const forward = surfaceNormalize(target.map((value, axis) => value - eye[axis]));
+    if (forward && eye.every(Number.isFinite) && target.every(Number.isFinite)) {
+      let right = surfaceNormalize(surfaceCross(forward, [0, 1, 0]));
+      if (!right) {
+        const prior = manualCameraBasis(inputCameraBasis);
+        right = surfaceProjectTangent(prior.slice(0, 3), forward);
+      }
+      const up = right && surfaceNormalize(surfaceCross(right, forward));
+      if (right && up) {
+        return {
+          eye,
+          basis: [...right, ...up, ...forward],
+          controlDistance: Math.max(0.1, Math.hypot(
+            target[0] - eye[0], target[1] - eye[1], target[2] - eye[2],
+          )),
+        };
+      }
+    }
+  }
+  const basis = Array.from(manualCameraBasis(inputCameraBasis));
+  return {
+    eye: [
+      panX - basis[6] * zoom,
+      panY - basis[7] * zoom,
+      panZ - basis[8] * zoom,
+    ],
+    basis,
+    controlDistance: zoom,
+  };
+}
+
+function applyManualCameraFrame(frame) {
+  if (!frame?.eye || !frame?.basis) return false;
+  manualCameraBasisState.set(frame.basis);
+  manualCameraBasisReady = true;
+  zoom = Math.max(0.1, Number(frame.controlDistance) || zoom);
+  panX = frame.eye[0] + frame.basis[6] * zoom;
+  panY = frame.eye[1] + frame.basis[7] * zoom;
+  panZ = frame.eye[2] + frame.basis[8] * zoom;
+  syncManualCameraEuler();
+  return true;
+}
+
+function beginSurfaceWalkAnchorTransition(startFrame, nowMs = performance.now()) {
+  if (!startFrame?.eye || !startFrame?.basis) return false;
+  surfaceWalk.anchorTransition = {
+    startEye: startFrame.eye.slice(),
+    startBasis: startFrame.basis.slice(),
+    startedAt: nowMs,
+    durationMs: Math.max(1, focusTransitionCentiseconds.peek() * 10),
+    inputRevision: manualCameraInputRevision,
+    hopHeight: null,
+  };
+  return true;
+}
+
+function applySurfaceWalkAnchorTransition(nowMs = performance.now()) {
+  const transition = surfaceWalk.anchorTransition;
+  if (!transition) return false;
+  if (transition.inputRevision !== manualCameraInputRevision) {
+    surfaceWalk.anchorTransition = null;
+    return false;
+  }
+
+  const targetFrame = activeCameraFrame();
+  const progress = (nowMs - transition.startedAt) / transition.durationMs;
+  if (transition.hopHeight == null) {
+    const distance = Math.hypot(
+      targetFrame.eye[0] - transition.startEye[0],
+      targetFrame.eye[1] - transition.startEye[1],
+      targetFrame.eye[2] - transition.startEye[2],
+    );
+    const sceneRadius = Math.max(sceneSourceBound?.radius || 1, 1e-4);
+    transition.hopHeight = Math.min(distance * 0.22, sceneRadius * 0.12);
+  }
+  const interpolated = interpolateWalkAnchorEye(
+    transition.startEye,
+    targetFrame.eye,
+    surfaceWalk.filteredNormal,
+    progress,
+    transition.hopHeight,
+  );
+  if (!interpolated) {
+    surfaceWalk.anchorTransition = null;
+    return false;
+  }
+
+  const forward = surfaceSmoothDirection(
+    transition.startBasis.slice(6, 9),
+    targetFrame.basis.slice(6, 9),
+    interpolated.easedProgress,
+  );
+  const upHint = surfaceSmoothDirection(
+    transition.startBasis.slice(3, 6),
+    targetFrame.basis.slice(3, 6),
+    interpolated.easedProgress,
+  );
+  const right = surfaceNormalize(surfaceCross(forward, upHint));
+  const up = right && surfaceNormalize(surfaceCross(right, forward));
+  if (!right || !up) {
+    surfaceWalk.anchorTransition = null;
+    return false;
+  }
+  applyManualCameraFrame({
+    eye: interpolated.eye,
+    basis: [...right, ...up, ...forward],
+    controlDistance: targetFrame.controlDistance,
+  });
+  if (surfaceWalk.snapshot) surfaceWalk.snapshot.eye_position = interpolated.eye.slice();
+
+  if (nowMs - surfaceWalk.lastLodAt >= 100) {
+    surfaceWalk.lastLodAt = nowMs;
+    debouncedLodRecompute();
+  }
+  if (progress >= 1) {
+    surfaceWalk.anchorTransition = null;
+    selectionLabel(
+      `Surface walk · node ${surfaceWalk.snapshot?.node} face ${surfaceWalk.snapshot?.face}`
+      + ' · WASD · right-click another surface or empty space to detach',
+    );
+    syncURL();
+  }
+  return true;
+}
+
 function applySurfaceWalkCamera(snapshot, orient = true, deltaSeconds = 0) {
   if (!snapshot || snapshot.status !== 'attached' || !snapshot.output_normal
       || !snapshot.output_position) return false;
@@ -2020,6 +2151,7 @@ function applySurfaceWalkCamera(snapshot, orient = true, deltaSeconds = 0) {
   panZ = eye[2] + basis[8] * zoom;
   snapshot.output_normal = normal;
   snapshot.eye_position = eye;
+  applySurfaceWalkAnchorTransition();
   return true;
 }
 
@@ -2037,12 +2169,14 @@ function updateSurfaceWalkSnapshot(snapshot, { orient = true, deltaSeconds = 0 }
     surfaceWalk.inputRevision = null;
     surfaceWalk.controllerRight = 0;
     surfaceWalk.controllerForward = 0;
+    surfaceWalk.anchorTransition = null;
     selectionLabel(`Surface walk detached · ${surfaceWalk.error}`);
     return false;
   }
   if (!applySurfaceWalkCamera(snapshot, orient, deltaSeconds)) {
     surfaceWalk.active = false;
     surfaceWalk.error = 'invalid contact frame';
+    surfaceWalk.anchorTransition = null;
     selectionLabel('Surface walk detached · invalid contact frame');
     return false;
   }
@@ -2051,7 +2185,10 @@ function updateSurfaceWalkSnapshot(snapshot, { orient = true, deltaSeconds = 0 }
   surfaceWalk.error = null;
   surfaceWalk.keys = Array.from(surfaceWalkKeys).sort();
   selectionLabel(
-    `Surface walk · node ${snapshot.node} face ${snapshot.face} · WASD · right-click detaches`,
+    surfaceWalk.anchorTransition
+      ? `Surface walk · gliding to node ${snapshot.node} face ${snapshot.face}…`
+      : `Surface walk · node ${snapshot.node} face ${snapshot.face}`
+        + ' · WASD · right-click another surface or empty space to detach',
   );
   return true;
 }
@@ -2070,6 +2207,7 @@ function detachSurfaceWalk(message = 'Surface walk detached') {
   surfaceWalk.inputRevision = null;
   surfaceWalk.controllerRight = 0;
   surfaceWalk.controllerForward = 0;
+  surfaceWalk.anchorTransition = null;
   selectionLabel(message);
 }
 
@@ -2268,18 +2406,17 @@ canvas.addEventListener('click', e => {
 
 canvas.addEventListener('contextmenu', e => {
   e.preventDefault();
-  if (surfaceWalk.active) {
-    detachSurfaceWalk();
-    return;
-  }
+  const startFrame = activeCameraFrame();
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
   const picked = pickSurfaceAtCanvasPixel(x, y);
   if (!picked?.barycentric) {
-    selectionLabel('No walkable surface under pointer');
+    if (surfaceWalk.active) detachSurfaceWalk();
+    else selectionLabel('No walkable surface under pointer');
     return;
   }
+  applyManualCameraFrame(startFrame);
   authoredCamera = null;
   const snapshot = mr_attachSurface(
     picked.face,
@@ -2287,6 +2424,7 @@ canvas.addEventListener('contextmenu', e => {
     surfaceWalkEyeHeight(),
     pickCameraPos,
   );
+  if (snapshot?.status === 'attached') beginSurfaceWalkAnchorTransition(startFrame);
   if (updateSurfaceWalkSnapshot(snapshot)) {
     mr_highlightFace(picked.face);
     debouncedLodRecompute();
@@ -2539,6 +2677,7 @@ function transportManualCamera(previous, next) {
   // A transition authored in the previous output chart is no longer valid.
   // Explicit reframe remains available after the sphere edit completes.
   cameraFocusTransition = null;
+  surfaceWalk.anchorTransition = null;
   return true;
 }
 

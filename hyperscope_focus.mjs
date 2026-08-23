@@ -519,6 +519,37 @@ export function smootherstep01(value) {
   return t * t * t * (t * (t * 6 - 15) + 10);
 }
 
+/**
+ * Glide an eye point to a surface anchor with a minimum-jerk quintic ease and
+ * a gentle hop along the destination surface normal.
+ */
+export function interpolateWalkAnchorEye(
+  startEye,
+  targetEye,
+  targetNormal,
+  progress,
+  hopHeight = 0,
+) {
+  const start = Array.from(startEye || [], Number);
+  const target = Array.from(targetEye || [], Number);
+  const normal = normalizedDirection(targetNormal);
+  if (start.length !== 3 || target.length !== 3
+      || !finitePoint(...start) || !finitePoint(...target) || !normal) {
+    return null;
+  }
+  const t = smootherstep01(progress);
+  const safeHopHeight = Number.isFinite(Number(hopHeight))
+    ? Math.max(0, Number(hopHeight))
+    : 0;
+  const hop = Math.sin(Math.PI * t) * safeHopHeight;
+  return {
+    eye: start.map((value, axis) =>
+      value + (target[axis] - value) * t + normal[axis] * hop),
+    easedProgress: t,
+    hop,
+  };
+}
+
 /** Interpolate sphere center linearly and positive radius logarithmically. */
 export function interpolateSphereFit(start, target, progress) {
   const t = smootherstep01(progress);

@@ -12,6 +12,7 @@ import {
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
   framedSphereDistance,
+  interpolateWalkAnchorEye,
   interpolateSphereFit,
   isPrimarySelectionClick,
   mobiusConformalScaleAt,
@@ -217,6 +218,20 @@ test('sphere fitting eases endpoints and interpolates radius without crossing ze
   );
   assert.deepEqual(halfway.center, [1, 2, 3]);
   assert(Math.abs(halfway.radius - 2) < 1e-12);
+});
+
+test('walk anchor glide eases exactly between endpoints with a normal hop', () => {
+  const start = interpolateWalkAnchorEye([0, 0, 0], [10, 0, 0], [0, 2, 0], 0, 2);
+  const middle = interpolateWalkAnchorEye([0, 0, 0], [10, 0, 0], [0, 2, 0], 0.5, 2);
+  const end = interpolateWalkAnchorEye([0, 0, 0], [10, 0, 0], [0, 2, 0], 1, 2);
+  assert.deepEqual(start.eye, [0, 0, 0]);
+  assert.deepEqual(middle.eye, [5, 2, 0]);
+  assert.equal(end.eye[0], 10);
+  assert(Math.abs(end.eye[1]) < 1e-12);
+  assert.equal(end.eye[2], 0);
+  assert.equal(start.hop, 0);
+  assert(Math.abs(end.hop) < 1e-12);
+  assert.equal(interpolateWalkAnchorEye([0, 0], [1, 2, 3], [0, 1, 0], 0.5), null);
 });
 
 test('object focus sphere applies a stable margin and rejects invalid bounds', () => {
