@@ -2611,6 +2611,148 @@ pub fn load_test_shape(shape: &str, param1: u32, param2: u32) -> JsValue {
     result.into()
 }
 
+/// Build a tiny Rust-authored scene for interactively explaining QB patches
+/// and adaptive tessellation. LOD fields are updated separately so animation
+/// transfers only the compact six-float classification, not source instances.
+#[wasm_bindgen]
+pub fn load_patch_lab(shape: &str, grid: u32, bend: f32) -> JsValue {
+    use quilting_core::educational::{PatchLabMesh, PatchLabShape};
+
+    let shape = match shape {
+        "triangle" => PatchLabShape::Triangle,
+        "plane" => PatchLabShape::Plane,
+        "cube" => PatchLabShape::Cube,
+        _ => return JsValue::NULL,
+    };
+    let mesh = PatchLabMesh::new(shape, grid, bend as f64);
+    let num_faces = mesh.faces.len();
+    let mut instances = vec![0.0f32; num_faces * instance_layout::STRIDE];
+    for (face_index, face) in mesh.faces.iter().enumerate() {
+        let mut writer = InstanceWriter::new(&mut instances, face_index);
+        for corner in 0..3 {
+            let vertex = face[corner];
+            let point = mesh.positions[vertex as usize];
+            let weight = mesh.face_weights[face_index][corner];
+            writer.set_position(
+                corner,
+                vertex,
+                [point[0] as f32, point[1] as f32, point[2] as f32],
+            );
+            writer.set_weight(corner, [
+                weight[0] as f32,
+                weight[1] as f32,
+                weight[2] as f32,
+                weight[3] as f32,
+            ]);
+        }
+        writer.set_edge_lods([4.0; 3]);
+        writer.set_vertex_lods([4.0; 3]);
+        writer.set_face_id(face_index as u32);
+        writer.set_uvs([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        // Zero smooth normals intentionally select analytic QB normals in the
+        // vertex shader. This keeps the curved triangle honest and the cube
+        // faceted without duplicating its corner vertices.
+    }
+
+    REMESH_SOURCE.with(|source| {
+        *source.borrow_mut() = Some(RemeshSource {
+            positions: mesh.positions.clone(),
+            faces: mesh.faces.iter()
+                .map(|face| face.map(|vertex| vertex as usize))
+                .collect(),
+        });
+    });
+    PATCH_LAB_SOURCE.with(|source| *source.borrow_mut() = Some(mesh.clone()));
+
+    let result = js_sys::Object::new();
+    let js_instances = js_sys::Float32Array::new_with_length(instances.len() as u32);
+    js_instances.copy_from(&instances);
+    js_sys::Reflect::set(&result, &"instances".into(), &js_instances).unwrap();
+    js_sys::Reflect::set(&result, &"num_faces".into(),
+        &JsValue::from_f64(num_faces as f64)).unwrap();
+    js_sys::Reflect::set(&result, &"num_vertices".into(),
+        &JsValue::from_f64(mesh.positions.len() as f64)).unwrap();
+    let materials = js_sys::Int32Array::new_with_length(num_faces as u32);
+    js_sys::Reflect::set(&result, &"face_materials".into(), &materials).unwrap();
+    result.into()
+}
+
+/// Re-sample and reconcile the current patch-laboratory LOD field.
+#[wasm_bindgen]
+pub fn update_patch_lab_lods(
+    field: &str,
+    phase: f32,
+    min_exp: u32,
+    max_exp: u32,
+    edge_a_exp: u32,
+    edge_b_exp: u32,
+    edge_c_exp: u32,
+) -> JsValue {
+    use quilting_core::educational::{PatchLabField, PatchLabLodConfig};
+
+    let field = match field {
+        "uniform" => PatchLabField::Uniform,
+        "wave" => PatchLabField::Wave,
+        "radial" => PatchLabField::Radial,
+        "sweep" => PatchLabField::Sweep,
+        "edges" => PatchLabField::ManualEdges,
+        _ => return JsValue::NULL,
+    };
+    PATCH_LAB_SOURCE.with(|source| {
+        let source = source.borrow();
+        let Some(mesh) = source.as_ref() else { return JsValue::NULL };
+        let lods = mesh.lods(PatchLabLodConfig {
+            field,
+            phase: phase as f64,
+            min_exp,
+            max_exp,
+            manual_edge_exp: [edge_a_exp, edge_b_exp, edge_c_exp],
+        });
+        let mut face_lods = Vec::with_capacity(lods.residents.len() * batch::FACE_LOD_STRIDE);
+        let mut requested = Vec::with_capacity(lods.residents.len() * 3);
+        let mut actual = Vec::with_capacity(lods.residents.len() * 3);
+        for (wanted, resident) in lods.requested.iter().zip(&lods.residents) {
+            requested.extend_from_slice(wanted);
+            actual.extend_from_slice(&resident.edge_lods());
+            face_lods.extend_from_slice(&[
+                resident.canonical[0] as f32,
+                resident.canonical[1] as f32,
+                resident.canonical[2] as f32,
+                resident.perm_index as f32,
+                quilting_core::permutation::perm_sign(resident.perm_index) as f32,
+                0.0,
+            ]);
+        }
+        let histogram = lods.histogram.iter()
+            .map(|(lod, count)| format!("{}/{}/{}×{}", lod[0], lod[1], lod[2], count))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let result = js_sys::Object::new();
+        let js_lods = js_sys::Float32Array::new_with_length(face_lods.len() as u32);
+        js_lods.copy_from(&face_lods);
+        js_sys::Reflect::set(&result, &"face_lods".into(), &js_lods).unwrap();
+        let js_requested = js_sys::Uint32Array::new_with_length(requested.len() as u32);
+        js_requested.copy_from(&requested);
+        js_sys::Reflect::set(&result, &"requested".into(), &js_requested).unwrap();
+        let js_actual = js_sys::Uint32Array::new_with_length(actual.len() as u32);
+        js_actual.copy_from(&actual);
+        js_sys::Reflect::set(&result, &"actual".into(), &js_actual).unwrap();
+        for (key, value) in [
+            ("promoted_faces", lods.promoted_faces),
+            ("promoted_edges", lods.promoted_edges),
+            ("shared_edges", lods.shared_edges),
+            ("shared_edge_mismatches", lods.shared_edge_mismatches),
+            ("max_face_edge_ratio", lods.max_face_edge_ratio as usize),
+        ] {
+            js_sys::Reflect::set(&result, &key.into(),
+                &JsValue::from_f64(value as f64)).unwrap();
+        }
+        js_sys::Reflect::set(&result, &"histogram".into(), &histogram.into()).unwrap();
+        result.into()
+    })
+}
+
 /// Source mesh data for remeshing (separate from GLTF_DATA so test shapes work).
 struct RemeshSource {
     positions: Vec<[f64; 3]>,
@@ -2619,6 +2761,7 @@ struct RemeshSource {
 
 thread_local! {
     static REMESH_SOURCE: RefCell<Option<RemeshSource>> = RefCell::new(None);
+    static PATCH_LAB_SOURCE: RefCell<Option<quilting_core::educational::PatchLabMesh>> = const { RefCell::new(None) };
 }
 
 /// Remesh the currently loaded glTF model into QB patches.

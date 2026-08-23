@@ -96,6 +96,11 @@ steps, follow the [hacker-night runbook](docs/hacker-night-runbook.md). Bundled
 third-party asset provenance and the remaining public-redistribution blockers
 are recorded in [ASSET_ATTRIBUTION.md](ASSET_ATTRIBUTION.md).
 
+The sidebar's **Patch Lab** opens a single curved QB triangle, a shared-edge
+plane, or a twelve-triangle cube in the production renderer. Its direct edge
+controls and animated LOD fields show requested versus crack-safe reconciled
+tessellation; see the [Patch Lab guide](docs/patch-lab.md).
+
 The Remesh Lab, a workbench for the mesh-to-QB-patch fitting pipeline:
 
 ```sh
@@ -146,6 +151,7 @@ scripts/fetch-assets.sh
 - [Hyperscape conformal scene model](docs/conformal-scene-model.md)
 - [Focus, selection, and navigation roadmap](docs/focus-navigation-roadmap.md)
 - [Meshoptimizer integration roadmap](docs/meshoptimizer-roadmap.md)
+- [Interactive Patch Lab](docs/patch-lab.md)
 
 ## License
 

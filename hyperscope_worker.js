@@ -334,6 +334,33 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'load_patch_lab') {
+    const result = wasm.load_patch_lab(data.shape, data.grid || 8, data.bend || 0);
+    const transfers = [];
+    if (result?.instances?.buffer) transfers.push(result.instances.buffer);
+    if (result?.face_materials?.buffer) transfers.push(result.face_materials.buffer);
+    self.postMessage({ type: 'patch_lab_loaded', id, result }, transfers);
+    return;
+  }
+
+  if (type === 'update_patch_lab_lods') {
+    const result = wasm.update_patch_lab_lods(
+      data.field,
+      data.phase || 0,
+      data.minExp || 0,
+      data.maxExp || 0,
+      data.edgeAExp || 0,
+      data.edgeBExp || 0,
+      data.edgeCExp || 0,
+    );
+    const transfers = [];
+    if (result?.face_lods?.buffer) transfers.push(result.face_lods.buffer);
+    if (result?.requested?.buffer) transfers.push(result.requested.buffer);
+    if (result?.actual?.buffer) transfers.push(result.actual.buffer);
+    self.postMessage({ type: 'patch_lab_lods', id, result }, transfers);
+    return;
+  }
+
   if (type === 'remesh') {
     const targetPatches = data.targetPatches || 200;
     const stats = wasm.remesh_current_model(targetPatches);

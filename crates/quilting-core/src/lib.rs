@@ -56,6 +56,7 @@ pub mod shapes;
 pub mod evaluate;
 pub mod conformal_lod;
 pub mod batch;
+pub mod educational;
 
 pub use atlas::TessellationAtlas;
 pub use evaluate::FaceInstance;

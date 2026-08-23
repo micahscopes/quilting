@@ -55,6 +55,9 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 .hs-diag h3{font-size:10px;color:#c9d1d9;margin-top:7px;text-transform:uppercase;letter-spacing:.7px}
 .hs-diag pre{font:9px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-word;color:#8b949e;margin-top:2px}
 .hs-warn{color:#f0883e!important}
+.lab-note{font-size:9px;line-height:1.4;color:#6e7681;margin-top:5px}
+.lab-stats{font:9px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;color:#8b949e;margin-top:6px;white-space:normal}
+.lab-stats .ok{color:#3fb950}.lab-stats .promoted{color:#d29922}.lab-stats .val{color:#58a6ff}
 #drop-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:10;border:3px dashed #58a6ff;background:rgba(31,111,235,0.08);align-items:center;justify-content:center}
 #drop-overlay.active{display:flex}
 #drop-overlay span{font-size:18px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase;pointer-events:none}
@@ -168,6 +171,53 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="min-px-sub" min="1" max="64" value="16" step="0.1"><span class="v" id="min-px-sub-v">16.0</span></div>
     <label>Atlas resolution (reload to apply)</label>
     <div class="sr"><input type="range" id="atlas-exp" min="3" max="9" value="7" step="1"><span class="v" id="atlas-exp-v">7</span></div>
+  </div>
+
+  <div class="section" id="patch-lab-section">
+    <label>Patch Lab</label>
+    <div class="btns" id="patch-lab-shapes">
+      <button data-shape="triangle">Tri patch</button>
+      <button data-shape="plane">Plane</button>
+      <button data-shape="cube">Cube</button>
+    </div>
+    <label style="margin-top:6px">LOD function</label>
+    <select id="patch-lab-field">
+      <option value="edges">Three edge controls</option>
+      <option value="wave">Traveling wave</option>
+      <option value="radial">Radial rings</option>
+      <option value="sweep">Moving detail band</option>
+      <option value="uniform">Uniform</option>
+    </select>
+    <div id="patch-lab-edges" style="margin-top:5px">
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">BC</span><input type="range" id="patch-lab-edge-a" min="0" max="7" value="3" step="1"><span class="v" id="patch-lab-edge-a-v">8</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">CA</span><input type="range" id="patch-lab-edge-b" min="0" max="7" value="4" step="1"><span class="v" id="patch-lab-edge-b-v">16</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">AB</span><input type="range" id="patch-lab-edge-c" min="0" max="7" value="4" step="1"><span class="v" id="patch-lab-edge-c-v">16</span></div>
+    </div>
+    <div id="patch-lab-field-controls">
+      <label style="margin-top:5px">Requested exponent range</label>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">Min</span><input type="range" id="patch-lab-min" min="0" max="7" value="1" step="1"><span class="v" id="patch-lab-min-v">2</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">Max</span><input type="range" id="patch-lab-max" min="0" max="7" value="6" step="1"><span class="v" id="patch-lab-max-v">64</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">Phase</span><input type="range" id="patch-lab-phase" min="0" max="6.283" value="0" step="0.001"><span class="v" id="patch-lab-phase-v">0.00</span></div>
+    </div>
+    <div id="patch-lab-bend" style="margin-top:5px">
+      <label>QB corner-weight bend</label>
+      <div class="sr"><input type="range" id="patch-lab-bend-slider" min="0" max="100" value="55" step="1"><span class="v" id="patch-lab-bend-slider-v">0.55</span></div>
+    </div>
+    <div id="patch-lab-grid" style="display:none;margin-top:5px">
+      <label>Plane grid</label>
+      <div class="sr"><input type="range" id="patch-lab-grid-slider" min="2" max="16" value="8" step="1"><span class="v" id="patch-lab-grid-slider-v">8²</span></div>
+    </div>
+    <div class="toggle-row" style="margin-top:6px">
+      <div class="toggle" id="patch-lab-animate"></div>
+      <span class="toggle-label">Animate LOD function</span>
+    </div>
+    <div class="btns" style="margin-top:5px">
+      <button id="patch-lab-both">Surface + wire</button>
+      <button id="patch-lab-colors">LOD colors</button>
+      <button id="patch-lab-exit">Exit lab</button>
+    </div>
+    <div class="lab-note">The field requests edge levels. Rust then promotes shared edges and enforces a 2:1 face ratio before drawing.</div>
+    <div class="lab-stats" id="patch-lab-stats">Choose a tri patch, plane, or cube.</div>
   </div>
 
   <div class="section">
@@ -291,6 +341,7 @@ import init, {
   mr_setPresentationNodeStates,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
+  mr_debugResidentLodEdges,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
 import {
@@ -1557,7 +1608,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=image-bitmap-upload-v1', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=patch-lab-v1', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -1597,6 +1648,16 @@ const presentationComposition = {
   assets: new Map(),
   primaryAssetId: null,
   totalFaces: 0,
+};
+const patchLab = {
+  active: false,
+  shape: 'triangle',
+  animate: false,
+  updateInFlight: false,
+  updateDirty: false,
+  lastAnimatedAt: -Infinity,
+  loadGeneration: 0,
+  returnUrl: null,
 };
 let nodeFocusRecords = new Map();
 let selectedObject = null;
@@ -2640,12 +2701,221 @@ bindSlider('min-px-sub', lod.minPx, v => v.toFixed(1));
 bindToggle('screen-atten-toggle', lod.screenAtten);
 bindSlider('atlas-exp', lod.atlas, v => v.toFixed(0));
 
+// --- Rust-backed educational patch laboratory ---
+function patchLabPowerLabel(id) {
+  const exponent = parseInt($(id).value, 10);
+  $(`${id}-v`).textContent = String(1 << exponent);
+}
+
+function updatePatchLabControlVisibility() {
+  const directEdges = $('patch-lab-field').value === 'edges';
+  $('patch-lab-edges').style.display = directEdges ? '' : 'none';
+  $('patch-lab-field-controls').style.display = directEdges ? 'none' : '';
+  $('patch-lab-bend').style.display = patchLab.shape === 'triangle' ? '' : 'none';
+  $('patch-lab-grid').style.display = patchLab.shape === 'plane' ? '' : 'none';
+  document.querySelectorAll('#patch-lab-shapes button').forEach(button => {
+    button.classList.toggle('a', patchLab.active && button.dataset.shape === patchLab.shape);
+  });
+  const atlasExp = Math.max(0, Math.min(9, Math.round(lod.atlas.peek())));
+  for (const id of ['patch-lab-min', 'patch-lab-max', 'patch-lab-edge-a', 'patch-lab-edge-b', 'patch-lab-edge-c']) {
+    $(id).max = atlasExp;
+    if (parseInt($(id).value, 10) > atlasExp) $(id).value = atlasExp;
+    patchLabPowerLabel(id);
+  }
+  $('patch-lab-exit').disabled = !patchLab.active;
+}
+
+function patchLabLodRequest() {
+  const atlasExp = Math.max(0, Math.min(9, Math.round(lod.atlas.peek())));
+  const directEdges = $('patch-lab-field').value === 'edges';
+  let minExp = directEdges ? 0 : Math.min(parseInt($('patch-lab-min').value, 10), atlasExp);
+  let maxExp = directEdges ? atlasExp : Math.min(parseInt($('patch-lab-max').value, 10), atlasExp);
+  if (minExp > maxExp) [minExp, maxExp] = [maxExp, minExp];
+  return {
+    field: $('patch-lab-field').value,
+    phase: parseFloat($('patch-lab-phase').value),
+    minExp,
+    maxExp,
+    edgeAExp: parseInt($('patch-lab-edge-a').value, 10),
+    edgeBExp: parseInt($('patch-lab-edge-b').value, 10),
+    edgeCExp: parseInt($('patch-lab-edge-c').value, 10),
+  };
+}
+
+function renderPatchLabStats(result) {
+  const requested = new Uint32Array(result.requested?.buffer || result.requested || 0);
+  const actual = new Uint32Array(result.actual?.buffer || result.actual || 0);
+  const renderer = mr_debugResidentLodEdges() || {};
+  const mismatch = Number(renderer.mismatchedEdges ?? result.shared_edge_mismatches ?? 0);
+  const edgeSummary = patchLab.shape === 'triangle' && requested.length >= 3
+    ? `<br>requested <span class="val">${Array.from(requested.slice(0, 3)).join(' / ')}</span>`
+      + ` → reconciled <span class="val">${Array.from(actual.slice(0, 3)).join(' / ')}</span>`
+    : '';
+  const promotedClass = result.promoted_edges > 0 ? 'promoted' : 'ok';
+  const promotedText = result.promoted_edges > 0
+    ? `${result.promoted_edges} edge promotion(s) on ${result.promoted_faces} face(s)`
+    : 'no reconciliation promotions';
+  const triangles = Number(renderer.residentTriangles || 0).toLocaleString();
+  $('patch-lab-stats').innerHTML =
+    `<span class="${mismatch === 0 ? 'ok' : 'promoted'}">${mismatch} shared-edge mismatches</span>`
+    + ` · max ratio ${result.max_face_edge_ratio}:1`
+    + `<br><span class="${promotedClass}">${promotedText}</span>`
+    + ` · ${triangles} rendered triangles`
+    + edgeSummary
+    + `<br>resident patterns: <span class="val">${result.histogram || '—'}</span>`;
+}
+
+async function updatePatchLabLods() {
+  if (!patchLab.active) return;
+  if (patchLab.updateInFlight) {
+    patchLab.updateDirty = true;
+    return;
+  }
+  patchLab.updateInFlight = true;
+  patchLab.updateDirty = false;
+  const generation = patchLab.loadGeneration;
+  try {
+    const response = await workerCall('update_patch_lab_lods', patchLabLodRequest());
+    if (!patchLab.active || generation !== patchLab.loadGeneration || !response.result?.face_lods) return;
+    const faceLods = new Float32Array(response.result.face_lods.buffer || response.result.face_lods);
+    mr_buildBatches(faceLods);
+    renderPatchLabStats(response.result);
+  } catch (error) {
+    $('patch-lab-stats').textContent = `LOD field failed: ${error.message}`;
+  } finally {
+    patchLab.updateInFlight = false;
+    if (patchLab.updateDirty && patchLab.active) updatePatchLabLods();
+  }
+}
+
+async function loadPatchLab(shape) {
+  if (!patchLab.active) patchLab.returnUrl = location.href;
+  patchLab.active = true;
+  patchLab.shape = shape;
+  patchLab.updateDirty = false;
+  remeshedMode = false;
+  const generation = ++patchLab.loadGeneration;
+  if (shape === 'triangle') {
+    $('patch-lab-field').value = 'edges';
+  } else if ($('patch-lab-field').value === 'edges') {
+    $('patch-lab-field').value = 'wave';
+  }
+  updatePatchLabControlVisibility();
+  $('patch-lab-stats').textContent = `Loading ${shape} laboratory…`;
+
+  // The laboratory owns the current source geometry. Stop model animation and
+  // authored scene updates; exiting reloads the exact pre-lab URL.
+  animating_sig.set(false);
+  gpuSkinned = false;
+  mr_clearAnimationState();
+  hyperscapeActive = false;
+  authoredCamera = null;
+  authoredLodStates = [];
+  presentationComposition.ready = false;
+  $('presentation-card').classList.remove('active');
+  clearSelectedObject('Patch laboratory');
+
+  try {
+    const response = await workerCall('load_patch_lab', {
+      shape,
+      grid: parseInt($('patch-lab-grid-slider').value, 10),
+      bend: parseInt($('patch-lab-bend-slider').value, 10) / 100,
+    });
+    if (!patchLab.active || generation !== patchLab.loadGeneration) return;
+    const result = response.result;
+    if (!result?.instances) throw new Error('Rust returned no laboratory geometry');
+    currentInstances = new Float32Array(result.instances.buffer || result.instances);
+    currentFaceNodes = new Int32Array(result.num_faces);
+    currentPrimaryFaceCount = result.num_faces;
+    rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
+    setRendererInstanceData(currentInstances, result.num_faces);
+    mr_setFaceMaterials(new Int32Array(result.face_materials.buffer || result.face_materials));
+    mr_setFaceNodes(currentFaceNodes);
+
+    // Start from a stable inspection frame; the ordinary camera, SpaceMouse,
+    // Möbius, and rendering controls remain live from here.
+    mob.xform.set('identity');
+    zoom = shape === 'cube' ? 3.8 : 3.25;
+    rotX = shape === 'cube' ? 0.35 : 0.08;
+    rotY = shape === 'cube' ? 0.55 : 0.0;
+    cameraRoll = 0;
+    panX = 0; panY = 0; panZ = 0;
+    setManualCameraBasisFromEuler();
+    renderMode.set('both');
+    await updatePatchLabLods();
+  } catch (error) {
+    $('patch-lab-stats').textContent = `Patch lab failed: ${error.message}`;
+  }
+}
+
+let patchLabGeometryDebounce = null;
+document.querySelectorAll('#patch-lab-shapes button').forEach(button => {
+  button.addEventListener('click', () => loadPatchLab(button.dataset.shape));
+});
+$('patch-lab-field').addEventListener('change', () => {
+  updatePatchLabControlVisibility();
+  updatePatchLabLods();
+});
+for (const id of ['patch-lab-edge-a', 'patch-lab-edge-b', 'patch-lab-edge-c']) {
+  $(id).addEventListener('input', () => {
+    patchLabPowerLabel(id);
+    updatePatchLabLods();
+  });
+}
+for (const id of ['patch-lab-min', 'patch-lab-max']) {
+  $(id).addEventListener('input', () => {
+    const min = parseInt($('patch-lab-min').value, 10);
+    const max = parseInt($('patch-lab-max').value, 10);
+    if (id === 'patch-lab-min' && min > max) $('patch-lab-max').value = min;
+    if (id === 'patch-lab-max' && max < min) $('patch-lab-min').value = max;
+    patchLabPowerLabel('patch-lab-min');
+    patchLabPowerLabel('patch-lab-max');
+    updatePatchLabLods();
+  });
+}
+$('patch-lab-phase').addEventListener('input', () => {
+  $('patch-lab-phase-v').textContent = parseFloat($('patch-lab-phase').value).toFixed(2);
+  updatePatchLabLods();
+});
+for (const [id, display] of [
+  ['patch-lab-bend-slider', value => (value / 100).toFixed(2)],
+  ['patch-lab-grid-slider', value => `${value}²`],
+]) {
+  $(id).addEventListener('input', () => {
+    $(`${id}-v`).textContent = display(parseInt($(id).value, 10));
+    clearTimeout(patchLabGeometryDebounce);
+    patchLabGeometryDebounce = setTimeout(() => {
+      if (patchLab.active) loadPatchLab(patchLab.shape);
+    }, 70);
+  });
+}
+$('patch-lab-animate').addEventListener('click', () => {
+  patchLab.animate = !patchLab.animate;
+  patchLab.lastAnimatedAt = performance.now();
+  $('patch-lab-animate').classList.toggle('on', patchLab.animate);
+});
+$('patch-lab-both').addEventListener('click', () => renderMode.set('both'));
+$('patch-lab-colors').addEventListener('click', () => renderMode.set('lod'));
+$('patch-lab-exit').addEventListener('click', () => {
+  if (patchLab.returnUrl) location.href = patchLab.returnUrl;
+});
+effect(() => {
+  lod.atlas.get();
+  updatePatchLabControlVisibility();
+  if (patchLab.active) updatePatchLabLods();
+});
+updatePatchLabControlVisibility();
+
 // --- Remesh controls ---
 $('remesh-target').addEventListener('input', () => {
   $('remesh-target-v').textContent = $('remesh-target').value;
 });
 
 async function loadTestShape(shape, p1, p2) {
+  patchLab.active = false;
+  gpuSkinned = false;
+  mr_clearAnimationState();
+  remeshedMode = true;
   $('remesh-stats').textContent = `Loading ${shape}...`;
   const resp = await workerCall('load_test_shape', { shape, param1: p1, param2: p2 });
   const r = resp.result;
@@ -3281,7 +3551,7 @@ let lastAnimationUiAt = -Infinity;
 const ANIMATION_UI_INTERVAL_MS = 50;
 
 async function tickAnimation(t) {
-  if (!gpuSkinned || !meshInfo || animInFlight) return;
+  if (patchLab.active || !gpuSkinned || !meshInfo || animInFlight) return;
   animInFlight = true;
   try {
     const resp = await workerCall('evaluate_animation_frame', { t });
@@ -3303,7 +3573,7 @@ async function tickAnimation(t) {
 let lodDirty = false; // set true when camera moves while LOD is in flight
 
 function debouncedLodRecompute() {
-  if (remeshedMode) return;
+  if (remeshedMode || patchLab.active) return;
   if (lodInFlight) {
     lodDirty = true;
     lodTelemetry.dirty = true;
@@ -3314,7 +3584,7 @@ function debouncedLodRecompute() {
 }
 
 async function recomputeLods() {
-  if (lodInFlight || !meshInfo || remeshedMode) return;
+  if (lodInFlight || !meshInfo || remeshedMode || patchLab.active) return;
   lodInFlight = true;
   lodTelemetry.inFlight = true;
   lodTelemetry.submitted += 1;
@@ -3485,6 +3755,10 @@ async function recomputeLods() {
 }
 
 async function loadModel(buffer, filename) {
+  patchLab.active = false;
+  patchLab.animate = false;
+  $('patch-lab-animate').classList.remove('on');
+  updatePatchLabControlVisibility();
   remeshedMode = false;
   $('stats').textContent = `Loading ${filename}...`;
   const resp = await workerCall('load_gltf_data', { bytes: buffer }, [buffer]);
@@ -3563,9 +3837,9 @@ function frame(ts) {
   // Presentation navigation is Rust-authoritative only while a cue transition
   // is active. Once settled, ordinary controls remain interactive; advancing
   // first synchronizes that edited view back into the controller.
-  tickRustPresentation(deltaSeconds, ts);
+  if (!patchLab.active) tickRustPresentation(deltaSeconds, ts);
 
-  if (animating && gpuSkinned && meshInfo) {
+  if (animating && !patchLab.active && gpuSkinned && meshInfo) {
     const duration = Number(meshInfo.duration) || 0;
     const timeMin = Number(meshInfo.time_min) || 0;
     if (duration > 0) {
@@ -3581,6 +3855,15 @@ function frame(ts) {
     // Keep LOD tracking the animated pose. The scheduler retains at most one
     // in-flight GPU job plus one coalesced follow-up for the newest frame.
     debouncedLodRecompute();
+  }
+
+  if (patchLab.active && patchLab.animate && ts - patchLab.lastAnimatedAt >= 90) {
+    const elapsed = (ts - patchLab.lastAnimatedAt) / 1000;
+    patchLab.lastAnimatedAt = ts;
+    const phase = (parseFloat($('patch-lab-phase').value) + elapsed * 1.35) % (Math.PI * 2);
+    $('patch-lab-phase').value = phase;
+    $('patch-lab-phase-v').textContent = phase.toFixed(2);
+    updatePatchLabLods();
   }
 
   // WebHID reports update a retained target state; camera integration happens
