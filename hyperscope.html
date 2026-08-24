@@ -986,6 +986,10 @@ $('sidebar-toggle').onclick = () => {
 // --- Camera ---
 let rotX = 0.3, rotY = 0.5, cameraRoll = 0, zoom = 3.0;
 let panX = 0, panY = 0, panZ = 0;
+// The orbit/control pivot is not automatically a semantic look-at point.
+// Free camera motion transports the sight tangent through conformal chart
+// changes; object reframe/pivot actions explicitly opt into point transport.
+let manualCameraSemanticTargetEnabled = false;
 let drag = false, lx = 0, ly = 0;
 const DEFAULT_WALK_RADII_PER_SECOND = 0.2;
 
@@ -1008,6 +1012,9 @@ const spaceMouseBlenderRotateInvert = signal(0, 'smbrinv');
 bindSlider('spacemouse-move', spaceMouseMove, value => (value / 100).toFixed(2));
 bindSlider('spacemouse-rotate', spaceMouseRotate, value => (value / 100).toFixed(2));
 bindSlider('camera-fov', cameraFovDegrees, value => `${value.toFixed(0)}°`);
+$('camera-fov').addEventListener('input', () => {
+  queueMicrotask(synchronizeRustProjectionLens);
+});
 bindSlider('focus-transition', focusTransitionCentiseconds,
   value => `${(value / 100).toFixed(2)} s`);
 bindSlider('walk-smoothing', walkSmoothingCentiseconds,
@@ -1324,6 +1331,41 @@ const rustNavigationShadowDiagnostics = {
 };
 globalThis.__hyperscopeNavigationShadow = rustNavigationShadowDiagnostics;
 
+function synchronizeRustProjectionLens() {
+  const verticalFovRadians = cameraFovRadians();
+  const near = cameraNearPlane();
+  const far = 10000;
+  try {
+    if (rustNavigationShadow) {
+      rustNavigationShadow.setPerspectiveLens(verticalFovRadians, near, far);
+      rustNavigationShadowSnapshot = rustNavigationShadow.tick(0);
+    }
+    let appSequence = null;
+    let appNavigation = null;
+    if (rustAppShadow) {
+      appSequence = rustAppShadow.setPerspectiveLens(verticalFovRadians, near, far);
+      appNavigation = rustAppShadow.tickNavigation(0);
+    }
+    if (rustPresentationController && appSequence != null && rustAppPresentationPoseReady) {
+      const incumbentSequence = rustPresentationController.setPerspectiveLens(
+        verticalFovRadians,
+        near,
+        far,
+      );
+      if (incumbentSequence !== appSequence) {
+        recordAppShadowMismatch(
+          'camera_lens_sequence',
+          `incumbent ${incumbentSequence} != app ${appSequence}`,
+        );
+      }
+      compareAppPresentationPose(rustPresentationController.tick(0), appNavigation);
+    }
+  } catch (error) {
+    rustNavigationShadowDiagnostics.error = error?.message || String(error);
+    recordAppShadowMismatch('camera_lens', error?.message || String(error));
+  }
+}
+
 function manualNavigationState() {
   const basis = manualCameraBasisState;
   return {
@@ -1333,10 +1375,14 @@ function manualNavigationState() {
       panZ - basis[8] * zoom,
     ],
     target: [panX, panY, panZ],
+    semanticTarget: manualCameraSemanticTargetEnabled ? [panX, panY, panZ] : null,
     right: [basis[0], basis[1], basis[2]],
     up: [basis[3], basis[4], basis[5]],
     forward: [basis[6], basis[7], basis[8]],
     controlDistance: zoom,
+    verticalFovRadians: cameraFovRadians(),
+    near: cameraNearPlane(),
+    far: 10000,
     focusCenter: focusSphere.center,
     focusRadius: focusSphere.radius,
     focusEnabled: focusSphere.active,
@@ -1357,10 +1403,22 @@ function navigationShadowError(snapshot, state = manualNavigationState()) {
     }
   };
   compare(snapshot.camera.eye, state.eye);
-  compare(snapshot.camera.semantic_target, state.target);
+  const snapshotHasTarget = snapshot.camera.semantic_target != null;
+  const stateHasTarget = state.semanticTarget != null;
+  if (!snapshotHasTarget || !stateHasTarget) {
+    if (snapshotHasTarget !== stateHasTarget) error = Infinity;
+  } else {
+    compare(snapshot.camera.semantic_target, state.semanticTarget);
+  }
   compare(snapshot.camera.right, state.right);
   compare(snapshot.camera.up, state.up);
   compare(snapshot.camera.forward, state.forward);
+  error = Math.max(
+    error,
+    Math.abs(snapshot.camera.vertical_fov_radians - state.verticalFovRadians),
+    Math.abs(snapshot.camera.near - state.near),
+    Math.abs(snapshot.camera.far - state.far),
+  );
   compare(snapshot.focus.center, state.focusCenter);
   error = Math.max(error, Math.abs(snapshot.focus.radius - state.focusRadius));
   if (snapshot.focus.focus_enabled !== state.focusEnabled
@@ -1373,6 +1431,12 @@ function navigationShadowError(snapshot, state = manualNavigationState()) {
 function navigationCameraFrameError(snapshot, frame) {
   if (!snapshot?.camera || !frame?.eye || !frame?.basis) return Infinity;
   let error = Math.abs(snapshot.camera.control_distance - frame.controlDistance);
+  error = Math.max(
+    error,
+    Math.abs(snapshot.camera.vertical_fov_radians - cameraFovRadians()),
+    Math.abs(snapshot.camera.near - cameraNearPlane()),
+    Math.abs(snapshot.camera.far - 10000),
+  );
   const compare = (actual, expected) => {
     if (!actual || actual.length !== expected.length) {
       error = Infinity;
@@ -1398,7 +1462,10 @@ function synchronizeRustNavigationShadow() {
       new Float64Array(state.forward),
       new Float64Array(state.up),
       state.controlDistance,
-      new Float64Array(state.target),
+      new Float64Array(state.semanticTarget || []),
+      state.verticalFovRadians,
+      state.near,
+      state.far,
       new Float64Array(state.focusCenter),
       state.focusRadius,
       state.focusEnabled,
@@ -1495,9 +1562,7 @@ function synchronizeRustPresentationFromBrowser() {
   const eye = new Float64Array(state.eye);
   const forward = new Float64Array(state.forward);
   const up = new Float64Array(state.up);
-  const semanticTarget = state.inversionEnabled
-    ? new Float64Array()
-    : new Float64Array(state.target);
+  const semanticTarget = new Float64Array(state.semanticTarget || []);
   const focusCenter = new Float64Array(state.focusCenter);
   const focusCoordinate = fz.focus.peek() / 100;
   const angularAperture = Math.max(fz.bandwidth.peek() / 100, 1e-6);
@@ -1507,6 +1572,9 @@ function synchronizeRustPresentationFromBrowser() {
     up,
     state.controlDistance,
     semanticTarget,
+    state.verticalFovRadians,
+    state.near,
+    state.far,
     focusCenter,
     state.focusRadius,
     state.focusEnabled,
@@ -1523,6 +1591,9 @@ function synchronizeRustPresentationFromBrowser() {
         up,
         state.controlDistance,
         semanticTarget,
+        state.verticalFovRadians,
+        state.near,
+        state.far,
         focusCenter,
         state.focusRadius,
         state.focusEnabled,
@@ -1709,6 +1780,8 @@ function applyRustPresentationNavigation(snapshot) {
   manualCameraBasisState.set(camera.forward, 6);
   manualCameraBasisReady = true;
   zoom = camera.control_distance;
+  cameraFovDegrees.set(camera.vertical_fov_radians * 180 / Math.PI);
+  manualCameraSemanticTargetEnabled = camera.semantic_target != null;
   const target = camera.semantic_target || [
     camera.eye[0] + camera.forward[0] * zoom,
     camera.eye[1] + camera.forward[1] * zoom,
@@ -1994,6 +2067,13 @@ function compareAppPresentationPose(expected, actual) {
     expected.camera.control_distance,
     actual.camera.control_distance,
   );
+  scalar(
+    'camera.vertical_fov_radians',
+    expected.camera.vertical_fov_radians,
+    actual.camera.vertical_fov_radians,
+  );
+  scalar('camera.near', expected.camera.near, actual.camera.near);
+  scalar('camera.far', expected.camera.far, actual.camera.far);
   scalar(
     'camera.transition_remaining',
     expected.camera.camera_transition_remaining,
@@ -2866,6 +2946,7 @@ function selectionLabel(message = '') {
 
 function clearSelectedObject(message = '') {
   selectedObject = null;
+  manualCameraSemanticTargetEnabled = false;
   cameraFocusTransition = null;
   focusSphereTransition = null;
   // Selection is an optional anchor, not ownership of the sphere. Dropping
@@ -2969,6 +3050,7 @@ function refreshSelectedObjectAnchor({ followObjectPivot = false } = {}) {
 
 function beginObjectPivotFocus(target, nowMs = performance.now()) {
   if (!target || spaceMouseNavigation.peek() !== 'object') return;
+  manualCameraSemanticTargetEnabled = true;
   cameraFocusTransition = {
     start: [panX, panY, panZ],
     target: target.slice(),
@@ -2981,6 +3063,7 @@ function reframeSelectedObject(nowMs = performance.now()) {
   const target = refreshSelectedObjectAnchor();
   if (!selectedObject || !target) return false;
   const radius = Math.max(selectedObject.outputRadius || 0, 0.001);
+  manualCameraSemanticTargetEnabled = true;
   cameraFocusTransition = {
     start: [panX, panY, panZ],
     target: target.slice(),
@@ -3075,6 +3158,7 @@ canvas.addEventListener('contextmenu', e => {
     return;
   }
   applyManualCameraFrame(startFrame);
+  manualCameraSemanticTargetEnabled = false;
   authoredCamera = null;
   const snapshot = mr_attachSurface(
     picked.face,
@@ -3355,6 +3439,7 @@ function transportManualCamera(previous, next) {
     ];
     transportedCamera = transportCameraAcrossSphereReflections({
       eye,
+      target: manualCameraSemanticTargetEnabled ? [panX, panY, panZ] : null,
       basis,
       orbitDistance: zoom,
     }, previous, next);
@@ -5340,6 +5425,7 @@ function frame(ts) {
           )));
         }
       } else if (spaceMouseMode === 'camera') {
+        manualCameraSemanticTargetEnabled = navigationMode === 'object';
         const pitch = navigationAxes[3] * rotateScale;
         const yaw = navigationAxes[4] * rotateScale;
         const roll = navigationAxes[5] * rotateScale;

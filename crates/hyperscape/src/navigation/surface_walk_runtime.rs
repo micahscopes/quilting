@@ -1,7 +1,7 @@
 use super::{
-    CameraError, CameraRig, SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition,
-    SurfaceWalkController, SurfaceWalkControls, SurfaceWalkError, SurfaceWalkFrame,
-    SurfaceWalkInput, SurfaceWalkMotion, TransitionEasing,
+    CameraError, CameraRig, PerspectiveLens, SphereReflectionState, SurfaceAnchorTarget,
+    SurfaceAnchorTransition, SurfaceWalkController, SurfaceWalkControls, SurfaceWalkError,
+    SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMotion, TransitionEasing,
 };
 use crate::{
     StableEntityId, SurfaceAddress, SurfaceAdvance, SurfaceAttachment, SurfaceDetachReason,
@@ -145,6 +145,16 @@ impl SurfaceWalkRuntime {
 
     pub fn anchor_transition(&self) -> Option<SurfaceAnchorTransition> {
         self.anchor_transition
+    }
+
+    /// Keep an in-flight re-anchor glide on the same projection contract as
+    /// the live camera. Surface walking may still refine the near plane from
+    /// eye height on its next exact contact step.
+    pub fn set_perspective_lens(&mut self, lens: PerspectiveLens) {
+        if let Some(transition) = self.anchor_transition.as_mut() {
+            transition.start.lens = lens;
+            transition.target.camera.lens = lens;
+        }
     }
 
     pub fn detach(&mut self, reason: SurfaceDetachReason) {
@@ -540,7 +550,10 @@ fn add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CameraBasis, FocusSphere, PerspectiveLens, SurfaceSample, TriangleAdjacency};
+    use crate::{
+        CameraBasis, FocusSphere, NavigationAction, NavigationController, PerspectiveLens,
+        SurfaceSample, TriangleAdjacency,
+    };
     use uuid::Uuid;
 
     #[derive(Clone)]
@@ -685,6 +698,41 @@ mod tests {
         assert_eq!(update.camera, start);
         assert!(update.target_frame.unwrap().camera.eye[1] < 0.0);
         close(update.anchor_transition_remaining_seconds.unwrap(), 1.0);
+    }
+
+    #[test]
+    fn attached_walker_rejects_point_target_mode_and_stays_free_on_the_next_step() {
+        let mut controller = NavigationController {
+            camera: camera([0.2, 2.0, -0.2]),
+            ..NavigationController::default()
+        };
+        let mut field = field();
+        let mut request = attach_request();
+        request.transition_duration_seconds = 0.0;
+        controller
+            .surface_walk
+            .attach(&mut controller.camera, request, &mut field)
+            .unwrap();
+        let before_camera = controller.camera;
+        let before_attachment = controller.surface_walk.attachment();
+
+        controller
+            .push(NavigationAction::SetSemanticTargetEnabled(true))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.camera, before_camera);
+        assert_eq!(controller.camera.semantic_target, None);
+        assert_eq!(controller.surface_walk.attachment(), before_attachment);
+        assert!(controller.diagnostics.0[0]
+            .contains("point-target camera transport is unavailable while surface walking"));
+
+        controller
+            .surface_walk
+            .step(&mut controller.camera, step_request(0.1, 0.0), &mut field)
+            .unwrap();
+        assert_eq!(controller.camera.semantic_target, None);
+        assert_eq!(controller.surface_walk.attachment(), before_attachment);
     }
 
     #[test]

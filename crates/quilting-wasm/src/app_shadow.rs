@@ -1,6 +1,6 @@
 use crate::navigation::{
-    optional_vector3, parse_easing, parse_preset, preset_name, stable_entity_id,
-    synchronized_navigation_state, vector3, SelectedFocusJsSnapshot,
+    optional_vector3, parse_easing, parse_preset, perspective_lens, preset_name,
+    stable_entity_id, synchronized_navigation_state, vector3, SelectedFocusJsSnapshot,
 };
 use hyperscape::{
     map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere, MappedSpaceMouseFrame,
@@ -176,6 +176,9 @@ impl HyperscopeAppShadow {
         up: &[f64],
         control_distance: f64,
         semantic_target: &[f64],
+        vertical_fov_radians: f64,
+        near: f64,
+        far: f64,
         focus_center: &[f64],
         focus_radius: f64,
         focus_enabled: bool,
@@ -189,6 +192,9 @@ impl HyperscopeAppShadow {
             up,
             control_distance,
             semantic_target,
+            vertical_fov_radians,
+            near,
+            far,
             focus_center,
             focus_radius,
             focus_enabled,
@@ -208,6 +214,25 @@ impl HyperscopeAppShadow {
     #[wasm_bindgen(js_name = setPreset)]
     pub fn set_preset(&self, preset: &str) -> Result<u64, JsValue> {
         self.dispatch_navigation(NavigationAction::SetPreset(parse_preset(preset)?))
+    }
+
+    #[wasm_bindgen(js_name = setPerspectiveLens)]
+    pub fn set_perspective_lens(
+        &self,
+        vertical_fov_radians: f64,
+        near: f64,
+        far: f64,
+    ) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::SetPerspectiveLens(perspective_lens(
+            vertical_fov_radians,
+            near,
+            far,
+        )?))
+    }
+
+    #[wasm_bindgen(js_name = setSemanticTargetEnabled)]
+    pub fn set_semantic_target_enabled(&self, enabled: bool) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::SetSemanticTargetEnabled(enabled))
     }
 
     #[wasm_bindgen(js_name = applyFrame)]
@@ -685,6 +710,9 @@ struct ShadowCameraSnapshot {
     forward: [f64; 3],
     control_distance: f64,
     semantic_target: Option<[f64; 3]>,
+    vertical_fov_radians: f64,
+    near: f64,
+    far: f64,
     camera_transition_remaining: Option<f64>,
     surface_anchor_transition_remaining: Option<f64>,
     surface_anchor_hop_height: Option<f64>,
@@ -785,6 +813,9 @@ fn navigation_to_js(
             forward: basis.forward,
             control_distance: frame.camera.control_distance,
             semantic_target: frame.camera.semantic_target,
+            vertical_fov_radians: frame.camera.lens.vertical_fov_radians,
+            near: frame.camera.lens.near,
+            far: frame.camera.lens.far,
             camera_transition_remaining: frame.camera_transition_remaining,
             surface_anchor_transition_remaining: frame.surface_anchor_transition_remaining,
             surface_anchor_hop_height: frame.surface_anchor_hop_height,

@@ -1,6 +1,7 @@
 use super::{
     CameraRig, CameraTransition, FocusNavigation, FocusSphere, NavigationFrame, NavigationPreset,
-    SphereReflectionState, SurfaceAnchorTarget, SurfaceWalkRuntime, TransitionEasing,
+    PerspectiveLens, SphereReflectionState, SurfaceAnchorTarget, SurfaceWalkRuntime,
+    TransitionEasing,
 };
 use crate::{HyperscapeDiagnostics, StableEntityId};
 use bevy_ecs::prelude::{Res, ResMut, Resource};
@@ -15,6 +16,15 @@ pub enum NavigationAction {
     SetPreset(NavigationPreset),
     ApplyFrame(NavigationFrame),
     SetCamera(CameraRig),
+    /// Replace projection parameters without introducing lens zoom into the
+    /// camera's Euclidean/conformal control distance.
+    SetPerspectiveLens(PerspectiveLens),
+    /// Choose whether conformal chart changes transport the current finite
+    /// view target or the free sight tangent at the camera eye. Enabling this
+    /// mode captures `CameraRig::view_target`, so representation changes never
+    /// introduce a latent orientation jump. A genuinely different point is
+    /// introduced by a complete `SetCamera`/`TransitionCamera` target.
+    SetSemanticTargetEnabled(bool),
     TransitionCamera {
         target: CameraRig,
         duration_seconds: f64,
@@ -201,6 +211,10 @@ pub struct NavigationRuntime {
     pub camera_transition: Option<CameraTransition>,
     pub integrated_until_seconds: f64,
     pub last_applied_sequence: Option<u64>,
+    /// Last successfully integrated manual edit of finite-target versus
+    /// free-tangent camera semantics. Presentation reconciliation observes
+    /// this fence so a future or rejected action cannot preempt authored aim.
+    pub last_semantic_target_policy_sequence: Option<u64>,
 }
 
 impl Default for NavigationRuntime {
@@ -211,6 +225,7 @@ impl Default for NavigationRuntime {
             camera_transition: None,
             integrated_until_seconds: 0.0,
             last_applied_sequence: None,
+            last_semantic_target_policy_sequence: None,
         }
     }
 }
@@ -281,6 +296,10 @@ fn integrate_navigation_to(
         let previous_surface_walk = surface_walk.clone();
         let previous_camera = *camera;
         let previous_focus = focus.clone();
+        let changes_semantic_target_policy = matches!(
+            &scheduled.action,
+            NavigationAction::SetSemanticTargetEnabled(_)
+        );
         let result =
             apply_action(scheduled.action, runtime, surface_walk, camera, focus).and_then(|()| {
                 reconcile_reflection(runtime, surface_walk, camera, focus)
@@ -295,6 +314,8 @@ fn integrate_navigation_to(
                 "navigation action {} failed: {error}",
                 scheduled.sequence
             ));
+        } else if changes_semantic_target_policy {
+            runtime.last_semantic_target_policy_sequence = Some(scheduled.sequence);
         }
         runtime.last_applied_sequence = Some(scheduled.sequence);
     }
@@ -331,6 +352,57 @@ fn apply_action(
             runtime.camera_transition = None;
             surface_walk.cancel_anchor_transition();
             *camera = target;
+        }
+        NavigationAction::SetPerspectiveLens(lens) => {
+            let lens = lens.validate().map_err(|error| error.to_string())?;
+            camera.lens = lens;
+            if let Some(transition) = runtime.camera_transition.as_mut() {
+                transition.start.lens = lens;
+                transition.target.lens = lens;
+            }
+            surface_walk.set_perspective_lens(lens);
+        }
+        NavigationAction::SetSemanticTargetEnabled(enabled) => {
+            if enabled
+                && (surface_walk.is_active() || surface_walk.anchor_transition().is_some())
+            {
+                return Err(
+                    "point-target camera transport is unavailable while surface walking".into(),
+                );
+            }
+            if enabled && camera.semantic_target.is_none() {
+                let current_target = camera.view_target();
+                camera.semantic_target = Some(current_target);
+                if let Some(transition) = runtime.camera_transition.as_mut() {
+                    let target_target = transition.target.view_target();
+                    let linear = (transition.elapsed_seconds / transition.duration_seconds)
+                        .clamp(0.0, 1.0);
+                    let sampled = transition.easing.sample(linear);
+                    let remaining = 1.0 - sampled;
+                    let virtual_start = if remaining > 1.0e-12 {
+                        std::array::from_fn(|axis| {
+                            (current_target[axis] - sampled * target_target[axis]) / remaining
+                        })
+                    } else {
+                        current_target
+                    };
+                    if virtual_start.iter().any(|value| !value.is_finite()) {
+                        return Err("semantic target transition became non-finite".into());
+                    }
+                    // Preserve the existing eye/orientation/lens path while
+                    // choosing the unique finite-target start whose sample at
+                    // the current clock equals the live view target.
+                    transition.start.semantic_target = Some(virtual_start);
+                    transition.target.semantic_target = Some(target_target);
+                }
+            } else if !enabled {
+                camera.semantic_target = None;
+                if let Some(transition) = runtime.camera_transition.as_mut() {
+                    transition.start.semantic_target = None;
+                    transition.target.semantic_target = None;
+                }
+            }
+            camera.validate().map_err(|error| error.to_string())?;
         }
         NavigationAction::TransitionCamera {
             target,
@@ -557,7 +629,7 @@ fn reconcile_reflection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HyperscapePlugin;
+    use crate::{CameraBasis, HyperscapePlugin};
     use bevy_app::App;
     use std::time::Duration;
 
@@ -655,6 +727,154 @@ mod tests {
         let partitioned = run(&[0.1; 12].into_iter().chain([0.05]).collect::<Vec<_>>());
         assert_eq!(single, partitioned);
         assert_eq!(single.eye, [4.0, 2.0, -1.0]);
+    }
+
+    #[test]
+    fn perspective_lens_edit_survives_active_camera_and_surface_glides() {
+        let lens = PerspectiveLens {
+            vertical_fov_radians: 1.25,
+            near: 0.002,
+            far: 25_000.0,
+        };
+        let mut camera_glide = NavigationController::default();
+        camera_glide
+            .push(NavigationAction::TransitionCamera {
+                target: CameraRig {
+                    eye: [4.0, 1.0, 2.0],
+                    ..CameraRig::default()
+                },
+                duration_seconds: 1.0,
+                easing: TransitionEasing::Linear,
+            })
+            .unwrap();
+        camera_glide.tick(0.25).unwrap();
+        camera_glide
+            .push(NavigationAction::SetPerspectiveLens(lens))
+            .unwrap();
+        camera_glide.tick(0.0).unwrap();
+        assert_eq!(camera_glide.camera.lens, lens);
+        let transition = camera_glide.runtime.camera_transition.unwrap();
+        assert_eq!(transition.start.lens, lens);
+        assert_eq!(transition.target.lens, lens);
+        camera_glide.tick(0.75).unwrap();
+        assert_eq!(camera_glide.camera.lens, lens);
+
+        let mut surface_glide = NavigationController::default();
+        surface_glide
+            .push(NavigationAction::BeginSurfaceAnchorTransition {
+                target: SurfaceAnchorTarget::new(
+                    CameraRig {
+                        eye: [2.0, 1.0, 3.0],
+                        ..CameraRig::default()
+                    },
+                    [0.0, 1.0, 0.0],
+                )
+                .unwrap(),
+                scene_radius: 10.0,
+                duration_seconds: 1.0,
+                easing: TransitionEasing::Linear,
+            })
+            .unwrap();
+        surface_glide.tick(0.25).unwrap();
+        surface_glide
+            .push(NavigationAction::SetPerspectiveLens(lens))
+            .unwrap();
+        surface_glide.tick(0.0).unwrap();
+        let transition = surface_glide.surface_walk.anchor_transition().unwrap();
+        assert_eq!(surface_glide.camera.lens, lens);
+        assert_eq!(transition.start.lens, lens);
+        assert_eq!(transition.target.camera.lens, lens);
+        surface_glide.tick(0.75).unwrap();
+        assert_eq!(surface_glide.camera.lens, lens);
+    }
+
+    #[test]
+    fn invalid_lens_is_consumed_without_mutating_navigation() {
+        let mut controller = NavigationController::default();
+        let before = controller.clone();
+        controller
+            .push(NavigationAction::SetPerspectiveLens(PerspectiveLens {
+                vertical_fov_radians: f64::NAN,
+                ..PerspectiveLens::default()
+            }))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.camera, before.camera);
+        assert_eq!(controller.focus, before.focus);
+        assert_eq!(controller.runtime.reflection, before.runtime.reflection);
+        assert_eq!(controller.runtime.last_applied_sequence, Some(0));
+        assert_eq!(controller.diagnostics.0.len(), 1);
+        assert!(controller.diagnostics.0[0].contains("camera lens values are invalid"));
+    }
+
+    #[test]
+    fn semantic_target_mode_is_explicit_and_continuous_during_an_active_glide() {
+        let mut controller = NavigationController::default();
+        let target = CameraRig::new(
+            [1.0, 2.0, 4.0],
+            CameraBasis::from_forward_up([-1.0, -0.25, -1.0], [0.0, 1.0, 0.0]).unwrap(),
+            9.0,
+            None,
+            PerspectiveLens::default(),
+        )
+        .unwrap();
+        controller
+            .push(NavigationAction::TransitionCamera {
+                target,
+                duration_seconds: 1.0,
+                easing: TransitionEasing::Linear,
+            })
+            .unwrap();
+        controller.tick(0.25).unwrap();
+        let settled_pose = controller.camera;
+        controller
+            .push(NavigationAction::SetSemanticTargetEnabled(true))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.camera.eye, settled_pose.eye);
+        assert_eq!(controller.camera.orientation, settled_pose.orientation);
+        assert_eq!(
+            controller.camera.semantic_target,
+            Some(settled_pose.view_target())
+        );
+        let transition = controller.runtime.camera_transition.unwrap();
+        assert!(transition.start.semantic_target.is_some());
+        assert!(transition.target.semantic_target.is_some());
+        let resampled = transition.sample(
+            transition.elapsed_seconds / transition.duration_seconds,
+        );
+        for (actual, expected) in resampled
+            .semantic_target
+            .unwrap()
+            .into_iter()
+            .zip(settled_pose.view_target())
+        {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
+        assert_eq!(
+            controller.runtime.last_semantic_target_policy_sequence,
+            Some(1)
+        );
+
+        controller
+            .push(NavigationAction::SetSemanticTargetEnabled(false))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+        assert_eq!(controller.camera.semantic_target, None);
+        let transition = controller.runtime.camera_transition.unwrap();
+        assert_eq!(transition.start.semantic_target, None);
+        assert_eq!(transition.target.semantic_target, None);
+        assert_eq!(
+            controller.runtime.last_semantic_target_policy_sequence,
+            Some(2)
+        );
+        controller.tick(0.75).unwrap();
+        assert_eq!(controller.camera.eye, target.eye);
+        assert_eq!(controller.camera.orientation, target.orientation);
+        assert_eq!(controller.camera.control_distance, target.control_distance);
+        assert_eq!(controller.camera.semantic_target, None);
     }
 
     #[test]

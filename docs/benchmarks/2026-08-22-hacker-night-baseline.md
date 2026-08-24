@@ -823,3 +823,55 @@ over 156 files and 38,578,327 bytes. The remaining browser cutover blockers are
 durable asset-scoped node identity, dispatching renderer picks through the one
 `AppStore` queue, effective focus-enable parity, lens/FOV transport, and
 explicit free-tangent versus semantic-target camera policy.
+
+## Rust-authoritative lens and aim-policy gate
+
+The next 2026-08-24 checkpoint moved the complete perspective lens and camera
+aim representation through the same ordered Rust navigation queue. A validated
+`SetPerspectiveLens` action changes FOV, near, and far together and rewrites
+both endpoints of active camera or surface-anchor transitions, so a glide
+cannot restore stale projection values. Invalid lenses are consumed with a
+diagnostic and no partial mutation. `SetSemanticTargetEnabled` changes only the
+camera representation: enabling captures the current view target without
+moving the camera, disabling restores free-tangent transport, and authored
+transition endpoints retain any deliberate target they already had. Attached
+surface walking rejects point-target mode transactionally because its camera
+contract is target-free. A successful-action sequence fence, observed by the
+presentation runtime, ensures that only an integrated manual aim edit preempts
+a temporarily deferred authored target; future and rejected edits do not.
+Enabling finite-target mode during a live camera glide solves a virtual target
+endpoint whose current-clock sample equals the live view target, preserving the
+existing eye/orientation/lens path without a next-frame aim discontinuity.
+
+Application replay is now version 0.6. It accepts 0.4 and 0.5, performs the
+omitted-selection-pivot migration only for 0.4, and rejects lens or aim-policy
+actions under either legacy version. The checked fingerprints are
+`5f1f3eb11b992f90f2653481d0d4fc5c` for the six-cue presentation,
+`144908e4a979c1a599cfb99f5ca7d4ef` for navigation, and
+`b6f2ab91e8eaa933b056768bc20cdb56` for orchestration.
+
+Both generated-WASM facades now synchronize and report identical non-default
+lenses and explicit target presence. The browser retains a target-presence bit
+independent of inversion, sends the 75-degree default through Rust, restores
+the bit from presentation snapshots, and queues slider edits through the
+application shadow. Its independent transport oracle now rejects a target
+pole instead of silently changing from point-target to free-tangent semantics.
+An isolated live Chrome-MCP probe on page 3 observed 75 degrees,
+`near=0.01`, `far=10000`, exact free-target parity, then exact `[0,0,0]`
+point-target parity after enabling the mode. The page console had no warnings
+or errors. A post-audit isolated probe also confirmed that WASM's `undefined`
+free target and the browser's `null` free target both normalize to absent,
+with no false mismatch.
+
+Validation passed for 89 direct Hyperscape tests, 38 application/replay tests,
+43 browser-independent JavaScript tests, strict no-dependency Hyperscape and
+application Clippy, Rustdoc, all three replay checks, WASM target checking, the
+five generated-WASM smokes, four executable Node/WASM tests, release Trunk
+build, and the live Chrome probe.
+The optimized WASM is 6,072,171 bytes raw and 2,137,056 bytes gzip, an increase
+of 1,973 raw bytes and a decrease of 238 gzip bytes. The source-coherent build
+receipt is `ce5f01b5fe1935b14ae6c6689ce8d7ac` over 156 files and
+38,610,321 bytes.
+Remaining cutover blockers are effective focus-enable parity, durable
+asset-scoped selection identity/pick dispatch, and the raw ECS
+`ProjectionCamera` lens/target path.

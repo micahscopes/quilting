@@ -1308,6 +1308,11 @@ mod tests {
             eye: [1.0, 2.0, 4.0],
             semantic_target: Some([1.0, 2.0, 0.0]),
             control_distance: 4.0,
+            lens: hyperscape::PerspectiveLens {
+                vertical_fov_radians: 1.25,
+                near: 0.002,
+                far: 25_000.0,
+            },
             ..CameraRig::default()
         };
         let focus = FocusNavigation {
@@ -1376,6 +1381,110 @@ mod tests {
         assert_eq!(summary.active_cue, Some(first_cue));
         assert_eq!(summary.revision, store.frame_snapshot().revision);
         assert_eq!(active.active.unwrap().cue_id, first_cue);
+    }
+
+    #[test]
+    fn manual_aim_policy_preempts_pending_presentation_target_without_stopping_pose() {
+        let store = AppStore::default();
+        let sphere = FocusSphere::new([0.0; 3], 3.0).unwrap();
+        let focus = FocusNavigation {
+            sphere,
+            inversion_enabled: true,
+            ..FocusNavigation::default()
+        };
+        let camera = CameraRig {
+            eye: [0.0, 0.0, 6.0],
+            semantic_target: None,
+            control_distance: 6.0,
+            ..CameraRig::default()
+        };
+        store
+            .dispatch(AppEvent::NavigationSynchronized(
+                NavigationSynchronization { camera, focus },
+            ))
+            .unwrap();
+        let fixture = presentation_fixture();
+        let expected = fixture.views[0].camera.to_camera_rig().unwrap();
+        store
+            .dispatch(AppEvent::PresentationLoaded(fixture))
+            .unwrap();
+        dispatch_presentation(&store, 0, 0.0, PresentationAction::Start).unwrap();
+        store
+            .dispatch_navigation(NavigationAction::SetSemanticTargetEnabled(false))
+            .unwrap();
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.7,
+                delta_seconds: 0.7,
+            }))
+            .unwrap();
+
+        let settled = store.frame_snapshot();
+        assert_eq!(settled.camera.semantic_target, None);
+        for (actual, expected) in settled.camera.eye.into_iter().zip(expected.eye) {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
+        assert!((settled.camera.orientation.dot(expected.orientation).abs() - 1.0).abs() < 1.0e-12);
+        assert_eq!(settled.camera.lens, expected.lens);
+    }
+
+    #[test]
+    fn future_aim_policy_does_not_preempt_a_presentation_target_early() {
+        let store = AppStore::default();
+        let sphere = FocusSphere::new([0.0; 3], 3.0).unwrap();
+        store
+            .dispatch(AppEvent::NavigationSynchronized(
+                NavigationSynchronization {
+                    camera: CameraRig {
+                        eye: [0.0, 0.0, 6.0],
+                        semantic_target: None,
+                        control_distance: 6.0,
+                        ..CameraRig::default()
+                    },
+                    focus: FocusNavigation {
+                        sphere,
+                        inversion_enabled: true,
+                        ..FocusNavigation::default()
+                    },
+                },
+            ))
+            .unwrap();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        dispatch_presentation(&store, 0, 0.0, PresentationAction::Start).unwrap();
+        let sequence = store
+            .frame_snapshot()
+            .last_applied_navigation_sequence
+            .unwrap()
+            + 1;
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence,
+                at_seconds: 1.0,
+                value: SemanticAction::Navigate(
+                    NavigationAction::SetSemanticTargetEnabled(false),
+                ),
+            }))
+            .unwrap();
+
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.7,
+                delta_seconds: 0.7,
+            }))
+            .unwrap();
+        assert_eq!(store.frame_snapshot().camera.semantic_target, Some([0.0; 3]));
+
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 1.0,
+                delta_seconds: 0.3,
+            }))
+            .unwrap();
+        let after_due = store.frame_snapshot();
+        assert_eq!(after_due.camera.semantic_target, None);
+        assert_eq!(after_due.last_applied_navigation_sequence, Some(sequence));
     }
 
     #[test]

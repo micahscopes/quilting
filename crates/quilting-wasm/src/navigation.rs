@@ -43,6 +43,9 @@ impl HyperscopeNavigation {
         up: &[f64],
         control_distance: f64,
         semantic_target: &[f64],
+        vertical_fov_radians: f64,
+        near: f64,
+        far: f64,
         focus_center: &[f64],
         focus_radius: f64,
         focus_enabled: bool,
@@ -56,6 +59,9 @@ impl HyperscopeNavigation {
             up,
             control_distance,
             semantic_target,
+            vertical_fov_radians,
+            near,
+            far,
             focus_center,
             focus_radius,
             focus_enabled,
@@ -85,6 +91,25 @@ impl HyperscopeNavigation {
     pub fn set_preset(&mut self, preset: &str) -> Result<u64, JsValue> {
         let preset = parse_preset(preset)?;
         self.push(NavigationAction::SetPreset(preset))
+    }
+
+    #[wasm_bindgen(js_name = setPerspectiveLens)]
+    pub fn set_perspective_lens(
+        &mut self,
+        vertical_fov_radians: f64,
+        near: f64,
+        far: f64,
+    ) -> Result<u64, JsValue> {
+        self.push(NavigationAction::SetPerspectiveLens(perspective_lens(
+            vertical_fov_radians,
+            near,
+            far,
+        )?))
+    }
+
+    #[wasm_bindgen(js_name = setSemanticTargetEnabled)]
+    pub fn set_semantic_target_enabled(&mut self, enabled: bool) -> Result<u64, JsValue> {
+        self.push(NavigationAction::SetSemanticTargetEnabled(enabled))
     }
 
     #[wasm_bindgen(js_name = applyFrame)]
@@ -433,6 +458,9 @@ impl<'a> From<&'a NavigationController> for NavigationSnapshot<'a> {
                 forward: basis.forward,
                 control_distance: controller.camera.control_distance,
                 semantic_target: controller.camera.semantic_target,
+                vertical_fov_radians: controller.camera.lens.vertical_fov_radians,
+                near: controller.camera.lens.near,
+                far: controller.camera.lens.far,
                 camera_transition_remaining,
                 surface_anchor_transition_remaining,
                 surface_anchor_hop_height,
@@ -466,6 +494,9 @@ struct CameraSnapshot {
     forward: [f64; 3],
     control_distance: f64,
     semantic_target: Option<[f64; 3]>,
+    vertical_fov_radians: f64,
+    near: f64,
+    far: f64,
     camera_transition_remaining: Option<f64>,
     surface_anchor_transition_remaining: Option<f64>,
     surface_anchor_hop_height: Option<f64>,
@@ -515,6 +546,9 @@ pub(crate) fn synchronized_navigation_state(
     up: &[f64],
     control_distance: f64,
     semantic_target: &[f64],
+    vertical_fov_radians: f64,
+    near: f64,
+    far: f64,
     focus_center: &[f64],
     focus_radius: f64,
     focus_enabled: bool,
@@ -534,7 +568,7 @@ pub(crate) fn synchronized_navigation_state(
         basis,
         control_distance,
         semantic_target,
-        PerspectiveLens::default(),
+        perspective_lens(vertical_fov_radians, near, far)?,
     )
     .map_err(js_error)?;
     let sphere =
@@ -579,6 +613,20 @@ pub(crate) fn stable_entity_id(value: &str) -> Result<StableEntityId, JsValue> {
         return Err(JsValue::from_str("focus entity UUID must not be nil"));
     }
     Ok(StableEntityId(entity))
+}
+
+pub(crate) fn perspective_lens(
+    vertical_fov_radians: f64,
+    near: f64,
+    far: f64,
+) -> Result<PerspectiveLens, JsValue> {
+    PerspectiveLens {
+        vertical_fov_radians,
+        near,
+        far,
+    }
+    .validate()
+    .map_err(js_error)
 }
 
 pub(crate) fn optional_vector3(values: &[f64], label: &str) -> Result<Option<[f64; 3]>, JsValue> {

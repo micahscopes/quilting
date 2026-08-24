@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.5",
+  "version": "hyperscope-app-replay/0.6",
   "events": [
     {
       "type": "synchronize_navigation",
@@ -282,6 +282,31 @@
     {
       "type": "navigate",
       "sequence": 17,
+      "at_seconds": 3.05,
+      "action": {
+        "action": "set_perspective_lens",
+        "vertical_fov_radians": 1.25,
+        "near": 0.002,
+        "far": 25000.0
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 18,
+      "at_seconds": 3.05,
+      "action": {
+        "action": "set_semantic_target_enabled",
+        "enabled": true
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 3.05,
+      "delta_seconds": 0.0
+    },
+    {
+      "type": "navigate",
+      "sequence": 19,
       "at_seconds": 3.05,
       "action": {
         "action": "anchor_focus",

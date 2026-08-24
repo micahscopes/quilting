@@ -215,6 +215,20 @@ test('target-free camera transport maps the sight tangent without inventing an a
   assert.deepEqual(transported.target, [1, 0, 0]);
 });
 
+test('point-target camera transport rejects a target pole instead of changing aim mode', () => {
+  const camera = {
+    eye: [2, 0, 0],
+    target: [0, 0, 0],
+    basis: [0, 0, -1, 0, 1, 0, -1, 0, 0],
+    orbitDistance: 2,
+  };
+  assert.equal(transportCameraAcrossSphereReflections(
+    camera,
+    { enabled: false },
+    { enabled: true, center: [0, 0, 0], radius: 1 },
+  ), null);
+});
+
 test('camera transport is stable while editing an unchanged inversion sphere', () => {
   const inversion = { enabled: true, center: [1, -2, 0.5], radius: 3 };
   const camera = {

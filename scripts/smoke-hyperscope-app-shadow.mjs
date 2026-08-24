@@ -14,6 +14,9 @@ const {
 const { mapSpaceMouseNavigationAxes } = await import(
   pathToFileURL(`${repository}/spacemouse.mjs`).href
 );
+const { transportCameraAcrossSphereReflections } = await import(
+  pathToFileURL(`${repository}/hyperscope_focus.mjs`).href
+);
 await init({ module_or_path: readFileSync(wasmPath) });
 
 const app = new HyperscopeAppShadow();
@@ -77,6 +80,7 @@ const forward = new Float64Array([0, 0, -1]);
 const up = new Float64Array([0, 1, 0]);
 const target = new Float64Array([0, 0, 0]);
 const focusCenter = new Float64Array([0.5, 0, 0]);
+const projectionLens = [1.25, 0.002, 25_000];
 function assertNavigationParity(actual, expected) {
   assert.equal(actual.elapsed_seconds, expected.elapsed_seconds);
   assert.equal(actual.preset, expected.preset);
@@ -87,6 +91,7 @@ function assertNavigationParity(actual, expected) {
   }
   for (const field of [
     'control_distance', 'camera_transition_remaining',
+    'vertical_fov_radians', 'near', 'far',
     'surface_anchor_transition_remaining', 'surface_anchor_hop_height',
   ]) {
     assert.equal(actual.camera[field], expected.camera[field]);
@@ -110,7 +115,8 @@ function assertNavigationParity(actual, expected) {
 const poleApp = new HyperscopeAppShadow();
 const poleCenter = new Float64Array([0, 0, 3]);
 poleApp.synchronizeNavigation(
-  eye, forward, up, 3, target, poleCenter, 2, false, false, 0.5, 0.1,
+  eye, forward, up, 3, target, ...projectionLens,
+  poleCenter, 2, false, false, 0.5, 0.1,
 );
 const beforePole = poleApp.navigationSnapshot();
 assert.equal(poleApp.setInversionEnabled(true), 0n);
@@ -129,6 +135,117 @@ assert.match(
 );
 poleApp.free();
 
+// Lens and semantic-target presence are camera semantics, not incidental
+// browser projection state. Exercise both generated facades against the
+// independent JavaScript conformal transport oracle in both aim modes.
+const assertArrayClose = (actual, expected, tolerance = 1e-11) => {
+  assert.equal(actual.length, expected.length);
+  actual.forEach((value, index) => {
+    assert.ok(
+      Math.abs(value - expected[index]) <= tolerance,
+      `axis ${index}: ${value} != ${expected[index]}`,
+    );
+  });
+};
+for (const semanticTargetEnabled of [false, true]) {
+  const policyApp = new HyperscopeAppShadow();
+  const policyIncumbent = new HyperscopeNavigation();
+  for (const candidate of [policyApp, policyIncumbent]) {
+    const synchronize = candidate instanceof HyperscopeAppShadow
+      ? candidate.synchronizeNavigation.bind(candidate)
+      : candidate.synchronizeState.bind(candidate);
+    synchronize(
+      eye, forward, up, 3, new Float64Array(), ...projectionLens,
+      focusCenter, 2, false, false, 0.5, 0.1,
+    );
+  }
+  assertNavigationParity(policyApp.navigationSnapshot(), policyIncumbent.snapshot());
+  const beforeInvalidLensApp = policyApp.navigationSnapshot();
+  const beforeInvalidLensIncumbent = policyIncumbent.snapshot();
+  assert.throws(
+    () => policyApp.setPerspectiveLens(Number.NaN, 0.01, 10_000),
+    /camera lens values are invalid/,
+  );
+  assert.throws(
+    () => policyIncumbent.setPerspectiveLens(Number.NaN, 0.01, 10_000),
+    /camera lens values are invalid/,
+  );
+  assert.deepEqual(policyApp.navigationSnapshot(), beforeInvalidLensApp);
+  assert.deepEqual(policyIncumbent.snapshot(), beforeInvalidLensIncumbent);
+
+  assert.equal(
+    policyApp.setPerspectiveLens(1.1, 0.003, 30_000),
+    policyIncumbent.setPerspectiveLens(1.1, 0.003, 30_000),
+  );
+  assertNavigationParity(policyApp.tickNavigation(0), policyIncumbent.tick(0));
+  assert.equal(policyApp.navigationSnapshot().camera.vertical_fov_radians, 1.1);
+  assert.equal(policyApp.navigationSnapshot().camera.near, 0.003);
+  assert.equal(policyApp.navigationSnapshot().camera.far, 30_000);
+  assert.equal(
+    policyApp.setPerspectiveLens(...projectionLens),
+    policyIncumbent.setPerspectiveLens(...projectionLens),
+  );
+  assertNavigationParity(policyApp.tickNavigation(0), policyIncumbent.tick(0));
+
+  if (semanticTargetEnabled) {
+    assert.equal(
+      policyApp.setSemanticTargetEnabled(true),
+      policyIncumbent.setSemanticTargetEnabled(true),
+    );
+    assertNavigationParity(policyApp.tickNavigation(0), policyIncumbent.tick(0));
+    assert.deepEqual(policyApp.navigationSnapshot().camera.semantic_target, [0, 0, 0]);
+  }
+  const reflectionCenter = new Float64Array([1, 0, 0]);
+  for (const candidate of [policyApp, policyIncumbent]) {
+    candidate.setFreeFocusSphere(reflectionCenter, 2);
+  }
+  assertNavigationParity(policyApp.tickNavigation(0), policyIncumbent.tick(0));
+  const beforeReflection = policyApp.navigationSnapshot();
+  const expectedReflection = transportCameraAcrossSphereReflections(
+    {
+      eye: beforeReflection.camera.eye,
+      target: semanticTargetEnabled ? beforeReflection.camera.semantic_target : null,
+      basis: [
+        ...beforeReflection.camera.right,
+        ...beforeReflection.camera.up,
+        ...beforeReflection.camera.forward,
+      ],
+      orbitDistance: beforeReflection.camera.control_distance,
+    },
+    { enabled: false },
+    { enabled: true, center: [1, 0, 0], radius: 2 },
+  );
+  assert.ok(expectedReflection);
+  assert.equal(
+    policyApp.setInversionEnabled(true),
+    policyIncumbent.setInversionEnabled(true),
+  );
+  assertNavigationParity(policyApp.tickNavigation(0), policyIncumbent.tick(0));
+  const reflected = policyApp.navigationSnapshot();
+  assertArrayClose(reflected.camera.eye, expectedReflection.eye);
+  assertArrayClose(
+    [
+      ...reflected.camera.right,
+      ...reflected.camera.up,
+      ...reflected.camera.forward,
+    ],
+    expectedReflection.basis,
+  );
+  assert.ok(
+    Math.abs(reflected.camera.control_distance - expectedReflection.orbitDistance) <= 1e-11,
+  );
+  if (semanticTargetEnabled) {
+    assertArrayClose(reflected.camera.semantic_target, expectedReflection.target);
+  } else {
+    assert.equal(reflected.camera.semantic_target, undefined);
+  }
+  assert.equal(reflected.camera.vertical_fov_radians, projectionLens[0]);
+  assert.equal(reflected.camera.near, projectionLens[1]);
+  assert.equal(reflected.camera.far, projectionLens[2]);
+  policyApp.free();
+  policyIncumbent.free();
+}
+
 // Selection remains one source-chart identity while the derived pivot/radius
 // follows the active reflection chart. A selected pivot at the reflection pole
 // becomes absent without destroying the source selection.
@@ -139,7 +256,8 @@ for (const candidate of [selectionApp, selectionIncumbent]) {
     ? candidate.synchronizeNavigation.bind(candidate)
     : candidate.synchronizeState.bind(candidate);
   synchronize(
-    eye, forward, up, 3, new Float64Array(), focusCenter, 2, false, false, 0.5, 0.1,
+    eye, forward, up, 3, new Float64Array(), ...projectionLens,
+    focusCenter, 2, false, false, 0.5, 0.1,
   );
 }
 const selectedEntity = '70000000-0000-4000-8000-000000000001';
@@ -216,7 +334,8 @@ selectionApp.free();
 selectionIncumbent.free();
 
 incumbent.synchronizeState(
-  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+  eye, forward, up, 3, target, ...projectionLens,
+  focusCenter, 2, false, false, 0.5, 0.1,
 );
 const synchronized = app.synchronizeNavigation(
   eye,
@@ -224,6 +343,7 @@ const synchronized = app.synchronizeNavigation(
   up,
   3,
   target,
+  ...projectionLens,
   focusCenter,
   2,
   false,
@@ -276,10 +396,12 @@ assertNavigationParity(app.tickNavigation(0), incumbent.tick(0));
 const navigationApp = app;
 const navigationIncumbent = incumbent;
 navigationIncumbent.synchronizeState(
-  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+  eye, forward, up, 3, target, ...projectionLens,
+  focusCenter, 2, false, false, 0.5, 0.1,
 );
 navigationApp.synchronizeNavigation(
-  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+  eye, forward, up, 3, target, ...projectionLens,
+  focusCenter, 2, false, false, 0.5, 0.1,
 );
 assert.equal(navigationApp.setPreset('fly'), navigationIncumbent.setPreset('fly'));
 assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
@@ -294,10 +416,12 @@ assert.equal(reverseInterleaveApp.disposition, 'applied');
 assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
 
 navigationIncumbent.synchronizeState(
-  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+  eye, forward, up, 3, target, ...projectionLens,
+  focusCenter, 2, false, false, 0.5, 0.1,
 );
 navigationApp.synchronizeNavigation(
-  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+  eye, forward, up, 3, target, ...projectionLens,
+  focusCenter, 2, false, false, 0.5, 0.1,
 );
 const firstNavigationSequence = navigationApp.setPreset('fly');
 assert.equal(firstNavigationSequence, navigationIncumbent.setPreset('fly'));
@@ -572,7 +696,7 @@ for (const [caseIndex, sample] of spaceMouseCases.entries()) {
   for (const candidate of [mappedApp, semanticApp]) {
     candidate.synchronizeNavigation(
       camera.eye, camera.forward, camera.up, 3, camera.target,
-      focusCenter, 2, false, false, 0.5, 0.1,
+      ...projectionLens, focusCenter, 2, false, false, 0.5, 0.1,
     );
   }
   const expectedFrame = browserSpaceMouseCameraFrame(normalizedAxes, sample);
@@ -613,7 +737,7 @@ const traceSemanticApp = new HyperscopeAppShadow();
 for (const candidate of [traceMappedApp, traceSemanticApp]) {
   candidate.synchronizeNavigation(
     new Float64Array([2, -1, 4]), forward, up, 3, new Float64Array(),
-    focusCenter, 2, false, false, 0.5, 0.1,
+    ...projectionLens, focusCenter, 2, false, false, 0.5, 0.1,
   );
 }
 const traceDeltas = [1 / 128, 1 / 64, 1 / 32];

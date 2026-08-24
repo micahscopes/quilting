@@ -639,7 +639,11 @@ export function transportCameraAcrossSphereReflections(camera, previous, next) {
     const targetRemap = targetUnmap
       ? reflectPointAndFrame(targetUnmap.point, [], after)
       : null;
-    if (targetRemap) target = targetRemap.point;
+    // Point-target transport is an atomic semantic contract. Reaching the
+    // target pole must reject the chart edit instead of silently switching to
+    // free-tangent transport and changing camera meaning.
+    if (!targetRemap) return null;
+    target = targetRemap.point;
   }
   let transportedDistance = orbitDistance * scale;
   let transportedForward = remap.directions[1];

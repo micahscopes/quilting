@@ -354,6 +354,10 @@ pub struct PresentationRuntime {
     /// that case the transition uses its equivalent sight tangent and restores
     /// the authored target only after reaching the destination chart.
     pending_semantic_target: Option<[f64; 3]>,
+    /// Successful manual aim-policy sequence visible when the pending target
+    /// was created. A changed fence preempts restoration; future and rejected
+    /// actions leave it unchanged.
+    pending_semantic_target_policy_sequence: Option<u64>,
 }
 
 impl Presentation {
@@ -537,6 +541,7 @@ impl PresentationRuntime {
             presentation,
             active_cue_index: None,
             pending_semantic_target: None,
+            pending_semantic_target_policy_sequence: None,
         })
     }
 
@@ -636,6 +641,9 @@ impl PresentationRuntime {
             .map_err(|error| PresentationError::Navigation(error.to_owned()))?;
 
         self.pending_semantic_target = pending_semantic_target;
+        self.pending_semantic_target_policy_sequence = navigation
+            .runtime
+            .last_semantic_target_policy_sequence;
         self.reconcile_navigation(navigation);
         self.active_cue_index = Some(index);
         self.snapshot(index)
@@ -659,6 +667,13 @@ impl PresentationRuntime {
         let Some(target) = self.pending_semantic_target else {
             return false;
         };
+        if navigation.runtime.last_semantic_target_policy_sequence
+            != self.pending_semantic_target_policy_sequence
+        {
+            self.pending_semantic_target = None;
+            self.pending_semantic_target_policy_sequence = None;
+            return false;
+        }
         let desired_reflection = if navigation.focus.inversion_enabled {
             SphereReflectionState::Sphere(navigation.focus.sphere)
         } else {
@@ -672,6 +687,7 @@ impl PresentationRuntime {
         }
         navigation.camera.semantic_target = Some(target);
         self.pending_semantic_target = None;
+        self.pending_semantic_target_policy_sequence = None;
         true
     }
 
@@ -1020,6 +1036,51 @@ mod tests {
     }
 
     #[test]
+    fn authored_lens_and_target_presence_interpolate_on_the_shared_camera_clock() {
+        for semantic_target in [None, Some([0.0, 0.0, 0.0])] {
+            let mut document = Presentation::from_json(FIXTURE).unwrap();
+            let cue = document.cues[0].clone();
+            let view = document
+                .views
+                .iter_mut()
+                .find(|view| view.id == cue.view)
+                .unwrap();
+            view.camera.semantic_target = semantic_target;
+            view.camera.vertical_fov_radians = 1.4;
+            view.camera.near = 0.001;
+            view.camera.far = 40_000.0;
+            document.validate().unwrap();
+
+            let mut runtime = PresentationRuntime::new(document).unwrap();
+            let mut navigation = NavigationController::default();
+            let start = navigation.camera;
+            runtime.activate_index(0, &mut navigation).unwrap();
+            assert_eq!(navigation.camera.lens, start.lens);
+            assert_eq!(navigation.camera.semantic_target, None);
+
+            runtime
+                .tick_navigation(&mut navigation, cue.transition.duration_seconds * 0.5)
+                .unwrap();
+            let middle = navigation.camera;
+            assert!((middle.lens.vertical_fov_radians
+                - (start.lens.vertical_fov_radians + 1.4) * 0.5)
+                .abs()
+                < 1.0e-12);
+            assert!((middle.lens.near - (start.lens.near * 0.001).sqrt()).abs() < 1.0e-12);
+            assert!((middle.lens.far - (start.lens.far * 40_000.0).sqrt()).abs() < 1.0e-9);
+            assert_eq!(middle.semantic_target.is_some(), semantic_target.is_some());
+
+            runtime
+                .tick_navigation(&mut navigation, cue.transition.duration_seconds * 0.5)
+                .unwrap();
+            assert_eq!(navigation.camera.lens.vertical_fov_radians, 1.4);
+            assert_eq!(navigation.camera.lens.near, 0.001);
+            assert_eq!(navigation.camera.lens.far, 40_000.0);
+            assert_eq!(navigation.camera.semantic_target, semantic_target);
+        }
+    }
+
+    #[test]
     fn educational_inversion_cue_crosses_a_safe_stable_sphere() {
         let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
         let mut navigation = NavigationController::default();
@@ -1108,6 +1169,89 @@ mod tests {
             SphereReflectionState::Identity
         );
         assert!(navigation.diagnostics.0.is_empty());
+    }
+
+    #[test]
+    fn manual_aim_policy_preempts_a_pending_presentation_target() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let mut navigation = NavigationController::default();
+        let sphere = FocusSphere::new([0.0; 3], 3.0).unwrap();
+        navigation.focus.sphere = sphere;
+        navigation.focus.inversion_enabled = true;
+        navigation.runtime.reflection = SphereReflectionState::Sphere(sphere);
+        navigation.camera = CameraRig {
+            eye: [0.0, 0.0, 6.0],
+            semantic_target: None,
+            control_distance: 6.0,
+            ..CameraRig::default()
+        };
+
+        runtime.activate_index(0, &mut navigation).unwrap();
+        assert!(runtime.pending_semantic_target.is_some());
+        navigation
+            .push(NavigationAction::SetSemanticTargetEnabled(false))
+            .unwrap();
+        runtime.tick_navigation(&mut navigation, 0.0).unwrap();
+        assert!(runtime.pending_semantic_target.is_none());
+        runtime.tick_navigation(&mut navigation, 0.7).unwrap();
+
+        assert_eq!(navigation.camera.semantic_target, None);
+        assert!(navigation
+            .runtime
+            .last_semantic_target_policy_sequence
+            .is_some());
+    }
+
+    #[test]
+    fn rejected_aim_policy_does_not_preempt_a_pending_presentation_target() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let mut navigation = NavigationController::default();
+        let sphere = FocusSphere::new([0.0; 3], 3.0).unwrap();
+        navigation.focus.sphere = sphere;
+        navigation.focus.inversion_enabled = true;
+        navigation.runtime.reflection = SphereReflectionState::Sphere(sphere);
+        navigation.camera = CameraRig {
+            eye: [0.0, 0.0, 6.0],
+            semantic_target: None,
+            control_distance: 6.0,
+            ..CameraRig::default()
+        };
+
+        runtime.activate_index(0, &mut navigation).unwrap();
+        let surface_target = crate::SurfaceAnchorTarget::new(
+            navigation.camera,
+            [0.0, 1.0, 0.0],
+        )
+        .unwrap();
+        navigation
+            .push(NavigationAction::BeginSurfaceAnchorTransition {
+                target: surface_target,
+                scene_radius: 10.0,
+                duration_seconds: 1.0,
+                easing: TransitionEasing::Linear,
+            })
+            .unwrap();
+        navigation.tick(0.0).unwrap();
+        navigation
+            .push(NavigationAction::SetSemanticTargetEnabled(true))
+            .unwrap();
+        runtime.tick_navigation(&mut navigation, 0.0).unwrap();
+
+        assert!(runtime.pending_semantic_target.is_some());
+        assert_eq!(
+            navigation.runtime.last_semantic_target_policy_sequence,
+            None
+        );
+        assert!(navigation.diagnostics.0.last().is_some_and(|diagnostic| {
+            diagnostic.contains("point-target camera transport is unavailable")
+        }));
+
+        navigation
+            .push(NavigationAction::CancelSurfaceAnchorTransition)
+            .unwrap();
+        runtime.tick_navigation(&mut navigation, 0.7).unwrap();
+        assert!(runtime.pending_semantic_target.is_none());
+        assert_eq!(navigation.camera.semantic_target, Some([0.0; 3]));
     }
 
     #[test]

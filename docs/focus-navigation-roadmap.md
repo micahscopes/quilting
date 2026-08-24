@@ -170,7 +170,17 @@ or sphere state.
    lens parity before authority can move. Rust now retains the selected source
    bound and clicked pivot beside its stable entity ID, and the application
    snapshot derives output-chart pivot/radius without destroying selection at
-   a reflection pole.
+   a reflection pole. The same application queue now accepts complete,
+   validated perspective-lens edits and explicit semantic-target enablement.
+   Lens changes persist through active camera and surface-anchor transitions;
+   point-target mode is rejected transactionally while surface walking, whose
+   camera is deliberately target-free. Both WASM facades round-trip the same
+   FOV/near/far and target-presence packet, and the browser's 75-degree default
+   survives Rust synchronization without using inversion as an aim proxy.
+   A successful-action sequence fence makes presentation target preemption
+   integration-time exact: future and rejected manual aim edits cannot clear a
+   deferred authored target. Mid-glide enablement preserves the existing pose
+   trajectory and solves a continuous finite-target path at the current clock.
    The semantic surface-walk response and topology are now composed in
    `SurfaceWalkRuntime`: scene-relative pace and avatar scale, tangent
    velocity, current animated material-point velocity, contact/normal
@@ -199,11 +209,13 @@ or sphere state.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.5
+6. **Persistence and replay — native oracle complete.** Replay version 0.6
    serializes stable entity references, selected source bounds/pivots, derived
    output-chart pivots/radii, detached spheres, camera rig state, and every
-   current high-level navigation action. It accepts 0.4 anchor events by
-   defaulting the omitted pivot to the bound center. Checked navigation and
+   current high-level navigation action, including complete lens and explicit
+   aim-mode edits. It accepts 0.4 anchor events by defaulting the omitted pivot
+   to the bound center, accepts 0.5 without that migration, and rejects the new
+   action vocabulary under either legacy tag. Checked navigation and
    orchestration fixtures cover transition cadence, asset effects,
    presence/authored lanes, and atomic rejection. Browser input capture and
    networking must carry semantic actions or authoritative state deltas, never

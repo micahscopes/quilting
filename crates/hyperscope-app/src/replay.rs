@@ -12,8 +12,8 @@ use crate::{
 };
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
-    NavigationPreset, Presentation, SphereReflectionState, StableEntityId, SurfaceAnchorTarget,
-    TransitionEasing,
+    NavigationPreset, PerspectiveLens, Presentation, SphereReflectionState, StableEntityId,
+    SurfaceAnchorTarget, TransitionEasing,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
@@ -24,8 +24,16 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.5";
-pub const LEGACY_APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.4";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.6";
+pub const LEGACY_APP_REPLAY_VERSION_0_5: &str = "hyperscope-app-replay/0.5";
+pub const LEGACY_APP_REPLAY_VERSION_0_4: &str = "hyperscope-app-replay/0.4";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplaySchema {
+    V0_4,
+    V0_5,
+    V0_6,
+}
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
 const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -149,6 +157,14 @@ pub enum ReplayNavigationAction {
     SetCamera {
         camera: AuthoredCamera,
     },
+    SetPerspectiveLens {
+        vertical_fov_radians: f64,
+        near: f64,
+        far: f64,
+    },
+    SetSemanticTargetEnabled {
+        enabled: bool,
+    },
     TransitionCamera {
         target: AuthoredCamera,
         duration_seconds: f64,
@@ -167,7 +183,7 @@ pub enum ReplayNavigationAction {
     AnchorFocus {
         entity: Uuid,
         source_bound: ReplayFocusSphere,
-        /// Optional only for reading 0.4 traces. New 0.5 traces retain the
+        /// Optional only for reading 0.4 traces. Newer traces retain the
         /// actual clicked/object pivot instead of substituting the bound center.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_pivot: Option<[f64; 3]>,
@@ -277,6 +293,21 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
             ReplayNavigationAction::SetCamera { camera } => Ok(Self::SetCamera(
                 camera.to_camera_rig().map_err(|error| error.to_string())?,
             )),
+            ReplayNavigationAction::SetPerspectiveLens {
+                vertical_fov_radians,
+                near,
+                far,
+            } => PerspectiveLens {
+                vertical_fov_radians,
+                near,
+                far,
+            }
+            .validate()
+            .map(Self::SetPerspectiveLens)
+            .map_err(|error| error.to_string()),
+            ReplayNavigationAction::SetSemanticTargetEnabled { enabled } => {
+                Ok(Self::SetSemanticTargetEnabled(enabled))
+            }
             ReplayNavigationAction::TransitionCamera {
                 target,
                 duration_seconds,
@@ -324,7 +355,7 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 finite(margin, "focus anchor margin")?;
                 nonnegative(duration_seconds, "focus transition duration")?;
                 let source_pivot = source_pivot.ok_or_else(|| {
-                    "replay 0.5 focus anchor requires an explicit source pivot".to_owned()
+                    "replay 0.5+ focus anchor requires an explicit source pivot".to_owned()
                 })?;
                 finite3(source_pivot, "focus anchor source pivot")?;
                 Ok(Self::AnchorFocus {
@@ -667,14 +698,16 @@ pub struct AppReplaySelectedFocusState {
 }
 
 pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppReplayError> {
-    if script.version != APP_REPLAY_VERSION && script.version != LEGACY_APP_REPLAY_VERSION {
-        return Err(AppReplayError::UnsupportedVersion(script.version.clone()));
-    }
-    let legacy = script.version == LEGACY_APP_REPLAY_VERSION;
+    let schema = match script.version.as_str() {
+        LEGACY_APP_REPLAY_VERSION_0_4 => ReplaySchema::V0_4,
+        LEGACY_APP_REPLAY_VERSION_0_5 => ReplaySchema::V0_5,
+        APP_REPLAY_VERSION => ReplaySchema::V0_6,
+        _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
+    };
     let store = AppStore::default();
     let mut records = Vec::with_capacity(script.events.len());
     for (ordinal, event) in script.events.iter().cloned().enumerate() {
-        let outcome = replay_event(&store, &event, legacy);
+        let outcome = replay_event(&store, &event, schema);
         records.push(AppReplayRecord {
             ordinal,
             event,
@@ -745,8 +778,8 @@ pub fn app_replay_fingerprint(trace: &AppReplayTrace) -> Result<String, serde_js
     Ok(format!("{fingerprint:032x}"))
 }
 
-fn replay_event(store: &AppStore, event: &AppReplayEvent, legacy: bool) -> AppReplayOutcome {
-    let result: Result<AppCommit, String> = replay_app_event(event, legacy)
+fn replay_event(store: &AppStore, event: &AppReplayEvent, schema: ReplaySchema) -> AppReplayOutcome {
+    let result: Result<AppCommit, String> = replay_app_event(event, schema)
         .and_then(|event| store.dispatch(event).map_err(|error| error.to_string()));
     match result {
         Ok(commit) => AppReplayOutcome::Committed {
@@ -762,7 +795,7 @@ fn replay_event(store: &AppStore, event: &AppReplayEvent, legacy: bool) -> AppRe
     }
 }
 
-fn replay_app_event(event: &AppReplayEvent, legacy: bool) -> Result<AppEvent, String> {
+fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppEvent, String> {
     match event {
         AppReplayEvent::LoadPresentation { presentation } => {
             Ok(AppEvent::PresentationLoaded(presentation.clone()))
@@ -780,7 +813,7 @@ fn replay_app_event(event: &AppReplayEvent, legacy: bool) -> Result<AppEvent, St
             sequence,
             at_seconds,
             action,
-        } => navigation_action_for_replay_version(*action, legacy).map(|action| {
+        } => navigation_action_for_replay_version(*action, schema).map(|action| {
             AppEvent::Input(Timed {
                 sequence: *sequence,
                 at_seconds: *at_seconds,
@@ -855,9 +888,18 @@ fn replay_app_event(event: &AppReplayEvent, legacy: bool) -> Result<AppEvent, St
 
 fn navigation_action_for_replay_version(
     mut action: ReplayNavigationAction,
-    legacy: bool,
+    schema: ReplaySchema,
 ) -> Result<NavigationAction, String> {
-    if legacy {
+    if schema != ReplaySchema::V0_6
+        && matches!(
+            action,
+            ReplayNavigationAction::SetPerspectiveLens { .. }
+                | ReplayNavigationAction::SetSemanticTargetEnabled { .. }
+        )
+    {
+        return Err("camera lens/target-mode actions require replay 0.6".to_owned());
+    }
+    if schema == ReplaySchema::V0_4 {
         if let ReplayNavigationAction::AnchorFocus {
             source_bound,
             source_pivot,
@@ -1056,6 +1098,10 @@ mod tests {
             ReplayNavigationAction::SetPreset { .. } => "set_preset",
             ReplayNavigationAction::ApplyFrame { .. } => "apply_frame",
             ReplayNavigationAction::SetCamera { .. } => "set_camera",
+            ReplayNavigationAction::SetPerspectiveLens { .. } => "set_perspective_lens",
+            ReplayNavigationAction::SetSemanticTargetEnabled { .. } => {
+                "set_semantic_target_enabled"
+            }
             ReplayNavigationAction::TransitionCamera { .. } => "transition_camera",
             ReplayNavigationAction::BeginSurfaceAnchorTransition { .. } => {
                 "begin_surface_anchor_transition"
@@ -1086,6 +1132,8 @@ mod tests {
             NavigationAction::SetPreset(_) => "set_preset",
             NavigationAction::ApplyFrame(_) => "apply_frame",
             NavigationAction::SetCamera(_) => "set_camera",
+            NavigationAction::SetPerspectiveLens(_) => "set_perspective_lens",
+            NavigationAction::SetSemanticTargetEnabled(_) => "set_semantic_target_enabled",
             NavigationAction::TransitionCamera { .. } => "transition_camera",
             NavigationAction::BeginSurfaceAnchorTransition { .. } => {
                 "begin_surface_anchor_transition"
@@ -1142,7 +1190,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, false).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_6).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -1286,6 +1334,8 @@ mod tests {
                 "detach_focus",
                 "scale_focus_log",
                 "set_camera",
+                "set_perspective_lens",
+                "set_semantic_target_enabled",
                 "set_focus_enabled",
                 "set_focus_field",
                 "set_free_focus_sphere",
@@ -1301,7 +1351,7 @@ mod tests {
         assert_eq!(authoritative_covered, covered);
 
         let trace = run_app_replay(&script).unwrap();
-        assert_eq!(trace.records.len(), 28);
+        assert_eq!(trace.records.len(), 31);
         assert_eq!(trace.records[1].state.camera.eye, [0.0, 0.0, 4.0]);
         assert_eq!(trace.records[1].state.navigation.pending_actions, 1);
         assert_eq!(
@@ -1351,10 +1401,14 @@ mod tests {
         assert_semantic_state_eq(after, before);
         assert_eq!(after.navigation.preset, ReplayNavigationPreset::Fly);
         assert_eq!(after.navigation.pending_actions, 0);
-        assert_eq!(after.navigation.last_applied_sequence, Some(16));
+        assert_eq!(after.navigation.last_applied_sequence, Some(18));
         assert!(after.navigation.diagnostics.is_empty());
         assert_eq!(after.focus.selected, None);
         assert_eq!(after.reflection, ReplayReflection::Identity);
+        assert_eq!(after.camera.vertical_fov_radians, 1.25);
+        assert_eq!(after.camera.near, 0.002);
+        assert_eq!(after.camera.far, 25_000.0);
+        assert!(after.camera.semantic_target.is_some());
         assert_eq!(
             format!(
                 "{APP_REPLAY_FINGERPRINT_ALGORITHM}:{}",
@@ -1383,7 +1437,7 @@ mod tests {
         )
         .unwrap();
         let legacy = AppReplayScript {
-            version: LEGACY_APP_REPLAY_VERSION.to_owned(),
+            version: LEGACY_APP_REPLAY_VERSION_0_4.to_owned(),
             events: vec![
                 AppReplayEvent::Navigate {
                     sequence: 0,
@@ -1427,6 +1481,68 @@ mod tests {
                 if error.contains("requires an explicit source pivot")
         ));
         assert_eq!(trace.records[0].state.focus.selected, None);
+    }
+
+    #[test]
+    fn replay_0_5_is_accepted_without_focus_pivot_migration() {
+        let action: ReplayNavigationAction = serde_json::from_str(
+            r#"{
+                "action":"anchor_focus",
+                "entity":"70000000-0000-4000-8000-000000000001",
+                "source_bound":{"center":[1.0,2.0,3.0],"radius":0.5},
+                "margin":1.1,
+                "duration_seconds":0.7,
+                "easing":"smoother_step"
+            }"#,
+        )
+        .unwrap();
+        let script = AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_5.to_owned(),
+            events: vec![AppReplayEvent::Navigate {
+                sequence: 0,
+                at_seconds: 0.0,
+                action,
+            }],
+        };
+        let trace = run_app_replay(&script).unwrap();
+        assert_eq!(trace.version, APP_REPLAY_VERSION);
+        assert!(matches!(
+            trace.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires an explicit source pivot")
+        ));
+    }
+
+    #[test]
+    fn legacy_replays_reject_0_6_camera_policy_actions() {
+        for version in [
+            LEGACY_APP_REPLAY_VERSION_0_4,
+            LEGACY_APP_REPLAY_VERSION_0_5,
+        ] {
+            for action in [
+                ReplayNavigationAction::SetPerspectiveLens {
+                    vertical_fov_radians: 1.2,
+                    near: 0.01,
+                    far: 10_000.0,
+                },
+                ReplayNavigationAction::SetSemanticTargetEnabled { enabled: true },
+            ] {
+                let script = AppReplayScript {
+                    version: version.to_owned(),
+                    events: vec![AppReplayEvent::Navigate {
+                        sequence: 0,
+                        at_seconds: 0.0,
+                        action,
+                    }],
+                };
+                let trace = run_app_replay(&script).unwrap();
+                assert!(matches!(
+                    trace.records[0].outcome,
+                    AppReplayOutcome::Rejected { ref error }
+                        if error.contains("require replay 0.6")
+                ));
+            }
+        }
     }
 
     #[test]

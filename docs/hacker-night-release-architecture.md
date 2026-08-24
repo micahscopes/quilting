@@ -139,13 +139,16 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.5 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.6 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane.
+  Version 0.6 adds complete validated perspective-lens edits and an explicit
+  semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. It accepts 0.4 inputs by treating an
-  omitted source pivot as the bound center. Action admission and integration
-  remain distinct: same-time
+  clears only those derived values. The reader accepts 0.4 and 0.5 inputs, but
+  only 0.4 migrates an omitted source pivot to the bound center. Both legacy
+  versions reject 0.6-only actions rather than silently changing their
+  meaning. Action admission and integration remain distinct: same-time
   navigation input remains pending until the next integration boundary. That
   is normally a frame event; transactional cue activation also integrates at
   zero time so its own queued transitions and any preceding due input commit
@@ -158,10 +161,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The six-cue golden is
-  `fnv1a-128-json:2ac1c692f6a6bfadf5bc5f5565d54823`;
+  `fnv1a-128-json:5f1f3eb11b992f90f2653481d0d4fc5c`;
   the navigation golden is
-  `fnv1a-128-json:b51c6b71ebc2031b7ca0c21239db6eed`; the orchestration
-  golden is `fnv1a-128-json:4a0661ea377eaf22dd1130f60fc6b5cd`.
+  `fnv1a-128-json:144908e4a979c1a599cfb99f5ca7d4ef`; the orchestration
+  golden is `fnv1a-128-json:b6f2ab91e8eaa933b056768bc20cdb56`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
