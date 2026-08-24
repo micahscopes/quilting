@@ -1334,6 +1334,41 @@ pub fn mr_set_focus_sphere(
     });
 }
 
+/// Compact readback of the retained focus/selection packet for migration
+/// parity checks. This reads CPU-side renderer state and performs no GPU
+/// synchronization.
+#[wasm_bindgen(js_name = "mr_debugFocusState")]
+pub fn mr_debug_focus_state() -> JsValue {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(renderer) = state.as_ref() else {
+            return JsValue::NULL;
+        };
+        let result = js_sys::Object::new();
+        let center = js_sys::Float32Array::from(&renderer.focus_sphere[..3]);
+        js_sys::Reflect::set(&result, &"center".into(), &center).ok();
+        js_sys::Reflect::set(
+            &result,
+            &"radius".into(),
+            &JsValue::from_f64(f64::from(renderer.focus_sphere[3])),
+        )
+        .ok();
+        js_sys::Reflect::set(
+            &result,
+            &"enabled".into(),
+            &JsValue::from_bool(renderer.focus_field_enabled),
+        )
+        .ok();
+        js_sys::Reflect::set(
+            &result,
+            &"selectedNode".into(),
+            &JsValue::from_f64(f64::from(renderer.selected_node)),
+        )
+        .ok();
+        result.into()
+    })
+}
+
 /// Pick the face under pixel (x, y). Renders a pick pass and reads back the face ID.
 /// Returns face ID (>= 0) or -1 if no face at that pixel.
 /// Also logs face info (LOD, edge lengths, instance data) to console.

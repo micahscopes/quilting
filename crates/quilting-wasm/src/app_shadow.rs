@@ -165,6 +165,24 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
+    /// Advance the high-rate frame lane without serializing an `AppCommit`.
+    /// The ordinary `advanceFrame` API remains available to orchestration
+    /// adapters that need the commit disposition and effects.
+    #[wasm_bindgen(js_name = advanceFrameQuiet)]
+    pub fn advance_frame_quiet(
+        &self,
+        elapsed_seconds: f64,
+        delta_seconds: f64,
+    ) -> Result<(), JsValue> {
+        self.store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds,
+                delta_seconds,
+            }))
+            .map_err(js_error)?;
+        Ok(())
+    }
+
     /// Replace settled camera/focus state before a low-rate authored
     /// transition. The app reducer validates and commits the replacement.
     #[wasm_bindgen(js_name = synchronizeNavigation)]
@@ -443,12 +461,7 @@ impl HyperscopeAppShadow {
     #[wasm_bindgen(js_name = tickNavigation)]
     pub fn tick_navigation(&self, delta_seconds: f64) -> Result<JsValue, JsValue> {
         let current = self.store.frame_snapshot();
-        self.store
-            .dispatch(AppEvent::Frame(FrameTick {
-                elapsed_seconds: current.elapsed_seconds + delta_seconds,
-                delta_seconds,
-            }))
-            .map_err(js_error)?;
+        self.advance_frame_quiet(current.elapsed_seconds + delta_seconds, delta_seconds)?;
         navigation_to_js(
             self.store.frame_snapshot(),
             self.store.navigation_diagnostics_snapshot(),

@@ -175,7 +175,11 @@ focus enablement, shell coordinate, angular aperture, sphere, lens, and aim
 policy. Toggle Fuzzy off and on and move the focus slider: each synchronous UI
 burst should produce one focus synchronization, no application mismatch, and
 no render-shadow mismatch. A focus-only route must remain active even when
-spherical inversion is disabled. Close the disposable tab after the check.
+spherical inversion is disabled. While settled, `frameCalls` should track the
+page frame counter one-for-one, `frameSnapshotCalls` must remain unchanged, and
+`frameErrors` must stay zero. A mapped authored selection should increment
+`selectionTransitionFrames` and `rendererFocusPacketComparisons` without
+incrementing either mismatch counter. Close the disposable tab after the check.
 
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.

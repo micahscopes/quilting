@@ -1093,3 +1093,55 @@ and both exponent-6 and exponent-7 policy probes. The optimized WASM is
 bytes respectively. The source-coherent
 build receipt is `69f31fa6cabdf7a881b5dca9c521a467` over 156 files and
 38,661,952 bytes.
+
+## Application-frame selection-transition shadow gate
+
+The next 2026-08-24 checkpoint removed the presentation-only clock gap without
+changing browser or renderer authority. `HyperscopeAppShadow::advanceFrameQuiet`
+dispatches the ordinary validated `AppEvent::Frame` lane without serializing an
+`AppCommit`. The browser calls it once per rendered frame when `appshadow=1`,
+but requests a navigation snapshot only while presentation or mapped-selection
+parity is active. `appshadow=0` still allocates no application controller and
+returns before crossing WASM.
+
+A selection event between animation frames first advances the application to
+the event timestamp before queuing `AnchorFocus`. Active selected-focus frames
+then use the incumbent focus transition's wall-clock cadence rather than the
+render loop's 250 ms clamp, including after background throttling. Presentation
+frames preserve their established clamped delta. The shadow compares center,
+radius, anchor, focus/inversion enablement, and remaining transition time. A
+compact renderer diagnostic exposes the already-retained CPU focus sphere,
+enablement, and selected node; it performs no GPU synchronization or readback.
+
+Chrome DevTools MCP 1.7.0 recorded no-reload steady traces of the same triangle
+lab with the shadow enabled and disabled. Each trace contained 300 target-page
+animation callbacks:
+
+| Gate | Frame median | Frame p95 | Frame p99 | Application-lane CPU sample |
+| --- | ---: | ---: | ---: | ---: |
+| `appshadow=1` | 0.420 ms | 0.725 ms | 1.015 ms | 2.1 us/frame self; 9.6 us/frame inclusive |
+| `appshadow=0` | 0.372 ms | 0.600 ms | 0.957 ms | no samples |
+
+The 48 us median and 125 us p95 whole-frame differences are conservative
+single-run measurements and include ordinary profiler/system noise; they are
+not a broad rendering benchmark. A separate fresh-page probe observed 226
+application frame calls for 226 rendered frames, zero settled-frame snapshots,
+zero frame errors, zero mismatches, and no console warnings or errors. The raw
+traces were intentionally kept outside the repository under `/tmp`.
+
+The generated-WASM oracle proves quiet-frame cadence parity and atomic invalid
+time rejection against the standalone navigation controller. Live mapped-pick
+transition evidence remains unavailable because the checked-in presentation
+meshes do not yet contain representative pickable stable IDs. Accordingly this
+is still a shadow gate: the renderer continues consuming incumbent browser
+focus state, and no selection authority changed.
+
+Validation passed for 43 application/replay tests, 46 browser-independent
+JavaScript tests, four executable Node/WASM tests, all five generated-WASM
+smokes, WASM target checking, the inline browser-module syntax check, strict
+no-dependency application Clippy, Rustdoc, all three unchanged replay goldens,
+the release Trunk build, ordinary offline preflight, and the Chrome MCP probes.
+The optimized WASM is 6,083,489 bytes raw and 2,136,370 bytes gzip: a
+1,453-byte raw increase and 4,063-byte gzip reduction relative to the runtime
+LOD-grading checkpoint. The source-coherent build receipt is
+`e922f7cbd2b2e2dc6b3edafea6d4543e` over 156 files and 38,671,378 bytes.

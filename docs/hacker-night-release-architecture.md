@@ -55,8 +55,13 @@ The first application boundary is now explicit:
   observable but cannot replace the active request. Each cue action compares
   the complete resolved presentation snapshot. A separate opt-in pose gate
   synchronizes settled navigation through the reducer and makes exactly one
-  compact comparison call per active cue-transition frame; it makes no calls
-  while settled or when shadowing is disabled. Bounded diagnostics are exposed at
+  compact comparison call per active cue-transition frame. The application
+  clock now advances once per browser frame through a non-serializing boundary;
+  it takes a navigation snapshot only during an active cue or mapped-selection
+  transition and makes no call when shadowing is disabled. Mapped selection
+  interpolation uses the incumbent wall-clock timestamp, including throttled
+  frames, and compares both browser focus state and the renderer's retained CPU
+  focus packet without a GPU readback. Bounded diagnostics are exposed at
   `globalThis.__hyperscopeAppShadowDiagnostics` until this lane earns browser
   authority. The same adapter now accepts the incumbent navigation shadow's
   device-neutral actions through `AppStore`; the shared navigation queue owns
@@ -197,7 +202,10 @@ presentation asset IDs across packed composition offsets and mirrors mapped
 picks/detaches through the AppStore. Session-generated load IDs, IndexedDB,
 drops, basename matches, and ordinary GLBs cannot acquire durable selection
 scope. Renderer focus transitions remain incumbent until the shared Rust clock
-and selected-focus packet complete the cutover gate.
+and selected-focus packet complete the cutover gate. The shared clock and
+CPU-retained packet now run as a measured shadow; representative mapped release
+assets and renderer consumption of the Rust packet remain required before
+authority changes.
 
 The offline release gate also has source provenance now. A Trunk pre-build hook
 uses Rust to fingerprint the authoritative crate/shader, HTML/module, manifest,

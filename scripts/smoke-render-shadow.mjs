@@ -7,6 +7,7 @@ const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const {
   default: init,
+  mr_debugFocusState,
   mr_renderShadowDiagnostics,
   mr_setLodGradingRatio,
   mr_setRenderShadowEnabled,
@@ -25,5 +26,6 @@ assert.equal(
 );
 assert.equal(mr_setLodGradingRatio(4), false, 'grading should be inert before a renderer exists');
 assert.equal(mr_setLodGradingRatio(3), false, 'unsupported grading ratios must fail closed');
+assert.equal(mr_debugFocusState(), null, 'focus diagnostics should be inert before a renderer exists');
 
 console.log(JSON.stringify({ generatedExports: true, inertBeforeRenderer: true }));

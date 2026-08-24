@@ -33,7 +33,7 @@ for (const handoff of [
 ]) {
   assert.ok(
     rendererSelection.indexOf(handoff) >= 0
-      && rendererSelection.indexOf(handoff) < rendererSelection.indexOf('anchorFocusSphereToSelection();'),
+      && rendererSelection.indexOf(handoff) < rendererSelection.indexOf('anchorFocusSphereToSelection('),
     `renderer selection must execute ${handoff} before anchoring`,
   );
 }

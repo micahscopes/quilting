@@ -223,9 +223,12 @@ or sphere state.
    only from an exact validated manifest fetch; its append is transactional.
    Mapped picks and clears traverse `AppStore::dispatch_navigation` in shadow,
    while unmapped ordinary assets retain incumbent browser selection without
-   synthesizing UUIDs. Next, author stable IDs into representative release
-   assets, advance selection transitions on the shared Rust frame clock, and
-   apply the compact selected-focus packet to the renderer before cutover.
+   synthesizing UUIDs. The application clock now advances through an
+   allocation-light boundary once per browser frame, snapshots only active
+   parity windows, and compares mapped focus interpolation with both the
+   incumbent browser state and the renderer's retained CPU packet. It performs
+   no GPU readback. Next, author stable IDs into representative release assets
+   and apply the compact selected-focus packet to the renderer before cutover.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.

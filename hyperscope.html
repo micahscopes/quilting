@@ -363,7 +363,7 @@ import init, {
   mr_setPresentationNodeStates,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
   mr_attachSurfaceWalk, mr_stepSurfaceWalk, mr_transportSurfaceWalkReflection,
-  mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
+  mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere, mr_debugFocusState,
   mr_debugResidentLodEdges,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
@@ -1909,13 +1909,15 @@ function applyRustPresentationNavigation(snapshot) {
   rustPresentationDiagnostics.navigation = snapshot;
 }
 
-function tickRustPresentation(deltaSeconds, nowMs) {
+function tickRustPresentation(deltaSeconds, nowMs, appFrame = null) {
   if (!rustPresentationController || !rustPresentationTransitionActive) return;
   try {
     const navigation = rustPresentationController.tick(deltaSeconds);
     if (rustAppPresentationPoseReady) {
       try {
-        const shadowNavigation = rustAppShadow.tickPresentation(deltaSeconds);
+        const shadowNavigation = appFrame
+          ? appFrame.navigation || rustAppShadow.navigationSnapshot()
+          : rustAppShadow.tickPresentation(deltaSeconds);
         rustAppShadowDiagnostics.presentationFrameCalls += 1;
         compareAppPresentationPose(navigation, shadowNavigation);
       } catch (error) {
@@ -1953,6 +1955,7 @@ function activateRustPresentation(direction, cueId) {
       clearSelectedObject('Selection cleared by presentation cue');
     }
     synchronizeRustApplicationPresentationFromBrowser();
+    resetRustApplicationFrameClock();
     const snapshot = direction === 'start'
       ? rustPresentationController.startPresentation()
       : direction === 'advance'
@@ -2105,6 +2108,9 @@ let rustAppShadowRequestOrdinal = 0;
 let rustAppShadowAssetOrdinal = 0;
 let rustAppPresentationPoseReady = false;
 let rustAppShadowSelectionQueued = false;
+let rustAppSelectionTransitionActive = false;
+let rustAppSelectionEventAtMs = null;
+let rustAppFrameElapsedSeconds = 0;
 const rustAppShadowAssetIds = new Map();
 const rustAppShadowDiagnostics = {
   enabled: RUST_APP_SHADOW_ENABLED,
@@ -2125,6 +2131,18 @@ const rustAppShadowDiagnostics = {
   selectionDetaches: 0,
   selectionComparisons: 0,
   selectionMismatches: 0,
+  selectionTransitionFrames: 0,
+  selectionTransitionMismatches: 0,
+  maximumSelectionTransitionError: 0,
+  rendererFocusPacketComparisons: 0,
+  rendererFocusPacketMismatches: 0,
+  frameCalls: 0,
+  eventFrameCalls: 0,
+  eventFrameSeconds: 0,
+  frameSnapshotCalls: 0,
+  frameErrors: 0,
+  lastFrameDeltaSeconds: 0,
+  maximumFrameDeltaSeconds: 0,
   presentationFrameCalls: 0,
   presentationPoseComparisons: 0,
   presentationPoseMismatches: 0,
@@ -2164,6 +2182,150 @@ function refreshAppShadowSnapshot() {
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
   return snapshot;
+}
+
+function resetRustApplicationFrameClock() {
+  rustAppSelectionEventAtMs = null;
+}
+
+function advanceRustApplicationClockToSelectionEvent(nowMs) {
+  if (!rustAppShadow || !Number.isFinite(nowMs)) return;
+  rustAppSelectionEventAtMs = nowMs;
+  if (!Number.isFinite(previousFrameTs)) return;
+  const partialSeconds = Math.max(0, (nowMs - previousFrameTs) / 1000);
+  if (partialSeconds === 0) return;
+  try {
+    const nextElapsedSeconds = rustAppFrameElapsedSeconds + partialSeconds;
+    rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, partialSeconds);
+    rustAppFrameElapsedSeconds = nextElapsedSeconds;
+    rustAppShadowDiagnostics.eventFrameCalls += 1;
+    rustAppShadowDiagnostics.eventFrameSeconds += partialSeconds;
+  } catch (error) {
+    rustAppShadowDiagnostics.frameErrors += 1;
+    recordAppShadowMismatch('selection_event_clock', error?.message || String(error));
+  }
+}
+
+function appSelectionTransitionError(navigation, nowMs) {
+  const errors = [];
+  const scalar = (left, right) => {
+    const l = Number(left), r = Number(right);
+    return Number.isFinite(l) && Number.isFinite(r) ? Math.abs(l - r) : Infinity;
+  };
+  const vector = (left, right) => {
+    if (!left || !right || left.length !== right.length) return Infinity;
+    let maximum = 0;
+    for (let axis = 0; axis < left.length; axis++) {
+      maximum = Math.max(maximum, scalar(left[axis], right[axis]));
+    }
+    return maximum;
+  };
+  errors.push(vector(navigation?.focus?.center, focusSphere.center));
+  errors.push(scalar(navigation?.focus?.radius, focusSphere.radius));
+  if (navigation?.focus?.anchored !== Boolean(selectedObject)) errors.push(Infinity);
+  if (navigation?.focus?.focus_enabled !== browserFocusFieldState().enabled) {
+    errors.push(Infinity);
+  }
+  if (navigation?.focus?.inversion_enabled
+      !== (mob.xform.peek() === 'sphere_reflection')) errors.push(Infinity);
+  const browserRemaining = focusSphereTransition
+    ? Math.max(
+      0,
+      (focusSphereTransition.durationMs - (nowMs - focusSphereTransition.startedAt)) / 1000,
+    )
+    : 0;
+  errors.push(scalar(navigation?.focus?.focus_transition_remaining || 0, browserRemaining));
+
+  const renderer = mr_debugFocusState();
+  if (!renderer) {
+    errors.push(Infinity);
+  } else {
+    rustAppShadowDiagnostics.rendererFocusPacketComparisons += 1;
+    // The renderer retains this packet as f32. Compare against the Rust
+    // transition after the same narrowing, with two ULPs of scale-aware room,
+    // so large scenes do not report expected f64-to-f32 quantization as drift.
+    const f32Matches = (actual, expected) => {
+      const narrowed = Math.fround(Number(expected));
+      const observed = Number(actual);
+      const tolerance = Math.max(
+        RUST_NAVIGATION_SHADOW_TOLERANCE,
+        Math.abs(narrowed) * 2 ** -22,
+      );
+      return Number.isFinite(observed)
+        && Number.isFinite(narrowed)
+        && Math.abs(observed - narrowed) <= tolerance;
+    };
+    const rendererMatches = renderer.center?.length === navigation?.focus?.center?.length
+      && Array.from(renderer.center).every(
+        (component, axis) => f32Matches(component, navigation.focus.center[axis]),
+      )
+      && f32Matches(renderer.radius, navigation?.focus?.radius)
+      && renderer.enabled === navigation?.focus?.focus_enabled
+      && Number(renderer.selectedNode) === Number(selectedObject?.node);
+    errors.push(rendererMatches ? 0 : Infinity);
+    if (!rendererMatches) {
+      rustAppShadowDiagnostics.rendererFocusPacketMismatches += 1;
+    }
+  }
+  return Math.max(...errors);
+}
+
+function compareAppSelectionTransitionFrame(navigation, nowMs) {
+  if (!rustAppShadowSelectionQueued || !selectedObject || !navigation) return;
+  rustAppShadowDiagnostics.selectionTransitionFrames += 1;
+  const error = appSelectionTransitionError(navigation, nowMs);
+  rustAppShadowDiagnostics.maximumSelectionTransitionError = Math.max(
+    rustAppShadowDiagnostics.maximumSelectionTransitionError,
+    error,
+  );
+  if (error > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+    rustAppShadowDiagnostics.selectionTransitionMismatches += 1;
+    const count = rustAppShadowDiagnostics.selectionTransitionMismatches;
+    if (count === 1 || (count & (count - 1)) === 0) {
+      recordAppShadowMismatch(
+        'selection_transition',
+        `Rust selected-focus transition diverged by ${error}`,
+      );
+    }
+  }
+}
+
+function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeconds) {
+  if (!rustAppShadow || !Number.isFinite(nowMs)) return null;
+  // Selection focus uses the incumbent wall-clock timestamp rather than the
+  // render loop's 250 ms clamp. Split the first post-pick frame at the event;
+  // ordinary and presentation frames retain their established clamped delta.
+  const deltaSeconds = Number.isFinite(rustAppSelectionEventAtMs)
+    ? Math.max(0, (nowMs - rustAppSelectionEventAtMs) / 1000)
+    : rustAppSelectionTransitionActive
+      ? Math.max(0, Number(rawFrameDeltaSeconds))
+      : Math.max(0, Number(frameDeltaSeconds));
+  rustAppSelectionEventAtMs = null;
+  try {
+    const nextElapsedSeconds = rustAppFrameElapsedSeconds + deltaSeconds;
+    rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, deltaSeconds);
+    rustAppFrameElapsedSeconds = nextElapsedSeconds;
+    rustAppShadowDiagnostics.frameCalls += 1;
+    rustAppShadowDiagnostics.lastFrameDeltaSeconds = deltaSeconds;
+    rustAppShadowDiagnostics.maximumFrameDeltaSeconds = Math.max(
+      rustAppShadowDiagnostics.maximumFrameDeltaSeconds,
+      deltaSeconds,
+    );
+    const needsSnapshot = rustAppSelectionTransitionActive
+      || (rustPresentationTransitionActive && rustAppPresentationPoseReady);
+    const navigation = needsSnapshot ? rustAppShadow.navigationSnapshot() : null;
+    if (navigation) rustAppShadowDiagnostics.frameSnapshotCalls += 1;
+    if (rustAppSelectionTransitionActive && navigation) {
+      compareAppSelectionTransitionFrame(navigation, nowMs);
+      rustAppSelectionTransitionActive =
+        Number(navigation.focus?.focus_transition_remaining || 0) > 0;
+    }
+    return { deltaSeconds, navigation };
+  } catch (error) {
+    rustAppShadowDiagnostics.frameErrors += 1;
+    recordAppShadowMismatch('frame_clock', error?.message || String(error));
+    return { deltaSeconds, navigation: null, error };
+  }
 }
 
 function compareAppPresentationPose(expected, actual) {
@@ -3105,6 +3267,7 @@ function compareAppSelectedFocus(expected, actual) {
 
 function detachAppSelectionShadow(reason) {
   if (!rustAppShadowSelectionQueued) return false;
+  rustAppSelectionTransitionActive = false;
   if (!rustAppShadow) {
     rustAppShadowSelectionQueued = false;
     return false;
@@ -3132,7 +3295,7 @@ function detachAppSelectionShadow(reason) {
   }
 }
 
-function mirrorSelectedObjectToApp() {
+function mirrorSelectedObjectToApp(nowMs = performance.now()) {
   if (!rustAppShadow || !selectedObject) return 'unobserved';
   const identity = selectedObject.identity;
   if (!identity?.durable) {
@@ -3146,6 +3309,11 @@ function mirrorSelectedObjectToApp() {
     return 'invalid';
   }
   try {
+    // Start the browser and AppStore fit from one observed camera/focus state
+    // and one adapter timestamp. The application clock then advances once per
+    // browser frame instead of only when a presentation happens to be active.
+    advanceRustApplicationClockToSelectionEvent(nowMs);
+    synchronizeRustApplicationPresentationFromBrowser();
     rustAppShadow.anchorFocus(
       identity.assetId,
       identity.entityId,
@@ -3158,6 +3326,8 @@ function mirrorSelectedObjectToApp() {
     );
     const navigation = rustAppShadow.tickNavigation(0);
     rustAppShadowSelectionQueued = true;
+    rustAppSelectionTransitionActive =
+      Number(navigation.focus?.focus_transition_remaining || 0) > 0;
     rustAppShadowDiagnostics.mappedSelectionPicks += 1;
     rustAppShadowDiagnostics.selectionDispatches += 1;
     compareAppSelectedFocus({
@@ -3167,6 +3337,7 @@ function mirrorSelectedObjectToApp() {
       sourcePivot: selectedObject.sourceAnchor,
       margin: target.margin,
     }, navigation.selected_focus);
+    compareAppSelectionTransitionFrame(navigation, nowMs);
     refreshAppShadowSnapshot();
     return 'mapped';
   } catch (error) {
@@ -3180,6 +3351,7 @@ function mirrorSelectedObjectToApp() {
 
 function clearSelectedObject(message = '') {
   detachAppSelectionShadow(message || 'browser selection clear');
+  rustAppSelectionTransitionActive = false;
   selectedObject = null;
   manualCameraSemanticTargetEnabled = false;
   cameraFocusTransition = null;
@@ -3347,8 +3519,9 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   refreshSelectedObjectAnchor();
   mr_setSelectedNode(node);
   mr_highlightFace(highlightFace ? faceId : -1);
-  anchorFocusSphereToSelection();
-  mirrorSelectedObjectToApp();
+  const selectedAtMs = performance.now();
+  anchorFocusSphereToSelection(selectedAtMs);
+  mirrorSelectedObjectToApp(selectedAtMs);
   selectionLabel();
   console.log(
     `Selected glTF node ${node} from face ${faceId}`
@@ -5475,10 +5648,11 @@ async function loadModel(buffer, filename) {
 function frame(ts) {
   requestAnimationFrame(frame);
   applyPendingCanvasSize();
-  advanceFocusTransitions(ts);
-
-  const deltaSeconds = previousFrameTs == null ? 0 : Math.min((ts - previousFrameTs) / 1000, 0.25);
+  const rawDeltaSeconds = previousFrameTs == null ? 0 : (ts - previousFrameTs) / 1000;
+  const deltaSeconds = Math.min(rawDeltaSeconds, 0.25);
   previousFrameTs = ts;
+  advanceFocusTransitions(ts);
+  const appFrame = advanceRustApplicationFrame(ts, deltaSeconds, rawDeltaSeconds);
   if (hyperscapeActive) {
     const includeSceneDiagnostics = ts - lastSceneDiagnosticRenderAt >= 250;
     const snapshot = mr_tickHyperscape(deltaSeconds, includeSceneDiagnostics);
@@ -5541,7 +5715,7 @@ function frame(ts) {
   // Presentation navigation is Rust-authoritative only while a cue transition
   // is active. Once settled, ordinary controls remain interactive; advancing
   // first synchronizes that edited view back into the controller.
-  if (!patchLab.active) tickRustPresentation(deltaSeconds, ts);
+  if (!patchLab.active) tickRustPresentation(deltaSeconds, ts, appFrame);
 
   if (animating && !patchLab.active && gpuSkinned && meshInfo) {
     const duration = Number(meshInfo.duration) || 0;
@@ -6766,6 +6940,7 @@ phase('wasm', [], async () => {
     globalThis.__hyperscopeAppShadowController = rustAppShadow;
     rustAppShadowDiagnostics.state = 'observing';
     synchronizeRustApplicationPresentationFromBrowser();
+    resetRustApplicationFrameClock();
     refreshAppShadowSnapshot();
   }
   if (RUST_ROUTE_SHADOW_ENABLED) {

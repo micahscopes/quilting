@@ -439,6 +439,55 @@ assert.equal(selectionApp.navigationSnapshot().selected_focus.output_radius, und
 selectionApp.free();
 selectionIncumbent.free();
 
+// The browser frame adapter can advance the Rust application clock without
+// paying to serialize a navigation object on every settled frame. Snapshots
+// remain explicit and the same transition stays cadence-equivalent to the
+// standalone incumbent controller.
+const clockApp = new HyperscopeAppShadow();
+const clockIncumbent = new HyperscopeNavigation();
+for (const candidate of [clockApp, clockIncumbent]) {
+  const synchronize = candidate instanceof HyperscopeAppShadow
+    ? candidate.synchronizeNavigation.bind(candidate)
+    : candidate.synchronizeState.bind(candidate);
+  synchronize(
+    eye, forward, up, 3, new Float64Array(), ...projectionLens,
+    focusCenter, 2, true, false, 0.5, 0.1,
+  );
+}
+assert.equal(
+  clockApp.anchorFocus(
+    selectedAsset,
+    selectedEntity,
+    new Float64Array([3, 1, -2]),
+    0.75,
+    new Float64Array([3, 1, -2]),
+    1.1,
+    1,
+    'smootherstep',
+  ),
+  clockIncumbent.anchorFocus(
+    selectedAsset,
+    selectedEntity,
+    new Float64Array([3, 1, -2]),
+    0.75,
+    new Float64Array([3, 1, -2]),
+    1.1,
+    1,
+    'smootherstep',
+  ),
+);
+assertNavigationParity(clockApp.tickNavigation(0), clockIncumbent.tick(0));
+assert.equal(clockApp.advanceFrameQuiet(0.25, 0.25), undefined);
+assertNavigationParity(clockApp.navigationSnapshot(), clockIncumbent.tick(0.25));
+const beforeRejectedFrame = clockApp.navigationSnapshot();
+assert.throws(() => clockApp.advanceFrameQuiet(0.24, -0.01), /time/);
+assert.deepEqual(clockApp.navigationSnapshot(), beforeRejectedFrame);
+assert.equal(clockApp.advanceFrameQuiet(1, 0.75), undefined);
+assertNavigationParity(clockApp.navigationSnapshot(), clockIncumbent.tick(0.75));
+assert.equal(clockApp.navigationSnapshot().focus.focus_transition_remaining, undefined);
+clockApp.free();
+clockIncumbent.free();
+
 incumbent.synchronizeState(
   eye, forward, up, 3, target, ...projectionLens,
   focusCenter, 2, false, false, 0.5, 0.1,
