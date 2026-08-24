@@ -102,6 +102,25 @@ fn frozen_payload_round_trips_deterministically() {
 }
 
 #[test]
+fn frozen_asset_options_round_trip_when_absent() {
+    let project = project(0xaaab);
+    let authored = envelope(
+        4,
+        AuthoredCommand::UpsertAsset {
+            asset: AssetDescriptor {
+                id: asset_id(0xbbbc),
+                uri: "models/empty-options.glb".into(),
+                media_type: None,
+                content_digest: None,
+            },
+        },
+    );
+
+    let bytes = encode_authored(project, &authored).unwrap();
+    assert_eq!(decode_authored(project, &bytes).unwrap(), authored);
+}
+
+#[test]
 fn wrong_project_domain_and_versions_are_rejected() {
     let expected = project(1);
     let bytes = encode_authored(expected, &set(1, entity_id(9), 2.0)).unwrap();

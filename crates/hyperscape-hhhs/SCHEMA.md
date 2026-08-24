@@ -18,7 +18,9 @@ untrusted record bytes.
 
 The binary body uses a private untagged enum with frozen variant order:
 
-0. `UpsertAsset(AssetDescriptor)`
+0. `UpsertAsset(FrozenAssetDescriptor)`, whose fields are `id`, `uri`,
+   `media_type`, and `content_digest`; both option discriminants are always
+   encoded, independent of the protocol type's JSON omission policy
 1. `SetEntityTransform(EntityId, WireTransform)`
 2. `RemoveEntity(EntityId)`
 

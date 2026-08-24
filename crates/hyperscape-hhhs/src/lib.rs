@@ -114,15 +114,48 @@ struct FrozenEnvelope {
 
 #[derive(Serialize, Deserialize)]
 enum FrozenCommand {
-    UpsertAsset(AssetDescriptor),
+    UpsertAsset(FrozenAssetDescriptor),
     SetEntityTransform(EntityId, WireTransform),
     RemoveEntity(EntityId),
+}
+
+/// Binary-schema mirror without the protocol type's JSON-only
+/// `skip_serializing_if` field policy. Positional codecs must encode both
+/// option discriminants even when their values are absent.
+#[derive(Serialize, Deserialize)]
+struct FrozenAssetDescriptor {
+    id: AssetId,
+    uri: String,
+    media_type: Option<String>,
+    content_digest: Option<[u8; 32]>,
+}
+
+impl From<&AssetDescriptor> for FrozenAssetDescriptor {
+    fn from(asset: &AssetDescriptor) -> Self {
+        Self {
+            id: asset.id,
+            uri: asset.uri.clone(),
+            media_type: asset.media_type.clone(),
+            content_digest: asset.content_digest,
+        }
+    }
+}
+
+impl From<FrozenAssetDescriptor> for AssetDescriptor {
+    fn from(asset: FrozenAssetDescriptor) -> Self {
+        Self {
+            id: asset.id,
+            uri: asset.uri,
+            media_type: asset.media_type,
+            content_digest: asset.content_digest,
+        }
+    }
 }
 
 impl From<&AuthoredEnvelope> for FrozenEnvelope {
     fn from(envelope: &AuthoredEnvelope) -> Self {
         let command = match &envelope.command {
-            AuthoredCommand::UpsertAsset { asset } => FrozenCommand::UpsertAsset(asset.clone()),
+            AuthoredCommand::UpsertAsset { asset } => FrozenCommand::UpsertAsset(asset.into()),
             AuthoredCommand::SetEntityTransform { entity, transform } => {
                 FrozenCommand::SetEntityTransform(*entity, *transform)
             }
@@ -138,7 +171,9 @@ impl From<&AuthoredEnvelope> for FrozenEnvelope {
 impl From<FrozenEnvelope> for AuthoredEnvelope {
     fn from(envelope: FrozenEnvelope) -> Self {
         let command = match envelope.command {
-            FrozenCommand::UpsertAsset(asset) => AuthoredCommand::UpsertAsset { asset },
+            FrozenCommand::UpsertAsset(asset) => AuthoredCommand::UpsertAsset {
+                asset: asset.into(),
+            },
             FrozenCommand::SetEntityTransform(entity, transform) => {
                 AuthoredCommand::SetEntityTransform { entity, transform }
             }
