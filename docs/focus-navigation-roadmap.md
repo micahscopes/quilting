@@ -138,6 +138,15 @@ or sphere state.
    modifiers, authored-camera
    arbitration, and live browser cutover remain outside this slice; rotation
    cadence invariance is not inferred from same-trace parity.
+   The semantic surface-walk response is now frozen separately in
+   `SurfaceWalkController`: scene-relative pace and avatar scale, tangent
+   velocity, contact/normal smoothing, relative-pitch retention, tangent pull,
+   eye height, and the scale-aware near plane no longer require a browser.
+   `HyperscopeSurfaceWalk` exercises that controller through generated WASM
+   over 2,160 mapping cases and a deterministic 600-frame contact trace. The
+   live walker is not cut over yet: the next gate must combine this response,
+   `SurfaceWalker` advancement, and `SurfaceAnchorTransition` in one atomic
+   application action so Rust and JavaScript cannot disagree about attachment.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere
    transitions in Rust, and extract one compact focus packet per view.

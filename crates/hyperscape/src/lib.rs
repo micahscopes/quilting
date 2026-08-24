@@ -24,12 +24,15 @@ pub mod presentation;
 pub mod surface;
 
 pub use navigation::{
-    map_space_mouse_axes, map_space_mouse_camera, CameraBasis, CameraError, CameraRig,
+    compose_surface_relative_forward, decompose_surface_relative_forward, map_space_mouse_axes,
+    map_space_mouse_camera, scale_relative_near_plane, CameraBasis, CameraError, CameraRig,
     CameraTransition, FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition,
     MappedSpaceMouseFrame, NavigationAction, NavigationActionQueue, NavigationAxes,
     NavigationController, NavigationFrame, NavigationPreset, NavigationRuntime, PerspectiveLens,
     ScheduledNavigationAction, SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping,
-    SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,
+    SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition, SurfaceRelativeView,
+    SurfaceWalkContactFrame, SurfaceWalkController, SurfaceWalkControls, SurfaceWalkError,
+    SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkMotion, TransitionEasing,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{

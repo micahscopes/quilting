@@ -17,6 +17,7 @@ cargo run -p hyperscape --bin hyperscope-preflight
 node --test tests/*.test.mjs
 node scripts/smoke-hyperscope-presentation.mjs
 node scripts/smoke-hyperscope-app-shadow.mjs
+node scripts/smoke-surface-walk.mjs
 node scripts/smoke-hyperscope-route-shadow.mjs
 node scripts/smoke-render-shadow.mjs
 ```
@@ -30,6 +31,10 @@ coherent but stale `dist/`. It reports the matching fingerprints and checked
 bundle size. The generated-WASM smoke verifies start, cue deep-link, malformed
 cue, unknown-cue, application projection, and camera/focus transition parity
 without needing a GPU or browser.
+The surface-walk smoke additionally checks the Rust scale/speed/near-plane
+policy against the shared live-page helpers, then runs deterministic animated
+contact, pitch-recapture, orientation-retention, reset, and invalid-input
+traces without a renderer.
 
 The replay checks must print
 `PASS fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`,

@@ -4,10 +4,12 @@ mod navigation;
 mod render_shadow;
 mod round_shadow;
 mod route_shadow;
+mod surface_walk;
 mod surface_runtime;
 
 pub use app_shadow::{map_space_mouse_camera_frame, HyperscopeAppShadow};
 pub use route_shadow::{canonicalize_hyperscope_route, hyperscope_control_specs};
+pub use surface_walk::HyperscopeSurfaceWalk;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;

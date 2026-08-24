@@ -329,6 +329,165 @@ function normalizedDirection(direction) {
   return values.map(value => value / length);
 }
 
+function surfaceFrameDirection(direction) {
+  const values = Array.from(direction || [], Number);
+  if (values.length !== 3 || !finitePoint(...values)) return null;
+  const length = Math.hypot(...values);
+  if (!(length > 1e-8) || !Number.isFinite(length)) return null;
+  return values.map(value => value / length);
+}
+
+/** Normalize a surface-frame direction using the incumbent walk tolerance. */
+export function surfaceNormalize(direction) {
+  return surfaceFrameDirection(direction);
+}
+
+function surfaceFrameCross(left, right) {
+  return [
+    left[1] * right[2] - left[2] * right[1],
+    left[2] * right[0] - left[0] * right[2],
+    left[0] * right[1] - left[1] * right[0],
+  ];
+}
+
+/** Project a direction into a normalized local surface tangent. */
+export function surfaceProjectTangent(direction, normal) {
+  const value = Array.from(direction || [], Number);
+  const surfaceNormal = surfaceFrameDirection(normal);
+  if (value.length !== 3 || !finitePoint(...value) || !surfaceNormal) return null;
+  const normalPart = value.reduce(
+    (sum, coordinate, axis) => sum + coordinate * surfaceNormal[axis],
+    0,
+  );
+  return surfaceFrameDirection(value.map(
+    (coordinate, axis) => coordinate - surfaceNormal[axis] * normalPart,
+  ));
+}
+
+/** Spherical direction response used by the incumbent surface-walk camera. */
+export function surfaceSmoothDirection(from, to, amount) {
+  const destination = surfaceFrameDirection(to);
+  if (!destination || !Number.isFinite(amount)) return null;
+  if (!from || amount >= 1) return destination;
+  const source = surfaceFrameDirection(from);
+  if (!source) return null;
+  if (amount <= 0) return source;
+  const cosine = Math.max(-1, Math.min(1, source.reduce(
+    (sum, value, axis) => sum + value * destination[axis],
+    0,
+  )));
+  if (cosine > 0.9995) {
+    return surfaceFrameDirection(source.map(
+      (value, axis) => value + (destination[axis] - value) * amount,
+    )) || destination;
+  }
+  if (cosine < -0.9995) {
+    const orthogonal = surfaceFrameDirection(surfaceFrameCross(source, [1, 0, 0]))
+      || surfaceFrameDirection(surfaceFrameCross(source, [0, 1, 0]));
+    if (!orthogonal) return destination;
+    return surfaceFrameDirection(source.map(
+      (value, axis) => value * Math.cos(Math.PI * amount)
+        + orthogonal[axis] * Math.sin(Math.PI * amount),
+    )) || destination;
+  }
+  const angle = Math.acos(cosine);
+  const sine = Math.sin(angle);
+  if (Math.abs(sine) < 1e-8) return destination;
+  const firstWeight = Math.sin((1 - amount) * angle) / sine;
+  const secondWeight = Math.sin(amount * angle) / sine;
+  return surfaceFrameDirection(source.map(
+    (value, axis) => value * firstWeight + destination[axis] * secondWeight,
+  )) || destination;
+}
+
+/**
+ * Pure incumbent oracle for one animated surface-walk camera response.
+ * Acquisition, topology walking, and camera application stay outside.
+ */
+export function resolveSurfaceWalkView(state, camera, contact, options) {
+  const basis = Array.from(camera?.basis || [], Number);
+  const targetPosition = Array.from(contact?.outputPosition || [], Number);
+  const targetNormal = surfaceFrameDirection(contact?.outputNormal);
+  const deltaSeconds = Number(options?.deltaSeconds);
+  const smoothingSeconds = Number(options?.smoothingSeconds);
+  const tangentPullFraction = Number(options?.tangentPullFraction);
+  const eyeHeight = Number(options?.eyeHeight);
+  if (basis.length !== 9 || !basis.every(Number.isFinite)
+      || targetPosition.length !== 3 || !targetPosition.every(Number.isFinite)
+      || !targetNormal || !Number.isFinite(deltaSeconds) || deltaSeconds < 0
+      || !Number.isFinite(smoothingSeconds) || smoothingSeconds < 0
+      || !Number.isFinite(tangentPullFraction) || tangentPullFraction < 0
+      || tangentPullFraction > 1 || !(eyeHeight > 0) || !Number.isFinite(eyeHeight)) {
+    return null;
+  }
+  const active = Boolean(options?.active);
+  const priorPosition = state?.filteredPosition == null
+    ? null : Array.from(state.filteredPosition, Number);
+  const priorNormal = state?.filteredNormal == null
+    ? null : surfaceFrameDirection(state.filteredNormal);
+  const priorTangent = state?.tangentForward == null
+    ? null : surfaceFrameDirection(state.tangentForward);
+  if ((priorPosition && (priorPosition.length !== 3 || !priorPosition.every(Number.isFinite)))
+      || (state?.filteredNormal != null && !priorNormal)
+      || (state?.tangentForward != null && !priorTangent)) return null;
+
+  const filterAmount = !active || !(deltaSeconds > 0) || smoothingSeconds <= 0
+    ? 1 : 1 - Math.exp(-deltaSeconds / smoothingSeconds);
+  const filteredPosition = priorPosition
+    ? priorPosition.map(
+      (value, axis) => value + (targetPosition[axis] - value) * filterAmount,
+    )
+    : targetPosition;
+  const filteredNormal = surfaceSmoothDirection(priorNormal, targetNormal, filterAmount);
+  if (!filteredNormal) return null;
+  const eye = filteredPosition.map(
+    (value, axis) => value + filteredNormal[axis] * eyeHeight,
+  );
+
+  let tangentForward = priorTangent;
+  let relativePitch = Number.isFinite(state?.relativePitch) ? state.relativePitch : null;
+  let outputBasis = basis.slice();
+  if (options?.orient) {
+    const oldForward = basis.slice(6, 9);
+    const captureRelativeView = !active || Boolean(options?.captureRelativeView)
+      || !Number.isFinite(relativePitch) || !tangentForward;
+    const relativeView = captureRelativeView
+      ? decomposeSurfaceRelativeForward(
+        oldForward,
+        filteredNormal,
+        tangentForward || basis.slice(3, 6),
+      )
+      : null;
+    tangentForward = relativeView?.tangent
+      || surfaceProjectTangent(tangentForward, filteredNormal)
+      || surfaceProjectTangent(basis.slice(3, 6), filteredNormal)
+      || surfaceFrameDirection(surfaceFrameCross(filteredNormal, [1, 0, 0]))
+      || surfaceFrameDirection(surfaceFrameCross(filteredNormal, [0, 0, 1]));
+    if (!tangentForward) return null;
+    if (relativeView) relativePitch = relativeView.pitch;
+    const targetForward = composeSurfaceRelativeForward(
+      tangentForward,
+      filteredNormal,
+      Number.isFinite(relativePitch) ? relativePitch : 0,
+    ) || tangentForward;
+    const framePullAmount = !active || !(deltaSeconds > 0)
+      ? 1 : 1 - Math.exp(-tangentPullFraction * 8 * deltaSeconds);
+    const forward = surfaceSmoothDirection(oldForward, targetForward, framePullAmount);
+    const right = forward && surfaceFrameDirection(surfaceFrameCross(forward, filteredNormal));
+    const up = right && surfaceFrameDirection(surfaceFrameCross(right, forward));
+    if (!right || !up) return null;
+    outputBasis = [...right, ...up, ...forward];
+  }
+  return {
+    filteredPosition,
+    filteredNormal,
+    tangentForward,
+    relativePitch: Number.isFinite(relativePitch) ? relativePitch : null,
+    eye,
+    basis: outputBasis,
+  };
+}
+
 /** Split a view direction into a surface tangent heading and relative pitch. */
 export function decomposeSurfaceRelativeForward(forward, normal, tangentHint = null) {
   const view = normalizedDirection(forward);

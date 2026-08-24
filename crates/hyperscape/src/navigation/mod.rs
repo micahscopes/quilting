@@ -7,6 +7,7 @@
 pub(crate) mod action;
 mod camera;
 mod focus;
+mod surface_walk;
 mod transition;
 
 pub use action::{
@@ -19,6 +20,12 @@ pub use camera::{
     SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping, SphereReflectionState,
 };
 pub use focus::{FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition};
+pub use surface_walk::{
+    compose_surface_relative_forward, decompose_surface_relative_forward,
+    scale_relative_near_plane, SurfaceRelativeView, SurfaceWalkController, SurfaceWalkControls,
+    SurfaceWalkContactFrame, SurfaceWalkError, SurfaceWalkFrame, SurfaceWalkInput,
+    SurfaceWalkMetrics, SurfaceWalkMotion,
+};
 pub use transition::{
     CameraTransition, SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,
 };

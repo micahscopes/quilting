@@ -17,6 +17,7 @@ import {
   isPrimarySelectionClick,
   mobiusConformalScaleAt,
   perspectiveNavigationSpeed,
+  resolveSurfaceWalkView,
   scaleRadiusMultiplicatively,
   scaleAnchoredFocusRadius,
   scaleRelativeNearPlane,
@@ -73,6 +74,45 @@ test('walking pace is normalized by scene radius and avatar scale', () => {
   assert.equal(sceneRelativeWalkSpeed(2, 0.25, 0.125), 0.0625);
   assert.equal(sceneRelativeWalkSpeed(Number.NaN, 0.25), null);
   assert.equal(sceneRelativeWalkSpeed(0, 0.25), null);
+});
+
+test('surface-walk view oracle retains pitch and rejects degenerate contact frames', () => {
+  const pitch = -Math.PI / 6;
+  const forward = composeSurfaceRelativeForward([0, 0, -1], [0, 1, 0], pitch);
+  const basis = [1, 0, 0, 0, Math.cos(pitch), Math.sin(pitch), ...forward];
+  const options = {
+    active: false,
+    deltaSeconds: 0,
+    smoothingSeconds: 0.18,
+    tangentPullFraction: 0.7,
+    eyeHeight: 0.035,
+    orient: true,
+    captureRelativeView: false,
+  };
+  const first = resolveSurfaceWalkView(
+    {},
+    { basis },
+    { outputPosition: [0, 0, 0], outputNormal: [0, 1, 0] },
+    options,
+  );
+  assert(first);
+  assert(Math.abs(first.relativePitch - pitch) < 1e-12);
+  assert.deepEqual(first.eye, [0, 0.035, 0]);
+
+  const next = resolveSurfaceWalkView(
+    first,
+    { basis: first.basis },
+    { outputPosition: [1, 0, 0], outputNormal: [0, 0, 1] },
+    { ...options, active: true, deltaSeconds: 10, smoothingSeconds: 0, tangentPullFraction: 1 },
+  );
+  assert(next);
+  assert(Math.abs(next.relativePitch - pitch) < 1e-12);
+  assert.equal(resolveSurfaceWalkView(
+    first,
+    { basis: first.basis },
+    { outputPosition: [0, 0, 0], outputNormal: [0, 1e-10, 0] },
+    options,
+  ), null);
 });
 
 test('face source centroid ignores packed vertex IDs', () => {

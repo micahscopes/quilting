@@ -82,6 +82,7 @@ jobs:
         run: |
           node scripts/smoke-hyperscope-presentation.mjs
           node scripts/smoke-hyperscope-app-shadow.mjs
+          node scripts/smoke-surface-walk.mjs
           node scripts/smoke-hyperscope-route-shadow.mjs
           node scripts/smoke-render-shadow.mjs
 

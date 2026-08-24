@@ -64,7 +64,7 @@ The first application boundary is now explicit:
   parity-complete frame snapshot. This is an offline
   cutover gate only: `navshadow=1` and the browser camera remain unchanged until
   live Chrome parity is measured.
-- The next offline input gate freezes normalized SpaceMouse camera samples at
+- The normalized SpaceMouse camera gate freezes samples at
   a platform-neutral Rust boundary. Browser code retains only WebHID/report
   acquisition, device shaping/smoothing, button layers, and the
   screen-relative linear speed frozen at gesture start. Rust validates axes in
@@ -77,6 +77,21 @@ The first application boundary is now explicit:
   `AppStore` camera initial states, and a 120-frame deterministic trace.
   Modifier layers, surface-walk
   input, and authored-transition arbitration remain explicit later cutovers.
+- The first surface-walk application gate is now a backend-neutral
+  `SurfaceWalkController`. It owns the scene-radius/body-scale speed law,
+  combined-input unit-disc limiting, displayed-chart tangent velocity,
+  exponential contact and normal response, retained surface-relative pitch,
+  tangent alignment, eye height, and scale-relative near plane. The adapter
+  accepts contact frames rather than renderer or topology handles, so it can
+  compose with the existing animated `SurfaceWalker`, replays, native games,
+  and a future WebGPU frontend. `HyperscopeSurfaceWalk` exposes the same state
+  machine without DOM, HID, WebGL, or worker dependencies. Its generated-WASM
+  gate covers 2,160 scale/input combinations, a deterministic 600-frame
+  animated-contact trace, pitch recapture, position-only conformal updates,
+  reset, and rejected-input atomicity. The live page remains authoritative for
+  walking until this controller is joined atomically to `SurfaceRuntime` and
+  the existing Rust surface-anchor transition; browser key/HID acquisition,
+  LOD scheduling, and labels remain adapters.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 67 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit

@@ -521,3 +521,35 @@ files and 38,378,234 bytes. Native camera tests, strict core Clippy and Rustdoc,
 the WASM target check, the 16 SpaceMouse adapter tests, and all four
 generated-WASM smokes passed. No runtime or cadence-invariance claim is made
 until the user-run Chrome adapter is explicitly wired and measured.
+
+## Rust surface-walk response boundary follow-up
+
+On 2026-08-24, the next offline gate moved the semantic response above the
+existing animated topology walker into `hyperscape::SurfaceWalkController`.
+Rust now owns scene-radius/body-scale speed, combined-input unit-disc limiting,
+displayed-chart tangent velocity, contact and normal response, retained
+surface-relative pitch, tangent pull, eye height, and the scale-aware near
+plane. The renderer-independent contact-frame API deliberately does not yet
+own attachment lifecycle, animation scheduling, LOD scheduling, or UI.
+
+The incumbent JavaScript camera response was factored into the pure
+`resolveSurfaceWalkView` helper still used by the live page. The generated-WASM
+smoke compared that actual oracle against Rust for 600 animated curved-contact
+frames, in addition to 2,160 scene/pace/body/height/input mappings, pitch
+recapture, position-only conformal updates, reset, and atomic rejection. Exact
+vector arity, nested unknown fields, non-finite values, negative deltas, and
+finite-input overflow are rejected at the WASM boundary. The generated
+TypeScript declaration exposes structural request/response types instead of
+`any`. The live page also now detaches the Rust topology runtime when an
+attached contact cannot form a valid camera frame, preventing split attachment
+state while browser walking remains authoritative.
+
+This slice increased optimized WASM from 5,989,628 to 6,029,193 bytes (+39,565
+raw); gzip increased from 2,098,831 to 2,118,125 bytes (+19,294). The
+source-coherent build receipt is `cc7baa878a0ef914f3515eb6379940fa` over 155
+files and 38,424,153 bytes. The 61 native Hyperscape tests, 25 shared JavaScript
+focus/navigation tests, WASM target check, generated-WASM surface walk smoke,
+and release Trunk build passed. The next authority gate must compose this view
+response, `SurfaceWalker` advancement, height/scale intent, and the existing
+surface-anchor transition into one application action before deleting browser
+walk state.
