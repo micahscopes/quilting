@@ -495,6 +495,58 @@ pub struct JfaPipeline {
     jfa_result_in_ping: bool,
 }
 
+/// Owns handles only while a multi-step GL construction is incomplete.
+/// Disarming transfers the copied handles to their completed owner; every
+/// early return instead releases each staged handle exactly once.
+struct StagedHandles<'a, C, T: Copy> {
+    context: &'a C,
+    handles: Vec<T>,
+    delete: fn(&C, T),
+}
+
+impl<'a, C, T: Copy> StagedHandles<'a, C, T> {
+    fn new(context: &'a C, delete: fn(&C, T)) -> Self {
+        Self { context, handles: Vec::new(), delete }
+    }
+
+    fn stage(&mut self, handle: T) -> T {
+        self.handles.push(handle);
+        handle
+    }
+
+    fn disarm(mut self) {
+        self.handles.clear();
+    }
+}
+
+impl<C, T: Copy> Drop for StagedHandles<'_, C, T> {
+    fn drop(&mut self) {
+        for handle in self.handles.drain(..).rev() {
+            (self.delete)(self.context, handle);
+        }
+    }
+}
+
+fn delete_program(gl: &glow::Context, program: glow::Program) {
+    unsafe { gl.delete_program(program); }
+}
+
+fn delete_shader(gl: &glow::Context, shader: glow::Shader) {
+    unsafe { gl.delete_shader(shader); }
+}
+
+fn delete_vertex_array(gl: &glow::Context, vao: glow::VertexArray) {
+    unsafe { gl.delete_vertex_array(vao); }
+}
+
+fn delete_framebuffer(gl: &glow::Context, framebuffer: glow::Framebuffer) {
+    unsafe { gl.delete_framebuffer(framebuffer); }
+}
+
+fn delete_texture(gl: &glow::Context, texture: glow::Texture) {
+    unsafe { gl.delete_texture(texture); }
+}
+
 fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<glow::Shader, String> {
     unsafe {
         let shader = gl.create_shader(shader_type)?;
@@ -511,26 +563,34 @@ fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<
 
 fn link_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> Result<glow::Program, String> {
     unsafe {
-        let vs = compile_shader(gl, glow::VERTEX_SHADER, vs_src)?;
-        let fs = compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?;
-        let prog = gl.create_program()?;
+        // Programs are declared after shaders so an early return deletes the
+        // program first, then its attached shaders in reverse acquisition.
+        let mut shaders = StagedHandles::new(gl, delete_shader);
+        let mut programs = StagedHandles::new(gl, delete_program);
+        let vs = shaders.stage(compile_shader(gl, glow::VERTEX_SHADER, vs_src)?);
+        let fs = shaders.stage(compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?);
+        let prog = programs.stage(gl.create_program()?);
         gl.attach_shader(prog, vs);
         gl.attach_shader(prog, fs);
         gl.link_program(prog);
-        gl.delete_shader(vs);
-        gl.delete_shader(fs);
         if !gl.get_program_link_status(prog) {
             let log = gl.get_program_info_log(prog);
-            gl.delete_program(prog);
             return Err(format!("program link: {log}"));
         }
+        programs.disarm();
+        // Successful links retain the existing behavior of deleting attached
+        // shaders; GL defers their final release until the program is deleted.
         Ok(prog)
     }
 }
 
 fn create_fbo_tex(gl: &glow::Context, w: i32, h: i32, format: u32) -> Result<(glow::Framebuffer, glow::Texture), String> {
     unsafe {
-        let tex = gl.create_texture()?;
+        // Framebuffers are declared after textures so failure cleanup always
+        // deletes the attachment owner before its texture.
+        let mut textures = StagedHandles::new(gl, delete_texture);
+        let mut framebuffers = StagedHandles::new(gl, delete_framebuffer);
+        let tex = textures.stage(gl.create_texture()?);
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         // RGBA16F needs HALF_FLOAT type, RGBA32F needs FLOAT, RGBA8 needs UNSIGNED_BYTE
         let (ext_format, ext_type) = match format {
@@ -545,10 +605,12 @@ fn create_fbo_tex(gl: &glow::Context, w: i32, h: i32, format: u32) -> Result<(gl
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
 
-        let fbo = gl.create_framebuffer()?;
+        let fbo = framebuffers.stage(gl.create_framebuffer()?);
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        framebuffers.disarm();
+        textures.disarm();
         Ok((fbo, tex))
     }
 }
@@ -594,21 +656,32 @@ fn per_pass_blur_strength(blur_strength: f32, blur_passes: u32) -> f32 {
 impl JfaPipeline {
     /// Create the JFA pipeline. Call once at init time.
     pub fn new(gl: &glow::Context, config: JfaConfig) -> Result<Self, String> {
-        let prog_init = link_program(gl, VS_FULLSCREEN, FS_JFA_INIT)?;
-        let prog_step = link_program(gl, VS_FULLSCREEN, FS_JFA_STEP)?;
-        let prog_firmness = link_program(gl, VS_FULLSCREEN, FS_JFA_FIRMNESS)?;
-        let prog_blur_dir = link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?;
-        let prog_weight_radial = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?;
-        let prog_weight_conformal = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?;
-        let prog_reduce_minmax = link_program(gl, VS_FULLSCREEN, FS_REDUCE_MINMAX)?;
-        let prog_weight_conformal_norm = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL_NORM)?;
-        let prog_weight_kawase = link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?;
-        let prog_passthrough = link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?;
-        let prog_mip_composite = link_program(gl, VS_FULLSCREEN, FS_MIP_COMPOSITE)?;
-        let prog_gauss_down = link_program(gl, VS_FULLSCREEN, FS_GAUSS_DOWN)?;
-        let vao = unsafe { gl.create_vertex_array()? };
+        // Declaration order is intentional: Rust drops locals in reverse, so
+        // every failure retires programs, VAOs, FBOs, then textures.
+        let mut textures = StagedHandles::new(gl, delete_texture);
+        let mut framebuffers = StagedHandles::new(gl, delete_framebuffer);
+        let mut vertex_arrays = StagedHandles::new(gl, delete_vertex_array);
+        let mut programs = StagedHandles::new(gl, delete_program);
+
+        let prog_init = programs.stage(link_program(gl, VS_FULLSCREEN, FS_JFA_INIT)?);
+        let prog_step = programs.stage(link_program(gl, VS_FULLSCREEN, FS_JFA_STEP)?);
+        let prog_firmness = programs.stage(link_program(gl, VS_FULLSCREEN, FS_JFA_FIRMNESS)?);
+        let prog_blur_dir = programs.stage(link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?);
+        let prog_weight_radial = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?);
+        let prog_weight_conformal = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?);
+        let prog_reduce_minmax = programs.stage(link_program(gl, VS_FULLSCREEN, FS_REDUCE_MINMAX)?);
+        let prog_weight_conformal_norm = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL_NORM)?);
+        let prog_weight_kawase = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?);
+        let prog_passthrough = programs.stage(link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?);
+        let prog_mip_composite = programs.stage(link_program(gl, VS_FULLSCREEN, FS_MIP_COMPOSITE)?);
+        let prog_gauss_down = programs.stage(link_program(gl, VS_FULLSCREEN, FS_GAUSS_DOWN)?);
+        let vao = vertex_arrays.stage(unsafe { gl.create_vertex_array()? });
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
+        let reduce_tex_a = textures.stage(reduce_tex_a);
+        let reduce_fbo_a = framebuffers.stage(reduce_fbo_a);
         let (reduce_fbo_b, reduce_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
+        let reduce_tex_b = textures.stage(reduce_tex_b);
+        let reduce_fbo_b = framebuffers.stage(reduce_fbo_b);
 
         let fmt = match config.precision {
             Precision::Float32 => glow::RGBA32F,
@@ -617,12 +690,22 @@ impl JfaPipeline {
 
         // Allocate with placeholder 1x1 — resize() will set real size
         let (ping_fbo, ping_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
+        let ping_tex = textures.stage(ping_tex);
+        let ping_fbo = framebuffers.stage(ping_fbo);
         let (pong_fbo, pong_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
+        let pong_tex = textures.stage(pong_tex);
+        let pong_fbo = framebuffers.stage(pong_fbo);
         let (firmness_fbo, firmness_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
+        let firmness_tex = textures.stage(firmness_tex);
+        let firmness_fbo = framebuffers.stage(firmness_fbo);
         let (blur_fbo, blur_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
+        let blur_tex = textures.stage(blur_tex);
+        let blur_fbo = framebuffers.stage(blur_fbo);
         let (blur_fbo_b, blur_tex_b) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
+        let blur_tex_b = textures.stage(blur_tex_b);
+        let blur_fbo_b = framebuffers.stage(blur_fbo_b);
 
-        Ok(JfaPipeline {
+        let pipeline = JfaPipeline {
             prog_init, prog_step, prog_firmness,
             prog_weight_radial, prog_weight_conformal,
             prog_reduce_minmax, prog_weight_conformal_norm, prog_weight_kawase,
@@ -634,7 +717,12 @@ impl JfaPipeline {
             blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
             jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
             last_weight_tex: None, jfa_result_in_ping: false,
-        })
+        };
+        programs.disarm();
+        vertex_arrays.disarm();
+        framebuffers.disarm();
+        textures.disarm();
+        Ok(pipeline)
     }
 
     /// Resize internal textures to match viewport. Call when viewport changes.
@@ -1274,6 +1362,73 @@ impl JfaPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn record_release(released: &RefCell<Vec<&'static str>>, handle: &'static str) {
+        released.borrow_mut().push(handle);
+    }
+
+    #[test]
+    fn staged_handles_release_once_in_reverse_acquisition_order() {
+        let released = RefCell::new(Vec::new());
+        {
+            let mut staged = StagedHandles::new(&released, record_release);
+            staged.stage("first");
+            staged.stage("second");
+            staged.stage("third");
+        }
+        assert_eq!(*released.borrow(), vec!["third", "second", "first"]);
+    }
+
+    #[test]
+    fn disarmed_handles_are_not_released() {
+        let released = RefCell::new(Vec::new());
+        let mut staged = StagedHandles::new(&released, record_release);
+        staged.stage("transferred");
+        staged.disarm();
+        assert!(released.borrow().is_empty());
+    }
+
+    #[test]
+    fn construction_categories_retire_in_dependency_order() {
+        let released = RefCell::new(Vec::new());
+        {
+            let mut textures = StagedHandles::new(&released, record_release);
+            let mut framebuffers = StagedHandles::new(&released, record_release);
+            let mut vertex_arrays = StagedHandles::new(&released, record_release);
+            let mut programs = StagedHandles::new(&released, record_release);
+            textures.stage("texture-a");
+            textures.stage("texture-b");
+            framebuffers.stage("fbo-a");
+            framebuffers.stage("fbo-b");
+            vertex_arrays.stage("vao");
+            programs.stage("program-a");
+            programs.stage("program-b");
+        }
+        assert_eq!(
+            *released.borrow(),
+            vec![
+                "program-b", "program-a", "vao", "fbo-b", "fbo-a",
+                "texture-b", "texture-a",
+            ]
+        );
+    }
+
+    #[test]
+    fn synthetic_early_failure_releases_all_preceding_handles() {
+        fn fail_after_two_stages(
+            released: &RefCell<Vec<&'static str>>,
+        ) -> Result<(), &'static str> {
+            let mut staged = StagedHandles::new(released, record_release);
+            staged.stage("first");
+            staged.stage("second");
+            Err("synthetic failure")
+        }
+
+        let released = RefCell::new(Vec::new());
+        assert_eq!(fail_after_two_stages(&released), Err("synthetic failure"));
+        assert_eq!(*released.borrow(), vec!["second", "first"]);
+    }
 
     #[test]
     fn downsample_never_produces_empty_buffers() {
