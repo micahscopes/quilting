@@ -373,6 +373,7 @@ import {
   spaceMouseNavigationPolicy,
 } from './spacemouse.mjs?rev=object-focus-v1';
 import {
+  advanceVirtualTransitionClock,
   applyMobiusPoint,
   buildFocusBounds,
   faceSourceCentroid,
@@ -394,7 +395,7 @@ import {
   smootherstep01,
   transportCameraAcrossSphereReflections,
   transportPointAndDirectionsAcrossSphereReflections,
-} from './hyperscope_focus.mjs?rev=rust-surface-walk-oracle-v1';
+} from './hyperscope_focus.mjs?rev=shared-anchor-clock-v2';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -2523,20 +2524,19 @@ function applyManualCameraFrame(frame) {
   return true;
 }
 
-function beginSurfaceWalkAnchorTransition(startFrame, nowMs = performance.now()) {
+function beginSurfaceWalkAnchorTransition(startFrame) {
   if (!startFrame?.eye || !startFrame?.basis) return false;
   cancelSurfaceWalkAnchorTransition();
   rustNavigationShadowCameraActive = false;
   surfaceWalk.anchorTransition = {
     startEye: startFrame.eye.slice(),
     startBasis: startFrame.basis.slice(),
-    startedAt: nowMs,
-    durationMs: Math.max(1, focusTransitionCentiseconds.peek() * 10),
+    elapsedSeconds: 0,
+    durationSeconds: Math.max(0.001, focusTransitionCentiseconds.peek() / 100),
     inputRevision: manualCameraInputRevision,
     hopHeight: null,
     rustShadowActive: Boolean(rustNavigationShadow && synchronizeRustNavigationShadow()),
     rustShadowStarted: false,
-    rustShadowLastAt: nowMs,
   };
   return true;
 }
@@ -2554,7 +2554,7 @@ function cancelSurfaceWalkAnchorTransition() {
   surfaceWalk.anchorTransition = null;
 }
 
-function advanceRustSurfaceAnchorShadow(transition, targetFrame, nowMs) {
+function advanceRustSurfaceAnchorShadow(transition, targetFrame, deltaSeconds) {
   if (!transition.rustShadowActive || !rustNavigationShadow) return null;
   try {
     const eye = new Float64Array(targetFrame.eye);
@@ -2569,7 +2569,7 @@ function advanceRustSurfaceAnchorShadow(transition, targetFrame, nowMs) {
         targetFrame.controlDistance,
         normal,
         Math.max(sceneSourceBound?.radius || 1, 1e-4),
-        transition.durationMs / 1000,
+        transition.durationSeconds,
         'smootherstep',
       );
       transition.rustShadowStarted = true;
@@ -2582,8 +2582,6 @@ function advanceRustSurfaceAnchorShadow(transition, targetFrame, nowMs) {
         normal,
       );
     }
-    const deltaSeconds = Math.max(0, nowMs - transition.rustShadowLastAt) / 1000;
-    transition.rustShadowLastAt = nowMs;
     rustNavigationShadowSnapshot = rustNavigationShadow.tick(deltaSeconds);
     return rustNavigationShadowSnapshot;
   } catch (error) {
@@ -2594,7 +2592,7 @@ function advanceRustSurfaceAnchorShadow(transition, targetFrame, nowMs) {
   }
 }
 
-function applySurfaceWalkAnchorTransition(nowMs = performance.now()) {
+function applySurfaceWalkAnchorTransition(deltaSeconds = 0, nowMs = performance.now()) {
   const transition = surfaceWalk.anchorTransition;
   if (!transition) return false;
   if (transition.inputRevision !== manualCameraInputRevision) {
@@ -2603,7 +2601,17 @@ function applySurfaceWalkAnchorTransition(nowMs = performance.now()) {
   }
 
   const targetFrame = activeCameraFrame();
-  const progress = (nowMs - transition.startedAt) / transition.durationMs;
+  const clock = advanceVirtualTransitionClock(
+    transition.elapsedSeconds,
+    transition.durationSeconds,
+    deltaSeconds,
+  );
+  if (!clock) {
+    cancelSurfaceWalkAnchorTransition();
+    return false;
+  }
+  transition.elapsedSeconds = clock.elapsedSeconds;
+  const progress = clock.progress;
   if (transition.hopHeight == null) {
     const distance = Math.hypot(
       targetFrame.eye[0] - transition.startEye[0],
@@ -2625,7 +2633,7 @@ function applySurfaceWalkAnchorTransition(nowMs = performance.now()) {
     return false;
   }
 
-  const rustSnapshot = advanceRustSurfaceAnchorShadow(transition, targetFrame, nowMs);
+  const rustSnapshot = advanceRustSurfaceAnchorShadow(transition, targetFrame, deltaSeconds);
 
   const forward = surfaceSmoothDirection(
     transition.startBasis.slice(6, 9),
@@ -2679,7 +2687,7 @@ function applySurfaceWalkAnchorTransition(nowMs = performance.now()) {
     surfaceWalk.lastLodAt = nowMs;
     debouncedLodRecompute();
   }
-  if (progress >= 1) {
+  if (clock.complete) {
     cancelSurfaceWalkAnchorTransition();
     selectionLabel(
       `Surface walk · node ${surfaceWalk.snapshot?.node} face ${surfaceWalk.snapshot?.face}`
@@ -2734,7 +2742,7 @@ function applySurfaceWalkCamera(snapshot, orient = true, deltaSeconds = 0) {
   panZ = resolved.eye[2] + resolved.basis[8] * zoom;
   snapshot.output_normal = resolved.filteredNormal;
   snapshot.eye_position = resolved.eye;
-  applySurfaceWalkAnchorTransition();
+  applySurfaceWalkAnchorTransition(deltaSeconds);
   return true;
 }
 

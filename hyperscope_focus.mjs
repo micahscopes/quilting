@@ -679,6 +679,41 @@ export function smootherstep01(value) {
 }
 
 /**
+ * Advance a transition on an explicit virtual-time delta.
+ *
+ * Keeping this independent of `performance.now()` makes camera glides
+ * deterministic under replay and gives the JavaScript oracle and Rust owner
+ * one clock during authority migration.
+ */
+export function advanceVirtualTransitionClock(elapsedSeconds, durationSeconds, deltaSeconds) {
+  if (typeof elapsedSeconds !== 'number'
+      || typeof durationSeconds !== 'number'
+      || typeof deltaSeconds !== 'number') {
+    return null;
+  }
+  const elapsed = elapsedSeconds;
+  const duration = durationSeconds;
+  const delta = deltaSeconds;
+  if (!Number.isFinite(elapsed) || elapsed < 0
+      || !Number.isFinite(duration) || duration <= 0
+      || !Number.isFinite(delta) || delta < 0) {
+    return null;
+  }
+  const accumulated = Math.min(duration, elapsed + delta);
+  const progress = accumulated / duration;
+  // Match the Rust transition owner's endpoint rule. Decimal frame cadences
+  // such as ten 0.1-second ticks must land on the same terminal state as one
+  // 1-second tick instead of leaving an extra one-frame sliver.
+  const complete = progress >= 1 - 1e-12;
+  const nextElapsed = complete ? duration : accumulated;
+  return {
+    elapsedSeconds: nextElapsed,
+    progress: complete ? 1 : progress,
+    complete,
+  };
+}
+
+/**
  * Glide an eye point to a surface anchor with a minimum-jerk quintic ease and
  * a gentle hop along the destination surface normal.
  */

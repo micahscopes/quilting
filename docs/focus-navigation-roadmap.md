@@ -150,10 +150,12 @@ or sphere state.
    semantic walking frame to the candidate while JavaScript remains live
    authority. The production adapter shares the same posed QB geometry and
    adjacency as the incumbent walker and exposes bounded topology/camera drift
-   diagnostics. Cutover waits for clean Chrome traces across absolute-clock
-   anchor timing, reflection/chart edits, animation pose sampling, and
-   Float32-sensitive edge crossings; `walkimpl=rust` therefore resolves back
-   to shadow for now.
+   diagnostics. The oracle and candidate now advance re-anchoring from one
+   explicit virtual frame delta with identical endpoint snapping, and the
+   generated boundary exposes a typed composed result. Cutover still waits for
+   clean target-browser traces across that clock, reflection/chart edits,
+   animation pose sampling, and Float32-sensitive edge crossings;
+   `walkimpl=rust` therefore resolves back to shadow for now.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere
    transitions in Rust, and extract one compact focus packet per view.

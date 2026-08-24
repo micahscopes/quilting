@@ -33,6 +33,7 @@ use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{
     ComposedSurfaceWalkSnapshot, SurfaceRuntime, SurfaceRuntimeSnapshot,
 };
+use crate::surface_walk::ComposedSurfaceWalkResultJs;
 use hyperscape::interchange::{
     GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
 };
@@ -1582,8 +1583,8 @@ fn surface_snapshot_to_js(snapshot: Result<SurfaceRuntimeSnapshot, String>) -> J
 
 fn composed_surface_snapshot_to_js(
     snapshot: Result<ComposedSurfaceWalkSnapshot, String>,
-) -> JsValue {
-    match snapshot {
+) -> ComposedSurfaceWalkResultJs {
+    let value = match snapshot {
         Ok(snapshot) => serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL),
         Err(error) => {
             warn!("Composed surface walker: {error}");
@@ -1592,7 +1593,8 @@ fn composed_surface_snapshot_to_js(
             js_sys::Reflect::set(&result, &"error".into(), &error.into()).ok();
             result.into()
         }
-    }
+    };
+    value.unchecked_into()
 }
 
 fn exact_vector3(values: &[f64], label: &str) -> Result<[f64; 3], String> {
@@ -1725,11 +1727,11 @@ pub fn mr_attach_surface_walk(
     scene_radius: f64,
     controls: &[f64],
     transition_duration_seconds: f64,
-) -> JsValue {
+) -> ComposedSurfaceWalkResultJs {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let Some(state) = state.as_mut() else {
-            return JsValue::NULL;
+            return JsValue::NULL.unchecked_into();
         };
         let Some(&node) = state.face_nodes.get(face as usize) else {
             return composed_surface_snapshot_to_js(Err("surface face has no node".into()));
@@ -1827,11 +1829,11 @@ pub fn mr_step_surface_walk(
     fast: bool,
     orient: bool,
     capture_relative_view: bool,
-) -> JsValue {
+) -> ComposedSurfaceWalkResultJs {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let Some(state) = state.as_mut() else {
-            return JsValue::NULL;
+            return JsValue::NULL.unchecked_into();
         };
         let request = (|| {
             let face = state

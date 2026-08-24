@@ -585,3 +585,30 @@ browser-independent JavaScript tests, five generated-WASM smokes, and all
 three replay lanes passed after deliberately updating only the navigation
 golden for the reviewed surface-anchor interpolation semantics. Live browser
 authority remains unchanged.
+
+## Shared surface-anchor clock and typed composed boundary follow-up
+
+On 2026-08-24, the live JavaScript oracle stopped deriving the surface
+re-anchor glide from absolute `performance.now()` and now advances it from the
+same explicit, clamped frame delta passed to `SurfaceWalkRuntime`. Both sides
+snap normalized progress within `1e-12` of the endpoint, so ten 0.1-second
+steps and one 1-second step reach the identical terminal state. This removes a
+timing-only source of shadow drift during uneven rendering or background-tab
+stalls without changing the default `walkimpl=js` authority.
+
+The composed production exports now retain a structural
+`ComposedSurfaceWalkResult` TypeScript union through wasm-bindgen. The
+generated-WASM surface smoke calls both exports before renderer initialization
+to prove their inert boundary behavior and rejects a regression back to
+`any`. A live initialized-renderer trace is still required before cutover.
+
+The optimized WASM changed from 6,053,590 to 6,053,594 bytes (+4 raw); gzip
+changed from 2,128,315 to 2,124,101 bytes (-4,214). The source-coherent build
+receipt is `3e4b0bf87e58c17a179f4cebab91d902` over 156 files and 38,484,379
+bytes. The complete native workspace suite, 69 direct Hyperscape tests, 25
+all-feature application tests, 42 browser-independent JavaScript tests, 19
+Blender interchange tests, strict application Clippy/Rustdoc, all three replay
+goldens, the WASM target check, release Trunk build, all five generated-WASM
+smokes, and the ordinary release preflight passed. Reflection/chart follower
+transport, Float32-sensitive edge crossings, animation pose-time velocity,
+and target-browser composed diagnostics remain explicit cutover gates.

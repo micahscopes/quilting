@@ -95,9 +95,14 @@ The first application boundary is now explicit:
   gates retain the 2,160 mapping cases and 600-frame response oracle, while
   native aggregate tests cover atomic admission, animated velocity, scale,
   recovery side, coordinated detach, view recapture, and locomotion cadence.
-  Live cutover remains blocked on measured target-browser parity for the
-  browser's absolute anchor clock, reflection-time follower transport,
-  Float32 near-edge behavior, and pose-time velocity sampling.
+  The live oracle and Rust candidate now advance the re-anchor glide from the
+  same explicit clamped frame delta, including the same endpoint snap, so
+  replay and background scheduling cannot create timing-only drift. The direct
+  generated-WASM smoke also preserves a structural
+  `ComposedSurfaceWalkResult` boundary instead of `any`. Live cutover remains
+  blocked on target-browser validation of that shared clock plus
+  reflection-time follower transport, Float32 near-edge behavior, and
+  pose-time velocity sampling.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 68 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit

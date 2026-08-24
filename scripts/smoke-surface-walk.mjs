@@ -12,8 +12,75 @@ import {
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
-const { default: init, HyperscopeSurfaceWalk } = await import(packageUrl);
+const declarationsPath = `${repository}/pkg/quilting_wasm.d.ts`;
+const {
+  default: init,
+  HyperscopeSurfaceWalk,
+  mr_attachSurfaceWalk,
+  mr_stepSurfaceWalk,
+} = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
+
+const generatedDeclarations = readFileSync(declarationsPath, 'utf8');
+assert.match(
+  generatedDeclarations,
+  /export function mr_attachSurfaceWalk\([^\n]+\): ComposedSurfaceWalkResult;/,
+  'composed attach must retain its generated TypeScript result contract',
+);
+assert.match(
+  generatedDeclarations,
+  /export function mr_stepSurfaceWalk\([^\n]+\): ComposedSurfaceWalkResult;/,
+  'composed step must retain its generated TypeScript result contract',
+);
+assert.match(
+  generatedDeclarations,
+  /export interface ComposedSurfaceWalkCameraSnapshot \{[^}]*control_distance: number;[^}]*vertical_fov_radians: number;/s,
+  'composed camera declarations must match the snake_case serialized packet',
+);
+assert.match(
+  generatedDeclarations,
+  /export interface ComposedSurfaceWalkMetricsSnapshot \{[^}]*body_scale: number;[^}]*radii_per_second: number;[^}]*eye_height: number;/s,
+  'composed metrics declarations must match the snake_case serialized packet',
+);
+
+const inertCameraEye = new Float64Array([0, 1, 3]);
+const inertCameraForward = new Float64Array([0, 0, -1]);
+const inertCameraUp = new Float64Array([0, 1, 0]);
+const inertCameraParameters = new Float64Array([3, Math.PI / 3, 0.01, 10_000]);
+const inertControls = new Float64Array(11);
+assert.equal(
+  mr_attachSurfaceWalk(
+    0,
+    new Float64Array([1, 0, 0]),
+    inertCameraEye,
+    inertCameraForward,
+    inertCameraUp,
+    inertCameraParameters,
+    1,
+    inertControls,
+    1,
+  ),
+  null,
+  'composed attach should be inert before renderer state exists',
+);
+assert.equal(
+  mr_stepSurfaceWalk(
+    1 / 60,
+    inertCameraEye,
+    inertCameraForward,
+    inertCameraUp,
+    inertCameraParameters,
+    1,
+    inertControls,
+    0,
+    0,
+    false,
+    true,
+    false,
+  ),
+  null,
+  'composed step should be inert before renderer state exists',
+);
 
 const defaultControls = Object.freeze({
   baseRadiiPerSecond: 0.2,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  advanceVirtualTransitionClock,
   applyMobiusPoint,
   buildFocusBounds,
   buildNodeFocusRecords,
@@ -272,6 +273,27 @@ test('walk anchor glide eases exactly between endpoints with a normal hop', () =
   assert.equal(start.hop, 0);
   assert(Math.abs(end.hop) < 1e-12);
   assert.equal(interpolateWalkAnchorEye([0, 0], [1, 2, 3], [0, 1, 0], 0.5), null);
+});
+
+test('walk anchor clock is virtual, cadence independent, and strictly validated', () => {
+  let partitioned = { elapsedSeconds: 0 };
+  for (let frame = 0; frame < 10; frame++) {
+    partitioned = advanceVirtualTransitionClock(partitioned.elapsedSeconds, 1, 0.1);
+  }
+  const single = advanceVirtualTransitionClock(0, 1, 1);
+  assert.equal(partitioned.elapsedSeconds, single.elapsedSeconds);
+  assert.equal(partitioned.progress, 1);
+  assert.equal(partitioned.complete, true);
+  assert.deepEqual(advanceVirtualTransitionClock(0.25, 1, 0), {
+    elapsedSeconds: 0.25,
+    progress: 0.25,
+    complete: false,
+  });
+  assert.equal(advanceVirtualTransitionClock(0, 0, 0.1), null);
+  assert.equal(advanceVirtualTransitionClock(0, 1, -0.1), null);
+  assert.equal(advanceVirtualTransitionClock(Infinity, 1, 0.1), null);
+  assert.equal(advanceVirtualTransitionClock(0, 1, '0.1'), null);
+  assert.equal(advanceVirtualTransitionClock(0, 1, null), null);
 });
 
 test('object focus sphere applies a stable margin and rejects invalid bounds', () => {

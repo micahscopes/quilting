@@ -34,7 +34,11 @@ without needing a GPU or browser.
 The surface-walk smoke additionally checks the Rust scale/speed/near-plane
 policy against the shared live-page helpers, then runs deterministic animated
 contact, pitch-recapture, orientation-retention, reset, and invalid-input
-traces without a renderer.
+traces without a renderer. It also calls the composed attach/step exports
+before renderer initialization and verifies that their generated TypeScript
+return type remains `ComposedSurfaceWalkResult`; the browser-independent test
+suite checks that partitioned and single-step re-anchor clocks finish on the
+same exact virtual-time endpoint.
 
 The replay checks must print
 `PASS fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`,

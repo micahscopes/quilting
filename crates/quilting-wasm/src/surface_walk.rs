@@ -79,6 +79,51 @@ export interface SurfaceWalkFrameSnapshot {
   relativePitchRadians?: number;
   metrics: SurfaceWalkMetricsSnapshot;
 }
+export interface ComposedSurfaceWalkCameraSnapshot {
+  eye: readonly [number, number, number];
+  right: readonly [number, number, number];
+  up: readonly [number, number, number];
+  forward: readonly [number, number, number];
+  control_distance: number;
+  vertical_fov_radians: number;
+  near: number;
+  far: number;
+}
+export interface ComposedSurfaceWalkMetricsSnapshot {
+  body_scale: number;
+  radii_per_second: number;
+  speed: number;
+  eye_height: number;
+  near: number;
+}
+export interface ComposedSurfaceWalkSnapshot {
+  status: 'attached' | 'detached';
+  phase: 'anchoring' | 'walking' | 'detached';
+  detach_reason?: string | null;
+  node?: number | null;
+  face?: number | null;
+  barycentric?: readonly [number, number, number] | null;
+  output_position?: readonly [number, number, number] | null;
+  output_normal?: readonly [number, number, number] | null;
+  surface_velocity?: readonly [number, number, number] | null;
+  projected_output_velocity: readonly [number, number, number];
+  desired_output_velocity?: readonly [number, number, number] | null;
+  condition_number?: number | null;
+  substeps: number;
+  edge_crossings: number;
+  camera: ComposedSurfaceWalkCameraSnapshot;
+  target_camera?: ComposedSurfaceWalkCameraSnapshot | null;
+  metrics?: ComposedSurfaceWalkMetricsSnapshot | null;
+  anchor_transition_remaining_seconds?: number | null;
+}
+export interface ComposedSurfaceWalkErrorSnapshot {
+  status: 'error';
+  error: string;
+}
+export type ComposedSurfaceWalkResult =
+  | ComposedSurfaceWalkSnapshot
+  | ComposedSurfaceWalkErrorSnapshot
+  | null;
 "#;
 
 #[wasm_bindgen]
@@ -91,6 +136,8 @@ extern "C" {
     pub type SurfaceWalkMotionSnapshotJs;
     #[wasm_bindgen(typescript_type = "SurfaceWalkFrameSnapshot")]
     pub type SurfaceWalkFrameSnapshotJs;
+    #[wasm_bindgen(typescript_type = "ComposedSurfaceWalkResult")]
+    pub type ComposedSurfaceWalkResultJs;
 }
 
 /// Offline-capable WASM facade for the Rust surface-walk authority.
