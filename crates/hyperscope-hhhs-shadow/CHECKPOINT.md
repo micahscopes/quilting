@@ -35,7 +35,7 @@ encoding. The digest detects corruption; it is not an authority signature.
 
 ## Atomic-persistence gate
 
-The current pinned HHHS 0.4.2 open-authority API can prepare an authored entry,
+The current pinned HHHS 0.4.3 open-authority API can prepare an authored entry,
 but unlike its presented-authority APIs it cannot attach a local projection
 checkpoint to that same `StorageTransaction`. Therefore the browser adapter
 must not yet claim crash-atomic persistence of the source checkpoint alongside

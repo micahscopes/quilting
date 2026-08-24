@@ -1249,3 +1249,23 @@ default remains `js`; this is a broader rollback-safe authority candidate, not
 an unmeasured default flip. A separate release build staged 23 files / 30.98
 MiB and passed strict `noncommercial-mixed` offline preflight with source/build
 fingerprint `69e1ebbf196a09673865f3c981fed0b8`.
+
+## HHHS 0.4.3 retained-history dependency gate
+
+The 2026-08-25 dependency checkpoint moved every HHHS workspace crate from the
+immutable 0.4.2 revision to tagged 0.4.3 commit
+`35d2018cb5239f29a420eab26ed23f0bd3870b5b`. Upstream 0.4.3 replaces eager
+capability reachability with linear-space lazy capture, shares immutable DAG
+snapshot entries, extends staged snapshots without sorting complete history,
+reads storage sequence directly during optimistic finalization, and avoids a
+post-history commitment when a transaction carries no projection checkpoint.
+Canonical encodings and authority semantics are declared unchanged upstream.
+
+The local gate did not infer application speedup from those implementation
+changes. It proved compatibility with 20 `hyperscape-hhhs` tests, 10 recovered
+shadow/checkpoint tests, 6 browser durability codec tests, strict no-dependency
+Clippy for all three integration crates, and wasm32 compilation of the browser
+tests. The frozen authored-payload, project-archive, and source-checkpoint
+digests remained unchanged. HHHS 0.4.3 still has no open-authority
+co-transaction attachment API, so crash-atomic browser persistence of the
+source cursor remains gated rather than approximated with a second write.
