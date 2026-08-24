@@ -112,7 +112,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">X</span><input type="range" id="mx" min="-30" max="30" step="0.1" value="5"><span class="v" id="mx-v">0.50</span></div>
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Y</span><input type="range" id="my" min="-30" max="30" step="0.1" value="0"><span class="v" id="my-v">0.00</span></div>
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Z</span><input type="range" id="mz" min="-30" max="30" step="0.1" value="0"><span class="v" id="mz-v">0.00</span></div>
-      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0" max="50" step="0.1" value="20"><span class="v" id="mr-v">2.00</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0.11" max="50" step="0.01" value="20"><span class="v" id="mr-v">2.00</span></div>
     </div>
     <div id="selection-status" style="color:#8b949e;font-size:9px;margin-top:5px">No object selected</div>
     <label style="margin-top:5px">Focus/navigation transition</label>
@@ -4274,11 +4274,18 @@ applyParams = function(params) {
   const integer = (value, fallback, minimum, maximum) =>
     Math.round(finite(value, fallback, minimum, maximum));
   renderMode.set(params.mode || 'pbr');
-  mob.xform.set(params.xform || 'identity');
-  mob.mx.set(finite(params.mx, 5, -30, 30));
-  mob.my.set(finite(params.my, 0, -30, 30));
-  mob.mz.set(finite(params.mz, 0, -30, 30));
-  mob.mr.set(finite(params.mr, 20, 0, 50));
+  // URL restoration is one chart request. Enabling inversion against the
+  // default sphere before installing the linked center/radius can encounter a
+  // transient pole and incorrectly leave an otherwise-safe deep link in the
+  // identity chart. Geometry is staged first, then the mode, and effects see
+  // only the complete transaction when the batch commits.
+  batchSignals(() => {
+    mob.mx.set(finite(params.mx, 5, -30, 30));
+    mob.my.set(finite(params.my, 0, -30, 30));
+    mob.mz.set(finite(params.mz, 0, -30, 30));
+    mob.mr.set(finite(params.mr, 20, 0.11, 50));
+    mob.xform.set(params.xform || 'identity');
+  });
   focusSphere.center = [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10];
   focusSphere.radius = Math.max(mob.mr.peek() / 10, 0.011);
   focusSphere.active = mob.xform.peek() === 'sphere_reflection';

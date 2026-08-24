@@ -158,6 +158,16 @@ or sphere state.
    modifiers, authored-camera
    arbitration, and live browser cutover remain outside this slice; rotation
    cadence invariance is not inferred from same-trace parity.
+   Focus/inversion actions and their reflection transport are now one staged
+   Rust transaction: a camera, transition, or surface-follower pole consumes
+   the ordered input exactly once while restoring the preceding camera, focus
+   sphere/mode, active reflection, and walk state. The app boundary and
+   generated-WASM smoke exercise the exact camera-eye pole oracle. Browser URL
+   restoration likewise batches center, radius, and transform mode as one
+   request, so it cannot reject a safe linked sphere against transient default
+   geometry. Live focus/selection shadow comparisons still require stable
+   glTF node identity, source pivot/bound state, transition clocks, and lens
+   parity before authority can move.
    The semantic surface-walk response and topology are now composed in
    `SurfaceWalkRuntime`: scene-relative pace and avatar scale, tangent
    velocity, current animated material-point velocity, contact/normal

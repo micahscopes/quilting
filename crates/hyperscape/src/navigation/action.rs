@@ -270,14 +270,32 @@ fn integrate_navigation_to(
             diagnostics,
         );
         runtime.integrated_until_seconds = action_time;
-        if let Err(error) = apply_action(scheduled.action, runtime, surface_walk, camera, focus) {
+        // A semantic action and the conformal transport it requests are one
+        // transaction. In particular, a focus/inversion edit must not leave
+        // the desired sphere in a new chart when the camera, an in-flight
+        // camera transition, or the surface follower reaches that chart's
+        // pole. Keep queue time/sequence outside the staged state so rejected
+        // input is consumed exactly once without splitting navigation state.
+        let previous_runtime = runtime.clone();
+        let previous_surface_walk = surface_walk.clone();
+        let previous_camera = *camera;
+        let previous_focus = focus.clone();
+        let result =
+            apply_action(scheduled.action, runtime, surface_walk, camera, focus).and_then(|()| {
+                reconcile_reflection(runtime, surface_walk, camera, focus)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = result {
+            *runtime = previous_runtime;
+            *surface_walk = previous_surface_walk;
+            *camera = previous_camera;
+            *focus = previous_focus;
             diagnostics.0.push(format!(
                 "navigation action {} failed: {error}",
                 scheduled.sequence
             ));
         }
         runtime.last_applied_sequence = Some(scheduled.sequence);
-        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
     }
 
     advance_navigation(
@@ -436,7 +454,13 @@ fn advance_navigation(
         // anchor. Advance and reconcile that chart first so cancellation does
         // not consume one render-partition-dependent slice of the glide.
         focus.advance(delta_seconds);
-        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
+        reconcile_reflection_or_stop_focus_transition(
+            runtime,
+            surface_walk,
+            camera,
+            focus,
+            diagnostics,
+        );
         if surface_walk.anchor_transition().is_some() {
             surface_walk.advance_anchor_transition(delta_seconds, camera);
         }
@@ -445,10 +469,45 @@ fn advance_navigation(
             runtime.camera_transition = None;
         }
         focus.advance(delta_seconds);
-        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
+        reconcile_reflection_or_stop_focus_transition(
+            runtime,
+            surface_walk,
+            camera,
+            focus,
+            diagnostics,
+        );
     } else {
         focus.advance(delta_seconds);
-        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
+        reconcile_reflection_or_stop_focus_transition(
+            runtime,
+            surface_walk,
+            camera,
+            focus,
+            diagnostics,
+        );
+    }
+}
+
+fn reconcile_reflection_or_stop_focus_transition(
+    runtime: &mut NavigationRuntime,
+    surface_walk: &mut SurfaceWalkRuntime,
+    camera: &mut CameraRig,
+    focus: &mut FocusNavigation,
+    diagnostics: &mut HyperscapeDiagnostics,
+) {
+    if let Err(error) = reconcile_reflection(runtime, surface_walk, camera, focus) {
+        // Reflection transport itself is staged. The sphere has already
+        // advanced, however, so restore it to the reflection that remains
+        // authoritative and stop retrying the same inaccessible transition
+        // every frame. Direct actions use the stronger whole-action rollback
+        // in `integrate_navigation_to` above.
+        if let SphereReflectionState::Sphere(sphere) = runtime.reflection {
+            focus.sphere = sphere;
+        }
+        focus.transition = None;
+        diagnostics.0.push(format!(
+            "could not advance inversion sphere across a reflection pole: {error}"
+        ));
     }
 }
 
@@ -457,15 +516,14 @@ fn reconcile_reflection(
     surface_walk: &mut SurfaceWalkRuntime,
     camera: &mut CameraRig,
     focus: &FocusNavigation,
-    diagnostics: &mut HyperscapeDiagnostics,
-) {
+) -> Result<(), super::CameraError> {
     let desired = if focus.inversion_enabled {
         SphereReflectionState::Sphere(focus.sphere)
     } else {
         SphereReflectionState::Identity
     };
     if desired == runtime.reflection {
-        return;
+        return Ok(());
     }
     let mut transported_camera = *camera;
     let mut transported_transition = runtime.camera_transition;
@@ -479,17 +537,12 @@ fn reconcile_reflection(
             transported_surface_walk.transport_between_reflections(runtime.reflection, desired)?;
             Ok(())
         });
-    match result {
-        Ok(()) => {
-            *camera = transported_camera;
-            runtime.camera_transition = transported_transition;
-            *surface_walk = transported_surface_walk;
-            runtime.reflection = desired;
-        }
-        Err(error) => diagnostics.0.push(format!(
-            "could not transport camera with inversion sphere: {error}"
-        )),
-    }
+    result?;
+    *camera = transported_camera;
+    runtime.camera_transition = transported_transition;
+    *surface_walk = transported_surface_walk;
+    runtime.reflection = desired;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -617,6 +670,61 @@ mod tests {
             app.world().resource::<NavigationRuntime>().reflection,
             SphereReflectionState::Sphere(FocusSphere::new([0.0; 3], 1.0).unwrap())
         );
+    }
+
+    #[test]
+    fn inversion_pole_rejects_the_complete_navigation_action() {
+        let mut controller = NavigationController::default();
+        controller.focus.sphere = FocusSphere::new([0.0, 0.0, 3.0], 2.0).unwrap();
+        let before_camera = controller.camera;
+        let before_focus = controller.focus.clone();
+        let before_reflection = controller.runtime.reflection;
+        let before_surface_walk = controller.surface_walk.clone();
+
+        controller
+            .push(NavigationAction::SetInversionEnabled(true))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.camera, before_camera);
+        assert_eq!(controller.focus, before_focus);
+        assert_eq!(controller.runtime.reflection, before_reflection);
+        assert_eq!(controller.surface_walk, before_surface_walk);
+        assert_eq!(controller.runtime.last_applied_sequence, Some(0));
+        assert_eq!(controller.queue.len(), 0);
+        assert_eq!(controller.diagnostics.0.len(), 1);
+        assert!(controller.diagnostics.0[0].contains(
+            "navigation action 0 failed: camera transport reached a spherical-reflection pole"
+        ));
+    }
+
+    #[test]
+    fn animated_inversion_pole_stops_at_the_last_coherent_sphere() {
+        let mut controller = NavigationController::default();
+        controller.camera.eye = [0.0, 0.0, 3.0];
+        controller.focus.sphere = FocusSphere::new([0.0, 0.0, 0.0], 1.0).unwrap();
+        controller
+            .push(NavigationAction::SetInversionEnabled(true))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+        let coherent_sphere = controller.focus.sphere;
+        let coherent_reflection = controller.runtime.reflection;
+
+        controller
+            .push(NavigationAction::TransitionFreeFocusSphere {
+                target: FocusSphere::new([0.0, 0.0, 3.0], 1.0).unwrap(),
+                duration_seconds: 1.0,
+                easing: TransitionEasing::Linear,
+            })
+            .unwrap();
+        controller.tick(1.0).unwrap();
+
+        assert_eq!(controller.focus.sphere, coherent_sphere);
+        assert_eq!(controller.runtime.reflection, coherent_reflection);
+        assert!(controller.focus.transition.is_none());
+        assert_eq!(controller.camera.eye, [0.0, 0.0, 1.0 / 3.0]);
+        assert!(controller.diagnostics.0.iter().any(|message| message
+            .contains("could not advance inversion sphere across a reflection pole")));
     }
 
     #[test]

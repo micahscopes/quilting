@@ -741,3 +741,43 @@ interchange tests, all three replay goldens, strict Hyperscape/application
 Clippy, application Rustdoc, four executable Node/WASM adapter tests, all five
 generated-WASM smokes, release Trunk build, ordinary release preflight, the
 initialized pole rollback, and the final Rust-authority Chrome trace passed.
+
+## Rust focus-chart transaction gate
+
+The next 2026-08-24 checkpoint closed the equivalent split inside the shared
+Rust navigation controller. Each ordered `NavigationAction` and the reflection
+reconciliation it requests are staged together. If camera, in-flight camera
+transition, or surface-walk transport reaches a reflection pole, camera,
+focus sphere and enablement, active reflection, and surface state return to the
+preceding coherent snapshot. The rejected sequence is still consumed exactly
+once and produces one diagnostic. If an already-running inversion-sphere
+transition reaches a pole later, it returns to the last active sphere and
+stops instead of retrying an inconsistent desired chart every frame.
+
+The application reducer and generated-WASM facade now execute the same exact
+camera-eye pole oracle: identity camera eye `[0, 0, 3]`, proposed center
+`[0, 0, 3]`, and radius `2`. The action leaves reflection identity and
+`inversion_enabled=false`, preserves the complete camera/focus packet, empties
+the queue, records sequence zero as consumed, and exposes the pole diagnostic.
+
+Browser route hydration now batches inversion center, radius, and transform
+mode as one chart request. Radius is normalized to the shared positive minimum
+of `0.011` world units (`0.11` control units), eliminating the prior state in
+which a zero-radius deep link displayed sphere reflection while the renderer
+used identity. A live Chrome-MCP route from `mr=0` settled at `mr=0.11`; URL,
+active button, and Rust navigation all reported sphere reflection. The
+initialized camera-eye pole click preserved the identity URL/button, all four
+sphere controls, and renderer surface counters.
+
+Validation passed for the native workspace excluding the target-specific WASM
+crate, 77 Hyperscape tests, 26 application/replay tests, 42 JavaScript tests,
+strict no-dependency Hyperscape/application Clippy, all three replay goldens,
+four executable Node/WASM tests, all five generated-WASM smokes, release Trunk
+build, and ordinary offline preflight. The plain native workspace command is
+not a valid WASM check because `glow::Context::from_webgl2_context` exists only
+for `wasm32`; `wasm-pack test --node` is the executable gate for that crate.
+
+The optimized WASM is 6,063,048 bytes raw and 2,133,614 bytes gzip. The
+source-coherent build receipt is `69447c5415089632bf249e09db1231a5` over 156
+files and 38,556,122 bytes. Preflight retains the expected local-GLB and horse
+distribution-policy warnings.

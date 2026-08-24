@@ -101,6 +101,33 @@ function assertNavigationParity(actual, expected) {
   assert.equal(actual.reflection, expected.reflection);
   assert.deepEqual(actual.diagnostics, expected.diagnostics);
 }
+
+// A generated-WASM authority gate for the exact browser rollback oracle: the
+// proposed inversion sphere is centered at the camera eye. The queued action
+// is consumed, but camera, focus intent, and active reflection remain one
+// coherent identity-chart transaction after the transport reaches its pole.
+const poleApp = new HyperscopeAppShadow();
+const poleCenter = new Float64Array([0, 0, 3]);
+poleApp.synchronizeNavigation(
+  eye, forward, up, 3, target, poleCenter, 2, false, false, 0.5, 0.1,
+);
+const beforePole = poleApp.navigationSnapshot();
+assert.equal(poleApp.setInversionEnabled(true), 0n);
+assert.equal(poleApp.navigationSnapshot().pending_actions, 1);
+const afterPole = poleApp.tickNavigation(0);
+assert.equal(afterPole.pending_actions, 0);
+assert.equal(afterPole.last_applied_sequence, 0);
+assert.equal(afterPole.reflection, 'identity');
+assert.equal(afterPole.focus.inversion_enabled, false);
+assert.deepEqual(afterPole.focus.center, beforePole.focus.center);
+assert.equal(afterPole.focus.radius, beforePole.focus.radius);
+assert.deepEqual(afterPole.camera, beforePole.camera);
+assert.match(
+  afterPole.diagnostics.at(-1),
+  /camera transport reached a spherical-reflection pole/,
+);
+poleApp.free();
+
 incumbent.synchronizeState(
   eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
 );

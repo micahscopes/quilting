@@ -1020,6 +1020,46 @@ mod tests {
     }
 
     #[test]
+    fn app_navigation_pole_consumes_input_without_splitting_focus_and_reflection() {
+        let store = AppStore::default();
+        let camera = CameraRig::default();
+        let focus = FocusNavigation {
+            sphere: FocusSphere::new(camera.eye, 2.0).unwrap(),
+            ..FocusNavigation::default()
+        };
+        store
+            .dispatch(AppEvent::NavigationSynchronized(
+                NavigationSynchronization {
+                    camera,
+                    focus: focus.clone(),
+                },
+            ))
+            .unwrap();
+        let before = store.frame_snapshot();
+
+        let (sequence, queued) = store
+            .dispatch_navigation(NavigationAction::SetInversionEnabled(true))
+            .unwrap();
+        assert_eq!(sequence, 0);
+        assert!(!queued.published_ui);
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+
+        let after = store.frame_snapshot();
+        assert_eq!(after.camera, before.camera);
+        assert_eq!(after.focus, before.focus);
+        assert_eq!(after.reflection, before.reflection);
+        assert_eq!(after.pending_navigation_actions, 0);
+        assert_eq!(after.last_applied_navigation_sequence, Some(sequence));
+        assert!(store.navigation_diagnostics_snapshot()[0]
+            .contains("camera transport reached a spherical-reflection pole"));
+    }
+
+    #[test]
     fn presentation_and_local_navigation_share_sequence_and_integration_authority() {
         let store = AppStore::default();
         store
