@@ -932,6 +932,7 @@ fn extract_hyperscope_packets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperscape_protocol::{AssetEntityId, AssetId};
     use quilting_core::{
         ConformalGenerator, ConformalTransformChain, Quat, RoundWall, RoundWallGeometry,
     };
@@ -946,6 +947,14 @@ mod tests {
     }
 
     const EPS: f64 = 1.0e-7;
+
+    fn selection_identity(entity: u128) -> AssetEntityId {
+        AssetEntityId::new(
+            AssetId::from_u128(0x6000).unwrap(),
+            EntityId::from_u128(entity).unwrap(),
+        )
+        .unwrap()
+    }
 
     fn chain(generators: Vec<ConformalGenerator>) -> ConformalTransformChain {
         ConformalTransformChain::new(generators).unwrap()
@@ -977,11 +986,11 @@ mod tests {
 
     #[test]
     fn focus_navigation_anchors_animates_and_detaches_without_losing_the_sphere() {
-        let entity = StableEntityId(Uuid::from_u128(7));
+        let identity = selection_identity(7);
         let bound = FocusSphere::new([1.0, 2.0, 3.0], 2.0).unwrap();
         let mut focus = FocusNavigation::default();
-        focus.anchor_to(entity, bound, 1.1, 1.0).unwrap();
-        assert_eq!(focus.anchor.unwrap().entity, entity);
+        focus.anchor_to(identity, bound, 1.1, 1.0).unwrap();
+        assert_eq!(focus.anchor.unwrap().identity, identity);
         assert!(focus.focus_enabled);
 
         assert!(focus.advance(0.5));
@@ -1006,16 +1015,21 @@ mod tests {
 
     #[test]
     fn anchored_focus_edits_only_a_bounded_margin() {
-        let entity = StableEntityId(Uuid::from_u128(11));
+        let identity = selection_identity(11);
         let bound = FocusSphere::new([3.0, 4.0, 5.0], 2.0).unwrap();
         let mut focus = FocusNavigation::default();
         let initial = focus.clone();
+        let invalid_identity: AssetEntityId = serde_json::from_value(serde_json::json!({
+            "asset": AssetId::from_u128(0x6000).unwrap(),
+            "entity": Uuid::nil(),
+        }))
+        .unwrap();
         assert_eq!(
-            focus.anchor_to(StableEntityId(Uuid::nil()), bound, 1.1, 0.0),
-            Err("focus anchor entity must have a non-nil stable identity")
+            focus.anchor_to(invalid_identity, bound, 1.1, 0.0),
+            Err("focus anchor must have non-nil asset and entity identities")
         );
         assert_eq!(focus, initial);
-        focus.anchor_to(entity, bound, 1.1, 0.0).unwrap();
+        focus.anchor_to(identity, bound, 1.1, 0.0).unwrap();
         assert!(!focus.translate_free([1.0, 0.0, 0.0]));
         assert_eq!(focus.sphere.center, bound.center);
         assert!(focus.scale_radius(100.0));

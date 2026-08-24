@@ -74,6 +74,31 @@ stable_id!(RequestId, "request");
 stable_id!(AssetId, "asset");
 stable_id!(EntityId, "entity");
 
+/// Stable identity of one entity within a particular source asset.
+///
+/// A glTF node index and a renderer node offset are container/runtime handles,
+/// not identities. Carrying the asset explicitly prevents composed scenes
+/// from aliasing nodes that happen to use the same local index, while the
+/// entity UUID remains stable across Blender, Hyperscape, and authored edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AssetEntityId {
+    pub asset: AssetId,
+    pub entity: EntityId,
+}
+
+impl AssetEntityId {
+    pub fn new(asset: AssetId, entity: EntityId) -> Result<Self, WireError> {
+        let identity = Self { asset, entity };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    pub fn validate(self) -> Result<(), WireError> {
+        self.asset.validate()?;
+        self.entity.validate()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageHeader {
     pub version: ProtocolVersion,
@@ -448,5 +473,51 @@ mod tests {
         let mut envelope = envelope;
         envelope.header.version = CURRENT_PROTOCOL_VERSION;
         assert_eq!(envelope.validate(), Err(WireError::NilId("message")));
+    }
+
+    #[test]
+    fn asset_entity_identity_is_explicit_and_validated() {
+        let identity = AssetEntityId::new(
+            AssetId::from_u128(4).unwrap(),
+            EntityId::from_u128(5).unwrap(),
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&identity).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AssetEntityId>(&encoded).unwrap(),
+            identity,
+        );
+        assert_ne!(
+            identity,
+            AssetEntityId::new(
+                AssetId::from_u128(6).unwrap(),
+                EntityId::from_u128(5).unwrap(),
+            )
+            .unwrap(),
+            "the same entity UUID in another asset is a different selection",
+        );
+
+        let nil_entity = format!(
+            r#"{{"asset":"{}","entity":"{}"}}"#,
+            AssetId::from_u128(4).unwrap(),
+            Uuid::nil(),
+        );
+        assert_eq!(
+            serde_json::from_str::<AssetEntityId>(&nil_entity)
+                .unwrap()
+                .validate(),
+            Err(WireError::NilId("entity")),
+        );
+        let nil_asset = format!(
+            r#"{{"asset":"{}","entity":"{}"}}"#,
+            Uuid::nil(),
+            EntityId::from_u128(5).unwrap(),
+        );
+        assert_eq!(
+            serde_json::from_str::<AssetEntityId>(&nil_asset)
+                .unwrap()
+                .validate(),
+            Err(WireError::NilId("asset")),
+        );
     }
 }

@@ -1,6 +1,6 @@
 use super::TransitionEasing;
-use crate::StableEntityId;
 use bevy_ecs::prelude::Resource;
+use hyperscape_protocol::AssetEntityId;
 
 /// A positive ordinary-space sphere used by selection focus and inversion.
 ///
@@ -43,7 +43,7 @@ impl FocusSphere {
 /// Optional object ownership of the shared focus/inversion sphere.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FocusAnchor {
-    pub entity: StableEntityId,
+    pub identity: AssetEntityId,
     pub source_bound: FocusSphere,
     /// Selected point in the entity's ordinary source chart. This is kept
     /// separately from the bound center because a face click, object pivot,
@@ -117,13 +117,13 @@ impl FocusNavigation {
     /// Select and smoothly fit around an entity while preserving one sphere.
     pub fn anchor_to(
         &mut self,
-        entity: StableEntityId,
+        identity: AssetEntityId,
         source_bound: FocusSphere,
         margin: f64,
         duration_seconds: f64,
     ) -> Result<(), &'static str> {
         self.anchor_to_with_easing(
-            entity,
+            identity,
             source_bound,
             margin,
             duration_seconds,
@@ -133,14 +133,14 @@ impl FocusNavigation {
 
     pub fn anchor_to_with_easing(
         &mut self,
-        entity: StableEntityId,
+        identity: AssetEntityId,
         source_bound: FocusSphere,
         margin: f64,
         duration_seconds: f64,
         easing: TransitionEasing,
     ) -> Result<(), &'static str> {
         self.anchor_to_pivot_with_easing(
-            entity,
+            identity,
             source_bound,
             source_bound.center,
             margin,
@@ -154,16 +154,16 @@ impl FocusNavigation {
     /// before mutation so an adapter cannot leave a partially selected object.
     pub fn anchor_to_pivot_with_easing(
         &mut self,
-        entity: StableEntityId,
+        identity: AssetEntityId,
         source_bound: FocusSphere,
         source_pivot: [f64; 3],
         margin: f64,
         duration_seconds: f64,
         easing: TransitionEasing,
     ) -> Result<(), &'static str> {
-        if entity.0.is_nil() {
-            return Err("focus anchor entity must have a non-nil stable identity");
-        }
+        identity
+            .validate()
+            .map_err(|_| "focus anchor must have non-nil asset and entity identities")?;
         FocusSphere::new(source_bound.center, source_bound.radius)?;
         if source_pivot.into_iter().any(|value| !value.is_finite()) {
             return Err("focus anchor source pivot must be finite");
@@ -177,7 +177,7 @@ impl FocusNavigation {
             radius: (source_bound.radius * margin).max(Self::MIN_RADIUS),
         };
         self.anchor = Some(FocusAnchor {
-            entity,
+            identity,
             source_bound,
             source_pivot,
             margin,
@@ -300,10 +300,14 @@ impl FocusNavigation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use hyperscape_protocol::{AssetId, EntityId};
 
-    fn entity() -> StableEntityId {
-        StableEntityId(Uuid::from_u128(7))
+    fn identity() -> AssetEntityId {
+        AssetEntityId::new(
+            AssetId::from_u128(6).unwrap(),
+            EntityId::from_u128(7).unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -314,7 +318,7 @@ mod tests {
 
         focus
             .anchor_to_pivot_with_easing(
-                entity(),
+                identity(),
                 bound,
                 pivot,
                 1.1,
@@ -324,7 +328,7 @@ mod tests {
             .unwrap();
 
         let anchor = focus.anchor.unwrap();
-        assert_eq!(anchor.entity, entity());
+        assert_eq!(anchor.identity, identity());
         assert_eq!(anchor.source_bound, bound);
         assert_eq!(anchor.source_pivot, pivot);
         assert_eq!(anchor.margin, 1.1);
@@ -338,7 +342,7 @@ mod tests {
         let before = focus.clone();
         let error = focus
             .anchor_to_pivot_with_easing(
-                entity(),
+                identity(),
                 FocusSphere::new([0.0; 3], 1.0).unwrap(),
                 [0.0, f64::NAN, 0.0],
                 1.1,
@@ -359,7 +363,7 @@ mod tests {
         };
         focus
             .anchor_to_pivot_with_easing(
-                entity(),
+                identity(),
                 FocusSphere::new([1.0, 0.0, 0.0], 0.5).unwrap(),
                 [1.2, 0.0, 0.0],
                 1.1,

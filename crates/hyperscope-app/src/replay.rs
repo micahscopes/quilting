@@ -12,19 +12,20 @@ use crate::{
 };
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
-    NavigationPreset, PerspectiveLens, Presentation, SphereReflectionState, StableEntityId,
-    SurfaceAnchorTarget, TransitionEasing,
+    NavigationPreset, PerspectiveLens, Presentation, SphereReflectionState, SurfaceAnchorTarget,
+    TransitionEasing,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
-    RequestId,
+    AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, PeerId,
+    PresenceEnvelope, RequestId,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.6";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.7";
+pub const LEGACY_APP_REPLAY_VERSION_0_6: &str = "hyperscope-app-replay/0.6";
 pub const LEGACY_APP_REPLAY_VERSION_0_5: &str = "hyperscope-app-replay/0.5";
 pub const LEGACY_APP_REPLAY_VERSION_0_4: &str = "hyperscope-app-replay/0.4";
 
@@ -33,6 +34,7 @@ enum ReplaySchema {
     V0_4,
     V0_5,
     V0_6,
+    V0_7,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -181,6 +183,11 @@ pub enum ReplayNavigationAction {
     },
     CancelSurfaceAnchorTransition,
     AnchorFocus {
+        /// Optional only for reading traces before asset-scoped selection in
+        /// replay 0.7.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asset_id: Option<Uuid>,
+        #[serde(rename = "entity_id", alias = "entity")]
         entity: Uuid,
         source_bound: ReplayFocusSphere,
         /// Optional only for reading 0.4 traces. Newer traces retain the
@@ -342,6 +349,7 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 Ok(Self::CancelSurfaceAnchorTransition)
             }
             ReplayNavigationAction::AnchorFocus {
+                asset_id,
                 entity,
                 source_bound,
                 source_pivot,
@@ -349,9 +357,9 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 duration_seconds,
                 easing,
             } => {
-                if entity.is_nil() {
-                    return Err("focus anchor entity must have a non-nil stable identity".into());
-                }
+                let asset_id = asset_id.ok_or_else(|| {
+                    "replay 0.7+ focus anchor requires an explicit asset identity".to_owned()
+                })?;
                 finite(margin, "focus anchor margin")?;
                 nonnegative(duration_seconds, "focus transition duration")?;
                 let source_pivot = source_pivot.ok_or_else(|| {
@@ -359,7 +367,11 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 })?;
                 finite3(source_pivot, "focus anchor source pivot")?;
                 Ok(Self::AnchorFocus {
-                    entity: StableEntityId(entity),
+                    identity: AssetEntityId::new(
+                        AssetId::new(asset_id).map_err(|error| error.to_string())?,
+                        EntityId::new(entity).map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?,
                     source_bound: source_bound.try_into()?,
                     source_pivot,
                     margin,
@@ -689,7 +701,8 @@ pub struct AppReplayFocusState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppReplaySelectedFocusState {
-    pub entity: Uuid,
+    pub asset_id: Uuid,
+    pub entity_id: Uuid,
     pub source_bound: ReplayFocusSphere,
     pub source_pivot: [f64; 3],
     pub margin: f64,
@@ -701,7 +714,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
     let schema = match script.version.as_str() {
         LEGACY_APP_REPLAY_VERSION_0_4 => ReplaySchema::V0_4,
         LEGACY_APP_REPLAY_VERSION_0_5 => ReplaySchema::V0_5,
-        APP_REPLAY_VERSION => ReplaySchema::V0_6,
+        LEGACY_APP_REPLAY_VERSION_0_6 => ReplaySchema::V0_6,
+        APP_REPLAY_VERSION => ReplaySchema::V0_7,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -890,7 +904,7 @@ fn navigation_action_for_replay_version(
     mut action: ReplayNavigationAction,
     schema: ReplaySchema,
 ) -> Result<NavigationAction, String> {
-    if schema != ReplaySchema::V0_6
+    if matches!(schema, ReplaySchema::V0_4 | ReplaySchema::V0_5)
         && matches!(
             action,
             ReplayNavigationAction::SetPerspectiveLens { .. }
@@ -910,6 +924,17 @@ fn navigation_action_for_replay_version(
                 *source_pivot = Some(source_bound.center);
             }
         }
+    }
+    if schema != ReplaySchema::V0_7
+        && matches!(
+            action,
+            ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
+        )
+    {
+        return Err(
+            "legacy focus anchor has an unscoped entity identity; add asset_id before replaying"
+                .to_owned(),
+        );
     }
     NavigationAction::try_from(action)
 }
@@ -1015,7 +1040,8 @@ fn replay_state(store: &AppStore) -> AppReplayState {
             selected: frame
                 .selected_focus
                 .map(|selected| AppReplaySelectedFocusState {
-                    entity: selected.entity.0,
+                    asset_id: selected.identity.asset.as_uuid(),
+                    entity_id: selected.identity.entity.as_uuid(),
                     source_bound: selected.source_bound.into(),
                     source_pivot: selected.source_pivot,
                     margin: selected.margin,
@@ -1383,7 +1409,11 @@ mod tests {
             .as_ref()
             .expect("anchor-focus frame exposes selected source and output state");
         assert_eq!(
-            selected.entity,
+            selected.asset_id,
+            Uuid::parse_str("60000000-0000-4000-8000-000000000001").unwrap()
+        );
+        assert_eq!(
+            selected.entity_id,
             Uuid::parse_str("70000000-0000-4000-8000-000000000001").unwrap()
         );
         assert_eq!(selected.source_bound.center, [1.5, 0.0, 0.0]);
@@ -1393,7 +1423,7 @@ mod tests {
         assert!(matches!(
             trace.records.last().unwrap().outcome,
             AppReplayOutcome::Rejected { ref error }
-                if error.contains("non-nil stable identity")
+                if error.contains("entity ID must not be nil")
         ));
         let before = &trace.records[trace.records.len() - 2].state;
         let after = &trace.records.last().unwrap().state;
@@ -1424,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_anchor_focus_defaults_pivot_to_bound_center() {
+    fn legacy_unscoped_anchor_focus_is_not_given_a_false_durable_scope() {
         let action: ReplayNavigationAction = serde_json::from_str(
             r#"{
                 "action":"anchor_focus",
@@ -1452,8 +1482,12 @@ mod tests {
         };
         let trace = run_app_replay(&legacy).unwrap();
         assert_eq!(trace.version, APP_REPLAY_VERSION);
-        let selected = trace.records[1].state.focus.selected.as_ref().unwrap();
-        assert_eq!(selected.source_pivot, selected.source_bound.center);
+        assert!(matches!(
+            trace.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("unscoped entity identity")
+        ));
+        assert_eq!(trace.records[1].state.focus.selected, None);
     }
 
     #[test]
@@ -1461,6 +1495,7 @@ mod tests {
         let action: ReplayNavigationAction = serde_json::from_str(
             r#"{
                 "action":"anchor_focus",
+                "asset_id":"60000000-0000-4000-8000-000000000001",
                 "entity":"70000000-0000-4000-8000-000000000001",
                 "source_bound":{"center":[1.0,2.0,3.0],"radius":0.5},
                 "margin":1.1,
@@ -1484,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_0_5_is_accepted_without_focus_pivot_migration() {
+    fn replay_0_5_does_not_migrate_unscoped_focus_identity() {
         let action: ReplayNavigationAction = serde_json::from_str(
             r#"{
                 "action":"anchor_focus",
@@ -1509,8 +1544,89 @@ mod tests {
         assert!(matches!(
             trace.records[0].outcome,
             AppReplayOutcome::Rejected { ref error }
-                if error.contains("requires an explicit source pivot")
+                if error.contains("unscoped entity identity")
         ));
+    }
+
+    #[test]
+    fn current_anchor_focus_rejects_an_omitted_asset_scope() {
+        let action: ReplayNavigationAction = serde_json::from_str(
+            r#"{
+                "action":"anchor_focus",
+                "entity":"70000000-0000-4000-8000-000000000001",
+                "source_bound":{"center":[1.0,2.0,3.0],"radius":0.5},
+                "source_pivot":[1.0,2.0,3.0],
+                "margin":1.1,
+                "duration_seconds":0.7,
+                "easing":"smoother_step"
+            }"#,
+        )
+        .unwrap();
+        let trace = run_app_replay(&AppReplayScript::new(vec![AppReplayEvent::Navigate {
+            sequence: 0,
+            at_seconds: 0.0,
+            action,
+        }]))
+        .unwrap();
+        assert!(matches!(
+            trace.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires an explicit asset identity")
+        ));
+        assert_eq!(trace.records[0].state.focus.selected, None);
+    }
+
+    #[test]
+    fn replay_distinguishes_the_same_entity_uuid_in_two_assets() {
+        let anchor = |asset_id| ReplayNavigationAction::AnchorFocus {
+            asset_id: Some(asset_id),
+            entity: Uuid::from_u128(7),
+            source_bound: ReplayFocusSphere {
+                center: [0.0; 3],
+                radius: 1.0,
+            },
+            source_pivot: Some([0.0; 3]),
+            margin: 1.1,
+            duration_seconds: 0.0,
+            easing: TransitionEasing::SmootherStep,
+        };
+        let first_asset = Uuid::from_u128(5);
+        let second_asset = Uuid::from_u128(6);
+        let trace = run_app_replay(&AppReplayScript::new(vec![
+            AppReplayEvent::Navigate {
+                sequence: 0,
+                at_seconds: 0.0,
+                action: anchor(first_asset),
+            },
+            AppReplayEvent::Frame {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            },
+            AppReplayEvent::Navigate {
+                sequence: 1,
+                at_seconds: 0.0,
+                action: anchor(second_asset),
+            },
+            AppReplayEvent::Frame {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            },
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            trace.records[1]
+                .state
+                .focus
+                .selected
+                .as_ref()
+                .unwrap()
+                .asset_id,
+            first_asset,
+        );
+        let selected = trace.records[3].state.focus.selected.as_ref().unwrap();
+        assert_eq!(selected.asset_id, second_asset);
+        assert_eq!(selected.entity_id, Uuid::from_u128(7));
     }
 
     #[test]
@@ -1546,8 +1662,40 @@ mod tests {
     }
 
     #[test]
+    fn replay_0_6_retains_camera_policy_actions() {
+        let script = AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_6.to_owned(),
+            events: vec![
+                AppReplayEvent::Navigate {
+                    sequence: 0,
+                    at_seconds: 0.0,
+                    action: ReplayNavigationAction::SetPerspectiveLens {
+                        vertical_fov_radians: 1.2,
+                        near: 0.01,
+                        far: 10_000.0,
+                    },
+                },
+                AppReplayEvent::Frame {
+                    elapsed_seconds: 0.0,
+                    delta_seconds: 0.0,
+                },
+            ],
+        };
+        let trace = run_app_replay(&script).unwrap();
+        assert!(trace
+            .records
+            .iter()
+            .all(|record| matches!(record.outcome, AppReplayOutcome::Committed { .. })));
+        let camera = &trace.records[1].state.camera;
+        assert_eq!(camera.vertical_fov_radians, 1.2);
+        assert_eq!(camera.near, 0.01);
+        assert_eq!(camera.far, 10_000.0);
+    }
+
+    #[test]
     fn explicit_anchor_pivot_roundtrips_in_the_current_schema() {
         let action = ReplayNavigationAction::AnchorFocus {
+            asset_id: Some(Uuid::from_u128(6)),
             entity: Uuid::from_u128(7),
             source_bound: ReplayFocusSphere {
                 center: [1.0, 2.0, 3.0],
@@ -1559,6 +1707,8 @@ mod tests {
             easing: TransitionEasing::SmoothStep,
         };
         let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("asset_id"));
+        assert!(json.contains("entity_id"));
         assert!(json.contains("source_pivot"));
         assert_eq!(
             serde_json::from_str::<ReplayNavigationAction>(&json).unwrap(),

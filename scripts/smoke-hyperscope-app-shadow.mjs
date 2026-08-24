@@ -261,6 +261,7 @@ for (const candidate of [selectionApp, selectionIncumbent]) {
   );
 }
 const selectedEntity = '70000000-0000-4000-8000-000000000001';
+const selectedAsset = '60000000-0000-4000-8000-000000000001';
 const selectedBoundCenter = new Float64Array([0, 0, 0]);
 const selectedPivot = new Float64Array([4, 0, 0]);
 const nilEntity = '00000000-0000-0000-0000-000000000000';
@@ -268,29 +269,42 @@ const appBeforeNilEntity = selectionApp.navigationSnapshot();
 const incumbentBeforeNilEntity = selectionIncumbent.snapshot();
 assert.throws(
   () => selectionApp.anchorFocus(
-    nilEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+    nilEntity, selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
   ),
-  /focus entity UUID must not be nil/,
+  /asset ID must not be nil/,
 );
 assert.throws(
   () => selectionIncumbent.anchorFocus(
-    nilEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+    nilEntity, selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
   ),
-  /focus entity UUID must not be nil/,
+  /asset ID must not be nil/,
+);
+assert.throws(
+  () => selectionApp.anchorFocus(
+    selectedAsset, nilEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+  ),
+  /entity ID must not be nil/,
+);
+assert.throws(
+  () => selectionIncumbent.anchorFocus(
+    selectedAsset, nilEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+  ),
+  /entity ID must not be nil/,
 );
 assert.deepEqual(selectionApp.navigationSnapshot(), appBeforeNilEntity);
 assert.deepEqual(selectionIncumbent.snapshot(), incumbentBeforeNilEntity);
 assert.equal(
   selectionApp.anchorFocus(
-    selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+    selectedAsset, selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
   ),
   selectionIncumbent.anchorFocus(
-    selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+    selectedAsset, selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
   ),
 );
 assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
 assert.deepEqual(selectionApp.navigationSnapshot().selected_focus, {
-  entity: selectedEntity,
+  asset_id: selectedAsset,
+  entity_id: selectedEntity,
   source_bound_center: [0, 0, 0],
   source_bound_radius: 2,
   source_pivot: [4, 0, 0],
@@ -317,10 +331,10 @@ assert.equal(selectionApp.navigationSnapshot().reflection, 'sphere_reflection');
 const polePivot = new Float64Array([0, 0, 0]);
 assert.equal(
   selectionApp.anchorFocus(
-    selectedEntity, selectedBoundCenter, 2, polePivot, 1, 0, 'smootherstep',
+    selectedAsset, selectedEntity, selectedBoundCenter, 2, polePivot, 1, 0, 'smootherstep',
   ),
   selectionIncumbent.anchorFocus(
-    selectedEntity, selectedBoundCenter, 2, polePivot, 1, 0, 'smootherstep',
+    selectedAsset, selectedEntity, selectedBoundCenter, 2, polePivot, 1, 0, 'smootherstep',
   ),
 );
 assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));

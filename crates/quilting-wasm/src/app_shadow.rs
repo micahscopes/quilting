@@ -1,6 +1,6 @@
 use crate::navigation::{
-    optional_vector3, parse_easing, parse_preset, perspective_lens, preset_name,
-    stable_entity_id, synchronized_navigation_state, vector3, SelectedFocusJsSnapshot,
+    asset_entity_id, optional_vector3, parse_easing, parse_preset, perspective_lens, preset_name,
+    synchronized_navigation_state, vector3, SelectedFocusJsSnapshot,
 };
 use hyperscape::{
     map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere, MappedSpaceMouseFrame,
@@ -376,6 +376,7 @@ impl HyperscopeAppShadow {
     #[allow(clippy::too_many_arguments)]
     pub fn anchor_focus(
         &self,
+        asset: &str,
         entity: &str,
         source_bound_center: &[f64],
         source_bound_radius: f64,
@@ -385,7 +386,7 @@ impl HyperscopeAppShadow {
         easing: &str,
     ) -> Result<u64, JsValue> {
         self.dispatch_navigation(NavigationAction::AnchorFocus {
-            entity: stable_entity_id(entity)?,
+            identity: asset_entity_id(asset, entity)?,
             source_bound: FocusSphere::new(
                 vector3(source_bound_center, "focus source-bound center")?,
                 source_bound_radius,

@@ -41,9 +41,9 @@ suite checks that partitioned and single-step re-anchor clocks finish on the
 same exact virtual-time endpoint.
 
 The replay checks must print
-`PASS fnv1a-128-json:5f1f3eb11b992f90f2653481d0d4fc5c`,
-`PASS fnv1a-128-json:144908e4a979c1a599cfb99f5ca7d4ef`, and
-`PASS fnv1a-128-json:b6f2ab91e8eaa933b056768bc20cdb56`. The first executes
+`PASS fnv1a-128-json:4d8598faf9db62e8500d49d94ead89ed`,
+`PASS fnv1a-128-json:4b6f0b82cf471af7af17b99ed37317d4`, and
+`PASS fnv1a-128-json:2cb74a642b3d4fc40b4eda777addb833`. The first executes
 the complete six-cue semantic walkthrough. The second exercises every current
 navigation action, including focus/inversion, camera and surface transitions,
 stable selection anchoring, clicked source/output pivot projection, complete

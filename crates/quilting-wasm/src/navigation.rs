@@ -1,8 +1,9 @@
 use hyperscape::{
     CameraBasis, CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
     NavigationFrame, NavigationPreset, PerspectiveLens, PresentationRuntime, PresentationSnapshot,
-    SphereReflectionState, StableEntityId, SurfaceAnchorTarget, TransitionEasing,
+    SphereReflectionState, SurfaceAnchorTarget, TransitionEasing,
 };
+use hyperscape_protocol::{AssetEntityId, AssetId, EntityId};
 use hyperscope_app::SelectedFocusSnapshot;
 use serde::Serialize;
 use uuid::Uuid;
@@ -210,6 +211,7 @@ impl HyperscopeNavigation {
     #[allow(clippy::too_many_arguments)]
     pub fn anchor_focus(
         &mut self,
+        asset: &str,
         entity: &str,
         source_bound_center: &[f64],
         source_bound_radius: f64,
@@ -219,7 +221,7 @@ impl HyperscopeNavigation {
         easing: &str,
     ) -> Result<u64, JsValue> {
         self.push(NavigationAction::AnchorFocus {
-            entity: stable_entity_id(entity)?,
+            identity: asset_entity_id(asset, entity)?,
             source_bound: FocusSphere::new(
                 vector3(source_bound_center, "focus source-bound center")?,
                 source_bound_radius,
@@ -516,7 +518,8 @@ struct FocusSnapshot {
 
 #[derive(Serialize)]
 pub(crate) struct SelectedFocusJsSnapshot {
-    entity: String,
+    asset_id: String,
+    entity_id: String,
     source_bound_center: [f64; 3],
     source_bound_radius: f64,
     source_pivot: [f64; 3],
@@ -528,7 +531,8 @@ pub(crate) struct SelectedFocusJsSnapshot {
 impl From<SelectedFocusSnapshot> for SelectedFocusJsSnapshot {
     fn from(selected: SelectedFocusSnapshot) -> Self {
         Self {
-            entity: selected.entity.0.to_string(),
+            asset_id: selected.identity.asset.to_string(),
+            entity_id: selected.identity.entity.to_string(),
             source_bound_center: selected.source_bound.center,
             source_bound_radius: selected.source_bound.radius,
             source_pivot: selected.source_pivot,
@@ -606,13 +610,14 @@ pub(crate) fn vector3(values: &[f64], label: &str) -> Result<[f64; 3], JsValue> 
     Ok(value)
 }
 
-pub(crate) fn stable_entity_id(value: &str) -> Result<StableEntityId, JsValue> {
-    let entity = Uuid::parse_str(value)
+pub(crate) fn asset_entity_id(asset: &str, entity: &str) -> Result<AssetEntityId, JsValue> {
+    let asset = Uuid::parse_str(asset)
+        .map_err(|error| JsValue::from_str(&format!("focus asset must be a UUID: {error}")))?;
+    let entity = Uuid::parse_str(entity)
         .map_err(|error| JsValue::from_str(&format!("focus entity must be a UUID: {error}")))?;
-    if entity.is_nil() {
-        return Err(JsValue::from_str("focus entity UUID must not be nil"));
-    }
-    Ok(StableEntityId(entity))
+    let asset = AssetId::new(asset).map_err(js_error)?;
+    let entity = EntityId::new(entity).map_err(js_error)?;
+    AssetEntityId::new(asset, entity).map_err(js_error)
 }
 
 pub(crate) fn perspective_lens(

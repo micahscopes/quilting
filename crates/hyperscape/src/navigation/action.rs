@@ -3,9 +3,10 @@ use super::{
     PerspectiveLens, SphereReflectionState, SurfaceAnchorTarget, SurfaceWalkRuntime,
     TransitionEasing,
 };
-use crate::{HyperscapeDiagnostics, StableEntityId};
+use crate::HyperscapeDiagnostics;
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use bevy_time::{Time, Virtual};
+use hyperscape_protocol::AssetEntityId;
 use std::collections::VecDeque;
 
 /// Device-neutral edits accepted by camera, selection, and focus state.
@@ -41,7 +42,7 @@ pub enum NavigationAction {
     UpdateSurfaceAnchorTarget(SurfaceAnchorTarget),
     CancelSurfaceAnchorTransition,
     AnchorFocus {
-        entity: StableEntityId,
+        identity: AssetEntityId,
         source_bound: FocusSphere,
         source_pivot: [f64; 3],
         margin: f64,
@@ -455,7 +456,7 @@ fn apply_action(
             surface_walk.cancel_anchor_transition();
         }
         NavigationAction::AnchorFocus {
-            entity,
+            identity,
             source_bound,
             source_pivot,
             margin,
@@ -463,7 +464,7 @@ fn apply_action(
             easing,
         } => focus
             .anchor_to_pivot_with_easing(
-                entity,
+                identity,
                 source_bound,
                 source_pivot,
                 margin,
@@ -631,7 +632,16 @@ mod tests {
     use super::*;
     use crate::{CameraBasis, HyperscapePlugin};
     use bevy_app::App;
+    use hyperscape_protocol::{AssetId, EntityId};
     use std::time::Duration;
+
+    fn selection_identity(entity: u128) -> AssetEntityId {
+        AssetEntityId::new(
+            AssetId::from_u128(0x6000).unwrap(),
+            EntityId::from_u128(entity).unwrap(),
+        )
+        .unwrap()
+    }
 
     fn test_app() -> App {
         let mut app = App::new();
@@ -904,12 +914,12 @@ mod tests {
     #[test]
     fn scheduled_anchor_focus_commits_identity_bound_pivot_and_transition_together() {
         let mut controller = NavigationController::default();
-        let entity = StableEntityId(uuid::Uuid::from_u128(17));
+        let identity = selection_identity(17);
         let source_bound = FocusSphere::new([1.0, -2.0, 0.5], 0.75).unwrap();
         let source_pivot = [1.2, -1.8, 0.4];
         controller
             .push(NavigationAction::AnchorFocus {
-                entity,
+                identity,
                 source_bound,
                 source_pivot,
                 margin: 1.1,
@@ -921,7 +931,7 @@ mod tests {
         controller.tick(0.0).unwrap();
 
         let anchor = controller.focus.anchor.unwrap();
-        assert_eq!(anchor.entity, entity);
+        assert_eq!(anchor.identity, identity);
         assert_eq!(anchor.source_bound, source_bound);
         assert_eq!(anchor.source_pivot, source_pivot);
         assert_eq!(anchor.margin, 1.1);
@@ -936,7 +946,7 @@ mod tests {
         let before = controller.focus.clone();
         controller
             .push(NavigationAction::AnchorFocus {
-                entity: StableEntityId(uuid::Uuid::from_u128(17)),
+                identity: selection_identity(17),
                 source_bound: FocusSphere::new([0.0; 3], 1.0).unwrap(),
                 source_pivot: [f64::INFINITY, 0.0, 0.0],
                 margin: 1.1,
@@ -1025,7 +1035,7 @@ mod tests {
             .push(
                 0.0,
                 NavigationAction::AnchorFocus {
-                    entity: StableEntityId(uuid::Uuid::from_u128(7)),
+                    identity: selection_identity(7),
                     source_bound: FocusSphere::new([1.0, 0.0, 0.0], 1.0).unwrap(),
                     source_pivot: [1.0, 0.0, 0.0],
                     margin: 1.0,

@@ -20,11 +20,11 @@ use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
     CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
     NavigationPreset, Presentation, PresentationRuntime, PresentationSnapshot,
-    ScheduledNavigationAction, SphereReflectionState, StableEntityId,
+    ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
-    RequestId,
+    AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId,
+    PresenceEnvelope, RequestId,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
@@ -230,7 +230,7 @@ pub struct AppFrameSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectedFocusSnapshot {
-    pub entity: StableEntityId,
+    pub identity: AssetEntityId,
     pub source_bound: FocusSphere,
     pub source_pivot: [f64; 3],
     pub margin: f64,
@@ -256,7 +256,7 @@ impl SelectedFocusSnapshot {
                     .then_some((transport.point, output_radius))
             });
         Some(Self {
-            entity: anchor.entity,
+            identity: anchor.identity,
             source_bound: anchor.source_bound,
             source_pivot: anchor.source_pivot,
             margin: anchor.margin,
@@ -897,7 +897,8 @@ mod tests {
     use super::*;
     use hyperscape::{CameraRig, NavigationFrame};
     use hyperscape_protocol::{
-        CameraPresence, MessageHeader, MessageId, ProtocolVersion, CURRENT_PROTOCOL_VERSION,
+        CameraPresence, EntityId, MessageHeader, MessageId, ProtocolVersion,
+        CURRENT_PROTOCOL_VERSION,
     };
 
     fn asset(id: u128, uri: &str) -> AssetDescriptor {
@@ -911,6 +912,18 @@ mod tests {
 
     fn request(id: u128) -> RequestId {
         RequestId::from_u128(id).unwrap()
+    }
+
+    fn selection_identity_for(asset: u128, entity: u128) -> AssetEntityId {
+        AssetEntityId::new(
+            AssetId::from_u128(asset).unwrap(),
+            EntityId::from_u128(entity).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn selection_identity() -> AssetEntityId {
+        selection_identity_for(0x6000, 0x7000)
     }
 
     fn presentation_fixture() -> Presentation {
@@ -1120,7 +1133,7 @@ mod tests {
 
     fn selected_focus_action(source_pivot: [f64; 3]) -> NavigationAction {
         NavigationAction::AnchorFocus {
-            entity: StableEntityId(Uuid::from_u128(0x7000)),
+            identity: selection_identity(),
             source_bound: FocusSphere::new([0.0; 3], 2.0).unwrap(),
             source_pivot,
             margin: 1.0,
@@ -1135,7 +1148,7 @@ mod tests {
         let anchor_sequence = apply_navigation_now(&store, selected_focus_action([4.0, 0.0, 0.0]));
         let identity = store.frame_snapshot();
         let selected = identity.selected_focus.unwrap();
-        assert_eq!(selected.entity, StableEntityId(Uuid::from_u128(0x7000)));
+        assert_eq!(selected.identity, selection_identity());
         assert_eq!(selected.source_pivot, [4.0, 0.0, 0.0]);
         assert_eq!(selected.output_pivot, Some([4.0, 0.0, 0.0]));
         assert_eq!(selected.output_radius, Some(2.0));
@@ -1150,6 +1163,53 @@ mod tests {
         assert_eq!(anchor_sequence, 0);
         assert_eq!(inversion_sequence, 1);
         assert_eq!(reflected.last_applied_navigation_sequence, Some(1));
+    }
+
+    #[test]
+    fn selection_identity_commits_on_the_app_frame_and_keeps_asset_scope() {
+        let store = AppStore::default();
+        let source_bound = FocusSphere::new([0.0; 3], 2.0).unwrap();
+        let action = |identity| NavigationAction::AnchorFocus {
+            identity,
+            source_bound,
+            source_pivot: [1.0, 0.0, 0.0],
+            margin: 1.1,
+            duration_seconds: 0.0,
+            easing: hyperscape::TransitionEasing::SmootherStep,
+        };
+
+        let first = selection_identity_for(0x6000, 0x7000);
+        assert_eq!(store.dispatch_navigation(action(first)).unwrap().0, 0);
+        let pending = store.frame_snapshot();
+        assert_eq!(pending.pending_navigation_actions, 1);
+        assert_eq!(pending.selected_focus, None);
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        assert_eq!(
+            store.frame_snapshot().selected_focus.unwrap().identity,
+            first
+        );
+
+        let second_asset = selection_identity_for(0x6001, 0x7000);
+        assert_eq!(
+            store.dispatch_navigation(action(second_asset)).unwrap().0,
+            1
+        );
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        assert_eq!(
+            store.frame_snapshot().selected_focus.unwrap().identity,
+            second_asset,
+        );
+        assert_ne!(first, second_asset);
     }
 
     #[test]
@@ -1176,7 +1236,7 @@ mod tests {
         let mut focus = FocusNavigation::default();
         focus
             .anchor_to_pivot_with_easing(
-                StableEntityId(Uuid::from_u128(0x7000)),
+                selection_identity(),
                 FocusSphere::new([0.0; 3], 2.0).unwrap(),
                 [2.0e-154, 0.0, 0.0],
                 1.0,
@@ -1199,7 +1259,7 @@ mod tests {
         let mut focus = FocusNavigation::default();
         focus
             .anchor_to_pivot_with_easing(
-                StableEntityId(Uuid::from_u128(0x7000)),
+                selection_identity(),
                 FocusSphere::new([0.0; 3], f64::from_bits(1)).unwrap(),
                 [1.0e154, 0.0, 0.0],
                 1.0,

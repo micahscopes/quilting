@@ -210,23 +210,28 @@ or sphere state.
    identity/reflection and cyclic source/neighbor permutation cases.
    `walkimpl=rust` is therefore a real rollback-safe authority mode; the
    default stays `js` until it has seen broader interactive soak time.
-4. **Selection bridge — focus parity and Rust read model complete; browser
-   dispatch pending.**
-   Map durable asset-scoped glTF node identities to Hyperscape entities, send
-   pick results through `AppStore::dispatch_navigation`, tick sphere
+4. **Selection bridge — asset-scoped Rust contract and read model complete;
+   browser mapping/dispatch pending.**
+   Protocol, navigation, AppStore snapshots, replay 0.7, and the generated WASM
+   facades now carry an explicit `(asset ID, entity ID)` pair. Pre-0.7
+   unscoped replay anchors fail closed. Next, map durable asset-scoped glTF
+   node identities to Hyperscape entities, send pick results through
+   `AppStore::dispatch_navigation`, tick sphere
    transitions in Rust, and apply its one compact selected-focus packet per
    view. Ordinary GLB node-index UUIDs remain shadow-only and must never enter
    routes, HHHS, or durable replay.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.6
-   serializes stable entity references, selected source bounds/pivots, derived
+6. **Persistence and replay — native oracle complete.** Replay version 0.7
+   serializes asset-scoped stable entity references, selected source
+   bounds/pivots, derived
    output-chart pivots/radii, detached spheres, camera rig state, and every
    current high-level navigation action, including complete lens and explicit
    aim-mode edits. It accepts 0.4 anchor events by defaulting the omitted pivot
-   to the bound center, accepts 0.5 without that migration, and rejects the new
-   action vocabulary under either legacy tag. Checked navigation and
+   to the bound center, accepts 0.5 without that migration, accepts 0.6 camera
+   policy actions, and rejects every pre-0.7 unscoped focus anchor rather than
+   inventing asset scope. Checked navigation and
    orchestration fixtures cover transition cadence, asset effects,
    presence/authored lanes, and atomic rejection. Browser input capture and
    networking must carry semantic actions or authoritative state deltas, never

@@ -968,3 +968,41 @@ a 2,132-byte raw / 1,045-byte gzip increase (0.035% / 0.049%) for the explicit
 measurement API, with no atlas payload or live grading-policy change. The
 source-coherent build receipt is `674ec7cc32a6f39663aadc42ccd8edca`
 over 156 files and 38,631,448 bytes.
+
+## Asset-scoped selection identity gate
+
+The next 2026-08-24 checkpoint made durable selection identity an explicit
+`(asset ID, entity ID)` pair from the protocol boundary through
+`FocusNavigation`, the ordered application queue, its compact selected-focus
+snapshot, replay, and both generated-WASM navigation facades. A glTF node
+index or a renderer composition offset remains a transient handle and cannot
+be mistaken for authored identity. Tests cover the same entity UUID in two
+assets and prove that the application does not expose a queued selection until
+the next frame integration boundary.
+
+Application replay is now version 0.7. Current focus actions serialize
+`asset_id` and `entity_id`; versions 0.4, 0.5, and 0.6 remain readable, but a
+pre-0.7 anchor without explicit asset scope fails closed rather than acquiring
+a fabricated durable asset. Version 0.4 alone retains its omitted-pivot
+migration, and version 0.6 retains the complete lens and semantic-target
+policy. The checked fingerprints are
+`4d8598faf9db62e8500d49d94ead89ed` for the six-cue presentation,
+`4b6f0b82cf471af7af17b99ed37317d4` for navigation, and
+`2cb74a642b3d4fc40b4eda777addb833` for orchestration.
+
+Validation passed for 89 direct Hyperscape tests, 6 protocol tests, 42
+application/replay tests, 44 browser-independent JavaScript tests, four
+executable Node/WASM tests, the five generated-WASM smokes, WASM target
+checking, strict no-dependency application Clippy, Rustdoc, release Trunk
+build, all three replay checks, and ordinary offline preflight. The optimized
+WASM is 6,075,989 bytes raw and 2,138,520 bytes gzip,
+increases of 1,686 and 497 bytes respectively. The source-coherent build
+receipt is `cc8d7e32d05df457d4cb79ae738ae135` over 156 files and
+38,642,396 bytes.
+
+This checkpoint does not claim browser pick cutover. The next bounded step is
+to export authored stable node IDs from validated glTF metadata, retain an
+explicit durable asset ID through primary/secondary composition offsets, and
+dispatch only mapped picks through the application shadow. Unmapped ordinary
+GLBs must remain usable without synthesizing a durable UUID; renderer node and
+face indices remain presentation handles.

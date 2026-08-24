@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.6",
+  "version": "hyperscope-app-replay/0.7",
   "events": [
     {
       "type": "synchronize_navigation",
@@ -200,7 +200,8 @@
       "at_seconds": 2.0,
       "action": {
         "action": "anchor_focus",
-        "entity": "70000000-0000-4000-8000-000000000001",
+        "asset_id": "60000000-0000-4000-8000-000000000001",
+        "entity_id": "70000000-0000-4000-8000-000000000001",
         "source_bound": {
           "center": [1.5, 0.0, 0.0],
           "radius": 0.75
@@ -310,7 +311,8 @@
       "at_seconds": 3.05,
       "action": {
         "action": "anchor_focus",
-        "entity": "00000000-0000-0000-0000-000000000000",
+        "asset_id": "60000000-0000-4000-8000-000000000001",
+        "entity_id": "00000000-0000-0000-0000-000000000000",
         "source_bound": {
           "center": [0.0, 0.0, 0.0],
           "radius": 1.0
