@@ -272,8 +272,8 @@ fn primary_binding_plan(mode: &str) -> Result<WebGlBindingPlan, String> {
     WebGlBindingPlan::new(uniform_blocks, samplers)
 }
 
-/// Pure descriptors for the six primary render programs. Handwritten GLSL
-/// auxiliary programs deliberately remain outside this first checkpoint.
+/// Pure descriptors for the six primary render programs. Application-level
+/// auxiliary descriptors may be resolved through the same memo separately.
 pub fn primary_program_descriptors() -> Result<Vec<(&'static str, WebGlProgramKey)>, String> {
     let compiler_catalog_revision = quilting_shaders::compiler_catalog_revision();
     let vertex = ShaderModuleDescriptor::new(

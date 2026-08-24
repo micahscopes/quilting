@@ -8,6 +8,9 @@ use wasm_bindgen::JsCast;
 use std::cell::RefCell;
 use tracing::{info, debug, warn};
 use crate::{perf_mark, perf_measure};
+use crate::auxiliary_programs::{
+    auxiliary_program_descriptor, AuxiliaryProgram, POST_PROCESS_UNIFORMS_BINDING,
+};
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
@@ -123,6 +126,62 @@ fn bind_pbr_material_state(
     }
 }
 
+/// Shared non-program resources for the two no-attribute fullscreen passes.
+/// Their programs are non-owning handles retained by the Renderer memo.
+struct FullscreenAuxResources {
+    vao: glow::VertexArray,
+    params_ubo: glow::Buffer,
+}
+
+impl FullscreenAuxResources {
+    fn new(gl: &glow::Context) -> Result<Self, String> {
+        unsafe {
+            let vao = gl.create_vertex_array()
+                .map_err(|error| format!("fullscreen auxiliary VAO: {error}"))?;
+            let params_ubo = match gl.create_buffer() {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    gl.delete_vertex_array(vao);
+                    return Err(format!("fullscreen auxiliary UBO: {error}"));
+                }
+            };
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(params_ubo));
+            gl.buffer_data_size(glow::UNIFORM_BUFFER, 16, glow::DYNAMIC_DRAW);
+            gl.bind_buffer(glow::UNIFORM_BUFFER, None);
+            Ok(Self { vao, params_ubo })
+        }
+    }
+
+    fn upload_and_bind(&self, gl: &glow::Context, value: [f32; 4]) {
+        unsafe {
+            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.params_ubo));
+            gl.buffer_sub_data_u8_slice(
+                glow::UNIFORM_BUFFER,
+                0,
+                bytemuck_cast_slice(&value),
+            );
+            gl.bind_buffer_base(
+                glow::UNIFORM_BUFFER,
+                POST_PROCESS_UNIFORMS_BINDING,
+                Some(self.params_ubo),
+            );
+        }
+    }
+
+    fn destroy(self, gl: &glow::Context) {
+        unsafe {
+            gl.bind_buffer_base(
+                glow::UNIFORM_BUFFER,
+                POST_PROCESS_UNIFORMS_BINDING,
+                None,
+            );
+            gl.bind_buffer(glow::UNIFORM_BUFFER, None);
+            gl.delete_vertex_array(self.vao);
+            gl.delete_buffer(self.params_ubo);
+        }
+    }
+}
+
 struct MainState {
     renderer: Renderer,
     /// Authoritative drawable size, updated with the GL viewport by mr_resize.
@@ -221,7 +280,7 @@ struct MainState {
     blur_fbo: Option<glow::Framebuffer>,
     blur_tex: Option<glow::Texture>,
     blur_program: Option<glow::Program>,
-    blur_vao: Option<glow::VertexArray>,
+    fullscreen_aux: Option<FullscreenAuxResources>,
     // MRT: PBR renders to this FBO with color + weight attachments
     pbr_fbo: Option<glow::Framebuffer>,
     pbr_color_tex: Option<glow::Texture>,
@@ -249,7 +308,6 @@ struct MainState {
     focus_sphere: [f32; 4],
     focus_field_enabled: bool,
     highlight_prog: Option<glow::Program>,
-    highlight_vao: Option<glow::VertexArray>,
 }
 
 impl MainState {
@@ -306,17 +364,15 @@ impl MainState {
             fuzzy.destroy(gl);
         }
 
+        // Application-owned fullscreen bindings retire before Renderer drops
+        // the memo-owned programs and their shared shader modules.
+        if let Some(resources) = self.fullscreen_aux.take() {
+            resources.destroy(gl);
+        }
+        let _ = self.blur_program.take();
+        let _ = self.highlight_prog.take();
+
         unsafe {
-            for vao in [self.blur_vao.take(), self.highlight_vao.take()]
-                .into_iter().flatten()
-            {
-                gl.delete_vertex_array(vao);
-            }
-            for program in [self.blur_program.take(), self.highlight_prog.take()]
-                .into_iter().flatten()
-            {
-                gl.delete_program(program);
-            }
             for renderbuffer in [self.pbr_depth_rb.take(), self.pick_depth.take()]
                 .into_iter().flatten()
             {
@@ -343,6 +399,20 @@ impl MainState {
         // Drop implementation tears down its transform feedback, program memo,
         // UBOs, and animation textures with this same context.
     }
+}
+
+fn resolve_auxiliary_program(
+    state: &mut MainState,
+    kind: AuxiliaryProgram,
+) -> Result<glow::Program, String> {
+    let descriptor = auxiliary_program_descriptor(kind)
+        .map_err(|error| format!("{kind:?} descriptor: {error}"))?;
+    let program = state.renderer.resolve_program(descriptor)
+        .map_err(|error| format!("{kind:?} program: {error}"))?;
+    if state.fullscreen_aux.is_none() {
+        state.fullscreen_aux = Some(FullscreenAuxResources::new(state.renderer.gl())?);
+    }
+    Ok(program)
 }
 
 #[derive(Default)]
@@ -495,70 +565,6 @@ struct PresentationNodeState {
     opacity: f32,
 }
 
-/// Create a separable Gaussian blur program (GLSL ES 300, not WGSL).
-fn create_blur_program(gl: &glow::Context) -> Result<(glow::Program, glow::VertexArray), String> {
-    unsafe {
-        let vs_src = "#version 300 es\n\
-            out vec2 v_uv;\n\
-            void main() {\n\
-                float x = float((gl_VertexID & 1) << 2) - 1.0;\n\
-                float y = float((gl_VertexID & 2) << 1) - 1.0;\n\
-                v_uv = vec2(x, y) * 0.5 + 0.5;\n\
-                gl_Position = vec4(x, y, 0.0, 1.0);\n\
-            }";
-        let fs_src = "#version 300 es\n\
-            precision highp float;\n\
-            uniform sampler2D u_tex;\n\
-            uniform vec2 u_dir;\n\
-            in vec2 v_uv;\n\
-            out vec4 o_color;\n\
-            void main() {\n\
-                vec3 c = textureLod(u_tex, v_uv, 0.0).rgb * 0.227027;\n\
-                c += textureLod(u_tex, v_uv + u_dir * 1.384615, 0.0).rgb * 0.316216;\n\
-                c += textureLod(u_tex, v_uv - u_dir * 1.384615, 0.0).rgb * 0.316216;\n\
-                c += textureLod(u_tex, v_uv + u_dir * 3.230769, 0.0).rgb * 0.070270;\n\
-                c += textureLod(u_tex, v_uv - u_dir * 3.230769, 0.0).rgb * 0.070270;\n\
-                o_color = vec4(c, 1.0);\n\
-            }";
-
-        let vs = gl.create_shader(glow::VERTEX_SHADER).map_err(|e| format!("{e}"))?;
-        gl.shader_source(vs, vs_src);
-        gl.compile_shader(vs);
-        if !gl.get_shader_compile_status(vs) {
-            let log = gl.get_shader_info_log(vs);
-            return Err(format!("blur VS: {log}"));
-        }
-        let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| format!("{e}"))?;
-        gl.shader_source(fs, fs_src);
-        gl.compile_shader(fs);
-        if !gl.get_shader_compile_status(fs) {
-            let log = gl.get_shader_info_log(fs);
-            return Err(format!("blur FS: {log}"));
-        }
-        let prog = gl.create_program().map_err(|e| format!("{e}"))?;
-        gl.attach_shader(prog, vs);
-        gl.attach_shader(prog, fs);
-        gl.link_program(prog);
-        if !gl.get_program_link_status(prog) {
-            let log = gl.get_program_info_log(prog);
-            return Err(format!("blur link: {log}"));
-        }
-        gl.detach_shader(prog, vs); gl.delete_shader(vs);
-        gl.detach_shader(prog, fs); gl.delete_shader(fs);
-
-        // Set texture unit
-        gl.use_program(Some(prog));
-        if let Some(loc) = gl.get_uniform_location(prog, "u_tex") {
-            gl.uniform_1_i32(Some(&loc), 0);
-        }
-        gl.use_program(None);
-
-        let vao = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
-
-        Ok((prog, vao))
-    }
-}
-
 thread_local! {
     static STATE: RefCell<Option<MainState>> = RefCell::new(None);
     static TESS_CACHE: RefCell<std::collections::HashMap<[u32; 3], TessBuffers>> =
@@ -667,7 +673,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             blur_fbo: None,
             blur_tex: None,
             blur_program: None,
-            blur_vao: None,
+            fullscreen_aux: None,
             pbr_fbo: None,
             pbr_color_tex: None,
             pbr_depth_rb: None,
@@ -690,7 +696,6 @@ pub fn mr_init(canvas_id: &str) -> bool {
             focus_sphere: [0.5, 0.0, 0.0, 2.0],
             focus_field_enabled: false,
             highlight_prog: None,
-            highlight_vao: None,
         };
         let previous = state.borrow_mut().take();
         if let Some(previous) = previous {
@@ -1560,22 +1565,11 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
         sync_render_batches(state);
         // Lazy-init highlight program
         if state.highlight_prog.is_none() {
-            let gl = state.renderer.gl();
-            unsafe {
-                let vs = gl.create_shader(glow::VERTEX_SHADER).unwrap();
-                gl.shader_source(vs, HIGHLIGHT_VS);
-                gl.compile_shader(vs);
-                let fs = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
-                gl.shader_source(fs, HIGHLIGHT_FS);
-                gl.compile_shader(fs);
-                let prog = gl.create_program().unwrap();
-                gl.attach_shader(prog, vs);
-                gl.attach_shader(prog, fs);
-                gl.link_program(prog);
-                gl.delete_shader(vs);
-                gl.delete_shader(fs);
-                state.highlight_prog = Some(prog);
-                state.highlight_vao = Some(gl.create_vertex_array().unwrap());
+            match resolve_auxiliary_program(state, AuxiliaryProgram::Highlight) {
+                Ok(program) => state.highlight_prog = Some(program),
+                Err(error) => {
+                    warn!("Selection highlight unavailable; picking continues: {error}");
+                }
             }
         }
 
@@ -3454,6 +3448,27 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         sync_render_batches(state);
         refresh_render_shadow_scene(state);
+        let has_transmission = if matches!(state.render_mode, RenderMode::Pbr) {
+            let default_material = PbrParams::default();
+            state.render_batches.iter().any(|batch| {
+                let (_, material) = pbr_material_for_index(
+                    &state.materials,
+                    &default_material,
+                    batch.material_index,
+                );
+                material.transmission_factor > 0.0
+            })
+        } else {
+            false
+        };
+        if has_transmission && state.blur_program.is_none() {
+            match resolve_auxiliary_program(state, AuxiliaryProgram::Blur) {
+                Ok(program) => state.blur_program = Some(program),
+                Err(error) => {
+                    warn!("Transmission blur unavailable; rendering continues: {error}");
+                }
+            }
+        }
         let render_batches = state.render_batches.as_slice();
 
         let gl = state.renderer.gl();
@@ -3645,14 +3660,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     );
                 }
                 // --- Blit opaque framebuffer to scene_color texture for refraction ---
-                let has_transmission = render_batches.iter().any(|b| {
-                    let (_, m) = pbr_material_for_index(
-                        &state.materials,
-                        &default_mat,
-                        b.material_index,
-                    );
-                    m.transmission_factor > 0.0
-                });
                 if has_transmission {
                     unsafe {
                         // Get canvas size from viewport
@@ -3709,12 +3716,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
 
                         // --- Gaussian blur pyramid: blur each mip level from the previous ---
-                        if state.blur_program.is_none() {
-                            if let Ok((prog, vao)) = create_blur_program(gl) {
-                                state.blur_program = Some(prog);
-                                state.blur_vao = Some(vao);
-                            }
-                        }
                         // One temp texture for ping-pong during H/V separable blur
                         if state.blur_tex.is_none() || state.scene_color_size != (vw, vh) {
                             if let Some(f) = state.blur_fbo { gl.delete_framebuffer(f); }
@@ -3735,15 +3736,14 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             state.blur_tex = Some(t);
                         }
 
-                        if let (Some(prog), Some(vao), Some(blur_fbo), Some(blur_tex), Some(sc_fbo)) =
-                            (state.blur_program, state.blur_vao, state.blur_fbo, state.blur_tex, state.scene_color_fbo)
+                        if let (Some(prog), Some(resources), Some(blur_fbo), Some(blur_tex), Some(sc_fbo)) =
+                            (state.blur_program, state.fullscreen_aux.as_ref(), state.blur_fbo, state.blur_tex, state.scene_color_fbo)
                         {
                             let sc_tex = state.scene_color_tex.unwrap();
                             gl.use_program(Some(prog));
-                            gl.bind_vertex_array(Some(vao));
+                            gl.bind_vertex_array(Some(resources.vao));
                             gl.disable(glow::DEPTH_TEST);
                             gl.disable(glow::BLEND);
-                            let dir_loc = gl.get_uniform_location(prog, "u_dir");
 
                             // For each mip level 1..N: Gaussian blur from mip (level-1)
                             let num_mips = ((vw.max(vh) as f32).log2().floor() as i32 + 1).min(8);
@@ -3769,7 +3769,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 // Force sampling from specific mip level
                                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, mip - 1);
                                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, mip - 1);
-                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), px, 0.0); }
+                                resources.upload_and_bind(gl, [px, 0.0, 0.0, 0.0]);
                                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
                                 // Restore mip range
                                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
@@ -3781,7 +3781,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                     glow::TEXTURE_2D, Some(sc_tex), mip);
                                 gl.active_texture(glow::TEXTURE0);
                                 gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
-                                if let Some(ref loc) = dir_loc { gl.uniform_2_f32(Some(loc), 0.0, py); }
+                                resources.upload_and_bind(gl, [0.0, py, 0.0, 0.0]);
                                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
                             }
 
@@ -4031,41 +4031,13 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
     });
 }
 
-const HIGHLIGHT_VS: &str = r#"#version 300 es
-out vec2 v_uv;
-void main() {
-    float x = (gl_VertexID == 1) ? 3.0 : -1.0;
-    float y = (gl_VertexID == 2) ? 3.0 : -1.0;
-    v_uv = vec2(x * 0.5 + 0.5, y * 0.5 + 0.5);
-    gl_Position = vec4(x, y, 0.0, 1.0);
-}
-"#;
-
-const HIGHLIGHT_FS: &str = r#"#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 o_color;
-uniform sampler2D u_pick;
-uniform vec3 u_target;
-
-void main() {
-    vec4 px = texture(u_pick, v_uv);
-    if (px.a < 0.5) discard; // background
-    if (abs(px.r - u_target.r) > 0.003 ||
-        abs(px.g - u_target.g) > 0.003 ||
-        abs(px.b - u_target.b) > 0.003) discard;
-    o_color = vec4(0.0, 1.0, 1.0, 0.5);
-}
-"#;
-
-
 /// Render highlight overlay for the picked face.
 /// Requires pick FBO + highlight program to exist (created in mr_pick).
 /// Renders pick pass to FBO, then fullscreen overlay where face ID matches.
 fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_renderer::pass::Camera) {
     let target_id = state.highlight_face;
-    let (highlight_prog, highlight_vao, pick_fbo, pick_tex) = match (
-        state.highlight_prog, state.highlight_vao, state.pick_fbo, state.pick_tex,
+    let (highlight_prog, resources, pick_fbo, pick_tex) = match (
+        state.highlight_prog, state.fullscreen_aux.as_ref(), state.pick_fbo, state.pick_tex,
     ) {
         (Some(p), Some(v), Some(f), Some(t)) => (p, v, f, t),
         _ => return, // not initialized (mr_pick hasn't been called yet)
@@ -4113,17 +4085,12 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
 
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(pick_tex));
-        if let Some(loc) = gl.get_uniform_location(highlight_prog, "u_pick") {
-            gl.uniform_1_i32(Some(&loc), 0);
-        }
         let tr = (target_id & 255) as f32 / 255.0;
         let tg = ((target_id >> 8) & 255) as f32 / 255.0;
         let tb = ((target_id >> 16) & 255) as f32 / 255.0;
-        if let Some(loc) = gl.get_uniform_location(highlight_prog, "u_target") {
-            gl.uniform_3_f32(Some(&loc), tr, tg, tb);
-        }
+        resources.upload_and_bind(gl, [tr, tg, tb, 0.0]);
 
-        gl.bind_vertex_array(Some(highlight_vao));
+        gl.bind_vertex_array(Some(resources.vao));
         gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
         gl.disable(glow::BLEND);

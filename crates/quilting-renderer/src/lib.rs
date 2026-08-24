@@ -20,7 +20,7 @@ use buffer::{
     VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf,
     FaceDataTexture, SkinningTexture, MorphTargetTexture,
 };
-use shader::{Programs, WebGlProgramMemo, WebGlProgramMemoDiagnostics};
+use shader::{Programs, WebGlProgramKey, WebGlProgramMemo, WebGlProgramMemoDiagnostics};
 use prepare::PatchPreparer;
 
 /// High-level renderer for the quilting pipeline.
@@ -28,7 +28,7 @@ use prepare::PatchPreparer;
 /// Owns the glow context, compiled shader programs, and all shared uniform buffers.
 pub struct Renderer {
     gl: glow::Context,
-    /// Sole owner of descriptor-lowered primary shaders and programs.
+    /// Sole owner of descriptor-lowered shaders and programs for this epoch.
     program_memo: WebGlProgramMemo,
     /// Non-owning convenience view into `program_memo`.
     programs: Programs,
@@ -211,6 +211,12 @@ impl Renderer {
     /// Access compiled programs (for advanced uniform management).
     pub fn programs(&self) -> &Programs {
         &self.programs
+    }
+
+    /// Resolve an application-owned WebGL program descriptor in this
+    /// renderer's context epoch. The returned handle is non-owning.
+    pub fn resolve_program(&mut self, key: WebGlProgramKey) -> Result<glow::Program, String> {
+        self.program_memo.get_or_create(&self.gl, key)
     }
 
     /// CPU-only cache counters; querying these never synchronizes with the GPU.

@@ -1,4 +1,5 @@
 mod app_shadow;
+mod auxiliary_programs;
 pub mod main_renderer;
 mod navigation;
 mod render_shadow;
