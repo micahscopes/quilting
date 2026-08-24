@@ -155,6 +155,9 @@ self.onmessage = async function(e) {
     if (result?.face_node_indices?.buffer) {
       transfers.push(result.face_node_indices.buffer);
     }
+    if (result?.node_world_transforms?.buffer) {
+      transfers.push(result.node_world_transforms.buffer);
+    }
     // Only authored Hyperscape assets need their source bytes again on the
     // main thread to initialize the ECS graph. Ordinary GLBs stay transferred
     // to the retained loader worker instead of being cloned across both heaps.

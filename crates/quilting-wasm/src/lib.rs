@@ -1659,8 +1659,8 @@ pub fn get_rest_pose_instances() -> JsValue {
 /// Walks ALL scene nodes, applies world transforms, merges all meshes.
 /// Returns a JS object with:
 ///   { time_min, time_max, num_vertices, num_faces, materials, textures,
-///     face_node_indices, node_stable_entity_ids, base_color, metallic,
-///     roughness }
+///     face_node_indices, node_stable_entity_ids, node_world_transforms,
+///     base_color, metallic, roughness }
 /// Built with js_sys to avoid serde overhead on large data.
 #[wasm_bindgen]
 pub fn load_gltf_data(data: &[u8]) -> JsValue {
@@ -1688,18 +1688,22 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         scene.scenes.first()
     };
 
+    let node_world_transforms = active_scene
+        .map(|active| quilting_gltf::scene::compute_world_transforms(&scene.nodes, active))
+        .unwrap_or_default();
+
     // Collect all (mesh_idx, skin_idx, world_transform) from the scene graph
     let mut mesh_nodes: Vec<MeshNodeRef> = Vec::new();
 
-    if let Some(active) = active_scene {
-        let world_transforms = quilting_gltf::scene::compute_world_transforms(&scene.nodes, active);
+    if active_scene.is_some() {
+        debug_assert_eq!(node_world_transforms.len(), scene.nodes.len());
         for (node_idx, node) in scene.nodes.iter().enumerate() {
             if let Some(mi) = node.mesh {
                 mesh_nodes.push(MeshNodeRef {
                     node_idx,
                     mesh_idx: mi,
                     skin_idx: node.skin,
-                    world_transform: world_transforms[node_idx],
+                    world_transform: node_world_transforms[node_idx],
                 });
             }
         }
@@ -2022,6 +2026,22 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         );
     }
 
+    // Authored Hyperscape geometry deliberately remains node-local so the
+    // renderer can compose source node transforms with presentation layers and
+    // future live edits. Ordinary assets retain baked coordinates and therefore
+    // return an empty table instead of cloning one matrix per source node.
+    let js_node_world_transforms = if authored_coordinates {
+        let values: Vec<f32> = node_world_transforms
+            .iter()
+            .flat_map(|matrix| matrix.iter().map(|&value| value as f32))
+            .collect();
+        let transforms = js_sys::Float32Array::new_with_length(values.len() as u32);
+        transforms.copy_from(&values);
+        transforms
+    } else {
+        js_sys::Float32Array::new_with_length(0)
+    };
+
     // Extract first material as default (backward compat).
     // With raw image blobs (browser-native decode), we use base_color_factor directly.
     let (base_color, metallic, roughness) = if !scene.materials.is_empty() {
@@ -2115,6 +2135,11 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         &result,
         &"node_stable_entity_ids".into(),
         &js_node_stable_entity_ids,
+    ).unwrap();
+    js_sys::Reflect::set(
+        &result,
+        &"node_world_transforms".into(),
+        &js_node_world_transforms,
     ).unwrap();
 
     // Backward-compat scalar fields

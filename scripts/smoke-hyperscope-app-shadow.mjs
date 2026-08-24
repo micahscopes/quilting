@@ -61,6 +61,7 @@ function authoredTriangleGlb(stableEntityId) {
     nodes: [
       {
         mesh: 0,
+        translation: [2, 3, 4],
         ...(stableEntityId
           ? { extras: { hyperscape: { stable_id: stableEntityId, frame: 0 } } }
           : {}),
@@ -104,6 +105,20 @@ assert.deepEqual(
   'the loader must export a dense authored node-identity table',
 );
 assert.deepEqual(Array.from(authoredModel.face_node_indices), [0]);
+assert.deepEqual(
+  Array.from(authoredModel.node_world_transforms),
+  [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    2, 3, 4, 1,
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ],
+  'the loader must retain dense authored node world transforms',
+);
 const releaseAuthoredModel = loadGltfData(new Uint8Array(readFileSync(
   `${repository}/examples/hyperscape-blender-demo.glb`,
 )));
@@ -134,6 +149,11 @@ assert.deepEqual(
   ordinaryModel.node_stable_entity_ids,
   [],
   'ordinary assets must not clone one null identity per renderer node',
+);
+assert.equal(
+  ordinaryModel.node_world_transforms.length,
+  0,
+  'ordinary assets must not clone one matrix per renderer node',
 );
 
 const app = new HyperscopeAppShadow();

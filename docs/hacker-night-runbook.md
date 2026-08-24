@@ -131,7 +131,7 @@ the same numbered cue rather than returning to cue one.
 5. **The Möbius map folds into each patch's weights** — inversion and the
    red/blue stretch field complete without a pole warning.
 6. **Scenes stay composable** — PBR returns and both the animated horse and
-   Blender-authored scene are visible; diagnostics report 2 assets and 4,264
+   Blender-authored scene are visible; diagnostics report 2 assets and 4,252
    faces.
 
 Keep the sidebar available during rehearsal so a presenter can inspect or

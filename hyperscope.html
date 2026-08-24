@@ -1828,9 +1828,11 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     const layer = activeLayers.get(assetId);
     const visible = !!layer?.visible;
     const opacity = visible ? Math.max(0, Math.min(1, Number(layer.opacity) || 0)) : 0;
-    const matrix = presentationLayerMatrix(layer?.transform);
+    const layerMatrix = presentationLayerMatrix(layer?.transform);
     opacityPending ||= opacity > 0 && opacity < 1;
     for (const node of resident.nodes) {
+      const sourceMatrix = resident.nodeWorldTransforms?.get(node);
+      const matrix = sourceMatrix ? mulM4(layerMatrix, sourceMatrix) : layerMatrix;
       const nodeVisible = visible && !resident.hiddenNodes?.has(node);
       renderRecords.push(node, nodeVisible ? 1 : 0, nodeVisible ? opacity : 0, ...matrix);
       if (assetId === presentationComposition.primaryAssetId) {
@@ -2083,7 +2085,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=lod-grading-v1', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=authored-node-trs-v1', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -6724,10 +6726,14 @@ async function loadStaticPresentationAsset(asset, fetched) {
     ? info.node_stable_entity_ids.slice()
     : [];
   info.node_stable_entity_ids = null;
+  const nodeWorldTransforms = info.node_world_transforms instanceof Float32Array
+    ? info.node_world_transforms
+    : new Float32Array(info.node_world_transforms || 0);
+  info.node_world_transforms = null;
   const numVertices = Number(skin?.num_vertices || info.num_vertices) || 0;
   if (instances.length !== faceCount * 52 || faceLods.length < faceCount * 6
       || faceMaterials.length !== faceCount || faceNodes.length !== faceCount
-      || numVertices <= 0) {
+      || numVertices <= 0 || nodeWorldTransforms.length % 16 !== 0) {
     throw new Error(`${asset.name}: presentation payload dimensions are inconsistent`);
   }
   return {
@@ -6741,6 +6747,7 @@ async function loadStaticPresentationAsset(asset, fetched) {
     numVertices,
     nodeMetadata,
     nodeStableEntityIds,
+    nodeWorldTransforms,
     fetchMs: fetched.fetchMs,
   };
 }
@@ -6899,6 +6906,18 @@ async function initializePresentationComposition() {
         resident.nodeMetadata
           .filter(node => node.guide)
           .map(node => node.index + resident.nodeOffset),
+      ),
+      nodeWorldTransforms: new Map(
+        uniqueNodeIds(resident.faceNodes).map(node => {
+          const start = node * 16;
+          if (start + 16 > resident.nodeWorldTransforms.length) {
+            throw new Error(`${resident.asset.name}: node ${node} has no authored world transform`);
+          }
+          return [
+            node + resident.nodeOffset,
+            resident.nodeWorldTransforms.slice(start, start + 16),
+          ];
+        }),
       ),
       faceOffset: resident.faceOffset,
       faceCount: resident.faceCount,
