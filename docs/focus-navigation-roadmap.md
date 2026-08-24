@@ -115,17 +115,20 @@ or sphere state.
    mirror SpaceMouse camera actions and surface re-anchor glides, then inspect
    `globalThis.__hyperscopeNavigationShadow`. The surface observer separately
    reports samples, drift frames, maximum error, and the last Rust/browser
-   pose pair. Drift is recorded without changing the rendered camera;
-   removing `navshadow=1` is the immediate rollback. Remove duplicate
-   JavaScript authority only after representative all-mode, all-scale parity
-   runs are clean.
+   pose pair. `HyperscopeAppShadow` now admits the same action set through the
+   application reducer and an offline generated-WASM smoke compares both Rust
+   boundaries through ordinary frames, focus/inversion edits, and animated
+   surface re-anchor/retarget/cancel. Drift is recorded without changing the
+   rendered camera; removing `navshadow=1` is the immediate rollback. Remove
+   duplicate JavaScript authority only after representative all-mode,
+   all-scale parity runs are clean.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere
    transitions in Rust, and extract one compact focus packet per view.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.3
+6. **Persistence and replay — native oracle complete.** Replay version 0.4
    serializes stable entity references, detached spheres, camera rig state, and
    every current high-level navigation action. Checked navigation and
    orchestration fixtures cover transition cadence, asset effects,

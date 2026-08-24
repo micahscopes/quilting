@@ -198,7 +198,7 @@ browser WASM is 5,969,847 bytes, 1,219 bytes smaller than the preceding
 5,971,066-byte build; gzip is effectively flat at 2,096,949 bytes (+100). The
 source-coherent build receipt is `dd8eb4d56f3db0ba9a1e12bd24872a1e`.
 
-Replay version 0.3 extends that oracle across every current application event
+Replay version 0.4 extends that oracle across every current application event
 lane. Its third portable fixture proves complete asset descriptors and exact
 fetch/cancel effects, supersession, loaded/failed/cancelled state, stale
 completion, presence order and exact TTL expiry, all three durable authored
@@ -213,6 +213,28 @@ The expanded oracle and CI remain outside the shipped browser runtime. The
 optimized WASM remains 5,969,847 bytes; gzip is effectively flat at 2,096,933
 bytes (+84 from the preceding 2,096,849-byte baseline). The source-coherent
 build receipt is `bf2cf66ce7924641196d602d9a35daa3`.
+
+The first single-application-boundary slice then exposed the incumbent
+device-neutral navigation action set through `HyperscopeAppShadow` and
+`AppStore`, with queue-authoritative sequencing and application-owned virtual
+time. Version 0.4 records navigation admission separately from integration so
+pre-tick pending/pose state matches the compatibility facade. Frames are the
+usual integration boundary; transactional cue activation also performs its
+required zero-time integration in shared sequence order.
+Its compact frame
+packet now includes preset, pending work, quaternion/basis, camera and surface
+transition clocks/hop, focus/reflection, and navigation diagnostics. The
+generated-WASM smoke proves exact state parity against the compatibility
+`HyperscopeNavigation` facade through flight, focus/inversion, and animated
+surface re-anchor/retarget/cancel. Browser authority and `navshadow=1` remain
+unchanged pending live target-browser evidence.
+
+This temporary dual-facade checkpoint grows optimized WASM from 5,969,847 to
+5,983,991 bytes (+14,144); gzip is effectively flat, growing from 2,096,933 to
+2,096,971 bytes (+38). The raw overhead is explicitly budgeted for removal when
+the compatibility facade is backed by or retired in favor of the single
+application adapter. The source-coherent build receipt is
+`f0a54c89d9df0016f5c0a0d40adf2535`.
 
 ## Canonical atlas
 

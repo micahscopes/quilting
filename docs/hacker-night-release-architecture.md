@@ -58,7 +58,12 @@ The first application boundary is now explicit:
   compact comparison call per active cue-transition frame; it makes no calls
   while settled or when shadowing is disabled. Bounded diagnostics are exposed at
   `globalThis.__hyperscopeAppShadowDiagnostics` until this lane earns browser
-  authority.
+  authority. The same adapter now accepts the incumbent navigation shadow's
+  device-neutral actions through `AppStore`; the shared navigation queue owns
+  their sequence and the application owns virtual time. The adapter exposes a
+  parity-complete frame snapshot. This is an offline
+  cutover gate only: `navshadow=1` and the browser camera remain unchanged until
+  live Chrome parity is measured.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 67 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
@@ -83,8 +88,14 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.3 walks every checked-in cue, every current
-  semantic navigation action, and every current application event lane. The
+  `hyperscope-replay` version 0.4 walks every checked-in cue, every current
+  semantic navigation action, and every current application event lane.
+  Version 0.4 makes action admission and integration distinct: same-time
+  navigation input remains pending until the next integration boundary. That
+  is normally a frame event; transactional cue activation also integrates at
+  zero time so its own queued transitions and any preceding due input commit
+  in sequence. This exactly matches the standalone controller's observable
+  queue contract. The
   navigation oracle covers camera frames,
   focus/inversion, camera transitions, surface re-anchor/retarget/cancel,
   stable-identity selection, detach/free edits, and rejected-input atomicity.
@@ -92,10 +103,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The six-cue golden is
-  `fnv1a-128-json:b06e5f2829663995385b6f0963855e2d`;
+  `fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`;
   the navigation golden is
-  `fnv1a-128-json:c6b49d2c0e3ec84509386807ab2a5dbf`; the orchestration
-  golden is `fnv1a-128-json:e67dfadddd6729f0c8544212784e867c`.
+  `fnv1a-128-json:c3fcf7d1c5dd2106464f90d40942d06b`; the orchestration
+  golden is `fnv1a-128-json:faccd0ee52b825ad9fae8934eea9d227`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.

@@ -92,6 +92,15 @@ impl NavigationController {
         self.queue.push(self.elapsed_seconds(), action)
     }
 
+    /// Sequence that will be assigned by the next locally-authored action.
+    ///
+    /// Adapters that share this controller with presentation or replay must
+    /// never maintain a parallel counter: every producer advances this one
+    /// queue authority.
+    pub fn next_sequence(&self) -> u64 {
+        self.queue.next_sequence
+    }
+
     pub fn schedule(
         &mut self,
         at_seconds: f64,

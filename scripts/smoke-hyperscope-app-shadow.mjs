@@ -70,11 +70,16 @@ const up = new Float64Array([0, 1, 0]);
 const target = new Float64Array([0, 0, 0]);
 const focusCenter = new Float64Array([0.5, 0, 0]);
 function assertNavigationParity(actual, expected) {
-  for (const field of ['eye', 'right', 'up', 'forward', 'semantic_target']) {
+  assert.equal(actual.elapsed_seconds, expected.elapsed_seconds);
+  assert.equal(actual.preset, expected.preset);
+  assert.equal(actual.pending_actions, expected.pending_actions);
+  assert.equal(actual.last_applied_sequence, expected.last_applied_sequence);
+  for (const field of ['eye', 'orientation', 'right', 'up', 'forward', 'semantic_target']) {
     assert.deepEqual(actual.camera[field], expected.camera[field]);
   }
   for (const field of [
     'control_distance', 'camera_transition_remaining',
+    'surface_anchor_transition_remaining', 'surface_anchor_hop_height',
   ]) {
     assert.equal(actual.camera[field], expected.camera[field]);
   }
@@ -86,6 +91,7 @@ function assertNavigationParity(actual, expected) {
     assert.equal(actual.focus[field], expected.focus[field]);
   }
   assert.equal(actual.reflection, expected.reflection);
+  assert.deepEqual(actual.diagnostics, expected.diagnostics);
 }
 incumbent.synchronizeState(
   eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
@@ -138,11 +144,156 @@ assert.equal(
   'a malformed shadow cue must preserve the preceding reducer state',
 );
 
-app.advanceFrame(2, 0.1);
+// Presentation and direct navigation deliberately share these same two
+// instances. This catches collisions between cue-authored and adapter-authored
+// sequence numbers before the explicit re-synchronization below.
+assert.equal(app.toggleInversion(), incumbent.toggleInversion());
+assertNavigationParity(app.navigationSnapshot(), incumbent.snapshot());
+assertNavigationParity(app.tickNavigation(0), incumbent.tick(0));
+
+const navigationApp = app;
+const navigationIncumbent = incumbent;
+navigationIncumbent.synchronizeState(
+  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+);
+navigationApp.synchronizeNavigation(
+  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+);
+assert.equal(navigationApp.setPreset('fly'), navigationIncumbent.setPreset('fly'));
+assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
+const reverseInterleaveApp = navigationApp.present(6, 'advance', '');
+const reverseInterleaveIncumbent = navigationIncumbent.advancePresentation();
+assert.deepEqual(
+  navigationApp.snapshot().presentation.active,
+  reverseInterleaveIncumbent,
+  'direct navigation followed by presentation must preserve shared sequence order',
+);
+assert.equal(reverseInterleaveApp.disposition, 'applied');
+assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
+
+navigationIncumbent.synchronizeState(
+  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+);
+navigationApp.synchronizeNavigation(
+  eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
+);
+const firstNavigationSequence = navigationApp.setPreset('fly');
+assert.equal(firstNavigationSequence, navigationIncumbent.setPreset('fly'));
+assert.equal(firstNavigationSequence, 0n, 'synchronization resets the shared sequence authority');
+assert.equal(
+  navigationApp.applyFrame(
+    new Float64Array([0.2, -0.1, -0.4]),
+    new Float64Array([0.03, -0.02, 0.01]),
+    0,
+    false,
+  ),
+  navigationIncumbent.applyFrame(
+    new Float64Array([0.2, -0.1, -0.4]),
+    new Float64Array([0.03, -0.02, 0.01]),
+    0,
+    false,
+  ),
+);
+assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
+assertNavigationParity(
+  navigationApp.tickNavigation(1 / 60),
+  navigationIncumbent.tick(1 / 60),
+);
+
+const transitionEye = new Float64Array([0.5, 0.25, 4]);
+assert.equal(
+  navigationApp.transitionCamera(
+    transitionEye, forward, up, 4, target, 0.5, 'smootherstep',
+  ),
+  navigationIncumbent.transitionCamera(
+    transitionEye, forward, up, 4, target, 0.5, 'smootherstep',
+  ),
+);
+assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
+assertNavigationParity(
+  navigationApp.tickNavigation(0.25),
+  navigationIncumbent.tick(0.25),
+);
+assert.equal(
+  navigationApp.setFreeFocusSphere(new Float64Array([0.25, 0.5, -0.25]), 1.5),
+  navigationIncumbent.setFreeFocusSphere(new Float64Array([0.25, 0.5, -0.25]), 1.5),
+);
+assert.equal(
+  navigationApp.setFocusEnabled(true),
+  navigationIncumbent.setFocusEnabled(true),
+);
+assert.equal(
+  navigationApp.setFocusField(0.35, 0.075),
+  navigationIncumbent.setFocusField(0.35, 0.075),
+);
+assert.equal(
+  navigationApp.setInversionEnabled(true),
+  navigationIncumbent.setInversionEnabled(true),
+);
+assert.equal(
+  navigationApp.translateFocus(new Float64Array([0.1, -0.2, 0.05])),
+  navigationIncumbent.translateFocus(new Float64Array([0.1, -0.2, 0.05])),
+);
+assert.equal(
+  navigationApp.scaleFocusLog(Math.log(1.2)),
+  navigationIncumbent.scaleFocusLog(Math.log(1.2)),
+);
+assert.equal(
+  navigationApp.toggleInversion(),
+  navigationIncumbent.toggleInversion(),
+);
+assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
+assertNavigationParity(navigationApp.tickNavigation(0), navigationIncumbent.tick(0));
+
+const anchorEye = new Float64Array([1, 0.5, 2]);
+const anchorForward = new Float64Array([0, 0, -1]);
+const anchorUp = new Float64Array([0, 1, 0]);
+const anchorNormal = new Float64Array([0, 1, 0]);
+assert.equal(
+  navigationApp.beginSurfaceAnchorTransition(
+    anchorEye, anchorForward, anchorUp, 2, anchorNormal, 10, 1, 'smootherstep',
+  ),
+  navigationIncumbent.beginSurfaceAnchorTransition(
+    anchorEye, anchorForward, anchorUp, 2, anchorNormal, 10, 1, 'smootherstep',
+  ),
+);
+assertNavigationParity(
+  navigationApp.tickNavigation(0.25),
+  navigationIncumbent.tick(0.25),
+);
+assert.equal(
+  navigationApp.updateSurfaceAnchorTarget(
+    new Float64Array([1.25, 0.6, 2]),
+    anchorForward,
+    anchorUp,
+    2,
+    anchorNormal,
+  ),
+  navigationIncumbent.updateSurfaceAnchorTarget(
+    new Float64Array([1.25, 0.6, 2]),
+    anchorForward,
+    anchorUp,
+    2,
+    anchorNormal,
+  ),
+);
+assertNavigationParity(
+  navigationApp.tickNavigation(0.25),
+  navigationIncumbent.tick(0.25),
+);
+assert.equal(
+  navigationApp.cancelSurfaceAnchorTransition(),
+  navigationIncumbent.cancelSurfaceAnchorTransition(),
+);
+assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
+assertNavigationParity(navigationApp.tickNavigation(0), navigationIncumbent.tick(0));
+
+const finalFrameTime = app.navigationSnapshot().elapsed_seconds + 0.1;
+app.advanceFrame(finalFrameTime, 0.1);
 assert.throws(
   () => app.requestAsset(
     3,
-    3,
+    finalFrameTime + 1,
     'e0000000-0000-4000-8000-000000000003',
     asset,
     'horse.glb',
@@ -161,4 +312,5 @@ console.log(JSON.stringify({
   readyBytes: ready.assets[0].status.byte_length,
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
   presentationCue: finalSnapshot.presentation.active.cue_id,
+  navigationBoundaryParity: true,
 }));

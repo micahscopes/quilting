@@ -18,8 +18,9 @@ pub use settings::*;
 use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
-    CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController, Presentation,
-    PresentationRuntime, PresentationSnapshot, ScheduledNavigationAction, SphereReflectionState,
+    CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
+    NavigationPreset, Presentation, PresentationRuntime, PresentationSnapshot,
+    ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
@@ -212,10 +213,15 @@ pub struct AppSummary {
 pub struct AppFrameSnapshot {
     pub revision: u64,
     pub elapsed_seconds: f64,
+    pub navigation_preset: NavigationPreset,
+    pub pending_navigation_actions: usize,
+    pub last_applied_navigation_sequence: Option<u64>,
     pub camera: CameraRig,
     pub focus: FocusNavigation,
     pub reflection: SphereReflectionState,
     pub camera_transition_remaining: Option<f64>,
+    pub surface_anchor_transition_remaining: Option<f64>,
+    pub surface_anchor_hop_height: Option<f64>,
 }
 
 /// Low-rate FRP projection. Camera/focus motion stays in
@@ -275,13 +281,27 @@ impl AppState {
             self.navigation.runtime.camera_transition.map(|transition| {
                 (transition.duration_seconds - transition.elapsed_seconds).max(0.0)
             });
+        let surface_anchor_transition_remaining = self
+            .navigation
+            .runtime
+            .surface_anchor_transition
+            .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
         AppFrameSnapshot {
             revision: self.revision,
             elapsed_seconds: self.frame_elapsed_seconds,
+            navigation_preset: self.navigation.runtime.preset,
+            pending_navigation_actions: self.navigation.queue.len(),
+            last_applied_navigation_sequence: self.navigation.runtime.last_applied_sequence,
             camera: self.navigation.camera,
             focus: self.navigation.focus.clone(),
             reflection: self.navigation.runtime.reflection,
             camera_transition_remaining,
+            surface_anchor_transition_remaining,
+            surface_anchor_hop_height: self
+                .navigation
+                .runtime
+                .surface_anchor_transition
+                .map(|transition| transition.hop_height),
         }
     }
 
@@ -303,9 +323,6 @@ impl AppState {
                                 at_seconds: timed.at_seconds,
                                 action,
                             })
-                            .map_err(ReduceError::Navigation)?;
-                        self.navigation
-                            .advance_to(self.frame_elapsed_seconds)
                             .map_err(ReduceError::Navigation)?;
                         publish_ui = false;
                     }
@@ -685,6 +702,37 @@ impl AppStore {
         Ok(commit)
     }
 
+    /// Queue a local semantic navigation action at the current virtual frame
+    /// time, allocating its sequence from the same authority used by
+    /// presentation and explicitly sequenced replay input.
+    ///
+    /// The action remains pending until the next navigation integration
+    /// boundary: normally a frame dispatch, or a presentation cue activation
+    /// whose transactional zero-time tick must apply its own queued actions.
+    /// This matches [`NavigationController::push`]. Allocation and insertion
+    /// occur under one lock so concurrent adapters cannot race a
+    /// snapshot-derived counter.
+    pub fn dispatch_navigation(
+        &self,
+        action: NavigationAction,
+    ) -> Result<(u64, AppCommit), ReduceError> {
+        let (sequence, commit) = {
+            let mut state = self.lock_state();
+            let sequence = state.navigation.next_sequence();
+            let at_seconds = state.frame_elapsed_seconds;
+            let commit = state.reduce(AppEvent::Input(Timed {
+                sequence,
+                at_seconds,
+                value: SemanticAction::Navigate(action),
+            }))?;
+            (sequence, commit)
+        };
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok((sequence, commit))
+    }
+
     /// Publish a coherent read-model batch after a high-rate event burst. The
     /// summary is set last and its revision acts as the consumer commit fence.
     pub fn flush_read_models(&self) -> u64 {
@@ -704,6 +752,12 @@ impl AppStore {
 
     pub fn frame_snapshot(&self) -> AppFrameSnapshot {
         self.lock_state().frame_snapshot()
+    }
+
+    /// Low-rate diagnostics projection kept separate from the render-frame
+    /// snapshot so a nonempty diagnostic log is not cloned every frame.
+    pub fn navigation_diagnostics_snapshot(&self) -> Vec<String> {
+        self.lock_state().navigation.diagnostics.0.clone()
     }
 
     pub fn summary_snapshot(&self) -> AppSummary {
@@ -929,6 +983,98 @@ mod tests {
         }
 
         assert_eq!(run(&[1.0]), run(&[0.1; 10]));
+    }
+
+    #[test]
+    fn local_navigation_matches_controller_queue_semantics_before_and_after_tick() {
+        let store = AppStore::default();
+        let mut controller = NavigationController::default();
+        let action = NavigationAction::SetPreset(NavigationPreset::Fly);
+
+        let (app_sequence, commit) = store.dispatch_navigation(action.clone()).unwrap();
+        let controller_sequence = controller.push(action).unwrap();
+        assert_eq!(app_sequence, controller_sequence);
+        assert!(!commit.published_ui);
+
+        let queued = store.frame_snapshot();
+        assert_eq!(queued.pending_navigation_actions, controller.queue.len());
+        assert_eq!(queued.last_applied_navigation_sequence, None);
+        assert_eq!(queued.navigation_preset, controller.runtime.preset);
+
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        controller.tick(0.0).unwrap();
+        let applied = store.frame_snapshot();
+        assert_eq!(applied.pending_navigation_actions, controller.queue.len());
+        assert_eq!(
+            applied.last_applied_navigation_sequence,
+            controller.runtime.last_applied_sequence
+        );
+        assert_eq!(applied.navigation_preset, controller.runtime.preset);
+        assert_eq!(applied.camera, controller.camera);
+        assert_eq!(applied.focus, controller.focus);
+    }
+
+    #[test]
+    fn presentation_and_local_navigation_share_sequence_and_integration_authority() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        dispatch_presentation(&store, 1, 0.0, PresentationAction::Start).unwrap();
+
+        let after_start = store.frame_snapshot();
+        let presentation_sequence = after_start
+            .last_applied_navigation_sequence
+            .expect("cue activation applies navigation actions");
+        let (local_sequence, _) = store
+            .dispatch_navigation(NavigationAction::SetPreset(NavigationPreset::Fly))
+            .unwrap();
+        assert_eq!(local_sequence, presentation_sequence + 1);
+        let queued = store.frame_snapshot();
+        assert_eq!(queued.pending_navigation_actions, 1);
+        assert_eq!(
+            queued.last_applied_navigation_sequence,
+            Some(presentation_sequence)
+        );
+
+        // Cue activation is also a navigation integration boundary: it must
+        // apply its own zero-time actions and therefore drains an already-due
+        // local action in the same sequence order as NavigationController.
+        dispatch_presentation(&store, 2, 0.0, PresentationAction::Advance).unwrap();
+        let after_advance = store.frame_snapshot();
+        assert_eq!(after_advance.pending_navigation_actions, 0);
+        assert_eq!(after_advance.navigation_preset, NavigationPreset::Fly);
+        let advanced_sequence = after_advance
+            .last_applied_navigation_sequence
+            .expect("cue advance applies navigation actions");
+        assert!(advanced_sequence > local_sequence);
+        let (post_presentation_sequence, _) = store
+            .dispatch_navigation(NavigationAction::ToggleInversion)
+            .unwrap();
+        assert_eq!(post_presentation_sequence, advanced_sequence + 1);
+
+        store
+            .dispatch(AppEvent::NavigationSynchronized(
+                NavigationSynchronization {
+                    camera: CameraRig::default(),
+                    focus: FocusNavigation::default(),
+                },
+            ))
+            .unwrap();
+        let (resynchronized_sequence, _) = store
+            .dispatch_navigation(NavigationAction::SetFocusEnabled(true))
+            .unwrap();
+        assert_eq!(resynchronized_sequence, 0);
+        assert_eq!(store.frame_snapshot().pending_navigation_actions, 1);
+        assert_eq!(
+            store.frame_snapshot().last_applied_navigation_sequence,
+            None
+        );
     }
 
     #[test]

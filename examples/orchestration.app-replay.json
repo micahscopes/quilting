@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.3",
+  "version": "hyperscope-app-replay/0.4",
   "events": [
     {
       "type": "request_asset",

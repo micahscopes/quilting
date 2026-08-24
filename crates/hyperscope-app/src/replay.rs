@@ -24,7 +24,7 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.3";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.4";
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
 const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -1241,8 +1241,17 @@ mod tests {
         assert_eq!(authoritative_covered, covered);
 
         let trace = run_app_replay(&script).unwrap();
-        assert_eq!(trace.records.len(), 27);
-        assert_eq!(trace.records[1].state.camera.eye, [0.5, -0.25, 5.0]);
+        assert_eq!(trace.records.len(), 28);
+        assert_eq!(trace.records[1].state.camera.eye, [0.0, 0.0, 4.0]);
+        assert_eq!(trace.records[1].state.navigation.pending_actions, 1);
+        assert_eq!(
+            trace.records[1].state.navigation.last_applied_sequence,
+            None
+        );
+        assert_eq!(
+            trace.records[8].state.navigation.last_applied_sequence,
+            Some(6)
+        );
         assert_eq!(
             trace.records[15]
                 .state
@@ -1251,7 +1260,7 @@ mod tests {
             Some(1.0)
         );
         assert_eq!(
-            trace.records[16]
+            trace.records[18]
                 .state
                 .navigation
                 .surface_anchor_transition_remaining_seconds,

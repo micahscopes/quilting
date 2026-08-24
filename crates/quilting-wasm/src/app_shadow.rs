@@ -1,5 +1,11 @@
-use crate::navigation::synchronized_navigation_state;
-use hyperscape::{Presentation, PresentationSnapshot};
+use crate::navigation::{
+    optional_vector3, parse_easing, parse_preset, preset_name, synchronized_navigation_state,
+    vector3,
+};
+use hyperscape::{
+    CameraBasis, CameraRig, FocusSphere, NavigationAction, NavigationFrame, Presentation,
+    PresentationSnapshot, SurfaceAnchorTarget,
+};
 use hyperscape_protocol::{AssetDescriptor, AssetId, RequestId};
 use hyperscope_app::{
     AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion,
@@ -167,10 +173,143 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
-    /// Advance the app-owned presentation clock by the same delta as the
-    /// incumbent controller and return a compact pose/focus parity snapshot.
-    #[wasm_bindgen(js_name = tickPresentation)]
-    pub fn tick_presentation(&self, delta_seconds: f64) -> Result<JsValue, JsValue> {
+    #[wasm_bindgen(js_name = setPreset)]
+    pub fn set_preset(&self, preset: &str) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::SetPreset(parse_preset(preset)?))
+    }
+
+    #[wasm_bindgen(js_name = applyFrame)]
+    pub fn apply_frame(
+        &self,
+        translation: &[f64],
+        rotation: &[f64],
+        dolly_log: f64,
+        horizon_locked: bool,
+    ) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::ApplyFrame(NavigationFrame {
+            translation: vector3(translation, "camera translation")?,
+            rotation: vector3(rotation, "camera rotation")?,
+            dolly_log,
+            horizon_locked,
+        }))
+    }
+
+    #[wasm_bindgen(js_name = transitionCamera)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_camera(
+        &self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        semantic_target: &[f64],
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        let target = CameraRig::new(
+            vector3(eye, "camera eye")?,
+            CameraBasis::from_forward_up(
+                vector3(forward, "camera forward")?,
+                vector3(up, "camera up")?,
+            )
+            .map_err(js_error)?,
+            control_distance,
+            optional_vector3(semantic_target, "camera target")?,
+            self.store.frame_snapshot().camera.lens,
+        )
+        .map_err(js_error)?;
+        self.dispatch_navigation(NavigationAction::TransitionCamera {
+            target,
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
+    #[wasm_bindgen(js_name = beginSurfaceAnchorTransition)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_surface_anchor_transition(
+        &self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        normal: &[f64],
+        scene_radius: f64,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        let target = self.surface_anchor_target(eye, forward, up, control_distance, normal)?;
+        self.dispatch_navigation(NavigationAction::BeginSurfaceAnchorTransition {
+            target,
+            scene_radius,
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
+    #[wasm_bindgen(js_name = updateSurfaceAnchorTarget)]
+    pub fn update_surface_anchor_target(
+        &self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        normal: &[f64],
+    ) -> Result<u64, JsValue> {
+        let target = self.surface_anchor_target(eye, forward, up, control_distance, normal)?;
+        self.dispatch_navigation(NavigationAction::UpdateSurfaceAnchorTarget(target))
+    }
+
+    #[wasm_bindgen(js_name = cancelSurfaceAnchorTransition)]
+    pub fn cancel_surface_anchor_transition(&self) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::CancelSurfaceAnchorTransition)
+    }
+
+    #[wasm_bindgen(js_name = setFreeFocusSphere)]
+    pub fn set_free_focus_sphere(&self, center: &[f64], radius: f64) -> Result<u64, JsValue> {
+        let sphere =
+            FocusSphere::new(vector3(center, "focus center")?, radius).map_err(js_error)?;
+        self.dispatch_navigation(NavigationAction::SetFreeFocusSphere(sphere))
+    }
+
+    #[wasm_bindgen(js_name = translateFocus)]
+    pub fn translate_focus(&self, delta: &[f64]) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::TranslateFocus(vector3(
+            delta,
+            "focus translation",
+        )?))
+    }
+
+    #[wasm_bindgen(js_name = scaleFocusLog)]
+    pub fn scale_focus_log(&self, log_delta: f64) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::ScaleFocusLog(log_delta))
+    }
+
+    #[wasm_bindgen(js_name = setFocusEnabled)]
+    pub fn set_focus_enabled(&self, enabled: bool) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::SetFocusEnabled(enabled))
+    }
+
+    #[wasm_bindgen(js_name = setFocusField)]
+    pub fn set_focus_field(&self, coordinate: f64, angular_aperture: f64) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::SetFocusField {
+            coordinate,
+            angular_aperture,
+        })
+    }
+
+    #[wasm_bindgen(js_name = setInversionEnabled)]
+    pub fn set_inversion_enabled(&self, enabled: bool) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::SetInversionEnabled(enabled))
+    }
+
+    #[wasm_bindgen(js_name = toggleInversion)]
+    pub fn toggle_inversion(&self) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::ToggleInversion)
+    }
+
+    #[wasm_bindgen(js_name = tickNavigation)]
+    pub fn tick_navigation(&self, delta_seconds: f64) -> Result<JsValue, JsValue> {
         let current = self.store.frame_snapshot();
         self.store
             .dispatch(AppEvent::Frame(FrameTick {
@@ -178,7 +317,25 @@ impl HyperscopeAppShadow {
                 delta_seconds,
             }))
             .map_err(js_error)?;
-        navigation_to_js(self.store.frame_snapshot())
+        navigation_to_js(
+            self.store.frame_snapshot(),
+            self.store.navigation_diagnostics_snapshot(),
+        )
+    }
+
+    #[wasm_bindgen(js_name = navigationSnapshot)]
+    pub fn navigation_snapshot(&self) -> Result<JsValue, JsValue> {
+        navigation_to_js(
+            self.store.frame_snapshot(),
+            self.store.navigation_diagnostics_snapshot(),
+        )
+    }
+
+    /// Advance the app-owned presentation clock by the same delta as the
+    /// incumbent controller and return a compact pose/focus parity snapshot.
+    #[wasm_bindgen(js_name = tickPresentation)]
+    pub fn tick_presentation(&self, delta_seconds: f64) -> Result<JsValue, JsValue> {
+        self.tick_navigation(delta_seconds)
     }
 
     /// Admit a validated presentation document without activating a cue or
@@ -267,6 +424,35 @@ impl Default for HyperscopeAppShadow {
 }
 
 impl HyperscopeAppShadow {
+    fn dispatch_navigation(&self, action: NavigationAction) -> Result<u64, JsValue> {
+        let (sequence, _) = self.store.dispatch_navigation(action).map_err(js_error)?;
+        Ok(sequence)
+    }
+
+    fn surface_anchor_target(
+        &self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        normal: &[f64],
+    ) -> Result<SurfaceAnchorTarget, JsValue> {
+        let camera = CameraRig::new(
+            vector3(eye, "surface anchor eye")?,
+            CameraBasis::from_forward_up(
+                vector3(forward, "surface anchor forward")?,
+                vector3(up, "surface anchor up")?,
+            )
+            .map_err(js_error)?,
+            control_distance,
+            None,
+            self.store.frame_snapshot().camera.lens,
+        )
+        .map_err(js_error)?;
+        SurfaceAnchorTarget::new(camera, vector3(normal, "surface anchor normal")?)
+            .map_err(js_error)
+    }
+
     fn complete_asset(
         &self,
         request_id: &str,
@@ -332,20 +518,27 @@ struct ShadowPresentation {
 #[derive(Serialize)]
 struct ShadowNavigationSnapshot {
     elapsed_seconds: f64,
+    preset: &'static str,
+    pending_actions: usize,
+    last_applied_sequence: Option<u64>,
     reflection: &'static str,
     camera: ShadowCameraSnapshot,
     focus: ShadowFocusSnapshot,
+    diagnostics: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct ShadowCameraSnapshot {
     eye: [f64; 3],
+    orientation: [f64; 4],
     right: [f64; 3],
     up: [f64; 3],
     forward: [f64; 3],
     control_distance: f64,
     semantic_target: Option<[f64; 3]>,
     camera_transition_remaining: Option<f64>,
+    surface_anchor_transition_remaining: Option<f64>,
+    surface_anchor_hop_height: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -412,7 +605,10 @@ struct ShadowDiagnostic {
     message: String,
 }
 
-fn navigation_to_js(frame: AppFrameSnapshot) -> Result<JsValue, JsValue> {
+fn navigation_to_js(
+    frame: AppFrameSnapshot,
+    navigation_diagnostics: Vec<String>,
+) -> Result<JsValue, JsValue> {
     let basis = frame.camera.basis();
     let focus_transition_remaining = frame
         .focus
@@ -420,18 +616,29 @@ fn navigation_to_js(frame: AppFrameSnapshot) -> Result<JsValue, JsValue> {
         .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
     to_js(&ShadowNavigationSnapshot {
         elapsed_seconds: frame.elapsed_seconds,
+        preset: preset_name(frame.navigation_preset),
+        pending_actions: frame.pending_navigation_actions,
+        last_applied_sequence: frame.last_applied_navigation_sequence,
         reflection: match frame.reflection {
             hyperscape::SphereReflectionState::Identity => "identity",
             hyperscape::SphereReflectionState::Sphere(_) => "sphere_reflection",
         },
         camera: ShadowCameraSnapshot {
             eye: frame.camera.eye,
+            orientation: [
+                frame.camera.orientation.w,
+                frame.camera.orientation.x,
+                frame.camera.orientation.y,
+                frame.camera.orientation.z,
+            ],
             right: basis.right,
             up: basis.up,
             forward: basis.forward,
             control_distance: frame.camera.control_distance,
             semantic_target: frame.camera.semantic_target,
             camera_transition_remaining: frame.camera_transition_remaining,
+            surface_anchor_transition_remaining: frame.surface_anchor_transition_remaining,
+            surface_anchor_hop_height: frame.surface_anchor_hop_height,
         },
         focus: ShadowFocusSnapshot {
             center: frame.focus.sphere.center,
@@ -443,6 +650,7 @@ fn navigation_to_js(frame: AppFrameSnapshot) -> Result<JsValue, JsValue> {
             angular_aperture: frame.focus.angular_aperture,
             focus_transition_remaining,
         },
+        diagnostics: navigation_diagnostics,
     })
 }
 

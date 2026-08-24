@@ -63,14 +63,20 @@ impl HyperscopeNavigation {
             angular_aperture,
         )?;
 
-        self.controller = NavigationController::default();
-        self.controller.camera = camera;
-        self.controller.focus = focus;
-        self.controller.runtime.reflection = if inversion_enabled {
-            SphereReflectionState::Sphere(self.controller.focus.sphere)
+        // Re-synchronization replaces settled pose/focus and resets queued
+        // sequence authority, but it must not rewind the shared virtual clock.
+        // AppStore has the same clock-preserving contract.
+        let elapsed_seconds = self.controller.elapsed_seconds();
+        let mut controller = NavigationController::default();
+        controller.advance_to(elapsed_seconds).map_err(js_error)?;
+        controller.camera = camera;
+        controller.focus = focus;
+        controller.runtime.reflection = if inversion_enabled {
+            SphereReflectionState::Sphere(controller.focus.sphere)
         } else {
             SphereReflectionState::Identity
         };
+        self.controller = controller;
         Ok(())
     }
 
@@ -346,6 +352,7 @@ struct NavigationSnapshot<'a> {
     elapsed_seconds: f64,
     preset: &'static str,
     pending_actions: usize,
+    last_applied_sequence: Option<u64>,
     reflection: &'static str,
     camera: CameraSnapshot,
     focus: FocusSnapshot,
@@ -375,6 +382,7 @@ impl<'a> From<&'a NavigationController> for NavigationSnapshot<'a> {
             elapsed_seconds: controller.elapsed_seconds(),
             preset: preset_name(controller.runtime.preset),
             pending_actions: controller.queue.len(),
+            last_applied_sequence: controller.runtime.last_applied_sequence,
             reflection: match controller.runtime.reflection {
                 SphereReflectionState::Identity => "identity",
                 SphereReflectionState::Sphere(_) => "sphere_reflection",
@@ -491,7 +499,7 @@ pub(crate) fn synchronized_navigation_state(
     ))
 }
 
-fn vector3(values: &[f64], label: &str) -> Result<[f64; 3], JsValue> {
+pub(crate) fn vector3(values: &[f64], label: &str) -> Result<[f64; 3], JsValue> {
     let value: [f64; 3] = values
         .try_into()
         .map_err(|_| JsValue::from_str(&format!("{label} must contain exactly three values")))?;
@@ -501,7 +509,7 @@ fn vector3(values: &[f64], label: &str) -> Result<[f64; 3], JsValue> {
     Ok(value)
 }
 
-fn optional_vector3(values: &[f64], label: &str) -> Result<Option<[f64; 3]>, JsValue> {
+pub(crate) fn optional_vector3(values: &[f64], label: &str) -> Result<Option<[f64; 3]>, JsValue> {
     if values.is_empty() {
         Ok(None)
     } else {
@@ -509,7 +517,7 @@ fn optional_vector3(values: &[f64], label: &str) -> Result<Option<[f64; 3]>, JsV
     }
 }
 
-fn parse_preset(value: &str) -> Result<NavigationPreset, JsValue> {
+pub(crate) fn parse_preset(value: &str) -> Result<NavigationPreset, JsValue> {
     match value {
         "hyperscope" => Ok(NavigationPreset::Hyperscope),
         "object" => Ok(NavigationPreset::Object),
@@ -519,7 +527,7 @@ fn parse_preset(value: &str) -> Result<NavigationPreset, JsValue> {
     }
 }
 
-fn preset_name(value: NavigationPreset) -> &'static str {
+pub(crate) fn preset_name(value: NavigationPreset) -> &'static str {
     match value {
         NavigationPreset::Hyperscope => "hyperscope",
         NavigationPreset::Object => "object",
@@ -528,7 +536,7 @@ fn preset_name(value: NavigationPreset) -> &'static str {
     }
 }
 
-fn parse_easing(value: &str) -> Result<TransitionEasing, JsValue> {
+pub(crate) fn parse_easing(value: &str) -> Result<TransitionEasing, JsValue> {
     match value {
         "linear" => Ok(TransitionEasing::Linear),
         "smoothstep" => Ok(TransitionEasing::SmoothStep),

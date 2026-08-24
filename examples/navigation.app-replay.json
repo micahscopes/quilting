@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.3",
+  "version": "hyperscope-app-replay/0.4",
   "events": [
     {
       "type": "synchronize_navigation",
@@ -272,6 +272,11 @@
       "action": {
         "action": "toggle_inversion"
       }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 3.05,
+      "delta_seconds": 0.0
     },
     {
       "type": "navigate",

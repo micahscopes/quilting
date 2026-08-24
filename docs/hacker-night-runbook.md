@@ -32,9 +32,9 @@ cue, unknown-cue, application projection, and camera/focus transition parity
 without needing a GPU or browser.
 
 The replay checks must print
-`PASS fnv1a-128-json:b06e5f2829663995385b6f0963855e2d`,
-`PASS fnv1a-128-json:c6b49d2c0e3ec84509386807ab2a5dbf`, and
-`PASS fnv1a-128-json:e67dfadddd6729f0c8544212784e867c`. The first executes
+`PASS fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`,
+`PASS fnv1a-128-json:c3fcf7d1c5dd2106464f90d40942d06b`, and
+`PASS fnv1a-128-json:faccd0ee52b825ad9fae8934eea9d227`. The first executes
 the complete six-cue semantic walkthrough. The second exercises every current
 navigation action, including focus/inversion, camera and surface transitions,
 stable selection anchoring, and an atomic rejected input. The third covers
