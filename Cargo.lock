@@ -1337,6 +1337,7 @@ name = "hyperscope-hhhs-shadow"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "hhhs",
  "hhhs-replica",
  "hhhs-store",
  "hyperscape-hhhs",
