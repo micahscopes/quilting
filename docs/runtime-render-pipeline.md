@@ -169,8 +169,49 @@ The backend-independent pieces already live below the WebGL renderer:
 - `quilting_core::batch::{ResidentLod, RenderBatchKey, RenderBatchMember}`;
 - `quilting_core::instance_layout`, including the eight-float topology record
   and 52-float prepared-patch record;
+- `quilting_core::render_pipeline`, whose immutable shader-module, bind-group,
+  vertex-layout, render-pipeline, and compute-pipeline descriptors define the
+  initial WebGL2/WebGPU common subset needed for backend memoization;
 - canonical atlas keys and S3 permutation semantics; and
 - WGSL surface, preparation, and material shader logic.
+
+The pipeline descriptors are values, not GPU objects. They retain exact shader
+source through `Arc<str>`, cache a non-authoritative source fingerprint so
+hash-map lookup does not rescan the WGSL, canonicalize definitions and
+binding/layout order, and reject duplicate identities. Compiler identity
+includes the composable naga-oil module catalog as well as compiler versions;
+diagnostic labels do not affect equality. The few floating-point pipeline
+constants use a finite wrapper that normalizes negative zero and rejects
+NaN/infinity. A descriptor therefore works as a functional rendering value and
+a complete key for the supported subset; it never contains a frame uniform,
+camera value, resource handle, command encoder, or mutable backend cursor.
+Binding arrays, sparse color targets, stage override constants, and
+backend-specific primitive extensions remain explicit follow-up work rather
+than being silently omitted from a claimed complete WebGPU key.
+
+`quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
+descriptor to a concrete backend resource, inserts only after construction has
+fully succeeded, and scopes every entry to an explicit device/context epoch.
+Changing epoch returns the old resources for destruction by the backend that
+created them. This cache is derived runtime state: FRP may publish a changed
+render plan or descriptor, but HHHS must never replicate GPU handles, cache
+contents, compilation status, or per-frame bindings.
+
+The binding schema will be normalized before WebGPU execution:
+
+| Group | Stable responsibility |
+|---|---|
+| 0 | frame and pose: view, joints, skinning, morph, source-face data |
+| 1 | entity/batch: Möbius packet, Euclidean model/normal, QB enablement |
+| 2 | material/style uniforms and material textures |
+| 3 | pass resources: scene color, transmission, blur/focus, highlight |
+
+The current WGSL happens to reuse group 0/binding 1 for the vertex joint block
+and a fragment material block. WebGL tolerates this because stage-specific GLSL
+block names are bound after linking; a WebGPU pipeline layout cannot. The
+descriptor/cache migration must therefore land with reflected `(group,
+binding, stage, kind)` metadata and deterministic WebGL lowering, replacing
+generated-name substring heuristics before WebGPU is treated as equivalent.
 
 ## Atlas topology and grading policy
 

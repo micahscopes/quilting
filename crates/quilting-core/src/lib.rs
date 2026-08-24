@@ -31,6 +31,8 @@
 //! - [`batch`] — grouping faces into instanced draw calls.
 //! - [`render`] — backend-neutral scene snapshots and frame commands shared by
 //!   WebGL2 and WebGPU implementations.
+//! - [`render_pipeline`] — immutable shader, binding-layout, and pipeline
+//!   descriptions suitable for functional planning and backend memoization.
 //!
 //! # Invariants worth knowing before editing
 //!
@@ -60,6 +62,7 @@ pub mod conformal_lod;
 pub mod batch;
 pub mod educational;
 pub mod render;
+pub mod render_pipeline;
 
 pub use atlas::TessellationAtlas;
 pub use evaluate::FaceInstance;

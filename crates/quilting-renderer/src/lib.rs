@@ -7,6 +7,7 @@
 //! Works on both native OpenGL and WASM WebGL2 targets via glow.
 
 pub mod shader;
+pub mod memo;
 pub mod buffer;
 pub mod pass;
 pub mod compute;
