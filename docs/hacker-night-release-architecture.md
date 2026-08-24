@@ -99,10 +99,17 @@ The first application boundary is now explicit:
   same explicit clamped frame delta, including the same endpoint snap, so
   replay and background scheduling cannot create timing-only drift. The direct
   generated-WASM smoke also preserves a structural
-  `ComposedSurfaceWalkResult` boundary instead of `any`. Live cutover remains
-  blocked on target-browser validation of that shared clock plus
-  reflection-time follower transport, Float32 near-edge behavior, and
-  pose-time velocity sampling.
+  `ComposedSurfaceWalkResult` boundary instead of `any`. Reflection edits now
+  transport the camera, stable attachment side, retained contact follower, and
+  previous posed-contact samples transactionally through the exact chart
+  differential; a pole rolls every participant back, and a successful edit
+  cancels the old-chart anchor glide to match the browser oracle. Live cutover
+  remains blocked on initialized target-browser validation of the shared clock
+  and reflection diagnostics, plus Float32 near-edge behavior and pose-time
+  velocity sampling. Executable Node/WASM aggregate tests cover both walkers,
+  non-binary-exact f32 Möbius packing, one-shot velocity rebasing, and the first
+  real animated-pose sample; native replay also proves that an animated chart
+  edit cancels an old-chart anchor independently of tick partition.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 68 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit

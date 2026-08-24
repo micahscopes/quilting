@@ -381,18 +381,16 @@ impl CameraRig {
             return Ok(1.0);
         }
         let basis = self.basis();
-        let unmap = reflect_point_and_directions(self.eye, [basis.up, basis.forward], previous)?;
-        let remap = reflect_point_and_directions(unmap.point, unmap.directions, next)?;
-        let local_scale = unmap.scale * remap.scale;
-        if !local_scale.is_finite() || local_scale <= 0.0 {
-            return Err(CameraError::ReflectionPole);
-        }
+        let remap =
+            previous.transport_point_and_directions(next, self.eye, [basis.up, basis.forward])?;
+        let local_scale = remap.local_scale;
 
         let mapped_target = self
             .semantic_target
             .map(|target| {
-                let target = reflect_point_and_directions(target, [], previous)?.point;
-                Ok(reflect_point_and_directions(target, [], next)?.point)
+                previous
+                    .transport_point_and_directions(next, target, [])
+                    .map(|transport| transport.point)
             })
             .transpose()?;
 
@@ -676,6 +674,58 @@ pub fn map_space_mouse_camera(
 pub enum SphereReflectionState {
     Identity,
     Sphere(FocusSphere),
+}
+
+/// A point and tangent directions transported through
+/// `next ∘ previous⁻¹` between Euclidean and spherical-reflection
+/// charts. Directions carry only the orthogonal conformal differential; the
+/// positive local scale is reported separately.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReflectionTransport<const N: usize> {
+    pub point: [f64; 3],
+    pub directions: [[f64; 3]; N],
+    pub local_scale: f64,
+}
+
+impl SphereReflectionState {
+    pub fn orientation_sign(self) -> i8 {
+        match self {
+            Self::Identity => 1,
+            Self::Sphere(_) => -1,
+        }
+    }
+
+    /// Transport a point and any tangent directions through the exact chart
+    /// change. The operation stages both reflection evaluations before
+    /// returning, so a pole never produces a partially transported frame.
+    pub fn transport_point_and_directions<const N: usize>(
+        self,
+        next: Self,
+        point: [f64; 3],
+        directions: [[f64; 3]; N],
+    ) -> Result<ReflectionTransport<N>, CameraError> {
+        if !finite3(point) || directions.iter().any(|direction| !finite3(*direction)) {
+            return Err(CameraError::NonFinite);
+        }
+        if self == next {
+            return Ok(ReflectionTransport {
+                point,
+                directions,
+                local_scale: 1.0,
+            });
+        }
+        let unmap = reflect_point_and_directions(point, directions, self)?;
+        let remap = reflect_point_and_directions(unmap.point, unmap.directions, next)?;
+        let local_scale = unmap.scale * remap.scale;
+        if !local_scale.is_finite() || local_scale <= 0.0 {
+            return Err(CameraError::ReflectionPole);
+        }
+        Ok(ReflectionTransport {
+            point: remap.point,
+            directions: remap.directions,
+            local_scale,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

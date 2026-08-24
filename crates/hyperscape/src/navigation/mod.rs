@@ -18,7 +18,8 @@ pub use action::{
 pub use camera::{
     map_space_mouse_axes, map_space_mouse_camera, CameraBasis, CameraError, CameraRig,
     MappedSpaceMouseFrame, NavigationAxes, NavigationFrame, NavigationPreset, PerspectiveLens,
-    SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping, SphereReflectionState,
+    ReflectionTransport, SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping,
+    SphereReflectionState,
 };
 pub use focus::{FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition};
 pub use surface_walk::{
@@ -28,8 +29,8 @@ pub use surface_walk::{
     SurfaceWalkMotion,
 };
 pub use surface_walk_runtime::{
-    SurfaceWalkAttachRequest, SurfaceWalkRecoveryRequest, SurfaceWalkRuntime,
-    SurfaceWalkRuntimeError, SurfaceWalkStepRequest, SurfaceWalkUpdate,
+    SurfaceWalkAttachRequest, SurfaceWalkRecoveryRequest, SurfaceWalkReflectionTransport,
+    SurfaceWalkRuntime, SurfaceWalkRuntimeError, SurfaceWalkStepRequest, SurfaceWalkUpdate,
 };
 pub use transition::{
     CameraTransition, SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,

@@ -18,10 +18,12 @@ const {
   HyperscopeSurfaceWalk,
   mr_attachSurfaceWalk,
   mr_stepSurfaceWalk,
+  mr_transportSurfaceWalkReflection,
 } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
 
 const generatedDeclarations = readFileSync(declarationsPath, 'utf8');
+const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 assert.match(
   generatedDeclarations,
   /export function mr_attachSurfaceWalk\([^\n]+\): ComposedSurfaceWalkResult;/,
@@ -41,6 +43,29 @@ assert.match(
   generatedDeclarations,
   /export interface ComposedSurfaceWalkMetricsSnapshot \{[^}]*body_scale: number;[^}]*radii_per_second: number;[^}]*eye_height: number;/s,
   'composed metrics declarations must match the snake_case serialized packet',
+);
+assert.match(
+  generatedDeclarations,
+  /export function mr_transportSurfaceWalkReflection\(previous_enabled: boolean, previous_center: Float64Array, previous_radius: number, next_enabled: boolean, next_center: Float64Array, next_radius: number\): SurfaceWalkReflectionTransportResult;/,
+  'reflection transport must retain its generated TypeScript result contract',
+);
+assert.match(
+  generatedDeclarations,
+  /export interface SurfaceWalkReflectionTransportSnapshot \{[^}]*legacy_attached: boolean;[^}]*composed_attached: boolean;[^}]*composed_follower_transported: boolean;[^}]*normal_side_flipped: boolean;[^}]*anchor_transition_cancelled: boolean;[^}]*legacy_previous_position_transported: boolean;[^}]*composed_previous_position_transported: boolean;/s,
+  'reflection transport declarations must match the snake_case serialized packet',
+);
+const reflectionEffectStart = browserSource.indexOf(
+  'const reflectionTransport = transportManualCamera(previousManualReflection, nextReflection);',
+);
+assert.notEqual(reflectionEffectStart, -1, 'browser must stage reflection transport explicitly');
+const reflectionEffect = browserSource.slice(
+  reflectionEffectStart,
+  browserSource.indexOf('// --- Animation controls ---', reflectionEffectStart),
+);
+assert.match(
+  reflectionEffect,
+  /if \(!reflectionTransport\.accepted\) return;\s+previousManualReflection = nextReflection;[\s\S]*mr_setMobius\(flat\);/,
+  'a rejected camera/follower/WASM transport must abort before chart and renderer commit',
 );
 
 const inertCameraEye = new Float64Array([0, 1, 3]);
@@ -80,6 +105,51 @@ assert.equal(
   ),
   null,
   'composed step should be inert before renderer state exists',
+);
+assert.equal(
+  mr_transportSurfaceWalkReflection(
+    false,
+    new Float64Array([0, 0, 0]),
+    1,
+    true,
+    new Float64Array([0, 0, 0]),
+    2,
+  ),
+  null,
+  'reflection transport should be inert before renderer state exists',
+);
+assert.throws(
+  () => mr_transportSurfaceWalkReflection(
+    false,
+    new Float64Array([0, 0]),
+    1,
+    true,
+    new Float64Array([0, 0, 0]),
+    2,
+  ),
+  'reflection centers must have exact arity even before renderer initialization',
+);
+assert.throws(
+  () => mr_transportSurfaceWalkReflection(
+    false,
+    new Float64Array([0, 0, 0]),
+    Number.NaN,
+    true,
+    new Float64Array([0, 0, 0]),
+    2,
+  ),
+  'reflection state must be finite even before renderer initialization',
+);
+assert.throws(
+  () => mr_transportSurfaceWalkReflection(
+    false,
+    new Float64Array([0, 0, 0]),
+    1,
+    true,
+    new Float64Array([0, 0, 0]),
+    0,
+  ),
+  'enabled reflection radius must be positive even before renderer initialization',
 );
 
 const defaultControls = Object.freeze({

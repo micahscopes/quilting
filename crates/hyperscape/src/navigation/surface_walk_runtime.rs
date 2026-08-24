@@ -1,7 +1,7 @@
 use super::{
-    CameraError, CameraRig, SurfaceAnchorTarget, SurfaceAnchorTransition, SurfaceWalkController,
-    SurfaceWalkControls, SurfaceWalkError, SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMotion,
-    TransitionEasing,
+    CameraError, CameraRig, SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition,
+    SurfaceWalkController, SurfaceWalkControls, SurfaceWalkError, SurfaceWalkFrame,
+    SurfaceWalkInput, SurfaceWalkMotion, TransitionEasing,
 };
 use crate::{
     StableEntityId, SurfaceAddress, SurfaceAdvance, SurfaceAttachment, SurfaceDetachReason,
@@ -120,6 +120,16 @@ pub struct SurfaceWalkRuntime {
     anchor_transition: Option<SurfaceAnchorTransition>,
 }
 
+/// Observable result of carrying an attached walker into a new reflection
+/// chart. The stable source address never changes during this operation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SurfaceWalkReflectionTransport {
+    pub attached: bool,
+    pub follower_transported: bool,
+    pub normal_side_flipped: bool,
+    pub anchor_transition_cancelled: bool,
+}
+
 impl SurfaceWalkRuntime {
     pub fn attachment(&self) -> Option<SurfaceAttachment> {
         self.walker.attachment()
@@ -141,6 +151,43 @@ impl SurfaceWalkRuntime {
         self.walker.detach(reason);
         self.controller.reset();
         self.anchor_transition = None;
+    }
+
+    /// Transport retained displayed-chart state without changing the stable
+    /// source address. This matches the current browser oracle by cancelling
+    /// a re-anchor glide authored in the old chart; the next posed sample
+    /// retargets the attached camera from the transported follower state.
+    /// All changes are staged so a reflection pole cannot split topology,
+    /// follower, side, and transition state.
+    pub fn transport_between_reflections(
+        &mut self,
+        previous: SphereReflectionState,
+        next: SphereReflectionState,
+    ) -> Result<SurfaceWalkReflectionTransport, CameraError> {
+        let attached = self.is_active();
+        if previous == next {
+            return Ok(SurfaceWalkReflectionTransport {
+                attached,
+                ..SurfaceWalkReflectionTransport::default()
+            });
+        }
+        let mut candidate = self.clone();
+        let follower_transported = candidate
+            .controller
+            .transport_between_reflections(previous, next)?;
+        let normal_side_flipped =
+            attached && previous.orientation_sign() != next.orientation_sign();
+        if normal_side_flipped {
+            candidate.walker.flip_normal_side();
+        }
+        let anchor_transition_cancelled = candidate.anchor_transition.take().is_some();
+        *self = candidate;
+        Ok(SurfaceWalkReflectionTransport {
+            attached,
+            follower_transported,
+            normal_side_flipped,
+            anchor_transition_cancelled,
+        })
     }
 
     /// Preserve the physical side across an orientation-reversing chart edit.
@@ -493,7 +540,7 @@ fn add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CameraBasis, PerspectiveLens, SurfaceSample, TriangleAdjacency};
+    use crate::{CameraBasis, FocusSphere, PerspectiveLens, SurfaceSample, TriangleAdjacency};
     use uuid::Uuid;
 
     #[derive(Clone)]
@@ -790,5 +837,91 @@ mod tests {
                 close(single[axis], partitioned[axis]);
             }
         }
+    }
+
+    #[test]
+    fn reflection_transport_preserves_address_and_eye_height_and_flips_side_once() {
+        let mut runtime = SurfaceWalkRuntime::default();
+        let mut field = field();
+        let mut camera = camera([0.2, 2.0, -0.2]);
+        runtime
+            .attach(&mut camera, attach_request(), &mut field)
+            .unwrap();
+        let before = runtime.attachment().unwrap();
+        assert!(runtime.anchor_transition().is_some());
+
+        let inversion =
+            SphereReflectionState::Sphere(FocusSphere::new([0.0, 0.0, 0.0], 2.0).unwrap());
+        let outcome = runtime
+            .transport_between_reflections(SphereReflectionState::Identity, inversion)
+            .unwrap();
+        let after = runtime.attachment().unwrap();
+        assert_eq!(after.address, before.address);
+        assert_eq!(after.eye_height, before.eye_height);
+        assert_eq!(after.normal_sign, -before.normal_sign);
+        assert_eq!(
+            outcome,
+            SurfaceWalkReflectionTransport {
+                attached: true,
+                follower_transported: true,
+                normal_side_flipped: true,
+                anchor_transition_cancelled: true,
+            }
+        );
+        assert!(runtime.anchor_transition().is_none());
+
+        let same = runtime
+            .transport_between_reflections(inversion, inversion)
+            .unwrap();
+        assert_eq!(runtime.attachment().unwrap(), after);
+        assert_eq!(
+            same,
+            SurfaceWalkReflectionTransport {
+                attached: true,
+                ..SurfaceWalkReflectionTransport::default()
+            }
+        );
+    }
+
+    #[test]
+    fn sphere_to_sphere_transport_keeps_the_physical_side() {
+        let mut runtime = SurfaceWalkRuntime::default();
+        let mut field = field();
+        let mut camera = camera([0.2, 2.0, -0.2]);
+        runtime
+            .attach(&mut camera, attach_request(), &mut field)
+            .unwrap();
+        let before = runtime.attachment().unwrap();
+        let first = SphereReflectionState::Sphere(FocusSphere::new([0.0, 0.0, 0.0], 2.0).unwrap());
+        let second =
+            SphereReflectionState::Sphere(FocusSphere::new([0.25, 0.0, 0.0], 3.0).unwrap());
+
+        let outcome = runtime
+            .transport_between_reflections(first, second)
+            .unwrap();
+        let after = runtime.attachment().unwrap();
+        assert_eq!(after, before);
+        assert!(outcome.follower_transported);
+        assert!(!outcome.normal_side_flipped);
+        assert!(outcome.anchor_transition_cancelled);
+    }
+
+    #[test]
+    fn reflection_pole_preserves_the_complete_surface_runtime() {
+        let mut runtime = SurfaceWalkRuntime::default();
+        let mut field = field();
+        let mut camera = camera([0.2, 2.0, -0.2]);
+        let mut request = attach_request();
+        request.address = address([1.0, 0.0, 0.0]);
+        runtime.attach(&mut camera, request, &mut field).unwrap();
+        let before = runtime.clone();
+        let inversion =
+            SphereReflectionState::Sphere(FocusSphere::new([0.0, 0.0, 0.0], 1.0).unwrap());
+
+        assert_eq!(
+            runtime.transport_between_reflections(SphereReflectionState::Identity, inversion),
+            Err(CameraError::ReflectionPole)
+        );
+        assert_eq!(runtime, before);
     }
 }

@@ -1,4 +1,4 @@
-use super::{CameraBasis, CameraError, CameraRig};
+use super::{CameraBasis, CameraError, CameraRig, SphereReflectionState};
 use crate::SurfaceContact;
 use std::error::Error;
 use std::fmt;
@@ -226,6 +226,45 @@ impl SurfaceWalkController {
 
     pub fn reset(&mut self) {
         self.state = None;
+    }
+
+    /// Carry retained contact filtering and heading through an exact
+    /// spherical-reflection chart change. Relative pitch is intrinsic to the
+    /// surface frame and therefore remains unchanged. A pole rejects the
+    /// whole operation without mutating the follower.
+    pub fn transport_between_reflections(
+        &mut self,
+        previous: SphereReflectionState,
+        next: SphereReflectionState,
+    ) -> Result<bool, CameraError> {
+        let Some(state) = self.state else {
+            return Ok(false);
+        };
+        if previous == next {
+            return Ok(false);
+        }
+        let tangent = state.tangent_forward.unwrap_or(state.filtered_normal);
+        let transported = previous.transport_point_and_directions(
+            next,
+            state.filtered_position,
+            [state.filtered_normal, tangent],
+        )?;
+        let filtered_normal =
+            normalize_surface(transported.directions[0]).ok_or(CameraError::DegenerateBasis)?;
+        let tangent_forward = state
+            .tangent_forward
+            .map(|_| {
+                project_surface_tangent(transported.directions[1], filtered_normal)
+                    .ok_or(CameraError::DegenerateBasis)
+            })
+            .transpose()?;
+        self.state = Some(SurfaceWalkState {
+            filtered_position: transported.point,
+            filtered_normal,
+            tangent_forward,
+            relative_pitch_radians: state.relative_pitch_radians,
+        });
+        Ok(true)
     }
 
     /// Map semantic forward/right input into displayed-chart velocity.
@@ -590,7 +629,7 @@ fn lerp(left: [f64; 3], right: [f64; 3], amount: f64) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{StableEntityId, SurfaceAddress};
+    use crate::{FocusSphere, StableEntityId, SurfaceAddress};
     use std::f64::consts::FRAC_PI_6;
     use uuid::Uuid;
 
@@ -762,6 +801,77 @@ mod tests {
         assert_close(next.filtered_position[0], 10.0 * (1.0 - (-1.0f64).exp()));
         assert_close(next.metrics.eye_height, 0.035 / 256.0);
         assert_close(next.camera.lens.near, 0.0000109375);
+    }
+
+    #[test]
+    fn follower_state_transports_between_reflection_charts_without_resetting_pitch() {
+        let mut controller = SurfaceWalkController::default();
+        controller
+            .follow_contact(
+                &camera(),
+                &contact([2.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+                1.0,
+                SurfaceWalkControls {
+                    smoothing_seconds: 1.0,
+                    ..SurfaceWalkControls::default()
+                },
+                0.0,
+                true,
+                false,
+            )
+            .unwrap();
+        let original = controller.clone();
+        let inversion = SphereReflectionState::Sphere(FocusSphere::new([0.0; 3], 1.0).unwrap());
+
+        assert!(controller
+            .transport_between_reflections(SphereReflectionState::Identity, inversion)
+            .unwrap());
+        let transported = controller.state.unwrap();
+        assert_vec_close(transported.filtered_position, [0.5, 0.0, 0.0]);
+        assert_vec_close(transported.filtered_normal, [-1.0, 0.0, 0.0]);
+        assert_vec_close(transported.tangent_forward.unwrap(), [0.0, 0.0, -1.0]);
+        assert_eq!(
+            transported.relative_pitch_radians,
+            original.state.unwrap().relative_pitch_radians,
+        );
+
+        assert!(controller
+            .transport_between_reflections(inversion, SphereReflectionState::Identity)
+            .unwrap());
+        let round_trip = controller.state.unwrap();
+        let original = original.state.unwrap();
+        assert_vec_close(round_trip.filtered_position, original.filtered_position);
+        assert_vec_close(round_trip.filtered_normal, original.filtered_normal);
+        assert_vec_close(
+            round_trip.tangent_forward.unwrap(),
+            original.tangent_forward.unwrap(),
+        );
+        assert_eq!(
+            round_trip.relative_pitch_radians,
+            original.relative_pitch_radians
+        );
+    }
+
+    #[test]
+    fn follower_reflection_pole_rejection_is_atomic() {
+        let mut controller = SurfaceWalkController::default();
+        controller
+            .follow_contact(
+                &camera(),
+                &contact([0.0; 3], [0.0, 1.0, 0.0]),
+                1.0,
+                SurfaceWalkControls::default(),
+                0.0,
+                true,
+                false,
+            )
+            .unwrap();
+        let before = controller.clone();
+        let inversion = SphereReflectionState::Sphere(FocusSphere::new([0.0; 3], 1.0).unwrap());
+        let result =
+            controller.transport_between_reflections(SphereReflectionState::Identity, inversion);
+        assert_eq!(result, Err(CameraError::ReflectionPole),);
+        assert_eq!(controller, before);
     }
 
     #[test]

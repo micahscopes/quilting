@@ -29,12 +29,13 @@ pub use navigation::{
     CameraTransition, FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition,
     MappedSpaceMouseFrame, NavigationAction, NavigationActionQueue, NavigationAxes,
     NavigationController, NavigationFrame, NavigationPreset, NavigationRuntime, PerspectiveLens,
-    ScheduledNavigationAction, SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping,
-    SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition, SurfaceRelativeView,
-    SurfaceWalkAttachRequest, SurfaceWalkContactFrame, SurfaceWalkController, SurfaceWalkControls,
-    SurfaceWalkError, SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkMotion,
-    SurfaceWalkRecoveryRequest, SurfaceWalkRuntime, SurfaceWalkRuntimeError,
-    SurfaceWalkStepRequest, SurfaceWalkUpdate, TransitionEasing,
+    ReflectionTransport, ScheduledNavigationAction, SpaceMouseCameraInput, SpaceMouseInputError,
+    SpaceMouseMapping, SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition,
+    SurfaceRelativeView, SurfaceWalkAttachRequest, SurfaceWalkContactFrame, SurfaceWalkController,
+    SurfaceWalkControls, SurfaceWalkError, SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMetrics,
+    SurfaceWalkMotion, SurfaceWalkRecoveryRequest, SurfaceWalkReflectionTransport,
+    SurfaceWalkRuntime, SurfaceWalkRuntimeError, SurfaceWalkStepRequest, SurfaceWalkUpdate,
+    TransitionEasing,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{

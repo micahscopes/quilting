@@ -612,3 +612,35 @@ goldens, the WASM target check, release Trunk build, all five generated-WASM
 smokes, and the ordinary release preflight passed. Reflection/chart follower
 transport, Float32-sensitive edge crossings, animation pose-time velocity,
 and target-browser composed diagnostics remain explicit cutover gates.
+
+## Atomic reflection-chart surface walking follow-up
+
+On 2026-08-24, `ReflectionTransport` became the shared exact map for camera
+and surface point/direction transport between Euclidean and spherical
+reflection charts. `SurfaceWalkRuntime` now stages the follower, filtered
+contact frame, physical-side parity, previous posed positions, and active
+anchor transition before committing any of them. A pole in any staged value
+rejects the complete navigation edit. A chart-parity change flips the physical
+side exactly once, and an animated chart edit cancels the incumbent
+partition-dependent anchor glide before it consumes another time slice.
+
+The production WASM adapter applies that transaction to both the legacy and
+composed walkers. It rebases their cached position once after a successful
+chart edit so the semantic f64 reflection followed by the renderer's f32
+Mobius packing cannot appear as false surface velocity. The browser now treats
+manual or authored-camera reflection edits as one outer transaction: camera,
+JavaScript follower, Rust aggregate, previous reflection state, and renderer
+Mobius state either all advance or all remain unchanged. The generated
+TypeScript boundary exposes a structural seven-field transport diagnostic.
+
+The optimized WASM changed from 6,053,594 to 6,057,645 bytes (+4,051 raw);
+gzip changed from 2,124,101 to 2,131,143 bytes (+7,042). The source-coherent
+build receipt is `258938e4bb3576c8ac3b1838073dd2a8` over 156 files and
+38,518,088 bytes. The complete native workspace suite, 75 direct Hyperscape
+tests, 25 all-feature application tests, 42 browser-independent JavaScript
+tests, 19 Blender interchange tests, strict Hyperscape and application Clippy,
+application Rustdoc, all three replay goldens, WASM target check, release Trunk
+build, five generated-WASM smokes, ordinary release preflight, and two
+executable Node/WASM reflection-transport tests passed. An initialized target-
+browser trace, Float32 edge-crossing parity, and explicit pose-time sampling
+remain cutover gates before Rust surface walking can become authoritative.

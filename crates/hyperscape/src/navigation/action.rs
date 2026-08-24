@@ -432,14 +432,24 @@ fn advance_navigation(
         return;
     }
     if surface_walk.anchor_transition().is_some() {
-        surface_walk.advance_anchor_transition(delta_seconds, camera);
+        // A moving enabled inversion sphere invalidates an old-chart surface
+        // anchor. Advance and reconcile that chart first so cancellation does
+        // not consume one render-partition-dependent slice of the glide.
+        focus.advance(delta_seconds);
+        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
+        if surface_walk.anchor_transition().is_some() {
+            surface_walk.advance_anchor_transition(delta_seconds, camera);
+        }
     } else if let Some(transition) = runtime.camera_transition.as_mut() {
         if transition.advance(delta_seconds, camera) {
             runtime.camera_transition = None;
         }
+        focus.advance(delta_seconds);
+        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
+    } else {
+        focus.advance(delta_seconds);
+        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
     }
-    focus.advance(delta_seconds);
-    reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
 }
 
 fn reconcile_reflection(
@@ -457,24 +467,23 @@ fn reconcile_reflection(
     if desired == runtime.reflection {
         return;
     }
-    // A surface target is expressed in the prior displayed chart. The browser
-    // behavior oracle cancels re-anchor glides on chart edits and asks the
-    // attached walker for a fresh frame; preserve that safety rule here.
-    surface_walk.cancel_anchor_transition();
     let mut transported_camera = *camera;
     let mut transported_transition = runtime.camera_transition;
+    let mut transported_surface_walk = surface_walk.clone();
     let result = transported_camera
         .transport_between_reflections(runtime.reflection, desired)
         .and_then(|_| {
             if let Some(transition) = transported_transition.as_mut() {
                 transition.transport_between_reflections(runtime.reflection, desired)?;
             }
+            transported_surface_walk.transport_between_reflections(runtime.reflection, desired)?;
             Ok(())
         });
     match result {
         Ok(()) => {
             *camera = transported_camera;
             runtime.camera_transition = transported_transition;
+            *surface_walk = transported_surface_walk;
             runtime.reflection = desired;
         }
         Err(error) => diagnostics.0.push(format!(
@@ -673,6 +682,79 @@ mod tests {
         let partitioned = run(&[0.1; 10]);
         assert_eq!(single, partitioned);
         assert_eq!(single.eye, [4.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn animated_reflection_cancels_surface_anchor_before_any_partitioned_progress() {
+        fn run(steps: &[f64]) -> NavigationController {
+            let mut controller = NavigationController::default();
+            controller
+                .push(NavigationAction::SetInversionEnabled(true))
+                .unwrap();
+            controller.tick(0.0).unwrap();
+            let target = SurfaceAnchorTarget::new(
+                CameraRig {
+                    eye: [4.0, 1.0, 3.0],
+                    ..CameraRig::default()
+                },
+                [0.0, 1.0, 0.0],
+            )
+            .unwrap();
+            controller
+                .push(NavigationAction::BeginSurfaceAnchorTransition {
+                    target,
+                    scene_radius: 10.0,
+                    duration_seconds: 1.0,
+                    easing: TransitionEasing::Linear,
+                })
+                .unwrap();
+            controller
+                .push(NavigationAction::TransitionFreeFocusSphere {
+                    target: FocusSphere::new([0.75, 0.25, -0.5], 3.0).unwrap(),
+                    duration_seconds: 1.0,
+                    easing: TransitionEasing::Linear,
+                })
+                .unwrap();
+            controller.tick(0.0).unwrap();
+            assert!(controller.surface_walk.anchor_transition().is_some());
+            for seconds in steps {
+                controller.tick(*seconds).unwrap();
+            }
+            controller
+        }
+
+        let single = run(&[0.5]);
+        let partitioned = run(&[0.1; 5]);
+        for (single, partitioned) in single
+            .camera
+            .eye
+            .into_iter()
+            .chain(single.camera.basis().right)
+            .chain(single.camera.basis().up)
+            .chain(single.camera.basis().forward)
+            .chain([single.camera.control_distance])
+            .zip(
+                partitioned
+                    .camera
+                    .eye
+                    .into_iter()
+                    .chain(partitioned.camera.basis().right)
+                    .chain(partitioned.camera.basis().up)
+                    .chain(partitioned.camera.basis().forward)
+                    .chain([partitioned.camera.control_distance]),
+            )
+        {
+            assert!((single - partitioned).abs() < 1.0e-12);
+        }
+        assert_eq!(single.camera.lens, partitioned.camera.lens);
+        assert_eq!(
+            single.camera.semantic_target,
+            partitioned.camera.semantic_target
+        );
+        assert_eq!(single.focus, partitioned.focus);
+        assert_eq!(single.runtime.reflection, partitioned.runtime.reflection);
+        assert_eq!(single.surface_walk, partitioned.surface_walk);
+        assert!(single.surface_walk.anchor_transition().is_none());
     }
 
     #[test]

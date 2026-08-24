@@ -356,7 +356,7 @@ import init, {
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
   mr_setPresentationNodeStates,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
-  mr_attachSurfaceWalk, mr_stepSurfaceWalk,
+  mr_attachSurfaceWalk, mr_stepSurfaceWalk, mr_transportSurfaceWalkReflection,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
   mr_debugResidentLodEdges,
   required_tessellation_atlas_triples,
@@ -2214,6 +2214,9 @@ const surfaceWalkRustShadow = {
   lastError: null,
   lastDrift: null,
   snapshot: null,
+  reflectionTransports: 0,
+  reflectionTransportFailures: 0,
+  lastReflectionTransport: null,
 };
 globalThis.__hyperscopeSurfaceWalkRustShadow = surfaceWalkRustShadow;
 
@@ -3216,26 +3219,67 @@ function sameManualReflection(first, second) {
     && first.center.every((coordinate, axis) => coordinate === second.center[axis]);
 }
 
-function transportManualCamera(previous, next) {
-  if (!previous || sameManualReflection(previous, next) || authoredCamera) return false;
-  const basis = manualCameraBasis(inputCameraBasis);
-  const eye = [
-    panX - basis[6] * zoom,
-    panY - basis[7] * zoom,
-    panZ - basis[8] * zoom,
-  ];
-  const transported = transportCameraAcrossSphereReflections({
-    eye,
-    basis,
-    orbitDistance: zoom,
-  }, previous, next);
-  if (!transported) {
-    console.warn('Camera transport skipped: viewpoint reached the inversion pole');
+function transportSurfaceWalkRustReflection(previous, next) {
+  const previousCenter = new Float64Array(previous.enabled ? previous.center : [0, 0, 0]);
+  const nextCenter = new Float64Array(next.enabled ? next.center : [0, 0, 0]);
+  try {
+    const snapshot = mr_transportSurfaceWalkReflection(
+      previous.enabled,
+      previousCenter,
+      previous.enabled ? previous.radius : 1,
+      next.enabled,
+      nextCenter,
+      next.enabled ? next.radius : 1,
+    );
+    if (!snapshot) throw new Error('Rust reflection transport returned no renderer state');
+    surfaceWalkRustShadow.reflectionTransports += 1;
+    surfaceWalkRustShadow.lastReflectionTransport = snapshot;
+    return true;
+  } catch (error) {
+    const message = error?.message || String(error);
+    surfaceWalkRustShadow.reflectionTransportFailures += 1;
+    surfaceWalkRustShadow.lastReflectionTransport = {
+      error: message,
+      previous,
+      next,
+    };
+    console.warn(`Surface-walk reflection transport skipped: ${message}`);
     return false;
   }
+}
 
-  if (surfaceWalk.active && surfaceWalk.snapshot?.output_position
-      && surfaceWalk.snapshot?.output_normal) {
+function transportManualCamera(previous, next) {
+  if (!previous || sameManualReflection(previous, next)) {
+    return { accepted: true, cameraTransported: false };
+  }
+  const transportManualRig = !authoredCamera;
+  const basis = transportManualRig
+    ? manualCameraBasis(inputCameraBasis)
+    : activeCameraFrame().basis;
+  let transportedCamera = null;
+  if (transportManualRig) {
+    const eye = [
+      panX - basis[6] * zoom,
+      panY - basis[7] * zoom,
+      panZ - basis[8] * zoom,
+    ];
+    transportedCamera = transportCameraAcrossSphereReflections({
+      eye,
+      basis,
+      orbitDistance: zoom,
+    }, previous, next);
+    if (!transportedCamera) {
+      console.warn('Camera transport skipped: viewpoint reached the inversion pole');
+      return { accepted: false, cameraTransported: false };
+    }
+  }
+
+  let transportedSurfaceFollower = null;
+  if (surfaceWalk.active) {
+    if (!surfaceWalk.snapshot?.output_position || !surfaceWalk.snapshot?.output_normal) {
+      console.warn('Camera transport skipped: attached surface has no contact frame');
+      return { accepted: false, cameraTransported: false };
+    }
     const contactPosition = surfaceWalk.filteredPosition
       || Array.from(surfaceWalk.snapshot.output_position);
     const contactNormal = surfaceWalk.filteredNormal
@@ -3250,32 +3294,44 @@ function transportManualCamera(previous, next) {
         next,
       )
       : null;
-    if (contactFrame) {
-      const mappedNormal = surfaceNormalize(contactFrame.directions[0]);
-      const mappedTangent = surfaceNormalize(contactFrame.directions[1]);
-      if (mappedNormal && mappedTangent) {
-        surfaceWalk.filteredPosition = contactFrame.point;
-        surfaceWalk.filteredNormal = mappedNormal;
-        surfaceWalk.tangentForward = mappedTangent;
-        surfaceWalk.snapshot.output_position = contactFrame.point.slice();
-        surfaceWalk.snapshot.output_normal = mappedNormal.slice();
-      }
+    const mappedNormal = contactFrame && surfaceNormalize(contactFrame.directions[0]);
+    const mappedTangent = contactFrame && surfaceNormalize(contactFrame.directions[1]);
+    if (!contactFrame || !mappedNormal || !mappedTangent) {
+      console.warn('Camera transport skipped: surface follower reached the inversion pole');
+      return { accepted: false, cameraTransported: false };
+    }
+    transportedSurfaceFollower = {
+      point: contactFrame.point,
+      normal: mappedNormal,
+      tangent: mappedTangent,
+    };
+    if (!transportSurfaceWalkRustReflection(previous, next)) {
+      return { accepted: false, cameraTransported: false };
     }
   }
 
-  manualCameraBasisState.set(transported.basis);
-  manualCameraBasisReady = true;
-  zoom = transported.orbitDistance;
-  panX = transported.target[0];
-  panY = transported.target[1];
-  panZ = transported.target[2];
-  syncManualCameraEuler();
-  if (surfaceWalk.active) applySurfaceWalkCamera(surfaceWalk.snapshot, false, 0);
+  if (transportedSurfaceFollower) {
+    surfaceWalk.filteredPosition = transportedSurfaceFollower.point;
+    surfaceWalk.filteredNormal = transportedSurfaceFollower.normal;
+    surfaceWalk.tangentForward = transportedSurfaceFollower.tangent;
+    surfaceWalk.snapshot.output_position = transportedSurfaceFollower.point.slice();
+    surfaceWalk.snapshot.output_normal = transportedSurfaceFollower.normal.slice();
+  }
+  if (transportedCamera) {
+    manualCameraBasisState.set(transportedCamera.basis);
+    manualCameraBasisReady = true;
+    zoom = transportedCamera.orbitDistance;
+    panX = transportedCamera.target[0];
+    panY = transportedCamera.target[1];
+    panZ = transportedCamera.target[2];
+    syncManualCameraEuler();
+    if (surfaceWalk.active) applySurfaceWalkCamera(surfaceWalk.snapshot, false, 0);
+  }
   // A transition authored in the previous output chart is no longer valid.
   // Explicit reframe remains available after the sphere edit completes.
   cameraFocusTransition = null;
   cancelSurfaceWalkAnchorTransition();
-  return true;
+  return { accepted: true, cameraTransported: Boolean(transportedCamera) };
 }
 
 function fitOrToggleInversionToSelection(nowMs = performance.now()) {
@@ -3508,11 +3564,12 @@ effect(() => {
   const radius = mob.mr.get()/10;
   const m = computeMobius(type, center[0], center[1], center[2], radius);
   const nextReflection = manualReflectionState(type, center, radius);
-  const cameraTransported = transportManualCamera(previousManualReflection, nextReflection);
+  const reflectionTransport = transportManualCamera(previousManualReflection, nextReflection);
+  if (!reflectionTransport.accepted) return;
   previousManualReflection = nextReflection;
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
-  refreshSelectedObjectAnchor({ followObjectPivot: !cameraTransported });
+  refreshSelectedObjectAnchor({ followObjectPivot: !reflectionTransport.cameraTransported });
   if (!wasmOk.get()) return;
   if (hyperscapeActive) {
     hyperscapeActive = false;

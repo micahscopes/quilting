@@ -32,14 +32,15 @@ use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{
     ComposedSurfaceWalkSnapshot, SurfaceRuntime, SurfaceRuntimeSnapshot,
+    SurfaceWalkReflectionTransportSnapshot,
 };
-use crate::surface_walk::ComposedSurfaceWalkResultJs;
+use crate::surface_walk::{ComposedSurfaceWalkResultJs, SurfaceWalkReflectionTransportResultJs};
 use hyperscape::interchange::{
     GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
 };
 use hyperscape::{
-    CameraBasis, CameraRig, ChamberSide, ContactClassification, PerspectiveLens,
-    SurfaceWalkControls, SurfaceWalkInput,
+    CameraBasis, CameraRig, ChamberSide, ContactClassification, FocusSphere, PerspectiveLens,
+    SphereReflectionState, SurfaceWalkControls, SurfaceWalkInput,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -1658,6 +1659,62 @@ fn surface_walk_controls(values: &[f64]) -> Result<SurfaceWalkControls, String> 
         default_near,
         minimum_near,
         near_eye_fraction,
+    })
+}
+
+fn surface_walk_reflection_state(
+    enabled: bool,
+    center: &[f64],
+    radius: f64,
+) -> Result<SphereReflectionState, String> {
+    let center = exact_vector3(center, "surface-walk reflection center")?;
+    if !center.into_iter().all(f64::is_finite) || !radius.is_finite() {
+        return Err("surface-walk reflection must be finite".to_string());
+    }
+    if enabled {
+        FocusSphere::new(center, radius)
+            .map(SphereReflectionState::Sphere)
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(SphereReflectionState::Identity)
+    }
+}
+
+fn surface_walk_reflection_transport_to_js(
+    snapshot: SurfaceWalkReflectionTransportSnapshot,
+) -> Result<SurfaceWalkReflectionTransportResultJs, JsValue> {
+    serde_wasm_bindgen::to_value(&snapshot)
+        .map(JsCast::unchecked_into)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Atomically carry topology-side state, the composed contact follower, and
+/// previous animated-contact samples into a new spherical-reflection chart.
+/// This export is deliberately independent of the render backend.
+#[wasm_bindgen(js_name = "mr_transportSurfaceWalkReflection")]
+pub fn mr_transport_surface_walk_reflection(
+    previous_enabled: bool,
+    previous_center: &[f64],
+    previous_radius: f64,
+    next_enabled: bool,
+    next_center: &[f64],
+    next_radius: f64,
+) -> Result<SurfaceWalkReflectionTransportResultJs, JsValue> {
+    let previous =
+        surface_walk_reflection_state(previous_enabled, previous_center, previous_radius)
+            .map_err(|error| JsValue::from_str(&error))?;
+    let next = surface_walk_reflection_state(next_enabled, next_center, next_radius)
+        .map_err(|error| JsValue::from_str(&error))?;
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return Ok(JsValue::NULL.unchecked_into());
+        };
+        let snapshot = state
+            .surface_runtime
+            .transport_between_reflections(previous, next)
+            .map_err(|error| JsValue::from_str(&error))?;
+        surface_walk_reflection_transport_to_js(snapshot)
     })
 }
 

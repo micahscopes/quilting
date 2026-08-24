@@ -79,6 +79,21 @@ directions. FOV and lens parameters remain unchanged. Selection itself never
 pans the camera; object-pivot navigation and explicit reframe remain deliberate
 camera actions.
 
+An attached surface follower now crosses the same chart boundary as one atomic
+Rust operation. Its stable source face/barycentric address and eye height do
+not change; the filtered output point, normal, tangent, and prior posed-contact
+sample are transported by the exact conformal differential; relative pitch is
+retained; and physical-side parity flips exactly once. A pole rejects the
+camera, topology side, follower, and velocity history together. The current
+browser oracle cancels an active surface re-anchor glide when its output chart
+changes, so the Rust aggregate deliberately does the same until rebase
+semantics are introduced as an explicit behavior change. The first sample in
+the new chart rebases animation velocity instead of differencing f64 semantic
+sphere transport against f32-packed renderer coefficients; the following
+sample resumes ordinary pose-time velocity measurement. This trades one
+deliberate zero-velocity sample at a rare chart edit for freedom from a
+frame-delta-amplified false impulse.
+
 ## Target Rust ownership
 
 The intended flow is:
@@ -153,8 +168,9 @@ or sphere state.
    diagnostics. The oracle and candidate now advance re-anchoring from one
    explicit virtual frame delta with identical endpoint snapping, and the
    generated boundary exposes a typed composed result. Cutover still waits for
-   clean target-browser traces across that clock, reflection/chart edits,
-   animation pose sampling, and Float32-sensitive edge crossings;
+   clean target-browser traces across that clock and the now-atomic
+   reflection/chart transport, plus animation pose sampling and
+   Float32-sensitive edge crossings;
    `walkimpl=rust` therefore resolves back to shadow for now.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere

@@ -124,6 +124,18 @@ export type ComposedSurfaceWalkResult =
   | ComposedSurfaceWalkSnapshot
   | ComposedSurfaceWalkErrorSnapshot
   | null;
+export interface SurfaceWalkReflectionTransportSnapshot {
+  legacy_attached: boolean;
+  composed_attached: boolean;
+  composed_follower_transported: boolean;
+  normal_side_flipped: boolean;
+  anchor_transition_cancelled: boolean;
+  legacy_previous_position_transported: boolean;
+  composed_previous_position_transported: boolean;
+}
+export type SurfaceWalkReflectionTransportResult =
+  | SurfaceWalkReflectionTransportSnapshot
+  | null;
 "#;
 
 #[wasm_bindgen]
@@ -138,6 +150,8 @@ extern "C" {
     pub type SurfaceWalkFrameSnapshotJs;
     #[wasm_bindgen(typescript_type = "ComposedSurfaceWalkResult")]
     pub type ComposedSurfaceWalkResultJs;
+    #[wasm_bindgen(typescript_type = "SurfaceWalkReflectionTransportResult")]
+    pub type SurfaceWalkReflectionTransportResultJs;
 }
 
 /// Offline-capable WASM facade for the Rust surface-walk authority.

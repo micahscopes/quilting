@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use hyperscape::{
-    CameraRig, StableEntityId, SurfaceAddress, SurfaceAdvance, SurfaceAttachment,
-    SurfaceDetachReason, SurfaceField, SurfaceSample, SurfaceWalkAttachRequest,
+    CameraRig, SphereReflectionState, StableEntityId, SurfaceAddress, SurfaceAdvance,
+    SurfaceAttachment, SurfaceDetachReason, SurfaceField, SurfaceSample, SurfaceWalkAttachRequest,
     SurfaceWalkControls, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkRuntime,
     SurfaceWalkStepRequest, SurfaceWalkUpdate, SurfaceWalker, SurfaceWalkerStatus,
     TransitionEasing, TriangleAdjacency,
@@ -35,6 +35,8 @@ pub(crate) struct SurfaceRuntime {
     morph_weights: Vec<f32>,
     previous_output_position: Option<[f64; 3]>,
     composed_previous_output_position: Option<[f64; 3]>,
+    suppress_surface_velocity_once: bool,
+    composed_suppress_surface_velocity_once: bool,
     attachment_orientation_sign: i8,
     composed_attachment_orientation_sign: i8,
 }
@@ -98,6 +100,21 @@ pub(crate) struct ComposedSurfaceWalkSnapshot {
     pub anchor_transition_remaining_seconds: Option<f64>,
 }
 
+/// Atomic renderer-adapter result for a change of spherical-reflection chart.
+/// Both topology paths and their animation-history samples are committed
+/// together, so the following posed frame cannot double-flip the attachment or
+/// infer a spurious surface velocity from coordinates in two different charts.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct SurfaceWalkReflectionTransportSnapshot {
+    pub legacy_attached: bool,
+    pub composed_attached: bool,
+    pub composed_follower_transported: bool,
+    pub normal_side_flipped: bool,
+    pub anchor_transition_cancelled: bool,
+    pub legacy_previous_position_transported: bool,
+    pub composed_previous_position_transported: bool,
+}
+
 impl SurfaceRuntime {
     pub fn reset_geometry(&mut self) {
         self.walker = SurfaceWalker::default();
@@ -105,6 +122,8 @@ impl SurfaceRuntime {
         self.adjacency = None;
         self.previous_output_position = None;
         self.composed_previous_output_position = None;
+        self.suppress_surface_velocity_once = false;
+        self.composed_suppress_surface_velocity_once = false;
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
     }
@@ -140,6 +159,8 @@ impl SurfaceRuntime {
         self.morph_weights.clear();
         self.previous_output_position = None;
         self.composed_previous_output_position = None;
+        self.suppress_surface_velocity_once = false;
+        self.composed_suppress_surface_velocity_once = false;
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
     }
@@ -154,6 +175,66 @@ impl SurfaceRuntime {
         self.composed
             .attachment()
             .map(|attachment| attachment.address.face)
+    }
+
+    /// Carry every output-chart surface-walk cache through
+    /// `next ∘ previous⁻¹` as one transaction. Large immutable geometry and
+    /// pose buffers remain borrowed by the runtime and are never cloned here.
+    pub fn transport_between_reflections(
+        &mut self,
+        previous: SphereReflectionState,
+        next: SphereReflectionState,
+    ) -> Result<SurfaceWalkReflectionTransportSnapshot, String> {
+        let legacy_attached = self.walker.attachment().is_some();
+        if previous == next {
+            return Ok(SurfaceWalkReflectionTransportSnapshot {
+                legacy_attached,
+                composed_attached: self.composed.is_active(),
+                composed_follower_transported: false,
+                normal_side_flipped: false,
+                anchor_transition_cancelled: false,
+                legacy_previous_position_transported: false,
+                composed_previous_position_transported: false,
+            });
+        }
+        let parity_changed = previous.orientation_sign() != next.orientation_sign();
+        let mut legacy_walker = self.walker.clone();
+        if legacy_attached && parity_changed {
+            legacy_walker.flip_normal_side();
+        }
+
+        let mut composed = self.composed.clone();
+        let composed_outcome = composed
+            .transport_between_reflections(previous, next)
+            .map_err(|error| error.to_string())?;
+        let legacy_previous_position =
+            transport_optional_position(self.previous_output_position, previous, next)?;
+        let composed_previous_position =
+            transport_optional_position(self.composed_previous_output_position, previous, next)?;
+        let orientation_delta = previous.orientation_sign() * next.orientation_sign();
+
+        self.walker = legacy_walker;
+        self.composed = composed;
+        self.previous_output_position = legacy_previous_position;
+        self.composed_previous_output_position = composed_previous_position;
+        self.suppress_surface_velocity_once = self.previous_output_position.is_some();
+        self.composed_suppress_surface_velocity_once =
+            self.composed_previous_output_position.is_some();
+        self.attachment_orientation_sign *= orientation_delta;
+        self.composed_attachment_orientation_sign *= orientation_delta;
+
+        Ok(SurfaceWalkReflectionTransportSnapshot {
+            legacy_attached,
+            composed_attached: composed_outcome.attached,
+            composed_follower_transported: composed_outcome.follower_transported,
+            normal_side_flipped: (legacy_attached && parity_changed)
+                || composed_outcome.normal_side_flipped,
+            anchor_transition_cancelled: composed_outcome.anchor_transition_cancelled,
+            legacy_previous_position_transported: self.previous_output_position.is_some(),
+            composed_previous_position_transported: self
+                .composed_previous_output_position
+                .is_some(),
+        })
     }
 
     /// Reconstruct the exact posed source controls used by the GPU animation
@@ -278,6 +359,7 @@ impl SurfaceRuntime {
             .map_err(|error| format!("invalid surface attachment: {error:?}"))?;
         self.walker.attach(attachment);
         self.previous_output_position = None;
+        self.suppress_surface_velocity_once = false;
         self.attachment_orientation_sign = normalize_orientation_sign(orientation_sign);
         self.step_relative(
             instances,
@@ -295,6 +377,8 @@ impl SurfaceRuntime {
         self.composed.detach(SurfaceDetachReason::Manual);
         self.previous_output_position = None;
         self.composed_previous_output_position = None;
+        self.suppress_surface_velocity_once = false;
+        self.composed_suppress_surface_velocity_once = false;
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
         detached_snapshot(SurfaceDetachReason::Manual)
@@ -362,10 +446,12 @@ impl SurfaceRuntime {
                 &mut field,
             )
             .map_err(|error| error.to_string())?;
-        self.composed_previous_output_position =
-            update.advance.contact.map(|contact| contact.output_position);
-        self.composed_attachment_orientation_sign =
-            normalize_orientation_sign(orientation_sign);
+        self.composed_previous_output_position = update
+            .advance
+            .contact
+            .map(|contact| contact.output_position);
+        self.composed_suppress_surface_velocity_once = false;
+        self.composed_attachment_orientation_sign = normalize_orientation_sign(orientation_sign);
         Ok(composed_snapshot(update, node))
     }
 
@@ -427,13 +513,15 @@ impl SurfaceRuntime {
             euclidean_model,
             surface_velocity: [0.0; 3],
         };
-        if let Some(current_start) = field.sample(attachment.address) {
-            if delta_seconds > 1.0e-9 {
-                if let Some(previous) = previous_output_position {
-                    field.surface_velocity = scale(
-                        sub(current_start.output_position, previous),
-                        1.0 / delta_seconds,
-                    );
+        if !self.composed_suppress_surface_velocity_once {
+            if let Some(current_start) = field.sample(attachment.address) {
+                if delta_seconds > 1.0e-9 {
+                    if let Some(previous) = previous_output_position {
+                        field.surface_velocity = scale(
+                            sub(current_start.output_position, previous),
+                            1.0 / delta_seconds,
+                        );
+                    }
                 }
             }
         }
@@ -454,8 +542,11 @@ impl SurfaceRuntime {
             .map_err(|error| error.to_string())?;
         self.composed = candidate;
         self.composed_attachment_orientation_sign = next_orientation_sign;
-        self.composed_previous_output_position =
-            update.advance.contact.map(|contact| contact.output_position);
+        self.composed_previous_output_position = update
+            .advance
+            .contact
+            .map(|contact| contact.output_position);
+        self.composed_suppress_surface_velocity_once = false;
         Ok(composed_snapshot(update, node))
     }
 
@@ -469,6 +560,7 @@ impl SurfaceRuntime {
         candidate.detach(reason);
         self.composed = candidate;
         self.composed_previous_output_position = None;
+        self.composed_suppress_surface_velocity_once = false;
         self.composed_attachment_orientation_sign = orientation_sign;
         composed_snapshot(
             SurfaceWalkUpdate {
@@ -530,7 +622,7 @@ impl SurfaceRuntime {
         let current_start = field
             .sample(attachment.address)
             .ok_or_else(|| "could not sample attached surface".to_string())?;
-        if delta_seconds > 1.0e-9 {
+        if !self.suppress_surface_velocity_once && delta_seconds > 1.0e-9 {
             if let Some(previous) = previous_output_position {
                 field.surface_velocity = scale(
                     sub(current_start.output_position, previous),
@@ -543,6 +635,7 @@ impl SurfaceRuntime {
             .walker
             .advance(delta_seconds, desired_absolute_velocity, &mut field);
         self.previous_output_position = advance.contact.map(|contact| contact.output_position);
+        self.suppress_surface_velocity_once = false;
         Ok(snapshot_from_advance(advance, node))
     }
 }
@@ -943,7 +1036,26 @@ fn finite3(value: [f64; 3]) -> bool {
 }
 
 fn normalize_orientation_sign(sign: i8) -> i8 {
-    if sign < 0 { -1 } else { 1 }
+    if sign < 0 {
+        -1
+    } else {
+        1
+    }
+}
+
+fn transport_optional_position(
+    position: Option<[f64; 3]>,
+    previous: SphereReflectionState,
+    next: SphereReflectionState,
+) -> Result<Option<[f64; 3]>, String> {
+    position
+        .map(|position| {
+            previous
+                .transport_point_and_directions::<0>(next, position, [])
+                .map(|transport| transport.point)
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
 }
 
 fn add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
@@ -973,6 +1085,8 @@ fn length(value: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperscape::{CameraBasis, FocusSphere, PerspectiveLens};
+    use wasm_bindgen_test::wasm_bindgen_test;
 
     fn triangle_instances() -> Vec<f32> {
         let mut instances = vec![0.0; instance_layout::STRIDE];
@@ -1001,6 +1115,28 @@ mod tests {
     fn identity_mobius() -> [f32; 16] {
         [
             1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        ]
+    }
+
+    fn sphere_reflection_mobius(center: [f64; 3], radius: f64) -> [f32; 16] {
+        let center_squared = center.into_iter().map(|value| value * value).sum::<f64>();
+        [
+            0.0,
+            center[0] as f32,
+            center[1] as f32,
+            center[2] as f32,
+            (center_squared - radius * radius) as f32,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -center[0] as f32,
+            -center[1] as f32,
+            -center[2] as f32,
         ]
     }
 
@@ -1135,6 +1271,238 @@ mod tests {
         let expected_side = scale(expected_side, 1.0 / length(expected_side));
         let actual_side = inverted.output_normal.unwrap();
         assert!(dot(expected_side, actual_side) > 1.0 - 1.0e-8);
+    }
+
+    #[wasm_bindgen_test]
+    fn reflection_transport_carries_legacy_side_and_velocity_history_once() {
+        let mut instances = triangle_instances();
+        for corner in 0..3 {
+            instances[instance_layout::offset::POSITIONS + corner * 4 + 3] = 2.0;
+        }
+        let mut runtime = SurfaceRuntime::default();
+        runtime.set_morph_targets(&[0.1, 0.0, 0.0, 0.1, 0.0, 0.0, 0.1, 0.0, 0.0], 3, 1);
+        runtime.set_pose(&[], &[0.0]);
+        let address = [0.5, 0.25, 0.25];
+        let mut camera = CameraRig::new(
+            [0.25, 0.25, 3.0],
+            CameraBasis::from_forward_up([1.0, 0.0, -1.0], [0.0, 1.0, 0.0]).unwrap(),
+            3.0,
+            None,
+            PerspectiveLens::default(),
+        )
+        .unwrap();
+        let attached = runtime
+            .attach(
+                &instances,
+                1,
+                &[0],
+                0,
+                address,
+                0.1,
+                camera.eye,
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        runtime
+            .attach_composed(
+                &instances,
+                1,
+                &[0],
+                0,
+                address,
+                camera,
+                1.0,
+                SurfaceWalkControls::default(),
+                1.0,
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        let source_position = attached.output_position.unwrap();
+        let legacy_before = runtime.walker.attachment().unwrap();
+        let composed_before = runtime.composed.attachment().unwrap();
+        let center = [0.1, -0.2, 0.3];
+        let radius = 1.1;
+        let inversion = SphereReflectionState::Sphere(FocusSphere::new(center, radius).unwrap());
+        let mobius = sphere_reflection_mobius(center, radius);
+
+        let outcome = runtime
+            .transport_between_reflections(SphereReflectionState::Identity, inversion)
+            .unwrap();
+        assert!(outcome.legacy_attached);
+        assert!(outcome.composed_attached);
+        assert!(outcome.composed_follower_transported);
+        assert!(outcome.normal_side_flipped);
+        assert!(outcome.anchor_transition_cancelled);
+        assert!(outcome.legacy_previous_position_transported);
+        assert!(outcome.composed_previous_position_transported);
+        assert_eq!(
+            runtime.walker.attachment().unwrap().normal_sign,
+            -legacy_before.normal_sign
+        );
+        assert_eq!(
+            runtime.composed.attachment().unwrap().normal_sign,
+            -composed_before.normal_sign
+        );
+        assert_eq!(
+            runtime.walker.attachment().unwrap().address,
+            legacy_before.address
+        );
+        assert_eq!(
+            runtime.composed.attachment().unwrap().address,
+            composed_before.address
+        );
+        assert_eq!(runtime.attachment_orientation_sign, -1);
+        assert_eq!(runtime.composed_attachment_orientation_sign, -1);
+        assert!(runtime.suppress_surface_velocity_once);
+        assert!(runtime.composed_suppress_surface_velocity_once);
+        let expected = inversion
+            .transport_point_and_directions::<0>(
+                SphereReflectionState::Identity,
+                runtime.previous_output_position.unwrap(),
+                [],
+            )
+            .unwrap()
+            .point;
+        assert!(length(sub(expected, source_position)) < 1.0e-10);
+
+        camera
+            .transport_between_reflections(SphereReflectionState::Identity, inversion)
+            .unwrap();
+        let legacy_static = runtime
+            .step_relative(
+                &instances,
+                &[0],
+                1.0 / 60.0,
+                [0.0; 3],
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        let composed_static = runtime
+            .step_composed(
+                &instances,
+                &[0],
+                1.0 / 60.0,
+                camera,
+                1.0,
+                SurfaceWalkControls::default(),
+                SurfaceWalkInput::default(),
+                true,
+                false,
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy_static.barycentric.unwrap(),
+            legacy_before.address.barycentric
+        );
+        assert_eq!(
+            composed_static.barycentric.unwrap(),
+            composed_before.address.barycentric
+        );
+        assert!(length(legacy_static.projected_output_velocity) < 1.0e-12);
+        assert!(length(composed_static.surface_velocity.unwrap()) < 1.0e-12);
+        assert_eq!(
+            runtime.walker.attachment().unwrap().normal_sign,
+            -legacy_before.normal_sign
+        );
+        assert_eq!(
+            runtime.composed.attachment().unwrap().normal_sign,
+            -composed_before.normal_sign
+        );
+
+        runtime.set_pose(&[], &[0.2]);
+        let legacy_animated = runtime
+            .step_relative(
+                &instances,
+                &[0],
+                0.1,
+                [0.0; 3],
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        let composed_animated = runtime
+            .step_composed(
+                &instances,
+                &[0],
+                0.1,
+                camera,
+                1.0,
+                SurfaceWalkControls::default(),
+                SurfaceWalkInput::default(),
+                true,
+                false,
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy_animated.barycentric.unwrap(),
+            legacy_before.address.barycentric
+        );
+        assert_eq!(
+            composed_animated.barycentric.unwrap(),
+            composed_before.address.barycentric
+        );
+        let composed_velocity = composed_animated.surface_velocity.unwrap();
+        assert!(length(composed_velocity) > 1.0e-6);
+        assert!(
+            length(sub(
+                legacy_animated.projected_output_velocity,
+                composed_velocity,
+            )) < 1.0e-9
+        );
+
+        runtime
+            .transport_between_reflections(inversion, SphereReflectionState::Identity)
+            .unwrap();
+        assert_eq!(
+            runtime.walker.attachment().unwrap().normal_sign,
+            legacy_before.normal_sign
+        );
+        assert_eq!(runtime.attachment_orientation_sign, 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn reflection_transport_rolls_back_if_velocity_history_hits_a_pole() {
+        let instances = triangle_instances();
+        let mut runtime = SurfaceRuntime::default();
+        let attached = runtime
+            .attach(
+                &instances,
+                1,
+                &[0],
+                0,
+                [0.5, 0.25, 0.25],
+                0.1,
+                [0.25, 0.25, 3.0],
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        let pole = attached.output_position.unwrap();
+        let before_attachment = runtime.walker.attachment();
+        let before_position = runtime.previous_output_position;
+        let before_orientation = runtime.attachment_orientation_sign;
+        let inversion = SphereReflectionState::Sphere(FocusSphere::new(pole, 1.0).unwrap());
+
+        assert!(runtime
+            .transport_between_reflections(SphereReflectionState::Identity, inversion)
+            .is_err());
+        assert_eq!(runtime.walker.attachment(), before_attachment);
+        assert_eq!(runtime.previous_output_position, before_position);
+        assert_eq!(runtime.attachment_orientation_sign, before_orientation);
     }
 
     #[test]
