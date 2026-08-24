@@ -485,11 +485,9 @@ pub struct JfaPipeline {
     blur_tex: glow::Texture,
     blur_fbo_b: glow::Framebuffer,
     blur_tex_b: glow::Texture,
-    // Current allocated size (downsampled for JFA, full for blur)
-    jfa_size: (i32, i32),
-    full_size: (i32, i32),
+    // Current logical viewport and texture-allocation state.
+    allocation: AllocationSpec,
     config: JfaConfig,
-    internal_format: u32,
     // --- Debug bookkeeping, recorded by `run()` so `debug_blit` shows real data ---
     /// Weight texture handed to the most recent `run()`. `None` before the first run.
     last_weight_tex: Option<glow::Texture>,
@@ -655,14 +653,79 @@ fn create_fbo_tex(gl: &glow::Context, w: i32, h: i32, format: u32) -> Result<(gl
     }
 }
 
-/// Resolution of the JFA ping-pong buffers for a given viewport.
-///
-/// JFA runs at `1/downsample` resolution and is bilinearly upsampled in the
-/// firmness pass; `downsample` is clamped to at least 1 and the result never
-/// degenerates to a zero-sized texture.
-fn downsampled_size(width: i32, height: i32, downsample: u32) -> (i32, i32) {
-    let ds = downsample.max(1) as i32;
-    ((width / ds).max(1), (height / ds).max(1))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EffectiveDownsample(u32);
+
+impl EffectiveDownsample {
+    const fn new(requested: u32) -> Self {
+        Self(if requested == 0 { 1 } else { requested })
+    }
+
+    const fn get(self) -> u32 {
+        self.0
+    }
+
+    fn apply_to_size(self, width: i32, height: i32) -> (i32, i32) {
+        (self.apply_to_axis(width), self.apply_to_axis(height))
+    }
+
+    fn scale_distance(self, distance: f32) -> f32 {
+        distance / self.get() as f32
+    }
+
+    fn apply_to_axis(self, length: i32) -> i32 {
+        let positive_length = length.max(1) as u32;
+        (positive_length / self.get()).max(1) as i32
+    }
+}
+
+/// The dimensions and precision that determine internal texture storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AllocationSpec {
+    full_size: (i32, i32),
+    jfa_size: (i32, i32),
+    precision: Precision,
+    effective_downsample: EffectiveDownsample,
+}
+
+impl AllocationSpec {
+    fn for_config(width: i32, height: i32, config: &JfaConfig) -> Self {
+        let effective_downsample = EffectiveDownsample::new(config.downsample);
+        Self {
+            full_size: (width, height),
+            jfa_size: effective_downsample.apply_to_size(width, height),
+            precision: config.precision,
+            effective_downsample,
+        }
+    }
+
+    const fn uninitialized(config: &JfaConfig) -> Self {
+        Self {
+            full_size: (0, 0),
+            jfa_size: (0, 0),
+            precision: config.precision,
+            effective_downsample: EffectiveDownsample::new(config.downsample),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReallocationDecision {
+    jfa_ping_pong: bool,
+    firmness: bool,
+    blur_ping_pong: bool,
+}
+
+impl ReallocationDecision {
+    fn between(current: AllocationSpec, desired: AllocationSpec) -> Self {
+        let full_size_changed = current.full_size != desired.full_size;
+        let precision_changed = current.precision != desired.precision;
+        Self {
+            jfa_ping_pong: current.jfa_size != desired.jfa_size || precision_changed,
+            firmness: full_size_changed || precision_changed,
+            blur_ping_pong: full_size_changed,
+        }
+    }
 }
 
 /// Number of mip levels (including level 0) used by the mip-blur path.
@@ -742,6 +805,7 @@ impl JfaPipeline {
         let blur_tex_b = textures.stage(blur_tex_b);
         let blur_fbo_b = framebuffers.stage(blur_fbo_b);
 
+        let allocation = AllocationSpec::uninitialized(&config);
         let pipeline = JfaPipeline {
             prog_init, prog_step, prog_firmness,
             prog_weight_radial, prog_weight_conformal,
@@ -752,7 +816,7 @@ impl JfaPipeline {
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex,
             blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
-            jfa_size: (0, 0), full_size: (0, 0), config, internal_format: fmt,
+            allocation, config,
             last_weight_tex: None, jfa_result_in_ping: false,
         };
         programs.disarm();
@@ -762,38 +826,44 @@ impl JfaPipeline {
         Ok(pipeline)
     }
 
-    /// Resize internal textures to match viewport. Call when viewport changes.
+    /// Reconcile internal texture storage with the viewport and configuration.
+    /// Call after changing `downsample` or `precision`, even at the same viewport size.
     pub fn resize(&mut self, gl: &glow::Context, width: i32, height: i32) {
-        if self.full_size == (width, height) { return; }
-        self.full_size = (width, height);
-
-        let (jw, jh) = downsampled_size(width, height, self.config.downsample);
-        self.jfa_size = (jw, jh);
-
-        let fmt = self.internal_format;
+        let desired = AllocationSpec::for_config(width, height, &self.config);
+        if self.allocation == desired { return; }
+        let reallocate = ReallocationDecision::between(self.allocation, desired);
+        let (jw, jh) = desired.jfa_size;
+        let fmt = match desired.precision {
+            Precision::Float32 => glow::RGBA32F,
+            Precision::Float16 => glow::RGBA16F,
+        };
         let (ext_format, ext_type) = match fmt {
             glow::RGBA32F => (glow::RGBA, glow::FLOAT),
             glow::RGBA16F => (glow::RGBA, glow::HALF_FLOAT),
             _ => (glow::RGBA, glow::UNSIGNED_BYTE),
         };
         unsafe {
-            // Resize JFA ping/pong (downsampled)
-            for tex in [self.ping_tex, self.pong_tex] {
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, jw, jh, 0,
+            if reallocate.jfa_ping_pong {
+                for tex in [self.ping_tex, self.pong_tex] {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, jw, jh, 0,
+                        ext_format, ext_type, glow::PixelUnpackData::Slice(None));
+                }
+            }
+            if reallocate.firmness {
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
                     ext_format, ext_type, glow::PixelUnpackData::Slice(None));
             }
-            // Resize firmness (full res)
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
-                ext_format, ext_type, glow::PixelUnpackData::Slice(None));
-            // Resize blur ping-pong (full res, RGBA8)
-            for tex in [self.blur_tex, self.blur_tex_b] {
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
-                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            if reallocate.blur_ping_pong {
+                for tex in [self.blur_tex, self.blur_tex_b] {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0,
+                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                }
             }
         }
+        self.allocation = desired;
     }
 
     /// Run the full JFA blur pipeline.
@@ -808,8 +878,8 @@ impl JfaPipeline {
         scene_tex: glow::Texture,
         output_fbo: Option<glow::Framebuffer>,
     ) {
-        let (fw, fh) = self.full_size;
-        let (jw, jh) = self.jfa_size;
+        let (fw, fh) = self.allocation.full_size;
+        let (jw, jh) = self.allocation.jfa_size;
         if fw == 0 || fh == 0 { return; }
 
         // The weight texture is used as-is — the old pre-blur pass was removed because
@@ -930,7 +1000,12 @@ impl JfaPipeline {
                 gl.uniform_2_f32(Some(&loc), jw as f32, jh as f32);
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_max_distance") {
-                gl.uniform_1_f32(Some(&loc), self.config.max_distance / self.config.downsample as f32);
+                gl.uniform_1_f32(
+                    Some(&loc),
+                    self.allocation
+                        .effective_downsample
+                        .scale_distance(self.config.max_distance),
+                );
             }
             if let Some(loc) = gl.get_uniform_location(self.prog_firmness, "u_focus") {
                 gl.uniform_1_f32(Some(&loc), self.config.focus);
@@ -1308,7 +1383,7 @@ impl JfaPipeline {
         scene_tex: glow::Texture,
         output_fbo: Option<glow::Framebuffer>,
     ) {
-        let (fw, fh) = self.full_size;
+        let (fw, fh) = self.allocation.full_size;
         if fw == 0 || fh == 0 { return; }
         self.generate_radial_weight(gl, weight_fbo, fw, fh);
         self.run(gl, weight_tex, scene_tex, output_fbo);
@@ -1333,7 +1408,7 @@ impl JfaPipeline {
         debug_stage: u32,
         output_fbo: Option<glow::Framebuffer>,
     ) {
-        let (fw, fh) = self.full_size;
+        let (fw, fh) = self.allocation.full_size;
         if fw == 0 || fh == 0 { return; }
         // Every stage shows a product of the last run; before that they are all
         // uninitialized textures, so draw nothing rather than garbage.
@@ -1369,7 +1444,8 @@ impl JfaPipeline {
         self.firmness_tex
     }
 
-    /// Update configuration. Textures are NOT resized — call resize() if downsample changed.
+    /// Update configuration. Call [`resize`](Self::resize) afterward when changing
+    /// `downsample` or `precision`; a same-size call applies the new allocation state.
     pub fn set_config(&mut self, config: JfaConfig) {
         self.config = config;
     }
@@ -1530,13 +1606,93 @@ mod tests {
     }
 
     #[test]
-    fn downsample_never_produces_empty_buffers() {
-        assert_eq!(downsampled_size(1920, 1080, 2), (960, 540));
-        assert_eq!(downsampled_size(1920, 1080, 4), (480, 270));
-        // downsample=0 is treated as 1 rather than dividing by zero
-        assert_eq!(downsampled_size(800, 600, 0), (800, 600));
-        // A viewport smaller than the downsample factor still yields a 1x1 buffer
-        assert_eq!(downsampled_size(3, 1, 8), (1, 1));
+    fn effective_downsample_is_shared_by_size_and_distance() {
+        let half = EffectiveDownsample::new(2);
+        assert_eq!(half.apply_to_size(1920, 1080), (960, 540));
+        assert_eq!(half.scale_distance(11.0), 5.5);
+
+        let clamped = EffectiveDownsample::new(0);
+        assert_eq!(clamped.get(), 1);
+        assert_eq!(clamped.apply_to_size(800, 600), (800, 600));
+        assert_eq!(clamped.scale_distance(11.0), 11.0);
+
+        assert_eq!(EffectiveDownsample::new(8).apply_to_size(3, 1), (1, 1));
+        assert_eq!(
+            EffectiveDownsample::new(u32::MAX).apply_to_size(i32::MAX, i32::MAX),
+            (1, 1),
+        );
+    }
+
+    #[test]
+    fn allocation_decision_tracks_size_downsample_and_precision() {
+        let config = JfaConfig {
+            downsample: 2,
+            precision: Precision::Float16,
+            ..JfaConfig::default()
+        };
+        let current = AllocationSpec::for_config(1920, 1080, &config);
+        assert_eq!(current.jfa_size, (960, 540));
+        assert_eq!(
+            ReallocationDecision::between(current, current),
+            ReallocationDecision {
+                jfa_ping_pong: false,
+                firmness: false,
+                blur_ping_pong: false,
+            },
+        );
+
+        let mut dynamic_only = config.clone();
+        dynamic_only.blur_strength = 2.5;
+        assert_eq!(
+            ReallocationDecision::between(
+                current,
+                AllocationSpec::for_config(1920, 1080, &dynamic_only),
+            ),
+            ReallocationDecision {
+                jfa_ping_pong: false,
+                firmness: false,
+                blur_ping_pong: false,
+            },
+        );
+
+        let mut downsampled = config.clone();
+        downsampled.downsample = 4;
+        let downsampled = AllocationSpec::for_config(1920, 1080, &downsampled);
+        assert_eq!(downsampled.jfa_size, (480, 270));
+        assert_eq!(
+            ReallocationDecision::between(current, downsampled),
+            ReallocationDecision {
+                jfa_ping_pong: true,
+                firmness: false,
+                blur_ping_pong: false,
+            },
+        );
+
+        let mut precise = config.clone();
+        precise.precision = Precision::Float32;
+        assert_eq!(
+            ReallocationDecision::between(
+                current,
+                AllocationSpec::for_config(1920, 1080, &precise),
+            ),
+            ReallocationDecision {
+                jfa_ping_pong: true,
+                firmness: true,
+                blur_ping_pong: false,
+            },
+        );
+
+        assert_eq!(
+            ReallocationDecision::between(
+                current,
+                AllocationSpec::for_config(1280, 720, &config),
+            ),
+            ReallocationDecision {
+                jfa_ping_pong: true,
+                firmness: true,
+                blur_ping_pong: true,
+            },
+        );
     }
 
     #[test]
