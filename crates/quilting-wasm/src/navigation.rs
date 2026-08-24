@@ -1,6 +1,6 @@
 use hyperscape::{
-    CameraBasis, CameraRig, FocusSphere, NavigationAction, NavigationController, NavigationFrame,
-    NavigationPreset, PerspectiveLens, PresentationRuntime, PresentationSnapshot,
+    CameraBasis, CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
+    NavigationFrame, NavigationPreset, PerspectiveLens, PresentationRuntime, PresentationSnapshot,
     SphereReflectionState, SurfaceAnchorTarget, TransitionEasing,
 };
 use serde::Serialize;
@@ -49,42 +49,25 @@ impl HyperscopeNavigation {
         focus_coordinate: f64,
         angular_aperture: f64,
     ) -> Result<(), JsValue> {
-        let eye = vector3(eye, "camera eye")?;
-        let basis = CameraBasis::from_forward_up(
-            vector3(forward, "camera forward")?,
-            vector3(up, "camera up")?,
-        )
-        .map_err(js_error)?;
-        let semantic_target = optional_vector3(semantic_target, "camera target")?;
-        let camera = CameraRig::new(
+        let (camera, focus) = synchronized_navigation_state(
             eye,
-            basis,
+            forward,
+            up,
             control_distance,
             semantic_target,
-            PerspectiveLens::default(),
-        )
-        .map_err(js_error)?;
-        let sphere = FocusSphere::new(vector3(focus_center, "focus center")?, focus_radius)
-            .map_err(js_error)?;
-        if !focus_coordinate.is_finite()
-            || !(0.0..=1.0).contains(&focus_coordinate)
-            || !angular_aperture.is_finite()
-            || angular_aperture <= 0.0
-        {
-            return Err(JsValue::from_str(
-                "focus coordinate must be in [0,1] and aperture must be positive",
-            ));
-        }
+            focus_center,
+            focus_radius,
+            focus_enabled,
+            inversion_enabled,
+            focus_coordinate,
+            angular_aperture,
+        )?;
 
         self.controller = NavigationController::default();
         self.controller.camera = camera;
-        self.controller.focus.sphere = sphere;
-        self.controller.focus.focus_enabled = focus_enabled;
-        self.controller.focus.inversion_enabled = inversion_enabled;
-        self.controller.focus.focus_coordinate = focus_coordinate;
-        self.controller.focus.angular_aperture = angular_aperture;
+        self.controller.focus = focus;
         self.controller.runtime.reflection = if inversion_enabled {
-            SphereReflectionState::Sphere(sphere)
+            SphereReflectionState::Sphere(self.controller.focus.sphere)
         } else {
             SphereReflectionState::Identity
         };
@@ -452,6 +435,60 @@ struct FocusSnapshot {
     focus_coordinate: f64,
     angular_aperture: f64,
     focus_transition_remaining: Option<f64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn synchronized_navigation_state(
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    control_distance: f64,
+    semantic_target: &[f64],
+    focus_center: &[f64],
+    focus_radius: f64,
+    focus_enabled: bool,
+    inversion_enabled: bool,
+    focus_coordinate: f64,
+    angular_aperture: f64,
+) -> Result<(CameraRig, FocusNavigation), JsValue> {
+    let eye = vector3(eye, "camera eye")?;
+    let basis = CameraBasis::from_forward_up(
+        vector3(forward, "camera forward")?,
+        vector3(up, "camera up")?,
+    )
+    .map_err(js_error)?;
+    let semantic_target = optional_vector3(semantic_target, "camera target")?;
+    let camera = CameraRig::new(
+        eye,
+        basis,
+        control_distance,
+        semantic_target,
+        PerspectiveLens::default(),
+    )
+    .map_err(js_error)?;
+    let sphere =
+        FocusSphere::new(vector3(focus_center, "focus center")?, focus_radius).map_err(js_error)?;
+    if !focus_coordinate.is_finite()
+        || !(0.0..=1.0).contains(&focus_coordinate)
+        || !angular_aperture.is_finite()
+        || angular_aperture <= 0.0
+    {
+        return Err(JsValue::from_str(
+            "focus coordinate must be in [0,1] and aperture must be positive",
+        ));
+    }
+    Ok((
+        camera,
+        FocusNavigation {
+            sphere,
+            anchor: None,
+            transition: None,
+            focus_enabled,
+            inversion_enabled,
+            focus_coordinate,
+            angular_aperture,
+        },
+    ))
 }
 
 fn vector3(values: &[f64], label: &str) -> Result<[f64; 3], JsValue> {

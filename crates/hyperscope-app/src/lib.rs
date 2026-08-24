@@ -14,8 +14,8 @@ pub use settings::*;
 use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
-    CameraRig, FocusNavigation, NavigationAction, NavigationController, Presentation,
-    PresentationRuntime, PresentationSnapshot, ScheduledNavigationAction,
+    CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController, Presentation,
+    PresentationRuntime, PresentationSnapshot, ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
@@ -74,6 +74,15 @@ pub struct FrameTick {
     pub delta_seconds: f64,
 }
 
+/// Settled semantic navigation state supplied by a platform adapter before a
+/// low-rate authored transition. Process-local focus anchors and in-flight
+/// transitions are intentionally not admissible through this boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavigationSynchronization {
+    pub camera: CameraRig,
+    pub focus: FocusNavigation,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReceivedPresence {
     pub envelope: PresenceEnvelope,
@@ -116,6 +125,7 @@ pub enum EffectCompletion {
 pub enum AppEvent {
     Input(Timed<SemanticAction>),
     PresentationLoaded(Presentation),
+    NavigationSynchronized(NavigationSynchronization),
     Frame(FrameTick),
     EffectCompleted(EffectCompletion),
     RemotePresence(ReceivedPresence),
@@ -200,6 +210,8 @@ pub struct AppFrameSnapshot {
     pub elapsed_seconds: f64,
     pub camera: CameraRig,
     pub focus: FocusNavigation,
+    pub reflection: SphereReflectionState,
+    pub camera_transition_remaining: Option<f64>,
 }
 
 /// Low-rate FRP projection. Camera/focus motion stays in
@@ -255,11 +267,17 @@ impl AppState {
     }
 
     pub fn frame_snapshot(&self) -> AppFrameSnapshot {
+        let camera_transition_remaining =
+            self.navigation.runtime.camera_transition.map(|transition| {
+                (transition.duration_seconds - transition.elapsed_seconds).max(0.0)
+            });
         AppFrameSnapshot {
             revision: self.revision,
             elapsed_seconds: self.frame_elapsed_seconds,
             camera: self.navigation.camera,
             focus: self.navigation.focus.clone(),
+            reflection: self.navigation.runtime.reflection,
+            camera_transition_remaining,
         }
     }
 
@@ -348,6 +366,10 @@ impl AppState {
                     .map_err(|error| ReduceError::Presentation(error.to_string()))?;
                 self.presentation = Some(presentation);
                 self.active_presentation = None;
+            }
+            AppEvent::NavigationSynchronized(synchronization) => {
+                self.synchronize_navigation(synchronization)?;
+                publish_ui = false;
             }
             AppEvent::Frame(frame) => {
                 if !frame.elapsed_seconds.is_finite()
@@ -503,6 +525,49 @@ impl AppState {
         self.presentation = Some(presentation);
         self.navigation = navigation;
         self.active_presentation = Some(snapshot);
+        Ok(())
+    }
+
+    fn synchronize_navigation(
+        &mut self,
+        synchronization: NavigationSynchronization,
+    ) -> Result<(), ReduceError> {
+        synchronization
+            .camera
+            .validate()
+            .map_err(|error| ReduceError::NavigationState(error.to_string()))?;
+        FocusSphere::new(
+            synchronization.focus.sphere.center,
+            synchronization.focus.sphere.radius,
+        )
+        .map_err(|error| ReduceError::NavigationState(error.to_owned()))?;
+        if synchronization.focus.anchor.is_some() || synchronization.focus.transition.is_some() {
+            return Err(ReduceError::NavigationState(
+                "synchronized focus state must be free and settled".to_owned(),
+            ));
+        }
+        if !synchronization.focus.focus_coordinate.is_finite()
+            || !(0.0..=1.0).contains(&synchronization.focus.focus_coordinate)
+            || !synchronization.focus.angular_aperture.is_finite()
+            || synchronization.focus.angular_aperture <= 0.0
+        {
+            return Err(ReduceError::NavigationState(
+                "focus coordinate must be in [0,1] and aperture must be positive".to_owned(),
+            ));
+        }
+
+        let mut navigation = NavigationController::default();
+        navigation
+            .advance_to(self.frame_elapsed_seconds)
+            .map_err(ReduceError::Navigation)?;
+        navigation.camera = synchronization.camera;
+        navigation.focus = synchronization.focus;
+        navigation.runtime.reflection = if navigation.focus.inversion_enabled {
+            SphereReflectionState::Sphere(navigation.focus.sphere)
+        } else {
+            SphereReflectionState::Identity
+        };
+        self.navigation = navigation;
         Ok(())
     }
 
@@ -688,6 +753,7 @@ pub enum ReduceError {
     FutureEffectInput,
     FuturePresentationInput,
     Navigation(&'static str),
+    NavigationState(String),
     Presentation(String),
     NoPresentation,
     Wire(String),
@@ -706,6 +772,9 @@ impl fmt::Display for ReduceError {
             Self::FuturePresentationInput => formatter
                 .write_str("presentation input cannot be scheduled beyond the current app frame"),
             Self::Navigation(message) => write!(formatter, "navigation event failed: {message}"),
+            Self::NavigationState(message) => {
+                write!(formatter, "navigation synchronization failed: {message}")
+            }
             Self::Presentation(message) => {
                 write!(formatter, "presentation event failed: {message}")
             }
@@ -856,6 +925,64 @@ mod tests {
         }
 
         assert_eq!(run(&[1.0]), run(&[0.1; 10]));
+    }
+
+    #[test]
+    fn navigation_synchronization_is_validated_atomic_and_clock_preserving() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 2.0,
+                delta_seconds: 2.0,
+            }))
+            .unwrap();
+        let camera = CameraRig {
+            eye: [1.0, 2.0, 4.0],
+            semantic_target: Some([1.0, 2.0, 0.0]),
+            control_distance: 4.0,
+            ..CameraRig::default()
+        };
+        let focus = FocusNavigation {
+            sphere: FocusSphere::new([0.25, -0.5, 0.75], 1.5).unwrap(),
+            focus_enabled: true,
+            inversion_enabled: true,
+            focus_coordinate: 0.4,
+            angular_aperture: 0.08,
+            ..FocusNavigation::default()
+        };
+
+        let commit = store
+            .dispatch(AppEvent::NavigationSynchronized(
+                NavigationSynchronization {
+                    camera,
+                    focus: focus.clone(),
+                },
+            ))
+            .unwrap();
+        assert!(!commit.published_ui);
+        let synchronized = store.frame_snapshot();
+        assert_eq!(synchronized.elapsed_seconds, 2.0);
+        assert_eq!(synchronized.camera, camera);
+        assert_eq!(synchronized.focus, focus);
+        assert_eq!(
+            synchronized.reflection,
+            SphereReflectionState::Sphere(focus.sphere)
+        );
+        assert_eq!(synchronized.camera_transition_remaining, None);
+
+        let revision = synchronized.revision;
+        let mut invalid_focus = focus;
+        invalid_focus.sphere.radius = -1.0;
+        assert!(store
+            .dispatch(AppEvent::NavigationSynchronized(
+                NavigationSynchronization {
+                    camera,
+                    focus: invalid_focus,
+                },
+            ))
+            .is_err());
+        assert_eq!(store.frame_snapshot(), synchronized);
+        assert_eq!(store.frame_snapshot().revision, revision);
     }
 
     #[test]
