@@ -43,6 +43,61 @@ const LOD_COMPUTE_FS: &str = include_str!("../shaders/lod_compute.frag.glsl");
 const LOD_COHERENCE_VS: &str = include_str!("../shaders/lod_coherence.vert.glsl");
 const DUMMY_FS: &str = include_str!("../shaders/lod_dummy.frag.glsl");
 
+/// Owns one handle only while a multi-step GL construction is incomplete.
+/// Taking the handle transfers it to the completed owner; every early return
+/// instead releases it exactly once.
+struct StagedHandle<'a, C, T: Copy> {
+    context: &'a C,
+    handle: Option<T>,
+    delete: fn(&C, T),
+}
+
+impl<'a, C, T: Copy> StagedHandle<'a, C, T> {
+    fn new(context: &'a C, handle: T, delete: fn(&C, T)) -> Self {
+        Self { context, handle: Some(handle), delete }
+    }
+
+    fn get(&self) -> T {
+        self.handle.expect("staged handle has not been transferred")
+    }
+
+    fn into_inner(mut self) -> T {
+        self.handle.take().expect("staged handle has not been transferred")
+    }
+}
+
+impl<C, T: Copy> Drop for StagedHandle<'_, C, T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            (self.delete)(self.context, handle);
+        }
+    }
+}
+
+fn delete_program(gl: &glow::Context, program: glow::Program) {
+    unsafe { gl.delete_program(program); }
+}
+
+fn delete_shader(gl: &glow::Context, shader: glow::Shader) {
+    unsafe { gl.delete_shader(shader); }
+}
+
+fn delete_vertex_array(gl: &glow::Context, vao: glow::VertexArray) {
+    unsafe { gl.delete_vertex_array(vao); }
+}
+
+fn delete_buffer(gl: &glow::Context, buffer: glow::Buffer) {
+    unsafe { gl.delete_buffer(buffer); }
+}
+
+fn delete_framebuffer(gl: &glow::Context, framebuffer: glow::Framebuffer) {
+    unsafe { gl.delete_framebuffer(framebuffer); }
+}
+
+fn delete_transform_feedback(gl: &glow::Context, feedback: glow::TransformFeedback) {
+    unsafe { gl.delete_transform_feedback(feedback); }
+}
+
 /// Two-pass LOD compute pipeline.
 /// Pass 1: FBO render (LOD exponents → RGBA32F texture, one pixel per face)
 /// Pass 2: Transform feedback (edge coherence + canonicalize → readback buffer)
@@ -128,41 +183,53 @@ impl LodCompute {
     pub fn new(gl: &glow::Context, max_faces: usize) -> Result<Self, String> {
         unsafe {
             // --- Pass 1: regular program (renders to FBO, not TF) ---
-            let program1 = build_program(gl, LOD_COMPUTE_VS, LOD_COMPUTE_FS, "LOD pass 1")?;
+            let program1 = StagedHandle::new(
+                gl,
+                build_program(gl, LOD_COMPUTE_VS, LOD_COMPUTE_FS, "LOD pass 1")?,
+                delete_program,
+            );
 
             let req = |prog, name: &str| -> Result<glow::UniformLocation, String> {
                 gl.get_uniform_location(prog, name)
                     .ok_or_else(|| format!("{name} uniform not found in pass 1"))
             };
 
-            let mob_a_loc = req(program1, "mob_a")?;
-            let mob_b_loc = req(program1, "mob_b")?;
-            let mob_c_loc = req(program1, "mob_c")?;
-            let mob_d_loc = req(program1, "mob_d")?;
-            let u_pole_loc = gl.get_uniform_location(program1, "u_pole");
-            let u_mob_k_loc = gl.get_uniform_location(program1, "u_mob_k");
-            let u_c_norm_sq_loc = gl.get_uniform_location(program1, "u_c_norm_sq");
-            let u_has_pole_loc = gl.get_uniform_location(program1, "u_has_pole");
-            let model_matrix_loc = req(program1, "model_matrix")?;
-            let density_loc = req(program1, "density")?;
-            let mesh_radius_loc = req(program1, "mesh_radius")?;
-            let min_px_loc = req(program1, "min_px")?;
-            let max_lod_loc = req(program1, "max_lod")?;
-            let vp_matrix_loc = req(program1, "vp_matrix")?;
-            let vp_width_loc = req(program1, "vp_width")?;
-            let vp_height_loc = req(program1, "vp_height")?;
-            let num_verts_loc = gl.get_uniform_location(program1, "u_num_vertices");
-            let num_joints_loc = gl.get_uniform_location(program1, "u_num_joints");
-            let num_morph_loc = gl.get_uniform_location(program1, "u_num_morph_targets");
-            let fbo_width_loc = gl.get_uniform_location(program1, "u_fbo_width");
-            let fbo_height_loc = gl.get_uniform_location(program1, "u_fbo_height");
+            let mob_a_loc = req(program1.get(), "mob_a")?;
+            let mob_b_loc = req(program1.get(), "mob_b")?;
+            let mob_c_loc = req(program1.get(), "mob_c")?;
+            let mob_d_loc = req(program1.get(), "mob_d")?;
+            let u_pole_loc = gl.get_uniform_location(program1.get(), "u_pole");
+            let u_mob_k_loc = gl.get_uniform_location(program1.get(), "u_mob_k");
+            let u_c_norm_sq_loc = gl.get_uniform_location(program1.get(), "u_c_norm_sq");
+            let u_has_pole_loc = gl.get_uniform_location(program1.get(), "u_has_pole");
+            let model_matrix_loc = req(program1.get(), "model_matrix")?;
+            let density_loc = req(program1.get(), "density")?;
+            let mesh_radius_loc = req(program1.get(), "mesh_radius")?;
+            let min_px_loc = req(program1.get(), "min_px")?;
+            let max_lod_loc = req(program1.get(), "max_lod")?;
+            let vp_matrix_loc = req(program1.get(), "vp_matrix")?;
+            let vp_width_loc = req(program1.get(), "vp_width")?;
+            let vp_height_loc = req(program1.get(), "vp_height")?;
+            let num_verts_loc = gl.get_uniform_location(program1.get(), "u_num_vertices");
+            let num_joints_loc = gl.get_uniform_location(program1.get(), "u_num_joints");
+            let num_morph_loc = gl.get_uniform_location(program1.get(), "u_num_morph_targets");
+            let fbo_width_loc = gl.get_uniform_location(program1.get(), "u_fbo_width");
+            let fbo_height_loc = gl.get_uniform_location(program1.get(), "u_fbo_height");
 
             // Pass 1 VAO + input buffer
-            let vao1 = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
-            gl.bind_vertex_array(Some(vao1));
+            let vao1 = StagedHandle::new(
+                gl,
+                gl.create_vertex_array().map_err(|e| format!("{e}"))?,
+                delete_vertex_array,
+            );
+            gl.bind_vertex_array(Some(vao1.get()));
 
-            let input_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(input_buf));
+            let input_buf = StagedHandle::new(
+                gl,
+                gl.create_buffer().map_err(|e| format!("{e}"))?,
+                delete_buffer,
+            );
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(input_buf.get()));
             gl.buffer_data_size(glow::ARRAY_BUFFER,
                 (max_faces * 3 * 4) as i32, glow::STATIC_DRAW);
             gl.enable_vertex_attrib_array(0);
@@ -170,35 +237,68 @@ impl LodCompute {
             gl.bind_vertex_array(None);
 
             // Pass 1 FBO (texture attached in upload_adjacency when we know num_faces)
-            let pass1_fbo = gl.create_framebuffer().map_err(|e| format!("{e}"))?;
+            let pass1_fbo = StagedHandle::new(
+                gl,
+                gl.create_framebuffer().map_err(|e| format!("{e}"))?,
+                delete_framebuffer,
+            );
 
             // --- Pass 2: TF program ---
-            let program2 = build_tf_program(gl, LOD_COHERENCE_VS, DUMMY_FS,
-                &["out_canon_a", "out_canon_b", "out_canon_c", "out_perm_index", "out_parity", "out_atlas_index"],
-                "LOD pass 2")?;
+            let program2 = StagedHandle::new(
+                gl,
+                build_tf_program(gl, LOD_COHERENCE_VS, DUMMY_FS,
+                    &["out_canon_a", "out_canon_b", "out_canon_c", "out_perm_index", "out_parity", "out_atlas_index"],
+                    "LOD pass 2")?,
+                delete_program,
+            );
 
-            let vao2 = gl.create_vertex_array().map_err(|e| format!("{e}"))?;
+            let vao2 = StagedHandle::new(
+                gl,
+                gl.create_vertex_array().map_err(|e| format!("{e}"))?,
+                delete_vertex_array,
+            );
 
-            let output_buf2 = gl.create_buffer().map_err(|e| format!("{e}"))?;
-            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(output_buf2));
+            let output_buf2 = StagedHandle::new(
+                gl,
+                gl.create_buffer().map_err(|e| format!("{e}"))?,
+                delete_buffer,
+            );
+            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(output_buf2.get()));
             gl.buffer_data_size(glow::TRANSFORM_FEEDBACK_BUFFER,
                 (max_faces * FLOATS_PER_FACE_OUTPUT * 4) as i32,
                 glow::DYNAMIC_READ);
 
-            let tf2 = gl.create_transform_feedback().map_err(|e| format!("{e}"))?;
+            let tf2 = StagedHandle::new(
+                gl,
+                gl.create_transform_feedback().map_err(|e| format!("{e}"))?,
+                delete_transform_feedback,
+            );
+
+            let pos_loc = gl.get_uniform_location(program1.get(), "u_positions");
+            let skinning_loc = gl.get_uniform_location(program1.get(), "u_skinning");
+            let joints_loc = gl.get_uniform_location(program1.get(), "u_joints");
+            let morph_deltas_loc = gl.get_uniform_location(program1.get(), "u_morph_deltas");
+            let morph_wt_loc = gl.get_uniform_location(program1.get(), "u_morph_wt");
+            let p2_lods_loc = gl.get_uniform_location(program2.get(), "u_pass1_lods");
+            let p2_adj_loc = gl.get_uniform_location(program2.get(), "u_adjacency");
+            let p2_lut_loc = gl.get_uniform_location(program2.get(), "u_atlas_lut");
+            let p2_num_faces_loc = gl.get_uniform_location(program2.get(), "u_num_faces");
 
             Ok(Self {
-                program1, vao1, input_buf, pass1_fbo,
+                program1: program1.into_inner(),
+                vao1: vao1.into_inner(),
+                input_buf: input_buf.into_inner(),
+                pass1_fbo: pass1_fbo.into_inner(),
                 pass1_texture: None, pass1_tex_w: 0, pass1_tex_h: 0,
                 pos_texture: None, skinning_texture: None, joints_texture: None,
                 joints_texture_capacity: 0,
                 morph_texture: None, morph_wt_texture: None,
                 morph_wt_texture_capacity: 0,
-                pos_loc: gl.get_uniform_location(program1, "u_positions"),
-                skinning_loc: gl.get_uniform_location(program1, "u_skinning"),
-                joints_loc: gl.get_uniform_location(program1, "u_joints"),
-                morph_deltas_loc: gl.get_uniform_location(program1, "u_morph_deltas"),
-                morph_wt_loc: gl.get_uniform_location(program1, "u_morph_wt"),
+                pos_loc,
+                skinning_loc,
+                joints_loc,
+                morph_deltas_loc,
+                morph_wt_loc,
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 u_pole_loc, u_mob_k_loc, u_c_norm_sq_loc, u_has_pole_loc,
                 model_matrix_loc,
@@ -207,13 +307,16 @@ impl LodCompute {
                 num_verts_loc, num_joints_loc, num_morph_loc,
                 fbo_width_loc, fbo_height_loc,
 
-                program2, vao2, output_buf2, tf2,
+                program2: program2.into_inner(),
+                vao2: vao2.into_inner(),
+                output_buf2: output_buf2.into_inner(),
+                tf2: tf2.into_inner(),
                 adjacency_texture: None,
                 lut_texture: None,
-                p2_lods_loc: gl.get_uniform_location(program2, "u_pass1_lods"),
-                p2_adj_loc: gl.get_uniform_location(program2, "u_adjacency"),
-                p2_lut_loc: gl.get_uniform_location(program2, "u_atlas_lut"),
-                p2_num_faces_loc: gl.get_uniform_location(program2, "u_num_faces"),
+                p2_lods_loc,
+                p2_adj_loc,
+                p2_lut_loc,
+                p2_num_faces_loc,
 
                 max_faces,
                 bound1: false,
@@ -773,23 +876,33 @@ fn build_program(
     label: &str,
 ) -> Result<glow::Program, String> {
     unsafe {
-        let vs = compile_shader(gl, glow::VERTEX_SHADER, vs_src)?;
-        let fs = compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?;
+        let vs = StagedHandle::new(
+            gl,
+            compile_shader(gl, glow::VERTEX_SHADER, vs_src)?,
+            delete_shader,
+        );
+        let fs = StagedHandle::new(
+            gl,
+            compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?,
+            delete_shader,
+        );
 
-        let program = gl.create_program().map_err(|e| format!("{e}"))?;
-        gl.attach_shader(program, vs);
-        gl.attach_shader(program, fs);
+        let program = StagedHandle::new(
+            gl,
+            gl.create_program().map_err(|e| format!("{e}"))?,
+            delete_program,
+        );
+        gl.attach_shader(program.get(), vs.get());
+        gl.attach_shader(program.get(), fs.get());
 
-        gl.link_program(program);
-        if !gl.get_program_link_status(program) {
-            let log = gl.get_program_info_log(program);
+        gl.link_program(program.get());
+        if !gl.get_program_link_status(program.get()) {
+            let log = gl.get_program_info_log(program.get());
             return Err(format!("{label} link: {log}"));
         }
-        gl.detach_shader(program, vs);
-        gl.detach_shader(program, fs);
-        gl.delete_shader(vs);
-        gl.delete_shader(fs);
-        Ok(program)
+        gl.detach_shader(program.get(), vs.get());
+        gl.detach_shader(program.get(), fs.get());
+        Ok(program.into_inner())
     }
 }
 
@@ -837,6 +950,42 @@ fn bytemuck_cast_slice_mut(data: &mut [f32]) -> &mut [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn staged_handle_releases_an_untransferred_resource_exactly_once() {
+        let deleted = RefCell::new(Vec::new());
+        {
+            let _staged = StagedHandle::new(&deleted, 17_u32, |deleted, handle| {
+                deleted.borrow_mut().push(handle);
+            });
+        }
+        assert_eq!(*deleted.borrow(), vec![17]);
+    }
+
+    #[test]
+    fn staged_handle_does_not_release_a_transferred_resource() {
+        let deleted = RefCell::new(Vec::new());
+        let handle = StagedHandle::new(&deleted, 23_u32, |deleted, handle| {
+            deleted.borrow_mut().push(handle);
+        }).into_inner();
+        assert_eq!(handle, 23);
+        assert!(deleted.borrow().is_empty());
+    }
+
+    #[test]
+    fn staged_handles_release_in_reverse_construction_order() {
+        let deleted = RefCell::new(Vec::new());
+        {
+            let _shader = StagedHandle::new(&deleted, "shader", |deleted, handle| {
+                deleted.borrow_mut().push(handle);
+            });
+            let _program = StagedHandle::new(&deleted, "program", |deleted, handle| {
+                deleted.borrow_mut().push(handle);
+            });
+        }
+        assert_eq!(*deleted.borrow(), vec!["program", "shader"]);
+    }
 
     #[test]
     fn visibility_payload_survives_both_gpu_passes() {

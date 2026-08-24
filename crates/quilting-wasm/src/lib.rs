@@ -237,6 +237,91 @@ pub fn build_required_atlas(max_lod_exp: u32, max_face_edge_ratio: u32) -> f64 {
     elapsed
 }
 
+fn replace_retained_state<T, P>(
+    current: &mut Option<T>,
+    pending: &mut Option<P>,
+    replacement: T,
+    release: impl FnOnce(T, Option<P>),
+) {
+    match current.take() {
+        Some(previous) => release(previous, pending.take()),
+        None => {
+            debug_assert!(pending.is_none(), "pending work exists without retained state");
+            pending.take();
+        }
+    }
+    *current = Some(replacement);
+}
+
+#[cfg(test)]
+mod gpu_compute_lifecycle_tests {
+    use super::replace_retained_state;
+
+    #[test]
+    fn replacement_releases_pending_work_with_the_previous_state() {
+        let mut current = Some("old context");
+        let mut pending = Some("old fence");
+        let mut released = None;
+
+        replace_retained_state(
+            &mut current,
+            &mut pending,
+            "new context",
+            |old, work| released = Some((old, work)),
+        );
+
+        assert_eq!(released, Some(("old context", Some("old fence"))));
+        assert_eq!(current, Some("new context"));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn first_install_does_not_run_retirement_cleanup() {
+        let mut current = None;
+        let mut pending: Option<&str> = None;
+        let mut released = false;
+
+        replace_retained_state(
+            &mut current,
+            &mut pending,
+            "first context",
+            |_, _| released = true,
+        );
+
+        assert!(!released);
+        assert_eq!(current, Some("first context"));
+    }
+}
+
+fn release_pending_lod_job(
+    gl: &glow::Context,
+    compute: &mut LodCompute,
+    job: PendingAnimatedLods,
+) {
+    unsafe { gl.delete_sync(job.fence); }
+    for run in job.runs {
+        compute.discard_staged_readback(gl, run.readback);
+    }
+}
+
+fn install_gpu_compute(gl: glow::Context, compute: LodCompute) {
+    PENDING_ANIMATED_LODS.with(|pending| {
+        GPU_COMPUTE.with(|gpu_compute| {
+            replace_retained_state(
+                &mut gpu_compute.borrow_mut(),
+                &mut pending.borrow_mut(),
+                (gl, compute),
+                |(old_gl, mut old_compute), pending_job| {
+                    if let Some(job) = pending_job {
+                        release_pending_lod_job(&old_gl, &mut old_compute, job);
+                    }
+                    old_compute.destroy(&old_gl);
+                },
+            );
+        });
+    });
+}
+
 /// Initialize GPU compute context using OffscreenCanvas.
 /// Call once per worker — creates a WebGL2 context for transform feedback LOD computation.
 #[wasm_bindgen]
@@ -265,7 +350,7 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
 
     match LodCompute::new(&gl, max_faces as usize) {
         Ok(compute) => {
-            GPU_COMPUTE.with(|gc| *gc.borrow_mut() = Some((gl, compute)));
+            install_gpu_compute(gl, compute);
             true
         }
         Err(e) => {
@@ -921,10 +1006,7 @@ pub fn cancel_animated_lods() -> bool {
     };
     GPU_COMPUTE.with(|gc| {
         if let Some((gl, compute)) = gc.borrow_mut().as_mut() {
-            unsafe { gl.delete_sync(job.fence); }
-            for run in job.runs {
-                compute.discard_staged_readback(gl, run.readback);
-            }
+            release_pending_lod_job(gl, compute, job);
         }
     });
     true
