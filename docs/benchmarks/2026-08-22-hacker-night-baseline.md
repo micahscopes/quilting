@@ -150,6 +150,21 @@ error. The generated app smoke covered load/start/jump plus malformed-jump
 atomicity. This adapter increased optimized WASM from 5,960,031 to 5,965,208
 bytes (5,177 raw); gzip increased from 2,089,818 to 2,093,926 bytes.
 
+The presentation pose gate then added an atomic, clock-preserving navigation
+synchronization event and frame-by-frame camera/focus comparison. Its
+generated-WASM oracle matched the incumbent controller exactly at the midpoint
+and endpoint of the opening transition, then across twelve 0.1-second samples
+of the inversion cue, including basis vectors, semantic target, focus sphere,
+reflection state, and remaining transition clocks. The browser gate uses one
+`tickPresentation` call only during an active transition and returns at most 25
+numeric scalars, three booleans, and one reflection tag; it emits no traffic
+while settled or with `appshadow=0`.
+
+Navigation synchronization plus the pose observer increased optimized WASM
+from 5,965,208 to 5,971,073 bytes (5,865 raw); gzip increased from 2,093,926 to
+2,097,167 bytes. Live browser samples remain pending until a user-run Quilting
+tab is available.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:

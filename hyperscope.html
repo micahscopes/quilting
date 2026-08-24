@@ -1481,19 +1481,52 @@ globalThis.__hyperscopePresentation = rustPresentationDiagnostics;
 function synchronizeRustPresentationFromBrowser() {
   if (!rustPresentationController) return;
   const state = manualNavigationState();
+  const eye = new Float64Array(state.eye);
+  const forward = new Float64Array(state.forward);
+  const up = new Float64Array(state.up);
+  const semanticTarget = state.inversionEnabled
+    ? new Float64Array()
+    : new Float64Array(state.target);
+  const focusCenter = new Float64Array(state.focusCenter);
+  const focusCoordinate = fz.focus.peek() / 100;
+  const angularAperture = Math.max(fz.bandwidth.peek() / 100, 1e-6);
   rustPresentationController.synchronizeState(
-    new Float64Array(state.eye),
-    new Float64Array(state.forward),
-    new Float64Array(state.up),
+    eye,
+    forward,
+    up,
     state.controlDistance,
-    state.inversionEnabled ? new Float64Array() : new Float64Array(state.target),
-    new Float64Array(state.focusCenter),
+    semanticTarget,
+    focusCenter,
     state.focusRadius,
     state.focusEnabled,
     state.inversionEnabled,
-    fz.focus.peek() / 100,
-    Math.max(fz.bandwidth.peek() / 100, 1e-6),
+    focusCoordinate,
+    angularAperture,
   );
+  if (rustAppShadow) {
+    rustAppPresentationPoseReady = false;
+    try {
+      rustAppShadowDiagnostics.lastCommit = rustAppShadow.synchronizeNavigation(
+        eye,
+        forward,
+        up,
+        state.controlDistance,
+        semanticTarget,
+        focusCenter,
+        state.focusRadius,
+        state.focusEnabled,
+        state.inversionEnabled,
+        focusCoordinate,
+        angularAperture,
+      );
+      rustAppShadowDiagnostics.navigationSynchronizations += 1;
+    } catch (error) {
+      recordAppShadowMismatch(
+        'presentation_navigation_sync',
+        error?.message || String(error),
+      );
+    }
+  }
 }
 
 function renderRustPresentationSnapshot(snapshot) {
@@ -1682,6 +1715,19 @@ function tickRustPresentation(deltaSeconds, nowMs) {
   if (!rustPresentationController || !rustPresentationTransitionActive) return;
   try {
     const navigation = rustPresentationController.tick(deltaSeconds);
+    if (rustAppPresentationPoseReady) {
+      try {
+        const shadowNavigation = rustAppShadow.tickPresentation(deltaSeconds);
+        rustAppShadowDiagnostics.presentationFrameCalls += 1;
+        compareAppPresentationPose(navigation, shadowNavigation);
+      } catch (error) {
+        rustAppPresentationPoseReady = false;
+        recordAppShadowMismatch(
+          'presentation_tick_exception',
+          error?.message || String(error),
+        );
+      }
+    }
     applyRustPresentationNavigation(navigation);
     const remaining = Math.max(
       navigation.camera.camera_transition_remaining || 0,
@@ -1853,6 +1899,7 @@ let rustAppShadow = null;
 let rustAppShadowSequence = 0;
 let rustAppShadowRequestOrdinal = 0;
 let rustAppShadowAssetOrdinal = 0;
+let rustAppPresentationPoseReady = false;
 const rustAppShadowAssetIds = new Map();
 const rustAppShadowDiagnostics = {
   enabled: RUST_APP_SHADOW_ENABLED,
@@ -1864,6 +1911,11 @@ const rustAppShadowDiagnostics = {
   staleCompletions: 0,
   presentationLoads: 0,
   presentationComparisons: 0,
+  navigationSynchronizations: 0,
+  presentationFrameCalls: 0,
+  presentationPoseComparisons: 0,
+  presentationPoseMismatches: 0,
+  maximumPresentationPoseError: 0,
   mismatches: [],
   lastCommit: null,
   snapshot: null,
@@ -1899,19 +1951,89 @@ function refreshAppShadowSnapshot() {
   return snapshot;
 }
 
+function compareAppPresentationPose(expected, actual) {
+  const errors = [];
+  const scalar = (label, left, right) => {
+    if (left == null || right == null) {
+      if (left !== right) errors.push([label, Infinity]);
+      return;
+    }
+    errors.push([label, Math.abs(Number(left) - Number(right))]);
+  };
+  const vector = (label, left, right) => {
+    if (!left || !right || left.length !== right.length) {
+      if (left !== right) errors.push([label, Infinity]);
+      return;
+    }
+    for (let axis = 0; axis < left.length; axis++) {
+      scalar(`${label}[${axis}]`, left[axis], right[axis]);
+    }
+  };
+  vector('camera.eye', expected.camera.eye, actual.camera.eye);
+  vector('camera.right', expected.camera.right, actual.camera.right);
+  vector('camera.up', expected.camera.up, actual.camera.up);
+  vector('camera.forward', expected.camera.forward, actual.camera.forward);
+  vector(
+    'camera.semantic_target',
+    expected.camera.semantic_target,
+    actual.camera.semantic_target,
+  );
+  scalar(
+    'camera.control_distance',
+    expected.camera.control_distance,
+    actual.camera.control_distance,
+  );
+  scalar(
+    'camera.transition_remaining',
+    expected.camera.camera_transition_remaining,
+    actual.camera.camera_transition_remaining,
+  );
+  vector('focus.center', expected.focus.center, actual.focus.center);
+  scalar('focus.radius', expected.focus.radius, actual.focus.radius);
+  scalar('focus.coordinate', expected.focus.focus_coordinate, actual.focus.focus_coordinate);
+  scalar('focus.aperture', expected.focus.angular_aperture, actual.focus.angular_aperture);
+  scalar(
+    'focus.transition_remaining',
+    expected.focus.focus_transition_remaining,
+    actual.focus.focus_transition_remaining,
+  );
+  for (const key of ['anchored', 'focus_enabled', 'inversion_enabled']) {
+    if (expected.focus[key] !== actual.focus[key]) errors.push([`focus.${key}`, Infinity]);
+  }
+  if (expected.reflection !== actual.reflection) errors.push(['reflection', Infinity]);
+
+  const [field, maximum] = errors.reduce(
+    (worst, candidate) => candidate[1] > worst[1] ? candidate : worst,
+    ['none', 0],
+  );
+  rustAppShadowDiagnostics.maximumPresentationPoseError = Math.max(
+    rustAppShadowDiagnostics.maximumPresentationPoseError,
+    maximum,
+  );
+  rustAppShadowDiagnostics.presentationPoseComparisons += 1;
+  if (maximum > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+    rustAppShadowDiagnostics.presentationPoseMismatches += 1;
+    recordAppShadowMismatch(
+      'presentation_pose',
+      `${field} diverged by ${maximum}`,
+    );
+  }
+}
+
 function mirrorAppPresentation(direction, cueId, expected) {
   if (!rustAppShadow) return;
   try {
     const commit = rustAppShadow.present(
       ++rustAppShadowSequence,
-      0,
       direction,
       cueId || '',
     );
     rustAppShadowDiagnostics.lastCommit = commit;
     rustAppShadowDiagnostics.presentationComparisons += 1;
     const active = refreshAppShadowSnapshot()?.presentation?.active;
-    if (JSON.stringify(active ?? null) !== JSON.stringify(expected ?? null)) {
+    const matches = JSON.stringify(active ?? null) === JSON.stringify(expected ?? null);
+    rustAppPresentationPoseReady = matches;
+    if (!matches) {
       recordAppShadowMismatch(
         'presentation_projection',
         `Rust app presentation projection diverged for ${direction}`,

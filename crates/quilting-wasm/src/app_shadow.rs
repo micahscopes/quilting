@@ -1,8 +1,10 @@
+use crate::navigation::synchronized_navigation_state;
 use hyperscape::{Presentation, PresentationSnapshot};
 use hyperscape_protocol::{AssetDescriptor, AssetId, RequestId};
 use hyperscope_app::{
-    AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetStatus,
-    CommitDisposition, EffectCompletion, FrameTick, PresentationAction, SemanticAction, Timed,
+    AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion,
+    AssetLoadOutcome, AssetStatus, CommitDisposition, EffectCompletion, FrameTick,
+    NavigationSynchronization, PresentationAction, SemanticAction, Timed,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -125,6 +127,60 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
+    /// Replace settled camera/focus state before a low-rate authored
+    /// transition. The app reducer validates and commits the replacement.
+    #[wasm_bindgen(js_name = synchronizeNavigation)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn synchronize_navigation(
+        &self,
+        eye: &[f64],
+        forward: &[f64],
+        up: &[f64],
+        control_distance: f64,
+        semantic_target: &[f64],
+        focus_center: &[f64],
+        focus_radius: f64,
+        focus_enabled: bool,
+        inversion_enabled: bool,
+        focus_coordinate: f64,
+        angular_aperture: f64,
+    ) -> Result<JsValue, JsValue> {
+        let (camera, focus) = synchronized_navigation_state(
+            eye,
+            forward,
+            up,
+            control_distance,
+            semantic_target,
+            focus_center,
+            focus_radius,
+            focus_enabled,
+            inversion_enabled,
+            focus_coordinate,
+            angular_aperture,
+        )?;
+        let commit = self
+            .store
+            .dispatch(AppEvent::NavigationSynchronized(
+                NavigationSynchronization { camera, focus },
+            ))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+
+    /// Advance the app-owned presentation clock by the same delta as the
+    /// incumbent controller and return a compact pose/focus parity snapshot.
+    #[wasm_bindgen(js_name = tickPresentation)]
+    pub fn tick_presentation(&self, delta_seconds: f64) -> Result<JsValue, JsValue> {
+        let current = self.store.frame_snapshot();
+        self.store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: current.elapsed_seconds + delta_seconds,
+                delta_seconds,
+            }))
+            .map_err(js_error)?;
+        navigation_to_js(self.store.frame_snapshot())
+    }
+
     /// Admit a validated presentation document without activating a cue or
     /// changing navigation state.
     #[wasm_bindgen(js_name = loadPresentation)]
@@ -141,13 +197,7 @@ impl HyperscopeAppShadow {
     /// the existing navigation controller remains frame/camera authority until
     /// a separate pose-parity gate is enabled.
     #[wasm_bindgen(js_name = present)]
-    pub fn present(
-        &self,
-        sequence: u32,
-        at_seconds: f64,
-        action: &str,
-        cue_id: &str,
-    ) -> Result<JsValue, JsValue> {
+    pub fn present(&self, sequence: u32, action: &str, cue_id: &str) -> Result<JsValue, JsValue> {
         let action = match action {
             "start" => PresentationAction::Start,
             "advance" => PresentationAction::Advance,
@@ -160,7 +210,7 @@ impl HyperscopeAppShadow {
             .store
             .dispatch(AppEvent::Input(Timed {
                 sequence: u64::from(sequence),
-                at_seconds,
+                at_seconds: self.store.frame_snapshot().elapsed_seconds,
                 value: SemanticAction::Present(action),
             }))
             .map_err(js_error)?;
@@ -280,6 +330,37 @@ struct ShadowPresentation {
 }
 
 #[derive(Serialize)]
+struct ShadowNavigationSnapshot {
+    elapsed_seconds: f64,
+    reflection: &'static str,
+    camera: ShadowCameraSnapshot,
+    focus: ShadowFocusSnapshot,
+}
+
+#[derive(Serialize)]
+struct ShadowCameraSnapshot {
+    eye: [f64; 3],
+    right: [f64; 3],
+    up: [f64; 3],
+    forward: [f64; 3],
+    control_distance: f64,
+    semantic_target: Option<[f64; 3]>,
+    camera_transition_remaining: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct ShadowFocusSnapshot {
+    center: [f64; 3],
+    radius: f64,
+    anchored: bool,
+    focus_enabled: bool,
+    inversion_enabled: bool,
+    focus_coordinate: f64,
+    angular_aperture: f64,
+    focus_transition_remaining: Option<f64>,
+}
+
+#[derive(Serialize)]
 struct ShadowAsset {
     id: String,
     uri: String,
@@ -329,6 +410,40 @@ struct ShadowDiagnostic {
     revision: String,
     code: &'static str,
     message: String,
+}
+
+fn navigation_to_js(frame: AppFrameSnapshot) -> Result<JsValue, JsValue> {
+    let basis = frame.camera.basis();
+    let focus_transition_remaining = frame
+        .focus
+        .transition
+        .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
+    to_js(&ShadowNavigationSnapshot {
+        elapsed_seconds: frame.elapsed_seconds,
+        reflection: match frame.reflection {
+            hyperscape::SphereReflectionState::Identity => "identity",
+            hyperscape::SphereReflectionState::Sphere(_) => "sphere_reflection",
+        },
+        camera: ShadowCameraSnapshot {
+            eye: frame.camera.eye,
+            right: basis.right,
+            up: basis.up,
+            forward: basis.forward,
+            control_distance: frame.camera.control_distance,
+            semantic_target: frame.camera.semantic_target,
+            camera_transition_remaining: frame.camera_transition_remaining,
+        },
+        focus: ShadowFocusSnapshot {
+            center: frame.focus.sphere.center,
+            radius: frame.focus.sphere.radius,
+            anchored: frame.focus.anchor.is_some(),
+            focus_enabled: frame.focus.focus_enabled,
+            inversion_enabled: frame.focus.inversion_enabled,
+            focus_coordinate: frame.focus.focus_coordinate,
+            angular_aperture: frame.focus.angular_aperture,
+            focus_transition_remaining,
+        },
+    })
 }
 
 fn commit_to_js(commit: &AppCommit) -> Result<JsValue, JsValue> {

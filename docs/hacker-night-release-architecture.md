@@ -53,8 +53,10 @@ The first application boundary is now explicit:
   that reducer without changing the browser loader, cue controller, or
   renderer. Superseding a load emits cancel-then-fetch; late completions remain
   observable but cannot replace the active request. Each cue action compares
-  the complete resolved presentation snapshot, with no additional per-frame
-  WASM traffic. Bounded diagnostics are exposed at
+  the complete resolved presentation snapshot. A separate opt-in pose gate
+  synchronizes settled navigation through the reducer and makes exactly one
+  compact comparison call per active cue-transition frame; it makes no calls
+  while settled or when shadowing is disabled. Bounded diagnostics are exposed at
   `globalThis.__hyperscopeAppShadowDiagnostics` until this lane earns browser
   authority.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 67 currently

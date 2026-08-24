@@ -12,6 +12,7 @@ From the repository root:
 trunk build --release
 cargo run -p hyperscape --bin hyperscope-preflight
 node scripts/smoke-hyperscope-presentation.mjs
+node scripts/smoke-hyperscope-app-shadow.mjs
 ```
 
 The ordinary preflight must print `PASS`. It validates the Rust presentation
@@ -21,7 +22,8 @@ bootstrap. Trunk also embeds a deterministic receipt for the Rust, shader,
 HTML/module, and copied-asset inputs; preflight recomputes it and rejects a
 coherent but stale `dist/`. It reports the matching fingerprints and checked
 bundle size. The generated-WASM smoke verifies start, cue deep-link, malformed
-cue, and unknown-cue behavior without needing a GPU or browser.
+cue, unknown-cue, application projection, and camera/focus transition parity
+without needing a GPU or browser.
 
 For a public downloadable archive, use the stricter gate:
 
