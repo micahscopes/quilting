@@ -5,20 +5,30 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source_dir="$repo_root/dist"
 output_arg="${1:-dist-release}"
+source_arg="${2:-dist}"
 
-if [[ ! -f "$source_dir/index.html" ]]; then
-    echo "error: $source_dir is not a completed Trunk build" >&2
-    exit 2
+if [[ "$source_arg" = /* ]]; then
+    source_dir="$(realpath -m "$source_arg")"
+else
+    source_dir="$(realpath -m "$repo_root/$source_arg")"
 fi
-
 if [[ "$output_arg" = /* ]]; then
     output_dir="$(realpath -m "$output_arg")"
 else
     output_dir="$(realpath -m "$repo_root/$output_arg")"
 fi
+
+if [[ ! -f "$source_dir/index.html" ]]; then
+    echo "error: $source_dir is not a completed Trunk build" >&2
+    exit 2
+fi
 source_dir="$(realpath "$source_dir")"
+
+if grep -Fq '.well-known/trunk/ws' "$source_dir/index.html"; then
+    echo "error: $source_dir contains Trunk's development live-reload client; use trunk build --release" >&2
+    exit 2
+fi
 
 case "$output_dir" in
     "$repo_root"|"$source_dir"|"$source_dir"/*)

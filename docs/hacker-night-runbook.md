@@ -85,6 +85,17 @@ cargo run -p hyperscape --bin hyperscope-preflight -- \
   --strict
 ```
 
+If `trunk serve` is currently using `dist/`, build to a separate directory so
+its development live-reload client cannot race into the release bundle:
+
+```sh
+trunk build --release --dist dist-build-release
+scripts/stage-hyperscope-release.sh dist-release dist-build-release
+```
+
+The staging script rejects any source HTML containing Trunk's live-reload
+WebSocket client. Offline preflight enforces the same invariant independently.
+
 The staging command refuses to overwrite an existing directory. Remove or
 rename an older `dist-release/` yourself before preparing a new archive. Under
 the default `permissive-only` policy, the horse remains a hard warning.

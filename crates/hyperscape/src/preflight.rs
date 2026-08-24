@@ -360,6 +360,9 @@ pub fn run_offline_preflight(options: &OfflinePreflightOptions) -> OfflinePrefli
             &mut report,
             &mut checked,
         ) {
+            if relative == Path::new("index.html") {
+                validate_release_html(&bytes, &mut report);
+            }
             if relative
                 .extension()
                 .is_some_and(|extension| extension == "glb")
@@ -599,6 +602,23 @@ fn validate_glb_bytes(relative: &Path, bytes: &[u8], report: &mut OfflinePreflig
     }
 }
 
+fn validate_release_html(bytes: &[u8], report: &mut OfflinePreflightReport) {
+    const DEVELOPMENT_MARKERS: &[&[u8]] = &[
+        b".well-known/trunk/ws",
+        b"__trunk_address__",
+        b"__trunk_ws_base__",
+    ];
+    if DEVELOPMENT_MARKERS
+        .iter()
+        .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
+    {
+        report.errors.push(
+            "bundle index.html contains Trunk's development live-reload client; build with `trunk build --release` instead of staging `trunk serve` output"
+                .to_owned(),
+        );
+    }
+}
+
 fn validate_glb_header(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() < 12 {
         return Err("file is shorter than the 12-byte GLB header".to_owned());
@@ -650,7 +670,7 @@ fn path_for_report(path: &Path) -> String {
 mod tests {
     use super::{
         local_uri_to_relative_path, update_build_input_fingerprint, validate_glb_header,
-        DistributionPolicy, FNV1A_128_OFFSET,
+        validate_release_html, DistributionPolicy, FNV1A_128_OFFSET, OfflinePreflightReport,
     };
     use std::path::PathBuf;
 
@@ -716,5 +736,20 @@ mod tests {
             DistributionPolicy::NoncommercialMixed.as_str(),
             "noncommercial-mixed"
         );
+    }
+
+    #[test]
+    fn release_html_rejects_trunk_live_reload_client() {
+        let options = super::OfflinePreflightOptions::default();
+        let mut report = OfflinePreflightReport::new(&options);
+        validate_release_html(
+            b"<script>new WebSocket('ws://host/.well-known/trunk/ws')</script>",
+            &mut report,
+        );
+        assert_eq!(report.errors.len(), 1);
+
+        let mut clean = OfflinePreflightReport::new(&options);
+        validate_release_html(b"<script type=module src=app.js></script>", &mut clean);
+        assert!(clean.errors.is_empty());
     }
 }
