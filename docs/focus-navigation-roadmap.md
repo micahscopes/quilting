@@ -223,9 +223,13 @@ or sphere state.
    loader as a dense authored identity table. Presentation composition maps
    only pickable nodes, preserves source-node offsets, and admits asset scope
    only from an exact validated manifest fetch; its append is transactional.
-   Mapped picks and clears traverse `AppStore::dispatch_navigation` in shadow,
-   while unmapped ordinary assets retain incumbent browser selection without
-   synthesizing UUIDs. The application clock now advances through an
+   Mapped picks and clears traverse `AppStore::dispatch_navigation` in shadow.
+   Authored assets retain their durable UUIDs; ready ordinary loads receive
+   deterministic Rust-derived session node identities scoped by the load-lane
+   asset ID. Those session pairs are runtime keys only and cannot enter authored
+   commands or HHHS history. Stale, loading, or otherwise unresolved assets
+   retain incumbent browser selection. The application clock now advances
+   through an
    allocation-light boundary once per browser frame, snapshots only active
    parity windows, and compares mapped focus interpolation with both the
    incumbent browser state and the renderer's retained CPU packet. It performs
@@ -234,7 +238,8 @@ or sphere state.
    `selectionimpl=rust` identity-checks the selected `(asset, entity)` pair and
    transfers the complete Rust focus/selection packet directly into the
    resident renderer without serializing its sphere through JavaScript.
-   Ordinary unmapped assets remain on JavaScript authority. The selected-fit
+   Only genuinely unresolved assets remain on JavaScript authority. The
+   selected-fit
    clock also retains an event fence across delayed RAF callbacks whose
    timestamp predates the pick, preventing the pre-event interval from being
    integrated twice. The default remains `js` pending broader interactive

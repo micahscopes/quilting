@@ -2405,7 +2405,7 @@ function applyRustAppFocusToRenderer(navigation, selection = selectedObject) {
   let entityId = '';
   if (selection) {
     const identity = selection.identity;
-    if (!identity?.durable || !selectedFocus
+    if (!identity || !selectedFocus
         || selectedFocus.asset_id !== identity.assetId
         || selectedFocus.entity_id !== identity.entityId) {
       rustAppShadowDiagnostics.rendererAuthorityErrors += 1;
@@ -2709,6 +2709,7 @@ let currentPrimaryFaceCount = 0;
 let modelNodeStableEntityIds = [];
 let packedNodeIdentities = new Map();
 let currentModelDurableAssetId = null;
+let currentModelSessionAssetId = null;
 const presentationComposition = {
   ready: false,
   assets: new Map(),
@@ -3480,7 +3481,7 @@ function detachAppSelectionShadow(reason) {
 function mirrorSelectedObjectToApp(nowMs = performance.now()) {
   if (!rustAppShadow || !selectedObject) return 'unobserved';
   const identity = selectedObject.identity;
-  if (!identity?.durable) {
+  if (!identity) {
     rustAppShadowDiagnostics.unmappedSelectionPicks += 1;
     detachAppSelectionShadow('replacement by an unmapped renderer pick');
     return 'unmapped';
@@ -3710,7 +3711,11 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   selectionLabel();
   console.log(
     `Selected glTF node ${node} from face ${faceId}`
-      + `${selectedObject.identity ? ' with durable identity' : ' without durable identity'}: source sphere`,
+      + `${selectedObject.identity?.durable
+        ? ' with durable identity'
+        : selectedObject.identity
+          ? ' with session identity'
+          : ' without semantic identity'}: source sphere`,
     bound.center,
     bound.radius,
   );
@@ -4305,8 +4310,12 @@ $('load-hyperscape-demo').addEventListener('click', async () => {
     const response = await fetch(uri);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     const buffer = await response.arrayBuffer();
-    completeAppAssetShadow(assetShadow, buffer);
-    await loadModel(buffer, uri);
+    const disposition = completeAppAssetShadow(assetShadow, buffer);
+    await loadModel(
+      buffer,
+      uri,
+      disposition === 'applied' ? assetShadow?.assetId : null,
+    );
   } catch (error) {
     failAppAssetShadow(assetShadow, 'demo_fetch_failed', error, true);
     $('hyperscape-diagnostics').textContent = `Hyperscape demo load failed: ${error.message}`;
@@ -5157,10 +5166,14 @@ wrapEl.addEventListener('drop', async e => {
   const assetShadow = beginAppAssetShadow(file.name, 'drop');
   try {
     const buf = await file.arrayBuffer();
-    completeAppAssetShadow(assetShadow, buf);
+    const disposition = completeAppAssetShadow(assetShadow, buf);
     await idbPut(IDB_GLB_STORE, file.name, buf);
     currentGlb = file.name;
-    await loadModel(buf, file.name);
+    await loadModel(
+      buf,
+      file.name,
+      disposition === 'applied' ? assetShadow?.assetId : null,
+    );
     syncURL();
   } catch (error) {
     failAppAssetShadow(assetShadow, 'drop_read_failed', error);
@@ -5822,7 +5835,7 @@ async function recomputeLods() {
   if (lodDirty) recomputeLods();
 }
 
-async function loadModel(buffer, filename) {
+async function loadModel(buffer, filename, sessionAssetId = null) {
   patchLab.active = false;
   patchLab.animate = false;
   $('patch-lab-animate').classList.remove('on');
@@ -5831,7 +5844,7 @@ async function loadModel(buffer, filename) {
   $('stats').textContent = `Loading ${filename}...`;
   const resp = await workerCall('load_gltf_data', { bytes: buffer }, [buffer]);
   meshInfo = resp.result;
-  await finishModelUpload(resp.result, filename);
+  await finishModelUpload(resp.result, filename, null, sessionAssetId);
   activateHyperscape(resp.hyperscapeBytes);
 }
 
@@ -6419,7 +6432,12 @@ function packPbrMaterials(materials, textureOffset = 0) {
   return packed;
 }
 
-async function finishModelUpload(info, filename, durableAssetId = null) {
+async function finishModelUpload(
+  info,
+  filename,
+  durableAssetId = null,
+  sessionAssetId = null,
+) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   const uploadStarted = performance.now();
   const uploadTimings = { worker: info.loader_timing || null };
@@ -6440,6 +6458,9 @@ async function finishModelUpload(info, filename, durableAssetId = null) {
   currentPrimaryFaceCount = 0;
   currentModelDurableAssetId = typeof durableAssetId === 'string'
     ? durableAssetId.toLowerCase()
+    : null;
+  currentModelSessionAssetId = typeof sessionAssetId === 'string'
+    ? sessionAssetId.toLowerCase()
     : null;
   modelNodeStableEntityIds = Array.isArray(info.node_stable_entity_ids)
     ? info.node_stable_entity_ids.slice()
@@ -6529,6 +6550,27 @@ async function finishModelUpload(info, filename, durableAssetId = null) {
   if (reusedFaceNodes) modelPayloadTelemetry.avoidedFaceMetadataCopyBytes += faceNodes.byteLength;
   info.face_node_indices = null;
   mr_setFaceNodes(faceNodes);
+  if (currentModelSessionAssetId && rustAppShadow && !currentModelDurableAssetId) {
+    try {
+      const identities = rustAppShadow.sessionNodeIdentities(
+        currentModelSessionAssetId,
+        new Int32Array(uniqueNodeIds(faceNodes)),
+      );
+      for (const identity of identities) {
+        packedNodeIdentities.set(identity.sourceNode, Object.freeze({
+          assetId: identity.assetId,
+          entityId: identity.entityId,
+          sourceNode: identity.sourceNode,
+          durable: false,
+        }));
+      }
+    } catch (error) {
+      recordAppShadowMismatch(
+        'session_selection_identity',
+        `${filename}: ${error?.message || String(error)}`,
+      );
+    }
+  }
   if (faceNodes.length) {
     const nodeCounts = {};
     for (let i = 0; i < faceNodes.length; i++) {
@@ -6970,7 +7012,9 @@ async function initializePresentationComposition() {
   faceNodes.set(modelFaceNodes);
 
   presentationComposition.assets.clear();
-  const composedNodeIdentities = new Map();
+  const composedNodeIdentities = currentModelDurableAssetId === primaryAsset.id
+    ? new Map()
+    : new Map(packedNodeIdentities);
   let primaryDurableNodes = 0;
   if (currentModelDurableAssetId === primaryAsset.id && modelNodeStableEntityIds.some(Boolean)) {
     primaryDurableNodes = appendPackedNodeIdentities(
@@ -7365,13 +7409,14 @@ phase('model', ['workers'], async () => {
       }
     }
     if (!buf) return null;
-    completeAppAssetShadow(assetShadow, buf);
+    const disposition = completeAppAssetShadow(assetShadow, buf);
     const resp = await workerCall('load_gltf_data', { bytes: buf }, [buf]);
     return {
       result: resp.result,
       filename: currentGlb,
       buffer: resp.hyperscapeBytes,
       durableAssetId,
+      sessionAssetId: disposition === 'applied' ? assetShadow?.assetId : null,
     };
   } catch (error) {
     failAppAssetShadow(assetShadow, 'startup_fetch_failed', error, true);
@@ -7395,6 +7440,7 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
       modelData.result,
       modelData.filename,
       modelData.durableAssetId,
+      modelData.sessionAssetId,
     );
     activateHyperscape(modelData.buffer);
     const animIdx = parseInt(initParams.anim);

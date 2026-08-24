@@ -23,7 +23,7 @@ use hyperscape::{
     ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId,
+    AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, PeerId,
     PresenceEnvelope, RequestId,
 };
 use std::collections::{BTreeMap, VecDeque};
@@ -33,6 +33,23 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
 
 const MAX_DIAGNOSTICS: usize = 256;
+const SESSION_NODE_ENTITY_PREFIX: u128 = 0xeeeeeeee_0000_4000_8000_000000000000;
+
+/// Build an application-local identity for one glTF node in a session-scoped
+/// asset load.
+///
+/// The asset ID is allocated by the application load lane, so the pair cannot
+/// be confused with durable Blender/authored identity even though it uses the
+/// same validated runtime key. The recognizable UUID prefix and exact node
+/// payload make the mapping deterministic, allocation-free, and injective for
+/// every `u32` glTF node index. Adapters must never promote this pair into an
+/// authored command or HHHS history.
+pub fn session_node_identity(asset: AssetId, source_node: u32) -> AssetEntityId {
+    let entity = EntityId::from_u128(SESSION_NODE_ENTITY_PREFIX | (u128::from(source_node) + 1))
+        .expect("the session-node namespace and nonzero node payload form a non-nil UUID");
+    AssetEntityId::new(asset, entity)
+        .expect("a validated application asset and session entity form a valid identity")
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Timed<T> {
@@ -924,6 +941,29 @@ mod tests {
 
     fn selection_identity() -> AssetEntityId {
         selection_identity_for(0x6000, 0x7000)
+    }
+
+    #[test]
+    fn session_node_identities_are_asset_scoped_injective_and_recognizable() {
+        let first_asset = AssetId::from_u128(0x6000).unwrap();
+        let second_asset = AssetId::from_u128(0x6001).unwrap();
+        let first = session_node_identity(first_asset, 0);
+        let later = session_node_identity(first_asset, u32::MAX);
+        let other_asset = session_node_identity(second_asset, 0);
+
+        assert_eq!(first.asset, first_asset);
+        assert_eq!(other_asset.asset, second_asset);
+        assert_eq!(
+            first.entity.as_uuid().as_u128(),
+            SESSION_NODE_ENTITY_PREFIX | 1
+        );
+        assert_eq!(
+            later.entity.as_uuid().as_u128(),
+            SESSION_NODE_ENTITY_PREFIX | (u128::from(u32::MAX) + 1),
+        );
+        assert_ne!(first.entity, later.entity);
+        assert_eq!(first.entity, other_asset.entity);
+        assert_ne!(first, other_asset);
     }
 
     fn presentation_fixture() -> Presentation {

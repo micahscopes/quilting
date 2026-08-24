@@ -1223,3 +1223,29 @@ application Clippy, WASM target checking, 47 browser-independent JavaScript
 tests, all five generated-WASM smokes, the release Trunk build, and the live MCP
 gate. The source-coherent build receipt is
 `07acda5d054f4427057f9dd5c5646a6e` over 156 files and 38,677,409 bytes.
+
+## Session-scoped ordinary selection gate
+
+The 2026-08-25 follow-up extended the same Rust selection/focus path to
+ordinary startup, IndexedDB, and dropped GLBs without laundering runtime
+handles into durable identity. `hyperscope-app::session_node_identity` derives
+an injective entity UUID from a non-durable load-lane asset ID and the exact
+`u32` glTF node index. The generated WASM boundary releases a deduplicated
+identity batch only after the Rust reducer reports that asset ready. A stale
+completion remains loading and is explicitly denied selection identity.
+Authored manifest/node UUIDs continue through the separate durable path, and
+neither session selection nor any other presence state is admissible to HHHS.
+
+The generated-WASM smoke covered stale denial, ready admission, deterministic
+node 0/7 values, deduplication, and negative-node rejection while retaining the
+7,168 SpaceMouse mappings, 648 response-policy cases, four camera states, and
+120-frame trace. All 45 replay-enabled native `hyperscope-app` tests passed.
+Chrome DevTools MCP then selected ordinary animated horse node 0 under `selectionimpl=rust`:
+one mapped pick, one dispatch/comparison, two transition/renderer comparisons,
+two renderer writes, and zero unmapped picks, semantic drift, packet drift,
+misses, authority errors, or frame errors. A composed authored node repeated
+the zero-drift result. The browser emitted no warnings or errors. The release
+default remains `js`; this is a broader rollback-safe authority candidate, not
+an unmeasured default flip. A separate release build staged 23 files / 30.98
+MiB and passed strict `noncommercial-mixed` offline preflight with source/build
+fingerprint `69e1ebbf196a09673865f3c981fed0b8`.

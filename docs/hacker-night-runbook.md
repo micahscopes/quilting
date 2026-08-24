@@ -196,6 +196,12 @@ remain zero. The route implicitly enables the application observer, but
 `selectionimpl=js` remains the release rollback/default. Close the disposable
 tab after the check.
 
+Repeat the selection probe on ordinary `?selectionimpl=rust`. A successfully
+committed startup/IndexedDB/drop load should report a mapped selection and Rust
+renderer-authority writes, not an unmapped pick. A superseded, loading, or
+failed asset must not receive session identities. These IDs are intentionally
+session-only and are never evidence of durable Blender/HHHS identity.
+
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.
 

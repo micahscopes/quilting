@@ -192,6 +192,11 @@ assert.equal(afterStale.loadingAssets, 1);
 assert.equal(afterStale.assets[0].status.state, 'loading');
 assert.equal(afterStale.assets[0].status.request_id, second);
 assert.equal(afterStale.diagnostics[0].code, 'stale_effect_completion');
+assert.throws(
+  () => app.sessionNodeIdentities(asset, new Int32Array([0])),
+  /requires a ready AppStore asset/,
+  'a stale completion must not grant session selection authority',
+);
 
 const applied = app.completeAssetLoaded(second, asset, 181_808);
 assert.equal(applied.disposition, 'applied');
@@ -199,6 +204,28 @@ const ready = app.snapshot();
 assert.equal(ready.loadingAssets, 0);
 assert.equal(ready.assets[0].status.state, 'ready');
 assert.equal(ready.assets[0].status.byte_length, 181_808);
+const sessionNodeIdentities = app.sessionNodeIdentities(
+  asset,
+  new Int32Array([7, 0, 7]),
+);
+assert.deepEqual(sessionNodeIdentities, [
+  {
+    assetId: asset,
+    entityId: 'eeeeeeee-0000-4000-8000-000000000001',
+    sourceNode: 0,
+    durable: false,
+  },
+  {
+    assetId: asset,
+    entityId: 'eeeeeeee-0000-4000-8000-000000000008',
+    sourceNode: 7,
+    durable: false,
+  },
+]);
+assert.throws(
+  () => app.sessionNodeIdentities(asset, new Int32Array([-1])),
+  /must be nonnegative/,
+);
 
 const presentationDocument = readFileSync(
   `${repository}/examples/hacker-night.presentation.json`,
@@ -1087,6 +1114,7 @@ console.log(JSON.stringify({
   replacementEffects: replaced.effects.map(effect => effect.type),
   staleDisposition: stale.disposition,
   readyBytes: ready.assets[0].status.byte_length,
+  sessionSelectionNodes: sessionNodeIdentities.length,
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
   presentationCue: finalSnapshot.presentation.active.cue_id,
   navigationBoundaryParity: true,

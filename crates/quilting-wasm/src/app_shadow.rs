@@ -9,9 +9,9 @@ use hyperscape::{
 };
 use hyperscape_protocol::{AssetDescriptor, AssetId, RequestId};
 use hyperscope_app::{
-    AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion,
-    AssetLoadOutcome, AssetStatus, CommitDisposition, EffectCompletion, FrameTick,
-    NavigationSynchronization, PresentationAction, SemanticAction, Timed,
+    session_node_identity, AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore,
+    AssetLoadCompletion, AssetLoadOutcome, AssetStatus, CommitDisposition, EffectCompletion,
+    FrameTick, NavigationSynchronization, PresentationAction, SemanticAction, Timed,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -147,6 +147,51 @@ impl HyperscopeAppShadow {
                 retryable,
             },
         )
+    }
+
+    /// Resolve renderer-local glTF nodes to application-local selection IDs
+    /// after Rust has committed the corresponding session asset as ready.
+    /// Authored/durable UUIDs use the separate loader metadata path.
+    #[wasm_bindgen(js_name = sessionNodeIdentities)]
+    pub fn session_node_identities(
+        &self,
+        asset_id: &str,
+        source_nodes: &[i32],
+    ) -> Result<JsValue, JsValue> {
+        let asset = asset_id_from_str(asset_id)?;
+        let ready = self.store.asset_snapshot().into_iter().any(|candidate| {
+            candidate.descriptor.id == asset
+                && matches!(candidate.status, AssetStatus::Ready { .. })
+        });
+        if !ready {
+            return Err(JsValue::from_str(
+                "session selection identity requires a ready AppStore asset",
+            ));
+        }
+
+        let mut nodes = source_nodes
+            .iter()
+            .copied()
+            .map(|node| {
+                u32::try_from(node)
+                    .map_err(|_| JsValue::from_str("session selection node must be nonnegative"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        nodes.sort_unstable();
+        nodes.dedup();
+        let identities = nodes
+            .into_iter()
+            .map(|source_node| {
+                let identity = session_node_identity(asset, source_node);
+                SessionNodeIdentity {
+                    asset_id: identity.asset.to_string(),
+                    entity_id: identity.entity.to_string(),
+                    source_node,
+                    durable: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        to_js(&identities)
     }
 
     #[wasm_bindgen(js_name = advanceFrame)]
@@ -478,7 +523,7 @@ impl HyperscopeAppShadow {
 
     /// Apply one identity-checked AppStore focus/selection packet directly to
     /// the resident renderer. The packed node remains a backend-local handle;
-    /// the durable `(asset, entity)` pair must match the selected Rust state
+    /// the application `(asset, entity)` pair must match the selected Rust state
     /// before it can be joined to that handle.
     ///
     /// Passing `selected_node = -1` and empty IDs applies a detached focus
@@ -686,6 +731,15 @@ struct ShadowCommit {
     disposition: &'static str,
     published_ui: bool,
     effects: Vec<ShadowEffect>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionNodeIdentity {
+    asset_id: String,
+    entity_id: String,
+    source_node: u32,
+    durable: bool,
 }
 
 #[derive(Serialize)]
