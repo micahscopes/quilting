@@ -1,0 +1,18 @@
+[package]
+name = "hyperscope-hhhs-shadow"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional AppStore-to-HHHS authored-state parity observer for Hyperscope"
+
+[dependencies]
+hhhs-replica.workspace = true
+hyperscape-hhhs = { path = "../hyperscape-hhhs" }
+hyperscape-protocol = { path = "../hyperscape-protocol" }
+hyperscope-app = { path = "../hyperscope-app" }
+
+[dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }
+hhhs-store.workspace = true

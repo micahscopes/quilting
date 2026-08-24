@@ -1264,6 +1264,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperscope-hhhs-shadow"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "hhhs-replica",
+ "hhhs-store",
+ "hyperscape-hhhs",
+ "hyperscape-protocol",
+ "hyperscope-app",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
