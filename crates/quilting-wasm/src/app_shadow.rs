@@ -1,6 +1,6 @@
 use crate::navigation::{
-    optional_vector3, parse_easing, parse_preset, preset_name, synchronized_navigation_state,
-    vector3,
+    optional_vector3, parse_easing, parse_preset, preset_name, stable_entity_id,
+    synchronized_navigation_state, vector3, SelectedFocusJsSnapshot,
 };
 use hyperscape::{
     map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere, MappedSpaceMouseFrame,
@@ -347,6 +347,37 @@ impl HyperscopeAppShadow {
         self.dispatch_navigation(NavigationAction::SetFreeFocusSphere(sphere))
     }
 
+    #[wasm_bindgen(js_name = anchorFocus)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn anchor_focus(
+        &self,
+        entity: &str,
+        source_bound_center: &[f64],
+        source_bound_radius: f64,
+        source_pivot: &[f64],
+        margin: f64,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::AnchorFocus {
+            entity: stable_entity_id(entity)?,
+            source_bound: FocusSphere::new(
+                vector3(source_bound_center, "focus source-bound center")?,
+                source_bound_radius,
+            )
+            .map_err(js_error)?,
+            source_pivot: vector3(source_pivot, "focus source pivot")?,
+            margin,
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
+    #[wasm_bindgen(js_name = detachFocus)]
+    pub fn detach_focus(&self) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::DetachFocus)
+    }
+
     #[wasm_bindgen(js_name = translateFocus)]
     pub fn translate_focus(&self, delta: &[f64]) -> Result<u64, JsValue> {
         self.dispatch_navigation(NavigationAction::TranslateFocus(vector3(
@@ -599,6 +630,7 @@ struct ShadowNavigationSnapshot {
     reflection: &'static str,
     camera: ShadowCameraSnapshot,
     focus: ShadowFocusSnapshot,
+    selected_focus: Option<SelectedFocusJsSnapshot>,
     diagnostics: Vec<String>,
 }
 
@@ -767,6 +799,7 @@ fn navigation_to_js(
             angular_aperture: frame.focus.angular_aperture,
             focus_transition_remaining,
         },
+        selected_focus: frame.selected_focus.map(SelectedFocusJsSnapshot::from),
         diagnostics: navigation_diagnostics,
     })
 }

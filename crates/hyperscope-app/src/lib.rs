@@ -20,7 +20,7 @@ use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
     CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
     NavigationPreset, Presentation, PresentationRuntime, PresentationSnapshot,
-    ScheduledNavigationAction, SphereReflectionState,
+    ScheduledNavigationAction, SphereReflectionState, StableEntityId,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
@@ -218,10 +218,52 @@ pub struct AppFrameSnapshot {
     pub last_applied_navigation_sequence: Option<u64>,
     pub camera: CameraRig,
     pub focus: FocusNavigation,
+    /// Selected object and clicked pivot projected into the active output
+    /// chart. Source selection survives a projection pole; only the derived
+    /// output values become absent.
+    pub selected_focus: Option<SelectedFocusSnapshot>,
     pub reflection: SphereReflectionState,
     pub camera_transition_remaining: Option<f64>,
     pub surface_anchor_transition_remaining: Option<f64>,
     pub surface_anchor_hop_height: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectedFocusSnapshot {
+    pub entity: StableEntityId,
+    pub source_bound: FocusSphere,
+    pub source_pivot: [f64; 3],
+    pub margin: f64,
+    pub output_pivot: Option<[f64; 3]>,
+    pub output_radius: Option<f64>,
+}
+
+impl SelectedFocusSnapshot {
+    /// Build the selected-focus read model from one authoritative navigation
+    /// state. Mapping always starts in the ordinary source chart; changing the
+    /// output chart never mutates durable/source selection identity.
+    pub fn from_navigation(
+        focus: &FocusNavigation,
+        reflection: SphereReflectionState,
+    ) -> Option<Self> {
+        let anchor = focus.anchor?;
+        let projected = SphereReflectionState::Identity
+            .transport_point_and_directions(reflection, anchor.source_pivot, [])
+            .ok()
+            .and_then(|transport| {
+                let output_radius = anchor.source_bound.radius * transport.local_scale;
+                (output_radius.is_finite() && output_radius > 0.0)
+                    .then_some((transport.point, output_radius))
+            });
+        Some(Self {
+            entity: anchor.entity,
+            source_bound: anchor.source_bound,
+            source_pivot: anchor.source_pivot,
+            margin: anchor.margin,
+            output_pivot: projected.map(|(point, _)| point),
+            output_radius: projected.map(|(_, radius)| radius),
+        })
+    }
 }
 
 /// Low-rate FRP projection. Camera/focus motion stays in
@@ -286,6 +328,10 @@ impl AppState {
             .surface_walk
             .anchor_transition()
             .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
+        let selected_focus = SelectedFocusSnapshot::from_navigation(
+            &self.navigation.focus,
+            self.navigation.runtime.reflection,
+        );
         AppFrameSnapshot {
             revision: self.revision,
             elapsed_seconds: self.frame_elapsed_seconds,
@@ -294,6 +340,7 @@ impl AppState {
             last_applied_navigation_sequence: self.navigation.runtime.last_applied_sequence,
             camera: self.navigation.camera,
             focus: self.navigation.focus.clone(),
+            selected_focus,
             reflection: self.navigation.runtime.reflection,
             camera_transition_remaining,
             surface_anchor_transition_remaining,
@@ -1057,6 +1104,137 @@ mod tests {
         assert_eq!(after.last_applied_navigation_sequence, Some(sequence));
         assert!(store.navigation_diagnostics_snapshot()[0]
             .contains("camera transport reached a spherical-reflection pole"));
+    }
+
+    fn apply_navigation_now(store: &AppStore, action: NavigationAction) -> u64 {
+        let (sequence, _) = store.dispatch_navigation(action).unwrap();
+        let elapsed_seconds = store.frame_snapshot().elapsed_seconds;
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        sequence
+    }
+
+    fn selected_focus_action(source_pivot: [f64; 3]) -> NavigationAction {
+        NavigationAction::AnchorFocus {
+            entity: StableEntityId(Uuid::from_u128(0x7000)),
+            source_bound: FocusSphere::new([0.0; 3], 2.0).unwrap(),
+            source_pivot,
+            margin: 1.0,
+            duration_seconds: 0.0,
+            easing: hyperscape::TransitionEasing::SmootherStep,
+        }
+    }
+
+    #[test]
+    fn frame_snapshot_projects_selection_in_identity_and_sphere_charts() {
+        let store = AppStore::default();
+        let anchor_sequence = apply_navigation_now(&store, selected_focus_action([4.0, 0.0, 0.0]));
+        let identity = store.frame_snapshot();
+        let selected = identity.selected_focus.unwrap();
+        assert_eq!(selected.entity, StableEntityId(Uuid::from_u128(0x7000)));
+        assert_eq!(selected.source_pivot, [4.0, 0.0, 0.0]);
+        assert_eq!(selected.output_pivot, Some([4.0, 0.0, 0.0]));
+        assert_eq!(selected.output_radius, Some(2.0));
+
+        let inversion_sequence =
+            apply_navigation_now(&store, NavigationAction::SetInversionEnabled(true));
+        let reflected = store.frame_snapshot();
+        let selected = reflected.selected_focus.unwrap();
+        assert_eq!(selected.source_pivot, [4.0, 0.0, 0.0]);
+        assert_eq!(selected.output_pivot, Some([1.0, 0.0, 0.0]));
+        assert_eq!(selected.output_radius, Some(0.5));
+        assert_eq!(anchor_sequence, 0);
+        assert_eq!(inversion_sequence, 1);
+        assert_eq!(reflected.last_applied_navigation_sequence, Some(1));
+    }
+
+    #[test]
+    fn selection_at_reflection_pole_preserves_source_and_clears_output() {
+        let store = AppStore::default();
+        apply_navigation_now(&store, selected_focus_action([0.0; 3]));
+        apply_navigation_now(&store, NavigationAction::SetInversionEnabled(true));
+
+        let frame = store.frame_snapshot();
+        let selected = frame.selected_focus.unwrap();
+        assert_eq!(selected.source_pivot, [0.0; 3]);
+        assert_eq!(
+            selected.source_bound,
+            FocusSphere::new([0.0; 3], 2.0).unwrap()
+        );
+        assert_eq!(selected.output_pivot, None);
+        assert_eq!(selected.output_radius, None);
+        assert!(frame.focus.inversion_enabled);
+        assert!(matches!(frame.reflection, SphereReflectionState::Sphere(_)));
+    }
+
+    #[test]
+    fn nonfinite_projected_radius_is_not_exposed_to_adapters() {
+        let mut focus = FocusNavigation::default();
+        focus
+            .anchor_to_pivot_with_easing(
+                StableEntityId(Uuid::from_u128(0x7000)),
+                FocusSphere::new([0.0; 3], 2.0).unwrap(),
+                [2.0e-154, 0.0, 0.0],
+                1.0,
+                0.0,
+                hyperscape::TransitionEasing::SmootherStep,
+            )
+            .unwrap();
+
+        let selected = SelectedFocusSnapshot::from_navigation(
+            &focus,
+            SphereReflectionState::Sphere(focus.sphere),
+        )
+        .unwrap();
+        assert_eq!(selected.output_pivot, None);
+        assert_eq!(selected.output_radius, None);
+    }
+
+    #[test]
+    fn underflowed_projected_radius_is_not_exposed_to_adapters() {
+        let mut focus = FocusNavigation::default();
+        focus
+            .anchor_to_pivot_with_easing(
+                StableEntityId(Uuid::from_u128(0x7000)),
+                FocusSphere::new([0.0; 3], f64::from_bits(1)).unwrap(),
+                [1.0e154, 0.0, 0.0],
+                1.0,
+                0.0,
+                hyperscape::TransitionEasing::SmootherStep,
+            )
+            .unwrap();
+
+        let selected = SelectedFocusSnapshot::from_navigation(
+            &focus,
+            SphereReflectionState::Sphere(focus.sphere),
+        )
+        .unwrap();
+        assert_eq!(selected.output_pivot, None);
+        assert_eq!(selected.output_radius, None);
+    }
+
+    #[test]
+    fn detach_focus_clears_selection_without_resetting_chart() {
+        let store = AppStore::default();
+        apply_navigation_now(&store, selected_focus_action([4.0, 0.0, 0.0]));
+        apply_navigation_now(&store, NavigationAction::SetInversionEnabled(true));
+        let before = store.frame_snapshot();
+
+        apply_navigation_now(&store, NavigationAction::DetachFocus);
+        let detached = store.frame_snapshot();
+
+        assert_eq!(detached.selected_focus, None);
+        assert_eq!(detached.focus.sphere, before.focus.sphere);
+        assert_eq!(detached.focus.focus_enabled, before.focus.focus_enabled);
+        assert_eq!(
+            detached.focus.inversion_enabled,
+            before.focus.inversion_enabled
+        );
+        assert_eq!(detached.reflection, before.reflection);
     }
 
     #[test]

@@ -166,8 +166,11 @@ or sphere state.
    restoration likewise batches center, radius, and transform mode as one
    request, so it cannot reject a safe linked sphere against transient default
    geometry. Live focus/selection shadow comparisons still require stable
-   glTF node identity, source pivot/bound state, transition clocks, and lens
-   parity before authority can move.
+   glTF node identity, browser-to-Rust pick dispatch, transition clocks, and
+   lens parity before authority can move. Rust now retains the selected source
+   bound and clicked pivot beside its stable entity ID, and the application
+   snapshot derives output-chart pivot/radius without destroying selection at
+   a reflection pole.
    The semantic surface-walk response and topology are now composed in
    `SurfaceWalkRuntime`: scene-relative pace and avatar scale, tangent
    velocity, current animated material-point velocity, contact/normal
@@ -187,15 +190,20 @@ or sphere state.
    identity/reflection and cyclic source/neighbor permutation cases.
    `walkimpl=rust` is therefore a real rollback-safe authority mode; the
    default stays `js` until it has seen broader interactive soak time.
-4. **Selection bridge.** Map stable glTF node identities to Hyperscape
-   entities, send pick results as semantic selection actions, tick sphere
-   transitions in Rust, and extract one compact focus packet per view.
+4. **Selection bridge — Rust read model complete, browser dispatch pending.**
+   Map durable asset-scoped glTF node identities to Hyperscape entities, send
+   pick results through `AppStore::dispatch_navigation`, tick sphere
+   transitions in Rust, and apply its one compact selected-focus packet per
+   view. Ordinary GLB node-index UUIDs remain shadow-only and must never enter
+   routes, HHHS, or durable replay.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.4
-   serializes stable entity references, detached spheres, camera rig state, and
-   every current high-level navigation action. Checked navigation and
+6. **Persistence and replay — native oracle complete.** Replay version 0.5
+   serializes stable entity references, selected source bounds/pivots, derived
+   output-chart pivots/radii, detached spheres, camera rig state, and every
+   current high-level navigation action. It accepts 0.4 anchor events by
+   defaulting the omitted pivot to the bound center. Checked navigation and
    orchestration fixtures cover transition cadence, asset effects,
    presence/authored lanes, and atomic rejection. Browser input capture and
    networking must carry semantic actions or authoritative state deltas, never

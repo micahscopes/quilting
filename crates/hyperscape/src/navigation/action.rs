@@ -33,6 +33,7 @@ pub enum NavigationAction {
     AnchorFocus {
         entity: StableEntityId,
         source_bound: FocusSphere,
+        source_pivot: [f64; 3],
         margin: f64,
         duration_seconds: f64,
         easing: TransitionEasing,
@@ -384,11 +385,19 @@ fn apply_action(
         NavigationAction::AnchorFocus {
             entity,
             source_bound,
+            source_pivot,
             margin,
             duration_seconds,
             easing,
         } => focus
-            .anchor_to_with_easing(entity, source_bound, margin, duration_seconds, easing)
+            .anchor_to_pivot_with_easing(
+                entity,
+                source_bound,
+                source_pivot,
+                margin,
+                duration_seconds,
+                easing,
+            )
             .map_err(str::to_owned)?,
         NavigationAction::DetachFocus => focus.detach(),
         NavigationAction::SetFreeFocusSphere(sphere) => {
@@ -673,6 +682,57 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_anchor_focus_commits_identity_bound_pivot_and_transition_together() {
+        let mut controller = NavigationController::default();
+        let entity = StableEntityId(uuid::Uuid::from_u128(17));
+        let source_bound = FocusSphere::new([1.0, -2.0, 0.5], 0.75).unwrap();
+        let source_pivot = [1.2, -1.8, 0.4];
+        controller
+            .push(NavigationAction::AnchorFocus {
+                entity,
+                source_bound,
+                source_pivot,
+                margin: 1.1,
+                duration_seconds: 0.7,
+                easing: TransitionEasing::SmoothStep,
+            })
+            .unwrap();
+
+        controller.tick(0.0).unwrap();
+
+        let anchor = controller.focus.anchor.unwrap();
+        assert_eq!(anchor.entity, entity);
+        assert_eq!(anchor.source_bound, source_bound);
+        assert_eq!(anchor.source_pivot, source_pivot);
+        assert_eq!(anchor.margin, 1.1);
+        assert_eq!(controller.focus.transition.unwrap().duration_seconds, 0.7);
+        assert!(controller.focus.focus_enabled);
+        assert_eq!(controller.runtime.last_applied_sequence, Some(0));
+    }
+
+    #[test]
+    fn invalid_anchor_pivot_is_consumed_without_partial_selection() {
+        let mut controller = NavigationController::default();
+        let before = controller.focus.clone();
+        controller
+            .push(NavigationAction::AnchorFocus {
+                entity: StableEntityId(uuid::Uuid::from_u128(17)),
+                source_bound: FocusSphere::new([0.0; 3], 1.0).unwrap(),
+                source_pivot: [f64::INFINITY, 0.0, 0.0],
+                margin: 1.1,
+                duration_seconds: 0.7,
+                easing: TransitionEasing::SmootherStep,
+            })
+            .unwrap();
+
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.focus, before);
+        assert_eq!(controller.runtime.last_applied_sequence, Some(0));
+        assert!(controller.diagnostics.0[0].contains("source pivot must be finite"));
+    }
+
+    #[test]
     fn inversion_pole_rejects_the_complete_navigation_action() {
         let mut controller = NavigationController::default();
         controller.focus.sphere = FocusSphere::new([0.0, 0.0, 3.0], 2.0).unwrap();
@@ -747,6 +807,7 @@ mod tests {
                 NavigationAction::AnchorFocus {
                     entity: StableEntityId(uuid::Uuid::from_u128(7)),
                     source_bound: FocusSphere::new([1.0, 0.0, 0.0], 1.0).unwrap(),
+                    source_pivot: [1.0, 0.0, 0.0],
                     margin: 1.0,
                     duration_seconds: 1.0,
                     easing: TransitionEasing::Linear,

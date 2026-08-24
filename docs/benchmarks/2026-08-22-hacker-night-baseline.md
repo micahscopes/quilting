@@ -781,3 +781,45 @@ The optimized WASM is 6,063,048 bytes raw and 2,133,614 bytes gzip. The
 source-coherent build receipt is `69447c5415089632bf249e09db1231a5` over 156
 files and 38,556,122 bytes. Preflight retains the expected local-GLB and horse
 distribution-policy warnings.
+
+## Selected-focus source/output projection gate
+
+The following 2026-08-24 checkpoint completed the Rust read model needed for
+selection cutover. `FocusAnchor` now retains one non-nil stable entity ID, its
+ordinary-space bound, the exact clicked/object source pivot, and the fitted
+margin. The application derives the selected pivot and bound radius in the
+active output chart from that source state. Identity and sphere-reflection
+views therefore cannot disagree about which point is selected, and a pivot at
+the reflection pole clears only the two derived output values; source
+selection remains intact. Detach removes ownership and its transition without
+resetting the settled sphere, focus mode, inversion, or chart.
+
+Both generated-WASM navigation facades expose matched `anchorFocus` and
+`detachFocus` oracle calls. Their snapshots include the same selected-focus
+packet, but the application reducer remains the intended authority. The Node
+smoke compares both facades through identity, reflection, detach, and a
+selected-pivot pole. Both adapters reject a nil entity UUID before queue or
+revision mutation. A live isolated Chrome-MCP probe on page 3 reported
+identity pivot/radius `[4,0,0]`/`2`, reflected pivot/radius `[1,0,0]`/`0.5`,
+no packet after detach, and a pole packet retaining only source identity,
+bound, pivot, and margin.
+
+Application replay moved to version 0.5. It records selected source
+bound/pivot/margin and derived output pivot/radius, while accepting version
+0.4 anchor actions by defaulting an omitted pivot to the bound center. The new
+goldens are `2ac1c692f6a6bfadf5bc5f5565d54823` for the presentation,
+`b51c6b71ebc2031b7ca0c21239db6eed` for navigation, and
+`4a0661ea377eaf22dd1130f60fc6b5cd` for orchestration.
+
+Validation passed for the full native workspace, 82 direct Hyperscape tests,
+34 application/replay tests, 42 browser-independent JavaScript tests, 19
+Blender interchange tests, strict no-dependency Hyperscape/application
+Clippy, Rustdoc, all replay checks, four executable Node/WASM tests, all five
+generated-WASM smokes, release Trunk build, ordinary offline preflight, and
+the live Chrome-MCP projection oracle. The optimized WASM is 6,070,198 bytes
+raw and 2,137,294 bytes gzip, increases of 7,150 and 3,680 bytes respectively.
+The source-coherent build receipt is `e89e73b62f6843b97c6d3df54df7de4d`
+over 156 files and 38,578,327 bytes. The remaining browser cutover blockers are
+durable asset-scoped node identity, dispatching renderer picks through the one
+`AppStore` queue, effective focus-enable parity, lens/FOV transport, and
+explicit free-tangent versus semantic-target camera policy.

@@ -1,8 +1,9 @@
 use hyperscape::{
     CameraBasis, CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
     NavigationFrame, NavigationPreset, PerspectiveLens, PresentationRuntime, PresentationSnapshot,
-    SphereReflectionState, SurfaceAnchorTarget, TransitionEasing,
+    SphereReflectionState, StableEntityId, SurfaceAnchorTarget, TransitionEasing,
 };
+use hyperscope_app::SelectedFocusSnapshot;
 use serde::Serialize;
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
@@ -178,6 +179,37 @@ impl HyperscopeNavigation {
         let sphere =
             FocusSphere::new(vector3(center, "focus center")?, radius).map_err(js_error)?;
         self.push(NavigationAction::SetFreeFocusSphere(sphere))
+    }
+
+    #[wasm_bindgen(js_name = anchorFocus)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn anchor_focus(
+        &mut self,
+        entity: &str,
+        source_bound_center: &[f64],
+        source_bound_radius: f64,
+        source_pivot: &[f64],
+        margin: f64,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        self.push(NavigationAction::AnchorFocus {
+            entity: stable_entity_id(entity)?,
+            source_bound: FocusSphere::new(
+                vector3(source_bound_center, "focus source-bound center")?,
+                source_bound_radius,
+            )
+            .map_err(js_error)?,
+            source_pivot: vector3(source_pivot, "focus source pivot")?,
+            margin,
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
+    #[wasm_bindgen(js_name = detachFocus)]
+    pub fn detach_focus(&mut self) -> Result<u64, JsValue> {
+        self.push(NavigationAction::DetachFocus)
     }
 
     #[wasm_bindgen(js_name = translateFocus)]
@@ -356,6 +388,7 @@ struct NavigationSnapshot<'a> {
     reflection: &'static str,
     camera: CameraSnapshot,
     focus: FocusSnapshot,
+    selected_focus: Option<SelectedFocusJsSnapshot>,
     diagnostics: &'a [String],
 }
 
@@ -414,6 +447,11 @@ impl<'a> From<&'a NavigationController> for NavigationSnapshot<'a> {
                 angular_aperture: controller.focus.angular_aperture,
                 focus_transition_remaining,
             },
+            selected_focus: SelectedFocusSnapshot::from_navigation(
+                &controller.focus,
+                controller.runtime.reflection,
+            )
+            .map(SelectedFocusJsSnapshot::from),
             diagnostics: &controller.diagnostics.0,
         }
     }
@@ -443,6 +481,31 @@ struct FocusSnapshot {
     focus_coordinate: f64,
     angular_aperture: f64,
     focus_transition_remaining: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SelectedFocusJsSnapshot {
+    entity: String,
+    source_bound_center: [f64; 3],
+    source_bound_radius: f64,
+    source_pivot: [f64; 3],
+    margin: f64,
+    output_pivot: Option<[f64; 3]>,
+    output_radius: Option<f64>,
+}
+
+impl From<SelectedFocusSnapshot> for SelectedFocusJsSnapshot {
+    fn from(selected: SelectedFocusSnapshot) -> Self {
+        Self {
+            entity: selected.entity.0.to_string(),
+            source_bound_center: selected.source_bound.center,
+            source_bound_radius: selected.source_bound.radius,
+            source_pivot: selected.source_pivot,
+            margin: selected.margin,
+            output_pivot: selected.output_pivot,
+            output_radius: selected.output_radius,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -507,6 +570,15 @@ pub(crate) fn vector3(values: &[f64], label: &str) -> Result<[f64; 3], JsValue> 
         return Err(JsValue::from_str(&format!("{label} must be finite")));
     }
     Ok(value)
+}
+
+pub(crate) fn stable_entity_id(value: &str) -> Result<StableEntityId, JsValue> {
+    let entity = Uuid::parse_str(value)
+        .map_err(|error| JsValue::from_str(&format!("focus entity must be a UUID: {error}")))?;
+    if entity.is_nil() {
+        return Err(JsValue::from_str("focus entity UUID must not be nil"));
+    }
+    Ok(StableEntityId(entity))
 }
 
 pub(crate) fn optional_vector3(values: &[f64], label: &str) -> Result<Option<[f64; 3]>, JsValue> {

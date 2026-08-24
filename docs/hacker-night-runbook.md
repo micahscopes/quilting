@@ -41,12 +41,13 @@ suite checks that partitioned and single-step re-anchor clocks finish on the
 same exact virtual-time endpoint.
 
 The replay checks must print
-`PASS fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`,
-`PASS fnv1a-128-json:87454fbfb82c9ab594e9ce9a06da69ad`, and
-`PASS fnv1a-128-json:faccd0ee52b825ad9fae8934eea9d227`. The first executes
+`PASS fnv1a-128-json:2ac1c692f6a6bfadf5bc5f5565d54823`,
+`PASS fnv1a-128-json:b51c6b71ebc2031b7ca0c21239db6eed`, and
+`PASS fnv1a-128-json:4a0661ea377eaf22dd1130f60fc6b5cd`. The first executes
 the complete six-cue semantic walkthrough. The second exercises every current
 navigation action, including focus/inversion, camera and surface transitions,
-stable selection anchoring, and an atomic rejected input. The third covers
+stable selection anchoring, clicked source/output pivot projection, and an
+atomic rejected input. The third covers
 asset supersession/cancellation/completion, stale and failed effects, presence
 ordering/expiry, authored revision admission, and rejected wire input. All run
 through `hyperscope-app` independently of browser timing, input adapters, and

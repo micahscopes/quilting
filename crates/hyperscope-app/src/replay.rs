@@ -24,7 +24,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.4";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.5";
+pub const LEGACY_APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.4";
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
 const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -166,6 +167,10 @@ pub enum ReplayNavigationAction {
     AnchorFocus {
         entity: Uuid,
         source_bound: ReplayFocusSphere,
+        /// Optional only for reading 0.4 traces. New 0.5 traces retain the
+        /// actual clicked/object pivot instead of substituting the bound center.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_pivot: Option<[f64; 3]>,
         margin: f64,
         duration_seconds: f64,
         easing: TransitionEasing,
@@ -308,6 +313,7 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
             ReplayNavigationAction::AnchorFocus {
                 entity,
                 source_bound,
+                source_pivot,
                 margin,
                 duration_seconds,
                 easing,
@@ -317,9 +323,14 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 }
                 finite(margin, "focus anchor margin")?;
                 nonnegative(duration_seconds, "focus transition duration")?;
+                let source_pivot = source_pivot.ok_or_else(|| {
+                    "replay 0.5 focus anchor requires an explicit source pivot".to_owned()
+                })?;
+                finite3(source_pivot, "focus anchor source pivot")?;
                 Ok(Self::AnchorFocus {
                     entity: StableEntityId(entity),
                     source_bound: source_bound.try_into()?,
+                    source_pivot,
                     margin,
                     duration_seconds,
                     easing,
@@ -383,6 +394,15 @@ impl TryFrom<ReplayFocusSphere> for FocusSphere {
 
     fn try_from(sphere: ReplayFocusSphere) -> Result<Self, Self::Error> {
         Self::new(sphere.center, sphere.radius).map_err(str::to_owned)
+    }
+}
+
+impl From<FocusSphere> for ReplayFocusSphere {
+    fn from(sphere: FocusSphere) -> Self {
+        Self {
+            center: sphere.center,
+            radius: sphere.radius,
+        }
     }
 }
 
@@ -627,7 +647,7 @@ pub struct AppReplayCameraState {
 pub struct AppReplayFocusState {
     pub center: [f64; 3],
     pub radius: f64,
-    pub anchor_entity: Option<Uuid>,
+    pub selected: Option<AppReplaySelectedFocusState>,
     pub focus_enabled: bool,
     pub inversion_enabled: bool,
     pub coordinate: f64,
@@ -635,14 +655,26 @@ pub struct AppReplayFocusState {
     pub transition_remaining_seconds: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplaySelectedFocusState {
+    pub entity: Uuid,
+    pub source_bound: ReplayFocusSphere,
+    pub source_pivot: [f64; 3],
+    pub margin: f64,
+    pub output_pivot: Option<[f64; 3]>,
+    pub output_radius: Option<f64>,
+}
+
 pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppReplayError> {
-    if script.version != APP_REPLAY_VERSION {
+    if script.version != APP_REPLAY_VERSION && script.version != LEGACY_APP_REPLAY_VERSION {
         return Err(AppReplayError::UnsupportedVersion(script.version.clone()));
     }
+    let legacy = script.version == LEGACY_APP_REPLAY_VERSION;
     let store = AppStore::default();
     let mut records = Vec::with_capacity(script.events.len());
     for (ordinal, event) in script.events.iter().cloned().enumerate() {
-        let outcome = replay_event(&store, &event);
+        let outcome = replay_event(&store, &event, legacy);
         records.push(AppReplayRecord {
             ordinal,
             event,
@@ -713,8 +745,8 @@ pub fn app_replay_fingerprint(trace: &AppReplayTrace) -> Result<String, serde_js
     Ok(format!("{fingerprint:032x}"))
 }
 
-fn replay_event(store: &AppStore, event: &AppReplayEvent) -> AppReplayOutcome {
-    let result: Result<AppCommit, String> = replay_app_event(event)
+fn replay_event(store: &AppStore, event: &AppReplayEvent, legacy: bool) -> AppReplayOutcome {
+    let result: Result<AppCommit, String> = replay_app_event(event, legacy)
         .and_then(|event| store.dispatch(event).map_err(|error| error.to_string()));
     match result {
         Ok(commit) => AppReplayOutcome::Committed {
@@ -730,7 +762,7 @@ fn replay_event(store: &AppStore, event: &AppReplayEvent) -> AppReplayOutcome {
     }
 }
 
-fn replay_app_event(event: &AppReplayEvent) -> Result<AppEvent, String> {
+fn replay_app_event(event: &AppReplayEvent, legacy: bool) -> Result<AppEvent, String> {
     match event {
         AppReplayEvent::LoadPresentation { presentation } => {
             Ok(AppEvent::PresentationLoaded(presentation.clone()))
@@ -748,7 +780,7 @@ fn replay_app_event(event: &AppReplayEvent) -> Result<AppEvent, String> {
             sequence,
             at_seconds,
             action,
-        } => NavigationAction::try_from(*action).map(|action| {
+        } => navigation_action_for_replay_version(*action, legacy).map(|action| {
             AppEvent::Input(Timed {
                 sequence: *sequence,
                 at_seconds: *at_seconds,
@@ -819,6 +851,25 @@ fn replay_app_event(event: &AppReplayEvent) -> Result<AppEvent, String> {
             delta_seconds: *delta_seconds,
         })),
     }
+}
+
+fn navigation_action_for_replay_version(
+    mut action: ReplayNavigationAction,
+    legacy: bool,
+) -> Result<NavigationAction, String> {
+    if legacy {
+        if let ReplayNavigationAction::AnchorFocus {
+            source_bound,
+            source_pivot,
+            ..
+        } = &mut action
+        {
+            if source_pivot.is_none() {
+                *source_pivot = Some(source_bound.center);
+            }
+        }
+    }
+    NavigationAction::try_from(action)
 }
 
 fn replay_effect(effect: &AppEffect) -> AppReplayEffect {
@@ -919,7 +970,16 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         focus: AppReplayFocusState {
             center: frame.focus.sphere.center,
             radius: frame.focus.sphere.radius,
-            anchor_entity: frame.focus.anchor.map(|anchor| anchor.entity.0),
+            selected: frame
+                .selected_focus
+                .map(|selected| AppReplaySelectedFocusState {
+                    entity: selected.entity.0,
+                    source_bound: selected.source_bound.into(),
+                    source_pivot: selected.source_pivot,
+                    margin: selected.margin,
+                    output_pivot: selected.output_pivot,
+                    output_radius: selected.output_radius,
+                }),
             focus_enabled: frame.focus.focus_enabled,
             inversion_enabled: frame.focus.inversion_enabled,
             coordinate: frame.focus.focus_coordinate,
@@ -1082,7 +1142,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event).ok())
+            .filter_map(|event| replay_app_event(event, false).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -1266,6 +1326,20 @@ mod tests {
                 .surface_anchor_transition_remaining_seconds,
             None
         );
+        let selected = trace.records[18]
+            .state
+            .focus
+            .selected
+            .as_ref()
+            .expect("anchor-focus frame exposes selected source and output state");
+        assert_eq!(
+            selected.entity,
+            Uuid::parse_str("70000000-0000-4000-8000-000000000001").unwrap()
+        );
+        assert_eq!(selected.source_bound.center, [1.5, 0.0, 0.0]);
+        assert_eq!(selected.source_pivot, [1.7, 0.1, 0.0]);
+        assert!(selected.output_pivot.is_some());
+        assert!(selected.output_radius.is_some_and(|radius| radius > 0.0));
         assert!(matches!(
             trace.records.last().unwrap().outcome,
             AppReplayOutcome::Rejected { ref error }
@@ -1279,7 +1353,7 @@ mod tests {
         assert_eq!(after.navigation.pending_actions, 0);
         assert_eq!(after.navigation.last_applied_sequence, Some(16));
         assert!(after.navigation.diagnostics.is_empty());
-        assert_eq!(after.focus.anchor_entity, None);
+        assert_eq!(after.focus.selected, None);
         assert_eq!(after.reflection, ReplayReflection::Identity);
         assert_eq!(
             format!(
@@ -1292,6 +1366,87 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AppReplayTrace>(&trace_json).unwrap(),
             trace
+        );
+    }
+
+    #[test]
+    fn legacy_anchor_focus_defaults_pivot_to_bound_center() {
+        let action: ReplayNavigationAction = serde_json::from_str(
+            r#"{
+                "action":"anchor_focus",
+                "entity":"70000000-0000-4000-8000-000000000001",
+                "source_bound":{"center":[1.0,2.0,3.0],"radius":0.5},
+                "margin":1.1,
+                "duration_seconds":0.7,
+                "easing":"smoother_step"
+            }"#,
+        )
+        .unwrap();
+        let legacy = AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION.to_owned(),
+            events: vec![
+                AppReplayEvent::Navigate {
+                    sequence: 0,
+                    at_seconds: 0.0,
+                    action,
+                },
+                AppReplayEvent::Frame {
+                    elapsed_seconds: 0.0,
+                    delta_seconds: 0.0,
+                },
+            ],
+        };
+        let trace = run_app_replay(&legacy).unwrap();
+        assert_eq!(trace.version, APP_REPLAY_VERSION);
+        let selected = trace.records[1].state.focus.selected.as_ref().unwrap();
+        assert_eq!(selected.source_pivot, selected.source_bound.center);
+    }
+
+    #[test]
+    fn current_anchor_focus_rejects_an_omitted_pivot() {
+        let action: ReplayNavigationAction = serde_json::from_str(
+            r#"{
+                "action":"anchor_focus",
+                "entity":"70000000-0000-4000-8000-000000000001",
+                "source_bound":{"center":[1.0,2.0,3.0],"radius":0.5},
+                "margin":1.1,
+                "duration_seconds":0.7,
+                "easing":"smoother_step"
+            }"#,
+        )
+        .unwrap();
+        let current = AppReplayScript::new(vec![AppReplayEvent::Navigate {
+            sequence: 0,
+            at_seconds: 0.0,
+            action,
+        }]);
+        let trace = run_app_replay(&current).unwrap();
+        assert!(matches!(
+            trace.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires an explicit source pivot")
+        ));
+        assert_eq!(trace.records[0].state.focus.selected, None);
+    }
+
+    #[test]
+    fn explicit_anchor_pivot_roundtrips_in_the_current_schema() {
+        let action = ReplayNavigationAction::AnchorFocus {
+            entity: Uuid::from_u128(7),
+            source_bound: ReplayFocusSphere {
+                center: [1.0, 2.0, 3.0],
+                radius: 0.5,
+            },
+            source_pivot: Some([1.25, 2.1, 2.75]),
+            margin: 1.1,
+            duration_seconds: 0.7,
+            easing: TransitionEasing::SmoothStep,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("source_pivot"));
+        assert_eq!(
+            serde_json::from_str::<ReplayNavigationAction>(&json).unwrap(),
+            action
         );
     }
 

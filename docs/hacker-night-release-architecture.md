@@ -139,9 +139,13 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.4 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.5 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane.
-  Version 0.4 makes action admission and integration distinct: same-time
+  Version 0.5 retains selected source bounds and clicked pivots and derives
+  output-chart pivots/radii in the application snapshot; a projection pole
+  clears only those derived values. It accepts 0.4 inputs by treating an
+  omitted source pivot as the bound center. Action admission and integration
+  remain distinct: same-time
   navigation input remains pending until the next integration boundary. That
   is normally a frame event; transactional cue activation also integrates at
   zero time so its own queued transitions and any preceding due input commit
@@ -154,10 +158,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The six-cue golden is
-  `fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`;
+  `fnv1a-128-json:2ac1c692f6a6bfadf5bc5f5565d54823`;
   the navigation golden is
-  `fnv1a-128-json:87454fbfb82c9ab594e9ce9a06da69ad`; the orchestration
-  golden is `fnv1a-128-json:faccd0ee52b825ad9fae8934eea9d227`.
+  `fnv1a-128-json:b51c6b71ebc2031b7ca0c21239db6eed`; the orchestration
+  golden is `fnv1a-128-json:4a0661ea377eaf22dd1130f60fc6b5cd`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.

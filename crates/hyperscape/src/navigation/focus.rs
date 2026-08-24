@@ -45,6 +45,10 @@ impl FocusSphere {
 pub struct FocusAnchor {
     pub entity: StableEntityId,
     pub source_bound: FocusSphere,
+    /// Selected point in the entity's ordinary source chart. This is kept
+    /// separately from the bound center because a face click, object pivot,
+    /// and fitted focus sphere need not share the same point.
+    pub source_pivot: [f64; 3],
     pub margin: f64,
 }
 
@@ -135,10 +139,35 @@ impl FocusNavigation {
         duration_seconds: f64,
         easing: TransitionEasing,
     ) -> Result<(), &'static str> {
+        self.anchor_to_pivot_with_easing(
+            entity,
+            source_bound,
+            source_bound.center,
+            margin,
+            duration_seconds,
+            easing,
+        )
+    }
+
+    /// Select and smoothly fit around an entity while retaining the exact
+    /// clicked/object pivot in the ordinary source chart. Validation happens
+    /// before mutation so an adapter cannot leave a partially selected object.
+    pub fn anchor_to_pivot_with_easing(
+        &mut self,
+        entity: StableEntityId,
+        source_bound: FocusSphere,
+        source_pivot: [f64; 3],
+        margin: f64,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    ) -> Result<(), &'static str> {
         if entity.0.is_nil() {
             return Err("focus anchor entity must have a non-nil stable identity");
         }
         FocusSphere::new(source_bound.center, source_bound.radius)?;
+        if source_pivot.into_iter().any(|value| !value.is_finite()) {
+            return Err("focus anchor source pivot must be finite");
+        }
         if !margin.is_finite() || !duration_seconds.is_finite() || duration_seconds < 0.0 {
             return Err("focus margin and transition duration must be finite and nonnegative");
         }
@@ -150,6 +179,7 @@ impl FocusNavigation {
         self.anchor = Some(FocusAnchor {
             entity,
             source_bound,
+            source_pivot,
             margin,
         });
         self.focus_enabled = true;
@@ -264,5 +294,87 @@ impl FocusNavigation {
     pub fn toggle_inversion(&mut self) -> bool {
         self.inversion_enabled = !self.inversion_enabled;
         self.inversion_enabled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn entity() -> StableEntityId {
+        StableEntityId(Uuid::from_u128(7))
+    }
+
+    #[test]
+    fn focus_anchor_preserves_selected_source_pivot() {
+        let mut focus = FocusNavigation::default();
+        let bound = FocusSphere::new([1.0, 2.0, 3.0], 0.5).unwrap();
+        let pivot = [1.25, 2.1, 2.75];
+
+        focus
+            .anchor_to_pivot_with_easing(
+                entity(),
+                bound,
+                pivot,
+                1.1,
+                0.7,
+                TransitionEasing::SmoothStep,
+            )
+            .unwrap();
+
+        let anchor = focus.anchor.unwrap();
+        assert_eq!(anchor.entity, entity());
+        assert_eq!(anchor.source_bound, bound);
+        assert_eq!(anchor.source_pivot, pivot);
+        assert_eq!(anchor.margin, 1.1);
+        assert!(focus.focus_enabled);
+        assert_eq!(focus.transition.unwrap().target.center, bound.center);
+    }
+
+    #[test]
+    fn nonfinite_selection_pivot_is_rejected_atomically() {
+        let mut focus = FocusNavigation::default();
+        let before = focus.clone();
+        let error = focus
+            .anchor_to_pivot_with_easing(
+                entity(),
+                FocusSphere::new([0.0; 3], 1.0).unwrap(),
+                [0.0, f64::NAN, 0.0],
+                1.1,
+                0.7,
+                TransitionEasing::SmootherStep,
+            )
+            .unwrap_err();
+
+        assert_eq!(error, "focus anchor source pivot must be finite");
+        assert_eq!(focus, before);
+    }
+
+    #[test]
+    fn detaching_selection_preserves_sphere_focus_and_inversion() {
+        let mut focus = FocusNavigation {
+            inversion_enabled: true,
+            ..FocusNavigation::default()
+        };
+        focus
+            .anchor_to_pivot_with_easing(
+                entity(),
+                FocusSphere::new([1.0, 0.0, 0.0], 0.5).unwrap(),
+                [1.2, 0.0, 0.0],
+                1.1,
+                0.0,
+                TransitionEasing::SmootherStep,
+            )
+            .unwrap();
+        let sphere = focus.sphere;
+
+        focus.detach();
+
+        assert_eq!(focus.anchor, None);
+        assert_eq!(focus.transition, None);
+        assert_eq!(focus.sphere, sphere);
+        assert!(focus.focus_enabled);
+        assert!(focus.inversion_enabled);
     }
 }

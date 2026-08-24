@@ -98,6 +98,7 @@ function assertNavigationParity(actual, expected) {
   ]) {
     assert.equal(actual.focus[field], expected.focus[field]);
   }
+  assert.deepEqual(actual.selected_focus, expected.selected_focus);
   assert.equal(actual.reflection, expected.reflection);
   assert.deepEqual(actual.diagnostics, expected.diagnostics);
 }
@@ -127,6 +128,92 @@ assert.match(
   /camera transport reached a spherical-reflection pole/,
 );
 poleApp.free();
+
+// Selection remains one source-chart identity while the derived pivot/radius
+// follows the active reflection chart. A selected pivot at the reflection pole
+// becomes absent without destroying the source selection.
+const selectionApp = new HyperscopeAppShadow();
+const selectionIncumbent = new HyperscopeNavigation();
+for (const candidate of [selectionApp, selectionIncumbent]) {
+  const synchronize = candidate instanceof HyperscopeAppShadow
+    ? candidate.synchronizeNavigation.bind(candidate)
+    : candidate.synchronizeState.bind(candidate);
+  synchronize(
+    eye, forward, up, 3, new Float64Array(), focusCenter, 2, false, false, 0.5, 0.1,
+  );
+}
+const selectedEntity = '70000000-0000-4000-8000-000000000001';
+const selectedBoundCenter = new Float64Array([0, 0, 0]);
+const selectedPivot = new Float64Array([4, 0, 0]);
+const nilEntity = '00000000-0000-0000-0000-000000000000';
+const appBeforeNilEntity = selectionApp.navigationSnapshot();
+const incumbentBeforeNilEntity = selectionIncumbent.snapshot();
+assert.throws(
+  () => selectionApp.anchorFocus(
+    nilEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+  ),
+  /focus entity UUID must not be nil/,
+);
+assert.throws(
+  () => selectionIncumbent.anchorFocus(
+    nilEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+  ),
+  /focus entity UUID must not be nil/,
+);
+assert.deepEqual(selectionApp.navigationSnapshot(), appBeforeNilEntity);
+assert.deepEqual(selectionIncumbent.snapshot(), incumbentBeforeNilEntity);
+assert.equal(
+  selectionApp.anchorFocus(
+    selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+  ),
+  selectionIncumbent.anchorFocus(
+    selectedEntity, selectedBoundCenter, 2, selectedPivot, 1, 0, 'smootherstep',
+  ),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.deepEqual(selectionApp.navigationSnapshot().selected_focus, {
+  entity: selectedEntity,
+  source_bound_center: [0, 0, 0],
+  source_bound_radius: 2,
+  source_pivot: [4, 0, 0],
+  margin: 1,
+  output_pivot: [4, 0, 0],
+  output_radius: 2,
+});
+assert.equal(
+  selectionApp.setInversionEnabled(true),
+  selectionIncumbent.setInversionEnabled(true),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.deepEqual(selectionApp.navigationSnapshot().selected_focus.output_pivot, [1, 0, 0]);
+assert.equal(selectionApp.navigationSnapshot().selected_focus.output_radius, 0.5);
+
+assert.equal(
+  selectionApp.detachFocus(),
+  selectionIncumbent.detachFocus(),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.equal(selectionApp.navigationSnapshot().selected_focus, undefined);
+assert.equal(selectionApp.navigationSnapshot().reflection, 'sphere_reflection');
+
+const polePivot = new Float64Array([0, 0, 0]);
+assert.equal(
+  selectionApp.anchorFocus(
+    selectedEntity, selectedBoundCenter, 2, polePivot, 1, 0, 'smootherstep',
+  ),
+  selectionIncumbent.anchorFocus(
+    selectedEntity, selectedBoundCenter, 2, polePivot, 1, 0, 'smootherstep',
+  ),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.deepEqual(
+  selectionApp.navigationSnapshot().selected_focus.source_pivot,
+  [0, 0, 0],
+);
+assert.equal(selectionApp.navigationSnapshot().selected_focus.output_pivot, undefined);
+assert.equal(selectionApp.navigationSnapshot().selected_focus.output_radius, undefined);
+selectionApp.free();
+selectionIncumbent.free();
 
 incumbent.synchronizeState(
   eye, forward, up, 3, target, focusCenter, 2, false, false, 0.5, 0.1,
