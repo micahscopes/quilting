@@ -561,26 +561,63 @@ fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<
     }
 }
 
-fn link_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> Result<glow::Program, String> {
+const JFA_PROGRAM_COUNT: usize = 12;
+
+const JFA_FRAGMENT_CATALOG: [(&str, &str); JFA_PROGRAM_COUNT] = [
+    ("init", FS_JFA_INIT),
+    ("step", FS_JFA_STEP),
+    ("firmness", FS_JFA_FIRMNESS),
+    ("blur_dir", FS_BLUR_DIR),
+    ("weight_radial", FS_WEIGHT_RADIAL),
+    ("weight_conformal", FS_WEIGHT_CONFORMAL),
+    ("reduce_minmax", FS_REDUCE_MINMAX),
+    ("weight_conformal_norm", FS_WEIGHT_CONFORMAL_NORM),
+    ("weight_kawase", FS_WEIGHT_KAWASE),
+    ("passthrough", FS_PASSTHROUGH),
+    ("mip_composite", FS_MIP_COMPOSITE),
+    ("gauss_down", FS_GAUSS_DOWN),
+];
+
+fn link_program_catalog(
+    gl: &glow::Context,
+) -> Result<[glow::Program; JFA_PROGRAM_COUNT], String> {
     unsafe {
         // Programs are declared after shaders so an early return deletes the
-        // program first, then its attached shaders in reverse acquisition.
+        // programs first, then all attached shaders in reverse acquisition.
         let mut shaders = StagedHandles::new(gl, delete_shader);
         let mut programs = StagedHandles::new(gl, delete_program);
-        let vs = shaders.stage(compile_shader(gl, glow::VERTEX_SHADER, vs_src)?);
-        let fs = shaders.stage(compile_shader(gl, glow::FRAGMENT_SHADER, fs_src)?);
-        let prog = programs.stage(gl.create_program()?);
-        gl.attach_shader(prog, vs);
-        gl.attach_shader(prog, fs);
-        gl.link_program(prog);
-        if !gl.get_program_link_status(prog) {
-            let log = gl.get_program_info_log(prog);
-            return Err(format!("program link: {log}"));
+        let vs = shaders.stage(
+            compile_shader(gl, glow::VERTEX_SHADER, VS_FULLSCREEN)
+                .map_err(|error| format!("fullscreen vertex {error}"))?,
+        );
+        let mut linked = Vec::with_capacity(JFA_PROGRAM_COUNT);
+
+        for (name, fragment_source) in JFA_FRAGMENT_CATALOG {
+            let fs = shaders.stage(
+                compile_shader(gl, glow::FRAGMENT_SHADER, fragment_source)
+                    .map_err(|error| format!("{name} fragment {error}"))?,
+            );
+            let prog = programs.stage(
+                gl.create_program()
+                    .map_err(|error| format!("{name} program create: {error}"))?,
+            );
+            gl.attach_shader(prog, vs);
+            gl.attach_shader(prog, fs);
+            gl.link_program(prog);
+            if !gl.get_program_link_status(prog) {
+                let log = gl.get_program_info_log(prog);
+                return Err(format!("{name} program link: {log}"));
+            }
+            linked.push(prog);
         }
+
+        let linked = linked.try_into().map_err(|_| {
+            format!("JFA fragment catalog did not produce {JFA_PROGRAM_COUNT} programs")
+        })?;
         programs.disarm();
-        // Successful links retain the existing behavior of deleting attached
-        // shaders; GL defers their final release until the program is deleted.
-        Ok(prog)
+        // Delete-flag the shared vertex shader and each fragment shader. GL
+        // retains them through their program attachments until pipeline drop.
+        Ok(linked)
     }
 }
 
@@ -663,18 +700,24 @@ impl JfaPipeline {
         let mut vertex_arrays = StagedHandles::new(gl, delete_vertex_array);
         let mut programs = StagedHandles::new(gl, delete_program);
 
-        let prog_init = programs.stage(link_program(gl, VS_FULLSCREEN, FS_JFA_INIT)?);
-        let prog_step = programs.stage(link_program(gl, VS_FULLSCREEN, FS_JFA_STEP)?);
-        let prog_firmness = programs.stage(link_program(gl, VS_FULLSCREEN, FS_JFA_FIRMNESS)?);
-        let prog_blur_dir = programs.stage(link_program(gl, VS_FULLSCREEN, FS_BLUR_DIR)?);
-        let prog_weight_radial = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_RADIAL)?);
-        let prog_weight_conformal = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL)?);
-        let prog_reduce_minmax = programs.stage(link_program(gl, VS_FULLSCREEN, FS_REDUCE_MINMAX)?);
-        let prog_weight_conformal_norm = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_CONFORMAL_NORM)?);
-        let prog_weight_kawase = programs.stage(link_program(gl, VS_FULLSCREEN, FS_WEIGHT_KAWASE)?);
-        let prog_passthrough = programs.stage(link_program(gl, VS_FULLSCREEN, FS_PASSTHROUGH)?);
-        let prog_mip_composite = programs.stage(link_program(gl, VS_FULLSCREEN, FS_MIP_COMPOSITE)?);
-        let prog_gauss_down = programs.stage(link_program(gl, VS_FULLSCREEN, FS_GAUSS_DOWN)?);
+        let catalog_programs = link_program_catalog(gl)?;
+        for &program in &catalog_programs {
+            programs.stage(program);
+        }
+        let [
+            prog_init,
+            prog_step,
+            prog_firmness,
+            prog_blur_dir,
+            prog_weight_radial,
+            prog_weight_conformal,
+            prog_reduce_minmax,
+            prog_weight_conformal_norm,
+            prog_weight_kawase,
+            prog_passthrough,
+            prog_mip_composite,
+            prog_gauss_down,
+        ] = catalog_programs;
         let vao = vertex_arrays.stage(unsafe { gl.create_vertex_array()? });
         let (reduce_fbo_a, reduce_tex_a) = create_fbo_tex(gl, 1, 1, glow::RGBA16F)?;
         let reduce_tex_a = textures.stage(reduce_tex_a);
@@ -1428,6 +1471,54 @@ mod tests {
         let released = RefCell::new(Vec::new());
         assert_eq!(fail_after_two_stages(&released), Err("synthetic failure"));
         assert_eq!(*released.borrow(), vec!["second", "first"]);
+    }
+
+    #[test]
+    fn jfa_fragment_catalog_has_pipeline_field_order() {
+        let names = JFA_FRAGMENT_CATALOG.map(|(name, _)| name);
+        assert_eq!(
+            names,
+            [
+                "init",
+                "step",
+                "firmness",
+                "blur_dir",
+                "weight_radial",
+                "weight_conformal",
+                "reduce_minmax",
+                "weight_conformal_norm",
+                "weight_kawase",
+                "passthrough",
+                "mip_composite",
+                "gauss_down",
+            ],
+        );
+        assert_eq!(
+            JFA_FRAGMENT_CATALOG.map(|(_, source)| source),
+            [
+                FS_JFA_INIT,
+                FS_JFA_STEP,
+                FS_JFA_FIRMNESS,
+                FS_BLUR_DIR,
+                FS_WEIGHT_RADIAL,
+                FS_WEIGHT_CONFORMAL,
+                FS_REDUCE_MINMAX,
+                FS_WEIGHT_CONFORMAL_NORM,
+                FS_WEIGHT_KAWASE,
+                FS_PASSTHROUGH,
+                FS_MIP_COMPOSITE,
+                FS_GAUSS_DOWN,
+            ],
+        );
+    }
+
+    #[test]
+    fn jfa_catalog_has_one_shared_vertex_source_and_twelve_fragment_sources() {
+        let shared_vertex_source_count = 1;
+        let fragment_source_count = JFA_FRAGMENT_CATALOG.len();
+        assert_eq!(JFA_PROGRAM_COUNT, 12);
+        assert_eq!(fragment_source_count, JFA_PROGRAM_COUNT);
+        assert_eq!(shared_vertex_source_count + fragment_source_count, 13);
     }
 
     #[test]
