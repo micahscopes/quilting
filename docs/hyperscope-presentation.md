@@ -52,6 +52,12 @@ cue validation, camera/focus transitions,
 and resolved layer state remain Rust-authoritative. The browser adapter fetches
 assets and translates the resolved snapshot into renderer commands.
 
+Every activated cue is serialized as its stable UUID in the `cue` URL
+parameter. Copying or reloading the URL therefore re-enters that exact cue
+through Rust's validated `jump_to_cue` path; an absent cue starts at cue one,
+while a malformed or unknown cue fails visibly instead of silently presenting
+the wrong slide.
+
 The WebGL backend keeps each asset and layer semantically distinct while
 packing their face records into shared immutable GPU buffers. Stable node
 ranges retain per-layer visibility and affine transforms, materials keep

@@ -809,6 +809,7 @@ const PARAM_DEFAULTS = {
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0',
+  cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
@@ -844,6 +845,7 @@ function readParams() {
     fov: get('fov'), interp: get('interp'), walksmooth: get('walksmooth'),
     walkalign: get('walkalign'), walkspeed: get('walkspeed'),
     walkscale: get('walkscale'), walkheight: get('walkheight'),
+    cue: get('cue'),
     lab: get('lab'), labfield: get('labfield'),
     laba: get('laba'), labb: get('labb'), labc: get('labc'),
     labmin: get('labmin'), labmax: get('labmax'), labphase: get('labphase'),
@@ -941,7 +943,10 @@ function syncURL() {
     set('py', panY.toFixed(3), parseFloat(PARAM_DEFAULTS.py).toFixed(3));
     set('pz', panZ.toFixed(3), parseFloat(PARAM_DEFAULTS.pz).toFixed(3));
     if (RUST_NAVIGATION_SHADOW_ENABLED) p.set('navshadow', '1');
-    if (RUST_PRESENTATION_ENABLED) p.set('presentation', '1');
+    if (RUST_PRESENTATION_ENABLED) {
+      p.set('presentation', '1');
+      set('cue', rustPresentationDiagnostics.activeCue || '', PARAM_DEFAULTS.cue);
+    }
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
     if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
     if (RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
@@ -1709,6 +1714,7 @@ function activateRustPresentation(direction, cueId) {
     rustPresentationTransitionActive = true;
     applyRustPresentationNavigation(rustPresentationController.tick(0));
     rustPresentationDiagnostics.error = null;
+    syncURL();
     return snapshot;
   } catch (error) {
     rustPresentationDiagnostics.error = error?.message || String(error);
@@ -1729,8 +1735,14 @@ async function initializeRustPresentation() {
     globalThis.__hyperscopePresentationJump = cueId => activateRustPresentation('jump', cueId);
     $('presentation-card').classList.add('active');
     rustPresentationDiagnostics.ready = true;
-    activateRustPresentation('start');
+    const snapshot = initParams.cue
+      ? activateRustPresentation('jump', initParams.cue)
+      : activateRustPresentation('start');
+    if (!snapshot) {
+      throw new Error(rustPresentationDiagnostics.error || 'presentation cue activation failed');
+    }
   } catch (error) {
+    rustPresentationDiagnostics.ready = false;
     rustPresentationDiagnostics.error = error?.message || String(error);
     $('presentation-card').classList.add('active');
     $('presentation-heading').textContent = 'Presentation unavailable';

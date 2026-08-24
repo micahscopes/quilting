@@ -11,4 +11,4 @@ description = "Rust-authoritative application reducer and FRP read models for Hy
 futures-signals = { version = "0.3.34", default-features = false }
 hyperscape = { path = "../hyperscape" }
 hyperscape-protocol = { path = "../hyperscape-protocol" }
-
+uuid = "1"

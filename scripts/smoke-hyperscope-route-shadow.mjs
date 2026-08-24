@@ -17,6 +17,8 @@ assert.equal(new Set(specs.map(spec => spec.key)).size, specs.length);
 assert.equal(specs.find(spec => spec.key === 'minpx').defaultValue, '16');
 assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
+assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
+assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 const syncSource = browserSource.match(
@@ -64,6 +66,22 @@ assert.deepEqual(malformed.pairs, [
   ['atten', 'yes'],
   ['rx', 'NaN'],
 ]);
+
+const cue = 'e0000000-0000-4000-8000-000000000004';
+const linkedCue = canonicalizeHyperscopeRoute([
+  ['presentation', '1'],
+  ['cue', cue],
+]);
+assert.deepEqual(linkedCue.pairs, [
+  ['presentation', '1'],
+  ['cue', cue],
+]);
+assert.deepEqual(linkedCue.diagnostics, []);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['cue', 'not-a-uuid']]).diagnostics
+    .map(diagnostic => diagnostic.code),
+  ['invalid_value'],
+);
 
 console.log(JSON.stringify({
   specs: specs.length,

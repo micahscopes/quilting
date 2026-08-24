@@ -5,6 +5,7 @@ pub enum ControlValueKind {
     Text,
     Number,
     Toggle,
+    OptionalUuid,
 }
 
 impl ControlValueKind {
@@ -13,6 +14,7 @@ impl ControlValueKind {
             Self::Text => "text",
             Self::Number => "number",
             Self::Toggle => "toggle",
+            Self::OptionalUuid => "optional_uuid",
         }
     }
 
@@ -21,6 +23,10 @@ impl ControlValueKind {
             Self::Text => !value.is_empty(),
             Self::Number => value.parse::<f64>().is_ok_and(|number| number.is_finite()),
             Self::Toggle => matches!(value, "0" | "1"),
+            Self::OptionalUuid => {
+                value.is_empty()
+                    || uuid::Uuid::parse_str(value).is_ok_and(|identifier| !identifier.is_nil())
+            }
         }
     }
 
@@ -33,6 +39,11 @@ impl ControlValueKind {
                 .is_some_and(|(left, right)| {
                     left.is_finite() && right.is_finite() && left == right
                 }),
+            Self::OptionalUuid => match (uuid::Uuid::parse_str(left), uuid::Uuid::parse_str(right))
+            {
+                (Ok(left), Ok(right)) => left == right,
+                _ => left == right,
+            },
             Self::Text | Self::Toggle => left == right,
         }
     }
@@ -129,6 +140,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("pz", "0", Number),
     spec!("navshadow", "0", Toggle),
     spec!("presentation", "0", Toggle),
+    spec!("cue", "", OptionalUuid),
     spec!("roundshadow", "0", Toggle),
     spec!("appshadow", "0", Toggle),
     spec!("routeshadow", "0", Toggle),
@@ -299,5 +311,29 @@ mod tests {
                 RouteDiagnosticCode::UnknownKey,
             ]
         );
+    }
+
+    #[test]
+    fn optional_presentation_cue_accepts_absence_or_a_non_nil_uuid() {
+        let absent = HyperscopeRoute::from_pairs([("cue", "")]);
+        assert!(absent.canonical_pairs().is_empty());
+        assert!(absent.diagnostics().is_empty());
+
+        let cue = "e0000000-0000-4000-8000-000000000004";
+        let linked = HyperscopeRoute::from_pairs([("presentation", "1"), ("cue", cue)]);
+        assert_eq!(
+            linked.canonical_pairs(),
+            vec![("presentation", "1"), ("cue", cue)]
+        );
+        assert!(linked.diagnostics().is_empty());
+
+        for invalid in ["not-a-uuid", "00000000-0000-0000-0000-000000000000"] {
+            let route = HyperscopeRoute::from_pairs([("cue", invalid)]);
+            assert_eq!(route.diagnostics().len(), 1);
+            assert_eq!(
+                route.diagnostics()[0].code,
+                RouteDiagnosticCode::InvalidValue
+            );
+        }
     }
 }
