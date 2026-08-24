@@ -21,6 +21,119 @@ use quilting_round_index::PatchControl;
 use serde::Serialize;
 use uuid::Uuid;
 
+const MIN_POSE_SAMPLE_DELTA_SECONDS: f64 = 1.0e-9;
+
+pub(crate) fn validate_pose_stamp(
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+) -> Result<(), String> {
+    if !clip_time_seconds.is_finite() || !sample_time_seconds.is_finite() {
+        return Err("animation pose clocks must be finite".into());
+    }
+    if revision == 0 {
+        return Err("animation pose revision must be nonzero".into());
+    }
+    if continuity_epoch == 0 {
+        return Err("animation pose continuity epoch must be nonzero".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TimedPoseSample {
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+    continuous: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SurfaceVelocityTracker {
+    previous_output_position: Option<[f64; 3]>,
+    previous_pose_revision: Option<u32>,
+    previous_pose_continuity_epoch: Option<u32>,
+    previous_pose_sample_time_seconds: Option<f64>,
+    velocity: [f64; 3],
+    pose_sample_delta_seconds: Option<f64>,
+    velocity_rebased: bool,
+    suppress_once: bool,
+}
+
+impl SurfaceVelocityTracker {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn begin_chart_transport(&mut self, transported_position: Option<[f64; 3]>) {
+        self.previous_output_position = transported_position;
+        self.velocity = [0.0; 3];
+        self.pose_sample_delta_seconds = None;
+        self.velocity_rebased = transported_position.is_some();
+        self.suppress_once = transported_position.is_some();
+    }
+
+    fn observe(
+        &mut self,
+        current_output_position: [f64; 3],
+        pose: Option<TimedPoseSample>,
+    ) -> [f64; 3] {
+        if self.suppress_once {
+            self.velocity = [0.0; 3];
+            self.pose_sample_delta_seconds = None;
+            self.velocity_rebased = true;
+            return self.velocity;
+        }
+        let Some(pose) = pose else {
+            self.velocity = [0.0; 3];
+            self.pose_sample_delta_seconds = None;
+            self.velocity_rebased = false;
+            return self.velocity;
+        };
+        if self.previous_pose_revision == Some(pose.revision)
+            && self.previous_pose_continuity_epoch == Some(pose.continuity_epoch)
+        {
+            self.velocity = [0.0; 3];
+            self.pose_sample_delta_seconds = None;
+            self.velocity_rebased = false;
+            return self.velocity;
+        }
+        let sample_delta = self
+            .previous_pose_sample_time_seconds
+            .map(|previous| pose.sample_time_seconds - previous)
+            .filter(|delta| delta.is_finite() && *delta > MIN_POSE_SAMPLE_DELTA_SECONDS);
+        if pose.continuous && self.previous_pose_continuity_epoch == Some(pose.continuity_epoch) {
+            if let (Some(previous), Some(sample_delta)) =
+                (self.previous_output_position, sample_delta)
+            {
+                self.velocity = scale(sub(current_output_position, previous), 1.0 / sample_delta);
+                self.pose_sample_delta_seconds = Some(sample_delta);
+                self.velocity_rebased = false;
+                return self.velocity;
+            }
+        }
+        self.velocity = [0.0; 3];
+        self.pose_sample_delta_seconds = None;
+        self.velocity_rebased = true;
+        self.velocity
+    }
+
+    fn commit(&mut self, output_position: Option<[f64; 3]>, pose: Option<TimedPoseSample>) {
+        self.previous_output_position = output_position;
+        self.previous_pose_revision = pose.map(|sample| sample.revision);
+        self.previous_pose_continuity_epoch = pose.map(|sample| sample.continuity_epoch);
+        self.previous_pose_sample_time_seconds = pose.map(|sample| sample.sample_time_seconds);
+        self.suppress_once = false;
+        if output_position.is_none() {
+            self.velocity = [0.0; 3];
+            self.pose_sample_delta_seconds = None;
+            self.velocity_rebased = false;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SurfaceRuntime {
     walker: SurfaceWalker,
@@ -33,10 +146,9 @@ pub(crate) struct SurfaceRuntime {
     morph_num_targets: usize,
     joint_matrices: Vec<f32>,
     morph_weights: Vec<f32>,
-    previous_output_position: Option<[f64; 3]>,
-    composed_previous_output_position: Option<[f64; 3]>,
-    suppress_surface_velocity_once: bool,
-    composed_suppress_surface_velocity_once: bool,
+    pose_sample: Option<TimedPoseSample>,
+    legacy_velocity: SurfaceVelocityTracker,
+    composed_velocity: SurfaceVelocityTracker,
     attachment_orientation_sign: i8,
     composed_attachment_orientation_sign: i8,
 }
@@ -55,6 +167,18 @@ pub(crate) struct SurfaceRuntimeSnapshot {
     pub condition_number: f64,
     pub substeps: u32,
     pub edge_crossings: u32,
+    pub pose_sample: Option<SurfacePoseSampleSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct SurfacePoseSampleSnapshot {
+    pub clip_time_seconds: f64,
+    pub sample_time_seconds: f64,
+    pub revision: u32,
+    pub continuity_epoch: u32,
+    pub continuous: bool,
+    pub sample_delta_seconds: Option<f64>,
+    pub velocity_rebased: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -98,6 +222,7 @@ pub(crate) struct ComposedSurfaceWalkSnapshot {
     pub target_camera: Option<SurfaceWalkCameraSnapshot>,
     pub metrics: Option<SurfaceWalkMetricsSnapshot>,
     pub anchor_transition_remaining_seconds: Option<f64>,
+    pub pose_sample: Option<SurfacePoseSampleSnapshot>,
 }
 
 /// Atomic renderer-adapter result for a change of spherical-reflection chart.
@@ -120,10 +245,8 @@ impl SurfaceRuntime {
         self.walker = SurfaceWalker::default();
         self.composed = SurfaceWalkRuntime::default();
         self.adjacency = None;
-        self.previous_output_position = None;
-        self.composed_previous_output_position = None;
-        self.suppress_surface_velocity_once = false;
-        self.composed_suppress_surface_velocity_once = false;
+        self.legacy_velocity.reset();
+        self.composed_velocity.reset();
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
     }
@@ -142,11 +265,68 @@ impl SurfaceRuntime {
         self.morph_num_targets = num_targets;
     }
 
+    #[cfg(test)]
     pub fn set_pose(&mut self, joint_matrices: &[f32], morph_weights: &[f32]) {
         self.joint_matrices.clear();
         self.joint_matrices.extend_from_slice(joint_matrices);
         self.morph_weights.clear();
         self.morph_weights.extend_from_slice(morph_weights);
+        self.pose_sample = None;
+        self.legacy_velocity.velocity = [0.0; 3];
+        self.composed_velocity.velocity = [0.0; 3];
+    }
+
+    /// Install a renderer pose together with its exact clip time and a
+    /// monotonic semantic sample clock. The clip clock may wrap normally; the
+    /// sample clock must increase for a continuous animation interval. An
+    /// ordinary model transform must remain stable between these samples;
+    /// reflection chart edits use `transport_between_reflections` instead.
+    pub fn set_timed_pose(
+        &mut self,
+        joint_matrices: &[f32],
+        morph_weights: &[f32],
+        clip_time_seconds: f64,
+        sample_time_seconds: f64,
+        revision: u32,
+        continuity_epoch: u32,
+    ) -> Result<bool, String> {
+        validate_pose_stamp(
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+        )?;
+        let previous_pose = self.pose_sample;
+        let continuous = if let Some(previous) = previous_pose {
+            if continuity_epoch < previous.continuity_epoch {
+                return Ok(false);
+            }
+            if continuity_epoch == previous.continuity_epoch {
+                if revision <= previous.revision {
+                    return Ok(false);
+                }
+                if sample_time_seconds <= previous.sample_time_seconds {
+                    return Err("animation pose sample time must increase within an epoch".into());
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        self.joint_matrices.clear();
+        self.joint_matrices.extend_from_slice(joint_matrices);
+        self.morph_weights.clear();
+        self.morph_weights.extend_from_slice(morph_weights);
+        self.pose_sample = Some(TimedPoseSample {
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+            continuous,
+        });
+        Ok(true)
     }
 
     pub fn clear_animation(&mut self) {
@@ -157,10 +337,9 @@ impl SurfaceRuntime {
         self.morph_num_targets = 0;
         self.joint_matrices.clear();
         self.morph_weights.clear();
-        self.previous_output_position = None;
-        self.composed_previous_output_position = None;
-        self.suppress_surface_velocity_once = false;
-        self.composed_suppress_surface_velocity_once = false;
+        self.pose_sample = None;
+        self.legacy_velocity.reset();
+        self.composed_velocity.reset();
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
     }
@@ -207,19 +386,24 @@ impl SurfaceRuntime {
         let composed_outcome = composed
             .transport_between_reflections(previous, next)
             .map_err(|error| error.to_string())?;
-        let legacy_previous_position =
-            transport_optional_position(self.previous_output_position, previous, next)?;
-        let composed_previous_position =
-            transport_optional_position(self.composed_previous_output_position, previous, next)?;
+        let legacy_previous_position = transport_optional_position(
+            self.legacy_velocity.previous_output_position,
+            previous,
+            next,
+        )?;
+        let composed_previous_position = transport_optional_position(
+            self.composed_velocity.previous_output_position,
+            previous,
+            next,
+        )?;
         let orientation_delta = previous.orientation_sign() * next.orientation_sign();
 
         self.walker = legacy_walker;
         self.composed = composed;
-        self.previous_output_position = legacy_previous_position;
-        self.composed_previous_output_position = composed_previous_position;
-        self.suppress_surface_velocity_once = self.previous_output_position.is_some();
-        self.composed_suppress_surface_velocity_once =
-            self.composed_previous_output_position.is_some();
+        self.legacy_velocity
+            .begin_chart_transport(legacy_previous_position);
+        self.composed_velocity
+            .begin_chart_transport(composed_previous_position);
         self.attachment_orientation_sign *= orientation_delta;
         self.composed_attachment_orientation_sign *= orientation_delta;
 
@@ -230,9 +414,13 @@ impl SurfaceRuntime {
             normal_side_flipped: (legacy_attached && parity_changed)
                 || composed_outcome.normal_side_flipped,
             anchor_transition_cancelled: composed_outcome.anchor_transition_cancelled,
-            legacy_previous_position_transported: self.previous_output_position.is_some(),
+            legacy_previous_position_transported: self
+                .legacy_velocity
+                .previous_output_position
+                .is_some(),
             composed_previous_position_transported: self
-                .composed_previous_output_position
+                .composed_velocity
+                .previous_output_position
                 .is_some(),
         })
     }
@@ -358,8 +546,7 @@ impl SurfaceRuntime {
         let attachment = SurfaceAttachment::with_normal_sign(address, eye_height, normal_sign)
             .map_err(|error| format!("invalid surface attachment: {error:?}"))?;
         self.walker.attach(attachment);
-        self.previous_output_position = None;
-        self.suppress_surface_velocity_once = false;
+        self.legacy_velocity.reset();
         self.attachment_orientation_sign = normalize_orientation_sign(orientation_sign);
         self.step_relative(
             instances,
@@ -375,10 +562,8 @@ impl SurfaceRuntime {
     pub fn detach(&mut self) -> SurfaceRuntimeSnapshot {
         self.walker.detach(SurfaceDetachReason::Manual);
         self.composed.detach(SurfaceDetachReason::Manual);
-        self.previous_output_position = None;
-        self.composed_previous_output_position = None;
-        self.suppress_surface_velocity_once = false;
-        self.composed_suppress_surface_velocity_once = false;
+        self.legacy_velocity.reset();
+        self.composed_velocity.reset();
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
         detached_snapshot(SurfaceDetachReason::Manual)
@@ -446,13 +631,20 @@ impl SurfaceRuntime {
                 &mut field,
             )
             .map_err(|error| error.to_string())?;
-        self.composed_previous_output_position = update
-            .advance
-            .contact
-            .map(|contact| contact.output_position);
-        self.composed_suppress_surface_velocity_once = false;
+        self.composed_velocity.reset();
+        self.composed_velocity.commit(
+            update
+                .advance
+                .contact
+                .map(|contact| contact.output_position),
+            self.pose_sample,
+        );
         self.composed_attachment_orientation_sign = normalize_orientation_sign(orientation_sign);
-        Ok(composed_snapshot(update, node))
+        Ok(composed_snapshot(
+            update,
+            node,
+            pose_sample_snapshot(self.pose_sample, self.composed_velocity),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -487,7 +679,6 @@ impl SurfaceRuntime {
                 SurfaceDetachReason::SampleUnavailable,
             ));
         };
-        let previous_output_position = self.composed_previous_output_position;
         let Some(adjacency) = self.adjacency.as_ref() else {
             return Ok(self.commit_composed_detach(
                 candidate,
@@ -513,17 +704,10 @@ impl SurfaceRuntime {
             euclidean_model,
             surface_velocity: [0.0; 3],
         };
-        if !self.composed_suppress_surface_velocity_once {
-            if let Some(current_start) = field.sample(attachment.address) {
-                if delta_seconds > 1.0e-9 {
-                    if let Some(previous) = previous_output_position {
-                        field.surface_velocity = scale(
-                            sub(current_start.output_position, previous),
-                            1.0 / delta_seconds,
-                        );
-                    }
-                }
-            }
+        let mut velocity_tracker = self.composed_velocity;
+        if let Some(current_start) = field.sample(attachment.address) {
+            field.surface_velocity =
+                velocity_tracker.observe(current_start.output_position, self.pose_sample);
         }
         let mut camera = camera;
         let update = candidate
@@ -542,12 +726,19 @@ impl SurfaceRuntime {
             .map_err(|error| error.to_string())?;
         self.composed = candidate;
         self.composed_attachment_orientation_sign = next_orientation_sign;
-        self.composed_previous_output_position = update
-            .advance
-            .contact
-            .map(|contact| contact.output_position);
-        self.composed_suppress_surface_velocity_once = false;
-        Ok(composed_snapshot(update, node))
+        velocity_tracker.commit(
+            update
+                .advance
+                .contact
+                .map(|contact| contact.output_position),
+            self.pose_sample,
+        );
+        self.composed_velocity = velocity_tracker;
+        Ok(composed_snapshot(
+            update,
+            node,
+            pose_sample_snapshot(self.pose_sample, self.composed_velocity),
+        ))
     }
 
     fn commit_composed_detach(
@@ -559,8 +750,7 @@ impl SurfaceRuntime {
     ) -> ComposedSurfaceWalkSnapshot {
         candidate.detach(reason);
         self.composed = candidate;
-        self.composed_previous_output_position = None;
-        self.composed_suppress_surface_velocity_once = false;
+        self.composed_velocity.reset();
         self.composed_attachment_orientation_sign = orientation_sign;
         composed_snapshot(
             SurfaceWalkUpdate {
@@ -571,6 +761,7 @@ impl SurfaceRuntime {
                 anchor_transition_remaining_seconds: None,
             },
             0,
+            None,
         )
     }
 
@@ -596,7 +787,6 @@ impl SurfaceRuntime {
         let node = *face_nodes
             .get(attachment.address.face as usize)
             .ok_or_else(|| "surface face has no node identity".to_string())?;
-        let previous_output_position = self.previous_output_position;
         let adjacency = self
             .adjacency
             .as_ref()
@@ -622,21 +812,23 @@ impl SurfaceRuntime {
         let current_start = field
             .sample(attachment.address)
             .ok_or_else(|| "could not sample attached surface".to_string())?;
-        if !self.suppress_surface_velocity_once && delta_seconds > 1.0e-9 {
-            if let Some(previous) = previous_output_position {
-                field.surface_velocity = scale(
-                    sub(current_start.output_position, previous),
-                    1.0 / delta_seconds,
-                );
-            }
-        }
+        let mut velocity_tracker = self.legacy_velocity;
+        field.surface_velocity =
+            velocity_tracker.observe(current_start.output_position, self.pose_sample);
         let desired_absolute_velocity = add(relative_output_velocity, field.surface_velocity);
         let advance = self
             .walker
             .advance(delta_seconds, desired_absolute_velocity, &mut field);
-        self.previous_output_position = advance.contact.map(|contact| contact.output_position);
-        self.suppress_surface_velocity_once = false;
-        Ok(snapshot_from_advance(advance, node))
+        velocity_tracker.commit(
+            advance.contact.map(|contact| contact.output_position),
+            self.pose_sample,
+        );
+        self.legacy_velocity = velocity_tracker;
+        Ok(snapshot_from_advance(
+            advance,
+            node,
+            pose_sample_snapshot(self.pose_sample, self.legacy_velocity),
+        ))
     }
 }
 
@@ -899,7 +1091,11 @@ fn apply_affine(matrix: [f32; 16], point: [f64; 3]) -> Option<[f64; 3]> {
     finite3(output).then_some(output)
 }
 
-fn snapshot_from_advance(advance: SurfaceAdvance, node: usize) -> SurfaceRuntimeSnapshot {
+fn snapshot_from_advance(
+    advance: SurfaceAdvance,
+    node: usize,
+    pose_sample: Option<SurfacePoseSampleSnapshot>,
+) -> SurfaceRuntimeSnapshot {
     let detach_reason = match advance.status {
         SurfaceWalkerStatus::Attached => None,
         SurfaceWalkerStatus::Detached(reason) => Some(detach_reason_name(reason)),
@@ -921,10 +1117,15 @@ fn snapshot_from_advance(advance: SurfaceAdvance, node: usize) -> SurfaceRuntime
         condition_number: advance.condition_number,
         substeps: advance.substeps,
         edge_crossings: advance.edge_crossings,
+        pose_sample,
     }
 }
 
-fn composed_snapshot(update: SurfaceWalkUpdate, node: usize) -> ComposedSurfaceWalkSnapshot {
+fn composed_snapshot(
+    update: SurfaceWalkUpdate,
+    node: usize,
+    pose_sample: Option<SurfacePoseSampleSnapshot>,
+) -> ComposedSurfaceWalkSnapshot {
     let contact = update.advance.contact;
     let detach_reason = match update.advance.status {
         SurfaceWalkerStatus::Attached => None,
@@ -965,7 +1166,23 @@ fn composed_snapshot(update: SurfaceWalkUpdate, node: usize) -> ComposedSurfaceW
             .target_frame
             .map(|frame| metrics_snapshot(frame.metrics)),
         anchor_transition_remaining_seconds: update.anchor_transition_remaining_seconds,
+        pose_sample,
     }
+}
+
+fn pose_sample_snapshot(
+    pose: Option<TimedPoseSample>,
+    tracker: SurfaceVelocityTracker,
+) -> Option<SurfacePoseSampleSnapshot> {
+    pose.map(|sample| SurfacePoseSampleSnapshot {
+        clip_time_seconds: sample.clip_time_seconds,
+        sample_time_seconds: sample.sample_time_seconds,
+        revision: sample.revision,
+        continuity_epoch: sample.continuity_epoch,
+        continuous: sample.continuous,
+        sample_delta_seconds: tracker.pose_sample_delta_seconds,
+        velocity_rebased: tracker.velocity_rebased,
+    })
 }
 
 fn camera_snapshot(camera: CameraRig) -> SurfaceWalkCameraSnapshot {
@@ -1006,6 +1223,7 @@ fn detached_snapshot(reason: SurfaceDetachReason) -> SurfaceRuntimeSnapshot {
         condition_number: f64::INFINITY,
         substeps: 0,
         edge_crossings: 0,
+        pose_sample: None,
     }
 }
 
@@ -1253,8 +1471,7 @@ mod tests {
                 [0.0; 3],
                 -1,
                 [
-                    0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0,
-                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                 ],
                 identity_matrix(),
             )
@@ -1281,7 +1498,9 @@ mod tests {
         }
         let mut runtime = SurfaceRuntime::default();
         runtime.set_morph_targets(&[0.1, 0.0, 0.0, 0.1, 0.0, 0.0, 0.1, 0.0, 0.0], 3, 1);
-        runtime.set_pose(&[], &[0.0]);
+        runtime
+            .set_timed_pose(&[], &[0.0], 0.0, 10.0, 1, 1)
+            .unwrap();
         let address = [0.5, 0.25, 0.25];
         let mut camera = CameraRig::new(
             [0.25, 0.25, 3.0],
@@ -1357,12 +1576,12 @@ mod tests {
         );
         assert_eq!(runtime.attachment_orientation_sign, -1);
         assert_eq!(runtime.composed_attachment_orientation_sign, -1);
-        assert!(runtime.suppress_surface_velocity_once);
-        assert!(runtime.composed_suppress_surface_velocity_once);
+        assert!(runtime.legacy_velocity.suppress_once);
+        assert!(runtime.composed_velocity.suppress_once);
         let expected = inversion
             .transport_point_and_directions::<0>(
                 SphereReflectionState::Identity,
-                runtime.previous_output_position.unwrap(),
+                runtime.legacy_velocity.previous_output_position.unwrap(),
                 [],
             )
             .unwrap()
@@ -1409,6 +1628,8 @@ mod tests {
         );
         assert!(length(legacy_static.projected_output_velocity) < 1.0e-12);
         assert!(length(composed_static.surface_velocity.unwrap()) < 1.0e-12);
+        assert!(legacy_static.pose_sample.unwrap().velocity_rebased);
+        assert!(composed_static.pose_sample.unwrap().velocity_rebased);
         assert_eq!(
             runtime.walker.attachment().unwrap().normal_sign,
             -legacy_before.normal_sign
@@ -1418,12 +1639,14 @@ mod tests {
             -composed_before.normal_sign
         );
 
-        runtime.set_pose(&[], &[0.2]);
+        runtime
+            .set_timed_pose(&[], &[0.2], 0.2, 10.2, 2, 1)
+            .unwrap();
         let legacy_animated = runtime
             .step_relative(
                 &instances,
                 &[0],
-                0.1,
+                1.0 / 1000.0,
                 [0.0; 3],
                 -1,
                 mobius,
@@ -1434,7 +1657,7 @@ mod tests {
             .step_composed(
                 &instances,
                 &[0],
-                0.1,
+                1.0 / 3.0,
                 camera,
                 1.0,
                 SurfaceWalkControls::default(),
@@ -1462,6 +1685,138 @@ mod tests {
                 composed_velocity,
             )) < 1.0e-9
         );
+        for pose in [
+            legacy_animated.pose_sample.unwrap(),
+            composed_animated.pose_sample.unwrap(),
+        ] {
+            assert_eq!(pose.revision, 2);
+            assert_eq!(pose.continuity_epoch, 1);
+            assert!(pose.continuous);
+            assert!((pose.sample_delta_seconds.unwrap() - 0.2).abs() < 1.0e-12);
+            assert!(!pose.velocity_rebased);
+        }
+
+        let legacy_held = runtime
+            .step_relative(
+                &instances,
+                &[0],
+                1.0 / 60.0,
+                [0.0; 3],
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        let composed_held = runtime
+            .step_composed(
+                &instances,
+                &[0],
+                1.0 / 60.0,
+                camera,
+                1.0,
+                SurfaceWalkControls::default(),
+                SurfaceWalkInput::default(),
+                true,
+                false,
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        assert!(length(legacy_held.projected_output_velocity) < 1.0e-12);
+        assert!(length(composed_held.surface_velocity.unwrap()) < 1.0e-12);
+        assert!(legacy_held
+            .pose_sample
+            .unwrap()
+            .sample_delta_seconds
+            .is_none());
+        assert!(composed_held
+            .pose_sample
+            .unwrap()
+            .sample_delta_seconds
+            .is_none());
+
+        assert!(runtime
+            .set_timed_pose(&[], &[0.25], 0.3, 10.3, 3, 1)
+            .unwrap());
+        assert!(runtime
+            .set_timed_pose(&[], &[0.4], 0.5, 10.5, 4, 1)
+            .unwrap());
+        let legacy_coalesced = runtime
+            .step_relative(
+                &instances,
+                &[0],
+                1.0 / 500.0,
+                [0.0; 3],
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        let composed_coalesced = runtime
+            .step_composed(
+                &instances,
+                &[0],
+                0.25,
+                camera,
+                1.0,
+                SurfaceWalkControls::default(),
+                SurfaceWalkInput::default(),
+                true,
+                false,
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        let coalesced_velocity = composed_coalesced.surface_velocity.unwrap();
+        assert!(length(coalesced_velocity) > 1.0e-6);
+        assert!(
+            length(sub(
+                legacy_coalesced.projected_output_velocity,
+                coalesced_velocity,
+            )) < 1.0e-9
+        );
+        for pose in [
+            legacy_coalesced.pose_sample.unwrap(),
+            composed_coalesced.pose_sample.unwrap(),
+        ] {
+            assert_eq!(pose.revision, 4);
+            assert!((pose.sample_delta_seconds.unwrap() - 0.3).abs() < 1.0e-12);
+        }
+
+        runtime.set_timed_pose(&[], &[0.3], 0.0, 0.0, 1, 2).unwrap();
+        let legacy_rebased = runtime
+            .step_relative(
+                &instances,
+                &[0],
+                1.0 / 60.0,
+                [0.0; 3],
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        let composed_rebased = runtime
+            .step_composed(
+                &instances,
+                &[0],
+                1.0 / 60.0,
+                camera,
+                1.0,
+                SurfaceWalkControls::default(),
+                SurfaceWalkInput::default(),
+                true,
+                false,
+                -1,
+                mobius,
+                identity_matrix(),
+            )
+            .unwrap();
+        assert!(length(legacy_rebased.projected_output_velocity) < 1.0e-12);
+        assert!(length(composed_rebased.surface_velocity.unwrap()) < 1.0e-12);
+        assert!(legacy_rebased.pose_sample.unwrap().velocity_rebased);
+        assert!(composed_rebased.pose_sample.unwrap().velocity_rebased);
 
         runtime
             .transport_between_reflections(inversion, SphereReflectionState::Identity)
@@ -1493,7 +1848,7 @@ mod tests {
             .unwrap();
         let pole = attached.output_position.unwrap();
         let before_attachment = runtime.walker.attachment();
-        let before_position = runtime.previous_output_position;
+        let before_position = runtime.legacy_velocity.previous_output_position;
         let before_orientation = runtime.attachment_orientation_sign;
         let inversion = SphereReflectionState::Sphere(FocusSphere::new(pole, 1.0).unwrap());
 
@@ -1501,8 +1856,42 @@ mod tests {
             .transport_between_reflections(SphereReflectionState::Identity, inversion)
             .is_err());
         assert_eq!(runtime.walker.attachment(), before_attachment);
-        assert_eq!(runtime.previous_output_position, before_position);
+        assert_eq!(
+            runtime.legacy_velocity.previous_output_position,
+            before_position
+        );
         assert_eq!(runtime.attachment_orientation_sign, before_orientation);
+    }
+
+    #[wasm_bindgen_test]
+    fn timed_pose_rejects_stale_or_invalid_packets_atomically() {
+        let mut runtime = SurfaceRuntime::default();
+        assert!(runtime
+            .set_timed_pose(&[1.0, 2.0], &[0.25], 0.5, 10.0, 4, 3)
+            .unwrap());
+        let accepted_pose = runtime.pose_sample;
+        let accepted_matrices = runtime.joint_matrices.clone();
+        let accepted_morphs = runtime.morph_weights.clone();
+
+        assert!(!runtime
+            .set_timed_pose(&[9.0], &[0.9], 0.6, 10.1, 4, 3)
+            .unwrap());
+        assert!(!runtime
+            .set_timed_pose(&[8.0], &[0.8], 0.7, 10.2, 100, 2)
+            .unwrap());
+        assert!(runtime
+            .set_timed_pose(&[7.0], &[0.7], 0.8, 10.0, 5, 3)
+            .is_err());
+        assert!(runtime
+            .set_timed_pose(&[6.0], &[0.6], f64::NAN, 10.3, 5, 3)
+            .is_err());
+        assert!(runtime
+            .set_timed_pose(&[5.0], &[0.5], 0.9, 10.3, 0, 3)
+            .is_err());
+
+        assert_eq!(runtime.pose_sample, accepted_pose);
+        assert_eq!(runtime.joint_matrices, accepted_matrices);
+        assert_eq!(runtime.morph_weights, accepted_morphs);
     }
 
     #[test]

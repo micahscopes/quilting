@@ -31,7 +31,7 @@ use quilting_core::render::{
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{
-    ComposedSurfaceWalkSnapshot, SurfaceRuntime, SurfaceRuntimeSnapshot,
+    validate_pose_stamp, ComposedSurfaceWalkSnapshot, SurfaceRuntime, SurfaceRuntimeSnapshot,
     SurfaceWalkReflectionTransportSnapshot,
 };
 use crate::surface_walk::{ComposedSurfaceWalkResultJs, SurfaceWalkReflectionTransportResultJs};
@@ -3131,14 +3131,47 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
 }
 
 #[wasm_bindgen(js_name = "mr_uploadAnimationPose")]
-pub fn mr_upload_animation_pose(matrices: &[f32], morph_weights: &[f32], skin_tex_w: i32) {
+pub fn mr_upload_animation_pose(
+    matrices: &[f32],
+    morph_weights: &[f32],
+    skin_tex_w: i32,
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+) -> Result<bool, JsValue> {
+    validate_pose_stamp(
+        clip_time_seconds,
+        sample_time_seconds,
+        revision,
+        continuity_epoch,
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
     STATE.with(|s| {
-        if let Some(ref mut st) = *s.borrow_mut() {
-            st.renderer.joint_ubo().upload(st.renderer.gl(), matrices, morph_weights, skin_tex_w);
-            st.surface_runtime.set_pose(matrices, morph_weights);
-            st.render_shadow.pose_changed();
+        let mut state = s.borrow_mut();
+        let Some(st) = state.as_mut() else {
+            return Ok(false);
+        };
+        let accepted = st
+            .surface_runtime
+            .set_timed_pose(
+                matrices,
+                morph_weights,
+                clip_time_seconds,
+                sample_time_seconds,
+                revision,
+                continuity_epoch,
+            )
+            .map_err(|error| JsValue::from_str(&error))?;
+        if !accepted {
+            return Ok(false);
         }
-    });
+        st.renderer
+            .joint_ubo()
+            .upload(st.renderer.gl(), matrices, morph_weights, skin_tex_w);
+        st.render_shadow.pose_changed();
+        Ok(true)
+    })
 }
 
 /// Reset skeletal and morph animation state before accepting a new model.

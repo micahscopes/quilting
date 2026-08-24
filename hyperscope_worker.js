@@ -191,7 +191,15 @@ self.onmessage = async function(e) {
     const transfers = [];
     if (pose?.matrices?.buffer) transfers.push(pose.matrices.buffer);
     if (pose?.morph_weights?.buffer) transfers.push(pose.morph_weights.buffer);
-    self.postMessage({ type: 'animation_pose', id, pose }, transfers);
+    self.postMessage({
+      type: 'animation_pose',
+      id,
+      pose,
+      clipTime: data.t,
+      sampleTime: data.sampleTime,
+      revision: data.revision,
+      continuityEpoch: data.continuityEpoch,
+    }, transfers);
     return;
   }
 

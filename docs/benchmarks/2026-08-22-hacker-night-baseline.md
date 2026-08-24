@@ -644,3 +644,48 @@ build, five generated-WASM smokes, ordinary release preflight, and two
 executable Node/WASM reflection-transport tests passed. An initialized target-
 browser trace, Float32 edge-crossing parity, and explicit pose-time sampling
 remain cutover gates before Rust surface walking can become authoritative.
+
+## Semantic animation pose-clock follow-up
+
+On 2026-08-24, animated surface walking stopped dividing an asynchronously
+delivered pose displacement by the next browser render delta. Each issued pose
+request now carries its clip time, a monotonic semantic sample time, a caller-
+owned revision, and a continuity epoch. The worker echoes that stamp; the
+browser retains one in-flight evaluation plus only the newest pending request,
+rejects old epochs after clip/model changes, and WASM rejects a stale or
+malformed stamp before either CPU or GPU pose state changes. Pause, paused
+scrub, clip switch, model reset, and clip wrap explicitly rebase continuity.
+Legacy and composed walkers retain independent stamped contact histories, use
+the semantic sample delta for the first step that observes a new pose, emit
+zero for a held revision, and preserve the separate one-shot reflection-chart
+rebase.
+
+The executable Node/WASM adapter suite now runs three tests. It proves the same
+surface velocity with render deltas of 1/1000 and 1/3 second, a 0.2-second pose
+sample delta, a coalesced two-upload secant over 0.3 seconds, zero velocity for
+a repeated revision, zero on an epoch change, reflection rebasing for both
+walkers, pole rollback, and atomic rejection of duplicate, stale, non-finite,
+zero-revision, and non-monotonic packets. The generated declaration exposes
+the seven-argument stamped upload and typed pose diagnostics; the ordinary
+surface smoke still covers 2,160 mapping cases and 600 incumbent-parity frames.
+
+A fresh initialized horse trace used Claude's installed Chrome DevTools MCP on
+the user-run release server. Right-click attached both walkers to face 16. Over
+120 animated frames crossing continuity epochs 60–62, every discontinuous
+sample had zero velocity, continuous sample deltas stayed between 0.0165 and
+0.0168 seconds, topology drift remained 0, camera drift remained 0, and the
+maximum accumulated camera comparison error was 1.36e-7. Pausing produced an
+epoch-60 rebase on the first observed frame followed by 29 held frames with
+exactly zero surface/projected velocity. A paused scrub from clip time 1.0956
+to 0.555 advanced epoch 77→78, rebased exactly once, then remained at zero for
+the held pose. The page reported no warnings or errors.
+
+The optimized WASM changed from 6,057,645 to 6,061,392 bytes (+3,747 raw);
+gzip changed from 2,131,143 to 2,133,266 bytes (+2,123). The source-coherent
+build receipt is `5114a03cbd013eebf39e44a446b18320` over 156 files and
+38,535,660 bytes. The full native workspace, 75 direct Hyperscape tests, 25
+application/replay tests, 42 browser-independent JavaScript tests, 19 Blender
+interchange tests, all three replay goldens, strict Hyperscape/application
+Clippy, application Rustdoc, three executable Node/WASM adapter tests, all
+five generated-WASM smokes, release Trunk build, and ordinary release
+preflight passed.

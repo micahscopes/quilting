@@ -11,9 +11,13 @@ The request-animation-frame callback performs only the following work for an
 ordinary glTF scene:
 
 1. Apply a pending canvas resize, if any.
-2. Advance animation time. At most one worker pose request is in flight; its
-   returned joint matrices and morph weights are uploaded to retained GPU
-   resources. Source vertices are not sent back per frame.
+2. Advance the monotonic semantic animation clock. At most one worker pose
+   request is in flight and only the newest pending request is retained. Every
+   request carries its issued sample time, revision, and continuity epoch;
+   pause, scrub, clip switch, model reset, and clip wrap start a new epoch.
+   Old-epoch responses are discarded before WASM, and WASM atomically rejects
+   stale/invalid stamps before either its CPU pose or retained GPU resources
+   change. Source vertices are not sent back per frame.
 3. Sample retained mouse/SpaceMouse state once and update the camera and shared
    focus/inversion sphere. The browser currently adapts device axes directly;
    the accepted ownership target is deterministic `hyperscape::FocusNavigation`

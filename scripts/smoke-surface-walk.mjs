@@ -19,6 +19,7 @@ const {
   mr_attachSurfaceWalk,
   mr_stepSurfaceWalk,
   mr_transportSurfaceWalkReflection,
+  mr_uploadAnimationPose,
 } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
 
@@ -36,6 +37,11 @@ assert.match(
 );
 assert.match(
   generatedDeclarations,
+  /export function mr_uploadAnimationPose\(matrices: Float32Array, morph_weights: Float32Array, skin_tex_w: number, clip_time_seconds: number, sample_time_seconds: number, revision: number, continuity_epoch: number\): boolean;/,
+  'animation uploads must carry an explicit semantic clock and caller-owned stamp',
+);
+assert.match(
+  generatedDeclarations,
   /export interface ComposedSurfaceWalkCameraSnapshot \{[^}]*control_distance: number;[^}]*vertical_fov_radians: number;/s,
   'composed camera declarations must match the snake_case serialized packet',
 );
@@ -43,6 +49,11 @@ assert.match(
   generatedDeclarations,
   /export interface ComposedSurfaceWalkMetricsSnapshot \{[^}]*body_scale: number;[^}]*radii_per_second: number;[^}]*eye_height: number;/s,
   'composed metrics declarations must match the snake_case serialized packet',
+);
+assert.match(
+  generatedDeclarations,
+  /export interface SurfacePoseSampleSnapshot \{[^}]*sample_time_seconds: number;[^}]*revision: number;[^}]*continuity_epoch: number;[^}]*sample_delta_seconds\?: number \| null;[^}]*velocity_rebased: boolean;/s,
+  'surface walking diagnostics must expose the accepted pose stamp and derivative interval',
 );
 assert.match(
   generatedDeclarations,
@@ -67,12 +78,59 @@ assert.match(
   /if \(!reflectionTransport\.accepted\) return;\s+previousManualReflection = nextReflection;[\s\S]*mr_setMobius\(flat\);/,
   'a rejected camera/follower/WASM transport must abort before chart and renderer commit',
 );
+assert.match(
+  browserSource,
+  /workerCall\('evaluate_animation_frame', request\)[\s\S]*request\.continuityEpoch !== animationPoseContinuityEpoch[\s\S]*mr_uploadAnimationPose\([\s\S]*request\.sampleTime,[\s\S]*request\.revision,[\s\S]*request\.continuityEpoch,/,
+  'browser animation scheduling must reject old epochs and preserve the issued pose stamp',
+);
+assert.match(
+  browserSource,
+  /const blockGeneration = \+\+animationPoseBlockGeneration;[\s\S]*if \(blockGeneration !== animationPoseBlockGeneration\) return;[\s\S]*finally \{\s+if \(blockGeneration === animationPoseBlockGeneration\)/,
+  'overlapping clip switches must reject stale setup completions without unblocking the winner',
+);
 
 const inertCameraEye = new Float64Array([0, 1, 3]);
 const inertCameraForward = new Float64Array([0, 0, -1]);
 const inertCameraUp = new Float64Array([0, 1, 0]);
 const inertCameraParameters = new Float64Array([3, Math.PI / 3, 0.01, 10_000]);
 const inertControls = new Float64Array(11);
+assert.equal(
+  mr_uploadAnimationPose(
+    new Float32Array(0),
+    new Float32Array(0),
+    0,
+    0,
+    0,
+    1,
+    1,
+  ),
+  false,
+  'a valid stamped pose should be inert before renderer state exists',
+);
+assert.throws(
+  () => mr_uploadAnimationPose(
+    new Float32Array(0),
+    new Float32Array(0),
+    0,
+    Number.NaN,
+    0,
+    1,
+    1,
+  ),
+  'pose clocks must be finite even before renderer initialization',
+);
+assert.throws(
+  () => mr_uploadAnimationPose(
+    new Float32Array(0),
+    new Float32Array(0),
+    0,
+    0,
+    0,
+    0,
+    1,
+  ),
+  'pose revisions must be nonzero even before renderer initialization',
+);
 assert.equal(
   mr_attachSurfaceWalk(
     0,

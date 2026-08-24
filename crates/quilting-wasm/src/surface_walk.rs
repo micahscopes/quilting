@@ -96,6 +96,15 @@ export interface ComposedSurfaceWalkMetricsSnapshot {
   eye_height: number;
   near: number;
 }
+export interface SurfacePoseSampleSnapshot {
+  clip_time_seconds: number;
+  sample_time_seconds: number;
+  revision: number;
+  continuity_epoch: number;
+  continuous: boolean;
+  sample_delta_seconds?: number | null;
+  velocity_rebased: boolean;
+}
 export interface ComposedSurfaceWalkSnapshot {
   status: 'attached' | 'detached';
   phase: 'anchoring' | 'walking' | 'detached';
@@ -115,6 +124,7 @@ export interface ComposedSurfaceWalkSnapshot {
   target_camera?: ComposedSurfaceWalkCameraSnapshot | null;
   metrics?: ComposedSurfaceWalkMetricsSnapshot | null;
   anchor_transition_remaining_seconds?: number | null;
+  pose_sample?: SurfacePoseSampleSnapshot | null;
 }
 export interface ComposedSurfaceWalkErrorSnapshot {
   status: 'error';

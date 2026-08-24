@@ -103,10 +103,12 @@ The first application boundary is now explicit:
   transport the camera, stable attachment side, retained contact follower, and
   previous posed-contact samples transactionally through the exact chart
   differential; a pole rolls every participant back, and a successful edit
-  cancels the old-chart anchor glide to match the browser oracle. Live cutover
-  remains blocked on initialized target-browser validation of the shared clock
-  and reflection diagnostics, plus Float32 near-edge behavior and pose-time
-  velocity sampling. Executable Node/WASM aggregate tests cover both walkers,
+  cancels the old-chart anchor glide to match the browser oracle. Initialized
+  Chrome traces now validate the shared clock, successful reflection
+  transport, explicit pose-time velocity, pause/scrub rebasing, and zero
+  topology/camera drift. Live cutover remains blocked on an initialized
+  pole-rejection trace and Float32-sensitive near-edge behavior. Executable
+  Node/WASM aggregate tests cover both walkers,
   non-binary-exact f32 Möbius packing, one-shot velocity rebasing, and the first
   real animated-pose sample; native replay also proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.

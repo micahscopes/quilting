@@ -2152,6 +2152,16 @@ function failAppAssetShadow(token, code, error, retryable = false) {
 let gpuSkinned = false;
 let animating = true;
 let meshInfo = null;
+let animTime = 0;
+let animationPoseClockSeconds = 0;
+let animationPoseRevision = 0;
+let animationPoseContinuityEpoch = 1;
+let animationPosePending = null;
+let animationPoseBlocked = false;
+let animationPoseBlockGeneration = 0;
+let animInFlight = false;
+let lastAnimationUiAt = -Infinity;
+const ANIMATION_UI_INTERVAL_MS = 50;
 let currentInstances = null;
 let currentFaceNodes = new Int32Array(0);
 let modelFaceNodes = new Int32Array(0);
@@ -3596,6 +3606,10 @@ effect(() => {
   const nextAnimating = animating_sig.get();
   const changed = animating !== nextAnimating;
   animating = nextAnimating;
+  if (changed && !nextAnimating) {
+    rebaseAnimationPoseContinuity();
+    tickAnimation(animTime, animationPoseClockSeconds);
+  }
   // Pausing must submit one final rest-pose classification. Otherwise the
   // resident LODs (and opt-in round-index shadow bounds) remain stamped with
   // the last animated pose until some unrelated camera change occurs.
@@ -3606,60 +3620,85 @@ effect(() => {
 $('anim-sel').addEventListener('change', async () => {
   const idx = parseInt($('anim-sel').value);
   if (idx < 0 || !meshInfo) return;
+  const blockGeneration = ++animationPoseBlockGeneration;
+  animationPoseBlocked = true;
+  rebaseAnimationPoseContinuity();
   $('stats').textContent = 'Switching animation...';
-  const resp = await broadcastCall('set_active_animation', { index: idx });
-  const result = resp.result;
-  if (!result) { $('stats').textContent = 'Animation switch failed'; return; }
-  meshInfo.time_min = result.time_min;
-  meshInfo.time_max = result.time_max;
-  meshInfo.num_vertices = result.num_vertices;
-  meshInfo.num_faces = result.num_faces;
-  meshInfo.duration = result.time_max - result.time_min;
-  animTime = result.time_min;
-  const timeSlider = $('time');
-  timeSlider.min = result.time_min;
-  timeSlider.max = result.time_max;
-  timeSlider.step = (result.time_max - result.time_min) / 200;
-  timeSlider.value = result.time_min;
-  $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
+  let switched = false;
+  try {
+    const resp = await broadcastCall('set_active_animation', { index: idx });
+    if (blockGeneration !== animationPoseBlockGeneration) return;
+    const result = resp.result;
+    if (!result) { $('stats').textContent = 'Animation switch failed'; return; }
+    meshInfo.time_min = result.time_min;
+    meshInfo.time_max = result.time_max;
+    meshInfo.num_vertices = result.num_vertices;
+    meshInfo.num_faces = result.num_faces;
+    meshInfo.duration = result.time_max - result.time_min;
+    animTime = result.time_min;
+    const timeSlider = $('time');
+    timeSlider.min = result.time_min;
+    timeSlider.max = result.time_max;
+    timeSlider.step = (result.time_max - result.time_min) / 200;
+    timeSlider.value = result.time_min;
+    $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
 
-  const skinResp = await workerCall('get_skinning_data', {});
-  const skinData = skinResp.skinData;
-  const nv = skinData ? (skinData.num_vertices || 0) : 0;
-  skinTexW = Math.min(nv, 4096);
-  if (skinData && skinData.joint_indices) {
-    mr_uploadSkinningTexture(
-      new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
-      new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights),
-      skinData.num_vertices,
-    );
-  }
-  if (skinData && skinData.morph_deltas) {
-    mr_uploadMorphTexture(
-      new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
-      skinData.num_vertices,
-      skinData.num_morph_targets,
-    );
-  }
+    const skinResp = await workerCall('get_skinning_data', {});
+    if (blockGeneration !== animationPoseBlockGeneration) return;
+    const skinData = skinResp.skinData;
+    const nv = skinData ? (skinData.num_vertices || 0) : 0;
+    skinTexW = Math.min(nv, 4096);
+    if (skinData && skinData.joint_indices) {
+      mr_uploadSkinningTexture(
+        new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
+        new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights),
+        skinData.num_vertices,
+      );
+    }
+    if (skinData && skinData.morph_deltas) {
+      mr_uploadMorphTexture(
+        new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
+        skinData.num_vertices,
+        skinData.num_morph_targets,
+      );
+    }
 
-  const rpResp = await workerCall('get_rest_pose_instances', {});
-  const rp = rpResp.data || rpResp;
-  if (rp && rp.instances) {
-    setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
-    const animationNodes = modelFaceNodes.length === rp.num_faces
-      ? modelFaceNodes
-      : new Int32Array(rp.num_faces);
-    mr_setFaceNodes(animationNodes);
-    mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
+    const rpResp = await workerCall('get_rest_pose_instances', {});
+    if (blockGeneration !== animationPoseBlockGeneration) return;
+    const rp = rpResp.data || rpResp;
+    if (rp && rp.instances) {
+      setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
+      const animationNodes = modelFaceNodes.length === rp.num_faces
+        ? modelFaceNodes
+        : new Int32Array(rp.num_faces);
+      mr_setFaceNodes(animationNodes);
+      mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
+    }
+    await workerCall('upload_model_to_compute', {});
+    if (blockGeneration !== animationPoseBlockGeneration) return;
+    $('stats').textContent = `Animation: ${$('anim-sel').selectedOptions[0].textContent}`;
+    switched = true;
+    syncURL();
+  } catch (error) {
+    if (blockGeneration === animationPoseBlockGeneration) {
+      $('stats').textContent = `Animation switch failed: ${error.message}`;
+    }
+  } finally {
+    if (blockGeneration === animationPoseBlockGeneration) {
+      animationPoseBlocked = false;
+      if (switched) tickAnimation(animTime, animationPoseClockSeconds);
+    }
   }
-  await workerCall('upload_model_to_compute', {});
-  $('stats').textContent = `Animation: ${$('anim-sel').selectedOptions[0].textContent}`;
-  syncURL();
 });
 
 $('time').addEventListener('input', () => {
   $('time-v').textContent = parseFloat($('time').value).toFixed(2);
-  if (!animating) animTime = parseFloat($('time').value);
+  if (!animating) {
+    animTime = parseFloat($('time').value);
+    rebaseAnimationPoseContinuity();
+    tickAnimation(animTime, animationPoseClockSeconds);
+    debouncedLodRecompute();
+  }
 });
 
 // --- Fuzzy Vision controls (signal-driven) ---
@@ -3889,7 +3928,10 @@ async function loadPatchLab(
   // The laboratory owns the current source geometry. Stop model animation and
   // authored scene updates; exiting reloads the exact pre-lab URL.
   animating_sig.set(false);
+  animationPoseBlockGeneration += 1;
+  animationPoseBlocked = false;
   gpuSkinned = false;
+  rebaseAnimationPoseContinuity({ resetClock: true });
   mr_clearAnimationState();
   hyperscapeActive = false;
   authoredCamera = null;
@@ -4006,7 +4048,10 @@ $('remesh-target').addEventListener('input', () => {
 
 async function loadTestShape(shape, p1, p2) {
   patchLab.active = false;
+  animationPoseBlockGeneration += 1;
+  animationPoseBlocked = false;
   gpuSkinned = false;
+  rebaseAnimationPoseContinuity({ resetClock: true });
   mr_clearAnimationState();
   remeshedMode = true;
   $('remesh-stats').textContent = `Loading ${shape}...`;
@@ -4674,19 +4719,59 @@ function uploadProceduralEnvMaps() {
 }
 
 // --- Animation + LOD ---
-let animTime = 0;
 let lodInFlight = false;
 let lodDebounceTimer = null;
 let skinTexW = 0;
-let animInFlight = false;
-let lastAnimationUiAt = -Infinity;
-const ANIMATION_UI_INTERVAL_MS = 50;
 
-async function tickAnimation(t) {
-  if (patchLab.active || !gpuSkinned || !meshInfo || animInFlight) return;
+function rebaseAnimationPoseContinuity({ resetClock = false } = {}) {
+  if (animationPoseContinuityEpoch >= 0xffff_ffff) {
+    throw new Error('animation pose continuity epoch exhausted');
+  }
+  animationPoseContinuityEpoch += 1;
+  animationPoseRevision = 0;
+  animationPosePending = null;
+  if (resetClock) animationPoseClockSeconds = 0;
+  return animationPoseContinuityEpoch;
+}
+
+function nextAnimationPoseRevision() {
+  if (animationPoseRevision >= 0xffff_ffff) {
+    rebaseAnimationPoseContinuity();
+  }
+  animationPoseRevision += 1;
+  return animationPoseRevision;
+}
+
+function tickAnimation(t, sampleTime = animationPoseClockSeconds) {
+  if (patchLab.active || animationPoseBlocked || !gpuSkinned || !meshInfo) return;
+  const request = Object.freeze({
+    t: Number(t),
+    sampleTime: Number(sampleTime),
+    revision: nextAnimationPoseRevision(),
+    continuityEpoch: animationPoseContinuityEpoch,
+  });
+  if (animInFlight) {
+    animationPosePending = request;
+    return;
+  }
+  void evaluateAnimationPose(request);
+}
+
+async function evaluateAnimationPose(request) {
   animInFlight = true;
   try {
-    const resp = await workerCall('evaluate_animation_frame', { t });
+    const resp = await workerCall('evaluate_animation_frame', request);
+    const responseMatchesRequest = resp.clipTime === request.t
+      && resp.sampleTime === request.sampleTime
+      && resp.revision === request.revision
+      && resp.continuityEpoch === request.continuityEpoch;
+    if (!responseMatchesRequest) {
+      throw new Error('animation worker returned a mismatched pose stamp');
+    }
+    if (request.continuityEpoch !== animationPoseContinuityEpoch
+        || patchLab.active || animationPoseBlocked || !gpuSkinned || !meshInfo) {
+      return;
+    }
     if (resp.pose) {
       const matrices = resp.pose.matrices
         ? new Float32Array(resp.pose.matrices.buffer || resp.pose.matrices)
@@ -4695,11 +4780,28 @@ async function tickAnimation(t) {
         ? new Float32Array(resp.pose.morph_weights.buffer || resp.pose.morph_weights)
         : new Float32Array(0);
       if (matrices.length > 0 || morphW.length > 0) {
-        mr_uploadAnimationPose(matrices, morphW, skinTexW);
+        mr_uploadAnimationPose(
+          matrices,
+          morphW,
+          skinTexW,
+          request.t,
+          request.sampleTime,
+          request.revision,
+          request.continuityEpoch,
+        );
       }
     }
   } catch (e) { console.warn('Animation tick error:', e); }
-  animInFlight = false;
+  finally {
+    animInFlight = false;
+    const pending = animationPosePending;
+    animationPosePending = null;
+    if (pending
+        && pending.continuityEpoch === animationPoseContinuityEpoch
+        && !patchLab.active && !animationPoseBlocked && gpuSkinned && meshInfo) {
+      void evaluateAnimationPose(pending);
+    }
+  }
 }
 
 let lodDirty = false; // set true when camera moves while LOD is in flight
@@ -4974,8 +5076,13 @@ function frame(ts) {
   if (animating && !patchLab.active && gpuSkinned && meshInfo) {
     const duration = Number(meshInfo.duration) || 0;
     const timeMin = Number(meshInfo.time_min) || 0;
+    animationPoseClockSeconds += deltaSeconds;
     if (duration > 0) {
-      const offset = (animTime - timeMin + deltaSeconds) % duration;
+      const unwrappedOffset = animTime - timeMin + deltaSeconds;
+      if (unwrappedOffset >= duration || unwrappedOffset < 0) {
+        rebaseAnimationPoseContinuity();
+      }
+      const offset = unwrappedOffset % duration;
       animTime = timeMin + (offset < 0 ? offset + duration : offset);
     }
     if (ts - lastAnimationUiAt >= ANIMATION_UI_INTERVAL_MS) {
@@ -4983,7 +5090,7 @@ function frame(ts) {
       $('time').value = animTime;
       $('time-v').textContent = animTime.toFixed(2);
     }
-    tickAnimation(animTime);
+    tickAnimation(animTime, animationPoseClockSeconds);
     // Keep LOD tracking the animated pose. The scheduler retains at most one
     // in-flight GPU job plus one coalesced follow-up for the newest frame.
     debouncedLodRecompute();
@@ -5474,6 +5581,11 @@ async function finishModelUpload(info, filename) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   const uploadStarted = performance.now();
   const uploadTimings = { worker: info.loader_timing || null };
+  const modelHasAnimations = !!(info.animations && info.animations.length > 0);
+  animationPoseBlockGeneration += 1;
+  animationPoseBlocked = false;
+  gpuSkinned = false;
+  rebaseAnimationPoseContinuity({ resetClock: true });
   meshInfo = info;
   currentInstances = null;
   currentFaceNodes = new Int32Array(0);
@@ -5671,7 +5783,6 @@ async function finishModelUpload(info, filename) {
 
   // Skinning data
   sectionStarted = performance.now();
-  gpuSkinned = !!(info.animations && info.animations.length > 0);
   const skinResp = await workerCall('get_skinning_data', {});
   const skinData = skinResp.skinData;
   const nv = skinData ? (skinData.num_vertices || 0) : 0;
@@ -5767,6 +5878,8 @@ async function finishModelUpload(info, filename) {
     meshInfo.time_min = 0;
     meshInfo.duration = 0;
   }
+  gpuSkinned = modelHasAnimations;
+  if (gpuSkinned) tickAnimation(animTime, animationPoseClockSeconds);
   uploadTimings.animationSetupMs = performance.now() - sectionStarted;
   uploadTimings.totalMs = performance.now() - uploadStarted;
 

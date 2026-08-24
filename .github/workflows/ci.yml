@@ -78,6 +78,9 @@ jobs:
       - name: Build generated browser smoke artifact
         run: wasm-pack build --target web --out-dir ../../pkg crates/quilting-wasm
 
+      - name: Execute WASM adapter tests
+        run: wasm-pack test --node crates/quilting-wasm
+
       - name: Test generated WASM application boundaries
         run: |
           node scripts/smoke-hyperscope-presentation.mjs
