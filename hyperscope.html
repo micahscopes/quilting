@@ -396,6 +396,7 @@ import {
   scaleAnchoredFocusRadius,
   scaleRelativeNearPlane,
   sceneRelativeWalkSpeed,
+  selectionTransitionFrameDeltaSeconds,
   sharedFocusSphereActive,
   spheroidalFocusEnabled,
   resolveSurfaceWalkView,
@@ -405,7 +406,7 @@ import {
   smootherstep01,
   transportCameraAcrossSphereReflections,
   transportPointAndDirectionsAcrossSphereReflections,
-} from './hyperscope_focus.mjs?rev=asset-scoped-selection-v1';
+} from './hyperscope_focus.mjs?rev=rust-selection-authority-v1';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -414,8 +415,13 @@ const RUST_PRESENTATION_ENABLED =
   new URLSearchParams(location.search).get('presentation') === '1';
 const RUST_ROUND_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('roundshadow') === '1';
+const RUST_SELECTION_IMPLEMENTATION = (() => {
+  const requested = new URLSearchParams(location.search).get('selectionimpl') || 'js';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
+})();
 const RUST_APP_SHADOW_ENABLED =
-  new URLSearchParams(location.search).get('appshadow') === '1';
+  new URLSearchParams(location.search).get('appshadow') === '1'
+  || RUST_SELECTION_IMPLEMENTATION !== 'js';
 const RUST_ROUTE_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('routeshadow') === '1';
 const RUST_RENDER_SHADOW_ENABLED =
@@ -828,7 +834,7 @@ const PARAM_DEFAULTS = {
   smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
-  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js',
+  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -866,6 +872,7 @@ function readParams() {
     fov: get('fov'), interp: get('interp'), walksmooth: get('walksmooth'),
     walkalign: get('walkalign'), walkspeed: get('walkspeed'),
     walkscale: get('walkscale'), walkheight: get('walkheight'), walkimpl: get('walkimpl'),
+    selectionimpl: get('selectionimpl'),
     cue: get('cue'),
     lab: get('lab'), labfield: get('labfield'),
     laba: get('laba'), labb: get('labb'), labc: get('labc'),
@@ -939,6 +946,7 @@ function syncURL() {
       ss('walkscale', walkScaleSteps, PARAM_DEFAULTS.walkscale);
       ss('walkheight', walkHeightSteps, PARAM_DEFAULTS.walkheight);
       set('walkimpl', SURFACE_WALK_IMPLEMENTATION, PARAM_DEFAULTS.walkimpl);
+      set('selectionimpl', RUST_SELECTION_IMPLEMENTATION, PARAM_DEFAULTS.selectionimpl);
       if (patchLab.active) {
         set('lab', patchLab.shape, PARAM_DEFAULTS.lab);
         set('labfield', $('patch-lab-field').value, PARAM_DEFAULTS.labfield);
@@ -2136,6 +2144,9 @@ const rustAppShadowDiagnostics = {
   maximumSelectionTransitionError: 0,
   rendererFocusPacketComparisons: 0,
   rendererFocusPacketMismatches: 0,
+  rendererAuthorityWrites: 0,
+  rendererAuthorityMisses: 0,
+  rendererAuthorityErrors: 0,
   frameCalls: 0,
   eventFrameCalls: 0,
   eventFrameSeconds: 0,
@@ -2229,9 +2240,12 @@ function appSelectionTransitionError(navigation, nowMs) {
   if (navigation?.focus?.inversion_enabled
       !== (mob.xform.peek() === 'sphere_reflection')) errors.push(Infinity);
   const browserRemaining = focusSphereTransition
-    ? Math.max(
-      0,
-      (focusSphereTransition.durationMs - (nowMs - focusSphereTransition.startedAt)) / 1000,
+    ? Math.min(
+      focusSphereTransition.durationMs / 1000,
+      Math.max(
+        0,
+        (focusSphereTransition.durationMs - (nowMs - focusSphereTransition.startedAt)) / 1000,
+      ),
     )
     : 0;
   errors.push(scalar(navigation?.focus?.focus_transition_remaining || 0, browserRemaining));
@@ -2290,20 +2304,76 @@ function compareAppSelectionTransitionFrame(navigation, nowMs) {
   }
 }
 
+function applyRustAppFocusToRenderer(navigation, selection = selectedObject) {
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust' || !rustAppShadow || !navigation) {
+    return false;
+  }
+  const selectedFocus = navigation.selected_focus;
+  let node = -1;
+  let assetId = '';
+  let entityId = '';
+  if (selection) {
+    const identity = selection.identity;
+    if (!identity?.durable || !selectedFocus
+        || selectedFocus.asset_id !== identity.assetId
+        || selectedFocus.entity_id !== identity.entityId) {
+      rustAppShadowDiagnostics.rendererAuthorityErrors += 1;
+      recordAppShadowMismatch(
+        'renderer_focus_authority_identity',
+        `Rust renderer focus cannot resolve packed node ${selection.node}`,
+      );
+      return false;
+    }
+    node = selection.node;
+    assetId = identity.assetId;
+    entityId = identity.entityId;
+  } else if (selectedFocus != null) {
+    rustAppShadowDiagnostics.rendererAuthorityErrors += 1;
+    recordAppShadowMismatch(
+      'renderer_focus_authority_detach',
+      'Rust renderer focus retained a selected identity during detach',
+    );
+    return false;
+  }
+  try {
+    const applied = rustAppShadow.applyFocusToRenderer(node, assetId, entityId);
+    if (applied) rustAppShadowDiagnostics.rendererAuthorityWrites += 1;
+    else rustAppShadowDiagnostics.rendererAuthorityMisses += 1;
+    return applied;
+  } catch (error) {
+    rustAppShadowDiagnostics.rendererAuthorityErrors += 1;
+    recordAppShadowMismatch(
+      'renderer_focus_authority_exception',
+      error?.message || String(error),
+    );
+    return false;
+  }
+}
+
 function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeconds) {
   if (!rustAppShadow || !Number.isFinite(nowMs)) return null;
   // Selection focus uses the incumbent wall-clock timestamp rather than the
   // render loop's 250 ms clamp. Split the first post-pick frame at the event;
   // ordinary and presentation frames retain their established clamped delta.
-  const deltaSeconds = Number.isFinite(rustAppSelectionEventAtMs)
-    ? Math.max(0, (nowMs - rustAppSelectionEventAtMs) / 1000)
-    : rustAppSelectionTransitionActive
-      ? Math.max(0, Number(rawFrameDeltaSeconds))
-      : Math.max(0, Number(frameDeltaSeconds));
-  rustAppSelectionEventAtMs = null;
+  const selectionEventAtMs = rustAppSelectionEventAtMs;
+  const awaitingSelectionEventFrame = Number.isFinite(selectionEventAtMs);
+  const deltaSeconds = selectionTransitionFrameDeltaSeconds(
+    nowMs,
+    selectionEventAtMs,
+    rustAppSelectionTransitionActive,
+    rawFrameDeltaSeconds,
+    frameDeltaSeconds,
+  );
+  // A queued RAF callback can execute after the selection event while still
+  // carrying an older frame timestamp. Keep the event boundary armed until a
+  // frame actually reaches it, or the following raw frame delta counts the
+  // pre-event interval a second time.
+  const consumesSelectionEventFrame = awaitingSelectionEventFrame
+    && nowMs >= selectionEventAtMs;
   try {
     const nextElapsedSeconds = rustAppFrameElapsedSeconds + deltaSeconds;
     rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, deltaSeconds);
+    if (consumesSelectionEventFrame) rustAppSelectionEventAtMs = null;
     rustAppFrameElapsedSeconds = nextElapsedSeconds;
     rustAppShadowDiagnostics.frameCalls += 1;
     rustAppShadowDiagnostics.lastFrameDeltaSeconds = deltaSeconds;
@@ -2316,6 +2386,7 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
     const navigation = needsSnapshot ? rustAppShadow.navigationSnapshot() : null;
     if (navigation) rustAppShadowDiagnostics.frameSnapshotCalls += 1;
     if (rustAppSelectionTransitionActive && navigation) {
+      applyRustAppFocusToRenderer(navigation);
       compareAppSelectionTransitionFrame(navigation, nowMs);
       rustAppSelectionTransitionActive =
         Number(navigation.focus?.focus_transition_remaining || 0) > 0;
@@ -3283,6 +3354,7 @@ function detachAppSelectionShadow(reason) {
         `Rust retained selected focus after ${reason}`,
       );
     }
+    applyRustAppFocusToRenderer(navigation, null);
     rustAppShadowSelectionQueued = false;
     refreshAppShadowSnapshot();
     return true;
@@ -3337,6 +3409,7 @@ function mirrorSelectedObjectToApp(nowMs = performance.now()) {
       sourcePivot: selectedObject.sourceAnchor,
       margin: target.margin,
     }, navigation.selected_focus);
+    applyRustAppFocusToRenderer(navigation);
     compareAppSelectionTransitionFrame(navigation, nowMs);
     refreshAppShadowSnapshot();
     return 'mapped';

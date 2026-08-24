@@ -476,6 +476,67 @@ impl HyperscopeAppShadow {
         )
     }
 
+    /// Apply one identity-checked AppStore focus/selection packet directly to
+    /// the resident renderer. The packed node remains a backend-local handle;
+    /// the durable `(asset, entity)` pair must match the selected Rust state
+    /// before it can be joined to that handle.
+    ///
+    /// Passing `selected_node = -1` and empty IDs applies a detached focus
+    /// sphere and clears renderer selection. `false` means no renderer is
+    /// resident; malformed or mismatched identity is an error and changes
+    /// nothing.
+    #[wasm_bindgen(js_name = applyFocusToRenderer)]
+    pub fn apply_focus_to_renderer(
+        &self,
+        selected_node: i32,
+        asset: &str,
+        entity: &str,
+    ) -> Result<bool, JsValue> {
+        if selected_node < -1 {
+            return Err(JsValue::from_str(
+                "selected renderer node must be -1 or nonnegative",
+            ));
+        }
+        let frame = self.store.frame_snapshot();
+        match (selected_node, frame.selected_focus) {
+            (-1, None) if asset.is_empty() && entity.is_empty() => {}
+            (-1, _) => {
+                return Err(JsValue::from_str(
+                    "detached renderer focus requires empty IDs and no selected AppStore focus",
+                ));
+            }
+            (_, Some(selected)) => {
+                let expected = asset_entity_id(asset, entity)?;
+                if selected.identity != expected {
+                    return Err(JsValue::from_str(
+                        "renderer focus identity does not match selected AppStore focus",
+                    ));
+                }
+            }
+            (_, None) => {
+                return Err(JsValue::from_str(
+                    "renderer node requires a selected AppStore focus",
+                ));
+            }
+        }
+
+        let center = frame.focus.sphere.center.map(|component| component as f32);
+        let radius = frame.focus.sphere.radius as f32;
+        if !center.iter().all(|component| component.is_finite())
+            || !radius.is_finite()
+            || radius <= 0.0
+        {
+            return Err(JsValue::from_str(
+                "AppStore focus sphere is not representable by the f32 renderer",
+            ));
+        }
+        Ok(crate::main_renderer::apply_focus_packet(
+            [center[0], center[1], center[2], radius],
+            frame.focus.focus_enabled,
+            selected_node,
+        ))
+    }
+
     /// Advance the app-owned presentation clock by the same delta as the
     /// incumbent controller and return a compact pose/focus parity snapshot.
     #[wasm_bindgen(js_name = tickPresentation)]

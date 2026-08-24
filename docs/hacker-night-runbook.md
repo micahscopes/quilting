@@ -169,7 +169,7 @@ Use a fresh browser tab after the release build and verify:
 - reloading with the network disabled still succeeds through local HTTP.
 
 For the focus-authority migration gate, open a separate disposable tab at
-`?animate=0&fuzzy=1&fmode=3&navshadow=1&appshadow=1&rendershadow=1`.
+`?presentation=1&cue=e0000000-0000-4000-8000-000000000002&selectionimpl=rust`.
 Verify that the incumbent navigation snapshot and `AppStore` snapshot agree on
 focus enablement, shell coordinate, angular aperture, sphere, lens, and aim
 policy. Toggle Fuzzy off and on and move the focus slider: each synchronous UI
@@ -179,7 +179,11 @@ spherical inversion is disabled. While settled, `frameCalls` should track the
 page frame counter one-for-one, `frameSnapshotCalls` must remain unchanged, and
 `frameErrors` must stay zero. A mapped authored selection should increment
 `selectionTransitionFrames` and `rendererFocusPacketComparisons` without
-incrementing either mismatch counter. Close the disposable tab after the check.
+incrementing either mismatch counter. `rendererAuthorityWrites` must advance;
+`rendererAuthorityMisses`, `rendererAuthorityErrors`, and `frameErrors` must
+remain zero. The route implicitly enables the application observer, but
+`selectionimpl=js` remains the release rollback/default. Close the disposable
+tab after the check.
 
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.

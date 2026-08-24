@@ -194,20 +194,27 @@ The first application boundary is now explicit:
   presence expiry/order and bounded authored-message echo suppression; it does
   not yet select a transport or admit ephemeral state to HHHS.
 
-This layer is not yet the browser authority. It is the target behind the same
-shadow-and-rollback policy used for navigation; browser loading and URL state
-move only after adapters can compare existing behavior against reducer traces.
+This layer is not yet the complete browser authority. It is the target behind
+the same shadow-and-rollback policy used for navigation; browser loading and
+URL state move only after adapters can compare existing behavior against
+reducer traces.
 The selection adapter now joins validated authored node UUIDs to explicit
 presentation asset IDs across packed composition offsets and mirrors mapped
 picks/detaches through the AppStore. Session-generated load IDs, IndexedDB,
 drops, basename matches, and ordinary GLBs cannot acquire durable selection
-scope. Renderer focus transitions remain incumbent until the shared Rust clock
-and selected-focus packet complete the cutover gate. The checked Blender
+scope. The checked Blender
 release fixture now carries five persistent stable IDs, four joined to pickable
 mesh nodes, and a live Chrome MCP composition gate selects one with zero
 browser-transition, renderer-packet, or observer-sequence mismatch. The shared
-clock and CPU-retained packet now run as a measured shadow; renderer
-consumption of that packet remains required before authority changes.
+clock and CPU-retained packet remain measurable in every mode.
+`selectionimpl=js|shadow|rust` is the rollback boundary: the Rust mode verifies
+the durable identity against `AppStore`, joins only the backend-local packed
+node, and applies the selected focus packet directly to the resident renderer
+without round-tripping the sphere through JavaScript. Delayed RAF callbacks
+retain the selection event fence until their timestamp reaches the event, so
+background/main-thread backlog cannot double-integrate pre-selection time.
+Unmapped assets and free/manual focus edits deliberately remain on the browser
+path; the release default stays `js` until the narrower cutover has soaked.
 
 The offline release gate also has source provenance now. A Trunk pre-build hook
 uses Rust to fingerprint the authoritative crate/shader, HTML/module, manifest,

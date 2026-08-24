@@ -1315,6 +1315,34 @@ pub fn mr_set_selected_node(node_id: i32) {
     });
 }
 
+/// Atomically install a complete application-owned focus/selection packet.
+///
+/// This is crate-visible so the Rust application adapter can hand state to the
+/// renderer without serializing the packet through JavaScript. Returning
+/// `false` means either validation failed or no renderer is resident.
+pub(crate) fn apply_focus_packet(
+    sphere: [f32; 4],
+    enabled: bool,
+    selected_node: i32,
+) -> bool {
+    if !sphere.iter().all(|value| value.is_finite())
+        || sphere[3] <= 0.0
+        || selected_node < -1
+    {
+        return false;
+    }
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(renderer) = state.as_mut() else {
+            return false;
+        };
+        renderer.focus_sphere = sphere;
+        renderer.focus_field_enabled = enabled;
+        renderer.selected_node = selected_node;
+        true
+    })
+}
+
 #[wasm_bindgen(js_name = "mr_setFocusSphere")]
 pub fn mr_set_focus_sphere(
     center_x: f32,

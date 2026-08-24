@@ -430,6 +430,19 @@ assert.deepEqual(selectionApp.navigationSnapshot().selected_focus, {
   output_radius: 2,
 });
 assert.equal(
+  selectionApp.applyFocusToRenderer(17, selectedAsset, selectedEntity),
+  false,
+  'identity-checked renderer application must be inert before renderer initialization',
+);
+assert.throws(
+  () => selectionApp.applyFocusToRenderer(
+    17,
+    '60000000-0000-4000-8000-000000000002',
+    selectedEntity,
+  ),
+  /identity does not match/,
+);
+assert.equal(
   selectionApp.setInversionEnabled(true),
   selectionIncumbent.setInversionEnabled(true),
 );
@@ -444,6 +457,7 @@ assert.equal(
 assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
 assert.equal(selectionApp.navigationSnapshot().selected_focus, undefined);
 assert.equal(selectionApp.navigationSnapshot().reflection, 'sphere_reflection');
+assert.equal(selectionApp.applyFocusToRenderer(-1, '', ''), false);
 
 const polePivot = new Float64Array([0, 0, 0]);
 assert.equal(

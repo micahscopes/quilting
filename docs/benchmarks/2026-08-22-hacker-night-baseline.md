@@ -1187,3 +1187,39 @@ deterministic `gzip -9 -n`. The source-coherent build receipt is
 `3cb56e606c892c44d590e223d11c4797` over 156 files and 38,669,610 bytes.
 Preflight retained the expected warnings for the untracked local GLB directory
 and the noncommercial horse fixture; neither local asset was added to source.
+
+## Rust selected-focus renderer authority gate
+
+The next 2026-08-24 checkpoint introduced the explicit
+`selectionimpl=js|shadow|rust` rollback boundary. The Rust mode admits only a
+mapped durable selection: JavaScript supplies the backend-local packed node and
+the expected `(asset, entity)` IDs, `HyperscopeAppShadow` verifies those IDs
+against the selected `AppStore` focus, and Rust applies the complete
+focus-sphere/enablement/node packet to the resident renderer atomically. The
+sphere itself does not serialize through JavaScript. Detached selection uses
+the same checked path; malformed identity changes nothing. Ordinary GLBs and
+manual/free sphere edits remain on incumbent authority, and `js` remains the
+default.
+
+The first live cutover probe exposed a real event-clock edge. Chrome may run an
+already-queued RAF callback after a pick while retaining a timestamp older than
+the pick's `performance.now()`. Clearing the selection event fence on that
+stale frame made the following raw frame delta integrate the pre-event interval
+twice. The adapter now retains the fence until RAF time reaches the event and
+clamps the remaining-time oracle to the authored duration. A dependency-free
+regression proves that the stale frame advances zero and preserves the fence,
+then the first post-event frame advances exactly from the event.
+
+Chrome DevTools MCP selected the authored landmark in the final two-asset cue
+from a fresh release bundle. The trace reported one mapped pick, one dispatch,
+one identity comparison, two transition frames, two renderer packet
+comparisons, two Rust renderer-authority writes, zero unmapped picks, zero
+selection/transition/renderer mismatches, zero authority misses/errors, zero
+frame errors, an empty mismatch list, and no console warning or error. The
+disposable tab and server were removed after the gate.
+
+Validation passed for 28 `hyperscope-app` tests, strict no-dependency
+application Clippy, WASM target checking, 47 browser-independent JavaScript
+tests, all five generated-WASM smokes, the release Trunk build, and the live MCP
+gate. The source-coherent build receipt is
+`07acda5d054f4427057f9dd5c5646a6e` over 156 files and 38,677,409 bytes.

@@ -19,6 +19,9 @@ assert.equal(specs.find(spec => spec.key === 'lodratio').defaultValue, '2');
 assert.equal(specs.find(spec => spec.key === 'lodratio').kind, 'lod_ratio');
 assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
+assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
 
@@ -60,16 +63,21 @@ const malformed = canonicalizeHyperscopeRoute([
   ['atten', 'yes'],
   ['rx', 'NaN'],
   ['lodratio', '3'],
+  ['selectionimpl', 'sometimes'],
   ['mystery', '1'],
 ]);
 assert.deepEqual(
   malformed.diagnostics.map(diagnostic => diagnostic.code),
-  ['duplicate_key', 'invalid_value', 'invalid_value', 'invalid_value', 'unknown_key'],
+  [
+    'duplicate_key', 'invalid_value', 'invalid_value', 'invalid_value',
+    'invalid_value', 'unknown_key',
+  ],
 );
 assert.deepEqual(malformed.pairs, [
   ['mode', 'wire'],
   ['atten', 'yes'],
   ['lodratio', '3'],
+  ['selectionimpl', 'sometimes'],
   ['rx', 'NaN'],
 ]);
 

@@ -216,7 +216,7 @@ or sphere state.
    identity/reflection and cyclic source/neighbor permutation cases.
    `walkimpl=rust` is therefore a real rollback-safe authority mode; the
    default stays `js` until it has seen broader interactive soak time.
-4. **Selection bridge — asset-scoped shadow path complete; authority pending.**
+4. **Selection bridge — mapped renderer authority available behind rollback.**
    Protocol, navigation, AppStore snapshots, replay 0.7, and the generated WASM
    facades now carry an explicit `(asset ID, entity ID)` pair. Pre-0.7
    unscoped replay anchors fail closed. Validated glTF bindings now cross the
@@ -229,10 +229,16 @@ or sphere state.
    allocation-light boundary once per browser frame, snapshots only active
    parity windows, and compares mapped focus interpolation with both the
    incumbent browser state and the renderer's retained CPU packet. It performs
-   no GPU readback. A live Chrome MCP composition gate selects one of the four
-   authored mesh nodes with zero browser-transition, renderer-packet, or
-   sequence mismatch. Next, apply the compact selected-focus packet to the
-   renderer before cutover.
+   no GPU readback. `selectionimpl=js` keeps the incumbent renderer path,
+   `selectionimpl=shadow` enables the same AppStore oracle, and
+   `selectionimpl=rust` identity-checks the selected `(asset, entity)` pair and
+   transfers the complete Rust focus/selection packet directly into the
+   resident renderer without serializing its sphere through JavaScript.
+   Ordinary unmapped assets remain on JavaScript authority. The selected-fit
+   clock also retains an event fence across delayed RAF callbacks whose
+   timestamp predates the pick, preventing the pre-event interval from being
+   integrated twice. The default remains `js` pending broader interactive
+   soak and migration of free/manual focus edits.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.

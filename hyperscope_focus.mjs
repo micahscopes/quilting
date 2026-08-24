@@ -6,6 +6,28 @@ export const HYPERSCOPE_INSTANCE_STRIDE = 52;
 const MOBIUS_EPSILON = 1e-12;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Split the application clock at a selection event without counting the
+ * pre-event part of a delayed RAF twice.
+ *
+ * A queued RAF callback may execute after the event while retaining an older
+ * timestamp. Callers must keep `eventAtMs` armed until `frameAtMs >= eventAtMs`.
+ */
+export function selectionTransitionFrameDeltaSeconds(
+  frameAtMs,
+  eventAtMs,
+  transitionActive,
+  rawDeltaSeconds,
+  frameDeltaSeconds,
+) {
+  if (Number.isFinite(eventAtMs)) {
+    return Math.max(0, (Number(frameAtMs) - Number(eventAtMs)) / 1000);
+  }
+  return transitionActive
+    ? Math.max(0, Number(rawDeltaSeconds))
+    : Math.max(0, Number(frameDeltaSeconds));
+}
+
 function durableUuid(value, label) {
   const normalized = typeof value === 'string' ? value.toLowerCase() : '';
   if (!UUID_PATTERN.test(normalized)

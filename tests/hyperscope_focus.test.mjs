@@ -25,6 +25,7 @@ import {
   scaleAnchoredFocusRadius,
   scaleRelativeNearPlane,
   sceneRelativeWalkSpeed,
+  selectionTransitionFrameDeltaSeconds,
   sharedFocusSphereActive,
   spheroidalFocusEnabled,
   spheroidalDefocus,
@@ -34,6 +35,30 @@ import {
 } from '../hyperscope_focus.mjs';
 
 const STRIDE = 52;
+
+test('selection frame clock retains a future event boundary across stale RAF timestamps', () => {
+  let eventAtMs = 110;
+  let elapsed = 0;
+  const staleFrameAtMs = 100;
+  elapsed += selectionTransitionFrameDeltaSeconds(
+    staleFrameAtMs, eventAtMs, true, 0.016, 0.016,
+  );
+  if (staleFrameAtMs >= eventAtMs) eventAtMs = null;
+  assert.equal(elapsed, 0);
+  assert.equal(eventAtMs, 110, 'a stale RAF must not consume the event boundary');
+
+  const nextFrameAtMs = 126;
+  elapsed += selectionTransitionFrameDeltaSeconds(
+    nextFrameAtMs, eventAtMs, true, 0.026, 0.026,
+  );
+  if (nextFrameAtMs >= eventAtMs) eventAtMs = null;
+  assert.equal(elapsed, 0.016);
+  assert.equal(eventAtMs, null);
+  assert.equal(
+    selectionTransitionFrameDeltaSeconds(142, eventAtMs, true, 0.016, 0.016),
+    0.016,
+  );
+});
 
 test('durable presentation asset scope requires exact manifest-fetch provenance', () => {
   const assetId = '60000000-0000-4000-8000-000000000001';

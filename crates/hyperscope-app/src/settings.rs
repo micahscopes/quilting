@@ -6,6 +6,7 @@ pub enum ControlValueKind {
     Number,
     Toggle,
     LodRatio,
+    Implementation,
     OptionalUuid,
 }
 
@@ -16,6 +17,7 @@ impl ControlValueKind {
             Self::Number => "number",
             Self::Toggle => "toggle",
             Self::LodRatio => "lod_ratio",
+            Self::Implementation => "implementation",
             Self::OptionalUuid => "optional_uuid",
         }
     }
@@ -26,6 +28,7 @@ impl ControlValueKind {
             Self::Number => value.parse::<f64>().is_ok_and(|number| number.is_finite()),
             Self::Toggle => matches!(value, "0" | "1"),
             Self::LodRatio => matches!(value, "2" | "4"),
+            Self::Implementation => matches!(value, "js" | "shadow" | "rust"),
             Self::OptionalUuid => {
                 value.is_empty()
                     || uuid::Uuid::parse_str(value).is_ok_and(|identifier| !identifier.is_nil())
@@ -47,7 +50,7 @@ impl ControlValueKind {
                 (Ok(left), Ok(right)) => left == right,
                 _ => left == right,
             },
-            Self::Text | Self::Toggle | Self::LodRatio => left == right,
+            Self::Text | Self::Toggle | Self::LodRatio | Self::Implementation => left == right,
         }
     }
 }
@@ -124,7 +127,8 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("walkspeed", "0", Number),
     spec!("walkscale", "0", Number),
     spec!("walkheight", "0", Number),
-    spec!("walkimpl", "js", Text),
+    spec!("walkimpl", "js", Implementation),
+    spec!("selectionimpl", "js", Implementation),
     spec!("lab", "0", Text),
     spec!("labfield", "edges", Text),
     spec!("laba", "3", Number),
@@ -332,6 +336,25 @@ mod tests {
                 route.diagnostics()[0].code,
                 RouteDiagnosticCode::InvalidValue,
             );
+        }
+    }
+
+    #[test]
+    fn implementation_routes_admit_only_measured_authority_modes() {
+        for key in ["walkimpl", "selectionimpl"] {
+            for accepted in ["js", "shadow", "rust"] {
+                let route = HyperscopeRoute::from_pairs([(key, accepted)]);
+                assert!(route.diagnostics().is_empty());
+                assert_eq!(route.value(key), Some(accepted));
+            }
+            for rejected in ["", "browser", "auto", "Rust"] {
+                let route = HyperscopeRoute::from_pairs([(key, rejected)]);
+                assert_eq!(route.diagnostics().len(), 1);
+                assert_eq!(
+                    route.diagnostics()[0].code,
+                    RouteDiagnosticCode::InvalidValue,
+                );
+            }
         }
     }
 
