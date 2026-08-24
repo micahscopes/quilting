@@ -144,9 +144,12 @@ frustum/pose bound and must retain the hidden last-valid topology.
 - glTF parsing, image decode, static face textures, adjacency, and skinning
   data are produced once per model load.
 - The canonical tessellation atlas is restricted to 2:1-reachable triples,
-  generated in one worker transaction, packed once, cached in IndexedDB with
-  a versioned key, and uploaded once. Serialization and cache persistence run
-  after the first model/render startup boundary rather than delaying it.
+  generated hierarchically in one worker transaction, packed once, cached in
+  IndexedDB with a versioned key, and uploaded once. Only three irreducible
+  topology families are independently blue-noise sampled under this policy;
+  higher power-of-two descendants use exact midpoint subdivision.
+  Serialization and cache persistence run after the first model/render startup
+  boundary rather than delaying it.
 - HDR prefilter and irradiance products are cached in IndexedDB and uploaded
   once per selected environment.
 - Batch ownership changes only after a completed LOD classification, material
@@ -167,6 +170,44 @@ The backend-independent pieces already live below the WebGL renderer:
 - canonical atlas keys and S3 permutation semantics; and
 - WGSL surface, preparation, and material shader logic.
 
+## Atlas topology and grading policy
+
+Crack-free shared-edge equality and within-face grading are deliberately
+separate contracts. Shared edges must use identical boundary subdivision.
+The current 2:1 maximum within one source face is a conservative quality and
+residency policy: it avoids extreme fans, but it also promotes low edges and
+propagates a graded LOD halo through neighboring faces. A wider ratio therefore
+increases the number and size of cached atlas entries while potentially
+reducing the much larger per-scene resident draw workload.
+
+`TessellationAtlas::build_for_keys` makes the topology choice explicit over
+the same reachable key set:
+
+- `Direct` independently runs deterministic blue-noise sampling and constrained
+  Delaunay triangulation for every key.
+- `Hierarchical` samples only irreducible seed families, then derives all
+  power-of-two descendants through exact four-way midpoint subdivision.
+
+Both policies retain exact requested boundary counts. The reproducible probe
+is:
+
+```sh
+cargo run -p quilting-core --release --example bench_runtime_atlas -- \
+  --min-exp 6 --max-exp 6 --ratios 2,4 \
+  --modes hierarchical,direct --rounds 3
+```
+
+It reports reachable keys, independently sampled topology families, aggregate
+atlas vertices/triangles/bytes, one `2 / 64 / 64` resident example, boundary
+mismatches, a single-peak 24×24-grid promotion halo, minimum and
+first-percentile normalized triangle quality, and median construction time.
+The probe currently admits the measured 2:1 and 4:1 policies; compile-time
+ratios must be positive powers of two so grading stays on the atlas LOD
+lattice. This is a policy oracle; the live runtime remains hierarchical 2:1
+until scene-level and browser startup/cache measurements justify a cutover.
+The latest checked results are archived in the
+[hacker-night benchmark](benchmarks/2026-08-22-hacker-night-baseline.md).
+
 `MeshDraw`, VAOs, transform-feedback objects, GL textures, UBOs, framebuffers,
 and `glow::Context` are explicitly WebGL backend state. They must not migrate
 into a shared scene or command model.
@@ -178,7 +219,7 @@ into a shared scene or command model.
 2. Implement patch preparation as a compute pass writing the same logical
    52-float record. Keep the WebGL transform-feedback implementation as the
    compatibility backend.
-3. Move edge reconciliation, 2:1 grading, resident-topology selection, and
+3. Move edge reconciliation, configurable grading, resident-topology selection, and
    visible-instance compaction into storage buffers.
 4. Emit indirect draw arguments per `RenderBatchKey`. This removes the
    steady-state topology readback and avoids vertex invocation for invisible
@@ -191,9 +232,10 @@ into a shared scene or command model.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable
-batch buffers already implement that principle more completely. Its random
-Poisson/Delaunay generation and per-patch regl commands are not appropriate to
-reintroduce into the deterministic adaptive runtime.
+batch buffers already implement that principle more completely. Per-patch regl
+commands should not return, but independently generated blue-noise/Delaunay
+topology remains a deterministic offline-quality or background-cache candidate
+and is now measured against the hierarchical runtime over identical key sets.
 
 Meshoptimizer opportunities and the boundary between ordinary triangle
 clustering and conformal QB fitting are tracked in

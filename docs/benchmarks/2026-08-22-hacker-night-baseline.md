@@ -923,3 +923,48 @@ renderer-pick dispatch through the single `AppStore` queue, and Rust-owned
 selection transition clocks. The raw ECS `ProjectionCamera` lens/target path
 also remains before the application projection can become the sole camera
 authority.
+
+## Atlas topology-policy oracle
+
+The 2026-08-24 audit found that the live runtime does not independently
+blue-noise sample every resident LOD triple. The direct Bridson/constrained-
+Delaunay builder remains available, but production calls the hierarchical
+subset builder. Under 2:1 grading it independently samples only the three
+irreducible families `[1,1,1]`, `[1,1,2]`, and `[1,2,2]`; all higher patches
+are exact four-way midpoint descendants. The 2:1 within-face rule is a
+separate resident-LOD policy, not a seam or atlas requirement.
+
+`TessellationAtlas::build_for_keys` now compares direct and hierarchical
+construction over the identical ratio-bounded key set. Both modes preserved
+every requested boundary count at 2:1 and 4:1. The benchmark also runs the
+production fixed-point reconciler with an explicit, power-of-two policy ratio
+on a 24×24-cell triangulated grid containing one central LOD-64 peak. The live
+wrapper remains fixed at 2:1.
+
+The measured LOD-64 results from three post-warm-up release rounds were:
+
+| Topology / ratio | Atlas keys | Atlas triangles | Serialized bytes | `2/64/64` resident triangles | Promoted halo faces | Grid requested → resident triangles | q p01 | Median build |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Hierarchical 2:1 | 19 | 12,286 | 401,936 | 3,072 | 63 | 5,247 → 16,362 | 0.600 | 1.484 ms |
+| Hierarchical 4:1 | 34 | 19,106 | 626,532 | 2,816 | 18 | 5,247 → 8,742 | 0.400 | 2.658 ms |
+| Direct blue-noise 2:1 | 19 | 18,234 | 592,272 | 4,386 | 63 | 7,751 → 22,412 | 0.696 | 132.862 ms |
+| Direct blue-noise 4:1 | 34 | 26,742 | 870,884 | 3,192 | 18 | 7,751 → 12,200 | 0.686 | 197.729 ms |
+
+The conservative-waste concern is therefore real: on this fixed topology,
+4:1 reduced the hierarchical promotion halo from 63 to 18 faces and resident
+scene triangles by 46.6%, while increasing the complete LOD-64 atlas by 55.9%.
+Fresh direct blue-noise topology materially improved first-percentile triangle
+shape, but used more triangles and took roughly two orders of magnitude longer
+to build. These numbers support testing 4:1 as a scene-work reduction and
+keeping direct topology as an offline/background quality candidate; they do
+not yet authorize a live default change. Browser cache/startup and representative
+animated-scene measurements remain the cutover gate.
+
+Validation passed for 122 direct core tests, 14 integration tests, four atlas
+example tests, 44 browser-independent JavaScript tests, all three unchanged
+replay goldens, four executable Node/WASM tests, and all five generated-WASM
+smokes. The optimized WASM is 6,074,303 bytes raw and 2,138,023 bytes gzip:
+a 2,132-byte raw / 1,045-byte gzip increase (0.035% / 0.049%) for the explicit
+measurement API, with no atlas payload or live grading-policy change. The
+source-coherent build receipt is `674ec7cc32a6f39663aadc42ccd8edca`
+over 156 files and 38,631,448 bytes.

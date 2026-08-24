@@ -343,7 +343,37 @@ pub fn balance_resident_lods(
 ) -> usize {
     let num_faces = residents.len().min(topology.num_faces as usize);
     let mut scratch = ResidentLodBalanceScratch::default();
-    balance_resident_lods_seeded(residents, topology, 0..num_faces, &mut scratch)
+    balance_resident_lods_seeded::<MAX_FACE_EDGE_LOD_RATIO>(
+        residents,
+        topology,
+        0..num_faces,
+        &mut scratch,
+    )
+}
+
+/// Reconcile resident shared edges and grade each face to an explicit maximum
+/// edge-resolution ratio.
+///
+/// The production wrapper remains fixed at [`MAX_FACE_EDGE_LOD_RATIO`]. This
+/// explicit form exists so offline policy probes and future authored renderer
+/// settings can measure a wider ratio over the identical fixed-point algorithm
+/// without copying its topology semantics.
+pub fn balance_resident_lods_with_ratio<const MAX_FACE_EDGE_RATIO: u32>(
+    residents: &mut [Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+) -> usize {
+    assert!(
+        MAX_FACE_EDGE_RATIO.is_power_of_two(),
+        "LOD ratio must be a positive power of two",
+    );
+    let num_faces = residents.len().min(topology.num_faces as usize);
+    let mut scratch = ResidentLodBalanceScratch::default();
+    balance_resident_lods_seeded::<MAX_FACE_EDGE_RATIO>(
+        residents,
+        topology,
+        0..num_faces,
+        &mut scratch,
+    )
 }
 
 /// Restore crack-free, 2:1-graded topology from a sparse set of changed faces.
@@ -357,7 +387,7 @@ pub fn balance_resident_lods_from_faces(
     dirty_faces: &[usize],
     scratch: &mut ResidentLodBalanceScratch,
 ) -> usize {
-    balance_resident_lods_seeded(
+    balance_resident_lods_seeded::<MAX_FACE_EDGE_LOD_RATIO>(
         residents,
         topology,
         dirty_faces.iter().copied(),
@@ -365,7 +395,7 @@ pub fn balance_resident_lods_from_faces(
     )
 }
 
-fn balance_resident_lods_seeded(
+fn balance_resident_lods_seeded<const MAX_FACE_EDGE_RATIO: u32>(
     residents: &mut [Option<ResidentLod>],
     topology: &HalfEdgeMesh,
     dirty_faces: impl IntoIterator<Item = usize>,
@@ -428,7 +458,7 @@ fn balance_resident_lods_seeded(
         }
 
         let maximum = *face_lods.iter().max().unwrap_or(&1);
-        let minimum_allowed = (maximum / MAX_FACE_EDGE_LOD_RATIO).max(1);
+        let minimum_allowed = (maximum / MAX_FACE_EDGE_RATIO).max(1);
         for edge_lod in &mut face_lods {
             if *edge_lod < minimum_allowed {
                 *edge_lod = minimum_allowed;
@@ -964,6 +994,27 @@ mod tests {
 
         assert_eq!(balance_resident_lods(&mut residents, &topology), 1);
         assert_eq!(residents[0].unwrap().edge_lods(), [64, 64, 128]);
+    }
+
+    #[test]
+    fn explicit_four_to_one_policy_uses_the_same_reconciler() {
+        let faces = [[0, 1, 2]];
+        let topology = HalfEdgeMesh::from_triangles(3, &faces);
+        let mut residents = [Some(ResidentLod::from_edge_lods([1, 1, 128]))];
+
+        assert_eq!(
+            balance_resident_lods_with_ratio::<4>(&mut residents, &topology),
+            1,
+        );
+        assert_eq!(residents[0].unwrap().edge_lods(), [32, 32, 128]);
+    }
+
+    #[test]
+    #[should_panic(expected = "positive power of two")]
+    fn grading_policy_rejects_ratios_outside_the_atlas_lattice() {
+        let topology = HalfEdgeMesh::from_triangles(3, &[[0, 1, 2]]);
+        let mut residents = [Some(ResidentLod::uniform(1))];
+        balance_resident_lods_with_ratio::<3>(&mut residents, &topology);
     }
 
     #[test]

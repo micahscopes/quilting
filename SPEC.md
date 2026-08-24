@@ -196,6 +196,13 @@ In practice, UV/normal permutation was found to cause visible orientation jumps 
 - **Direct**: each canonical triple is independently generated via Bridson (Poisson disk) sampling + Delaunay triangulation. Produces high-quality patches but slow for large LOD ranges.
 - **Hierarchical** (current default): base patches at minimum LOD are generated directly. Higher LODs are derived by midpoint subdivision: `(2p, 2q, 2r)` from `(p, q, r)` by splitting every triangle into 4. This preserves boundary vertex positions exactly and is much faster.
 
+The live atlas currently combines hierarchical construction with a 2:1
+within-face grading policy. These are independent decisions: shared-edge
+equality is the crack-free requirement, while 2:1 is a conservative
+power-of-two quality/performance policy that may promote a halo of neighboring
+faces. Offline policy probes may use wider power-of-two ratios and direct
+blue-noise subsets without changing the live default.
+
 ### Edge Stitching Guarantee
 
 Adjacent faces sharing an edge must have the same LOD on that edge. This is guaranteed by the half-edge mesh structure: both half-edges of a shared edge map to the same canonical edge index, so they always get the same LOD value. No HashMap needed — a flat Vec indexed by half-edge index suffices.

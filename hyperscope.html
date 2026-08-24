@@ -228,7 +228,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button id="patch-lab-colors">LOD colors</button>
       <button id="patch-lab-exit">Exit lab</button>
     </div>
-    <div class="lab-note">Each edge slider is a request. The resident atlas enforces a 2:1 face ratio, so Rust promotes smaller edges when necessary; labels show request → resident.</div>
+    <div class="lab-note">Each edge slider is a request. The current resident-LOD policy grades each face to 2:1, and the cached atlas contains only the resulting reachable triples; labels show request → resident.</div>
     <div class="lab-stats" id="patch-lab-stats">Choose a tri patch, plane, or cube.</div>
   </div>
 

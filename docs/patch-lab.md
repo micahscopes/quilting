@@ -33,6 +33,14 @@ promotes values until:
 2. the largest and smallest edge resolutions in one source face differ by at
    most 2:1.
 
+The first rule is the crack-free stitching invariant. The second is a current
+grading policy, not a mathematical requirement of the atlas or shared edges.
+It bounds anisotropic triangle fans and makes a detail peak decay by one
+power-of-two level per neighboring source face, but its monotone promotions
+can also create a conservative halo of extra resident triangles. The runtime
+atlas is restricted to keys reachable under that policy only after grading;
+the atlas is not what causes the promotion.
+
 For example, requesting `1 / 8 / 128` on the single triangle produces a
 renderable `64 / 64 / 128`. The UI reports that as two promotions rather than
 silently presenting the reconciled values as if they had been requested.

@@ -141,6 +141,28 @@ impl TessellationAtlas {
         Self::build_direct(lod_levels, config)
     }
 
+    /// Build only a caller-selected canonical subset with an explicit topology
+    /// policy.
+    ///
+    /// `Direct` independently blue-noise samples and constrains every requested
+    /// patch. `Hierarchical` blue-noise samples only irreducible ancestors and
+    /// derives their power-of-two descendants by midpoint subdivision. Keeping
+    /// both policies behind one subset API lets runtime and offline tools
+    /// measure the quality/startup tradeoff over the exact same reachable keys.
+    pub fn build_for_keys(
+        lod_levels: &[u32],
+        keys: &[[u32; 3]],
+        config: &PatchConfig,
+        mode: BuildMode,
+    ) -> Self {
+        match mode {
+            BuildMode::Direct => Self::build_direct_for_keys(lod_levels, keys, config),
+            BuildMode::Hierarchical => {
+                Self::build_hierarchical_for_keys(lod_levels, keys, config)
+            }
+        }
+    }
+
     /// Build exactly the requested canonical patches and the ancestors needed
     /// to derive them by midpoint subdivision.
     ///
@@ -221,6 +243,41 @@ impl TessellationAtlas {
         #[cfg(not(feature = "parallel"))]
         {
             let results: Vec<_> = triples
+                .iter()
+                .filter_map(|&key| generate_patch(key, config).map(|(p, t)| (key, p, t)))
+                .collect();
+            merge_patches(lod_levels, results)
+        }
+    }
+
+    fn build_direct_for_keys(
+        lod_levels: &[u32],
+        keys: &[[u32; 3]],
+        config: &PatchConfig,
+    ) -> Self {
+        let mut canonical_keys: Vec<[u32; 3]> = keys
+            .iter()
+            .copied()
+            .map(|mut key| {
+                key.sort_unstable();
+                key
+            })
+            .collect();
+        canonical_keys.sort_unstable();
+        canonical_keys.dedup();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let results: Vec<_> = canonical_keys
+                .par_iter()
+                .filter_map(|&key| generate_patch(key, config).map(|(p, t)| (key, p, t)))
+                .collect();
+            merge_patches(lod_levels, results)
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let results: Vec<_> = canonical_keys
                 .iter()
                 .filter_map(|&key| generate_patch(key, config).map(|(p, t)| (key, p, t)))
                 .collect();
@@ -444,6 +501,18 @@ impl TessellationAtlas {
 mod tests {
     use super::*;
 
+    fn assert_boundary_vertex_counts(atlas: &TessellationAtlas, key: [u32; 3]) {
+        let patch = atlas.get_patch(key).expect("requested atlas patch");
+        let mut counts = [0_usize; 3];
+        for &[x, y] in &patch.positions {
+            let bary = crate::triangle::cartesian_to_bary(x, y);
+            for (edge, coordinate) in bary.into_iter().enumerate() {
+                counts[edge] += usize::from(coordinate.abs() <= 1.0e-9);
+            }
+        }
+        assert_eq!(counts, key.map(|resolution| resolution as usize + 1));
+    }
+
     #[test]
     fn build_small_atlas() {
         let config = PatchConfig::default();
@@ -495,6 +564,43 @@ mod tests {
             let full_patch = full.get_patch(key).unwrap();
             assert_eq!(subset_patch.positions, full_patch.positions, "patch {key:?}");
             assert_eq!(subset_patch.triangles, full_patch.triangles, "patch {key:?}");
+        }
+    }
+
+    #[test]
+    fn direct_subset_matches_full_direct_topology() {
+        let config = PatchConfig::default();
+        let lods = [1, 2, 4];
+        let requested = [[4, 2, 1], [1, 2, 4], [4, 4, 4]];
+        let expected = [[1, 2, 4], [4, 4, 4]];
+        let subset = TessellationAtlas::build_for_keys(
+            &lods,
+            &requested,
+            &config,
+            BuildMode::Direct,
+        );
+        let full = TessellationAtlas::build_with_mode(&lods, &config, BuildMode::Direct);
+
+        assert_eq!(subset.patches.len(), expected.len());
+        for key in expected {
+            let subset_patch = subset.get_patch(key).unwrap();
+            let full_patch = full.get_patch(key).unwrap();
+            assert_eq!(subset_patch.positions, full_patch.positions, "patch {key:?}");
+            assert_eq!(subset_patch.triangles, full_patch.triangles, "patch {key:?}");
+        }
+    }
+
+    #[test]
+    fn direct_and_hierarchical_four_to_one_patches_preserve_edge_counts() {
+        let config = PatchConfig::default();
+        let lods = [1, 2, 4, 8, 16];
+        let keys = [[1, 1, 4], [2, 8, 8], [4, 8, 16], [16, 16, 16]];
+
+        for mode in [BuildMode::Direct, BuildMode::Hierarchical] {
+            let atlas = TessellationAtlas::build_for_keys(&lods, &keys, &config, mode);
+            for key in keys {
+                assert_boundary_vertex_counts(&atlas, key);
+            }
         }
     }
 
