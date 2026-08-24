@@ -182,7 +182,7 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The six-cue golden is
-  `fnv1a-128-json:4d8598faf9db62e8500d49d94ead89ed`;
+  `fnv1a-128-json:e606549f81c07c645eca8bc10cfc1645`;
   the navigation golden is
   `fnv1a-128-json:4b6f0b82cf471af7af17b99ed37317d4`; the orchestration
   golden is `fnv1a-128-json:2cb74a642b3d4fc40b4eda777addb833`.

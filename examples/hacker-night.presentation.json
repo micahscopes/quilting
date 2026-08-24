@@ -58,8 +58,8 @@
       "id": "d0000000-0000-4000-8000-000000000001",
       "name": "Horse overview",
       "camera": {
-        "eye": [0.0, 0.0, 5.0],
-        "control_distance": 5.0,
+        "eye": [0.0, 0.0, 3.0],
+        "control_distance": 3.0,
         "semantic_target": [0.0, 0.0, 0.0]
       },
       "focus": {
