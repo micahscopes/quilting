@@ -1,5 +1,6 @@
 use super::TransitionEasing;
-use bevy_ecs::prelude::{Entity, Resource};
+use crate::StableEntityId;
+use bevy_ecs::prelude::Resource;
 
 /// A positive ordinary-space sphere used by selection focus and inversion.
 ///
@@ -42,7 +43,7 @@ impl FocusSphere {
 /// Optional object ownership of the shared focus/inversion sphere.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FocusAnchor {
-    pub entity: Entity,
+    pub entity: StableEntityId,
     pub source_bound: FocusSphere,
     pub margin: f64,
 }
@@ -112,7 +113,7 @@ impl FocusNavigation {
     /// Select and smoothly fit around an entity while preserving one sphere.
     pub fn anchor_to(
         &mut self,
-        entity: Entity,
+        entity: StableEntityId,
         source_bound: FocusSphere,
         margin: f64,
         duration_seconds: f64,
@@ -128,12 +129,15 @@ impl FocusNavigation {
 
     pub fn anchor_to_with_easing(
         &mut self,
-        entity: Entity,
+        entity: StableEntityId,
         source_bound: FocusSphere,
         margin: f64,
         duration_seconds: f64,
         easing: TransitionEasing,
     ) -> Result<(), &'static str> {
+        if entity.0.is_nil() {
+            return Err("focus anchor entity must have a non-nil stable identity");
+        }
         FocusSphere::new(source_bound.center, source_bound.radius)?;
         if !margin.is_finite() || !duration_seconds.is_finite() || duration_seconds < 0.0 {
             return Err("focus margin and transition duration must be finite and nonnegative");

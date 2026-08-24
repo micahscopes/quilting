@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn focus_navigation_anchors_animates_and_detaches_without_losing_the_sphere() {
-        let entity = Entity::from_bits(7);
+        let entity = StableEntityId(Uuid::from_u128(7));
         let bound = FocusSphere::new([1.0, 2.0, 3.0], 2.0).unwrap();
         let mut focus = FocusNavigation::default();
         focus.anchor_to(entity, bound, 1.1, 1.0).unwrap();
@@ -998,9 +998,15 @@ mod tests {
 
     #[test]
     fn anchored_focus_edits_only_a_bounded_margin() {
-        let entity = Entity::from_bits(11);
+        let entity = StableEntityId(Uuid::from_u128(11));
         let bound = FocusSphere::new([3.0, 4.0, 5.0], 2.0).unwrap();
         let mut focus = FocusNavigation::default();
+        let initial = focus.clone();
+        assert_eq!(
+            focus.anchor_to(StableEntityId(Uuid::nil()), bound, 1.1, 0.0),
+            Err("focus anchor entity must have a non-nil stable identity")
+        );
+        assert_eq!(focus, initial);
         focus.anchor_to(entity, bound, 1.1, 0.0).unwrap();
         assert!(!focus.translate_free([1.0, 0.0, 0.0]));
         assert_eq!(focus.sphere.center, bound.center);

@@ -2,8 +2,8 @@ use super::{
     CameraRig, CameraTransition, FocusNavigation, FocusSphere, NavigationFrame, NavigationPreset,
     SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,
 };
-use crate::HyperscapeDiagnostics;
-use bevy_ecs::prelude::{Entity, Res, ResMut, Resource};
+use crate::{HyperscapeDiagnostics, StableEntityId};
+use bevy_ecs::prelude::{Res, ResMut, Resource};
 use bevy_time::{Time, Virtual};
 use std::collections::VecDeque;
 
@@ -31,7 +31,7 @@ pub enum NavigationAction {
     UpdateSurfaceAnchorTarget(SurfaceAnchorTarget),
     CancelSurfaceAnchorTransition,
     AnchorFocus {
-        entity: Entity,
+        entity: StableEntityId,
         source_bound: FocusSphere,
         margin: f64,
         duration_seconds: f64,
@@ -629,7 +629,7 @@ mod tests {
             .push(
                 0.0,
                 NavigationAction::AnchorFocus {
-                    entity: Entity::from_bits(7),
+                    entity: StableEntityId(uuid::Uuid::from_u128(7)),
                     source_bound: FocusSphere::new([1.0, 0.0, 0.0], 1.0).unwrap(),
                     margin: 1.0,
                     duration_seconds: 1.0,

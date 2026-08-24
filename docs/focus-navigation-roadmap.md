@@ -85,7 +85,7 @@ device adapter -> semantic interaction actions -> FocusNavigation + CameraRig
               -> Hyperscope extraction -> WebGL2 or WebGPU backend
 ```
 
-`hyperscape::FocusNavigation` owns the sphere, optional entity anchor,
+`hyperscape::FocusNavigation` owns the sphere, optional stable-UUID entity anchor,
 transition, focus/inversion enablement, constrained/free translation, and
 radius policy. `NavigationController` and the ECS plugin consume semantic
 actions such as:
