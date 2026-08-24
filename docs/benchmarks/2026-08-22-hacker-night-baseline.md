@@ -689,3 +689,55 @@ interchange tests, all three replay goldens, strict Hyperscape/application
 Clippy, application Rustdoc, three executable Node/WASM adapter tests, all
 five generated-WASM smokes, release Trunk build, and ordinary release
 preflight passed.
+
+## Transactional pole rollback and opt-in Rust authority gate
+
+On 2026-08-24, the remaining outer pole-rejection split was closed. The
+camera, JavaScript follower, Rust aggregate, renderer Möbius state, URL, and
+the public transform/focus controls now form one transaction. A rejected
+center, radius, or transform request restores its signal controls in one
+suppressed batch; programmatic focus-sphere edits restore their preceding
+geometry, and wheel, interpolation, double-tap, and SpaceMouse callers do not
+commit derived margin or transition state after rejection.
+
+The deterministic initialized-browser oracle used Patch Lab at identity with
+camera eye and proposed reflection center both exactly `[0, 0, 3]`. Clicking
+Inversion preserved the identity button, all four center/radius controls, URL,
+surface state, and Rust transport counters. Before the change, only the
+renderer/URL transaction rolled back and the Inversion button remained active.
+
+The executable WASM suite now runs four tests. Its new adapter oracle starts at
+a pick-like `f32::EPSILON` distance from a shared edge, crosses that edge under
+both identity and non-binary-exact Float32 sphere-reflection charts, and covers
+all three cyclic source-corner by three cyclic neighbor-corner permutations:
+18 cases total. The legacy Float32 boundary and composed f64 runtime agree on
+attachment, face, one edge crossing, mapped shared-vertex weights, and output
+position; projected velocity remains within one `f32::EPSILON` after the
+intentional adapter rounding.
+
+Those gates enabled a real `walkimpl=rust` mode. Rust's composed snapshot now
+exports its filtered contact position, normal, tangent, relative pitch, camera,
+and anchor phase. The browser applies that packet as authority while retaining
+the legacy walker as a rollback diagnostic. In Rust mode only, that diagnostic
+receives the same-frame Rust semantic velocity instead of planning from the
+previous animated normal; `walkimpl=shadow` remains the unchanged JavaScript
+oracle and the release default remains `walkimpl=js` during soak.
+
+On the user-run release server, a fresh animated horse trace right-clicked into
+Rust authority and then held forward for 120 frames. All 120 frames remained
+attached and finite while crossing nine faces; topology drift and camera drift
+were both zero, maximum legacy-shadow barycentric error was
+`1.1526815446583072e-8`, and maximum camera error was
+`8.913883969841052e-8`. An attached reflection edit committed exactly one Rust
+transport, stayed finite for 60 frames, and produced no topology or camera
+drift. Chrome reported no warnings or errors.
+
+The optimized WASM changed from 6,061,392 to 6,061,935 bytes (+543 raw); gzip
+changed from 2,133,266 to 2,133,257 bytes (-9). The source-coherent build
+receipt is `d628592c228e87fd661257cc9e1258f9` over 156 files and 38,549,761
+bytes. The full native workspace, 75 direct Hyperscape tests, 25
+application/replay tests, 42 browser-independent JavaScript tests, 19 Blender
+interchange tests, all three replay goldens, strict Hyperscape/application
+Clippy, application Rustdoc, four executable Node/WASM adapter tests, all five
+generated-WASM smokes, release Trunk build, ordinary release preflight, the
+initialized pole rollback, and the final Rust-authority Chrome trace passed.

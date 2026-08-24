@@ -12,9 +12,11 @@ owner of surface topology, physical side, metric locomotion, animated contact
 response, view following, scale/height/near policy, recovery/detach, and the
 surface re-anchor glide. That glide matches the browser oracle's independent
 forward/up spherical smoothing and Gram-Schmidt reconstruction rather than
-using a generic quaternion camera interpolation. The prototype remains the
-live behavior oracle while `walkimpl=shadow` measures the composed aggregate
-before authority is removed from `hyperscope.html`.
+using a generic quaternion camera interpolation. The default `walkimpl=js`
+remains the rollback oracle, `walkimpl=shadow` measures the composed aggregate,
+and `walkimpl=rust` now makes the Rust contact frame, camera, anchor transition,
+and topology packet authoritative while retaining the legacy walker as a
+same-input diagnostic shadow.
 
 ## One sphere, several meanings
 
@@ -167,12 +169,14 @@ or sphere state.
    adjacency as the incumbent walker and exposes bounded topology/camera drift
    diagnostics. The oracle and candidate now advance re-anchoring from one
    explicit virtual frame delta with identical endpoint snapping, and the
-   generated boundary exposes a typed composed result. Initialized Chrome
-   traces now cover the shared clock, successful reflection transport,
-   animation pose sampling, and pause/scrub discontinuities without topology
-   or camera drift. Cutover still waits for an initialized pole-rejection
-   trace and Float32-sensitive edge crossings;
-   `walkimpl=rust` therefore resolves back to shadow for now.
+   generated boundary exposes a typed composed result including its retained
+   filtered contact frame. Initialized Chrome traces cover the shared clock,
+   successful and pole-rejected reflection transport, animation pose
+   sampling, pause/scrub, active locomotion, and transition completion. The
+   Float32 adapter gate crosses a pick-like near-edge address through all 18
+   identity/reflection and cyclic source/neighbor permutation cases.
+   `walkimpl=rust` is therefore a real rollback-safe authority mode; the
+   default stays `js` until it has seen broader interactive soak time.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere
    transitions in Rust, and extract one compact focus packet per view.

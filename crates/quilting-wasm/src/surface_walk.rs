@@ -122,6 +122,10 @@ export interface ComposedSurfaceWalkSnapshot {
   edge_crossings: number;
   camera: ComposedSurfaceWalkCameraSnapshot;
   target_camera?: ComposedSurfaceWalkCameraSnapshot | null;
+  filtered_position?: readonly [number, number, number] | null;
+  filtered_normal?: readonly [number, number, number] | null;
+  tangent_forward?: readonly [number, number, number] | null;
+  relative_pitch_radians?: number | null;
   metrics?: ComposedSurfaceWalkMetricsSnapshot | null;
   anchor_transition_remaining_seconds?: number | null;
   pose_sample?: SurfacePoseSampleSnapshot | null;

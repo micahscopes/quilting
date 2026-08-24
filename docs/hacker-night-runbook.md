@@ -162,12 +162,14 @@ Use a fresh browser tab after the release build and verify:
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.
 
-For migration diagnostics only, add `walkimpl=shadow`. The rendered camera and
+For migration diagnostics, add `walkimpl=shadow`. The rendered camera and
 attachment still come from the JavaScript oracle, while the composed Rust
 candidate reports samples, topology/camera drift, and its last packet at
-`globalThis.__hyperscopeSurfaceWalkRustShadow`. Do not use `walkimpl=rust` for
-the talk: it is intentionally redirected to shadow until live parity gates are
-closed.
+`globalThis.__hyperscopeSurfaceWalkRustShadow`. `walkimpl=rust` is now a real
+opt-in authority mode: Rust owns the contact response, camera, and re-anchor
+transition while the legacy walker remains a same-input rollback diagnostic.
+The release URL deliberately stays on the soaked `js` default for the talk;
+use `walkimpl=rust` only when explicitly demonstrating the migration.
 
 ## 6. Recovery during the talk
 

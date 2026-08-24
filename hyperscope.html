@@ -412,11 +412,7 @@ const RUST_RENDER_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('rendershadow') === '1';
 const SURFACE_WALK_IMPLEMENTATION = (() => {
   const requested = new URLSearchParams(location.search).get('walkimpl') || 'js';
-  if (requested === 'rust') {
-    console.warn('walkimpl=rust is parity-gated; running the Rust candidate in shadow mode');
-    return 'shadow';
-  }
-  return requested === 'shadow' ? 'shadow' : 'js';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
 })();
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 const rustRouteShadowDiagnostics = {
@@ -743,7 +739,7 @@ function phaseReady(name) { return phases[name]?.done?.peek() ?? false; }
 // Dedicated readiness signal — defined early so effects can subscribe via .get()
 const wasmOk = signal(false, 'wasmOk');
 // Bind a signal to a DOM slider (bidirectional)
-function bindSlider(id, sig, displayFn) {
+function bindSlider(id, sig, displayFn, onInput = null) {
   const el = $(id);
   const label = $(id + '-v');
   const updateDisplay = value => {
@@ -755,8 +751,10 @@ function bindSlider(id, sig, displayFn) {
   el.value = sig.peek();
   updateDisplay(sig.peek());
   el.addEventListener('input', () => {
-    sig.set(parseFloat(el.value));
+    const requested = parseFloat(el.value);
+    sig.set(requested);
     updateDisplay(sig.peek());
+    if (onInput) onInput(sig.peek(), Object.is(sig.peek(), requested));
   });
   // Keep slider in sync if signal is set programmatically
   effect(() => {
@@ -2215,7 +2213,8 @@ const surfaceWalk = {
 globalThis.__hyperscopeSurfaceWalk = surfaceWalk;
 
 const surfaceWalkRustShadow = {
-  enabled: SURFACE_WALK_IMPLEMENTATION === 'shadow',
+  enabled: SURFACE_WALK_IMPLEMENTATION !== 'js',
+  authority: SURFACE_WALK_IMPLEMENTATION,
   samples: 0,
   topologyDriftFrames: 0,
   cameraDriftFrames: 0,
@@ -2759,8 +2758,41 @@ function applySurfaceWalkCamera(snapshot, orient = true, deltaSeconds = 0) {
   return true;
 }
 
+function applyRustSurfaceWalkCamera(snapshot) {
+  const camera = snapshot?.camera;
+  const vector = value => {
+    const result = value ? Array.from(value, Number) : null;
+    return result?.length === 3 && result.every(Number.isFinite) ? result : null;
+  };
+  const eye = vector(camera?.eye);
+  const right = vector(camera?.right);
+  const up = vector(camera?.up);
+  const forward = vector(camera?.forward);
+  const filteredPosition = vector(snapshot?.filtered_position);
+  const filteredNormal = vector(snapshot?.filtered_normal);
+  const tangentForward = snapshot?.tangent_forward == null
+    ? null : vector(snapshot.tangent_forward);
+  if (!eye || !right || !up || !forward || !filteredPosition || !filteredNormal
+      || !Number.isFinite(camera?.control_distance)) return false;
+  if (!applyManualCameraFrame({
+    eye,
+    basis: [...right, ...up, ...forward],
+    controlDistance: camera.control_distance,
+  })) return false;
+  surfaceWalk.filteredPosition = filteredPosition;
+  surfaceWalk.filteredNormal = filteredNormal;
+  surfaceWalk.tangentForward = tangentForward;
+  surfaceWalk.relativePitch = Number.isFinite(snapshot.relative_pitch_radians)
+    ? snapshot.relative_pitch_radians : null;
+  surfaceWalk.inputRevision = manualCameraInputRevision;
+  surfaceWalk.anchorTransition = null;
+  snapshot.eye_position = eye.slice();
+  return true;
+}
+
 function updateSurfaceWalkSnapshot(snapshot, { orient = true, deltaSeconds = 0 } = {}) {
   if (!snapshot || snapshot.status !== 'attached') {
+    if (SURFACE_WALK_IMPLEMENTATION === 'rust') mr_detachSurface();
     surfaceWalk.active = false;
     surfaceWalk.snapshot = snapshot || null;
     surfaceWalk.error = snapshot?.error || snapshot?.detach_reason || 'surface unavailable';
@@ -2777,7 +2809,10 @@ function updateSurfaceWalkSnapshot(snapshot, { orient = true, deltaSeconds = 0 }
     selectionLabel(`Surface walk detached · ${surfaceWalk.error}`);
     return false;
   }
-  if (!applySurfaceWalkCamera(snapshot, orient, deltaSeconds)) {
+  const cameraApplied = SURFACE_WALK_IMPLEMENTATION === 'rust'
+    ? applyRustSurfaceWalkCamera(snapshot)
+    : applySurfaceWalkCamera(snapshot, orient, deltaSeconds);
+  if (!cameraApplied) {
     // The runtime reported an attached topology address, but its semantic
     // camera frame was unusable. Detach both authorities together so a later
     // valid-looking frame cannot revive a browser-only walk state.
@@ -2792,7 +2827,7 @@ function updateSurfaceWalkSnapshot(snapshot, { orient = true, deltaSeconds = 0 }
   surfaceWalk.error = null;
   surfaceWalk.keys = Array.from(surfaceWalkKeys).sort();
   selectionLabel(
-    surfaceWalk.anchorTransition
+    surfaceWalk.anchorTransition || snapshot.phase === 'anchoring'
       ? `Surface walk · gliding to node ${snapshot.node} face ${snapshot.face}…`
       : `Surface walk · node ${snapshot.node} face ${snapshot.face}`
         + ' · WASD · right-click another surface or empty space to detach',
@@ -2843,15 +2878,31 @@ function clearSelectedObject(message = '') {
 }
 
 function setFocusSphereGeometry(sphere) {
+  const previousCenter = focusSphere.center.slice();
+  const previousRadius = focusSphere.radius;
   focusSphere.center = sphere.center.slice();
   focusSphere.radius = Math.max(Number(sphere.radius) || 0, 0.011);
+  const requestedControls = [
+    focusSphere.center[0] * 10,
+    focusSphere.center[1] * 10,
+    focusSphere.center[2] * 10,
+    focusSphere.radius * 10,
+  ];
   batchSignals(() => {
-    mob.mx.set(focusSphere.center[0] * 10);
-    mob.my.set(focusSphere.center[1] * 10);
-    mob.mz.set(focusSphere.center[2] * 10);
-    mob.mr.set(focusSphere.radius * 10);
+    mob.mx.set(requestedControls[0]);
+    mob.my.set(requestedControls[1]);
+    mob.mz.set(requestedControls[2]);
+    mob.mr.set(requestedControls[3]);
   });
+  const accepted = [mob.mx.peek(), mob.my.peek(), mob.mz.peek(), mob.mr.peek()]
+    .every((value, index) => Object.is(value, requestedControls[index]));
+  if (!accepted) {
+    focusSphere.center = previousCenter;
+    focusSphere.radius = previousRadius;
+    return false;
+  }
   pushFocusSphereState();
+  return true;
 }
 
 function pushFocusSphereState() {
@@ -3032,8 +3083,12 @@ canvas.addEventListener('contextmenu', e => {
     pickCameraPos,
   );
   const rustSurfaceSnapshot = attachSurfaceWalkRustShadow(picked, startFrame);
-  if (snapshot?.status === 'attached') beginSurfaceWalkAnchorTransition(startFrame);
-  const attached = updateSurfaceWalkSnapshot(snapshot);
+  if (snapshot?.status === 'attached' && SURFACE_WALK_IMPLEMENTATION !== 'rust') {
+    beginSurfaceWalkAnchorTransition(startFrame);
+  }
+  const authoritativeSnapshot = SURFACE_WALK_IMPLEMENTATION === 'rust'
+    ? rustSurfaceSnapshot : snapshot;
+  const attached = updateSurfaceWalkSnapshot(authoritativeSnapshot);
   recordSurfaceWalkRustShadow(rustSurfaceSnapshot, snapshot);
   if (attached) {
     mr_highlightFace(picked.face);
@@ -3133,12 +3188,12 @@ canvas.addEventListener('wheel', e => {
         : scaleRadiusMultiplicatively(
           focusSphere.radius, direction, 1, 0.15,
         );
-      setFocusSphereGeometry({
+      const accepted = setFocusSphereGeometry({
         center: anchored ? selectedObject.bound.center : focusSphere.center,
         radius: nextRadius,
       });
-      if (anchored) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
-      if (mob.xform.peek() === 'sphere_reflection') debouncedLodRecompute();
+      if (anchored && accepted) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
+      if (accepted && mob.xform.peek() === 'sphere_reflection') debouncedLodRecompute();
     }
     syncURL();
     return;
@@ -3184,25 +3239,32 @@ const mob = {
   mx: signal(5, 'mx'), my: signal(0, 'my'), mz: signal(0, 'mz'), mr: signal(20, 'mr'),
 };
 bindBtnGroup('xform-btns', mob.xform);
-bindSlider('mx', mob.mx, v => (v/10).toFixed(2));
-bindSlider('my', mob.my, v => (v/10).toFixed(2));
-bindSlider('mz', mob.mz, v => (v/10).toFixed(2));
-bindSlider('mr', mob.mr, v => (v/10).toFixed(2));
-for (const id of ['mx', 'my', 'mz', 'mr']) {
-  $(id).addEventListener('input', () => {
-    focusSphereTransition = null;
-    focusSphere.center = [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10];
-    focusSphere.radius = Math.max(mob.mr.peek() / 10, 0.011);
-    focusSphere.active = true;
-    if (id !== 'mr') {
-      focusSphere.anchorNode = null;
-      focusSphere.anchorRadius = null;
-      focusSphere.margin = null;
-    } else if (focusSphere.anchorRadius) {
-      focusSphere.margin = focusSphere.radius / focusSphere.anchorRadius;
-    }
-  });
+function commitManualFocusSphereInput(id, accepted) {
+  if (!accepted) return;
+  focusSphereTransition = null;
+  focusSphere.center = [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10];
+  focusSphere.radius = Math.max(mob.mr.peek() / 10, 0.011);
+  focusSphere.active = true;
+  if (id !== 'mr') {
+    focusSphere.anchorNode = null;
+    focusSphere.anchorRadius = null;
+    focusSphere.margin = null;
+  } else if (focusSphere.anchorRadius) {
+    focusSphere.margin = focusSphere.radius / focusSphere.anchorRadius;
+  }
 }
+bindSlider('mx', mob.mx, v => (v/10).toFixed(2), (_, accepted) => {
+  commitManualFocusSphereInput('mx', accepted);
+});
+bindSlider('my', mob.my, v => (v/10).toFixed(2), (_, accepted) => {
+  commitManualFocusSphereInput('my', accepted);
+});
+bindSlider('mz', mob.mz, v => (v/10).toFixed(2), (_, accepted) => {
+  commitManualFocusSphereInput('mz', accepted);
+});
+bindSlider('mr', mob.mr, v => (v/10).toFixed(2), (_, accepted) => {
+  commitManualFocusSphereInput('mr', accepted);
+});
 
 function computeMobius(type, cx, cy, cz, r) {
   if (type === 'sphere_reflection' && r > 0.01) {
@@ -3214,6 +3276,7 @@ function computeMobius(type, cx, cy, cz, r) {
 
 let currentMobius = null;
 let previousManualReflection = null;
+let restoringManualReflectionControls = false;
 const FOCUS_SPHERE_MARGIN = 1.10;
 
 function manualReflectionState(type, center, radius) {
@@ -3227,6 +3290,23 @@ function sameManualReflection(first, second) {
   if (!first.enabled) return true;
   return first.radius === second.radius
     && first.center.every((coordinate, axis) => coordinate === second.center[axis]);
+}
+
+function restoreManualReflectionControls(previous) {
+  restoringManualReflectionControls = true;
+  try {
+    batchSignals(() => {
+      mob.xform.set(previous?.enabled ? 'sphere_reflection' : 'identity');
+      if (previous?.enabled) {
+        mob.mx.set(previous.center[0] * 10);
+        mob.my.set(previous.center[1] * 10);
+        mob.mz.set(previous.center[2] * 10);
+        mob.mr.set(previous.radius * 10);
+      }
+    });
+  } finally {
+    restoringManualReflectionControls = false;
+  }
 }
 
 function transportSurfaceWalkRustReflection(previous, next) {
@@ -3335,7 +3415,9 @@ function transportManualCamera(previous, next) {
     panY = transportedCamera.target[1];
     panZ = transportedCamera.target[2];
     syncManualCameraEuler();
-    if (surfaceWalk.active) applySurfaceWalkCamera(surfaceWalk.snapshot, false, 0);
+    if (surfaceWalk.active && SURFACE_WALK_IMPLEMENTATION !== 'rust') {
+      applySurfaceWalkCamera(surfaceWalk.snapshot, false, 0);
+    }
   }
   // A transition authored in the previous output chart is no longer valid.
   // Explicit reframe remains available after the sphere edit completes.
@@ -3352,8 +3434,13 @@ function fitOrToggleInversionToSelection(nowMs = performance.now()) {
 
   if (selectedObject) anchorFocusSphereToSelection(nowMs);
   const enable = mob.xform.peek() !== 'sphere_reflection';
-  mob.xform.set(enable ? 'sphere_reflection' : 'identity');
+  const requested = enable ? 'sphere_reflection' : 'identity';
+  mob.xform.set(requested);
   const subject = selectedObject ? `Node ${selectedObject.node}` : 'Free focus sphere';
+  if (mob.xform.peek() !== requested) {
+    selectionLabel(`${subject} · inversion unchanged at pole`);
+    return false;
+  }
   selectionLabel(`${subject} · inversion ${enable ? 'on' : 'off'}`);
   return true;
 }
@@ -3363,8 +3450,11 @@ function advanceFocusTransitions(nowMs) {
     const transition = focusSphereTransition;
     const progress = (nowMs - transition.startedAt) / transition.durationMs;
     const sphere = interpolateSphereFit(transition.start, transition.target, progress);
-    setFocusSphereGeometry(sphere);
-    if (progress >= 1) {
+    const accepted = setFocusSphereGeometry(sphere);
+    if (!accepted) {
+      focusSphereTransition = null;
+      selectionLabel('Focus sphere transition stopped at the inversion pole');
+    } else if (progress >= 1) {
       focusSphereTransition = null;
       selectionLabel(`Node ${transition.node} · focus sphere fitted +10%`);
     }
@@ -3572,10 +3662,14 @@ effect(() => {
   const type = mob.xform.get();
   const center = [mob.mx.get()/10, mob.my.get()/10, mob.mz.get()/10];
   const radius = mob.mr.get()/10;
+  if (restoringManualReflectionControls) return;
   const m = computeMobius(type, center[0], center[1], center[2], radius);
   const nextReflection = manualReflectionState(type, center, radius);
   const reflectionTransport = transportManualCamera(previousManualReflection, nextReflection);
-  if (!reflectionTransport.accepted) return;
+  if (!reflectionTransport.accepted) {
+    restoreManualReflectionControls(previousManualReflection);
+    return;
+  }
   previousManualReflection = nextReflection;
   const flat = new Float32Array([...m.a, ...m.b, ...m.c, ...m.d]);
   currentMobius = flat;
@@ -5377,8 +5471,8 @@ function frame(ts) {
             Math.max(-3, Math.min(3, focusSphere.center[1] + dy)),
             Math.max(-3, Math.min(3, focusSphere.center[2] + dz)),
           ];
-        setFocusSphereGeometry({ center: nextCenter, radius: nextRadius });
-        if (anchored) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
+        const accepted = setFocusSphereGeometry({ center: nextCenter, radius: nextRadius });
+        if (anchored && accepted) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       } else if (spaceMouseMode === 'depth-of-field') {
         rustNavigationShadowCameraActive = false;
         fz.enabled.set(true);
@@ -5464,8 +5558,14 @@ function frame(ts) {
           fast,
           captureRelativeView: surfaceWalk.inputRevision !== manualCameraInputRevision,
         });
-        const snapshot = mr_stepSurface(deltaSeconds, velocity);
-        const attached = updateSurfaceWalkSnapshot(snapshot, { deltaSeconds });
+        const legacyVelocity = SURFACE_WALK_IMPLEMENTATION === 'rust'
+          && rustSurfaceSnapshot?.desired_output_velocity
+          ? new Float32Array(rustSurfaceSnapshot.desired_output_velocity)
+          : velocity;
+        const snapshot = mr_stepSurface(deltaSeconds, legacyVelocity);
+        const authoritativeSnapshot = SURFACE_WALK_IMPLEMENTATION === 'rust'
+          ? rustSurfaceSnapshot : snapshot;
+        const attached = updateSurfaceWalkSnapshot(authoritativeSnapshot, { deltaSeconds });
         recordSurfaceWalkRustShadow(rustSurfaceSnapshot, snapshot);
         if (attached) {
           const moving = Math.abs(forwardAxis) > 1e-5 || Math.abs(rightAxis) > 1e-5;

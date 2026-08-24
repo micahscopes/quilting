@@ -52,6 +52,11 @@ assert.match(
 );
 assert.match(
   generatedDeclarations,
+  /export interface ComposedSurfaceWalkSnapshot \{[^}]*filtered_position\?: readonly \[number, number, number\] \| null;[^}]*filtered_normal\?: readonly \[number, number, number\] \| null;[^}]*tangent_forward\?: readonly \[number, number, number\] \| null;[^}]*relative_pitch_radians\?: number \| null;/s,
+  'Rust authority snapshots must expose their retained contact frame to the thin browser adapter',
+);
+assert.match(
+  generatedDeclarations,
   /export interface SurfacePoseSampleSnapshot \{[^}]*sample_time_seconds: number;[^}]*revision: number;[^}]*continuity_epoch: number;[^}]*sample_delta_seconds\?: number \| null;[^}]*velocity_rebased: boolean;/s,
   'surface walking diagnostics must expose the accepted pose stamp and derivative interval',
 );
@@ -75,8 +80,18 @@ const reflectionEffect = browserSource.slice(
 );
 assert.match(
   reflectionEffect,
-  /if \(!reflectionTransport\.accepted\) return;\s+previousManualReflection = nextReflection;[\s\S]*mr_setMobius\(flat\);/,
-  'a rejected camera/follower/WASM transport must abort before chart and renderer commit',
+  /if \(!reflectionTransport\.accepted\) \{\s+restoreManualReflectionControls\(previousManualReflection\);\s+return;\s+\}\s+previousManualReflection = nextReflection;[\s\S]*mr_setMobius\(flat\);/,
+  'a rejected camera/follower/WASM transport must restore controls and abort before chart and renderer commit',
+);
+assert.match(
+  browserSource,
+  /restoringManualReflectionControls = true;[\s\S]*batchSignals\(\(\) => \{[\s\S]*mob\.xform\.set\(previous\?\.enabled \? 'sphere_reflection' : 'identity'\);[\s\S]*restoringManualReflectionControls = false;/,
+  'manual reflection rollback must restore every public control as one suppressed signal transaction',
+);
+assert.match(
+  browserSource,
+  /\['js', 'shadow', 'rust'\]\.includes\(requested\)[\s\S]*SURFACE_WALK_IMPLEMENTATION === 'rust'[\s\S]*applyRustSurfaceWalkCamera\(snapshot\)/,
+  'walkimpl=rust must select the composed Rust camera snapshot instead of silently falling back to shadow',
 );
 assert.match(
   browserSource,

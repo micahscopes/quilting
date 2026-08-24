@@ -87,9 +87,10 @@ The first application boundary is now explicit:
   adjacency, and conformal transform rather than cloning a chess-scale mesh.
   `walkimpl=shadow` mirrors pointer attachment and each semantic walking frame
   through this aggregate and exposes topology/camera drift at
-  `globalThis.__hyperscopeSurfaceWalkRustShadow`; the default is still `js`,
-  and requesting `walkimpl=rust` deliberately falls back to shadow until the
-  authority gate is earned. The transition now matches the incumbent's
+  `globalThis.__hyperscopeSurfaceWalkRustShadow`; the default remains `js`,
+  while `walkimpl=rust` now consumes the aggregate's contact frame, camera, and
+  transition as authority and keeps the incumbent walker on the same semantic
+  velocity as a rollback diagnostic. The transition now matches the incumbent's
   independent forward/up direction smoothing, Gram-Schmidt basis recovery,
   and immediate scale-relative lens/control-distance update. Generated-WASM
   gates retain the 2,160 mapping cases and 600-frame response oracle, while
@@ -105,12 +106,14 @@ The first application boundary is now explicit:
   differential; a pole rolls every participant back, and a successful edit
   cancels the old-chart anchor glide to match the browser oracle. Initialized
   Chrome traces now validate the shared clock, successful reflection
-  transport, explicit pose-time velocity, pause/scrub rebasing, and zero
-  topology/camera drift. Live cutover remains blocked on an initialized
-  pole-rejection trace and Float32-sensitive near-edge behavior. Executable
-  Node/WASM aggregate tests cover both walkers,
-  non-binary-exact f32 Möbius packing, one-shot velocity rebasing, and the first
-  real animated-pose sample; native replay also proves that an animated chart
+  transport, explicit pose-time velocity, pause/scrub rebasing, active
+  locomotion, the initialized camera-pole rollback, and zero topology/camera
+  drift. The executable WASM gate also covers pick-like Float32 near-edge
+  crossings under all cyclic source/neighbor permutations in identity and
+  non-binary-exact reflection charts. Those gates enable explicit
+  `walkimpl=rust` authority without changing the default. Node/WASM aggregate
+  tests additionally cover both walkers, one-shot velocity rebasing, and the
+  first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 68 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default

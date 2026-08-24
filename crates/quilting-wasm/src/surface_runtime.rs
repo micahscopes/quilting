@@ -220,6 +220,10 @@ pub(crate) struct ComposedSurfaceWalkSnapshot {
     pub edge_crossings: u32,
     pub camera: SurfaceWalkCameraSnapshot,
     pub target_camera: Option<SurfaceWalkCameraSnapshot>,
+    pub filtered_position: Option<[f64; 3]>,
+    pub filtered_normal: Option<[f64; 3]>,
+    pub tangent_forward: Option<[f64; 3]>,
+    pub relative_pitch_radians: Option<f64>,
     pub metrics: Option<SurfaceWalkMetricsSnapshot>,
     pub anchor_transition_remaining_seconds: Option<f64>,
     pub pose_sample: Option<SurfacePoseSampleSnapshot>,
@@ -1162,6 +1166,12 @@ fn composed_snapshot(
         target_camera: update
             .target_frame
             .map(|frame| camera_snapshot(frame.camera)),
+        filtered_position: update.target_frame.map(|frame| frame.filtered_position),
+        filtered_normal: update.target_frame.map(|frame| frame.filtered_normal),
+        tangent_forward: update.target_frame.and_then(|frame| frame.tangent_forward),
+        relative_pitch_radians: update
+            .target_frame
+            .and_then(|frame| frame.relative_pitch_radians),
         metrics: update
             .target_frame
             .map(|frame| metrics_snapshot(frame.metrics)),
@@ -1356,6 +1366,86 @@ mod tests {
             -center[1] as f32,
             -center[2] as f32,
         ]
+    }
+
+    const QUAD_POINTS: [[f32; 3]; 4] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ];
+
+    fn two_triangle_instances(faces: [[usize; 3]; 2]) -> Vec<f32> {
+        let mut instances = vec![0.0; 2 * instance_layout::STRIDE];
+        for (face_index, face) in faces.into_iter().enumerate() {
+            let base = face_index * instance_layout::STRIDE;
+            for (corner, vertex) in face.into_iter().enumerate() {
+                let position_offset = base + instance_layout::offset::POSITIONS + corner * 4;
+                instances[position_offset] = vertex as f32;
+                instances[position_offset + 1..position_offset + 4]
+                    .copy_from_slice(&QUAD_POINTS[vertex]);
+                instances[base + instance_layout::offset::WEIGHTS + corner * 4] = 1.0;
+            }
+        }
+        instances
+    }
+
+    fn face_barycentric(face: [usize; 3], vertex_weights: [f32; 4]) -> [f64; 3] {
+        face.map(|vertex| f64::from(vertex_weights[vertex]))
+    }
+
+    fn vertex_weights(face: [usize; 3], barycentric: [f64; 3]) -> [f64; 4] {
+        let mut weights = [0.0; 4];
+        for (corner, vertex) in face.into_iter().enumerate() {
+            weights[vertex] = barycentric[corner];
+        }
+        weights
+    }
+
+    fn camera_crossing_shared_edge(
+        face: [usize; 3],
+        barycentric: [f64; 3],
+        mobius: [f32; 16],
+    ) -> CameraRig {
+        let patch = QBTriPatch::flat(
+            QUAD_POINTS[face[0]].map(f64::from),
+            QUAD_POINTS[face[1]].map(f64::from),
+            QUAD_POINTS[face[2]].map(f64::from),
+        )
+        .transform(&mobius_from_array(mobius));
+        let address = SurfaceAddress::new(runtime_entity_id(0), 0, barycentric).unwrap();
+        let differential = patch.eval_differential(address.barycentric[1], address.barycentric[2]);
+        let vertex_rates = [-2.0, 1.0, 1.0, 0.0];
+        let local_rates = face.map(|vertex| vertex_rates[vertex]);
+        let forward = add(
+            scale(differential.tangent_u, local_rates[1]),
+            scale(differential.tangent_v, local_rates[2]),
+        );
+        let forward = scale(forward, 1.0 / length(forward));
+        let normal = [
+            differential.tangent_u[1] * differential.tangent_v[2]
+                - differential.tangent_u[2] * differential.tangent_v[1],
+            differential.tangent_u[2] * differential.tangent_v[0]
+                - differential.tangent_u[0] * differential.tangent_v[2],
+            differential.tangent_u[0] * differential.tangent_v[1]
+                - differential.tangent_u[1] * differential.tangent_v[0],
+        ];
+        let normal = scale(normal, 1.0 / length(normal));
+        CameraRig::new(
+            add(differential.position, normal),
+            CameraBasis::from_forward_up(forward, normal).unwrap(),
+            1.0,
+            None,
+            PerspectiveLens::default(),
+        )
+        .unwrap()
+    }
+
+    fn assert_near3(left: [f64; 3], right: [f64; 3], tolerance: f64) {
+        assert!(
+            length(sub(left, right)) <= tolerance,
+            "left={left:?}, right={right:?}, tolerance={tolerance}"
+        );
     }
 
     #[test]
@@ -1892,6 +1982,145 @@ mod tests {
         assert_eq!(runtime.pose_sample, accepted_pose);
         assert_eq!(runtime.joint_matrices, accepted_matrices);
         assert_eq!(runtime.morph_weights, accepted_morphs);
+    }
+
+    #[wasm_bindgen_test]
+    fn float32_near_edge_crossing_matches_composed_runtime_across_permutations() {
+        let source_faces = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
+        let target_faces = [[1, 3, 2], [3, 2, 1], [2, 1, 3]];
+        let epsilon = f32::EPSILON;
+        let source_vertex_weights = [epsilon, 0.55_f32, 1.0_f32 - epsilon - 0.55_f32, 0.0];
+        let controls = SurfaceWalkControls {
+            base_radii_per_second: 0.1,
+            smoothing_seconds: 0.0,
+            ..SurfaceWalkControls::default()
+        };
+        let maps = [
+            (identity_mobius(), 1),
+            (sphere_reflection_mobius([0.1, -0.2, 0.3], 1.1), -1),
+        ];
+
+        for (mobius, orientation_sign) in maps {
+            let mut reference_position: Option<[f64; 3]> = None;
+            let mut reference_weights: Option<[f64; 4]> = None;
+            for source_face in source_faces {
+                for target_face in target_faces {
+                    let faces = [source_face, target_face];
+                    let instances = two_triangle_instances(faces);
+                    let barycentric = face_barycentric(source_face, source_vertex_weights);
+                    let camera = camera_crossing_shared_edge(source_face, barycentric, mobius);
+
+                    let mut legacy = SurfaceRuntime::default();
+                    let attached = legacy
+                        .attach(
+                            &instances,
+                            2,
+                            &[0, 0],
+                            0,
+                            barycentric,
+                            controls.base_eye_height,
+                            camera.eye,
+                            orientation_sign,
+                            mobius,
+                            identity_matrix(),
+                        )
+                        .unwrap();
+                    assert_eq!(attached.status, "attached");
+
+                    let mut composed = SurfaceRuntime::default();
+                    let composed_attached = composed
+                        .attach_composed(
+                            &instances,
+                            2,
+                            &[0, 0],
+                            0,
+                            barycentric,
+                            camera,
+                            1.0,
+                            controls,
+                            0.0,
+                            orientation_sign,
+                            mobius,
+                            identity_matrix(),
+                        )
+                        .unwrap();
+                    assert_eq!(composed_attached.status, "attached");
+
+                    let composed_step = composed
+                        .step_composed(
+                            &instances,
+                            &[0, 0],
+                            0.01,
+                            camera,
+                            1.0,
+                            controls,
+                            SurfaceWalkInput {
+                                forward_axis: 1.0,
+                                ..SurfaceWalkInput::default()
+                            },
+                            false,
+                            false,
+                            orientation_sign,
+                            mobius,
+                            identity_matrix(),
+                        )
+                        .unwrap();
+                    let desired_velocity = composed_step.desired_output_velocity.unwrap();
+                    let legacy_velocity = desired_velocity.map(|value| f64::from(value as f32));
+                    let legacy_step = legacy
+                        .step_relative(
+                            &instances,
+                            &[0, 0],
+                            0.01,
+                            legacy_velocity,
+                            orientation_sign,
+                            mobius,
+                            identity_matrix(),
+                        )
+                        .unwrap();
+
+                    assert_eq!(legacy_step.status, "attached");
+                    assert_eq!(composed_step.status, "attached");
+                    assert_eq!(legacy_step.face, Some(1));
+                    assert_eq!(composed_step.face, Some(1));
+                    assert_eq!(legacy_step.edge_crossings, 1);
+                    assert_eq!(composed_step.edge_crossings, 1);
+                    assert_near3(
+                        legacy_step.output_position.unwrap(),
+                        composed_step.output_position.unwrap(),
+                        1.0e-9,
+                    );
+                    assert_near3(
+                        legacy_step.projected_output_velocity,
+                        composed_step.projected_output_velocity,
+                        f64::from(f32::EPSILON),
+                    );
+                    for (legacy_value, composed_value) in legacy_step
+                        .barycentric
+                        .unwrap()
+                        .into_iter()
+                        .zip(composed_step.barycentric.unwrap())
+                    {
+                        assert!((legacy_value - composed_value).abs() <= 1.0e-9);
+                    }
+
+                    let position = composed_step.output_position.unwrap();
+                    let weights = vertex_weights(target_face, composed_step.barycentric.unwrap());
+                    if let Some(reference) = reference_position {
+                        assert_near3(position, reference, 1.0e-10);
+                    } else {
+                        reference_position = Some(position);
+                    }
+                    if let Some(reference) = reference_weights {
+                        for (actual, expected) in weights.into_iter().zip(reference) {
+                            assert!((actual - expected).abs() <= 1.0e-10);
+                        }
+                    } else {
+                        reference_weights = Some(weights);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
