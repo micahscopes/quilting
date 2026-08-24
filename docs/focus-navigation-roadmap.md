@@ -179,9 +179,11 @@ or sphere state.
    node IDs, joins pickable primary/secondary nodes to their explicit manifest
    asset scope, and dispatches mapped picks/detaches through the application
    queue. Ordinary URL, IndexedDB, local-fallback, and drop loads remain
-   deliberately unmapped. Live selection cutover still requires authored IDs
-   in release assets, Rust-owned transition clocks, and renderer consumption
-   of the Rust packet. Rust retains the selected source bound and clicked pivot
+   deliberately unmapped. The checked Blender release asset now carries five
+   persistent stable IDs, four of which are joined to pickable mesh nodes; its
+   reproducible exporter rejects a fixture which loses that identity. Live
+   selection cutover still requires renderer consumption of the Rust packet.
+   Rust retains the selected source bound and clicked pivot
    beside its asset-scoped stable identity, and the application
    snapshot derives output-chart pivot/radius without destroying selection at
    a reflection pole. The same application queue now accepts complete,
@@ -227,8 +229,10 @@ or sphere state.
    allocation-light boundary once per browser frame, snapshots only active
    parity windows, and compares mapped focus interpolation with both the
    incumbent browser state and the renderer's retained CPU packet. It performs
-   no GPU readback. Next, author stable IDs into representative release assets
-   and apply the compact selected-focus packet to the renderer before cutover.
+   no GPU readback. A live Chrome MCP composition gate selects one of the four
+   authored mesh nodes with zero browser-transition, renderer-packet, or
+   sequence mismatch. Next, apply the compact selected-focus packet to the
+   renderer before cutover.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.

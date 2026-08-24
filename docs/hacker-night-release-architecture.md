@@ -202,10 +202,12 @@ presentation asset IDs across packed composition offsets and mirrors mapped
 picks/detaches through the AppStore. Session-generated load IDs, IndexedDB,
 drops, basename matches, and ordinary GLBs cannot acquire durable selection
 scope. Renderer focus transitions remain incumbent until the shared Rust clock
-and selected-focus packet complete the cutover gate. The shared clock and
-CPU-retained packet now run as a measured shadow; representative mapped release
-assets and renderer consumption of the Rust packet remain required before
-authority changes.
+and selected-focus packet complete the cutover gate. The checked Blender
+release fixture now carries five persistent stable IDs, four joined to pickable
+mesh nodes, and a live Chrome MCP composition gate selects one with zero
+browser-transition, renderer-packet, or observer-sequence mismatch. The shared
+clock and CPU-retained packet now run as a measured shadow; renderer
+consumption of that packet remains required before authority changes.
 
 The offline release gate also has source provenance now. A Trunk pre-build hook
 uses Rust to fingerprint the authoritative crate/shader, HTML/module, manifest,

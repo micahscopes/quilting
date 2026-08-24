@@ -104,6 +104,31 @@ assert.deepEqual(
   'the loader must export a dense authored node-identity table',
 );
 assert.deepEqual(Array.from(authoredModel.face_node_indices), [0]);
+const releaseAuthoredModel = loadGltfData(new Uint8Array(readFileSync(
+  `${repository}/examples/hyperscape-blender-demo.glb`,
+)));
+const releaseStableIds = [
+  'f0000000-0000-4000-8000-000000000001',
+  'f0000000-0000-4000-8000-000000000002',
+  'f0000000-0000-4000-8000-000000000003',
+  'f0000000-0000-4000-8000-000000000004',
+  'f0000000-0000-4000-8000-000000000005',
+];
+assert.deepEqual(
+  releaseAuthoredModel.node_stable_entity_ids.filter(Boolean).sort(),
+  releaseStableIds.slice().sort(),
+  'the checked Blender scene must retain its five authored entity IDs',
+);
+const pickableReleaseIds = new Set(
+  Array.from(releaseAuthoredModel.face_node_indices)
+    .map(node => releaseAuthoredModel.node_stable_entity_ids[node])
+    .filter(Boolean),
+);
+assert.deepEqual(
+  Array.from(pickableReleaseIds).sort(),
+  releaseStableIds.filter(id => !id.endsWith('0003')).sort(),
+  'four checked release entities must join durable IDs to pickable faces',
+);
 const ordinaryModel = loadGltfData(authoredTriangleGlb(null));
 assert.deepEqual(
   ordinaryModel.node_stable_entity_ids,

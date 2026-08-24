@@ -50,6 +50,9 @@ class HYPERSCAPE_PT_object(bpy.types.Panel):
         layout.prop(binding, "enabled")
         if not binding.enabled:
             return
+        row = layout.row(align=True)
+        row.prop(binding, "stable_id")
+        row.operator("hyperscape.generate_stable_id", text="", icon="FILE_REFRESH")
         layout.prop(binding, "frame")
         layout.prop(binding, "anchor")
         layout.prop(binding, "path")

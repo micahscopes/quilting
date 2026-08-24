@@ -1381,7 +1381,7 @@ function synchronizeRustFocusField() {
       rustAppShadowDiagnostics.focusFieldBoundaryCalls += 2;
       refreshAppShadowSnapshot();
     }
-    if (rustPresentationController) {
+    if (rustPresentationController && rustAppPresentationPoseReady) {
       const incumbentSequences = [
         rustPresentationController.setFocusEnabled(field.enabled),
         rustPresentationController.setFocusField(field.coordinate, field.angularAperture),
@@ -1398,7 +1398,7 @@ function synchronizeRustFocusField() {
           }
         }
       }
-      if (appNavigation && rustAppPresentationPoseReady) {
+      if (appNavigation) {
         compareAppPresentationPose(incumbentNavigation, appNavigation);
       }
     }
@@ -1439,7 +1439,7 @@ function synchronizeRustProjectionLens() {
       appSequence = rustAppShadow.setPerspectiveLens(verticalFovRadians, near, far);
       appNavigation = rustAppShadow.tickNavigation(0);
     }
-    if (rustPresentationController) {
+    if (rustPresentationController && rustAppPresentationPoseReady) {
       const incumbentSequence = rustPresentationController.setPerspectiveLens(
         verticalFovRadians,
         near,
@@ -1452,7 +1452,7 @@ function synchronizeRustProjectionLens() {
         );
       }
       const incumbentNavigation = rustPresentationController.tick(0);
-      if (appNavigation && rustAppPresentationPoseReady) {
+      if (appNavigation) {
         compareAppPresentationPose(incumbentNavigation, appNavigation);
       }
     }

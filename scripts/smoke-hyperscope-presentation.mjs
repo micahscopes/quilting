@@ -37,6 +37,10 @@ for (const handoff of [
     `renderer selection must execute ${handoff} before anchoring`,
   );
 }
+assert.ok(
+  browserSource.match(/if \(rustPresentationController && rustAppPresentationPoseReady\)/g)?.length >= 2,
+  'selection handoff must stop focus/lens mutations of the inactive presentation observer',
+);
 
 const controller = new HyperscopeNavigation();
 const presentation = controller.loadPresentation(readFileSync(manifestPath, 'utf8'));

@@ -105,6 +105,10 @@ class HyperscapeConstraint(bpy.types.PropertyGroup):
 
 class HyperscapeObjectBinding(bpy.types.PropertyGroup):
     enabled: BoolProperty(name="Conformal Binding", default=False)
+    stable_id: StringProperty(
+        name="Stable Entity ID",
+        description="Durable UUID shared by Blender, Hyperscape, presentations, and authored edits",
+    )
     frame: IntProperty(name="Frame", default=0, min=0)
     anchor: IntProperty(name="Anchor", default=-1, min=-1)
     path: IntProperty(name="Path", default=-1, min=-1)

@@ -1145,3 +1145,45 @@ The optimized WASM is 6,083,489 bytes raw and 2,136,370 bytes gzip: a
 1,453-byte raw increase and 4,063-byte gzip reduction relative to the runtime
 LOD-grading checkpoint. The source-coherent build receipt is
 `e922f7cbd2b2e2dc6b3edafea6d4543e` over 156 files and 38,671,378 bytes.
+
+## Persistent Blender identity and live mapped-selection gate
+
+The next 2026-08-24 checkpoint closed the release-asset half of the selection
+authority gate. Blender object bindings now store a persistent stable entity
+UUID, expose explicit UUID generation in the object panel, emit it into
+Hyperscape glTF metadata, and restore it on import. The reproducible demo
+exporter creates the `.blend`, `.gltf`, `.bin`, and `.glb` variants from one
+authored scene and asserts five deterministic IDs. Four belong to pickable mesh
+nodes; the projection camera is intentionally non-pickable.
+
+The headless fixture generator now removes Blender's factory Cube and Camera
+before running the otherwise additive demo operator. The unbound factory Cube
+had been exported into the checked fixture, visually occluded authored nodes,
+and correctly produced an unmapped pick. Removing it from fixture generation
+keeps the interactive operator non-destructive while preventing unrelated
+startup objects from becoming release content.
+
+Chrome DevTools MCP loaded the final two-asset presentation and selected the
+authored nested landmark. The application reported one mapped pick, one
+selection dispatch and comparison, two sampled transition frames, two retained
+renderer-focus comparisons, zero selection/transition/renderer mismatches,
+zero frame errors, an empty global mismatch list, and no warning or error
+console messages. A direct pick also disables the now-inactive presentation
+pose observer before focus/lens signal synchronization; a later cue activation
+resynchronizes that observer explicitly. This prevents the selection action's
+additional sequence from being compared with a presentation controller which
+no longer owns the transition.
+
+Validation passed for 19 dependency-free Blender tests, the Blender 5.1.1
+headless export/import round trip, 46 browser-independent JavaScript tests,
+all five generated-WASM smokes, and the live Chrome MCP gate. Renderer focus
+state remains incumbent in this checkpoint; the next authority step is to
+apply the already-compared Rust selected-focus packet to the renderer behind a
+rollback flag.
+
+The release Trunk build and ordinary offline preflight also passed. The
+optimized WASM remains 6,083,489 bytes raw and is 2,136,342 bytes under
+deterministic `gzip -9 -n`. The source-coherent build receipt is
+`3cb56e606c892c44d590e223d11c4797` over 156 files and 38,669,610 bytes.
+Preflight retained the expected warnings for the untracked local GLB directory
+and the noncommercial horse fixture; neither local asset was added to source.

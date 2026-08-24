@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import tempfile
 from typing import Any
+import uuid
 
 import bpy
 from bpy.props import EnumProperty, StringProperty
@@ -143,6 +144,8 @@ def build_asset(
         if not binding.enabled or obj.name not in node_indices:
             continue
         encoded: dict[str, Any] = {"frame": binding.frame}
+        if binding.stable_id.strip():
+            encoded["stable_id"] = binding.stable_id.strip()
         if binding.anchor >= 0:
             encoded["anchor"] = binding.anchor
         if binding.path >= 0:
@@ -212,6 +215,7 @@ def load_asset(settings, payload: dict[str, Any], bindings, node_objects: dict[i
         if obj is None or binding is None:
             continue
         obj.hyperscape.enabled = True
+        obj.hyperscape.stable_id = binding.get("stable_id", "")
         obj.hyperscape.frame = binding["frame"]
         obj.hyperscape.anchor = binding.get("anchor", -1)
         obj.hyperscape.path = binding.get("path", -1)
@@ -691,6 +695,21 @@ class HYPERSCAPE_OT_export(bpy.types.Operator, ExportHelper):
         return {"FINISHED"}
 
 
+class HYPERSCAPE_OT_generate_stable_id(bpy.types.Operator):
+    bl_idname = "hyperscape.generate_stable_id"
+    bl_label = "Generate Stable Entity ID"
+    bl_description = "Assign a new durable UUID to the active bound object"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        obj = context.object
+        if obj is None or not obj.hyperscape.enabled:
+            self.report({"ERROR"}, "select an object with Conformal Binding enabled")
+            return {"CANCELLED"}
+        obj.hyperscape.stable_id = str(uuid.uuid4())
+        return {"FINISHED"}
+
+
 class HYPERSCAPE_OT_import(bpy.types.Operator, ImportHelper):
     bl_idname = "hyperscape.import"
     bl_label = "Import Hyperscape glTF/GLB"
@@ -738,6 +757,7 @@ CLASSES = (
     HYPERSCAPE_OT_reparent_frame,
     HYPERSCAPE_OT_refresh_guides,
     HYPERSCAPE_OT_sync_guides,
+    HYPERSCAPE_OT_generate_stable_id,
     HYPERSCAPE_OT_export,
     HYPERSCAPE_OT_import,
 )

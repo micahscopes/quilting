@@ -68,8 +68,10 @@ def create_demo_scene(context) -> None:
 
     traveler = _add_icosphere(collection, "HS_Traveler", (-3.0, 1.2, 0.5), 0.45, orange)
     nested = _add_cube(collection, "HS_NestedLandmark", (0.2, 1.0, 0.4), (0.35, 0.35, 0.8), green)
-    _add_cube(collection, "HS_EuclideanLandmark", (-5.0, -2.0, 0.7), (0.6, 0.6, 0.7), blue)
-    _add_cube(collection, "HS_Ground", (0.0, 0.0, -0.25), (8.0, 8.0, 0.2), gray)
+    euclidean = _add_cube(
+        collection, "HS_EuclideanLandmark", (-5.0, -2.0, 0.7), (0.6, 0.6, 0.7), blue
+    )
+    ground = _add_cube(collection, "HS_Ground", (0.0, 0.0, -0.25), (8.0, 8.0, 0.2), gray)
 
     camera_data = bpy.data.cameras.get("HS_ProjectionCamera") or bpy.data.cameras.new(
         "HS_ProjectionCamera"
@@ -167,13 +169,22 @@ def create_demo_scene(context) -> None:
     projection.frame = 0
 
     traveler.hyperscape.enabled = True
+    traveler.hyperscape.stable_id = "f0000000-0000-4000-8000-000000000001"
     traveler.hyperscape.frame = 0
     traveler.hyperscape.anchor = -1
     traveler.hyperscape.path = 0
     nested.hyperscape.enabled = True
+    nested.hyperscape.stable_id = "f0000000-0000-4000-8000-000000000002"
     nested.hyperscape.frame = 2
     nested.hyperscape.anchor = 1
+    euclidean.hyperscape.enabled = True
+    euclidean.hyperscape.stable_id = "f0000000-0000-4000-8000-000000000004"
+    euclidean.hyperscape.frame = 0
+    ground.hyperscape.enabled = True
+    ground.hyperscape.stable_id = "f0000000-0000-4000-8000-000000000005"
+    ground.hyperscape.frame = 0
     camera.hyperscape.enabled = True
+    camera.hyperscape.stable_id = "f0000000-0000-4000-8000-000000000003"
     camera.hyperscape.frame = 0
 
     settings.active_frame = 1

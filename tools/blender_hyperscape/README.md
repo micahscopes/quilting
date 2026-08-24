@@ -56,6 +56,11 @@ read and write the selected glTF/GLB file.
    ordinary glTF/GLB for unaware viewers and gains conformal metadata for
    Hyperscape/Hyperscope.
 
+Bound objects may carry a **Stable Entity ID**. Generate it once in the object
+panel and retain it across exports; import restores the same UUID. This is the
+durable identity used by Blender/Hyperscape edit sync and presentation
+selection, while glTF node indices remain container-local handles.
+
 Generator lists are displayed in application order. Sphere reflection at its
 center is a pole and preview evaluation reports it instead of fabricating a
 finite position. Frame reparent and object re-anchor actions preserve the
@@ -79,4 +84,13 @@ exports it, imports it into a fresh file, and checks the authored collections:
 blender --background --factory-startup --python-exit-code 1 \
   --python tools/blender_hyperscape/tests/blender_roundtrip.py -- \
   /tmp/hyperscape-roundtrip.glb
+```
+
+Regenerate the checked demo's `.blend`, `.gltf`, `.bin`, and `.glb` from the
+same authored scene with:
+
+```sh
+blender --background --factory-startup --python-exit-code 1 \
+  --python tools/blender_hyperscape/export_demo.py -- \
+  examples/hyperscape-blender-demo.glb
 ```

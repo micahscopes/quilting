@@ -71,6 +71,10 @@ presentation identities.
 Authored nodes marked `extras.hyperscape_guide: true` are hidden in presentation
 composition. They remain in the source Blender/GLB asset for diagnostics, but
 large wall spheres and path controls therefore do not occlude the staged scene.
+The checked Blender fixture also assigns five deterministic stable entity IDs,
+including four pickable mesh nodes. The IDs persist through `.blend`, `.gltf`,
+and `.glb` regeneration and form the authored side of the presentation
+selection join; source node indices remain container-local handles.
 The browser exposes asset fetch, resident ranges, hidden-guide counts, packed
 face count, active layers, pending capabilities, and failures at
 `globalThis.__hyperscopePresentation`.

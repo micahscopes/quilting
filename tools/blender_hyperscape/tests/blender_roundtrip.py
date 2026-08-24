@@ -32,6 +32,8 @@ def output_path() -> Path:
 
 destination = output_path()
 blender_hyperscape.register()
+bpy.ops.object.select_all(action="SELECT")
+bpy.ops.object.delete(use_global=False)
 bpy.ops.hyperscape.create_demo()
 
 source_blend = destination.with_suffix(".blend")
@@ -49,6 +51,15 @@ assert payload["paths"][0]["coordinate_frame"] == 0
 assert [transition["frame"] for transition in payload["paths"][0]["transitions"]] == [1, 2, 0]
 assert len(payload["constraints"]) == 2
 assert sum(binding is not None for binding in bindings) >= 3
+assert {
+    binding["stable_id"] for binding in bindings if binding and "stable_id" in binding
+} == {
+    "f0000000-0000-4000-8000-000000000001",
+    "f0000000-0000-4000-8000-000000000002",
+    "f0000000-0000-4000-8000-000000000003",
+    "f0000000-0000-4000-8000-000000000004",
+    "f0000000-0000-4000-8000-000000000005",
+}
 
 gltf_destination = destination.with_suffix(".gltf")
 result = bpy.ops.hyperscape.export(filepath=str(gltf_destination))
@@ -77,6 +88,17 @@ assert len(settings.paths[0].transitions) == 3
 assert len(settings.constraints) == 2
 assert settings.paths[0].subject is not None
 assert settings.constraints[0].target is not None
+assert {
+    obj.hyperscape.stable_id
+    for obj in bpy.context.scene.objects
+    if obj.hyperscape.enabled and obj.hyperscape.stable_id
+} == {
+    "f0000000-0000-4000-8000-000000000001",
+    "f0000000-0000-4000-8000-000000000002",
+    "f0000000-0000-4000-8000-000000000003",
+    "f0000000-0000-4000-8000-000000000004",
+    "f0000000-0000-4000-8000-000000000005",
+}
 
 bpy.ops.wm.save_as_mainfile(filepath=str(destination.with_name(destination.stem + "-roundtrip.blend")))
 print(f"Hyperscape Blender round trip passed: {destination}")
