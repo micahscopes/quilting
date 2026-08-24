@@ -14,8 +14,9 @@ pub use action::{
     ScheduledNavigationAction,
 };
 pub use camera::{
-    map_space_mouse_axes, CameraBasis, CameraError, CameraRig, NavigationAxes, NavigationFrame,
-    NavigationPreset, PerspectiveLens, SpaceMouseMapping, SphereReflectionState,
+    map_space_mouse_axes, map_space_mouse_camera, CameraBasis, CameraError, CameraRig,
+    MappedSpaceMouseFrame, NavigationAxes, NavigationFrame, NavigationPreset, PerspectiveLens,
+    SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping, SphereReflectionState,
 };
 pub use focus::{FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition};
 pub use transition::{

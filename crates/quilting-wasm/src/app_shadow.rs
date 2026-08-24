@@ -3,8 +3,9 @@ use crate::navigation::{
     vector3,
 };
 use hyperscape::{
-    CameraBasis, CameraRig, FocusSphere, NavigationAction, NavigationFrame, Presentation,
-    PresentationSnapshot, SurfaceAnchorTarget,
+    map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere, MappedSpaceMouseFrame,
+    NavigationAction, NavigationFrame, Presentation, PresentationSnapshot, SpaceMouseCameraInput,
+    SpaceMouseMapping, SurfaceAnchorTarget,
 };
 use hyperscape_protocol::{AssetDescriptor, AssetId, RequestId};
 use hyperscope_app::{
@@ -15,6 +16,37 @@ use hyperscope_app::{
 use serde::Serialize;
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
+
+/// Pure generated-WASM oracle for the normalized SpaceMouse camera boundary.
+/// This does not queue an action, advance virtual time, or mutate app state.
+#[wasm_bindgen(js_name = mapSpaceMouseCameraFrame)]
+#[allow(clippy::too_many_arguments)]
+pub fn map_space_mouse_camera_frame(
+    normalized_axes: &[f32],
+    preset: &str,
+    swap_yz: bool,
+    invert_pan: f64,
+    invert_rotate: f64,
+    delta_seconds: f64,
+    registered_linear_speed: f64,
+    move_gain: f64,
+    rotate_gain: f64,
+    horizon_lock_requested: bool,
+) -> Result<JsValue, JsValue> {
+    let mapped = space_mouse_camera_input(
+        normalized_axes,
+        preset,
+        swap_yz,
+        invert_pan,
+        invert_rotate,
+        delta_seconds,
+        registered_linear_speed,
+        move_gain,
+        rotate_gain,
+        horizon_lock_requested,
+    )?;
+    to_js(&ShadowMappedSpaceMouseFrame::from(mapped))
+}
 
 /// Opt-in WASM adapter for comparing browser asset jobs with the Rust app
 /// reducer. It observes fetch/file acquisition only and never loads a model,
@@ -192,6 +224,49 @@ impl HyperscopeAppShadow {
             dolly_log,
             horizon_locked,
         }))
+    }
+
+    /// Convert one browser-filtered SpaceMouse sample into semantic navigation
+    /// actions using Rust-owned mapping and response policy. WebHID acquisition,
+    /// report decoding, response shaping, and gesture-speed registration remain
+    /// outside this boundary. This queues actions but never advances time.
+    #[wasm_bindgen(js_name = queueSpaceMouseCamera)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_space_mouse_camera(
+        &self,
+        normalized_axes: &[f32],
+        preset: &str,
+        swap_yz: bool,
+        invert_pan: f64,
+        invert_rotate: f64,
+        delta_seconds: f64,
+        registered_linear_speed: f64,
+        move_gain: f64,
+        rotate_gain: f64,
+        horizon_lock_requested: bool,
+    ) -> Result<JsValue, JsValue> {
+        let mapped = space_mouse_camera_input(
+            normalized_axes,
+            preset,
+            swap_yz,
+            invert_pan,
+            invert_rotate,
+            delta_seconds,
+            registered_linear_speed,
+            move_gain,
+            rotate_gain,
+            horizon_lock_requested,
+        )?;
+        let preset_sequence =
+            self.dispatch_navigation(NavigationAction::SetPreset(mapped.preset))?;
+        let frame_sequence =
+            self.dispatch_navigation(NavigationAction::ApplyFrame(mapped.frame))?;
+        to_js(&ShadowSpaceMouseDispatch {
+            preset_sequence: preset_sequence.to_string(),
+            frame_sequence: frame_sequence.to_string(),
+            preset: preset_name(mapped.preset),
+            frame: ShadowNavigationFrame::from(mapped.frame),
+        })
     }
 
     #[wasm_bindgen(js_name = transitionCamera)]
@@ -528,6 +603,48 @@ struct ShadowNavigationSnapshot {
 }
 
 #[derive(Serialize)]
+struct ShadowSpaceMouseDispatch {
+    preset_sequence: String,
+    frame_sequence: String,
+    preset: &'static str,
+    frame: ShadowNavigationFrame,
+}
+
+#[derive(Serialize)]
+struct ShadowMappedSpaceMouseFrame {
+    preset: &'static str,
+    frame: ShadowNavigationFrame,
+}
+
+impl From<MappedSpaceMouseFrame> for ShadowMappedSpaceMouseFrame {
+    fn from(mapped: MappedSpaceMouseFrame) -> Self {
+        Self {
+            preset: preset_name(mapped.preset),
+            frame: mapped.frame.into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ShadowNavigationFrame {
+    translation: [f64; 3],
+    rotation: [f64; 3],
+    dolly_log: f64,
+    horizon_locked: bool,
+}
+
+impl From<NavigationFrame> for ShadowNavigationFrame {
+    fn from(frame: NavigationFrame) -> Self {
+        Self {
+            translation: frame.translation,
+            rotation: frame.rotation,
+            dolly_log: frame.dolly_log,
+            horizon_locked: frame.horizon_locked,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct ShadowCameraSnapshot {
     eye: [f64; 3],
     orientation: [f64; 4],
@@ -703,4 +820,46 @@ fn to_js(value: &impl Serialize) -> Result<JsValue, JsValue> {
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn space_mouse_camera_input(
+    normalized_axes: &[f32],
+    preset: &str,
+    swap_yz: bool,
+    invert_pan: f64,
+    invert_rotate: f64,
+    delta_seconds: f64,
+    registered_linear_speed: f64,
+    move_gain: f64,
+    rotate_gain: f64,
+    horizon_lock_requested: bool,
+) -> Result<MappedSpaceMouseFrame, JsValue> {
+    let normalized_axes: [f32; 6] = normalized_axes.try_into().map_err(|_| {
+        JsValue::from_str("SpaceMouse input must contain exactly six normalized axes")
+    })?;
+    map_space_mouse_camera(SpaceMouseCameraInput {
+        normalized_axes: normalized_axes.map(f64::from),
+        mapping: SpaceMouseMapping {
+            preset: parse_preset(preset)?,
+            swap_yz,
+            invert_pan: parse_space_mouse_mask(invert_pan)?,
+            invert_rotate: parse_space_mouse_mask(invert_rotate)?,
+        },
+        delta_seconds,
+        registered_linear_speed,
+        move_gain,
+        rotate_gain,
+        horizon_lock_requested,
+    })
+    .map_err(js_error)
+}
+
+fn parse_space_mouse_mask(value: f64) -> Result<u8, JsValue> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=7.0).contains(&value) {
+        return Err(JsValue::from_str(
+            "SpaceMouse inversion masks must be finite integers from 0 through 7",
+        ));
+    }
+    Ok(value as u8)
 }

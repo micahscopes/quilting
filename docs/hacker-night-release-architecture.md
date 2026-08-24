@@ -64,6 +64,19 @@ The first application boundary is now explicit:
   parity-complete frame snapshot. This is an offline
   cutover gate only: `navshadow=1` and the browser camera remain unchanged until
   live Chrome parity is measured.
+- The next offline input gate freezes normalized SpaceMouse camera samples at
+  a platform-neutral Rust boundary. Browser code retains only WebHID/report
+  acquisition, device shaping/smoothing, button layers, and the
+  screen-relative linear speed frozen at gesture start. Rust validates axes in
+  `[-1, 1]`, computes translation/rotation/object-dolly response from virtual
+  delta and user gains, applies preset/swap/inversion/horizon policy, and queues
+  the resulting ordinary navigation actions through `AppStore`. It adds no
+  device-specific event to the application vocabulary and does not tick or
+  change live browser authority. Generated WASM matches the incumbent mapping
+  over 7,168 exhaustive mapping cases, 648 response-policy cases, four
+  `AppStore` camera initial states, and a 120-frame deterministic trace.
+  Modifier layers, surface-walk
+  input, and authored-transition arbitration remain explicit later cutovers.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 67 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
@@ -158,6 +171,8 @@ versors; they never linearly interpolate the 16 raw matrix coefficients.
 
 - DOM controls and accessibility;
 - WebHID permission/device acquisition and raw report delivery;
+- dead-zone shaping, temporal smoothing, button interpretation, and
+  per-gesture screen-relative SpaceMouse speed registration;
 - drag/drop, file handles, IndexedDB, and network fetches;
 - canvas sizing and browser scheduling;
 - WebGL2 resource handles and backend implementation details.

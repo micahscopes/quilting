@@ -122,6 +122,22 @@ or sphere state.
    rendered camera; removing `navshadow=1` is the immediate rollback. Remove
    duplicate JavaScript authority only after representative all-mode,
    all-scale parity runs are clean.
+   The normalized SpaceMouse camera boundary is now frozen in Rust as
+   `SpaceMouseCameraInput -> NavigationFrame`. The browser still owns WebHID
+   permission/acquisition, report decoding, dead-zone and quadratic response,
+   stale decay, smoothing, buttons/modifier layers, and one screen-relative
+   speed registered and held for each translation gesture. Rust validates the
+   normalized sample and owns Blender/Hyperscope axis policy, swap/inversion
+   preferences, delta/gain integration, object dolly, and horizon policy. The
+   queue-only application adapter emits `SetPreset` followed by `ApplyFrame`
+   through the shared sequence authority and never ticks implicitly. An
+   offline generated-WASM oracle covers all four presets, both swap states, all
+   64 pan/rotation mask pairs, 14 axis vectors (7,168 combinations), 648
+   response-policy combinations, four `AppStore` target/basis initial states,
+   and a deterministic 120-frame trace. Surface walking, focus/inversion
+   modifiers, authored-camera
+   arbitration, and live browser cutover remain outside this slice; rotation
+   cadence invariance is not inferred from same-trace parity.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere
    transitions in Rust, and extract one compact focus packet per view.

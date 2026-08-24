@@ -5,7 +5,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
-const { default: init, HyperscopeAppShadow, HyperscopeNavigation } = await import(packageUrl);
+const {
+  default: init,
+  HyperscopeAppShadow,
+  HyperscopeNavigation,
+  mapSpaceMouseCameraFrame,
+} = await import(packageUrl);
+const { mapSpaceMouseNavigationAxes } = await import(
+  pathToFileURL(`${repository}/spacemouse.mjs`).href
+);
 await init({ module_or_path: readFileSync(wasmPath) });
 
 const app = new HyperscopeAppShadow();
@@ -288,6 +296,323 @@ assert.equal(
 assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
 assertNavigationParity(navigationApp.tickNavigation(0), navigationIncumbent.tick(0));
 
+function browserSpaceMouseCameraFrame(normalizedAxes, sample) {
+  const mapped = Array.from(mapSpaceMouseNavigationAxes(normalizedAxes, {
+    mode: sample.preset,
+    swapYZ: sample.swapYZ,
+    invertPan: sample.invertPan,
+    invertRotate: sample.invertRotate,
+  }));
+  const translationScale = sample.registeredLinearSpeed
+    * sample.moveGain * sample.deltaSeconds;
+  const rotationScale = 1.5 * sample.rotateGain * sample.deltaSeconds;
+  const translation = mapped.slice(0, 3).map(axis => axis * translationScale);
+  const rotation = mapped.slice(3, 6).map(axis => axis * rotationScale);
+  let dollyLog = 0;
+  if (sample.preset === 'object') {
+    translation[2] = 0;
+    dollyLog = mapped[2] * 1.5 * sample.moveGain * sample.deltaSeconds;
+  }
+  return {
+    translation,
+    rotation,
+    dolly_log: dollyLog,
+    horizon_locked: sample.preset === 'drone'
+      || (sample.preset !== 'hyperscope' && sample.horizonLockRequested),
+  };
+}
+
+function rustSpaceMouseCameraFrame(normalizedAxes, sample) {
+  return mapSpaceMouseCameraFrame(
+    normalizedAxes,
+    sample.preset,
+    sample.swapYZ,
+    sample.invertPan,
+    sample.invertRotate,
+    sample.deltaSeconds,
+    sample.registeredLinearSpeed,
+    sample.moveGain,
+    sample.rotateGain,
+    sample.horizonLockRequested,
+  );
+}
+
+const presets = ['hyperscope', 'object', 'fly', 'drone'];
+const normalizedAxes = new Float32Array([0.25, -0.5, 0.75, -1, 0.125, -0.25]);
+const spaceMouseAxisVectors = [new Float32Array(6)];
+for (let axis = 0; axis < 6; axis++) {
+  const positive = new Float32Array(6);
+  positive[axis] = 1;
+  spaceMouseAxisVectors.push(positive);
+  const negative = new Float32Array(6);
+  negative[axis] = -1;
+  spaceMouseAxisVectors.push(negative);
+}
+spaceMouseAxisVectors.push(normalizedAxes);
+
+let exhaustiveMappingCases = 0;
+for (const preset of presets) {
+  for (const swapYZ of [false, true]) {
+    for (let invertPan = 0; invertPan < 8; invertPan++) {
+      for (let invertRotate = 0; invertRotate < 8; invertRotate++) {
+        for (const axes of spaceMouseAxisVectors) {
+          const sample = {
+            preset,
+            swapYZ,
+            invertPan,
+            invertRotate,
+            deltaSeconds: 0.25,
+            registeredLinearSpeed: 2,
+            moveGain: 0.5,
+            rotateGain: 1.25,
+            horizonLockRequested: false,
+          };
+          assert.deepEqual(
+            rustSpaceMouseCameraFrame(axes, sample),
+            { preset, frame: browserSpaceMouseCameraFrame(axes, sample) },
+          );
+          exhaustiveMappingCases++;
+        }
+      }
+    }
+  }
+}
+
+let responsePolicyCases = 0;
+for (const preset of presets) {
+  for (const horizonLockRequested of [false, true]) {
+    for (const deltaSeconds of [0, 0.125, 0.5]) {
+      for (const registeredLinearSpeed of [0, 0.5, 4]) {
+        for (const moveGain of [0, 0.25, 3]) {
+          for (const rotateGain of [0, 0.5, 4]) {
+            const sample = {
+              preset,
+              swapYZ: true,
+              invertPan: 0b101,
+              invertRotate: 0b010,
+              deltaSeconds,
+              registeredLinearSpeed,
+              moveGain,
+              rotateGain,
+              horizonLockRequested,
+            };
+            assert.deepEqual(
+              rustSpaceMouseCameraFrame(normalizedAxes, sample),
+              { preset, frame: browserSpaceMouseCameraFrame(normalizedAxes, sample) },
+            );
+            responsePolicyCases++;
+          }
+        }
+      }
+    }
+  }
+}
+
+const spaceMouseCases = [
+  {
+    preset: 'hyperscope', swapYZ: false, invertPan: 0b010, invertRotate: 0b001,
+    deltaSeconds: 0.25, registeredLinearSpeed: 2, moveGain: 0.5, rotateGain: 4 / 3,
+    horizonLockRequested: true,
+  },
+  {
+    preset: 'object', swapYZ: false, invertPan: 0, invertRotate: 0,
+    deltaSeconds: 0.5, registeredLinearSpeed: 4, moveGain: 0.5, rotateGain: 2 / 3,
+    horizonLockRequested: true,
+  },
+  {
+    preset: 'fly', swapYZ: true, invertPan: 0b101, invertRotate: 0b010,
+    deltaSeconds: 0.125, registeredLinearSpeed: 8, moveGain: 0.75, rotateGain: 2,
+    horizonLockRequested: false,
+  },
+  {
+    preset: 'drone', swapYZ: false, invertPan: 0b111, invertRotate: 0b111,
+    deltaSeconds: 0.5, registeredLinearSpeed: 0.5, moveGain: 2, rotateGain: 1,
+    horizonLockRequested: false,
+  },
+];
+const spaceMouseCameraStates = [
+  { eye, forward, up, target },
+  {
+    eye: new Float64Array([2, -1, 4]),
+    forward,
+    up,
+    target: new Float64Array(),
+  },
+  {
+    eye: new Float64Array([1, 2, 3]),
+    forward: new Float64Array([0, -1, 0]),
+    up: new Float64Array([1, 0, 0]),
+    target: new Float64Array(),
+  },
+  {
+    eye: new Float64Array([3, 0, 0]),
+    forward: new Float64Array([-1, 0, 0]),
+    up: new Float64Array([0, 0, 1]),
+    target,
+  },
+];
+for (const [caseIndex, sample] of spaceMouseCases.entries()) {
+  const mappedApp = new HyperscopeAppShadow();
+  const semanticApp = new HyperscopeAppShadow();
+  const camera = spaceMouseCameraStates[caseIndex];
+  for (const candidate of [mappedApp, semanticApp]) {
+    candidate.synchronizeNavigation(
+      camera.eye, camera.forward, camera.up, 3, camera.target,
+      focusCenter, 2, false, false, 0.5, 0.1,
+    );
+  }
+  const expectedFrame = browserSpaceMouseCameraFrame(normalizedAxes, sample);
+  const dispatch = mappedApp.queueSpaceMouseCamera(
+    normalizedAxes,
+    sample.preset,
+    sample.swapYZ,
+    sample.invertPan,
+    sample.invertRotate,
+    sample.deltaSeconds,
+    sample.registeredLinearSpeed,
+    sample.moveGain,
+    sample.rotateGain,
+    sample.horizonLockRequested,
+  );
+  assert.deepEqual(dispatch.frame, expectedFrame);
+  assert.equal(dispatch.preset, sample.preset);
+  assert.equal(dispatch.preset_sequence, '0');
+  assert.equal(dispatch.frame_sequence, '1');
+  assert.equal(semanticApp.setPreset(sample.preset), 0n);
+  assert.equal(
+    semanticApp.applyFrame(
+      new Float64Array(expectedFrame.translation),
+      new Float64Array(expectedFrame.rotation),
+      expectedFrame.dolly_log,
+      expectedFrame.horizon_locked,
+    ),
+    1n,
+  );
+  assertNavigationParity(mappedApp.navigationSnapshot(), semanticApp.navigationSnapshot());
+  assertNavigationParity(mappedApp.tickNavigation(0), semanticApp.tickNavigation(0));
+  mappedApp.free();
+  semanticApp.free();
+}
+
+const traceMappedApp = new HyperscopeAppShadow();
+const traceSemanticApp = new HyperscopeAppShadow();
+for (const candidate of [traceMappedApp, traceSemanticApp]) {
+  candidate.synchronizeNavigation(
+    new Float64Array([2, -1, 4]), forward, up, 3, new Float64Array(),
+    focusCenter, 2, false, false, 0.5, 0.1,
+  );
+}
+const traceDeltas = [1 / 128, 1 / 64, 1 / 32];
+const traceSpeeds = [0.5, 2, 8];
+const traceMoveGains = [0.25, 1, 3];
+const traceRotateGains = [0.5, 1, 2];
+const traceFrames = 120;
+for (let frame = 0; frame < traceFrames; frame++) {
+  const sample = {
+    preset: presets[frame % presets.length],
+    swapYZ: (frame & 1) !== 0,
+    invertPan: frame % 8,
+    invertRotate: (frame * 3) % 8,
+    deltaSeconds: traceDeltas[frame % traceDeltas.length],
+    registeredLinearSpeed: traceSpeeds[(frame + 1) % traceSpeeds.length],
+    moveGain: traceMoveGains[(frame + 2) % traceMoveGains.length],
+    rotateGain: traceRotateGains[frame % traceRotateGains.length],
+    horizonLockRequested: (frame & 2) !== 0,
+  };
+  const axes = spaceMouseAxisVectors[frame % spaceMouseAxisVectors.length];
+  const expectedFrame = browserSpaceMouseCameraFrame(axes, sample);
+  const dispatch = traceMappedApp.queueSpaceMouseCamera(
+    axes,
+    sample.preset,
+    sample.swapYZ,
+    sample.invertPan,
+    sample.invertRotate,
+    sample.deltaSeconds,
+    sample.registeredLinearSpeed,
+    sample.moveGain,
+    sample.rotateGain,
+    sample.horizonLockRequested,
+  );
+  assert.deepEqual(dispatch.frame, expectedFrame);
+  assert.equal(dispatch.preset_sequence, String(frame * 2));
+  assert.equal(dispatch.frame_sequence, String(frame * 2 + 1));
+  assert.equal(traceSemanticApp.setPreset(sample.preset), BigInt(frame * 2));
+  assert.equal(
+    traceSemanticApp.applyFrame(
+      new Float64Array(expectedFrame.translation),
+      new Float64Array(expectedFrame.rotation),
+      expectedFrame.dolly_log,
+      expectedFrame.horizon_locked,
+    ),
+    BigInt(frame * 2 + 1),
+  );
+  assertNavigationParity(traceMappedApp.navigationSnapshot(), traceSemanticApp.navigationSnapshot());
+  assertNavigationParity(
+    traceMappedApp.tickNavigation(sample.deltaSeconds),
+    traceSemanticApp.tickNavigation(sample.deltaSeconds),
+  );
+}
+traceMappedApp.free();
+traceSemanticApp.free();
+
+const invalidSpaceMouseApp = new HyperscopeAppShadow();
+assert.throws(
+  () => invalidSpaceMouseApp.queueSpaceMouseCamera(
+    new Float32Array(5), 'fly', false, 0, 0, 1, 1, 1, 1, false,
+  ),
+  /exactly six normalized axes/,
+);
+assert.throws(
+  () => invalidSpaceMouseApp.queueSpaceMouseCamera(
+    new Float32Array([NaN, 0, 0, 0, 0, 0]), 'fly', false, 0, 0, 1, 1, 1, 1, false,
+  ),
+  /remain finite/,
+);
+assert.throws(
+  () => invalidSpaceMouseApp.queueSpaceMouseCamera(
+    new Float32Array([1.01, 0, 0, 0, 0, 0]), 'fly', false, 0, 0, 1, 1, 1, 1, false,
+  ),
+  /within \[-1, 1\]/,
+);
+for (const response of [
+  [-1, 1, 1, 1],
+  [1, -1, 1, 1],
+  [1, 1, -1, 1],
+  [1, 1, 1, -1],
+]) {
+  assert.throws(
+    () => invalidSpaceMouseApp.queueSpaceMouseCamera(
+      normalizedAxes, 'fly', false, 0, 0, ...response, false,
+    ),
+    /must be nonnegative/,
+  );
+}
+for (const invalidMask of [8, 256, 263, 1.5, NaN]) {
+  assert.throws(
+    () => invalidSpaceMouseApp.queueSpaceMouseCamera(
+      normalizedAxes, 'object', false, invalidMask, 0, 1, 1, 1, 1, false,
+    ),
+    /finite integers from 0 through 7/,
+  );
+}
+const overflowSpaceMouseAxes = new Float32Array([1, 0, 0, 0, 0, 0]);
+for (const [preset, deltaSeconds, registeredLinearSpeed, moveGain, rotateGain] of [
+  ['fly', 1, Number.MAX_VALUE, 2, 1],
+  ['fly', 1, 1, 1, Number.MAX_VALUE],
+  ['object', 1, 0, Number.MAX_VALUE, 1],
+]) {
+  assert.throws(
+    () => invalidSpaceMouseApp.queueSpaceMouseCamera(
+      overflowSpaceMouseAxes, preset, false, 0, 0,
+      deltaSeconds, registeredLinearSpeed, moveGain, rotateGain, false,
+    ),
+    /remain finite/,
+  );
+}
+assert.equal(invalidSpaceMouseApp.navigationSnapshot().pending_actions, 0);
+assert.equal(invalidSpaceMouseApp.navigationSnapshot().preset, 'hyperscope');
+invalidSpaceMouseApp.free();
+
 const finalFrameTime = app.navigationSnapshot().elapsed_seconds + 0.1;
 app.advanceFrame(finalFrameTime, 0.1);
 assert.throws(
@@ -313,4 +638,10 @@ console.log(JSON.stringify({
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
   presentationCue: finalSnapshot.presentation.active.cue_id,
   navigationBoundaryParity: true,
+  spaceMouseInputCases: {
+    exhaustiveMapping: exhaustiveMappingCases,
+    responsePolicy: responsePolicyCases,
+    queuedCameraStates: spaceMouseCases.length,
+    deterministicTraceFrames: traceFrames,
+  },
 }));

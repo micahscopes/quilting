@@ -498,6 +498,61 @@ pub struct SpaceMouseMapping {
     pub invert_rotate: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceMouseInputError {
+    NonFinite,
+    AxisOutOfRange,
+    NegativeResponse,
+    InvalidInversionMask,
+}
+
+impl fmt::Display for SpaceMouseInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NonFinite => "SpaceMouse input and derived response must remain finite",
+            Self::AxisOutOfRange => "normalized SpaceMouse axes must be within [-1, 1]",
+            Self::NegativeResponse => {
+                "SpaceMouse delta, gesture speed, and gains must be nonnegative"
+            }
+            Self::InvalidInversionMask => {
+                "SpaceMouse inversion masks may contain only the X, Y, and Z bits"
+            }
+        })
+    }
+}
+
+impl Error for SpaceMouseInputError {}
+
+/// One filtered, normalized six-axis sample plus the response parameters needed
+/// to turn it into a device-neutral navigation frame.
+///
+/// WebHID permission, report-layout decoding, dead-zone shaping, and temporal
+/// smoothing remain platform work. The browser registers `linear_speed` once
+/// when a translation gesture starts and keeps it fixed until that gesture
+/// ends. Preset policy, Blender normalization, response integration, inversion
+/// masks, object-mode dolly, and horizon policy are deterministic Rust
+/// semantics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpaceMouseCameraInput {
+    pub normalized_axes: [f64; 6],
+    pub mapping: SpaceMouseMapping,
+    pub delta_seconds: f64,
+    /// World units per second at a move gain of one. Frozen for the gesture.
+    pub registered_linear_speed: f64,
+    /// User move sensitivity, expressed as the browser setting divided by 100.
+    pub move_gain: f64,
+    /// User rotation sensitivity, expressed as the setting divided by 100.
+    pub rotate_gain: f64,
+    /// User-requested horizon lock. Drone always locks; Hyperscope never does.
+    pub horizon_lock_requested: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MappedSpaceMouseFrame {
+    pub preset: NavigationPreset,
+    pub frame: NavigationFrame,
+}
+
 impl Default for SpaceMouseMapping {
     fn default() -> Self {
         Self {
@@ -540,6 +595,81 @@ pub fn map_space_mouse_axes(raw: [f64; 6], mapping: SpaceMouseMapping) -> Naviga
             roll * mode_sign * mask_sign(mapping.invert_rotate, 2),
         ],
     }
+}
+
+/// Convert a filtered SpaceMouse sample into the same semantic frame consumed
+/// by mouse, keyboard, replay, and future game/XR adapters.
+pub fn map_space_mouse_camera(
+    input: SpaceMouseCameraInput,
+) -> Result<MappedSpaceMouseFrame, SpaceMouseInputError> {
+    if input
+        .normalized_axes
+        .into_iter()
+        .any(|value| !value.is_finite())
+        || !input.delta_seconds.is_finite()
+        || !input.registered_linear_speed.is_finite()
+        || !input.move_gain.is_finite()
+        || !input.rotate_gain.is_finite()
+    {
+        return Err(SpaceMouseInputError::NonFinite);
+    }
+    if input
+        .normalized_axes
+        .into_iter()
+        .any(|value| !(-1.0..=1.0).contains(&value))
+    {
+        return Err(SpaceMouseInputError::AxisOutOfRange);
+    }
+    if input.delta_seconds < 0.0
+        || input.registered_linear_speed < 0.0
+        || input.move_gain < 0.0
+        || input.rotate_gain < 0.0
+    {
+        return Err(SpaceMouseInputError::NegativeResponse);
+    }
+    if input.mapping.invert_pan & !0b111 != 0 || input.mapping.invert_rotate & !0b111 != 0 {
+        return Err(SpaceMouseInputError::InvalidInversionMask);
+    }
+
+    let mapped = map_space_mouse_axes(input.normalized_axes, input.mapping);
+    let translation_scale = input.registered_linear_speed * input.move_gain * input.delta_seconds;
+    let rotation_scale = 1.5 * input.rotate_gain * input.delta_seconds;
+    let object_dolly_scale = if input.mapping.preset == NavigationPreset::Object {
+        1.5 * input.move_gain * input.delta_seconds
+    } else {
+        0.0
+    };
+    if !translation_scale.is_finite()
+        || !rotation_scale.is_finite()
+        || !object_dolly_scale.is_finite()
+    {
+        return Err(SpaceMouseInputError::NonFinite);
+    }
+    let mut translation = mapped.translation.map(|axis| axis * translation_scale);
+    let dolly_log = if input.mapping.preset == NavigationPreset::Object {
+        translation[2] = 0.0;
+        mapped.translation[2] * object_dolly_scale
+    } else {
+        0.0
+    };
+    let horizon_locked = match input.mapping.preset {
+        NavigationPreset::Hyperscope => false,
+        NavigationPreset::Drone => true,
+        NavigationPreset::Object | NavigationPreset::Fly => input.horizon_lock_requested,
+    };
+    let frame = NavigationFrame {
+        translation,
+        rotation: mapped.rotation.map(|axis| axis * rotation_scale),
+        dolly_log,
+        horizon_locked,
+    };
+    frame
+        .validate()
+        .map_err(|_| SpaceMouseInputError::NonFinite)?;
+    Ok(MappedSpaceMouseFrame {
+        preset: input.mapping.preset,
+        frame,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -878,6 +1008,163 @@ mod tests {
                 translation: [-1.0, 3.0, -2.0],
                 rotation: [4.0, -6.0, 5.0],
             }
+        );
+    }
+
+    #[test]
+    fn spacemouse_camera_conversion_matches_browser_response_and_policy() {
+        let normalized_axes = [0.25, -0.5, 0.75, -1.0, 0.125, -0.25];
+        let hyperscope = map_space_mouse_camera(SpaceMouseCameraInput {
+            normalized_axes,
+            mapping: SpaceMouseMapping::default(),
+            delta_seconds: 0.25,
+            registered_linear_speed: 2.0,
+            move_gain: 0.5,
+            rotate_gain: 4.0 / 3.0,
+            horizon_lock_requested: true,
+        })
+        .unwrap();
+        assert_eq!(hyperscope.preset, NavigationPreset::Hyperscope);
+        assert_eq!(
+            hyperscope.frame,
+            NavigationFrame {
+                translation: [0.0625, 0.125, 0.1875],
+                rotation: [0.5, 0.0625, -0.125],
+                dolly_log: 0.0,
+                horizon_locked: false,
+            }
+        );
+
+        let object = map_space_mouse_camera(SpaceMouseCameraInput {
+            normalized_axes,
+            mapping: SpaceMouseMapping {
+                preset: NavigationPreset::Object,
+                swap_yz: false,
+                invert_pan: 0,
+                invert_rotate: 0,
+            },
+            delta_seconds: 0.5,
+            registered_linear_speed: 4.0,
+            move_gain: 0.5,
+            rotate_gain: 2.0 / 3.0,
+            horizon_lock_requested: true,
+        })
+        .unwrap();
+        assert_eq!(object.preset, NavigationPreset::Object);
+        assert_eq!(
+            object.frame,
+            NavigationFrame {
+                translation: [-0.25, 0.75, 0.0],
+                rotation: [-0.5, 0.125, 0.0625],
+                dolly_log: 0.1875,
+                horizon_locked: true,
+            }
+        );
+
+        let swapped = map_space_mouse_camera(SpaceMouseCameraInput {
+            normalized_axes,
+            mapping: SpaceMouseMapping {
+                preset: NavigationPreset::Fly,
+                swap_yz: true,
+                invert_pan: 0b101,
+                invert_rotate: 0b010,
+            },
+            delta_seconds: 0.5,
+            registered_linear_speed: 2.0,
+            move_gain: 1.0,
+            rotate_gain: 4.0 / 3.0,
+            horizon_lock_requested: true,
+        })
+        .unwrap();
+        assert_eq!(swapped.frame.translation, [-0.25, 0.5, 0.75]);
+        assert_eq!(swapped.frame.rotation, [1.0, -0.125, -0.25]);
+        assert!(swapped.frame.horizon_locked);
+
+        let drone = map_space_mouse_camera(SpaceMouseCameraInput {
+            normalized_axes,
+            mapping: SpaceMouseMapping {
+                preset: NavigationPreset::Drone,
+                swap_yz: false,
+                invert_pan: 0,
+                invert_rotate: 0,
+            },
+            delta_seconds: 0.0,
+            registered_linear_speed: 0.0,
+            move_gain: 0.0,
+            rotate_gain: 0.0,
+            horizon_lock_requested: false,
+        })
+        .unwrap();
+        assert!(drone.frame.horizon_locked);
+        assert_eq!(drone.frame.dolly_log, 0.0);
+    }
+
+    #[test]
+    fn spacemouse_camera_conversion_rejects_invalid_boundary_values() {
+        let valid = SpaceMouseCameraInput {
+            normalized_axes: [0.0; 6],
+            mapping: SpaceMouseMapping::default(),
+            delta_seconds: 1.0,
+            registered_linear_speed: 1.0,
+            move_gain: 1.0,
+            rotate_gain: 1.0,
+            horizon_lock_requested: false,
+        };
+        assert_eq!(
+            map_space_mouse_camera(SpaceMouseCameraInput {
+                normalized_axes: [f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ..valid
+            }),
+            Err(SpaceMouseInputError::NonFinite)
+        );
+        assert_eq!(
+            map_space_mouse_camera(SpaceMouseCameraInput {
+                normalized_axes: [1.000_001, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ..valid
+            }),
+            Err(SpaceMouseInputError::AxisOutOfRange)
+        );
+        assert_eq!(
+            map_space_mouse_camera(SpaceMouseCameraInput {
+                rotate_gain: -1.0,
+                ..valid
+            }),
+            Err(SpaceMouseInputError::NegativeResponse)
+        );
+        for overflowing in [
+            SpaceMouseCameraInput {
+                registered_linear_speed: f64::MAX,
+                move_gain: 2.0,
+                ..valid
+            },
+            SpaceMouseCameraInput {
+                rotate_gain: f64::MAX,
+                ..valid
+            },
+            SpaceMouseCameraInput {
+                mapping: SpaceMouseMapping {
+                    preset: NavigationPreset::Object,
+                    ..valid.mapping
+                },
+                registered_linear_speed: 0.0,
+                move_gain: f64::MAX,
+                ..valid
+            },
+        ] {
+            assert_eq!(
+                map_space_mouse_camera(overflowing),
+                Err(SpaceMouseInputError::NonFinite)
+            );
+        }
+        assert_eq!(
+            map_space_mouse_camera(SpaceMouseCameraInput {
+                mapping: SpaceMouseMapping {
+                    invert_pan: 0b1000,
+                    ..valid.mapping
+                },
+                ..valid
+            }),
+            Err(SpaceMouseInputError::InvalidInversionMask)
         );
     }
 }

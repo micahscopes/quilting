@@ -491,3 +491,33 @@ predicates, and atomic-refit tests. The observer still never changes WebGL draw
 membership. WebGL already performs current-pose vertex rejection; eliminating
 rejected instance invocation is reserved for a compacted/indirect WebGPU path
 or another measured submission strategy.
+
+## Rust SpaceMouse camera-input boundary follow-up
+
+On 2026-08-24, the offline application gate added a validated
+`SpaceMouseCameraInput -> NavigationFrame` conversion in `hyperscape` without
+changing the live browser controller. The adapter supplies six filtered axes,
+virtual delta, the linear speed frozen when the current translation gesture
+began, and user move/rotation gains. Rust owns preset normalization, Y/Z swap,
+all inversion masks, exact translation and rotation response, object-mode
+dolly, and horizon-lock policy. WebHID reports, response shaping, smoothing,
+stale decay, button layers, gesture-speed registration, surface walking, and
+focus/inversion modifiers remain browser concerns at this checkpoint.
+
+The generated-WASM smoke compared the incumbent JavaScript mapping with the
+pure Rust boundary across 7,168 combinations: four presets, two swap states,
+all eight pan masks, all eight rotation masks, and 14 zero/basis/mixed axis
+vectors. It separately covered 648 delta/speed/gain/horizon policy cases, four
+targetful/target-free `AppStore` camera initial states, a 120-frame
+deterministic trace, and atomic rejection of malformed, coercible, and
+overflowing samples. The
+queue adapter emits `SetPreset` then `ApplyFrame` under the shared sequence
+authority and does not integrate until an ordinary tick.
+
+This slice increased optimized WASM from 5,983,991 to 5,989,628 bytes (+5,637
+raw); gzip increased from 2,096,971 to 2,098,831 bytes (+1,860). The
+source-coherent build receipt is `ec1e4e53ac2f082b20cf110ced5c822d` over 153
+files and 38,378,234 bytes. Native camera tests, strict core Clippy and Rustdoc,
+the WASM target check, the 16 SpaceMouse adapter tests, and all four
+generated-WASM smokes passed. No runtime or cadence-invariance claim is made
+until the user-run Chrome adapter is explicitly wired and measured.
