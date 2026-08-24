@@ -1662,6 +1662,7 @@ const rustPresentationDiagnostics = {
   opacityOverridesPending: false,
   activeVisualization: 'pbr',
   activeTessellation: null,
+  activeAnimation: null,
   unsupportedOverlays: [],
   navigation: null,
   error: null,
@@ -1747,6 +1748,84 @@ function renderRustPresentationSnapshot(snapshot) {
   rustPresentationDiagnostics.desiredLayers = layers;
   rustPresentationDiagnostics.multiAssetRendererPending = layers.length > 1;
   applyPresentationLayerState(snapshot);
+}
+
+function primaryPresentationAnimation(snapshot) {
+  const animations = snapshot?.animations || [];
+  if (animations.length === 0) return null;
+  const primaryAssetId = presentationComposition.primaryAssetId
+    || rustPresentationManifest?.assets?.find(asset =>
+      presentationAssetMatchesFilename(asset, currentGlb))?.id;
+  const layers = new Map((snapshot.layers || []).map(layer => [layer.id, layer]));
+  const primary = animations.filter(animation =>
+    layers.get(animation.layer)?.asset === primaryAssetId);
+  if (primary.length !== 1 || animations.length !== 1) {
+    throw new Error('presentation supports exactly one primary-layer animation directive');
+  }
+  return primary[0];
+}
+
+async function applyPresentationAnimationState(snapshot = rustPresentationSnapshot) {
+  const generation = ++presentationAnimationGeneration;
+  let animation;
+  try {
+    animation = primaryPresentationAnimation(snapshot);
+    if (!animation) {
+      rustPresentationDiagnostics.activeAnimation = null;
+      return false;
+    }
+    if (!meshInfo || !gpuSkinned) return false;
+    const clips = meshInfo.animations || [];
+    const clipIndex = clips.findIndex(clip => clip.name === animation.clip);
+    if (clipIndex < 0) {
+      throw new Error(`presentation animation clip ${animation.clip} is not resident`);
+    }
+    if (String(clipIndex) !== $('anim-sel').value) {
+      if (presentationComposition.ready) {
+        throw new Error('presentation clip switching after scene packing is not supported');
+      }
+      const switched = await selectAnimationIndex(clipIndex);
+      if (!switched) throw new Error(`presentation animation clip ${animation.clip} failed to load`);
+    }
+    if (generation !== presentationAnimationGeneration || snapshot !== rustPresentationSnapshot) {
+      return false;
+    }
+    const authoredTime = Number(animation.time_seconds);
+    const timeMin = Number(meshInfo.time_min) || 0;
+    const timeMax = Number(meshInfo.time_max) || timeMin;
+    const time = timeMin + authoredTime;
+    if (!Number.isFinite(authoredTime) || authoredTime < 0 || time > timeMax) {
+      throw new Error(
+        `presentation animation time ${authoredTime} is outside clip ${animation.clip} `
+        + `duration ${Math.max(0, timeMax - timeMin)}`,
+      );
+    }
+    presentationAnimationSpeed = Number(animation.speed);
+    animTime = time;
+    $('time').value = animTime;
+    $('time-v').textContent = animTime.toFixed(2);
+    rebaseAnimationPoseContinuity();
+    animating_sig.set(Boolean(animation.playing));
+    tickAnimation(animTime, animationPoseClockSeconds);
+    debouncedLodRecompute();
+    rustPresentationDiagnostics.activeAnimation = {
+      layer: animation.layer,
+      clip: animation.clip,
+      timeSeconds: authoredTime,
+      playing: Boolean(animation.playing),
+      speed: presentationAnimationSpeed,
+    };
+    rustPresentationDiagnostics.error = null;
+    return true;
+  } catch (error) {
+    if (generation === presentationAnimationGeneration) {
+      rustPresentationDiagnostics.activeAnimation = null;
+      rustPresentationDiagnostics.error = error?.message || String(error);
+      $('presentation-adapter-status').textContent = 'animation directive failed';
+      console.warn('Presentation animation failed:', error);
+    }
+    return false;
+  }
 }
 
 function presentationLayerMatrix(transform = {}) {
@@ -1974,9 +2053,10 @@ function activateRustPresentation(direction, cueId) {
           ? rustPresentationController.reversePresentation()
           : rustPresentationController.jumpToPresentationCue(cueId);
     renderRustPresentationSnapshot(snapshot);
+    rustPresentationDiagnostics.error = null;
+    void applyPresentationAnimationState(snapshot);
     rustPresentationTransitionActive = true;
     applyRustPresentationNavigation(rustPresentationController.tick(0));
-    rustPresentationDiagnostics.error = null;
     mirrorAppPresentation(direction, cueId, snapshot);
     syncURL();
     return snapshot;
@@ -2595,6 +2675,8 @@ function failAppAssetShadow(token, code, error, retryable = false) {
 // --- Model state ---
 let gpuSkinned = false;
 let animating = true;
+let presentationAnimationSpeed = 1;
+let presentationAnimationGeneration = 0;
 let meshInfo = null;
 let animTime = 0;
 let animationPoseClockSeconds = 0;
@@ -4287,9 +4369,9 @@ effect(() => {
   syncURL();
 });
 
-$('anim-sel').addEventListener('change', async () => {
-  const idx = parseInt($('anim-sel').value);
-  if (idx < 0 || !meshInfo) return;
+async function selectAnimationIndex(idx) {
+  if (idx < 0 || !meshInfo) return false;
+  $('anim-sel').value = String(idx);
   const blockGeneration = ++animationPoseBlockGeneration;
   animationPoseBlocked = true;
   rebaseAnimationPoseContinuity();
@@ -4359,6 +4441,11 @@ $('anim-sel').addEventListener('change', async () => {
       if (switched) tickAnimation(animTime, animationPoseClockSeconds);
     }
   }
+  return switched;
+}
+
+$('anim-sel').addEventListener('change', () => {
+  void selectAnimationIndex(parseInt($('anim-sel').value));
 });
 
 $('time').addEventListener('input', () => {
@@ -4632,6 +4719,7 @@ async function loadPatchLab(
   animationPoseBlockGeneration += 1;
   animationPoseBlocked = false;
   gpuSkinned = false;
+  presentationAnimationSpeed = 1;
   rebaseAnimationPoseContinuity({ resetClock: true });
   mr_clearAnimationState();
   hyperscapeActive = false;
@@ -5797,7 +5885,7 @@ function frame(ts) {
     const timeMin = Number(meshInfo.time_min) || 0;
     animationPoseClockSeconds += deltaSeconds;
     if (duration > 0) {
-      const unwrappedOffset = animTime - timeMin + deltaSeconds;
+      const unwrappedOffset = animTime - timeMin + deltaSeconds * presentationAnimationSpeed;
       if (unwrappedOffset >= duration || unwrappedOffset < 0) {
         rebaseAnimationPoseContinuity();
       }
@@ -6614,6 +6702,9 @@ async function finishModelUpload(info, filename, durableAssetId = null) {
   }
   gpuSkinned = modelHasAnimations;
   if (gpuSkinned) tickAnimation(animTime, animationPoseClockSeconds);
+  if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
+    void applyPresentationAnimationState(rustPresentationSnapshot);
+  }
   uploadTimings.animationSetupMs = performance.now() - sectionStarted;
   uploadTimings.totalMs = performance.now() - uploadStarted;
 

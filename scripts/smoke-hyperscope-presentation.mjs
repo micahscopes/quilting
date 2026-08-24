@@ -49,6 +49,20 @@ assert.equal(presentation.cues.length, 6);
 const first = controller.startPresentation();
 assert.equal(first.cue_id, presentation.cues[0].id);
 assert.equal(first.cue_index, 0);
+assert.deepEqual(first.animations, presentation.cues[0].animations);
+
+for (const requiredAnimationAdapterStep of [
+  'primaryPresentationAnimation(snapshot)',
+  'selectAnimationIndex(clipIndex)',
+  'animTime = time;',
+  'animating_sig.set(Boolean(animation.playing));',
+  'deltaSeconds * presentationAnimationSpeed',
+]) {
+  assert.ok(
+    browserSource.includes(requiredAnimationAdapterStep),
+    `browser animation adapter is missing ${requiredAnimationAdapterStep}`,
+  );
+}
 
 const linkedCue = presentation.cues[2].id;
 const linked = controller.jumpToPresentationCue(linkedCue);
