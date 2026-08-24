@@ -211,18 +211,22 @@ pub fn build_atlas(max_lod_exp: u32, mode: &str) -> f64 {
     elapsed
 }
 
-/// Build only the canonical patches reachable under the renderer's 2:1
-/// within-face LOD contract. This keeps the entire build in one WASM call so
-/// browser startup does not schedule one worker message per patch.
+/// Build only the canonical patches reachable under the selected validated
+/// within-face LOD policy. This keeps the entire build in one WASM call so
+/// browser startup does not schedule one worker message per patch. Returns a
+/// negative duration for an unsupported ratio without replacing the atlas.
 #[wasm_bindgen]
-pub fn build_required_atlas(max_lod_exp: u32) -> f64 {
+pub fn build_required_atlas(max_lod_exp: u32, max_face_edge_ratio: u32) -> f64 {
+    let Some(grading) = batch::FaceLodGrading::from_ratio(max_face_edge_ratio) else {
+        return -1.0;
+    };
     let config = PatchConfig { k_candidates: 30, seed: 42 };
     let lods: Vec<u32> = (0..=max_lod_exp.min(30))
         .map(|exponent| 1u32 << exponent)
         .collect();
     let keys = quilting_core::atlas::ratio_bounded_canonical_triples(
         &lods,
-        batch::MAX_FACE_EDGE_LOD_RATIO,
+        grading.ratio(),
     );
 
     let start = js_sys::Date::now();
@@ -940,18 +944,22 @@ pub fn set_min_px_per_sub(px: f64) {
     quilting_core::evaluate::set_min_px_per_sub(px);
 }
 
-/// Return the canonical atlas triples reachable after the renderer's 2:1
-/// within-face LOD grading. The flat typed array is inexpensive to cross into
-/// JavaScript and keeps browser startup in lockstep with the shared topology
-/// contract used by both current and future backends.
+/// Return canonical atlas triples reachable after the selected validated
+/// within-face LOD grading. Unsupported ratios return an empty array.
 #[wasm_bindgen]
-pub fn required_tessellation_atlas_triples(max_lod_exp: u32) -> Vec<u32> {
+pub fn required_tessellation_atlas_triples(
+    max_lod_exp: u32,
+    max_face_edge_ratio: u32,
+) -> Vec<u32> {
+    let Some(grading) = batch::FaceLodGrading::from_ratio(max_face_edge_ratio) else {
+        return Vec::new();
+    };
     let lods: Vec<u32> = (0..=max_lod_exp.min(30))
         .map(|exponent| 1u32 << exponent)
         .collect();
     quilting_core::atlas::ratio_bounded_canonical_triples(
         &lods,
-        batch::MAX_FACE_EDGE_LOD_RATIO,
+        grading.ratio(),
     )
     .into_iter()
     .flatten()
@@ -2717,6 +2725,7 @@ pub fn load_patch_lab(shape: &str, grid: u32, bend: f32) -> JsValue {
 
 /// Re-sample and reconcile the current patch-laboratory LOD field.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn update_patch_lab_lods(
     field: &str,
     phase: f32,
@@ -2725,6 +2734,7 @@ pub fn update_patch_lab_lods(
     edge_a_exp: u32,
     edge_b_exp: u32,
     edge_c_exp: u32,
+    max_face_edge_ratio: u32,
 ) -> JsValue {
     use quilting_core::educational::{PatchLabField, PatchLabLodConfig};
 
@@ -2736,16 +2746,22 @@ pub fn update_patch_lab_lods(
         "edges" => PatchLabField::ManualEdges,
         _ => return JsValue::NULL,
     };
+    let Some(grading) = batch::FaceLodGrading::from_ratio(max_face_edge_ratio) else {
+        return JsValue::NULL;
+    };
     PATCH_LAB_SOURCE.with(|source| {
         let source = source.borrow();
         let Some(mesh) = source.as_ref() else { return JsValue::NULL };
-        let lods = mesh.lods(PatchLabLodConfig {
-            field,
-            phase: phase as f64,
-            min_exp,
-            max_exp,
-            manual_edge_exp: [edge_a_exp, edge_b_exp, edge_c_exp],
-        });
+        let lods = mesh.lods_with_grading(
+            PatchLabLodConfig {
+                field,
+                phase: phase as f64,
+                min_exp,
+                max_exp,
+                manual_edge_exp: [edge_a_exp, edge_b_exp, edge_c_exp],
+            },
+            grading,
+        );
         let mut face_lods = Vec::with_capacity(lods.residents.len() * batch::FACE_LOD_STRIDE);
         let mut requested = Vec::with_capacity(lods.residents.len() * 3);
         let mut actual = Vec::with_capacity(lods.residents.len() * 3);
@@ -2782,6 +2798,7 @@ pub fn update_patch_lab_lods(
             ("shared_edges", lods.shared_edges),
             ("shared_edge_mismatches", lods.shared_edge_mismatches),
             ("max_face_edge_ratio", lods.max_face_edge_ratio as usize),
+            ("policy_face_edge_ratio", grading.ratio() as usize),
         ] {
             js_sys::Reflect::set(&result, &key.into(),
                 &JsValue::from_f64(value as f64)).unwrap();

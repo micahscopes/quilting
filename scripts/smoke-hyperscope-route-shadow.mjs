@@ -15,6 +15,8 @@ await init({ module_or_path: readFileSync(wasmPath) });
 const specs = hyperscopeControlSpecs();
 assert.equal(new Set(specs.map(spec => spec.key)).size, specs.length);
 assert.equal(specs.find(spec => spec.key === 'minpx').defaultValue, '16');
+assert.equal(specs.find(spec => spec.key === 'lodratio').defaultValue, '2');
+assert.equal(specs.find(spec => spec.key === 'lodratio').kind, 'lod_ratio');
 assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
@@ -42,9 +44,11 @@ const canonical = canonicalizeHyperscopeRoute([
   ['mode', 'lod'],
   ['glb', 'horse.glb'],
   ['minpx', '16.0'],
+  ['lodratio', '4'],
 ]);
 assert.deepEqual(canonical.pairs, [
   ['mode', 'lod'],
+  ['lodratio', '4'],
   ['rx', '0.125'],
   ['routeshadow', '1'],
 ]);
@@ -55,15 +59,17 @@ const malformed = canonicalizeHyperscopeRoute([
   ['mode', 'pbr'],
   ['atten', 'yes'],
   ['rx', 'NaN'],
+  ['lodratio', '3'],
   ['mystery', '1'],
 ]);
 assert.deepEqual(
   malformed.diagnostics.map(diagnostic => diagnostic.code),
-  ['duplicate_key', 'invalid_value', 'invalid_value', 'unknown_key'],
+  ['duplicate_key', 'invalid_value', 'invalid_value', 'invalid_value', 'unknown_key'],
 );
 assert.deepEqual(malformed.pairs, [
   ['mode', 'wire'],
   ['atten', 'yes'],
+  ['lodratio', '3'],
   ['rx', 'NaN'],
 ]);
 

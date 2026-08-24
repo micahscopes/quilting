@@ -5,7 +5,7 @@
 //! mesh and LOD-field logic can drive the WebGL Hyperscope, a future WebGPU
 //! frontend, or a native example without duplicating the educational model.
 
-use crate::batch::{balance_resident_lods, ResidentLod};
+use crate::batch::{balance_resident_lods_with_grading, FaceLodGrading, ResidentLod};
 use crate::quaternion::Quat;
 use quilting_mesh::HalfEdgeMesh;
 use std::collections::BTreeMap;
@@ -113,9 +113,18 @@ impl PatchLabMesh {
         HalfEdgeMesh::from_triangles(self.positions.len() as u32, &self.faces)
     }
 
-    /// Sample a field at every face-local edge midpoint, quantize to powers of
-    /// two, then run the renderer's exact shared-edge and 2:1 face reconciliation.
+    /// Sample a field and apply the default 2:1 runtime grading policy.
     pub fn lods(&self, config: PatchLabLodConfig) -> PatchLabLodResult {
+        self.lods_with_grading(config, FaceLodGrading::default())
+    }
+
+    /// Sample a field at every face-local edge midpoint, quantize to powers of
+    /// two, then run the renderer's exact shared-edge and selected face grading.
+    pub fn lods_with_grading(
+        &self,
+        config: PatchLabLodConfig,
+        grading: FaceLodGrading,
+    ) -> PatchLabLodResult {
         let min_exp = config.min_exp.min(9);
         let max_exp = config.max_exp.clamp(min_exp, 9);
         let requested = self
@@ -156,7 +165,7 @@ impl PatchLabMesh {
             .map(ResidentLod::from_edge_lods)
             .map(Some)
             .collect::<Vec<_>>();
-        balance_resident_lods(&mut optional, &topology);
+        balance_resident_lods_with_grading(&mut optional, &topology, grading);
         let residents = optional
             .into_iter()
             .map(|lod| lod.expect("all lab faces are resident"))
@@ -348,16 +357,22 @@ mod tests {
     #[test]
     fn direct_triangle_edges_make_reconciliation_visible() {
         let mesh = PatchLabMesh::new(PatchLabShape::Triangle, 1, 0.0);
-        let result = mesh.lods(PatchLabLodConfig {
+        let config = PatchLabLodConfig {
             field: PatchLabField::ManualEdges,
             min_exp: 0,
             max_exp: 7,
             manual_edge_exp: [0, 3, 7],
             ..PatchLabLodConfig::default()
-        });
+        };
+        let result = mesh.lods(config);
         assert_eq!(result.requested[0], [1, 8, 128]);
         assert_eq!(result.residents[0].canonical, [64, 64, 128]);
         assert_eq!(result.promoted_edges, 2);
+
+        let wider = mesh.lods_with_grading(config, FaceLodGrading::FourToOne);
+        assert_eq!(wider.requested[0], [1, 8, 128]);
+        assert_eq!(wider.residents[0].canonical, [32, 32, 128]);
+        assert_eq!(wider.promoted_edges, 2);
     }
 
     #[test]

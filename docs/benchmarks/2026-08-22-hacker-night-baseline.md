@@ -1051,3 +1051,45 @@ not the renderer clock, and the renderer still consumes incumbent browser
 focus state. Those are the next cutover gates; this checkpoint proves the
 identity/provenance join and ordered dispatch without weakening ordinary GLB
 loading.
+
+## Runtime LOD-grading policy gate
+
+The 2026-08-24 follow-up made the measured 4:1 policy an explicit,
+rollback-safe runtime experiment rather than silently changing the 2:1
+default. `FaceLodGrading` is the backend-neutral Rust authority and admits only
+2:1 or 4:1. The main renderer uses it in the production sparse fixed-point
+reconciler; the educational Patch Lab calls the same policy; the WASM atlas
+builder restricts residency to its reachable keys; and the Rust route registry
+validates `lodratio=2|4`. Unsupported ratios fail closed without replacing the
+last valid atlas.
+
+The browser control and route are deliberately reload-to-apply. This prevents
+a partial live switch from trying to demote topology that was previously
+promoted or requesting keys absent from the resident atlas. IndexedDB keys and
+payload metadata include the active ratio and maximum exponent. Patch Lab
+diagnostics compare the policy returned by its worker with the renderer's
+active policy in addition to checking shared-edge equality.
+
+The default exponent-7 release probe reported:
+
+| Policy | Atlas keys | Atlas triangles | Serialized bytes | Independent blue-noise seeds | Promoted halo faces | Grid requested → resident triangles | Median build |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Hierarchical 2:1 | 22 | 49,150 | 1,589,448 | 3 | 84 | 17,535 → 62,214 | 16.225 ms |
+| Hierarchical 4:1 | 40 | 76,450 | 2,475,216 | 6 | 30 | 17,535 → 31,584 | 19.066 ms |
+
+Thus 4:1 reduced this sparse-peak resident workload by 49.2% and the promotion
+halo by 64.3%, while increasing complete-atlas triangles by 55.5% and bytes by
+55.7%. Both policies had zero boundary mismatches. The normalized first-
+percentile triangle quality changed from 0.600 to 0.400, which is why 4:1
+remains an experiment pending representative horse/chess image and frame-time
+soak rather than becoming the default from a synthetic workload alone.
+
+Validation passed for 123 core tests, 14 integration tests, 27 application
+tests, four executable Node/WASM tests, 46 browser-independent JavaScript
+tests, WASM target checking, inline browser and worker syntax, all five
+generated-WASM smokes, the release Trunk build, the ordinary offline preflight,
+and both exponent-6 and exponent-7 policy probes. The optimized WASM is
+6,082,036 bytes raw and 2,140,433 bytes gzip, increases of 5,204 and 1,643
+bytes respectively. The source-coherent
+build receipt is `69f31fa6cabdf7a881b5dca9c521a467` over 156 files and
+38,661,952 bytes.

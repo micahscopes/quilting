@@ -149,6 +149,11 @@ interactive rather than locking the camera.
   becomes invalid.
 - **Load a fallback model:** drag a local `.glb` onto the canvas or use the file
   picker. This is a recovery/demo path, not part of the deterministic cue deck.
+- **Compare grading policy:** open
+  `?lab=triangle&labfield=edges&laba=1&labb=6&labc=6`, then repeat with
+  `&lodratio=4`. The page reload is intentional: diagnostics must report the
+  active policy, zero shared-edge mismatches, the reconciled request, and the
+  resulting resident triangle count from the matching cached atlas.
 
 ## 5. Browser smoke check
 

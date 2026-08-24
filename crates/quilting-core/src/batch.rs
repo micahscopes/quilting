@@ -280,10 +280,39 @@ pub fn retain_face_lod(
     selected
 }
 
-/// Maximum edge-resolution ratio allowed inside one resident source triangle.
-/// A 2:1 balance prevents needle/fan atlas patches while still permitting LOD
-/// to decay by one power-of-two level per face away from a detail peak.
+/// Compatibility/default edge-resolution ratio inside one resident source
+/// triangle. The live renderer may explicitly select another validated
+/// [`FaceLodGrading`] policy.
 pub const MAX_FACE_EDGE_LOD_RATIO: u32 = 2;
+
+/// Supported within-face resident-LOD grading policies.
+///
+/// Shared-edge equality is the crack-free invariant. This policy separately
+/// bounds anisotropy and the promotion halo, and is deliberately restricted
+/// to the two measured power-of-two ratios represented in the runtime atlas.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FaceLodGrading {
+    #[default]
+    TwoToOne,
+    FourToOne,
+}
+
+impl FaceLodGrading {
+    pub const fn from_ratio(ratio: u32) -> Option<Self> {
+        match ratio {
+            2 => Some(Self::TwoToOne),
+            4 => Some(Self::FourToOne),
+            _ => None,
+        }
+    }
+
+    pub const fn ratio(self) -> u32 {
+        match self {
+            Self::TwoToOne => 2,
+            Self::FourToOne => 4,
+        }
+    }
+}
 
 /// Reusable work storage for sparse resident-LOD reconciliation.
 ///
@@ -354,10 +383,9 @@ pub fn balance_resident_lods(
 /// Reconcile resident shared edges and grade each face to an explicit maximum
 /// edge-resolution ratio.
 ///
-/// The production wrapper remains fixed at [`MAX_FACE_EDGE_LOD_RATIO`]. This
-/// explicit form exists so offline policy probes and future authored renderer
-/// settings can measure a wider ratio over the identical fixed-point algorithm
-/// without copying its topology semantics.
+/// The compatibility wrapper remains fixed at [`MAX_FACE_EDGE_LOD_RATIO`].
+/// Runtime policy selection and offline probes both dispatch through this same
+/// fixed-point implementation without copying its topology semantics.
 pub fn balance_resident_lods_with_ratio<const MAX_FACE_EDGE_RATIO: u32>(
     residents: &mut [Option<ResidentLod>],
     topology: &HalfEdgeMesh,
@@ -376,7 +404,19 @@ pub fn balance_resident_lods_with_ratio<const MAX_FACE_EDGE_RATIO: u32>(
     )
 }
 
-/// Restore crack-free, 2:1-graded topology from a sparse set of changed faces.
+/// Reconcile a complete resident snapshot using a validated runtime policy.
+pub fn balance_resident_lods_with_grading(
+    residents: &mut [Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    grading: FaceLodGrading,
+) -> usize {
+    match grading {
+        FaceLodGrading::TwoToOne => balance_resident_lods_with_ratio::<2>(residents, topology),
+        FaceLodGrading::FourToOne => balance_resident_lods_with_ratio::<4>(residents, topology),
+    }
+}
+
+/// Restore crack-free, default-graded topology from a sparse set of changed faces.
 ///
 /// The resident topology must already satisfy the invariants before the listed
 /// faces are changed. Promotions are propagated through twin adjacency until
@@ -393,6 +433,31 @@ pub fn balance_resident_lods_from_faces(
         dirty_faces.iter().copied(),
         scratch,
     )
+}
+
+/// Restore crack-free topology from a sparse frontier using a validated
+/// runtime grading policy.
+pub fn balance_resident_lods_from_faces_with_grading(
+    residents: &mut [Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    dirty_faces: &[usize],
+    scratch: &mut ResidentLodBalanceScratch,
+    grading: FaceLodGrading,
+) -> usize {
+    match grading {
+        FaceLodGrading::TwoToOne => balance_resident_lods_seeded::<2>(
+            residents,
+            topology,
+            dirty_faces.iter().copied(),
+            scratch,
+        ),
+        FaceLodGrading::FourToOne => balance_resident_lods_seeded::<4>(
+            residents,
+            topology,
+            dirty_faces.iter().copied(),
+            scratch,
+        ),
+    }
 }
 
 fn balance_resident_lods_seeded<const MAX_FACE_EDGE_RATIO: u32>(
@@ -1004,6 +1069,30 @@ mod tests {
 
         assert_eq!(
             balance_resident_lods_with_ratio::<4>(&mut residents, &topology),
+            1,
+        );
+        assert_eq!(residents[0].unwrap().edge_lods(), [32, 32, 128]);
+    }
+
+    #[test]
+    fn runtime_grading_policy_admits_only_measured_atlas_ratios() {
+        assert_eq!(FaceLodGrading::from_ratio(2), Some(FaceLodGrading::TwoToOne));
+        assert_eq!(FaceLodGrading::from_ratio(4), Some(FaceLodGrading::FourToOne));
+        for unsupported in [0, 1, 3, 8] {
+            assert_eq!(FaceLodGrading::from_ratio(unsupported), None);
+        }
+
+        let topology = HalfEdgeMesh::from_triangles(3, &[[0, 1, 2]]);
+        let mut residents = [Some(ResidentLod::from_edge_lods([1, 1, 128]))];
+        let mut scratch = ResidentLodBalanceScratch::default();
+        assert_eq!(
+            balance_resident_lods_from_faces_with_grading(
+                &mut residents,
+                &topology,
+                &[0],
+                &mut scratch,
+                FaceLodGrading::FourToOne,
+            ),
             1,
         );
         assert_eq!(residents[0].unwrap().edge_lods(), [32, 32, 128]);

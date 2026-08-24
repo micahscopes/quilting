@@ -8,6 +8,7 @@ const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const {
   default: init,
   mr_renderShadowDiagnostics,
+  mr_setLodGradingRatio,
   mr_setRenderShadowEnabled,
 } = await import(packageUrl);
 
@@ -22,5 +23,7 @@ assert.equal(
   null,
   'enabling should be inert before a renderer exists',
 );
+assert.equal(mr_setLodGradingRatio(4), false, 'grading should be inert before a renderer exists');
+assert.equal(mr_setLodGradingRatio(3), false, 'unsupported grading ratios must fail closed');
 
 console.log(JSON.stringify({ generatedExports: true, inertBeforeRenderer: true }));

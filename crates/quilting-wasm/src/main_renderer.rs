@@ -160,6 +160,9 @@ struct MainState {
     /// Current C0-continuous visualization LODs, indexed by source face.
     resident_vertex_lods: Vec<[u32; 3]>,
     resident_vertex_lod_scratch: Vec<u32>,
+    /// Validated within-face grading policy. Shared-edge equality remains an
+    /// independent invariant; this controls only anisotropy/promotion halos.
+    lod_grading: batch::FaceLodGrading,
     /// Visibility from the latest worker classification, retained separately
     /// from topology because invisible faces deliberately keep their last LOD.
     classified_face_visibility: Vec<bool>,
@@ -541,6 +544,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             resident_face_lods: Vec::new(),
             resident_vertex_lods: Vec::new(),
             resident_vertex_lod_scratch: Vec::new(),
+            lod_grading: batch::FaceLodGrading::default(),
             classified_face_visibility: Vec::new(),
             classified_culled_faces: 0,
             round_shadow: RoundShadowObserver::default(),
@@ -2297,6 +2301,7 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
         set_number("roundtripFailures", roundtrip_failures);
         set_number("anisotropicFaces", anisotropic_faces);
         set_number("maxEdgeRatio", max_edge_ratio);
+        set_number("gradingRatio", state.lod_grading.ratio());
         set_number("sameMaxDensityJumps", same_max_density_jumps);
         js_sys::Reflect::set(
             &result,
@@ -2438,6 +2443,29 @@ pub fn mr_set_face_nodes(nodes: &[i32]) {
             renderer.batch_layout_dirty = true;
         }
     });
+}
+
+/// Select the measured within-face LOD grading policy before model residency.
+/// A live switch would require recovering the unpromoted classifier snapshot
+/// and replacing the atlas atomically, so the browser intentionally exposes
+/// this as a reload-to-apply setting.
+#[wasm_bindgen(js_name = "mr_setLodGradingRatio")]
+pub fn mr_set_lod_grading_ratio(ratio: u32) -> bool {
+    let Some(grading) = batch::FaceLodGrading::from_ratio(ratio) else {
+        return false;
+    };
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else { return false };
+        if state.num_faces != 0 && state.lod_grading != grading {
+            web_sys::console::warn_1(
+                &"LOD grading ratio changes require a reload before model residency".into(),
+            );
+            return false;
+        }
+        state.lod_grading = grading;
+        true
+    })
 }
 
 /// Upload one packed canonical atlas. `patches` contains seven u32s per patch:
@@ -2948,11 +2976,12 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
 
         perf_mark("batch-balance-start");
         let lod_corrections = if let Some(topology) = state.lod_topology.as_ref() {
-            batch::balance_resident_lods_from_faces(
+            batch::balance_resident_lods_from_faces_with_grading(
                 &mut state.resident_face_lods,
                 topology,
                 &state.lod_dirty_faces,
                 &mut state.lod_balance_scratch,
+                state.lod_grading,
             )
         } else {
             0

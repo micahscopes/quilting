@@ -31,18 +31,21 @@ promotes values until:
 
 1. both faces incident to a shared edge use exactly the same subdivision; and
 2. the largest and smallest edge resolutions in one source face differ by at
-   most 2:1.
+   most the active 2:1 or 4:1 grading policy.
 
-The first rule is the crack-free stitching invariant. The second is a current
+The first rule is the crack-free stitching invariant. The second is a runtime
 grading policy, not a mathematical requirement of the atlas or shared edges.
-It bounds anisotropic triangle fans and makes a detail peak decay by one
-power-of-two level per neighboring source face, but its monotone promotions
-can also create a conservative halo of extra resident triangles. The runtime
-atlas is restricted to keys reachable under that policy only after grading;
-the atlas is not what causes the promotion.
+The default 2:1 policy bounds anisotropic triangle fans and makes a detail peak
+decay by one power-of-two level per neighboring source face, but its monotone
+promotions can also create a conservative halo of extra resident triangles.
+The optional 4:1 policy reduces that halo while allowing more anisotropic
+topology. Changing policy requires a reload because the cache contains only
+the triples reachable under the active policy; the atlas itself is not what
+causes promotion.
 
 For example, requesting `1 / 8 / 128` on the single triangle produces a
-renderable `64 / 64 / 128`. The UI reports that as two promotions rather than
+renderable `64 / 64 / 128` under 2:1 or `32 / 32 / 128` under 4:1. The UI
+reports either result as two promoted edges rather than
 silently presenting the reconciled values as if they had been requested.
 
 The deterministic geometry and field implementation lives in

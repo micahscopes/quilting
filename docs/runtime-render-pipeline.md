@@ -143,11 +143,13 @@ frustum/pose bound and must retain the hidden last-valid topology.
 
 - glTF parsing, image decode, static face textures, adjacency, and skinning
   data are produced once per model load.
-- The canonical tessellation atlas is restricted to 2:1-reachable triples,
+- The canonical tessellation atlas is restricted to triples reachable under
+  the active validated 2:1 or 4:1 grading policy,
   generated hierarchically in one worker transaction, packed once, cached in
-  IndexedDB with a versioned key, and uploaded once. Only three irreducible
-  topology families are independently blue-noise sampled under this policy;
-  higher power-of-two descendants use exact midpoint subdivision.
+  IndexedDB with a versioned key, and uploaded once. The 2:1 policy has three
+  irreducible topology families and 4:1 has six; only those roots are
+  independently blue-noise sampled. All higher power-of-two descendants use
+  exact midpoint subdivision.
   Serialization and cache persistence run after the first model/render startup
   boundary rather than delaying it.
 - HDR prefilter and irradiance products are cached in IndexedDB and uploaded
@@ -174,11 +176,14 @@ The backend-independent pieces already live below the WebGL renderer:
 
 Crack-free shared-edge equality and within-face grading are deliberately
 separate contracts. Shared edges must use identical boundary subdivision.
-The current 2:1 maximum within one source face is a conservative quality and
+The default 2:1 maximum within one source face is a conservative quality and
 residency policy: it avoids extreme fans, but it also promotes low edges and
-propagates a graded LOD halo through neighboring faces. A wider ratio therefore
-increases the number and size of cached atlas entries while potentially
-reducing the much larger per-scene resident draw workload.
+propagates a graded LOD halo through neighboring faces. The measured 4:1
+experiment is available through the validated `lodratio=4` route and the
+reload-to-apply control. It increases the number and size of cached atlas
+entries while potentially reducing the much larger per-scene resident draw
+workload. Cache identity includes both ratio and maximum exponent, and the
+renderer rejects unsupported or post-residency policy changes.
 
 `TessellationAtlas::build_for_keys` makes the topology choice explicit over
 the same reachable key set:
@@ -201,10 +206,10 @@ It reports reachable keys, independently sampled topology families, aggregate
 atlas vertices/triangles/bytes, one `2 / 64 / 64` resident example, boundary
 mismatches, a single-peak 24×24-grid promotion halo, minimum and
 first-percentile normalized triangle quality, and median construction time.
-The probe currently admits the measured 2:1 and 4:1 policies; compile-time
-ratios must be positive powers of two so grading stays on the atlas LOD
-lattice. This is a policy oracle; the live runtime remains hierarchical 2:1
-until scene-level and browser startup/cache measurements justify a cutover.
+The probe and live runtime admit only the measured 2:1 and 4:1 policies. The
+default remains hierarchical 2:1; 4:1 is an explicit rollback-safe experiment
+until representative animated-scene and browser startup/cache measurements
+justify a default cutover.
 The latest checked results are archived in the
 [hacker-night benchmark](benchmarks/2026-08-22-hacker-night-baseline.md).
 

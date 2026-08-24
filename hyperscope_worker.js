@@ -63,7 +63,16 @@ self.onmessage = async function(e) {
   }
 
   if (type === 'build_required_atlas') {
-    const ms = wasm.build_required_atlas(data.maxLodExp);
+    const ms = wasm.build_required_atlas(data.maxLodExp, data.maxFaceEdgeRatio);
+    if (!Number.isFinite(ms) || ms < 0) {
+      self.postMessage({
+        type: 'required_atlas_built',
+        id,
+        ms: null,
+        error: `unsupported atlas LOD grading ratio ${data.maxFaceEdgeRatio}`,
+      });
+      return;
+    }
     self.postMessage({ type: 'required_atlas_built', id, ms });
     return;
   }
@@ -360,6 +369,7 @@ self.onmessage = async function(e) {
       data.edgeAExp || 0,
       data.edgeBExp || 0,
       data.edgeCExp || 0,
+      data.maxFaceEdgeRatio,
     );
     const transfers = [];
     if (result?.face_lods?.buffer) transfers.push(result.face_lods.buffer);

@@ -5,6 +5,7 @@ pub enum ControlValueKind {
     Text,
     Number,
     Toggle,
+    LodRatio,
     OptionalUuid,
 }
 
@@ -14,6 +15,7 @@ impl ControlValueKind {
             Self::Text => "text",
             Self::Number => "number",
             Self::Toggle => "toggle",
+            Self::LodRatio => "lod_ratio",
             Self::OptionalUuid => "optional_uuid",
         }
     }
@@ -23,6 +25,7 @@ impl ControlValueKind {
             Self::Text => !value.is_empty(),
             Self::Number => value.parse::<f64>().is_ok_and(|number| number.is_finite()),
             Self::Toggle => matches!(value, "0" | "1"),
+            Self::LodRatio => matches!(value, "2" | "4"),
             Self::OptionalUuid => {
                 value.is_empty()
                     || uuid::Uuid::parse_str(value).is_ok_and(|identifier| !identifier.is_nil())
@@ -44,7 +47,7 @@ impl ControlValueKind {
                 (Ok(left), Ok(right)) => left == right,
                 _ => left == right,
             },
-            Self::Text | Self::Toggle => left == right,
+            Self::Text | Self::Toggle | Self::LodRatio => left == right,
         }
     }
 }
@@ -92,6 +95,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("atten", "1", Toggle),
     spec!("minpx", "16", Number),
     spec!("atlas", "7", Number),
+    spec!("lodratio", "2", LodRatio),
     spec!("animate", "1", Toggle),
     spec!("anim", "-1", Number),
     spec!("fuzzy", "0", Toggle),
@@ -312,6 +316,23 @@ mod tests {
                 RouteDiagnosticCode::UnknownKey,
             ]
         );
+    }
+
+    #[test]
+    fn lod_grading_route_admits_only_runtime_atlas_policies() {
+        for accepted in ["2", "4"] {
+            let route = HyperscopeRoute::from_pairs([("lodratio", accepted)]);
+            assert!(route.diagnostics().is_empty());
+            assert_eq!(route.value("lodratio"), Some(accepted));
+        }
+        for rejected in ["1", "3", "4.0", "8"] {
+            let route = HyperscopeRoute::from_pairs([("lodratio", rejected)]);
+            assert_eq!(route.diagnostics().len(), 1);
+            assert_eq!(
+                route.diagnostics()[0].code,
+                RouteDiagnosticCode::InvalidValue,
+            );
+        }
     }
 
     #[test]

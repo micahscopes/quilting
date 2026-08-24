@@ -9,8 +9,11 @@ const {
   default: init,
   HyperscopeAppShadow,
   HyperscopeNavigation,
+  build_required_atlas: buildRequiredAtlas,
+  export_all_patches: exportAllPatches,
   load_gltf_data: loadGltfData,
   mapSpaceMouseCameraFrame,
+  required_tessellation_atlas_triples: requiredAtlasTriples,
 } = await import(packageUrl);
 const { mapSpaceMouseNavigationAxes } = await import(
   pathToFileURL(`${repository}/spacemouse.mjs`).href
@@ -19,6 +22,18 @@ const { transportCameraAcrossSphereReflections } = await import(
   pathToFileURL(`${repository}/hyperscope_focus.mjs`).href
 );
 await init({ module_or_path: readFileSync(wasmPath) });
+
+assert.equal(requiredAtlasTriples(6, 2).length / 3, 19);
+assert.equal(requiredAtlasTriples(6, 4).length / 3, 34);
+assert.equal(requiredAtlasTriples(6, 3).length, 0);
+assert.ok(buildRequiredAtlas(6, 4) >= 0);
+assert.equal(exportAllPatches().patches.length / 7, 34);
+assert.equal(buildRequiredAtlas(6, 3), -1);
+assert.equal(
+  exportAllPatches().patches.length / 7,
+  34,
+  'a rejected policy must retain the last valid atlas',
+);
 
 function authoredTriangleGlb(stableEntityId) {
   const binary = new Uint8Array(44);

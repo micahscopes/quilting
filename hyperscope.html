@@ -183,6 +183,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="min-px-sub" min="1" max="64" value="16" step="0.1"><span class="v" id="min-px-sub-v">16.0</span></div>
     <label>Atlas resolution (reload to apply)</label>
     <div class="sr"><input type="range" id="atlas-exp" min="3" max="9" value="7" step="1"><span class="v" id="atlas-exp-v">7</span></div>
+    <label>Within-face grading (reload to apply)</label>
+    <div class="btns" id="lod-ratio-btns">
+      <button data-v="2" class="a">2:1</button>
+      <button data-v="4">4:1</button>
+    </div>
   </div>
 
   <div class="section" id="patch-lab-section">
@@ -228,7 +233,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button id="patch-lab-colors">LOD colors</button>
       <button id="patch-lab-exit">Exit lab</button>
     </div>
-    <div class="lab-note">Each edge slider is a request. The current resident-LOD policy grades each face to 2:1, and the cached atlas contains only the resulting reachable triples; labels show request → resident.</div>
+    <div class="lab-note" id="patch-lab-policy-note">Each edge slider is a request. The active resident-LOD policy grades each face to 2:1, and the cached atlas contains only the resulting reachable triples; labels show request → resident.</div>
     <div class="lab-stats" id="patch-lab-stats">Choose a tri patch, plane, or cube.</div>
   </div>
 
@@ -349,6 +354,7 @@ import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
+  mr_setLodGradingRatio,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
@@ -816,7 +822,7 @@ const PARAM_DEFAULTS = {
   mx: '5', my: '0', mz: '0', mr: '20',
   env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
   res: '0', density: '100', atten: '1', minpx: '16',
-  animate: '1', anim: '-1', atlas: '7',
+  animate: '1', anim: '-1', atlas: '7', lodratio: '2',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
   smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
@@ -847,6 +853,7 @@ function readParams() {
     animate: get('animate'),
     anim: get('anim'),
     atlas: get('atlas'),
+    lodratio: get('lodratio'),
     zoom: get('zoom'),
     rx: get('rx'),
     ry: get('ry'),
@@ -902,6 +909,7 @@ function syncURL() {
       set('atten', lod.screenAtten.peek() ? '1' : '0', PARAM_DEFAULTS.atten);
       ss('minpx', lod.minPx, PARAM_DEFAULTS.minpx);
       ss('atlas', lod.atlas, PARAM_DEFAULTS.atlas);
+      ss('lodratio', lod.grading, PARAM_DEFAULTS.lodratio);
       set('animate', animating_sig.peek() ? '1' : '0', PARAM_DEFAULTS.animate);
       set('anim', $('anim-sel').value, PARAM_DEFAULTS.anim);
       set('fuzzy', fz.enabled.peek() ? '1' : '0', PARAM_DEFAULTS.fuzzy);
@@ -1789,6 +1797,7 @@ function applyPresentationTessellation(tessellation = {}) {
     density,
     screenAttenuation,
     minPixelsPerSubdivision: minPixels,
+    maxFaceEdgeRatio: activeLodGradingRatio,
   };
 }
 
@@ -2051,7 +2060,7 @@ async function compileRuntimeWasm() {
 
 // --- Worker pool ---
 // The retained worker owns glTF parsing, animation evaluation, dynamic LOD and
-// the canonical atlas. The reachable 2:1 atlas is three cheap subdivision
+// the canonical atlas. The ratio-bounded atlas is a small set of subdivision
 // chains, so extra full-runtime helpers cost more to initialize than they save.
 const ATLAS_WORKERS = 1;
 const PRESENTATION_WORKER_INDEX = RUST_PRESENTATION_ENABLED ? ATLAS_WORKERS : -1;
@@ -2063,7 +2072,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=patch-lab-v1', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=lod-grading-v1', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -4192,12 +4201,15 @@ const lod = {
   screenAtten: signal(true, 'atten'),
   minPx: signal(16, 'minpx'),
   atlas: signal(7, 'atlas'),
+  grading: signal('2', 'lodratio'),
 };
+let activeLodGradingRatio = 2;
 bindSlider('res', lod.res, v => v === 0 ? 'auto' : String(1 << v));
 bindSlider('tess-density', lod.density, v => v.toFixed(0));
 bindSlider('min-px-sub', lod.minPx, v => v.toFixed(1));
 bindToggle('screen-atten-toggle', lod.screenAtten);
 bindSlider('atlas-exp', lod.atlas, v => v.toFixed(0));
+bindBtnGroup('lod-ratio-btns', lod.grading);
 
 // --- Rust-backed educational patch laboratory ---
 const PATCH_LAB_SHAPES = new Set(['triangle', 'plane', 'cube']);
@@ -4240,6 +4252,12 @@ function updatePatchLabControlVisibility() {
     if (parseInt($(id).value, 10) > atlasExp) $(id).value = atlasExp;
     patchLabPowerLabel(id);
   }
+  const requestedRatio = Number(lod.grading.peek());
+  $('patch-lab-policy-note').textContent =
+    `Each edge slider is a request. The active resident-LOD policy grades each face to ${activeLodGradingRatio}:1, and the cached atlas contains only the resulting reachable triples; labels show request → resident.`
+    + (requestedRatio !== activeLodGradingRatio
+      ? ` Reload to apply the requested ${requestedRatio}:1 policy.`
+      : '');
   $('patch-lab-exit').disabled = !patchLab.active;
 }
 
@@ -4257,6 +4275,7 @@ function patchLabLodRequest() {
     edgeAExp: parseInt($('patch-lab-edge-a').value, 10),
     edgeBExp: parseInt($('patch-lab-edge-b').value, 10),
     edgeCExp: parseInt($('patch-lab-edge-c').value, 10),
+    maxFaceEdgeRatio: activeLodGradingRatio,
   };
 }
 
@@ -4265,6 +4284,12 @@ function renderPatchLabStats(result, request) {
   const actual = new Uint32Array(result.actual?.buffer || result.actual || 0);
   const renderer = mr_debugResidentLodEdges() || {};
   const mismatch = Number(renderer.mismatchedEdges ?? result.shared_edge_mismatches ?? 0);
+  const policyRatio = Number(result.policy_face_edge_ratio);
+  const rendererPolicyRatio = Number(renderer.gradingRatio);
+  const policyAligned = rendererPolicyRatio === policyRatio;
+  const policySummary = policyAligned
+    ? `policy ${policyRatio}:1`
+    : `policy ${policyRatio}:1 (renderer ${rendererPolicyRatio}:1)`;
   const edgeSummary = patchLab.shape === 'triangle' && requested.length >= 3
     ? `<br>requested <span class="val">${Array.from(requested.slice(0, 3)).join(' / ')}</span>`
       + ` → reconciled <span class="val">${Array.from(actual.slice(0, 3)).join(' / ')}</span>`
@@ -4285,10 +4310,13 @@ function renderPatchLabStats(result, request) {
     promotedEdges: Number(result.promoted_edges || 0),
     residentTriangles: Number(renderer.residentTriangles || 0),
     mismatchedEdges: mismatch,
+    policyRatio,
+    policyAligned,
   };
   $('patch-lab-stats').innerHTML =
     `<span class="${mismatch === 0 ? 'ok' : 'promoted'}">${mismatch} shared-edge mismatches</span>`
-    + ` · max ratio ${result.max_face_edge_ratio}:1`
+    + ` · <span class="${policyAligned ? 'ok' : 'promoted'}">${policySummary}</span>`
+    + ` · observed max ${result.max_face_edge_ratio}:1`
     + `<br><span class="${promotedClass}">${promotedText}</span>`
     + ` · ${triangles} rendered triangles`
     + edgeSummary
@@ -4464,6 +4492,11 @@ effect(() => {
   updatePatchLabControlVisibility();
   if (patchLab.active) updatePatchLabLods();
 });
+effect(() => {
+  lod.grading.get();
+  updatePatchLabControlVisibility();
+  syncURL();
+});
 updatePatchLabControlVisibility();
 
 // --- Remesh controls ---
@@ -4631,6 +4664,7 @@ applyParams = function(params) {
   lod.screenAtten.set(params.atten !== '0');
   lod.minPx.set(finite(params.minpx, 16, 1, 64));
   lod.atlas.set(integer(params.atlas, 7, 3, 9));
+  lod.grading.set(params.lodratio === '4' ? '4' : '2');
   animating_sig.set(params.animate !== '0');
   zoom = finite(params.zoom, 3, 0.1, 1000);
   rotX = finite(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
@@ -4697,7 +4731,7 @@ applyParams = function(params) {
 // --- IndexedDB for dropped GLBs and versioned generated assets ---
 const IDB_NAME = 'hyperscope', IDB_VERSION = 3;
 const IDB_GLB_STORE = 'glb', IDB_ATLAS_STORE = 'atlas', IDB_ENV_STORE = 'environment';
-const ATLAS_CACHE_FORMAT = 'balanced-hierarchical-v1-ratio2-k30-seed42';
+const ATLAS_CACHE_FORMAT = 'balanced-hierarchical-v2-k30-seed42';
 const ENV_CACHE_FORMAT = 'cpu-ggx-v1-pf256-ir32-s64-firefly64';
 function idbOpen() {
   return new Promise((resolve, reject) => {
@@ -6721,6 +6755,11 @@ phase('wasm', [], async () => {
     sharedCompiledModule: true,
   };
   applyParams(initParams); // Set signal values first
+  activeLodGradingRatio = Number(lod.grading.peek());
+  if (!mr_setLodGradingRatio(activeLodGradingRatio)) {
+    throw new Error(`renderer rejected ${activeLodGradingRatio}:1 LOD grading`);
+  }
+  updatePatchLabControlVisibility();
   wasmOk.set(true); // THEN fire effects with correct values + WASM ready
   if (RUST_APP_SHADOW_ENABLED) {
     rustAppShadow = new HyperscopeAppShadow();
@@ -6775,6 +6814,7 @@ function cacheGeneratedAtlasAfterStartup(cacheKey, packed) {
     }
     await idbPut(IDB_ATLAS_STORE, cacheKey, {
       format: ATLAS_CACHE_FORMAT,
+      maxFaceEdgeRatio: activeLodGradingRatio,
       serialized,
       patches: packed.patches,
       bary: packed.bary,
@@ -6792,7 +6832,10 @@ function cacheGeneratedAtlasAfterStartup(cacheKey, packed) {
 // Phase 3: Build tessellation atlas (depends on workers)
 phase('atlas', ['workers'], async () => {
   const ATLAS_EXP = parseInt(initParams.atlas);
-  const flatTriples = required_tessellation_atlas_triples(ATLAS_EXP);
+  const flatTriples = required_tessellation_atlas_triples(
+    ATLAS_EXP,
+    activeLodGradingRatio,
+  );
   const allTriples = [];
   for (let offset = 0; offset < flatTriples.length; offset += 3) {
     allTriples.push([
@@ -6802,7 +6845,7 @@ phase('atlas', ['workers'], async () => {
     ]);
   }
 
-  const cacheKey = `${ATLAS_CACHE_FORMAT}:exp${ATLAS_EXP}`;
+  const cacheKey = `${ATLAS_CACHE_FORMAT}:ratio${activeLodGradingRatio}:exp${ATLAS_EXP}`;
   let packed = null;
   let source = 'generated';
   let serializedBytes = 0;
@@ -6816,6 +6859,7 @@ phase('atlas', ['workers'], async () => {
     const cached = await idbGet(IDB_ATLAS_STORE, cacheKey);
     cacheReadMs = performance.now() - cacheReadStartedAt;
     const validPacked = cached?.format === ATLAS_CACHE_FORMAT
+      && cached.maxFaceEdgeRatio === activeLodGradingRatio
       && cached.patches instanceof Uint32Array
       && cached.bary instanceof Float32Array
       && cached.tris instanceof Uint32Array
@@ -6844,7 +6888,11 @@ phase('atlas', ['workers'], async () => {
   if (!packed) {
     $('stats').textContent = `Building ${allTriples.length} reachable patches...`;
     const buildStartedAt = performance.now();
-    const build = await workerCall('build_required_atlas', { maxLodExp: ATLAS_EXP });
+    const build = await workerCall('build_required_atlas', {
+      maxLodExp: ATLAS_EXP,
+      maxFaceEdgeRatio: activeLodGradingRatio,
+    });
+    if (build.error) throw new Error(build.error);
     generationRoundtripMs = performance.now() - buildStartedAt;
     generationMs = Number(build.ms) || 0;
     const packStartedAt = performance.now();
@@ -6865,6 +6913,7 @@ phase('atlas', ['workers'], async () => {
   const uploadMs = performance.now() - uploadStartedAt;
   startupDiagnostics.atlas = {
     requestedPatches: allTriples.length,
+    maxFaceEdgeRatio: activeLodGradingRatio,
     packedPatches: packed.patches.length / 7,
     vertices: packed.bary.length / 3,
     triangleIndices: packed.tris.length,
