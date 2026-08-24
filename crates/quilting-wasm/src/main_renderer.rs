@@ -31,6 +31,7 @@ use quilting_core::render::{
     RenderFrameOptions, RenderGeometry, RenderSceneSnapshot, RenderStyle,
     RenderSubmissionStats, RenderView,
 };
+use quilting_core::source_bounds::source_focus_bounds;
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{
@@ -915,6 +916,38 @@ fn conformal_state_for_node(renderer: &MainState, node_index: usize) -> EntityCo
             orientation_sign: renderer.mobius_orientation,
             euclidean_model,
     }
+}
+
+/// Derive selection and scene-scale bounds from the same Euclidean model
+/// matrices that the renderer, picker, and surface walker consume. Hidden
+/// presentation nodes are excluded so guides cannot distort navigation scale.
+#[wasm_bindgen(js_name = "mr_sourceFocusBounds")]
+pub fn mr_source_focus_bounds() -> JsValue {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else {
+            return JsValue::NULL;
+        };
+        let mut models = BTreeMap::new();
+        for &node in &state.face_nodes {
+            models.entry(node).or_insert_with(|| {
+                if state.presentation_nodes.get(&node)
+                    .is_some_and(|presentation| !presentation.visible)
+                {
+                    None
+                } else {
+                    Some(conformal_state_for_node(state, node).euclidean_model)
+                }
+            });
+        }
+        match source_focus_bounds(&state.cached_instances, &state.face_nodes, &models) {
+            Ok(snapshot) => serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL),
+            Err(error) => {
+                warn!("Could not derive renderer source focus bounds: {error}");
+                JsValue::NULL
+            }
+        }
+    })
 }
 
 /// Synchronize the retained draw-command list with GPU batch ownership and

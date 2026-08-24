@@ -360,7 +360,7 @@ import init, {
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
-  mr_setPresentationNodeStates,
+  mr_setPresentationNodeStates, mr_sourceFocusBounds,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
   mr_attachSurfaceWalk, mr_stepSurfaceWalk, mr_transportSurfaceWalkReflection,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere, mr_debugFocusState,
@@ -382,9 +382,7 @@ import {
   advanceVirtualTransitionClock,
   appendPackedNodeIdentities,
   applyMobiusPoint,
-  buildFocusBounds,
   durablePresentationAssetId,
-  faceSourceCentroid,
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
   framedSphereDistance,
@@ -1924,6 +1922,11 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     rustPresentationDiagnostics.error = 'renderer rejected presentation node state';
     return false;
   }
+  const focusTransformKey = renderRecords.join(',');
+  if (presentationComposition.focusTransformKey !== focusTransformKey) {
+    presentationComposition.focusTransformKey = focusTransformKey;
+    rebuildNodeFocusRecords();
+  }
   authoredLodStates = lodRecords;
   authoredLodPending = true;
   authoredLodReasons.add('presentation-layer');
@@ -2705,6 +2708,7 @@ const presentationComposition = {
   assets: new Map(),
   primaryAssetId: null,
   totalFaces: 0,
+  focusTransformKey: null,
 };
 const patchLab = {
   active: false,
@@ -2935,9 +2939,25 @@ const focusSphere = {
   anchorRadius: null,
 };
 
-function rebuildNodeFocusRecords(instances, faceNodes) {
+function rebuildNodeFocusRecords() {
   const started = performance.now();
-  const bounds = buildFocusBounds(instances, faceNodes);
+  const rendererBounds = mr_sourceFocusBounds();
+  if (!rendererBounds?.nodes || !Array.isArray(rendererBounds.nodes)) {
+    throw new Error('renderer source focus bounds are unavailable');
+  }
+  const bounds = {
+    nodes: new Map(rendererBounds.nodes.map(record => [Number(record.node), {
+      node: Number(record.node),
+      center: Array.from(record.center, Number),
+      radius: Number(record.radius),
+      vertexCount: Number(record.vertex_count),
+    }])),
+    scene: rendererBounds.scene ? {
+      center: Array.from(rendererBounds.scene.center, Number),
+      radius: Number(rendererBounds.scene.radius),
+      vertexCount: Number(rendererBounds.scene.vertex_count),
+    } : null,
+  };
   nodeFocusRecords = bounds.nodes;
   sceneSourceBound = bounds.scene;
   modelPayloadTelemetry.focusBuildMs = performance.now() - started;
@@ -3653,7 +3673,9 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   }
   const node = Number(currentFaceNodes[faceId]);
   const bound = nodeFocusRecords.get(node);
-  const sourceAnchor = faceSourceCentroid(currentInstances, faceId);
+  // The renderer-derived bound is already in the shared source chart after
+  // authored/layer Euclidean transforms and before the Möbius map.
+  const sourceAnchor = bound?.center?.slice();
   if (!bound || !sourceAnchor) {
     clearSelectedObject(`Node ${node} has no focus bounds`);
     mr_highlightFace(-1);
@@ -4741,10 +4763,10 @@ async function loadPatchLab(
     currentInstances = new Float32Array(result.instances.buffer || result.instances);
     currentFaceNodes = new Int32Array(result.num_faces);
     currentPrimaryFaceCount = result.num_faces;
-    rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
     setRendererInstanceData(currentInstances, result.num_faces);
     mr_setFaceMaterials(new Int32Array(result.face_materials.buffer || result.face_materials));
     mr_setFaceNodes(currentFaceNodes);
+    rebuildNodeFocusRecords();
 
     // Shape selection starts from a stable inspection frame. Geometry edits
     // and URL restoration retain the exact authored camera/render state.
@@ -4855,10 +4877,10 @@ async function loadTestShape(shape, p1, p2) {
     clearSelectedObject();
     currentInstances = new Float32Array(r.instances.buffer || r.instances);
     currentFaceNodes = new Int32Array(r.num_faces);
-    rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
     setRendererInstanceData(currentInstances, r.num_faces);
     mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
     mr_setFaceNodes(currentFaceNodes);
+    rebuildNodeFocusRecords();
     mr_buildBatches(new Float32Array(r.face_lods.buffer || r.face_lods));
     $('remesh-stats').textContent = `${shape}: ${r.num_vertices} verts, ${r.num_faces} faces`;
   }
@@ -4886,10 +4908,10 @@ $('remesh-btn').addEventListener('click', async () => {
         clearSelectedObject();
         currentInstances = new Float32Array(r.instances.buffer || r.instances);
         currentFaceNodes = new Int32Array(r.num_faces);
-        rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
         setRendererInstanceData(currentInstances, r.num_faces);
         mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
         mr_setFaceNodes(currentFaceNodes);
+        rebuildNodeFocusRecords();
         mr_buildBatches(new Float32Array(r.face_lods.buffer || r.face_lods));
         remeshedMode = true;
       }
@@ -4916,9 +4938,9 @@ $('remesh-clear-btn').addEventListener('click', async () => {
       ? modelFaceNodes
       : new Int32Array(rp.num_faces);
     currentFaceNodes = restoredNodes;
-    rebuildNodeFocusRecords(currentInstances, currentFaceNodes);
     if (modelFaceMaterials.length === rp.num_faces) mr_setFaceMaterials(modelFaceMaterials);
     mr_setFaceNodes(currentFaceNodes);
+    rebuildNodeFocusRecords();
     mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
   }
 });
@@ -6422,6 +6444,7 @@ async function finishModelUpload(info, filename, durableAssetId = null) {
   presentationComposition.assets.clear();
   presentationComposition.primaryAssetId = null;
   presentationComposition.totalFaces = 0;
+  presentationComposition.focusTransformKey = null;
   mr_setPresentationNodeStates(new Float32Array());
   nodeFocusRecords = new Map();
   sceneSourceBound = null;
@@ -6661,7 +6684,6 @@ async function finishModelUpload(info, filename, durableAssetId = null) {
   currentInstances = instances;
   modelPayloadTelemetry.sourceInstanceBytes = instances.byteLength;
   modelPayloadTelemetry.retainedSourceInstanceBytes = instances.byteLength;
-  rebuildNodeFocusRecords(instances, currentFaceNodes);
   const faceLods = new Float32Array(rp.face_lods.buffer || rp.face_lods);
   currentInitialFaceLods = faceLods;
   modelPayloadTelemetry.initialFaceLodBytes = faceLods.byteLength;
@@ -6670,6 +6692,7 @@ async function finishModelUpload(info, filename, durableAssetId = null) {
 
   sectionStarted = performance.now();
   setRendererInstanceData(instances, numFaces);
+  rebuildNodeFocusRecords();
   uploadTimings.instanceUploadMs = performance.now() - sectionStarted;
   sectionStarted = performance.now();
   mr_buildBatches(faceLods);
@@ -7031,7 +7054,6 @@ async function initializePresentationComposition() {
   modelFaceNodes = faceNodes;
   modelFaceMaterials = faceMaterials;
   currentMaterialCount = materialCount;
-  nodeFocusRecords = rebuildNodeFocusRecords(instances, faceNodes);
   mr_setFaceMaterials(faceMaterials);
   mr_setFaceNodes(faceNodes);
   setRendererInstanceData(instances, totalFaces);

@@ -33,6 +33,8 @@
 //!   WebGL2 and WebGPU implementations.
 //! - [`render_pipeline`] — immutable shader, binding-layout, and pipeline
 //!   descriptions suitable for functional planning and backend memoization.
+//! - [`source_bounds`] — backend-neutral post-model, pre-conformal bounds for
+//!   selection, focus fitting, spatial indexing, and navigation scale.
 //!
 //! # Invariants worth knowing before editing
 //!
@@ -63,6 +65,7 @@ pub mod batch;
 pub mod educational;
 pub mod render;
 pub mod render_pipeline;
+pub mod source_bounds;
 
 pub use atlas::TessellationAtlas;
 pub use evaluate::FaceInstance;
