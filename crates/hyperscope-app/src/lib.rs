@@ -14,7 +14,8 @@ pub use settings::*;
 use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
-    CameraRig, FocusNavigation, NavigationAction, NavigationController, ScheduledNavigationAction,
+    CameraRig, FocusNavigation, NavigationAction, NavigationController, Presentation,
+    PresentationRuntime, PresentationSnapshot, ScheduledNavigationAction,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
@@ -24,6 +25,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
+use uuid::Uuid;
 
 const MAX_DIAGNOSTICS: usize = 256;
 
@@ -47,11 +49,23 @@ impl<T> Timed<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SemanticAction {
     Navigate(NavigationAction),
+    Present(PresentationAction),
     RequestAsset {
         request_id: RequestId,
         asset: AssetDescriptor,
     },
     CancelAsset(AssetId),
+}
+
+/// Low-rate presentation intent. Cue activation and the navigation transition
+/// it starts commit transactionally inside [`AppState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationAction {
+    Start,
+    Advance,
+    Reverse,
+    JumpToCue(Uuid),
+    Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,6 +115,7 @@ pub enum EffectCompletion {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppEvent {
     Input(Timed<SemanticAction>),
+    PresentationLoaded(Presentation),
     Frame(FrameTick),
     EffectCompleted(EffectCompletion),
     RemotePresence(ReceivedPresence),
@@ -175,6 +190,8 @@ pub struct AppSummary {
     pub loading_assets: usize,
     pub active_peers: usize,
     pub diagnostics: usize,
+    pub presentation_loaded: bool,
+    pub active_cue: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +200,17 @@ pub struct AppFrameSnapshot {
     pub elapsed_seconds: f64,
     pub camera: CameraRig,
     pub focus: FocusNavigation,
+}
+
+/// Low-rate FRP projection. Camera/focus motion stays in
+/// [`AppFrameSnapshot`], so ticking a transition does not clone cue assets and
+/// layers into every render frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationReadModel {
+    pub presentation_id: Uuid,
+    pub title: String,
+    pub cue_count: usize,
+    pub active: Option<PresentationSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -213,6 +241,8 @@ pub struct AppState {
     revision: u64,
     frame_elapsed_seconds: f64,
     navigation: NavigationController,
+    presentation: Option<PresentationRuntime>,
+    active_presentation: Option<PresentationSnapshot>,
     assets: BTreeMap<AssetId, AssetRecord>,
     presence: BTreeMap<PeerId, PresenceRecord>,
     authored_projection_revision: Option<u64>,
@@ -241,7 +271,7 @@ impl AppState {
         match event {
             AppEvent::Input(timed) => {
                 timed.validate_time()?;
-                let effect_may_run_now = timed.at_seconds <= self.frame_elapsed_seconds;
+                let input_may_run_now = timed.at_seconds <= self.frame_elapsed_seconds;
                 match timed.value {
                     SemanticAction::Navigate(action) => {
                         self.navigation
@@ -257,8 +287,14 @@ impl AppState {
                             .map_err(ReduceError::Navigation)?;
                         publish_ui = false;
                     }
+                    SemanticAction::Present(action) => {
+                        if !input_may_run_now {
+                            return Err(ReduceError::FuturePresentationInput);
+                        }
+                        self.apply_presentation_action(action)?;
+                    }
                     SemanticAction::RequestAsset { request_id, asset } => {
-                        if !effect_may_run_now {
+                        if !input_may_run_now {
                             return Err(ReduceError::FutureEffectInput);
                         }
                         request_id
@@ -290,7 +326,7 @@ impl AppState {
                         effects.push(AppEffect::FetchAsset { request_id, asset });
                     }
                     SemanticAction::CancelAsset(asset_id) => {
-                        if !effect_may_run_now {
+                        if !input_may_run_now {
                             return Err(ReduceError::FutureEffectInput);
                         }
                         let record = self
@@ -307,6 +343,12 @@ impl AppState {
                     }
                 }
             }
+            AppEvent::PresentationLoaded(presentation) => {
+                let presentation = PresentationRuntime::new(presentation)
+                    .map_err(|error| ReduceError::Presentation(error.to_string()))?;
+                self.presentation = Some(presentation);
+                self.active_presentation = None;
+            }
             AppEvent::Frame(frame) => {
                 if !frame.elapsed_seconds.is_finite()
                     || !frame.delta_seconds.is_finite()
@@ -318,6 +360,9 @@ impl AppState {
                 self.navigation
                     .advance_to(frame.elapsed_seconds)
                     .map_err(ReduceError::Navigation)?;
+                if let Some(presentation) = self.presentation.as_mut() {
+                    presentation.reconcile_navigation(&mut self.navigation);
+                }
                 self.frame_elapsed_seconds = frame.elapsed_seconds;
                 self.presence
                     .retain(|_, record| record.expires_at_seconds > frame.elapsed_seconds);
@@ -432,6 +477,35 @@ impl AppState {
         })
     }
 
+    fn apply_presentation_action(&mut self, action: PresentationAction) -> Result<(), ReduceError> {
+        if action == PresentationAction::Clear {
+            self.presentation = None;
+            self.active_presentation = None;
+            return Ok(());
+        }
+
+        // Presentation activation starts several navigation transitions. Work
+        // on clones so any reference, pole, or navigation failure leaves both
+        // authorities at the preceding committed revision.
+        let mut presentation = self
+            .presentation
+            .clone()
+            .ok_or(ReduceError::NoPresentation)?;
+        let mut navigation = self.navigation.clone();
+        let snapshot = match action {
+            PresentationAction::Start => presentation.activate_index(0, &mut navigation),
+            PresentationAction::Advance => presentation.advance(&mut navigation),
+            PresentationAction::Reverse => presentation.reverse(&mut navigation),
+            PresentationAction::JumpToCue(cue) => presentation.jump_to_cue(cue, &mut navigation),
+            PresentationAction::Clear => unreachable!("clear handled before transactional clone"),
+        }
+        .map_err(|error| ReduceError::Presentation(error.to_string()))?;
+        self.presentation = Some(presentation);
+        self.navigation = navigation;
+        self.active_presentation = Some(snapshot);
+        Ok(())
+    }
+
     fn push_diagnostic(&mut self, code: &'static str, message: String) {
         if self.diagnostics.len() == MAX_DIAGNOSTICS {
             self.diagnostics.pop_front();
@@ -455,7 +529,24 @@ impl AppState {
                 .count(),
             active_peers: self.presence.len(),
             diagnostics: self.diagnostics.len(),
+            presentation_loaded: self.presentation.is_some(),
+            active_cue: self
+                .active_presentation
+                .as_ref()
+                .map(|snapshot| snapshot.cue_id),
         }
+    }
+
+    fn presentation_read_model(&self) -> Option<PresentationReadModel> {
+        self.presentation.as_ref().map(|runtime| {
+            let presentation = runtime.presentation();
+            PresentationReadModel {
+                presentation_id: presentation.id,
+                title: presentation.title.clone(),
+                cue_count: presentation.cues.len(),
+                active: self.active_presentation.clone(),
+            }
+        })
     }
 
     fn asset_read_models(&self) -> Vec<AssetReadModel> {
@@ -493,6 +584,7 @@ pub struct AppStore {
     summary: Mutable<AppSummary>,
     assets: MutableVec<AssetReadModel>,
     diagnostics: MutableVec<DiagnosticReadModel>,
+    presentation: Mutable<Option<PresentationReadModel>>,
 }
 
 impl Default for AppStore {
@@ -506,11 +598,13 @@ impl AppStore {
         let summary = state.summary();
         let assets = state.asset_read_models();
         let diagnostics = state.diagnostic_read_models();
+        let presentation = state.presentation_read_model();
         Self {
             state: Arc::new(Mutex::new(state)),
             summary: Mutable::new(summary),
             assets: MutableVec::new_with_values(assets),
             diagnostics: MutableVec::new_with_values(diagnostics),
+            presentation: Mutable::new(presentation),
         }
     }
 
@@ -528,11 +622,13 @@ impl AppStore {
         let state = self.lock_state();
         let assets = state.asset_read_models();
         let diagnostics = state.diagnostic_read_models();
+        let presentation = state.presentation_read_model();
         let summary = state.summary();
         let revision = summary.revision;
         drop(state);
         self.assets.lock_mut().replace_cloned(assets);
         self.diagnostics.lock_mut().replace_cloned(diagnostics);
+        self.presentation.set_neq(presentation);
         self.summary.set_neq(summary);
         revision
     }
@@ -553,6 +649,10 @@ impl AppStore {
         self.diagnostics.lock_ref().to_vec()
     }
 
+    pub fn presentation_snapshot(&self) -> Option<PresentationReadModel> {
+        self.presentation.get_cloned()
+    }
+
     /// Presence remains a high-rate snapshot lane rather than an automatic UI
     /// signal. A view may sample it on the same throttle as camera overlays.
     pub fn presence_snapshot(&self) -> Vec<PeerPresenceReadModel> {
@@ -571,6 +671,10 @@ impl AppStore {
         self.diagnostics.signal_vec_cloned()
     }
 
+    pub fn presentation_signal(&self) -> MutableSignalCloned<Option<PresentationReadModel>> {
+        self.presentation.signal_cloned()
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, AppState> {
         self.state
             .lock()
@@ -582,7 +686,10 @@ impl AppStore {
 pub enum ReduceError {
     InvalidTime,
     FutureEffectInput,
+    FuturePresentationInput,
     Navigation(&'static str),
+    Presentation(String),
+    NoPresentation,
     Wire(String),
     UnknownAsset(AssetId),
 }
@@ -596,7 +703,13 @@ impl fmt::Display for ReduceError {
             Self::FutureEffectInput => formatter.write_str(
                 "effect-producing input cannot be scheduled beyond the current app frame",
             ),
+            Self::FuturePresentationInput => formatter
+                .write_str("presentation input cannot be scheduled beyond the current app frame"),
             Self::Navigation(message) => write!(formatter, "navigation event failed: {message}"),
+            Self::Presentation(message) => {
+                write!(formatter, "presentation event failed: {message}")
+            }
+            Self::NoPresentation => formatter.write_str("no presentation is loaded"),
             Self::Wire(message) => write!(formatter, "wire value failed validation: {message}"),
             Self::UnknownAsset(asset) => write!(formatter, "unknown asset {asset}"),
         }
@@ -624,6 +737,26 @@ mod tests {
 
     fn request(id: u128) -> RequestId {
         RequestId::from_u128(id).unwrap()
+    }
+
+    fn presentation_fixture() -> Presentation {
+        Presentation::from_json(include_str!(
+            "../../../examples/hacker-night.presentation.json"
+        ))
+        .unwrap()
+    }
+
+    fn dispatch_presentation(
+        store: &AppStore,
+        sequence: u64,
+        at_seconds: f64,
+        action: PresentationAction,
+    ) -> Result<AppCommit, ReduceError> {
+        store.dispatch(AppEvent::Input(Timed {
+            sequence,
+            at_seconds,
+            value: SemanticAction::Present(action),
+        }))
     }
 
     fn dispatch_request(
@@ -723,6 +856,124 @@ mod tests {
         }
 
         assert_eq!(run(&[1.0]), run(&[0.1; 10]));
+    }
+
+    #[test]
+    fn presentation_load_and_cue_activation_publish_one_coherent_read_model() {
+        let store = AppStore::default();
+        let fixture = presentation_fixture();
+        let presentation_id = fixture.id;
+        let first_cue = fixture.cues[0].id;
+
+        store
+            .dispatch(AppEvent::PresentationLoaded(fixture))
+            .unwrap();
+        assert!(store.summary_snapshot().presentation_loaded);
+        assert_eq!(store.summary_snapshot().active_cue, None);
+        let loaded = store.presentation_snapshot().unwrap();
+        assert_eq!(loaded.presentation_id, presentation_id);
+        assert_eq!(loaded.cue_count, 6);
+        assert_eq!(loaded.active, None);
+
+        dispatch_presentation(&store, 1, 0.0, PresentationAction::Start).unwrap();
+        let summary = store.summary_snapshot();
+        let active = store.presentation_snapshot().unwrap();
+        assert_eq!(summary.active_cue, Some(first_cue));
+        assert_eq!(summary.revision, store.frame_snapshot().revision);
+        assert_eq!(active.active.unwrap().cue_id, first_cue);
+    }
+
+    #[test]
+    fn presentation_transition_is_cadence_independent_through_the_app_boundary() {
+        fn run(partition: &[f64]) -> (AppFrameSnapshot, Uuid) {
+            let store = AppStore::default();
+            let fixture = presentation_fixture();
+            let destination = fixture.cues[5].id;
+            store
+                .dispatch(AppEvent::PresentationLoaded(fixture))
+                .unwrap();
+            dispatch_presentation(&store, 1, 0.0, PresentationAction::Start).unwrap();
+            store
+                .dispatch(AppEvent::Frame(FrameTick {
+                    elapsed_seconds: 0.7,
+                    delta_seconds: 0.7,
+                }))
+                .unwrap();
+            dispatch_presentation(&store, 2, 0.7, PresentationAction::JumpToCue(destination))
+                .unwrap();
+            let mut elapsed = 0.7;
+            for delta in partition {
+                elapsed += delta;
+                store
+                    .dispatch(AppEvent::Frame(FrameTick {
+                        elapsed_seconds: elapsed,
+                        delta_seconds: *delta,
+                    }))
+                    .unwrap();
+            }
+            (store.frame_snapshot(), destination)
+        }
+
+        let (single, destination) = run(&[1.2]);
+        let (partitioned, partitioned_destination) = run(&[0.1; 12]);
+        assert_eq!(destination, partitioned_destination);
+        for (single, partitioned) in single.camera.eye.into_iter().zip(partitioned.camera.eye) {
+            assert!((single - partitioned).abs() < 1.0e-9);
+        }
+        assert!(
+            (single
+                .camera
+                .orientation
+                .dot(partitioned.camera.orientation)
+                .abs()
+                - 1.0)
+                .abs()
+                < 1.0e-9
+        );
+        assert!((single.focus.sphere.radius - partitioned.focus.sphere.radius).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn rejected_presentation_action_is_atomic() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        dispatch_presentation(&store, 1, 0.0, PresentationAction::Start).unwrap();
+        let revision = store.frame_snapshot().revision;
+        let camera = store.frame_snapshot().camera;
+        let active = store.presentation_snapshot();
+
+        let unknown = Uuid::parse_str("f0000000-0000-4000-8000-000000000099").unwrap();
+        let error = dispatch_presentation(&store, 2, 0.0, PresentationAction::JumpToCue(unknown))
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown presentation cue"));
+        assert_eq!(store.frame_snapshot().revision, revision);
+        assert_eq!(store.frame_snapshot().camera, camera);
+        assert_eq!(store.presentation_snapshot(), active);
+    }
+
+    #[test]
+    fn invalid_or_future_presentation_input_cannot_partially_mutate_state() {
+        let store = AppStore::default();
+        let mut invalid = presentation_fixture();
+        invalid.title.clear();
+        assert!(store
+            .dispatch(AppEvent::PresentationLoaded(invalid))
+            .is_err());
+        assert_eq!(store.frame_snapshot().revision, 0);
+        assert!(!store.summary_snapshot().presentation_loaded);
+
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        let revision = store.frame_snapshot().revision;
+        assert_eq!(
+            dispatch_presentation(&store, 1, 1.0, PresentationAction::Start),
+            Err(ReduceError::FuturePresentationInput)
+        );
+        assert_eq!(store.frame_snapshot().revision, revision);
+        assert_eq!(store.summary_snapshot().active_cue, None);
     }
 
     #[test]

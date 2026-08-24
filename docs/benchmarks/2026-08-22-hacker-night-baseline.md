@@ -116,6 +116,33 @@ only service on port 8888 was an unrelated `Walkie Songie` application and no
 Quilting Trunk process was running. No server was started, stopped, or replaced
 to manufacture a runtime result.
 
+## Rust presentation application authority follow-up
+
+The next 2026-08-24 slices made presentation cue links durable and moved
+presentation state into the `hyperscope-app` reducer without cutting over the
+working browser controller. The route registry now has 67 keys: `cue` is an
+optional, non-nil UUID, every committed cue is reflected into the URL, and
+startup reaches it through Rust's `jump_to_cue`. The generated-WASM smoke
+verified six fixture cues, direct entry to cue four, malformed/unknown rejection,
+and preservation of the preceding cue after a rejected jump.
+
+Inside `hyperscope-app`, presentation load and start/advance/reverse/jump/clear
+are reducer events/actions. Cue activation operates transactionally on cloned
+presentation/navigation state, then commits both together; rejected actions do
+not advance the application revision. A low-rate futures-signals presentation
+projection carries the document and active resolved cue while high-rate frame
+snapshots remain limited to camera/focus state. Tests cover validation
+atomicity, future-action rejection, commit-fence coherence, and equal final
+camera/focus state for one 1.2-second tick versus twelve 0.1-second ticks.
+
+Together, the cue route and application presentation authority increased the
+optimized WASM from 5,944,514 to 5,960,031 bytes (15,517 raw bytes, about
+0.26%); gzip increased from 2,083,582 to 2,089,818 bytes. Generated app,
+presentation, and route smokes; 14 `hyperscope-app` tests; 53 `hyperscape`
+tests; WASM checking; strict app Clippy; Rustdoc; and raw/staged release
+preflights passed. Live browser comparison remains pending because the only
+available Chrome page is still the unrelated application on port 8888.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:

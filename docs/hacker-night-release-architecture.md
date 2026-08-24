@@ -42,9 +42,12 @@ The first application boundary is now explicit:
   presence have no conversion into the durable lane.
 - `hyperscope-app` owns `AppEvent -> AppCommit + AppEffect`, deterministic
   navigation scheduling, asset job generations, stale completion rejection,
-  local presence expiry, diagnostics, and futures-signals read models.
-  Effect-producing future inputs are rejected until a real application event
-  scheduler exists rather than being executed at the wrong time.
+  presentation loading/cue actions, local presence expiry, diagnostics, and
+  futures-signals read models. Cue activation and its navigation transitions
+  commit transactionally; rejected cue/pole/reference operations preserve the
+  preceding revision. Effect-producing and presentation future inputs are
+  rejected until a real application event scheduler exists rather than being
+  executed at the wrong time.
 - `appshadow=1` now feeds real startup, IndexedDB, drag/drop, authored-demo,
   and presentation asset acquisition into that reducer without changing the
   browser loader or renderer. Superseding a load emits cancel-then-fetch;
@@ -52,7 +55,7 @@ The first application boundary is now explicit:
   Bounded diagnostics are exposed at
   `globalThis.__hyperscopeAppShadowDiagnostics` until this lane earns browser
   authority.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 66 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 67 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. With `routeshadow=1`, the browser still writes
@@ -66,8 +69,10 @@ The first application boundary is now explicit:
   per-frame diagnostic traffic.
 - High-rate frame, navigation, and presence events advance authoritative state
   without forcing DOM-rate notifications. `SignalVec` asset/diagnostic views
-  are published as a batch and an `AppSummary` revision is set last as the
-  consumer commit fence; adapters explicitly flush at their UI cadence.
+  and the low-rate presentation projection are published as a batch and an
+  `AppSummary` revision is set last as the consumer commit fence; adapters
+  explicitly flush at their UI cadence. Presentation transitions reconcile on
+  the frame lane without cloning cue assets/layers into render snapshots.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
