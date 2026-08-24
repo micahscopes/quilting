@@ -20,7 +20,7 @@ use buffer::{
     VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf,
     FaceDataTexture, SkinningTexture, MorphTargetTexture,
 };
-use shader::Programs;
+use shader::{Programs, WebGlProgramMemo, WebGlProgramMemoDiagnostics};
 use prepare::PatchPreparer;
 
 /// High-level renderer for the quilting pipeline.
@@ -28,6 +28,9 @@ use prepare::PatchPreparer;
 /// Owns the glow context, compiled shader programs, and all shared uniform buffers.
 pub struct Renderer {
     gl: glow::Context,
+    /// Sole owner of descriptor-lowered primary shaders and programs.
+    program_memo: WebGlProgramMemo,
+    /// Non-owning convenience view into `program_memo`.
     programs: Programs,
     vtx_ubo: VertexUniformBuf,
     wire_ubo: WireUniformBuf,
@@ -48,23 +51,63 @@ impl Renderer {
     /// The glow::Context must already be current (e.g. from a WebGL2 canvas
     /// or a native OpenGL window).
     pub fn new(gl: glow::Context) -> Result<Self, String> {
-        let programs = shader::compile_programs(&gl)?;
-        let vtx_ubo = VertexUniformBuf::new(&gl)?;
-        let wire_ubo = WireUniformBuf::new(&gl)?;
-        let pbr_ubo = PbrUniformBuf::new(&gl)?;
-        let matcap_ubo = MatcapUniformBuf::new(&gl)?;
-        let joint_ubo = JointMatricesBuf::new(&gl)?;
-        let patch_preparer = PatchPreparer::new(&gl)?;
+        // One Renderer is one immutable WebGL context epoch. Context restore
+        // rebuilds the complete Renderer so no non-owning handle view can
+        // survive an epoch change.
+        let mut program_memo = WebGlProgramMemo::new(0);
+        let mut programs: Option<Programs> = None;
+        let mut vtx_ubo: Option<VertexUniformBuf> = None;
+        let mut wire_ubo: Option<WireUniformBuf> = None;
+        let mut pbr_ubo: Option<PbrUniformBuf> = None;
+        let mut matcap_ubo: Option<MatcapUniformBuf> = None;
+        let mut joint_ubo: Option<JointMatricesBuf> = None;
+        let mut patch_preparer: Option<PatchPreparer> = None;
+
+        let construction = (|| -> Result<(), String> {
+            programs = Some(shader::compile_programs(&gl, &mut program_memo)?);
+            vtx_ubo = Some(VertexUniformBuf::new(&gl)?);
+            wire_ubo = Some(WireUniformBuf::new(&gl)?);
+            pbr_ubo = Some(PbrUniformBuf::new(&gl)?);
+            matcap_ubo = Some(MatcapUniformBuf::new(&gl)?);
+            joint_ubo = Some(JointMatricesBuf::new(&gl)?);
+            patch_preparer = Some(PatchPreparer::new(&gl)?);
+            Ok(())
+        })();
+
+        if let Err(error) = construction {
+            if let Some(resource) = patch_preparer {
+                resource.destroy(&gl);
+            }
+            if let Some(resource) = joint_ubo {
+                resource.destroy(&gl);
+            }
+            if let Some(resource) = matcap_ubo {
+                resource.destroy(&gl);
+            }
+            if let Some(resource) = pbr_ubo {
+                resource.destroy(&gl);
+            }
+            if let Some(resource) = wire_ubo {
+                resource.destroy(&gl);
+            }
+            if let Some(resource) = vtx_ubo {
+                resource.destroy(&gl);
+            }
+            program_memo.destroy(&gl);
+            return Err(error);
+        }
 
         Ok(Renderer {
             gl,
-            programs,
-            vtx_ubo,
-            wire_ubo,
-            pbr_ubo,
-            matcap_ubo,
-            joint_ubo,
-            patch_preparer,
+            program_memo,
+            programs: programs.expect("successful construction resolved primary programs"),
+            vtx_ubo: vtx_ubo.expect("successful construction allocated vertex UBO"),
+            wire_ubo: wire_ubo.expect("successful construction allocated wire UBO"),
+            pbr_ubo: pbr_ubo.expect("successful construction allocated PBR UBO"),
+            matcap_ubo: matcap_ubo.expect("successful construction allocated matcap UBO"),
+            joint_ubo: joint_ubo.expect("successful construction allocated joint UBO"),
+            patch_preparer: patch_preparer
+                .expect("successful construction allocated patch preparer"),
             face_data_texture: None,
             skinning_texture: None,
             morph_texture: None,
@@ -168,6 +211,11 @@ impl Renderer {
     /// Access compiled programs (for advanced uniform management).
     pub fn programs(&self) -> &Programs {
         &self.programs
+    }
+
+    /// CPU-only cache counters; querying these never synchronizes with the GPU.
+    pub fn program_memo_diagnostics(&self) -> WebGlProgramMemoDiagnostics {
+        self.program_memo.diagnostics()
     }
 
     /// Current viewport dimensions.
@@ -274,13 +322,15 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        self.programs.destroy(&self.gl);
+        // The preparer retains its own deferred program. Primary programs are
+        // deleted by the memo before their shared shader modules.
+        self.patch_preparer.destroy(&self.gl);
+        self.program_memo.destroy(&self.gl);
         self.vtx_ubo.destroy(&self.gl);
         self.wire_ubo.destroy(&self.gl);
         self.pbr_ubo.destroy(&self.gl);
         self.matcap_ubo.destroy(&self.gl);
         self.joint_ubo.destroy(&self.gl);
-        self.patch_preparer.destroy(&self.gl);
         if let Some(texture) = self.face_data_texture.take() {
             texture.destroy(&self.gl);
         }

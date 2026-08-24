@@ -1,7 +1,14 @@
-use naga_oil::compose::{
-    ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderDefValue,
-};
+pub use naga_oil::compose::ShaderDefValue;
+use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor};
 use std::collections::HashMap;
+use std::fmt::Write;
+use std::sync::{Arc, OnceLock};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPointStage {
+    Vertex,
+    Fragment,
+}
 
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
@@ -20,6 +27,45 @@ pub mod sources {
     pub const FRAG_PBR: &str = include_str!("../shaders/fragment/pbr.wgsl");
     pub const FRAG_STRETCH: &str = include_str!("../shaders/fragment/stretch.wgsl");
     pub const FRAG_PICK: &str = include_str!("../shaders/fragment/pick.wgsl");
+}
+
+/// Exact identity of the compiler configuration and composable WGSL catalog.
+///
+/// Pipeline descriptor caches retain this value beside an entry module's own
+/// source. Including the complete imported sources makes a catalog edit a
+/// cache miss without relying on a manually bumped, collision-prone digest.
+/// The dependency versions mirror this crate's resolved compiler API; changing
+/// either compiler dependency must change this prefix as part of the upgrade.
+pub fn compiler_catalog_revision() -> Arc<str> {
+    static REVISION: OnceLock<Arc<str>> = OnceLock::new();
+    Arc::clone(REVISION.get_or_init(build_compiler_catalog_revision))
+}
+
+fn build_compiler_catalog_revision() -> Arc<str> {
+    const COMPILER_CONFIGURATION: &str =
+        "quilting-shaders/catalog-v1;naga=28.0.0;naga-oil=0.21.0";
+    let modules = [
+        ("quilting::math::quaternion", sources::QUATERNION),
+        ("quilting::surface::qb_eval", sources::QB_EVAL),
+        ("quilting::lighting::pbr", sources::PBR),
+        ("quilting::lighting::matcap", sources::MATCAP),
+        ("quilting::viz::density", sources::DENSITY),
+    ];
+    let capacity = COMPILER_CONFIGURATION.len()
+        + modules
+            .iter()
+            .map(|(path, source)| path.len() + source.len() + 48)
+            .sum::<usize>();
+    let mut revision = String::with_capacity(capacity);
+    revision.push_str(COMPILER_CONFIGURATION);
+    for (path, source) in modules {
+        // Length framing keeps the identity unambiguous even when a source
+        // happens to contain one of the textual separators.
+        write!(revision, "\0{}:{path}\0{}:", path.len(), source.len())
+            .expect("writing to a String cannot fail");
+        revision.push_str(source);
+    }
+    revision.into()
 }
 
 /// Build a naga-oil Composer preloaded with all quilting shader modules.
@@ -85,6 +131,21 @@ pub fn emit_glsl_native(
     entry_point: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     emit_glsl_with_options(module, stage, entry_point, false)
+}
+
+/// Emit one descriptor-selected graphics entry point without exposing naga's
+/// stage type through renderer-facing APIs.
+pub fn emit_graphics_entry_glsl(
+    module: &naga::Module,
+    stage: EntryPointStage,
+    entry_point: &str,
+    adjust_coordinate_space: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let stage = match stage {
+        EntryPointStage::Vertex => naga::ShaderStage::Vertex,
+        EntryPointStage::Fragment => naga::ShaderStage::Fragment,
+    };
+    emit_glsl_with_options(module, stage, entry_point, adjust_coordinate_space)
 }
 
 fn emit_glsl_with_options(
@@ -189,6 +250,26 @@ pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_catalog_identity_is_deterministic_and_exact() {
+        let first = compiler_catalog_revision();
+        let second = compiler_catalog_revision();
+        assert_eq!(first, second);
+        assert!(first.starts_with(
+            "quilting-shaders/catalog-v1;naga=28.0.0;naga-oil=0.21.0"
+        ));
+        for (path, source) in [
+            ("quilting::math::quaternion", sources::QUATERNION),
+            ("quilting::surface::qb_eval", sources::QB_EVAL),
+            ("quilting::lighting::pbr", sources::PBR),
+            ("quilting::lighting::matcap", sources::MATCAP),
+            ("quilting::viz::density", sources::DENSITY),
+        ] {
+            assert!(first.contains(path));
+            assert!(first.contains(source));
+        }
+    }
 
     #[test]
     fn composer_loads_all_modules() {

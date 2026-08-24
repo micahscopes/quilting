@@ -4,6 +4,14 @@
 //! then creates OpenGL shader programs via glow.
 
 use glow::HasContext;
+use quilting_core::render_pipeline::{
+    GraphicsProgramDescriptor, ShaderDefinitionValue, ShaderModuleDescriptor, ShaderStage,
+    ShaderTarget,
+};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+use crate::memo::{DeviceMemo, DeviceMemoDiagnostics};
 
 #[cfg(target_arch = "wasm32")]
 fn log_info(msg: &str) {
@@ -24,19 +32,6 @@ pub struct Programs {
     pub pick: glow::Program,
 }
 
-impl Programs {
-    pub fn destroy(&self, gl: &glow::Context) {
-        unsafe {
-            gl.delete_program(self.matcap);
-            gl.delete_program(self.wire);
-            gl.delete_program(self.normals);
-            gl.delete_program(self.pbr);
-            gl.delete_program(self.stretch);
-            gl.delete_program(self.pick);
-        }
-    }
-}
-
 /// Uniform block binding points.
 /// Naga emits `layout(std140) uniform BlockName { ... }` blocks.
 /// We bind these to UBO binding points.
@@ -44,6 +39,134 @@ pub const VERTEX_UNIFORMS_BINDING: u32 = 0;
 pub const WIRE_UNIFORMS_BINDING: u32 = 1;
 pub const PBR_UNIFORMS_BINDING: u32 = 2;
 pub const JOINT_MATRICES_BINDING: u32 = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WebGlUniformBlockBinding {
+    pub name: Arc<str>,
+    pub binding_point: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WebGlSamplerBinding {
+    pub name: Arc<str>,
+    pub texture_unit: u32,
+}
+
+/// Immutable WebGL mutations applied immediately after a program links.
+///
+/// These assignments are part of program cache identity: two otherwise equal
+/// shader programs configured with different UBO points or texture units must
+/// never alias the same mutable `WebGlProgram`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WebGlBindingPlan {
+    uniform_blocks: Vec<WebGlUniformBlockBinding>,
+    samplers: Vec<WebGlSamplerBinding>,
+}
+
+impl WebGlBindingPlan {
+    pub fn new(
+        mut uniform_blocks: Vec<WebGlUniformBlockBinding>,
+        mut samplers: Vec<WebGlSamplerBinding>,
+    ) -> Result<Self, String> {
+        if uniform_blocks.iter().any(|binding| binding.name.is_empty())
+            || samplers.iter().any(|binding| binding.name.is_empty())
+        {
+            return Err("WebGL binding names must not be empty".into());
+        }
+        uniform_blocks.sort_by(|left, right| left.name.cmp(&right.name));
+        samplers.sort_by(|left, right| left.name.cmp(&right.name));
+        if uniform_blocks
+            .windows(2)
+            .any(|pair| pair[0].name == pair[1].name)
+        {
+            return Err("duplicate WebGL uniform-block binding".into());
+        }
+        if samplers.windows(2).any(|pair| pair[0].name == pair[1].name) {
+            return Err("duplicate WebGL sampler binding".into());
+        }
+        Ok(Self {
+            uniform_blocks,
+            samplers,
+        })
+    }
+
+    pub fn uniform_blocks(&self) -> &[WebGlUniformBlockBinding] {
+        &self.uniform_blocks
+    }
+
+    pub fn samplers(&self) -> &[WebGlSamplerBinding] {
+        &self.samplers
+    }
+}
+
+/// Complete key for one linked and initialized WebGL program.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WebGlProgramKey {
+    program: GraphicsProgramDescriptor,
+    bindings: WebGlBindingPlan,
+}
+
+impl WebGlProgramKey {
+    pub fn new(program: GraphicsProgramDescriptor, bindings: WebGlBindingPlan) -> Self {
+        Self { program, bindings }
+    }
+
+    pub fn program(&self) -> &GraphicsProgramDescriptor {
+        &self.program
+    }
+
+    pub fn bindings(&self) -> &WebGlBindingPlan {
+        &self.bindings
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WebGlProgramMemoDiagnostics {
+    pub device_epoch: u64,
+    pub shaders: DeviceMemoDiagnostics,
+    pub programs: DeviceMemoDiagnostics,
+}
+
+/// Sole owner of descriptor-lowered primary WebGL shader/program handles.
+/// `Programs` is only a compact non-owning view into this memo.
+pub struct WebGlProgramMemo {
+    shaders: DeviceMemo<ShaderModuleDescriptor, glow::Shader>,
+    programs: DeviceMemo<WebGlProgramKey, glow::Program>,
+}
+
+impl WebGlProgramMemo {
+    pub fn new(device_epoch: u64) -> Self {
+        Self {
+            shaders: DeviceMemo::new(device_epoch),
+            programs: DeviceMemo::new(device_epoch),
+        }
+    }
+
+    pub fn device_epoch(&self) -> u64 {
+        debug_assert_eq!(self.shaders.device_epoch(), self.programs.device_epoch());
+        self.programs.device_epoch()
+    }
+
+    pub fn diagnostics(&self) -> WebGlProgramMemoDiagnostics {
+        WebGlProgramMemoDiagnostics {
+            device_epoch: self.device_epoch(),
+            shaders: self.shaders.diagnostics(),
+            programs: self.programs.diagnostics(),
+        }
+    }
+
+    /// Delete every linked program before deleting the cached shader modules.
+    pub fn destroy(&mut self, gl: &glow::Context) {
+        unsafe {
+            for program in self.programs.drain() {
+                gl.delete_program(program);
+            }
+            for shader in self.shaders.drain() {
+                gl.delete_shader(shader);
+            }
+        }
+    }
+}
 
 /// Compiled GLSL source for a vertex/fragment pair.
 pub struct CompiledGlsl {
@@ -55,26 +178,212 @@ pub struct CompiledGlsl {
 pub(crate) const FRAGMENT_MODES: &[&str] =
     &["matcap", "wire", "normals", "pbr", "stretch", "pick"];
 
+fn fragment_source_and_entry(mode: &str) -> Result<(&'static str, &'static str), String> {
+    match mode {
+        "matcap" => Ok((quilting_shaders::sources::FRAG_MATCAP, "fs_matcap")),
+        "wire" => Ok((quilting_shaders::sources::FRAG_WIRE, "fs_wire")),
+        "normals" => Ok((quilting_shaders::sources::FRAG_NORMALS, "fs_normals")),
+        "pbr" => Ok((quilting_shaders::sources::FRAG_PBR, "fs_pbr")),
+        "stretch" => Ok((quilting_shaders::sources::FRAG_STRETCH, "fs_stretch")),
+        "pick" => Ok((quilting_shaders::sources::FRAG_PICK, "fs_pick")),
+        _ => Err(format!("unknown fragment mode: {mode}")),
+    }
+}
+
+fn primary_binding_plan(mode: &str) -> Result<WebGlBindingPlan, String> {
+    let mut uniform_blocks = vec![
+        WebGlUniformBlockBinding {
+            name: "Uniforms_block_0Vertex".into(),
+            binding_point: VERTEX_UNIFORMS_BINDING,
+        },
+        WebGlUniformBlockBinding {
+            name: "JointMatrices_block_1Vertex".into(),
+            binding_point: JOINT_MATRICES_BINDING,
+        },
+    ];
+    match mode {
+        "matcap" => uniform_blocks.push(WebGlUniformBlockBinding {
+            name: "MatcapUniforms_block_0Fragment".into(),
+            binding_point: WIRE_UNIFORMS_BINDING,
+        }),
+        "wire" => uniform_blocks.push(WebGlUniformBlockBinding {
+            name: "WireUniforms_block_0Fragment".into(),
+            binding_point: WIRE_UNIFORMS_BINDING,
+        }),
+        "pbr" => uniform_blocks.push(WebGlUniformBlockBinding {
+            name: "PbrUniforms_block_0Fragment".into(),
+            binding_point: PBR_UNIFORMS_BINDING,
+        }),
+        "normals" | "stretch" | "pick" => {}
+        _ => return Err(format!("unknown fragment mode: {mode}")),
+    }
+
+    let mut samplers = vec![
+        WebGlSamplerBinding {
+            name: "_group_0_binding_2_vs".into(),
+            texture_unit: SKINNING_TEX_UNIT,
+        },
+        WebGlSamplerBinding {
+            name: "_group_0_binding_3_vs".into(),
+            texture_unit: MORPH_TEX_UNIT,
+        },
+        WebGlSamplerBinding {
+            name: "_group_0_binding_4_vs".into(),
+            texture_unit: FACE_DATA_TEX_UNIT,
+        },
+    ];
+    if mode == "pbr" {
+        for (binding, texture_unit) in [
+            (2, 0),
+            (3, 0),
+            (4, 1),
+            (5, 1),
+            (6, 2),
+            (7, 2),
+            (8, 3),
+            (9, 3),
+            (10, 4),
+            (11, 4),
+            (12, 5),
+            (13, 5),
+            (14, 6),
+            (15, 6),
+            (16, 7),
+            (17, 7),
+            (18, 8),
+            (19, 8),
+            (20, 9),
+            (21, 9),
+            (22, 10),
+            (23, 10),
+        ] {
+            samplers.push(WebGlSamplerBinding {
+                name: format!("_group_0_binding_{binding}_fs").into(),
+                texture_unit,
+            });
+        }
+    }
+    WebGlBindingPlan::new(uniform_blocks, samplers)
+}
+
+/// Pure descriptors for the six primary render programs. Handwritten GLSL
+/// auxiliary programs deliberately remain outside this first checkpoint.
+pub fn primary_program_descriptors() -> Result<Vec<(&'static str, WebGlProgramKey)>, String> {
+    let compiler_catalog_revision = quilting_shaders::compiler_catalog_revision();
+    let vertex = ShaderModuleDescriptor::new(
+        "quilting primary vertex",
+        quilting_shaders::sources::VERTEX_MAIN,
+        Arc::clone(&compiler_catalog_revision),
+        ShaderStage::Vertex,
+        "vs_main",
+        ShaderTarget::GlslEs300 {
+            adjust_coordinate_space: false,
+        },
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    FRAGMENT_MODES
+        .iter()
+        .map(|&mode| {
+            let (source, entry_point) = fragment_source_and_entry(mode)?;
+            let fragment = ShaderModuleDescriptor::new(
+                format!("quilting {mode} fragment"),
+                source,
+                Arc::clone(&compiler_catalog_revision),
+                ShaderStage::Fragment,
+                entry_point,
+                ShaderTarget::GlslEs300 {
+                    adjust_coordinate_space: false,
+                },
+                Vec::new(),
+            )
+            .map_err(|error| error.to_string())?;
+            let program = GraphicsProgramDescriptor::new(
+                vertex.clone(),
+                Some(fragment),
+                Vec::new(),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok((mode, WebGlProgramKey::new(program, primary_binding_plan(mode)?)))
+        })
+        .collect()
+}
+
+fn compile_module_glsl(descriptor: &ShaderModuleDescriptor) -> Result<String, String> {
+    let ShaderTarget::GlslEs300 {
+        adjust_coordinate_space,
+    } = descriptor.target()
+    else {
+        return Err(format!(
+            "WebGL cannot lower {:?} shader target for '{}'",
+            descriptor.target(),
+            descriptor.label()
+        ));
+    };
+    let stage = match descriptor.stage() {
+        ShaderStage::Vertex => quilting_shaders::EntryPointStage::Vertex,
+        ShaderStage::Fragment => quilting_shaders::EntryPointStage::Fragment,
+        ShaderStage::Compute => {
+            return Err("WebGL2 does not support compute shader modules".into())
+        }
+    };
+    let definitions = descriptor
+        .definitions()
+        .iter()
+        .map(|definition| {
+            let value = match definition.value {
+                ShaderDefinitionValue::Bool(value) => {
+                    quilting_shaders::ShaderDefValue::Bool(value)
+                }
+                ShaderDefinitionValue::I32(value) => {
+                    quilting_shaders::ShaderDefValue::Int(value)
+                }
+                ShaderDefinitionValue::U32(value) => {
+                    quilting_shaders::ShaderDefValue::UInt(value)
+                }
+            };
+            (definition.name.to_string(), value)
+        })
+        .collect::<HashMap<_, _>>();
+    let module = quilting_shaders::compile_shader(descriptor.source(), definitions)
+        .map_err(|error| format!("{} WGSL: {error}", descriptor.label()))?;
+    quilting_shaders::emit_graphics_entry_glsl(
+        &module,
+        stage,
+        descriptor.entry_point(),
+        adjust_coordinate_space,
+    )
+    .map_err(|error| format!("{} GLSL: {error}", descriptor.label()))
+}
+
 /// Compile all WGSL shaders to GLSL via quilting-shaders (naga).
 /// Uses the "native" emission path (no Y-flip / Z-remap).
 /// Returns raw GLSL strings for each program.
 pub fn compile_all_glsl() -> Result<Vec<(&'static str, CompiledGlsl)>, String> {
-    let vertex_glsl = quilting_shaders::compile_vertex_glsl_native()
-        .map_err(|e| format!("vertex GLSL: {e}"))?;
+    let descriptors = primary_program_descriptors()?;
+    let shared_vertex = descriptors
+        .first()
+        .ok_or("primary shader catalog is empty")?
+        .1
+        .program()
+        .vertex();
+    let vertex = compile_module_glsl(shared_vertex)?;
 
-    let mut programs = Vec::new();
-
-    for &mode in FRAGMENT_MODES {
-        let frag_glsl = quilting_shaders::compile_fragment_glsl_native(mode)
-            .map_err(|e| format!("{mode} fragment GLSL: {e}"))?;
-
-        programs.push((mode, CompiledGlsl {
-            vertex: vertex_glsl.clone(),
-            fragment: frag_glsl,
-        }));
-    }
-
-    Ok(programs)
+    descriptors
+        .into_iter()
+        .map(|(mode, key)| {
+            let fragment = compile_module_glsl(
+                key.program()
+                    .fragment()
+                    .ok_or_else(|| format!("primary program '{mode}' has no fragment shader"))?,
+            )?;
+            Ok((mode, CompiledGlsl {
+                vertex: vertex.clone(),
+                fragment,
+            }))
+        })
+        .collect()
 }
 
 /// Compile a single GL shader (vertex or fragment) from GLSL source.
@@ -100,7 +409,7 @@ fn compile_gl_shader(
 }
 
 /// Link a vertex + fragment shader into a GL program.
-fn link_program(
+fn link_owned_program(
     gl: &glow::Context,
     vert: glow::Shader,
     frag: glow::Shader,
@@ -138,6 +447,133 @@ fn link_program(
     }
 }
 
+fn link_cached_program(
+    gl: &glow::Context,
+    vertex: glow::Shader,
+    fragment: Option<glow::Shader>,
+    transform_feedback_varyings: &[Arc<str>],
+) -> Result<glow::Program, String> {
+    unsafe {
+        let program = gl.create_program().map_err(|error| format!("create_program: {error}"))?;
+        gl.attach_shader(program, vertex);
+        if let Some(fragment) = fragment {
+            gl.attach_shader(program, fragment);
+        }
+        if !transform_feedback_varyings.is_empty() {
+            let varyings = transform_feedback_varyings
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>();
+            gl.transform_feedback_varyings(program, &varyings, glow::INTERLEAVED_ATTRIBS);
+        }
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            let log = gl.get_program_info_log(program);
+            gl.delete_program(program);
+            return Err(format!("program link error: {log}"));
+        }
+        gl.detach_shader(program, vertex);
+        if let Some(fragment) = fragment {
+            gl.detach_shader(program, fragment);
+        }
+        Ok(program)
+    }
+}
+
+fn initialize_cached_program(
+    gl: &glow::Context,
+    program: glow::Program,
+    bindings: &WebGlBindingPlan,
+) -> Result<(), String> {
+    unsafe {
+        let planned_blocks = bindings
+            .uniform_blocks()
+            .iter()
+            .map(|binding| (binding.name.as_ref(), binding.binding_point))
+            .collect::<HashMap<_, _>>();
+        let num_blocks = gl.get_program_parameter_i32(program, glow::ACTIVE_UNIFORM_BLOCKS);
+        let mut active_blocks = BTreeSet::new();
+        for index in 0..u32::try_from(num_blocks).unwrap_or(0) {
+            let name = gl.get_active_uniform_block_name(program, index);
+            let Some(&binding_point) = planned_blocks.get(name.as_str()) else {
+                gl.delete_program(program);
+                return Err(format!("active WebGL uniform block '{name}' has no binding plan"));
+            };
+            gl.uniform_block_binding(program, index, binding_point);
+            active_blocks.insert(name);
+        }
+        if num_blocks > 2 {
+            log_info(&format!(
+                "All {num_blocks} UBO blocks: {:?}",
+                active_blocks
+            ));
+        }
+
+        gl.use_program(Some(program));
+        for binding in bindings.samplers() {
+            if let Some(location) = gl.get_uniform_location(program, binding.name.as_ref()) {
+                let texture_unit = i32::try_from(binding.texture_unit).map_err(|_| {
+                    gl.use_program(None);
+                    gl.delete_program(program);
+                    format!(
+                        "texture unit {} for '{}' exceeds WebGL's signed uniform range",
+                        binding.texture_unit, binding.name
+                    )
+                })?;
+                gl.uniform_1_i32(Some(&location), texture_unit);
+            }
+        }
+        gl.use_program(None);
+        log_info(&format!(
+            "UBO blocks bound for program: {:?}",
+            active_blocks
+        ));
+    }
+    Ok(())
+}
+
+impl WebGlProgramMemo {
+    pub fn get_or_create(
+        &mut self,
+        gl: &glow::Context,
+        key: WebGlProgramKey,
+    ) -> Result<glow::Program, String> {
+        let shaders = &mut self.shaders;
+        let programs = &mut self.programs;
+        programs
+            .get_or_try_insert_with(key, |key| {
+                let vertex = *shaders.get_or_try_insert_with(
+                    key.program().vertex().clone(),
+                    |descriptor| {
+                        let source = compile_module_glsl(descriptor)?;
+                        compile_gl_shader(gl, glow::VERTEX_SHADER, &source)
+                    },
+                )?;
+                let fragment = key
+                    .program()
+                    .fragment()
+                    .map(|descriptor| {
+                        shaders
+                            .get_or_try_insert_with(descriptor.clone(), |descriptor| {
+                                let source = compile_module_glsl(descriptor)?;
+                                compile_gl_shader(gl, glow::FRAGMENT_SHADER, &source)
+                            })
+                            .copied()
+                    })
+                    .transpose()?;
+                let program = link_cached_program(
+                    gl,
+                    vertex,
+                    fragment,
+                    key.program().transform_feedback_varyings(),
+                )?;
+                initialize_cached_program(gl, program, key.bindings())?;
+                Ok(program)
+            })
+            .copied()
+    }
+}
+
 /// Create a GL program from GLSL vertex + fragment source.
 pub fn create_program(
     gl: &glow::Context,
@@ -150,7 +586,7 @@ pub fn create_program(
             unsafe { gl.delete_shader(vert); }
             e
         })?;
-    link_program(gl, vert, frag, None)
+    link_owned_program(gl, vert, frag, None)
 }
 
 /// Create a transform-feedback GL program from GLSL source. Varyings are
@@ -168,7 +604,7 @@ pub fn create_transform_feedback_program(
             unsafe { gl.delete_shader(vert); }
             e
         })?;
-    link_program(gl, vert, frag, Some(varyings))
+    link_owned_program(gl, vert, frag, Some(varyings))
 }
 
 /// Bind uniform block indices to known binding points for a program.
@@ -291,9 +727,11 @@ pub const MORPH_TEX_UNIT: u32 = 14;
 pub const FACE_DATA_TEX_UNIT: u32 = 13;
 
 /// Compile all WGSL shaders to GLSL, create GL programs, and bind uniform blocks.
-pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
-    let glsl_sources = compile_all_glsl()?;
-
+pub fn compile_programs(
+    gl: &glow::Context,
+    memo: &mut WebGlProgramMemo,
+) -> Result<Programs, String> {
+    let descriptors = primary_program_descriptors()?;
     let mut matcap = None;
     let mut wire = None;
     let mut normals = None;
@@ -301,16 +739,12 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
     let mut stretch = None;
     let mut pick = None;
 
-    for (name, compiled) in &glsl_sources {
-        log_info(&format!("Compiling program '{}': VS {} chars, FS {} chars",
-            name, compiled.vertex.len(), compiled.fragment.len()));
-
-        let program = create_program(gl, &compiled.vertex, &compiled.fragment)
-            .map_err(|e| format!("program '{name}': {e}"))?;
-
-        bind_uniform_blocks(gl, program);
-
-        match *name {
+    for (name, descriptor) in descriptors {
+        log_info(&format!("Resolving primary program '{name}'"));
+        let program = memo
+            .get_or_create(gl, descriptor)
+            .map_err(|error| format!("program '{name}': {error}"))?;
+        match name {
             "matcap" => matcap = Some(program),
             "wire" => wire = Some(program),
             "normals" => normals = Some(program),
@@ -320,7 +754,10 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
             _ => {}
         }
     }
-    log_info(&format!("All {} shader programs compiled and linked", glsl_sources.len()));
+    log_info(&format!(
+        "All {} primary shader programs resolved",
+        FRAGMENT_MODES.len()
+    ));
 
     Ok(Programs {
         matcap: matcap.ok_or("matcap program not compiled")?,
@@ -330,4 +767,230 @@ pub fn compile_programs(gl: &glow::Context) -> Result<Programs, String> {
         stretch: stretch.ok_or("stretch program not compiled")?,
         pick: pick.ok_or("pick program not compiled")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn primary_descriptors_share_one_exact_vertex_module() {
+        let descriptors = primary_program_descriptors().unwrap();
+        assert_eq!(
+            descriptors
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            FRAGMENT_MODES
+        );
+        let vertex = descriptors[0].1.program().vertex();
+        assert_eq!(vertex.source(), quilting_shaders::sources::VERTEX_MAIN);
+        assert_eq!(vertex.entry_point(), "vs_main");
+        assert_eq!(
+            vertex.target(),
+            ShaderTarget::GlslEs300 {
+                adjust_coordinate_space: false
+            }
+        );
+        assert!(descriptors
+            .iter()
+            .all(|(_, key)| key.program().vertex() == vertex));
+        let shader_modules = descriptors
+            .iter()
+            .flat_map(|(_, key)| {
+                [
+                    key.program().vertex(),
+                    key.program()
+                        .fragment()
+                        .expect("primary programs have fragment shaders"),
+                ]
+            })
+            .cloned()
+            .collect::<HashSet<_>>();
+        assert_eq!(shader_modules.len(), 7);
+        assert_eq!(
+            descriptors.iter().map(|(_, key)| key.clone()).collect::<HashSet<_>>().len(),
+            FRAGMENT_MODES.len()
+        );
+    }
+
+    #[test]
+    fn emitted_primary_interfaces_are_covered_by_the_exact_plans() {
+        for (mode, key) in primary_program_descriptors().unwrap() {
+            let planned_blocks = key
+                .bindings()
+                .uniform_blocks()
+                .iter()
+                .map(|binding| binding.name.as_ref())
+                .collect::<HashSet<_>>();
+            let planned_samplers = key
+                .bindings()
+                .samplers()
+                .iter()
+                .map(|binding| binding.name.as_ref())
+                .collect::<HashSet<_>>();
+            for descriptor in [
+                key.program().vertex(),
+                key.program()
+                    .fragment()
+                    .expect("primary programs have fragment shaders"),
+            ] {
+                let source = compile_module_glsl(descriptor).unwrap();
+                for line in source.lines() {
+                    if let Some(after_uniform) = line.split("uniform ").nth(1) {
+                        if let Some(block) = after_uniform
+                            .split_whitespace()
+                            .next()
+                            .filter(|name| name.contains("_block_"))
+                        {
+                            assert!(
+                                planned_blocks.contains(block),
+                                "{mode} has unplanned uniform block {block}"
+                            );
+                        }
+                    }
+                    if line.contains("sampler") {
+                        for token in line.split_whitespace() {
+                            let sampler = token.trim_end_matches(';');
+                            if sampler.starts_with("_group_") {
+                                assert!(
+                                    planned_samplers.contains(sampler),
+                                    "{mode} has unplanned sampler {sampler}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binding_plans_are_exact_canonical_program_identity() {
+        let descriptors = primary_program_descriptors().unwrap();
+        let pbr = descriptors
+            .iter()
+            .find(|(name, _)| *name == "pbr")
+            .unwrap()
+            .1
+            .clone();
+        let block_bindings = pbr
+            .bindings()
+            .uniform_blocks()
+            .iter()
+            .map(|binding| (binding.name.as_ref(), binding.binding_point))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            block_bindings,
+            vec![
+                ("JointMatrices_block_1Vertex", JOINT_MATRICES_BINDING),
+                ("PbrUniforms_block_0Fragment", PBR_UNIFORMS_BINDING),
+                ("Uniforms_block_0Vertex", VERTEX_UNIFORMS_BINDING),
+            ]
+        );
+        assert_eq!(
+            pbr.bindings()
+                .samplers()
+                .iter()
+                .find(|binding| binding.name.as_ref() == "_group_0_binding_23_fs")
+                .map(|binding| binding.texture_unit),
+            Some(10)
+        );
+
+        let altered = WebGlBindingPlan::new(
+            vec![WebGlUniformBlockBinding {
+                name: "Uniforms_block_0Vertex".into(),
+                binding_point: 99,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_ne!(
+            pbr,
+            WebGlProgramKey::new(pbr.program().clone(), altered)
+        );
+    }
+
+    #[test]
+    fn binding_plan_order_is_canonical_and_duplicate_names_fail() {
+        let left = WebGlBindingPlan::new(
+            vec![
+                WebGlUniformBlockBinding {
+                    name: "z".into(),
+                    binding_point: 2,
+                },
+                WebGlUniformBlockBinding {
+                    name: "a".into(),
+                    binding_point: 1,
+                },
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let right = WebGlBindingPlan::new(
+            vec![
+                WebGlUniformBlockBinding {
+                    name: "a".into(),
+                    binding_point: 1,
+                },
+                WebGlUniformBlockBinding {
+                    name: "z".into(),
+                    binding_point: 2,
+                },
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(left, right);
+        assert!(WebGlBindingPlan::new(
+            vec![
+                WebGlUniformBlockBinding {
+                    name: "same".into(),
+                    binding_point: 1,
+                },
+                WebGlUniformBlockBinding {
+                    name: "same".into(),
+                    binding_point: 2,
+                },
+            ],
+            Vec::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn descriptor_lowering_rejects_non_webgl_and_compute_targets() {
+        let catalog = quilting_shaders::compiler_catalog_revision();
+        let wgsl = ShaderModuleDescriptor::new(
+            "wgsl-only",
+            quilting_shaders::sources::VERTEX_MAIN,
+            Arc::clone(&catalog),
+            ShaderStage::Vertex,
+            "vs_main",
+            ShaderTarget::Wgsl,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(compile_module_glsl(&wgsl)
+            .unwrap_err()
+            .contains("WebGL cannot lower"));
+
+        let compute = ShaderModuleDescriptor::new(
+            "compute",
+            "@compute @workgroup_size(1) fn main() {}",
+            catalog,
+            ShaderStage::Compute,
+            "main",
+            ShaderTarget::GlslEs300 {
+                adjust_coordinate_space: false,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            compile_module_glsl(&compute).unwrap_err(),
+            "WebGL2 does not support compute shader modules"
+        );
+    }
 }

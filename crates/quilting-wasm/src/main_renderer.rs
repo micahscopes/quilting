@@ -1397,6 +1397,60 @@ pub fn mr_debug_focus_state() -> JsValue {
     })
 }
 
+/// CPU-only readback of descriptor memo counters. No GL query, fence, or
+/// buffer synchronization is performed.
+#[wasm_bindgen(js_name = "mr_programCacheDiagnostics")]
+pub fn mr_program_cache_diagnostics() -> JsValue {
+    fn counters(
+        diagnostics: quilting_renderer::memo::DeviceMemoDiagnostics,
+    ) -> js_sys::Object {
+        let result = js_sys::Object::new();
+        for (name, value) in [
+            ("hits", diagnostics.hits),
+            ("misses", diagnostics.misses),
+            ("failedCreations", diagnostics.failed_creations),
+            ("invalidations", diagnostics.invalidations),
+            ("residentEntries", diagnostics.resident_entries as u64),
+        ] {
+            js_sys::Reflect::set(
+                &result,
+                &JsValue::from_str(name),
+                &JsValue::from_f64(value as f64),
+            )
+            .expect("setting a property on a new plain object must succeed");
+        }
+        result
+    }
+
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else {
+            return JsValue::NULL;
+        };
+        let diagnostics = state.renderer.program_memo_diagnostics();
+        let result = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &result,
+            &JsValue::from_str("deviceEpoch"),
+            &JsValue::from_f64(diagnostics.device_epoch as f64),
+        )
+        .expect("setting a property on a new plain object must succeed");
+        js_sys::Reflect::set(
+            &result,
+            &JsValue::from_str("shaders"),
+            &counters(diagnostics.shaders),
+        )
+        .expect("setting a property on a new plain object must succeed");
+        js_sys::Reflect::set(
+            &result,
+            &JsValue::from_str("programs"),
+            &counters(diagnostics.programs),
+        )
+        .expect("setting a property on a new plain object must succeed");
+        result.into()
+    })
+}
+
 /// Pick the face under pixel (x, y). Renders a pick pass and reads back the face ID.
 /// Returns face ID (>= 0) or -1 if no face at that pixel.
 /// Also logs face info (LOD, edge lengths, instance data) to console.
