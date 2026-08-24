@@ -1714,6 +1714,7 @@ function activateRustPresentation(direction, cueId) {
     rustPresentationTransitionActive = true;
     applyRustPresentationNavigation(rustPresentationController.tick(0));
     rustPresentationDiagnostics.error = null;
+    mirrorAppPresentation(direction, cueId, snapshot);
     syncURL();
     return snapshot;
   } catch (error) {
@@ -1727,8 +1728,21 @@ async function initializeRustPresentation() {
   try {
     const response = await fetch('./hacker-night.presentation.json');
     if (!response.ok) throw new Error(`presentation fetch returned ${response.status}`);
+    const source = await response.text();
     rustPresentationController = new HyperscopeNavigation();
-    rustPresentationManifest = rustPresentationController.loadPresentation(await response.text());
+    rustPresentationManifest = rustPresentationController.loadPresentation(source);
+    if (rustAppShadow) {
+      try {
+        rustAppShadowDiagnostics.lastCommit = rustAppShadow.loadPresentation(source);
+        rustAppShadowDiagnostics.presentationLoads += 1;
+        refreshAppShadowSnapshot();
+      } catch (error) {
+        recordAppShadowMismatch(
+          'presentation_load_exception',
+          error?.message || String(error),
+        );
+      }
+    }
     globalThis.__hyperscopePresentationController = rustPresentationController;
     globalThis.__hyperscopePresentationAdvance = () => activateRustPresentation('advance');
     globalThis.__hyperscopePresentationReverse = () => activateRustPresentation('reverse');
@@ -1848,6 +1862,8 @@ const rustAppShadowDiagnostics = {
   failed: 0,
   requestedCancellations: 0,
   staleCompletions: 0,
+  presentationLoads: 0,
+  presentationComparisons: 0,
   mismatches: [],
   lastCommit: null,
   snapshot: null,
@@ -1881,6 +1897,32 @@ function refreshAppShadowSnapshot() {
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
   return snapshot;
+}
+
+function mirrorAppPresentation(direction, cueId, expected) {
+  if (!rustAppShadow) return;
+  try {
+    const commit = rustAppShadow.present(
+      ++rustAppShadowSequence,
+      0,
+      direction,
+      cueId || '',
+    );
+    rustAppShadowDiagnostics.lastCommit = commit;
+    rustAppShadowDiagnostics.presentationComparisons += 1;
+    const active = refreshAppShadowSnapshot()?.presentation?.active;
+    if (JSON.stringify(active ?? null) !== JSON.stringify(expected ?? null)) {
+      recordAppShadowMismatch(
+        'presentation_projection',
+        `Rust app presentation projection diverged for ${direction}`,
+      );
+    }
+  } catch (error) {
+    recordAppShadowMismatch(
+      'presentation_exception',
+      `${direction}: ${error?.message || String(error)}`,
+    );
+  }
 }
 
 function beginAppAssetShadow(uri, source, explicitAssetId = null) {

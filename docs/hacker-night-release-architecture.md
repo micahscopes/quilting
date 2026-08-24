@@ -49,10 +49,12 @@ The first application boundary is now explicit:
   rejected until a real application event scheduler exists rather than being
   executed at the wrong time.
 - `appshadow=1` now feeds real startup, IndexedDB, drag/drop, authored-demo,
-  and presentation asset acquisition into that reducer without changing the
-  browser loader or renderer. Superseding a load emits cancel-then-fetch;
-  late completions remain observable but cannot replace the active request.
-  Bounded diagnostics are exposed at
+  and presentation asset acquisition plus presentation load/cue intent into
+  that reducer without changing the browser loader, cue controller, or
+  renderer. Superseding a load emits cancel-then-fetch; late completions remain
+  observable but cannot replace the active request. Each cue action compares
+  the complete resolved presentation snapshot, with no additional per-frame
+  WASM traffic. Bounded diagnostics are exposed at
   `globalThis.__hyperscopeAppShadowDiagnostics` until this lane earns browser
   authority.
 - `hyperscope-app::ControlSpec` is the canonical registry for all 67 currently

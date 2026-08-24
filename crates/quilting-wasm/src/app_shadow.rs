@@ -1,7 +1,8 @@
+use hyperscape::{Presentation, PresentationSnapshot};
 use hyperscape_protocol::{AssetDescriptor, AssetId, RequestId};
 use hyperscope_app::{
     AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetStatus,
-    CommitDisposition, EffectCompletion, FrameTick, SemanticAction, Timed,
+    CommitDisposition, EffectCompletion, FrameTick, PresentationAction, SemanticAction, Timed,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -124,6 +125,48 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
+    /// Admit a validated presentation document without activating a cue or
+    /// changing navigation state.
+    #[wasm_bindgen(js_name = loadPresentation)]
+    pub fn load_presentation(&self, json: &str) -> Result<JsValue, JsValue> {
+        let presentation = Presentation::from_json(json).map_err(js_error)?;
+        let commit = self
+            .store
+            .dispatch(AppEvent::PresentationLoaded(presentation))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+
+    /// Mirror low-rate cue intent. This shadow compares resolved desired state;
+    /// the existing navigation controller remains frame/camera authority until
+    /// a separate pose-parity gate is enabled.
+    #[wasm_bindgen(js_name = present)]
+    pub fn present(
+        &self,
+        sequence: u32,
+        at_seconds: f64,
+        action: &str,
+        cue_id: &str,
+    ) -> Result<JsValue, JsValue> {
+        let action = match action {
+            "start" => PresentationAction::Start,
+            "advance" => PresentationAction::Advance,
+            "reverse" => PresentationAction::Reverse,
+            "jump" => PresentationAction::JumpToCue(parse_uuid(cue_id, "cue ID")?),
+            "clear" => PresentationAction::Clear,
+            _ => return Err(JsValue::from_str("unknown presentation action")),
+        };
+        let commit = self
+            .store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: u64::from(sequence),
+                at_seconds,
+                value: SemanticAction::Present(action),
+            }))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+
     /// A bounded, UI-shaped projection. The app store publishes asset and
     /// diagnostic vectors before its summary revision commit fence.
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
@@ -148,11 +191,21 @@ impl HyperscopeAppShadow {
                 message: diagnostic.message,
             })
             .collect();
+        let presentation =
+            self.store
+                .presentation_snapshot()
+                .map(|presentation| ShadowPresentation {
+                    id: presentation.presentation_id.to_string(),
+                    title: presentation.title,
+                    cue_count: presentation.cue_count,
+                    active: presentation.active,
+                });
         to_js(&ShadowSnapshot {
             revision: summary.revision.to_string(),
             assets,
             loading_assets: summary.loading_assets,
             diagnostics,
+            presentation,
         })
     }
 }
@@ -214,6 +267,16 @@ struct ShadowSnapshot {
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
     diagnostics: Vec<ShadowDiagnostic>,
+    presentation: Option<ShadowPresentation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPresentation {
+    id: String,
+    title: String,
+    cue_count: usize,
+    active: Option<PresentationSnapshot>,
 }
 
 #[derive(Serialize)]

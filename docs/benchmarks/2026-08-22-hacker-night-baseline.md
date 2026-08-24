@@ -143,6 +143,13 @@ tests; WASM checking; strict app Clippy; Rustdoc; and raw/staged release
 preflights passed. Live browser comparison remains pending because the only
 available Chrome page is still the unrelated application on port 8888.
 
+The subsequent `appshadow=1` adapter added presentation document admission and
+exact resolved-snapshot comparison at cue boundaries. It sends no frame ticks
+across the browser/WASM boundary and does not alter the existing controller on
+error. The generated app smoke covered load/start/jump plus malformed-jump
+atomicity. This adapter increased optimized WASM from 5,960,031 to 5,965,208
+bytes (5,177 raw); gzip increased from 2,089,818 to 2,093,926 bytes.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:

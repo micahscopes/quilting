@@ -52,6 +52,32 @@ assert.equal(ready.loadingAssets, 0);
 assert.equal(ready.assets[0].status.state, 'ready');
 assert.equal(ready.assets[0].status.byte_length, 181_808);
 
+const presentationDocument = readFileSync(
+  `${repository}/examples/hacker-night.presentation.json`,
+  'utf8',
+);
+const presentation = JSON.parse(presentationDocument);
+const loadedPresentation = app.loadPresentation(presentationDocument);
+assert.equal(loadedPresentation.disposition, 'applied');
+assert.equal(app.snapshot().presentation.cueCount, 6);
+assert.equal(app.snapshot().presentation.active, undefined);
+
+const startedPresentation = app.present(3, 0, 'start', '');
+assert.equal(startedPresentation.disposition, 'applied');
+assert.equal(app.snapshot().presentation.active.cue_id, presentation.cues[0].id);
+const linkedCue = presentation.cues[2].id;
+app.present(4, 0, 'jump', linkedCue);
+assert.equal(app.snapshot().presentation.active.cue_id, linkedCue);
+assert.throws(
+  () => app.present(5, 0, 'jump', 'not-a-uuid'),
+  /cue ID must be a UUID/,
+);
+assert.equal(
+  app.snapshot().presentation.active.cue_id,
+  linkedCue,
+  'a malformed shadow cue must preserve the preceding reducer state',
+);
+
 app.advanceFrame(1, 1);
 assert.throws(
   () => app.requestAsset(
@@ -65,6 +91,7 @@ assert.throws(
   /effect-producing input cannot be scheduled/,
 );
 
+const finalSnapshot = app.snapshot();
 app.free();
 console.log(JSON.stringify({
   requested: requested.effects.length,
@@ -72,4 +99,5 @@ console.log(JSON.stringify({
   staleDisposition: stale.disposition,
   readyBytes: ready.assets[0].status.byte_length,
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
+  presentationCue: finalSnapshot.presentation.active.cue_id,
 }));
