@@ -367,12 +367,12 @@ impl<'a> From<&'a NavigationController> for NavigationSnapshot<'a> {
             .camera_transition
             .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
         let surface_anchor_transition_remaining = controller
-            .runtime
-            .surface_anchor_transition
+            .surface_walk
+            .anchor_transition()
             .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
         let surface_anchor_hop_height = controller
-            .runtime
-            .surface_anchor_transition
+            .surface_walk
+            .anchor_transition()
             .map(|transition| transition.hop_height);
         let focus_transition_remaining = controller
             .focus

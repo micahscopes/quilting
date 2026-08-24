@@ -77,22 +77,28 @@ The first application boundary is now explicit:
   `AppStore` camera initial states, and a 120-frame deterministic trace.
   Modifier layers, surface-walk
   input, and authored-transition arbitration remain explicit later cutovers.
-- The first surface-walk application gate is now a backend-neutral
-  `SurfaceWalkController`. It owns the scene-radius/body-scale speed law,
-  combined-input unit-disc limiting, displayed-chart tangent velocity,
-  exponential contact and normal response, retained surface-relative pitch,
-  tangent alignment, eye height, and scale-relative near plane. The adapter
-  accepts contact frames rather than renderer or topology handles, so it can
-  compose with the existing animated `SurfaceWalker`, replays, native games,
-  and a future WebGPU frontend. `HyperscopeSurfaceWalk` exposes the same state
-  machine without DOM, HID, WebGL, or worker dependencies. Its generated-WASM
-  gate covers 2,160 scale/input combinations, a deterministic 600-frame
-  animated-contact trace, pitch recapture, position-only conformal updates,
-  reset, and rejected-input atomicity. The live page remains authoritative for
-  walking until this controller is joined atomically to `SurfaceRuntime` and
-  the existing Rust surface-anchor transition; browser key/HID acquisition,
-  LOD scheduling, and labels remain adapters.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 67 currently
+- Surface walking now has one backend-neutral Rust aggregate:
+  `SurfaceWalkRuntime` atomically owns `SurfaceWalker` topology and physical
+  side, `SurfaceWalkController` metric locomotion and view response, animated
+  material-point velocity, body/eye scale and near plane, recovery/detach, and
+  the sole `SurfaceAnchorTransition`. Invalid semantic input rolls the complete
+  aggregate and camera back; topology failure commits one coordinated detach.
+  The production WASM adapter borrows the incumbent posed QB controls,
+  adjacency, and conformal transform rather than cloning a chess-scale mesh.
+  `walkimpl=shadow` mirrors pointer attachment and each semantic walking frame
+  through this aggregate and exposes topology/camera drift at
+  `globalThis.__hyperscopeSurfaceWalkRustShadow`; the default is still `js`,
+  and requesting `walkimpl=rust` deliberately falls back to shadow until the
+  authority gate is earned. The transition now matches the incumbent's
+  independent forward/up direction smoothing, Gram-Schmidt basis recovery,
+  and immediate scale-relative lens/control-distance update. Generated-WASM
+  gates retain the 2,160 mapping cases and 600-frame response oracle, while
+  native aggregate tests cover atomic admission, animated velocity, scale,
+  recovery side, coordinated detach, view recapture, and locomotion cadence.
+  Live cutover remains blocked on measured target-browser parity for the
+  browser's absolute anchor clock, reflection-time follower transport,
+  Float32 near-edge behavior, and pose-time velocity sampling.
+- `hyperscope-app::ControlSpec` is the canonical registry for all 68 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. With `routeshadow=1`, the browser still writes
@@ -133,7 +139,7 @@ The first application boundary is now explicit:
   atomic rejection, and transition cadence invariance. The six-cue golden is
   `fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`;
   the navigation golden is
-  `fnv1a-128-json:c3fcf7d1c5dd2106464f90d40942d06b`; the orchestration
+  `fnv1a-128-json:87454fbfb82c9ab594e9ce9a06da69ad`; the orchestration
   golden is `fnv1a-128-json:faccd0ee52b825ad9fae8934eea9d227`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a

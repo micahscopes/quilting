@@ -1,4 +1,7 @@
-use super::{CameraError, CameraRig, SphereReflectionState};
+use super::{
+    surface_walk::smooth_surface_direction, CameraBasis, CameraError, CameraRig,
+    SphereReflectionState,
+};
 use quilting_core::Quat;
 use serde::{Deserialize, Serialize};
 
@@ -122,17 +125,38 @@ impl SurfaceAnchorTransition {
             return self.target.camera;
         }
         if linear <= 0.0 {
-            return self.start;
+            let mut start = self.start;
+            // The incumbent applies scale-relative clipping immediately;
+            // only eye/orientation glide to the new contact.
+            start.control_distance = self.target.camera.control_distance;
+            start.lens = self.target.camera.lens;
+            return start;
         }
         let t = self.easing.sample(linear);
-        let mut camera = interpolate_camera(self.start, self.target.camera, t);
+        let start_basis = self.start.basis();
+        let target_basis = self.target.camera.basis();
+        let basis = smooth_surface_direction(start_basis.forward, target_basis.forward, t)
+            .and_then(|forward| {
+                smooth_surface_direction(start_basis.up, target_basis.up, t).and_then(|up_hint| {
+                    let right = normalize3(cross3(forward, up_hint))?;
+                    let up = normalize3(cross3(right, forward))?;
+                    Some(CameraBasis { right, up, forward })
+                })
+            })
+            .unwrap_or(target_basis);
         let hop = (std::f64::consts::PI * t).sin() * self.hop_height;
-        camera.eye = add3(
+        let eye = add3(
             lerp3(self.start.eye, self.target.camera.eye, t),
             scale3(self.target.normal, hop),
         );
-        camera.semantic_target = None;
-        camera
+        CameraRig::new(
+            eye,
+            basis,
+            self.target.camera.control_distance,
+            None,
+            self.target.camera.lens,
+        )
+        .unwrap_or(self.target.camera)
     }
 }
 
@@ -249,6 +273,14 @@ fn add3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 
 fn scale3(value: [f64; 3], amount: f64) -> [f64; 3] {
     std::array::from_fn(|axis| value[axis] * amount)
+}
+
+fn cross3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
 }
 
 fn distance3(left: [f64; 3], right: [f64; 3]) -> f64 {
@@ -404,5 +436,60 @@ mod tests {
         let midpoint = transition.sample(0.5);
         assert!((midpoint.eye[0] - 2.5).abs() < 1.0e-12);
         assert!((midpoint.eye[2] - (3.0 + hop_height)).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn surface_anchor_matches_incumbent_basis_and_applies_walk_lens_immediately() {
+        let start = CameraRig::default();
+        let target_camera = CameraRig::new(
+            [2.0, 0.0, 3.0],
+            CameraBasis {
+                right: [0.0, 0.0, -1.0],
+                up: [1.0, 0.0, 0.0],
+                forward: [0.0, 1.0, 0.0],
+            },
+            7.0,
+            None,
+            PerspectiveLens {
+                vertical_fov_radians: 1.2,
+                near: 0.000_4,
+                far: 20_000.0,
+            },
+        )
+        .unwrap();
+        let transition = SurfaceAnchorTransition::new(
+            start,
+            SurfaceAnchorTarget::new(target_camera, [0.0, 1.0, 0.0]).unwrap(),
+            10.0,
+            1.0,
+            TransitionEasing::Linear,
+        )
+        .unwrap();
+
+        let initial = transition.sample(0.0);
+        assert_eq!(initial.eye, start.eye);
+        assert_eq!(initial.control_distance, target_camera.control_distance);
+        assert_eq!(initial.lens, target_camera.lens);
+
+        let midpoint = transition.sample(0.5);
+        let basis = midpoint.basis();
+        let expected_forward = [0.0, 2.0_f64.sqrt().recip(), -2.0_f64.sqrt().recip()];
+        let expected_right = [
+            3.0_f64.sqrt().recip(),
+            -3.0_f64.sqrt().recip(),
+            -3.0_f64.sqrt().recip(),
+        ];
+        let expected_up = [
+            (2.0 / 3.0_f64).sqrt(),
+            6.0_f64.sqrt().recip(),
+            6.0_f64.sqrt().recip(),
+        ];
+        for axis in 0..3 {
+            assert!((basis.forward[axis] - expected_forward[axis]).abs() < 1.0e-12);
+            assert!((basis.right[axis] - expected_right[axis]).abs() < 1.0e-12);
+            assert!((basis.up[axis] - expected_up[axis]).abs() < 1.0e-12);
+        }
+        assert_eq!(midpoint.control_distance, target_camera.control_distance);
+        assert_eq!(midpoint.lens, target_camera.lens);
     }
 }

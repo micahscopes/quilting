@@ -30,11 +30,16 @@ use quilting_core::render::{
 };
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
-use crate::surface_runtime::{SurfaceRuntime, SurfaceRuntimeSnapshot};
+use crate::surface_runtime::{
+    ComposedSurfaceWalkSnapshot, SurfaceRuntime, SurfaceRuntimeSnapshot,
+};
 use hyperscape::interchange::{
     GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
 };
-use hyperscape::{ChamberSide, ContactClassification};
+use hyperscape::{
+    CameraBasis, CameraRig, ChamberSide, ContactClassification, PerspectiveLens,
+    SurfaceWalkControls, SurfaceWalkInput,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -1575,6 +1580,85 @@ fn surface_snapshot_to_js(snapshot: Result<SurfaceRuntimeSnapshot, String>) -> J
     }
 }
 
+fn composed_surface_snapshot_to_js(
+    snapshot: Result<ComposedSurfaceWalkSnapshot, String>,
+) -> JsValue {
+    match snapshot {
+        Ok(snapshot) => serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL),
+        Err(error) => {
+            warn!("Composed surface walker: {error}");
+            let result = js_sys::Object::new();
+            js_sys::Reflect::set(&result, &"status".into(), &"error".into()).ok();
+            js_sys::Reflect::set(&result, &"error".into(), &error.into()).ok();
+            result.into()
+        }
+    }
+}
+
+fn exact_vector3(values: &[f64], label: &str) -> Result<[f64; 3], String> {
+    values
+        .try_into()
+        .map_err(|_| format!("{label} must contain exactly three numbers"))
+}
+
+fn surface_walk_camera(
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    parameters: &[f64],
+) -> Result<CameraRig, String> {
+    let [control_distance, vertical_fov_radians, near, far]: [f64; 4] = parameters
+        .try_into()
+        .map_err(|_| "surface-walk camera parameters must contain exactly four numbers")?;
+    CameraRig::new(
+        exact_vector3(eye, "surface-walk camera eye")?,
+        CameraBasis::from_forward_up(
+            exact_vector3(forward, "surface-walk camera forward")?,
+            exact_vector3(up, "surface-walk camera up")?,
+        )
+        .map_err(|error| error.to_string())?,
+        control_distance,
+        None,
+        PerspectiveLens {
+            vertical_fov_radians,
+            near,
+            far,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn surface_walk_controls(values: &[f64]) -> Result<SurfaceWalkControls, String> {
+    let [
+        base_radii_per_second,
+        base_eye_height,
+        speed_octave_steps,
+        body_scale_octave_steps,
+        eye_height_octave_steps,
+        smoothing_seconds,
+        tangent_pull_fraction,
+        fast_multiplier,
+        default_near,
+        minimum_near,
+        near_eye_fraction,
+    ]: [f64; 11] = values
+        .try_into()
+        .map_err(|_| "surface-walk controls must contain exactly eleven numbers")?;
+    Ok(SurfaceWalkControls {
+        base_radii_per_second,
+        base_eye_height,
+        speed_octave_steps,
+        body_scale_octave_steps,
+        eye_height_octave_steps,
+        smoothing_seconds,
+        tangent_pull_fraction,
+        fast_multiplier,
+        default_near,
+        minimum_near,
+        near_eye_fraction,
+    })
+}
+
 /// Attach the Rust walker to a source face selected by `mr_pickSurface`.
 #[wasm_bindgen(js_name = "mr_attachSurface")]
 pub fn mr_attach_surface(
@@ -1626,6 +1710,63 @@ pub fn mr_attach_surface(
     })
 }
 
+/// Candidate Rust-authoritative surface-walk attachment. The legacy walker
+/// remains available beside this instance only for `js|shadow|rust` migration
+/// comparison; both borrow the same immutable geometry and pose data.
+#[wasm_bindgen(js_name = "mr_attachSurfaceWalk")]
+#[allow(clippy::too_many_arguments)]
+pub fn mr_attach_surface_walk(
+    face: u32,
+    barycentric: &[f64],
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    camera_parameters: &[f64],
+    scene_radius: f64,
+    controls: &[f64],
+    transition_duration_seconds: f64,
+) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let Some(&node) = state.face_nodes.get(face as usize) else {
+            return composed_surface_snapshot_to_js(Err("surface face has no node".into()));
+        };
+        let request = (|| {
+            let barycentric = exact_vector3(barycentric, "surface barycentric")?;
+            let camera = surface_walk_camera(eye, forward, up, camera_parameters)?;
+            let controls = surface_walk_controls(controls)?;
+            let conformal = conformal_state_for_node(state, node);
+            let orientation_sign = conformal.orientation_sign
+                * affine_orientation_sign(&conformal.euclidean_model);
+            let MainState {
+                surface_runtime,
+                cached_instances,
+                face_nodes,
+                num_faces,
+                ..
+            } = state;
+            surface_runtime.attach_composed(
+                cached_instances,
+                *num_faces,
+                face_nodes,
+                face,
+                barycentric,
+                camera,
+                scene_radius,
+                controls,
+                transition_duration_seconds,
+                orientation_sign,
+                conformal.mobius,
+                conformal.euclidean_model,
+            )
+        })();
+        composed_surface_snapshot_to_js(request)
+    })
+}
+
 /// Advance relative to the current animated surface in the displayed output
 /// chart. The runtime adds measured surface/frame velocity before applying the
 /// Jacobian pseudoinverse, so zero input remains stuck to moving geometry.
@@ -1665,6 +1806,73 @@ pub fn mr_step_surface(delta_seconds: f64, relative_output_velocity: &[f32]) -> 
             conformal.mobius,
             conformal.euclidean_model,
         ))
+    })
+}
+
+/// Apply one complete semantic walking frame to the composed Rust candidate.
+/// The returned packet contains topology, metrics, target contact camera, and
+/// the camera to render after the optional anchor glide.
+#[wasm_bindgen(js_name = "mr_stepSurfaceWalk")]
+#[allow(clippy::too_many_arguments)]
+pub fn mr_step_surface_walk(
+    delta_seconds: f64,
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    camera_parameters: &[f64],
+    scene_radius: f64,
+    controls: &[f64],
+    forward_axis: f64,
+    right_axis: f64,
+    fast: bool,
+    orient: bool,
+    capture_relative_view: bool,
+) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let request = (|| {
+            let face = state
+                .surface_runtime
+                .composed_attachment_face()
+                .ok_or_else(|| "composed surface walker is detached".to_string())?;
+            let node = *state
+                .face_nodes
+                .get(face as usize)
+                .ok_or_else(|| "attached face has no node".to_string())?;
+            let camera = surface_walk_camera(eye, forward, up, camera_parameters)?;
+            let controls = surface_walk_controls(controls)?;
+            let conformal = conformal_state_for_node(state, node);
+            let orientation_sign = conformal.orientation_sign
+                * affine_orientation_sign(&conformal.euclidean_model);
+            let MainState {
+                surface_runtime,
+                cached_instances,
+                face_nodes,
+                ..
+            } = state;
+            surface_runtime.step_composed(
+                cached_instances,
+                face_nodes,
+                delta_seconds,
+                camera,
+                scene_radius,
+                controls,
+                SurfaceWalkInput {
+                    forward_axis,
+                    right_axis,
+                    fast,
+                },
+                orient,
+                capture_relative_view,
+                orientation_sign,
+                conformal.mobius,
+                conformal.euclidean_model,
+            )
+        })();
+        composed_surface_snapshot_to_js(request)
     })
 }
 

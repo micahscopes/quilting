@@ -283,8 +283,8 @@ impl AppState {
             });
         let surface_anchor_transition_remaining = self
             .navigation
-            .runtime
-            .surface_anchor_transition
+            .surface_walk
+            .anchor_transition()
             .map(|transition| (transition.duration_seconds - transition.elapsed_seconds).max(0.0));
         AppFrameSnapshot {
             revision: self.revision,
@@ -299,8 +299,8 @@ impl AppState {
             surface_anchor_transition_remaining,
             surface_anchor_hop_height: self
                 .navigation
-                .runtime
-                .surface_anchor_transition
+                .surface_walk
+                .anchor_transition()
                 .map(|transition| transition.hop_height),
         }
     }

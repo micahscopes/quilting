@@ -152,6 +152,10 @@ pub struct SurfaceContact {
     pub address: SurfaceAddress,
     pub output_position: [f64; 3],
     pub output_normal: [f64; 3],
+    /// Output-chart velocity of the attached material point due to animation
+    /// and conformal-frame motion. Locomotion adds its relative tangent intent
+    /// to this value before advancing through the surface metric.
+    pub surface_velocity: [f64; 3],
     pub eye_position: [f64; 3],
 }
 
@@ -590,6 +594,7 @@ fn contact_from_sample(
         address: attachment.address,
         output_position: sample.output_position,
         output_normal,
+        surface_velocity: sample.surface_velocity,
         eye_position: add(
             sample.output_position,
             scale(output_normal, attachment.eye_height),

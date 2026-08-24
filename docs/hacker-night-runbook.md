@@ -38,7 +38,7 @@ traces without a renderer.
 
 The replay checks must print
 `PASS fnv1a-128-json:ff9b269959257fc54bfc038dae2a3306`,
-`PASS fnv1a-128-json:c3fcf7d1c5dd2106464f90d40942d06b`, and
+`PASS fnv1a-128-json:87454fbfb82c9ab594e9ce9a06da69ad`, and
 `PASS fnv1a-128-json:faccd0ee52b825ad9fae8934eea9d227`. The first executes
 the complete six-cue semantic walkthrough. The second exercises every current
 navigation action, including focus/inversion, camera and surface transitions,
@@ -157,6 +157,13 @@ Use a fresh browser tab after the release build and verify:
 
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.
+
+For migration diagnostics only, add `walkimpl=shadow`. The rendered camera and
+attachment still come from the JavaScript oracle, while the composed Rust
+candidate reports samples, topology/camera drift, and its last packet at
+`globalThis.__hyperscopeSurfaceWalkRustShadow`. Do not use `walkimpl=rust` for
+the talk: it is intentionally redirected to shadow until live parity gates are
+closed.
 
 ## 6. Recovery during the talk
 

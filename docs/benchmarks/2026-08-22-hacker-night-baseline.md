@@ -553,3 +553,35 @@ and release Trunk build passed. The next authority gate must compose this view
 response, `SurfaceWalker` advancement, height/scale intent, and the existing
 surface-anchor transition into one application action before deleting browser
 walk state.
+
+## Atomic Rust surface-walk aggregate follow-up
+
+On 2026-08-24, `hyperscape::SurfaceWalkRuntime` composed the response boundary,
+animated `SurfaceWalker` topology, physical-side choice, body/eye scale,
+scale-relative clipping, animated material-point velocity, recovery/detach,
+and the surface-anchor transition into one copy-on-commit owner. Invalid
+semantic input leaves the entire aggregate and camera untouched; a topology
+failure resets topology, response history, and transition together. The
+surface transition also changed from generic quaternion interpolation to the
+incumbent browser oracle's independent forward/up spherical smoothing followed
+by Gram-Schmidt recovery, with target lens and control distance applied
+immediately.
+
+The production WASM adapter borrows the existing posed QB controls, adjacency,
+and conformal state rather than duplicating mesh data. `walkimpl=shadow` mirrors
+right-click attachment and per-frame semantic walking input, records topology
+and camera drift in the page, and never changes the rendered result. The
+default remains `js`; a requested `rust` mode is deliberately redirected to
+shadow. The remaining authority blockers are target-browser measurements of
+the incumbent absolute anchor clock, follower state across reflection/chart
+transport, Float32-sensitive near-edge crossings, and animation pose-time
+velocity.
+
+This slice increased optimized WASM from 6,029,193 to 6,053,590 bytes (+24,397
+raw); gzip increased from 2,118,125 to 2,128,315 bytes (+10,190). The
+source-coherent build receipt is `d2a0b8f45a03f2be97f772a88819605e` over 156
+files and 38,481,078 bytes. The release Trunk build, 69 Hyperscape tests, 41
+browser-independent JavaScript tests, five generated-WASM smokes, and all
+three replay lanes passed after deliberately updating only the navigation
+golden for the reviewed surface-anchor interpolation semantics. Live browser
+authority remains unchanged.

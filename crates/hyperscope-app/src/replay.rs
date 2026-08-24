@@ -890,14 +890,14 @@ fn replay_state(store: &AppStore) -> AppReplayState {
                 .expect("supported Rust targets have at most 64-bit usize"),
             last_applied_sequence: navigation.runtime.last_applied_sequence,
             surface_anchor_transition_remaining_seconds: navigation
-                .runtime
-                .surface_anchor_transition
+                .surface_walk
+                .anchor_transition()
                 .map(|transition| {
                     (transition.duration_seconds - transition.elapsed_seconds).max(0.0)
                 }),
             surface_anchor_hop_height: navigation
-                .runtime
-                .surface_anchor_transition
+                .surface_walk
+                .anchor_transition()
                 .map(|transition| transition.hop_height),
             diagnostics: navigation.diagnostics.0.clone(),
         },

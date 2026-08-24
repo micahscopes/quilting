@@ -356,6 +356,7 @@ import init, {
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
   mr_setPresentationNodeStates,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
+  mr_attachSurfaceWalk, mr_stepSurfaceWalk,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere,
   mr_debugResidentLodEdges,
   required_tessellation_atlas_triples,
@@ -408,6 +409,14 @@ const RUST_ROUTE_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('routeshadow') === '1';
 const RUST_RENDER_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('rendershadow') === '1';
+const SURFACE_WALK_IMPLEMENTATION = (() => {
+  const requested = new URLSearchParams(location.search).get('walkimpl') || 'js';
+  if (requested === 'rust') {
+    console.warn('walkimpl=rust is parity-gated; running the Rust candidate in shadow mode');
+    return 'shadow';
+  }
+  return requested === 'shadow' ? 'shadow' : 'js';
+})();
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 const rustRouteShadowDiagnostics = {
   enabled: RUST_ROUTE_SHADOW_ENABLED,
@@ -810,7 +819,7 @@ const PARAM_DEFAULTS = {
   smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
-  walkspeed: '0', walkscale: '0', walkheight: '0',
+  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -846,7 +855,7 @@ function readParams() {
     smbpinv: get('smbpinv'), smbrinv: get('smbrinv'),
     fov: get('fov'), interp: get('interp'), walksmooth: get('walksmooth'),
     walkalign: get('walkalign'), walkspeed: get('walkspeed'),
-    walkscale: get('walkscale'), walkheight: get('walkheight'),
+    walkscale: get('walkscale'), walkheight: get('walkheight'), walkimpl: get('walkimpl'),
     cue: get('cue'),
     lab: get('lab'), labfield: get('labfield'),
     laba: get('laba'), labb: get('labb'), labc: get('labc'),
@@ -918,6 +927,7 @@ function syncURL() {
       ss('walkspeed', walkSpeedSteps, PARAM_DEFAULTS.walkspeed);
       ss('walkscale', walkScaleSteps, PARAM_DEFAULTS.walkscale);
       ss('walkheight', walkHeightSteps, PARAM_DEFAULTS.walkheight);
+      set('walkimpl', SURFACE_WALK_IMPLEMENTATION, PARAM_DEFAULTS.walkimpl);
       if (patchLab.active) {
         set('lab', patchLab.shape, PARAM_DEFAULTS.lab);
         set('labfield', $('patch-lab-field').value, PARAM_DEFAULTS.labfield);
@@ -2193,6 +2203,168 @@ const surfaceWalk = {
 };
 globalThis.__hyperscopeSurfaceWalk = surfaceWalk;
 
+const surfaceWalkRustShadow = {
+  enabled: SURFACE_WALK_IMPLEMENTATION === 'shadow',
+  samples: 0,
+  topologyDriftFrames: 0,
+  cameraDriftFrames: 0,
+  maxBarycentricError: 0,
+  maxCameraError: 0,
+  lastError: null,
+  lastDrift: null,
+  snapshot: null,
+};
+globalThis.__hyperscopeSurfaceWalkRustShadow = surfaceWalkRustShadow;
+
+function surfaceWalkRustControls() {
+  return new Float64Array([
+    DEFAULT_WALK_RADII_PER_SECOND,
+    surfaceWalk.baseEyeHeight,
+    walkSpeedSteps.peek(),
+    walkScaleSteps.peek(),
+    walkHeightSteps.peek(),
+    walkSmoothingCentiseconds.peek() / 100,
+    walkTangentPullPercent.peek() / 100,
+    3,
+    0.01,
+    1e-7,
+    0.08,
+  ]);
+}
+
+function surfaceWalkRustCamera(frame = activeCameraFrame()) {
+  return {
+    eye: new Float64Array(frame.eye),
+    forward: new Float64Array(frame.basis.slice(6, 9)),
+    up: new Float64Array(frame.basis.slice(3, 6)),
+    parameters: new Float64Array([
+      frame.controlDistance,
+      cameraFovRadians(),
+      cameraNearPlane(),
+      10000,
+    ]),
+  };
+}
+
+function attachSurfaceWalkRustShadow(picked, startFrame) {
+  if (!surfaceWalkRustShadow.enabled) return null;
+  try {
+    const camera = surfaceWalkRustCamera(startFrame);
+    const snapshot = mr_attachSurfaceWalk(
+      picked.face,
+      new Float64Array(picked.barycentric),
+      camera.eye,
+      camera.forward,
+      camera.up,
+      camera.parameters,
+      Math.max(sceneSourceBound?.radius || 1, 1e-4),
+      surfaceWalkRustControls(),
+      focusTransitionCentiseconds.peek() / 100,
+    );
+    surfaceWalkRustShadow.snapshot = snapshot;
+    surfaceWalkRustShadow.lastError = snapshot?.status === 'error'
+      ? snapshot.error || 'Rust surface attachment failed' : null;
+    return snapshot;
+  } catch (error) {
+    surfaceWalkRustShadow.lastError = error?.message || String(error);
+    return null;
+  }
+}
+
+function stepSurfaceWalkRustShadow({
+  deltaSeconds,
+  forwardAxis,
+  rightAxis,
+  fast,
+  captureRelativeView,
+}) {
+  if (!surfaceWalkRustShadow.enabled) return null;
+  try {
+    const camera = surfaceWalkRustCamera();
+    const snapshot = mr_stepSurfaceWalk(
+      deltaSeconds,
+      camera.eye,
+      camera.forward,
+      camera.up,
+      camera.parameters,
+      Math.max(sceneSourceBound?.radius || 1, 1e-4),
+      surfaceWalkRustControls(),
+      forwardAxis,
+      rightAxis,
+      fast,
+      true,
+      captureRelativeView,
+    );
+    surfaceWalkRustShadow.snapshot = snapshot;
+    surfaceWalkRustShadow.lastError = snapshot?.status === 'error'
+      ? snapshot.error || 'Rust surface step failed' : null;
+    return snapshot;
+  } catch (error) {
+    surfaceWalkRustShadow.lastError = error?.message || String(error);
+    return null;
+  }
+}
+
+function recordSurfaceWalkRustShadow(rustSnapshot, browserSnapshot) {
+  if (!browserSnapshot) return;
+  surfaceWalkRustShadow.samples += 1;
+  const rustStatus = rustSnapshot?.status || 'missing';
+  const browserStatus = browserSnapshot.status || 'missing';
+  const bothAttached = rustStatus === 'attached' && browserStatus === 'attached';
+  let barycentricError = 0;
+  let topologyMatches = rustStatus === browserStatus;
+  if (bothAttached) {
+    topologyMatches = topologyMatches && rustSnapshot.face === browserSnapshot.face;
+  } else if (rustStatus === 'detached' && browserStatus === 'detached') {
+    topologyMatches = rustSnapshot.detach_reason === browserSnapshot.detach_reason;
+  }
+  if (bothAttached && rustSnapshot.barycentric && browserSnapshot.barycentric) {
+    for (let axis = 0; axis < 3; axis++) {
+      barycentricError = Math.max(
+        barycentricError,
+        Math.abs(rustSnapshot.barycentric[axis] - browserSnapshot.barycentric[axis]),
+      );
+    }
+  } else if (bothAttached) {
+    topologyMatches = false;
+    barycentricError = Infinity;
+  }
+  const cameraError = bothAttached
+    ? navigationCameraFrameError(rustSnapshot, activeCameraFrame())
+    : 0;
+  surfaceWalkRustShadow.maxBarycentricError = Math.max(
+    surfaceWalkRustShadow.maxBarycentricError,
+    barycentricError,
+  );
+  surfaceWalkRustShadow.maxCameraError = Math.max(
+    surfaceWalkRustShadow.maxCameraError,
+    cameraError,
+  );
+  if (!topologyMatches || barycentricError > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+    surfaceWalkRustShadow.topologyDriftFrames += 1;
+  }
+  if (cameraError > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+    surfaceWalkRustShadow.cameraDriftFrames += 1;
+  }
+  if (!topologyMatches || barycentricError > RUST_NAVIGATION_SHADOW_TOLERANCE
+      || cameraError > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+    surfaceWalkRustShadow.lastDrift = {
+      topologyMatches,
+      barycentricError,
+      cameraError,
+      browser: browserSnapshot,
+      rust: rustSnapshot,
+    };
+    const count = Math.max(
+      surfaceWalkRustShadow.topologyDriftFrames,
+      surfaceWalkRustShadow.cameraDriftFrames,
+    );
+    if (count === 1 || (count & (count - 1)) === 0) {
+      console.warn('Rust composed surface-walk shadow drift:', surfaceWalkRustShadow.lastDrift);
+    }
+  }
+}
+
 function surfaceWalkScale() {
   return Math.pow(2, walkScaleSteps.peek() / 100);
 }
@@ -2838,8 +3010,11 @@ canvas.addEventListener('contextmenu', e => {
     surfaceWalkEyeHeight(),
     pickCameraPos,
   );
+  const rustSurfaceSnapshot = attachSurfaceWalkRustShadow(picked, startFrame);
   if (snapshot?.status === 'attached') beginSurfaceWalkAnchorTransition(startFrame);
-  if (updateSurfaceWalkSnapshot(snapshot)) {
+  const attached = updateSurfaceWalkSnapshot(snapshot);
+  recordSurfaceWalkRustShadow(rustSurfaceSnapshot, snapshot);
+  if (attached) {
     mr_highlightFace(picked.face);
     debouncedLodRecompute();
   }
@@ -5110,8 +5285,17 @@ function frame(ts) {
           (forward[1] * forwardAxis + right[1] * rightAxis) * speed / inputLength,
           (forward[2] * forwardAxis + right[2] * rightAxis) * speed / inputLength,
         ]);
+        const rustSurfaceSnapshot = stepSurfaceWalkRustShadow({
+          deltaSeconds,
+          forwardAxis,
+          rightAxis,
+          fast,
+          captureRelativeView: surfaceWalk.inputRevision !== manualCameraInputRevision,
+        });
         const snapshot = mr_stepSurface(deltaSeconds, velocity);
-        if (updateSurfaceWalkSnapshot(snapshot, { deltaSeconds })) {
+        const attached = updateSurfaceWalkSnapshot(snapshot, { deltaSeconds });
+        recordSurfaceWalkRustShadow(rustSurfaceSnapshot, snapshot);
+        if (attached) {
           const moving = Math.abs(forwardAxis) > 1e-5 || Math.abs(rightAxis) > 1e-5;
           if (moving && ts - surfaceWalk.lastLodAt >= 100) {
             surfaceWalk.lastLodAt = ts;

@@ -7,11 +7,14 @@ This document remains the detailed behavior oracle for focus and navigation.
 Status: the browser prototype is functional, the render contract is GPU-side,
 and `hyperscape` now owns `FocusNavigation`, quaternion `CameraRig`, named
 navigation policies, sequence/timestamp-ordered `NavigationAction`s, and
-deterministic camera/focus transitions. This includes the surface re-anchor
-glide: Hyperscape owns its virtual clock, quaternion interpolation, bounded
-scene-scale hop, animated destination refresh, and cancellation policy. The
-prototype remains the behavior oracle while the opt-in WASM shadow path
-measures parity before authority is removed from `hyperscope.html`.
+deterministic camera/focus transitions. `SurfaceWalkRuntime` is the single Rust
+owner of surface topology, physical side, metric locomotion, animated contact
+response, view following, scale/height/near policy, recovery/detach, and the
+surface re-anchor glide. That glide matches the browser oracle's independent
+forward/up spherical smoothing and Gram-Schmidt reconstruction rather than
+using a generic quaternion camera interpolation. The prototype remains the
+live behavior oracle while `walkimpl=shadow` measures the composed aggregate
+before authority is removed from `hyperscope.html`.
 
 ## One sphere, several meanings
 
@@ -138,15 +141,19 @@ or sphere state.
    modifiers, authored-camera
    arbitration, and live browser cutover remain outside this slice; rotation
    cadence invariance is not inferred from same-trace parity.
-   The semantic surface-walk response is now frozen separately in
-   `SurfaceWalkController`: scene-relative pace and avatar scale, tangent
-   velocity, contact/normal smoothing, relative-pitch retention, tangent pull,
-   eye height, and the scale-aware near plane no longer require a browser.
-   `HyperscopeSurfaceWalk` exercises that controller through generated WASM
-   over 2,160 mapping cases and a deterministic 600-frame contact trace. The
-   live walker is not cut over yet: the next gate must combine this response,
-   `SurfaceWalker` advancement, and `SurfaceAnchorTransition` in one atomic
-   application action so Rust and JavaScript cannot disagree about attachment.
+   The semantic surface-walk response and topology are now composed in
+   `SurfaceWalkRuntime`: scene-relative pace and avatar scale, tangent
+   velocity, current animated material-point velocity, contact/normal
+   smoothing, relative-pitch retention, tangent pull, eye height, scale-aware
+   near plane, surface advancement, recovery/detach, and re-anchor transition
+   commit atomically. `walkimpl=shadow` feeds right-click attachment and each
+   semantic walking frame to the candidate while JavaScript remains live
+   authority. The production adapter shares the same posed QB geometry and
+   adjacency as the incumbent walker and exposes bounded topology/camera drift
+   diagnostics. Cutover waits for clean Chrome traces across absolute-clock
+   anchor timing, reflection/chart edits, animation pose sampling, and
+   Float32-sensitive edge crossings; `walkimpl=rust` therefore resolves back
+   to shadow for now.
 4. **Selection bridge.** Map stable glTF node identities to Hyperscape
    entities, send pick results as semantic selection actions, tick sphere
    transitions in Rust, and extract one compact focus packet per view.

@@ -1,6 +1,6 @@
 use super::{
     CameraRig, CameraTransition, FocusNavigation, FocusSphere, NavigationFrame, NavigationPreset,
-    SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition, TransitionEasing,
+    SphereReflectionState, SurfaceAnchorTarget, SurfaceWalkRuntime, TransitionEasing,
 };
 use crate::{HyperscapeDiagnostics, StableEntityId};
 use bevy_ecs::prelude::{Res, ResMut, Resource};
@@ -78,6 +78,7 @@ pub struct NavigationActionQueue {
 pub struct NavigationController {
     pub queue: NavigationActionQueue,
     pub runtime: NavigationRuntime,
+    pub surface_walk: SurfaceWalkRuntime,
     pub camera: CameraRig,
     pub focus: FocusNavigation,
     pub diagnostics: HyperscapeDiagnostics,
@@ -124,6 +125,7 @@ impl NavigationController {
             elapsed_seconds,
             &mut self.queue,
             &mut self.runtime,
+            &mut self.surface_walk,
             &mut self.camera,
             &mut self.focus,
             &mut self.diagnostics,
@@ -196,7 +198,6 @@ pub struct NavigationRuntime {
     pub preset: NavigationPreset,
     pub reflection: SphereReflectionState,
     pub camera_transition: Option<CameraTransition>,
-    pub surface_anchor_transition: Option<SurfaceAnchorTransition>,
     pub integrated_until_seconds: f64,
     pub last_applied_sequence: Option<u64>,
 }
@@ -207,7 +208,6 @@ impl Default for NavigationRuntime {
             preset: NavigationPreset::Hyperscope,
             reflection: SphereReflectionState::Identity,
             camera_transition: None,
-            surface_anchor_transition: None,
             integrated_until_seconds: 0.0,
             last_applied_sequence: None,
         }
@@ -218,6 +218,7 @@ pub(crate) fn apply_navigation_actions(
     time: Res<Time<Virtual>>,
     mut queue: ResMut<NavigationActionQueue>,
     mut runtime: ResMut<NavigationRuntime>,
+    mut surface_walk: ResMut<SurfaceWalkRuntime>,
     mut camera: ResMut<CameraRig>,
     mut focus: ResMut<FocusNavigation>,
     mut diagnostics: ResMut<HyperscapeDiagnostics>,
@@ -226,6 +227,7 @@ pub(crate) fn apply_navigation_actions(
         time.elapsed_secs_f64(),
         &mut queue,
         &mut runtime,
+        &mut surface_walk,
         &mut camera,
         &mut focus,
         &mut diagnostics,
@@ -236,6 +238,7 @@ fn integrate_navigation_to(
     now: f64,
     queue: &mut NavigationActionQueue,
     runtime: &mut NavigationRuntime,
+    surface_walk: &mut SurfaceWalkRuntime,
     camera: &mut CameraRig,
     focus: &mut FocusNavigation,
     diagnostics: &mut HyperscapeDiagnostics,
@@ -261,24 +264,26 @@ fn integrate_navigation_to(
         advance_navigation(
             action_time - runtime.integrated_until_seconds,
             runtime,
+            surface_walk,
             camera,
             focus,
             diagnostics,
         );
         runtime.integrated_until_seconds = action_time;
-        if let Err(error) = apply_action(scheduled.action, runtime, camera, focus) {
+        if let Err(error) = apply_action(scheduled.action, runtime, surface_walk, camera, focus) {
             diagnostics.0.push(format!(
                 "navigation action {} failed: {error}",
                 scheduled.sequence
             ));
         }
         runtime.last_applied_sequence = Some(scheduled.sequence);
-        reconcile_reflection(runtime, camera, focus, diagnostics);
+        reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
     }
 
     advance_navigation(
         now - runtime.integrated_until_seconds,
         runtime,
+        surface_walk,
         camera,
         focus,
         diagnostics,
@@ -289,6 +294,7 @@ fn integrate_navigation_to(
 fn apply_action(
     action: NavigationAction,
     runtime: &mut NavigationRuntime,
+    surface_walk: &mut SurfaceWalkRuntime,
     camera: &mut CameraRig,
     focus: &mut FocusNavigation,
 ) -> Result<(), String> {
@@ -296,7 +302,7 @@ fn apply_action(
         NavigationAction::SetPreset(preset) => runtime.preset = preset,
         NavigationAction::ApplyFrame(frame) => {
             runtime.camera_transition = None;
-            runtime.surface_anchor_transition = None;
+            surface_walk.cancel_anchor_transition();
             camera
                 .apply_navigation(runtime.preset, frame)
                 .map_err(|error| error.to_string())?;
@@ -304,7 +310,7 @@ fn apply_action(
         NavigationAction::SetCamera(target) => {
             target.validate().map_err(|error| error.to_string())?;
             runtime.camera_transition = None;
-            runtime.surface_anchor_transition = None;
+            surface_walk.cancel_anchor_transition();
             *camera = target;
         }
         NavigationAction::TransitionCamera {
@@ -318,7 +324,7 @@ fn apply_action(
             }
             if duration_seconds == 0.0 {
                 runtime.camera_transition = None;
-                runtime.surface_anchor_transition = None;
+                surface_walk.cancel_anchor_transition();
                 *camera = target;
             } else {
                 let transition = CameraTransition::new(*camera, target, duration_seconds, easing)
@@ -328,7 +334,7 @@ fn apply_action(
                 // Make the live state match before a same-timestamp reflection.
                 *camera = transition.start;
                 runtime.camera_transition = Some(transition);
-                runtime.surface_anchor_transition = None;
+                surface_walk.cancel_anchor_transition();
             }
         }
         NavigationAction::BeginSurfaceAnchorTransition {
@@ -345,33 +351,17 @@ fn apply_action(
             let target = SurfaceAnchorTarget::new(target.camera, target.normal)
                 .map_err(|error| error.to_string())?;
             runtime.camera_transition = None;
-            if duration_seconds == 0.0 {
-                runtime.surface_anchor_transition = None;
-                *camera = target.camera;
-            } else {
-                let transition = SurfaceAnchorTransition::new(
-                    *camera,
-                    target,
-                    scene_radius,
-                    duration_seconds,
-                    easing,
-                )
+            surface_walk
+                .begin_anchor_transition(camera, target, scene_radius, duration_seconds, easing)
                 .map_err(|error| error.to_string())?;
-                *camera = transition.start;
-                runtime.surface_anchor_transition = Some(transition);
-            }
         }
         NavigationAction::UpdateSurfaceAnchorTarget(target) => {
-            let transition = runtime
-                .surface_anchor_transition
-                .as_mut()
-                .ok_or_else(|| "surface anchor transition is not active".to_owned())?;
-            transition
-                .retarget(target)
-                .map_err(|error| error.to_string())?;
+            surface_walk
+                .update_anchor_target(target)
+                .map_err(|_| "surface anchor transition is not active".to_owned())?;
         }
         NavigationAction::CancelSurfaceAnchorTransition => {
-            runtime.surface_anchor_transition = None;
+            surface_walk.cancel_anchor_transition();
         }
         NavigationAction::AnchorFocus {
             entity,
@@ -433,6 +423,7 @@ fn apply_action(
 fn advance_navigation(
     delta_seconds: f64,
     runtime: &mut NavigationRuntime,
+    surface_walk: &mut SurfaceWalkRuntime,
     camera: &mut CameraRig,
     focus: &mut FocusNavigation,
     diagnostics: &mut HyperscapeDiagnostics,
@@ -440,21 +431,20 @@ fn advance_navigation(
     if !delta_seconds.is_finite() || delta_seconds <= 0.0 {
         return;
     }
-    if let Some(transition) = runtime.surface_anchor_transition.as_mut() {
-        if transition.advance(delta_seconds, camera) {
-            runtime.surface_anchor_transition = None;
-        }
+    if surface_walk.anchor_transition().is_some() {
+        surface_walk.advance_anchor_transition(delta_seconds, camera);
     } else if let Some(transition) = runtime.camera_transition.as_mut() {
         if transition.advance(delta_seconds, camera) {
             runtime.camera_transition = None;
         }
     }
     focus.advance(delta_seconds);
-    reconcile_reflection(runtime, camera, focus, diagnostics);
+    reconcile_reflection(runtime, surface_walk, camera, focus, diagnostics);
 }
 
 fn reconcile_reflection(
     runtime: &mut NavigationRuntime,
+    surface_walk: &mut SurfaceWalkRuntime,
     camera: &mut CameraRig,
     focus: &FocusNavigation,
     diagnostics: &mut HyperscapeDiagnostics,
@@ -470,7 +460,7 @@ fn reconcile_reflection(
     // A surface target is expressed in the prior displayed chart. The browser
     // behavior oracle cancels re-anchor glides on chart edits and asks the
     // attached walker for a fresh frame; preserve that safety rule here.
-    runtime.surface_anchor_transition = None;
+    surface_walk.cancel_anchor_transition();
     let mut transported_camera = *camera;
     let mut transported_transition = runtime.camera_transition;
     let result = transported_camera
@@ -708,8 +698,8 @@ mod tests {
             .unwrap();
         controller.tick(0.5).unwrap();
         let elapsed = controller
-            .runtime
-            .surface_anchor_transition
+            .surface_walk
+            .anchor_transition()
             .unwrap()
             .elapsed_seconds;
         controller
@@ -721,8 +711,8 @@ mod tests {
 
         assert_eq!(
             controller
-                .runtime
-                .surface_anchor_transition
+                .surface_walk
+                .anchor_transition()
                 .unwrap()
                 .elapsed_seconds,
             elapsed
@@ -747,12 +737,12 @@ mod tests {
             .push(NavigationAction::ApplyFrame(NavigationFrame::default()))
             .unwrap();
         controller.tick(0.0).unwrap();
-        assert!(controller.runtime.surface_anchor_transition.is_none());
+        assert!(controller.surface_walk.anchor_transition().is_none());
 
         controller.push(begin).unwrap();
         controller.tick(0.0).unwrap();
         controller.push(NavigationAction::ToggleInversion).unwrap();
         controller.tick(0.0).unwrap();
-        assert!(controller.runtime.surface_anchor_transition.is_none());
+        assert!(controller.surface_walk.anchor_transition().is_none());
     }
 }

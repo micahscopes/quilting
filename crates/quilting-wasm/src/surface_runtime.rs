@@ -8,8 +8,11 @@
 use std::collections::BTreeMap;
 
 use hyperscape::{
-    StableEntityId, SurfaceAddress, SurfaceAdvance, SurfaceAttachment, SurfaceDetachReason,
-    SurfaceField, SurfaceSample, SurfaceWalker, SurfaceWalkerStatus, TriangleAdjacency,
+    CameraRig, StableEntityId, SurfaceAddress, SurfaceAdvance, SurfaceAttachment,
+    SurfaceDetachReason, SurfaceField, SurfaceSample, SurfaceWalkAttachRequest,
+    SurfaceWalkControls, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkRuntime,
+    SurfaceWalkStepRequest, SurfaceWalkUpdate, SurfaceWalker, SurfaceWalkerStatus,
+    TransitionEasing, TriangleAdjacency,
 };
 use quilting_core::instance_layout;
 use quilting_core::patch::QBTriPatch;
@@ -21,6 +24,7 @@ use uuid::Uuid;
 #[derive(Debug, Default)]
 pub(crate) struct SurfaceRuntime {
     walker: SurfaceWalker,
+    composed: SurfaceWalkRuntime,
     adjacency: Option<TriangleAdjacency>,
     joint_indices: Vec<[u16; 4]>,
     joint_weights: Vec<[f32; 4]>,
@@ -30,7 +34,9 @@ pub(crate) struct SurfaceRuntime {
     joint_matrices: Vec<f32>,
     morph_weights: Vec<f32>,
     previous_output_position: Option<[f64; 3]>,
+    composed_previous_output_position: Option<[f64; 3]>,
     attachment_orientation_sign: i8,
+    composed_attachment_orientation_sign: i8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,12 +55,58 @@ pub(crate) struct SurfaceRuntimeSnapshot {
     pub edge_crossings: u32,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct SurfaceWalkCameraSnapshot {
+    pub eye: [f64; 3],
+    pub right: [f64; 3],
+    pub up: [f64; 3],
+    pub forward: [f64; 3],
+    pub control_distance: f64,
+    pub vertical_fov_radians: f64,
+    pub near: f64,
+    pub far: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct SurfaceWalkMetricsSnapshot {
+    pub body_scale: f64,
+    pub radii_per_second: f64,
+    pub speed: f64,
+    pub eye_height: f64,
+    pub near: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ComposedSurfaceWalkSnapshot {
+    pub status: &'static str,
+    pub phase: &'static str,
+    pub detach_reason: Option<&'static str>,
+    pub node: Option<u32>,
+    pub face: Option<u32>,
+    pub barycentric: Option<[f64; 3]>,
+    pub output_position: Option<[f64; 3]>,
+    pub output_normal: Option<[f64; 3]>,
+    pub surface_velocity: Option<[f64; 3]>,
+    pub projected_output_velocity: [f64; 3],
+    pub desired_output_velocity: Option<[f64; 3]>,
+    pub condition_number: Option<f64>,
+    pub substeps: u32,
+    pub edge_crossings: u32,
+    pub camera: SurfaceWalkCameraSnapshot,
+    pub target_camera: Option<SurfaceWalkCameraSnapshot>,
+    pub metrics: Option<SurfaceWalkMetricsSnapshot>,
+    pub anchor_transition_remaining_seconds: Option<f64>,
+}
+
 impl SurfaceRuntime {
     pub fn reset_geometry(&mut self) {
         self.walker = SurfaceWalker::default();
+        self.composed = SurfaceWalkRuntime::default();
         self.adjacency = None;
         self.previous_output_position = None;
+        self.composed_previous_output_position = None;
         self.attachment_orientation_sign = 1;
+        self.composed_attachment_orientation_sign = 1;
     }
 
     pub fn set_skinning(&mut self, joint_indices: &[[u16; 4]], joint_weights: &[[f32; 4]]) {
@@ -87,11 +139,19 @@ impl SurfaceRuntime {
         self.joint_matrices.clear();
         self.morph_weights.clear();
         self.previous_output_position = None;
+        self.composed_previous_output_position = None;
         self.attachment_orientation_sign = 1;
+        self.composed_attachment_orientation_sign = 1;
     }
 
     pub fn attachment_face(&self) -> Option<u32> {
         self.walker
+            .attachment()
+            .map(|attachment| attachment.address.face)
+    }
+
+    pub fn composed_attachment_face(&self) -> Option<u32> {
+        self.composed
             .attachment()
             .map(|attachment| attachment.address.face)
     }
@@ -232,9 +292,194 @@ impl SurfaceRuntime {
 
     pub fn detach(&mut self) -> SurfaceRuntimeSnapshot {
         self.walker.detach(SurfaceDetachReason::Manual);
+        self.composed.detach(SurfaceDetachReason::Manual);
         self.previous_output_position = None;
+        self.composed_previous_output_position = None;
         self.attachment_orientation_sign = 1;
+        self.composed_attachment_orientation_sign = 1;
         detached_snapshot(SurfaceDetachReason::Manual)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_composed(
+        &mut self,
+        instances: &[f32],
+        num_faces: usize,
+        face_nodes: &[usize],
+        face: u32,
+        barycentric: [f64; 3],
+        camera: CameraRig,
+        scene_radius: f64,
+        controls: SurfaceWalkControls,
+        transition_duration_seconds: f64,
+        orientation_sign: i8,
+        mobius: [f32; 16],
+        euclidean_model: [f32; 16],
+    ) -> Result<ComposedSurfaceWalkSnapshot, String> {
+        if face as usize >= num_faces || face_nodes.len() != num_faces {
+            return Err("surface face is outside the current model".into());
+        }
+        if self.adjacency.is_none() {
+            self.adjacency = Some(build_adjacency(instances, num_faces, face_nodes)?);
+        }
+        let node = face_nodes[face as usize];
+        let address = SurfaceAddress::new(runtime_entity_id(node), face, barycentric)
+            .map_err(|error| format!("invalid surface address: {error:?}"))?;
+        let adjacency = self
+            .adjacency
+            .as_ref()
+            .ok_or_else(|| "surface topology is unavailable".to_string())?;
+        let mut field = RuntimeSurfaceField {
+            instances,
+            face_nodes,
+            adjacency,
+            pose: PoseData {
+                joint_indices: &self.joint_indices,
+                joint_weights: &self.joint_weights,
+                morph_deltas: &self.morph_deltas,
+                morph_num_vertices: self.morph_num_vertices,
+                morph_num_targets: self.morph_num_targets,
+                joint_matrices: &self.joint_matrices,
+                morph_weights: &self.morph_weights,
+            },
+            mobius: mobius_from_array(mobius),
+            euclidean_model,
+            surface_velocity: [0.0; 3],
+        };
+        let mut camera = camera;
+        let update = self
+            .composed
+            .attach(
+                &mut camera,
+                SurfaceWalkAttachRequest {
+                    address,
+                    normal_sign: None,
+                    scene_radius,
+                    controls,
+                    transition_duration_seconds,
+                    transition_easing: TransitionEasing::SmootherStep,
+                },
+                &mut field,
+            )
+            .map_err(|error| error.to_string())?;
+        self.composed_previous_output_position =
+            update.advance.contact.map(|contact| contact.output_position);
+        self.composed_attachment_orientation_sign =
+            normalize_orientation_sign(orientation_sign);
+        Ok(composed_snapshot(update, node))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_composed(
+        &mut self,
+        instances: &[f32],
+        face_nodes: &[usize],
+        delta_seconds: f64,
+        camera: CameraRig,
+        scene_radius: f64,
+        controls: SurfaceWalkControls,
+        input: SurfaceWalkInput,
+        orient: bool,
+        capture_relative_view: bool,
+        orientation_sign: i8,
+        mobius: [f32; 16],
+        euclidean_model: [f32; 16],
+    ) -> Result<ComposedSurfaceWalkSnapshot, String> {
+        let next_orientation_sign = normalize_orientation_sign(orientation_sign);
+        let mut candidate = self.composed.clone();
+        if self.composed_attachment_orientation_sign != next_orientation_sign {
+            candidate.flip_normal_side();
+        }
+        let attachment = candidate
+            .attachment()
+            .ok_or_else(|| "composed surface walker is detached".to_string())?;
+        let Some(&node) = face_nodes.get(attachment.address.face as usize) else {
+            return Ok(self.commit_composed_detach(
+                candidate,
+                camera,
+                next_orientation_sign,
+                SurfaceDetachReason::SampleUnavailable,
+            ));
+        };
+        let previous_output_position = self.composed_previous_output_position;
+        let Some(adjacency) = self.adjacency.as_ref() else {
+            return Ok(self.commit_composed_detach(
+                candidate,
+                camera,
+                next_orientation_sign,
+                SurfaceDetachReason::SampleUnavailable,
+            ));
+        };
+        let mut field = RuntimeSurfaceField {
+            instances,
+            face_nodes,
+            adjacency,
+            pose: PoseData {
+                joint_indices: &self.joint_indices,
+                joint_weights: &self.joint_weights,
+                morph_deltas: &self.morph_deltas,
+                morph_num_vertices: self.morph_num_vertices,
+                morph_num_targets: self.morph_num_targets,
+                joint_matrices: &self.joint_matrices,
+                morph_weights: &self.morph_weights,
+            },
+            mobius: mobius_from_array(mobius),
+            euclidean_model,
+            surface_velocity: [0.0; 3],
+        };
+        if let Some(current_start) = field.sample(attachment.address) {
+            if delta_seconds > 1.0e-9 {
+                if let Some(previous) = previous_output_position {
+                    field.surface_velocity = scale(
+                        sub(current_start.output_position, previous),
+                        1.0 / delta_seconds,
+                    );
+                }
+            }
+        }
+        let mut camera = camera;
+        let update = candidate
+            .step(
+                &mut camera,
+                SurfaceWalkStepRequest {
+                    delta_seconds,
+                    scene_radius,
+                    controls,
+                    input,
+                    orient,
+                    capture_relative_view,
+                },
+                &mut field,
+            )
+            .map_err(|error| error.to_string())?;
+        self.composed = candidate;
+        self.composed_attachment_orientation_sign = next_orientation_sign;
+        self.composed_previous_output_position =
+            update.advance.contact.map(|contact| contact.output_position);
+        Ok(composed_snapshot(update, node))
+    }
+
+    fn commit_composed_detach(
+        &mut self,
+        mut candidate: SurfaceWalkRuntime,
+        camera: CameraRig,
+        orientation_sign: i8,
+        reason: SurfaceDetachReason,
+    ) -> ComposedSurfaceWalkSnapshot {
+        candidate.detach(reason);
+        self.composed = candidate;
+        self.composed_previous_output_position = None;
+        self.composed_attachment_orientation_sign = orientation_sign;
+        composed_snapshot(
+            SurfaceWalkUpdate {
+                advance: detached_advance(reason),
+                motion: None,
+                target_frame: None,
+                camera,
+                anchor_transition_remaining_seconds: None,
+            },
+            0,
+        )
     }
 
     pub fn step_relative(
@@ -586,6 +831,74 @@ fn snapshot_from_advance(advance: SurfaceAdvance, node: usize) -> SurfaceRuntime
     }
 }
 
+fn composed_snapshot(update: SurfaceWalkUpdate, node: usize) -> ComposedSurfaceWalkSnapshot {
+    let contact = update.advance.contact;
+    let detach_reason = match update.advance.status {
+        SurfaceWalkerStatus::Attached => None,
+        SurfaceWalkerStatus::Detached(reason) => Some(detach_reason_name(reason)),
+    };
+    let transition_active = update.anchor_transition_remaining_seconds.is_some();
+    ComposedSurfaceWalkSnapshot {
+        status: if detach_reason.is_some() {
+            "detached"
+        } else {
+            "attached"
+        },
+        phase: if detach_reason.is_some() {
+            "detached"
+        } else if transition_active {
+            "anchoring"
+        } else {
+            "walking"
+        },
+        detach_reason,
+        node: contact.map(|_| node as u32),
+        face: contact.map(|value| value.address.face),
+        barycentric: contact.map(|value| value.address.barycentric),
+        output_position: contact.map(|value| value.output_position),
+        output_normal: contact.map(|value| value.output_normal),
+        surface_velocity: contact.map(|value| value.surface_velocity),
+        projected_output_velocity: update.advance.projected_output_velocity,
+        desired_output_velocity: update.motion.map(|motion| motion.desired_output_velocity),
+        condition_number: (update.advance.status == SurfaceWalkerStatus::Attached)
+            .then_some(update.advance.condition_number),
+        substeps: update.advance.substeps,
+        edge_crossings: update.advance.edge_crossings,
+        camera: camera_snapshot(update.camera),
+        target_camera: update
+            .target_frame
+            .map(|frame| camera_snapshot(frame.camera)),
+        metrics: update
+            .target_frame
+            .map(|frame| metrics_snapshot(frame.metrics)),
+        anchor_transition_remaining_seconds: update.anchor_transition_remaining_seconds,
+    }
+}
+
+fn camera_snapshot(camera: CameraRig) -> SurfaceWalkCameraSnapshot {
+    let basis = camera.basis();
+    SurfaceWalkCameraSnapshot {
+        eye: camera.eye,
+        right: basis.right,
+        up: basis.up,
+        forward: basis.forward,
+        control_distance: camera.control_distance,
+        vertical_fov_radians: camera.lens.vertical_fov_radians,
+        near: camera.lens.near,
+        far: camera.lens.far,
+    }
+}
+
+fn metrics_snapshot(metrics: SurfaceWalkMetrics) -> SurfaceWalkMetricsSnapshot {
+    SurfaceWalkMetricsSnapshot {
+        body_scale: metrics.body_scale,
+        radii_per_second: metrics.radii_per_second,
+        speed: metrics.speed,
+        eye_height: metrics.eye_height,
+        near: metrics.near,
+    }
+}
+
 fn detached_snapshot(reason: SurfaceDetachReason) -> SurfaceRuntimeSnapshot {
     SurfaceRuntimeSnapshot {
         status: "detached",
@@ -596,6 +909,17 @@ fn detached_snapshot(reason: SurfaceDetachReason) -> SurfaceRuntimeSnapshot {
         output_position: None,
         output_normal: None,
         eye_position: None,
+        projected_output_velocity: [0.0; 3],
+        condition_number: f64::INFINITY,
+        substeps: 0,
+        edge_crossings: 0,
+    }
+}
+
+fn detached_advance(reason: SurfaceDetachReason) -> SurfaceAdvance {
+    SurfaceAdvance {
+        status: SurfaceWalkerStatus::Detached(reason),
+        contact: None,
         projected_output_velocity: [0.0; 3],
         condition_number: f64::INFINITY,
         substeps: 0,

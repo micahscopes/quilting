@@ -120,6 +120,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("walkspeed", "0", Number),
     spec!("walkscale", "0", Number),
     spec!("walkheight", "0", Number),
+    spec!("walkimpl", "js", Text),
     spec!("lab", "0", Text),
     spec!("labfield", "edges", Text),
     spec!("laba", "3", Number),

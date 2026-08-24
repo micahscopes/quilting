@@ -31,8 +31,10 @@ pub use navigation::{
     NavigationController, NavigationFrame, NavigationPreset, NavigationRuntime, PerspectiveLens,
     ScheduledNavigationAction, SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping,
     SphereReflectionState, SurfaceAnchorTarget, SurfaceAnchorTransition, SurfaceRelativeView,
-    SurfaceWalkContactFrame, SurfaceWalkController, SurfaceWalkControls, SurfaceWalkError,
-    SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkMotion, TransitionEasing,
+    SurfaceWalkAttachRequest, SurfaceWalkContactFrame, SurfaceWalkController, SurfaceWalkControls,
+    SurfaceWalkError, SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkMotion,
+    SurfaceWalkRecoveryRequest, SurfaceWalkRuntime, SurfaceWalkRuntimeError,
+    SurfaceWalkStepRequest, SurfaceWalkUpdate, TransitionEasing,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{
@@ -381,6 +383,7 @@ impl Plugin for HyperscapePlugin {
             .init_resource::<CameraRig>()
             .init_resource::<NavigationActionQueue>()
             .init_resource::<NavigationRuntime>()
+            .init_resource::<SurfaceWalkRuntime>()
             .init_resource::<HyperscopeExtraction>()
             .init_resource::<HyperscapeDiagnostics>()
             .configure_sets(

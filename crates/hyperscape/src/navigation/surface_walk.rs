@@ -344,7 +344,9 @@ impl SurfaceWalkController {
             )
         });
         let filtered_normal = prior
-            .and_then(|state| smooth_direction(state.filtered_normal, target_normal, filter_amount))
+            .and_then(|state| {
+                smooth_surface_direction(state.filtered_normal, target_normal, filter_amount)
+            })
             .unwrap_or(target_normal);
         let eye = add(
             filtered_position,
@@ -391,7 +393,7 @@ impl SurfaceWalkController {
             } else {
                 1.0 - (-(controls.tangent_pull_fraction * 8.0) * delta_seconds).exp()
             };
-            let forward = smooth_direction(basis.forward, target_forward, pull_amount)
+            let forward = smooth_surface_direction(basis.forward, target_forward, pull_amount)
                 .ok_or(SurfaceWalkError::DegenerateFrame)?;
             let right = normalize_surface(cross(forward, filtered_normal))
                 .ok_or(SurfaceWalkError::DegenerateFrame)?;
@@ -493,7 +495,11 @@ fn octave_scale(steps: f64) -> Result<f64, SurfaceWalkError> {
     }
 }
 
-fn smooth_direction(from: [f64; 3], to: [f64; 3], amount: f64) -> Option<[f64; 3]> {
+pub(super) fn smooth_surface_direction(
+    from: [f64; 3],
+    to: [f64; 3],
+    amount: f64,
+) -> Option<[f64; 3]> {
     let from = normalize_surface(from)?;
     let to = normalize_surface(to)?;
     if amount >= 1.0 {
@@ -605,6 +611,7 @@ mod tests {
                 .unwrap(),
             output_position: position,
             output_normal: normal,
+            surface_velocity: [0.0; 3],
             eye_position: position,
         }
     }
