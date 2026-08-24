@@ -298,4 +298,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn one_pixel_plan_still_requires_two_step_shader_cleanups() {
+        let plan = JfaPropagationPlan::new(Extent2d::new(1, 1));
+        assert!(plan.primary_steps().next().is_none());
+        assert_eq!(
+            plan.cleanup_steps().collect::<Vec<_>>(),
+            vec![
+                JfaPropagationStep {
+                    step: 1,
+                    source: PingPong::Ping,
+                    destination: PingPong::Pong,
+                },
+                JfaPropagationStep {
+                    step: 1,
+                    source: PingPong::Pong,
+                    destination: PingPong::Ping,
+                },
+            ],
+        );
+    }
 }

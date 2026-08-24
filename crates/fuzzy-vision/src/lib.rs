@@ -884,6 +884,11 @@ impl JfaPipeline {
 
             // JFA+2: extra step=1 cleanup passes to fix boundary artifacts.
             // These catch seed assignment errors that the main passes miss.
+            // A 1x1 field has no primary steps, so the init program would
+            // otherwise remain active while cleanup uploads step uniforms.
+            if propagation_plan.primary_step_count() == 0 {
+                gl.use_program(Some(self.prog_step));
+            }
             for pass in propagation_plan.cleanup_steps() {
                 let src_tex = match pass.source {
                     PingPong::Ping => self.ping_tex,
