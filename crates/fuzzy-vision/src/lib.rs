@@ -1063,6 +1063,24 @@ impl JfaPipeline {
                 let ty = 1.0 / fh as f32;
 
                 gl.use_program(Some(self.prog_blur_dir));
+                let u_scene = gl.get_uniform_location(self.prog_blur_dir, "u_scene");
+                let u_weight = gl.get_uniform_location(self.prog_blur_dir, "u_weight");
+                let u_blur_radius = gl.get_uniform_location(self.prog_blur_dir, "u_blur_radius");
+                let u_blur_strength = gl.get_uniform_location(self.prog_blur_dir, "u_blur_strength");
+                let u_dir = gl.get_uniform_location(self.prog_blur_dir, "u_dir");
+                let u_is_final = gl.get_uniform_location(self.prog_blur_dir, "u_is_final");
+                if let Some(loc) = u_scene.as_ref() {
+                    gl.uniform_1_i32(Some(loc), 0);
+                }
+                if let Some(loc) = u_weight.as_ref() {
+                    gl.uniform_1_i32(Some(loc), 1);
+                }
+                if let Some(loc) = u_blur_radius.as_ref() {
+                    gl.uniform_1_f32(Some(loc), self.config.max_distance);
+                }
+                if let Some(loc) = u_blur_strength.as_ref() {
+                    gl.uniform_1_f32(Some(loc), per_pass_strength);
+                }
                 // Ping-pong: read from A, write to B, swap
                 let mut read_tex = scene_tex;
                 let mut write_to_a = true; // true = write to blur_fbo, false = write to blur_fbo_b
@@ -1083,23 +1101,11 @@ impl JfaPipeline {
                         gl.bind_texture(glow::TEXTURE_2D, Some(read_tex));
                         gl.active_texture(glow::TEXTURE1);
                         gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
-                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_scene") {
-                            gl.uniform_1_i32(Some(&loc), 0);
+                        if let Some(loc) = u_dir.as_ref() {
+                            gl.uniform_2_f32(Some(loc), dx * tx, dy * ty);
                         }
-                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_weight") {
-                            gl.uniform_1_i32(Some(&loc), 1);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_radius") {
-                            gl.uniform_1_f32(Some(&loc), self.config.max_distance);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_blur_strength") {
-                            gl.uniform_1_f32(Some(&loc), per_pass_strength);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_dir") {
-                            gl.uniform_2_f32(Some(&loc), dx * tx, dy * ty);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(self.prog_blur_dir, "u_is_final") {
-                            gl.uniform_1_f32(Some(&loc), if is_last { 1.0 } else { 0.0 });
+                        if let Some(loc) = u_is_final.as_ref() {
+                            gl.uniform_1_f32(Some(loc), if is_last { 1.0 } else { 0.0 });
                         }
                         gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
