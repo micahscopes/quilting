@@ -27,7 +27,10 @@
 //! reachable from `Drop`, so GL objects are *not* released automatically —
 //! call [`JfaPipeline::destroy`] explicitly when tearing the pipeline down.
 
+mod plan;
+
 use glow::HasContext;
+use plan::{Extent2d, JfaPropagationPlan, PingPong, ShaderId};
 
 /// Precision mode for intermediate textures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,21 +564,21 @@ fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<
     }
 }
 
-const JFA_PROGRAM_COUNT: usize = 12;
+const JFA_PROGRAM_COUNT: usize = ShaderId::ALL.len();
 
-const JFA_FRAGMENT_CATALOG: [(&str, &str); JFA_PROGRAM_COUNT] = [
-    ("init", FS_JFA_INIT),
-    ("step", FS_JFA_STEP),
-    ("firmness", FS_JFA_FIRMNESS),
-    ("blur_dir", FS_BLUR_DIR),
-    ("weight_radial", FS_WEIGHT_RADIAL),
-    ("weight_conformal", FS_WEIGHT_CONFORMAL),
-    ("reduce_minmax", FS_REDUCE_MINMAX),
-    ("weight_conformal_norm", FS_WEIGHT_CONFORMAL_NORM),
-    ("weight_kawase", FS_WEIGHT_KAWASE),
-    ("passthrough", FS_PASSTHROUGH),
-    ("mip_composite", FS_MIP_COMPOSITE),
-    ("gauss_down", FS_GAUSS_DOWN),
+const JFA_FRAGMENT_CATALOG: [(ShaderId, &str); JFA_PROGRAM_COUNT] = [
+    (ShaderId::Init, FS_JFA_INIT),
+    (ShaderId::Step, FS_JFA_STEP),
+    (ShaderId::Firmness, FS_JFA_FIRMNESS),
+    (ShaderId::BlurDir, FS_BLUR_DIR),
+    (ShaderId::WeightRadial, FS_WEIGHT_RADIAL),
+    (ShaderId::WeightConformal, FS_WEIGHT_CONFORMAL),
+    (ShaderId::ReduceMinmax, FS_REDUCE_MINMAX),
+    (ShaderId::WeightConformalNorm, FS_WEIGHT_CONFORMAL_NORM),
+    (ShaderId::WeightKawase, FS_WEIGHT_KAWASE),
+    (ShaderId::Passthrough, FS_PASSTHROUGH),
+    (ShaderId::MipComposite, FS_MIP_COMPOSITE),
+    (ShaderId::GaussDown, FS_GAUSS_DOWN),
 ];
 
 fn link_program_catalog(
@@ -592,21 +595,21 @@ fn link_program_catalog(
         );
         let mut linked = Vec::with_capacity(JFA_PROGRAM_COUNT);
 
-        for (name, fragment_source) in JFA_FRAGMENT_CATALOG {
+        for (shader_id, fragment_source) in JFA_FRAGMENT_CATALOG {
             let fs = shaders.stage(
                 compile_shader(gl, glow::FRAGMENT_SHADER, fragment_source)
-                    .map_err(|error| format!("{name} fragment {error}"))?,
+                    .map_err(|error| format!("{shader_id:?} fragment {error}"))?,
             );
             let prog = programs.stage(
                 gl.create_program()
-                    .map_err(|error| format!("{name} program create: {error}"))?,
+                    .map_err(|error| format!("{shader_id:?} program create: {error}"))?,
             );
             gl.attach_shader(prog, vs);
             gl.attach_shader(prog, fs);
             gl.link_program(prog);
             if !gl.get_program_link_status(prog) {
                 let log = gl.get_program_info_log(prog);
-                return Err(format!("{name} program link: {log}"));
+                return Err(format!("{shader_id:?} program link: {log}"));
             }
             linked.push(prog);
         }
@@ -660,15 +663,6 @@ fn create_fbo_tex(gl: &glow::Context, w: i32, h: i32, format: u32) -> Result<(gl
 fn downsampled_size(width: i32, height: i32, downsample: u32) -> (i32, i32) {
     let ds = downsample.max(1) as i32;
     ((width / ds).max(1), (height / ds).max(1))
-}
-
-/// Number of jump-flooding passes needed to cover a `w` x `h` buffer.
-///
-/// Standard JFA starts at `2^(n-1)` and halves to 1, so `n = ceil(log2(max_dim))`.
-/// This is the "O(log n) regardless of blur radius" property the library sells.
-fn jfa_step_count(width: i32, height: i32) -> u32 {
-    let max_dim = width.max(height).max(1) as f32;
-    max_dim.log2().ceil().max(0.0) as u32
 }
 
 /// Number of mip levels (including level 0) used by the mip-blur path.
@@ -835,9 +829,20 @@ impl JfaPipeline {
                 self.jfa_result_in_ping = true;
                 self.ping_tex
             } else {
+            let propagation_plan = JfaPropagationPlan::new(Extent2d::new(jw as u32, jh as u32));
+            let propagation_extent = propagation_plan.extent();
             // --- Stage 1: Init seeds from weight texture (into ping, at JFA resolution) ---
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.ping_fbo));
-            gl.viewport(0, 0, jw, jh);
+            let initial_fbo = match propagation_plan.initial_buffer() {
+                PingPong::Ping => self.ping_fbo,
+                PingPong::Pong => self.pong_fbo,
+            };
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(initial_fbo));
+            gl.viewport(
+                0,
+                0,
+                propagation_extent.width() as i32,
+                propagation_extent.height() as i32,
+            );
             gl.use_program(Some(self.prog_init));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(weight_tex));
@@ -847,15 +852,14 @@ impl JfaPipeline {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             // --- Stage 2: JFA propagation (log2 passes, ping-pong) ---
-            let num_steps = jfa_step_count(jw, jh);
-            let mut read_from_ping = true;
-
-            for i in 0..num_steps {
-                let step = 1u32 << (num_steps - 1 - i);
-                let (src_tex, dst_fbo) = if read_from_ping {
-                    (self.ping_tex, self.pong_fbo)
-                } else {
-                    (self.pong_tex, self.ping_fbo)
+            for pass in propagation_plan.primary_steps() {
+                let src_tex = match pass.source {
+                    PingPong::Ping => self.ping_tex,
+                    PingPong::Pong => self.pong_tex,
+                };
+                let dst_fbo = match pass.destination {
+                    PingPong::Ping => self.ping_fbo,
+                    PingPong::Pong => self.pong_fbo,
                 };
 
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
@@ -866,37 +870,46 @@ impl JfaPipeline {
                     gl.uniform_1_i32(Some(&loc), 0);
                 }
                 if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_step") {
-                    gl.uniform_1_i32(Some(&loc), step as i32);
+                    gl.uniform_1_i32(Some(&loc), pass.step as i32);
                 }
                 if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_dims") {
-                    gl.uniform_2_f32(Some(&loc), jw as f32, jh as f32);
+                    gl.uniform_2_f32(
+                        Some(&loc),
+                        propagation_extent.width() as f32,
+                        propagation_extent.height() as f32,
+                    );
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
-                read_from_ping = !read_from_ping;
             }
 
             // JFA+2: extra step=1 cleanup passes to fix boundary artifacts.
             // These catch seed assignment errors that the main passes miss.
-            for _ in 0..2 {
-                let (src_tex, dst_fbo) = if read_from_ping {
-                    (self.ping_tex, self.pong_fbo)
-                } else {
-                    (self.pong_tex, self.ping_fbo)
+            for pass in propagation_plan.cleanup_steps() {
+                let src_tex = match pass.source {
+                    PingPong::Ping => self.ping_tex,
+                    PingPong::Pong => self.pong_tex,
+                };
+                let dst_fbo = match pass.destination {
+                    PingPong::Ping => self.ping_fbo,
+                    PingPong::Pong => self.pong_fbo,
                 };
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
                 if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_step") {
-                    gl.uniform_1_i32(Some(&loc), 1);
+                    gl.uniform_1_i32(Some(&loc), pass.step as i32);
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
-                read_from_ping = !read_from_ping;
             }
 
             // JFA result is in whichever buffer was last written to. Which one that is
             // depends on the step-count parity, so record it for debug_blit().
-            self.jfa_result_in_ping = read_from_ping;
-            if read_from_ping { self.ping_tex } else { self.pong_tex }
+            let final_buffer = propagation_plan.final_buffer();
+            self.jfa_result_in_ping = final_buffer == PingPong::Ping;
+            match final_buffer {
+                PingPong::Ping => self.ping_tex,
+                PingPong::Pong => self.pong_tex,
+            }
             };
 
             // --- Stage 3: Firmness blend (full resolution) ---
@@ -1481,24 +1494,8 @@ mod tests {
 
     #[test]
     fn jfa_fragment_catalog_has_pipeline_field_order() {
-        let names = JFA_FRAGMENT_CATALOG.map(|(name, _)| name);
-        assert_eq!(
-            names,
-            [
-                "init",
-                "step",
-                "firmness",
-                "blur_dir",
-                "weight_radial",
-                "weight_conformal",
-                "reduce_minmax",
-                "weight_conformal_norm",
-                "weight_kawase",
-                "passthrough",
-                "mip_composite",
-                "gauss_down",
-            ],
-        );
+        let shader_ids = JFA_FRAGMENT_CATALOG.map(|(shader_id, _)| shader_id);
+        assert_eq!(shader_ids, ShaderId::ALL);
         assert_eq!(
             JFA_FRAGMENT_CATALOG.map(|(_, source)| source),
             [
@@ -1538,29 +1535,37 @@ mod tests {
     }
 
     #[test]
-    fn jfa_step_count_covers_the_buffer() {
+    fn jfa_plan_step_count_covers_the_buffer() {
         // The first jump is 2^(n-1), which must reach at least half way across the
         // buffer for the flood to be complete — equivalently 2^n >= max_dim.
-        for &(w, h) in &[(1, 1), (2, 2), (17, 5), (960, 540), (1920, 1080), (4096, 2160)] {
-            let n = jfa_step_count(w, h);
-            let reach = 1u64 << n;
+        for &(width, height) in &[
+            (1, 1),
+            (2, 2),
+            (17, 5),
+            (960, 540),
+            (1920, 1080),
+            (4096, 2160),
+        ] {
+            let plan = JfaPropagationPlan::new(Extent2d::new(width, height));
+            let step_count = plan.primary_step_count();
+            let reach = 1u64 << step_count;
             assert!(
-                reach >= w.max(h) as u64,
-                "{w}x{h}: {n} steps only reach {reach}px",
+                reach >= width.max(height) as u64,
+                "{width}x{height}: {step_count} steps only reach {reach}px",
             );
         }
     }
 
     #[test]
-    fn jfa_step_count_is_logarithmic_not_linear() {
-        // The whole pitch of the scatter formulation: cost grows with log of the
-        // buffer size, not with the blur radius.
-        assert_eq!(jfa_step_count(1, 1), 0);
-        assert_eq!(jfa_step_count(2, 2), 1);
-        assert_eq!(jfa_step_count(256, 256), 8);
-        assert_eq!(jfa_step_count(257, 1), 9);
-        // Doubling the buffer adds exactly one pass.
-        assert_eq!(jfa_step_count(1024, 1024) + 1, jfa_step_count(2048, 2048));
+    fn jfa_plan_step_count_is_logarithmic_not_linear() {
+        let step_count = |width, height| {
+            JfaPropagationPlan::new(Extent2d::new(width, height)).primary_step_count()
+        };
+        assert_eq!(step_count(1, 1), 0);
+        assert_eq!(step_count(2, 2), 1);
+        assert_eq!(step_count(256, 256), 8);
+        assert_eq!(step_count(257, 1), 9);
+        assert_eq!(step_count(1024, 1024) + 1, step_count(2048, 2048));
     }
 
     #[test]
