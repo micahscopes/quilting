@@ -11,6 +11,8 @@ const HACKER_NIGHT_PRESENTATION: &str =
     include_str!("../../../../examples/hacker-night.presentation.json");
 const HACKER_NIGHT_GOLDEN: &str =
     include_str!("../../../../examples/hacker-night.replay.fingerprint");
+const NAVIGATION_REPLAY: &str = include_str!("../../../../examples/navigation.app-replay.json");
+const NAVIGATION_GOLDEN: &str = include_str!("../../../../examples/navigation.replay.fingerprint");
 
 #[derive(Debug, Default)]
 struct Options {
@@ -21,6 +23,7 @@ struct Options {
 
 #[derive(Debug)]
 enum Source {
+    NavigationOracle,
     Script(String),
     Presentation(String),
 }
@@ -39,17 +42,21 @@ fn execute() -> Result<(), String> {
     let Some(options) = parse_options()? else {
         return Ok(());
     };
-    let has_custom_source = options.source.is_some();
-    if options.check && has_custom_source {
-        return Err("--check only applies to the embedded hacker-night oracle".to_owned());
-    }
+    let expected = options.check.then(|| match options.source.as_ref() {
+        None => Ok(HACKER_NIGHT_GOLDEN.trim()),
+        Some(Source::NavigationOracle) => Ok(NAVIGATION_GOLDEN.trim()),
+        Some(Source::Script(_) | Source::Presentation(_)) => {
+            Err("--check only applies to an embedded oracle".to_owned())
+        }
+    });
+    let expected = expected.transpose()?;
     let script = load_script(options.source)?;
     let trace = run_app_replay(&script).map_err(|error| error.to_string())?;
     let fingerprint = app_replay_fingerprint(&trace).map_err(|error| error.to_string())?;
     let qualified = format!("{APP_REPLAY_FINGERPRINT_ALGORITHM}:{fingerprint}");
 
     if options.check {
-        let expected = HACKER_NIGHT_GOLDEN.trim();
+        let expected = expected.expect("check mode selected an embedded oracle");
         if qualified != expected {
             return Err(format!(
                 "golden replay mismatch: expected {expected}, observed {qualified}"
@@ -89,6 +96,7 @@ fn parse_options() -> Result<Option<Options>, String> {
                         .ok_or_else(|| "--presentation requires a path".to_owned())?,
                 ),
             )?,
+            "--navigation" => set_source(&mut options, Source::NavigationOracle)?,
             "--fingerprint" => options.fingerprint_only = true,
             "--check" => options.check = true,
             "-h" | "--help" => {
@@ -106,7 +114,10 @@ fn parse_options() -> Result<Option<Options>, String> {
 
 fn set_source(options: &mut Options, source: Source) -> Result<(), String> {
     if options.source.is_some() {
-        Err("choose at most one of --script and --presentation".to_owned())
+        Err(
+            "choose at most one replay source: --navigation, --script, or --presentation"
+                .to_owned(),
+        )
     } else {
         options.source = Some(source);
         Ok(())
@@ -115,6 +126,8 @@ fn set_source(options: &mut Options, source: Source) -> Result<(), String> {
 
 fn load_script(source: Option<Source>) -> Result<AppReplayScript, String> {
     match source {
+        Some(Source::NavigationOracle) => serde_json::from_str(NAVIGATION_REPLAY)
+            .map_err(|error| format!("embedded navigation replay is invalid: {error}")),
         Some(Source::Script(path)) => {
             let json = fs::read_to_string(&path)
                 .map_err(|error| format!("could not read replay script {path:?}: {error}"))?;
@@ -136,14 +149,15 @@ fn load_script(source: Option<Source>) -> Result<AppReplayScript, String> {
 
 fn print_help() {
     println!(
-        "Usage: hyperscope-replay [--script PATH | --presentation PATH] [--fingerprint | --check]\n\
+        "Usage: hyperscope-replay [--navigation | --script PATH | --presentation PATH] [--fingerprint | --check]\n\
          \n\
          Replays versioned semantic application events without a browser or renderer.\n\
          With no source, walks the embedded hacker-night presentation.\n\
          \n\
+           --navigation         Replay the embedded semantic navigation oracle\n\
            --script PATH        Replay a serialized AppReplayScript\n\
            --presentation PATH  Build a complete cue walkthrough from a presentation\n\
            --fingerprint        Print only the qualified deterministic fingerprint\n\
-           --check              Check the embedded walkthrough against its golden"
+           --check              Check the selected embedded oracle against its golden"
     );
 }

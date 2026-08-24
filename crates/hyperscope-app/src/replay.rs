@@ -9,13 +9,17 @@ use crate::{
     AppCommit, AppEffect, AppEvent, AppStore, CommitDisposition, FrameTick,
     NavigationSynchronization, PresentationAction, SemanticAction, Timed,
 };
-use hyperscape::{AuthoredCamera, AuthoredFocus, Presentation, SphereReflectionState};
+use hyperscape::{
+    AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
+    NavigationPreset, Presentation, SphereReflectionState, StableEntityId, SurfaceAnchorTarget,
+    TransitionEasing,
+};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.1";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.2";
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
 const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -46,6 +50,11 @@ pub enum AppReplayEvent {
         camera: AuthoredCamera,
         focus: AuthoredFocus,
     },
+    Navigate {
+        sequence: u64,
+        at_seconds: f64,
+        action: ReplayNavigationAction,
+    },
     Present {
         sequence: u64,
         at_seconds: f64,
@@ -55,6 +64,302 @@ pub enum AppReplayEvent {
         elapsed_seconds: f64,
         delta_seconds: f64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ReplayNavigationAction {
+    SetPreset {
+        preset: ReplayNavigationPreset,
+    },
+    ApplyFrame {
+        frame: ReplayNavigationFrame,
+    },
+    SetCamera {
+        camera: AuthoredCamera,
+    },
+    TransitionCamera {
+        target: AuthoredCamera,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
+    BeginSurfaceAnchorTransition {
+        target: ReplaySurfaceAnchorTarget,
+        scene_radius: f64,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
+    UpdateSurfaceAnchorTarget {
+        target: ReplaySurfaceAnchorTarget,
+    },
+    CancelSurfaceAnchorTransition,
+    AnchorFocus {
+        entity: Uuid,
+        source_bound: ReplayFocusSphere,
+        margin: f64,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
+    DetachFocus,
+    SetFreeFocusSphere {
+        sphere: ReplayFocusSphere,
+    },
+    TransitionFreeFocusSphere {
+        target: ReplayFocusSphere,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
+    TranslateFocus {
+        delta: [f64; 3],
+    },
+    ScaleFocusLog {
+        log_delta: f64,
+    },
+    SetFocusEnabled {
+        enabled: bool,
+    },
+    SetFocusField {
+        coordinate: f64,
+        angular_aperture: f64,
+    },
+    SetInversionEnabled {
+        enabled: bool,
+    },
+    ToggleInversion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayNavigationPreset {
+    Hyperscope,
+    Object,
+    Fly,
+    Drone,
+}
+
+impl From<ReplayNavigationPreset> for NavigationPreset {
+    fn from(preset: ReplayNavigationPreset) -> Self {
+        match preset {
+            ReplayNavigationPreset::Hyperscope => Self::Hyperscope,
+            ReplayNavigationPreset::Object => Self::Object,
+            ReplayNavigationPreset::Fly => Self::Fly,
+            ReplayNavigationPreset::Drone => Self::Drone,
+        }
+    }
+}
+
+impl From<NavigationPreset> for ReplayNavigationPreset {
+    fn from(preset: NavigationPreset) -> Self {
+        match preset {
+            NavigationPreset::Hyperscope => Self::Hyperscope,
+            NavigationPreset::Object => Self::Object,
+            NavigationPreset::Fly => Self::Fly,
+            NavigationPreset::Drone => Self::Drone,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayNavigationFrame {
+    pub translation: [f64; 3],
+    pub rotation: [f64; 3],
+    pub dolly_log: f64,
+    pub horizon_locked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayFocusSphere {
+    pub center: [f64; 3],
+    pub radius: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySurfaceAnchorTarget {
+    pub camera: AuthoredCamera,
+    pub normal: [f64; 3],
+}
+
+impl TryFrom<ReplayNavigationAction> for NavigationAction {
+    type Error = String;
+
+    fn try_from(action: ReplayNavigationAction) -> Result<Self, Self::Error> {
+        match action {
+            ReplayNavigationAction::SetPreset { preset } => Ok(Self::SetPreset(preset.into())),
+            ReplayNavigationAction::ApplyFrame { frame } => {
+                finite3(frame.translation, "navigation translation")?;
+                finite3(frame.rotation, "navigation rotation")?;
+                finite(frame.dolly_log, "navigation dolly")?;
+                Ok(Self::ApplyFrame(NavigationFrame {
+                    translation: frame.translation,
+                    rotation: frame.rotation,
+                    dolly_log: frame.dolly_log,
+                    horizon_locked: frame.horizon_locked,
+                }))
+            }
+            ReplayNavigationAction::SetCamera { camera } => Ok(Self::SetCamera(
+                camera.to_camera_rig().map_err(|error| error.to_string())?,
+            )),
+            ReplayNavigationAction::TransitionCamera {
+                target,
+                duration_seconds,
+                easing,
+            } => {
+                nonnegative(duration_seconds, "camera transition duration")?;
+                Ok(Self::TransitionCamera {
+                    target: target.to_camera_rig().map_err(|error| error.to_string())?,
+                    duration_seconds,
+                    easing,
+                })
+            }
+            ReplayNavigationAction::BeginSurfaceAnchorTransition {
+                target,
+                scene_radius,
+                duration_seconds,
+                easing,
+            } => {
+                positive(scene_radius, "surface anchor scene radius")?;
+                nonnegative(duration_seconds, "surface anchor transition duration")?;
+                Ok(Self::BeginSurfaceAnchorTransition {
+                    target: target.try_into()?,
+                    scene_radius,
+                    duration_seconds,
+                    easing,
+                })
+            }
+            ReplayNavigationAction::UpdateSurfaceAnchorTarget { target } => {
+                Ok(Self::UpdateSurfaceAnchorTarget(target.try_into()?))
+            }
+            ReplayNavigationAction::CancelSurfaceAnchorTransition => {
+                Ok(Self::CancelSurfaceAnchorTransition)
+            }
+            ReplayNavigationAction::AnchorFocus {
+                entity,
+                source_bound,
+                margin,
+                duration_seconds,
+                easing,
+            } => {
+                if entity.is_nil() {
+                    return Err("focus anchor entity must have a non-nil stable identity".into());
+                }
+                finite(margin, "focus anchor margin")?;
+                nonnegative(duration_seconds, "focus transition duration")?;
+                Ok(Self::AnchorFocus {
+                    entity: StableEntityId(entity),
+                    source_bound: source_bound.try_into()?,
+                    margin,
+                    duration_seconds,
+                    easing,
+                })
+            }
+            ReplayNavigationAction::DetachFocus => Ok(Self::DetachFocus),
+            ReplayNavigationAction::SetFreeFocusSphere { sphere } => {
+                Ok(Self::SetFreeFocusSphere(sphere.try_into()?))
+            }
+            ReplayNavigationAction::TransitionFreeFocusSphere {
+                target,
+                duration_seconds,
+                easing,
+            } => {
+                nonnegative(duration_seconds, "focus transition duration")?;
+                Ok(Self::TransitionFreeFocusSphere {
+                    target: target.try_into()?,
+                    duration_seconds,
+                    easing,
+                })
+            }
+            ReplayNavigationAction::TranslateFocus { delta } => {
+                finite3(delta, "focus translation")?;
+                Ok(Self::TranslateFocus(delta))
+            }
+            ReplayNavigationAction::ScaleFocusLog { log_delta } => {
+                finite(log_delta, "focus logarithmic scale")?;
+                Ok(Self::ScaleFocusLog(log_delta))
+            }
+            ReplayNavigationAction::SetFocusEnabled { enabled } => {
+                Ok(Self::SetFocusEnabled(enabled))
+            }
+            ReplayNavigationAction::SetFocusField {
+                coordinate,
+                angular_aperture,
+            } => {
+                if !coordinate.is_finite()
+                    || !(0.0..=1.0).contains(&coordinate)
+                    || !angular_aperture.is_finite()
+                    || angular_aperture <= 0.0
+                {
+                    return Err(
+                        "focus coordinate must be in [0,1] and aperture must be positive".into(),
+                    );
+                }
+                Ok(Self::SetFocusField {
+                    coordinate,
+                    angular_aperture,
+                })
+            }
+            ReplayNavigationAction::SetInversionEnabled { enabled } => {
+                Ok(Self::SetInversionEnabled(enabled))
+            }
+            ReplayNavigationAction::ToggleInversion => Ok(Self::ToggleInversion),
+        }
+    }
+}
+
+impl TryFrom<ReplayFocusSphere> for FocusSphere {
+    type Error = String;
+
+    fn try_from(sphere: ReplayFocusSphere) -> Result<Self, Self::Error> {
+        Self::new(sphere.center, sphere.radius).map_err(str::to_owned)
+    }
+}
+
+impl TryFrom<ReplaySurfaceAnchorTarget> for SurfaceAnchorTarget {
+    type Error = String;
+
+    fn try_from(target: ReplaySurfaceAnchorTarget) -> Result<Self, Self::Error> {
+        Self::new(
+            target
+                .camera
+                .to_camera_rig()
+                .map_err(|error| error.to_string())?,
+            target.normal,
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn finite(value: f64, label: &str) -> Result<(), String> {
+    value
+        .is_finite()
+        .then_some(())
+        .ok_or_else(|| format!("{label} must be finite"))
+}
+
+fn finite3(value: [f64; 3], label: &str) -> Result<(), String> {
+    value
+        .into_iter()
+        .all(f64::is_finite)
+        .then_some(())
+        .ok_or_else(|| format!("{label} must be finite"))
+}
+
+fn nonnegative(value: f64, label: &str) -> Result<(), String> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(format!("{label} must be finite and nonnegative"))
+    }
+}
+
+fn positive(value: f64, label: &str) -> Result<(), String> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(format!("{label} must be finite and positive"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,8 +444,20 @@ pub struct AppReplayState {
     pub active_scene: Option<Uuid>,
     pub active_view: Option<Uuid>,
     pub reflection: ReplayReflection,
+    pub navigation: AppReplayNavigationState,
     pub camera: AppReplayCameraState,
     pub focus: AppReplayFocusState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayNavigationState {
+    pub preset: ReplayNavigationPreset,
+    pub pending_actions: usize,
+    pub last_applied_sequence: Option<u64>,
+    pub surface_anchor_transition_remaining_seconds: Option<f64>,
+    pub surface_anchor_hop_height: Option<f64>,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,7 +485,7 @@ pub struct AppReplayCameraState {
 pub struct AppReplayFocusState {
     pub center: [f64; 3],
     pub radius: f64,
-    pub anchored: bool,
+    pub anchor_entity: Option<Uuid>,
     pub focus_enabled: bool,
     pub inversion_enabled: bool,
     pub coordinate: f64,
@@ -272,6 +589,19 @@ fn replay_event(store: &AppStore, event: &AppReplayEvent) -> AppReplayOutcome {
                     .dispatch(AppEvent::NavigationSynchronized(synchronization))
                     .map_err(|error| error.to_string())
             }),
+        AppReplayEvent::Navigate {
+            sequence,
+            at_seconds,
+            action,
+        } => NavigationAction::try_from(*action).and_then(|action| {
+            store
+                .dispatch(AppEvent::Input(Timed {
+                    sequence: *sequence,
+                    at_seconds: *at_seconds,
+                    value: SemanticAction::Navigate(action),
+                }))
+                .map_err(|error| error.to_string())
+        }),
         AppReplayEvent::Present {
             sequence,
             at_seconds,
@@ -325,11 +655,10 @@ fn replay_effect(effect: &AppEffect) -> AppReplayEffect {
 }
 
 fn replay_state(store: &AppStore) -> AppReplayState {
-    let frame = store.frame_snapshot();
-    let presentation = store.presentation_snapshot();
-    let active = presentation
-        .as_ref()
-        .and_then(|presentation| presentation.active.as_ref());
+    let state = store.lock_state();
+    let frame = state.frame_snapshot();
+    let active = state.active_presentation.as_ref();
+    let navigation = &state.navigation;
     let focus_transition_remaining = frame
         .focus
         .transition
@@ -343,6 +672,22 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         reflection: match frame.reflection {
             SphereReflectionState::Identity => ReplayReflection::Identity,
             SphereReflectionState::Sphere(_) => ReplayReflection::SphereReflection,
+        },
+        navigation: AppReplayNavigationState {
+            preset: navigation.runtime.preset.into(),
+            pending_actions: navigation.queue.len(),
+            last_applied_sequence: navigation.runtime.last_applied_sequence,
+            surface_anchor_transition_remaining_seconds: navigation
+                .runtime
+                .surface_anchor_transition
+                .map(|transition| {
+                    (transition.duration_seconds - transition.elapsed_seconds).max(0.0)
+                }),
+            surface_anchor_hop_height: navigation
+                .runtime
+                .surface_anchor_transition
+                .map(|transition| transition.hop_height),
+            diagnostics: navigation.diagnostics.0.clone(),
         },
         camera: AppReplayCameraState {
             eye: frame.camera.eye,
@@ -362,7 +707,7 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         focus: AppReplayFocusState {
             center: frame.focus.sphere.center,
             radius: frame.focus.sphere.radius,
-            anchored: frame.focus.anchor.is_some(),
+            anchor_entity: frame.focus.anchor.map(|anchor| anchor.entity.0),
             focus_enabled: frame.focus.focus_enabled,
             inversion_enabled: frame.focus.inversion_enabled,
             coordinate: frame.focus.focus_coordinate,
@@ -395,6 +740,8 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../../../examples/hacker-night.presentation.json");
     const GOLDEN: &str = include_str!("../../../examples/hacker-night.replay.fingerprint");
+    const NAVIGATION_FIXTURE: &str = include_str!("../../../examples/navigation.app-replay.json");
+    const NAVIGATION_GOLDEN: &str = include_str!("../../../examples/navigation.replay.fingerprint");
     const UNKNOWN_CUE: &str = "f0000000-0000-4000-8000-000000000099";
 
     fn fixture() -> Presentation {
@@ -406,8 +753,63 @@ mod tests {
         assert_eq!(left.active_scene, right.active_scene);
         assert_eq!(left.active_view, right.active_view);
         assert_eq!(left.reflection, right.reflection);
+        assert_eq!(left.navigation, right.navigation);
         assert_eq!(left.camera, right.camera);
         assert_eq!(left.focus, right.focus);
+    }
+
+    fn navigation_action_name(action: &ReplayNavigationAction) -> &'static str {
+        match action {
+            ReplayNavigationAction::SetPreset { .. } => "set_preset",
+            ReplayNavigationAction::ApplyFrame { .. } => "apply_frame",
+            ReplayNavigationAction::SetCamera { .. } => "set_camera",
+            ReplayNavigationAction::TransitionCamera { .. } => "transition_camera",
+            ReplayNavigationAction::BeginSurfaceAnchorTransition { .. } => {
+                "begin_surface_anchor_transition"
+            }
+            ReplayNavigationAction::UpdateSurfaceAnchorTarget { .. } => {
+                "update_surface_anchor_target"
+            }
+            ReplayNavigationAction::CancelSurfaceAnchorTransition => {
+                "cancel_surface_anchor_transition"
+            }
+            ReplayNavigationAction::AnchorFocus { .. } => "anchor_focus",
+            ReplayNavigationAction::DetachFocus => "detach_focus",
+            ReplayNavigationAction::SetFreeFocusSphere { .. } => "set_free_focus_sphere",
+            ReplayNavigationAction::TransitionFreeFocusSphere { .. } => {
+                "transition_free_focus_sphere"
+            }
+            ReplayNavigationAction::TranslateFocus { .. } => "translate_focus",
+            ReplayNavigationAction::ScaleFocusLog { .. } => "scale_focus_log",
+            ReplayNavigationAction::SetFocusEnabled { .. } => "set_focus_enabled",
+            ReplayNavigationAction::SetFocusField { .. } => "set_focus_field",
+            ReplayNavigationAction::SetInversionEnabled { .. } => "set_inversion_enabled",
+            ReplayNavigationAction::ToggleInversion => "toggle_inversion",
+        }
+    }
+
+    fn authoritative_navigation_action_name(action: &NavigationAction) -> &'static str {
+        match action {
+            NavigationAction::SetPreset(_) => "set_preset",
+            NavigationAction::ApplyFrame(_) => "apply_frame",
+            NavigationAction::SetCamera(_) => "set_camera",
+            NavigationAction::TransitionCamera { .. } => "transition_camera",
+            NavigationAction::BeginSurfaceAnchorTransition { .. } => {
+                "begin_surface_anchor_transition"
+            }
+            NavigationAction::UpdateSurfaceAnchorTarget(_) => "update_surface_anchor_target",
+            NavigationAction::CancelSurfaceAnchorTransition => "cancel_surface_anchor_transition",
+            NavigationAction::AnchorFocus { .. } => "anchor_focus",
+            NavigationAction::DetachFocus => "detach_focus",
+            NavigationAction::SetFreeFocusSphere(_) => "set_free_focus_sphere",
+            NavigationAction::TransitionFreeFocusSphere { .. } => "transition_free_focus_sphere",
+            NavigationAction::TranslateFocus(_) => "translate_focus",
+            NavigationAction::ScaleFocusLog(_) => "scale_focus_log",
+            NavigationAction::SetFocusEnabled(_) => "set_focus_enabled",
+            NavigationAction::SetFocusField { .. } => "set_focus_field",
+            NavigationAction::SetInversionEnabled(_) => "set_inversion_enabled",
+            NavigationAction::ToggleInversion => "toggle_inversion",
+        }
     }
 
     #[test]
@@ -480,6 +882,103 @@ mod tests {
     }
 
     #[test]
+    fn navigation_fixture_covers_the_semantic_vocabulary_and_matches_its_golden() {
+        let script: AppReplayScript = serde_json::from_str(NAVIGATION_FIXTURE).unwrap();
+        let encoded = serde_json::to_string(&script).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AppReplayScript>(&encoded).unwrap(),
+            script
+        );
+
+        let covered = script
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AppReplayEvent::Navigate { action, .. } => Some(navigation_action_name(action)),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let authoritative_covered = script
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AppReplayEvent::Navigate { action, .. } => NavigationAction::try_from(*action)
+                    .ok()
+                    .map(|action| authoritative_navigation_action_name(&action)),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            covered,
+            std::collections::BTreeSet::from([
+                "anchor_focus",
+                "apply_frame",
+                "begin_surface_anchor_transition",
+                "cancel_surface_anchor_transition",
+                "detach_focus",
+                "scale_focus_log",
+                "set_camera",
+                "set_focus_enabled",
+                "set_focus_field",
+                "set_free_focus_sphere",
+                "set_inversion_enabled",
+                "set_preset",
+                "toggle_inversion",
+                "transition_camera",
+                "transition_free_focus_sphere",
+                "translate_focus",
+                "update_surface_anchor_target",
+            ])
+        );
+        assert_eq!(authoritative_covered, covered);
+
+        let trace = run_app_replay(&script).unwrap();
+        assert_eq!(trace.records.len(), 27);
+        assert_eq!(trace.records[1].state.camera.eye, [0.5, -0.25, 5.0]);
+        assert_eq!(
+            trace.records[15]
+                .state
+                .navigation
+                .surface_anchor_transition_remaining_seconds,
+            Some(1.0)
+        );
+        assert_eq!(
+            trace.records[16]
+                .state
+                .navigation
+                .surface_anchor_transition_remaining_seconds,
+            None
+        );
+        assert!(matches!(
+            trace.records.last().unwrap().outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("non-nil stable identity")
+        ));
+        let before = &trace.records[trace.records.len() - 2].state;
+        let after = &trace.records.last().unwrap().state;
+        assert_eq!(after.revision, before.revision);
+        assert_semantic_state_eq(after, before);
+        assert_eq!(after.navigation.preset, ReplayNavigationPreset::Fly);
+        assert_eq!(after.navigation.pending_actions, 0);
+        assert_eq!(after.navigation.last_applied_sequence, Some(16));
+        assert!(after.navigation.diagnostics.is_empty());
+        assert_eq!(after.focus.anchor_entity, None);
+        assert_eq!(after.reflection, ReplayReflection::Identity);
+        assert_eq!(
+            format!(
+                "{APP_REPLAY_FINGERPRINT_ALGORITHM}:{}",
+                app_replay_fingerprint(&trace).unwrap()
+            ),
+            NAVIGATION_GOLDEN.trim()
+        );
+        let trace_json = serde_json::to_string(&trace).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AppReplayTrace>(&trace_json).unwrap(),
+            trace
+        );
+    }
+
+    #[test]
     fn completed_transition_is_cadence_independent_in_replay() {
         let presentation = fixture();
         let destination = presentation.cues[5].id;
@@ -509,6 +1008,44 @@ mod tests {
         for step in 1..=12 {
             partitioned.push(AppReplayEvent::Frame {
                 elapsed_seconds: 0.7 + f64::from(step) * 0.1,
+                delta_seconds: 0.1,
+            });
+        }
+
+        let single = run_app_replay(&AppReplayScript::new(single)).unwrap();
+        let partitioned = run_app_replay(&AppReplayScript::new(partitioned)).unwrap();
+        let single = &single.records.last().unwrap().state;
+        let partitioned = &partitioned.records.last().unwrap().state;
+        assert!((single.elapsed_seconds - partitioned.elapsed_seconds).abs() < 1.0e-12);
+        assert_semantic_state_eq(single, partitioned);
+    }
+
+    #[test]
+    fn semantic_navigation_transition_is_cadence_independent_in_replay() {
+        let target = AuthoredCamera {
+            eye: [3.0, 1.0, 7.0],
+            control_distance: 7.0,
+            semantic_target: Some([0.0; 3]),
+            ..AuthoredCamera::default()
+        };
+        let prefix = vec![AppReplayEvent::Navigate {
+            sequence: 0,
+            at_seconds: 0.0,
+            action: ReplayNavigationAction::TransitionCamera {
+                target,
+                duration_seconds: 1.2,
+                easing: TransitionEasing::SmootherStep,
+            },
+        }];
+        let mut single = prefix.clone();
+        single.push(AppReplayEvent::Frame {
+            elapsed_seconds: 1.2,
+            delta_seconds: 1.2,
+        });
+        let mut partitioned = prefix;
+        for step in 1..=12 {
+            partitioned.push(AppReplayEvent::Frame {
+                elapsed_seconds: f64::from(step) * 0.1,
                 delta_seconds: 0.1,
             });
         }

@@ -82,9 +82,14 @@ The first application boundary is now explicit:
   camera/focus/cue snapshot; it contains no DOM events, device reports,
   renderer handles, or wall clock. Decimal JSON uses exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` walks every checked-in cue, while tests prove
-  rejected-event atomicity and transition cadence invariance. The six-cue
-  golden is `fnv1a-128-json:65b613ca3af3c796d83e7a8b0fc40943`.
+  `hyperscope-replay` version 0.2 walks every checked-in cue and every current
+  semantic navigation action. The navigation oracle covers camera frames,
+  focus/inversion, camera transitions, surface re-anchor/retarget/cancel,
+  stable-identity selection, detach/free edits, and rejected-input atomicity.
+  Tests prove JSON round trips and transition cadence invariance. The six-cue
+  golden is `fnv1a-128-json:cf1a497ee914e5b6c3c9e541e0f21232`;
+  the navigation golden is
+  `fnv1a-128-json:fb3bd34a7b427b8d52fa058a00b98331`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.

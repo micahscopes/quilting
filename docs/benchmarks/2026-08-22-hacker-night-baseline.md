@@ -183,6 +183,21 @@ golden, and raw/staged preflights passed. The build receipt was
 `255d51aa55039588583c7d4699f8a5f5`. Live browser proof remains pending; no
 server or unrelated browser tab was changed for this checkpoint.
 
+Replay version 0.2 then replaced the process-local Bevy handle in
+`FocusAnchor` with a non-nil stable UUID and added a portable navigation
+fixture covering all 17 current semantic navigation action variants. It
+records preset/queue/sequence state, stable focus ownership, surface-transition
+clock and hop, and navigation diagnostics alongside camera/focus state. The
+fixture includes camera and focus edits, inversion transport, camera and
+surface transitions, animated surface retargeting, cancellation, selection
+anchor/detach, and an atomically rejected nil identity. Both presentation and
+navigation traces round-trip exact JSON and have checked fingerprints.
+
+The expanded replay remains entirely behind the native feature. The optimized
+browser WASM is 5,969,847 bytes, 1,219 bytes smaller than the preceding
+5,971,066-byte build; gzip is effectively flat at 2,096,949 bytes (+100). The
+source-coherent build receipt is `dd8eb4d56f3db0ba9a1e12bd24872a1e`.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:

@@ -125,9 +125,12 @@ or sphere state.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay.** Serialize stable entity references, detached
-   spheres, camera rig state, and high-level action streams. Network semantic
-   actions or authoritative state deltas, never raw HID reports.
+6. **Persistence and replay — native oracle complete.** Replay version 0.2
+   serializes stable entity references, detached spheres, camera rig state, and
+   every current high-level navigation action. The checked navigation fixture
+   covers transition cadence and atomic rejection. Browser input capture and
+   networking must carry semantic actions or authoritative state deltas, never
+   raw HID reports.
 7. **WebGPU backend.** Upload the extracted focus packet as frame/view data,
    classify the field in WGSL, and retain the same weight-channel meaning. GPU
    visibility compaction and indirect draws remain independent of interaction

@@ -1,0 +1,293 @@
+{
+  "version": "hyperscope-app-replay/0.2",
+  "events": [
+    {
+      "type": "synchronize_navigation",
+      "camera": {
+        "eye": [0.0, 0.0, 4.0],
+        "orientation": [1.0, 0.0, 0.0, 0.0],
+        "control_distance": 4.0,
+        "semantic_target": [0.0, 0.0, 0.0],
+        "vertical_fov_radians": 1.0471975511965979,
+        "near": 0.01,
+        "far": 10000.0
+      },
+      "focus": {
+        "center": [1.5, 0.0, 0.0],
+        "radius": 1.5,
+        "enabled": false,
+        "inversion_enabled": false,
+        "coordinate": 0.5,
+        "angular_aperture": 0.1
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 0,
+      "at_seconds": 0.0,
+      "action": {
+        "action": "set_camera",
+        "camera": {
+          "eye": [0.5, -0.25, 5.0],
+          "orientation": [1.0, 0.0, 0.0, 0.0],
+          "control_distance": 5.0,
+          "semantic_target": [0.0, 0.0, 0.0],
+          "vertical_fov_radians": 1.0471975511965979,
+          "near": 0.01,
+          "far": 10000.0
+        }
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 1,
+      "at_seconds": 0.0,
+      "action": {
+        "action": "set_preset",
+        "preset": "fly"
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 2,
+      "at_seconds": 0.0,
+      "action": {
+        "action": "apply_frame",
+        "frame": {
+          "translation": [0.25, 0.1, -0.5],
+          "rotation": [0.05, -0.04, 0.03],
+          "dollyLog": 0.0,
+          "horizonLocked": false
+        }
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 3,
+      "at_seconds": 0.0,
+      "action": {
+        "action": "set_free_focus_sphere",
+        "sphere": {
+          "center": [0.0, 0.0, 0.0],
+          "radius": 2.0
+        }
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 4,
+      "at_seconds": 0.0,
+      "action": {
+        "action": "set_focus_enabled",
+        "enabled": true
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 5,
+      "at_seconds": 0.0,
+      "action": {
+        "action": "set_focus_field",
+        "coordinate": 0.45,
+        "angular_aperture": 0.08
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 6,
+      "at_seconds": 0.0,
+      "action": {
+        "action": "set_inversion_enabled",
+        "enabled": true
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 0.25,
+      "delta_seconds": 0.25
+    },
+    {
+      "type": "navigate",
+      "sequence": 7,
+      "at_seconds": 0.25,
+      "action": {
+        "action": "transition_camera",
+        "target": {
+          "eye": [2.0, 1.0, 6.0],
+          "orientation": [0.9807852804032304, 0.0, 0.19509032201612825, 0.0],
+          "control_distance": 6.0,
+          "semantic_target": [0.0, 0.0, 0.0],
+          "vertical_fov_radians": 1.0471975511965979,
+          "near": 0.01,
+          "far": 10000.0
+        },
+        "duration_seconds": 0.75,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 0.5,
+      "delta_seconds": 0.25
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 1.0,
+      "delta_seconds": 0.5
+    },
+    {
+      "type": "navigate",
+      "sequence": 8,
+      "at_seconds": 1.0,
+      "action": {
+        "action": "begin_surface_anchor_transition",
+        "target": {
+          "camera": {
+            "eye": [1.0, 0.5, 2.0],
+            "orientation": [1.0, 0.0, 0.0, 0.0],
+            "control_distance": 2.0,
+            "vertical_fov_radians": 1.0471975511965979,
+            "near": 0.01,
+            "far": 10000.0
+          },
+          "normal": [0.0, 1.0, 0.0]
+        },
+        "scene_radius": 10.0,
+        "duration_seconds": 2.0,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 1.4,
+      "delta_seconds": 0.4
+    },
+    {
+      "type": "navigate",
+      "sequence": 9,
+      "at_seconds": 1.4,
+      "action": {
+        "action": "update_surface_anchor_target",
+        "target": {
+          "camera": {
+            "eye": [1.5, 0.6, 2.2],
+            "orientation": [1.0, 0.0, 0.0, 0.0],
+            "control_distance": 2.0,
+            "vertical_fov_radians": 1.0471975511965979,
+            "near": 0.01,
+            "far": 10000.0
+          },
+          "normal": [0.0, 1.0, 0.0]
+        }
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 2.0,
+      "delta_seconds": 0.6
+    },
+    {
+      "type": "navigate",
+      "sequence": 10,
+      "at_seconds": 2.0,
+      "action": {
+        "action": "cancel_surface_anchor_transition"
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 11,
+      "at_seconds": 2.0,
+      "action": {
+        "action": "anchor_focus",
+        "entity": "70000000-0000-4000-8000-000000000001",
+        "source_bound": {
+          "center": [1.5, 0.0, 0.0],
+          "radius": 0.75
+        },
+        "margin": 1.1,
+        "duration_seconds": 0.8,
+        "easing": "smooth_step"
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 2.4,
+      "delta_seconds": 0.4
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 2.8,
+      "delta_seconds": 0.4
+    },
+    {
+      "type": "navigate",
+      "sequence": 12,
+      "at_seconds": 2.8,
+      "action": {
+        "action": "scale_focus_log",
+        "log_delta": 0.1
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 13,
+      "at_seconds": 2.8,
+      "action": {
+        "action": "detach_focus"
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 14,
+      "at_seconds": 2.8,
+      "action": {
+        "action": "translate_focus",
+        "delta": [0.2, 0.0, -0.1]
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 15,
+      "at_seconds": 2.8,
+      "action": {
+        "action": "transition_free_focus_sphere",
+        "target": {
+          "center": [0.25, 0.0, 0.0],
+          "radius": 0.9
+        },
+        "duration_seconds": 0.25,
+        "easing": "linear"
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 3.05,
+      "delta_seconds": 0.25
+    },
+    {
+      "type": "navigate",
+      "sequence": 16,
+      "at_seconds": 3.05,
+      "action": {
+        "action": "toggle_inversion"
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 17,
+      "at_seconds": 3.05,
+      "action": {
+        "action": "anchor_focus",
+        "entity": "00000000-0000-0000-0000-000000000000",
+        "source_bound": {
+          "center": [0.0, 0.0, 0.0],
+          "radius": 1.0
+        },
+        "margin": 1.1,
+        "duration_seconds": 0.5,
+        "easing": "smoother_step"
+      }
+    }
+  ]
+}
