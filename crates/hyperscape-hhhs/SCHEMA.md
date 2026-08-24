@@ -39,3 +39,41 @@ frame clocks, render state, and GPU resources have no durable API here.
 Recovery replays only a locally trusted transaction log produced by the durable
 sink. Untrusted peer records always enter through normal HHHS repair and the
 application admission policy.
+
+## Portable project archive 0.1
+
+`ProjectArchive` is the offline/sneakernet boundary. It is intentionally not an
+`hhhs-store` transaction log: storage logs contain local persistence framing and
+are accepted only for trusted crash recovery. An imported project archive
+carries public HHHS replica records and `DurableProject::import_archive` offers
+every record to the ordinary authority, payload-policy, and causal-repair path.
+
+The archive encoding is:
+
+1. the exact bytes `hyperscape hhhs project archive v0.1\0`;
+2. archive-schema major and minor as little-endian `u16` values (`0, 1`);
+3. the stable project UUID as 16 network-order UUID bytes;
+4. record count as a little-endian `u64`;
+5. the expected 32-byte HHHS history root;
+6. the expected 32-byte materialized project-state root;
+7. each record as a little-endian `u64` byte length followed by the canonical
+   `hhhs-replica` record bytes, in deterministic predecessor-first order with
+   entry-hash tie breaking;
+8. a 32-byte BLAKE3 digest of every preceding archive byte.
+
+The complete archive is capped at `MAX_PROJECT_ARCHIVE_BYTES` (512 MiB), the
+record count at `MAX_PROJECT_ARCHIVE_RECORDS` (1,000,000), and each record at
+HHHS's `MAX_REPLICA_RECORD_BYTES`. Parsing checks declarations before reserving
+record storage. Records must be unique, contain their complete predecessor
+closure, decode as this project's frozen authored payload, and use the open
+authority profile configured by this adapter.
+
+The final digest detects corruption; it is not a signature or proof of author
+identity. Successful import additionally requires zero refused/deferred
+records and exact record-count, history-root, and state-root agreement after
+admission. A failed in-memory import returns no partial project.
+
+The archive contains authored scene history, stable IDs, asset URIs, and asset
+content digests. It does not embed GLB bytes, ephemeral camera/selection state,
+render resources, routes, or local storage metadata. GLB transport therefore
+remains an orthogonal content-addressed bundle concern.

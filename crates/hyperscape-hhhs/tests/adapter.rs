@@ -5,8 +5,9 @@ use futures_signals::signal_vec::{SignalVecExt, VecDiff};
 use hhhs::{DagSnapshot, Digest, ReachIndex};
 use hhhs_store::decode_storage_transaction_log;
 use hyperscape_hhhs::{
-    decode_authored, encode_authored, AdapterError, DurableProject, MemoryDurability, ProjectId,
-    StateRow, MAX_AUTHORED_PAYLOAD_BYTES, PAYLOAD_DOMAIN,
+    decode_authored, encode_authored, AdapterError, DurableProject, MemoryDurability,
+    ProjectArchive, ProjectId, StateRow, MAX_AUTHORED_PAYLOAD_BYTES, MAX_PROJECT_ARCHIVE_RECORDS,
+    PAYLOAD_DOMAIN, PROJECT_ARCHIVE_DOMAIN,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
@@ -83,6 +84,12 @@ where
         items.push(item);
     }
     items
+}
+
+fn resign_archive(bytes: &mut [u8]) {
+    let checksum_offset = bytes.len() - 32;
+    let checksum = Digest::of(&bytes[..checksum_offset]);
+    bytes[checksum_offset..].copy_from_slice(checksum.as_bytes());
 }
 
 #[test]
@@ -223,6 +230,106 @@ fn recovery_preserves_history_and_materialized_roots() {
     assert_eq!(recovered.history_len(), 2);
     assert_ne!(after.history_root, [0; 32]);
     assert_ne!(after.state_root, [0; 32]);
+}
+
+#[test]
+fn portable_archive_round_trips_deterministically_through_admission() {
+    let project = project(0x4004);
+    let mut original = DurableProject::new(project).unwrap();
+    block_on(original.admit(&upsert(1, asset_id(1), "scene.glb"))).unwrap();
+    block_on(original.admit(&set(2, entity_id(2), 7.0))).unwrap();
+    block_on(original.admit(&set(3, entity_id(3), 11.0))).unwrap();
+
+    let first = original.export_archive().unwrap();
+    let second = original.export_archive().unwrap();
+    let decoded = ProjectArchive::decode(&first).unwrap();
+    let imported = block_on(DurableProject::import_archive(&first)).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(decoded.project_id(), project);
+    assert_eq!(decoded.record_count(), 3);
+    assert_eq!(decoded.encode().unwrap(), first);
+    assert_eq!(imported.state().unwrap(), original.state().unwrap());
+    assert_eq!(imported.history_len(), original.history_len());
+    assert_eq!(imported.export_archive().unwrap(), first);
+    assert_ne!(imported.durability().bytes(), first);
+    assert_eq!(
+        Digest::of(&first).to_hex(),
+        "282e486c7469a765455e8e41872af98176fcc8d2396be6de82bfb4aaf4af0c52",
+        "this golden digest freezes the complete v0.1 archive encoding"
+    );
+}
+
+#[test]
+fn portable_archive_rejects_corruption_wrong_project_and_false_roots() {
+    let project_id = project(0x4005);
+    let mut original = DurableProject::new(project_id).unwrap();
+    block_on(original.admit(&set(1, entity_id(4), 5.0))).unwrap();
+    let archive = original.export_archive().unwrap();
+
+    let mut corrupted = archive.clone();
+    corrupted[PROJECT_ARCHIVE_DOMAIN.len() + 20] ^= 0x80;
+    assert!(matches!(
+        ProjectArchive::decode(&corrupted),
+        Err(AdapterError::ArchiveChecksumMismatch)
+    ));
+
+    let mut wrong_project = archive.clone();
+    let project_offset = PROJECT_ARCHIVE_DOMAIN.len() + 4;
+    wrong_project[project_offset..project_offset + 16]
+        .copy_from_slice(project(0x4999).as_uuid().as_bytes());
+    resign_archive(&mut wrong_project);
+    assert!(matches!(
+        ProjectArchive::decode(&wrong_project),
+        Err(AdapterError::WrongProject { .. })
+    ));
+
+    let mut wrong_history_root = archive.clone();
+    let history_root_offset = PROJECT_ARCHIVE_DOMAIN.len() + 4 + 16 + 8;
+    wrong_history_root[history_root_offset] ^= 1;
+    resign_archive(&mut wrong_history_root);
+    assert!(matches!(
+        block_on(DurableProject::import_archive(&wrong_history_root)),
+        Err(AdapterError::ArchiveHistoryRootMismatch)
+    ));
+
+    let mut wrong_state_root = archive;
+    let state_root_offset = history_root_offset + 32;
+    wrong_state_root[state_root_offset] ^= 1;
+    resign_archive(&mut wrong_state_root);
+    assert!(matches!(
+        block_on(DurableProject::import_archive(&wrong_state_root)),
+        Err(AdapterError::ArchiveStateRootMismatch)
+    ));
+}
+
+#[test]
+fn portable_archive_enforces_version_and_declared_record_bounds() {
+    let original = DurableProject::new(project(0x4006)).unwrap();
+    let archive = original.export_archive().unwrap();
+
+    let mut wrong_version = archive.clone();
+    wrong_version[PROJECT_ARCHIVE_DOMAIN.len()..PROJECT_ARCHIVE_DOMAIN.len() + 2]
+        .copy_from_slice(&99_u16.to_le_bytes());
+    resign_archive(&mut wrong_version);
+    assert!(matches!(
+        ProjectArchive::decode(&wrong_version),
+        Err(AdapterError::WrongArchiveVersion(ProtocolVersion {
+            major: 99,
+            minor: 1
+        }))
+    ));
+
+    let mut too_many = archive;
+    let count_offset = PROJECT_ARCHIVE_DOMAIN.len() + 4 + 16;
+    too_many[count_offset..count_offset + 8]
+        .copy_from_slice(&((MAX_PROJECT_ARCHIVE_RECORDS as u64) + 1).to_le_bytes());
+    resign_archive(&mut too_many);
+    assert!(matches!(
+        ProjectArchive::decode(&too_many),
+        Err(AdapterError::TooManyArchiveRecords { actual, max })
+            if actual == MAX_PROJECT_ARCHIVE_RECORDS + 1 && max == MAX_PROJECT_ARCHIVE_RECORDS
+    ));
 }
 
 #[test]

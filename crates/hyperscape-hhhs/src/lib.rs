@@ -13,8 +13,8 @@ use futures_signals::signal_vec::SignalVec;
 use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Position, Reach};
 use hhhs_reactive::{signal_vec_view, stream_view, Revision};
 use hhhs_replica::{
-    AdmissionPolicy, AdmittedAuthority, AsyncTransactionSink, DurableReplicaHost, Replica,
-    ReplicaRecord,
+    AdmissionPolicy, AdmittedAuthority, AsyncTransactionSink, AuthorityInput, DurableReplicaHost,
+    Replica, ReplicaRecord, ReplicaWireError, MAX_REPLICA_RECORD_BYTES,
 };
 use hhhs_store::{
     append_storage_transaction_log, decode_storage_transaction_log, empty_storage_transaction_log,
@@ -40,6 +40,18 @@ pub const MAX_AUTHORED_PAYLOAD_BYTES: usize = 1024 * 1024;
 const PAYLOAD_HEADER_BYTES: usize = PAYLOAD_DOMAIN.len() + 2 + 2 + 2 + 2 + 16;
 const MAX_AUTHORED_BODY_BYTES: u64 = (MAX_AUTHORED_PAYLOAD_BYTES - PAYLOAD_HEADER_BYTES) as u64;
 const STATE_ROOT_DOMAIN: &[u8] = b"hyperscape materialized project state v0.1";
+/// Frozen domain prefix for a portable, authority-rechecked project archive.
+pub const PROJECT_ARCHIVE_DOMAIN: &[u8] = b"hyperscape hhhs project archive v0.1\0";
+/// The only project archive schema understood by this crate.
+pub const PROJECT_ARCHIVE_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
+/// Strict aggregate bound applied before an imported archive is parsed.
+pub const MAX_PROJECT_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+/// Defensive bound on the number of records declared by one archive.
+pub const MAX_PROJECT_ARCHIVE_RECORDS: usize = 1_000_000;
+const ARCHIVE_CHECKSUM_BYTES: usize = 32;
+const ARCHIVE_FIXED_BODY_BYTES: usize = 4 + 16 + 8 + 32 + 32;
+const MIN_PROJECT_ARCHIVE_BYTES: usize =
+    PROJECT_ARCHIVE_DOMAIN.len() + ARCHIVE_FIXED_BODY_BYTES + ARCHIVE_CHECKSUM_BYTES;
 
 /// Stable identity of one replicated Hyperscape project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -87,6 +99,41 @@ pub enum AdapterError {
     Repair(#[from] hhhs_replica::ReplicaRepairError),
     #[error("durable transaction log failed: {0}")]
     Storage(#[from] StorageError),
+    #[error("project archive domain is unsupported")]
+    WrongArchiveDomain,
+    #[error("project archive version {0:?} is unsupported")]
+    WrongArchiveVersion(ProtocolVersion),
+    #[error("project archive is truncated or malformed")]
+    MalformedArchive,
+    #[error("project archive is {actual} bytes, exceeding the {max}-byte limit")]
+    ArchiveTooLarge { actual: usize, max: usize },
+    #[error("project archive declares {actual} records, exceeding the {max}-record limit")]
+    TooManyArchiveRecords { actual: usize, max: usize },
+    #[error("project archive record is {actual} bytes, exceeding the {max}-byte limit")]
+    ArchiveRecordTooLarge { actual: usize, max: usize },
+    #[error("project archive checksum does not match its contents")]
+    ArchiveChecksumMismatch,
+    #[error("project archive contains an invalid HHHS replica record: {0}")]
+    ArchiveRecord(#[from] ReplicaWireError),
+    #[error("project archive record {0:?} does not use the project's open authority profile")]
+    UnsupportedArchiveAuthority(EntryHash),
+    #[error("project archive repeats record {0:?}")]
+    DuplicateArchiveRecord(EntryHash),
+    #[error("project archive record {entry:?} is missing predecessor {predecessor:?}")]
+    MissingArchivePredecessor {
+        entry: EntryHash,
+        predecessor: EntryHash,
+    },
+    #[error("project archive records are not in canonical topological order")]
+    NonCanonicalArchiveOrder,
+    #[error("project archive import refused {refused} records and deferred {deferred}")]
+    IncompleteArchiveAdmission { refused: usize, deferred: usize },
+    #[error("project archive expected {expected} history entries but imported {actual}")]
+    ArchiveHistoryLengthMismatch { expected: usize, actual: usize },
+    #[error("project archive history root does not match the admitted history")]
+    ArchiveHistoryRootMismatch,
+    #[error("project archive state root does not match the materialized project")]
+    ArchiveStateRootMismatch,
 }
 
 fn canonical_codec() -> impl Options {
@@ -295,6 +342,243 @@ fn read_version(bytes: &[u8], cursor: &mut usize) -> Result<ProtocolVersion, Ada
     );
     *cursor += 2;
     Ok(ProtocolVersion { major, minor })
+}
+
+/// A complete, portable authored-history snapshot.
+///
+/// Unlike [`MemoryDurability`], this is an interchange format. It carries
+/// public [`ReplicaRecord`] values rather than storage transactions, so import
+/// can run the ordinary authority, payload, and causal-repair path again. The
+/// checksum detects accidental corruption; it is not a signature and conveys
+/// no author identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectArchive {
+    project_id: ProjectId,
+    history_root: [u8; 32],
+    state_root: [u8; 32],
+    records: Vec<ReplicaRecord>,
+}
+
+impl ProjectArchive {
+    pub fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    pub fn history_root(&self) -> [u8; 32] {
+        self.history_root
+    }
+
+    pub fn state_root(&self) -> [u8; 32] {
+        self.state_root
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Decode and structurally validate an untrusted archive without admitting
+    /// it. Call [`DurableProject::import_archive`] to re-run HHHS admission.
+    pub fn decode(bytes: &[u8]) -> Result<Self, AdapterError> {
+        if bytes.len() > MAX_PROJECT_ARCHIVE_BYTES {
+            return Err(AdapterError::ArchiveTooLarge {
+                actual: bytes.len(),
+                max: MAX_PROJECT_ARCHIVE_BYTES,
+            });
+        }
+        if bytes.len() < MIN_PROJECT_ARCHIVE_BYTES {
+            return Err(AdapterError::MalformedArchive);
+        }
+        if &bytes[..PROJECT_ARCHIVE_DOMAIN.len()] != PROJECT_ARCHIVE_DOMAIN {
+            return Err(AdapterError::WrongArchiveDomain);
+        }
+
+        let checksum_offset = bytes.len() - ARCHIVE_CHECKSUM_BYTES;
+        let expected_checksum = Digest::of(&bytes[..checksum_offset]);
+        if expected_checksum.as_bytes() != &bytes[checksum_offset..] {
+            return Err(AdapterError::ArchiveChecksumMismatch);
+        }
+
+        let mut reader = ArchiveReader::new(&bytes[PROJECT_ARCHIVE_DOMAIN.len()..checksum_offset]);
+        let version = ProtocolVersion {
+            major: reader.u16()?,
+            minor: reader.u16()?,
+        };
+        if version != PROJECT_ARCHIVE_VERSION {
+            return Err(AdapterError::WrongArchiveVersion(version));
+        }
+        let project_id = ProjectId::new(Uuid::from_bytes(reader.array::<16>()?))?;
+        let record_count =
+            usize::try_from(reader.u64()?).map_err(|_| AdapterError::TooManyArchiveRecords {
+                actual: usize::MAX,
+                max: MAX_PROJECT_ARCHIVE_RECORDS,
+            })?;
+        if record_count > MAX_PROJECT_ARCHIVE_RECORDS {
+            return Err(AdapterError::TooManyArchiveRecords {
+                actual: record_count,
+                max: MAX_PROJECT_ARCHIVE_RECORDS,
+            });
+        }
+        let history_root = reader.array::<32>()?;
+        let state_root = reader.array::<32>()?;
+        // Every record needs at least its u64 length prefix. Reject impossible
+        // declarations before reserving attacker-controlled capacity.
+        if record_count > reader.remaining() / 8 {
+            return Err(AdapterError::MalformedArchive);
+        }
+        let mut records = Vec::with_capacity(record_count);
+        let mut hashes = BTreeSet::new();
+        for _ in 0..record_count {
+            let record_len = usize::try_from(reader.u64()?).map_err(|_| {
+                AdapterError::ArchiveRecordTooLarge {
+                    actual: usize::MAX,
+                    max: MAX_REPLICA_RECORD_BYTES,
+                }
+            })?;
+            if record_len > MAX_REPLICA_RECORD_BYTES {
+                return Err(AdapterError::ArchiveRecordTooLarge {
+                    actual: record_len,
+                    max: MAX_REPLICA_RECORD_BYTES,
+                });
+            }
+            let record = ReplicaRecord::decode(reader.take(record_len)?)?;
+            let hash = record.entry_hash();
+            if record.authority() != &AuthorityInput::Open {
+                return Err(AdapterError::UnsupportedArchiveAuthority(hash));
+            }
+            if !hashes.insert(hash) {
+                return Err(AdapterError::DuplicateArchiveRecord(hash));
+            }
+            decode_authored(project_id, &record.entry().payload)?;
+            records.push(record);
+        }
+        if !reader.is_empty() {
+            return Err(AdapterError::MalformedArchive);
+        }
+        for record in &records {
+            for predecessor in &record.entry().header.prevs.0 {
+                if !hashes.contains(predecessor) {
+                    return Err(AdapterError::MissingArchivePredecessor {
+                        entry: record.entry_hash(),
+                        predecessor: *predecessor,
+                    });
+                }
+            }
+        }
+        let canonical_hashes: Vec<_> =
+            DagSnapshot::from_entries(records.iter().map(|record| record.entry().clone()))
+                .entries_topo()
+                .into_iter()
+                .map(|entry| entry.hash())
+                .collect();
+        let encoded_hashes: Vec<_> = records.iter().map(ReplicaRecord::entry_hash).collect();
+        if canonical_hashes != encoded_hashes {
+            return Err(AdapterError::NonCanonicalArchiveOrder);
+        }
+
+        Ok(Self {
+            project_id,
+            history_root,
+            state_root,
+            records,
+        })
+    }
+
+    /// Re-encode a validated archive in its canonical deterministic order.
+    pub fn encode(&self) -> Result<Vec<u8>, AdapterError> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(PROJECT_ARCHIVE_DOMAIN);
+        bytes.extend_from_slice(&PROJECT_ARCHIVE_VERSION.major.to_le_bytes());
+        bytes.extend_from_slice(&PROJECT_ARCHIVE_VERSION.minor.to_le_bytes());
+        bytes.extend_from_slice(self.project_id.as_uuid().as_bytes());
+        bytes.extend_from_slice(&(self.records.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&self.history_root);
+        bytes.extend_from_slice(&self.state_root);
+        for record in &self.records {
+            let encoded = record.encode();
+            if encoded.len() > MAX_REPLICA_RECORD_BYTES {
+                return Err(AdapterError::ArchiveRecordTooLarge {
+                    actual: encoded.len(),
+                    max: MAX_REPLICA_RECORD_BYTES,
+                });
+            }
+            let next_len = bytes
+                .len()
+                .checked_add(8)
+                .and_then(|length| length.checked_add(encoded.len()))
+                .and_then(|length| length.checked_add(ARCHIVE_CHECKSUM_BYTES))
+                .ok_or(AdapterError::ArchiveTooLarge {
+                    actual: usize::MAX,
+                    max: MAX_PROJECT_ARCHIVE_BYTES,
+                })?;
+            if next_len > MAX_PROJECT_ARCHIVE_BYTES {
+                return Err(AdapterError::ArchiveTooLarge {
+                    actual: next_len,
+                    max: MAX_PROJECT_ARCHIVE_BYTES,
+                });
+            }
+            bytes.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        let final_len = bytes.len().checked_add(ARCHIVE_CHECKSUM_BYTES).ok_or(
+            AdapterError::ArchiveTooLarge {
+                actual: usize::MAX,
+                max: MAX_PROJECT_ARCHIVE_BYTES,
+            },
+        )?;
+        if final_len > MAX_PROJECT_ARCHIVE_BYTES {
+            return Err(AdapterError::ArchiveTooLarge {
+                actual: final_len,
+                max: MAX_PROJECT_ARCHIVE_BYTES,
+            });
+        }
+        let checksum = Digest::of(&bytes);
+        bytes.extend_from_slice(checksum.as_bytes());
+        Ok(bytes)
+    }
+}
+
+struct ArchiveReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ArchiveReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], AdapterError> {
+        let end = self
+            .offset
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(AdapterError::MalformedArchive)?;
+        let result = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(result)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], AdapterError> {
+        self.take(N)?
+            .try_into()
+            .map_err(|_| AdapterError::MalformedArchive)
+    }
+
+    fn u16(&mut self) -> Result<u16, AdapterError> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> Result<u64, AdapterError> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.offset
+    }
 }
 
 #[derive(Clone)]
@@ -538,6 +822,38 @@ impl DurableProject<MemoryDurability> {
         let transactions = decode_storage_transaction_log(durability.bytes())?;
         Self::with_replayed_sink(project_id, durability, transactions)
     }
+
+    /// Import a portable archive through ordinary HHHS repair and application
+    /// policy. A failure drops the temporary in-memory host, so callers never
+    /// receive a partially admitted project.
+    pub async fn import_archive(bytes: &[u8]) -> Result<Self, AdapterError> {
+        let archive = ProjectArchive::decode(bytes)?;
+        let expected_len = archive.record_count();
+        let expected_history_root = archive.history_root();
+        let expected_state_root = archive.state_root();
+        let mut project = Self::new(archive.project_id())?;
+        let report = project.apply_records(&archive.records).await?;
+        if !report.refused.is_empty() || !report.deferred.is_empty() {
+            return Err(AdapterError::IncompleteArchiveAdmission {
+                refused: report.refused.len(),
+                deferred: report.deferred.len(),
+            });
+        }
+        if project.history_len() != expected_len {
+            return Err(AdapterError::ArchiveHistoryLengthMismatch {
+                expected: expected_len,
+                actual: project.history_len(),
+            });
+        }
+        let state = project.state()?;
+        if state.history_root != expected_history_root {
+            return Err(AdapterError::ArchiveHistoryRootMismatch);
+        }
+        if state.state_root != expected_state_root {
+            return Err(AdapterError::ArchiveStateRootMismatch);
+        }
+        Ok(project)
+    }
 }
 
 impl<D> DurableProject<D> {
@@ -617,6 +933,37 @@ impl<D> DurableProject<D> {
 
     pub fn history_len(&self) -> usize {
         self.storage.snapshot().len()
+    }
+
+    /// Capture the complete authored history as a deterministic portable
+    /// archive value. The live durability sink and local transaction framing
+    /// are deliberately excluded.
+    pub fn project_archive(&self) -> Result<ProjectArchive, AdapterError> {
+        let history = self.storage.snapshot();
+        let state = materialize_project(self.project_id, &history)?;
+        let entries = history.entries_topo();
+        if entries.len() > MAX_PROJECT_ARCHIVE_RECORDS {
+            return Err(AdapterError::TooManyArchiveRecords {
+                actual: entries.len(),
+                max: MAX_PROJECT_ARCHIVE_RECORDS,
+            });
+        }
+        let records = entries
+            .into_iter()
+            .map(|entry| ReplicaRecord::new(entry, AuthorityInput::Open))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ProjectArchive {
+            project_id: self.project_id,
+            history_root: state.history_root,
+            state_root: state.state_root,
+            records,
+        })
+    }
+
+    /// Encode [`Self::project_archive`] for file, removable-media, or other
+    /// offline transport.
+    pub fn export_archive(&self) -> Result<Vec<u8>, AdapterError> {
+        self.project_archive()?.encode()
     }
 
     pub fn state_stream(&self) -> impl Stream<Item = Revision<StateRow>> + 'static {
