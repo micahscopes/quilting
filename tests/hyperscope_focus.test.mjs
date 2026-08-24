@@ -23,6 +23,8 @@ import {
   scaleAnchoredFocusRadius,
   scaleRelativeNearPlane,
   sceneRelativeWalkSpeed,
+  sharedFocusSphereActive,
+  spheroidalFocusEnabled,
   spheroidalDefocus,
   smootherstep01,
   transportCameraAcrossSphereReflections,
@@ -317,6 +319,18 @@ test('object focus sphere applies a stable margin and rejects invalid bounds', (
   );
   assert.equal(focusSphereFromBound({ center: [1, 2], radius: 2 }), null);
   assert.equal(focusSphereFromBound({ center: [1, 2, 3], radius: -1 }), null);
+});
+
+test('spheroidal focus enablement is independent of inversion and legacy blur modes', () => {
+  assert.equal(spheroidalFocusEnabled(true, '3'), true);
+  assert.equal(spheroidalFocusEnabled(true, 3), true);
+  assert.equal(spheroidalFocusEnabled('1', '3'), true);
+  assert.equal(spheroidalFocusEnabled(false, '3'), false);
+  assert.equal(spheroidalFocusEnabled('0', '3'), false);
+  assert.equal(spheroidalFocusEnabled(true, '0'), false);
+  assert.equal(sharedFocusSphereActive(false, true, '3'), true);
+  assert.equal(sharedFocusSphereActive(true, false, '0'), true);
+  assert.equal(sharedFocusSphereActive(false, true, '0'), false);
 });
 
 test('compactified radial focus is exact at the origin, sphere, and infinity', () => {

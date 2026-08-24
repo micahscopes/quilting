@@ -165,9 +165,19 @@ or sphere state.
    generated-WASM smoke exercise the exact camera-eye pole oracle. Browser URL
    restoration likewise batches center, radius, and transform mode as one
    request, so it cannot reject a safe linked sphere against transient default
-   geometry. Live focus/selection shadow comparisons still require stable
-   glTF node identity, browser-to-Rust pick dispatch, transition clocks, and
-   lens parity before authority can move. Rust now retains the selected source
+   geometry. Effective spheroidal focus now has the same one-queue boundary:
+   Rust `focus_enabled` means fuzzy post-processing is enabled in mode 3,
+   while legacy blur modes and the retained shared sphere remain separate
+   renderer/interaction state. Focus coordinate and angular aperture are
+   coalesced with enablement into one browser signal burst and dispatched
+   through both navigation and `AppStore` parity controllers before the next
+   microtask. Initial application synchronization includes the complete lens,
+   aim, focus, inversion, and sphere packet, so a focus-only deep link no
+   longer starts from Rust defaults. Presentation snapshot application is
+   suppressed at the signal boundary and cannot echo semantic focus actions
+   back into Rust. Live selection cutover still requires stable glTF node
+   identity, browser-to-Rust pick dispatch, and transition clocks. Rust now
+   retains the selected source
    bound and clicked pivot beside its stable entity ID, and the application
    snapshot derives output-chart pivot/radius without destroying selection at
    a reflection pole. The same application queue now accepts complete,
@@ -200,7 +210,8 @@ or sphere state.
    identity/reflection and cyclic source/neighbor permutation cases.
    `walkimpl=rust` is therefore a real rollback-safe authority mode; the
    default stays `js` until it has seen broader interactive soak time.
-4. **Selection bridge — Rust read model complete, browser dispatch pending.**
+4. **Selection bridge — focus parity and Rust read model complete; browser
+   dispatch pending.**
    Map durable asset-scoped glTF node identities to Hyperscape entities, send
    pick results through `AppStore::dispatch_navigation`, tick sphere
    transitions in Rust, and apply its one compact selected-focus packet per

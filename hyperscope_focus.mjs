@@ -775,6 +775,25 @@ export function focusSphereFromBound(bound, margin = 1.1, minRadius = 0.02) {
 }
 
 /**
+ * The shared spheroidal field is a semantic focus effect, not a synonym for
+ * the legacy fuzzy post-process toggle or for the existence of its sphere.
+ */
+export function spheroidalFocusEnabled(postprocessEnabled, mode) {
+  const enabled = postprocessEnabled === true
+    || postprocessEnabled === 1
+    || postprocessEnabled === '1';
+  return enabled && String(mode) === '3';
+}
+
+/** Restore whether the retained shared sphere is interactively active. */
+export function sharedFocusSphereActive(inversionEnabled, postprocessEnabled, mode) {
+  const inversion = inversionEnabled === true
+    || inversionEnabled === 1
+    || inversionEnabled === '1';
+  return inversion || spheroidalFocusEnabled(postprocessEnabled, mode);
+}
+
+/**
  * Exact radial coordinate of the round S3 compactification induced by a
  * sphere: origin=0, sphere=1/2, and the pole at infinity=1.
  *

@@ -875,3 +875,51 @@ receipt is `ce5f01b5fe1935b14ae6c6689ce8d7ac` over 156 files and
 Remaining cutover blockers are effective focus-enable parity, durable
 asset-scoped selection identity/pick dispatch, and the raw ECS
 `ProjectionCamera` lens/target path.
+
+## Effective spheroidal-focus authority gate
+
+The following 2026-08-24 checkpoint separated three concepts that the browser
+prototype had allowed to drift together: existence of the retained shared
+sphere, enablement of spherical inversion, and enablement of the spheroidal
+depth-of-field effect. Rust `FocusNavigation.focus_enabled` now corresponds
+only to fuzzy post-processing enabled in mode 3. Legacy modes 0–2 remain
+renderer settings, while inversion or sphere editing can retain an active
+sphere without silently enabling focus. URL-style boolean values are parsed
+strictly, so `"0"` cannot become enabled through JavaScript truthiness.
+
+The browser observes only semantic focus enablement, shell coordinate, and
+angular aperture. One synchronous signal burst is coalesced into one microtask
+and queues `SetFocusEnabled` plus `SetFocusField` exactly once through each
+active Rust parity controller. Renderer-only blur radius, strength, quality,
+and normalization do not create navigation traffic. Applying an authored Rust
+presentation snapshot suppresses this adapter and cannot echo the same actions
+back into Rust. Initial `AppStore` setup now synchronizes the complete browser
+camera, lens, aim policy, focus field, inversion, and sphere rather than
+retaining constructor defaults until a later presentation action.
+
+An isolated Chrome-MCP probe used
+`?animate=0&lab=triangle&fuzzy=1&fmode=3&appshadow=1&navshadow=1&rendershadow=1`.
+At startup, the incumbent controller and `AppStore` agreed exactly on the
+75-degree lens, `near=0.01`, `far=10000`, absent semantic target, sphere center
+`[0.5,0,0]`, radius `2`, focus coordinate `0.62`, angular aperture `0.1`,
+focus enabled, and inversion disabled. Disabling focus and changing its shell
+to `0.35` in one synchronous burst produced one synchronization: four total
+boundary calls across the navigation and application controllers, with two
+application calls. Re-enabling focus produced the second synchronization and
+the expected cumulative counts of eight and four. Both snapshots retained
+exact parity, all eight observed render-shadow frames matched, the canonical
+URL retained focus-only state, and Chrome reported no warnings or errors. The
+disposable page was then closed without disturbing the user tabs.
+
+Validation passed for 89 direct Hyperscape tests, 38 application/replay tests,
+44 browser-independent JavaScript tests, all three unchanged replay goldens,
+four executable Node/WASM tests, all five generated-WASM smokes, the release
+Trunk build, ordinary offline preflight, and the live Chrome probe. The
+optimized WASM remains 6,072,171 bytes raw and is 2,136,978 bytes gzip, a
+78-byte gzip reduction. The source-coherent build receipt is
+`a6e814abb309e8300e31906bff4b26ed` over 156 files and 38,615,656 bytes.
+Remaining selection cutover blockers are durable asset-scoped node identity,
+renderer-pick dispatch through the single `AppStore` queue, and Rust-owned
+selection transition clocks. The raw ECS `ProjectionCamera` lens/target path
+also remains before the application projection can become the sole camera
+authority.

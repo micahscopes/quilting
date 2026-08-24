@@ -64,6 +64,18 @@ The first application boundary is now explicit:
   parity-complete frame snapshot. This is an offline
   cutover gate only: `navshadow=1` and the browser camera remain unchanged until
   live Chrome parity is measured.
+- Effective spheroidal-focus authority now crosses that same ordered boundary.
+  Rust `focus_enabled` denotes fuzzy post-processing enabled specifically in
+  mode 3; modes 0–2 remain renderer-only blur choices, and the retained shared
+  sphere may stay active for inversion or editing without enabling focus.
+  Browser signal changes to enablement, shell coordinate, and angular aperture
+  coalesce into one microtask and enqueue exactly two semantic actions per
+  active parity controller. Initial `AppStore` synchronization now includes
+  the complete camera lens, aim policy, focus field, inversion, and sphere, so
+  a focus-only route cannot temporarily retain Rust defaults. Applying an
+  authored presentation snapshot suppresses the reciprocal signal adapter and
+  cannot feed the same focus edit back into the queue. The browser renderer is
+  still live authority while this measured gate soaks.
 - The normalized SpaceMouse camera gate freezes samples at
   a platform-neutral Rust boundary. Browser code retains only WebHID/report
   acquisition, device shaping/smoothing, button layers, and the
