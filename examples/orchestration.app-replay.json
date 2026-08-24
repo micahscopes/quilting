@@ -1,0 +1,278 @@
+{
+  "version": "hyperscope-app-replay/0.3",
+  "events": [
+    {
+      "type": "request_asset",
+      "sequence": 0,
+      "at_seconds": 0.0,
+      "request_id": "b0000000-0000-4000-8000-000000000001",
+      "asset": {
+        "id": "a0000000-0000-4000-8000-000000000001",
+        "uri": "scene-a.glb",
+        "media_type": "model/gltf-binary"
+      }
+    },
+    {
+      "type": "request_asset",
+      "sequence": 1,
+      "at_seconds": 0.0,
+      "request_id": "b0000000-0000-4000-8000-000000000002",
+      "asset": {
+        "id": "a0000000-0000-4000-8000-000000000001",
+        "uri": "scene-a-v2.glb",
+        "media_type": "model/gltf-binary"
+      }
+    },
+    {
+      "type": "complete_asset_load",
+      "request_id": "b0000000-0000-4000-8000-000000000001",
+      "asset_id": "a0000000-0000-4000-8000-000000000001",
+      "outcome": {
+        "status": "loaded",
+        "byte_length": 100
+      }
+    },
+    {
+      "type": "complete_asset_load",
+      "request_id": "b0000000-0000-4000-8000-000000000002",
+      "asset_id": "a0000000-0000-4000-8000-000000000001",
+      "outcome": {
+        "status": "failed",
+        "code": "decode_failed",
+        "message": "fixture decode failure",
+        "retryable": false
+      }
+    },
+    {
+      "type": "request_asset",
+      "sequence": 2,
+      "at_seconds": 0.0,
+      "request_id": "b0000000-0000-4000-8000-000000000003",
+      "asset": {
+        "id": "a0000000-0000-4000-8000-000000000001",
+        "uri": "scene-a-v3.glb",
+        "media_type": "model/gltf-binary"
+      }
+    },
+    {
+      "type": "cancel_asset",
+      "sequence": 3,
+      "at_seconds": 0.0,
+      "asset_id": "a0000000-0000-4000-8000-000000000001"
+    },
+    {
+      "type": "complete_asset_load",
+      "request_id": "b0000000-0000-4000-8000-000000000003",
+      "asset_id": "a0000000-0000-4000-8000-000000000001",
+      "outcome": {
+        "status": "loaded",
+        "byte_length": 300
+      }
+    },
+    {
+      "type": "request_asset",
+      "sequence": 4,
+      "at_seconds": 0.0,
+      "request_id": "b0000000-0000-4000-8000-000000000004",
+      "asset": {
+        "id": "a0000000-0000-4000-8000-000000000002",
+        "uri": "scene-b.glb",
+        "media_type": "model/gltf-binary"
+      }
+    },
+    {
+      "type": "complete_asset_load",
+      "request_id": "b0000000-0000-4000-8000-000000000004",
+      "asset_id": "a0000000-0000-4000-8000-000000000002",
+      "outcome": {
+        "status": "loaded",
+        "byte_length": 2048,
+        "content_digest": [
+          7, 7, 7, 7, 7, 7, 7, 7,
+          7, 7, 7, 7, 7, 7, 7, 7,
+          7, 7, 7, 7, 7, 7, 7, 7,
+          7, 7, 7, 7, 7, 7, 7, 7
+        ]
+      }
+    },
+    {
+      "type": "receive_presence",
+      "envelope": {
+        "header": {
+          "version": { "major": 0, "minor": 1 },
+          "message_id": "c0000000-0000-4000-8000-000000000001",
+          "sender": "d0000000-0000-4000-8000-000000000001",
+          "sequence": 1
+        },
+        "presence": {
+          "ttl_millis": 1500,
+          "camera": {
+            "eye": [0.0, 1.0, 4.0],
+            "forward": [0.0, 0.0, -1.0],
+            "up": [0.0, 1.0, 0.0]
+          },
+          "selection": ["e0000000-0000-4000-8000-000000000001"],
+          "animation_seconds": 1.0
+        }
+      },
+      "received_at_seconds": 1.0
+    },
+    {
+      "type": "receive_presence",
+      "envelope": {
+        "header": {
+          "version": { "major": 0, "minor": 1 },
+          "message_id": "c0000000-0000-4000-8000-000000000002",
+          "sender": "d0000000-0000-4000-8000-000000000001",
+          "sequence": 1
+        },
+        "presence": {
+          "ttl_millis": 5000,
+          "selection": []
+        }
+      },
+      "received_at_seconds": 1.1
+    },
+    {
+      "type": "receive_presence",
+      "envelope": {
+        "header": {
+          "version": { "major": 0, "minor": 1 },
+          "message_id": "c0000000-0000-4000-8000-000000000003",
+          "sender": "d0000000-0000-4000-8000-000000000001",
+          "sequence": 2
+        },
+        "presence": {
+          "ttl_millis": 3000,
+          "selection": ["e0000000-0000-4000-8000-000000000002"],
+          "focus": {
+            "center": [1.0, 2.0, 3.0],
+            "radius": 2.0,
+            "inversion_enabled": true
+          },
+          "active_cue": "c0000000-0000-4000-8000-000000000099"
+        }
+      },
+      "received_at_seconds": 1.2
+    },
+    {
+      "type": "receive_presence",
+      "envelope": {
+        "header": {
+          "version": { "major": 0, "minor": 2 },
+          "message_id": "c0000000-0000-4000-8000-000000000004",
+          "sender": "d0000000-0000-4000-8000-000000000001",
+          "sequence": 3
+        },
+        "presence": {
+          "ttl_millis": 1000,
+          "selection": []
+        }
+      },
+      "received_at_seconds": 1.3
+    },
+    {
+      "type": "apply_authored_revision",
+      "projection_revision": 1,
+      "commands": [
+        {
+          "header": {
+            "version": { "major": 0, "minor": 1 },
+            "message_id": "c0000000-0000-4000-8000-000000000009",
+            "sender": "d0000000-0000-4000-8000-000000000002",
+            "sequence": 0
+          },
+          "command": {
+            "type": "upsert_asset",
+            "asset": {
+              "id": "a0000000-0000-4000-8000-000000000010",
+              "uri": "authored-scene.glb",
+              "media_type": "model/gltf-binary"
+            }
+          }
+        },
+        {
+          "header": {
+            "version": { "major": 0, "minor": 1 },
+            "message_id": "c0000000-0000-4000-8000-000000000010",
+            "sender": "d0000000-0000-4000-8000-000000000002",
+            "sequence": 1
+          },
+          "command": {
+            "type": "set_entity_transform",
+            "entity": "e0000000-0000-4000-8000-000000000010",
+            "transform": {
+              "translation": [1.0, 2.0, 3.0],
+              "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
+              "scale": [1.0, 1.0, 1.0]
+            }
+          }
+        },
+        {
+          "header": {
+            "version": { "major": 0, "minor": 1 },
+            "message_id": "c0000000-0000-4000-8000-000000000013",
+            "sender": "d0000000-0000-4000-8000-000000000002",
+            "sequence": 2
+          },
+          "command": {
+            "type": "remove_entity",
+            "entity": "e0000000-0000-4000-8000-000000000011"
+          }
+        }
+      ]
+    },
+    {
+      "type": "apply_authored_revision",
+      "projection_revision": 1,
+      "commands": [
+        {
+          "header": {
+            "version": { "major": 0, "minor": 1 },
+            "message_id": "c0000000-0000-4000-8000-000000000011",
+            "sender": "d0000000-0000-4000-8000-000000000002",
+            "sequence": 2
+          },
+          "command": {
+            "type": "remove_entity",
+            "entity": "e0000000-0000-4000-8000-000000000010"
+          }
+        }
+      ]
+    },
+    {
+      "type": "apply_authored_revision",
+      "projection_revision": 2,
+      "commands": [
+        {
+          "header": {
+            "version": { "major": 0, "minor": 1 },
+            "message_id": "c0000000-0000-4000-8000-000000000012",
+            "sender": "d0000000-0000-4000-8000-000000000002",
+            "sequence": 3
+          },
+          "command": {
+            "type": "remove_entity",
+            "entity": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 4.0,
+      "delta_seconds": 4.0
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 4.2,
+      "delta_seconds": 0.2
+    },
+    {
+      "type": "cancel_asset",
+      "sequence": 5,
+      "at_seconds": 4.2,
+      "asset_id": "a0000000-0000-4000-8000-000000000099"
+    }
+  ]
+}

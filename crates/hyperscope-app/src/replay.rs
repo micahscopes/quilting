@@ -6,20 +6,25 @@
 //! future render backends can consume the same oracle.
 
 use crate::{
-    AppCommit, AppEffect, AppEvent, AppStore, CommitDisposition, FrameTick,
-    NavigationSynchronization, PresentationAction, SemanticAction, Timed,
+    AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetStatus,
+    AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick, NavigationSynchronization,
+    PresentationAction, ReceivedPresence, SemanticAction, Timed,
 };
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
     NavigationPreset, Presentation, SphereReflectionState, StableEntityId, SurfaceAnchorTarget,
     TransitionEasing,
 };
+use hyperscape_protocol::{
+    AssetDescriptor, AssetId, AuthoredEnvelope, EphemeralPresence, PeerId, PresenceEnvelope,
+    RequestId,
+};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.2";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.3";
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
 const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -60,10 +65,75 @@ pub enum AppReplayEvent {
         at_seconds: f64,
         action: ReplayPresentationAction,
     },
+    RequestAsset {
+        sequence: u64,
+        at_seconds: f64,
+        request_id: RequestId,
+        asset: AssetDescriptor,
+    },
+    CancelAsset {
+        sequence: u64,
+        at_seconds: f64,
+        asset_id: AssetId,
+    },
+    CompleteAssetLoad {
+        request_id: RequestId,
+        asset_id: AssetId,
+        outcome: ReplayAssetLoadOutcome,
+    },
+    ReceivePresence {
+        envelope: PresenceEnvelope,
+        received_at_seconds: f64,
+    },
+    ApplyAuthoredRevision {
+        projection_revision: u64,
+        commands: Vec<AuthoredEnvelope>,
+    },
     Frame {
         elapsed_seconds: f64,
         delta_seconds: f64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReplayAssetLoadOutcome {
+    Loaded {
+        byte_length: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_digest: Option<[u8; 32]>,
+    },
+    Failed {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+}
+
+impl TryFrom<ReplayAssetLoadOutcome> for AssetLoadOutcome {
+    type Error = String;
+
+    fn try_from(outcome: ReplayAssetLoadOutcome) -> Result<Self, Self::Error> {
+        match outcome {
+            ReplayAssetLoadOutcome::Loaded {
+                byte_length,
+                content_digest,
+            } => Ok(Self::Loaded {
+                byte_length: usize::try_from(byte_length)
+                    .map_err(|_| "asset byte length exceeds this target's address space")?,
+                content_digest,
+            }),
+            ReplayAssetLoadOutcome::Failed {
+                code,
+                message,
+                retryable,
+            } => Ok(Self::Failed {
+                code,
+                message,
+                retryable,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -425,13 +495,12 @@ pub enum ReplayCommitDisposition {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppReplayEffect {
     FetchAsset {
-        request_id: String,
-        asset_id: String,
-        uri: String,
+        request_id: RequestId,
+        asset: AssetDescriptor,
     },
     CancelAssetLoad {
-        request_id: String,
-        asset_id: String,
+        request_id: RequestId,
+        asset_id: AssetId,
     },
 }
 
@@ -440,20 +509,93 @@ pub enum AppReplayEffect {
 pub struct AppReplayState {
     pub revision: u64,
     pub elapsed_seconds: f64,
+    pub authored_projection_revision: Option<u64>,
     pub active_cue: Option<Uuid>,
     pub active_scene: Option<Uuid>,
     pub active_view: Option<Uuid>,
+    pub assets: Vec<AppReplayAssetState>,
+    pub presence: Vec<AppReplayPresenceState>,
+    pub diagnostics: Vec<AppReplayDiagnosticState>,
     pub reflection: ReplayReflection,
     pub navigation: AppReplayNavigationState,
     pub camera: AppReplayCameraState,
     pub focus: AppReplayFocusState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayAssetState {
+    pub descriptor: AssetDescriptor,
+    pub status: ReplayAssetStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReplayAssetStatus {
+    Loading {
+        request_id: RequestId,
+    },
+    Ready {
+        byte_length: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_digest: Option<[u8; 32]>,
+    },
+    Failed {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+    Cancelled,
+}
+
+impl From<AssetStatus> for ReplayAssetStatus {
+    fn from(status: AssetStatus) -> Self {
+        match status {
+            AssetStatus::Loading { request_id } => Self::Loading { request_id },
+            AssetStatus::Ready {
+                byte_length,
+                content_digest,
+            } => Self::Ready {
+                byte_length: u64::try_from(byte_length)
+                    .expect("supported Rust targets have at most 64-bit usize"),
+                content_digest,
+            },
+            AssetStatus::Failed {
+                code,
+                message,
+                retryable,
+            } => Self::Failed {
+                code,
+                message,
+                retryable,
+            },
+            AssetStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayPresenceState {
+    pub peer: PeerId,
+    pub sequence: u64,
+    pub expires_at_seconds: f64,
+    pub presence: EphemeralPresence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayDiagnosticState {
+    pub revision: u64,
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppReplayNavigationState {
     pub preset: ReplayNavigationPreset,
-    pub pending_actions: usize,
+    pub pending_actions: u64,
     pub last_applied_sequence: Option<u64>,
     pub surface_anchor_transition_remaining_seconds: Option<f64>,
     pub surface_anchor_hop_height: Option<f64>,
@@ -572,57 +714,8 @@ pub fn app_replay_fingerprint(trace: &AppReplayTrace) -> Result<String, serde_js
 }
 
 fn replay_event(store: &AppStore, event: &AppReplayEvent) -> AppReplayOutcome {
-    let result: Result<AppCommit, String> = match event {
-        AppReplayEvent::LoadPresentation { presentation } => store
-            .dispatch(AppEvent::PresentationLoaded(presentation.clone()))
-            .map_err(|error| error.to_string()),
-        AppReplayEvent::SynchronizeNavigation { camera, focus } => camera
-            .to_camera_rig()
-            .and_then(|camera| {
-                focus
-                    .to_focus_navigation()
-                    .map(|focus| NavigationSynchronization { camera, focus })
-            })
-            .map_err(|error| error.to_string())
-            .and_then(|synchronization| {
-                store
-                    .dispatch(AppEvent::NavigationSynchronized(synchronization))
-                    .map_err(|error| error.to_string())
-            }),
-        AppReplayEvent::Navigate {
-            sequence,
-            at_seconds,
-            action,
-        } => NavigationAction::try_from(*action).and_then(|action| {
-            store
-                .dispatch(AppEvent::Input(Timed {
-                    sequence: *sequence,
-                    at_seconds: *at_seconds,
-                    value: SemanticAction::Navigate(action),
-                }))
-                .map_err(|error| error.to_string())
-        }),
-        AppReplayEvent::Present {
-            sequence,
-            at_seconds,
-            action,
-        } => store
-            .dispatch(AppEvent::Input(Timed {
-                sequence: *sequence,
-                at_seconds: *at_seconds,
-                value: SemanticAction::Present((*action).into()),
-            }))
-            .map_err(|error| error.to_string()),
-        AppReplayEvent::Frame {
-            elapsed_seconds,
-            delta_seconds,
-        } => store
-            .dispatch(AppEvent::Frame(FrameTick {
-                elapsed_seconds: *elapsed_seconds,
-                delta_seconds: *delta_seconds,
-            }))
-            .map_err(|error| error.to_string()),
-    };
+    let result: Result<AppCommit, String> = replay_app_event(event)
+        .and_then(|event| store.dispatch(event).map_err(|error| error.to_string()));
     match result {
         Ok(commit) => AppReplayOutcome::Committed {
             revision: commit.revision,
@@ -637,19 +730,109 @@ fn replay_event(store: &AppStore, event: &AppReplayEvent) -> AppReplayOutcome {
     }
 }
 
+fn replay_app_event(event: &AppReplayEvent) -> Result<AppEvent, String> {
+    match event {
+        AppReplayEvent::LoadPresentation { presentation } => {
+            Ok(AppEvent::PresentationLoaded(presentation.clone()))
+        }
+        AppReplayEvent::SynchronizeNavigation { camera, focus } => camera
+            .to_camera_rig()
+            .and_then(|camera| {
+                focus
+                    .to_focus_navigation()
+                    .map(|focus| NavigationSynchronization { camera, focus })
+            })
+            .map_err(|error| error.to_string())
+            .map(AppEvent::NavigationSynchronized),
+        AppReplayEvent::Navigate {
+            sequence,
+            at_seconds,
+            action,
+        } => NavigationAction::try_from(*action).map(|action| {
+            AppEvent::Input(Timed {
+                sequence: *sequence,
+                at_seconds: *at_seconds,
+                value: SemanticAction::Navigate(action),
+            })
+        }),
+        AppReplayEvent::Present {
+            sequence,
+            at_seconds,
+            action,
+        } => Ok(AppEvent::Input(Timed {
+            sequence: *sequence,
+            at_seconds: *at_seconds,
+            value: SemanticAction::Present((*action).into()),
+        })),
+        AppReplayEvent::RequestAsset {
+            sequence,
+            at_seconds,
+            request_id,
+            asset,
+        } => Ok(AppEvent::Input(Timed {
+            sequence: *sequence,
+            at_seconds: *at_seconds,
+            value: SemanticAction::RequestAsset {
+                request_id: *request_id,
+                asset: asset.clone(),
+            },
+        })),
+        AppReplayEvent::CancelAsset {
+            sequence,
+            at_seconds,
+            asset_id,
+        } => Ok(AppEvent::Input(Timed {
+            sequence: *sequence,
+            at_seconds: *at_seconds,
+            value: SemanticAction::CancelAsset(*asset_id),
+        })),
+        AppReplayEvent::CompleteAssetLoad {
+            request_id,
+            asset_id,
+            outcome,
+        } => Ok(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+            AssetLoadCompletion {
+                request_id: *request_id,
+                asset_id: *asset_id,
+                outcome: outcome.clone().try_into()?,
+            },
+        ))),
+        AppReplayEvent::ReceivePresence {
+            envelope,
+            received_at_seconds,
+        } => Ok(AppEvent::RemotePresence(ReceivedPresence {
+            envelope: envelope.clone(),
+            received_at_seconds: *received_at_seconds,
+        })),
+        AppReplayEvent::ApplyAuthoredRevision {
+            projection_revision,
+            commands,
+        } => Ok(AppEvent::AuthoredRevision(AuthoredRevision {
+            projection_revision: *projection_revision,
+            commands: commands.clone(),
+        })),
+        AppReplayEvent::Frame {
+            elapsed_seconds,
+            delta_seconds,
+        } => Ok(AppEvent::Frame(FrameTick {
+            elapsed_seconds: *elapsed_seconds,
+            delta_seconds: *delta_seconds,
+        })),
+    }
+}
+
 fn replay_effect(effect: &AppEffect) -> AppReplayEffect {
     match effect {
         AppEffect::FetchAsset { request_id, asset } => AppReplayEffect::FetchAsset {
-            request_id: request_id.to_string(),
-            asset_id: asset.id.to_string(),
-            uri: asset.uri.clone(),
+            request_id: *request_id,
+            asset: asset.clone(),
         },
         AppEffect::CancelAssetLoad {
             request_id,
             asset_id,
         } => AppReplayEffect::CancelAssetLoad {
-            request_id: request_id.to_string(),
-            asset_id: asset_id.to_string(),
+            request_id: *request_id,
+            asset_id: *asset_id,
         },
     }
 }
@@ -666,16 +849,45 @@ fn replay_state(store: &AppStore) -> AppReplayState {
     AppReplayState {
         revision: frame.revision,
         elapsed_seconds: frame.elapsed_seconds,
+        authored_projection_revision: state.authored_projection_revision,
         active_cue: active.map(|snapshot| snapshot.cue_id),
         active_scene: active.map(|snapshot| snapshot.scene_id),
         active_view: active.map(|snapshot| snapshot.view_id),
+        assets: state
+            .asset_read_models()
+            .into_iter()
+            .map(|asset| AppReplayAssetState {
+                descriptor: asset.descriptor,
+                status: asset.status.into(),
+            })
+            .collect(),
+        presence: state
+            .presence_read_models()
+            .into_iter()
+            .map(|presence| AppReplayPresenceState {
+                peer: presence.peer,
+                sequence: presence.sequence,
+                expires_at_seconds: presence.expires_at_seconds,
+                presence: presence.presence,
+            })
+            .collect(),
+        diagnostics: state
+            .diagnostic_read_models()
+            .into_iter()
+            .map(|diagnostic| AppReplayDiagnosticState {
+                revision: diagnostic.revision,
+                code: diagnostic.code.to_owned(),
+                message: diagnostic.message,
+            })
+            .collect(),
         reflection: match frame.reflection {
             SphereReflectionState::Identity => ReplayReflection::Identity,
             SphereReflectionState::Sphere(_) => ReplayReflection::SphereReflection,
         },
         navigation: AppReplayNavigationState {
             preset: navigation.runtime.preset.into(),
-            pending_actions: navigation.queue.len(),
+            pending_actions: u64::try_from(navigation.queue.len())
+                .expect("supported Rust targets have at most 64-bit usize"),
             last_applied_sequence: navigation.runtime.last_applied_sequence,
             surface_anchor_transition_remaining_seconds: navigation
                 .runtime
@@ -737,11 +949,16 @@ impl Error for AppReplayError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperscape_protocol::AuthoredCommand;
 
     const FIXTURE: &str = include_str!("../../../examples/hacker-night.presentation.json");
     const GOLDEN: &str = include_str!("../../../examples/hacker-night.replay.fingerprint");
     const NAVIGATION_FIXTURE: &str = include_str!("../../../examples/navigation.app-replay.json");
     const NAVIGATION_GOLDEN: &str = include_str!("../../../examples/navigation.replay.fingerprint");
+    const ORCHESTRATION_FIXTURE: &str =
+        include_str!("../../../examples/orchestration.app-replay.json");
+    const ORCHESTRATION_GOLDEN: &str =
+        include_str!("../../../examples/orchestration.replay.fingerprint");
     const UNKNOWN_CUE: &str = "f0000000-0000-4000-8000-000000000099";
 
     fn fixture() -> Presentation {
@@ -752,10 +969,26 @@ mod tests {
         assert_eq!(left.active_cue, right.active_cue);
         assert_eq!(left.active_scene, right.active_scene);
         assert_eq!(left.active_view, right.active_view);
+        assert_eq!(
+            left.authored_projection_revision,
+            right.authored_projection_revision
+        );
+        assert_eq!(left.assets, right.assets);
+        assert_eq!(left.presence, right.presence);
+        assert_eq!(left.diagnostics, right.diagnostics);
         assert_eq!(left.reflection, right.reflection);
         assert_eq!(left.navigation, right.navigation);
         assert_eq!(left.camera, right.camera);
         assert_eq!(left.focus, right.focus);
+    }
+
+    fn committed_effects(record: &AppReplayRecord) -> &[AppReplayEffect] {
+        match &record.outcome {
+            AppReplayOutcome::Committed { effects, .. } => effects,
+            AppReplayOutcome::Rejected { error } => {
+                panic!("expected committed replay record, rejected with {error}")
+            }
+        }
     }
 
     fn navigation_action_name(action: &ReplayNavigationAction) -> &'static str {
@@ -810,6 +1043,81 @@ mod tests {
             NavigationAction::SetInversionEnabled(_) => "set_inversion_enabled",
             NavigationAction::ToggleInversion => "toggle_inversion",
         }
+    }
+
+    fn authoritative_app_event_name(event: &AppEvent) -> &'static str {
+        match event {
+            AppEvent::Input(timed) => match &timed.value {
+                SemanticAction::Navigate(_) => "navigate",
+                SemanticAction::Present(_) => "present",
+                SemanticAction::RequestAsset { .. } => "request_asset",
+                SemanticAction::CancelAsset(_) => "cancel_asset",
+            },
+            AppEvent::PresentationLoaded(_) => "presentation_loaded",
+            AppEvent::NavigationSynchronized(_) => "navigation_synchronized",
+            AppEvent::Frame(_) => "frame",
+            AppEvent::EffectCompleted(completion) => match completion {
+                EffectCompletion::AssetLoad(_) => "effect_completed_asset_load",
+            },
+            AppEvent::RemotePresence(_) => "remote_presence",
+            AppEvent::AuthoredRevision(_) => "authored_revision",
+        }
+    }
+
+    fn authoritative_authored_command_name(command: &AuthoredCommand) -> &'static str {
+        match command {
+            AuthoredCommand::UpsertAsset { .. } => "upsert_asset",
+            AuthoredCommand::SetEntityTransform { .. } => "set_entity_transform",
+            AuthoredCommand::RemoveEntity { .. } => "remove_entity",
+        }
+    }
+
+    #[test]
+    fn fixtures_cover_the_authoritative_application_event_surface() {
+        let navigation: AppReplayScript = serde_json::from_str(NAVIGATION_FIXTURE).unwrap();
+        let orchestration: AppReplayScript = serde_json::from_str(ORCHESTRATION_FIXTURE).unwrap();
+        let presentation = presentation_walkthrough_replay(fixture());
+        let covered = presentation
+            .events
+            .iter()
+            .chain(navigation.events.iter())
+            .chain(orchestration.events.iter())
+            .filter_map(|event| replay_app_event(event).ok())
+            .map(|event| authoritative_app_event_name(&event))
+            .collect::<std::collections::BTreeSet<_>>();
+        let authored_covered = orchestration
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AppReplayEvent::ApplyAuthoredRevision { commands, .. } => Some(commands),
+                _ => None,
+            })
+            .flatten()
+            .map(|envelope| authoritative_authored_command_name(&envelope.command))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            covered,
+            std::collections::BTreeSet::from([
+                "authored_revision",
+                "cancel_asset",
+                "effect_completed_asset_load",
+                "frame",
+                "navigate",
+                "navigation_synchronized",
+                "presentation_loaded",
+                "present",
+                "remote_presence",
+                "request_asset",
+            ])
+        );
+        assert_eq!(
+            authored_covered,
+            std::collections::BTreeSet::from([
+                "remove_entity",
+                "set_entity_transform",
+                "upsert_asset",
+            ])
+        );
     }
 
     #[test]
@@ -970,6 +1278,168 @@ mod tests {
                 app_replay_fingerprint(&trace).unwrap()
             ),
             NAVIGATION_GOLDEN.trim()
+        );
+        let trace_json = serde_json::to_string(&trace).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AppReplayTrace>(&trace_json).unwrap(),
+            trace
+        );
+    }
+
+    #[test]
+    fn orchestration_fixture_covers_effects_presence_and_authored_admission() {
+        let script: AppReplayScript = serde_json::from_str(ORCHESTRATION_FIXTURE).unwrap();
+        let encoded = serde_json::to_string(&script).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AppReplayScript>(&encoded).unwrap(),
+            script
+        );
+
+        let trace = run_app_replay(&script).unwrap();
+        assert_eq!(trace.records.len(), 19);
+        let (first_request, first_asset) = match &script.events[0] {
+            AppReplayEvent::RequestAsset {
+                request_id, asset, ..
+            } => (*request_id, asset.clone()),
+            event => panic!("expected first asset request, observed {event:?}"),
+        };
+        let (second_request, second_asset) = match &script.events[1] {
+            AppReplayEvent::RequestAsset {
+                request_id, asset, ..
+            } => (*request_id, asset.clone()),
+            event => panic!("expected replacement asset request, observed {event:?}"),
+        };
+        assert_eq!(
+            committed_effects(&trace.records[0]),
+            &[AppReplayEffect::FetchAsset {
+                request_id: first_request,
+                asset: first_asset.clone(),
+            }]
+        );
+        assert_eq!(
+            committed_effects(&trace.records[1]),
+            &[
+                AppReplayEffect::CancelAssetLoad {
+                    request_id: first_request,
+                    asset_id: first_asset.id,
+                },
+                AppReplayEffect::FetchAsset {
+                    request_id: second_request,
+                    asset: second_asset,
+                },
+            ]
+        );
+        assert!(matches!(
+            trace.records[2].outcome,
+            AppReplayOutcome::Committed {
+                disposition: ReplayCommitDisposition::IgnoredStale,
+                ..
+            }
+        ));
+        assert!(matches!(
+            trace.records[3].state.assets[0].status,
+            ReplayAssetStatus::Failed {
+                ref code,
+                retryable: false,
+                ..
+            } if code == "decode_failed"
+        ));
+        assert!(matches!(
+            trace.records[5].state.assets[0].status,
+            ReplayAssetStatus::Cancelled
+        ));
+        let third_request = match &script.events[4] {
+            AppReplayEvent::RequestAsset { request_id, .. } => *request_id,
+            event => panic!("expected retry asset request, observed {event:?}"),
+        };
+        assert_eq!(
+            committed_effects(&trace.records[5]),
+            &[AppReplayEffect::CancelAssetLoad {
+                request_id: third_request,
+                asset_id: first_asset.id,
+            }]
+        );
+        assert!(matches!(
+            trace.records[6].outcome,
+            AppReplayOutcome::Committed {
+                disposition: ReplayCommitDisposition::IgnoredStale,
+                ..
+            }
+        ));
+        assert_eq!(
+            trace.records[8].state.assets[1].status,
+            ReplayAssetStatus::Ready {
+                byte_length: 2048,
+                content_digest: Some([7; 32]),
+            }
+        );
+
+        assert_eq!(trace.records[9].state.presence[0].sequence, 1);
+        assert_eq!(trace.records[9].state.presence[0].expires_at_seconds, 2.5);
+        assert!(matches!(
+            trace.records[10].outcome,
+            AppReplayOutcome::Committed {
+                disposition: ReplayCommitDisposition::IgnoredStale,
+                ..
+            }
+        ));
+        assert_eq!(trace.records[11].state.presence[0].sequence, 2);
+        assert_eq!(trace.records[11].state.presence[0].expires_at_seconds, 4.2);
+        assert!(matches!(
+            trace.records[12].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("unsupported protocol version")
+        ));
+        assert_eq!(
+            trace.records[12].state.revision,
+            trace.records[11].state.revision
+        );
+
+        assert_eq!(
+            trace.records[13].state.authored_projection_revision,
+            Some(1)
+        );
+        assert!(matches!(
+            trace.records[14].outcome,
+            AppReplayOutcome::Committed {
+                disposition: ReplayCommitDisposition::IgnoredStale,
+                ..
+            }
+        ));
+        assert!(matches!(
+            trace.records[15].outcome,
+            AppReplayOutcome::Rejected { ref error } if error.contains("entity ID must not be nil")
+        ));
+        assert_eq!(
+            trace.records[15].state.revision,
+            trace.records[14].state.revision
+        );
+        assert_eq!(trace.records[16].state.presence.len(), 1);
+        assert!(trace.records[17].state.presence.is_empty());
+        assert!(matches!(
+            trace.records[18].outcome,
+            AppReplayOutcome::Rejected { ref error } if error.contains("unknown asset")
+        ));
+        assert_semantic_state_eq(&trace.records[18].state, &trace.records[17].state);
+        assert_eq!(
+            trace.records[18]
+                .state
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "stale_effect_completion",
+                "stale_effect_completion",
+                "stale_authored_revision",
+            ]
+        );
+        assert_eq!(
+            format!(
+                "{APP_REPLAY_FINGERPRINT_ALGORITHM}:{}",
+                app_replay_fingerprint(&trace).unwrap()
+            ),
+            ORCHESTRATION_GOLDEN.trim()
         );
         let trace_json = serde_json::to_string(&trace).unwrap();
         assert_eq!(

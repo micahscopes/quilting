@@ -12,9 +12,13 @@ From the repository root:
 trunk build --release
 cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --check
 cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --navigation --check
+cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --orchestration --check
 cargo run -p hyperscape --bin hyperscope-preflight
+node --test tests/*.test.mjs
 node scripts/smoke-hyperscope-presentation.mjs
 node scripts/smoke-hyperscope-app-shadow.mjs
+node scripts/smoke-hyperscope-route-shadow.mjs
+node scripts/smoke-render-shadow.mjs
 ```
 
 The ordinary preflight must print `PASS`. It validates the Rust presentation
@@ -28,15 +32,18 @@ cue, unknown-cue, application projection, and camera/focus transition parity
 without needing a GPU or browser.
 
 The replay checks must print
-`PASS fnv1a-128-json:cf1a497ee914e5b6c3c9e541e0f21232` and
-`PASS fnv1a-128-json:fb3bd34a7b427b8d52fa058a00b98331`. The first executes
+`PASS fnv1a-128-json:b06e5f2829663995385b6f0963855e2d`,
+`PASS fnv1a-128-json:c6b49d2c0e3ec84509386807ab2a5dbf`, and
+`PASS fnv1a-128-json:e67dfadddd6729f0c8544212784e867c`. The first executes
 the complete six-cue semantic walkthrough. The second exercises every current
 navigation action, including focus/inversion, camera and surface transitions,
-stable selection anchoring, and an atomic rejected input. Both run through
-`hyperscope-app` independently of browser timing, input adapters, and the
-renderer. A mismatch means reducer, presentation, navigation, or trace behavior
-changed and must be reviewed; the fingerprints are deterministic regression
-oracles, not cryptographic signatures.
+stable selection anchoring, and an atomic rejected input. The third covers
+asset supersession/cancellation/completion, stale and failed effects, presence
+ordering/expiry, authored revision admission, and rejected wire input. All run
+through `hyperscope-app` independently of browser timing, input adapters, and
+the renderer. A mismatch means reducer, presentation, navigation,
+orchestration, or trace behavior changed and must be reviewed; the fingerprints
+are deterministic regression oracles, not cryptographic signatures.
 
 For a public downloadable archive, use the stricter gate:
 

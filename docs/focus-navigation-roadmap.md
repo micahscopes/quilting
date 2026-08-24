@@ -125,10 +125,11 @@ or sphere state.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.2
+6. **Persistence and replay — native oracle complete.** Replay version 0.3
    serializes stable entity references, detached spheres, camera rig state, and
-   every current high-level navigation action. The checked navigation fixture
-   covers transition cadence and atomic rejection. Browser input capture and
+   every current high-level navigation action. Checked navigation and
+   orchestration fixtures cover transition cadence, asset effects,
+   presence/authored lanes, and atomic rejection. Browser input capture and
    networking must carry semantic actions or authoritative state deltas, never
    raw HID reports.
 7. **WebGPU backend.** Upload the extracted focus packet as frame/view data,

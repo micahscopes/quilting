@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.2",
+  "version": "hyperscope-app-replay/0.3",
   "events": [
     {
       "type": "synchronize_navigation",

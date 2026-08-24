@@ -79,17 +79,23 @@ The first application boundary is now explicit:
   the frame lane without cloning cue assets/layers into render snapshots.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
-  camera/focus/cue snapshot; it contains no DOM events, device reports,
-  renderer handles, or wall clock. Decimal JSON uses exact `f64` round trips.
+  camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM
+  events, device reports, renderer handles, or wall clock. Decimal JSON uses
+  exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.2 walks every checked-in cue and every current
-  semantic navigation action. The navigation oracle covers camera frames,
+  `hyperscope-replay` version 0.3 walks every checked-in cue, every current
+  semantic navigation action, and every current application event lane. The
+  navigation oracle covers camera frames,
   focus/inversion, camera transitions, surface re-anchor/retarget/cancel,
   stable-identity selection, detach/free edits, and rejected-input atomicity.
-  Tests prove JSON round trips and transition cadence invariance. The six-cue
-  golden is `fnv1a-128-json:cf1a497ee914e5b6c3c9e541e0f21232`;
+  The orchestration oracle covers asset effects, stale completion, failures,
+  cancellation, presence TTL/order, authored revisions, and rejected wire
+  input. Tests prove exhaustive current event/action coverage, JSON round trips,
+  atomic rejection, and transition cadence invariance. The six-cue golden is
+  `fnv1a-128-json:b06e5f2829663995385b6f0963855e2d`;
   the navigation golden is
-  `fnv1a-128-json:fb3bd34a7b427b8d52fa058a00b98331`.
+  `fnv1a-128-json:c6b49d2c0e3ec84509386807ab2a5dbf`; the orchestration
+  golden is `fnv1a-128-json:e67dfadddd6729f0c8544212784e867c`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.

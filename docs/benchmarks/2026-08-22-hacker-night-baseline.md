@@ -198,6 +198,22 @@ browser WASM is 5,969,847 bytes, 1,219 bytes smaller than the preceding
 5,971,066-byte build; gzip is effectively flat at 2,096,949 bytes (+100). The
 source-coherent build receipt is `dd8eb4d56f3db0ba9a1e12bd24872a1e`.
 
+Replay version 0.3 extends that oracle across every current application event
+lane. Its third portable fixture proves complete asset descriptors and exact
+fetch/cancel effects, supersession, loaded/failed/cancelled state, stale
+completion, presence order and exact TTL expiry, all three durable authored
+commands, stale authored revisions, and atomic protocol rejection. Serialized
+byte lengths and queue counts are fixed-width `u64`, and exhaustive source-enum
+matches make new application, effect-completion, semantic-action, navigation,
+or authored-command variants fail the oracle suite until deliberately covered.
+CI now runs the three replay goldens, scoped strict Clippy/Rustdoc, 40
+browser-independent JavaScript tests, and all four generated-WASM smoke tools.
+
+The expanded oracle and CI remain outside the shipped browser runtime. The
+optimized WASM remains 5,969,847 bytes; gzip is effectively flat at 2,096,933
+bytes (+84 from the preceding 2,096,849-byte baseline). The source-coherent
+build receipt is `bf2cf66ce7924641196d602d9a35daa3`.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:

@@ -17,6 +17,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - uses: Swatinem/rust-cache@v2
 
@@ -28,6 +34,21 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Test Hyperscope application replay oracles
+        run: |
+          cargo test -p hyperscope-app --features replay
+          cargo run -q -p hyperscope-app --features replay --bin hyperscope-replay -- --check
+          cargo run -q -p hyperscope-app --features replay --bin hyperscope-replay -- --navigation --check
+          cargo run -q -p hyperscope-app --features replay --bin hyperscope-replay -- --orchestration --check
+
+      - name: Lint and document the Hyperscope application boundary
+        run: |
+          cargo clippy -p hyperscope-app --features replay --all-targets --no-deps -- -D warnings
+          cargo doc -p hyperscope-app --features replay --no-deps
+
+      - name: Test browser-independent JavaScript behavior oracles
+        run: node --test tests/*.test.mjs
 
       - name: Test Blender interchange boundary
         run: python -m unittest discover -s tools/blender_hyperscape/tests -p 'test_*.py' -v
@@ -42,12 +63,30 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Check quilting-wasm
         run: cargo check --target wasm32-unknown-unknown -p quilting-wasm
 
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: Build generated browser smoke artifact
+        run: wasm-pack build --target web --out-dir ../../pkg crates/quilting-wasm
+
+      - name: Test generated WASM application boundaries
+        run: |
+          node scripts/smoke-hyperscope-presentation.mjs
+          node scripts/smoke-hyperscope-app-shadow.mjs
+          node scripts/smoke-hyperscope-route-shadow.mjs
+          node scripts/smoke-render-shadow.mjs
+
 # A `cargo fmt --check` job is deliberately absent: the tree is not currently
 # rustfmt-clean, so gating on it would fail every build. Run `cargo fmt` across
-# the workspace once and it can be added here. Likewise `cargo clippy -D
-# warnings`, which the existing dead-code warnings would trip.
+# the workspace once and it can be added here. Strict Clippy is enforced above
+# for the Rust application boundary; workspace-wide Clippy still trips the
+# existing dead-code warnings.
