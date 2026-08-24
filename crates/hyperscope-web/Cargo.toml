@@ -1,0 +1,41 @@
+[package]
+name = "hyperscope-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional browser-host adapters for Hyperscope"
+
+[features]
+default = []
+durable-history = [
+    "dep:hhhs",
+    "dep:hhhs-replica",
+    "dep:hhhs-store",
+    "dep:hyperscape-hhhs",
+    "dep:futures",
+    "dep:indexed_db_futures",
+    "dep:js-sys",
+    "dep:thiserror",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+]
+
+[dependencies]
+hhhs = { workspace = true, optional = true }
+hhhs-replica = { workspace = true, optional = true }
+hhhs-store = { workspace = true, optional = true }
+hyperscape-hhhs = { path = "../hyperscape-hhhs", optional = true }
+thiserror = { version = "2", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures = { version = "0.3", optional = true }
+indexed_db_futures = { version = "=0.6.4", features = ["typed-arrays", "version-change"], optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "=0.2.106", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+hyperscape-protocol = { path = "../hyperscape-protocol" }
+wasm-bindgen-test = "0.3"

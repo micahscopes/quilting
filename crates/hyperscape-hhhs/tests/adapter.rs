@@ -3,9 +3,10 @@ use futures::future::FutureExt;
 use futures::stream::{Stream, StreamExt};
 use futures_signals::signal_vec::{SignalVecExt, VecDiff};
 use hhhs::{DagSnapshot, Digest, ReachIndex};
+use hhhs_store::decode_storage_transaction_log;
 use hyperscape_hhhs::{
-    decode_authored, encode_authored, AdapterError, DurableProject, ProjectId, StateRow,
-    MAX_AUTHORED_PAYLOAD_BYTES, PAYLOAD_DOMAIN,
+    decode_authored, encode_authored, AdapterError, DurableProject, MemoryDurability, ProjectId,
+    StateRow, MAX_AUTHORED_PAYLOAD_BYTES, PAYLOAD_DOMAIN,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
@@ -361,6 +362,33 @@ fn foreign_project_records_are_refused_without_publication() {
     assert!(report.admitted.is_empty());
     assert_eq!(local.history_len(), 0);
     assert_eq!(local.durability().bytes(), before_log);
+}
+
+#[test]
+fn trusted_transaction_recovery_keeps_the_sink_and_replay_in_lockstep() {
+    let project = project(13);
+    let entity = entity_id(10);
+    let mut original = DurableProject::new(project).unwrap();
+    block_on(original.admit(&set(1, entity, 4.0))).unwrap();
+    block_on(original.admit(&set(2, entity, 8.0))).unwrap();
+    let original_state = original.state().unwrap();
+    let durable_bytes = original.durability().bytes().to_vec();
+    let transactions = decode_storage_transaction_log(&durable_bytes).unwrap();
+    let durability = MemoryDurability::from_bytes(durable_bytes).unwrap();
+
+    let mut recovered =
+        DurableProject::recover_trusted_transactions(project, durability, transactions).unwrap();
+    assert_eq!(recovered.state().unwrap(), original_state);
+
+    block_on(recovered.admit(&remove(3, entity))).unwrap();
+    let restarted =
+        DurableProject::recover(project, recovered.durability().bytes().to_vec()).unwrap();
+    assert_eq!(restarted.history_len(), 3);
+    assert!(!restarted
+        .state()
+        .unwrap()
+        .entity_transforms
+        .contains_key(&entity));
 }
 
 #[test]

@@ -7,6 +7,7 @@ members = [
     "crates/hyperscape-protocol",
     "crates/hyperscope-app",
     "crates/hyperscope-hhhs-shadow",
+    "crates/hyperscope-web",
     "crates/quilting-core",
     "crates/quilting-gltf",
     "crates/quilting-mesh",

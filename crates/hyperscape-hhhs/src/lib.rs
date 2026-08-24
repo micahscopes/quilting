@@ -548,6 +548,30 @@ impl<D> DurableProject<D> {
         Self::with_replayed_sink(project_id, durability, Vec::new())
     }
 
+    /// Recover a project from storage transactions read from this exact local
+    /// durability sink.
+    ///
+    /// # Trust boundary
+    ///
+    /// `transactions` must come from locally trusted storage previously
+    /// written by `durability`. This constructor validates the embedded
+    /// Hyperscape payload schema and project identity, but deliberately replays
+    /// storage transactions instead of re-running peer authority admission.
+    /// Network, imported, or otherwise untrusted records must enter through
+    /// [`DurableProject::apply_records`].
+    ///
+    /// The sink must already contain the supplied transactions in the same
+    /// order. Supplying an empty or unrelated sink would make subsequent
+    /// persistence unable to recover the complete project after another
+    /// restart.
+    pub fn recover_trusted_transactions(
+        project_id: ProjectId,
+        durability: D,
+        transactions: Vec<StorageTransaction>,
+    ) -> Result<Self, AdapterError> {
+        Self::with_replayed_sink(project_id, durability, transactions)
+    }
+
     fn with_replayed_sink(
         project_id: ProjectId,
         durability: D,
