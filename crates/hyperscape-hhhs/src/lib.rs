@@ -126,6 +126,10 @@ pub enum AdapterError {
     },
     #[error("project archive records are not in canonical topological order")]
     NonCanonicalArchiveOrder,
+    #[error("project archive belongs to project {actual}, expected {expected}")]
+    WrongArchiveProject { expected: Uuid, actual: Uuid },
+    #[error("local project has {local_only} history records absent from the imported archive")]
+    ArchiveLocalDivergence { local_only: usize },
     #[error("project archive import refused {refused} records and deferred {deferred}")]
     IncompleteArchiveAdmission { refused: usize, deferred: usize },
     #[error("project archive expected {expected} history entries but imported {actual}")]
@@ -828,30 +832,8 @@ impl DurableProject<MemoryDurability> {
     /// receive a partially admitted project.
     pub async fn import_archive(bytes: &[u8]) -> Result<Self, AdapterError> {
         let archive = ProjectArchive::decode(bytes)?;
-        let expected_len = archive.record_count();
-        let expected_history_root = archive.history_root();
-        let expected_state_root = archive.state_root();
         let mut project = Self::new(archive.project_id())?;
-        let report = project.apply_records(&archive.records).await?;
-        if !report.refused.is_empty() || !report.deferred.is_empty() {
-            return Err(AdapterError::IncompleteArchiveAdmission {
-                refused: report.refused.len(),
-                deferred: report.deferred.len(),
-            });
-        }
-        if project.history_len() != expected_len {
-            return Err(AdapterError::ArchiveHistoryLengthMismatch {
-                expected: expected_len,
-                actual: project.history_len(),
-            });
-        }
-        let state = project.state()?;
-        if state.history_root != expected_history_root {
-            return Err(AdapterError::ArchiveHistoryRootMismatch);
-        }
-        if state.state_root != expected_state_root {
-            return Err(AdapterError::ArchiveStateRootMismatch);
-        }
+        project.apply_archive(&archive).await?;
         Ok(project)
     }
 }
@@ -985,6 +967,59 @@ impl<D> DurableProject<D>
 where
     D: AsyncTransactionSink,
 {
+    /// Re-admit a complete portable archive into this durability sink.
+    ///
+    /// Exact retries and resuming a prefix already present locally are safe.
+    /// A local branch absent from the archive is rejected before any write, so
+    /// this operation never silently replaces or discards divergent history.
+    pub async fn apply_archive(
+        &mut self,
+        archive: &ProjectArchive,
+    ) -> Result<ApplyRecordsReport, AdapterError> {
+        if self.project_id != archive.project_id {
+            return Err(AdapterError::WrongArchiveProject {
+                expected: self.project_id.as_uuid(),
+                actual: archive.project_id.as_uuid(),
+            });
+        }
+        let archive_hashes: BTreeSet<_> = archive
+            .records
+            .iter()
+            .map(ReplicaRecord::entry_hash)
+            .collect();
+        let local_only = self
+            .storage
+            .all_hashes()
+            .into_iter()
+            .filter(|hash| !archive_hashes.contains(hash))
+            .count();
+        if local_only != 0 {
+            return Err(AdapterError::ArchiveLocalDivergence { local_only });
+        }
+
+        let report = self.apply_records(&archive.records).await?;
+        if !report.refused.is_empty() || !report.deferred.is_empty() {
+            return Err(AdapterError::IncompleteArchiveAdmission {
+                refused: report.refused.len(),
+                deferred: report.deferred.len(),
+            });
+        }
+        if self.history_len() != archive.record_count() {
+            return Err(AdapterError::ArchiveHistoryLengthMismatch {
+                expected: archive.record_count(),
+                actual: self.history_len(),
+            });
+        }
+        let state = self.state()?;
+        if state.history_root != archive.history_root {
+            return Err(AdapterError::ArchiveHistoryRootMismatch);
+        }
+        if state.state_root != archive.state_root {
+            return Err(AdapterError::ArchiveStateRootMismatch);
+        }
+        Ok(report)
+    }
+
     pub async fn admit(
         &mut self,
         envelope: &AuthoredEnvelope,

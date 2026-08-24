@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 #[cfg(target_arch = "wasm32")]
 mod indexed_db;
 #[cfg(target_arch = "wasm32")]
-pub use indexed_db::{open_durable_project, IndexedDbDurability};
+pub use indexed_db::{import_project_archive, open_durable_project, IndexedDbDurability};
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::{origin_persistence, request_origin_persistence};
 
@@ -87,6 +87,8 @@ pub enum DurableHistoryError {
     IndexedDb(String),
     #[error("trusted local project recovery failed: {0}")]
     ProjectRecovery(String),
+    #[error("portable project archive failed validation or admission: {0}")]
+    ProjectArchive(String),
 }
 
 #[cfg(any(target_arch = "wasm32", test))]

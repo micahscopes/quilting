@@ -73,6 +73,16 @@ identity. Successful import additionally requires zero refused/deferred
 records and exact record-count, history-root, and state-root agreement after
 admission. A failed in-memory import returns no partial project.
 
+`DurableProject::apply_archive` also supports an exact retry or resuming a
+locally durable prefix of the same archive. It refuses a project with any local
+history hash absent from the archive before persistence, so this is an import,
+not an implicit destructive replace or divergent-history merge.
+
+On `wasm32`, `hyperscope-web::durable_history::import_project_archive` first
+performs the complete in-memory import above, then applies that validated
+archive to the dedicated strict-durability IndexedDB sink. JavaScript only
+needs to obtain or save the opaque bytes; it does not decode project state.
+
 The archive contains authored scene history, stable IDs, asset URIs, and asset
 content digests. It does not embed GLB bytes, ephemeral camera/selection state,
 render resources, routes, or local storage metadata. GLB transport therefore

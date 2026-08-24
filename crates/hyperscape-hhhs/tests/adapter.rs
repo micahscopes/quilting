@@ -333,6 +333,52 @@ fn portable_archive_enforces_version_and_declared_record_bounds() {
 }
 
 #[test]
+fn archive_application_resumes_a_prefix_and_exact_retries_are_write_free() {
+    let project = project(0x4007);
+    let entity = entity_id(0x4007);
+    let mut origin = DurableProject::new(project).unwrap();
+    let parent = block_on(origin.admit(&set(1, entity, 1.0))).unwrap();
+    block_on(origin.admit(&set(2, entity, 2.0))).unwrap();
+    let archive = ProjectArchive::decode(&origin.export_archive().unwrap()).unwrap();
+
+    let mut target = DurableProject::new(project).unwrap();
+    block_on(target.apply_records(std::slice::from_ref(&parent))).unwrap();
+    let resumed = block_on(target.apply_archive(&archive)).unwrap();
+    assert_eq!(resumed.lifted, 1);
+    assert_eq!(target.state().unwrap(), origin.state().unwrap());
+
+    let durable_before_retry = target.durability().bytes().to_vec();
+    let retried = block_on(target.apply_archive(&archive)).unwrap();
+    assert_eq!(retried.lifted, 0);
+    assert_eq!(target.durability().bytes(), durable_before_retry);
+}
+
+#[test]
+fn archive_application_rejects_local_divergence_and_foreign_projects_before_writing() {
+    let project_id = project(0x4008);
+    let mut origin = DurableProject::new(project_id).unwrap();
+    block_on(origin.admit(&set(1, entity_id(1), 1.0))).unwrap();
+    let archive = ProjectArchive::decode(&origin.export_archive().unwrap()).unwrap();
+
+    let mut divergent = DurableProject::new(project_id).unwrap();
+    block_on(divergent.admit(&set(2, entity_id(2), 2.0))).unwrap();
+    let divergent_before = divergent.durability().bytes().to_vec();
+    assert!(matches!(
+        block_on(divergent.apply_archive(&archive)),
+        Err(AdapterError::ArchiveLocalDivergence { local_only: 1 })
+    ));
+    assert_eq!(divergent.durability().bytes(), divergent_before);
+
+    let mut foreign = DurableProject::new(project(0x4998)).unwrap();
+    let foreign_before = foreign.durability().bytes().to_vec();
+    assert!(matches!(
+        block_on(foreign.apply_archive(&archive)),
+        Err(AdapterError::WrongArchiveProject { .. })
+    ));
+    assert_eq!(foreign.durability().bytes(), foreign_before);
+}
+
+#[test]
 fn causal_successor_replaces_its_observed_predecessor() {
     let mut host = DurableProject::new(project(5)).unwrap();
     let entity = entity_id(3);

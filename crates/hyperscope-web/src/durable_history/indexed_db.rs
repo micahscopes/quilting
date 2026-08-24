@@ -189,6 +189,30 @@ pub async fn open_durable_project(
         .map_err(|error| DurableHistoryError::ProjectRecovery(error.to_string()))
 }
 
+/// Validate a portable project archive in memory, then idempotently persist it
+/// into this origin's dedicated authored-history database.
+///
+/// Rust performs both archive decoding and ordinary HHHS admission before the
+/// browser database is touched. An exact retry or a locally stored prefix is
+/// resumed safely. A local branch absent from the archive is rejected before
+/// writing, rather than overwritten or silently merged.
+pub async fn import_project_archive(
+    bytes: &[u8],
+) -> Result<DurableProject<IndexedDbDurability>, DurableHistoryError> {
+    let validated = DurableProject::import_archive(bytes)
+        .await
+        .map_err(|error| DurableHistoryError::ProjectArchive(error.to_string()))?;
+    let archive = validated
+        .project_archive()
+        .map_err(|error| DurableHistoryError::ProjectArchive(error.to_string()))?;
+    let mut durable = open_durable_project(archive.project_id()).await?;
+    durable
+        .apply_archive(&archive)
+        .await
+        .map_err(|error| DurableHistoryError::ProjectArchive(error.to_string()))?;
+    Ok(durable)
+}
+
 /// Query whether the browser currently protects this origin from eviction.
 ///
 /// `BestEffort` and `Unknown` still allow strict, atomic IndexedDB commits, but
@@ -346,5 +370,42 @@ mod tests {
 
         let recovered = open_durable_project(project_id).await.unwrap();
         assert_eq!(recovered.state().unwrap(), before);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn project_archive_import_is_validated_persistent_and_idempotent() {
+        let project_id = unique_project();
+        let entity = EntityId::from_u128(0x4444).unwrap();
+        let authored = AuthoredEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(0x5555).unwrap(),
+                sender: PeerId::from_u128(0x6666).unwrap(),
+                sequence: 1,
+            },
+            command: AuthoredCommand::SetEntityTransform {
+                entity,
+                transform: WireTransform {
+                    translation: [4.0, 5.0, 6.0],
+                    rotation_wxyz: [1.0, 0.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+            },
+        };
+        let mut source = DurableProject::new(project_id).unwrap();
+        source.admit(&authored).await.unwrap();
+        let expected = source.state().unwrap();
+        let archive = source.export_archive().unwrap();
+
+        let imported = import_project_archive(&archive).await.unwrap();
+        assert_eq!(imported.state().unwrap(), expected);
+        drop(imported);
+
+        let retried = import_project_archive(&archive).await.unwrap();
+        assert_eq!(retried.state().unwrap(), expected);
+        drop(retried);
+
+        let recovered = open_durable_project(project_id).await.unwrap();
+        assert_eq!(recovered.state().unwrap(), expected);
     }
 }
