@@ -127,8 +127,8 @@ pub struct WebGlProgramMemoDiagnostics {
     pub programs: DeviceMemoDiagnostics,
 }
 
-/// Sole owner of descriptor-lowered primary WebGL shader/program handles.
-/// `Programs` is only a compact non-owning view into this memo.
+/// Sole owner of descriptor-lowered WebGL shader/program handles.
+/// `Programs` is only a compact non-owning view of the primary render subset.
 pub struct WebGlProgramMemo {
     shaders: DeviceMemo<ShaderModuleDescriptor, glow::Shader>,
     programs: DeviceMemo<WebGlProgramKey, glow::Program>,
@@ -190,17 +190,37 @@ fn fragment_source_and_entry(mode: &str) -> Result<(&'static str, &'static str),
     }
 }
 
+pub(crate) fn shared_vertex_binding_entries() -> (Vec<WebGlUniformBlockBinding>, Vec<WebGlSamplerBinding>) {
+    (
+        vec![
+            WebGlUniformBlockBinding {
+                name: "Uniforms_block_0Vertex".into(),
+                binding_point: VERTEX_UNIFORMS_BINDING,
+            },
+            WebGlUniformBlockBinding {
+                name: "JointMatrices_block_1Vertex".into(),
+                binding_point: JOINT_MATRICES_BINDING,
+            },
+        ],
+        vec![
+            WebGlSamplerBinding {
+                name: "_group_0_binding_2_vs".into(),
+                texture_unit: SKINNING_TEX_UNIT,
+            },
+            WebGlSamplerBinding {
+                name: "_group_0_binding_3_vs".into(),
+                texture_unit: MORPH_TEX_UNIT,
+            },
+            WebGlSamplerBinding {
+                name: "_group_0_binding_4_vs".into(),
+                texture_unit: FACE_DATA_TEX_UNIT,
+            },
+        ],
+    )
+}
+
 fn primary_binding_plan(mode: &str) -> Result<WebGlBindingPlan, String> {
-    let mut uniform_blocks = vec![
-        WebGlUniformBlockBinding {
-            name: "Uniforms_block_0Vertex".into(),
-            binding_point: VERTEX_UNIFORMS_BINDING,
-        },
-        WebGlUniformBlockBinding {
-            name: "JointMatrices_block_1Vertex".into(),
-            binding_point: JOINT_MATRICES_BINDING,
-        },
-    ];
+    let (mut uniform_blocks, mut samplers) = shared_vertex_binding_entries();
     match mode {
         "matcap" => uniform_blocks.push(WebGlUniformBlockBinding {
             name: "MatcapUniforms_block_0Fragment".into(),
@@ -218,20 +238,6 @@ fn primary_binding_plan(mode: &str) -> Result<WebGlBindingPlan, String> {
         _ => return Err(format!("unknown fragment mode: {mode}")),
     }
 
-    let mut samplers = vec![
-        WebGlSamplerBinding {
-            name: "_group_0_binding_2_vs".into(),
-            texture_unit: SKINNING_TEX_UNIT,
-        },
-        WebGlSamplerBinding {
-            name: "_group_0_binding_3_vs".into(),
-            texture_unit: MORPH_TEX_UNIT,
-        },
-        WebGlSamplerBinding {
-            name: "_group_0_binding_4_vs".into(),
-            texture_unit: FACE_DATA_TEX_UNIT,
-        },
-    ];
     if mode == "pbr" {
         for (binding, texture_unit) in [
             (2, 0),
@@ -812,6 +818,68 @@ mod tests {
         assert_eq!(
             descriptors.iter().map(|(_, key)| key.clone()).collect::<HashSet<_>>().len(),
             FRAGMENT_MODES.len()
+        );
+    }
+
+    #[test]
+    fn cold_renderer_descriptor_catalog_predicts_memo_diagnostics() {
+        let mut keys = primary_program_descriptors()
+            .unwrap()
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect::<Vec<_>>();
+        keys.push(crate::prepare::patch_prepare_program_descriptor().unwrap());
+
+        let shader_requests = keys.iter()
+            .map(|key| 1 + usize::from(key.program().fragment().is_some()))
+            .sum::<usize>();
+        let shader_modules = keys.iter()
+            .flat_map(|key| {
+                std::iter::once(key.program().vertex())
+                    .chain(key.program().fragment())
+            })
+            .cloned()
+            .collect::<HashSet<_>>();
+        let programs = keys.into_iter().collect::<HashSet<_>>();
+
+        assert_eq!(shader_requests, 14);
+        assert_eq!(shader_modules.len(), 9);
+        assert_eq!(programs.len(), 7);
+        assert_eq!(
+            WebGlProgramMemoDiagnostics {
+                device_epoch: 0,
+                shaders: DeviceMemoDiagnostics {
+                    hits: (shader_requests - shader_modules.len()) as u64,
+                    misses: shader_modules.len() as u64,
+                    failed_creations: 0,
+                    invalidations: 0,
+                    resident_entries: shader_modules.len(),
+                },
+                programs: DeviceMemoDiagnostics {
+                    hits: 0,
+                    misses: programs.len() as u64,
+                    failed_creations: 0,
+                    invalidations: 0,
+                    resident_entries: programs.len(),
+                },
+            },
+            WebGlProgramMemoDiagnostics {
+                device_epoch: 0,
+                shaders: DeviceMemoDiagnostics {
+                    hits: 5,
+                    misses: 9,
+                    failed_creations: 0,
+                    invalidations: 0,
+                    resident_entries: 9,
+                },
+                programs: DeviceMemoDiagnostics {
+                    hits: 0,
+                    misses: 7,
+                    failed_creations: 0,
+                    invalidations: 0,
+                    resident_entries: 7,
+                },
+            }
         );
     }
 

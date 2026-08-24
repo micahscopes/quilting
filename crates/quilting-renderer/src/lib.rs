@@ -70,7 +70,7 @@ impl Renderer {
             pbr_ubo = Some(PbrUniformBuf::new(&gl)?);
             matcap_ubo = Some(MatcapUniformBuf::new(&gl)?);
             joint_ubo = Some(JointMatricesBuf::new(&gl)?);
-            patch_preparer = Some(PatchPreparer::new(&gl)?);
+            patch_preparer = Some(PatchPreparer::new(&gl, &mut program_memo)?);
             Ok(())
         })();
 
@@ -322,8 +322,8 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        // The preparer retains its own deferred program. Primary programs are
-        // deleted by the memo before their shared shader modules.
+        // Transform-feedback objects release their bindings before the memo
+        // deletes every linked program and then every shared shader module.
         self.patch_preparer.destroy(&self.gl);
         self.program_memo.destroy(&self.gl);
         self.vtx_ubo.destroy(&self.gl);
