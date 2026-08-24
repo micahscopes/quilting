@@ -252,6 +252,99 @@ struct MainState {
     highlight_vao: Option<glow::VertexArray>,
 }
 
+impl MainState {
+    /// Retire one complete renderer epoch with the WebGL context that created
+    /// its resources. This must run before a replacement state becomes visible.
+    fn retire(mut self) {
+        let gl = self.renderer.gl();
+
+        unsafe {
+            gl.use_program(None);
+            gl.bind_vertex_array(None);
+            gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
+            gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, None);
+            gl.bind_buffer(glow::UNIFORM_BUFFER, None);
+        }
+
+        // RenderBatch/MeshDraw values are non-owning views into GpuBatch.
+        self.render_batches.clear();
+        for (_, batch) in std::mem::take(&mut self.batches) {
+            batch.destroy(gl);
+        }
+
+        // Patch views and batch VAOs reference the immutable atlas buffers.
+        // Retire every view before deleting their old-context owner.
+        TESS_CACHE.with(|cache| cache.borrow_mut().clear());
+        TESS_ATLAS.with(|atlas| {
+            if let Some(atlas) = atlas.borrow_mut().take() {
+                atlas.destroy(gl);
+            }
+        });
+
+        // Delete framebuffer objects before their attached textures and
+        // renderbuffers so attachment references cannot prolong allocation.
+        unsafe {
+            for framebuffer in [
+                self.scene_color_fbo.take(),
+                self.fuzzy_scene_fbo.take(),
+                self.blur_fbo.take(),
+                self.pbr_fbo.take(),
+                self.fuzzy_weight_fbo.take(),
+                self.pick_fbo.take(),
+            ].into_iter().flatten() {
+                gl.delete_framebuffer(framebuffer);
+            }
+        }
+
+        // The delegated owner follows the same framebuffer-before-attachment
+        // order for its internal render graph.
+        if let Some(fuzzy) = self.fuzzy.take() {
+            fuzzy.destroy(gl);
+        }
+
+        unsafe {
+            for vao in [self.blur_vao.take(), self.highlight_vao.take()]
+                .into_iter().flatten()
+            {
+                gl.delete_vertex_array(vao);
+            }
+            for program in [self.blur_program.take(), self.highlight_prog.take()]
+                .into_iter().flatten()
+            {
+                gl.delete_program(program);
+            }
+            for renderbuffer in [self.pbr_depth_rb.take(), self.pick_depth.take()]
+                .into_iter().flatten()
+            {
+                gl.delete_renderbuffer(renderbuffer);
+            }
+            for texture in [
+                self.scene_color_tex.take(),
+                self.fuzzy_scene_tex.take(),
+                self.blur_tex.take(),
+                self.pbr_color_tex.take(),
+                self.fuzzy_weight_tex.take(),
+                self.pick_tex.take(),
+                self.pick_bary_tex.take(),
+                self.env_maps.prefiltered.take(),
+                self.env_maps.irradiance.take(),
+                self.env_maps.sheen_lut.take(),
+            ].into_iter().flatten() {
+                gl.delete_texture(texture);
+            }
+        }
+
+        self.texture_cache.destroy(gl);
+        // `self` now drops. Renderer is the only remaining GL owner and its
+        // Drop implementation tears down its transform feedback, program memo,
+        // UBOs, and animation textures with this same context.
+    }
+}
+
 #[derive(Default)]
 struct BatchUpdateStats {
     calls: u64,
@@ -521,8 +614,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
 
     let fuzzy = fuzzy_vision::JfaPipeline::new(renderer.gl(), fuzzy_vision::JfaConfig::default()).ok();
 
-    STATE.with(|s| {
-        *s.borrow_mut() = Some(MainState {
+    STATE.with(|state| {
+        let replacement = MainState {
             viewport_size: (canvas.width() as i32, canvas.height() as i32),
             renderer, texture_cache,
             env_maps: EnvironmentMaps::default(),
@@ -598,7 +691,12 @@ pub fn mr_init(canvas_id: &str) -> bool {
             focus_field_enabled: false,
             highlight_prog: None,
             highlight_vao: None,
-        });
+        };
+        let previous = state.borrow_mut().take();
+        if let Some(previous) = previous {
+            previous.retire();
+        }
+        *state.borrow_mut() = Some(replacement);
     });
     info!("Renderer initialized on canvas '{}'", canvas_id);
     true

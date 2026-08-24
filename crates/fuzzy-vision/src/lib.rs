@@ -1251,14 +1251,6 @@ impl JfaPipeline {
                 gl.delete_program(prog);
             }
             gl.delete_vertex_array(self.vao);
-            for tex in [
-                self.reduce_tex_a, self.reduce_tex_b,
-                self.ping_tex, self.pong_tex,
-                self.firmness_tex,
-                self.blur_tex, self.blur_tex_b,
-            ] {
-                gl.delete_texture(tex);
-            }
             for fbo in [
                 self.reduce_fbo_a, self.reduce_fbo_b,
                 self.ping_fbo, self.pong_fbo,
@@ -1266,6 +1258,14 @@ impl JfaPipeline {
                 self.blur_fbo, self.blur_fbo_b,
             ] {
                 gl.delete_framebuffer(fbo);
+            }
+            for tex in [
+                self.reduce_tex_a, self.reduce_tex_b,
+                self.ping_tex, self.pong_tex,
+                self.firmness_tex,
+                self.blur_tex, self.blur_tex_b,
+            ] {
+                gl.delete_texture(tex);
             }
         }
     }
