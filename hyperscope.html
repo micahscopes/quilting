@@ -374,8 +374,10 @@ import {
 } from './spacemouse.mjs?rev=object-focus-v1';
 import {
   advanceVirtualTransitionClock,
+  appendPackedNodeIdentities,
   applyMobiusPoint,
   buildFocusBounds,
+  durablePresentationAssetId,
   faceSourceCentroid,
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
@@ -397,7 +399,7 @@ import {
   smootherstep01,
   transportCameraAcrossSphereReflections,
   transportPointAndDirectionsAcrossSphereReflections,
-} from './hyperscope_focus.mjs?rev=shared-anchor-clock-v2';
+} from './hyperscope_focus.mjs?rev=asset-scoped-selection-v1';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -1935,6 +1937,12 @@ function tickRustPresentation(deltaSeconds, nowMs) {
 function activateRustPresentation(direction, cueId) {
   if (!rustPresentationController) return null;
   try {
+    // Authored cue focus is deliberately free. Clear the incumbent selection
+    // before mirroring `present`, so browser highlight and AppStore ownership
+    // cross the same semantic boundary in the same order.
+    if (selectedObject || rustAppShadowSelectionQueued) {
+      clearSelectedObject('Selection cleared by presentation cue');
+    }
     synchronizeRustApplicationPresentationFromBrowser();
     const snapshot = direction === 'start'
       ? rustPresentationController.startPresentation()
@@ -2087,6 +2095,7 @@ let rustAppShadowSequence = 0;
 let rustAppShadowRequestOrdinal = 0;
 let rustAppShadowAssetOrdinal = 0;
 let rustAppPresentationPoseReady = false;
+let rustAppShadowSelectionQueued = false;
 const rustAppShadowAssetIds = new Map();
 const rustAppShadowDiagnostics = {
   enabled: RUST_APP_SHADOW_ENABLED,
@@ -2101,6 +2110,12 @@ const rustAppShadowDiagnostics = {
   navigationSynchronizations: 0,
   focusFieldSynchronizations: 0,
   focusFieldBoundaryCalls: 0,
+  mappedSelectionPicks: 0,
+  unmappedSelectionPicks: 0,
+  selectionDispatches: 0,
+  selectionDetaches: 0,
+  selectionComparisons: 0,
+  selectionMismatches: 0,
   presentationFrameCalls: 0,
   presentationPoseComparisons: 0,
   presentationPoseMismatches: 0,
@@ -2118,6 +2133,8 @@ function appShadowUuid(prefix, ordinal) {
 
 function appShadowAssetId(uri, explicitId) {
   if (explicitId) return String(explicitId).toLowerCase();
+  // Load-lane correlation only. This session-local UUID must never scope a
+  // durable entity selection; only validated presentation/catalog IDs do.
   const key = String(uri);
   let assetId = rustAppShadowAssetIds.get(key);
   if (!assetId) {
@@ -2354,6 +2371,9 @@ let currentSkinData = null;
 let currentMaterialCount = 0;
 let currentTextureCount = 0;
 let currentPrimaryFaceCount = 0;
+let modelNodeStableEntityIds = [];
+let packedNodeIdentities = new Map();
+let currentModelDurableAssetId = null;
 const presentationComposition = {
   ready: false,
   assets: new Map(),
@@ -3049,7 +3069,108 @@ function selectionLabel(message = '') {
   }
 }
 
+function compareAppSelectedFocus(expected, actual) {
+  rustAppShadowDiagnostics.selectionComparisons += 1;
+  const close = (left, right) => Number.isFinite(Number(left))
+    && Number.isFinite(Number(right))
+    && Math.abs(Number(left) - Number(right)) <= RUST_NAVIGATION_SHADOW_TOLERANCE;
+  const vectorClose = (left, right) => Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, axis) => close(value, right[axis]));
+  const matches = actual
+    && actual.asset_id === expected.assetId
+    && actual.entity_id === expected.entityId
+    && vectorClose(actual.source_bound_center, expected.bound.center)
+    && close(actual.source_bound_radius, expected.bound.radius)
+    && vectorClose(actual.source_pivot, expected.sourcePivot)
+    && close(actual.margin, expected.margin);
+  if (!matches) {
+    rustAppShadowDiagnostics.selectionMismatches += 1;
+    recordAppShadowMismatch(
+      'selected_focus',
+      `Rust selected-focus source packet diverged for packed node ${expected.node}`,
+    );
+  }
+  return matches;
+}
+
+function detachAppSelectionShadow(reason) {
+  if (!rustAppShadowSelectionQueued) return false;
+  if (!rustAppShadow) {
+    rustAppShadowSelectionQueued = false;
+    return false;
+  }
+  try {
+    rustAppShadow.detachFocus();
+    const navigation = rustAppShadow.tickNavigation(0);
+    rustAppShadowDiagnostics.selectionDetaches += 1;
+    if (navigation.selected_focus != null) {
+      rustAppShadowDiagnostics.selectionMismatches += 1;
+      recordAppShadowMismatch(
+        'selection_detach',
+        `Rust retained selected focus after ${reason}`,
+      );
+    }
+    rustAppShadowSelectionQueued = false;
+    refreshAppShadowSnapshot();
+    return true;
+  } catch (error) {
+    recordAppShadowMismatch(
+      'selection_detach_exception',
+      `${reason}: ${error?.message || String(error)}`,
+    );
+    return false;
+  }
+}
+
+function mirrorSelectedObjectToApp() {
+  if (!rustAppShadow || !selectedObject) return 'unobserved';
+  const identity = selectedObject.identity;
+  if (!identity?.durable) {
+    rustAppShadowDiagnostics.unmappedSelectionPicks += 1;
+    detachAppSelectionShadow('replacement by an unmapped renderer pick');
+    return 'unmapped';
+  }
+  const target = focusSphereFromBound(selectedObject.bound, FOCUS_SPHERE_MARGIN, 0.02);
+  if (!target) {
+    recordAppShadowMismatch('selection_bound', `packed node ${selectedObject.node} has no focus sphere`);
+    return 'invalid';
+  }
+  try {
+    rustAppShadow.anchorFocus(
+      identity.assetId,
+      identity.entityId,
+      new Float64Array(selectedObject.bound.center),
+      selectedObject.bound.radius,
+      new Float64Array(selectedObject.sourceAnchor),
+      target.margin,
+      focusTransitionCentiseconds.peek() / 100,
+      'smootherstep',
+    );
+    const navigation = rustAppShadow.tickNavigation(0);
+    rustAppShadowSelectionQueued = true;
+    rustAppShadowDiagnostics.mappedSelectionPicks += 1;
+    rustAppShadowDiagnostics.selectionDispatches += 1;
+    compareAppSelectedFocus({
+      ...identity,
+      node: selectedObject.node,
+      bound: selectedObject.bound,
+      sourcePivot: selectedObject.sourceAnchor,
+      margin: target.margin,
+    }, navigation.selected_focus);
+    refreshAppShadowSnapshot();
+    return 'mapped';
+  } catch (error) {
+    recordAppShadowMismatch(
+      'selection_dispatch_exception',
+      `packed node ${selectedObject.node}: ${error?.message || String(error)}`,
+    );
+    return 'error';
+  }
+}
+
 function clearSelectedObject(message = '') {
+  detachAppSelectionShadow(message || 'browser selection clear');
   selectedObject = null;
   manualCameraSemanticTargetEnabled = false;
   cameraFocusTransition = null;
@@ -3200,9 +3321,15 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
     mr_highlightFace(-1);
     return false;
   }
+  // A direct pick transfers focus authority from the authored cue to the
+  // user's selection. Stop both presentation observers before dispatching the
+  // browser and AppStore anchor paths, or their transition clocks diverge.
+  rustPresentationTransitionActive = false;
+  rustAppPresentationPoseReady = false;
   selectedObject = {
     node,
     face: faceId,
+    identity: packedNodeIdentities.get(node) || null,
     bound,
     sourceAnchor,
     outputAnchor: applyMobiusPoint(currentMobius, sourceAnchor) || sourceAnchor.slice(),
@@ -3212,9 +3339,11 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   mr_setSelectedNode(node);
   mr_highlightFace(highlightFace ? faceId : -1);
   anchorFocusSphereToSelection();
+  mirrorSelectedObjectToApp();
   selectionLabel();
   console.log(
-    `Selected glTF node ${node} from face ${faceId}: source sphere`,
+    `Selected glTF node ${node} from face ${faceId}`
+      + `${selectedObject.identity ? ' with durable identity' : ' without durable identity'}: source sphere`,
     bound.center,
     bound.radius,
   );
@@ -5891,7 +6020,7 @@ function packPbrMaterials(materials, textureOffset = 0) {
   return packed;
 }
 
-async function finishModelUpload(info, filename) {
+async function finishModelUpload(info, filename, durableAssetId = null) {
   if (!info) { $('stats').textContent = 'Failed to load model'; return; }
   const uploadStarted = performance.now();
   const uploadTimings = { worker: info.loader_timing || null };
@@ -5910,6 +6039,14 @@ async function finishModelUpload(info, filename) {
   currentMaterialCount = 0;
   currentTextureCount = 0;
   currentPrimaryFaceCount = 0;
+  currentModelDurableAssetId = typeof durableAssetId === 'string'
+    ? durableAssetId.toLowerCase()
+    : null;
+  modelNodeStableEntityIds = Array.isArray(info.node_stable_entity_ids)
+    ? info.node_stable_entity_ids.slice()
+    : [];
+  info.node_stable_entity_ids = null;
+  packedNodeIdentities = new Map();
   presentationComposition.ready = false;
   presentationComposition.assets.clear();
   presentationComposition.primaryAssetId = null;
@@ -6302,6 +6439,10 @@ async function loadStaticPresentationAsset(asset, fetched) {
   const faceNodes = info.face_node_indices
     ? new Int32Array(info.face_node_indices.buffer || info.face_node_indices)
     : new Int32Array(faceCount);
+  const nodeStableEntityIds = Array.isArray(info.node_stable_entity_ids)
+    ? info.node_stable_entity_ids.slice()
+    : [];
+  info.node_stable_entity_ids = null;
   const numVertices = Number(skin?.num_vertices || info.num_vertices) || 0;
   if (instances.length !== faceCount * 52 || faceLods.length < faceCount * 6
       || faceMaterials.length !== faceCount || faceNodes.length !== faceCount
@@ -6318,6 +6459,7 @@ async function loadStaticPresentationAsset(asset, fetched) {
     faceCount,
     numVertices,
     nodeMetadata,
+    nodeStableEntityIds,
     fetchMs: fetched.fetchMs,
   };
 }
@@ -6420,12 +6562,23 @@ async function initializePresentationComposition() {
   faceNodes.set(modelFaceNodes);
 
   presentationComposition.assets.clear();
+  const composedNodeIdentities = new Map();
+  let primaryDurableNodes = 0;
+  if (currentModelDurableAssetId === primaryAsset.id && modelNodeStableEntityIds.some(Boolean)) {
+    primaryDurableNodes = appendPackedNodeIdentities(
+      composedNodeIdentities,
+      primaryAsset.id,
+      modelNodeStableEntityIds,
+      uniqueNodeIds(modelFaceNodes),
+    );
+  }
   presentationComposition.assets.set(primaryAsset.id, {
     id: primaryAsset.id,
     name: primaryAsset.name,
     nodes: uniqueNodeIds(modelFaceNodes),
     faceOffset: 0,
     faceCount: primaryFaces,
+    durableSelectionNodes: primaryDurableNodes,
   });
   for (const resident of secondary) {
     const instanceStart = resident.faceOffset * 52;
@@ -6468,6 +6621,15 @@ async function initializePresentationComposition() {
       ),
       faceOffset: resident.faceOffset,
       faceCount: resident.faceCount,
+      durableSelectionNodes: resident.nodeStableEntityIds.some(Boolean)
+        ? appendPackedNodeIdentities(
+          composedNodeIdentities,
+          resident.asset.id,
+          resident.nodeStableEntityIds,
+          uniqueNodeIds(resident.faceNodes),
+          resident.nodeOffset,
+        )
+        : 0,
     });
   }
 
@@ -6484,9 +6646,14 @@ async function initializePresentationComposition() {
   setRendererInstanceData(instances, totalFaces);
   mr_buildBatches(faceLods);
 
+  packedNodeIdentities = composedNodeIdentities;
   presentationComposition.ready = true;
   presentationComposition.primaryAssetId = primaryAsset.id;
   presentationComposition.totalFaces = totalFaces;
+  if (selectedObject && !selectedObject.identity) {
+    selectedObject.identity = packedNodeIdentities.get(selectedObject.node) || null;
+    if (selectedObject.identity) mirrorSelectedObjectToApp();
+  }
   rustPresentationDiagnostics.assetsReady = true;
   rustPresentationDiagnostics.residentAssets = Array.from(
     presentationComposition.assets.values(),
@@ -6495,6 +6662,7 @@ async function initializePresentationComposition() {
       name: resident.name,
       nodes: resident.nodes,
       faces: resident.faceCount,
+      durableSelectionNodes: resident.durableSelectionNodes || 0,
       hiddenGuideNodes: resident.hiddenNodes?.size || 0,
     }),
   );
@@ -6726,6 +6894,7 @@ phase('model', ['workers'], async () => {
   const assetShadow = beginAppAssetShadow(currentGlb, 'startup');
   try {
     let buf = await idbGet(IDB_GLB_STORE, currentGlb);
+    let durableAssetId = null;
     if (!buf) {
       const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
       const urls = [url];
@@ -6749,6 +6918,11 @@ phase('model', ['workers'], async () => {
           continue;
         }
         buf = candidateBuf;
+        durableAssetId = durablePresentationAssetId(
+          rustPresentationManifest?.assets,
+          candidate,
+          'manifest-fetch',
+        );
         break;
       }
       if (!buf) {
@@ -6762,6 +6936,7 @@ phase('model', ['workers'], async () => {
       result: resp.result,
       filename: currentGlb,
       buffer: resp.hyperscapeBytes,
+      durableAssetId,
     };
   } catch (error) {
     failAppAssetShadow(assetShadow, 'startup_fetch_failed', error, true);
@@ -6781,7 +6956,11 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
     });
   } else if (modelData && modelData.result) {
     meshInfo = modelData.result;
-    await finishModelUpload(modelData.result, modelData.filename);
+    await finishModelUpload(
+      modelData.result,
+      modelData.filename,
+      modelData.durableAssetId,
+    );
     activateHyperscape(modelData.buffer);
     const animIdx = parseInt(initParams.anim);
     if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {

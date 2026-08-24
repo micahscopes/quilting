@@ -192,6 +192,12 @@ The first application boundary is now explicit:
 This layer is not yet the browser authority. It is the target behind the same
 shadow-and-rollback policy used for navigation; browser loading and URL state
 move only after adapters can compare existing behavior against reducer traces.
+The selection adapter now joins validated authored node UUIDs to explicit
+presentation asset IDs across packed composition offsets and mirrors mapped
+picks/detaches through the AppStore. Session-generated load IDs, IndexedDB,
+drops, basename matches, and ordinary GLBs cannot acquire durable selection
+scope. Renderer focus transitions remain incumbent until the shared Rust clock
+and selected-focus packet complete the cutover gate.
 
 The offline release gate also has source provenance now. A Trunk pre-build hook
 uses Rust to fingerprint the authoritative crate/shader, HTML/module, manifest,

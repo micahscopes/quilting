@@ -1006,3 +1006,48 @@ explicit durable asset ID through primary/secondary composition offsets, and
 dispatch only mapped picks through the application shadow. Unmapped ordinary
 GLBs must remain usable without synthesizing a durable UUID; renderer node and
 face indices remain presentation handles.
+
+## Durable browser-pick shadow gate
+
+The following 2026-08-24 checkpoint connected the asset-scoped Rust contract
+to browser picks without changing renderer authority. The validated
+Hyperscape glTF loader now exports a dense `node_stable_entity_ids` table for
+authored assets; null preserves an unbound source-node slot. Ordinary GLBs
+return an empty table, avoiding one cloned null per node on large assets. A
+generated one-triangle GLB smoke exercises both cases through the real WASM
+loader rather than a mocked result.
+
+Presentation composition builds a transient packed-node lookup containing the
+durable asset ID, authored entity ID, and asset-local source node. It includes
+only nodes that actually occur in pickable faces, so a high-index camera or
+guide cannot collide with the next asset's face-based namespace. Each append
+is staged and validated before the shared map changes. Tests cover primary and
+secondary offsets, the same entity UUID in different assets, non-pickable
+stable nodes, collision rejection, and atomic malformed-input rejection.
+
+Asset provenance fails closed. Only an exact fetch from a validated
+presentation manifest URI can authorize the primary asset ID. IndexedDB,
+drops, basename matches, local fallback URLs, and session-generated load IDs
+remain renderer-only. Secondary assets retain the explicit manifest identity
+that initiated their fetch. A mapped click queues `AnchorFocus` and integrates
+it at a zero-time application boundary; clear or replacement by an unmapped
+pick queues `DetachFocus` only when an application selection exists. Source
+identity, bound, clicked pivot, and margin are compared against the Rust
+snapshot. Ordinary/unmapped picks keep the incumbent tint/focus behavior and
+never synthesize a UUID.
+
+Validation passed for 24 glTF metadata tests, 46 browser-independent
+JavaScript tests, the inline browser-module syntax check, the five
+generated-WASM smokes, four executable Node/WASM tests, WASM target checking,
+release Trunk build, all three replay checks, and ordinary offline preflight.
+The optimized WASM is 6,076,832 bytes
+raw and 2,138,790 bytes gzip, increases of 843 and 270 bytes respectively.
+The source-coherent build receipt is `9f53971741562b58c6c397a7e8b73e86`
+over 156 files and 38,653,415 bytes.
+
+This remains a shadow gate. The checked-in presentation meshes do not yet
+provide representative pickable stable IDs, the AppStore transition clock is
+not the renderer clock, and the renderer still consumes incumbent browser
+focus state. Those are the next cutover gates; this checkpoint proves the
+identity/provenance join and ordered dispatch without weakening ordinary GLB
+loading.

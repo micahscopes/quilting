@@ -6,8 +6,37 @@ const repository = fileURLToPath(new URL('..', import.meta.url));
 const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const manifestPath = `${repository}/examples/hacker-night.presentation.json`;
+const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 const { default: init, HyperscopeNavigation } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
+
+const cueActivation = browserSource.slice(
+  browserSource.indexOf('function activateRustPresentation('),
+  browserSource.indexOf('async function initializeRustPresentation('),
+);
+const guardedSelectionClear = cueActivation.indexOf(
+  'if (selectedObject || rustAppShadowSelectionQueued)',
+);
+assert.ok(guardedSelectionClear >= 0);
+assert.ok(
+  guardedSelectionClear < cueActivation.indexOf('synchronizeRustApplicationPresentationFromBrowser();'),
+  'a cue must detach a real selection before synchronizing its free-focus start state',
+);
+
+const rendererSelection = browserSource.slice(
+  browserSource.indexOf('function selectObjectFromFace('),
+  browserSource.indexOf('function selectObjectAtViewCenter('),
+);
+for (const handoff of [
+  'rustPresentationTransitionActive = false;',
+  'rustAppPresentationPoseReady = false;',
+]) {
+  assert.ok(
+    rendererSelection.indexOf(handoff) >= 0
+      && rendererSelection.indexOf(handoff) < rendererSelection.indexOf('anchorFocusSphereToSelection();'),
+    `renderer selection must execute ${handoff} before anchoring`,
+  );
+}
 
 const controller = new HyperscopeNavigation();
 const presentation = controller.loadPresentation(readFileSync(manifestPath, 'utf8'));

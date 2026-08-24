@@ -175,10 +175,14 @@ or sphere state.
    aim, focus, inversion, and sphere packet, so a focus-only deep link no
    longer starts from Rust defaults. Presentation snapshot application is
    suppressed at the signal boundary and cannot echo semantic focus actions
-   back into Rust. Live selection cutover still requires stable glTF node
-   identity, browser-to-Rust pick dispatch, and transition clocks. Rust now
-   retains the selected source
-   bound and clicked pivot beside its stable entity ID, and the application
+   back into Rust. The selection shadow now exports validated authored glTF
+   node IDs, joins pickable primary/secondary nodes to their explicit manifest
+   asset scope, and dispatches mapped picks/detaches through the application
+   queue. Ordinary URL, IndexedDB, local-fallback, and drop loads remain
+   deliberately unmapped. Live selection cutover still requires authored IDs
+   in release assets, Rust-owned transition clocks, and renderer consumption
+   of the Rust packet. Rust retains the selected source bound and clicked pivot
+   beside its asset-scoped stable identity, and the application
    snapshot derives output-chart pivot/radius without destroying selection at
    a reflection pole. The same application queue now accepts complete,
    validated perspective-lens edits and explicit semantic-target enablement.
@@ -210,16 +214,18 @@ or sphere state.
    identity/reflection and cyclic source/neighbor permutation cases.
    `walkimpl=rust` is therefore a real rollback-safe authority mode; the
    default stays `js` until it has seen broader interactive soak time.
-4. **Selection bridge — asset-scoped Rust contract and read model complete;
-   browser mapping/dispatch pending.**
+4. **Selection bridge — asset-scoped shadow path complete; authority pending.**
    Protocol, navigation, AppStore snapshots, replay 0.7, and the generated WASM
    facades now carry an explicit `(asset ID, entity ID)` pair. Pre-0.7
-   unscoped replay anchors fail closed. Next, map durable asset-scoped glTF
-   node identities to Hyperscape entities, send pick results through
-   `AppStore::dispatch_navigation`, tick sphere
-   transitions in Rust, and apply its one compact selected-focus packet per
-   view. Ordinary GLB node-index UUIDs remain shadow-only and must never enter
-   routes, HHHS, or durable replay.
+   unscoped replay anchors fail closed. Validated glTF bindings now cross the
+   loader as a dense authored identity table. Presentation composition maps
+   only pickable nodes, preserves source-node offsets, and admits asset scope
+   only from an exact validated manifest fetch; its append is transactional.
+   Mapped picks and clears traverse `AppStore::dispatch_navigation` in shadow,
+   while unmapped ordinary assets retain incumbent browser selection without
+   synthesizing UUIDs. Next, author stable IDs into representative release
+   assets, advance selection transitions on the shared Rust frame clock, and
+   apply the compact selected-focus packet to the renderer before cutover.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.

@@ -4,6 +4,80 @@
 
 export const HYPERSCOPE_INSTANCE_STRIDE = 52;
 const MOBIUS_EPSILON = 1e-12;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function durableUuid(value, label) {
+  const normalized = typeof value === 'string' ? value.toLowerCase() : '';
+  if (!UUID_PATTERN.test(normalized)
+      || normalized === '00000000-0000-0000-0000-000000000000') {
+    throw new TypeError(`${label} must be a non-nil UUID`);
+  }
+  return normalized;
+}
+
+/** Resolve asset scope only for a byte load explicitly sourced from a manifest URI. */
+export function durablePresentationAssetId(assets, requestedUri, provenance) {
+  if (provenance !== 'manifest-fetch' || !Array.isArray(assets)) return null;
+  const requested = String(requestedUri);
+  const asset = assets.find(candidate => String(candidate?.uri) === requested);
+  return asset ? durableUuid(asset.id, 'presentation asset identity') : null;
+}
+
+/**
+ * Append authored node identities to a composed renderer-node lookup.
+ *
+ * The packed node is a transient renderer handle. `sourceNode` preserves the
+ * asset-local glTF address for diagnostics, while only the explicit asset and
+ * authored entity UUID pair may cross the semantic selection boundary.
+ */
+export function appendPackedNodeIdentities(
+  target,
+  assetId,
+  nodeStableEntityIds,
+  pickableSourceNodes,
+  nodeOffset = 0,
+) {
+  if (!(target instanceof Map)) throw new TypeError('identity target must be a Map');
+  if (!Array.isArray(nodeStableEntityIds)) {
+    throw new TypeError('node stable identities must be a dense array');
+  }
+  if (pickableSourceNodes == null || typeof pickableSourceNodes[Symbol.iterator] !== 'function') {
+    throw new TypeError('pickable source nodes must be iterable');
+  }
+  const asset = durableUuid(assetId, 'asset identity');
+  const offset = Number(nodeOffset);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new TypeError('node offset must be a non-negative safe integer');
+  }
+  // Stage the complete append before mutating the caller's map. A malformed
+  // later binding or namespace collision must not leave a partial identity
+  // catalog behind.
+  const staged = new Map();
+  const sourceNodes = new Set(Array.from(pickableSourceNodes, Number));
+  for (const sourceNode of sourceNodes) {
+    if (!Number.isSafeInteger(sourceNode) || sourceNode < 0
+        || sourceNode >= nodeStableEntityIds.length) {
+      throw new TypeError(`pickable source node ${sourceNode} is outside the identity table`);
+    }
+    const value = nodeStableEntityIds[sourceNode];
+    if (value == null) continue;
+    const packedNode = offset + sourceNode;
+    if (!Number.isSafeInteger(packedNode)) {
+      throw new TypeError(`packed node ${packedNode} is not a safe integer`);
+    }
+    if (target.has(packedNode) || staged.has(packedNode)) {
+      throw new TypeError(`packed node ${packedNode} already has a durable identity`);
+    }
+    staged.set(packedNode, Object.freeze({
+      assetId: asset,
+      entityId: durableUuid(value, `node ${sourceNode} entity identity`),
+      sourceNode,
+      durable: true,
+    }));
+  }
+  for (const [packedNode, identity] of staged) target.set(packedNode, identity);
+  return staged.size;
+}
 
 function finitePoint(x, y, z) {
   return Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z);

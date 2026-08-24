@@ -9,6 +9,7 @@ const {
   default: init,
   HyperscopeAppShadow,
   HyperscopeNavigation,
+  load_gltf_data: loadGltfData,
   mapSpaceMouseCameraFrame,
 } = await import(packageUrl);
 const { mapSpaceMouseNavigationAxes } = await import(
@@ -18,6 +19,82 @@ const { transportCameraAcrossSphereReflections } = await import(
   pathToFileURL(`${repository}/hyperscope_focus.mjs`).href
 );
 await init({ module_or_path: readFileSync(wasmPath) });
+
+function authoredTriangleGlb(stableEntityId) {
+  const binary = new Uint8Array(44);
+  new Float32Array(binary.buffer, 0, 9).set([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ]);
+  new Uint16Array(binary.buffer, 36, 3).set([0, 1, 2]);
+  const document = {
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: 42 }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36, target: 34962 },
+      { buffer: 0, byteOffset: 36, byteLength: 6, target: 34963 },
+    ],
+    accessors: [
+      {
+        bufferView: 0, componentType: 5126, count: 3, type: 'VEC3',
+        min: [0, 0, 0], max: [1, 1, 0],
+      },
+      { bufferView: 1, componentType: 5123, count: 3, type: 'SCALAR' },
+    ],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1 }] }],
+    nodes: [
+      {
+        mesh: 0,
+        ...(stableEntityId
+          ? { extras: { hyperscape: { stable_id: stableEntityId, frame: 0 } } }
+          : {}),
+      },
+      { name: 'unbound-camera-guide' },
+    ],
+    scenes: [{ nodes: [0, 1] }],
+    scene: 0,
+    ...(stableEntityId ? {
+      extras: {
+        hyperscape: {
+          version: '0.1',
+          frames: [{ name: 'world', parent: null, generators: [] }],
+        },
+      },
+    } : {}),
+  };
+  const jsonSource = new TextEncoder().encode(JSON.stringify(document));
+  const jsonLength = Math.ceil(jsonSource.length / 4) * 4;
+  const result = new Uint8Array(12 + 8 + jsonLength + 8 + binary.length);
+  const view = new DataView(result.buffer);
+  view.setUint32(0, 0x46546c67, true);
+  view.setUint32(4, 2, true);
+  view.setUint32(8, result.length, true);
+  view.setUint32(12, jsonLength, true);
+  view.setUint32(16, 0x4e4f534a, true);
+  result.fill(0x20, 20, 20 + jsonLength);
+  result.set(jsonSource, 20);
+  const binaryHeader = 20 + jsonLength;
+  view.setUint32(binaryHeader, binary.length, true);
+  view.setUint32(binaryHeader + 4, 0x004e4942, true);
+  result.set(binary, binaryHeader + 8);
+  return result;
+}
+
+const authoredEntity = '71000000-0000-4000-8000-000000000001';
+const authoredModel = loadGltfData(authoredTriangleGlb(authoredEntity));
+assert.deepEqual(
+  authoredModel.node_stable_entity_ids,
+  [authoredEntity, null],
+  'the loader must export a dense authored node-identity table',
+);
+assert.deepEqual(Array.from(authoredModel.face_node_indices), [0]);
+const ordinaryModel = loadGltfData(authoredTriangleGlb(null));
+assert.deepEqual(
+  ordinaryModel.node_stable_entity_ids,
+  [],
+  'ordinary assets must not clone one null identity per renderer node',
+);
 
 const app = new HyperscopeAppShadow();
 const asset = 'f0000000-0000-4000-8000-000000000001';

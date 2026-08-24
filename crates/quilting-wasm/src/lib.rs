@@ -1568,7 +1568,8 @@ pub fn get_rest_pose_instances() -> JsValue {
 /// Walks ALL scene nodes, applies world transforms, merges all meshes.
 /// Returns a JS object with:
 ///   { time_min, time_max, num_vertices, num_faces, materials, textures,
-///     base_color, metallic, roughness }
+///     face_node_indices, node_stable_entity_ids, base_color, metallic,
+///     roughness }
 /// Built with js_sys to avoid serde overhead on large data.
 #[wasm_bindgen]
 pub fn load_gltf_data(data: &[u8]) -> JsValue {
@@ -1906,6 +1907,30 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         .collect();
     js_face_nodes.copy_from(&node_indices);
 
+    // Dense authored identity table indexed exactly like the source glTF node
+    // array. Null entries are deliberate. Ordinary assets return an empty
+    // table rather than allocating/cloning one null per renderer-only node.
+    let authored_node_count = scene
+        .hyperscape
+        .as_ref()
+        .map(|asset| asset.node_bindings.len())
+        .unwrap_or(0);
+    let js_node_stable_entity_ids = js_sys::Array::new_with_length(authored_node_count as u32);
+    for node in 0..authored_node_count {
+        let stable_id = scene
+            .hyperscape
+            .as_ref()
+            .and_then(|asset| asset.node_bindings.get(node))
+            .and_then(Option::as_ref)
+            .and_then(|binding| binding.stable_id);
+        js_node_stable_entity_ids.set(
+            node as u32,
+            stable_id
+                .map(|stable_id| JsValue::from_str(&stable_id.to_string()))
+                .unwrap_or(JsValue::NULL),
+        );
+    }
+
     // Extract first material as default (backward compat).
     // With raw image blobs (browser-native decode), we use base_color_factor directly.
     let (base_color, metallic, roughness) = if !scene.materials.is_empty() {
@@ -1995,6 +2020,11 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     ).unwrap();
     js_sys::Reflect::set(&result, &"face_material_indices".into(), &js_face_materials).unwrap();
     js_sys::Reflect::set(&result, &"face_node_indices".into(), &js_face_nodes).unwrap();
+    js_sys::Reflect::set(
+        &result,
+        &"node_stable_entity_ids".into(),
+        &js_node_stable_entity_ids,
+    ).unwrap();
 
     // Backward-compat scalar fields
     let bc_arr = js_sys::Array::new();

@@ -3,12 +3,14 @@ import test from 'node:test';
 
 import {
   advanceVirtualTransitionClock,
+  appendPackedNodeIdentities,
   applyMobiusPoint,
   buildFocusBounds,
   buildNodeFocusRecords,
   compactifiedRadialCoordinate,
   composeSurfaceRelativeForward,
   decomposeSurfaceRelativeForward,
+  durablePresentationAssetId,
   faceSourceCentroid,
   focusSphereFromBound,
   focusRelativeNavigationSpeed,
@@ -32,6 +34,78 @@ import {
 } from '../hyperscope_focus.mjs';
 
 const STRIDE = 52;
+
+test('durable presentation asset scope requires exact manifest-fetch provenance', () => {
+  const assetId = '60000000-0000-4000-8000-000000000001';
+  const assets = [{ id: assetId, uri: '/horse.glb' }];
+  assert.equal(
+    durablePresentationAssetId(assets, '/horse.glb', 'manifest-fetch'),
+    assetId,
+  );
+  assert.equal(durablePresentationAssetId(assets, '/horse.glb', 'indexeddb'), null);
+  assert.equal(durablePresentationAssetId(assets, 'horse.glb', 'manifest-fetch'), null);
+  assert.equal(
+    durablePresentationAssetId(assets, '/local-glbs/horse.glb', 'manifest-fetch'),
+    null,
+  );
+});
+
+test('composed node identity keeps durable asset scope and source offsets', () => {
+  const primaryAsset = '60000000-0000-4000-8000-000000000001';
+  const secondaryAsset = '60000000-0000-4000-8000-000000000002';
+  const firstEntity = '70000000-0000-4000-8000-000000000001';
+  const secondEntity = '70000000-0000-4000-8000-000000000002';
+  const nonPickableCamera = '70000000-0000-4000-8000-000000000003';
+  const identities = new Map();
+
+  assert.equal(appendPackedNodeIdentities(
+    identities,
+    primaryAsset.toUpperCase(),
+    [firstEntity, null, secondEntity, nonPickableCamera],
+    [0, 1, 2],
+  ), 2);
+  assert.equal(appendPackedNodeIdentities(
+    identities,
+    secondaryAsset,
+    [firstEntity],
+    [0],
+    3,
+  ), 1);
+  assert.deepEqual(identities.get(0), {
+    assetId: primaryAsset,
+    entityId: firstEntity,
+    sourceNode: 0,
+    durable: true,
+  });
+  assert.deepEqual(identities.get(2), {
+    assetId: primaryAsset,
+    entityId: secondEntity,
+    sourceNode: 2,
+    durable: true,
+  });
+  assert.deepEqual(identities.get(3), {
+    assetId: secondaryAsset,
+    entityId: firstEntity,
+    sourceNode: 0,
+    durable: true,
+  });
+  assert.notDeepEqual(identities.get(0), identities.get(3));
+  assert.throws(
+    () => appendPackedNodeIdentities(identities, primaryAsset, [firstEntity], [0]),
+    /already has a durable identity/,
+  );
+  const rejected = new Map();
+  assert.throws(
+    () => appendPackedNodeIdentities(
+      rejected,
+      primaryAsset,
+      [firstEntity, 'not-a-uuid'],
+      [0, 1],
+    ),
+    /must be a non-nil UUID/,
+  );
+  assert.equal(rejected.size, 0, 'a rejected batch must not leave a partial catalog');
+});
 
 function instanceFace(points, vertexIds = [0, 1, 2]) {
   const data = new Float32Array(STRIDE);

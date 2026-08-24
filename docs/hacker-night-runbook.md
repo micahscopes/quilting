@@ -30,7 +30,9 @@ HTML/module, and copied-asset inputs; preflight recomputes it and rejects a
 coherent but stale `dist/`. It reports the matching fingerprints and checked
 bundle size. The generated-WASM smoke verifies start, cue deep-link, malformed
 cue, unknown-cue, application projection, and camera/focus transition parity
-without needing a GPU or browser.
+without needing a GPU or browser. It also loads synthetic authored and ordinary
+GLBs through the real WASM parser to prove that durable node IDs remain dense
+and asset-scoped while ordinary high-node-count files pay no null-table clone.
 The surface-walk smoke additionally checks the Rust scale/speed/near-plane
 policy against the shared live-page helpers, then runs deterministic animated
 contact, pitch-recapture, orientation-retention, reset, and invalid-input
