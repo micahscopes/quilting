@@ -7,8 +7,19 @@ license.workspace = true
 repository.workspace = true
 description = "Rust-authoritative application reducer and FRP read models for Hyperscope"
 
+[features]
+default = []
+replay = ["dep:serde", "dep:serde_json", "uuid/serde"]
+
 [dependencies]
 futures-signals = { version = "0.3.34", default-features = false }
 hyperscape = { path = "../hyperscape" }
 hyperscape-protocol = { path = "../hyperscape-protocol" }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", features = ["float_roundtrip"], optional = true }
 uuid = "1"
+
+[[bin]]
+name = "hyperscope-replay"
+path = "src/bin/hyperscope-replay.rs"
+required-features = ["replay"]

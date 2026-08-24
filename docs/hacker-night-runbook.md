@@ -10,6 +10,7 @@ From the repository root:
 
 ```sh
 trunk build --release
+cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --check
 cargo run -p hyperscape --bin hyperscope-preflight
 node scripts/smoke-hyperscope-presentation.mjs
 node scripts/smoke-hyperscope-app-shadow.mjs
@@ -24,6 +25,13 @@ coherent but stale `dist/`. It reports the matching fingerprints and checked
 bundle size. The generated-WASM smoke verifies start, cue deep-link, malformed
 cue, unknown-cue, application projection, and camera/focus transition parity
 without needing a GPU or browser.
+
+The replay check must print
+`PASS fnv1a-128-json:65b613ca3af3c796d83e7a8b0fc40943`. It executes the
+complete six-cue semantic walkthrough through `hyperscope-app`, independently
+of browser timing, input adapters, and the renderer. A mismatch means reducer,
+presentation, or trace behavior changed and must be reviewed; the fingerprint
+is a deterministic regression oracle, not a cryptographic signature.
 
 For a public downloadable archive, use the stricter gate:
 

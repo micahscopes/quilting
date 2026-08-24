@@ -165,6 +165,24 @@ from 5,965,208 to 5,971,073 bytes (5,865 raw); gzip increased from 2,093,926 to
 2,097,167 bytes. Live browser samples remain pending until a user-run Quilting
 tab is available.
 
+The next checkpoint added a versioned native application replay trace with
+semantic inputs, commit/rejection outcomes, compact committed state, exact
+decimal `f64` round trips, cadence-invariance coverage, and a checked six-cue
+golden fingerprint. Linking exact replay JSON support into the browser was
+measured and rejected: it raised optimized WASM to 6,094,559 bytes (+123,486
+raw, +28,054 gzip). The replay module and CLI are therefore behind the native
+`hyperscope-app/replay` feature. With that feature absent from the browser
+graph, optimized WASM is 5,971,066 bytes and 2,096,849 bytes gzip—effectively
+unchanged from the pose-observer checkpoint (-7 raw, -318 gzip in the final
+source-coherent build).
+
+The 15 default app tests, 19 replay-feature app tests, 53 Hyperscape tests, 40
+browser-independent JavaScript tests, four generated-WASM smokes, strict
+Clippy in both feature configurations, Rustdoc, WASM checking, the replay
+golden, and raw/staged preflights passed. The build receipt was
+`255d51aa55039588583c7d4699f8a5f5`. Live browser proof remains pending; no
+server or unrelated browser tab was changed for this checkpoint.
+
 ## Canonical atlas
 
 The browser's default reachable atlas contains:

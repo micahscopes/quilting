@@ -77,6 +77,14 @@ The first application boundary is now explicit:
   `AppSummary` revision is set last as the consumer commit fence; adapters
   explicitly flush at their UI cadence. Presentation transitions reconcile on
   the frame lane without cloning cue assets/layers into render snapshots.
+- `hyperscope-app` exposes a versioned, adapter-independent replay format. A
+  replay contains semantic events, each commit/rejection outcome, and a compact
+  camera/focus/cue snapshot; it contains no DOM events, device reports,
+  renderer handles, or wall clock. Decimal JSON uses exact `f64` round trips.
+  The native `replay` feature is excluded from browser builds;
+  `hyperscope-replay` walks every checked-in cue, while tests prove
+  rejected-event atomicity and transition cadence invariance. The six-cue
+  golden is `fnv1a-128-json:65b613ca3af3c796d83e7a8b0fc40943`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
@@ -298,7 +306,8 @@ readback becomes optional telemetry rather than a frame dependency.
 - shadow-index visualization and measured culling comparison;
 - a conformal transition between presentation sections;
 - an educational patch/tessellation inspector tied to the selected face;
-- deterministic input recording and presentation replay.
+- browser/device input capture and renderer-image replay atop the completed
+  semantic presentation replay oracle.
 
 ### Explicitly deferred unless the gates are already safe
 

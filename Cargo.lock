@@ -929,6 +929,8 @@ dependencies = [
  "futures-signals",
  "hyperscape",
  "hyperscape-protocol",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

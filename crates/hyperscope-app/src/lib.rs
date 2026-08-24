@@ -7,8 +7,12 @@
 //! not publish UI signals automatically. A view adapter calls
 //! [`AppStore::flush_read_models`] at its chosen cadence.
 
+#[cfg(feature = "replay")]
+mod replay;
 mod settings;
 
+#[cfg(feature = "replay")]
+pub use replay::*;
 pub use settings::*;
 
 use futures_signals::signal::{Mutable, MutableSignalCloned};
