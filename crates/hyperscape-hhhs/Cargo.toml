@@ -1,0 +1,25 @@
+[package]
+name = "hyperscape-hhhs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable HHHS authored-operation adapter for Hyperscape protocol 0.1"
+
+[dependencies]
+bincode = "=1.3.3"
+futures = "0.3"
+futures-signals = "0.3"
+hhhs.workspace = true
+hhhs-reactive.workspace = true
+hhhs-replica.workspace = true
+hhhs-store.workspace = true
+hhhs-sync.workspace = true
+hyperscape-protocol = { path = "../hyperscape-protocol" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = "1"
+
+[dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }

@@ -3,6 +3,7 @@ members = [
     "crates/distressed-blue-noise",
     "crates/fuzzy-vision",
     "crates/hyperscape",
+    "crates/hyperscape-hhhs",
     "crates/hyperscape-protocol",
     "crates/hyperscope-app",
     "crates/quilting-core",
@@ -46,6 +47,13 @@ edition = "2021"
 authors = ["Micah <micahscopes@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/micahscopes/quilting"
+
+[workspace.dependencies]
+hhhs = { version = "0.4.2", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "476a4c6a800fed215dade5089ac2c241ca79fcf8" }
+hhhs-reactive = { version = "0.4.2", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "476a4c6a800fed215dade5089ac2c241ca79fcf8" }
+hhhs-replica = { version = "0.4.2", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "476a4c6a800fed215dade5089ac2c241ca79fcf8" }
+hhhs-store = { version = "0.4.2", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "476a4c6a800fed215dade5089ac2c241ca79fcf8" }
+hhhs-sync = { version = "0.4.2", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "476a4c6a800fed215dade5089ac2c241ca79fcf8", features = ["driver"] }
 
 [profile.release]
 opt-level = 2
