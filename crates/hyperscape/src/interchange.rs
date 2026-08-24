@@ -629,7 +629,16 @@ mod tests {
             .iter()
             .position(|node| node.name.as_deref() == Some("HS_ProjectionCamera"))
             .unwrap();
-        let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset.unwrap()).unwrap();
+        let asset = asset.unwrap();
+        let bound_node_count = asset
+            .node_bindings
+            .iter()
+            .filter(|binding| binding.is_some())
+            .count();
+        let wall_count = asset.payload.walls.len();
+        assert_eq!(bound_node_count, 5);
+        assert_eq!(wall_count, 4);
+        let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset).unwrap();
         let traveler = runtime.entities()[traveler_node];
 
         assert!(runtime.packets_by_node().iter().any(|packet| {
@@ -646,7 +655,7 @@ mod tests {
             initial_diagnostics
                 .chamber_aggregates
                 .classifications_last_tick,
-            12
+            bound_node_count * wall_count
         );
         assert_eq!(
             initial_diagnostics
@@ -655,13 +664,13 @@ mod tests {
                 .iter()
                 .map(|(_, count)| count)
                 .sum::<usize>(),
-            3
+            bound_node_count
         );
         assert_eq!(
             initial_diagnostics
                 .chamber_aggregates
                 .aggregate_updates_last_tick,
-            3
+            bound_node_count
         );
         assert!(initial_diagnostics
             .visibility_hints
