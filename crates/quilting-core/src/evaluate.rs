@@ -385,12 +385,6 @@ pub fn compute_instances_with_uvs(
     // min(), preserving both interior conformal extent and seam coherence.
     let mut edge_lod_screen_caps: Vec<u32> = vec![0; num_half_edges];
 
-    // Faces whose complete source triangle reaches the Möbius pole. The
-    // medians cannot be trusted there, and screen attenuation must not reduce
-    // a truly unbounded patch. Exact closest-point classification below keeps
-    // this safety exception aligned with the GPU pass.
-    let mut pole_faces: Vec<usize> = Vec::new();
-
     for fi in 0..nf {
         let face = faces[fi];
         let v0 = vertices[face[0]];
@@ -430,7 +424,9 @@ pub fn compute_instances_with_uvs(
             / (target_size * intrinsic_similarity);
         if let Some(patch) = ConformalPatch::new(transform, v0, v1, v2) {
             if patch.min_bot_sq < POLE_PROXIMITY_NORM_SQ {
-                pole_faces.push(fi);
+                // A pole hit is unbounded intrinsic demand, but the finite
+                // framebuffer remains an authoritative screen-space cap.
+                world_demand = MAX_LOD as f64;
             } else {
                 let l_max = dist3(v1, v2).max(dist3(v0, v2)).max(dist3(v0, v1));
                 world_demand = world_demand.max(
@@ -461,6 +457,7 @@ pub fn compute_instances_with_uvs(
                     min_px,
                     MIN_LOD,
                     MAX_LOD,
+                    screen.width.hypot(screen.height),
                 );
                 edge_lod_screen_caps[canonical_edge(he_base + 1)] =
                     edge_lod_screen_caps[canonical_edge(he_base + 1)].max(caps[0]);
@@ -488,16 +485,6 @@ pub fn compute_instances_with_uvs(
             } else {
                 world
             };
-        }
-    }
-
-    // Pole-adjacent faces saturate regardless of screen attenuation — their
-    // collapsed projections would otherwise attenuate exactly the faces that
-    // need the most subdivision. Writing through the canonical edge slots
-    // keeps shared edges matching (no T-junctions).
-    for &fi in &pole_faces {
-        for ei in 0..3 {
-            edge_lods[canonical_edge(fi * 3 + ei)] = MAX_LOD;
         }
     }
 

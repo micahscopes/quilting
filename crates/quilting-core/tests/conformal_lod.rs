@@ -371,7 +371,7 @@ fn interior_floor_catches_the_spike_fan() {
     let m = Mobius::sphere_reflection(Quat::from_point(0.0, 0.0, -3.7), 0.8);
 
     let rim = rim_only_lods(v0, v1, v2, &m, min_px, cap);
-    let conf = conformal_edge_lods(v0, v1, v2, &m, projector, min_px, 2, cap);
+    let conf = conformal_edge_lods(v0, v1, v2, &m, projector, min_px, 2, cap, 1000.0 * std::f64::consts::SQRT_2);
 
     // The interior floor must lift the LoD above what the rim alone asked for.
     assert!(
@@ -435,7 +435,7 @@ fn lod_is_smooth_across_a_grid_straddling_the_pole() {
     let m = Mobius::sphere_reflection(Quat::from_point(0.05, 0.0, -2.9), 0.4);
     let min_px = 8.0;
     let lod = |a: [f64; 3], b: [f64; 3], c: [f64; 3]| -> u32 {
-        *conformal_edge_lods(a, b, c, &m, grid_projector, min_px, 2, 256).iter().max().unwrap()
+        *conformal_edge_lods(a, b, c, &m, grid_projector, min_px, 2, 256, 1000.0 * std::f64::consts::SQRT_2).iter().max().unwrap()
     };
 
     let mut worst = 1.0f64;
@@ -480,7 +480,7 @@ fn interior_floor_holds_for_off_center_poles() {
         (0.0, 0.60, -3.6, 0.6), // toward a vertex
     ] {
         let m = Mobius::sphere_reflection(Quat::from_point(px, py, pz), r);
-        let conf = conformal_edge_lods(v0, v1, v2, &m, projector, min_px, 2, cap);
+        let conf = conformal_edge_lods(v0, v1, v2, &m, projector, min_px, 2, cap, 1000.0 * std::f64::consts::SQRT_2);
         let worst = worst_screen_subedge(&atlas, conf, v0, v1, v2, &m);
         let capped = conf.iter().any(|&l| l >= cap);
         assert!(
@@ -494,8 +494,18 @@ fn interior_floor_holds_for_off_center_poles() {
 fn degenerate_face_falls_back_without_nan() {
     // Fable's finding 5: collinear/needle faces must not NaN the pole guard/floor.
     let m = Mobius::sphere_reflection(Quat::from_point(0.0, 0.0, -3.1), 0.5);
-    let lods = conformal_edge_lods([0.0, 0.0, -3.0], [1.0, 0.0, -3.0], [2.0, 0.0, -3.0], &m, projector, 16.0, 2, 64);
+    let lods = conformal_edge_lods([0.0, 0.0, -3.0], [1.0, 0.0, -3.0], [2.0, 0.0, -3.0], &m, projector, 16.0, 2, 64, 1000.0 * std::f64::consts::SQRT_2);
     for l in lods {
         assert!((2..=64).contains(&l) && l.is_power_of_two(), "degenerate produced garbage LoD: {lods:?}");
     }
+}
+
+#[test]
+fn exact_pole_is_capped_by_raster_capacity() {
+    let v0 = [-1.0, -1.0, -3.0];
+    let v1 = [1.0, -1.0, -3.0];
+    let v2 = [0.0, 1.0, -3.0];
+    let m = Mobius::sphere_reflection(Quat::from_point(0.0, 0.0, -3.0), 1.0);
+    let lods = conformal_edge_lods(v0, v1, v2, &m, projector, 64.0, 1, 128, 800.0);
+    assert_eq!(lods, [8, 8, 8]);
 }

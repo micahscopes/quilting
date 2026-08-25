@@ -1291,7 +1291,16 @@ mod tests {
     fn screen_attenuation_caps_instead_of_driving_lod() {
         assert!(LOD_COMPUTE_VS.contains("density/curvature demand above"));
         assert_eq!(LOD_COMPUTE_VS.matches("= min(lod_").count(), 3);
-        assert_eq!(LOD_COMPUTE_VS.matches("floor_pow2(max(px_").count(), 3);
+        assert_eq!(LOD_COMPUTE_VS.matches("floor_pow2(min(max(px_").count(), 3);
+        assert!(LOD_COMPUTE_VS.contains("float max_screen_extent = length(vec2(vp_width, vp_height))"));
+    }
+
+    #[test]
+    fn pole_demand_is_bounded_by_screen_capacity() {
+        let demand = LOD_COMPUTE_VS.find("interior_world_demand = max_lod").unwrap();
+        let attenuation = LOD_COMPUTE_VS.find("if (min_px > 0.0)").unwrap();
+        assert!(demand < attenuation);
+        assert!(!LOD_COMPUTE_VS[attenuation..].contains("lod_a = max_lod"));
     }
 
     #[test]

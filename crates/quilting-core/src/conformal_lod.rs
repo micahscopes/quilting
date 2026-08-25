@@ -269,7 +269,9 @@ fn floor_pow2(v: f64) -> f64 {
 /// pole guard `|c|²·d_T² < POLE_PROXIMITY_NORM_SQ ⇒ max_lod`.
 ///
 /// The GLSL twin in `lod_compute.vert.glsl` mirrors this; `min_lod`/`max_lod` are
-/// the clamp bounds (`max_lod` = the built atlas cap on the GPU path).
+/// the clamp bounds (`max_lod` = the built atlas cap on the GPU path), and
+/// `max_screen_extent_px` is a hard raster-capacity bound (normally the
+/// viewport diagonal).
 pub fn conformal_edge_lods(
     v0: [f64; 3],
     v1: [f64; 3],
@@ -279,8 +281,10 @@ pub fn conformal_edge_lods(
     min_px: f64,
     min_lod: u32,
     max_lod: u32,
+    max_screen_extent_px: f64,
 ) -> [u32; 3] {
     let clampl = |v: f64| (floor_pow2(v) as u32).clamp(min_lod, max_lod);
+    let screen_extent = max_screen_extent_px.max(0.0);
     let mid = |a: [f64; 3], b: [f64; 3]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
 
     let d0 = m.apply(q_from(v0));
@@ -302,13 +306,11 @@ pub fn conformal_edge_lods(
         Some(p) => p,
         None => {
             // Affine (no finite pole): the rim bounds screen-space capacity.
-            let f = |px: Option<f64>| px.map(|p| clampl(p / min_px)).unwrap_or(min_lod);
+            let f = |px: Option<f64>| px.map(|p| clampl(p.min(screen_extent) / min_px)).unwrap_or(min_lod);
             return [f(px_a), f(px_b), f(px_c)];
         }
     };
-    if patch.min_bot_sq < POLE_PROXIMITY_NORM_SQ {
-        return [max_lod, max_lod, max_lod];
-    }
+    let contains_pole = patch.min_bot_sq < POLE_PROXIMITY_NORM_SQ;
 
     let le = [d3(v1, v2), d3(v0, v2), d3(v0, v1)];
     let l_max = le[0].max(le[1]).max(le[2]);
@@ -327,23 +329,25 @@ pub fn conformal_edge_lods(
     // needed).
     // If y* falls behind the camera the face wraps past the near plane — leave it
     // to the rim + the cull rather than emit a spurious spike.
-    let mut px_int = 0.0;
+    let mut px_int = if contains_pole { screen_extent } else { 0.0 };
     let y_star = m.apply(q_from(patch.x_star));
-    if let Some(s0) = project(y_star) {
-        let yc = y_star.to_point();
-        let eps = 1e-3;
-        let mut rho = 0.0f64;
-        for dir in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.5774, 0.5774, 0.5774]] {
-            let yp = Quat::from_point(yc[0] + eps * dir[0], yc[1] + eps * dir[1], yc[2] + eps * dir[2]);
-            if let Some(sp) = project(yp) {
-                rho = rho.max(s2(sp, s0) / eps);
+    if !contains_pole {
+        if let Some(s0) = project(y_star) {
+            let yc = y_star.to_point();
+            let eps = 1e-3;
+            let mut rho = 0.0f64;
+            for dir in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.5774, 0.5774, 0.5774]] {
+                let yp = Quat::from_point(yc[0] + eps * dir[0], yc[1] + eps * dir[1], yc[2] + eps * dir[2]);
+                if let Some(sp) = project(yp) {
+                    rho = rho.max(s2(sp, s0) / eps);
+                }
             }
+            px_int = (patch.lambda_star * rho * l_max).min(screen_extent);
         }
-        px_int = patch.lambda_star * rho * l_max;
     }
 
     let drive = |px: Option<f64>| -> u32 {
-        let base = px.unwrap_or(0.0).max(px_int);
+        let base = px.unwrap_or(0.0).max(px_int).min(screen_extent);
         if base <= 0.0 {
             return min_lod;
         }
