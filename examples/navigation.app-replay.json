@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.8",
+  "version": "hyperscope-app-replay/0.10",
   "events": [
     {
       "type": "synchronize_navigation",
@@ -218,13 +218,31 @@
       "delta_seconds": 0.4
     },
     {
+      "type": "navigate",
+      "sequence": 12,
+      "at_seconds": 2.4,
+      "action": {
+        "action": "refit_focus_and_toggle_inversion",
+        "duration_seconds": 0.8,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 13,
+      "at_seconds": 2.4,
+      "action": {
+        "action": "toggle_inversion"
+      }
+    },
+    {
       "type": "frame",
       "elapsed_seconds": 2.8,
       "delta_seconds": 0.4
     },
     {
       "type": "navigate",
-      "sequence": 12,
+      "sequence": 14,
       "at_seconds": 2.8,
       "action": {
         "action": "scale_focus_log",
@@ -233,7 +251,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 13,
+      "sequence": 15,
       "at_seconds": 2.8,
       "action": {
         "action": "detach_focus"
@@ -241,7 +259,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 14,
+      "sequence": 16,
       "at_seconds": 2.8,
       "action": {
         "action": "translate_focus",
@@ -250,7 +268,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 15,
+      "sequence": 17,
       "at_seconds": 2.8,
       "action": {
         "action": "transition_free_focus_sphere",
@@ -269,7 +287,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 16,
+      "sequence": 18,
       "at_seconds": 3.05,
       "action": {
         "action": "toggle_inversion"
@@ -282,7 +300,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 17,
+      "sequence": 19,
       "at_seconds": 3.05,
       "action": {
         "action": "set_perspective_lens",
@@ -293,7 +311,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 18,
+      "sequence": 20,
       "at_seconds": 3.05,
       "action": {
         "action": "set_semantic_target_enabled",
@@ -307,7 +325,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 19,
+      "sequence": 21,
       "at_seconds": 3.05,
       "action": {
         "action": "anchor_focus",

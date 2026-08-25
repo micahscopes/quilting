@@ -279,6 +279,18 @@ impl HyperscopeNavigation {
         self.push(NavigationAction::ToggleInversion)
     }
 
+    #[wasm_bindgen(js_name = refitFocusAndToggleInversion)]
+    pub fn refit_focus_and_toggle_inversion(
+        &mut self,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        self.push(NavigationAction::RefitFocusAndToggleInversion {
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
     pub fn tick(&mut self, delta_seconds: f64) -> Result<JsValue, JsValue> {
         if let Some(presentation) = self.presentation.as_mut() {
             presentation

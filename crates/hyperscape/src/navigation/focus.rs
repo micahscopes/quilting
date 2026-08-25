@@ -204,6 +204,34 @@ impl FocusNavigation {
         self.transition = None;
     }
 
+    /// Restart the fitted sphere transition from its current geometry while
+    /// preserving the selected identity, source bound, clicked pivot, and
+    /// chosen margin. A detached sphere is a valid no-op, allowing one gesture
+    /// action to mean “refit when selected, otherwise use the free sphere.”
+    /// Duration is validated even for the detached case so replay admission is
+    /// independent of current selection state.
+    pub fn refit_anchor(
+        &mut self,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    ) -> Result<bool, &'static str> {
+        if !duration_seconds.is_finite() || duration_seconds < 0.0 {
+            return Err("focus transition duration must be finite and nonnegative");
+        }
+        let Some(anchor) = self.anchor else {
+            return Ok(false);
+        };
+        self.anchor_to_pivot_with_easing(
+            anchor.identity,
+            anchor.source_bound,
+            anchor.source_pivot,
+            anchor.margin,
+            duration_seconds,
+            easing,
+        )?;
+        Ok(true)
+    }
+
     /// Move an unanchored focus/inversion sphere to authored geometry.
     /// Presentation views use this path because durable cues refer to stable
     /// scene identity, never to a process-local Bevy entity handle.
@@ -380,5 +408,58 @@ mod tests {
         assert_eq!(focus.sphere, sphere);
         assert!(focus.focus_enabled);
         assert!(focus.inversion_enabled);
+    }
+
+    #[test]
+    fn refitting_selection_preserves_source_semantics_and_restarts_from_live_sphere() {
+        let mut focus = FocusNavigation::default();
+        let bound = FocusSphere::new([1.0, 2.0, 3.0], 0.5).unwrap();
+        let pivot = [1.25, 2.1, 2.75];
+        focus
+            .anchor_to_pivot_with_easing(
+                identity(),
+                bound,
+                pivot,
+                1.1,
+                0.7,
+                TransitionEasing::Linear,
+            )
+            .unwrap();
+        focus.advance(0.2);
+        let live = focus.sphere;
+
+        assert!(focus
+            .refit_anchor(1.25, TransitionEasing::SmootherStep)
+            .unwrap());
+
+        let anchor = focus.anchor.unwrap();
+        let transition = focus.transition.unwrap();
+        assert_eq!(anchor.identity, identity());
+        assert_eq!(anchor.source_bound, bound);
+        assert_eq!(anchor.source_pivot, pivot);
+        assert_eq!(anchor.margin, 1.1);
+        assert_eq!(transition.start, live);
+        assert_eq!(transition.target.center, bound.center);
+        assert_eq!(transition.target.radius, bound.radius * 1.1);
+        assert_eq!(transition.duration_seconds, 1.25);
+        assert_eq!(transition.easing, TransitionEasing::SmootherStep);
+    }
+
+    #[test]
+    fn detached_refit_validates_duration_without_changing_the_free_sphere() {
+        let mut focus = FocusNavigation::default();
+        let before = focus.clone();
+        assert!(!focus
+            .refit_anchor(0.7, TransitionEasing::SmootherStep)
+            .unwrap());
+        assert_eq!(focus, before);
+
+        assert_eq!(
+            focus
+                .refit_anchor(f64::NAN, TransitionEasing::Linear)
+                .unwrap_err(),
+            "focus transition duration must be finite and nonnegative"
+        );
+        assert_eq!(focus, before);
     }
 }

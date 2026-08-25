@@ -24,7 +24,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.9";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.10";
+pub const LEGACY_APP_REPLAY_VERSION_0_9: &str = "hyperscope-app-replay/0.9";
 pub const LEGACY_APP_REPLAY_VERSION_0_8: &str = "hyperscope-app-replay/0.8";
 pub const LEGACY_APP_REPLAY_VERSION_0_7: &str = "hyperscope-app-replay/0.7";
 pub const LEGACY_APP_REPLAY_VERSION_0_6: &str = "hyperscope-app-replay/0.6";
@@ -39,6 +40,7 @@ enum ReplaySchema {
     V0_7,
     V0_8,
     V0_9,
+    V0_10,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -253,6 +255,10 @@ pub enum ReplayNavigationAction {
         enabled: bool,
     },
     ToggleInversion,
+    RefitFocusAndToggleInversion {
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,6 +463,16 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 Ok(Self::SetInversionEnabled(enabled))
             }
             ReplayNavigationAction::ToggleInversion => Ok(Self::ToggleInversion),
+            ReplayNavigationAction::RefitFocusAndToggleInversion {
+                duration_seconds,
+                easing,
+            } => {
+                nonnegative(duration_seconds, "focus transition duration")?;
+                Ok(Self::RefitFocusAndToggleInversion {
+                    duration_seconds,
+                    easing,
+                })
+            }
         }
     }
 }
@@ -759,7 +775,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_6 => ReplaySchema::V0_6,
         LEGACY_APP_REPLAY_VERSION_0_7 => ReplaySchema::V0_7,
         LEGACY_APP_REPLAY_VERSION_0_8 => ReplaySchema::V0_8,
-        APP_REPLAY_VERSION => ReplaySchema::V0_9,
+        LEGACY_APP_REPLAY_VERSION_0_9 => ReplaySchema::V0_9,
+        APP_REPLAY_VERSION => ReplaySchema::V0_10,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -900,7 +917,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                 request_id: *request_id,
                 asset: asset.clone(),
                 scope: match schema {
-                    ReplaySchema::V0_9 => (*scope).into(),
+                    ReplaySchema::V0_9 | ReplaySchema::V0_10 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -968,6 +985,14 @@ fn navigation_action_for_replay_version(
     {
         return Err("camera lens/target-mode actions require replay 0.6".to_owned());
     }
+    if schema != ReplaySchema::V0_10
+        && matches!(
+            action,
+            ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
+        )
+    {
+        return Err("selected inversion gesture requires replay 0.10".to_owned());
+    }
     if schema == ReplaySchema::V0_4 {
         if let ReplayNavigationAction::AnchorFocus {
             source_bound,
@@ -982,7 +1007,7 @@ fn navigation_action_for_replay_version(
     }
     if !matches!(
         schema,
-        ReplaySchema::V0_7 | ReplaySchema::V0_8 | ReplaySchema::V0_9
+        ReplaySchema::V0_7 | ReplaySchema::V0_8 | ReplaySchema::V0_9 | ReplaySchema::V0_10
     )
         && matches!(
             action,
@@ -1230,6 +1255,9 @@ mod tests {
             ReplayNavigationAction::SetFocusField { .. } => "set_focus_field",
             ReplayNavigationAction::SetInversionEnabled { .. } => "set_inversion_enabled",
             ReplayNavigationAction::ToggleInversion => "toggle_inversion",
+            ReplayNavigationAction::RefitFocusAndToggleInversion { .. } => {
+                "refit_focus_and_toggle_inversion"
+            }
         }
     }
 
@@ -1256,6 +1284,9 @@ mod tests {
             NavigationAction::SetFocusField { .. } => "set_focus_field",
             NavigationAction::SetInversionEnabled(_) => "set_inversion_enabled",
             NavigationAction::ToggleInversion => "toggle_inversion",
+            NavigationAction::RefitFocusAndToggleInversion { .. } => {
+                "refit_focus_and_toggle_inversion"
+            }
         }
     }
 
@@ -1438,6 +1469,7 @@ mod tests {
                 "begin_surface_anchor_transition",
                 "cancel_surface_anchor_transition",
                 "detach_focus",
+                "refit_focus_and_toggle_inversion",
                 "scale_focus_log",
                 "set_camera",
                 "set_perspective_lens",
@@ -1457,7 +1489,7 @@ mod tests {
         assert_eq!(authoritative_covered, covered);
 
         let trace = run_app_replay(&script).unwrap();
-        assert_eq!(trace.records.len(), 31);
+        assert_eq!(trace.records.len(), 33);
         assert_eq!(trace.records[1].state.camera.eye, [0.0, 0.0, 4.0]);
         assert_eq!(trace.records[1].state.navigation.pending_actions, 1);
         assert_eq!(
@@ -1511,7 +1543,7 @@ mod tests {
         assert_semantic_state_eq(after, before);
         assert_eq!(after.navigation.preset, ReplayNavigationPreset::Fly);
         assert_eq!(after.navigation.pending_actions, 0);
-        assert_eq!(after.navigation.last_applied_sequence, Some(18));
+        assert_eq!(after.navigation.last_applied_sequence, Some(20));
         assert!(after.navigation.diagnostics.is_empty());
         assert_eq!(after.focus.selected, None);
         assert_eq!(after.reflection, ReplayReflection::Identity);
@@ -1720,6 +1752,39 @@ mod tests {
         ));
         assert_eq!(legacy.records[0].state.revision, 0);
         assert!(legacy.records[0].state.assets.is_empty());
+    }
+
+    #[test]
+    fn replay_0_10_adds_the_atomic_selected_inversion_gesture() {
+        let event = AppReplayEvent::Navigate {
+            sequence: 0,
+            at_seconds: 0.0,
+            action: ReplayNavigationAction::RefitFocusAndToggleInversion {
+                duration_seconds: 0.7,
+                easing: TransitionEasing::SmootherStep,
+            },
+        };
+        let current = run_app_replay(&AppReplayScript::new(vec![event.clone()])).unwrap();
+        assert!(matches!(
+            current.records[0].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_9.to_owned(),
+            events: vec![event],
+        })
+        .unwrap();
+        assert!(matches!(
+            legacy.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires replay 0.10")
+        ));
+        assert_eq!(legacy.records[0].state.revision, 0);
+        assert_eq!(
+            legacy.records[0].state.reflection,
+            ReplayReflection::Identity
+        );
     }
 
     #[test]

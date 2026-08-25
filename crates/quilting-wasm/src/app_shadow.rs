@@ -607,6 +607,21 @@ impl HyperscopeAppShadow {
         self.dispatch_navigation(NavigationAction::ToggleInversion)
     }
 
+    /// Admit the selected-object inversion gesture as one application action.
+    /// Rust restarts an existing anchored fit, toggles the chart, and performs
+    /// camera/surface transport transactionally before exposing a snapshot.
+    #[wasm_bindgen(js_name = refitFocusAndToggleInversion)]
+    pub fn refit_focus_and_toggle_inversion(
+        &self,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::RefitFocusAndToggleInversion {
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
     #[wasm_bindgen(js_name = tickNavigation)]
     pub fn tick_navigation(&self, delta_seconds: f64) -> Result<JsValue, JsValue> {
         let current = self.store.frame_snapshot();

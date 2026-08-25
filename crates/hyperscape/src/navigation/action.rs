@@ -66,6 +66,15 @@ pub enum NavigationAction {
     },
     SetInversionEnabled(bool),
     ToggleInversion,
+    /// Restart an anchored object's focus fit and toggle spherical inversion
+    /// as one conformal transaction. A detached sphere is only toggled. This
+    /// is the device-neutral meaning of the selection inversion gesture; the
+    /// camera, any active transition, the surface follower, focus geometry,
+    /// and reflection chart either all cross together or all roll back.
+    RefitFocusAndToggleInversion {
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
 }
 
 /// Sequence and virtual-clock time make input recordings independent of DOM
@@ -516,6 +525,15 @@ fn apply_action(
         NavigationAction::ToggleInversion => {
             focus.toggle_inversion();
         }
+        NavigationAction::RefitFocusAndToggleInversion {
+            duration_seconds,
+            easing,
+        } => {
+            focus
+                .refit_anchor(duration_seconds, easing)
+                .map_err(str::to_owned)?;
+            focus.toggle_inversion();
+        }
     }
     Ok(())
 }
@@ -938,6 +956,83 @@ mod tests {
         assert_eq!(controller.focus.transition.unwrap().duration_seconds, 0.7);
         assert!(controller.focus.focus_enabled);
         assert_eq!(controller.runtime.last_applied_sequence, Some(0));
+    }
+
+    #[test]
+    fn selected_inversion_gesture_refits_and_crosses_chart_atomically() {
+        let mut controller = NavigationController::default();
+        let identity = selection_identity(18);
+        let source_bound = FocusSphere::new([1.0, 0.5, 0.0], 0.75).unwrap();
+        let source_pivot = [1.2, 0.4, 0.1];
+        controller
+            .push(NavigationAction::AnchorFocus {
+                identity,
+                source_bound,
+                source_pivot,
+                margin: 1.1,
+                duration_seconds: 0.8,
+                easing: TransitionEasing::Linear,
+            })
+            .unwrap();
+        controller.tick(0.3).unwrap();
+        let live_sphere = controller.focus.sphere;
+        let camera_before_toggle = controller.camera;
+
+        controller
+            .push(NavigationAction::RefitFocusAndToggleInversion {
+                duration_seconds: 1.25,
+                easing: TransitionEasing::SmootherStep,
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        let transition = controller.focus.transition.unwrap();
+        assert_eq!(controller.focus.anchor.unwrap().identity, identity);
+        assert_eq!(transition.start, live_sphere);
+        assert_eq!(transition.target.center, source_bound.center);
+        assert_eq!(transition.target.radius, source_bound.radius * 1.1);
+        assert_eq!(transition.duration_seconds, 1.25);
+        assert!(controller.focus.inversion_enabled);
+        assert_eq!(
+            controller.runtime.reflection,
+            SphereReflectionState::Sphere(live_sphere)
+        );
+        assert_ne!(controller.camera.eye, camera_before_toggle.eye);
+        assert_eq!(controller.runtime.last_applied_sequence, Some(1));
+    }
+
+    #[test]
+    fn selected_inversion_pole_rejects_refit_toggle_as_one_action() {
+        let mut controller = NavigationController::default();
+        controller
+            .push(NavigationAction::AnchorFocus {
+                identity: selection_identity(19),
+                source_bound: FocusSphere::new(controller.camera.eye, 2.0).unwrap(),
+                source_pivot: controller.camera.eye,
+                margin: 1.1,
+                duration_seconds: 0.0,
+                easing: TransitionEasing::SmootherStep,
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+        let before_camera = controller.camera;
+        let before_focus = controller.focus.clone();
+        let before_reflection = controller.runtime.reflection;
+
+        controller
+            .push(NavigationAction::RefitFocusAndToggleInversion {
+                duration_seconds: 0.7,
+                easing: TransitionEasing::SmootherStep,
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.camera, before_camera);
+        assert_eq!(controller.focus, before_focus);
+        assert_eq!(controller.runtime.reflection, before_reflection);
+        assert_eq!(controller.runtime.last_applied_sequence, Some(1));
+        assert!(controller.diagnostics.0[0]
+            .contains("camera transport reached a spherical-reflection pole"));
     }
 
     #[test]
