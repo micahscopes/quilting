@@ -1528,3 +1528,37 @@ offline preflight with identical source/build fingerprint
 `c1ab30d96589b0ad1b8abe69baf94082`. Target-Chrome visual timing remains a
 separate cutover gate; renderer-wide wasm32 Clippy still reports the same 42
 pre-existing warnings outside this composition boundary.
+
+## Primary-scene asset effect authority
+
+The asset adapter now exposes `assetimpl=js|shadow|rust` as the 74th canonical
+route control. The default `js` path is unchanged. Shadow mode runs the Rust
+request oracle but never aborts or suppresses incumbent browser work. Rust mode
+classifies startup, drag/drop, and the authored demo as one primary-scene load
+scope; presentation resources remain independent per-asset jobs. Replacing a
+primary request cancels across different asset IDs, aborts an in-flight fetch,
+and prevents an already acquired but obsolete result from entering renderer
+installation.
+
+The thin browser effect host owns only `AbortController`, logical-URI
+acquisition, and a serialized dynamic install lane. The Rust reducer owns
+request generations, cancellation, completion disposition, and replay
+semantics. The install fence is checked after model parse and every asynchronous
+skinning, tessellation-parameter, rest-pose, compute-upload, and animation
+boundary. This also prevents two dynamic loads from interleaving through the
+worker's single retained glTF state. Initial glTF parsing remains parallel with
+atlas generation; dynamic requests wait for the initial render phase rather
+than slowing ordinary startup.
+
+Validation passed 55 replay-enabled application tests, 61 browser-independent
+JavaScript tests (including six effect-host cases), the generated application
+WASM smoke, the 74-control route smoke, inline-module syntax checking, and an
+isolated optimized Trunk build. Release staging and noncommercial-mixed offline
+preflight passed over 23 files / 31.30 MiB with matching source/build receipt
+`3cf9e463dd7839f9325146154c2fa640`. Replay schema 0.9 preserves 0.8 input
+meaning and renews the presentation, navigation, and orchestration fingerprints
+to `08f7953320c733fbab99cbe12d5e81a7`,
+`2656516995573de63986647d4196c478`, and
+`0dfe524f3c0a022dc4507d51e87679fb`. Target-Chrome drag/drop timing remains a
+separate cutover check because the Chrome DevTools MCP was not exposed to this
+agent session; no Playwright substitute was used.

@@ -40,6 +40,16 @@ the application reducer while retaining the established renderer path. Use
 `authority: "hyperscope-app"`, the expected cue UUID, and no error. Restore
 `presentimpl=js` for immediate orchestration rollback.
 
+Use `assetimpl=shadow` to exercise Rust request/cancellation/completion
+semantics while retaining the incumbent browser acquisition and installation
+behavior. Use `assetimpl=rust` to make Rust effects authoritative: startup,
+drag/drop, and the authored demo share one primary-scene scope, obsolete
+fetches receive an abort signal, and only the newest primary request may enter
+the serialized parse/upload lane. Presentation assets retain independent
+per-asset concurrency. Restore `assetimpl=js` for immediate loader rollback.
+Inspect `globalThis.__hyperscopeAppShadowDiagnostics`; a normal settled load
+must not add a request-effect mismatch or a prevented install.
+
 The ordinary preflight must print `PASS`. It validates the Rust presentation
 document, byte-for-byte manifest freshness, every presentation GLB, the runtime
 JS/WASM pairs, environment maps, licenses, and generated Trunk
@@ -63,9 +73,9 @@ suite checks that partitioned and single-step re-anchor clocks finish on the
 same exact virtual-time endpoint.
 
 The replay checks must print
-`PASS fnv1a-128-json:2123c41359d3187dbcbbff4334e069a0`,
-`PASS fnv1a-128-json:9b68dd4542773115658cfb78282feb41`, and
-`PASS fnv1a-128-json:71b484d19c93d0171d9c4996831b2542`. The first executes
+`PASS fnv1a-128-json:08f7953320c733fbab99cbe12d5e81a7`,
+`PASS fnv1a-128-json:2656516995573de63986647d4196c478`, and
+`PASS fnv1a-128-json:0dfe524f3c0a022dc4507d51e87679fb`. The first executes
 the complete six-cue semantic walkthrough. The second exercises every current
 navigation action, including focus/inversion, camera and surface transitions,
 stable selection anchoring, clicked source/output pivot projection, complete

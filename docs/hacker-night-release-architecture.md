@@ -48,11 +48,17 @@ The first application boundary is now explicit:
   preceding revision. Effect-producing and presentation future inputs are
   rejected until a real application event scheduler exists rather than being
   executed at the wrong time.
-- `appshadow=1` now feeds real startup, IndexedDB, drag/drop, authored-demo,
-  and presentation asset acquisition plus presentation load/cue intent into
-  that reducer without changing the browser loader, cue controller, or
-  renderer. Superseding a load emits cancel-then-fetch; late completions remain
-  observable but cannot replace the active request. Each cue action compares
+- `appshadow=1` feeds real startup, IndexedDB, drag/drop, authored-demo, and
+  presentation asset acquisition plus presentation load/cue intent into that
+  reducer. `assetimpl=js|shadow|rust` is the separate acquisition rollback
+  boundary. Shadow mode observes effects without changing incumbent behavior;
+  Rust mode gives startup/drop/demo requests one mutually exclusive
+  primary-scene scope while presentation layers retain per-asset concurrency.
+  Cross-asset replacement emits cancel-then-fetch, aborts obsolete browser
+  acquisition, serializes the global model worker's dynamic parse/upload lane,
+  and checks the current primary request after every asynchronous upload
+  boundary. Late completions remain diagnostic but cannot reach renderer
+  installation. Each cue action compares
   the complete resolved presentation snapshot. A separate opt-in pose gate
   synchronizes settled navigation through the reducer and makes exactly one
   compact comparison call per active cue-transition frame. The application
@@ -233,11 +239,14 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.8 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.9 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane. It
   records the key-sorted authored asset/entity materialization as well as its
   atomic projection revision, so stale or invalid Blender-style checkpoints
   cannot silently mutate the scene oracle.
+  Version 0.9 records whether an asset request is independent or replaces the
+  primary scene. A 0.8 trace keeps its historical per-asset meaning; it cannot
+  smuggle a `primary_scene` request into the older schema.
   Version 0.7 makes selected identities explicitly asset-scoped, so the same
   entity UUID in two composed assets cannot alias. Legacy unscoped focus
   anchors fail closed instead of receiving a fabricated asset identity.
@@ -245,7 +254,7 @@ The first application boundary is now explicit:
   semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. The reader accepts 0.4 through 0.7 inputs,
+  clears only those derived values. The reader accepts 0.4 through 0.9 inputs,
   but only 0.4 migrates an omitted source pivot to the bound center.
   Versions 0.4 and 0.5 reject 0.6-only actions rather than silently changing
   their meaning; every pre-0.7 unscoped focus anchor is rejected. Action
@@ -262,10 +271,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The six-cue golden is
-  `fnv1a-128-json:2123c41359d3187dbcbbff4334e069a0`;
+  `fnv1a-128-json:08f7953320c733fbab99cbe12d5e81a7`;
   the navigation golden is
-  `fnv1a-128-json:9b68dd4542773115658cfb78282feb41`; the orchestration
-  golden is `fnv1a-128-json:71b484d19c93d0171d9c4996831b2542`.
+  `fnv1a-128-json:2656516995573de63986647d4196c478`; the orchestration
+  golden is `fnv1a-128-json:0dfe524f3c0a022dc4507d51e87679fb`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
