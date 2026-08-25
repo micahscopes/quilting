@@ -1443,3 +1443,22 @@ check also passed. Ordinary crate-local Clippy attributed no warning to
 renderer/runtime findings, and strict whole-crate rustdoc by eight existing
 broken-link findings. This checkpoint does not conceal those separate cleanup
 debts or select a Blender/browser carrier.
+
+## Optional local peer relay
+
+The first carrier infrastructure lives behind the non-default
+`hyperscope-web/local-peer-relay` feature. Its state retains opaque raw JSON so
+unknown future fields and exact integers survive forwarding. Bounded eviction,
+pagination, process generations, decimal delivery cursors, and explicit gaps
+are transport evidence only; the relay has no application reducer, authored
+projection fence, persistence, or repair claim.
+
+Eight Rust cases passed for bounded gaps, opaque preservation, pagination,
+restart detection, invalid-input atomicity, cursor overflow, secure CLI
+defaults, and query validation. Strict crate-local Clippy and rustdoc passed.
+The checked Node smoke launched the real
+binary on an ephemeral loopback port and proved bearer rejection (`401`),
+origin rejection (`403`), exact-origin preflight (`204`), authenticated health,
+canonical authored-frame delivery, invalid-JSON rejection, and future-cursor
+gap reporting. The test relay was stopped; the user-run `:8888` server was not
+touched.

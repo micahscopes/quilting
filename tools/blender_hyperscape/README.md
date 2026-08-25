@@ -20,9 +20,23 @@ The **Hyperscape** tab in the 3D View sidebar provides:
 The dependency-free `protocol.py` module also validates the same checked-in
 v0.1 authored/presence JSON fixtures as Rust. It supplies sender-local presence
 ordering with receipt-relative TTL and bounded authored-message echo
-suppression, but deliberately supplies no transport. A future Blender bridge
-can therefore choose IPC/WebSocket/WebRTC independently, and HHHS 0.4 can wrap
-only authored envelopes without receiving viewport presence.
+suppression, but deliberately supplies no transport semantics. The optional
+local relay is a delivery-only adapter; HHHS can still wrap only authored
+envelopes without receiving viewport presence.
+
+For local bridge development, start the disabled-by-default relay and copy its
+printed bearer token into the browser and Blender adapters:
+
+```sh
+cargo run -p hyperscope-web --features local-peer-relay \
+  --bin hyperscope-local-peer-relay
+```
+
+It binds to `127.0.0.1:42117`, accepts only configured browser origins, retains
+a bounded in-memory suffix, and reports restart/history gaps rather than
+claiming persistence or repair. The Blender polling/main-thread adapter is a
+separate checkpoint; merely running the relay does not change the add-on or
+Hyperscope behavior.
 
 ## Install or build
 
@@ -75,6 +89,12 @@ Blender:
 
 ```sh
 python -m unittest discover -s tools/blender_hyperscape/tests -v
+```
+
+The relay's authenticated HTTP surface has its own reproducible smoke:
+
+```sh
+node scripts/smoke-local-peer-relay.mjs
 ```
 
 When Blender is installed, the headless integration script creates the demo,

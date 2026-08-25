@@ -21,13 +21,28 @@ durable-history = [
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
 ]
+local-peer-relay = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tiny_http",
+    "dep:uuid",
+]
 
 [dependencies]
 hhhs = { workspace = true, optional = true }
 hhhs-replica = { workspace = true, optional = true }
 hhhs-store = { workspace = true, optional = true }
 hyperscape-hhhs = { path = "../hyperscape-hhhs", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", features = ["raw_value"], optional = true }
 thiserror = { version = "2", optional = true }
+tiny_http = { version = "0.12", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+
+[[bin]]
+name = "hyperscope-local-peer-relay"
+path = "src/bin/local_peer_relay.rs"
+required-features = ["local-peer-relay"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures = { version = "0.3", optional = true }

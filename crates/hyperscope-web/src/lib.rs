@@ -8,3 +8,6 @@
 
 #[cfg(feature = "durable-history")]
 pub mod durable_history;
+
+#[cfg(feature = "local-peer-relay")]
+pub mod local_peer_relay;

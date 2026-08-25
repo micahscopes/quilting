@@ -195,6 +195,12 @@ The first application boundary is now explicit:
   deliberately separate high-rate lane whose sender sequences and local
   expiries do not masquerade as the throttled UI read-model revision. These
   methods select no carrier and add no browser state authority.
+- `hyperscope-web` offers an optional `local-peer-relay` binary, excluded from
+  default features. It is an authenticated, exact-origin, loopback-default
+  HTTP adapter over bounded opaque JSON delivery. Process generations and
+  decimal cursors make restart or retention gaps explicit. It neither parses
+  protocol commands nor allocates authored projection revisions; a gap is
+  degraded delivery, never counterfeit repair or convergence.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM
