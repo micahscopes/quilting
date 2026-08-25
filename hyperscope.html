@@ -3548,6 +3548,17 @@ function applyManualCameraFrame(frame) {
   return true;
 }
 
+function claimManualCameraFromActiveView() {
+  const frame = activeCameraFrame();
+  if (!applyManualCameraFrame(frame)) return null;
+  // An authored point target may coincide with a newly selected inversion
+  // center, which maps to the pole. Preserve the visible line-of-sight tangent
+  // instead when direct interaction transfers camera authority to the user.
+  manualCameraSemanticTargetEnabled = false;
+  authoredCamera = null;
+  return frame;
+}
+
 function beginSurfaceWalkAnchorTransition(startFrame) {
   if (!startFrame?.eye || !startFrame?.basis) return false;
   cancelSurfaceWalkAnchorTransition();
@@ -4173,6 +4184,10 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
     mr_highlightFace(-1);
     return false;
   }
+  if (!claimManualCameraFromActiveView()) {
+    selectionLabel('Could not claim the current camera for selection');
+    return false;
+  }
   // A direct pick transfers focus authority from the authored cue to the
   // user's selection. Stop both presentation observers before dispatching the
   // browser and AppStore anchor paths, or their transition clocks diverge.
@@ -4238,7 +4253,8 @@ canvas.addEventListener('click', e => {
 
 canvas.addEventListener('contextmenu', e => {
   e.preventDefault();
-  const startFrame = activeCameraFrame();
+  const startFrame = claimManualCameraFromActiveView();
+  if (!startFrame) return;
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
@@ -4248,9 +4264,6 @@ canvas.addEventListener('contextmenu', e => {
     else selectionLabel('No walkable surface under pointer');
     return;
   }
-  applyManualCameraFrame(startFrame);
-  manualCameraSemanticTargetEnabled = false;
-  authoredCamera = null;
   const snapshot = mr_attachSurface(
     picked.face,
     new Float32Array(picked.barycentric),

@@ -29,6 +29,7 @@ const rendererSelection = browserSource.slice(
   browserSource.indexOf('function selectObjectAtViewCenter('),
 );
 for (const handoff of [
+  'claimManualCameraFromActiveView()',
   'rustPresentationTransitionActive = false;',
   'rustAppPresentationPoseReady = false;',
 ]) {
