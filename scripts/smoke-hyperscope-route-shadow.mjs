@@ -35,6 +35,39 @@ assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
+const legacyRouteNormalizerSource = browserSource.match(
+  /function normalizeLegacyRouteShadow\(params\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(legacyRouteNormalizerSource, 'could not locate legacy route-shadow normalizer');
+const normalizeLegacyRouteShadow = runInNewContext(
+  `${legacyRouteNormalizerSource}; normalizeLegacyRouteShadow`,
+  { URLSearchParams },
+);
+assert.equal(
+  normalizeLegacyRouteShadow(new URLSearchParams('routeshadow=1')).toString(),
+  'routeimpl=shadow',
+);
+assert.equal(
+  normalizeLegacyRouteShadow(
+    new URLSearchParams('routeshadow=1&routeimpl=js'),
+  ).toString(),
+  'routeimpl=shadow',
+);
+assert.equal(
+  normalizeLegacyRouteShadow(
+    new URLSearchParams('routeshadow=1&routeimpl=rust'),
+  ).toString(),
+  'routeimpl=rust',
+);
+assert.equal(
+  normalizeLegacyRouteShadow(new URLSearchParams('routeshadow=0')).toString(),
+  '',
+);
+assert.equal(
+  specs.some(spec => spec.key === 'routeshadow'),
+  false,
+  'the legacy route-shadow alias must not remain a canonical Rust control',
+);
 const canonicalFixedSource = browserSource.match(
   /function canonicalFixedRouteNumber\(value, fractionDigits\) \{[\s\S]*?\n\}/,
 )?.[0];
@@ -79,7 +112,6 @@ const implicitBrowserDefaults = {
   presentation: '0',
   roundshadow: '0',
   appshadow: '0',
-  routeshadow: '0',
   rendershadow: '0',
 };
 assert.deepEqual(
@@ -245,7 +277,6 @@ assert.ok(
 );
 
 const canonical = canonicalizeHyperscopeRoute([
-  ['routeshadow', '1'],
   ['zoom', '3.00'],
   ['rx', '0.125'],
   ['mode', 'lod'],
@@ -258,10 +289,15 @@ assert.deepEqual(canonical.pairs, [
   ['mode', 'lod'],
   ['lodratio', '4'],
   ['rx', '0.125'],
-  ['routeshadow', '1'],
   ['routeimpl', 'shadow'],
 ]);
 assert.deepEqual(canonical.diagnostics, []);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['routeshadow', '1']]).diagnostics
+    .map(diagnostic => diagnostic.code),
+  ['unknown_key'],
+  'the legacy browser-only alias must not survive in the canonical Rust schema',
+);
 
 const malformed = canonicalizeHyperscopeRoute([
   ['mode', 'wire'],

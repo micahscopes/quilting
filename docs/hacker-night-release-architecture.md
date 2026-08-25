@@ -163,14 +163,16 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 74 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 73 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
   boundary for URL writes, with Rust now canonical and `routeimpl=js` retained
   as the serialized rollback. Rust commits the validated canonical pair order;
   a bridge error or Rust diagnostic falls back to the unchanged browser query
-  and records the fallback. `routeshadow=1` remains a legacy opt-in observer.
+  and records the fallback. Old `routeshadow=1` links are admitted once by the
+  browser bootstrap and normalized to `routeimpl=shadow`; the duplicate legacy
+  flag is no longer part of Rust state or canonical URLs.
   The same switch admits valid startup pairs through Rust before model, Patch
   Lab, animation, or control state is applied; malformed startup input retains
   the incumbent browser path. DOM assignment and control-specific clamping

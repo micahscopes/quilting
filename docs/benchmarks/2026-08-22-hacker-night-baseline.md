@@ -1896,3 +1896,34 @@ camera without `rz`. The browser and Rust queries both became
 `animate=0&anim=0`: two comparisons, one authoritative write, zero fallbacks,
 zero mismatches, and zero frame errors. The probe page, server, and artifact
 were removed without touching `:8888`.
+
+## Legacy route-shadow alias retirement
+
+The subtraction audit found that `routeshadow=1` and `routeimpl=shadow`
+represented the same route-observation mode. The legacy boolean has therefore
+left `hyperscope-app::ControlSpec`, Rust application state, and canonical URL
+serialization. The registry now contains 73 controls: 68 literal browser
+defaults and five implicit-zero migration flags. The required
+`routeimpl=js|shadow|rust` rollback boundary is unchanged.
+
+Old links remain recoverable without retaining duplicate authority. A small
+browser-bootstrap normalizer removes `routeshadow`; standalone legacy links and
+the old `routeshadow=1&routeimpl=js` observer combination become
+`routeimpl=shadow`, while an explicit Rust authority remains Rust. Generated
+WASM rejects the retired key as unknown, proving it cannot re-enter canonical
+Rust state, and the browser-independent smoke freezes every migration case.
+
+The isolated release artifact carried source/build fingerprint
+`e410c67b788275d7d9555f855c105347` over 173 inputs and 20,706,203 bytes.
+Strict noncommercial-mixed preflight passed 19 staged files totaling 23.46
+MiB. The optimized consolidated WASM decreased by 64 raw bytes to 6,599,214
+bytes; deterministic `gzip -9 -n` measured 2,318,962 bytes.
+
+Chrome DevTools MCP loaded `routeshadow=1&animate=0` and normalized it to
+`animate=0&anim=0&routeimpl=shadow`. Diagnostics reported 73 specs, shadow
+observation, two byte-identical comparisons, zero authority or fallback
+writes, no diagnostics, no mismatches, and zero frame errors. Explicit
+`routeimpl=js` remained serialized with the observer disabled and zero WASM
+calls. An ordinary unflagged route remained Rust-authoritative with one write,
+no fallback, byte-identical browser/Rust queries, and a clean warning/error
+console.

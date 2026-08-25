@@ -429,6 +429,22 @@ import {
 } from './local_peer_browser.mjs?rev=exact-frame-json-v1';
 import { BrowserAssetEffectHost } from './asset_effect_host.mjs?rev=rust-primary-load-v1';
 
+function normalizeLegacyRouteShadow(params) {
+  const normalized = new URLSearchParams(params);
+  const legacyShadow = normalized.get('routeshadow');
+  if (legacyShadow === null) return normalized;
+  normalized.delete('routeshadow');
+  const explicitImplementation = normalized.get('routeimpl');
+  if (legacyShadow === '1'
+      && (explicitImplementation === null || explicitImplementation === 'js')) {
+    normalized.set('routeimpl', 'shadow');
+  }
+  return normalized;
+}
+
+const initialRouteParams = normalizeLegacyRouteShadow(
+  new URLSearchParams(location.search),
+);
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('navshadow') === '1';
@@ -461,13 +477,10 @@ const RUST_APP_SHADOW_ENABLED =
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
 const RUST_ROUTE_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('routeimpl') || 'rust';
+  const requested = initialRouteParams.get('routeimpl') || 'rust';
   return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
 })();
-const LEGACY_RUST_ROUTE_SHADOW_ENABLED =
-  new URLSearchParams(location.search).get('routeshadow') === '1';
-const RUST_ROUTE_SHADOW_ENABLED =
-  LEGACY_RUST_ROUTE_SHADOW_ENABLED || RUST_ROUTE_IMPLEMENTATION !== 'js';
+const RUST_ROUTE_SHADOW_ENABLED = RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('rendershadow') === '1';
 const SURFACE_WALK_IMPLEMENTATION = (() => {
@@ -1078,7 +1091,6 @@ function syncURL() {
     if (EXPLICIT_RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
     set('assetimpl', RUST_ASSET_IMPLEMENTATION, PARAM_DEFAULTS.assetimpl);
     set('sceneimpl', RUST_SCENE_IMPLEMENTATION, PARAM_DEFAULTS.sceneimpl);
-    if (LEGACY_RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
     set('routeimpl', RUST_ROUTE_IMPLEMENTATION, PARAM_DEFAULTS.routeimpl);
     if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
     const rustRoute = compareRustRouteShadow(p);
@@ -8244,7 +8256,7 @@ globalThis.__hyperscopeLocalPeer = Object.freeze({
 // --- Init ---
 // Bootstrap platform flags and an inert camera preview from the raw query.
 // Rust route mode re-decodes valid pairs before any application state is set.
-let initParams = readParams();
+let initParams = readParams(initialRouteParams);
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -8274,7 +8286,7 @@ phase('wasm', [], async () => {
   const instantiateFinished = performance.now();
   if (RUST_ROUTE_SHADOW_ENABLED) {
     rustRouteShadowDiagnostics.specs = hyperscopeControlSpecs();
-    const startupBrowserParams = new URLSearchParams(location.search);
+    const startupBrowserParams = new URLSearchParams(initialRouteParams);
     const startupRoute = evaluateRustRoute(startupBrowserParams, false);
     rustRouteShadowDiagnostics.startupBrowserQuery = startupBrowserParams.toString();
     rustRouteShadowDiagnostics.startupRustQuery = startupRoute

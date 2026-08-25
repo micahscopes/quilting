@@ -155,7 +155,6 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("appshadow", "0", Toggle),
     spec!("assetimpl", "rust", Implementation),
     spec!("sceneimpl", "rust", Implementation),
-    spec!("routeshadow", "0", Toggle),
     spec!("routeimpl", "rust", Implementation),
     spec!("rendershadow", "0", Toggle),
 ];
@@ -283,7 +282,7 @@ mod tests {
     #[test]
     fn canonical_route_omits_defaults_and_uses_spec_order() {
         let route = HyperscopeRoute::from_pairs([
-            ("routeshadow", "1"),
+            ("routeimpl", "shadow"),
             ("rx", "0.125"),
             ("mode", "lod"),
             ("glb", "horse.glb"),
@@ -294,7 +293,7 @@ mod tests {
         assert_eq!(route.value("zoom"), Some("3.00"));
         assert_eq!(
             route.canonical_pairs(),
-            vec![("mode", "lod"), ("rx", "0.125"), ("routeshadow", "1")]
+            vec![("mode", "lod"), ("rx", "0.125"), ("routeimpl", "shadow")]
         );
         assert!(route.diagnostics().is_empty());
     }
