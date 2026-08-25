@@ -21,7 +21,7 @@ use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
     CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
-    NavigationPreset, Presentation, PresentationRuntime, PresentationSnapshot,
+    NavigationPreset, Presentation, PresentationAsset, PresentationRuntime, PresentationSnapshot,
     ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
@@ -295,6 +295,7 @@ pub struct PresentationReadModel {
     pub presentation_id: Uuid,
     pub title: String,
     pub cue_count: usize,
+    pub assets: Vec<PresentationAsset>,
     pub active: Option<PresentationSnapshot>,
 }
 
@@ -738,6 +739,7 @@ impl AppState {
                 presentation_id: presentation.id,
                 title: presentation.title.clone(),
                 cue_count: presentation.cues.len(),
+                assets: presentation.assets.clone(),
                 active: self.active_presentation.clone(),
             }
         })
@@ -1563,6 +1565,7 @@ mod tests {
         let store = AppStore::default();
         let fixture = presentation_fixture();
         let presentation_id = fixture.id;
+        let presentation_assets = fixture.assets.clone();
         let first_cue = fixture.cues[0].id;
 
         store
@@ -1573,6 +1576,7 @@ mod tests {
         let loaded = store.presentation_snapshot().unwrap();
         assert_eq!(loaded.presentation_id, presentation_id);
         assert_eq!(loaded.cue_count, 6);
+        assert_eq!(loaded.assets, presentation_assets);
         assert_eq!(loaded.active, None);
 
         dispatch_presentation(&store, 1, 0.0, PresentationAction::Start).unwrap();

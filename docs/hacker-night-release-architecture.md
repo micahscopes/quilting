@@ -69,6 +69,15 @@ The first application boundary is now explicit:
   parity-complete frame snapshot. This is an offline
   cutover gate only: `navshadow=1` and the browser camera remain unchanged until
   live Chrome parity is measured.
+- `presentimpl=js|shadow|rust` is the presentation-orchestration rollback
+  boundary. The default browser-orchestrated path keeps the standalone Rust
+  presentation controller. Shadow mode advances both Rust implementations and
+  compares their complete cue and navigation projections. Rust mode allocates
+  only `hyperscope-app`, obtains asset metadata from its low-rate read model,
+  dispatches cue intent through `AppEvent`, and consumes the application frame
+  snapshot; it performs no standalone controller tick or semantic manifest
+  parse in the browser. Target-browser rendering remains the final cutover
+  gate before changing the default.
 - Effective spheroidal-focus authority now crosses that same ordered boundary.
   Rust `focus_enabled` denotes fuzzy post-processing enabled specifically in
   mode 3; modes 0–2 remain renderer-only blur choices, and the retained shared

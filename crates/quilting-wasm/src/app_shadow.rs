@@ -5,8 +5,8 @@ use crate::navigation::{
 use hyperscape::{
     extract_packed_scene, map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere,
     LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame, PackedAssetInstance,
-    PackedNodeSource, PackedNodeTransformSource, Presentation, PresentationSnapshot,
-    SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget,
+    PackedNodeSource, PackedNodeTransformSource, Presentation, PresentationAsset,
+    PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, LocalPeerEnvelope,
@@ -824,6 +824,7 @@ impl HyperscopeAppShadow {
                     id: presentation.presentation_id.to_string(),
                     title: presentation.title,
                     cue_count: presentation.cue_count,
+                    assets: presentation.assets,
                     active: presentation.active,
                 });
         to_js(&ShadowSnapshot {
@@ -1048,6 +1049,7 @@ struct ShadowPresentation {
     id: String,
     title: String,
     cue_count: usize,
+    assets: Vec<PresentationAsset>,
     active: Option<PresentationSnapshot>,
 }
 

@@ -65,6 +65,21 @@ for (const requiredAnimationAdapterStep of [
   );
 }
 
+for (const requiredAuthorityStep of [
+  "get('presentimpl') || 'js'",
+  "RUST_PRESENTATION_IMPLEMENTATION === 'rust'",
+  "ensureRustAppShadow('presentation-authority')",
+  'rustPresentationController = null;',
+  'rustPresentationManifest = appPresentationManifest(refreshAppShadowSnapshot());',
+  'const result = dispatchAppPresentation(direction, cueId);',
+  'navigation = appFrame?.navigation || rustAppShadow.navigationSnapshot();',
+]) {
+  assert.ok(
+    browserSource.includes(requiredAuthorityStep),
+    `browser presentation authority gate is missing ${requiredAuthorityStep}`,
+  );
+}
+
 const layerAdapter = browserSource.slice(
   browserSource.indexOf('function applyPresentationLayerState('),
   browserSource.indexOf('function applyRustPresentationNavigation('),

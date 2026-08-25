@@ -22,6 +22,8 @@ assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');

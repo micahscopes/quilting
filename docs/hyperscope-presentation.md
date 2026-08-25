@@ -52,6 +52,16 @@ cue validation, camera/focus transitions,
 and resolved layer state remain Rust-authoritative. The browser adapter fetches
 assets and translates the resolved snapshot into renderer commands.
 
+Presentation orchestration has an explicit rollback boundary. The default
+`presentimpl=js` keeps the browser-orchestrated standalone Rust controller;
+`presentimpl=shadow` advances that controller while comparing the complete
+cue and navigation result with `hyperscope-app`; and `presentimpl=rust` loads
+the manifest, dispatches cue actions, and advances transition time only through
+the application reducer. In Rust mode the AppStore read model supplies the
+asset catalog needed by the browser I/O adapter, so no second presentation
+controller or semantic JSON parse is retained. `presentimpl=js` remains the
+immediate rollback until target-browser rendering has been rechecked.
+
 Every activated cue is serialized as its stable UUID in the `cue` URL
 parameter. Copying or reloading the URL therefore re-enters that exact cue
 through Rust's validated `jump_to_cue` path; an absent cue starts at cue one,

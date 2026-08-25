@@ -1476,3 +1476,24 @@ absolute object edit and one presence frame, admitted both in Rust/WASM, and
 resolved translation `[3, 4, 5]` through packed-scene extraction. Its actual
 Blender sequence was `1787631571532014228`, safely above JavaScript's exact
 integer range. All temporary processes were stopped and `:8888` was untouched.
+
+## AppStore presentation authority gate
+
+The presentation adapter now exposes `presentimpl=js|shadow|rust` as the 73rd
+canonical route control. Default mode retains the browser-orchestrated
+standalone Rust controller; shadow mode retains the existing full cue/pose
+comparison; Rust mode allocates only `HyperscopeAppShadow`, dispatches cue
+intent through the application reducer, and consumes its application-frame
+navigation snapshot. The low-rate presentation read model now includes the
+validated asset catalog, eliminating a second semantic manifest parse and the
+standalone controller from Rust-authority mode.
+
+The gate passed 51 replay-enabled application tests, 55 browser adapter tests,
+five generated-WASM tests, strict application Clippy, warning-free application
+rustdoc, the 73-control route smoke, the six-cue presentation smoke, and the
+generated application, render-shadow, and surface-walk smokes. An isolated
+release artifact built successfully and ordinary offline preflight returned
+`PASS` with an exact source/build fingerprint. Those oracles prove
+manifest/cue equality and cadence-invariant transition state without a DOM or
+GPU. The default remains `js` until the Rust-authority URL is visually and
+temporally rechecked in the target Chrome renderer.

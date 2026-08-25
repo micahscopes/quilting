@@ -150,6 +150,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("navshadow", "0", Toggle),
     spec!("presentation", "0", Toggle),
     spec!("cue", "", OptionalUuid),
+    spec!("presentimpl", "js", Implementation),
     spec!("roundshadow", "0", Toggle),
     spec!("appshadow", "0", Toggle),
     spec!("sceneimpl", "js", Implementation),
@@ -343,7 +344,13 @@ mod tests {
 
     #[test]
     fn implementation_routes_admit_only_measured_authority_modes() {
-        for key in ["walkimpl", "selectionimpl", "sceneimpl", "routeimpl"] {
+        for key in [
+            "walkimpl",
+            "selectionimpl",
+            "presentimpl",
+            "sceneimpl",
+            "routeimpl",
+        ] {
             for accepted in ["js", "shadow", "rust"] {
                 let route = HyperscopeRoute::from_pairs([(key, accepted)]);
                 assert!(route.diagnostics().is_empty());

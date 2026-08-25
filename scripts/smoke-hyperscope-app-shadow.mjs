@@ -499,6 +499,7 @@ const incumbent = new HyperscopeNavigation();
 incumbent.loadPresentation(presentationDocument);
 assert.equal(loadedPresentation.disposition, 'applied');
 assert.equal(app.snapshot().presentation.cueCount, 6);
+assert.deepEqual(app.snapshot().presentation.assets, presentation.assets);
 assert.equal(app.snapshot().presentation.active, undefined);
 
 const eye = new Float64Array([0, 0, 3]);

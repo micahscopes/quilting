@@ -30,6 +30,13 @@ node extraction while retaining the incumbent renderer path, or explicitly use
 empty unmatched-entity list. `sceneimpl=js` is the immediate rollback and is
 the default.
 
+Use `presentimpl=shadow` to compare the standalone presentation controller with
+the application reducer while retaining the established renderer path. Use
+`presentimpl=rust` to make `hyperscope-app` the sole cue/transition authority;
+`globalThis.__hyperscopePresentation` should report `implementation: "rust"`,
+`authority: "hyperscope-app"`, the expected cue UUID, and no error. Restore
+`presentimpl=js` for immediate orchestration rollback.
+
 The ordinary preflight must print `PASS`. It validates the Rust presentation
 document, byte-for-byte manifest freshness, every presentation GLB, the runtime
 JS/WASM pairs, environment maps, licenses, and generated Trunk
