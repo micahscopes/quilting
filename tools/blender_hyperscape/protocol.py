@@ -199,6 +199,26 @@ def validate_presence_envelope(envelope: Any) -> None:
             raise HyperscapeProtocolError("animation time must be finite and nonnegative")
 
 
+def validate_local_peer_frame(frame: Any) -> None:
+    """Validate the transport wrapper without collapsing its two lanes."""
+
+    if not isinstance(frame, Mapping):
+        raise HyperscapeProtocolError("local peer frame must be an object")
+    lane = frame.get("lane")
+    if lane == "authored":
+        validate_authored_envelope(frame.get("envelope"))
+    elif lane == "presence":
+        validate_presence_envelope(frame.get("envelope"))
+    else:
+        raise HyperscapeProtocolError(f"unknown local peer lane {lane!r}")
+
+
+def local_peer_frame(lane: str, envelope: Mapping[str, Any]) -> dict[str, Any]:
+    frame = {"lane": lane, "envelope": envelope}
+    validate_local_peer_frame(frame)
+    return frame
+
+
 def canonical_json(value: Mapping[str, Any]) -> str:
     """Match serde_json's checked-in pretty fixture representation."""
 

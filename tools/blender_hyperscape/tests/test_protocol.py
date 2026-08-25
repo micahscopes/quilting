@@ -104,6 +104,24 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(inbox.accept(second, 1.1))
         self.assertEqual(inbox.live(1.2), [second])
 
+    def test_local_peer_frame_keeps_authored_and_presence_disjoint(self) -> None:
+        _, authored = self.fixture("authored-set-transform-v0.1.json")
+        _, presence = self.fixture("presence-camera-v0.1.json")
+        self.assertEqual(
+            protocol.local_peer_frame("authored", authored),
+            {"lane": "authored", "envelope": authored},
+        )
+        self.assertEqual(
+            protocol.local_peer_frame("presence", presence),
+            {"lane": "presence", "envelope": presence},
+        )
+        with self.assertRaises(protocol.HyperscapeProtocolError):
+            protocol.validate_local_peer_frame(
+                {"lane": "authored", "envelope": presence}
+            )
+        with self.assertRaisesRegex(protocol.HyperscapeProtocolError, "lane"):
+            protocol.local_peer_frame("durable_presence", presence)
+
 
 if __name__ == "__main__":
     unittest.main()
