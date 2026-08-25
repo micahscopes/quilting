@@ -211,6 +211,76 @@ Keep the sidebar available during rehearsal so a presenter can inspect or
 recover state, then collapse it for the talk if desired. The text card remains
 interactive rather than locking the camera.
 
+### Stage-ready choreography
+
+Prepare three views before the audience arrives rather than configuring them
+during the talk:
+
+1. Open the six-cue deck at the known URL from section 2 and leave it on cue
+   one.
+2. Open the Patch Lab comparison from section 4 in a second browser tab. Keep
+   both the 2:1 URL and its `lodratio=4` variant in browser history.
+3. Open the authored demo in Blender, keep the **Hyperscape** sidebar visible,
+   and connect the browser and Blender to the relay using the steps below.
+
+The short talk path is:
+
+1. Advance through cues one to five without leaving the canvas: animated patch
+   boundaries, reusable atlas topology, shared-edge LOD, analytic normals, then
+   the conformal stretch field.
+2. Advance to cue six and show that the horse and Blender neighborhood remain
+   distinct authored assets in one renderer scene.
+3. Move one bound object in Blender. Its corresponding Hyperscope object should
+   move without reloading the GLB or replacing the presentation.
+4. Move the Hyperscope camera or select an authored object. Blender should show
+   the transient remote camera, focus/inversion sphere, and selection bounds
+   without creating or saving Blender objects.
+5. Return to Hyperscope for one interaction: select, invert, or attach to a
+   surface and walk. Use only the interaction rehearsed on the presentation
+   machine.
+6. If time permits, switch to the prepared Patch Lab tab and compare the 2:1
+   and 4:1 resident triangle counts.
+
+Do not improvise relay setup, HID permissions, or a development rebuild while
+speaking. If live sync is unavailable, continue with cue six as the composed
+scene finale; the checked-in scene demonstrates the same asset and identity
+boundary without the optional carrier.
+
+### Connect the live Blender finale
+
+Use a disposable loopback-only token chosen before the event. This explicit
+example keeps the rehearsal repeatable; replace it if the machine is shared:
+
+```sh
+cargo run -p hyperscope-web --features local-peer-relay \
+  --bin hyperscope-local-peer-relay -- \
+  --token quilting-hacker-night-local
+```
+
+The relay must report `127.0.0.1:42117`, the chosen bearer token, the
+presentation origin, and `delivery only: no persistence, repair, or projection
+authority`.
+
+In Hyperscope's **Local Blender Peer (opt-in)** section:
+
+1. Leave the URL as `http://127.0.0.1:42117`.
+2. Enter the same token and choose **Connect**.
+3. Confirm the status says connected and does not report a gap, restart, or
+   projection error.
+
+In Blender's **3D View > Sidebar > Hyperscape > Local Blender ↔ Hyperscope**
+panel:
+
+1. Choose **Connect Local Hyperscope Peer**.
+2. Leave the relay URL at `http://127.0.0.1:42117`, enter the same token, and
+   confirm.
+3. Confirm **State: connected** and at least one remote peer before moving an
+   authored object.
+
+The token is runtime-only: the browser does not persist it and Blender does not
+save it into the `.blend` or add-on preferences. Disconnect both peers and stop
+the relay after the presentation.
+
 ## 4. Interaction demonstrations
 
 - **Fly/orbit:** mouse and keyboard controls remain the baseline. A SpaceMouse
