@@ -75,7 +75,7 @@ assert.ok(
 );
 assert.ok(
   layerAdapter.indexOf('lodRecords.push(...lodRecord);')
-    < layerAdapter.indexOf('assetId === presentationComposition.primaryAssetId'),
+    < layerAdapter.indexOf('if (state.primary)'),
   'primary animation filtering must happen after the complete scene LOD state is retained',
 );
 const compositionAdapter = browserSource.slice(

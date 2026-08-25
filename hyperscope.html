@@ -423,9 +423,14 @@ const RUST_SELECTION_IMPLEMENTATION = (() => {
   const requested = new URLSearchParams(location.search).get('selectionimpl') || 'js';
   return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
 })();
+const RUST_SCENE_IMPLEMENTATION = (() => {
+  const requested = new URLSearchParams(location.search).get('sceneimpl') || 'js';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
+})();
 const RUST_APP_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('appshadow') === '1'
-  || RUST_SELECTION_IMPLEMENTATION !== 'js';
+  || RUST_SELECTION_IMPLEMENTATION !== 'js'
+  || RUST_SCENE_IMPLEMENTATION !== 'js';
 const RUST_ROUTE_IMPLEMENTATION = (() => {
   const requested = new URLSearchParams(location.search).get('routeimpl') || 'js';
   return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
@@ -858,7 +863,7 @@ const PARAM_DEFAULTS = {
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
-  routeimpl: 'js',
+  sceneimpl: 'js', routeimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -1003,6 +1008,7 @@ function syncURL() {
     }
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
     if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
+    set('sceneimpl', RUST_SCENE_IMPLEMENTATION, PARAM_DEFAULTS.sceneimpl);
     if (LEGACY_RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
     set('routeimpl', RUST_ROUTE_IMPLEMENTATION, PARAM_DEFAULTS.routeimpl);
     if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
@@ -1706,6 +1712,112 @@ const rustPresentationDiagnostics = {
   error: null,
 };
 globalThis.__hyperscopePresentation = rustPresentationDiagnostics;
+const rustSceneExtractionDiagnostics = {
+  enabled: RUST_SCENE_IMPLEMENTATION !== 'js',
+  implementation: RUST_SCENE_IMPLEMENTATION,
+  state: RUST_SCENE_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-scene',
+  calls: 0,
+  comparisons: 0,
+  mismatches: [],
+  maximumMatrixError: 0,
+  authoredOverrides: 0,
+  maximumAuthoredDelta: 0,
+  authoritativeWrites: 0,
+  fallbackWrites: 0,
+  lastAppRevision: null,
+  lastAuthoredProjectionRevision: null,
+  unmatchedAuthoredEntities: [],
+  lastError: null,
+};
+globalThis.__hyperscopeSceneExtraction = rustSceneExtractionDiagnostics;
+
+function recordSceneExtractionMismatch(detail) {
+  const mismatches = rustSceneExtractionDiagnostics.mismatches;
+  if (mismatches.length === 64) mismatches.shift();
+  mismatches.push({ ...detail, atMs: performance.now() });
+}
+
+function matrixMaximumAbsoluteError(left, right) {
+  if (!left || !right || left.length !== 16 || right.length !== 16) return Infinity;
+  let error = 0;
+  for (let index = 0; index < 16; index++) {
+    error = Math.max(error, Math.abs(Number(left[index]) - Number(right[index])));
+  }
+  return error;
+}
+
+function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
+  const incumbent = new Map(nodeStates.map(state => [state.node, state.incumbentMatrix]));
+  if (RUST_SCENE_IMPLEMENTATION === 'js') return incumbent;
+  rustSceneExtractionDiagnostics.calls += 1;
+  if (!rustAppShadow) {
+    rustSceneExtractionDiagnostics.state = 'fallback';
+    rustSceneExtractionDiagnostics.fallbackWrites += 1;
+    rustSceneExtractionDiagnostics.lastError = 'Rust application boundary is unavailable';
+    return incumbent;
+  }
+  try {
+    const extraction = rustAppShadow.extractPackedScene(JSON.stringify(packedInstances));
+    const rustNodes = new Map(extraction.nodes.map(node => [node.packedNode, node]));
+    const expectedNodes = nodeStates.filter(state => state.activeLayer);
+    if (rustNodes.size !== expectedNodes.length) {
+      throw new Error(
+        `Rust extracted ${rustNodes.size} active nodes; browser packed ${expectedNodes.length}`,
+      );
+    }
+    for (const state of expectedNodes) {
+      const rustNode = rustNodes.get(state.node);
+      if (!rustNode || rustNode.asset !== state.assetId || rustNode.layer !== state.layerId) {
+        throw new Error(`Rust extraction identity diverged for packed node ${state.node}`);
+      }
+      const error = matrixMaximumAbsoluteError(state.incumbentMatrix, rustNode.matrix);
+      if (rustNode.source === 'authored_absolute') {
+        rustSceneExtractionDiagnostics.authoredOverrides += 1;
+        rustSceneExtractionDiagnostics.maximumAuthoredDelta = Math.max(
+          rustSceneExtractionDiagnostics.maximumAuthoredDelta,
+          error,
+        );
+      } else {
+        rustSceneExtractionDiagnostics.comparisons += 1;
+        rustSceneExtractionDiagnostics.maximumMatrixError = Math.max(
+          rustSceneExtractionDiagnostics.maximumMatrixError,
+          error,
+        );
+        if (error > 2e-5) {
+          recordSceneExtractionMismatch({
+            code: 'gltf_world_matrix',
+            packedNode: state.node,
+            error,
+            browser: Array.from(state.incumbentMatrix),
+            rust: rustNode.matrix,
+          });
+        }
+      }
+    }
+    rustSceneExtractionDiagnostics.lastAppRevision = extraction.appRevision;
+    rustSceneExtractionDiagnostics.lastAuthoredProjectionRevision =
+      extraction.authoredProjectionRevision ?? null;
+    rustSceneExtractionDiagnostics.unmatchedAuthoredEntities =
+      extraction.unmatchedAuthoredEntities;
+    rustSceneExtractionDiagnostics.lastError = null;
+    if (RUST_SCENE_IMPLEMENTATION === 'rust') {
+      for (const [node, record] of rustNodes) incumbent.set(node, record.matrix);
+      rustSceneExtractionDiagnostics.authoritativeWrites += rustNodes.size;
+      rustSceneExtractionDiagnostics.state = 'authoritative';
+    } else {
+      rustSceneExtractionDiagnostics.state = 'observing';
+    }
+  } catch (error) {
+    rustSceneExtractionDiagnostics.state = 'fallback';
+    rustSceneExtractionDiagnostics.fallbackWrites += 1;
+    rustSceneExtractionDiagnostics.lastError = error?.message || String(error);
+    recordSceneExtractionMismatch({
+      code: 'extraction_error',
+      message: rustSceneExtractionDiagnostics.lastError,
+    });
+  }
+  return incumbent;
+}
 
 function synchronizeRustApplicationPresentationFromBrowser() {
   if (!rustPresentationController && !rustAppShadow) return;
@@ -1933,9 +2045,8 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     return false;
   }
   const activeLayers = new Map((snapshot.layers || []).map(layer => [layer.asset, layer]));
-  const renderRecords = [];
-  const lodRecords = [];
-  const primaryLodRecords = [];
+  const nodeStates = [];
+  const packedInstances = [];
   const identityMobius = [
     1, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 1, 0, 0, 0,
@@ -1948,16 +2059,56 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     const opacity = visible ? Math.max(0, Math.min(1, Number(layer.opacity) || 0)) : 0;
     const layerMatrix = presentationLayerMatrix(layer?.transform);
     opacityPending ||= opacity > 0 && opacity < 1;
+    const packedInstance = layer ? {
+      layer: layer.id,
+      asset: assetId,
+      layerTransform: layer.transform,
+      nodes: [],
+    } : null;
     for (const node of resident.nodes) {
       const sourceMatrix = resident.nodeWorldTransforms?.get(node);
       const matrix = sourceMatrix ? mulM4(layerMatrix, sourceMatrix) : layerMatrix;
       const nodeVisible = visible && !resident.hiddenNodes?.has(node);
-      renderRecords.push(node, nodeVisible ? 1 : 0, nodeVisible ? opacity : 0, ...matrix);
-      const lodRecord = [node, ...mobius, ...matrix];
-      lodRecords.push(...lodRecord);
-      if (assetId === presentationComposition.primaryAssetId) {
-        primaryLodRecords.push(...lodRecord);
+      const identity = packedNodeIdentities.get(node);
+      nodeStates.push({
+        node,
+        assetId,
+        layerId: layer?.id || null,
+        activeLayer: !!layer,
+        incumbentMatrix: matrix,
+        visible: nodeVisible,
+        opacity: nodeVisible ? opacity : 0,
+        primary: assetId === presentationComposition.primaryAssetId,
+      });
+      if (packedInstance) {
+        packedInstance.nodes.push({
+          packedNode: node,
+          sourceNode: identity?.sourceNode ?? node - (resident.nodeOffset || 0),
+          entityId: identity?.durable && identity.assetId === assetId
+            ? identity.entityId
+            : null,
+          sourceWorld: Array.from(sourceMatrix || [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+          ]),
+        });
       }
+    }
+    if (packedInstance) packedInstances.push(packedInstance);
+  }
+  const matrices = resolvePresentationNodeMatrices(nodeStates, packedInstances);
+  const renderRecords = [];
+  const lodRecords = [];
+  const primaryLodRecords = [];
+  for (const state of nodeStates) {
+    const matrix = matrices.get(state.node) || state.incumbentMatrix;
+    renderRecords.push(state.node, state.visible ? 1 : 0, state.opacity, ...matrix);
+    const lodRecord = [state.node, ...mobius, ...matrix];
+    lodRecords.push(...lodRecord);
+    if (state.primary) {
+      primaryLodRecords.push(...lodRecord);
     }
   }
   const applied = mr_setPresentationNodeStates(new Float32Array(renderRecords));
@@ -7172,6 +7323,7 @@ async function initializePresentationComposition() {
     id: primaryAsset.id,
     name: primaryAsset.name,
     nodes: uniqueNodeIds(modelFaceNodes),
+    nodeOffset: 0,
     faceOffset: 0,
     faceCount: primaryFaces,
     durableSelectionNodes: primaryDurableNodes,
@@ -7210,6 +7362,7 @@ async function initializePresentationComposition() {
         resident.faceOffset,
         resident.faceOffset + resident.faceCount,
       )),
+      nodeOffset: resident.nodeOffset,
       hiddenNodes: new Set(
         resident.nodeMetadata
           .filter(node => node.guide)

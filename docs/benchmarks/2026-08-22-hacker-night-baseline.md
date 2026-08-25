@@ -1383,3 +1383,25 @@ overflow. The checkpoint passed 95 Hyperscape tests, 6 protocol tests,
 crate-local strict Clippy, warning-free rustdoc, and a wasm32 library check.
 Transitive strict Clippy still reports one pre-existing unnecessary cast in
 `quilting-mesh`; it is not folded into this semantic checkpoint.
+
+## Browser packed-scene rollback gate
+
+The generated application facade now accepts packed layer/node metadata and
+extracts against its accepted authored checkpoint. Its generated-WASM oracle
+proved two node records, packed-node sorting, exact projection-fence retention,
+absolute authored replacement, outer layer composition, and duplicate-handle
+atomic rejection. The canonical URL registry grew from 71 to 72 controls with
+`sceneimpl=js|shadow|rust`.
+
+Chrome DevTools MCP loaded the final two-asset cue through a temporary Trunk
+server. In `shadow`, two low-rate applications compared 18 matrices across the
+horse and Blender-authored asset: zero mismatches, zero fallbacks, maximum
+absolute error `4.768371586472142e-8`, 4,252 resident faces, and 9 topology
+domains. `rust` then made 18 authoritative node/LOD writes with the same error,
+zero fallbacks, and no console messages. A final isolated test admitted an
+absolute transform for the stable Blender ground entity, reactivated the cue,
+and observed one authored override, 17 fallback-matrix comparisons, an
+intentional maximum authored delta of `8`, exact authored fence `"1"`, 18 Rust
+writes, zero mismatches/fallbacks, and no presentation error. The temporary
+servers were stopped and the existing listener on `10.0.0.1:8888` was not
+touched.

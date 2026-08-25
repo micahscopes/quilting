@@ -171,6 +171,15 @@ The first application boundary is now explicit:
   instance one asset and receive the same edit; one entity UUID crossing asset
   boundaries is rejected because the current command carries no asset ID.
   Unmatched valid edits remain explicit so a later-resident asset can converge.
+- Generated WASM exposes that join through the application facade, consuming
+  the app's accepted authored projection rather than a socket-local cache. The
+  browser has a canonical `sceneimpl=js|shadow|rust` rollback gate. `shadow`
+  compares only glTF fallback matrices while retaining JavaScript authority;
+  authored absolute edits are counted as intentional overrides. `rust` feeds
+  Rust matrices into both presentation node state and LOD state, falling back
+  visibly on extraction failure. The join runs on low-rate layer/scene changes
+  over node records, never per face or per animation frame. Diagnostics live at
+  `globalThis.__hyperscopeSceneExtraction`.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

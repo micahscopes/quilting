@@ -22,6 +22,8 @@ assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
@@ -50,6 +52,18 @@ for (const authorityStep of [
   assert.ok(
     syncSource.includes(authorityStep),
     `browser route authority adapter is missing ${authorityStep}`,
+  );
+}
+for (const sceneExtractionStep of [
+  "const requested = new URLSearchParams(location.search).get('sceneimpl') || 'js';",
+  'rustAppShadow.extractPackedScene(JSON.stringify(packedInstances))',
+  "rustNode.source === 'authored_absolute'",
+  "RUST_SCENE_IMPLEMENTATION === 'rust'",
+  "rustSceneExtractionDiagnostics.state = 'fallback';",
+]) {
+  assert.ok(
+    browserSource.includes(sceneExtractionStep),
+    `browser scene extraction rollback gate is missing ${sceneExtractionStep}`,
   );
 }
 const startupAdapter = browserSource.slice(

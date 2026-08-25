@@ -22,6 +22,14 @@ node scripts/smoke-hyperscope-route-shadow.mjs
 node scripts/smoke-render-shadow.mjs
 ```
 
+For the composed final cue, append `sceneimpl=shadow` to compare Rust ordinary
+node extraction while retaining the incumbent renderer path, or explicitly use
+`sceneimpl=rust` for the measured authority path. Inspect
+`globalThis.__hyperscopeSceneExtraction`: a healthy loaded fixture reports
+`state` as `observing` or `authoritative`, no fallback, no mismatches, and an
+empty unmatched-entity list. `sceneimpl=js` is the immediate rollback and is
+the default.
+
 The ordinary preflight must print `PASS`. It validates the Rust presentation
 document, byte-for-byte manifest freshness, every presentation GLB, the runtime
 JS/WASM pairs, environment maps, licenses, and generated Trunk

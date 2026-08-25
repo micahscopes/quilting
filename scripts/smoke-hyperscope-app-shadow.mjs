@@ -320,6 +320,66 @@ assert.throws(
 );
 assert.deepEqual(app.snapshot().authoredEntities, beforeInvalidAuthored.authoredEntities);
 
+const identityMatrix = [
+  1, 0, 0, 0,
+  0, 1, 0, 0,
+  0, 0, 1, 0,
+  0, 0, 0, 1,
+];
+const authoredPackedSceneInput = [{
+  layer: '62000000-0000-4000-8000-000000000010',
+  asset: authoredAsset,
+  layerTransform: {
+    translation: [10, 0, 0],
+    rotation: [1, 0, 0, 0],
+    scale: [2, 1, 1],
+  },
+  // Deliberately reverse packed order. Rust owns output ordering.
+  nodes: [
+    {
+      packedNode: 9,
+      sourceNode: 2,
+      entityId: null,
+      sourceWorld: identityMatrix.map((value, index) => index === 12 ? 4 : value),
+    },
+    {
+      packedNode: 3,
+      sourceNode: 1,
+      entityId: authoredTransformEnvelope.command.entity,
+      sourceWorld: identityMatrix.map((value, index) => index === 12 ? 99 : value),
+    },
+  ],
+}];
+const extractedScene = app.extractPackedScene(JSON.stringify(authoredPackedSceneInput));
+assert.equal(extractedScene.appRevision, app.snapshot().revision);
+assert.equal(extractedScene.authoredProjectionRevision, authoredProjectionRevision);
+assert.deepEqual(extractedScene.nodes.map(node => node.packedNode), [3, 9]);
+assert.deepEqual(extractedScene.nodes.map(node => node.source), [
+  'authored_absolute',
+  'gltf_world',
+]);
+assert.deepEqual(extractedScene.nodes[0].matrix, [
+  2, 0, 0, 0,
+  0, 1, 0, 0,
+  0, 0, 1, 0,
+  12, 2, 3, 1,
+]);
+assert.deepEqual(extractedScene.nodes[1].matrix, [
+  2, 0, 0, 0,
+  0, 1, 0, 0,
+  0, 0, 1, 0,
+  18, 0, 0, 1,
+]);
+assert.deepEqual(extractedScene.unmatchedAuthoredEntities, []);
+const beforeInvalidExtraction = app.snapshot();
+const duplicatePackedSceneInput = structuredClone(authoredPackedSceneInput);
+duplicatePackedSceneInput[0].nodes[0].packedNode = 3;
+assert.throws(
+  () => app.extractPackedScene(JSON.stringify(duplicatePackedSceneInput)),
+  /repeats renderer node 3/,
+);
+assert.deepEqual(app.snapshot(), beforeInvalidExtraction);
+
 const presentationDocument = readFileSync(
   `${repository}/examples/hacker-night.presentation.json`,
   'utf8',
@@ -1211,6 +1271,7 @@ console.log(JSON.stringify({
   authoredProjectionRevision: finalSnapshot.authoredProjectionRevision,
   authoredAssets: finalSnapshot.authoredAssets.length,
   authoredEntities: finalSnapshot.authoredEntities.length,
+  packedSceneNodes: extractedScene.nodes.length,
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
   presentationCue: finalSnapshot.presentation.active.cue_id,
   navigationBoundaryParity: true,

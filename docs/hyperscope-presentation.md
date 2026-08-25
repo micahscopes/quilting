@@ -79,6 +79,15 @@ The browser exposes asset fetch, resident ranges, hidden-guide counts, packed
 face count, active layers, pending capabilities, and failures at
 `globalThis.__hyperscopePresentation`.
 
+Ordinary packed-node matrix extraction has a separate rollback gate:
+`sceneimpl=js` retains the incumbent browser composition, `shadow` compares
+Rust's backend-neutral extraction without applying it, and `rust` applies the
+Rust result to both presentation rendering and LOD. The Rust boundary treats a
+durable entity transform as an absolute source-asset world TRS and keeps the
+presentation layer outermost. Its counters, matrix error, authored overrides,
+unmatched entities, revision fences, fallbacks, and bounded mismatches are at
+`globalThis.__hyperscopeSceneExtraction`.
+
 The checked-in story follows the renderer's actual data flow rather than
 embedding the historical demo renderer. Its first five cues step through the
 animated QB surface with PBR patch boundaries, the reused tessellation wire
