@@ -1762,3 +1762,56 @@ no longer enter the source receipt, so a long-lived checkout and a detached
 worktree cannot disagree merely because wasm-pack left an 18.5-MiB package
 behind. Strict noncommercial-mixed preflight passed over the staged 19-file /
 23.46-MiB offline bundle.
+
+## Foreground presentation rehearsal
+
+After freezing further authority-default changes, the exact committed
+presentation candidate was rebuilt and staged independently of the user-run
+`:8888` service. Strict noncommercial-mixed preflight passed over 19 files /
+23.46 MiB. The post-fix source/build receipt contains 173 inputs totaling
+20,704,755 bytes with fingerprint `608e1d9aa064224105977d9120f394e4`.
+
+The installed Chrome DevTools MCP traversed all six cues through the real
+keyboard event path in their authored order (`1, 3, 4, 5, 6, 2`). Every cue
+retained both assets, 4,252 packed and LOD-resident faces, nine topology
+domains, and one GPU pass per classification. Rust scene extraction remained
+authoritative with zero semantic mismatch or fallback; application frame
+errors and mismatch lists remained empty. Visual inspection found no open LOD
+seam in the coarse 64-pixel cue and no pole warning in the inversion/stretch
+cue. The final PBR composition is correct but deliberately sparse enough that
+its horse/board staging remains a presentation-choreography consideration, not
+a renderer failure.
+
+With the disposable tab brought to the foreground, 180 animation intervals on
+the inversion/stretch cue measured 16.76 ms mean, 16.7 ms median, 16.8 ms p95
+and p99, and 33.3 ms maximum. One interval exceeded both 20 and 33 ms.
+Application frame calls advanced one-for-one with the 181 sampled animation
+frames. The static Blender asset incurred no scene reclassification; the
+animated horse produced 180 primary-only classifications, each reporting one
+subject record and one GPU pass. Chrome's navigation trace reported zero
+layout shift.
+
+A synthetic file drop carrying the checked-in horse bytes entered the actual
+drop event path from the active deck, persisted `rehearsal-horse.glb`, and
+navigated to the clean `?glb=rehearsal-horse.glb&anim=0` route. Rust recorded
+one request and one successful completion, installed 984 faces, and reported
+no failure, stale result, prevented install, or mismatch. Browser Back restored
+the exact inversion/stretch cue, both assets, and all 4,252 faces.
+
+The rehearsal also found one genuine interaction blocker. Direct selection
+from an authored presentation cue fitted the horse's focus sphere, but the cue's
+old point target remained at that sphere center. Spherical inversion correctly
+mapped the point target to infinity and rejected the gesture as a pole. Commit
+`a6e0912` now claims the visible authored camera as a manual free-tangent frame
+whenever selection or surface walking takes control. The rebuilt artifact
+selected the center horse, enabled inversion, preserved the view tangent, and
+then attached surface walking to animated face 352 with no application or frame
+error. The same helper removes the duplicated authored-camera handoff formerly
+embedded in the context-menu path. Selection and walking defaults remain
+unchanged; the proposed selection-shadow default remains parked rather than
+entering the presentation candidate.
+
+The final gate passed 63 Node tests, 59 replay-enabled application tests, all
+six generated/runtime smokes, all three deterministic replay fingerprints,
+scoped strict Clippy, wasm32 checking, strict staged preflight, and a clean
+Chrome warning/error console.
