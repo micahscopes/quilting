@@ -1815,3 +1815,28 @@ The final gate passed 63 Node tests, 59 replay-enabled application tests, all
 six generated/runtime smokes, all three deterministic replay fingerprints,
 scoped strict Clippy, wasm32 checking, strict staged preflight, and a clean
 Chrome warning/error console.
+
+## Patch Lab presentation oracle
+
+The exact release artifact was also exercised through its URL-addressable
+Patch Lab. A triangle request of `2 / 64 / 64` reconciled to `32 / 64 / 64`
+under 2:1 grading (3,072 rendered triangles) and `16 / 64 / 64` under 4:1
+grading (2,304 triangles). Both policies reported one explicit promotion and
+zero shared-edge mismatches. Real slider events then independently requested
+`8 / 16 / 32`; 4:1 grading admitted that triple without promotion and rendered
+320 triangles. After URL debounce, the canonical link omitted default-valued
+A/B controls, retained `labc=5`, and restored the same result after reload.
+
+The traveling-wave field advanced from phase 0 to 0.951 while changing the
+resident pattern. The eight-by-eight plane rendered 149,400 triangles with no
+reconciliation mismatch; the cube rendered 12,928 triangles with twelve edge
+promotions on nine faces and no shared-edge mismatch. Stopping animation
+removed `labanimate=1` while retaining the final phase, shape, field, camera,
+and 4:1 policy in the link.
+
+Visual inspection caught one documentation defect: the runbook's grading link
+opened the correct geometry and numbers in default PBR, hiding the tessellation
+the demonstration is meant to explain. The canonical rehearsal link now
+includes `mode=both` and `animate=0`. The generated-WASM presentation smoke
+also freezes the exact 2:1 and 4:1 reconciliation triples, promotion count,
+policy, and zero-mismatch invariant without requiring a browser or renderer.

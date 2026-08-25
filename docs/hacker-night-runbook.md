@@ -213,8 +213,8 @@ interactive rather than locking the camera.
   persisting the file; Back returns to the exact deck URL. This is a
   recovery/demo path, not part of the deterministic cue deck.
 - **Compare grading policy:** open
-  `?lab=triangle&labfield=edges&laba=1&labb=6&labc=6`, then repeat with
-  `&lodratio=4`. The page reload is intentional: diagnostics must report the
+  `?mode=both&animate=0&lab=triangle&labfield=edges&laba=1&labb=6&labc=6`,
+  then add `&lodratio=4`. The page reload is intentional: diagnostics must report the
   active policy, zero shared-edge mismatches, the reconciled request, and the
   resulting resident triangle count from the matching cached atlas.
 - **Optional Blender presence:** start the loopback relay with the

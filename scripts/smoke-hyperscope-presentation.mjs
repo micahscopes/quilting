@@ -8,7 +8,12 @@ const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const manifestPath = `${repository}/examples/hacker-night.presentation.json`;
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 const workerSource = readFileSync(`${repository}/hyperscope_worker.js`, 'utf8');
-const { default: init, HyperscopeNavigation } = await import(packageUrl);
+const {
+  default: init,
+  HyperscopeNavigation,
+  load_patch_lab,
+  update_patch_lab_lods,
+} = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
 
 const cueActivation = browserSource.slice(
@@ -244,9 +249,29 @@ assert.equal(
   'a rejected deep link must preserve the last valid cue',
 );
 
+const patchMesh = load_patch_lab('triangle', 8, 0.55);
+assert.equal(patchMesh.num_faces, 1);
+const patchLabTwoToOne = update_patch_lab_lods('edges', 0, 0, 7, 1, 6, 6, 2);
+const patchLabFourToOne = update_patch_lab_lods('edges', 0, 0, 7, 1, 6, 6, 4);
+assert.deepEqual(Array.from(patchLabTwoToOne.requested), [2, 64, 64]);
+assert.deepEqual(Array.from(patchLabTwoToOne.actual), [32, 64, 64]);
+assert.equal(patchLabTwoToOne.promoted_edges, 1);
+assert.equal(patchLabTwoToOne.shared_edge_mismatches, 0);
+assert.equal(patchLabTwoToOne.policy_face_edge_ratio, 2);
+assert.deepEqual(Array.from(patchLabFourToOne.requested), [2, 64, 64]);
+assert.deepEqual(Array.from(patchLabFourToOne.actual), [16, 64, 64]);
+assert.equal(patchLabFourToOne.promoted_edges, 1);
+assert.equal(patchLabFourToOne.shared_edge_mismatches, 0);
+assert.equal(patchLabFourToOne.policy_face_edge_ratio, 4);
+
 console.log(JSON.stringify({
   cues: presentation.cues.length,
   initialCue: first.cue_id,
   linkedCue: linked.cue_id,
   rejectedCuePreserved: controller.presentationSnapshot().cue_id,
+  patchLab: {
+    requested: Array.from(patchLabTwoToOne.requested),
+    twoToOne: Array.from(patchLabTwoToOne.actual),
+    fourToOne: Array.from(patchLabFourToOne.actual),
+  },
 }));
