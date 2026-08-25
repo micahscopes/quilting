@@ -1270,6 +1270,8 @@ mod tests {
         assert!(LOD_COMPUTE_VS.contains("flat out vec4 v_lods"));
         assert!(LOD_COMPUTE_FS.contains("frag_color = v_lods"));
         assert!(LOD_COHERENCE_VS.contains("face.w < 0.5"));
+        assert!(LOD_COMPUTE_VS.contains("min_px > 0.0 ? min(2.0, max_lod) : max_lod"));
+        assert!(LOD_COHERENCE_VS.contains("out_canon_a = exp2(face.x)"));
         assert!(LOD_COHERENCE_VS.contains("out_atlas_index = -1.0"));
     }
 

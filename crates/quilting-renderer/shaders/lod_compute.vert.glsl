@@ -366,7 +366,14 @@ void main() {
     // Cull before the more expensive density work, but only with a bound on the
     // complete transformed patch. Pole-containing bounds deliberately survive.
     if (image_ball_outside_frustum(p0, p1, p2)) {
-        emit_face(vec4(1.0, 1.0, 1.0, 0.0));
+        // Keep the invisible payload self-describing. With screen attenuation
+        // the render GPU may resurrect this face one frame ahead of the worker,
+        // so retain a small drawable LOD2 standby. Without attenuation, preserve
+        // the uncapped policy. Pass 2 keeps these values beside its negative
+        // visibility sentinel instead of replacing them with an implicit LOD1.
+        float standby_lod = min_px > 0.0 ? min(2.0, max_lod) : max_lod;
+        float standby_exp = log2(max(standby_lod, 1.0));
+        emit_face(vec4(standby_exp, standby_exp, standby_exp, 0.0));
         return;
     }
 

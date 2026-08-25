@@ -213,9 +213,11 @@ struct MainState {
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
-    /// Last valid topology uploaded for each face. Worker visibility is
-    /// asynchronous, so an invisible sentinel must not demote a patch that the
-    /// current-pose render GPU may need to resurrect in the same frame.
+    /// Raw classifier request before shared-edge and within-face promotion.
+    /// Keeping this separate is what permits a former high-detail component to
+    /// demote instead of being promoted back by stale resident neighbors.
+    requested_face_lods: Vec<Option<batch::ResidentLod>>,
+    /// Crack-free promoted topology uploaded for each face.
     resident_face_lods: Vec<Option<batch::ResidentLod>>,
     /// Current C0-continuous visualization LODs, indexed by source face.
     resident_vertex_lods: Vec<[u32; 3]>,
@@ -224,7 +226,7 @@ struct MainState {
     /// independent invariant; this controls only anisotropy/promotion halos.
     lod_grading: batch::FaceLodGrading,
     /// Visibility from the latest worker classification, retained separately
-    /// from topology because invisible faces deliberately keep their last LOD.
+    /// from the drawable standby/resident topology.
     classified_face_visibility: Vec<bool>,
     classified_culled_faces: usize,
     /// Opt-in observer for the conservative CPU round hierarchy. It never
@@ -645,6 +647,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             batch_groups: BTreeMap::new(),
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
+            requested_face_lods: Vec::new(),
             resident_face_lods: Vec::new(),
             resident_vertex_lods: Vec::new(),
             resident_vertex_lod_scratch: Vec::new(),
@@ -2636,6 +2639,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.surface_runtime.reset_geometry();
             st.batch_groups.clear();
             st.batch_staging.clear();
+            st.requested_face_lods = vec![None; st.num_faces];
             st.resident_face_lods = vec![None; st.num_faces];
             st.resident_vertex_lods = vec![[1; 3]; st.num_faces];
             st.resident_vertex_lod_scratch.clear();
@@ -3397,6 +3401,9 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
             );
             state.face_nodes.resize(nf, 0);
         }
+        if state.requested_face_lods.len() != nf {
+            state.requested_face_lods.resize(nf, None);
+        }
         if state.resident_face_lods.len() != nf {
             state.resident_face_lods.resize(nf, None);
         }
@@ -3404,9 +3411,10 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
             state.classified_face_visibility = vec![false; nf];
             state.classified_culled_faces = nf;
         }
-        // Use LOD 2 for faces that have never had a visible classification if
-        // the atlas provides it. This preserves the historical safe fallback
-        // while allowing genuinely visible, sub-pixel faces to select LOD 1.
+        // Keep conservatively offscreen faces at a small drawable standby LOD.
+        // The current-pose render GPU can still resurrect one during an
+        // asynchronous camera/animation frame, while avoiding the permanent
+        // vertex cost and high-detail flash of arbitrary old topology.
         let initial_resident_lod = TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
             tc.keys()
@@ -3454,12 +3462,14 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
                     state.classified_face_visibility[fi] = cpu_visible;
                 }
             }
-            let previous = state.resident_face_lods[fi];
-            let resident = batch::ResidentLod::from_visible_payload(face_lods, record_index)
-                .or(previous)
-                .unwrap_or(initial_resident);
-            state.resident_face_lods[fi] = Some(resident);
-            if previous != Some(resident) {
+            let previous = state.requested_face_lods[fi];
+            let requested = batch::requested_face_lod(
+                face_lods,
+                record_index,
+                initial_resident,
+            );
+            state.requested_face_lods[fi] = Some(requested);
+            if previous != Some(requested) {
                 topology_changed = true;
                 state.lod_dirty_faces.push(fi);
             }
@@ -3470,7 +3480,8 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
 
         perf_mark("batch-balance-start");
         let lod_corrections = if let Some(topology) = state.lod_topology.as_ref() {
-            batch::balance_resident_lods_from_faces_with_grading(
+            batch::reconcile_resident_lods_from_requests_with_grading(
+                &state.requested_face_lods,
                 &mut state.resident_face_lods,
                 topology,
                 &state.lod_dirty_faces,
@@ -3478,6 +3489,9 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
                 state.lod_grading,
             )
         } else {
+            for &face in &state.lod_dirty_faces {
+                state.resident_face_lods[face] = state.requested_face_lods[face];
+            }
             0
         };
         perf_mark("batch-balance-end");

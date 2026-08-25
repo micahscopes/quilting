@@ -48,11 +48,9 @@ pub fn encode_face_lod_delta(
     false
 }
 
-/// Tessellation topology kept resident for a face between asynchronous LOD
-/// classifications. Invisible payloads must retain this topology: the render
-/// GPU may classify a newer animated pose as visible before the worker result
-/// catches up, and resurrecting it with a minimum-LOD fallback causes a coarse
-/// one-frame flash.
+/// Canonical tessellation topology requested or kept resident for one face.
+/// The renderer stores raw requests separately from their crack-free promoted
+/// closure so later classifications can genuinely lower detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResidentLod {
     pub canonical: [u32; 3],
@@ -89,11 +87,9 @@ impl ResidentLod {
         ]
     }
 
-    /// Decode a valid, visible six-float GPU classification payload.
-    pub fn from_visible_payload(face_lods: &[f32], face_index: usize) -> Option<Self> {
-        if !face_is_visible(face_lods, face_index) {
-            return None;
-        }
+    /// Decode the topology fields of a six-float GPU classification payload,
+    /// including the drawable standby carried beside an invisible sentinel.
+    pub fn from_payload_topology(face_lods: &[f32], face_index: usize) -> Option<Self> {
         let offset = face_index.checked_mul(FACE_LOD_STRIDE)?;
         let payload = face_lods.get(offset..offset + FACE_LOD_STRIDE)?;
         if !payload[..5].iter().all(|value| value.is_finite())
@@ -106,6 +102,12 @@ impl ResidentLod {
             perm_index: payload[3].round().clamp(0.0, 5.0) as usize,
             parity_bucket: usize::from(payload[4] < 0.0),
         })
+    }
+
+    /// Decode a valid, visible six-float GPU classification payload.
+    pub fn from_visible_payload(face_lods: &[f32], face_index: usize) -> Option<Self> {
+        face_is_visible(face_lods, face_index)
+            .then(|| Self::from_payload_topology(face_lods, face_index))?
     }
 }
 
@@ -265,19 +267,15 @@ pub fn group_resident_faces_into(
     groups.retain(|_, members| !members.is_empty());
 }
 
-/// Update a face's resident topology from a visible payload, or retain its
-/// previous topology when the asynchronous classifier reports it invisible.
-pub fn retain_face_lod(
+/// Decode a visible request or choose the bounded offscreen standby topology.
+/// The render GPU independently performs a current-pose conservative cull, so
+/// the standby remains drawable if asynchronous classification lags by a frame.
+pub fn requested_face_lod(
     face_lods: &[f32],
     face_index: usize,
-    resident: &mut Option<ResidentLod>,
-    initial: ResidentLod,
+    standby: ResidentLod,
 ) -> ResidentLod {
-    let selected = ResidentLod::from_visible_payload(face_lods, face_index)
-        .or(*resident)
-        .unwrap_or(initial);
-    *resident = Some(selected);
-    selected
+    ResidentLod::from_payload_topology(face_lods, face_index).unwrap_or(standby)
 }
 
 /// Compatibility/default edge-resolution ratio inside one resident source
@@ -326,6 +324,9 @@ pub struct ResidentLodBalanceScratch {
     queued: Vec<bool>,
     changed: Vec<bool>,
     changed_faces: Vec<usize>,
+    component_queue: VecDeque<usize>,
+    component_seen: Vec<bool>,
+    component_faces: Vec<usize>,
 }
 
 impl ResidentLodBalanceScratch {
@@ -352,6 +353,16 @@ impl ResidentLodBalanceScratch {
             self.changed[face] = true;
             self.changed_faces.push(face);
         }
+    }
+
+    fn begin_components(&mut self, num_faces: usize) {
+        self.component_queue.clear();
+        for face in self.component_faces.drain(..) {
+            if let Some(seen) = self.component_seen.get_mut(face) {
+                *seen = false;
+            }
+        }
+        self.component_seen.resize(num_faces, false);
     }
 }
 
@@ -458,6 +469,72 @@ pub fn balance_resident_lods_from_faces_with_grading(
             scratch,
         ),
     }
+}
+
+/// Rebuild the connected components touched by changed raw requests, then
+/// reconcile them to the least crack-free fixed point.
+///
+/// Resident values are promoted closure, not source requests. Starting a
+/// demotion from those promoted values makes old peaks ratchet forever: an
+/// unchanged neighbor immediately promotes the changed face back. Keeping the
+/// raw requests separately and resetting the affected topological components
+/// before the monotone pass permits both increases and decreases without a
+/// full-scene scan.
+pub fn reconcile_resident_lods_from_requests_with_grading(
+    requests: &[Option<ResidentLod>],
+    residents: &mut [Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    dirty_faces: &[usize],
+    scratch: &mut ResidentLodBalanceScratch,
+    grading: FaceLodGrading,
+) -> usize {
+    let num_faces = requests
+        .len()
+        .min(residents.len())
+        .min(topology.num_faces as usize);
+    scratch.begin_components(num_faces);
+
+    for &seed in dirty_faces {
+        if seed >= num_faces || scratch.component_seen[seed] {
+            continue;
+        }
+        scratch.component_seen[seed] = true;
+        scratch.component_queue.push_back(seed);
+        while let Some(face) = scratch.component_queue.pop_front() {
+            scratch.component_faces.push(face);
+            for half_edge in topology.face_half_edges(face as u32) {
+                let Some(twin) = topology.twin(half_edge) else {
+                    continue;
+                };
+                let neighbor = topology.half_edges[twin as usize].face as usize;
+                if neighbor < num_faces && !scratch.component_seen[neighbor] {
+                    scratch.component_seen[neighbor] = true;
+                    scratch.component_queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+
+    let component_faces = std::mem::take(&mut scratch.component_faces);
+    for &face in &component_faces {
+        residents[face] = requests[face];
+    }
+    let corrections = match grading {
+        FaceLodGrading::TwoToOne => balance_resident_lods_seeded::<2>(
+            residents,
+            topology,
+            component_faces.iter().copied(),
+            scratch,
+        ),
+        FaceLodGrading::FourToOne => balance_resident_lods_seeded::<4>(
+            residents,
+            topology,
+            component_faces.iter().copied(),
+            scratch,
+        ),
+    };
+    scratch.component_faces = component_faces;
+    corrections
 }
 
 fn balance_resident_lods_seeded<const MAX_FACE_EDGE_RATIO: u32>(
@@ -877,20 +954,22 @@ mod tests {
     }
 
     #[test]
-    fn invisible_payload_does_not_replace_resident_topology() {
+    fn invisible_payload_selects_bounded_standby_topology() {
         let visible = [16.0, 32.0, 64.0, 4.0, 1.0, 17.0];
-        let invisible = [1.0, 1.0, 1.0, 0.0, 1.0, -1.0];
+        let invisible = [2.0, 2.0, 2.0, 0.0, 1.0, -1.0];
         let resident = ResidentLod::from_visible_payload(&visible, 0).unwrap();
 
         assert_eq!(resident.canonical, [16, 32, 64]);
         assert_eq!(resident.perm_index, 4);
         assert_eq!(ResidentLod::from_visible_payload(&invisible, 0), None);
-        let mut stored = Some(resident);
         assert_eq!(
-            retain_face_lod(&invisible, 0, &mut stored, ResidentLod::uniform(2)),
-            resident,
+            ResidentLod::from_payload_topology(&invisible, 0),
+            Some(ResidentLod::uniform(2)),
         );
-        assert_eq!(stored, Some(resident));
+        assert_eq!(
+            requested_face_lod(&invisible, 0, ResidentLod::uniform(2)),
+            ResidentLod::uniform(2),
+        );
     }
 
     #[test]
@@ -1200,6 +1279,52 @@ mod tests {
         );
         assert_eq!(actual_changed, expected_changed);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn raw_requests_allow_a_promoted_component_to_demote() {
+        const SIDE: u32 = 4;
+        let mut faces = Vec::with_capacity((SIDE * SIDE * 2) as usize);
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let row = SIDE + 1;
+                let a = y * row + x;
+                let b = a + 1;
+                let c = a + row;
+                let d = c + 1;
+                faces.push([a, b, c]);
+                faces.push([b, d, c]);
+            }
+        }
+        let topology = HalfEdgeMesh::from_triangles((SIDE + 1) * (SIDE + 1), &faces);
+        let low = Some(ResidentLod::uniform(2));
+        for grading in [FaceLodGrading::TwoToOne, FaceLodGrading::FourToOne] {
+            let mut requests = vec![low; faces.len()];
+            requests[0] = Some(ResidentLod::from_edge_lods([128, 1, 1]));
+            let mut residents = requests.clone();
+            let mut scratch = ResidentLodBalanceScratch::default();
+
+            reconcile_resident_lods_from_requests_with_grading(
+                &requests,
+                &mut residents,
+                &topology,
+                &[0],
+                &mut scratch,
+                grading,
+            );
+            assert!(residents.iter().any(|resident| *resident != low));
+
+            requests[0] = low;
+            reconcile_resident_lods_from_requests_with_grading(
+                &requests,
+                &mut residents,
+                &topology,
+                &[0],
+                &mut scratch,
+                grading,
+            );
+            assert!(residents.iter().all(|resident| *resident == low));
+        }
     }
 
     #[test]

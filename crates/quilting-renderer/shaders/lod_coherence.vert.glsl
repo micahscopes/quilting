@@ -56,7 +56,9 @@ void main() {
 
     vec4 face = read_face(fi);
     if (face.w < 0.5) {
-        out_canon_a = 1.0; out_canon_b = 1.0; out_canon_c = 1.0;
+        out_canon_a = exp2(face.x);
+        out_canon_b = exp2(face.y);
+        out_canon_c = exp2(face.z);
         out_perm_index = 0.0; out_parity = 1.0; out_atlas_index = -1.0;
         gl_Position = vec4(0.0);
         return;
