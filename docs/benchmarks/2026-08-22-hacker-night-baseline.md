@@ -1927,3 +1927,29 @@ writes, no diagnostics, no mismatches, and zero frame errors. Explicit
 calls. An ordinary unflagged route remained Rust-authoritative with one write,
 no fallback, byte-identical browser/Rust queries, and a clean warning/error
 console.
+
+## Consolidated browser bootstrap policy
+
+The next subtraction slice removed six independently copied
+`js|shadow|rust` validators and reduced ten startup parses of
+`location.search` to one immutable `URLSearchParams` snapshot. Presentation,
+selection, scene extraction, asset effects, canonical routing, and surface
+walking now obtain their boot policy through one pure
+`implementationFromRoute` helper. The legacy route-shadow normalizer receives
+the same snapshot and remains the only compatibility rewrite.
+
+No authority default or rollback mode changed. The helper oracle exhaustively
+checks `js`, `shadow`, `rust`, absent input, and invalid fallback, while the
+existing presentation, route, and walking smokes continue to bind each policy
+to its downstream authority path. `hyperscope.html` retained its line count but
+decreased by 436 bytes, from 349,483 to 349,047 bytes.
+
+The exact isolated release carried fingerprint
+`05170e7e91798344a9100fa74f3b582c` over 173 inputs and 20,705,767 bytes.
+Strict noncommercial-mixed preflight passed 19 files totaling 23.46 MiB.
+Chrome loaded one combined rollback URL and simultaneously reported standalone
+JavaScript presentation, JavaScript asset effects, shadow scene extraction,
+disabled JavaScript route observation, shadow surface walking, zero application
+or scene mismatches, and zero frame errors. An ordinary URL retained Rust route,
+asset, scene, and presentation defaults plus JavaScript walk/selection defaults;
+the warning/error console remained empty.

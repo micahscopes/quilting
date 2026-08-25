@@ -136,8 +136,7 @@ for (const requiredAnimationAdapterStep of [
 }
 
 for (const requiredAuthorityStep of [
-  "get('presentimpl') || 'rust'",
-  "? requested : 'rust';",
+  "implementationFromRoute(\n  initialBrowserParams, 'presentimpl', 'rust',\n)",
   "presentimpl: 'rust'",
   "RUST_PRESENTATION_IMPLEMENTATION === 'rust'",
   "ensureRustAppShadow('presentation-authority')",

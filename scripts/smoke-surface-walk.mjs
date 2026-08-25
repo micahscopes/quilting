@@ -90,7 +90,7 @@ assert.match(
 );
 assert.match(
   browserSource,
-  /\['js', 'shadow', 'rust'\]\.includes\(requested\)[\s\S]*SURFACE_WALK_IMPLEMENTATION === 'rust'[\s\S]*applyRustSurfaceWalkCamera\(snapshot\)/,
+  /implementationFromRoute\(\s*initialBrowserParams, 'walkimpl', 'js',\s*\)[\s\S]*SURFACE_WALK_IMPLEMENTATION === 'rust'[\s\S]*applyRustSurfaceWalkCamera\(snapshot\)/,
   'walkimpl=rust must select the composed Rust camera snapshot instead of silently falling back to shadow',
 );
 assert.match(

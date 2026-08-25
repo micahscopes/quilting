@@ -442,51 +442,51 @@ function normalizeLegacyRouteShadow(params) {
   return normalized;
 }
 
-const initialRouteParams = normalizeLegacyRouteShadow(
-  new URLSearchParams(location.search),
-);
+function implementationFromRoute(params, key, defaultImplementation) {
+  const requested = params.get(key) || defaultImplementation;
+  return ['js', 'shadow', 'rust'].includes(requested)
+    ? requested
+    : defaultImplementation;
+}
+
+const initialBrowserParams = new URLSearchParams(location.search);
+const initialRouteParams = normalizeLegacyRouteShadow(initialBrowserParams);
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
-  new URLSearchParams(location.search).get('navshadow') === '1';
+  initialBrowserParams.get('navshadow') === '1';
 const RUST_PRESENTATION_ENABLED =
-  new URLSearchParams(location.search).get('presentation') === '1';
-const RUST_PRESENTATION_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('presentimpl') || 'rust';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
-})();
+  initialBrowserParams.get('presentation') === '1';
+const RUST_PRESENTATION_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'presentimpl', 'rust',
+);
 const RUST_ROUND_SHADOW_ENABLED =
-  new URLSearchParams(location.search).get('roundshadow') === '1';
-const RUST_SELECTION_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('selectionimpl') || 'js';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
-})();
-const RUST_SCENE_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('sceneimpl') || 'rust';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
-})();
-const RUST_ASSET_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('assetimpl') || 'rust';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
-})();
+  initialBrowserParams.get('roundshadow') === '1';
+const RUST_SELECTION_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'selectionimpl', 'js',
+);
+const RUST_SCENE_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'sceneimpl', 'rust',
+);
+const RUST_ASSET_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'assetimpl', 'rust',
+);
 const EXPLICIT_RUST_APP_SHADOW_ENABLED =
-  new URLSearchParams(location.search).get('appshadow') === '1';
+  initialBrowserParams.get('appshadow') === '1';
 const RUST_APP_SHADOW_ENABLED =
   EXPLICIT_RUST_APP_SHADOW_ENABLED
   || RUST_ASSET_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
-const RUST_ROUTE_IMPLEMENTATION = (() => {
-  const requested = initialRouteParams.get('routeimpl') || 'rust';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
-})();
+const RUST_ROUTE_IMPLEMENTATION = implementationFromRoute(
+  initialRouteParams, 'routeimpl', 'rust',
+);
 const RUST_ROUTE_SHADOW_ENABLED = RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
-  new URLSearchParams(location.search).get('rendershadow') === '1';
-const SURFACE_WALK_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('walkimpl') || 'js';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
-})();
+  initialBrowserParams.get('rendershadow') === '1';
+const SURFACE_WALK_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'walkimpl', 'js',
+);
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 const rustRouteShadowDiagnostics = {
   enabled: RUST_ROUTE_SHADOW_ENABLED,
@@ -913,7 +913,7 @@ const PARAM_DEFAULTS = {
   fqual: '2', fkaw: '1', fkoff: '15',
 };
 
-function readParams(p = new URLSearchParams(location.search)) {
+function readParams(p) {
   const get = (k) => p.get(k) ?? PARAM_DEFAULTS[k];
   return {
     glb: get('glb'),

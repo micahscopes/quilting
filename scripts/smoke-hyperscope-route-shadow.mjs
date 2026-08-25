@@ -68,6 +68,31 @@ assert.equal(
   false,
   'the legacy route-shadow alias must not remain a canonical Rust control',
 );
+const implementationFromRouteSource = browserSource.match(
+  /function implementationFromRoute\(params, key, defaultImplementation\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(implementationFromRouteSource, 'could not locate implementation-mode parser');
+const implementationFromRoute = runInNewContext(
+  `${implementationFromRouteSource}; implementationFromRoute`,
+);
+for (const implementation of ['js', 'shadow', 'rust']) {
+  assert.equal(
+    implementationFromRoute(
+      new URLSearchParams(`mode=${implementation}`),
+      'mode',
+      'rust',
+    ),
+    implementation,
+  );
+}
+assert.equal(
+  implementationFromRoute(new URLSearchParams(), 'mode', 'js'),
+  'js',
+);
+assert.equal(
+  implementationFromRoute(new URLSearchParams('mode=invalid'), 'mode', 'rust'),
+  'rust',
+);
 const canonicalFixedSource = browserSource.match(
   /function canonicalFixedRouteNumber\(value, fractionDigits\) \{[\s\S]*?\n\}/,
 )?.[0];
@@ -81,8 +106,7 @@ assert.equal(canonicalFixedRouteNumber(0.0004, 3), '0.000');
 assert.equal(canonicalFixedRouteNumber(-0.0006, 3), '-0.001');
 assert.equal(canonicalFixedRouteNumber(1.25, 2), '1.25');
 for (const routeDefaultStep of [
-  "get('routeimpl') || 'rust'",
-  "? requested : 'rust';",
+  "implementationFromRoute(\n  initialRouteParams, 'routeimpl', 'rust',\n)",
   "routeimpl: 'rust'",
 ]) {
   assert.ok(
@@ -156,8 +180,7 @@ for (const authorityStep of [
   );
 }
 for (const sceneExtractionStep of [
-  "const requested = new URLSearchParams(location.search).get('sceneimpl') || 'rust';",
-  "? requested : 'rust';",
+  "implementationFromRoute(\n  initialBrowserParams, 'sceneimpl', 'rust',\n)",
   "sceneimpl: 'rust'",
   'rustAppShadow.extractActivePresentationScene(',
   'JSON.stringify(presentationBindings)',
@@ -172,8 +195,7 @@ for (const sceneExtractionStep of [
   );
 }
 for (const assetAuthorityStep of [
-  "const requested = new URLSearchParams(location.search).get('assetimpl') || 'rust';",
-  "? requested : 'rust';",
+  "implementationFromRoute(\n  initialBrowserParams, 'assetimpl', 'rust',\n)",
   "assetimpl: 'rust'",
   "RUST_ASSET_IMPLEMENTATION !== 'js'",
   'EXPLICIT_RUST_APP_SHADOW_ENABLED',
