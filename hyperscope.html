@@ -381,6 +381,8 @@ import init, {
   mr_setPresentationNodeStates, mr_setAuthoredNodeTransforms, mr_sourceFocusBounds,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
   mr_attachSurfaceWalk, mr_stepSurfaceWalk, mr_transportSurfaceWalkReflection,
+  mr_attachSurfaceCameraAnchor, mr_stepSurfaceCameraAnchor,
+  mr_transportSurfaceCameraAnchorReflection, mr_detachSurfaceCameraAnchor,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere, mr_debugFocusState,
   mr_debugResidentLodEdges,
   required_tessellation_atlas_triples,
@@ -1309,6 +1311,11 @@ const manualCameraBasisState = new Float64Array(9);
 let manualCameraBasisReady = false;
 let manualCameraInputRevision = 0;
 
+function markManualCameraInput() {
+  manualCameraInputRevision += 1;
+  return manualCameraInputRevision;
+}
+
 function setManualCameraBasisFromEuler() {
   const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
   const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
@@ -1346,7 +1353,7 @@ function syncManualCameraEuler() {
 function rotateManualCameraAboutAxis(axisX, axisY, axisZ, angle) {
   const axisLength = Math.hypot(axisX, axisY, axisZ);
   if (axisLength < 1e-12 || Math.abs(angle) < 1e-12) return;
-  manualCameraInputRevision += 1;
+  markManualCameraInput();
   const x = axisX / axisLength, y = axisY / axisLength, z = axisZ / axisLength;
   const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
   const m00 = t*x*x+c,   m01 = t*x*y-s*z, m02 = t*x*z+s*y;
@@ -3317,6 +3324,14 @@ const surfaceWalk = {
 };
 globalThis.__hyperscopeSurfaceWalk = surfaceWalk;
 
+const surfaceCameraAnchor = {
+  active: false,
+  snapshot: null,
+  inputRevision: null,
+  error: null,
+};
+globalThis.__hyperscopeSurfaceCameraAnchor = surfaceCameraAnchor;
+
 const surfaceWalkRustShadow = {
   enabled: SURFACE_WALK_IMPLEMENTATION !== 'js',
   authority: SURFACE_WALK_IMPLEMENTATION,
@@ -3362,6 +3377,53 @@ function surfaceWalkRustCamera(frame = activeCameraFrame()) {
       10000,
     ]),
   };
+}
+
+function surfaceCameraAnchorSemanticTarget() {
+  return manualCameraSemanticTargetEnabled
+    ? new Float64Array([panX, panY, panZ])
+    : new Float64Array(0);
+}
+
+function attachSurfaceCameraAnchor(picked, startFrame) {
+  try {
+    const camera = surfaceWalkRustCamera(startFrame);
+    const snapshot = mr_attachSurfaceCameraAnchor(
+      picked.face,
+      new Float64Array(picked.barycentric),
+      camera.eye,
+      camera.forward,
+      camera.up,
+      camera.parameters,
+      surfaceCameraAnchorSemanticTarget(),
+    );
+    return updateSurfaceCameraAnchorSnapshot(snapshot);
+  } catch (error) {
+    surfaceCameraAnchor.error = error?.message || String(error);
+    selectionLabel(`Surface camera anchor failed · ${surfaceCameraAnchor.error}`);
+    return false;
+  }
+}
+
+function stepSurfaceCameraAnchor() {
+  if (!surfaceCameraAnchor.active) return false;
+  try {
+    const camera = surfaceWalkRustCamera();
+    const snapshot = mr_stepSurfaceCameraAnchor(
+      camera.eye,
+      camera.forward,
+      camera.up,
+      camera.parameters,
+      surfaceCameraAnchorSemanticTarget(),
+      surfaceCameraAnchor.inputRevision !== manualCameraInputRevision,
+    );
+    return updateSurfaceCameraAnchorSnapshot(snapshot);
+  } catch (error) {
+    detachSurfaceCameraAnchor(
+      `Surface camera anchor detached · ${error?.message || String(error)}`,
+    );
+    return false;
+  }
 }
 
 function attachSurfaceWalkRustShadow(picked, startFrame) {
@@ -3650,20 +3712,34 @@ function applyManualCameraFrame(frame) {
   manualCameraBasisState.set(frame.basis);
   manualCameraBasisReady = true;
   zoom = Math.max(0.1, Number(frame.controlDistance) || zoom);
-  panX = frame.eye[0] + frame.basis[6] * zoom;
-  panY = frame.eye[1] + frame.basis[7] * zoom;
-  panZ = frame.eye[2] + frame.basis[8] * zoom;
+  const semanticTarget = frame.semanticTarget == null
+    ? null : Array.from(frame.semanticTarget, Number);
+  const hasSemanticTarget = semanticTarget?.length === 3
+    && semanticTarget.every(Number.isFinite);
+  if (hasSemanticTarget) {
+    panX = semanticTarget[0];
+    panY = semanticTarget[1];
+    panZ = semanticTarget[2];
+  } else {
+    panX = frame.eye[0] + frame.basis[6] * zoom;
+    panY = frame.eye[1] + frame.basis[7] * zoom;
+    panZ = frame.eye[2] + frame.basis[8] * zoom;
+  }
+  manualCameraSemanticTargetEnabled = Boolean(hasSemanticTarget);
   syncManualCameraEuler();
   return true;
 }
 
-function claimManualCameraFromActiveView() {
+function claimManualCameraFromActiveView({ preserveSemanticTarget = false } = {}) {
+  const retainSemanticTarget = preserveSemanticTarget
+    && !authoredCamera
+    && manualCameraSemanticTargetEnabled;
   const frame = activeCameraFrame();
   if (!applyManualCameraFrame(frame)) return null;
   // An authored point target may coincide with a newly selected inversion
   // center, which maps to the pole. Preserve the visible line-of-sight tangent
   // instead when direct interaction transfers camera authority to the user.
-  manualCameraSemanticTargetEnabled = false;
+  manualCameraSemanticTargetEnabled = retainSemanticTarget;
   authoredCamera = null;
   return frame;
 }
@@ -3920,6 +3996,69 @@ function applyRustSurfaceWalkCamera(snapshot) {
   surfaceWalk.anchorTransition = null;
   snapshot.eye_position = eye.slice();
   return true;
+}
+
+function applyRustSurfaceCameraAnchor(snapshot) {
+  const camera = snapshot?.camera;
+  const vector = value => {
+    const result = value == null ? null : Array.from(value, Number);
+    return result?.length === 3 && result.every(Number.isFinite) ? result : null;
+  };
+  const eye = vector(camera?.eye);
+  const right = vector(camera?.right);
+  const up = vector(camera?.up);
+  const forward = vector(camera?.forward);
+  const semanticTarget = camera?.semantic_target == null
+    ? null : vector(camera.semantic_target);
+  if (!eye || !right || !up || !forward || !Number.isFinite(camera?.control_distance)) {
+    return false;
+  }
+  if (!applyManualCameraFrame({
+    eye,
+    basis: [...right, ...up, ...forward],
+    controlDistance: camera.control_distance,
+    semanticTarget,
+  })) return false;
+  surfaceCameraAnchor.inputRevision = manualCameraInputRevision;
+  return true;
+}
+
+function updateSurfaceCameraAnchorSnapshot(snapshot) {
+  if (!snapshot || snapshot.status !== 'attached') {
+    surfaceCameraAnchor.active = false;
+    surfaceCameraAnchor.snapshot = snapshot || null;
+    surfaceCameraAnchor.inputRevision = null;
+    surfaceCameraAnchor.error = snapshot?.error || snapshot?.detach_reason || 'surface unavailable';
+    selectionLabel(`Surface camera anchor detached · ${surfaceCameraAnchor.error}`);
+    return false;
+  }
+  if (!applyRustSurfaceCameraAnchor(snapshot)) {
+    mr_detachSurfaceCameraAnchor();
+    surfaceCameraAnchor.active = false;
+    surfaceCameraAnchor.snapshot = null;
+    surfaceCameraAnchor.inputRevision = null;
+    surfaceCameraAnchor.error = 'invalid camera frame';
+    selectionLabel('Surface camera anchor detached · invalid camera frame');
+    return false;
+  }
+  surfaceCameraAnchor.active = true;
+  surfaceCameraAnchor.snapshot = snapshot;
+  surfaceCameraAnchor.error = null;
+  selectionLabel(
+    `Surface camera anchor · node ${snapshot.node} face ${snapshot.face}`
+      + ' · ordinary camera controls remain surface-relative'
+      + ' · Shift+right-click another surface or empty space to detach',
+  );
+  return true;
+}
+
+function detachSurfaceCameraAnchor(message = 'Surface camera anchor detached') {
+  if (surfaceCameraAnchor.active) mr_detachSurfaceCameraAnchor();
+  surfaceCameraAnchor.active = false;
+  surfaceCameraAnchor.snapshot = null;
+  surfaceCameraAnchor.inputRevision = null;
+  surfaceCameraAnchor.error = null;
+  selectionLabel(message);
 }
 
 function updateSurfaceWalkSnapshot(snapshot, { orient = true, deltaSeconds = 0 } = {}) {
@@ -4362,17 +4501,32 @@ canvas.addEventListener('click', e => {
 
 canvas.addEventListener('contextmenu', e => {
   e.preventDefault();
-  const startFrame = claimManualCameraFromActiveView();
+  const fixedAnchorRequested = e.shiftKey;
+  const startFrame = claimManualCameraFromActiveView({
+    preserveSemanticTarget: fixedAnchorRequested,
+  });
   if (!startFrame) return;
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
   const picked = pickSurfaceAtCanvasPixel(x, y);
   if (!picked?.barycentric) {
-    if (surfaceWalk.active) detachSurfaceWalk();
-    else selectionLabel('No walkable surface under pointer');
+    if (fixedAnchorRequested && surfaceCameraAnchor.active) detachSurfaceCameraAnchor();
+    else if (!fixedAnchorRequested && surfaceWalk.active) detachSurfaceWalk();
+    else selectionLabel(fixedAnchorRequested
+      ? 'No anchorable surface under pointer'
+      : 'No walkable surface under pointer');
     return;
   }
+  if (fixedAnchorRequested) {
+    if (surfaceWalk.active) detachSurfaceWalk();
+    if (attachSurfaceCameraAnchor(picked, startFrame)) {
+      mr_highlightFace(picked.face);
+      debouncedLodRecompute();
+    }
+    return;
+  }
+  if (surfaceCameraAnchor.active) detachSurfaceCameraAnchor();
   const snapshot = mr_attachSurface(
     picked.face,
     new Float32Array(picked.barycentric),
@@ -4415,6 +4569,7 @@ window.addEventListener('mousemove', e => {
     panX -= (dx * basis[0] + dy * basis[3]) * s;
     panY -= (dx * basis[1] + dy * basis[4]) * s;
     panZ -= (dx * basis[2] + dy * basis[5]) * s;
+    if (dx !== 0 || dy !== 0) markManualCameraInput();
   } else {
     // Mouse drag remains an orbit about the target: world-up yaw followed by
     // camera-local pitch. The persistent basis keeps working after SpaceMouse
@@ -4457,6 +4612,10 @@ window.addEventListener('keydown', e => {
   }
   if (e.key === 'Escape' && surfaceWalk.active) {
     detachSurfaceWalk();
+    return;
+  }
+  if (e.key === 'Escape' && surfaceCameraAnchor.active) {
+    detachSurfaceCameraAnchor();
     return;
   }
   if (e.key === 'Escape' && selectedObject) {
@@ -4503,6 +4662,7 @@ canvas.addEventListener('wheel', e => {
     syncURL();
     return;
   }
+  markManualCameraInput();
   zoom *= e.deltaY > 0 ? 1.1 : 0.9;
   zoom = Math.max(0.1, Math.min(100, zoom));
   clearTimeout(camDebounce);
@@ -4643,6 +4803,41 @@ function transportSurfaceWalkRustReflection(previous, next) {
   }
 }
 
+function transportSurfaceCameraAnchorRustReflection(previous, next, transportedCamera) {
+  if (!surfaceCameraAnchor.active) return true;
+  if (!transportedCamera?.eye || !transportedCamera?.basis) return false;
+  const previousCenter = new Float64Array(previous.enabled ? previous.center : [0, 0, 0]);
+  const nextCenter = new Float64Array(next.enabled ? next.center : [0, 0, 0]);
+  try {
+    const accepted = mr_transportSurfaceCameraAnchorReflection(
+      previous.enabled,
+      previousCenter,
+      previous.enabled ? previous.radius : 1,
+      next.enabled,
+      nextCenter,
+      next.enabled ? next.radius : 1,
+      new Float64Array(transportedCamera.eye),
+      new Float64Array(transportedCamera.basis.slice(6, 9)),
+      new Float64Array(transportedCamera.basis.slice(3, 6)),
+      new Float64Array([
+        transportedCamera.orbitDistance,
+        cameraFovRadians(),
+        cameraNearPlane(),
+        10000,
+      ]),
+      manualCameraSemanticTargetEnabled
+        ? new Float64Array(transportedCamera.target)
+        : new Float64Array(0),
+    );
+    if (!accepted) throw new Error('Rust camera anchor was not attached');
+    return true;
+  } catch (error) {
+    surfaceCameraAnchor.error = error?.message || String(error);
+    console.warn(`Surface camera-anchor reflection transport skipped: ${surfaceCameraAnchor.error}`);
+    return false;
+  }
+}
+
 function transportManualCamera(previous, next) {
   if (!previous || sameManualReflection(previous, next)) {
     return { accepted: true, cameraTransported: false };
@@ -4704,6 +4899,10 @@ function transportManualCamera(previous, next) {
     if (!transportSurfaceWalkRustReflection(previous, next)) {
       return { accepted: false, cameraTransported: false };
     }
+  }
+  if (surfaceCameraAnchor.active
+      && !transportSurfaceCameraAnchorRustReflection(previous, next, transportedCamera)) {
+    return { accepted: false, cameraTransported: false };
   }
 
   if (transportedSurfaceFollower) {
@@ -6805,6 +7004,7 @@ function frame(ts) {
     let moving = false;
     for (let axis = 0; axis < 6; axis++) moving ||= spaceMouseAxes[axis] !== 0;
     if (moving) {
+      if (spaceMouseMode === 'camera' && !walkingSpaceMouse) markManualCameraInput();
       const basis = manualCameraBasis(inputCameraBasis);
       const translating = Math.abs(navigationAxes[0]) + Math.abs(navigationAxes[1])
         + Math.abs(navigationAxes[2]) > 1e-5;
@@ -7064,6 +7264,8 @@ function frame(ts) {
     syncURL();
   }
 
+  if (surfaceCameraAnchor.active) stepSurfaceCameraAnchor();
+
   if (surfaceWalk.active && deltaSeconds > 0) {
     const basis = manualCameraBasis(inputCameraBasis);
     const normal = surfaceNormalize(Array.from(surfaceWalk.snapshot?.output_normal || []));
@@ -7299,6 +7501,9 @@ async function finishModelUpload(
   });
   clearSelectedObject();
   if (surfaceWalk.active) detachSurfaceWalk('Surface walk detached · model changed');
+  if (surfaceCameraAnchor.active) {
+    detachSurfaceCameraAnchor('Surface camera anchor detached · model changed');
+  }
 
   // A static model must not inherit joint/morph counts or textures from the
   // animated model that preceded it.

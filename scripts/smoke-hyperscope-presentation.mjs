@@ -138,6 +138,20 @@ for (const requiredAnimationAdapterStep of [
   );
 }
 
+for (const requiredAnimatedAnchorStep of [
+  'mr_attachSurfaceCameraAnchor',
+  'mr_stepSurfaceCameraAnchor',
+  'mr_transportSurfaceCameraAnchorReflection',
+  'fixedAnchorRequested = e.shiftKey',
+  'surfaceCameraAnchor.inputRevision !== manualCameraInputRevision',
+  'ordinary camera controls remain surface-relative',
+]) {
+  assert.ok(
+    browserSource.includes(requiredAnimatedAnchorStep),
+    `hyperscope browser adapter is missing animated-anchor step: ${requiredAnimatedAnchorStep}`,
+  );
+}
+
 for (const requiredAuthorityStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'presentimpl', 'rust',\n)",
   "presentimpl: 'rust'",
