@@ -39,8 +39,10 @@ pub use navigation::{
     TransitionEasing,
 };
 pub use packed_scene::{
-    extract_packed_scene, PackedAssetInstance, PackedNodeSource, PackedNodeTransform,
-    PackedNodeTransformSource, PackedSceneError, PackedSceneExtraction,
+    extract_packed_presentation_scene, extract_packed_scene, PackedAssetInstance,
+    PackedNodeSource, PackedNodeTransform, PackedNodeTransformSource,
+    PackedPresentationLayerBinding, PackedPresentationNode, PackedPresentationSceneError,
+    PackedPresentationSceneExtraction, PackedSceneError, PackedSceneExtraction,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{

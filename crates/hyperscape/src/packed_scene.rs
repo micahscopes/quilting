@@ -7,7 +7,7 @@
 //! matrix for that entity, then the presentation layer remains the outermost
 //! affine transform. Conformal frame extraction is deliberately separate.
 
-use crate::LayerTransform;
+use crate::{LayerTransform, PresentationSnapshot};
 use hyperscape_protocol::{AssetEntityId, AssetId, EntityId, WireTransform};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -36,6 +36,18 @@ pub struct PackedAssetInstance {
     pub nodes: Vec<PackedNodeSource>,
 }
 
+/// Renderer-resident node metadata bound to one active presentation layer.
+///
+/// The adapter supplies only identities and backend-local handles. Layer TRS,
+/// visibility, and opacity are resolved from the active Rust presentation
+/// snapshot and therefore cannot be overridden by this binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedPresentationLayerBinding {
+    pub layer: Uuid,
+    pub asset: AssetId,
+    pub nodes: Vec<PackedNodeSource>,
+}
+
 /// Which ordinary source transform supplied an extracted node matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackedNodeTransformSource {
@@ -56,11 +68,35 @@ pub struct PackedNodeTransform {
     pub matrix: [f32; 16],
 }
 
+/// One backend-neutral node record for the active presentation composition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedPresentationNode {
+    pub layer: Uuid,
+    pub asset: AssetId,
+    pub packed_node: u32,
+    pub source_node: u32,
+    pub identity: Option<AssetEntityId>,
+    pub source: PackedNodeTransformSource,
+    pub matrix: [f32; 16],
+    pub visible: bool,
+    /// Effective renderer opacity. Invisible layers resolve to zero.
+    pub opacity: f32,
+}
+
 /// Deterministic extraction plus edits that have no resident node yet.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PackedSceneExtraction {
     /// Sorted by scene-wide packed node handle.
     pub nodes: Vec<PackedNodeTransform>,
+    /// Sorted durable entity IDs with no binding in the current packed scene.
+    pub unmatched_authored_entities: Vec<EntityId>,
+}
+
+/// Deterministic active-cue composition plus unbound authored edits.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PackedPresentationSceneExtraction {
+    /// Sorted by scene-wide renderer handle.
+    pub nodes: Vec<PackedPresentationNode>,
     /// Sorted durable entity IDs with no binding in the current packed scene.
     pub unmatched_authored_entities: Vec<EntityId>,
 }
@@ -139,6 +175,176 @@ impl fmt::Display for PackedSceneError {
 }
 
 impl Error for PackedSceneError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackedPresentationSceneError {
+    DuplicateLayerState(Uuid),
+    InvalidLayerAsset {
+        layer: Uuid,
+        asset: Uuid,
+    },
+    InvalidLayerOpacity(Uuid),
+    UnknownLayerBinding(Uuid),
+    DuplicateLayerBinding(Uuid),
+    MissingLayerBinding(Uuid),
+    LayerAssetMismatch {
+        layer: Uuid,
+        expected: AssetId,
+        actual: AssetId,
+    },
+    Scene(PackedSceneError),
+}
+
+impl fmt::Display for PackedPresentationSceneError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateLayerState(layer) => {
+                write!(formatter, "active presentation repeats layer {layer}")
+            }
+            Self::InvalidLayerAsset { layer, asset } => write!(
+                formatter,
+                "active presentation layer {layer} has invalid asset {asset}"
+            ),
+            Self::InvalidLayerOpacity(layer) => write!(
+                formatter,
+                "active presentation layer {layer} opacity must be finite and in [0,1]"
+            ),
+            Self::UnknownLayerBinding(layer) => {
+                write!(
+                    formatter,
+                    "renderer bound inactive presentation layer {layer}"
+                )
+            }
+            Self::DuplicateLayerBinding(layer) => {
+                write!(
+                    formatter,
+                    "renderer repeated presentation layer binding {layer}"
+                )
+            }
+            Self::MissingLayerBinding(layer) => {
+                write!(
+                    formatter,
+                    "renderer omitted active presentation layer {layer}"
+                )
+            }
+            Self::LayerAssetMismatch {
+                layer,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "renderer bound presentation layer {layer} to asset {actual}; expected {expected}"
+            ),
+            Self::Scene(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for PackedPresentationSceneError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Scene(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<PackedSceneError> for PackedPresentationSceneError {
+    fn from(error: PackedSceneError) -> Self {
+        Self::Scene(error)
+    }
+}
+
+/// Resolve an active presentation snapshot against renderer-resident nodes.
+///
+/// The active snapshot is the only source of layer transform, visibility, and
+/// opacity. Bindings merely join stable layer/asset identity to process-local
+/// packed node handles. Every active layer must be bound exactly once; an
+/// adapter may bind repeated instances of the same asset as long as their
+/// packed node handles are distinct.
+pub fn extract_packed_presentation_scene(
+    snapshot: &PresentationSnapshot,
+    bindings: &[PackedPresentationLayerBinding],
+    authored_transforms: &BTreeMap<EntityId, WireTransform>,
+) -> Result<PackedPresentationSceneExtraction, PackedPresentationSceneError> {
+    let mut active_layers = BTreeMap::new();
+    for layer in &snapshot.layers {
+        if active_layers.insert(layer.id, layer).is_some() {
+            return Err(PackedPresentationSceneError::DuplicateLayerState(layer.id));
+        }
+        if !layer.opacity.is_finite() || !(0.0..=1.0).contains(&layer.opacity) {
+            return Err(PackedPresentationSceneError::InvalidLayerOpacity(layer.id));
+        }
+    }
+
+    let mut bound_layers = BTreeSet::new();
+    let mut instances = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        if !bound_layers.insert(binding.layer) {
+            return Err(PackedPresentationSceneError::DuplicateLayerBinding(
+                binding.layer,
+            ));
+        }
+        let layer = active_layers.get(&binding.layer).ok_or(
+            PackedPresentationSceneError::UnknownLayerBinding(binding.layer),
+        )?;
+        let expected = AssetId::new(layer.asset).map_err(|_| {
+            PackedPresentationSceneError::InvalidLayerAsset {
+                layer: layer.id,
+                asset: layer.asset,
+            }
+        })?;
+        if binding.asset != expected {
+            return Err(PackedPresentationSceneError::LayerAssetMismatch {
+                layer: binding.layer,
+                expected,
+                actual: binding.asset,
+            });
+        }
+        instances.push(PackedAssetInstance {
+            layer: binding.layer,
+            asset: binding.asset,
+            layer_transform: layer.transform,
+            nodes: binding.nodes.clone(),
+        });
+    }
+    if let Some((&layer, _)) = active_layers
+        .iter()
+        .find(|(layer, _)| !bound_layers.contains(layer))
+    {
+        return Err(PackedPresentationSceneError::MissingLayerBinding(layer));
+    }
+
+    let extraction = extract_packed_scene(&instances, authored_transforms)?;
+    let nodes = extraction
+        .nodes
+        .into_iter()
+        .map(|node| {
+            let layer = active_layers
+                .get(&node.layer)
+                .expect("validated packed instance must reference an active layer");
+            PackedPresentationNode {
+                layer: node.layer,
+                asset: node.asset,
+                packed_node: node.packed_node,
+                source_node: node.source_node,
+                identity: node.identity,
+                source: node.source,
+                matrix: node.matrix,
+                visible: layer.visible,
+                opacity: if layer.visible {
+                    layer.opacity as f32
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+    Ok(PackedPresentationSceneExtraction {
+        nodes,
+        unmatched_authored_entities: extraction.unmatched_authored_entities,
+    })
+}
 
 /// Resolve ordinary node matrices without mutating ECS, application, or
 /// renderer state.
@@ -414,6 +620,49 @@ mod tests {
         }
     }
 
+    fn presentation_layer(
+        layer_id: u128,
+        asset_id: u128,
+        visible: bool,
+        opacity: f64,
+    ) -> crate::PresentationLayerState {
+        crate::PresentationLayerState {
+            id: layer(layer_id),
+            name: format!("layer-{layer_id}"),
+            asset: asset(asset_id).as_uuid(),
+            transform: LayerTransform::default(),
+            visible,
+            opacity,
+        }
+    }
+
+    fn presentation_snapshot(layers: Vec<crate::PresentationLayerState>) -> PresentationSnapshot {
+        PresentationSnapshot {
+            cue_index: 0,
+            cue_id: layer(100),
+            scene_id: layer(101),
+            view_id: layer(102),
+            text: None,
+            required_assets: Vec::new(),
+            layers,
+            animations: Vec::new(),
+            overlays: Vec::new(),
+            tessellation: crate::PresentationTessellation::default(),
+        }
+    }
+
+    fn presentation_binding(
+        layer_id: u128,
+        asset_id: u128,
+        nodes: Vec<PackedNodeSource>,
+    ) -> PackedPresentationLayerBinding {
+        PackedPresentationLayerBinding {
+            layer: layer(layer_id),
+            asset: asset(asset_id),
+            nodes,
+        }
+    }
+
     fn assert_matrix_close(actual: [f32; 16], expected: [f32; 16]) {
         for (index, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
             assert!(
@@ -518,6 +767,122 @@ mod tests {
         assert!(extraction.nodes.iter().all(|node| {
             node.source == PackedNodeTransformSource::AuthoredAbsolute && node.matrix[12] == 8.0
         }));
+    }
+
+    #[test]
+    fn active_presentation_owns_layer_transform_visibility_and_opacity() {
+        let edited = entity(50);
+        let mut foreground = presentation_layer(11, 20, true, 0.25);
+        foreground.transform.translation = [10.0, 0.0, 0.0];
+        foreground.transform.scale = [2.0, 1.0, 1.0];
+        let mut hidden = presentation_layer(12, 21, false, 0.75);
+        hidden.transform.translation = [-4.0, 0.0, 0.0];
+        let snapshot = presentation_snapshot(vec![foreground, hidden]);
+        let bindings = vec![
+            presentation_binding(12, 21, vec![source(9, 1, None)]),
+            presentation_binding(11, 20, vec![source(3, 0, Some(edited))]),
+        ];
+        let authored = BTreeMap::from([(
+            edited,
+            WireTransform {
+                translation: [1.0, 2.0, 3.0],
+                rotation_wxyz: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0; 3],
+            },
+        )]);
+
+        let extraction =
+            extract_packed_presentation_scene(&snapshot, &bindings, &authored).unwrap();
+
+        assert_eq!(
+            extraction
+                .nodes
+                .iter()
+                .map(|node| node.packed_node)
+                .collect::<Vec<_>>(),
+            vec![3, 9]
+        );
+        assert_eq!(
+            extraction.nodes[0].source,
+            PackedNodeTransformSource::AuthoredAbsolute
+        );
+        assert_matrix_close(
+            extraction.nodes[0].matrix,
+            [
+                2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 12.0, 2.0, 3.0, 1.0,
+            ],
+        );
+        assert!(extraction.nodes[0].visible);
+        assert_eq!(extraction.nodes[0].opacity, 0.25);
+        assert!(!extraction.nodes[1].visible);
+        assert_eq!(extraction.nodes[1].opacity, 0.0);
+        assert_eq!(extraction.nodes[1].matrix[12], -4.0);
+        assert!(extraction.unmatched_authored_entities.is_empty());
+    }
+
+    #[test]
+    fn presentation_bindings_support_repeated_assets_with_distinct_handles() {
+        let snapshot = presentation_snapshot(vec![
+            presentation_layer(11, 20, true, 1.0),
+            presentation_layer(12, 20, true, 0.5),
+        ]);
+        let bindings = vec![
+            presentation_binding(11, 20, vec![source(1, 0, None)]),
+            presentation_binding(12, 20, vec![source(2, 0, None)]),
+        ];
+
+        let extraction =
+            extract_packed_presentation_scene(&snapshot, &bindings, &BTreeMap::new()).unwrap();
+
+        assert_eq!(extraction.nodes.len(), 2);
+        assert_eq!(extraction.nodes[0].layer, layer(11));
+        assert_eq!(extraction.nodes[1].layer, layer(12));
+        assert_eq!(extraction.nodes[0].opacity, 1.0);
+        assert_eq!(extraction.nodes[1].opacity, 0.5);
+    }
+
+    #[test]
+    fn presentation_bindings_reject_missing_duplicate_unknown_and_wrong_assets() {
+        let snapshot = presentation_snapshot(vec![presentation_layer(11, 20, true, 1.0)]);
+
+        assert_eq!(
+            extract_packed_presentation_scene(&snapshot, &[], &BTreeMap::new()).unwrap_err(),
+            PackedPresentationSceneError::MissingLayerBinding(layer(11))
+        );
+        assert_eq!(
+            extract_packed_presentation_scene(
+                &snapshot,
+                &[
+                    presentation_binding(11, 20, vec![]),
+                    presentation_binding(11, 20, vec![]),
+                ],
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            PackedPresentationSceneError::DuplicateLayerBinding(layer(11))
+        );
+        assert_eq!(
+            extract_packed_presentation_scene(
+                &snapshot,
+                &[presentation_binding(12, 20, vec![])],
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            PackedPresentationSceneError::UnknownLayerBinding(layer(12))
+        );
+        assert_eq!(
+            extract_packed_presentation_scene(
+                &snapshot,
+                &[presentation_binding(11, 21, vec![])],
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            PackedPresentationSceneError::LayerAssetMismatch {
+                layer: layer(11),
+                expected: asset(20),
+                actual: asset(21),
+            }
+        );
     }
 
     #[test]
