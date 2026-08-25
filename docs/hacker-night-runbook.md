@@ -27,8 +27,11 @@ node extraction while retaining the incumbent renderer path, or explicitly use
 `sceneimpl=rust` for the measured authority path. Inspect
 `globalThis.__hyperscopeSceneExtraction`: a healthy loaded fixture reports
 `state` as `observing` or `authoritative`, no fallback, no mismatches, and an
-empty unmatched-entity list. `sceneimpl=js` is the immediate rollback and is
-the default.
+empty unmatched-entity list. `lastCue` must equal the presentation cue,
+`semanticMismatches` must be zero, and `maximumOpacityError` should remain at
+or below `1e-6`. The adapter sends only layer/asset identity and resident node
+metadata; Rust owns layer TRS, visibility, opacity, and authored overrides.
+`sceneimpl=js` is the immediate rollback and is the default.
 
 Use `presentimpl=shadow` to compare the standalone presentation controller with
 the application reducer while retaining the established renderer path. Use

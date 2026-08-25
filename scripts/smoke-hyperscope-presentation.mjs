@@ -73,12 +73,30 @@ for (const requiredAuthorityStep of [
   'rustPresentationManifest = appPresentationManifest(refreshAppShadowSnapshot());',
   'const result = dispatchAppPresentation(direction, cueId);',
   'navigation = appFrame?.navigation || rustAppShadow.navigationSnapshot();',
+  'rustAppShadow.extractActivePresentationScene(',
+  'const presentationBindings = [];',
+  'const semantics = resolved.semanticNodes.get(state.node);',
 ]) {
   assert.ok(
     browserSource.includes(requiredAuthorityStep),
     `browser presentation authority gate is missing ${requiredAuthorityStep}`,
   );
 }
+
+const presentationBindingAdapter = browserSource.slice(
+  browserSource.indexOf('const presentationBinding = layer ? {'),
+  browserSource.indexOf('} : null;', browserSource.indexOf('const presentationBinding = layer ? {')),
+);
+assert.ok(!presentationBindingAdapter.includes('layerTransform'));
+const activationAdapter = browserSource.slice(
+  browserSource.indexOf('function activateRustPresentation('),
+  browserSource.indexOf('async function initializeRustPresentation('),
+);
+assert.ok(
+  activationAdapter.indexOf('mirrorAppPresentation(direction, cueId, snapshot)')
+    < activationAdapter.indexOf('renderRustPresentationSnapshot(snapshot)'),
+  'AppStore cue authority must commit before active-scene extraction during rendering',
+);
 
 const layerAdapter = browserSource.slice(
   browserSource.indexOf('function applyPresentationLayerState('),

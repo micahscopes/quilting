@@ -181,14 +181,20 @@ The first application boundary is now explicit:
   boundaries is rejected because the current command carries no asset ID.
   Unmatched valid edits remain explicit so a later-resident asset can converge.
 - Generated WASM exposes that join through the application facade, consuming
-  the app's accepted authored projection rather than a socket-local cache. The
-  browser has a canonical `sceneimpl=js|shadow|rust` rollback gate. `shadow`
-  compares only glTF fallback matrices while retaining JavaScript authority;
-  authored absolute edits are counted as intentional overrides. `rust` feeds
-  Rust matrices into both presentation node state and LOD state, falling back
-  visibly on extraction failure. The join runs on low-rate layer/scene changes
-  over node records, never per face or per animation frame. Diagnostics live at
-  `globalThis.__hyperscopeSceneExtraction`.
+  the app's active cue and accepted authored projection rather than a
+  socket-local or browser-semantic cache. The browser supplies only stable
+  layer/asset identity plus renderer-local node/source metadata; AppStore
+  samples cue, authored projection, and application revision under one lock
+  and Rust supplies layer TRS, effective visibility/opacity, and sorted node
+  matrices. Unknown, missing, duplicate, mismatched, or semantic-bearing
+  bindings fail atomically. The browser has a canonical
+  `sceneimpl=js|shadow|rust` rollback gate. `shadow` compares fallback matrices
+  and layer render state while retaining JavaScript authority; authored
+  absolute edits are counted as intentional overrides. `rust` feeds Rust
+  matrices and layer state into both presentation rendering and LOD state,
+  falling back visibly on extraction failure. The join runs on low-rate
+  layer/scene changes over node records, never per face or per animation frame.
+  Diagnostics live at `globalThis.__hyperscopeSceneExtraction`.
 - The direct local-peer ingress is transport neutral and explicitly
   single-writer. `LocalPeerEnvelope` has disjoint `authored` and `presence`
   variants; application ingress turns only validated authored frames into

@@ -58,8 +58,10 @@ for (const authorityStep of [
 }
 for (const sceneExtractionStep of [
   "const requested = new URLSearchParams(location.search).get('sceneimpl') || 'js';",
-  'rustAppShadow.extractPackedScene(JSON.stringify(packedInstances))',
+  'rustAppShadow.extractActivePresentationScene(',
+  'JSON.stringify(presentationBindings)',
   "rustNode.source === 'authored_absolute'",
+  'semanticNodes.set(node, {',
   "RUST_SCENE_IMPLEMENTATION === 'rust'",
   "rustSceneExtractionDiagnostics.state = 'fallback';",
 ]) {

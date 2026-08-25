@@ -1497,3 +1497,34 @@ release artifact built successfully and ordinary offline preflight returned
 manifest/cue equality and cadence-invariant transition state without a DOM or
 GPU. The default remains `js` until the Rust-authority URL is visually and
 temporally rechecked in the target Chrome renderer.
+
+## Active presentation composition authority
+
+The second packed-scene slice removes semantic layer input from the browser
+join. `PackedPresentationLayerBinding` contains only layer/asset identity and
+renderer-resident node metadata. Rust validates every active layer exactly
+once against `PresentationSnapshot`, applies cue-owned TRS/visibility/opacity,
+then composes the accepted authored absolute transform under the outer layer.
+`AppStore::extract_active_presentation_scene` samples the application revision,
+active cue/scene, and authored projection under one lock without publishing a
+signal or mutating state. The generated WASM input rejects unknown fields, so
+an adapter cannot smuggle a `layerTransform` through the binding.
+
+Eight focused Hyperscape cases cover authoritative transform/render state,
+repeated assets with distinct renderer handles, sorted output, authored
+replacement, and missing/duplicate/unknown/mismatched bindings. The
+application suite proves a coherent non-mutating read; generated WASM proves
+exact decimal revision fences, active cue/scene identity, authored replacement,
+effective visibility/opacity, semantic-input rejection, and atomic failure.
+The browser comparison now checks both matrices and layer render state and
+commits a shadow AppStore cue before rendering it, preventing extraction of a
+new browser cue against the previous application cue.
+
+The checkpoint passed 98 Hyperscape tests, 52 replay-enabled application
+tests, 55 browser-adapter tests, five generated-WASM tests, strict native
+Clippy, warning-free native rustdoc, and the presentation, route, application,
+render-shadow, and surface-walk smokes. An isolated release build passed
+offline preflight with identical source/build fingerprint
+`c1ab30d96589b0ad1b8abe69baf94082`. Target-Chrome visual timing remains a
+separate cutover gate; renderer-wide wasm32 Clippy still reports the same 42
+pre-existing warnings outside this composition boundary.

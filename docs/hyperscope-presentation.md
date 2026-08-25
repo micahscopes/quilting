@@ -92,10 +92,15 @@ face count, active layers, pending capabilities, and failures at
 Ordinary packed-node matrix extraction has a separate rollback gate:
 `sceneimpl=js` retains the incumbent browser composition, `shadow` compares
 Rust's backend-neutral extraction without applying it, and `rust` applies the
-Rust result to both presentation rendering and LOD. The Rust boundary treats a
-durable entity transform as an absolute source-asset world TRS and keeps the
-presentation layer outermost. Its counters, matrix error, authored overrides,
-unmatched entities, revision fences, fallbacks, and bounded mismatches are at
+Rust result to both presentation rendering and LOD. The browser binding now
+contains only stable layer/asset identity and renderer-local node/source
+metadata; it cannot supply layer TRS, visibility, or opacity. AppStore samples
+the active cue, authored Blender projection, and application revision under one
+lock, validates every active layer binding exactly once, then returns sorted
+matrices plus effective visibility/opacity. A durable entity transform remains
+an absolute source-asset world TRS with the presentation layer outermost. The
+diagnostics expose cue/revision fences, matrix and opacity comparisons,
+authored overrides, unmatched entities, fallbacks, and bounded mismatches at
 `globalThis.__hyperscopeSceneExtraction`.
 
 The checked-in story follows the renderer's actual data flow rather than

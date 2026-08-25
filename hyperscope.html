@@ -1744,14 +1744,18 @@ const rustSceneExtractionDiagnostics = {
   state: RUST_SCENE_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-scene',
   calls: 0,
   comparisons: 0,
+  semanticComparisons: 0,
+  semanticMismatches: 0,
   mismatches: [],
   maximumMatrixError: 0,
+  maximumOpacityError: 0,
   authoredOverrides: 0,
   maximumAuthoredDelta: 0,
   authoritativeWrites: 0,
   fallbackWrites: 0,
   lastAppRevision: null,
   lastAuthoredProjectionRevision: null,
+  lastCue: null,
   unmatchedAuthoredEntities: [],
   lastError: null,
 };
@@ -1772,23 +1776,32 @@ function matrixMaximumAbsoluteError(left, right) {
   return error;
 }
 
-function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
+function resolvePresentationNodeMatrices(nodeStates, presentationBindings, snapshot) {
   const incumbent = new Map(nodeStates.map(state => [state.node, state.incumbentMatrix]));
   const authoredMatrices = new Map();
+  const semanticNodes = new Map();
   const localPeerAuthoritative = Boolean(localPeerRelay)
     || localPeerDiagnostics.lastProjectionRevision !== null;
   if (RUST_SCENE_IMPLEMENTATION === 'js' && !localPeerAuthoritative) {
-    return { matrices: incumbent, authoredMatrices };
+    return { matrices: incumbent, authoredMatrices, semanticNodes };
   }
   rustSceneExtractionDiagnostics.calls += 1;
   if (!rustAppShadow) {
     rustSceneExtractionDiagnostics.state = 'fallback';
     rustSceneExtractionDiagnostics.fallbackWrites += 1;
     rustSceneExtractionDiagnostics.lastError = 'Rust application boundary is unavailable';
-    return { matrices: incumbent, authoredMatrices };
+    return { matrices: incumbent, authoredMatrices, semanticNodes };
   }
   try {
-    const extraction = rustAppShadow.extractPackedScene(JSON.stringify(packedInstances));
+    const extraction = rustAppShadow.extractActivePresentationScene(
+      JSON.stringify(presentationBindings),
+    );
+    if (extraction.cueId !== snapshot?.cue_id || extraction.sceneId !== snapshot?.scene_id) {
+      throw new Error(
+        `Rust extracted cue ${extraction.cueId}/${extraction.sceneId}; `
+        + `browser requested ${snapshot?.cue_id}/${snapshot?.scene_id}`,
+      );
+    }
     const rustNodes = new Map(extraction.nodes.map(node => [node.packedNode, node]));
     const expectedNodes = nodeStates.filter(state => state.activeLayer);
     if (rustNodes.size !== expectedNodes.length) {
@@ -1802,6 +1815,23 @@ function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
         throw new Error(`Rust extraction identity diverged for packed node ${state.node}`);
       }
       const error = matrixMaximumAbsoluteError(state.incumbentMatrix, rustNode.matrix);
+      const opacityError = Math.abs(Number(state.layerOpacity) - Number(rustNode.opacity));
+      const semanticsMatch = state.layerVisible === rustNode.visible
+        && opacityError <= 1e-6;
+      rustSceneExtractionDiagnostics.semanticComparisons += 1;
+      rustSceneExtractionDiagnostics.maximumOpacityError = Math.max(
+        rustSceneExtractionDiagnostics.maximumOpacityError,
+        opacityError,
+      );
+      if (!semanticsMatch) {
+        rustSceneExtractionDiagnostics.semanticMismatches += 1;
+        recordSceneExtractionMismatch({
+          code: 'presentation_layer_state',
+          packedNode: state.node,
+          browser: { visible: state.layerVisible, opacity: state.layerOpacity },
+          rust: { visible: rustNode.visible, opacity: rustNode.opacity },
+        });
+      }
       if (rustNode.source === 'authored_absolute') {
         rustSceneExtractionDiagnostics.authoredOverrides += 1;
         rustSceneExtractionDiagnostics.maximumAuthoredDelta = Math.max(
@@ -1828,6 +1858,7 @@ function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
     rustSceneExtractionDiagnostics.lastAppRevision = extraction.appRevision;
     rustSceneExtractionDiagnostics.lastAuthoredProjectionRevision =
       extraction.authoredProjectionRevision ?? null;
+    rustSceneExtractionDiagnostics.lastCue = extraction.cueId;
     rustSceneExtractionDiagnostics.unmatchedAuthoredEntities =
       extraction.unmatchedAuthoredEntities;
     rustSceneExtractionDiagnostics.lastError = null;
@@ -1840,6 +1871,10 @@ function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
     if (RUST_SCENE_IMPLEMENTATION === 'rust' || localPeerAuthoritative) {
       for (const [node, record] of rustNodes) {
         incumbent.set(node, record.matrix);
+        semanticNodes.set(node, {
+          visible: Boolean(record.visible),
+          opacity: Number(record.opacity),
+        });
         if (record.source === 'authored_absolute') {
           authoredMatrices.set(node, record.matrix);
         }
@@ -1858,7 +1893,7 @@ function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
       message: rustSceneExtractionDiagnostics.lastError,
     });
   }
-  return { matrices: incumbent, authoredMatrices };
+  return { matrices: incumbent, authoredMatrices, semanticNodes };
 }
 
 function synchronizeRustApplicationPresentationFromBrowser() {
@@ -2107,7 +2142,7 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
   }
   const activeLayers = new Map((snapshot.layers || []).map(layer => [layer.asset, layer]));
   const nodeStates = [];
-  const packedInstances = [];
+  const presentationBindings = [];
   const identityMobius = [
     1, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 1, 0, 0, 0,
@@ -2120,16 +2155,16 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     const opacity = visible ? Math.max(0, Math.min(1, Number(layer.opacity) || 0)) : 0;
     const layerMatrix = presentationLayerMatrix(layer?.transform);
     opacityPending ||= opacity > 0 && opacity < 1;
-    const packedInstance = layer ? {
+    const presentationBinding = layer ? {
       layer: layer.id,
       asset: assetId,
-      layerTransform: layer.transform,
       nodes: [],
     } : null;
     for (const node of resident.nodes) {
       const sourceMatrix = resident.nodeWorldTransforms?.get(node);
       const matrix = sourceMatrix ? mulM4(layerMatrix, sourceMatrix) : layerMatrix;
-      const nodeVisible = visible && !resident.hiddenNodes?.has(node);
+      const hidden = resident.hiddenNodes?.has(node) || false;
+      const nodeVisible = visible && !hidden;
       const identity = packedNodeIdentities.get(node);
       nodeStates.push({
         node,
@@ -2137,12 +2172,15 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
         layerId: layer?.id || null,
         activeLayer: !!layer,
         incumbentMatrix: matrix,
+        layerVisible: visible,
+        layerOpacity: opacity,
+        hidden,
         visible: nodeVisible,
         opacity: nodeVisible ? opacity : 0,
         primary: assetId === presentationComposition.primaryAssetId,
       });
-      if (packedInstance) {
-        packedInstance.nodes.push({
+      if (presentationBinding) {
+        presentationBinding.nodes.push({
           packedNode: node,
           sourceNode: identity?.sourceNode ?? node - (resident.nodeOffset || 0),
           entityId: identity?.durable && identity.assetId === assetId
@@ -2157,16 +2195,23 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
         });
       }
     }
-    if (packedInstance) packedInstances.push(packedInstance);
+    if (presentationBinding) presentationBindings.push(presentationBinding);
   }
-  const resolved = resolvePresentationNodeMatrices(nodeStates, packedInstances);
+  const resolved = resolvePresentationNodeMatrices(
+    nodeStates,
+    presentationBindings,
+    snapshot,
+  );
   const matrices = resolved.matrices;
   const renderRecords = [];
   const lodRecords = [];
   const primaryLodRecords = [];
   for (const state of nodeStates) {
     const matrix = matrices.get(state.node) || state.incumbentMatrix;
-    renderRecords.push(state.node, state.visible ? 1 : 0, state.opacity, ...matrix);
+    const semantics = resolved.semanticNodes.get(state.node);
+    const visible = semantics ? semantics.visible && !state.hidden : state.visible;
+    const opacity = visible ? (semantics?.opacity ?? state.opacity) : 0;
+    renderRecords.push(state.node, visible ? 1 : 0, opacity, ...matrix);
     const lodRecord = [state.node, ...mobius, ...matrix];
     lodRecords.push(...lodRecord);
     if (state.primary) {
@@ -2342,12 +2387,16 @@ function activateRustPresentation(direction, cueId) {
             : rustPresentationController.jumpToPresentationCue(cueId);
       navigation = rustPresentationController.tick(0);
     }
+    // The scene extractor reads the active cue and authored projection under
+    // one AppStore lock. Mirror before rendering so shadow/Rust scene modes
+    // can never compose the newly selected browser cue against the previous
+    // application cue.
+    if (!presentationAppAuthority()) mirrorAppPresentation(direction, cueId, snapshot);
     renderRustPresentationSnapshot(snapshot);
     rustPresentationDiagnostics.error = null;
     void applyPresentationAnimationState(snapshot);
     rustPresentationTransitionActive = true;
     applyRustPresentationNavigation(navigation);
-    if (!presentationAppAuthority()) mirrorAppPresentation(direction, cueId, snapshot);
     syncURL();
     return snapshot;
   } catch (error) {
