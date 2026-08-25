@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import test from 'node:test';
 
 import {
@@ -261,4 +262,17 @@ test('start and stop abort the polling loop without persisting credentials', asy
   await relay.stop();
   assert.equal(relay.snapshot().state, 'stopped');
   assert.equal('token' in relay.snapshot(), false);
+});
+
+test('settled poll delays release their session abort listener', async () => {
+  const relay = transport();
+  relay.abortController = new AbortController();
+  for (let iteration = 0; iteration < 20; iteration += 1) {
+    await relay.delay(0);
+    assert.equal(
+      getEventListeners(relay.abortController.signal, 'abort').length,
+      0,
+      `delay ${iteration} retained an abort listener`,
+    );
+  }
 });

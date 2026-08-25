@@ -387,11 +387,17 @@ export class BrowserLocalPeerRelay {
     if (this.stopping) return;
     const signal = this.abortController?.signal;
     await new Promise(resolve => {
-      const timer = setTimeout(resolve, milliseconds);
-      signal?.addEventListener('abort', () => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
         resolve();
-      }, { once: true });
+      };
+      const timer = setTimeout(finish, milliseconds);
+      signal?.addEventListener('abort', finish, { once: true });
+      if (signal?.aborted) finish();
     });
   }
 
