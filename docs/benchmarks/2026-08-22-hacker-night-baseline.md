@@ -1560,5 +1560,35 @@ meaning and renews the presentation, navigation, and orchestration fingerprints
 to `08f7953320c733fbab99cbe12d5e81a7`,
 `2656516995573de63986647d4196c478`, and
 `0dfe524f3c0a022dc4507d51e87679fb`. Target-Chrome drag/drop timing remains a
-separate cutover check because the Chrome DevTools MCP was not exposed to this
-agent session; no Playwright substitute was used.
+separate cutover check because the Chrome DevTools MCP had not yet been
+connected to this agent at that checkpoint; no Playwright substitute was used.
+
+## Single-pass composed-scene LOD
+
+The final two-asset cue was live-checked through the installed Chrome DevTools
+MCP against an isolated optimized artifact. The Blender-authored asset is not
+outside adaptive LOD: it owns 3,268 of 4,252 resident faces, and changing
+`minpx` from 16 to 1 reclassified all 3,268 while visibly changing the floor
+and object LOD colors. The formerly ambiguous `lastLodScope` is now accompanied
+by separate scene/primary-animation counters and timestamps.
+
+The WebGL2 classifier now uploads immutable face-to-node ownership once and a
+compact ten-texel record per active node. One vertex pass selects each face's
+Möbius and Euclidean matrices before shared edge coherence. On this cue the
+full-scene workload fell from one baseline plus nine whole-mesh subject
+classifications/readbacks to one classification/readback carrying nine node
+records; the animated prefix carries one horse record. This removes 90% of the
+whole-mesh GPU passes and staged readback bytes for the measured scene. A
+20-sample alternating `minpx=1/16` target-Chrome check measured 21.0 ms median
+before and 17.6 ms after end-to-end scene-update latency (16.2% lower); p95 was
+27.3 ms before and 28.2 ms after, so no tail-latency improvement is claimed for
+this small 4,252-face fixture. The architectural win is bounded per-scene work
+instead of multiplication by authored node count.
+
+Native renderer tests prove full-scene versus face-prefix domain selection,
+last-record duplicate resolution, ownership-scoped adjacency, and the shader
+subject-table contract. The wasm32 library check, release Trunk build, and live
+scene/primary classifications completed with one GPU pass and no browser
+console warnings or errors. Noncommercial-mixed offline preflight passed over
+23 files / 31.32 MiB with matching source/build receipt
+`372352f4e9592ec6a4bc978fab6adb80`.

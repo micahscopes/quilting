@@ -9,7 +9,9 @@
 //! directly consumable by group_into_batches.
 
 use glow::HasContext;
+use quilting_core::quaternion::{Mobius, Quat};
 use quilting_mesh::HalfEdgeMesh;
+use std::collections::HashMap;
 
 #[cfg(target_arch = "wasm32")]
 fn log_info(msg: &str) {
@@ -25,6 +27,81 @@ pub const FLOATS_PER_FACE_PASS1: usize = 4;
 
 /// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) = 6 floats per face.
 pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
+
+/// Per-node state consumed by the composed-scene LOD pass. The four Möbius
+/// quaternions and four model-matrix columns are packed without transposition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LodSubjectState {
+    pub node: usize,
+    pub mobius: [f32; 16],
+    pub model: [f32; 16],
+    pub pole: [f32; 4],
+    pub mobius_power: f32,
+    pub c_norm_sq: f32,
+    pub has_pole: f32,
+}
+
+const SUBJECT_STATE_TEXELS: usize = 10;
+pub const SUBJECT_STATE_STRIDE: usize = 33;
+
+/// Decode the browser/WASM subject ABI into the backend-neutral node table.
+/// Only nodes owning a face inside the classified prefix are retained; a
+/// duplicate record deterministically resolves to its last value.
+pub fn build_lod_subject_states(
+    packed: &[f32],
+    node_first_faces: &HashMap<usize, usize>,
+    classified_faces: usize,
+) -> Vec<LodSubjectState> {
+    let mut states = HashMap::<usize, LodSubjectState>::new();
+    for record_index in 0..packed.len() / SUBJECT_STATE_STRIDE {
+        let offset = record_index * SUBJECT_STATE_STRIDE;
+        let record = &packed[offset..offset + SUBJECT_STATE_STRIDE];
+        if !record[0].is_finite() || record[0] < 0.0 {
+            continue;
+        }
+        let node = record[0] as usize;
+        if node_first_faces.get(&node).is_none_or(|&face| face >= classified_faces) {
+            continue;
+        }
+        let mut transform = [0.0; 16];
+        let mut model = [0.0; 16];
+        transform.copy_from_slice(&record[1..17]);
+        model.copy_from_slice(&record[17..33]);
+        let q = |offset: usize| {
+            Quat::new(
+                transform[offset] as f64,
+                transform[offset + 1] as f64,
+                transform[offset + 2] as f64,
+                transform[offset + 3] as f64,
+            )
+        };
+        let mobius = Mobius::new(q(0), q(4), q(8), q(12));
+        let (pole, power, c_norm_sq, has_pole) = match mobius.pole() {
+            Some(h) => (
+                [h.w as f32, h.x as f32, h.y as f32, h.z as f32],
+                mobius.power() as f32,
+                mobius.c.norm_sq() as f32,
+                1.0,
+            ),
+            None => ([0.0; 4], 0.0, mobius.c.norm_sq() as f32, 0.0),
+        };
+        states.insert(
+            node,
+            LodSubjectState {
+                node,
+                mobius: transform,
+                model,
+                pole,
+                mobius_power: power,
+                c_norm_sq,
+                has_pole,
+            },
+        );
+    }
+    let mut states: Vec<_> = states.into_values().collect();
+    states.sort_by_key(|state| state.node);
+    states
+}
 
 /// Build the pass-two edge-negotiation texture while preserving authored
 /// ownership boundaries. Exact duplicate render vertices are welded inside
@@ -174,6 +251,10 @@ pub struct LodCompute {
     morph_texture: Option<glow::Texture>,
     morph_wt_texture: Option<glow::Texture>,
     morph_wt_texture_capacity: usize,
+    face_subject_texture: Option<glow::Texture>,
+    subject_state_texture: Option<glow::Texture>,
+    subject_state_rows: usize,
+    subject_state_scratch: Vec<f32>,
 
     // Pass 1 uniform locations
     pos_loc: Option<glow::UniformLocation>,
@@ -181,6 +262,9 @@ pub struct LodCompute {
     joints_loc: Option<glow::UniformLocation>,
     morph_deltas_loc: Option<glow::UniformLocation>,
     morph_wt_loc: Option<glow::UniformLocation>,
+    face_subjects_loc: Option<glow::UniformLocation>,
+    subject_states_loc: Option<glow::UniformLocation>,
+    use_subject_states_loc: Option<glow::UniformLocation>,
     mob_a_loc: glow::UniformLocation,
     mob_b_loc: glow::UniformLocation,
     mob_c_loc: glow::UniformLocation,
@@ -334,6 +418,10 @@ impl LodCompute {
             let joints_loc = gl.get_uniform_location(program1.get(), "u_joints");
             let morph_deltas_loc = gl.get_uniform_location(program1.get(), "u_morph_deltas");
             let morph_wt_loc = gl.get_uniform_location(program1.get(), "u_morph_wt");
+            let face_subjects_loc = gl.get_uniform_location(program1.get(), "u_face_subjects");
+            let subject_states_loc = gl.get_uniform_location(program1.get(), "u_subject_states");
+            let use_subject_states_loc =
+                gl.get_uniform_location(program1.get(), "u_use_subject_states");
             let p2_lods_loc = gl.get_uniform_location(program2.get(), "u_pass1_lods");
             let p2_adj_loc = gl.get_uniform_location(program2.get(), "u_adjacency");
             let p2_lut_loc = gl.get_uniform_location(program2.get(), "u_atlas_lut");
@@ -349,11 +437,18 @@ impl LodCompute {
                 joints_texture_capacity: 0,
                 morph_texture: None, morph_wt_texture: None,
                 morph_wt_texture_capacity: 0,
+                face_subject_texture: None,
+                subject_state_texture: None,
+                subject_state_rows: 0,
+                subject_state_scratch: Vec::new(),
                 pos_loc,
                 skinning_loc,
                 joints_loc,
                 morph_deltas_loc,
                 morph_wt_loc,
+                face_subjects_loc,
+                subject_states_loc,
+                use_subject_states_loc,
                 mob_a_loc, mob_b_loc, mob_c_loc, mob_d_loc,
                 u_pole_loc, u_mob_k_loc, u_c_norm_sq_loc, u_has_pole_loc,
                 model_matrix_loc,
@@ -425,6 +520,108 @@ impl LodCompute {
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER,
                 bytemuck_cast_slice(clamped), glow::STATIC_DRAW);
         }
+    }
+
+    /// Upload the immutable face → authored-node relation and allocate the
+    /// compact per-node state table used by composed-scene classifications.
+    pub fn upload_face_subjects(&mut self, gl: &glow::Context, subjects: &[usize]) {
+        let width = 4096usize;
+        let height = subjects.len().div_ceil(width).max(1);
+        let mut packed = vec![0.0f32; width * height];
+        for (destination, &subject) in packed.iter_mut().zip(subjects) {
+            *destination = subject as f32;
+        }
+        self.subject_state_rows = subjects
+            .iter()
+            .copied()
+            .max()
+            .map_or(1, |node| node.saturating_add(1));
+        self.subject_state_scratch
+            .resize(self.subject_state_rows * SUBJECT_STATE_TEXELS * 4, 0.0);
+
+        unsafe {
+            if let Some(old) = self.face_subject_texture { gl.delete_texture(old); }
+            let face_texture = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(face_texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R32F as i32,
+                width as i32,
+                height as i32,
+                0,
+                glow::RED,
+                glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(&packed))),
+            );
+            set_nearest(gl);
+            self.face_subject_texture = Some(face_texture);
+
+            if let Some(old) = self.subject_state_texture { gl.delete_texture(old); }
+            let state_texture = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(state_texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA32F as i32,
+                SUBJECT_STATE_TEXELS as i32,
+                self.subject_state_rows as i32,
+                0,
+                glow::RGBA,
+                glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(
+                    &self.subject_state_scratch,
+                ))),
+            );
+            set_nearest(gl);
+            self.subject_state_texture = Some(state_texture);
+            self.bound1 = false;
+        }
+    }
+
+    fn upload_subject_states(
+        &mut self,
+        gl: &glow::Context,
+        states: &[LodSubjectState],
+    ) -> Result<(), String> {
+        if self.face_subject_texture.is_none() || self.subject_state_texture.is_none() {
+            return Err("LOD subject textures are not resident".to_string());
+        }
+        if states.is_empty() {
+            return Ok(());
+        }
+        self.subject_state_scratch.fill(0.0);
+        for state in states {
+            if state.node >= self.subject_state_rows {
+                continue;
+            }
+            let row = state.node * SUBJECT_STATE_TEXELS * 4;
+            self.subject_state_scratch[row..row + 16].copy_from_slice(&state.mobius);
+            self.subject_state_scratch[row + 16..row + 32].copy_from_slice(&state.model);
+            self.subject_state_scratch[row + 32..row + 36].copy_from_slice(&state.pole);
+            self.subject_state_scratch[row + 36] = state.mobius_power;
+            self.subject_state_scratch[row + 37] = state.c_norm_sq;
+            self.subject_state_scratch[row + 38] = state.has_pole;
+            self.subject_state_scratch[row + 39] = 1.0;
+        }
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, self.subject_state_texture);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                SUBJECT_STATE_TEXELS as i32,
+                self.subject_state_rows as i32,
+                glow::RGBA,
+                glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast_slice(
+                    &self.subject_state_scratch,
+                ))),
+            );
+            self.bound1 = false;
+        }
+        Ok(())
     }
 
     /// Upload rest-pose positions as a float texture.
@@ -643,8 +840,8 @@ impl LodCompute {
 
     /// Run both LOD compute passes. Returns number of faces processed.
     ///
-    /// Commands remain queued so callers can stage one or more subject runs,
-    /// append a shared fence, and flush the complete job once.
+    /// Composed-scene subject transforms are selected per face from a compact
+    /// node table, so every classification remains one two-pass GPU job.
     pub fn compute_lods(
         &mut self,
         gl: &glow::Context,
@@ -652,6 +849,7 @@ impl LodCompute {
         num_vertices: u32,
         num_joints: u32,
         num_morph_targets: u32,
+        subject_states: &[LodSubjectState],
         mobius: [f32; 16],
         model_matrix: [f32; 16],
         pole: [f32; 4],
@@ -665,13 +863,14 @@ impl LodCompute {
         vp_matrix: &[f32; 16],
         vp_width: f32,
         vp_height: f32,
-    ) -> usize {
+    ) -> Result<usize, String> {
         let n = num_faces.min(self.max_faces);
         if self.pass1_texture.is_none() || self.adjacency_texture.is_none() {
             log_info(&format!("LOD compute skipped: pass1_tex={} adj_tex={}",
                 self.pass1_texture.is_some(), self.adjacency_texture.is_some()));
-            return 0;
+            return Ok(0);
         }
+        self.upload_subject_states(gl, subject_states)?;
         unsafe {
             // === Pass 1: LOD exponent computation (FBO render) ===
             gl.use_program(Some(self.program1));
@@ -694,6 +893,8 @@ impl LodCompute {
                 bind_tex(gl, &mut unit, self.joints_texture, &self.joints_loc);      // unit 2
                 bind_tex(gl, &mut unit, self.morph_texture, &self.morph_deltas_loc); // unit 3
                 bind_tex(gl, &mut unit, self.morph_wt_texture, &self.morph_wt_loc);  // unit 4
+                bind_tex(gl, &mut unit, self.face_subject_texture, &self.face_subjects_loc); // unit 5
+                bind_tex(gl, &mut unit, self.subject_state_texture, &self.subject_states_loc); // unit 6
 
                 self.bound1 = true;
             }
@@ -728,6 +929,13 @@ impl LodCompute {
             if let Some(tex) = self.morph_wt_texture {
                 gl.active_texture(glow::TEXTURE4);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+            if let Some(tex) = self.subject_state_texture {
+                gl.active_texture(glow::TEXTURE6);
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            }
+            if let Some(ref loc) = self.use_subject_states_loc {
+                gl.uniform_1_i32(Some(loc), i32::from(!subject_states.is_empty()));
             }
 
             gl.uniform_4_f32(Some(&self.mob_a_loc), mobius[0], mobius[1], mobius[2], mobius[3]);
@@ -809,7 +1017,7 @@ impl LodCompute {
             // Pass 2 clobbers texture units — force rebind on next frame
             self.bound1 = false;
         }
-        n
+        Ok(n)
     }
 
     /// Copy the latest transform-feedback result into an independent GPU
@@ -917,6 +1125,8 @@ impl LodCompute {
             if let Some(t) = self.joints_texture { gl.delete_texture(t); }
             if let Some(t) = self.morph_texture { gl.delete_texture(t); }
             if let Some(t) = self.morph_wt_texture { gl.delete_texture(t); }
+            if let Some(t) = self.face_subject_texture { gl.delete_texture(t); }
+            if let Some(t) = self.subject_state_texture { gl.delete_texture(t); }
             if let Some(t) = self.pass1_texture { gl.delete_texture(t); }
             if let Some(t) = self.adjacency_texture { gl.delete_texture(t); }
         }
@@ -1007,6 +1217,18 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    fn subject_record(node: f32, marker: f32) -> Vec<f32> {
+        let mut record = vec![0.0; SUBJECT_STATE_STRIDE];
+        record[0] = node;
+        record[1] = 1.0;
+        record[13] = 1.0;
+        record[17] = marker;
+        record[22] = 1.0;
+        record[27] = 1.0;
+        record[32] = 1.0;
+        record
+    }
+
     #[test]
     fn staged_handle_releases_an_untransferred_resource_exactly_once() {
         let deleted = RefCell::new(Vec::new());
@@ -1075,10 +1297,44 @@ mod tests {
     #[test]
     fn gpu_intrinsic_lod_removes_global_mobius_similarity() {
         assert!(LOD_COMPUTE_VS.contains(
-            "float intrinsic_similarity = u_has_pole > 0.5 ? max(u_mob_k, 1e-12) : 1.0"
+            "float intrinsic_similarity = active_has_pole > 0.5"
         ));
+        assert!(LOD_COMPUTE_VS.contains("max(active_mob_k, 1e-12)"));
         assert!(LOD_COMPUTE_VS.contains("target_size * intrinsic_similarity"));
         assert!(LOD_COMPUTE_VS.contains("lambda_star / intrinsic_similarity"));
+    }
+
+    #[test]
+    fn composed_subject_state_is_selected_in_the_single_face_pass() {
+        assert!(LOD_COMPUTE_VS.contains("uniform highp sampler2D u_face_subjects"));
+        assert!(LOD_COMPUTE_VS.contains("uniform highp sampler2D u_subject_states"));
+        assert!(LOD_COMPUTE_VS.contains("int subject = int(texelFetch"));
+        assert!(LOD_COMPUTE_VS.contains("active_model_matrix = mat4("));
+    }
+
+    #[test]
+    fn subject_table_covers_only_the_classified_face_domain() {
+        let packed = [
+            subject_record(1.0, 11.0),
+            subject_record(2.0, 22.0),
+            subject_record(3.0, 33.0),
+        ]
+        .concat();
+        let first_faces = HashMap::from([(1, 0), (2, 1), (3, 3)]);
+
+        let scene = build_lod_subject_states(&packed, &first_faces, 3);
+        assert_eq!(scene.iter().map(|state| state.node).collect::<Vec<_>>(), [1, 2]);
+
+        let primary = build_lod_subject_states(&packed, &first_faces, 1);
+        assert_eq!(primary.iter().map(|state| state.node).collect::<Vec<_>>(), [1]);
+    }
+
+    #[test]
+    fn last_duplicate_subject_record_wins_deterministically() {
+        let packed = [subject_record(2.0, 20.0), subject_record(2.0, 29.0)].concat();
+        let states = build_lod_subject_states(&packed, &HashMap::from([(2, 0)]), 1);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].model[0], 29.0);
     }
 
     fn coincident_square() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {

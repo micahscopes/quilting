@@ -16,7 +16,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
-use quilting_renderer::compute::{build_scoped_lod_adjacency, LodCompute, StagedLodReadback};
+use quilting_renderer::compute::{
+    build_lod_subject_states, build_scoped_lod_adjacency, LodCompute, StagedLodReadback,
+};
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
@@ -152,17 +154,12 @@ fn normalized_animation_pose(
     }))
 }
 
-struct PendingLodRun {
-    subject_node: Option<usize>,
-    readback: StagedLodReadback,
-}
-
 struct PendingAnimatedLods {
     fence: glow::Fence,
-    runs: Vec<PendingLodRun>,
-    face_nodes: Vec<usize>,
+    readback: StagedLodReadback,
     classified_faces: usize,
     resident_faces: usize,
+    subject_records: usize,
     pose: Option<PendingLodPose>,
 }
 
@@ -183,7 +180,7 @@ struct AnimatedLodDeltaState {
 struct LodComputeModel {
     num_faces: usize,
     num_vertices: u32,
-    face_nodes: Vec<usize>,
+    node_first_faces: HashMap<usize, usize>,
 }
 
 struct LodComputeUpload {
@@ -311,6 +308,7 @@ mod gpu_compute_lifecycle_tests {
         assert!(!released);
         assert_eq!(current, Some("first context"));
     }
+
 }
 
 fn release_pending_lod_job(
@@ -319,9 +317,7 @@ fn release_pending_lod_job(
     job: PendingAnimatedLods,
 ) {
     unsafe { gl.delete_sync(job.fence); }
-    for run in job.runs {
-        compute.discard_staged_readback(gl, run.readback);
-    }
+    compute.discard_staged_readback(gl, job.readback);
 }
 
 fn install_gpu_compute(gl: glow::Context, compute: LodCompute) {
@@ -492,6 +488,7 @@ fn upload_lod_compute_model(upload: LodComputeUpload) -> Result<bool, String> {
         };
         compute.upload_positions_texture(gl, &upload.positions, num_vertices);
         compute.upload_face_indices(gl, &face_indices);
+        compute.upload_face_subjects(gl, &upload.face_nodes);
         compute.upload_skinning_texture(gl, &upload.joint_indices, &upload.joint_weights);
         if upload.num_morph_targets > 0 {
             compute.upload_morph_deltas(
@@ -511,10 +508,17 @@ fn upload_lod_compute_model(upload: LodComputeUpload) -> Result<bool, String> {
         return Ok(false);
     }
 
+    let node_first_faces = upload.face_nodes.iter().enumerate().fold(
+        HashMap::new(),
+        |mut first_faces, (face, &node)| {
+            first_faces.entry(node).or_insert(face);
+            first_faces
+        },
+    );
     let model = LodComputeModel {
         num_faces: upload.faces.len(),
         num_vertices: num_vertices as u32,
-        face_nodes: upload.face_nodes,
+        node_first_faces,
     };
     LOD_COMPUTE_MODEL.with(|current| *current.borrow_mut() = Some(model));
     LOD_MESH_RADIUS.with(|radius| *radius.borrow_mut() = mesh_radius);
@@ -783,8 +787,8 @@ pub fn debug_gpu_compute_state() -> String {
 /// 1. Evaluates animation (morph + skeletal) at time t
 /// 2. Uploads joint matrices + morph weights to worker GPU
 /// 3. Runs transform feedback LOD compute (Möbius + medians + snap)
-/// 4. Copies each baseline/per-subject result into GPU staging
-/// 5. Inserts one fence after all staged copies
+/// 4. Classifies every face once, selecting its authored-node state on GPU
+/// 5. Copies one coherent result into GPU staging and inserts one fence
 ///
 /// `subject_states` is a packed sequence of
 /// `[node_index, mobius(16), euclidean_model(16)]` records. When present, each
@@ -831,20 +835,11 @@ pub fn dispatch_animated_lods(
         };
         let num_vertices = compute_model.num_vertices;
         let mesh_radius = LOD_MESH_RADIUS.with(|r| *r.borrow()) as f32;
-        const SUBJECT_STATE_STRIDE: usize = 33;
-        let extracted_states: Vec<(usize, [f32; 16], [f32; 16])> = subject_states
-            .chunks_exact(SUBJECT_STATE_STRIDE)
-            .filter_map(|record| {
-                if !record[0].is_finite() || record[0] < 0.0 {
-                    return None;
-                }
-                let mut transform = [0.0; 16];
-                let mut model = [0.0; 16];
-                transform.copy_from_slice(&record[1..17]);
-                model.copy_from_slice(&record[17..33]);
-                Some((record[0] as usize, transform, model))
-            })
-            .collect();
+        let extracted_states = build_lod_subject_states(
+            subject_states,
+            &compute_model.node_first_faces,
+            num_faces,
+        );
 
         perf_mark("lod-wasm-start");
 
@@ -920,86 +915,69 @@ pub fn dispatch_animated_lods(
                 0.0, 0.0, 0.0, 0.0,
                 1.0, 0.0, 0.0, 0.0,
             ];
-            let mut run = |
-                subject_node: Option<usize>,
-                transform: [f32; 16],
-                model: [f32; 16],
-            | -> Result<PendingLodRun, String> {
-                // Derive the conformal pole and power used by the interior-complete
-                // LOD estimate. The transform is packed as quaternion a, b, c, d.
-                let q = |offset: usize| Quat::new(
-                    transform[offset] as f64,
-                    transform[offset + 1] as f64,
-                    transform[offset + 2] as f64,
-                    transform[offset + 3] as f64,
-                );
-                let mobius = Mobius::new(q(0), q(4), q(8), q(12));
-                let (pole, power, c_norm_sq, has_pole) = match mobius.pole() {
-                    Some(h) => (
-                        [h.w as f32, h.x as f32, h.y as f32, h.z as f32],
-                        mobius.power() as f32,
-                        mobius.c.norm_sq() as f32,
-                        1.0,
-                    ),
-                    None => ([0.0; 4], 0.0, mobius.c.norm_sq() as f32, 0.0),
-                };
-                perf_mark("lod-gpu-dispatch-start");
-                let n = compute.compute_lods(
-                    gl, num_faces, num_vertices,
-                    num_joints, num_morph,
-                    transform, model, pole, power, c_norm_sq, has_pole,
-                    density, mesh_radius, min_px, max_lod,
-                    &vp, vp_width, vp_height,
-                );
-                perf_mark("lod-gpu-dispatch-end");
-                perf_measure("lod-gpu-dispatch", "lod-gpu-dispatch-start", "lod-gpu-dispatch-end");
-
-                if n == 0 {
-                    return Err("LOD dispatch returned no faces".to_string());
-                }
-                perf_mark("lod-gpu-stage-start");
-                let readback = compute.stage_readback(gl, n)?;
-                perf_mark("lod-gpu-stage-end");
-                perf_measure("lod-gpu-stage", "lod-gpu-stage-start", "lod-gpu-stage-end");
-                Ok(PendingLodRun { subject_node, readback })
-            };
             let baseline = if extracted_states.is_empty() {
                 legacy_mobius
             } else {
                 identity_mobius
             };
-            let mut runs = Vec::with_capacity(extracted_states.len() + 1);
-            let mut dispatch_error = None;
-            match run(None, baseline, identity) {
-                Ok(staged) => runs.push(staged),
-                Err(error) => dispatch_error = Some(error),
-            }
-            for (node, transform, model) in &extracted_states {
-                if dispatch_error.is_some() {
-                    break;
+            let baseline_q = |offset: usize| {
+                Quat::new(
+                    baseline[offset] as f64,
+                    baseline[offset + 1] as f64,
+                    baseline[offset + 2] as f64,
+                    baseline[offset + 3] as f64,
+                )
+            };
+            let baseline_mobius = Mobius::new(
+                baseline_q(0), baseline_q(4), baseline_q(8), baseline_q(12),
+            );
+            let (pole, power, c_norm_sq, has_pole) = match baseline_mobius.pole() {
+                Some(h) => (
+                    [h.w as f32, h.x as f32, h.y as f32, h.z as f32],
+                    baseline_mobius.power() as f32,
+                    baseline_mobius.c.norm_sq() as f32,
+                    1.0,
+                ),
+                None => ([0.0; 4], 0.0, baseline_mobius.c.norm_sq() as f32, 0.0),
+            };
+            perf_mark("lod-gpu-dispatch-start");
+            let dispatched = compute.compute_lods(
+                gl, num_faces, num_vertices,
+                num_joints, num_morph,
+                &extracted_states,
+                baseline, identity, pole, power, c_norm_sq, has_pole,
+                density, mesh_radius, min_px, max_lod,
+                &vp, vp_width, vp_height,
+            );
+            perf_mark("lod-gpu-dispatch-end");
+            perf_measure("lod-gpu-dispatch", "lod-gpu-dispatch-start", "lod-gpu-dispatch-end");
+            let n = match dispatched {
+                Ok(n) if n > 0 => n,
+                Ok(_) => {
+                    web_sys::console::warn_1(&"LOD dispatch returned no faces".into());
+                    return None;
                 }
-                match run(Some(*node), *transform, *model) {
-                    Ok(staged) => runs.push(staged),
-                    Err(error) => dispatch_error = Some(error),
+                Err(error) => {
+                    web_sys::console::warn_1(&format!("LOD dispatch failed: {error}").into());
+                    return None;
                 }
-            }
-            drop(run);
-
-            if let Some(error) = dispatch_error {
-                web_sys::console::warn_1(&format!("LOD dispatch failed: {error}").into());
-                for run in runs {
-                    compute.discard_staged_readback(gl, run.readback);
+            };
+            perf_mark("lod-gpu-stage-start");
+            let readback = match compute.stage_readback(gl, n) {
+                Ok(readback) => readback,
+                Err(error) => {
+                    web_sys::console::warn_1(&format!("LOD staging failed: {error}").into());
+                    return None;
                 }
-                return None;
-            }
+            };
+            perf_mark("lod-gpu-stage-end");
+            perf_measure("lod-gpu-stage", "lod-gpu-stage-start", "lod-gpu-stage-end");
 
             let fence = match unsafe { gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) } {
                 Ok(fence) => fence,
                 Err(error) => {
                     web_sys::console::warn_1(&format!("LOD fence creation failed: {error}").into());
-                    for run in runs {
-                        compute.discard_staged_readback(gl, run.readback);
-                    }
+                    compute.discard_staged_readback(gl, readback);
                     return None;
                 }
             };
@@ -1007,17 +985,10 @@ pub fn dispatch_animated_lods(
             unsafe { gl.flush(); }
             Some(PendingAnimatedLods {
                 fence,
-                runs,
-                // Ordinary glTF dispatches only the baseline run and never
-                // consults node ownership. Avoid cloning a mesh-sized face map
-                // after every camera or animation update in that common path.
-                face_nodes: if extracted_states.is_empty() {
-                    Vec::new()
-                } else {
-                    compute_model.face_nodes.clone()
-                },
+                readback,
                 classified_faces: num_faces,
                 resident_faces,
+                subject_records: extracted_states.len(),
                 pose: captured_pose,
             })
         });
@@ -1072,17 +1043,15 @@ pub fn poll_animated_lods() -> JsValue {
         };
         let PendingAnimatedLods {
             fence,
-            runs: pending_runs,
-            face_nodes,
+            readback,
             classified_faces,
             resident_faces,
+            subject_records,
             pose,
         } = job;
         unsafe { gl.delete_sync(fence); }
         if status == glow::WAIT_FAILED {
-            for run in pending_runs {
-                compute.discard_staged_readback(gl, run.readback);
-            }
+            compute.discard_staged_readback(gl, readback);
             web_sys::console::warn_1(&"LOD fence wait failed".into());
             return JsValue::NULL;
         }
@@ -1090,29 +1059,7 @@ pub fn poll_animated_lods() -> JsValue {
         perf_mark("lod-gpu-wait-end");
         perf_measure("lod-gpu-wait", "lod-gpu-wait-start", "lod-gpu-wait-end");
         perf_mark("lod-gpu-readback-start");
-        let mut runs = pending_runs.into_iter();
-        let Some(baseline) = runs.next() else {
-            return JsValue::NULL;
-        };
-        let mut gpu_class = compute.finish_staged_readback(gl, baseline.readback);
-        for run in runs {
-            let classified = compute.finish_staged_readback(gl, run.readback);
-            if classified.len() == gpu_class.len() {
-                if let Some(node) = run.subject_node {
-                    for (face, &face_node) in face_nodes.iter().enumerate() {
-                        if face_node == node {
-                            let offset = face * batch::FACE_LOD_STRIDE;
-                            let end = offset + batch::FACE_LOD_STRIDE;
-                            if end <= gpu_class.len() {
-                                gpu_class[offset..end]
-                                    .copy_from_slice(&classified[offset..end]);
-                            }
-                        }
-                    }
-                }
-            }
-            compute.recycle_readback_vector(classified);
-        }
+        let gpu_class = compute.finish_staged_readback(gl, readback);
         perf_mark("lod-gpu-readback-end");
         perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
         let result = ANIMATED_LOD_DELTA.with(|delta| {
@@ -1161,6 +1108,16 @@ pub fn poll_animated_lods() -> JsValue {
                 &result,
                 &"resident_faces".into(),
                 &JsValue::from_f64(resident_faces as f64),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"subject_records".into(),
+                &JsValue::from_f64(subject_records as f64),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"gpu_passes".into(),
+                &JsValue::from_f64(1.0),
             ).ok();
             if let Some(pose) = pose {
                 js_sys::Reflect::set(

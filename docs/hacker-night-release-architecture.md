@@ -31,6 +31,19 @@ The names describe layers, not competing applications:
 Hyperscape uses Bevy ECS without depending on Bevy's renderer. WebGL2 and
 WebGPU consume the same extracted logical view and render-command data.
 
+### HHHS release boundary
+
+The current exact HHHS `0.4.3` dependency remains pinned while the upstream
+`0.4.4` candidate completes its durable-session, browser-journal, networking,
+acceptance, and downstream release gates. Hyperscope does not locally imitate
+the moving `hhhs-web-browser` storage journal or repair protocol. Camera,
+focus, selection, animation, cue time, asset jobs, and peer presence remain
+ephemeral application state. Explicit authored edits may enter a future HHHS
+durable-session adapter only after semantic validation; the opt-in local
+Blender relay remains a disposable transport with no durability or repair
+claim. This keeps the renderer independent of HHHS release cadence while
+leaving one deliberate durable authored-state seam.
+
 ## Rust application migration status
 
 The first application boundary is now explicit:
@@ -491,6 +504,12 @@ Backend code owns actual buffers, textures, VAOs, transform feedback, storage
 buffers, pipelines, bind groups, framebuffers, and submission.
 
 WebGL2 keeps asynchronous classification and resident crack-free topology.
+Composed scenes upload immutable face-to-node ownership once and refresh a
+compact node transform table. The LOD vertex pass selects Möbius and Euclidean
+state per face, so one coherent two-pass classification and one staged
+readback cover the scene; the animated-primary prefix uses the same contract
+without touching static authored assets. This table is backend-neutral input,
+not a WebGL transform-feedback abstraction.
 WebGPU will replace transform feedback with compute preparation, reconcile LOD
 in storage, compact visible instances, and emit indirect draw arguments. CPU
 readback becomes optional telemetry rather than a frame dependency.

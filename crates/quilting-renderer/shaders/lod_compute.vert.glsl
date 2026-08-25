@@ -43,6 +43,23 @@ uniform vec4 mob_c;
 uniform vec4 mob_d;
 uniform mat4 model_matrix;
 
+// Composed scenes keep face ownership static and refresh this compact node
+// table when authored transforms change. One pass can therefore classify the
+// complete packed scene instead of reclassifying/readbacking it once per node.
+uniform highp sampler2D u_face_subjects;
+uniform highp sampler2D u_subject_states;
+uniform int u_use_subject_states;
+
+vec4 active_mob_a;
+vec4 active_mob_b;
+vec4 active_mob_c;
+vec4 active_mob_d;
+mat4 active_model_matrix;
+vec4 active_pole;
+float active_mob_k;
+float active_c_norm_sq;
+float active_has_pole;
+
 uniform float density;
 uniform float mesh_radius;
 uniform float min_px;        // minimum pixels per subdivision (0 = no attenuation)
@@ -97,8 +114,8 @@ float min_bot_sq = 1e30;
 
 vec3 mobius(vec3 p) {
     vec4 q = vec4(0.0, p);
-    vec4 top = qmul(mob_a, q) + mob_b;
-    vec4 bot = qmul(mob_c, q) + mob_d;
+    vec4 top = qmul(active_mob_a, q) + active_mob_b;
+    vec4 bot = qmul(active_mob_c, q) + active_mob_d;
     min_bot_sq = min(min_bot_sq, dot(bot, bot));
     vec4 result = qmul(top, qinv(bot));
     return result.yzw;
@@ -109,8 +126,8 @@ vec3 mobius(vec3 p) {
 // them through mobius() would poison the cull's sampled denominator.
 vec3 mobius_pure(vec3 p) {
     vec4 q = vec4(0.0, p);
-    vec4 top = qmul(mob_a, q) + mob_b;
-    vec4 bot = qmul(mob_c, q) + mob_d;
+    vec4 top = qmul(active_mob_a, q) + active_mob_b;
+    vec4 bot = qmul(active_mob_c, q) + active_mob_d;
     return qmul(top, qinv(bot)).yzw;
 }
 
@@ -268,9 +285,9 @@ bool image_ball_outside_frustum(vec3 p0, vec3 p1, vec3 p2) {
     ));
     vec3 direction = vec3(1.0, 0.0, 0.0);
 
-    if (u_has_pole > 0.5) {
-        vec3 delta = center - u_pole.yzw;
-        float pole_distance_sq = u_pole.x * u_pole.x + dot(delta, delta);
+    if (active_has_pole > 0.5) {
+        vec3 delta = center - active_pole.yzw;
+        float pole_distance_sq = active_pole.x * active_pole.x + dot(delta, delta);
         float guarded_radius = 1.05 * source_radius;
         if (pole_distance_sq <= guarded_radius * guarded_radius) {
             return false;
@@ -306,10 +323,45 @@ void emit_face(vec4 payload) {
 void main() {
     float lod_a, lod_b, lod_c;
 
+    active_mob_a = mob_a;
+    active_mob_b = mob_b;
+    active_mob_c = mob_c;
+    active_mob_d = mob_d;
+    active_model_matrix = model_matrix;
+    active_pole = u_pole;
+    active_mob_k = u_mob_k;
+    active_c_norm_sq = u_c_norm_sq;
+    active_has_pole = u_has_pole;
+    if (u_use_subject_states != 0) {
+        int face_id = gl_VertexID;
+        int subject = int(texelFetch(
+            u_face_subjects,
+            ivec2(face_id % 4096, face_id / 4096),
+            0
+        ).r + 0.5);
+        vec4 metadata = texelFetch(u_subject_states, ivec2(9, subject), 0);
+        if (metadata.w > 0.5) {
+            active_mob_a = texelFetch(u_subject_states, ivec2(0, subject), 0);
+            active_mob_b = texelFetch(u_subject_states, ivec2(1, subject), 0);
+            active_mob_c = texelFetch(u_subject_states, ivec2(2, subject), 0);
+            active_mob_d = texelFetch(u_subject_states, ivec2(3, subject), 0);
+            active_model_matrix = mat4(
+                texelFetch(u_subject_states, ivec2(4, subject), 0),
+                texelFetch(u_subject_states, ivec2(5, subject), 0),
+                texelFetch(u_subject_states, ivec2(6, subject), 0),
+                texelFetch(u_subject_states, ivec2(7, subject), 0)
+            );
+            active_pole = texelFetch(u_subject_states, ivec2(8, subject), 0);
+            active_mob_k = metadata.x;
+            active_c_norm_sq = metadata.y;
+            active_has_pole = metadata.z;
+        }
+    }
+
     // Fetch animated vertex positions
-    vec3 p0 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.x)), 1.0)).xyz;
-    vec3 p1 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.y)), 1.0)).xyz;
-    vec3 p2 = (model_matrix * vec4(fetch_animated_pos(int(face_indices.z)), 1.0)).xyz;
+    vec3 p0 = (active_model_matrix * vec4(fetch_animated_pos(int(face_indices.x)), 1.0)).xyz;
+    vec3 p1 = (active_model_matrix * vec4(fetch_animated_pos(int(face_indices.y)), 1.0)).xyz;
+    vec3 p2 = (active_model_matrix * vec4(fetch_animated_pos(int(face_indices.z)), 1.0)).xyz;
 
     // Cull before the more expensive density work, but only with a bound on the
     // complete transformed patch. Pole-containing bounds deliberately survive.
@@ -346,18 +398,18 @@ void main() {
     vec3  x_star = mid_a;
     float dT2 = 0.0;
     bool  patch_valid = false;         // true only for a non-degenerate face with a pole
-    if (u_has_pole > 0.5) {
+    if (active_has_pole > 0.5) {
         // Degenerate (needle / collinear) faces have no well-defined closest point;
         // closest_point_triangle would divide by ~0 and spray NaN through the pole
         // guard and floor. Skip them and fall back to the rim, mirroring
         // ConformalPatch::new's None guard.
         vec3 nrm = cross(p1 - p0, p2 - p0);
         if (dot(nrm, nrm) >= 1e-24) {
-            vec3 hi = u_pole.yzw;
-            float hw2 = u_pole.x * u_pole.x;
+            vec3 hi = active_pole.yzw;
+            float hw2 = active_pole.x * active_pole.x;
             x_star = closest_point_triangle(hi, p0, p1, p2);
             dT2 = hw2 + dot(x_star - hi, x_star - hi);
-            min_bot_true = u_c_norm_sq * dT2;
+            min_bot_true = active_c_norm_sq * dT2;
             patch_valid = true;
         }
     }
@@ -368,7 +420,9 @@ void main() {
     // changes the size of the complete image, not its intrinsic conformal
     // complexity. Remove it from world/curvature demand; the screen-capacity
     // path below still sees the true projected size and can attenuate it.
-    float intrinsic_similarity = u_has_pole > 0.5 ? max(u_mob_k, 1e-12) : 1.0;
+    float intrinsic_similarity = active_has_pole > 0.5
+        ? max(active_mob_k, 1e-12)
+        : 1.0;
 
     // Uniform per-face density demand from the largest median. Max prevents
     // small-median sabotage on skinny triangles. A finite-pole patch also gets
@@ -380,7 +434,7 @@ void main() {
     float interior_world_demand = 0.0;
     if (patch_valid && min_bot_true >= 1e-8) {
         source_l_max = max(distance(p1, p2), max(distance(p0, p2), distance(p0, p1)));
-        lambda_star = u_mob_k / max(dT2, 1e-30);
+        lambda_star = active_mob_k / max(dT2, 1e-30);
         interior_world_demand = (lambda_star / intrinsic_similarity) * source_l_max / target_size;
     }
     lod_a = clamp(snap_pow2(max(max_med, interior_world_demand)), 1.0, max_lod);

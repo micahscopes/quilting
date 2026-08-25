@@ -204,6 +204,10 @@ Use a fresh browser tab after the release build and verify:
 - no `phase wasm failed`, atlas-upload failure, GLB parse error, or uncaught
   exception appears in the console;
 - the horse animates continuously and LOD does not flash to a stale low level;
+- on the final two-asset cue, `__hyperscopePresentation.lodCadence` reports a
+  scene classification with `lastSubjectRecords: 9` and `lastGpuPasses: 1`;
+  later `primary-animation` classifications report one subject without
+  implying that the static Blender-authored asset has left LOD residency;
 - picking/selection tint and surface attachment use the visible object;
 - moving through all six cues leaves exactly one requested visualization mode
   active;

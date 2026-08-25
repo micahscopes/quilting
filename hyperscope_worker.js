@@ -354,6 +354,8 @@ self.onmessage = async function(e) {
           pose_morph_weights: result.pose_morph_weights || null,
           classified_faces: result.classified_faces,
           resident_faces: result.resident_faces,
+          subject_records: result.subject_records,
+          gpu_passes: result.gpu_passes,
         }, transfers);
       } else {
         let gpuState = 'unknown';

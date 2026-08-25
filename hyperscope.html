@@ -1738,6 +1738,14 @@ const rustPresentationDiagnostics = {
   lodResidentFaces: 0,
   lodTopologyDomains: 0,
   lastLodScope: null,
+  lodCadence: {
+    sceneClassifications: 0,
+    primaryAnimationClassifications: 0,
+    lastSceneAt: null,
+    lastPrimaryAnimationAt: null,
+    lastSubjectRecords: 0,
+    lastGpuPasses: 0,
+  },
   opacityOverridesPending: false,
   activeVisualization: 'pbr',
   activeTessellation: null,
@@ -6177,9 +6185,20 @@ async function recomputeLods() {
       if (presentationComposition.ready) {
         const classifiedFaces = Number(resp.classified_faces)
           || Math.floor(faceLods.length / 6);
-        rustPresentationDiagnostics.lastLodScope =
+        const classificationScope =
           classifiedFaces === presentationComposition.totalFaces
             ? 'scene' : 'primary-animation';
+        rustPresentationDiagnostics.lastLodScope = classificationScope;
+        const cadence = rustPresentationDiagnostics.lodCadence;
+        cadence.lastSubjectRecords = Number(resp.subject_records) || 0;
+        cadence.lastGpuPasses = Number(resp.gpu_passes) || 0;
+        if (classificationScope === 'scene') {
+          cadence.sceneClassifications += 1;
+          cadence.lastSceneAt = performance.now();
+        } else {
+          cadence.primaryAnimationClassifications += 1;
+          cadence.lastPrimaryAnimationAt = performance.now();
+        }
       }
       if (resp.indices) {
         const faceIndices = new Uint32Array(resp.indices.buffer || resp.indices);
@@ -6982,6 +7001,14 @@ async function finishModelUpload(
   rustPresentationDiagnostics.lodResidentFaces = 0;
   rustPresentationDiagnostics.lodTopologyDomains = 0;
   rustPresentationDiagnostics.lastLodScope = null;
+  Object.assign(rustPresentationDiagnostics.lodCadence, {
+    sceneClassifications: 0,
+    primaryAnimationClassifications: 0,
+    lastSceneAt: null,
+    lastPrimaryAnimationAt: null,
+    lastSubjectRecords: 0,
+    lastGpuPasses: 0,
+  });
   mr_setPresentationNodeStates(new Float32Array());
   nodeFocusRecords = new Map();
   sceneSourceBound = null;

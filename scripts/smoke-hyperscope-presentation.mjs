@@ -123,6 +123,8 @@ for (const requiredSceneLodStep of [
   'recordPresentationLodUpdate(faceIndices);',
   'faceLimit: primaryOnly ? currentPrimaryFaceCount : 0',
   'presentationComposition.primaryLodStates',
+  'cadence.sceneClassifications += 1;',
+  'cadence.primaryAnimationClassifications += 1;',
 ]) {
   assert.ok(
     compositionAdapter.includes(requiredSceneLodStep)
@@ -135,6 +137,8 @@ for (const requiredWorkerStep of [
   'wasm.cancel_animated_lods();',
   'wasm.upload_composed_model_to_compute(',
   'faceLimit || 0',
+  'subject_records: result.subject_records',
+  'gpu_passes: result.gpu_passes',
 ]) {
   assert.ok(
     workerSource.includes(requiredWorkerStep),
