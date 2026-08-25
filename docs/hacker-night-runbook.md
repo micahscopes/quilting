@@ -31,94 +31,39 @@ translation `[3,4,5]`. Blender must project the remote camera, inversion sphere,
 and bound selection into at least 166 transient overlay segments without
 creating an object.
 
-For the composed final cue, the default `sceneimpl=rust` path makes Rust own
-ordinary node extraction. Append `sceneimpl=shadow` to compare it while
-retaining the incumbent renderer path. Inspect
-`globalThis.__hyperscopeSceneExtraction`: a healthy loaded fixture reports
-`state` as `observing` or `authoritative`, no fallback, no mismatches, and an
-empty unmatched-entity list. `lastCue` must equal the presentation cue,
-`semanticMismatches` must be zero, and `maximumOpacityError` should remain at
-or below `1e-6`. The adapter sends only layer/asset identity and resident node
-metadata; Rust owns layer TRS, visibility, opacity, and authored overrides.
-`sceneimpl=js` is the immediate rollback; the explicit rollback value remains
-in the synchronized URL.
+### Authority and rollback check
 
-`hyperscope-app` is the default presentation cue/transition authority. An
-ordinary `presentation=1` route should report `implementation: "rust"` and
-`authority: "hyperscope-app"` through
-`globalThis.__hyperscopePresentation`, reach the expected cue UUID without an
-error, and retain neither `presentimpl=rust` nor implied `appshadow=1` in the
-synchronized URL. Use `presentimpl=shadow` to compare AppStore against the
-standalone controller, or `presentimpl=js` for immediate orchestration
-rollback; the explicit rollback value must remain in the URL.
+An ordinary deck uses Rust for presentation, asset effects, packed-scene
+extraction, and canonical routes. Before the talk, verify:
 
-Rust asset effects are the default authority: startup, drag/drop, and the
-authored demo share one primary-scene scope, obsolete fetches receive an abort
-signal, and only the newest primary request may enter the serialized
-parse/upload lane. Presentation assets retain independent per-asset
-concurrency. Use `assetimpl=shadow` to compare Rust request, cancellation, and
-completion semantics while retaining incumbent behavior, or `assetimpl=js`
-for immediate loader rollback. Because Rust is the canonical default, only the
-non-default rollback value is retained in a synchronized URL.
+- `__hyperscopePresentation` is ready under `hyperscope-app` authority;
+- `__hyperscopeAppShadowDiagnostics` reports Rust asset effects, no failed
+  loads, no mismatches, and no frame errors;
+- `__hyperscopeSceneExtraction` is authoritative with no semantic mismatch or
+  fallback; and
+- `__hyperscopeRouteShadowDiagnostics` is authoritative, has byte-identical
+  browser/Rust queries, and has no mismatch or fallback write.
 
-On an ordinary unflagged load,
-`globalThis.__hyperscopeAppShadowDiagnostics.assetImplementation` must be
-`"rust"`; startup should produce one request and one applied completion with an
-empty mismatch list. The synchronized URL must contain neither
-`assetimpl=rust` nor an implicitly enabled `appshadow=1`. A deliberate
-`assetimpl=js` reload must retain that pair and report the application adapter
-as disabled.
+The default `rust` values stay out of canonical links. For recovery, append
+`presentimpl=js`, `assetimpl=js`, `sceneimpl=js`, or `routeimpl=js`; an explicit
+rollback must remain in the synchronized URL. The corresponding `shadow` value
+compares implementations without granting Rust authority. Detailed parity
+fields and ownership boundaries live in the
+[release architecture](hacker-night-release-architecture.md) and
+[presentation contract](hyperscope-presentation.md).
 
-Rust also owns canonical URL admission and serialization by default. An
-ordinary link should report `implementation: "rust"`, `startupSource: "rust"`,
-equal `lastBrowserQuery` and `lastRustQuery`, at least one authoritative write,
-and no fallback or mismatch through
-`globalThis.__hyperscopeRouteShadowDiagnostics`. The synchronized URL omits
-`routeimpl=rust`. Use `routeimpl=shadow` to compare without granting write
-authority or `routeimpl=js` for immediate rollback; the explicit JavaScript
-rollback must remain in the URL and perform no route-WASM calls. A malformed
-known value deliberately reports `startupSource: "browser-fallback"` and
-retains browser startup behavior before the next valid state write normalizes
-the link.
+The ordinary preflight must print `PASS`, matching source/build fingerprints,
+and the checked bundle size. It rejects a coherent but stale `dist/` as well as
+missing presentation/runtime assets. The three replay commands must print:
 
-The ordinary preflight must print `PASS`. It validates the Rust presentation
-document, byte-for-byte manifest freshness, every presentation GLB, the
-consolidated runtime JS/WASM pair, environment maps, licenses, and generated Trunk
-bootstrap. Trunk also embeds a deterministic receipt for the Rust, shader,
-HTML/module, and copied-asset inputs; preflight recomputes it and rejects a
-coherent but stale `dist/`. It reports the matching fingerprints and checked
-bundle size. The generated-WASM smoke verifies start, cue deep-link, malformed
-cue, unknown-cue, application projection, atomic authored checkpoint
-materialization, lossless `u64` projection fences, stale/invalid rollback, and
-camera/focus transition parity without needing a GPU or browser. It also loads
-synthetic authored and ordinary
-GLBs through the real WASM parser to prove that durable node IDs remain dense
-and asset-scoped while ordinary high-node-count files pay no null-table clone.
-The surface-walk smoke additionally checks the Rust scale/speed/near-plane
-policy against the shared live-page helpers, then runs deterministic animated
-contact, pitch-recapture, orientation-retention, reset, and invalid-input
-traces without a renderer. It also calls the composed attach/step exports
-before renderer initialization and verifies that their generated TypeScript
-return type remains `ComposedSurfaceWalkResult`; the browser-independent test
-suite checks that partitioned and single-step re-anchor clocks finish on the
-same exact virtual-time endpoint.
+```text
+PASS fnv1a-128-json:ea73662b9602640b487943ba2d9880f7
+PASS fnv1a-128-json:632127d93ad2417225544b3d14819302
+PASS fnv1a-128-json:9bc89c319883e25f7e91d001656d924b
+```
 
-The replay checks must print
-`PASS fnv1a-128-json:ea73662b9602640b487943ba2d9880f7`,
-`PASS fnv1a-128-json:632127d93ad2417225544b3d14819302`, and
-`PASS fnv1a-128-json:9bc89c319883e25f7e91d001656d924b`. The first executes
-the complete six-cue semantic walkthrough. The second exercises every current
-navigation action, including focus/inversion, camera and surface transitions,
-stable selection anchoring, clicked source/output pivot projection, complete
-perspective-lens edits, explicit free-tangent/point-target mode, and an atomic
-rejected input. The third covers
-asset supersession/cancellation/completion, stale and failed effects, presence
-ordering/expiry, authored revision admission and materialization, stale/invalid
-checkpoint rollback, and rejected wire input. All run through `hyperscope-app`
-independently of browser timing, input adapters, and the renderer. A mismatch
-means reducer, presentation, navigation,
-orchestration, or trace behavior changed and must be reviewed; the fingerprints
-are deterministic regression oracles, not cryptographic signatures.
+They are deterministic regression oracles for the cue walkthrough,
+navigation, and orchestration/history paths; any mismatch must be reviewed.
 
 For a public downloadable archive, use the stricter gate:
 
@@ -331,40 +276,14 @@ Use a fresh browser tab after the release build and verify:
 - the final cue reports no failed or unsupported required asset;
 - reloading with the network disabled still succeeds through local HTTP.
 
-For the focus-authority migration gate, open a separate disposable tab at
-`?presentation=1&cue=e0000000-0000-4000-8000-000000000002&selectionimpl=rust`.
-Verify that the incumbent navigation snapshot and `AppStore` snapshot agree on
-focus enablement, shell coordinate, angular aperture, sphere, lens, and aim
-policy. Toggle Fuzzy off and on and move the focus slider: each synchronous UI
-burst should produce one focus synchronization, no application mismatch, and
-no render-shadow mismatch. A focus-only route must remain active even when
-spherical inversion is disabled. While settled, `frameCalls` should track the
-page frame counter one-for-one, `frameSnapshotCalls` must remain unchanged, and
-`frameErrors` must stay zero. A mapped authored selection should increment
-`selectionTransitionFrames` and `rendererFocusPacketComparisons` without
-incrementing either mismatch counter. `rendererAuthorityWrites` must advance;
-`rendererAuthorityMisses`, `rendererAuthorityErrors`, and `frameErrors` must
-remain zero. The route implicitly enables the application observer, but
-`selectionimpl=js` remains the release rollback/default. Close the disposable
-tab after the check.
-
-Repeat the selection probe on ordinary `?selectionimpl=rust`. A successfully
-committed startup/IndexedDB/drop load should report a mapped selection and Rust
-renderer-authority writes, not an unmapped pick. A superseded, loading, or
-failed asset must not receive session identities. These IDs are intentionally
-session-only and are never evidence of durable Blender/HHHS identity.
-
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.
 
-For migration diagnostics, add `walkimpl=shadow`. The rendered camera and
-attachment still come from the JavaScript oracle, while the composed Rust
-candidate reports samples, topology/camera drift, and its last packet at
-`globalThis.__hyperscopeSurfaceWalkRustShadow`. `walkimpl=rust` is now a real
-opt-in authority mode: Rust owns the contact response, camera, and re-anchor
-transition while the legacy walker remains a same-input rollback diagnostic.
-The release URL deliberately stays on the soaked `js` default for the talk;
-use `walkimpl=rust` only when explicitly demonstrating the migration.
+Selection and surface walking deliberately retain their rehearsed JavaScript
+defaults for the talk. Do not add `selectionimpl=rust` or `walkimpl=rust` on
+stage unless that exact opt-in path was rehearsed on the presentation machine.
+The shadow/Rust parity procedure remains in the
+[focus and navigation roadmap](focus-navigation-roadmap.md).
 
 ## 6. Recovery during the talk
 
