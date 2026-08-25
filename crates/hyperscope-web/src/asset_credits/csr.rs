@@ -1,4 +1,4 @@
-use super::{external_credit_url, project_asset_credits, AssetCredit};
+use super::{compact_credit_text, external_credit_url, project_asset_credits, AssetCredit};
 use futures_signals::signal::SignalExt as _;
 use futures_signals::signal_vec::SignalVecExt as _;
 use hyperscope_app::AppStore;
@@ -27,6 +27,16 @@ pub fn mount_asset_credits(parent: web_sys::HtmlElement, store: AppStore) {
 #[component]
 fn AssetCredits(credits: ReadSignal<Vec<AssetCredit>>) -> impl IntoView {
     view! {
+        <div class="asset-credit-footer" aria-live="polite">
+            {move || {
+                credits
+                    .get()
+                    .into_iter()
+                    .filter_map(|credit| compact_credit_text(&credit))
+                    .map(|credit| view! { <span>{credit}</span> })
+                    .collect_view()
+            }}
+        </div>
         <details class="hs-diag" id="asset-credits-rust-view">
             <summary>
                 "Asset credits "

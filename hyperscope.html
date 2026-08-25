@@ -64,6 +64,9 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 .asset-credit a,.asset-credit-note a{color:#58a6ff;text-decoration:none;overflow-wrap:anywhere}
 .asset-credit a:hover,.asset-credit-note a:hover{text-decoration:underline}
 .asset-credit-note{margin-top:7px;color:#6e7681;font-size:9px;line-height:1.4}
+.asset-credit-footer{position:fixed;left:50%;bottom:12px;z-index:9;display:flex;gap:6px;max-width:min(720px,calc(100vw - 32px));padding:4px 8px;transform:translateX(-50%);border:1px solid rgba(139,148,158,.24);border-radius:5px;background:rgba(13,17,23,.72);backdrop-filter:blur(5px);color:#b1bac4;font-size:10px;line-height:1.3;letter-spacing:.01em;pointer-events:none}
+.asset-credit-footer:empty{display:none}
+.asset-credit-footer span+span::before{content:' / ';color:#6e7681}
 .lab-note{font-size:9px;line-height:1.4;color:#6e7681;margin-top:5px}
 .lab-stats{font:9px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;color:#8b949e;margin-top:6px;white-space:normal}
 .lab-stats .ok{color:#3fb950}.lab-stats .promoted{color:#d29922}.lab-stats .val{color:#58a6ff}
@@ -93,6 +96,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   <canvas id="cv"></canvas>
   <div id="drop-overlay"><span>Drop .glb / .gltf file here</span></div>
   <div id="presentation-card-rust" hidden></div>
+  <div class="asset-credit-footer" id="asset-credit-footer" aria-live="polite"></div>
   <section class="presentation-card" id="presentation-card" aria-live="polite">
     <div class="presentation-eyebrow" id="presentation-eyebrow"></div>
     <h2 class="presentation-heading" id="presentation-heading"></h2>
@@ -2912,6 +2916,7 @@ function assetCreditSourceLink(source) {
 
 function renderAssetCredits(snapshot) {
   const list = $('asset-credit-list');
+  const footer = $('asset-credit-footer');
   if (!list) return;
   const credited = (snapshot?.assets || []).filter(asset => {
     const status = asset?.status;
@@ -2920,6 +2925,19 @@ function renderAssetCredits(snapshot) {
     return metadata && Object.values(metadata).some(value => typeof value === 'string' && value);
   });
   $('asset-credit-count').textContent = credited.length ? `(${credited.length})` : '';
+  if (footer) {
+    footer.replaceChildren(...credited.flatMap(asset => {
+      const { author, license } = asset.status.metadata;
+      const compact = [author, license]
+        .filter(Boolean)
+        .map(value => value.replace(/\s+\(https?:\/\/[^)]+\)$/, ''))
+        .join(' · ');
+      if (!compact) return [];
+      const line = document.createElement('span');
+      line.textContent = compact;
+      return [line];
+    }));
+  }
   if (credited.length === 0) {
     list.className = 'asset-credit-note';
     list.textContent = 'No embedded attribution metadata is available for the loaded asset.';
@@ -2964,6 +2982,7 @@ function ensureRustAssetCreditsView() {
   rustAppShadowDiagnostics.assetCreditsMountAttempts += 1;
   const host = $('asset-credits-rust');
   const fallback = $('asset-credits');
+  const fallbackFooter = $('asset-credit-footer');
   if (!host || !fallback || typeof rustAppShadow.mountAssetCredits !== 'function') {
     return false;
   }
@@ -2971,12 +2990,14 @@ function ensureRustAssetCreditsView() {
     rustAppShadow.mountAssetCredits(host);
     host.hidden = false;
     fallback.hidden = true;
+    if (fallbackFooter) fallbackFooter.hidden = true;
     rustAssetCreditsMounted = true;
     rustAppShadowDiagnostics.assetCreditsAuthority = 'hyperscope-web';
     return true;
   } catch (error) {
     host.hidden = true;
     fallback.hidden = false;
+    if (fallbackFooter) fallbackFooter.hidden = false;
     rustAppShadowDiagnostics.assetCreditsMountErrors += 1;
     recordAppShadowMismatch('asset_credits_mount', error?.message || String(error));
     return false;

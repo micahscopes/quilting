@@ -63,6 +63,40 @@ pub fn external_credit_url(source: &str) -> Option<&str> {
     .then_some(source)
 }
 
+/// Compact on-canvas attribution. Presentation views intentionally show only
+/// the authored credit and license; the detailed sidebar retains the rest of
+/// the embedded metadata.
+pub fn compact_credit_text(credit: &AssetCredit) -> Option<String> {
+    let author = credit
+        .metadata
+        .author
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(compact_credit_field);
+    let license = credit
+        .metadata
+        .license
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(compact_credit_field);
+    match (author, license) {
+        (Some(author), Some(license)) => Some(format!("{author} · {license}")),
+        (Some(author), None) => Some(author.to_owned()),
+        (None, Some(license)) => Some(license.to_owned()),
+        (None, None) => None,
+    }
+}
+
+fn compact_credit_field(value: &str) -> &str {
+    let Some((label, suffix)) = value.rsplit_once(" (") else {
+        return value;
+    };
+    let Some(url) = suffix.strip_suffix(')') else {
+        return value;
+    };
+    external_credit_url(url).map_or(value, |_| label)
+}
+
 fn asset_basename(uri: &str) -> &str {
     uri.rsplit('/')
         .find(|component| !component.is_empty())
@@ -159,5 +193,39 @@ mod tests {
         ] {
             assert_eq!(external_credit_url(source), None, "accepted {source:?}");
         }
+    }
+
+    #[test]
+    fn compact_credit_contains_only_author_and_license() {
+        let credit = AssetCredit {
+            asset_id: AssetId::from_u128(1).unwrap(),
+            uri: "credited.glb".to_owned(),
+            display_name: "Hidden title".to_owned(),
+            metadata: AssetMetadata {
+                title: Some("Hidden title".to_owned()),
+                author: Some("Example Artist".to_owned()),
+                license: Some(
+                    "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)".to_owned(),
+                ),
+                copyright: Some("Hidden copyright".to_owned()),
+                generator: Some("Hidden generator".to_owned()),
+                source: Some("https://example.test/model".to_owned()),
+            },
+        };
+
+        assert_eq!(
+            compact_credit_text(&credit).as_deref(),
+            Some("Example Artist · CC BY 4.0"),
+        );
+        assert_eq!(
+            compact_credit_text(&AssetCredit {
+                metadata: AssetMetadata {
+                    generator: Some("Exporter".to_owned()),
+                    ..AssetMetadata::default()
+                },
+                ..credit
+            }),
+            None,
+        );
     }
 }
