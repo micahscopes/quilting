@@ -13,6 +13,7 @@ import {
   mapSpaceMouseFlyAxes,
   mapSpaceMouseNavigationAxes,
   shapeSpaceMouseAxis,
+  spaceMouseInputAllowed,
   spaceMouseLocalRotationVector,
   spaceMouseModifierMode,
   spaceMouseNavigationPolicy,
@@ -165,6 +166,26 @@ test('axis response removes drift and preserves full-scale sign', () => {
   assert.equal(shapeSpaceMouseAxis(1), 1);
   assert.equal(shapeSpaceMouseAxis(-1), -1);
   assert(shapeSpaceMouseAxis(0.5) > 0 && shapeSpaceMouseAxis(0.5) < 0.5);
+});
+
+test('foreground input is the default while background input remains opt-in', () => {
+  assert.equal(spaceMouseInputAllowed(false, true, true), true);
+  assert.equal(spaceMouseInputAllowed(false, false, true), false);
+  assert.equal(spaceMouseInputAllowed(false, true, false), false);
+  assert.equal(spaceMouseInputAllowed(true, false, false), true);
+});
+
+test('disabling controller input clears retained motion and buttons', () => {
+  const controller = new SpaceMouseController({ hid: null });
+  controller.state.axes[0] = 1;
+  controller.state.buttons = SPACEMOUSE_LEFT_BUTTON;
+  controller.filteredAxes[0] = 0.5;
+  controller.lastAxisReportAt = 10;
+  controller.setInputEnabled(false);
+  assert.deepEqual(Array.from(controller.state.axes), [0, 0, 0, 0, 0, 0]);
+  assert.equal(controller.state.buttons, 0);
+  assert.deepEqual(Array.from(controller.filteredAxes), [0, 0, 0, 0, 0, 0]);
+  assert.equal(controller.lastAxisReportAt, -Infinity);
 });
 
 test('frame sampling smooths fresh input and decays stale input', () => {

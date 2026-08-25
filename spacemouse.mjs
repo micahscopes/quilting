@@ -114,6 +114,15 @@ export function shapeSpaceMouseAxis(value, deadzone = 0.08) {
   return Math.sign(value) * normalized * normalized;
 }
 
+/** Whether a page should consume SpaceMouse input under the foreground policy. */
+export function spaceMouseInputAllowed(
+  backgroundEnabled,
+  documentVisible,
+  windowFocused,
+) {
+  return !!backgroundEnabled || (!!documentVisible && !!windowFocused);
+}
+
 /**
  * Convert raw HID X/Y/Z/Rx/Ry/Rz into a right/up/forward +
  * pitch/yaw/roll camera-local velocity vector.
@@ -301,6 +310,7 @@ export class SpaceMouseController {
     this.state = createSpaceMouseState();
     this.filteredAxes = new Float32Array(6);
     this.lastAxisReportAt = -Infinity;
+    this.inputEnabled = true;
     this.handleInputReport = this.handleInputReport.bind(this);
     this.handleDisconnect = this.handleDisconnect.bind(this);
     if (this.hid) this.hid.addEventListener('disconnect', this.handleDisconnect);
@@ -396,14 +406,30 @@ export class SpaceMouseController {
       this.device.removeEventListener('inputreport', this.handleInputReport);
     }
     this.device = null;
+    this.resetInput();
+  }
+
+  resetSmoothing() {
+    this.filteredAxes.fill(0);
+  }
+
+  /** Discard retained axes/buttons so focus changes cannot replay stale motion. */
+  resetInput() {
     this.state.axes.fill(0);
     this.state.buttons = 0;
     this.filteredAxes.fill(0);
     this.lastAxisReportAt = -Infinity;
   }
 
-  resetSmoothing() {
-    this.filteredAxes.fill(0);
+  /** Enable or suppress HID reports without closing the granted device. */
+  setInputEnabled(enabled) {
+    const next = !!enabled;
+    if (next === this.inputEnabled) return;
+    this.inputEnabled = next;
+    // Clear on both edges: reports received just before blur must not continue
+    // moving in the background, and background targets must not replay when
+    // the page becomes foreground-authoritative again.
+    this.resetInput();
   }
 
   handleDisconnect(event) {
@@ -414,6 +440,7 @@ export class SpaceMouseController {
   }
 
   handleInputReport(event) {
+    if (!this.inputEnabled) return;
     if (!decodeSpaceMouseReport(event.reportId, event.data, this.state)) return;
     if (event.reportId === 1 || event.reportId === 2) {
       this.lastAxisReportAt = performance.now();

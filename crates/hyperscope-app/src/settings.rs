@@ -116,6 +116,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("smnav", "hyperscope", Text),
     spec!("smlock", "1", Toggle),
     spec!("smswap", "0", Toggle),
+    spec!("smbackground", "0", Toggle),
     spec!("smpinv", "2", Number),
     spec!("smrinv", "1", Number),
     spec!("smbpinv", "0", Number),

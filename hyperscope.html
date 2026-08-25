@@ -310,6 +310,10 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="toggle" id="spacemouse-swap-toggle"></div>
       <span class="toggle-label">Swap Y/Z axes</span>
     </div>
+    <div class="toggle-row" style="margin-top:4px">
+      <div class="toggle" id="spacemouse-background-toggle"></div>
+      <span class="toggle-label">Allow input when unfocused</span>
+    </div>
     <label style="margin-top:5px">Invert movement</label>
     <div class="btns" id="spacemouse-pan-invert">
       <button data-bit="1">X</button><button data-bit="2">Y</button><button data-bit="4">Z</button>
@@ -408,10 +412,11 @@ import {
   SpaceMouseController,
   mapSpaceMouseFlyAxes,
   mapSpaceMouseNavigationAxes,
+  spaceMouseInputAllowed,
   spaceMouseModifierMode,
   spaceMouseLocalRotationVector,
   spaceMouseNavigationPolicy,
-} from './spacemouse.mjs?rev=object-focus-v1';
+} from './spacemouse.mjs?rev=foreground-policy-v1';
 import {
   advanceVirtualTransitionClock,
   appendPackedNodeIdentities,
@@ -917,7 +922,7 @@ const PARAM_DEFAULTS = {
   animate: '1', anim: '-1', atlas: '7', lodratio: '2',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
-  smlock: '1', smswap: '0', smpinv: '2', smrinv: '1',
+  smlock: '1', smswap: '0', smbackground: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
@@ -952,7 +957,7 @@ function readParams(p) {
     rz: get('rz'),
     px: get('px'), py: get('py'), pz: get('pz'),
     smmove: get('smmove'), smrotate: get('smrotate'), smnav: get('smnav'),
-    smlock: get('smlock'), smswap: get('smswap'),
+    smlock: get('smlock'), smswap: get('smswap'), smbackground: get('smbackground'),
     smpinv: get('smpinv'), smrinv: get('smrinv'),
     smbpinv: get('smbpinv'), smbrinv: get('smbrinv'),
     fov: get('fov'), interp: get('interp'), walksmooth: get('walksmooth'),
@@ -1026,6 +1031,7 @@ function syncURL() {
       ss('smnav', spaceMouseNavigation, PARAM_DEFAULTS.smnav);
       set('smlock', spaceMouseLockHorizon.peek() ? '1' : '0', PARAM_DEFAULTS.smlock);
       set('smswap', spaceMouseSwapYZ.peek() ? '1' : '0', PARAM_DEFAULTS.smswap);
+      set('smbackground', spaceMouseBackground.peek() ? '1' : '0', PARAM_DEFAULTS.smbackground);
       ss('smpinv', spaceMouseHyperscopePanInvert, PARAM_DEFAULTS.smpinv);
       ss('smrinv', spaceMouseHyperscopeRotateInvert, PARAM_DEFAULTS.smrinv);
       ss('smbpinv', spaceMouseBlenderPanInvert, PARAM_DEFAULTS.smbpinv);
@@ -1163,6 +1169,7 @@ const walkHeightSteps = signal(0, 'walkheight');
 const spaceMouseNavigation = signal('hyperscope', 'smnav');
 const spaceMouseLockHorizon = signal(true, 'smlock');
 const spaceMouseSwapYZ = signal(false, 'smswap');
+const spaceMouseBackground = signal(false, 'smbackground');
 const spaceMouseHyperscopePanInvert = signal(2, 'smpinv');
 const spaceMouseHyperscopeRotateInvert = signal(1, 'smrinv');
 const spaceMouseBlenderPanInvert = signal(0, 'smbpinv');
@@ -1202,6 +1209,7 @@ effect(() => {
 });
 bindToggle('spacemouse-horizon-toggle', spaceMouseLockHorizon);
 bindToggle('spacemouse-swap-toggle', spaceMouseSwapYZ);
+bindToggle('spacemouse-background-toggle', spaceMouseBackground);
 bindNavigationAxisMask(
   'spacemouse-pan-invert',
   spaceMouseHyperscopePanInvert,
@@ -1220,6 +1228,7 @@ effect(() => {
   spaceMouseNavigation.get();
   spaceMouseLockHorizon.get();
   spaceMouseSwapYZ.get();
+  spaceMouseBackground.get();
   spaceMouseHyperscopePanInvert.get();
   spaceMouseHyperscopeRotateInvert.get();
   spaceMouseBlenderPanInvert.get();
@@ -1265,6 +1274,24 @@ const spaceMouse = new SpaceMouseController({
     spaceMouseConnect.textContent = state === 'connected' ? 'SpaceMouse connected' : 'Connect SpaceMouse';
     if (state !== 'connected') spaceMouseButtonGestures.reset();
   },
+});
+function synchronizeSpaceMouseInputPolicy() {
+  const enabled = spaceMouseInputAllowed(
+    spaceMouseBackground.peek(),
+    document.visibilityState === 'visible',
+    document.hasFocus(),
+  );
+  spaceMouse.setInputEnabled(enabled);
+  spaceMouseDiagnostics.inputEnabled = enabled;
+  spaceMouseDiagnostics.backgroundEnabled = spaceMouseBackground.peek();
+  if (!enabled) spaceMouseButtonGestures.reset();
+}
+window.addEventListener('focus', synchronizeSpaceMouseInputPolicy);
+window.addEventListener('blur', synchronizeSpaceMouseInputPolicy);
+document.addEventListener('visibilitychange', synchronizeSpaceMouseInputPolicy);
+effect(() => {
+  spaceMouseBackground.get();
+  synchronizeSpaceMouseInputPolicy();
 });
 spaceMouseDiagnostics.available = spaceMouse.available;
 spaceMouseDiagnostics.axes = spaceMouse.filteredAxes;
@@ -6127,6 +6154,7 @@ applyParams = function(params) {
     ? params.smnav : 'hyperscope');
   spaceMouseLockHorizon.set(params.smlock === '1');
   spaceMouseSwapYZ.set(params.smswap === '1');
+  spaceMouseBackground.set(params.smbackground === '1');
   spaceMouseHyperscopePanInvert.set(integer(params.smpinv, 2, 0, 7));
   spaceMouseHyperscopeRotateInvert.set(integer(params.smrinv, 1, 0, 7));
   spaceMouseBlenderPanInvert.set(integer(params.smbpinv, 0, 0, 7));
