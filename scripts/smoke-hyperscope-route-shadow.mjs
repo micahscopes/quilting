@@ -22,6 +22,8 @@ assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'routeimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
 
@@ -39,6 +41,17 @@ assert.deepEqual(
   browserKeyOrder,
   'Rust route order/default registry drifted from the browser oracle',
 );
+for (const authorityStep of [
+  "RUST_ROUTE_IMPLEMENTATION === 'rust'",
+  'committedParams = new URLSearchParams(rustRoute.pairs);',
+  "rustRouteShadowDiagnostics.state = 'fallback';",
+  'history.replaceState(null, \'\', url);',
+]) {
+  assert.ok(
+    syncSource.includes(authorityStep),
+    `browser route authority adapter is missing ${authorityStep}`,
+  );
+}
 
 const canonical = canonicalizeHyperscopeRoute([
   ['routeshadow', '1'],
@@ -48,12 +61,14 @@ const canonical = canonicalizeHyperscopeRoute([
   ['glb', 'horse.glb'],
   ['minpx', '16.0'],
   ['lodratio', '4'],
+  ['routeimpl', 'rust'],
 ]);
 assert.deepEqual(canonical.pairs, [
   ['mode', 'lod'],
   ['lodratio', '4'],
   ['rx', '0.125'],
   ['routeshadow', '1'],
+  ['routeimpl', 'rust'],
 ]);
 assert.deepEqual(canonical.diagnostics, []);
 
@@ -64,13 +79,14 @@ const malformed = canonicalizeHyperscopeRoute([
   ['rx', 'NaN'],
   ['lodratio', '3'],
   ['selectionimpl', 'sometimes'],
+  ['routeimpl', 'sometimes'],
   ['mystery', '1'],
 ]);
 assert.deepEqual(
   malformed.diagnostics.map(diagnostic => diagnostic.code),
   [
     'duplicate_key', 'invalid_value', 'invalid_value', 'invalid_value',
-    'invalid_value', 'unknown_key',
+    'invalid_value', 'invalid_value', 'unknown_key',
   ],
 );
 assert.deepEqual(malformed.pairs, [
@@ -79,6 +95,7 @@ assert.deepEqual(malformed.pairs, [
   ['lodratio', '3'],
   ['selectionimpl', 'sometimes'],
   ['rx', 'NaN'],
+  ['routeimpl', 'sometimes'],
 ]);
 
 const cue = 'e0000000-0000-4000-8000-000000000004';

@@ -1269,3 +1269,32 @@ tests. The frozen authored-payload, project-archive, and source-checkpoint
 digests remained unchanged. HHHS 0.4.3 still has no open-authority
 co-transaction attachment API, so crash-atomic browser persistence of the
 source cursor remains gated rather than approximated with a second write.
+
+## Rust canonical-route write authority gate
+
+The 2026-08-25 URL follow-up promoted the existing Rust route oracle behind an
+explicit `routeimpl=js|shadow|rust` rollback boundary. The 71-entry
+`hyperscope-app::ControlSpec` registry remains the sole authority for key
+identity, value classes, default equivalence, and serialization order. Rust
+mode commits the canonical pair sequence returned through WASM; a diagnostic
+or bridge failure retains the complete browser-built query and increments a
+bounded fallback counter. Shadow mode compares without writing, and the
+default JavaScript mode performs no route WASM calls. Startup value application
+is deliberately unchanged and remains a later authority gate.
+
+Chrome DevTools MCP verified a fresh Rust-authority load and a subsequent wheel
+navigation update. Both writes had byte-identical browser, Rust, and committed
+queries, with two comparisons, two authoritative writes, zero fallbacks, and
+zero mismatches. A fresh shadow load produced one comparison and no authority
+or fallback write; a fresh default load left the observer disabled with zero
+comparisons. The generated-WASM oracle covers canonical order, numeric default
+equivalence, duplicates, malformed values, unknown keys, and the adapter's
+explicit fallback branch.
+
+In the same Chrome process, 2,000 five-pair canonicalizations measured
+0.038 ms/call median and 0.145 ms/call worst sampled batch average. URL writes
+remain capped at 3.33 Hz by the existing 300 ms scheduler, so this path is not
+frame-rate traffic. The optimized WASM at this checkpoint is 6,287,430 bytes
+raw and 2,201,127 bytes under deterministic `gzip -9 -n`; no before/after size
+claim is inferred because the preceding composed-LOD checkpoint was not
+rebuilt as an isolated release artifact.

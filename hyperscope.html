@@ -426,8 +426,14 @@ const RUST_SELECTION_IMPLEMENTATION = (() => {
 const RUST_APP_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('appshadow') === '1'
   || RUST_SELECTION_IMPLEMENTATION !== 'js';
-const RUST_ROUTE_SHADOW_ENABLED =
+const RUST_ROUTE_IMPLEMENTATION = (() => {
+  const requested = new URLSearchParams(location.search).get('routeimpl') || 'js';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
+})();
+const LEGACY_RUST_ROUTE_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('routeshadow') === '1';
+const RUST_ROUTE_SHADOW_ENABLED =
+  LEGACY_RUST_ROUTE_SHADOW_ENABLED || RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('rendershadow') === '1';
 const SURFACE_WALK_IMPLEMENTATION = (() => {
@@ -437,8 +443,11 @@ const SURFACE_WALK_IMPLEMENTATION = (() => {
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 const rustRouteShadowDiagnostics = {
   enabled: RUST_ROUTE_SHADOW_ENABLED,
+  implementation: RUST_ROUTE_IMPLEMENTATION,
   state: RUST_ROUTE_SHADOW_ENABLED ? 'awaiting-wasm' : 'disabled',
   comparisons: 0,
+  authoritativeWrites: 0,
+  fallbackWrites: 0,
   mismatches: [],
   rustDiagnostics: [],
   specs: null,
@@ -448,7 +457,7 @@ const rustRouteShadowDiagnostics = {
 globalThis.__hyperscopeRouteShadowDiagnostics = rustRouteShadowDiagnostics;
 
 function compareRustRouteShadow(params) {
-  if (!RUST_ROUTE_SHADOW_ENABLED || !wasmOk.peek()) return;
+  if (!RUST_ROUTE_SHADOW_ENABLED || !wasmOk.peek()) return null;
   try {
     const result = canonicalizeHyperscopeRoute(Array.from(params.entries()));
     const browserQuery = params.toString();
@@ -467,6 +476,7 @@ function compareRustRouteShadow(params) {
         atMs: performance.now(),
       });
     }
+    return result;
   } catch (error) {
     const mismatches = rustRouteShadowDiagnostics.mismatches;
     if (mismatches.length === 64) mismatches.shift();
@@ -474,6 +484,7 @@ function compareRustRouteShadow(params) {
       error: error?.message || String(error),
       atMs: performance.now(),
     });
+    return null;
   }
 }
 
@@ -839,6 +850,7 @@ const PARAM_DEFAULTS = {
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
+  routeimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -984,11 +996,23 @@ function syncURL() {
     }
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
     if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
-    if (RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
+    if (LEGACY_RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
+    set('routeimpl', RUST_ROUTE_IMPLEMENTATION, PARAM_DEFAULTS.routeimpl);
     if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
-    compareRustRouteShadow(p);
+    const rustRoute = compareRustRouteShadow(p);
+    let committedParams = p;
+    if (RUST_ROUTE_IMPLEMENTATION === 'rust') {
+      if (rustRoute && rustRoute.diagnostics.length === 0) {
+        committedParams = new URLSearchParams(rustRoute.pairs);
+        rustRouteShadowDiagnostics.authoritativeWrites += 1;
+        rustRouteShadowDiagnostics.state = 'authoritative';
+      } else {
+        rustRouteShadowDiagnostics.fallbackWrites += 1;
+        rustRouteShadowDiagnostics.state = 'fallback';
+      }
+    }
 
-    const qs = p.toString();
+    const qs = committedParams.toString();
     const url = qs ? `${location.pathname}?${qs}` : location.pathname;
     history.replaceState(null, '', url);
   }, 300);
@@ -7322,7 +7346,8 @@ phase('wasm', [], async () => {
   }
   if (RUST_ROUTE_SHADOW_ENABLED) {
     rustRouteShadowDiagnostics.specs = hyperscopeControlSpecs();
-    rustRouteShadowDiagnostics.state = 'observing';
+    rustRouteShadowDiagnostics.state =
+      RUST_ROUTE_IMPLEMENTATION === 'rust' ? 'ready' : 'observing';
   }
   if (RUST_NAVIGATION_SHADOW_ENABLED) {
     rustNavigationShadow = new HyperscopeNavigation();

@@ -132,12 +132,14 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 70 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 71 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
-  malformed/unknown diagnostics. With `routeshadow=1`, the browser still writes
-  its URL but compares every bounded-rate serialization against Rust at
-  `globalThis.__hyperscopeRouteShadowDiagnostics`.
+  malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
+  boundary for URL writes. Rust mode commits the validated canonical pair
+  order; a bridge error or Rust diagnostic falls back to the unchanged browser
+  query and records the fallback. `routeshadow=1` remains a legacy opt-in
+  observer. Startup value application remains a separate later cutover.
 - `quilting-core::render` owns retained scene snapshots, logical frame
   commands, indexed submission accounting, and the bounded backend-parity
   observer. `rendershadow=1` extracts WebGL state only when the retained scene
