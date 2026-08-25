@@ -308,3 +308,17 @@ or permissive-only bundle. Exclude `local-glbs/` and any test downloads from
 every archive. A public bundle under the intended
 policy is ready only when the strict preflight has no errors or warnings and
 the browser smoke check passes on the target machine.
+
+After that gate passes, make a deterministic transport archive at a new path:
+
+```sh
+release_archive=../hyperscope-hacker-night.tar.gz
+test ! -e "$release_archive"
+tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+  --format=gnu -C dist-release -cf - . | gzip -9 -n > "$release_archive"
+sha256sum "$release_archive"
+```
+
+Extract the archive into an empty directory and repeat strict preflight before
+publishing or moving it to the presentation machine. The deterministic options
+make identical staged contents produce an identical compressed archive.

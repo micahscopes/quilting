@@ -1966,3 +1966,10 @@ scene, route, and frame mismatch/error counts stayed zero and the console had
 no warnings or errors. The runbook now serves the strictly staged
 `dist-release/` rather than the development `dist/` so a known-good talk bundle
 cannot accidentally include local GLBs or stale development output.
+
+The exact staged directory was also packaged with sorted paths, epoch mtimes,
+numeric zero ownership, GNU tar, and header-free deterministic gzip. The
+18,688,358-byte archive has SHA-256
+`9f802021c806111e0542522fb0f19607fdffa683f50e7c439b363122ad1de92d`.
+A fresh extraction passed the same strict preflight and repackaged byte-for-byte
+identically, proving the transport artifact rather than only its source tree.
