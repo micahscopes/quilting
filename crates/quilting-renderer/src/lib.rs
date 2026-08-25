@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn affine_conformal_maps_still_transform_normals_and_stretch() {
-        let source = include_str!("../../quilting-shaders/shaders/vertex/main.wgsl");
+        let source = quilting_shaders::sources::VERTEX_MAIN;
         assert!(
             !source.contains("let is_mobius"),
             "c=0 includes rotations and signed scales, so it cannot bypass the differential"
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn current_pose_culling_precedes_surface_evaluation() {
-        let source = include_str!("../../quilting-shaders/shaders/vertex/main.wgsl");
+        let source = quilting_shaders::sources::VERTEX_MAIN;
         let main = source.find("fn vs_main").expect("main vertex entry point");
         let cull = source[main..].find("if patch_outside_frustum(")
             .expect("vertex shader must cull from current posed control points");
@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(pass::batch_orientation_sign(-1, 1.0), -1);
         assert_eq!(pass::batch_orientation_sign(-1, -1.0), 1);
 
-        let source = include_str!("../../quilting-shaders/shaders/vertex/main.wgsl");
+        let source = quilting_shaders::sources::VERTEX_MAIN;
         assert!(
             source.contains("let bary = perm_bary(in.bary, perm_index)"),
             "canonical atlas barycentrics must be permuted per instance",
