@@ -1341,3 +1341,24 @@ WASM smokes, and all three replay checks. This checkpoint deliberately stops
 before renderer extraction or a Blender transport: it establishes the atomic
 materialization boundary those adapters can consume without giving network or
 frame traffic reducer authority.
+
+## Generated authored-checkpoint admission gate
+
+The transport-neutral boundary now crosses generated WASM without selecting a
+network. `HyperscopeAppShadow::applyAuthoredRevision` accepts an atomic array of
+the same protocol-v0.1 JSON envelopes used by Blender and carries the projection
+revision as decimal text. The executable gate used revision
+`9007199254740993`, proving that the fence does not round through JavaScript's
+safe-integer limit. The bounded application snapshot exposes sorted authored
+assets and entity transforms alongside that exact fence.
+
+The generated-WASM oracle admitted an asset plus transform, ignored a stale
+removal, then rejected a batch containing a valid update followed by an invalid
+zero-scale transform. Revision, asset projection, and transform projection were
+byte-for-byte equivalent before and after rejection; an out-of-range `u64`
+fence was also rejected before dispatch. wasm32 checking, focused formatting,
+the full browser-independent JavaScript suite, all five generated/script WASM
+smokes, and all three replay fingerprints remained green. Package-wide strict
+Clippy is not claimed here: the renderer has 42 pre-existing warnings under the
+current toolchain, outside this boundary's files. No socket, Blender callback,
+renderer matrix, or HHHS operation is inferred from admission alone.

@@ -156,6 +156,13 @@ The first application boundary is now explicit:
   revision is set last as the consumer commit fence; adapters explicitly flush
   at their UI cadence. Presentation transitions reconcile on the frame lane
   without cloning cue assets/layers into render snapshots.
+- The generated `HyperscopeAppShadow` facade admits one transport-neutral
+  authored checkpoint as a decimal-text `u64` projection revision plus the
+  canonical protocol JSON command array shared with Blender. This avoids
+  JavaScript integer truncation, validates the whole batch before mutation,
+  and exposes the key-sorted authored asset/entity projection in its bounded
+  snapshot. It still chooses no socket and has no renderer authority; those
+  remain separate extraction and transport cutovers.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

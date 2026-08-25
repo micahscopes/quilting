@@ -7,11 +7,12 @@ use hyperscape::{
     NavigationAction, NavigationFrame, Presentation, PresentationSnapshot, SpaceMouseCameraInput,
     SpaceMouseMapping, SurfaceAnchorTarget,
 };
-use hyperscape_protocol::{AssetDescriptor, AssetId, RequestId};
+use hyperscape_protocol::{AssetDescriptor, AssetId, AuthoredEnvelope, RequestId};
 use hyperscope_app::{
     session_node_identity, AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore,
-    AssetLoadCompletion, AssetLoadOutcome, AssetStatus, CommitDisposition, EffectCompletion,
-    FrameTick, NavigationSynchronization, PresentationAction, SemanticAction, Timed,
+    AssetLoadCompletion, AssetLoadOutcome, AssetStatus, AuthoredRevision, CommitDisposition,
+    EffectCompletion, FrameTick, NavigationSynchronization, PresentationAction, SemanticAction,
+    Timed,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -625,10 +626,40 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
-    /// A bounded, UI-shaped projection. The app store publishes asset and
-    /// diagnostic vectors before its summary revision commit fence.
+    /// Atomically admit one transport-neutral authored checkpoint. The
+    /// revision travels as decimal text so JavaScript cannot truncate a u64;
+    /// commands retain the canonical protocol JSON shape shared with Blender.
+    /// Parsing or validation failure leaves the preceding AppStore revision
+    /// and materialized authored scene unchanged.
+    #[wasm_bindgen(js_name = applyAuthoredRevision)]
+    pub fn apply_authored_revision(
+        &self,
+        projection_revision: &str,
+        commands_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let projection_revision = projection_revision.parse::<u64>().map_err(|error| {
+            js_error(format!("authored projection revision is invalid: {error}"))
+        })?;
+        let commands =
+            serde_json::from_str::<Vec<AuthoredEnvelope>>(commands_json).map_err(|error| {
+                js_error(format!("authored command batch is invalid JSON: {error}"))
+            })?;
+        let commit = self
+            .store
+            .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
+                projection_revision,
+                commands,
+            }))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+
+    /// A bounded, UI-shaped projection. The app store publishes runtime asset,
+    /// authored asset/entity, and diagnostic vectors before its summary
+    /// revision commit fence.
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         let summary = self.store.summary_snapshot();
+        let authored = self.store.authored_scene_snapshot();
         let assets = self
             .store
             .asset_snapshot()
@@ -662,6 +693,29 @@ impl HyperscopeAppShadow {
             revision: summary.revision.to_string(),
             assets,
             loading_assets: summary.loading_assets,
+            authored_projection_revision: authored
+                .projection_revision
+                .map(|revision| revision.to_string()),
+            authored_assets: authored
+                .assets
+                .into_iter()
+                .map(|asset| ShadowAuthoredAsset {
+                    id: asset.id.to_string(),
+                    uri: asset.uri,
+                    media_type: asset.media_type,
+                    content_digest: asset.content_digest,
+                })
+                .collect(),
+            authored_entities: authored
+                .entities
+                .into_iter()
+                .map(|entity| ShadowAuthoredEntity {
+                    entity_id: entity.entity.to_string(),
+                    translation: entity.transform.translation,
+                    rotation_wxyz: entity.transform.rotation_wxyz,
+                    scale: entity.transform.scale,
+                })
+                .collect(),
             diagnostics,
             presentation,
         })
@@ -762,8 +816,29 @@ struct ShadowSnapshot {
     revision: String,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
+    authored_projection_revision: Option<String>,
+    authored_assets: Vec<ShadowAuthoredAsset>,
+    authored_entities: Vec<ShadowAuthoredEntity>,
     diagnostics: Vec<ShadowDiagnostic>,
     presentation: Option<ShadowPresentation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAuthoredAsset {
+    id: String,
+    uri: String,
+    media_type: Option<String>,
+    content_digest: Option<[u8; 32]>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAuthoredEntity {
+    entity_id: String,
+    translation: [f64; 3],
+    rotation_wxyz: [f64; 4],
+    scale: [f64; 3],
 }
 
 #[derive(Serialize)]

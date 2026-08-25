@@ -227,6 +227,99 @@ assert.throws(
   /must be nonnegative/,
 );
 
+// Transport-neutral authored checkpoints cross generated WASM as canonical
+// protocol JSON while the projection fence remains lossless beyond JS's safe
+// integer range. Stale and malformed batches must leave the materialization
+// exactly unchanged.
+const authoredTransformEnvelope = JSON.parse(readFileSync(
+  `${repository}/fixtures/protocol/authored-set-transform-v0.1.json`,
+  'utf8',
+));
+const authoredAsset = '62000000-0000-4000-8000-000000000001';
+const authoredProjectionRevision = '9007199254740993';
+const authoredUpsertEnvelope = {
+  header: {
+    version: { major: 0, minor: 1 },
+    message_id: '62000000-0000-4000-8000-000000000002',
+    sender: '62000000-0000-4000-8000-000000000003',
+    sequence: 2,
+  },
+  command: {
+    type: 'upsert_asset',
+    asset: {
+      id: authoredAsset,
+      uri: 'blender-live.glb',
+      media_type: 'model/gltf-binary',
+    },
+  },
+};
+const authoredApplied = app.applyAuthoredRevision(
+  authoredProjectionRevision,
+  JSON.stringify([authoredTransformEnvelope, authoredUpsertEnvelope]),
+);
+assert.equal(authoredApplied.disposition, 'applied');
+const authoredSnapshot = app.snapshot();
+assert.equal(
+  authoredSnapshot.authoredProjectionRevision,
+  authoredProjectionRevision,
+  'the authored fence must not round through a JavaScript number',
+);
+assert.deepEqual(authoredSnapshot.authoredAssets.map(entry => entry.id), [authoredAsset]);
+assert.equal(authoredSnapshot.authoredAssets[0].uri, 'blender-live.glb');
+assert.equal(authoredSnapshot.authoredAssets[0].mediaType, 'model/gltf-binary');
+assert.deepEqual(authoredSnapshot.authoredEntities, [{
+  entityId: authoredTransformEnvelope.command.entity,
+  translation: [1, 2, 3],
+  rotationWxyz: [1, 0, 0, 0],
+  scale: [1, 1, 1],
+}]);
+
+const staleRemoval = structuredClone(authoredTransformEnvelope);
+staleRemoval.header.message_id = '62000000-0000-4000-8000-000000000004';
+staleRemoval.header.sequence = 4;
+staleRemoval.command = {
+  type: 'remove_entity',
+  entity: authoredTransformEnvelope.command.entity,
+};
+assert.equal(
+  app.applyAuthoredRevision(
+    authoredProjectionRevision,
+    JSON.stringify([staleRemoval]),
+  ).disposition,
+  'ignored_stale',
+);
+assert.deepEqual(app.snapshot().authoredEntities, authoredSnapshot.authoredEntities);
+
+const validThenInvalid = structuredClone(authoredTransformEnvelope);
+validThenInvalid.header.message_id = '62000000-0000-4000-8000-000000000005';
+validThenInvalid.header.sequence = 5;
+validThenInvalid.command.transform.translation = [9, 9, 9];
+const invalidTransform = structuredClone(validThenInvalid);
+invalidTransform.header.message_id = '62000000-0000-4000-8000-000000000006';
+invalidTransform.header.sequence = 6;
+invalidTransform.command.transform.scale = [0, 1, 1];
+const beforeInvalidAuthored = app.snapshot();
+assert.throws(
+  () => app.applyAuthoredRevision(
+    '9007199254740994',
+    JSON.stringify([validThenInvalid, invalidTransform]),
+  ),
+  /transform must be finite with nonzero rotation and scale/,
+);
+const afterInvalidAuthored = app.snapshot();
+assert.equal(afterInvalidAuthored.revision, beforeInvalidAuthored.revision);
+assert.equal(
+  afterInvalidAuthored.authoredProjectionRevision,
+  beforeInvalidAuthored.authoredProjectionRevision,
+);
+assert.deepEqual(afterInvalidAuthored.authoredAssets, beforeInvalidAuthored.authoredAssets);
+assert.deepEqual(afterInvalidAuthored.authoredEntities, beforeInvalidAuthored.authoredEntities);
+assert.throws(
+  () => app.applyAuthoredRevision('18446744073709551616', '[]'),
+  /authored projection revision is invalid/,
+);
+assert.deepEqual(app.snapshot().authoredEntities, beforeInvalidAuthored.authoredEntities);
+
 const presentationDocument = readFileSync(
   `${repository}/examples/hacker-night.presentation.json`,
   'utf8',
@@ -1115,6 +1208,9 @@ console.log(JSON.stringify({
   staleDisposition: stale.disposition,
   readyBytes: ready.assets[0].status.byte_length,
   sessionSelectionNodes: sessionNodeIdentities.length,
+  authoredProjectionRevision: finalSnapshot.authoredProjectionRevision,
+  authoredAssets: finalSnapshot.authoredAssets.length,
+  authoredEntities: finalSnapshot.authoredEntities.length,
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
   presentationCue: finalSnapshot.presentation.active.cue_id,
   navigationBoundaryParity: true,
