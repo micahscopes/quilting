@@ -15,9 +15,10 @@ use hyperscape_protocol::{
 };
 use hyperscope_app::{
     session_node_identity, AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore,
-    AssetLoadCompletion, AssetLoadOutcome, AssetStatus, AuthoredRevision, CommitDisposition,
-    EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
-    LocalPeerReceipt, NavigationSynchronization, PresentationAction, SemanticAction, Timed,
+    AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetStatus, AuthoredRevision,
+    CommitDisposition, EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress,
+    LocalPeerLane, LocalPeerReceipt, NavigationSynchronization, PresentationAction,
+    SemanticAction, Timed,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -86,22 +87,41 @@ impl HyperscopeAppShadow {
         uri: &str,
         media_type: &str,
     ) -> Result<JsValue, JsValue> {
-        let request_id = request_id_from_str(request_id)?;
-        let asset = AssetDescriptor {
-            id: asset_id_from_str(asset_id)?,
-            uri: uri.to_owned(),
-            media_type: (!media_type.is_empty()).then(|| media_type.to_owned()),
-            content_digest: None,
-        };
-        let commit = self
-            .store
-            .dispatch(AppEvent::Input(Timed {
-                sequence: u64::from(sequence),
-                at_seconds,
-                value: SemanticAction::RequestAsset { request_id, asset },
-            }))
-            .map_err(js_error)?;
-        commit_to_js(&commit)
+        self.request_asset_scoped(
+            sequence,
+            at_seconds,
+            request_id,
+            asset_id,
+            uri,
+            media_type,
+            AssetLoadScope::Asset,
+        )
+    }
+
+    /// Request the one browser asset job allowed to replace the renderer's
+    /// primary scene. A later call cancels the preceding primary request even
+    /// when it names a different asset; presentation-layer requests remain
+    /// independent through `requestAsset`.
+    #[wasm_bindgen(js_name = requestPrimaryAsset)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_primary_asset(
+        &self,
+        sequence: u32,
+        at_seconds: f64,
+        request_id: &str,
+        asset_id: &str,
+        uri: &str,
+        media_type: &str,
+    ) -> Result<JsValue, JsValue> {
+        self.request_asset_scoped(
+            sequence,
+            at_seconds,
+            request_id,
+            asset_id,
+            uri,
+            media_type,
+            AssetLoadScope::PrimaryScene,
+        )
     }
 
     #[wasm_bindgen(js_name = cancelAsset)]
@@ -887,6 +907,12 @@ impl HyperscopeAppShadow {
             revision: summary.revision.to_string(),
             assets,
             loading_assets: summary.loading_assets,
+            loading_primary_scene_asset: summary
+                .loading_primary_scene_asset
+                .map(|asset| asset.to_string()),
+            loading_primary_scene_request: summary
+                .loading_primary_scene_request
+                .map(|request| request.to_string()),
             authored_projection_revision: authored
                 .projection_revision
                 .map(|revision| revision.to_string()),
@@ -923,6 +949,39 @@ impl Default for HyperscopeAppShadow {
 }
 
 impl HyperscopeAppShadow {
+    #[allow(clippy::too_many_arguments)]
+    fn request_asset_scoped(
+        &self,
+        sequence: u32,
+        at_seconds: f64,
+        request_id: &str,
+        asset_id: &str,
+        uri: &str,
+        media_type: &str,
+        scope: AssetLoadScope,
+    ) -> Result<JsValue, JsValue> {
+        let request_id = request_id_from_str(request_id)?;
+        let asset = AssetDescriptor {
+            id: asset_id_from_str(asset_id)?,
+            uri: uri.to_owned(),
+            media_type: (!media_type.is_empty()).then(|| media_type.to_owned()),
+            content_digest: None,
+        };
+        let commit = self
+            .store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: u64::from(sequence),
+                at_seconds,
+                value: SemanticAction::RequestAsset {
+                    request_id,
+                    asset,
+                    scope,
+                },
+            }))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+
     fn dispatch_navigation(&self, action: NavigationAction) -> Result<u64, JsValue> {
         let (sequence, _) = self.store.dispatch_navigation(action).map_err(js_error)?;
         Ok(sequence)
@@ -1035,6 +1094,8 @@ struct ShadowSnapshot {
     revision: String,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
+    loading_primary_scene_asset: Option<String>,
+    loading_primary_scene_request: Option<String>,
     authored_projection_revision: Option<String>,
     authored_assets: Vec<ShadowAuthoredAsset>,
     authored_entities: Vec<ShadowAuthoredEntity>,

@@ -204,6 +204,52 @@ const ready = app.snapshot();
 assert.equal(ready.loadingAssets, 0);
 assert.equal(ready.assets[0].status.state, 'ready');
 assert.equal(ready.assets[0].status.byte_length, 181_808);
+
+const primaryApp = new HyperscopeAppShadow();
+const primaryHorse = 'f0000000-0000-4000-8000-000000000010';
+const primaryChess = 'f0000000-0000-4000-8000-000000000011';
+const primaryFirst = 'e0000000-0000-4000-8000-000000000010';
+const primarySecond = 'e0000000-0000-4000-8000-000000000011';
+primaryApp.requestPrimaryAsset(
+  1,
+  0,
+  primaryFirst,
+  primaryHorse,
+  'horse.glb',
+  'model/gltf-binary',
+);
+const primaryReplacement = primaryApp.requestPrimaryAsset(
+  2,
+  0,
+  primarySecond,
+  primaryChess,
+  'local-glbs/chess.glb',
+  'model/gltf-binary',
+);
+assert.deepEqual(
+  primaryReplacement.effects.map(effect => effect.type),
+  ['cancel_asset_load', 'fetch_asset'],
+  'primary scene replacement must cancel across different asset IDs',
+);
+assert.equal(primaryReplacement.effects[0].request_id, primaryFirst);
+assert.equal(primaryReplacement.effects[0].asset_id, primaryHorse);
+let primarySnapshot = primaryApp.snapshot();
+assert.equal(primarySnapshot.loadingPrimarySceneAsset, primaryChess);
+assert.equal(primarySnapshot.loadingPrimarySceneRequest, primarySecond);
+assert.equal(
+  primaryApp.completeAssetLoaded(primaryFirst, primaryHorse, 181_808).disposition,
+  'ignored_stale',
+);
+primarySnapshot = primaryApp.snapshot();
+assert.equal(primarySnapshot.loadingPrimarySceneRequest, primarySecond);
+assert.equal(
+  primaryApp.completeAssetLoaded(primarySecond, primaryChess, 200_000).disposition,
+  'applied',
+);
+primarySnapshot = primaryApp.snapshot();
+assert.equal(primarySnapshot.loadingPrimarySceneAsset, undefined);
+assert.equal(primarySnapshot.loadingPrimarySceneRequest, undefined);
+
 const sessionNodeIdentities = app.sessionNodeIdentities(
   asset,
   new Int32Array([7, 0, 7]),
