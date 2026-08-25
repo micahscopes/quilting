@@ -861,6 +861,50 @@ const incumbentStart = incumbent.startPresentation();
 assert.equal(startedPresentation.disposition, 'applied');
 assert.equal(app.snapshot().presentation.active.cue_id, presentation.cues[0].id);
 assert.deepEqual(app.snapshot().presentation.active, incumbentStart);
+const activePresentation = app.snapshot().presentation.active;
+const activePresentationBindings = activePresentation.layers.map((layer, index) => ({
+  layer: layer.id,
+  asset: layer.asset,
+  nodes: [{
+    packedNode: index + 20,
+    sourceNode: index,
+    entityId: index === 0 ? authoredTransformEnvelope.command.entity : null,
+    sourceWorld: identityMatrix.map((value, element) => element === 12 ? 99 : value),
+  }],
+}));
+const activeComposition = app.extractActivePresentationScene(
+  JSON.stringify(activePresentationBindings),
+);
+assert.equal(activeComposition.appRevision, app.snapshot().revision);
+assert.equal(activeComposition.authoredProjectionRevision, authoredProjectionRevision);
+assert.equal(activeComposition.cueId, activePresentation.cue_id);
+assert.equal(activeComposition.sceneId, activePresentation.scene_id);
+assert.deepEqual(activeComposition.nodes.map(node => node.packedNode), [20]);
+assert.equal(activeComposition.nodes[0].layer, activePresentation.layers[0].id);
+assert.equal(activeComposition.nodes[0].asset, activePresentation.layers[0].asset);
+assert.equal(activeComposition.nodes[0].source, 'authored_absolute');
+assert.deepEqual(activeComposition.nodes[0].matrix, [
+  1, 0, 0, 0,
+  0, 1, 0, 0,
+  0, 0, 1, 0,
+  1, 2, 3, 1,
+]);
+assert.equal(activeComposition.nodes[0].visible, true);
+assert.equal(activeComposition.nodes[0].opacity, 1);
+assert.deepEqual(activeComposition.unmatchedAuthoredEntities, []);
+const beforeRejectedComposition = app.snapshot();
+assert.throws(
+  () => app.extractActivePresentationScene(JSON.stringify([])),
+  /omitted active presentation layer/,
+);
+assert.throws(
+  () => app.extractActivePresentationScene(JSON.stringify([{
+    ...activePresentationBindings[0],
+    layerTransform: { translation: [99, 0, 0] },
+  }])),
+  /unknown field `layerTransform`/,
+);
+assert.deepEqual(app.snapshot(), beforeRejectedComposition);
 const midTransition = app.tickPresentation(0.35);
 const incumbentMidTransition = incumbent.tick(0.35);
 assert.equal(midTransition.elapsed_seconds, 0.35);
@@ -1382,6 +1426,7 @@ console.log(JSON.stringify({
   authoredAssets: finalSnapshot.authoredAssets.length,
   authoredEntities: finalSnapshot.authoredEntities.length,
   packedSceneNodes: extractedScene.nodes.length,
+  activePresentationNodes: activeComposition.nodes.length,
   peerIngress: {
     authored: peerApplied.disposition,
     duplicate: peerDuplicate.disposition,

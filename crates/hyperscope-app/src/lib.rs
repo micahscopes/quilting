@@ -20,9 +20,10 @@ pub use settings::*;
 use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
-    CameraRig, FocusNavigation, FocusSphere, NavigationAction, NavigationController,
-    NavigationPreset, Presentation, PresentationAsset, PresentationRuntime, PresentationSnapshot,
-    ScheduledNavigationAction, SphereReflectionState,
+    extract_packed_presentation_scene, CameraRig, FocusNavigation, FocusSphere, NavigationAction,
+    NavigationController, NavigationPreset, PackedPresentationLayerBinding,
+    PackedPresentationNode, PackedPresentationSceneError, Presentation, PresentationAsset,
+    PresentationRuntime, PresentationSnapshot, ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId,
@@ -297,6 +298,51 @@ pub struct PresentationReadModel {
     pub cue_count: usize,
     pub assets: Vec<PresentationAsset>,
     pub active: Option<PresentationSnapshot>,
+}
+
+/// One coherent application revision of the active presentation composition.
+/// Renderer handles enter through [`PackedPresentationLayerBinding`]; all
+/// semantic layer and authored transform state is sampled under one lock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivePresentationSceneReadModel {
+    pub revision: u64,
+    pub authored_projection_revision: Option<u64>,
+    pub cue_id: Uuid,
+    pub scene_id: Uuid,
+    pub nodes: Vec<PackedPresentationNode>,
+    pub unmatched_authored_entities: Vec<EntityId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentationSceneReadError {
+    NoActivePresentation,
+    Extraction(PackedPresentationSceneError),
+}
+
+impl fmt::Display for PresentationSceneReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoActivePresentation => {
+                formatter.write_str("no active presentation cue is available for extraction")
+            }
+            Self::Extraction(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for PresentationSceneReadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::NoActivePresentation => None,
+            Self::Extraction(error) => Some(error),
+        }
+    }
+}
+
+impl From<PackedPresentationSceneError> for PresentationSceneReadError {
+    fn from(error: PackedPresentationSceneError) -> Self {
+        Self::Extraction(error)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -912,6 +958,33 @@ impl AppStore {
 
     pub fn presentation_snapshot(&self) -> Option<PresentationReadModel> {
         self.presentation.get_cloned()
+    }
+
+    /// Resolve the active cue against resident renderer nodes without
+    /// publishing signals or mutating application state. The app revision,
+    /// active cue, and authored materialization are sampled under one lock.
+    pub fn extract_active_presentation_scene(
+        &self,
+        bindings: &[PackedPresentationLayerBinding],
+    ) -> Result<ActivePresentationSceneReadModel, PresentationSceneReadError> {
+        let state = self.lock_state();
+        let snapshot = state
+            .active_presentation
+            .as_ref()
+            .ok_or(PresentationSceneReadError::NoActivePresentation)?;
+        let extraction = extract_packed_presentation_scene(
+            snapshot,
+            bindings,
+            &state.authored_entities,
+        )?;
+        Ok(ActivePresentationSceneReadModel {
+            revision: state.revision,
+            authored_projection_revision: state.authored_projection_revision,
+            cue_id: snapshot.cue_id,
+            scene_id: snapshot.scene_id,
+            nodes: extraction.nodes,
+            unmatched_authored_entities: extraction.unmatched_authored_entities,
+        })
     }
 
     /// Presence remains a high-rate snapshot lane rather than an automatic UI
@@ -1585,6 +1658,72 @@ mod tests {
         assert_eq!(summary.active_cue, Some(first_cue));
         assert_eq!(summary.revision, store.frame_snapshot().revision);
         assert_eq!(active.active.unwrap().cue_id, first_cue);
+    }
+
+    #[test]
+    fn active_presentation_scene_read_is_coherent_and_nonmutating() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        dispatch_presentation(&store, 1, 0.0, PresentationAction::Start).unwrap();
+        let before_frame = store.frame_snapshot();
+        let before_presentation = store.presentation_snapshot();
+        let active = before_presentation
+            .as_ref()
+            .and_then(|presentation| presentation.active.as_ref())
+            .unwrap();
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 1.0,
+        ];
+        let bindings = active
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| PackedPresentationLayerBinding {
+                layer: layer.id,
+                asset: AssetId::new(layer.asset).unwrap(),
+                nodes: vec![hyperscape::PackedNodeSource {
+                    packed_node: index as u32 + 7,
+                    source_node: index as u32,
+                    entity: None,
+                    source_world: identity,
+                }],
+            })
+            .collect::<Vec<_>>();
+
+        let extraction = store.extract_active_presentation_scene(&bindings).unwrap();
+
+        assert_eq!(extraction.revision, before_frame.revision);
+        assert_eq!(extraction.cue_id, active.cue_id);
+        assert_eq!(extraction.scene_id, active.scene_id);
+        assert_eq!(extraction.nodes.len(), active.layers.len());
+        for (node, layer) in extraction.nodes.iter().zip(&active.layers) {
+            assert_eq!(node.layer, layer.id);
+            assert_eq!(node.asset.as_uuid(), layer.asset);
+            assert_eq!(node.visible, layer.visible);
+            assert_eq!(
+                node.opacity,
+                if layer.visible {
+                    layer.opacity as f32
+                } else {
+                    0.0
+                }
+            );
+        }
+        assert_eq!(store.frame_snapshot(), before_frame);
+        assert_eq!(store.presentation_snapshot(), before_presentation);
+
+        let mut missing = bindings;
+        missing.pop();
+        assert!(matches!(
+            store.extract_active_presentation_scene(&missing),
+            Err(PresentationSceneReadError::Extraction(
+                PackedPresentationSceneError::MissingLayerBinding(_)
+            ))
+        ));
+        assert_eq!(store.frame_snapshot(), before_frame);
     }
 
     #[test]

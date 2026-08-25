@@ -5,8 +5,9 @@ use crate::navigation::{
 use hyperscape::{
     extract_packed_scene, map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere,
     LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame, PackedAssetInstance,
-    PackedNodeSource, PackedNodeTransformSource, Presentation, PresentationAsset,
-    PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget,
+    PackedNodeSource, PackedNodeTransformSource, PackedPresentationLayerBinding, Presentation,
+    PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
+    SurfaceAnchorTarget,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, LocalPeerEnvelope,
@@ -737,18 +738,7 @@ impl HyperscopeAppShadow {
                     nodes: input
                         .nodes
                         .into_iter()
-                        .map(|node| {
-                            Ok(PackedNodeSource {
-                                packed_node: node.packed_node,
-                                source_node: node.source_node,
-                                entity: node
-                                    .entity_id
-                                    .as_deref()
-                                    .map(entity_id_from_str)
-                                    .transpose()?,
-                                source_world: node.source_world,
-                            })
-                        })
+                        .map(packed_node_source)
                         .collect::<Result<Vec<_>, JsValue>>()?,
                 })
             })
@@ -781,6 +771,72 @@ impl HyperscopeAppShadow {
                         PackedNodeTransformSource::AuthoredAbsolute => "authored_absolute",
                     },
                     matrix: node.matrix,
+                })
+                .collect(),
+            unmatched_authored_entities: extraction
+                .unmatched_authored_entities
+                .into_iter()
+                .map(|entity| entity.to_string())
+                .collect(),
+        })
+    }
+
+    /// Join renderer-resident handles to the application-owned active cue.
+    /// Bindings carry no layer transform, visibility, or opacity; those values
+    /// and authored Blender overrides are sampled atomically from AppStore.
+    #[wasm_bindgen(js_name = extractActivePresentationScene)]
+    pub fn extract_active_presentation_scene(
+        &self,
+        bindings_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let inputs =
+            serde_json::from_str::<Vec<ShadowPresentationLayerBindingInput>>(bindings_json)
+                .map_err(|error| {
+                    js_error(format!(
+                        "active presentation binding input is invalid JSON: {error}"
+                    ))
+                })?;
+        let bindings = inputs
+            .into_iter()
+            .map(|input| {
+                Ok(PackedPresentationLayerBinding {
+                    layer: parse_uuid(&input.layer, "presentation layer ID")?,
+                    asset: asset_id_from_str(&input.asset)?,
+                    nodes: input
+                        .nodes
+                        .into_iter()
+                        .map(packed_node_source)
+                        .collect::<Result<Vec<_>, JsValue>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?;
+        let extraction = self
+            .store
+            .extract_active_presentation_scene(&bindings)
+            .map_err(js_error)?;
+        to_js(&ShadowActivePresentationSceneExtraction {
+            app_revision: extraction.revision.to_string(),
+            authored_projection_revision: extraction
+                .authored_projection_revision
+                .map(|revision| revision.to_string()),
+            cue_id: extraction.cue_id.to_string(),
+            scene_id: extraction.scene_id.to_string(),
+            nodes: extraction
+                .nodes
+                .into_iter()
+                .map(|node| ShadowPackedPresentationNode {
+                    layer: node.layer.to_string(),
+                    asset: node.asset.to_string(),
+                    packed_node: node.packed_node,
+                    source_node: node.source_node,
+                    entity_id: node.identity.map(|identity| identity.entity.to_string()),
+                    source: match node.source {
+                        PackedNodeTransformSource::GltfWorld => "gltf_world",
+                        PackedNodeTransformSource::AuthoredAbsolute => "authored_absolute",
+                    },
+                    matrix: node.matrix,
+                    visible: node.visible,
+                    opacity: node.opacity,
                 })
                 .collect(),
             unmatched_authored_entities: extraction
@@ -1014,6 +1070,14 @@ struct ShadowPackedAssetInput {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShadowPresentationLayerBindingInput {
+    layer: String,
+    asset: String,
+    nodes: Vec<ShadowPackedNodeInput>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowPackedNodeInput {
     packed_node: u32,
@@ -1033,6 +1097,17 @@ struct ShadowPackedSceneExtraction {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ShadowActivePresentationSceneExtraction {
+    app_revision: String,
+    authored_projection_revision: Option<String>,
+    cue_id: String,
+    scene_id: String,
+    nodes: Vec<ShadowPackedPresentationNode>,
+    unmatched_authored_entities: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ShadowPackedNodeTransform {
     layer: String,
     asset: String,
@@ -1041,6 +1116,20 @@ struct ShadowPackedNodeTransform {
     entity_id: Option<String>,
     source: &'static str,
     matrix: [f32; 16],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPackedPresentationNode {
+    layer: String,
+    asset: String,
+    packed_node: u32,
+    source_node: u32,
+    entity_id: Option<String>,
+    source: &'static str,
+    matrix: [f32; 16],
+    visible: bool,
+    opacity: f32,
 }
 
 #[derive(Serialize)]
@@ -1305,6 +1394,19 @@ fn asset_id_from_str(value: &str) -> Result<AssetId, JsValue> {
 
 fn entity_id_from_str(value: &str) -> Result<EntityId, JsValue> {
     EntityId::new(parse_uuid(value, "entity ID")?).map_err(js_error)
+}
+
+fn packed_node_source(node: ShadowPackedNodeInput) -> Result<PackedNodeSource, JsValue> {
+    Ok(PackedNodeSource {
+        packed_node: node.packed_node,
+        source_node: node.source_node,
+        entity: node
+            .entity_id
+            .as_deref()
+            .map(entity_id_from_str)
+            .transpose()?,
+        source_world: node.source_world,
+    })
 }
 
 fn parse_uuid(value: &str, context: &str) -> Result<Uuid, JsValue> {
