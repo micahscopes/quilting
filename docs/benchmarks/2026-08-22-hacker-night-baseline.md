@@ -1592,3 +1592,40 @@ scene/primary classifications completed with one GPU pass and no browser
 console warnings or errors. Noncommercial-mixed offline preflight passed over
 23 files / 31.32 MiB with matching source/build receipt
 `372352f4e9592ec6a4bc978fab6adb80`.
+
+## Rust asset authority default cutover
+
+The measured `assetimpl=rust` lane is now the canonical default. An absent or
+invalid browser implementation value selects Rust, while `assetimpl=js`
+remains an explicit serialized rollback. Effective Rust authority no longer
+injects the legacy `appshadow=1` observer flag into synchronized URLs. The
+browser effect host also requires an explicit policy at construction, avoiding
+a second hidden JavaScript default.
+
+The installed Chrome DevTools MCP exercised a fresh isolated optimized build
+on `127.0.0.1:8891`; the user-run `:8888` was untouched. Default startup
+finished with one Rust request and completion, no failure, stale completion,
+prevented install, or mismatch, and synchronized to the clean
+`?animate=0&anim=0` route. An isolated `assetimpl=js` page rendered the same
+984-face horse with the application adapter disabled and preserved the
+rollback value in its URL. The final two-asset Rust-presentation cue completed
+two Rust requests, retained both adaptive-LOD assets and 4,252 packed faces,
+and reported no pending composition, application mismatch, presentation
+error, or console warning.
+
+A real pair of same-turn drop events (`ant.glb` followed by `horse.glb`)
+produced exactly two requests, two load completions, one requested
+cancellation, one stale completion, and one prevented install. The horse was
+the final 984-face model, the URL retained no default authority flags, and the
+console remained clean. This is the expected distinction between semantic
+completion and renderer installation: the superseded result is admitted as
+stale evidence but cannot mutate the resident scene.
+
+Validation passed 56 replay-enabled application tests, 62
+browser-independent tests, the three unchanged replay fingerprints, route,
+application, presentation, render, and 600-frame surface-walk smokes,
+crate-scoped strict Clippy, and application rustdoc. The exact staged release
+passed strict noncommercial-mixed preflight over 23 files / 31.34 MiB with
+matching source/build fingerprint `f2e8c4358314964e728205f947f6925e`.
+Transitive strict Clippy still stops on the previously existing unnecessary
+cast in `quilting-mesh`; it is not attributed to this cutover.

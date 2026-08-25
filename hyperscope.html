@@ -449,11 +449,13 @@ const RUST_SCENE_IMPLEMENTATION = (() => {
   return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
 })();
 const RUST_ASSET_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('assetimpl') || 'js';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
+  const requested = new URLSearchParams(location.search).get('assetimpl') || 'rust';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
 })();
+const EXPLICIT_RUST_APP_SHADOW_ENABLED =
+  new URLSearchParams(location.search).get('appshadow') === '1';
 const RUST_APP_SHADOW_ENABLED =
-  new URLSearchParams(location.search).get('appshadow') === '1'
+  EXPLICIT_RUST_APP_SHADOW_ENABLED
   || RUST_ASSET_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
@@ -890,7 +892,7 @@ const PARAM_DEFAULTS = {
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
-  presentimpl: 'js', assetimpl: 'js', sceneimpl: 'js', routeimpl: 'js',
+  presentimpl: 'js', assetimpl: 'rust', sceneimpl: 'js', routeimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -1040,7 +1042,7 @@ function syncURL() {
       PARAM_DEFAULTS.presentimpl,
     );
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
-    if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
+    if (EXPLICIT_RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
     set('assetimpl', RUST_ASSET_IMPLEMENTATION, PARAM_DEFAULTS.assetimpl);
     set('sceneimpl', RUST_SCENE_IMPLEMENTATION, PARAM_DEFAULTS.sceneimpl);
     if (LEGACY_RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
@@ -2554,10 +2556,10 @@ async function broadcastCall(type, data) {
   ))[0];
 }
 
-// Opt-in observer for the Rust application reducer's asset-effect lane. The
-// browser still performs every fetch/file read and remains renderer authority;
-// this records whether the same request, cancellation, completion, and stale
-// result decisions are represented by AppEvent -> AppEffect.
+// Application reducer facade. Rust owns asset request, cancellation,
+// completion, and stale-result decisions by default. The browser retains only
+// fetch/file/IndexedDB resources and renderer installation; explicit shadow or
+// JS modes preserve the measured observer and rollback paths.
 let rustAppShadow = null;
 let rustAppShadowSequence = 0;
 let rustAppShadowRequestOrdinal = 0;

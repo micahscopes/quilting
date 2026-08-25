@@ -153,7 +153,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("presentimpl", "js", Implementation),
     spec!("roundshadow", "0", Toggle),
     spec!("appshadow", "0", Toggle),
-    spec!("assetimpl", "js", Implementation),
+    spec!("assetimpl", "rust", Implementation),
     spec!("sceneimpl", "js", Implementation),
     spec!("routeshadow", "0", Toggle),
     spec!("routeimpl", "js", Implementation),
@@ -367,6 +367,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rust_asset_authority_is_default_with_an_explicit_js_rollback() {
+        let default_route = HyperscopeRoute::from_pairs([("assetimpl", "rust")]);
+        assert_eq!(default_route.value("assetimpl"), Some("rust"));
+        assert!(default_route.canonical_pairs().is_empty());
+
+        let rollback_route = HyperscopeRoute::from_pairs([("assetimpl", "js")]);
+        assert_eq!(rollback_route.canonical_pairs(), vec![("assetimpl", "js")]);
+        assert!(rollback_route.diagnostics().is_empty());
     }
 
     #[test]

@@ -32,6 +32,13 @@ function begin(host, {
   });
 }
 
+test('the platform host requires an explicit authority policy', () => {
+  assert.throws(
+    () => new BrowserAssetEffectHost(),
+    /unsupported asset implementation/,
+  );
+});
+
 test('rust mode aborts and fences a superseded primary scene', () => {
   const host = new BrowserAssetEffectHost('rust');
   const first = begin(host, {

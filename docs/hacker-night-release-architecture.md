@@ -61,12 +61,16 @@ The first application boundary is now explicit:
   preceding revision. Effect-producing and presentation future inputs are
   rejected until a real application event scheduler exists rather than being
   executed at the wrong time.
-- `appshadow=1` feeds real startup, IndexedDB, drag/drop, authored-demo, and
-  presentation asset acquisition plus presentation load/cue intent into that
-  reducer. `assetimpl=js|shadow|rust` is the separate acquisition rollback
-  boundary. Shadow mode observes effects without changing incumbent behavior;
-  Rust mode gives startup/drop/demo requests one mutually exclusive
-  primary-scene scope while presentation layers retain per-asset concurrency.
+- The application adapter feeds real startup, IndexedDB, drag/drop,
+  authored-demo, and presentation asset acquisition plus presentation load/cue
+  intent into that reducer. `appshadow=1` explicitly enables the observer when
+  no Rust authority lane already requires it; implicit enablement is not added
+  to canonical URLs. `assetimpl=js|shadow|rust` is the separate acquisition
+  rollback boundary. Rust is now the canonical default; an explicit
+  `assetimpl=js` remains the serialized rollback. Shadow mode observes effects
+  without changing incumbent behavior; Rust mode gives startup/drop/demo
+  requests one mutually exclusive primary-scene scope while presentation
+  layers retain per-asset concurrency.
   Cross-asset replacement emits cancel-then-fetch, aborts obsolete browser
   acquisition, serializes the global model worker's dynamic parse/upload lane,
   and checks the current primary request after every asynchronous upload
@@ -160,7 +164,7 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 71 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 74 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
@@ -317,10 +321,12 @@ The first application boundary is now explicit:
   presence expiry/order and bounded authored-message echo suppression; it does
   not yet select a transport or admit ephemeral state to HHHS.
 
-This layer is not yet the complete browser authority. It is the target behind
-the same shadow-and-rollback policy used for navigation; browser loading and
-URL state move only after adapters can compare existing behavior against
-reducer traces.
+This layer is not yet the complete browser authority. Primary asset request,
+cancellation, completion, and stale-install policy have crossed to Rust after
+their live cutover gate; file/network acquisition and renderer installation
+remain browser adapters. Navigation, selection, presentation, scene
+extraction, and URL state retain their separate shadow-and-rollback gates until
+each default cutover has equivalent evidence.
 The selection adapter now joins validated authored node UUIDs to explicit
 presentation asset IDs across packed composition offsets and mirrors mapped
 picks/detaches through the AppStore. Ready IndexedDB, dropped, startup, and

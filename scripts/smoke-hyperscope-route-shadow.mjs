@@ -25,7 +25,7 @@ assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js'
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'assetimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'assetimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
@@ -73,8 +73,11 @@ for (const sceneExtractionStep of [
   );
 }
 for (const assetAuthorityStep of [
-  "const requested = new URLSearchParams(location.search).get('assetimpl') || 'js';",
+  "const requested = new URLSearchParams(location.search).get('assetimpl') || 'rust';",
+  "? requested : 'rust';",
+  "assetimpl: 'rust'",
   "RUST_ASSET_IMPLEMENTATION !== 'js'",
+  'EXPLICIT_RUST_APP_SHADOW_ENABLED',
   "import { BrowserAssetEffectHost } from './asset_effect_host.mjs",
   'const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);',
   'rustAppShadow.requestPrimaryAsset.bind(rustAppShadow)',
@@ -91,6 +94,20 @@ for (const assetAuthorityStep of [
     `browser asset authority adapter is missing ${assetAuthorityStep}`,
   );
 }
+assert.ok(
+  browserSource.includes("if (EXPLICIT_RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');"),
+  'implicit Rust asset authority must not pollute canonical URLs with appshadow=1',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['assetimpl', 'rust']]).pairs,
+  [],
+  'canonical routes must omit the Rust asset-authority default',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['assetimpl', 'js']]).pairs,
+  [['assetimpl', 'js']],
+  'canonical routes must retain an explicit JavaScript rollback',
+);
 const startupAdapter = browserSource.slice(
   browserSource.indexOf("phase('wasm', [], async () =>"),
   browserSource.indexOf("phase('workers', ['wasm'], async () =>"),

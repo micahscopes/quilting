@@ -46,7 +46,7 @@ function validateEffect(effect) {
  * request. It deliberately does not parse models or mutate renderer state.
  */
 export class BrowserAssetEffectHost {
-  constructor(implementation = 'js') {
+  constructor(implementation) {
     if (!IMPLEMENTATIONS.has(implementation)) {
       throw new TypeError(`unsupported asset implementation ${JSON.stringify(implementation)}`);
     }

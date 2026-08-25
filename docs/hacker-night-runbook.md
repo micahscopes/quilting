@@ -49,15 +49,21 @@ the application reducer while retaining the established renderer path. Use
 `authority: "hyperscope-app"`, the expected cue UUID, and no error. Restore
 `presentimpl=js` for immediate orchestration rollback.
 
-Use `assetimpl=shadow` to exercise Rust request/cancellation/completion
-semantics while retaining the incumbent browser acquisition and installation
-behavior. Use `assetimpl=rust` to make Rust effects authoritative: startup,
-drag/drop, and the authored demo share one primary-scene scope, obsolete
-fetches receive an abort signal, and only the newest primary request may enter
-the serialized parse/upload lane. Presentation assets retain independent
-per-asset concurrency. Restore `assetimpl=js` for immediate loader rollback.
-Inspect `globalThis.__hyperscopeAppShadowDiagnostics`; a normal settled load
-must not add a request-effect mismatch or a prevented install.
+Rust asset effects are the default authority: startup, drag/drop, and the
+authored demo share one primary-scene scope, obsolete fetches receive an abort
+signal, and only the newest primary request may enter the serialized
+parse/upload lane. Presentation assets retain independent per-asset
+concurrency. Use `assetimpl=shadow` to compare Rust request, cancellation, and
+completion semantics while retaining incumbent behavior, or `assetimpl=js`
+for immediate loader rollback. Because Rust is the canonical default, only the
+non-default rollback value is retained in a synchronized URL.
+On an ordinary unflagged load,
+`globalThis.__hyperscopeAppShadowDiagnostics.assetImplementation` must be
+`"rust"`; startup should produce one request and one applied completion with an
+empty mismatch list. The synchronized URL must contain neither
+`assetimpl=rust` nor an implicitly enabled `appshadow=1`. A deliberate
+`assetimpl=js` reload must retain that pair and report the application adapter
+as disabled.
 
 The ordinary preflight must print `PASS`. It validates the Rust presentation
 document, byte-for-byte manifest freshness, every presentation GLB, the runtime
