@@ -300,7 +300,7 @@ prevents a meaningful fallback rendering.
 
 The machine-readable schema is
 [`schema/hyperscape-0.1.schema.json`](schema/hyperscape-0.1.schema.json), and
-[`../examples/hyperscape-track.gltf`](../examples/hyperscape-track.gltf) is a
+[`hyperscape-track.gltf`](../crates/quilting-gltf/fixtures/hyperscape-track.gltf) is a
 minimal editable interchange fixture. The checked-in
 [`hyperscape-blender-demo.blend`](../examples/hyperscape-blender-demo.blend)
 is the editable Blender source for the nested/overlapping full-flow scene;

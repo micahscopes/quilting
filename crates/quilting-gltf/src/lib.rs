@@ -11,6 +11,9 @@ use std::fmt;
 pub const WRAP_REPEAT: u32 = 0x2901;
 pub const WRAP_CLAMP_TO_EDGE: u32 = 0x812F;
 pub const WRAP_MIRRORED_REPEAT: u32 = 0x8370;
+/// Minimal conformal glTF used by downstream extraction tests and examples.
+pub const HYPERSCAPE_TRACK_GLTF: &[u8] =
+    include_bytes!("../fixtures/hyperscape-track.gltf");
 
 /// Raw encoded image blob (PNG/JPEG bytes, not decoded).
 #[derive(Debug, Clone, Default)]

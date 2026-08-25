@@ -39,7 +39,7 @@ const BUILD_INPUT_ROOT_FILES: &[&str] = &[
     "horse.glb",
     "ant.glb",
     "examples/hyperscape-blender-demo.glb",
-    "examples/hacker-night.presentation.json",
+    "crates/hyperscape/fixtures/hacker-night.presentation.json",
     "ASSET_ATTRIBUTION.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",
@@ -94,7 +94,9 @@ impl Default for OfflinePreflightOptions {
     fn default() -> Self {
         Self {
             source_root: PathBuf::from("."),
-            source_manifest: PathBuf::from("examples/hacker-night.presentation.json"),
+            source_manifest: PathBuf::from(
+                "crates/hyperscape/fixtures/hacker-night.presentation.json",
+            ),
             dist_dir: PathBuf::from("dist"),
             distribution_policy: DistributionPolicy::default(),
         }

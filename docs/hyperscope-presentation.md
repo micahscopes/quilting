@@ -2,7 +2,7 @@
 
 `hyperscape` owns presentation sequencing and view transitions; a browser is
 an adapter for asset I/O, renderer commands, text, and input. The checked-in
-[`hacker-night.presentation.json`](../examples/hacker-night.presentation.json)
+[`hacker-night.presentation.json`](../crates/hyperscape/fixtures/hacker-night.presentation.json)
 is the first two-asset fixture, and
 [`hyperscope-presentation-0.1.schema.json`](schema/hyperscope-presentation-0.1.schema.json)
 describes its portable JSON shape.

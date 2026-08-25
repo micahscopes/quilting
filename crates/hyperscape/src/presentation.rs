@@ -18,6 +18,10 @@ use std::fmt;
 use uuid::Uuid;
 
 pub const PRESENTATION_VERSION: &str = "0.1";
+/// Canonical interactive presentation used by the replay oracle and browser
+/// release. Keeping it beside the parser makes packaged tests self-contained.
+pub const HACKER_NIGHT_PRESENTATION_JSON: &str =
+    include_str!("../fixtures/hacker-night.presentation.json");
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Presentation {
@@ -943,7 +947,7 @@ const fn default_focus_aperture() -> f64 {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = include_str!("../../../examples/hacker-night.presentation.json");
+    const FIXTURE: &str = HACKER_NIGHT_PRESENTATION_JSON;
 
     fn assert_camera_near(actual: CameraRig, expected: CameraRig) {
         for (actual, expected) in actual.eye.into_iter().zip(expected.eye) {

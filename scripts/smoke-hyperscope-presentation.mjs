@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
-const manifestPath = `${repository}/examples/hacker-night.presentation.json`;
+const manifestPath = `${repository}/crates/hyperscape/fixtures/hacker-night.presentation.json`;
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 const workerSource = readFileSync(`${repository}/hyperscope_worker.js`, 'utf8');
 const {

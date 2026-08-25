@@ -606,7 +606,7 @@ assert.throws(
 assert.deepEqual(app.snapshot(), beforeInvalidExtraction);
 
 const presentationDocument = readFileSync(
-  `${repository}/examples/hacker-night.presentation.json`,
+  `${repository}/crates/hyperscape/fixtures/hacker-night.presentation.json`,
   'utf8',
 );
 const presentation = JSON.parse(presentationDocument);

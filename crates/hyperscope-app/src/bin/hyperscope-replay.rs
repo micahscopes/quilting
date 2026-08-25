@@ -7,16 +7,15 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-const HACKER_NIGHT_PRESENTATION: &str =
-    include_str!("../../../../examples/hacker-night.presentation.json");
+const HACKER_NIGHT_PRESENTATION: &str = hyperscape::HACKER_NIGHT_PRESENTATION_JSON;
 const HACKER_NIGHT_GOLDEN: &str =
-    include_str!("../../../../examples/hacker-night.replay.fingerprint");
-const NAVIGATION_REPLAY: &str = include_str!("../../../../examples/navigation.app-replay.json");
-const NAVIGATION_GOLDEN: &str = include_str!("../../../../examples/navigation.replay.fingerprint");
+    include_str!("../../fixtures/hacker-night.replay.fingerprint");
+const NAVIGATION_REPLAY: &str = include_str!("../../fixtures/navigation.app-replay.json");
+const NAVIGATION_GOLDEN: &str = include_str!("../../fixtures/navigation.replay.fingerprint");
 const ORCHESTRATION_REPLAY: &str =
-    include_str!("../../../../examples/orchestration.app-replay.json");
+    include_str!("../../fixtures/orchestration.app-replay.json");
 const ORCHESTRATION_GOLDEN: &str =
-    include_str!("../../../../examples/orchestration.replay.fingerprint");
+    include_str!("../../fixtures/orchestration.replay.fingerprint");
 
 #[derive(Debug, Default)]
 struct Options {

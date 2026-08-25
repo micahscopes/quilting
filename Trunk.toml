@@ -17,7 +17,7 @@ watch = [
     "ant.glb",
     "envmaps/",
     "examples/hyperscape-blender-demo.glb",
-    "examples/hacker-night.presentation.json",
+    "crates/hyperscape/fixtures/hacker-night.presentation.json",
     "ASSET_ATTRIBUTION.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",

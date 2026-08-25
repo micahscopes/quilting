@@ -1174,14 +1174,14 @@ mod tests {
     use super::*;
     use hyperscape_protocol::AuthoredCommand;
 
-    const FIXTURE: &str = include_str!("../../../examples/hacker-night.presentation.json");
-    const GOLDEN: &str = include_str!("../../../examples/hacker-night.replay.fingerprint");
-    const NAVIGATION_FIXTURE: &str = include_str!("../../../examples/navigation.app-replay.json");
-    const NAVIGATION_GOLDEN: &str = include_str!("../../../examples/navigation.replay.fingerprint");
+    const FIXTURE: &str = hyperscape::HACKER_NIGHT_PRESENTATION_JSON;
+    const GOLDEN: &str = include_str!("../fixtures/hacker-night.replay.fingerprint");
+    const NAVIGATION_FIXTURE: &str = include_str!("../fixtures/navigation.app-replay.json");
+    const NAVIGATION_GOLDEN: &str = include_str!("../fixtures/navigation.replay.fingerprint");
     const ORCHESTRATION_FIXTURE: &str =
-        include_str!("../../../examples/orchestration.app-replay.json");
+        include_str!("../fixtures/orchestration.app-replay.json");
     const ORCHESTRATION_GOLDEN: &str =
-        include_str!("../../../examples/orchestration.replay.fingerprint");
+        include_str!("../fixtures/orchestration.replay.fingerprint");
     const UNKNOWN_CUE: &str = "f0000000-0000-4000-8000-000000000099";
 
     fn fixture() -> Presentation {

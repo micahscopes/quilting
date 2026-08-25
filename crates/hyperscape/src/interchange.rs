@@ -510,8 +510,7 @@ mod tests {
     #[test]
     fn checked_in_gltf_spawns_paths_anchors_constraints_and_extraction() {
         let scene =
-            quilting_gltf::load_gltf(include_bytes!("../../../examples/hyperscape-track.gltf"))
-                .unwrap();
+            quilting_gltf::load_gltf(quilting_gltf::HYPERSCAPE_TRACK_GLTF).unwrap();
         let mut app = App::new();
         app.add_plugins(HyperscapePlugin);
         let entities = spawn_gltf_hyperscape(app.world_mut(), &scene).unwrap();
@@ -552,7 +551,7 @@ mod tests {
 
     #[test]
     fn self_contained_runtime_ticks_authored_time() {
-        let bytes = include_bytes!("../../../examples/hyperscape-track.gltf");
+        let bytes = quilting_gltf::HYPERSCAPE_TRACK_GLTF;
         let (nodes, asset) = quilting_gltf::load_hyperscape_graph(bytes).unwrap();
         let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset.unwrap()).unwrap();
         assert_eq!(runtime.packets().len(), 0);

@@ -131,7 +131,7 @@ fn usage_error(message: &str) -> ExitCode {
 fn print_usage() {
     println!(
         "Usage: hyperscope-preflight [--source-root PATH] [--manifest PATH] [--dist PATH] [--distribution-policy POLICY] [--json] [--strict]\n\
-         Defaults: --source-root . --manifest examples/hacker-night.presentation.json --dist dist\n\
+         Defaults: --source-root . --manifest crates/hyperscape/fixtures/hacker-night.presentation.json --dist dist\n\
          Policies: permissive-only (default), noncommercial-mixed\n\
          --strict also fails on assets incompatible with the selected policy and local GLBs"
     );

@@ -1204,9 +1204,7 @@ mod tests {
     }
 
     fn presentation_fixture() -> Presentation {
-        Presentation::from_json(include_str!(
-            "../../../examples/hacker-night.presentation.json"
-        ))
+        Presentation::from_json(hyperscape::HACKER_NIGHT_PRESENTATION_JSON)
         .unwrap()
     }
 

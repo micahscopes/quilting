@@ -55,7 +55,7 @@ pub use presentation::{
     Presentation, PresentationAsset, PresentationCue, PresentationError, PresentationLayer,
     PresentationLayerState, PresentationOverlay, PresentationRuntime, PresentationScene,
     PresentationSnapshot, PresentationTessellation, PresentationTransition, PresentationView,
-    ViewLayerOverride, PRESENTATION_VERSION,
+    ViewLayerOverride, HACKER_NIGHT_PRESENTATION_JSON, PRESENTATION_VERSION,
 };
 pub use surface::{
     SurfaceAddress, SurfaceAddressError, SurfaceAdvance, SurfaceAttachment, SurfaceContact,

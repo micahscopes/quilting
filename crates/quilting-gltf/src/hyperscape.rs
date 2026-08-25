@@ -854,7 +854,7 @@ mod tests {
 
     #[test]
     fn checked_in_example_is_valid_and_keeps_ordinary_nodes() {
-        let bytes = include_bytes!("../../../examples/hyperscape-track.gltf");
+        let bytes = crate::HYPERSCAPE_TRACK_GLTF;
         let parsed = gltf::Gltf::from_slice(bytes).unwrap();
         assert_eq!(parsed.document.nodes().count(), 3);
         let asset = extract_asset(&parsed.document).unwrap().unwrap();
