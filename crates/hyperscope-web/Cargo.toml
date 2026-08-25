@@ -10,6 +10,13 @@ description = "Optional browser-host adapters for Hyperscope"
 [features]
 default = []
 asset-credits = ["dep:hyperscape-protocol", "dep:hyperscope-app"]
+csr = [
+    "asset-credits",
+    "dep:futures-signals",
+    "dep:leptos",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+]
 durable-history = [
     "dep:hhhs",
     "dep:hhhs-replica",
@@ -49,10 +56,13 @@ required-features = ["local-peer-relay"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures = { version = "0.3", optional = true }
+futures-signals = { version = "0.3.34", default-features = false, optional = true }
 indexed_db_futures = { version = "=0.6.4", features = ["typed-arrays", "version-change"], optional = true }
 js-sys = { version = "0.3", optional = true }
-wasm-bindgen = { version = "=0.2.106", optional = true }
+leptos = { version = "=0.8.20", default-features = false, features = ["csr"], optional = true }
+wasm-bindgen = { version = "=0.2.108", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["Element", "HtmlElement"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }

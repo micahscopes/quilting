@@ -7,6 +7,11 @@
 use hyperscape_protocol::AssetId;
 use hyperscope_app::{AssetMetadata, AssetReadModel, AssetStatus};
 
+#[cfg(all(feature = "csr", target_arch = "wasm32"))]
+mod csr;
+#[cfg(all(feature = "csr", target_arch = "wasm32"))]
+pub use csr::mount_asset_credits;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetCredit {
     pub asset_id: AssetId,
