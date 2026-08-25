@@ -27,7 +27,9 @@ With Blender installed, also run
 `node scripts/smoke-blender-browser-relay.mjs`. It must report one
 Blender-authored edit, one browser presence frame, three received frames, the
 exact browser presence sequence `18446744073709551614`, and projected
-translation `[3,4,5]`.
+translation `[3,4,5]`. Blender must project the remote camera, inversion sphere,
+and bound selection into at least 166 transient overlay segments without
+creating an object.
 
 For the composed final cue, append `sceneimpl=shadow` to compare Rust ordinary
 node extraction while retaining the incumbent renderer path, or explicitly use
@@ -210,7 +212,9 @@ interactive rather than locking the camera.
   every 500 ms. Disconnect, wait longer than the 1,500 ms TTL, and verify
   `peerPresenceSnapshot().peers` no longer contains the browser sender. This
   lane is delivery-only: it must not create HHHS history, browser persistence,
-  or Blender datablocks.
+  or Blender datablocks. In Blender, the same live sample should appear as a
+  camera glyph, focus/inversion sphere, and selected-object wire bounds; an
+  inverted browser view must appear in Blender's ordinary source chart.
 
 ## 5. Browser smoke check
 

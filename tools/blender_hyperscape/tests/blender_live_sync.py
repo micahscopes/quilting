@@ -14,7 +14,7 @@ ADDON_PARENT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ADDON_PARENT))
 
 import blender_hyperscape  # noqa: E402
-from blender_hyperscape import live_sync, protocol, relay  # noqa: E402
+from blender_hyperscape import live_sync, presence_overlay, protocol, relay  # noqa: E402
 
 
 class FakeTransport:
@@ -140,9 +140,27 @@ remote_samples[0]["presence"]["selection"].clear()
 assert runtime.remote_presence()[0]["presence"]["selection"] == [
     obj.hyperscape.stable_id
 ]
+datablocks_before_overlay = (
+    len(bpy.data.objects),
+    len(bpy.data.cameras),
+    len(bpy.data.materials),
+    len(bpy.data.collections),
+)
+presence_overlay.update(bpy.context.scene, runtime.remote_presence())
+overlay = presence_overlay.status()
+assert overlay.peers == 1
+assert overlay.segments >= 12
+assert datablocks_before_overlay == (
+    len(bpy.data.objects),
+    len(bpy.data.cameras),
+    len(bpy.data.materials),
+    len(bpy.data.collections),
+)
 assert tuple(round(value, 6) for value in obj.matrix_world.translation) == (4.0, 5.0, 6.0)
 runtime.tick(bpy.context.scene, 12.0)
 assert runtime.status().remote_peers == 0
+presence_overlay.update(bpy.context.scene, runtime.remote_presence())
+assert presence_overlay.status().peers == 0
 
 # Timeline evaluation updates the observed pose but never authors each frame.
 obj.location = (7.0, 8.0, 9.0)
@@ -168,6 +186,7 @@ else:
     raise AssertionError("a sheared matrix was encoded as protocol TRS")
 
 runtime.disconnect()
+presence_overlay.stop()
 assert not transport.started
 blender_hyperscape.unregister()
 print("Hyperscape Blender live sync passed")

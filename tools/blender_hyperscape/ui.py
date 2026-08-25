@@ -104,6 +104,16 @@ class HYPERSCAPE_PT_live_sync(bpy.types.Panel):
                     f"{status.transport.restarts}"
                 )
             )
+        overlay = live_sync.overlay_status()
+        layout.label(
+            text=(
+                f"Viewport overlay: {overlay.peers} peers · "
+                f"{overlay.segments} segments"
+            ),
+            icon="HIDE_OFF" if overlay.active else "HIDE_ON",
+        )
+        if overlay.last_error:
+            layout.label(text=overlay.last_error, icon="ERROR")
         if status.detail:
             layout.label(text=status.detail, icon="ERROR")
         layout.label(text="Direct single-writer demo; HHHS owns durable repair.")

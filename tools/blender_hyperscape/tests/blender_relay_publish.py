@@ -15,7 +15,7 @@ ADDON_PARENT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ADDON_PARENT))
 
 import blender_hyperscape  # noqa: E402
-from blender_hyperscape import live_sync, relay  # noqa: E402
+from blender_hyperscape import live_sync, presence_overlay, relay  # noqa: E402
 
 
 relay_url = os.environ["HYPERSCAPE_RELAY_URL"]
@@ -74,14 +74,22 @@ try:
         "inversion_enabled": True,
     }
     assert remote[0]["presence"]["animation_seconds"] == 2.5
+    object_count = len(bpy.data.objects)
+    presence_overlay.update(bpy.context.scene, remote)
+    overlay = presence_overlay.status()
+    assert overlay.peers == 1
+    assert overlay.segments >= 166
+    assert len(bpy.data.objects) == object_count
     print(json.dumps({
         "marker": "Hyperscape Blender relay round trip passed",
         "authoredSent": status.authored_sent,
         "transportSent": transport.status().sent_frames,
         "remotePeers": len(remote),
+        "overlaySegments": overlay.segments,
         "entity": entity_id,
     }))
 finally:
     if runtime.active:
         runtime.disconnect()
+    presence_overlay.stop()
     blender_hyperscape.unregister()

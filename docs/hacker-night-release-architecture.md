@@ -259,10 +259,14 @@ The first application boundary is now explicit:
   than retaining a page-uptime offset. This is an explicit migration seam, not a
   claim that default mouse navigation is already AppStore-authoritative.
   Outbound echo suppression also avoids a second reducer event per sample.
-  Blender exposes detached TTL-filtered remote samples for a future viewport
-  draw adapter; it creates no helper datablocks and saves no presence in the
-  `.blend`. The real Blender/browser smoke proves both directions and preserves
-  near-`u64::MAX` sequences as exact JSON.
+  Blender exposes detached TTL-filtered remote samples to a transient
+  `POST_VIEW` draw adapter. It renders peer camera glyphs, focus/inversion
+  spheres, and selected-entity wire bounds without creating helper datablocks
+  or saving presence in the `.blend`. An inverted output-chart camera is
+  reflected back through the shared sphere, including its tangent frame,
+  before it is drawn in Blender's ordinary source chart. The real
+  Blender/browser smoke proves both directions, at least 166 overlay segments,
+  no added objects, and near-`u64::MAX` sequences preserved as exact JSON.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

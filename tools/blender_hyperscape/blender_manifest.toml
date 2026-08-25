@@ -13,3 +13,4 @@ license = ["SPDX:MIT", "SPDX:Apache-2.0"]
 
 [permissions]
 files = "Import and export glTF and GLB scenes"
+network = "Connect to an explicitly configured local Hyperscope relay"

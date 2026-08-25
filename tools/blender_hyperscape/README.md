@@ -48,6 +48,14 @@ being approximated. Camera, selection, and animation time use the ephemeral
 presence lane. Timeline evaluation refreshes presence but is not converted
 into a stream of authored transforms.
 
+Remote browser presence is projected into a transient 3D View overlay: a
+camera glyph, focus/inversion sphere, and wire bounds around uniquely bound
+selected entities. Hyperscope publishes its rendered camera in the output
+chart, so an active spherical inversion is reflected back into Blender's
+ordinary source chart before drawing its eye and tangent frame. The overlay is
+rebuilt from TTL-filtered samples, creates no Blender datablocks, and is never
+saved in the `.blend`.
+
 This bridge is intentionally a direct, arrival-ordered single-writer demo. Its
 cursor detects delivery gaps and process restarts but is not a scene revision.
 It has no durable storage, repair, capability delegation, or multi-writer
@@ -68,8 +76,11 @@ Validate the manifest and package with:
 blender --command extension validate tools/blender_hyperscape-0.1.0.zip
 ```
 
-The extension requests file access only because its import/export operators
-read and write the selected glTF/GLB file.
+The extension requests file access for the selected glTF/GLB import/export
+path and network access for an explicitly configured local Hyperscope relay.
+Live sync remains disabled until **Connect** is chosen, accepts a loopback URL
+by default, and does not retain the bearer token in the `.blend` or add-on
+preferences.
 
 ## Authoring workflow
 
@@ -131,8 +142,9 @@ blender --background --factory-startup --python-exit-code 1 \
 ```
 
 The live-sync integration check proves local edit publication, echo
-suppression, remote transform application, ephemeral presence expiry,
-timeline isolation, and explicit shear rejection against a fake transport:
+suppression, remote transform application, ephemeral presence expiry and
+overlay cleanup, timeline isolation, explicit shear rejection, and the
+absence of overlay-created datablocks against a fake transport:
 
 ```sh
 blender --background --factory-startup --python-exit-code 1 \

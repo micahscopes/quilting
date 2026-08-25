@@ -170,6 +170,12 @@ try {
   const blenderExit = await blenderExitPromise;
   assert.equal(blenderExit, 0, `${blenderStdout}\n${blenderStderr}`);
   assert.match(blenderStdout, /Hyperscape Blender relay round trip passed/);
+  const blenderSummaryLine = blenderStdout
+    .split(/\r?\n/)
+    .find(line => line.includes('Hyperscape Blender relay round trip passed'));
+  assert.ok(blenderSummaryLine);
+  const blenderSummary = JSON.parse(blenderSummaryLine);
+  assert.ok(blenderSummary.overlaySegments >= 166);
 
   const identity = [
     1, 0, 0, 0,
@@ -198,6 +204,7 @@ try {
   summary = {
     blenderAuthoredFrames: 1,
     browserPresenceFrames: 1,
+    blenderOverlaySegments: blenderSummary.overlaySegments,
     browserReceivedFrames: browserRelay.snapshot().receivedFrames,
     rustAppliedFrames: browserRelay.snapshot().appliedFrames,
     exactSequence: sequence,

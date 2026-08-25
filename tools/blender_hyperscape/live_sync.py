@@ -21,7 +21,7 @@ from bpy.app.handlers import persistent
 from bpy.props import StringProperty
 from mathutils import Matrix, Quaternion, Vector
 
-from . import protocol, relay
+from . import presence_overlay, protocol, relay
 
 
 TIMER_INTERVAL_SECONDS = 0.05
@@ -486,6 +486,10 @@ def runtime_status() -> BlenderLiveSyncStatus:
     return _RUNTIME.status()
 
 
+def overlay_status() -> presence_overlay.PresenceOverlayStatus:
+    return presence_overlay.status()
+
+
 def _addon_preferences(context) -> Any | None:
     addon = context.preferences.addons.get(__package__)
     return addon.preferences if addon is not None else None
@@ -502,6 +506,8 @@ def _ensure_peer_id(preferences) -> str:
 def connect(scene: bpy.types.Scene, base_url: str, token: str, peer_id: str) -> None:
     transport = relay.LocalRelayTransport(base_url, token)
     _RUNTIME.connect(scene, transport, peer_id)
+    presence_overlay.start()
+    presence_overlay.update(scene, _RUNTIME.remote_presence())
     if not bpy.app.timers.is_registered(_timer):
         bpy.app.timers.register(_timer, first_interval=0.0)
 
@@ -511,6 +517,7 @@ def disconnect() -> None:
         _RUNTIME.disconnect()
     if bpy.app.timers.is_registered(_timer):
         bpy.app.timers.unregister(_timer)
+    presence_overlay.stop()
 
 
 def _timer() -> float | None:
@@ -528,12 +535,13 @@ def _timer() -> float | None:
         None,
     )
     if scene is None:
-        _RUNTIME.disconnect()
+        disconnect()
         return None
     try:
         _RUNTIME.tick(scene)
     except Exception as error:  # A UI timer must not take Blender down with it.
         _RUNTIME._detail = str(error)
+    presence_overlay.update(scene, _RUNTIME.remote_presence())
     _tag_view3d_redraw()
     return TIMER_INTERVAL_SECONDS
 
