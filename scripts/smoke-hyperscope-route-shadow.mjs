@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
@@ -29,11 +30,58 @@ assert.equal(specs.find(spec => spec.key === 'assetimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'routeimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'routeimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
+for (const routeDefaultStep of [
+  "get('routeimpl') || 'rust'",
+  "? requested : 'rust';",
+  "routeimpl: 'rust'",
+]) {
+  assert.ok(
+    browserSource.includes(routeDefaultStep),
+    `browser route default is missing ${routeDefaultStep}`,
+  );
+}
+const browserDefaultsSource = browserSource.match(
+  /const PARAM_DEFAULTS = (\{[\s\S]*?\n\});/,
+)?.[1];
+assert.ok(browserDefaultsSource, 'could not locate browser URL defaults');
+const browserDefaults = JSON.parse(JSON.stringify(
+  runInNewContext(`(${browserDefaultsSource})`),
+));
+const rustDefaults = Object.fromEntries(
+  specs.map(spec => [spec.key, spec.defaultValue]),
+);
+for (const [key, value] of Object.entries(browserDefaults)) {
+  assert.equal(
+    rustDefaults[key],
+    value,
+    `Rust route default for ${key} drifted from the browser rollback`,
+  );
+}
+const implicitBrowserDefaults = {
+  navshadow: '0',
+  presentation: '0',
+  roundshadow: '0',
+  appshadow: '0',
+  routeshadow: '0',
+  rendershadow: '0',
+};
+assert.deepEqual(
+  Object.fromEntries(
+    Object.keys(implicitBrowserDefaults).map(key => [key, rustDefaults[key]]),
+  ),
+  implicitBrowserDefaults,
+  'Rust implicit flag defaults drifted from the browser rollback',
+);
+assert.equal(
+  Object.keys(browserDefaults).length + Object.keys(implicitBrowserDefaults).length,
+  specs.length,
+  'the browser/Rust default parity oracle does not cover every route control',
+);
 const syncSource = browserSource.match(
   /function syncURL\(\) \{([\s\S]*?)\/\/ Apply URL params to controls on load/,
 )?.[1];
@@ -147,6 +195,16 @@ assert.deepEqual(
   [['sceneimpl', 'js']],
   'canonical routes must retain an explicit scene-extraction rollback',
 );
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['routeimpl', 'rust']]).pairs,
+  [],
+  'canonical routes must omit the Rust route-authority default',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['routeimpl', 'js']]).pairs,
+  [['routeimpl', 'js']],
+  'canonical routes must retain an explicit route-authority rollback',
+);
 const startupAdapter = browserSource.slice(
   browserSource.indexOf("phase('wasm', [], async () =>"),
   browserSource.indexOf("phase('workers', ['wasm'], async () =>"),
@@ -177,14 +235,14 @@ const canonical = canonicalizeHyperscopeRoute([
   ['glb', 'horse.glb'],
   ['minpx', '16.0'],
   ['lodratio', '4'],
-  ['routeimpl', 'rust'],
+  ['routeimpl', 'shadow'],
 ]);
 assert.deepEqual(canonical.pairs, [
   ['mode', 'lod'],
   ['lodratio', '4'],
   ['rx', '0.125'],
   ['routeshadow', '1'],
-  ['routeimpl', 'rust'],
+  ['routeimpl', 'shadow'],
 ]);
 assert.deepEqual(canonical.diagnostics, []);
 

@@ -69,6 +69,18 @@ empty mismatch list. The synchronized URL must contain neither
 `assetimpl=js` reload must retain that pair and report the application adapter
 as disabled.
 
+Rust also owns canonical URL admission and serialization by default. An
+ordinary link should report `implementation: "rust"`, `startupSource: "rust"`,
+equal `lastBrowserQuery` and `lastRustQuery`, at least one authoritative write,
+and no fallback or mismatch through
+`globalThis.__hyperscopeRouteShadowDiagnostics`. The synchronized URL omits
+`routeimpl=rust`. Use `routeimpl=shadow` to compare without granting write
+authority or `routeimpl=js` for immediate rollback; the explicit JavaScript
+rollback must remain in the URL and perform no route-WASM calls. A malformed
+known value deliberately reports `startupSource: "browser-fallback"` and
+retains browser startup behavior before the next valid state write normalizes
+the link.
+
 The ordinary preflight must print `PASS`. It validates the Rust presentation
 document, byte-for-byte manifest freshness, every presentation GLB, the
 consolidated runtime JS/WASM pair, environment maps, licenses, and generated Trunk

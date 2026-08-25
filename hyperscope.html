@@ -461,8 +461,8 @@ const RUST_APP_SHADOW_ENABLED =
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
 const RUST_ROUTE_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('routeimpl') || 'js';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
+  const requested = new URLSearchParams(location.search).get('routeimpl') || 'rust';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
 })();
 const LEGACY_RUST_ROUTE_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('routeshadow') === '1';
@@ -892,7 +892,7 @@ const PARAM_DEFAULTS = {
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
-  presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'rust', routeimpl: 'js',
+  presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'rust', routeimpl: 'rust',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',

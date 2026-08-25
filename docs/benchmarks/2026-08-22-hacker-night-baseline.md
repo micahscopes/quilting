@@ -1840,3 +1840,36 @@ the demonstration is meant to explain. The canonical rehearsal link now
 includes `mode=both` and `animate=0`. The generated-WASM presentation smoke
 also freezes the exact 2:1 and 4:1 reconciliation triples, promotion count,
 policy, and zero-mismatch invariant without requiring a browser or renderer.
+
+## Rust canonical-route default gate
+
+The route boundary became Rust-authoritative by default after its write-side
+and startup shadows had remained explicit rollback modes. The browser and Rust
+registries still coexist for rollback, so the generated-WASM oracle now proves
+all 74 defaults rather than checking only key order: 68 literal browser
+defaults plus the six implicit-zero migration flags must exactly match
+`hyperscope-app::ControlSpec`. `routeimpl=rust` is default-equivalent and
+omitted from canonical links; `routeimpl=js` remains explicit and serialized.
+
+The isolated release artifact carried source/build fingerprint
+`53ff42f8fe62b9b477010047fd249024` across 173 inputs and 20,705,286 input
+bytes. Offline preflight passed 19 staged files totaling 23.46 MiB. The
+optimized consolidated WASM remained 6,599,278 bytes raw and changed from
+2,318,831 to 2,318,797 bytes under deterministic `gzip -9 -n` (-34 bytes).
+
+Chrome DevTools MCP opened a Patch Lab deep link containing the alternate
+default spelling `zoom=3.00`. Rust admitted startup with no diagnostics,
+removed that spelling, and committed a byte-identical browser/Rust query with
+two comparisons, one authoritative write, zero fallback writes, and zero
+mismatches. A real edge-slider input advanced those counts to three and two
+while preserving exact query equality. A malformed `smlock=yes` link recorded
+the expected `invalid_value`, used `browser-fallback` only for startup, and
+then normalized to `smlock=0`. Explicit `routeimpl=js` remained in the link
+with the observer disabled and zero route-WASM calls.
+
+The presentation cue deep link then resolved cue
+`e0000000-0000-4000-8000-000000000002` under both route and application Rust
+authority, retained both assets and all 4,252 resident faces, and reached four
+authoritative route writes with no fallback, mismatch, frame error, warning,
+or console error. The isolated server and page were removed after the probe;
+the user-run `:8888` process was not touched.

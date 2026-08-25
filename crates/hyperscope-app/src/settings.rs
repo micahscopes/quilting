@@ -156,7 +156,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("assetimpl", "rust", Implementation),
     spec!("sceneimpl", "rust", Implementation),
     spec!("routeshadow", "0", Toggle),
-    spec!("routeimpl", "js", Implementation),
+    spec!("routeimpl", "rust", Implementation),
     spec!("rendershadow", "0", Toggle),
 ];
 
@@ -387,7 +387,10 @@ mod tests {
         assert!(default_route.canonical_pairs().is_empty());
 
         let rollback_route = HyperscopeRoute::from_pairs([("presentimpl", "js")]);
-        assert_eq!(rollback_route.canonical_pairs(), vec![("presentimpl", "js")]);
+        assert_eq!(
+            rollback_route.canonical_pairs(),
+            vec![("presentimpl", "js")]
+        );
         assert!(rollback_route.diagnostics().is_empty());
     }
 
@@ -399,6 +402,17 @@ mod tests {
 
         let rollback_route = HyperscopeRoute::from_pairs([("sceneimpl", "js")]);
         assert_eq!(rollback_route.canonical_pairs(), vec![("sceneimpl", "js")]);
+        assert!(rollback_route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rust_route_authority_is_default_with_an_explicit_js_rollback() {
+        let default_route = HyperscopeRoute::from_pairs([("routeimpl", "rust")]);
+        assert_eq!(default_route.value("routeimpl"), Some("rust"));
+        assert!(default_route.canonical_pairs().is_empty());
+
+        let rollback_route = HyperscopeRoute::from_pairs([("routeimpl", "js")]);
+        assert_eq!(rollback_route.canonical_pairs(), vec![("routeimpl", "js")]);
         assert!(rollback_route.diagnostics().is_empty());
     }
 
