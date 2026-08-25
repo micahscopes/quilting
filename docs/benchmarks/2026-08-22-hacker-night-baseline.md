@@ -1311,3 +1311,33 @@ the subsequent ordinary state write normalized it to `smlock=0`. Default mode
 still performed zero startup or write-side route calls. This adds one
 non-frame-rate WASM call only when shadow or Rust route mode is explicitly
 selected.
+
+## Atomic authored application materialization gate
+
+The next 2026-08-25 checkpoint turned admitted protocol revisions into a
+deterministic application read model instead of advancing only a checkpoint
+number. `AppState` now retains key-sorted authored asset descriptors and latest
+entity transforms. It validates every envelope before cloning and applying the
+command batch, so one malformed command cannot partially update either map;
+equal/older projection revisions remain diagnostic no-ops. Command order inside
+an accepted revision is authoritative and a later command for the same key wins.
+Runtime load requests remain a separate lane: an authored asset descriptor does
+not implicitly fetch or replace renderer state.
+
+`AppStore` publishes authored assets and entities as low-rate `SignalVec`
+projections before setting its summary revision fence. Replay version 0.8 adds
+both materialized collections to every compact state record. The orchestration
+fixture proves that a valid asset/transform survives a stale removal and a
+subsequent invalid revision; version 0.7 remains readable with its existing
+asset-scoped focus semantics. The checked fingerprints are
+`2123c41359d3187dbcbbff4334e069a0` for the six-cue presentation,
+`9b68dd4542773115658cfb78282feb41` for navigation, and
+`71b484d19c93d0171d9c4996831b2542` for orchestration.
+
+Validation passed for 47 replay-enabled application tests, strict
+no-dependency application Clippy, warning-free Rustdoc, wasm32 compilation of
+`quilting-wasm`, 47 browser-independent JavaScript tests, all five generated
+WASM smokes, and all three replay checks. This checkpoint deliberately stops
+before renderer extraction or a Blender transport: it establishes the atomic
+materialization boundary those adapters can consume without giving network or
+frame traffic reducer authority.

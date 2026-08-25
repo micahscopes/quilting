@@ -217,7 +217,7 @@ or sphere state.
    `walkimpl=rust` is therefore a real rollback-safe authority mode; the
    default stays `js` until it has seen broader interactive soak time.
 4. **Selection bridge — mapped renderer authority available behind rollback.**
-   Protocol, navigation, AppStore snapshots, replay 0.7, and the generated WASM
+   Protocol, navigation, AppStore snapshots, replay 0.8, and the generated WASM
    facades now carry an explicit `(asset ID, entity ID)` pair. Pre-0.7
    unscoped replay anchors fail closed. Validated glTF bindings now cross the
    loader as a dense authored identity table. Presentation composition maps
@@ -247,7 +247,7 @@ or sphere state.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.7
+6. **Persistence and replay — native oracle complete.** Replay version 0.8
    serializes asset-scoped stable entity references, selected source
    bounds/pivots, derived
    output-chart pivots/radii, detached spheres, camera rig state, and every
@@ -257,7 +257,9 @@ or sphere state.
    policy actions, and rejects every pre-0.7 unscoped focus anchor rather than
    inventing asset scope. Checked navigation and
    orchestration fixtures cover transition cadence, asset effects,
-   presence/authored lanes, and atomic rejection. Browser input capture and
+   presence/authored lanes, deterministic authored asset/entity materialization,
+   and atomic rejection. Version 0.7 remains readable with its asset-scoped
+   focus semantics. Browser input capture and
    networking must carry semantic actions or authoritative state deltas, never
    raw HID reports.
 7. **WebGPU backend.** Upload the extracted focus packet as frame/view data,

@@ -23,8 +23,8 @@ use hyperscape::{
     ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, PeerId,
-    PresenceEnvelope, RequestId,
+    AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId,
+    EphemeralPresence, PeerId, PresenceEnvelope, RequestId, WireTransform,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
@@ -214,13 +214,15 @@ pub struct DiagnosticReadModel {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppSummary {
-    /// This is a commit fence: asset and diagnostic SignalVec replacements are
-    /// published before this revision changes.
+    /// This is a commit fence: runtime asset, authored scene, and diagnostic
+    /// SignalVec replacements are published before this revision changes.
     pub revision: u64,
     pub authored_projection_revision: Option<u64>,
     pub assets: usize,
     pub loading_assets: usize,
     pub active_peers: usize,
+    pub authored_assets: usize,
+    pub authored_entities: usize,
     pub diagnostics: usize,
     pub presentation_loaded: bool,
     pub active_cue: Option<Uuid>,
@@ -302,6 +304,25 @@ pub struct PeerPresenceReadModel {
     pub presence: EphemeralPresence,
 }
 
+/// One durable authored entity projection. The protocol currently exposes
+/// transform and removal commands only, so presence in this collection means
+/// the latest accepted authored revision retains a transform for the entity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AuthoredEntityReadModel {
+    pub entity: EntityId,
+    pub transform: WireTransform,
+}
+
+/// Deterministic low-rate projection of the materialized authored command
+/// lane. Assets and entities are key-sorted; the projection revision is the
+/// upstream atomic checkpoint fence, distinct from the local app revision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthoredSceneReadModel {
+    pub projection_revision: Option<u64>,
+    pub assets: Vec<AssetDescriptor>,
+    pub entities: Vec<AuthoredEntityReadModel>,
+}
+
 #[derive(Debug, Clone)]
 struct AssetRecord {
     descriptor: AssetDescriptor,
@@ -327,6 +348,8 @@ pub struct AppState {
     assets: BTreeMap<AssetId, AssetRecord>,
     presence: BTreeMap<PeerId, PresenceRecord>,
     authored_projection_revision: Option<u64>,
+    authored_assets: BTreeMap<AssetId, AssetDescriptor>,
+    authored_entities: BTreeMap<EntityId, WireTransform>,
     diagnostics: VecDeque<DiagnosticReadModel>,
 }
 
@@ -565,6 +588,23 @@ impl AppState {
                         ),
                     );
                 } else {
+                    let mut authored_assets = self.authored_assets.clone();
+                    let mut authored_entities = self.authored_entities.clone();
+                    for envelope in &revision.commands {
+                        match &envelope.command {
+                            AuthoredCommand::UpsertAsset { asset } => {
+                                authored_assets.insert(asset.id, asset.clone());
+                            }
+                            AuthoredCommand::SetEntityTransform { entity, transform } => {
+                                authored_entities.insert(*entity, *transform);
+                            }
+                            AuthoredCommand::RemoveEntity { entity } => {
+                                authored_entities.remove(entity);
+                            }
+                        }
+                    }
+                    self.authored_assets = authored_assets;
+                    self.authored_entities = authored_entities;
                     self.authored_projection_revision = Some(revision.projection_revision);
                 }
             }
@@ -678,6 +718,8 @@ impl AppState {
                 .filter(|record| matches!(record.status, AssetStatus::Loading { .. }))
                 .count(),
             active_peers: self.presence.len(),
+            authored_assets: self.authored_assets.len(),
+            authored_entities: self.authored_entities.len(),
             diagnostics: self.diagnostics.len(),
             presentation_loaded: self.presentation.is_some(),
             active_cue: self
@@ -724,6 +766,18 @@ impl AppState {
             })
             .collect()
     }
+
+    fn authored_scene_read_model(&self) -> AuthoredSceneReadModel {
+        AuthoredSceneReadModel {
+            projection_revision: self.authored_projection_revision,
+            assets: self.authored_assets.values().cloned().collect(),
+            entities: self
+                .authored_entities
+                .iter()
+                .map(|(&entity, &transform)| AuthoredEntityReadModel { entity, transform })
+                .collect(),
+        }
+    }
 }
 
 /// Thread-safe reducer host with futures-signals projections. Signal vectors
@@ -733,6 +787,8 @@ pub struct AppStore {
     state: Arc<Mutex<AppState>>,
     summary: Mutable<AppSummary>,
     assets: MutableVec<AssetReadModel>,
+    authored_assets: MutableVec<AssetDescriptor>,
+    authored_entities: MutableVec<AuthoredEntityReadModel>,
     diagnostics: MutableVec<DiagnosticReadModel>,
     presentation: Mutable<Option<PresentationReadModel>>,
 }
@@ -747,12 +803,15 @@ impl AppStore {
     pub fn new(state: AppState) -> Self {
         let summary = state.summary();
         let assets = state.asset_read_models();
+        let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
         Self {
             state: Arc::new(Mutex::new(state)),
             summary: Mutable::new(summary),
             assets: MutableVec::new_with_values(assets),
+            authored_assets: MutableVec::new_with_values(authored.assets),
+            authored_entities: MutableVec::new_with_values(authored.entities),
             diagnostics: MutableVec::new_with_values(diagnostics),
             presentation: Mutable::new(presentation),
         }
@@ -802,12 +861,19 @@ impl AppStore {
     pub fn flush_read_models(&self) -> u64 {
         let state = self.lock_state();
         let assets = state.asset_read_models();
+        let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
         let summary = state.summary();
         let revision = summary.revision;
         drop(state);
         self.assets.lock_mut().replace_cloned(assets);
+        self.authored_assets
+            .lock_mut()
+            .replace_cloned(authored.assets);
+        self.authored_entities
+            .lock_mut()
+            .replace_cloned(authored.entities);
         self.diagnostics.lock_mut().replace_cloned(diagnostics);
         self.presentation.set_neq(presentation);
         self.summary.set_neq(summary);
@@ -832,6 +898,10 @@ impl AppStore {
         self.assets.lock_ref().to_vec()
     }
 
+    pub fn authored_scene_snapshot(&self) -> AuthoredSceneReadModel {
+        self.lock_state().authored_scene_read_model()
+    }
+
     pub fn diagnostic_snapshot(&self) -> Vec<DiagnosticReadModel> {
         self.diagnostics.lock_ref().to_vec()
     }
@@ -852,6 +922,14 @@ impl AppStore {
 
     pub fn asset_signal_vec(&self) -> MutableSignalVec<AssetReadModel> {
         self.assets.signal_vec_cloned()
+    }
+
+    pub fn authored_asset_signal_vec(&self) -> MutableSignalVec<AssetDescriptor> {
+        self.authored_assets.signal_vec_cloned()
+    }
+
+    pub fn authored_entity_signal_vec(&self) -> MutableSignalVec<AuthoredEntityReadModel> {
+        self.authored_entities.signal_vec_cloned()
     }
 
     pub fn diagnostic_signal_vec(&self) -> MutableSignalVec<DiagnosticReadModel> {
@@ -914,8 +992,8 @@ mod tests {
     use super::*;
     use hyperscape::{CameraRig, NavigationFrame};
     use hyperscape_protocol::{
-        CameraPresence, EntityId, MessageHeader, MessageId, ProtocolVersion,
-        CURRENT_PROTOCOL_VERSION,
+        AuthoredCommand, CameraPresence, EntityId, MessageHeader, MessageId, ProtocolVersion,
+        WireTransform, CURRENT_PROTOCOL_VERSION,
     };
 
     fn asset(id: u128, uri: &str) -> AssetDescriptor {
@@ -929,6 +1007,26 @@ mod tests {
 
     fn request(id: u128) -> RequestId {
         RequestId::from_u128(id).unwrap()
+    }
+
+    fn authored(sequence: u64, command: AuthoredCommand) -> AuthoredEnvelope {
+        AuthoredEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(u128::from(sequence) + 1_000).unwrap(),
+                sender: PeerId::from_u128(2_000).unwrap(),
+                sequence,
+            },
+            command,
+        }
+    }
+
+    fn transform(x: f64) -> WireTransform {
+        WireTransform {
+            translation: [x, x + 1.0, x + 2.0],
+            rotation_wxyz: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        }
     }
 
     fn selection_identity_for(asset: u128, entity: u128) -> AssetEntityId {
@@ -1744,9 +1842,128 @@ mod tests {
     }
 
     #[test]
+    fn authored_revisions_materialize_sorted_assets_and_entity_transforms() {
+        let store = AppStore::default();
+        let asset_a = asset(90, "a.glb");
+        let asset_b = asset(91, "b.glb");
+        let entity_a = EntityId::from_u128(92).unwrap();
+        let entity_b = EntityId::from_u128(93).unwrap();
+        let first = store
+            .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
+                projection_revision: 7,
+                commands: vec![
+                    authored(
+                        0,
+                        AuthoredCommand::UpsertAsset {
+                            asset: asset_b.clone(),
+                        },
+                    ),
+                    authored(
+                        1,
+                        AuthoredCommand::SetEntityTransform {
+                            entity: entity_b,
+                            transform: transform(2.0),
+                        },
+                    ),
+                    authored(
+                        2,
+                        AuthoredCommand::UpsertAsset {
+                            asset: asset_a.clone(),
+                        },
+                    ),
+                    authored(
+                        3,
+                        AuthoredCommand::SetEntityTransform {
+                            entity: entity_a,
+                            transform: transform(1.0),
+                        },
+                    ),
+                ],
+            }))
+            .unwrap();
+        assert_eq!(first.disposition, CommitDisposition::Applied);
+        assert!(first.published_ui);
+
+        let scene = store.authored_scene_snapshot();
+        assert_eq!(scene.projection_revision, Some(7));
+        assert_eq!(
+            scene.assets.iter().map(|asset| asset.id).collect::<Vec<_>>(),
+            vec![asset_a.id, asset_b.id],
+        );
+        assert_eq!(
+            scene
+                .entities
+                .iter()
+                .map(|entity| entity.entity)
+                .collect::<Vec<_>>(),
+            vec![entity_a, entity_b],
+        );
+        assert_eq!(scene.entities[0].transform, transform(1.0));
+        assert_eq!(store.summary_snapshot().authored_assets, 2);
+        assert_eq!(store.summary_snapshot().authored_entities, 2);
+        assert_eq!(store.summary_snapshot().revision, first.revision);
+
+        let mut replacement_asset = asset_a.clone();
+        replacement_asset.uri = "a-v2.glb".into();
+        store
+            .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
+                projection_revision: 8,
+                commands: vec![
+                    authored(
+                        4,
+                        AuthoredCommand::UpsertAsset {
+                            asset: replacement_asset,
+                        },
+                    ),
+                    authored(
+                        5,
+                        AuthoredCommand::SetEntityTransform {
+                            entity: entity_a,
+                            transform: transform(4.0),
+                        },
+                    ),
+                    authored(6, AuthoredCommand::RemoveEntity { entity: entity_b }),
+                ],
+            }))
+            .unwrap();
+        let scene = store.authored_scene_snapshot();
+        assert_eq!(scene.projection_revision, Some(8));
+        assert_eq!(scene.assets[0].uri, "a-v2.glb");
+        assert_eq!(scene.entities.len(), 1);
+        assert_eq!(scene.entities[0].entity, entity_a);
+        assert_eq!(scene.entities[0].transform, transform(4.0));
+
+        let stale = store
+            .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
+                projection_revision: 8,
+                commands: vec![authored(
+                    7,
+                    AuthoredCommand::RemoveEntity { entity: entity_a },
+                )],
+            }))
+            .unwrap();
+        assert_eq!(stale.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(store.authored_scene_snapshot().entities[0].entity, entity_a);
+    }
+
+    #[test]
     fn invalid_authored_revision_is_atomic() {
         let store = AppStore::default();
+        let retained_entity = EntityId::from_u128(29).unwrap();
+        store
+            .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
+                projection_revision: 1,
+                commands: vec![authored(
+                    0,
+                    AuthoredCommand::SetEntityTransform {
+                        entity: retained_entity,
+                        transform: transform(1.0),
+                    },
+                )],
+            }))
+            .unwrap();
         let revision_before = store.frame_snapshot().revision;
+        let scene_before = store.authored_scene_snapshot();
         let invalid: AuthoredEnvelope = hyperscape_protocol::AuthoredEnvelope {
             header: MessageHeader {
                 version: ProtocolVersion { major: 9, minor: 0 },
@@ -1760,11 +1977,21 @@ mod tests {
         };
         assert!(store
             .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
-                projection_revision: 1,
-                commands: vec![invalid],
+                projection_revision: 2,
+                commands: vec![
+                    authored(
+                        1,
+                        AuthoredCommand::SetEntityTransform {
+                            entity: retained_entity,
+                            transform: transform(9.0),
+                        },
+                    ),
+                    invalid,
+                ],
             }))
             .is_err());
         assert_eq!(store.frame_snapshot().revision, revision_before);
+        assert_eq!(store.authored_scene_snapshot(), scene_before);
     }
 
     #[test]

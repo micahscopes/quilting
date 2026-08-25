@@ -43,18 +43,19 @@ suite checks that partitioned and single-step re-anchor clocks finish on the
 same exact virtual-time endpoint.
 
 The replay checks must print
-`PASS fnv1a-128-json:e606549f81c07c645eca8bc10cfc1645`,
-`PASS fnv1a-128-json:4b6f0b82cf471af7af17b99ed37317d4`, and
-`PASS fnv1a-128-json:2cb74a642b3d4fc40b4eda777addb833`. The first executes
+`PASS fnv1a-128-json:2123c41359d3187dbcbbff4334e069a0`,
+`PASS fnv1a-128-json:9b68dd4542773115658cfb78282feb41`, and
+`PASS fnv1a-128-json:71b484d19c93d0171d9c4996831b2542`. The first executes
 the complete six-cue semantic walkthrough. The second exercises every current
 navigation action, including focus/inversion, camera and surface transitions,
 stable selection anchoring, clicked source/output pivot projection, complete
 perspective-lens edits, explicit free-tangent/point-target mode, and an atomic
 rejected input. The third covers
 asset supersession/cancellation/completion, stale and failed effects, presence
-ordering/expiry, authored revision admission, and rejected wire input. All run
-through `hyperscope-app` independently of browser timing, input adapters, and
-the renderer. A mismatch means reducer, presentation, navigation,
+ordering/expiry, authored revision admission and materialization, stale/invalid
+checkpoint rollback, and rejected wire input. All run through `hyperscope-app`
+independently of browser timing, input adapters, and the renderer. A mismatch
+means reducer, presentation, navigation,
 orchestration, or trace behavior changed and must be reviewed; the fingerprints
 are deterministic regression oracles, not cryptographic signatures.
 

@@ -17,14 +17,15 @@ use hyperscape::{
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, PeerId,
-    PresenceEnvelope, RequestId,
+    PresenceEnvelope, RequestId, WireTransform,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.7";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.8";
+pub const LEGACY_APP_REPLAY_VERSION_0_7: &str = "hyperscope-app-replay/0.7";
 pub const LEGACY_APP_REPLAY_VERSION_0_6: &str = "hyperscope-app-replay/0.6";
 pub const LEGACY_APP_REPLAY_VERSION_0_5: &str = "hyperscope-app-replay/0.5";
 pub const LEGACY_APP_REPLAY_VERSION_0_4: &str = "hyperscope-app-replay/0.4";
@@ -35,6 +36,7 @@ enum ReplaySchema {
     V0_5,
     V0_6,
     V0_7,
+    V0_8,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -577,12 +579,21 @@ pub struct AppReplayState {
     pub active_scene: Option<Uuid>,
     pub active_view: Option<Uuid>,
     pub assets: Vec<AppReplayAssetState>,
+    pub authored_assets: Vec<AssetDescriptor>,
+    pub authored_entities: Vec<AppReplayAuthoredEntityState>,
     pub presence: Vec<AppReplayPresenceState>,
     pub diagnostics: Vec<AppReplayDiagnosticState>,
     pub reflection: ReplayReflection,
     pub navigation: AppReplayNavigationState,
     pub camera: AppReplayCameraState,
     pub focus: AppReplayFocusState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayAuthoredEntityState {
+    pub entity: EntityId,
+    pub transform: WireTransform,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -715,7 +726,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_4 => ReplaySchema::V0_4,
         LEGACY_APP_REPLAY_VERSION_0_5 => ReplaySchema::V0_5,
         LEGACY_APP_REPLAY_VERSION_0_6 => ReplaySchema::V0_6,
-        APP_REPLAY_VERSION => ReplaySchema::V0_7,
+        LEGACY_APP_REPLAY_VERSION_0_7 => ReplaySchema::V0_7,
+        APP_REPLAY_VERSION => ReplaySchema::V0_8,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -925,7 +937,7 @@ fn navigation_action_for_replay_version(
             }
         }
     }
-    if schema != ReplaySchema::V0_7
+    if !matches!(schema, ReplaySchema::V0_7 | ReplaySchema::V0_8)
         && matches!(
             action,
             ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -958,6 +970,7 @@ fn replay_effect(effect: &AppEffect) -> AppReplayEffect {
 fn replay_state(store: &AppStore) -> AppReplayState {
     let state = store.lock_state();
     let frame = state.frame_snapshot();
+    let authored = state.authored_scene_read_model();
     let active = state.active_presentation.as_ref();
     let navigation = &state.navigation;
     let focus_transition_remaining = frame
@@ -977,6 +990,15 @@ fn replay_state(store: &AppStore) -> AppReplayState {
             .map(|asset| AppReplayAssetState {
                 descriptor: asset.descriptor,
                 status: asset.status.into(),
+            })
+            .collect(),
+        authored_assets: authored.assets,
+        authored_entities: authored
+            .entities
+            .into_iter()
+            .map(|entity| AppReplayAuthoredEntityState {
+                entity: entity.entity,
+                transform: entity.transform,
             })
             .collect(),
         presence: state
@@ -1102,6 +1124,8 @@ mod tests {
             right.authored_projection_revision
         );
         assert_eq!(left.assets, right.assets);
+        assert_eq!(left.authored_assets, right.authored_assets);
+        assert_eq!(left.authored_entities, right.authored_entities);
         assert_eq!(left.presence, right.presence);
         assert_eq!(left.diagnostics, right.diagnostics);
         assert_eq!(left.reflection, right.reflection);
@@ -1216,7 +1240,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_6).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_8).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -1577,6 +1601,47 @@ mod tests {
     }
 
     #[test]
+    fn replay_0_7_retains_asset_scoped_focus_actions() {
+        let script = AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_7.to_owned(),
+            events: vec![
+                AppReplayEvent::Navigate {
+                    sequence: 0,
+                    at_seconds: 0.0,
+                    action: ReplayNavigationAction::AnchorFocus {
+                        asset_id: Some(Uuid::from_u128(5)),
+                        entity: Uuid::from_u128(6),
+                        source_bound: ReplayFocusSphere {
+                            center: [1.0, 2.0, 3.0],
+                            radius: 0.5,
+                        },
+                        source_pivot: Some([1.1, 2.0, 3.0]),
+                        margin: 1.1,
+                        duration_seconds: 0.0,
+                        easing: TransitionEasing::SmootherStep,
+                    },
+                },
+                AppReplayEvent::Frame {
+                    elapsed_seconds: 0.0,
+                    delta_seconds: 0.0,
+                },
+            ],
+        };
+        let trace = run_app_replay(&script).unwrap();
+        assert_eq!(trace.version, APP_REPLAY_VERSION);
+        assert_eq!(
+            trace.records[1]
+                .state
+                .focus
+                .selected
+                .as_ref()
+                .unwrap()
+                .asset_id,
+            Uuid::from_u128(5)
+        );
+    }
+
+    #[test]
     fn replay_distinguishes_the_same_entity_uuid_in_two_assets() {
         let anchor = |asset_id| ReplayNavigationAction::AnchorFocus {
             asset_id: Some(asset_id),
@@ -1829,6 +1894,25 @@ mod tests {
             trace.records[13].state.authored_projection_revision,
             Some(1)
         );
+        assert_eq!(trace.records[13].state.authored_assets.len(), 1);
+        assert_eq!(
+            trace.records[13].state.authored_assets[0].uri,
+            "authored-scene.glb"
+        );
+        assert_eq!(trace.records[13].state.authored_entities.len(), 1);
+        assert_eq!(
+            trace.records[13].state.authored_entities[0].entity,
+            EntityId::new(
+                Uuid::parse_str("e0000000-0000-4000-8000-000000000010").unwrap()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            trace.records[13].state.authored_entities[0]
+                .transform
+                .translation,
+            [1.0, 2.0, 3.0]
+        );
         assert!(matches!(
             trace.records[14].outcome,
             AppReplayOutcome::Committed {
@@ -1836,6 +1920,10 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            trace.records[14].state.authored_entities,
+            trace.records[13].state.authored_entities
+        );
         assert!(matches!(
             trace.records[15].outcome,
             AppReplayOutcome::Rejected { ref error } if error.contains("entity ID must not be nil")
@@ -1843,6 +1931,10 @@ mod tests {
         assert_eq!(
             trace.records[15].state.revision,
             trace.records[14].state.revision
+        );
+        assert_eq!(
+            trace.records[15].state.authored_entities,
+            trace.records[14].state.authored_entities
         );
         assert_eq!(trace.records[16].state.presence.len(), 1);
         assert!(trace.records[17].state.presence.is_empty());

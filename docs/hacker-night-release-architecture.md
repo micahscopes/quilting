@@ -150,19 +150,23 @@ The first application boundary is now explicit:
   explicitly query `globalThis.__hyperscopeRenderShadow` but receives no
   per-frame diagnostic traffic.
 - High-rate frame, navigation, and presence events advance authoritative state
-  without forcing DOM-rate notifications. `SignalVec` asset/diagnostic views
-  and the low-rate presentation projection are published as a batch and an
-  `AppSummary` revision is set last as the consumer commit fence; adapters
-  explicitly flush at their UI cadence. Presentation transitions reconcile on
-  the frame lane without cloning cue assets/layers into render snapshots.
+  without forcing DOM-rate notifications. `SignalVec` runtime-asset,
+  authored-asset, authored-entity, and diagnostic views plus the low-rate
+  presentation projection are published as a batch and an `AppSummary`
+  revision is set last as the consumer commit fence; adapters explicitly flush
+  at their UI cadence. Presentation transitions reconcile on the frame lane
+  without cloning cue assets/layers into render snapshots.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.7 walks every checked-in cue, every current
-  semantic navigation action, and every current application event lane.
+  `hyperscope-replay` version 0.8 walks every checked-in cue, every current
+  semantic navigation action, and every current application event lane. It
+  records the key-sorted authored asset/entity materialization as well as its
+  atomic projection revision, so stale or invalid Blender-style checkpoints
+  cannot silently mutate the scene oracle.
   Version 0.7 makes selected identities explicitly asset-scoped, so the same
   entity UUID in two composed assets cannot alias. Legacy unscoped focus
   anchors fail closed instead of receiving a fabricated asset identity.
@@ -170,8 +174,8 @@ The first application boundary is now explicit:
   semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. The reader accepts 0.4, 0.5, and 0.6
-  inputs, but only 0.4 migrates an omitted source pivot to the bound center.
+  clears only those derived values. The reader accepts 0.4 through 0.7 inputs,
+  but only 0.4 migrates an omitted source pivot to the bound center.
   Versions 0.4 and 0.5 reject 0.6-only actions rather than silently changing
   their meaning; every pre-0.7 unscoped focus anchor is rejected. Action
   admission and integration remain distinct: same-time
@@ -187,10 +191,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The six-cue golden is
-  `fnv1a-128-json:e606549f81c07c645eca8bc10cfc1645`;
+  `fnv1a-128-json:2123c41359d3187dbcbbff4334e069a0`;
   the navigation golden is
-  `fnv1a-128-json:4b6f0b82cf471af7af17b99ed37317d4`; the orchestration
-  golden is `fnv1a-128-json:2cb74a642b3d4fc40b4eda777addb833`.
+  `fnv1a-128-json:9b68dd4542773115658cfb78282feb41`; the orchestration
+  golden is `fnv1a-128-json:71b484d19c93d0171d9c4996831b2542`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
