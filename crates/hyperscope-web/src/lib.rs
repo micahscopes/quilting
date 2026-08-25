@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "animation-control")]
+pub mod animation_control;
+
 #[cfg(feature = "asset-credits")]
 pub mod asset_credits;
 

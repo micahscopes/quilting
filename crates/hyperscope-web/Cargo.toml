@@ -9,9 +9,11 @@ description = "Optional browser-host adapters for Hyperscope"
 
 [features]
 default = []
+animation-control = ["dep:hyperscope-app"]
 asset-credits = ["dep:hyperscape-protocol", "dep:hyperscope-app"]
 presentation-card = ["dep:hyperscope-app"]
 csr = [
+    "animation-control",
     "asset-credits",
     "presentation-card",
     "dep:futures-signals",
