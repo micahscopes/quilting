@@ -150,6 +150,15 @@ impl HyperscopeAppShadow {
         }
     }
 
+    /// Mount the opt-in Leptos asset-credit island over this controller's
+    /// committed AppStore projections. The browser passes only the host
+    /// element; Rust retains the reactive subscription and rendering logic.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountAssetCredits)]
+    pub fn mount_asset_credits(&self, parent: web_sys::HtmlElement) {
+        hyperscope_web::asset_credits::mount_asset_credits(parent, self.store.clone());
+    }
+
     #[wasm_bindgen(js_name = requestAsset)]
     #[allow(clippy::too_many_arguments)]
     pub fn request_asset(

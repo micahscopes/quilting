@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["console_error_panic_hook"]
+leptos-ui = ["dep:hyperscope-web", "hyperscope-web/csr"]
 
 [dependencies]
 quilting-core = { version = "0.1.0", path = "../quilting-core" }
@@ -22,6 +23,7 @@ quilting-gltf = { version = "0.1.0", path = "../quilting-gltf" }
 hyperscape = { version = "0.1.0", path = "../hyperscape" }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 hyperscope-app = { version = "0.1.0", path = "../hyperscope-app" }
+hyperscope-web = { version = "0.1.0", path = "../hyperscope-web", optional = true }
 quilting-remesh = { version = "0.1.0", path = "../quilting-remesh" }
 quilting-round-index = { version = "0.1.0", path = "../quilting-round-index" }
 wasm-bindgen = "=0.2.108"
@@ -35,7 +37,7 @@ js-sys = "0.3"
 rustc-hash = "2"
 web-sys = { version = "0.3", features = [
     "console", "Performance", "OffscreenCanvas", "WebGl2RenderingContext",
-    "Window", "Document", "Element", "HtmlCanvasElement", "ImageBitmap",
+    "Window", "Document", "Element", "HtmlCanvasElement", "HtmlElement", "ImageBitmap",
 ] }
 glow = "0.16"
 quilting-renderer = { version = "0.1.0", path = "../quilting-renderer" }

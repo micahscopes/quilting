@@ -1973,3 +1973,50 @@ numeric zero ownership, GNU tar, and header-free deterministic gzip. The
 `9f802021c806111e0542522fb0f19607fdffa683f50e7c439b363122ad1de92d`.
 A fresh extraction passed the same strict preflight and repackaged byte-for-byte
 identically, proving the transport artifact rather than only its source tree.
+
+## First Leptos CSR authority island
+
+Asset credits are the first browser view moved behind the intended
+`hyperscope-web` boundary. A framework-neutral Rust projection consumes only
+committed `AppStore` asset read models; an optional Leptos CSR component
+subscribes directly to the store's `SignalVec`. The browser supplies one host
+element and retains no copied credit state. The incumbent DOM renderer remains
+present as a feature-absent or mount-failure rollback.
+
+Matched release-mode `wasm-pack` builds measured the cost before enabling the
+feature in the Hyperscope Trunk hook. The baseline versus `leptos-ui` artifacts
+were:
+
+| Artifact | Baseline | Leptos | Delta |
+| --- | ---: | ---: | ---: |
+| WASM raw | 6,637,433 B | 6,731,719 B | +94,286 B (+1.421%) |
+| WASM `gzip -9 -n` | 2,333,786 B | 2,372,490 B | +38,704 B (+1.658%) |
+| JS glue raw | 165,166 B | 178,142 B | +12,976 B (+7.856%) |
+| JS glue `gzip -9 -n` | 26,191 B | 28,292 B | +2,101 B (+8.022%) |
+| Combined gzip | 2,359,977 B | 2,400,782 B | +40,805 B (+1.729%) |
+
+The exact feature-enabled Trunk build covered 189 source inputs totaling
+20,846,319 bytes with fingerprint
+`e22e496fa99ee53e9827cf40eec29469`. All 64 browser-independent JavaScript
+tests, both native Rust projection tests, and the five generated-WASM
+application/presentation/route/render/walking smokes passed.
+
+Chrome DevTools MCP then exercised isolated feature-enabled and feature-absent
+release artifacts without touching the user-run server or existing pages. The
+feature build mounted exactly one `#asset-credits-rust-view`, hid the fallback,
+reported `assetCreditsAuthority="hyperscope-web"`, one mount attempt, zero
+mount errors or mismatches, and rendered the ready horse's generator metadata.
+The baseline build exposed no mount method, retained exactly one visible
+browser fallback, and likewise reported zero errors or mismatches. Both runs
+had clean warning/error consoles.
+
+Startup samples were intentionally treated as observational rather than a
+causal benchmark because the shared Chrome process retained renderer, shader,
+HTTP, IndexedDB, and WebAssembly caches. The first feature run spent 1,451.3 ms
+in the broad WASM phase, the intervening baseline spent 816.1 ms, and a warm
+feature crossover spent 690.7 ms. Renderer initialization accounted for
+1,210.4, 666.5, and 570.6 ms respectively; compile time was 200.4, 133.3, and
+99.8 ms. The reversal on the warm crossover means these samples do not support
+attributing the cold-run gap to Leptos. The reproducible artifact delta above
+is the current size gate; a fresh-process repeated startup distribution remains
+required before migrating a large portion of the interface.

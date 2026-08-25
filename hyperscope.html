@@ -353,6 +353,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="stats" id="stats">Loading WASM...</div>
   <div class="stats" id="hyperscape-diagnostics">Hyperscape: no authored scene</div>
+  <div id="asset-credits-rust" hidden></div>
   <details class="hs-diag" id="asset-credits">
     <summary>Asset credits <span id="asset-credit-count"></span></summary>
     <div id="asset-credit-list" class="asset-credit-note">No credited asset loaded yet.</div>
@@ -2668,6 +2669,8 @@ let rustAppShadowSelectionQueued = false;
 let rustAppSelectionTransitionActive = false;
 let rustAppSelectionEventAtMs = null;
 let rustAppFrameElapsedSeconds = 0;
+let rustAssetCreditsMountAttempted = false;
+let rustAssetCreditsMounted = false;
 const rustAppShadowAssetIds = new Map();
 const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);
 const rustAppShadowDiagnostics = {
@@ -2681,6 +2684,9 @@ const rustAppShadowDiagnostics = {
   preventedInstalls: 0,
   acquisitionAborts: 0,
   assetImplementation: RUST_ASSET_IMPLEMENTATION,
+  assetCreditsAuthority: 'browser-fallback',
+  assetCreditsMountAttempts: 0,
+  assetCreditsMountErrors: 0,
   presentationLoads: 0,
   presentationComparisons: 0,
   navigationSynchronizations: 0,
@@ -2870,11 +2876,37 @@ function renderAssetCredits(snapshot) {
   }));
 }
 
+function ensureRustAssetCreditsView() {
+  if (rustAssetCreditsMounted) return true;
+  if (rustAssetCreditsMountAttempted || !rustAppShadow) return false;
+  rustAssetCreditsMountAttempted = true;
+  rustAppShadowDiagnostics.assetCreditsMountAttempts += 1;
+  const host = $('asset-credits-rust');
+  const fallback = $('asset-credits');
+  if (!host || !fallback || typeof rustAppShadow.mountAssetCredits !== 'function') {
+    return false;
+  }
+  try {
+    rustAppShadow.mountAssetCredits(host);
+    host.hidden = false;
+    fallback.hidden = true;
+    rustAssetCreditsMounted = true;
+    rustAppShadowDiagnostics.assetCreditsAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    host.hidden = true;
+    fallback.hidden = false;
+    rustAppShadowDiagnostics.assetCreditsMountErrors += 1;
+    recordAppShadowMismatch('asset_credits_mount', error?.message || String(error));
+    return false;
+  }
+}
+
 function refreshAppShadowSnapshot() {
   if (!rustAppShadow) return null;
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
-  renderAssetCredits(snapshot);
+  if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
   return snapshot;
 }
 
