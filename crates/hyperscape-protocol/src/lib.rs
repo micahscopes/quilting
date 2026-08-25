@@ -411,9 +411,9 @@ mod tests {
     use super::*;
 
     const AUTHORED_FIXTURE: &str =
-        include_str!("../../../fixtures/protocol/authored-set-transform-v0.1.json");
+        include_str!("../fixtures/authored-set-transform-v0.1.json");
     const PRESENCE_FIXTURE: &str =
-        include_str!("../../../fixtures/protocol/presence-camera-v0.1.json");
+        include_str!("../fixtures/presence-camera-v0.1.json");
 
     fn header() -> MessageHeader {
         MessageHeader {
