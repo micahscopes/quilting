@@ -651,7 +651,6 @@ mod tests {
             output_position: position,
             output_normal: normal,
             surface_velocity: [0.0; 3],
-            eye_position: position,
         }
     }
 

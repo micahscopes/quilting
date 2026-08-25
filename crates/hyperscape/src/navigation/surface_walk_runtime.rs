@@ -303,10 +303,9 @@ impl SurfaceWalkRuntime {
                 1
             }
         });
-        let metrics = request.controls.metrics(request.scene_radius, false)?;
-        let attachment =
-            SurfaceAttachment::with_normal_sign(address, metrics.eye_height, normal_sign)
-                .map_err(|_| SurfaceWalkRuntimeError::InvalidAttachment)?;
+        request.controls.metrics(request.scene_radius, false)?;
+        let attachment = SurfaceAttachment::with_normal_sign(address, normal_sign)
+            .map_err(|_| SurfaceWalkRuntimeError::InvalidAttachment)?;
 
         let mut candidate = self.clone();
         candidate.walker.attach(attachment);
@@ -435,19 +434,16 @@ impl SurfaceWalkRuntime {
         request: SurfaceWalkStepRequest,
         field: &mut F,
     ) -> Result<SurfaceWalkUpdate, SurfaceWalkRuntimeError> {
-        let metrics = request
+        request
             .controls
             .metrics(request.scene_radius, request.input.fast)?;
-        let Some(mut attachment) = self.walker.attachment() else {
+        if self.walker.attachment().is_none() {
             let reason = self
                 .walker
                 .last_detach_reason()
                 .unwrap_or(SurfaceDetachReason::SampleUnavailable);
             return Ok(self.coordinated_detach(*camera, reason, detached_advance(reason)));
-        };
-        attachment.eye_height = metrics.eye_height;
-        self.walker.attach(attachment);
-
+        }
         let current = self.walker.advance(0.0, [0.0; 3], field);
         let Some(current_contact) = current.contact else {
             let reason = detached_reason(current.status);
@@ -756,7 +752,6 @@ mod tests {
             update.advance.projected_output_velocity,
             field.surface_velocity
         );
-        close(runtime.attachment().unwrap().eye_height, 0.035);
         close(update.target_frame.unwrap().camera.lens.near, 0.0028);
     }
 
@@ -888,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn reflection_transport_preserves_address_and_eye_height_and_flips_side_once() {
+    fn reflection_transport_preserves_address_and_flips_side_once() {
         let mut runtime = SurfaceWalkRuntime::default();
         let mut field = field();
         let mut camera = camera([0.2, 2.0, -0.2]);
@@ -905,7 +900,6 @@ mod tests {
             .unwrap();
         let after = runtime.attachment().unwrap();
         assert_eq!(after.address, before.address);
-        assert_eq!(after.eye_height, before.eye_height);
         assert_eq!(after.normal_sign, -before.normal_sign);
         assert_eq!(
             outcome,

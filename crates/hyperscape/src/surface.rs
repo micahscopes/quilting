@@ -111,34 +111,32 @@ pub trait SurfaceField {
     }
 }
 
+/// Stable source-topology attachment shared by stationary followers and
+/// walkers. Camera height, locomotion, and filtering are deliberately owned by
+/// navigation policy rather than this identity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceAttachment {
     pub address: SurfaceAddress,
-    pub eye_height: f64,
-    /// Which side of the currently sampled oriented surface carries the eye.
+    /// Which side of the currently sampled oriented surface is retained.
     /// This is always `+1` or `-1` and is explicitly flipped by a runtime when
     /// its output coordinate frame reverses orientation.
     pub normal_sign: i8,
 }
 
 impl SurfaceAttachment {
-    pub fn new(address: SurfaceAddress, eye_height: f64) -> Result<Self, SurfaceAddressError> {
-        if !eye_height.is_finite() {
-            return Err(SurfaceAddressError::NonFinite);
-        }
+    pub fn new(address: SurfaceAddress) -> Result<Self, SurfaceAddressError> {
+        let address = SurfaceAddress::new(address.entity, address.face, address.barycentric)?;
         Ok(Self {
             address,
-            eye_height,
             normal_sign: 1,
         })
     }
 
     pub fn with_normal_sign(
         address: SurfaceAddress,
-        eye_height: f64,
         normal_sign: i8,
     ) -> Result<Self, SurfaceAddressError> {
-        let mut attachment = Self::new(address, eye_height)?;
+        let mut attachment = Self::new(address)?;
         if !matches!(normal_sign, -1 | 1) {
             return Err(SurfaceAddressError::InvalidNormalSign);
         }
@@ -156,7 +154,6 @@ pub struct SurfaceContact {
     /// and conformal-frame motion. Locomotion adds its relative tangent intent
     /// to this value before advancing through the surface metric.
     pub surface_velocity: [f64; 3],
-    pub eye_position: [f64; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,13 +265,11 @@ impl SurfaceWalker {
         entity: StableEntityId,
         output_position: [f64; 3],
         maximum_distance: f64,
-        eye_height: f64,
         field: &mut F,
     ) -> bool {
         if !finite3(output_position)
             || !maximum_distance.is_finite()
             || maximum_distance <= 0.0
-            || !eye_height.is_finite()
         {
             return false;
         }
@@ -293,7 +288,6 @@ impl SurfaceWalker {
         }
         self.attach(SurfaceAttachment {
             address,
-            eye_height,
             normal_sign: 1,
         });
         true
@@ -595,10 +589,6 @@ fn contact_from_sample(
         output_position: sample.output_position,
         output_normal,
         surface_velocity: sample.surface_velocity,
-        eye_position: add(
-            sample.output_position,
-            scale(output_normal, attachment.eye_height),
-        ),
     })
 }
 
@@ -837,7 +827,7 @@ mod tests {
             },
             ..SurfaceWalker::default()
         };
-        walker.attach(SurfaceAttachment::new(address, 0.25).unwrap());
+        walker.attach(SurfaceAttachment::new(address).unwrap());
         walker
     }
 
@@ -851,11 +841,10 @@ mod tests {
         assert_eq!(contact.address.face, 0);
         assert!((contact.address.barycentric[1] - 0.3).abs() < 1.0e-12);
         assert!((contact.output_position[0] - 0.3).abs() < 1.0e-12);
-        assert!((contact.eye_position[2] - 0.25).abs() < 1.0e-12);
     }
 
     #[test]
-    fn attachment_normal_sign_selects_and_flips_the_eye_side() {
+    fn attachment_normal_sign_selects_and_flips_the_surface_side() {
         let address = SurfaceAddress::new(entity(), 0, [0.6, 0.2, 0.2]).unwrap();
         let mut walker = SurfaceWalker {
             config: SurfaceWalkerConfig {
@@ -864,16 +853,14 @@ mod tests {
             },
             ..SurfaceWalker::default()
         };
-        walker.attach(SurfaceAttachment::with_normal_sign(address, 0.25, -1).unwrap());
+        walker.attach(SurfaceAttachment::with_normal_sign(address, -1).unwrap());
         let mut field = field(1.0);
         let below = walker.advance(0.0, [0.0; 3], &mut field).contact.unwrap();
         assert!(below.output_normal[2] < -0.999);
-        assert!((below.eye_position[2] + 0.25).abs() < 1.0e-12);
 
         walker.flip_normal_side();
         let above = walker.advance(0.0, [0.0; 3], &mut field).contact.unwrap();
         assert!(above.output_normal[2] > 0.999);
-        assert!((above.eye_position[2] - 0.25).abs() < 1.0e-12);
     }
 
     #[test]

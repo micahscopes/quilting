@@ -149,6 +149,7 @@ pub(crate) struct SurfaceRuntime {
     pose_sample: Option<TimedPoseSample>,
     legacy_velocity: SurfaceVelocityTracker,
     composed_velocity: SurfaceVelocityTracker,
+    legacy_eye_height: f64,
     attachment_orientation_sign: i8,
     composed_attachment_orientation_sign: i8,
 }
@@ -251,6 +252,7 @@ impl SurfaceRuntime {
         self.adjacency = None;
         self.legacy_velocity.reset();
         self.composed_velocity.reset();
+        self.legacy_eye_height = 0.0;
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
     }
@@ -506,6 +508,9 @@ impl SurfaceRuntime {
         if face as usize >= num_faces || face_nodes.len() != num_faces {
             return Err("surface face is outside the current model".into());
         }
+        if !eye_height.is_finite() {
+            return Err("surface eye height must be finite".into());
+        }
         if self.adjacency.is_none() {
             self.adjacency = Some(build_adjacency(instances, num_faces, face_nodes)?);
         }
@@ -547,10 +552,11 @@ impl SurfaceRuntime {
                 1
             }
         };
-        let attachment = SurfaceAttachment::with_normal_sign(address, eye_height, normal_sign)
+        let attachment = SurfaceAttachment::with_normal_sign(address, normal_sign)
             .map_err(|error| format!("invalid surface attachment: {error:?}"))?;
         self.walker.attach(attachment);
         self.legacy_velocity.reset();
+        self.legacy_eye_height = eye_height;
         self.attachment_orientation_sign = normalize_orientation_sign(orientation_sign);
         self.step_relative(
             instances,
@@ -568,6 +574,7 @@ impl SurfaceRuntime {
         self.composed.detach(SurfaceDetachReason::Manual);
         self.legacy_velocity.reset();
         self.composed_velocity.reset();
+        self.legacy_eye_height = 0.0;
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
         detached_snapshot(SurfaceDetachReason::Manual)
@@ -831,6 +838,7 @@ impl SurfaceRuntime {
         Ok(snapshot_from_advance(
             advance,
             node,
+            self.legacy_eye_height,
             pose_sample_snapshot(self.pose_sample, self.legacy_velocity),
         ))
     }
@@ -1098,6 +1106,7 @@ fn apply_affine(matrix: [f32; 16], point: [f64; 3]) -> Option<[f64; 3]> {
 fn snapshot_from_advance(
     advance: SurfaceAdvance,
     node: usize,
+    eye_height: f64,
     pose_sample: Option<SurfacePoseSampleSnapshot>,
 ) -> SurfaceRuntimeSnapshot {
     let detach_reason = match advance.status {
@@ -1116,7 +1125,12 @@ fn snapshot_from_advance(
         barycentric: advance.contact.map(|contact| contact.address.barycentric),
         output_position: advance.contact.map(|contact| contact.output_position),
         output_normal: advance.contact.map(|contact| contact.output_normal),
-        eye_position: advance.contact.map(|contact| contact.eye_position),
+        eye_position: advance.contact.map(|contact| {
+            add(
+                contact.output_position,
+                scale(contact.output_normal, eye_height),
+            )
+        }),
         projected_output_velocity: advance.projected_output_velocity,
         condition_number: advance.condition_number,
         substeps: advance.substeps,
