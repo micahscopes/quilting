@@ -9,6 +9,7 @@ description = "Optional browser-host adapters for Hyperscope"
 
 [features]
 default = []
+asset-credits = ["dep:hyperscape-protocol", "dep:hyperscope-app"]
 durable-history = [
     "dep:hhhs",
     "dep:hhhs-replica",
@@ -33,6 +34,8 @@ hhhs = { workspace = true, optional = true }
 hhhs-replica = { workspace = true, optional = true }
 hhhs-store = { workspace = true, optional = true }
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
+hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol", optional = true }
+hyperscope-app = { version = "0.1.0", path = "../hyperscope-app", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["raw_value"], optional = true }
 thiserror = { version = "2", optional = true }

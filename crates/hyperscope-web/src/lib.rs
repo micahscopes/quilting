@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "asset-credits")]
+pub mod asset_credits;
+
 #[cfg(feature = "durable-history")]
 pub mod durable_history;
 
