@@ -180,6 +180,14 @@ The first application boundary is now explicit:
   visibly on extraction failure. The join runs on low-rate layer/scene changes
   over node records, never per face or per animation frame. Diagnostics live at
   `globalThis.__hyperscopeSceneExtraction`.
+- The direct local-peer ingress is transport neutral and explicitly
+  single-writer. `LocalPeerEnvelope` has disjoint `authored` and `presence`
+  variants; application ingress turns only validated authored frames into
+  monotonically fenced `AuthoredRevision` events and sends presence through
+  receipt-relative TTL handling. Bounded message-ID memory, sender-local
+  sequence tracking, and consuming local-echo memory reject retries without
+  giving a relay reducer authority. Multi-writer authored convergence still
+  requires `hyperscape-hhhs`; arrival order is never presented as causality.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

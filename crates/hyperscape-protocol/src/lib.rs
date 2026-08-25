@@ -331,6 +331,33 @@ impl PresenceEnvelope {
     }
 }
 
+/// Transport-neutral local peer frame. A platform adapter may carry this over
+/// WebSocket, HTTP long-polling, IPC, or an in-process test channel, but the
+/// two lanes remain distinct after decoding. Only `Authored` is eligible for
+/// durable admission; `Presence` always retains receipt-relative TTL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "lane", content = "envelope", rename_all = "snake_case")]
+pub enum LocalPeerEnvelope {
+    Authored(AuthoredEnvelope),
+    Presence(PresenceEnvelope),
+}
+
+impl LocalPeerEnvelope {
+    pub fn validate(&self) -> Result<(), WireError> {
+        match self {
+            Self::Authored(envelope) => envelope.validate(),
+            Self::Presence(envelope) => envelope.validate(),
+        }
+    }
+
+    pub fn message_id(&self) -> MessageId {
+        match self {
+            Self::Authored(envelope) => envelope.header.message_id,
+            Self::Presence(envelope) => envelope.header.message_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireError {
     UnsupportedVersion(ProtocolVersion),
@@ -459,6 +486,30 @@ mod tests {
             format!("{}\n", serde_json::to_string_pretty(&envelope).unwrap()),
             PRESENCE_FIXTURE
         );
+    }
+
+    #[test]
+    fn local_peer_framing_preserves_the_authored_presence_type_boundary() {
+        let authored: AuthoredEnvelope = serde_json::from_str(AUTHORED_FIXTURE).unwrap();
+        let presence: PresenceEnvelope = serde_json::from_str(PRESENCE_FIXTURE).unwrap();
+        let authored_frame = LocalPeerEnvelope::Authored(authored.clone());
+        let presence_frame = LocalPeerEnvelope::Presence(presence.clone());
+        for frame in [&authored_frame, &presence_frame] {
+            frame.validate().unwrap();
+            let encoded = serde_json::to_string(frame).unwrap();
+            assert_eq!(
+                serde_json::from_str::<LocalPeerEnvelope>(&encoded).unwrap(),
+                *frame
+            );
+        }
+        assert_eq!(authored_frame.message_id(), authored.header.message_id);
+        assert_eq!(presence_frame.message_id(), presence.header.message_id);
+
+        let smuggled = serde_json::json!({
+            "lane": "authored",
+            "envelope": presence,
+        });
+        assert!(serde_json::from_value::<LocalPeerEnvelope>(smuggled).is_err());
     }
 
     #[test]

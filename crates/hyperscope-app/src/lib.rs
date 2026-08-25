@@ -9,10 +9,12 @@
 
 #[cfg(feature = "replay")]
 mod replay;
+mod peer;
 mod settings;
 
 #[cfg(feature = "replay")]
 pub use replay::*;
+pub use peer::*;
 pub use settings::*;
 
 use futures_signals::signal::{Mutable, MutableSignalCloned};

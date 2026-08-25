@@ -1405,3 +1405,21 @@ intentional maximum authored delta of `8`, exact authored fence `"1"`, 18 Rust
 writes, zero mismatches/fallbacks, and no presentation error. The temporary
 servers were stopped and the existing listener on `10.0.0.1:8888` was not
 touched.
+
+## Transport-neutral local peer ingress
+
+The first local Blender bridge checkpoint selects no WebSocket, HTTP server,
+or relay. `hyperscape-protocol::LocalPeerEnvelope` freezes distinct authored
+and presence lane shapes, and `hyperscope-app::LocalPeerIngress` is the only
+direct-demo admission policy. Authored messages receive a monotonic local
+projection fence only after validation; duplicate IDs, sender-stale sequences,
+and consumed local echoes produce no reducer commit. Presence goes through the
+existing receipt-time TTL path and never advances the authored projection.
+
+Four application cases prove retry/echo/stale rejection, bounded-memory
+eviction, invalid-frame atomicity, expiry, and sequential single-writer
+convergence between independent stores; the protocol case proves round trips
+and rejects a presence payload relabeled as authored. The gate passed 51 app
+tests, 7 protocol tests, strict crate-local Clippy, warning-free
+rustdoc, and wasm32 app checking. This intentionally does not claim
+multi-writer convergence: that remains the HHHS adapter's job.
