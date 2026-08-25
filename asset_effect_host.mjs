@@ -53,6 +53,7 @@ export class BrowserAssetEffectHost {
     this.implementation = implementation;
     this.jobs = new Map();
     this.primary = null;
+    this.installTail = Promise.resolve();
   }
 
   begin({
@@ -147,5 +148,17 @@ export class BrowserAssetEffectHost {
     if (!token || this.implementation !== 'rust') return false;
     return token.signal.aborted || error?.name === 'AbortError';
   }
-}
 
+  runInstall(token, operation) {
+    if (typeof operation !== 'function') {
+      throw new TypeError('asset installation must be a function');
+    }
+    if (this.implementation !== 'rust') return operation();
+    const turn = this.installTail.then(async () => {
+      if (!this.mayInstall(token)) return false;
+      return operation();
+    });
+    this.installTail = turn.catch(() => undefined);
+    return turn;
+  }
+}

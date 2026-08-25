@@ -24,6 +24,8 @@ assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementat
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'assetimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'assetimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
@@ -68,6 +70,25 @@ for (const sceneExtractionStep of [
   assert.ok(
     browserSource.includes(sceneExtractionStep),
     `browser scene extraction rollback gate is missing ${sceneExtractionStep}`,
+  );
+}
+for (const assetAuthorityStep of [
+  "const requested = new URLSearchParams(location.search).get('assetimpl') || 'js';",
+  "RUST_ASSET_IMPLEMENTATION !== 'js'",
+  "import { BrowserAssetEffectHost } from './asset_effect_host.mjs",
+  'const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);',
+  'rustAppShadow.requestPrimaryAsset.bind(rustAppShadow)',
+  'browserAssetEffectHost.begin({',
+  'browserAssetEffectHost.runInstall(assetToken, async () => {',
+  "beginAppAssetShadow(file.name, 'drop', null, 'primary_scene')",
+  "beginAppAssetShadow(currentGlb, 'startup', null, 'primary_scene')",
+  'fetch(candidate, appAssetFetchOptions(assetShadow))',
+  'if (!appAssetMayInstall(assetShadow)) return;',
+  "if (RUST_ASSET_IMPLEMENTATION === 'rust') throw error;",
+]) {
+  assert.ok(
+    browserSource.includes(assetAuthorityStep),
+    `browser asset authority adapter is missing ${assetAuthorityStep}`,
   );
 }
 const startupAdapter = browserSource.slice(

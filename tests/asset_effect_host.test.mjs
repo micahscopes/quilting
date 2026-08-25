@@ -131,3 +131,47 @@ test('js mode preserves incumbent logical URIs without requiring Rust effects', 
   assert.equal(host.mayInstall(token), true);
 });
 
+test('rust mode serializes primary installations and skips a queued stale job', async () => {
+  const host = new BrowserAssetEffectHost('rust');
+  const first = begin(host, {
+    requestId: 'request-1', assetId: 'horse', uri: 'horse.glb', scope: 'primary_scene',
+  }).token;
+  host.recordCompletion(first, 'applied');
+  let releaseFirst;
+  const firstBlocked = new Promise(resolve => { releaseFirst = resolve; });
+  const order = [];
+  const firstInstall = host.runInstall(first, async () => {
+    order.push('first-start');
+    await firstBlocked;
+    order.push('first-end');
+    return true;
+  });
+  await Promise.resolve();
+
+  const second = begin(host, {
+    requestId: 'request-2',
+    assetId: 'chess',
+    uri: 'chess.glb',
+    scope: 'primary_scene',
+    effects: [
+      cancelEffect('request-1', 'horse'),
+      fetchEffect('request-2', 'chess', 'chess.glb'),
+    ],
+  }).token;
+  host.recordCompletion(second, 'applied');
+  const secondInstall = host.runInstall(second, async () => {
+    order.push('second');
+    return true;
+  });
+  releaseFirst();
+  assert.equal(await firstInstall, true);
+  assert.equal(await secondInstall, true);
+  assert.deepEqual(order, ['first-start', 'first-end', 'second']);
+
+  const staleQueued = host.runInstall(first, async () => {
+    order.push('stale');
+    return true;
+  });
+  assert.equal(await staleQueued, false);
+  assert.deepEqual(order, ['first-start', 'first-end', 'second']);
+});

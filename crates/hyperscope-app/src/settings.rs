@@ -153,6 +153,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("presentimpl", "js", Implementation),
     spec!("roundshadow", "0", Toggle),
     spec!("appshadow", "0", Toggle),
+    spec!("assetimpl", "js", Implementation),
     spec!("sceneimpl", "js", Implementation),
     spec!("routeshadow", "0", Toggle),
     spec!("routeimpl", "js", Implementation),
@@ -348,6 +349,7 @@ mod tests {
             "walkimpl",
             "selectionimpl",
             "presentimpl",
+            "assetimpl",
             "sceneimpl",
             "routeimpl",
         ] {

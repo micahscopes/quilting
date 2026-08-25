@@ -13,6 +13,7 @@
 <link data-trunk rel="copy-file" href="spacemouse.mjs" />
 <link data-trunk rel="copy-file" href="hyperscope_focus.mjs" />
 <link data-trunk rel="copy-file" href="local_peer_browser.mjs" />
+<link data-trunk rel="copy-file" href="asset_effect_host.mjs" />
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
 <link data-trunk rel="copy-file" href="examples/hyperscape-blender-demo.glb" />
@@ -425,6 +426,7 @@ import {
   BrowserLocalPeerRelay,
   DEFAULT_LOCAL_PEER_RELAY_URL,
 } from './local_peer_browser.mjs?rev=exact-frame-json-v1';
+import { BrowserAssetEffectHost } from './asset_effect_host.mjs?rev=rust-primary-load-v1';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -445,8 +447,13 @@ const RUST_SCENE_IMPLEMENTATION = (() => {
   const requested = new URLSearchParams(location.search).get('sceneimpl') || 'js';
   return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
 })();
+const RUST_ASSET_IMPLEMENTATION = (() => {
+  const requested = new URLSearchParams(location.search).get('assetimpl') || 'js';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
+})();
 const RUST_APP_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('appshadow') === '1'
+  || RUST_ASSET_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
@@ -882,7 +889,7 @@ const PARAM_DEFAULTS = {
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
-  presentimpl: 'js', sceneimpl: 'js', routeimpl: 'js',
+  presentimpl: 'js', assetimpl: 'js', sceneimpl: 'js', routeimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -920,6 +927,7 @@ function readParams(p = new URLSearchParams(location.search)) {
     walkalign: get('walkalign'), walkspeed: get('walkspeed'),
     walkscale: get('walkscale'), walkheight: get('walkheight'), walkimpl: get('walkimpl'),
     selectionimpl: get('selectionimpl'),
+    assetimpl: get('assetimpl'),
     cue: get('cue'),
     lab: get('lab'), labfield: get('labfield'),
     laba: get('laba'), labb: get('labb'), labc: get('labc'),
@@ -1032,6 +1040,7 @@ function syncURL() {
     );
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
     if (RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
+    set('assetimpl', RUST_ASSET_IMPLEMENTATION, PARAM_DEFAULTS.assetimpl);
     set('sceneimpl', RUST_SCENE_IMPLEMENTATION, PARAM_DEFAULTS.sceneimpl);
     if (LEGACY_RUST_ROUTE_SHADOW_ENABLED) p.set('routeshadow', '1');
     set('routeimpl', RUST_ROUTE_IMPLEMENTATION, PARAM_DEFAULTS.routeimpl);
@@ -2550,6 +2559,7 @@ let rustAppSelectionTransitionActive = false;
 let rustAppSelectionEventAtMs = null;
 let rustAppFrameElapsedSeconds = 0;
 const rustAppShadowAssetIds = new Map();
+const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);
 const rustAppShadowDiagnostics = {
   enabled: RUST_APP_SHADOW_ENABLED,
   state: RUST_APP_SHADOW_ENABLED ? 'awaiting-wasm' : 'disabled',
@@ -2558,6 +2568,9 @@ const rustAppShadowDiagnostics = {
   failed: 0,
   requestedCancellations: 0,
   staleCompletions: 0,
+  preventedInstalls: 0,
+  acquisitionAborts: 0,
+  assetImplementation: RUST_ASSET_IMPLEMENTATION,
   presentationLoads: 0,
   presentationComparisons: 0,
   navigationSynchronizations: 0,
@@ -2949,36 +2962,46 @@ function mirrorAppPresentation(direction, cueId, expected) {
   }
 }
 
-function beginAppAssetShadow(uri, source, explicitAssetId = null) {
+function beginAppAssetShadow(uri, source, explicitAssetId = null, scope = 'asset') {
   if (!rustAppShadow) return null;
   const requestId = appShadowUuid('e', ++rustAppShadowRequestOrdinal);
   const assetId = appShadowAssetId(uri, explicitAssetId);
-  const token = { requestId, assetId, uri: String(uri), source, completed: false };
+  const requestedUri = String(uri);
   try {
-    const commit = rustAppShadow.requestAsset(
+    const request = scope === 'primary_scene'
+      ? rustAppShadow.requestPrimaryAsset.bind(rustAppShadow)
+      : rustAppShadow.requestAsset.bind(rustAppShadow);
+    const commit = request(
       ++rustAppShadowSequence,
       0,
       requestId,
       assetId,
-      token.uri,
-      /\.gltf$/i.test(token.uri) ? 'model/gltf+json' : 'model/gltf-binary',
+      requestedUri,
+      /\.gltf$/i.test(requestedUri) ? 'model/gltf+json' : 'model/gltf-binary',
     );
-    const fetchEffect = commit.effects.find(effect => effect.type === 'fetch_asset');
     const cancellations = commit.effects.filter(effect => effect.type === 'cancel_asset_load');
     rustAppShadowDiagnostics.requestedCancellations += cancellations.length;
     rustAppShadowDiagnostics.requests += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
-    if (!fetchEffect || fetchEffect.request_id !== requestId
-        || fetchEffect.asset_id !== assetId || fetchEffect.uri !== token.uri) {
-      recordAppShadowMismatch('request_effect', `Rust request effect diverged for ${token.uri}`);
+    const hosted = browserAssetEffectHost.begin({
+      requestId,
+      assetId,
+      uri: requestedUri,
+      source,
+      scope,
+      commit,
+    });
+    for (const mismatch of hosted.mismatches) {
+      recordAppShadowMismatch('request_effect', `${requestedUri}: ${mismatch}`);
     }
     refreshAppShadowSnapshot();
-    return token;
+    return hosted.token;
   } catch (error) {
     recordAppShadowMismatch(
       'request_exception',
-      `${token.uri}: ${error?.message || String(error)}`,
+      `${requestedUri}: ${error?.message || String(error)}`,
     );
+    if (RUST_ASSET_IMPLEMENTATION === 'rust') throw error;
     return null;
   }
 }
@@ -2996,6 +3019,7 @@ function completeAppAssetShadow(token, buffer) {
     rustAppShadowDiagnostics.loaded += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
+    browserAssetEffectHost.recordCompletion(token, commit.disposition);
     const snapshot = refreshAppShadowSnapshot();
     const asset = snapshot?.assets.find(candidate => candidate.id === token.assetId);
     if (commit.disposition === 'applied'
@@ -3027,6 +3051,7 @@ function failAppAssetShadow(token, code, error, retryable = false) {
     rustAppShadowDiagnostics.failed += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
+    browserAssetEffectHost.recordCompletion(token, commit.disposition);
     refreshAppShadowSnapshot();
     return commit.disposition;
   } catch (shadowError) {
@@ -3036,6 +3061,26 @@ function failAppAssetShadow(token, code, error, retryable = false) {
     );
     return 'error';
   }
+}
+
+function appAssetMayInstall(token) {
+  const allowed = browserAssetEffectHost.mayInstall(token);
+  if (!allowed) rustAppShadowDiagnostics.preventedInstalls += 1;
+  return allowed;
+}
+
+function appAssetFetchOptions(token) {
+  return token ? { signal: token.signal } : undefined;
+}
+
+function appAssetCancellationExpected(token, error) {
+  const expected = browserAssetEffectHost.isExpectedCancellation(token, error);
+  if (expected) rustAppShadowDiagnostics.acquisitionAborts += 1;
+  return expected;
+}
+
+async function waitForInitialPrimaryInstall() {
+  if (!phaseReady('render')) await gate(phases.render.done);
 }
 // --- Model state ---
 let gpuSkinned = false;
@@ -4664,18 +4709,24 @@ $('hyperscape-camera').addEventListener('change', () => {
 
 $('load-hyperscape-demo').addEventListener('click', async () => {
   const uri = 'hyperscape-blender-demo.glb';
-  const assetShadow = beginAppAssetShadow(uri, 'authored-demo');
+  let assetShadow = null;
   try {
-    const response = await fetch(uri);
+    await waitForInitialPrimaryInstall();
+    assetShadow = beginAppAssetShadow(uri, 'authored-demo', null, 'primary_scene');
+    const response = await fetch(assetShadow?.uri || uri, appAssetFetchOptions(assetShadow));
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     const buffer = await response.arrayBuffer();
     const disposition = completeAppAssetShadow(assetShadow, buffer);
+    if (!appAssetMayInstall(assetShadow)) return;
     await loadModel(
       buffer,
       uri,
+      null,
       disposition === 'applied' ? assetShadow?.assetId : null,
+      assetShadow,
     );
   } catch (error) {
+    if (appAssetCancellationExpected(assetShadow, error)) return;
     failAppAssetShadow(assetShadow, 'demo_fetch_failed', error, true);
     $('hyperscape-diagnostics').textContent = `Hyperscape demo load failed: ${error.message}`;
   }
@@ -5522,19 +5573,26 @@ wrapEl.addEventListener('drop', async e => {
     $('stats').textContent = 'Drop a .glb or .gltf file';
     return;
   }
-  const assetShadow = beginAppAssetShadow(file.name, 'drop');
+  let assetShadow = null;
   try {
+    await waitForInitialPrimaryInstall();
+    assetShadow = beginAppAssetShadow(file.name, 'drop', null, 'primary_scene');
     const buf = await file.arrayBuffer();
     const disposition = completeAppAssetShadow(assetShadow, buf);
+    if (!appAssetMayInstall(assetShadow)) return;
     await idbPut(IDB_GLB_STORE, file.name, buf);
+    if (!appAssetMayInstall(assetShadow)) return;
     currentGlb = file.name;
-    await loadModel(
+    const installed = await loadModel(
       buf,
       file.name,
+      null,
       disposition === 'applied' ? assetShadow?.assetId : null,
+      assetShadow,
     );
-    syncURL();
+    if (installed) syncURL();
   } catch (error) {
+    if (appAssetCancellationExpected(assetShadow, error)) return;
     failAppAssetShadow(assetShadow, 'drop_read_failed', error);
     $('stats').textContent = `Could not load ${file.name}: ${error?.message || String(error)}`;
     console.warn('Dropped model load failed:', error);
@@ -6248,17 +6306,35 @@ async function recomputeLods() {
   if (lodDirty) recomputeLods();
 }
 
-async function loadModel(buffer, filename, sessionAssetId = null) {
-  patchLab.active = false;
-  patchLab.animate = false;
-  $('patch-lab-animate').classList.remove('on');
-  updatePatchLabControlVisibility();
-  remeshedMode = false;
-  $('stats').textContent = `Loading ${filename}...`;
-  const resp = await workerCall('load_gltf_data', { bytes: buffer }, [buffer]);
-  meshInfo = resp.result;
-  await finishModelUpload(resp.result, filename, null, sessionAssetId);
-  activateHyperscape(resp.hyperscapeBytes);
+async function loadModel(
+  buffer,
+  filename,
+  durableAssetId = null,
+  sessionAssetId = null,
+  assetToken = null,
+) {
+  return browserAssetEffectHost.runInstall(assetToken, async () => {
+    if (!appAssetMayInstall(assetToken)) return false;
+    patchLab.active = false;
+    patchLab.animate = false;
+    $('patch-lab-animate').classList.remove('on');
+    updatePatchLabControlVisibility();
+    remeshedMode = false;
+    $('stats').textContent = `Loading ${filename}...`;
+    const resp = await workerCall('load_gltf_data', { bytes: buffer }, [buffer]);
+    if (!appAssetMayInstall(assetToken)) return false;
+    meshInfo = resp.result;
+    const uploaded = await finishModelUpload(
+      resp.result,
+      filename,
+      durableAssetId,
+      sessionAssetId,
+      assetToken,
+    );
+    if (!uploaded || !appAssetMayInstall(assetToken)) return false;
+    activateHyperscape(resp.hyperscapeBytes);
+    return true;
+  });
 }
 
 // --- Render loop ---
@@ -6861,8 +6937,10 @@ async function finishModelUpload(
   filename,
   durableAssetId = null,
   sessionAssetId = null,
+  assetToken = null,
 ) {
-  if (!info) { $('stats').textContent = 'Failed to load model'; return; }
+  if (!appAssetMayInstall(assetToken)) return false;
+  if (!info) { $('stats').textContent = 'Failed to load model'; return false; }
   const uploadStarted = performance.now();
   const uploadTimings = { worker: info.loader_timing || null };
   const modelHasAnimations = !!(info.animations && info.animations.length > 0);
@@ -7125,6 +7203,7 @@ async function finishModelUpload(
   // Skinning data
   sectionStarted = performance.now();
   const skinResp = await workerCall('get_skinning_data', {});
+  if (!appAssetMayInstall(assetToken)) return false;
   const skinData = skinResp.skinData;
   const nv = skinData ? (skinData.num_vertices || 0) : 0;
   skinTexW = Math.min(nv, 4096);
@@ -7160,10 +7239,12 @@ async function finishModelUpload(
 
   const tp = getTessParams();
   await workerCall('set_tess_params', { density: tp.density, screenAtten: tp.screen_atten, minPx: tp.minPx });
+  if (!appAssetMayInstall(assetToken)) return false;
   uploadTimings.skinningAndParamsMs = performance.now() - sectionStarted;
 
   sectionStarted = performance.now();
   const rpResp = await workerCall('get_rest_pose_instances', {});
+  if (!appAssetMayInstall(assetToken)) return false;
   const rp = rpResp.data || rpResp;
   uploadTimings.restPoseMs = performance.now() - sectionStarted;
 
@@ -7173,7 +7254,7 @@ async function finishModelUpload(
     sceneSourceBound = null;
     $('stats').textContent = `${filename}: static model (no animation data path yet)`;
     uploadTimings.totalMs = performance.now() - uploadStarted;
-    return;
+    return true;
   }
 
   const instances = new Float32Array(rp.instances.buffer || rp.instances);
@@ -7205,6 +7286,7 @@ async function finishModelUpload(
 
   sectionStarted = performance.now();
   await workerCall('upload_model_to_compute', {});
+  if (!appAssetMayInstall(assetToken)) return false;
   uploadTimings.computeUploadMs = performance.now() - sectionStarted;
 
   sectionStarted = performance.now();
@@ -7212,6 +7294,7 @@ async function finishModelUpload(
     const firstAnimation = info.animations[0];
     animTime = Number(info.time_min ?? firstAnimation.t_min) || 0;
     await workerCall('set_active_animation', { index: 0 });
+    if (!appAssetMayInstall(assetToken)) return false;
     meshInfo.time_min = animTime;
     meshInfo.duration = firstAnimation.duration || 0;
   } else {
@@ -7232,6 +7315,7 @@ async function finishModelUpload(
   if (localPeerRelay) applyLocalPeerAuthoredProjection();
   // Trigger GPU LOD recompute with current tess params (screen attenuation, density)
   debouncedLodRecompute();
+  return true;
 }
 
 function presentationAssetMatchesFilename(asset, filename) {
@@ -7252,13 +7336,20 @@ function maximumNodeId(faceNodes) {
 
 async function fetchPresentationGlb(asset) {
   const startedAt = performance.now();
-  const assetShadow = beginAppAssetShadow(asset.uri, 'presentation', asset.id);
+  let assetShadow = null;
   let buffer;
   try {
-    const response = await fetch(asset.uri);
+    assetShadow = beginAppAssetShadow(asset.uri, 'presentation', asset.id);
+    const response = await fetch(
+      assetShadow?.uri || asset.uri,
+      appAssetFetchOptions(assetShadow),
+    );
     if (!response.ok) throw new Error(`${asset.name}: HTTP ${response.status} for ${asset.uri}`);
     buffer = await response.arrayBuffer();
     completeAppAssetShadow(assetShadow, buffer);
+    if (!appAssetMayInstall(assetShadow)) {
+      throw new Error(`${asset.name}: obsolete presentation asset request`);
+    }
   } catch (error) {
     failAppAssetShadow(assetShadow, 'presentation_fetch_failed', error, true);
     throw error;
@@ -8095,19 +8186,22 @@ phase('atlas', ['workers'], async () => {
 // Phase 4: Load model (depends on workers, runs in parallel with atlas)
 phase('model', ['workers'], async () => {
   if (initialPatchLabShape) return null;
-  const assetShadow = beginAppAssetShadow(currentGlb, 'startup');
+  let assetShadow = null;
   try {
-    let buf = await idbGet(IDB_GLB_STORE, currentGlb);
+    assetShadow = beginAppAssetShadow(currentGlb, 'startup', null, 'primary_scene');
+    const logicalUri = assetShadow?.uri || currentGlb;
+    let buf = await idbGet(IDB_GLB_STORE, logicalUri);
     let durableAssetId = null;
     if (!buf) {
-      const url = currentGlb.startsWith('/') || currentGlb.startsWith('http') ? currentGlb : '/' + currentGlb;
+      const url = logicalUri.startsWith('/') || logicalUri.startsWith('http')
+        ? logicalUri : '/' + logicalUri;
       const urls = [url];
-      if (/^[^/]+\.glb$/i.test(currentGlb)) {
-        urls.push(`/local-glbs/${encodeURIComponent(currentGlb)}`);
+      if (/^[^/]+\.glb$/i.test(logicalUri)) {
+        urls.push(`/local-glbs/${encodeURIComponent(logicalUri)}`);
       }
       const failures = [];
       for (const candidate of urls) {
-        const resp = await fetch(candidate);
+        const resp = await fetch(candidate, appAssetFetchOptions(assetShadow));
         if (!resp.ok) {
           failures.push(`${candidate} returned HTTP ${resp.status}`);
           continue;
@@ -8117,7 +8211,7 @@ phase('model', ['workers'], async () => {
         const isGlb = magic.length === 4
           && magic[0] === 0x67 && magic[1] === 0x6c
           && magic[2] === 0x54 && magic[3] === 0x46;
-        if (/\.glb$/i.test(currentGlb) && !isGlb) {
+        if (/\.glb$/i.test(logicalUri) && !isGlb) {
           failures.push(`${candidate} returned ${resp.headers.get('content-type') || 'unknown content type'}, not a GLB`);
           continue;
         }
@@ -8130,20 +8224,24 @@ phase('model', ['workers'], async () => {
         break;
       }
       if (!buf) {
-        throw new Error(`${currentGlb} is not in IndexedDB; ${failures.join('; ')}`);
+        throw new Error(`${logicalUri} is not in IndexedDB; ${failures.join('; ')}`);
       }
     }
     if (!buf) return null;
     const disposition = completeAppAssetShadow(assetShadow, buf);
+    if (!appAssetMayInstall(assetShadow)) return null;
     const resp = await workerCall('load_gltf_data', { bytes: buf }, [buf]);
+    if (!appAssetMayInstall(assetShadow)) return null;
     return {
       result: resp.result,
       filename: currentGlb,
       buffer: resp.hyperscapeBytes,
       durableAssetId,
       sessionAssetId: disposition === 'applied' ? assetShadow?.assetId : null,
+      assetToken: assetShadow,
     };
   } catch (error) {
+    if (appAssetCancellationExpected(assetShadow, error)) return null;
     failAppAssetShadow(assetShadow, 'startup_fetch_failed', error, true);
     throw error;
   }
@@ -8159,19 +8257,22 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
       preserveView: true,
       fromUrl: true,
     });
-  } else if (modelData && modelData.result) {
+  } else if (modelData?.result && appAssetMayInstall(modelData.assetToken)) {
     meshInfo = modelData.result;
-    await finishModelUpload(
+    const installed = await finishModelUpload(
       modelData.result,
       modelData.filename,
       modelData.durableAssetId,
       modelData.sessionAssetId,
+      modelData.assetToken,
     );
-    activateHyperscape(modelData.buffer);
-    const animIdx = parseInt(initParams.anim);
-    if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
-      $('anim-sel').value = animIdx;
-      $('anim-sel').dispatchEvent(new Event('change'));
+    if (installed && appAssetMayInstall(modelData.assetToken)) {
+      activateHyperscape(modelData.buffer);
+      const animIdx = parseInt(initParams.anim);
+      if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
+        $('anim-sel').value = animIdx;
+        $('anim-sel').dispatchEvent(new Event('change'));
+      }
     }
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
