@@ -7,6 +7,7 @@ const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const manifestPath = `${repository}/examples/hacker-night.presentation.json`;
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
+const workerSource = readFileSync(`${repository}/hyperscope_worker.js`, 'utf8');
 const { default: init, HyperscopeNavigation } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
 
@@ -61,6 +62,50 @@ for (const requiredAnimationAdapterStep of [
   assert.ok(
     browserSource.includes(requiredAnimationAdapterStep),
     `browser animation adapter is missing ${requiredAnimationAdapterStep}`,
+  );
+}
+
+const layerAdapter = browserSource.slice(
+  browserSource.indexOf('function applyPresentationLayerState('),
+  browserSource.indexOf('function applyRustPresentationNavigation('),
+);
+assert.ok(
+  layerAdapter.includes('lodRecords.push(...lodRecord);'),
+  'every resident presentation node must contribute its authored LOD state',
+);
+assert.ok(
+  layerAdapter.indexOf('lodRecords.push(...lodRecord);')
+    < layerAdapter.indexOf('assetId === presentationComposition.primaryAssetId'),
+  'primary animation filtering must happen after the complete scene LOD state is retained',
+);
+const compositionAdapter = browserSource.slice(
+  browserSource.indexOf('async function uploadPresentationCompositionToLodWorker('),
+  browserSource.indexOf('// --- Init ---'),
+);
+for (const requiredSceneLodStep of [
+  "workerCall('upload_composed_model_to_compute'",
+  'resident.faceOffset + resident.faceCount',
+  'await uploadPresentationCompositionToLodWorker(',
+  'residentFaces !== presentationComposition.totalFaces',
+  'recordPresentationLodUpdate(faceIndices);',
+  'faceLimit: primaryOnly ? currentPrimaryFaceCount : 0',
+  'presentationComposition.primaryLodStates',
+]) {
+  assert.ok(
+    compositionAdapter.includes(requiredSceneLodStep)
+      || browserSource.includes(requiredSceneLodStep),
+    `packed-scene LOD adapter is missing ${requiredSceneLodStep}`,
+  );
+}
+for (const requiredWorkerStep of [
+  "type === 'upload_composed_model_to_compute'",
+  'wasm.cancel_animated_lods();',
+  'wasm.upload_composed_model_to_compute(',
+  'faceLimit || 0',
+]) {
+  assert.ok(
+    workerSource.includes(requiredWorkerStep),
+    `worker packed-scene LOD path is missing ${requiredWorkerStep}`,
   );
 }
 

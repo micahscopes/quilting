@@ -10,6 +10,7 @@ description = "glow-based WebGL2/OpenGL renderer for quilting QB surfaces"
 [dependencies]
 glow = "0.16"
 quilting-core = { path = "../quilting-core" }
+quilting-mesh = { path = "../quilting-mesh" }
 quilting-shaders = { path = "../quilting-shaders" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -16,12 +16,11 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
-use quilting_renderer::compute::{LodCompute, StagedLodReadback};
+use quilting_renderer::compute::{build_scoped_lod_adjacency, LodCompute, StagedLodReadback};
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
 use quilting_core::sampling::PatchConfig;
 use quilting_core::triangle;
-use quilting_mesh::HalfEdgeMesh;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use glow::HasContext;
@@ -162,6 +161,8 @@ struct PendingAnimatedLods {
     fence: glow::Fence,
     runs: Vec<PendingLodRun>,
     face_nodes: Vec<usize>,
+    classified_faces: usize,
+    resident_faces: usize,
     pose: Option<PendingLodPose>,
 }
 
@@ -178,12 +179,30 @@ struct AnimatedLodDeltaState {
     changed_lods: Vec<f32>,
 }
 
+#[derive(Clone)]
+struct LodComputeModel {
+    num_faces: usize,
+    num_vertices: u32,
+    face_nodes: Vec<usize>,
+}
+
+struct LodComputeUpload {
+    positions: Vec<f32>,
+    faces: Vec<[u32; 3]>,
+    joint_indices: Vec<[u16; 4]>,
+    joint_weights: Vec<[f32; 4]>,
+    morph_deltas: Vec<f32>,
+    num_morph_targets: usize,
+    face_nodes: Vec<usize>,
+}
+
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     static PENDING_ANIMATED_LODS: RefCell<Option<PendingAnimatedLods>> = RefCell::new(None);
     static ANIMATED_LOD_DELTA: RefCell<AnimatedLodDeltaState> =
         RefCell::new(AnimatedLodDeltaState::default());
+    static LOD_COMPUTE_MODEL: RefCell<Option<LodComputeModel>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
@@ -362,14 +381,293 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
 }
 
 thread_local! {
-    /// Cached half-edge mesh for edge coherence reconciliation after GPU LOD readback.
-    static LOD_HALF_EDGE: RefCell<Option<HalfEdgeMesh>> = RefCell::new(None);
     /// Sorted atlas keys — maps atlas_index back to canonical LOD triples.
     static LOD_ATLAS_KEYS: RefCell<Vec<[u32; 3]>> = RefCell::new(Vec::new());
     /// Mesh bounding sphere radius (from rest-pose positions, for GPU density scaling).
     static LOD_MESH_RADIUS: RefCell<f64> = RefCell::new(1.0);
     /// Maximum LOD the atlas supports — clamp here instead of falling to LOD 2.
     static LOD_MAX: RefCell<f32> = RefCell::new(512.0);
+}
+
+fn lod_mesh_radius(positions: &[f32], faces: &[[u32; 3]]) -> Result<f64, String> {
+    let num_vertices = positions.len() / 3;
+    let mut used = vec![false; num_vertices];
+    for face in faces {
+        for &vertex in face {
+            let vertex = vertex as usize;
+            if vertex >= num_vertices {
+                return Err(format!("LOD face references missing vertex {vertex}"));
+            }
+            used[vertex] = true;
+        }
+    }
+    let used_count = used.iter().filter(|&&is_used| is_used).count();
+    if used_count == 0 {
+        return Err("LOD model has no referenced vertices".to_string());
+    }
+    let mut center = [0.0f64; 3];
+    for (vertex, &is_used) in used.iter().enumerate() {
+        if is_used {
+            for axis in 0..3 {
+                center[axis] += positions[vertex * 3 + axis] as f64;
+            }
+        }
+    }
+    for coordinate in &mut center {
+        *coordinate /= used_count as f64;
+    }
+    let mut radius = 0.0f64;
+    for (vertex, &is_used) in used.iter().enumerate() {
+        if is_used {
+            let delta = [
+                positions[vertex * 3] as f64 - center[0],
+                positions[vertex * 3 + 1] as f64 - center[1],
+                positions[vertex * 3 + 2] as f64 - center[2],
+            ];
+            radius = radius.max(
+                (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt(),
+            );
+        }
+    }
+    Ok(radius.max(1e-6))
+}
+
+fn upload_lod_compute_model(upload: LodComputeUpload) -> Result<bool, String> {
+    let num_vertices = upload.positions.len() / 3;
+    if upload.positions.len() != num_vertices * 3 || num_vertices == 0 {
+        return Err("LOD position payload is malformed".to_string());
+    }
+    if upload.faces.len() != upload.face_nodes.len() {
+        return Err("LOD face ownership does not match topology".to_string());
+    }
+    if upload.joint_indices.len() != num_vertices
+        || upload.joint_weights.len() != num_vertices
+    {
+        return Err("LOD skinning payload does not match vertex count".to_string());
+    }
+    if upload.num_morph_targets > 0
+        && upload.morph_deltas.len() != upload.num_morph_targets * num_vertices * 3
+    {
+        return Err("LOD morph payload does not match model shape".to_string());
+    }
+    let topology_positions: Vec<[f64; 3]> = upload.positions
+        .chunks_exact(3)
+        .map(|position| [position[0] as f64, position[1] as f64, position[2] as f64])
+        .collect();
+    let adjacency = build_scoped_lod_adjacency(
+        &topology_positions,
+        &upload.faces,
+        &upload.face_nodes,
+    )?;
+    let mesh_radius = lod_mesh_radius(&upload.positions, &upload.faces)?;
+    let face_indices: Vec<f32> = upload.faces.iter()
+        .flat_map(|face| face.map(|vertex| vertex as f32))
+        .collect();
+    let atlas = ATLAS.with(|atlas_cell| {
+        let atlas_cell = atlas_cell.borrow();
+        let atlas = atlas_cell.as_ref()?;
+        const LUT_SIZE: usize = 1200;
+        let mut lut = vec![255u8; LUT_SIZE];
+        let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
+        keys.sort();
+        for (index, key) in keys.iter().enumerate().take(255) {
+            let ea = (key[0] as f64).log2().round() as usize;
+            let eb = (key[1] as f64).log2().round() as usize;
+            let ec = (key[2] as f64).log2().round() as usize;
+            let lut_key = ea + eb * 10 + ec * 100;
+            if lut_key < LUT_SIZE {
+                lut[lut_key] = index as u8;
+            }
+        }
+        let max_lod = keys.last()
+            .map(|key| *key.iter().max().expect("atlas key has three edges"))
+            .unwrap_or(512) as f32;
+        Some((lut, keys, max_lod))
+    }).ok_or_else(|| "LOD atlas is not resident".to_string())?;
+
+    let uploaded = GPU_COMPUTE.with(|gpu_compute| {
+        let mut gpu_compute = gpu_compute.borrow_mut();
+        let Some((gl, compute)) = gpu_compute.as_mut() else {
+            return false;
+        };
+        compute.upload_positions_texture(gl, &upload.positions, num_vertices);
+        compute.upload_face_indices(gl, &face_indices);
+        compute.upload_skinning_texture(gl, &upload.joint_indices, &upload.joint_weights);
+        if upload.num_morph_targets > 0 {
+            compute.upload_morph_deltas(
+                gl,
+                &upload.morph_deltas,
+                num_vertices,
+                upload.num_morph_targets,
+            );
+        } else {
+            compute.upload_morph_deltas(gl, &[0.0; 3], 1, 1);
+        }
+        compute.upload_atlas_lut(gl, &atlas.0);
+        compute.upload_adjacency(gl, &adjacency, upload.faces.len());
+        true
+    });
+    if !uploaded {
+        return Ok(false);
+    }
+
+    let model = LodComputeModel {
+        num_faces: upload.faces.len(),
+        num_vertices: num_vertices as u32,
+        face_nodes: upload.face_nodes,
+    };
+    LOD_COMPUTE_MODEL.with(|current| *current.borrow_mut() = Some(model));
+    LOD_MESH_RADIUS.with(|radius| *radius.borrow_mut() = mesh_radius);
+    LOD_MAX.with(|max| *max.borrow_mut() = atlas.2);
+    LOD_ATLAS_KEYS.with(|keys| *keys.borrow_mut() = atlas.1);
+    reset_animated_lod_delta();
+    Ok(true)
+}
+
+fn stored_gltf_lod_upload(data: &StoredGltfData) -> Result<LodComputeUpload, String> {
+    let combined = &data.combined;
+    let num_vertices = combined.positions.len();
+    let mut positions = vec![0.0f32; num_vertices * 3];
+    for (vertex, position) in combined.positions.iter().enumerate() {
+        for axis in 0..3 {
+            positions[vertex * 3 + axis] =
+                ((position[axis] - data.norm_center[axis]) * data.norm_scale) as f32;
+        }
+    }
+    let faces: Vec<[u32; 3]> = combined.triangles.iter()
+        .map(|face| face.map(|vertex| vertex as u32))
+        .collect();
+    let (joint_indices, joint_weights) = match (
+        combined.joint_indices.as_ref(),
+        combined.joint_weights.as_ref(),
+    ) {
+        (Some(indices), Some(weights)) if indices.len() == num_vertices
+            && weights.len() == num_vertices => (indices.clone(), weights.clone()),
+        (None, None) => (vec![[0; 4]; num_vertices], vec![[0.0; 4]; num_vertices]),
+        _ => return Err("stored glTF has incomplete skinning data".to_string()),
+    };
+    let num_morph_targets = combined.morph_targets.len();
+    let mut morph_deltas = Vec::with_capacity(num_morph_targets * num_vertices * 3);
+    for target in &combined.morph_targets {
+        for vertex in 0..num_vertices {
+            let delta = target.get(vertex).copied().unwrap_or([0.0; 3]);
+            morph_deltas.extend(delta.map(|coordinate| coordinate as f32 * data.norm_scale as f32));
+        }
+    }
+    if data.face_node_indices.len() != faces.len() {
+        return Err("stored glTF has incomplete face ownership".to_string());
+    }
+    Ok(LodComputeUpload {
+        positions,
+        faces,
+        joint_indices,
+        joint_weights,
+        morph_deltas,
+        num_morph_targets,
+        face_nodes: data.face_node_indices.clone(),
+    })
+}
+
+fn composed_lod_upload(
+    data: &StoredGltfData,
+    instances: &[f32],
+    face_nodes: &[i32],
+    total_vertices: u32,
+    primary_faces: u32,
+) -> Result<LodComputeUpload, String> {
+    let num_faces = instances.len() / instance_layout::STRIDE;
+    if instances.len() != num_faces * instance_layout::STRIDE || num_faces == 0 {
+        return Err("composed LOD instances are malformed".to_string());
+    }
+    if face_nodes.len() != num_faces {
+        return Err("composed LOD face ownership does not match instances".to_string());
+    }
+    if primary_faces as usize != data.combined.triangles.len() {
+        return Err("composed LOD primary face boundary does not match the retained model".to_string());
+    }
+    let num_vertices = total_vertices as usize;
+    if num_vertices < data.combined.positions.len() {
+        return Err("composed LOD vertex count truncates the primary asset".to_string());
+    }
+    let mut positions = vec![0.0f32; num_vertices * 3];
+    let mut position_seen = vec![false; num_vertices];
+    let mut faces = Vec::with_capacity(num_faces);
+    for face in 0..num_faces {
+        let instance = &instances[
+            face * instance_layout::STRIDE..(face + 1) * instance_layout::STRIDE
+        ];
+        let mut vertices = [0u32; 3];
+        for corner in 0..3 {
+            let offset = instance_layout::offset::POSITIONS + corner * 4;
+            let encoded = instance[offset];
+            if !encoded.is_finite() || encoded < 0.0 || encoded.fract() != 0.0
+                || encoded as usize >= num_vertices
+            {
+                return Err(format!("composed LOD face {face} has invalid vertex index"));
+            }
+            let vertex = encoded as usize;
+            let position = [instance[offset + 1], instance[offset + 2], instance[offset + 3]];
+            if !position.iter().all(|coordinate| coordinate.is_finite()) {
+                return Err(format!("composed LOD vertex {vertex} has a non-finite position"));
+            }
+            if position_seen[vertex] {
+                let resident = &positions[vertex * 3..vertex * 3 + 3];
+                if resident != position.as_slice() {
+                    return Err(format!(
+                        "composed LOD vertex {vertex} has inconsistent source positions"
+                    ));
+                }
+            } else {
+                positions[vertex * 3..vertex * 3 + 3].copy_from_slice(&position);
+                position_seen[vertex] = true;
+            }
+            vertices[corner] = vertex as u32;
+        }
+        faces.push(vertices);
+    }
+
+    let face_nodes: Vec<usize> = face_nodes.iter().enumerate()
+        .map(|(face, &node)| {
+            usize::try_from(node)
+                .map_err(|_| format!("composed LOD face {face} has a negative node"))
+        })
+        .collect::<Result<_, _>>()?;
+    let primary_vertices = data.combined.positions.len();
+    let mut joint_indices = vec![[0u16; 4]; num_vertices];
+    let mut joint_weights = vec![[0.0f32; 4]; num_vertices];
+    match (
+        data.combined.joint_indices.as_ref(),
+        data.combined.joint_weights.as_ref(),
+    ) {
+        (Some(indices), Some(weights)) if indices.len() == primary_vertices
+            && weights.len() == primary_vertices => {
+                joint_indices[..primary_vertices].copy_from_slice(indices);
+                joint_weights[..primary_vertices].copy_from_slice(weights);
+            }
+        (None, None) => {}
+        _ => return Err("retained primary model has incomplete skinning data".to_string()),
+    }
+    let num_morph_targets = data.combined.morph_targets.len();
+    let mut morph_deltas = vec![0.0f32; num_morph_targets * num_vertices * 3];
+    for (target_index, target) in data.combined.morph_targets.iter().enumerate() {
+        for vertex in 0..primary_vertices {
+            let delta = target.get(vertex).copied().unwrap_or([0.0; 3]);
+            let offset = (target_index * num_vertices + vertex) * 3;
+            for axis in 0..3 {
+                morph_deltas[offset + axis] =
+                    delta[axis] as f32 * data.norm_scale as f32;
+            }
+        }
+    }
+    Ok(LodComputeUpload {
+        positions,
+        faces,
+        joint_indices,
+        joint_weights,
+        morph_deltas,
+        num_morph_targets,
+        face_nodes,
+    })
 }
 
 /// Upload static animation data to the GPU compute context for per-frame LOD.
@@ -384,160 +682,39 @@ thread_local! {
 pub fn upload_model_to_compute() -> bool {
     GLTF_DATA.with(|gd| {
         let data = gd.borrow();
-        let data = match data.as_ref() {
-            Some(d) => d,
-            None => return false,
-        };
-
-        GPU_COMPUTE.with(|gc| {
-            let mut gc = gc.borrow_mut();
-            let (gl, compute) = match gc.as_mut() {
-                Some(pair) => pair,
-                None => return false,
-            };
-
-            let combined = &data.combined;
-            let nv = combined.positions.len();
-
-            // Upload rest-pose positions (normalized)
-            let center = data.norm_center;
-            let s = data.norm_scale;
-            let mut pos_f32 = Vec::with_capacity(nv * 3);
-            for pos in &combined.positions {
-                pos_f32.push(((pos[0] - center[0]) * s) as f32);
-                pos_f32.push(((pos[1] - center[1]) * s) as f32);
-                pos_f32.push(((pos[2] - center[2]) * s) as f32);
+        let Some(data) = data.as_ref() else { return false };
+        match stored_gltf_lod_upload(data).and_then(upload_lod_compute_model) {
+            Ok(uploaded) => uploaded,
+            Err(error) => {
+                web_sys::console::warn_1(&format!("LOD model upload failed: {error}").into());
+                false
             }
-            compute.upload_positions_texture(gl, &pos_f32, nv);
+        }
+    })
+}
 
-            // Upload face indices
-            let face_indices_f32: Vec<f32> = combined.triangles.iter()
-                .flat_map(|f| [f[0] as f32, f[1] as f32, f[2] as f32])
-                .collect();
-            compute.upload_face_indices(gl, &face_indices_f32);
-
-            // Upload skinning data — real or identity fallback for static models
-            if let (Some(ji), Some(jw)) = (&combined.joint_indices, &combined.joint_weights) {
-                compute.upload_skinning_texture(gl, ji, jw);
-            } else {
-                // Static model: all vertices → joint 0, weight 1.0
-                let ji_default: Vec<[u16; 4]> = vec![[0, 0, 0, 0]; nv];
-                let jw_default: Vec<[f32; 4]> = vec![[1.0, 0.0, 0.0, 0.0]; nv];
-                compute.upload_skinning_texture(gl, &ji_default, &jw_default);
-            }
-
-            // Upload morph deltas — always upload even if empty, to clear stale data
-            if !combined.morph_targets.is_empty() {
-                let num_targets = combined.morph_targets.len();
-                let ns = data.norm_scale as f32;
-                let mut deltas = Vec::with_capacity(num_targets * nv * 3);
-                for target in &combined.morph_targets {
-                    for vi in 0..nv {
-                        if vi < target.len() {
-                            deltas.push(target[vi][0] as f32 * ns);
-                            deltas.push(target[vi][1] as f32 * ns);
-                            deltas.push(target[vi][2] as f32 * ns);
-                        } else {
-                            deltas.extend_from_slice(&[0.0, 0.0, 0.0]);
-                        }
-                    }
-                }
-                compute.upload_morph_deltas(gl, &deltas, nv, num_targets);
-            } else {
-                // No morph targets: upload a 1x1 zero texture to clear stale data
-                compute.upload_morph_deltas(gl, &[0.0; 3], 1, 1);
-            }
-
-            // Upload atlas LUT and cache keys for readback mapping
-            ATLAS.with(|atlas_cell| {
-                let atlas = atlas_cell.borrow();
-                if let Some(atlas) = atlas.as_ref() {
-                    const LUT_SIZE: usize = 1200;
-                    let mut lut = vec![255u8; LUT_SIZE];
-                    let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
-                    keys.sort();
-                    for (idx, key) in keys.iter().enumerate() {
-                        if idx >= 255 { break; }
-                        let ea = (key[0] as f64).log2().round() as usize;
-                        let eb = (key[1] as f64).log2().round() as usize;
-                        let ec = (key[2] as f64).log2().round() as usize;
-                        let lut_key = ea + eb * 10 + ec * 100;
-                        if lut_key < LUT_SIZE { lut[lut_key] = idx as u8; }
-                    }
-                    compute.upload_atlas_lut(gl, &lut);
-                    let max_lod = keys.last().map(|k| *k.iter().max().unwrap()).unwrap_or(512) as f32;
-                    LOD_MAX.with(|m| *m.borrow_mut() = max_lod);
-                    LOD_ATLAS_KEYS.with(|ak| *ak.borrow_mut() = keys);
-                }
-            });
-
-            // Build half-edge mesh and upload adjacency texture for GPU edge coherence
-            let faces_u32: Vec<[u32; 3]> = combined.triangles.iter()
-                .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
-                .collect();
-            // glTF duplicates render vertices at UV/normal/material seams. Keep
-            // those attributes distinct, but weld exact coincident boundary
-            // positions for the topology used by edge-LOD reconciliation.
-            let topology_positions: Vec<[f64; 3]> = pos_f32
-                .chunks_exact(3)
-                .map(|position| [position[0] as f64, position[1] as f64, position[2] as f64])
-                .collect();
-            let he_mesh = HalfEdgeMesh::from_triangles_welded_exact(
-                &topology_positions,
-                &faces_u32,
-            );
-            {
-                // Build adjacency data: 4 floats per entry, 3 entries per face
-                // (neighbor_face, neighbor_lod_idx, 0, 0) per edge
-                let nf = faces_u32.len();
-                let mut adj_data = vec![0.0f32; nf * 3 * 4];
-                for fi in 0..nf {
-                    let hes = he_mesh.face_half_edges(fi as u32);
-                    for (hi, &he_id) in hes.iter().enumerate() {
-                        let lod_idx = (hi + 2) % 3;
-                        let base = (fi * 3 + lod_idx) * 4;
-                        if let Some(twin_id) = quilting_mesh::unpack_twin(he_mesh.half_edges[he_id as usize].twin) {
-                            let adj_fi = he_mesh.half_edges[twin_id as usize].face as usize;
-                            let adj_hes = he_mesh.face_half_edges(adj_fi as u32);
-                            let mut adj_lod_idx = 0;
-                            for (adj_hi, &adj_he_id) in adj_hes.iter().enumerate() {
-                                if adj_he_id == twin_id {
-                                    adj_lod_idx = (adj_hi + 2) % 3;
-                                    break;
-                                }
-                            }
-                            adj_data[base]     = adj_fi as f32;
-                            adj_data[base + 1] = adj_lod_idx as f32;
-                        } else {
-                            adj_data[base]     = -1.0; // boundary
-                            adj_data[base + 1] = 0.0;
-                        }
-                    }
-                }
-                compute.upload_adjacency(gl, &adj_data, nf);
-            }
-            LOD_HALF_EDGE.with(|he| {
-                *he.borrow_mut() = Some(he_mesh);
-            });
-
-            // Compute mesh_radius from normalized positions
-            let (mut cx, mut cy, mut cz) = (0.0f64, 0.0, 0.0);
-            let n = nv as f64;
-            for i in 0..nv {
-                cx += pos_f32[i*3] as f64; cy += pos_f32[i*3+1] as f64; cz += pos_f32[i*3+2] as f64;
-            }
-            cx /= n; cy /= n; cz /= n;
-            let mut max_r = 0.0f64;
-            for i in 0..nv {
-                let dx = pos_f32[i*3] as f64 - cx;
-                let dy = pos_f32[i*3+1] as f64 - cy;
-                let dz = pos_f32[i*3+2] as f64 - cz;
-                max_r = max_r.max((dx*dx + dy*dy + dz*dz).sqrt());
-            }
-            LOD_MESH_RADIUS.with(|r| *r.borrow_mut() = max_r.max(1e-6));
-
-            true
-        })
+/// Replace the primary-only LOD topology with the renderer's packed scene.
+/// Authored nodes retain separate topology domains while sharing the primary
+/// worker's GPU context, animation pose, camera, and conformal state.
+#[wasm_bindgen]
+pub fn upload_composed_model_to_compute(
+    instances: &[f32],
+    face_nodes: &[i32],
+    total_vertices: u32,
+    primary_faces: u32,
+) -> Result<bool, JsValue> {
+    GLTF_DATA.with(|stored| {
+        let stored = stored.borrow();
+        let data = stored.as_ref()
+            .ok_or_else(|| JsValue::from_str("primary glTF is not resident"))?;
+        let upload = composed_lod_upload(
+            data,
+            instances,
+            face_nodes,
+            total_vertices,
+            primary_faces,
+        ).map_err(|error| JsValue::from_str(&error))?;
+        upload_lod_compute_model(upload).map_err(|error| JsValue::from_str(&error))
     })
 }
 
@@ -622,6 +799,7 @@ pub fn dispatch_animated_lods(
     t: f64,
     mobius: &[f32],
     subject_states: &[f32],
+    face_limit: u32,
     density: f32,
     min_px: f32,
     vp_matrix: &[f32],
@@ -642,8 +820,16 @@ pub fn dispatch_animated_lods(
             None => return false,
         };
 
-        let num_faces = data.combined.triangles.len();
-        let num_vertices = data.combined.positions.len() as u32;
+        let Some(compute_model) = LOD_COMPUTE_MODEL.with(|model| model.borrow().clone()) else {
+            return false;
+        };
+        let resident_faces = compute_model.num_faces;
+        let num_faces = if face_limit == 0 {
+            resident_faces
+        } else {
+            resident_faces.min(face_limit as usize)
+        };
+        let num_vertices = compute_model.num_vertices;
         let mesh_radius = LOD_MESH_RADIUS.with(|r| *r.borrow()) as f32;
         const SUBJECT_STATE_STRIDE: usize = 33;
         let extracted_states: Vec<(usize, [f32; 16], [f32; 16])> = subject_states
@@ -828,8 +1014,10 @@ pub fn dispatch_animated_lods(
                 face_nodes: if extracted_states.is_empty() {
                     Vec::new()
                 } else {
-                    data.face_node_indices.clone()
+                    compute_model.face_nodes.clone()
                 },
+                classified_faces: num_faces,
+                resident_faces,
                 pose: captured_pose,
             })
         });
@@ -886,6 +1074,8 @@ pub fn poll_animated_lods() -> JsValue {
             fence,
             runs: pending_runs,
             face_nodes,
+            classified_faces,
+            resident_faces,
             pose,
         } = job;
         unsafe { gl.delete_sync(fence); }
@@ -961,6 +1151,16 @@ pub fn poll_animated_lods() -> JsValue {
                 &result,
                 &"full_snapshot".into(),
                 &JsValue::from_bool(full_snapshot),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"classified_faces".into(),
+                &JsValue::from_f64(classified_faces as f64),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"resident_faces".into(),
+                &JsValue::from_f64(resident_faces as f64),
             ).ok();
             if let Some(pose) = pose {
                 js_sys::Reflect::set(
@@ -2102,6 +2302,10 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
             cached_pose: RefCell::new(None),
         });
     });
+    // The uploaded GPU topology belongs to the previous retained model until
+    // upload_model_to_compute installs this model's validated shape.
+    LOD_COMPUTE_MODEL.with(|model| *model.borrow_mut() = None);
+    reset_animated_lod_delta();
 
     FACE_MATERIALS.with(|fm| *fm.borrow_mut() = face_material_indices);
     SENT_TESS.with(|s| s.borrow_mut().clear());

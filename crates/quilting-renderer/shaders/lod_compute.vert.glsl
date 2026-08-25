@@ -155,6 +155,7 @@ vec3 skin_position(vec3 pos, int vertex_id) {
     vec4 jw = texelFetch(u_skinning, ivec2(col, chunk * 2 + 1), 0);
 
     vec3 skinned = vec3(0.0);
+    float applied_weight = 0.0;
     vec4 p4 = vec4(pos, 1.0);
 
     for (int k = 0; k < 4; k++) {
@@ -168,8 +169,13 @@ vec3 skin_position(vec3 pos, int vertex_id) {
             texelFetch(u_joints, ivec2(2, idx), 0),
             texelFetch(u_joints, ivec2(3, idx), 0)
         );
+        applied_weight += w;
         skinned += w * (m * p4).xyz;
     }
+    // A composed scene may mix a skinned primary asset with static resident
+    // assets. Their zero-weight sentinel must retain the authored rest position,
+    // matching the main renderer's mixed-skinning contract.
+    if (applied_weight <= 1e-6) return pos;
     return skinned;
 }
 

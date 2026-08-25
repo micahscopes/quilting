@@ -9,6 +9,7 @@
 //! directly consumable by group_into_batches.
 
 use glow::HasContext;
+use quilting_mesh::HalfEdgeMesh;
 
 #[cfg(target_arch = "wasm32")]
 fn log_info(msg: &str) {
@@ -24,6 +25,60 @@ pub const FLOATS_PER_FACE_PASS1: usize = 4;
 
 /// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) = 6 floats per face.
 pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
+
+/// Build the pass-two edge-negotiation texture while preserving authored
+/// ownership boundaries. Exact duplicate render vertices are welded inside
+/// each node/domain, but coincident objects remain independent.
+pub fn build_scoped_lod_adjacency(
+    positions: &[[f64; 3]],
+    faces: &[[u32; 3]],
+    face_domains: &[usize],
+) -> Result<Vec<f32>, String> {
+    let num_faces = faces.len();
+    if num_faces == 0 || face_domains.len() != num_faces {
+        return Err("LOD topology ownership must match every face".to_string());
+    }
+
+    let mut adjacency = vec![0.0f32; num_faces * 3 * 4];
+    for face in 0..num_faces {
+        for edge_lod in 0..3 {
+            adjacency[(face * 3 + edge_lod) * 4] = -1.0;
+        }
+    }
+
+    let mut domains = std::collections::BTreeMap::<usize, Vec<(usize, [u32; 3])>>::new();
+    for (face, (&domain, &vertices)) in face_domains.iter().zip(faces).enumerate() {
+        domains.entry(domain).or_default().push((face, vertices));
+    }
+    for domain_faces in domains.values() {
+        let local_faces: Vec<[u32; 3]> =
+            domain_faces.iter().map(|(_, vertices)| *vertices).collect();
+        let mesh = HalfEdgeMesh::from_triangles_welded_exact(positions, &local_faces);
+        for local_face in 0..domain_faces.len() {
+            let global_face = domain_faces[local_face].0;
+            let half_edges = mesh.face_half_edges(local_face as u32);
+            for (half_edge_index, &half_edge) in half_edges.iter().enumerate() {
+                let edge_lod = (half_edge_index + 2) % 3;
+                let base = (global_face * 3 + edge_lod) * 4;
+                let Some(twin) =
+                    quilting_mesh::unpack_twin(mesh.half_edges[half_edge as usize].twin)
+                else {
+                    continue;
+                };
+                let adjacent_local_face = mesh.half_edges[twin as usize].face as usize;
+                let adjacent_half_edges = mesh.face_half_edges(adjacent_local_face as u32);
+                let adjacent_lod = adjacent_half_edges
+                    .iter()
+                    .position(|&candidate| candidate == twin)
+                    .map(|index| (index + 2) % 3)
+                    .unwrap_or(0);
+                adjacency[base] = domain_faces[adjacent_local_face].0 as f32;
+                adjacency[base + 1] = adjacent_lod as f32;
+            }
+        }
+    }
+    Ok(adjacency)
+}
 
 /// GPU-side copy of a completed LOD transform-feedback output. The worker can
 /// fence after staging one or more runs, poll without blocking, then read only
@@ -1024,6 +1079,48 @@ mod tests {
         ));
         assert!(LOD_COMPUTE_VS.contains("target_size * intrinsic_similarity"));
         assert!(LOD_COMPUTE_VS.contains("lambda_star / intrinsic_similarity"));
+    }
+
+    fn coincident_square() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        (
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        )
+    }
+
+    fn adjacent_edges(adjacency: &[f32]) -> usize {
+        (0..adjacency.len())
+            .step_by(4)
+            .filter(|&offset| adjacency[offset] >= 0.0)
+            .count()
+    }
+
+    #[test]
+    fn exact_render_seams_negotiate_inside_one_node() {
+        let (positions, faces) = coincident_square();
+        let adjacency = build_scoped_lod_adjacency(&positions, &faces, &[0, 0]).unwrap();
+        assert_eq!(adjacent_edges(&adjacency), 2);
+    }
+
+    #[test]
+    fn coincident_edges_do_not_join_distinct_nodes() {
+        let (positions, faces) = coincident_square();
+        let adjacency = build_scoped_lod_adjacency(&positions, &faces, &[0, 1]).unwrap();
+        assert_eq!(adjacent_edges(&adjacency), 0);
+    }
+
+    #[test]
+    fn topology_ownership_must_cover_every_face() {
+        let (positions, faces) = coincident_square();
+        assert!(build_scoped_lod_adjacency(&positions, &faces, &[0]).is_err());
+        assert!(build_scoped_lod_adjacency(&positions, &faces, &[0, 1, 2]).is_err());
     }
 
 }

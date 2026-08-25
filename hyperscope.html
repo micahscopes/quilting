@@ -1663,6 +1663,9 @@ const rustPresentationDiagnostics = {
   multiAssetRendererPending: false,
   residentAssets: [],
   packedFaces: 0,
+  lodResidentFaces: 0,
+  lodTopologyDomains: 0,
+  lastLodScope: null,
   opacityOverridesPending: false,
   activeVisualization: 'pbr',
   activeTessellation: null,
@@ -1901,6 +1904,7 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
   const activeLayers = new Map((snapshot.layers || []).map(layer => [layer.asset, layer]));
   const renderRecords = [];
   const lodRecords = [];
+  const primaryLodRecords = [];
   const identityMobius = [
     1, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 1, 0, 0, 0,
@@ -1918,8 +1922,10 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
       const matrix = sourceMatrix ? mulM4(layerMatrix, sourceMatrix) : layerMatrix;
       const nodeVisible = visible && !resident.hiddenNodes?.has(node);
       renderRecords.push(node, nodeVisible ? 1 : 0, nodeVisible ? opacity : 0, ...matrix);
+      const lodRecord = [node, ...mobius, ...matrix];
+      lodRecords.push(...lodRecord);
       if (assetId === presentationComposition.primaryAssetId) {
-        lodRecords.push(node, ...mobius, ...matrix);
+        primaryLodRecords.push(...lodRecord);
       }
     }
   }
@@ -1934,6 +1940,7 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     rebuildNodeFocusRecords();
   }
   authoredLodStates = lodRecords;
+  presentationComposition.primaryLodStates = primaryLodRecords;
   authoredLodPending = true;
   authoredLodReasons.add('presentation-layer');
   rustPresentationDiagnostics.opacityOverridesPending = opacityPending;
@@ -2174,7 +2181,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=authored-node-trs-v1', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=composed-scene-lod-v1', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -2715,6 +2722,9 @@ const presentationComposition = {
   assets: new Map(),
   primaryAssetId: null,
   totalFaces: 0,
+  lodResidentFaces: 0,
+  lodTopologyDomains: 0,
+  primaryLodStates: [],
   focusTransformKey: null,
 };
 const patchLab = {
@@ -5652,9 +5662,11 @@ async function evaluateAnimationPose(request) {
 }
 
 let lodDirty = false; // set true when camera moves while LOD is in flight
+let lodFullSceneDirty = true;
 
-function debouncedLodRecompute() {
+function debouncedLodRecompute(scope = 'scene') {
   if (remeshedMode || patchLab.active) return;
+  if (scope !== 'primary-animation') lodFullSceneDirty = true;
   if (lodInFlight) {
     lodDirty = true;
     lodTelemetry.dirty = true;
@@ -5664,6 +5676,27 @@ function debouncedLodRecompute() {
   lodDebounceTimer = setTimeout(recomputeLods, 0);
 }
 
+function recordPresentationLodUpdate(faceIndices) {
+  if (!presentationComposition.ready || faceIndices.length === 0) return;
+  for (const resident of presentationComposition.assets.values()) {
+    const start = resident.faceOffset;
+    const end = start + resident.faceCount;
+    let changedFaces = 0;
+    for (const face of faceIndices) {
+      if (face >= start && face < end) changedFaces += 1;
+    }
+    if (changedFaces === 0) continue;
+    resident.lodUpdateBatches = (resident.lodUpdateBatches || 0) + 1;
+    resident.lastLodChangedFaces = changedFaces;
+    const diagnostic = rustPresentationDiagnostics.residentAssets
+      .find(asset => asset.id === resident.id);
+    if (diagnostic) {
+      diagnostic.lodUpdateBatches = resident.lodUpdateBatches;
+      diagnostic.lastLodChangedFaces = changedFaces;
+    }
+  }
+}
+
 async function recomputeLods() {
   if (lodInFlight || !meshInfo || remeshedMode || patchLab.active) return;
   lodInFlight = true;
@@ -5671,6 +5704,10 @@ async function recomputeLods() {
   lodTelemetry.submitted += 1;
   lodDirty = false;
   lodTelemetry.dirty = false;
+  const primaryOnly = presentationComposition.ready
+    && !lodFullSceneDirty
+    && presentationComposition.primaryLodStates.length > 0;
+  lodFullSceneDirty = false;
   const lodT0 = performance.now();
   try {
     const lodAnimated = animating;
@@ -5705,7 +5742,10 @@ async function recomputeLods() {
 
     const resp = await workerCall('compute_animated_lods', {
       t: lodAnimated ? animTime : 0, mobius: lodMobius, density: tp.density, minPx: tp.minPx,
-      subjectStates: authoredLodStates,
+      subjectStates: primaryOnly
+        ? presentationComposition.primaryLodStates
+        : authoredLodStates,
+      faceLimit: primaryOnly ? currentPrimaryFaceCount : 0,
       vpMatrix: vp, vpWidth: w, vpHeight: h,
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
       skipAnimation: !lodAnimated,
@@ -5727,26 +5767,45 @@ async function recomputeLods() {
     // discarding the completed result would starve continuously animated scenes.
     if (resp.lods && !remeshedMode) {
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
+      if (presentationComposition.ready) {
+        const classifiedFaces = Number(resp.classified_faces)
+          || Math.floor(faceLods.length / 6);
+        rustPresentationDiagnostics.lastLodScope =
+          classifiedFaces === presentationComposition.totalFaces
+            ? 'scene' : 'primary-animation';
+      }
       if (resp.indices) {
         const faceIndices = new Uint32Array(resp.indices.buffer || resp.indices);
+        if (faceLods.length !== faceIndices.length * 6) {
+          throw new Error('sparse LOD payload does not match its face index count');
+        }
         if (faceIndices.length > 0) {
           clearBatchMeasures();
           mr_updateBatches(faceIndices, faceLods);
+          recordPresentationLodUpdate(faceIndices);
           appliedClassification = true;
         }
       } else if (presentationComposition.ready) {
-        // The retained compute worker owns the animated primary asset only.
-        // Convert its occasional full snapshot into a primary-range sparse
-        // update so static presentation layers keep their resident topology.
-        const count = Math.min(
-          currentPrimaryFaceCount,
-          Math.floor(faceLods.length / 6),
-        );
+        // Convert an occasional full classification of either the packed scene
+        // or its animation-dirty primary prefix into renderer face updates.
+        const count = Number(resp.classified_faces) || Math.floor(faceLods.length / 6);
+        const residentFaces = Number(resp.resident_faces) || count;
+        if (residentFaces !== presentationComposition.totalFaces) {
+          throw new Error(
+            `LOD worker has ${residentFaces}/${presentationComposition.totalFaces} resident faces`,
+          );
+        }
+        if (faceLods.length !== count * 6) {
+          throw new Error(
+            `composed LOD snapshot has ${faceLods.length / 6}/${count} faces`,
+          );
+        }
         if (count > 0) {
           const faceIndices = new Uint32Array(count);
           for (let face = 0; face < count; face++) faceIndices[face] = face;
           clearBatchMeasures();
           mr_updateBatches(faceIndices, faceLods);
+          recordPresentationLodUpdate(faceIndices);
           appliedClassification = true;
         }
       } else {
@@ -5778,6 +5837,10 @@ async function recomputeLods() {
           'batch-upload-end',
         );
       }
+    } else if (!primaryOnly) {
+      // Do not let an interrupted scene-level classification silently demote
+      // subsequent animation ticks to the primary-only fast path.
+      lodFullSceneDirty = true;
     }
     if (RUST_ROUND_SHADOW_ENABLED && appliedClassification) {
       const unsupportedKey = roundAuthoredScene ? 'authored' : null;
@@ -5827,6 +5890,7 @@ async function recomputeLods() {
     );
   } catch (e) {
     lodTelemetry.errors += 1;
+    if (!primaryOnly) lodFullSceneDirty = true;
     console.warn('LOD recompute error:', e);
   }
   lodInFlight = false;
@@ -5941,7 +6005,7 @@ function frame(ts) {
     tickAnimation(animTime, animationPoseClockSeconds);
     // Keep LOD tracking the animated pose. The scheduler retains at most one
     // in-flight GPU job plus one coalesced follow-up for the newest frame.
-    debouncedLodRecompute();
+    debouncedLodRecompute('primary-animation');
   }
 
   if (patchLab.active && patchLab.animate && ts - patchLab.lastAnimatedAt >= 90) {
@@ -6471,7 +6535,14 @@ async function finishModelUpload(
   presentationComposition.assets.clear();
   presentationComposition.primaryAssetId = null;
   presentationComposition.totalFaces = 0;
+  presentationComposition.lodResidentFaces = 0;
+  presentationComposition.lodTopologyDomains = 0;
+  presentationComposition.primaryLodStates = [];
   presentationComposition.focusTransformKey = null;
+  lodFullSceneDirty = true;
+  rustPresentationDiagnostics.lodResidentFaces = 0;
+  rustPresentationDiagnostics.lodTopologyDomains = 0;
+  rustPresentationDiagnostics.lastLodScope = null;
   mr_setPresentationNodeStates(new Float32Array());
   nodeFocusRecords = new Map();
   sceneSourceBound = null;
@@ -6944,6 +7015,48 @@ function extendPrimaryAnimationTextures(totalVertices) {
   skinTexW = Math.min(totalVertices, 4096);
 }
 
+async function uploadPresentationCompositionToLodWorker(
+  instances,
+  faceNodes,
+  totalVertices,
+  primaryFaces,
+) {
+  const residents = Array.from(presentationComposition.assets.values())
+    .sort((left, right) => left.faceOffset - right.faceOffset);
+  const faceDomainEnds = Array.from(
+    residents,
+    resident => resident.faceOffset + resident.faceCount,
+  );
+  const topologyDomains = new Set(faceNodes).size;
+  if (faceDomainEnds.length === 0
+      || faceDomainEnds[0] !== primaryFaces
+      || faceDomainEnds[faceDomainEnds.length - 1] !== faceNodes.length) {
+    throw new Error('presentation LOD topology domains do not match the packed scene');
+  }
+
+  // Transfer one-time staging copies. The renderer retains its authoritative
+  // instance and node buffers; the worker reconstructs a compact scene model.
+  const computeInstances = instances.slice();
+  const computeFaceNodes = faceNodes.slice();
+  const response = await workerCall('upload_composed_model_to_compute', {
+    instances: computeInstances.buffer,
+    faceNodes: computeFaceNodes.buffer,
+    totalVertices,
+    primaryFaces,
+  }, [computeInstances.buffer, computeFaceNodes.buffer]);
+  if (!response.ok) {
+    throw new Error(response.error || 'packed presentation LOD upload failed');
+  }
+  if (response.numFaces !== faceNodes.length
+      || response.topologyDomains !== topologyDomains) {
+    throw new Error('presentation LOD worker acknowledged the wrong scene shape');
+  }
+  presentationComposition.lodResidentFaces = response.numFaces;
+  presentationComposition.lodTopologyDomains = response.topologyDomains;
+  rustPresentationDiagnostics.lodResidentFaces = response.numFaces;
+  rustPresentationDiagnostics.lodTopologyDomains = response.topologyDomains;
+}
+
 async function initializePresentationComposition() {
   if (!RUST_PRESENTATION_ENABLED || !rustPresentationManifest || !currentInstances) return false;
   const primaryAsset = rustPresentationManifest.assets.find(asset =>
@@ -7097,6 +7210,12 @@ async function initializePresentationComposition() {
     });
   }
 
+  await uploadPresentationCompositionToLodWorker(
+    instances,
+    faceNodes,
+    totalVertices,
+    primaryFaces,
+  );
   extendPrimaryAnimationTextures(totalVertices);
   currentInstances = instances;
   currentInitialFaceLods = faceLods;
@@ -7125,6 +7244,9 @@ async function initializePresentationComposition() {
       name: resident.name,
       nodes: resident.nodes,
       faces: resident.faceCount,
+      adaptiveLod: true,
+      lodUpdateBatches: resident.lodUpdateBatches || 0,
+      lastLodChangedFaces: resident.lastLodChangedFaces || 0,
       durableSelectionNodes: resident.durableSelectionNodes || 0,
       hiddenGuideNodes: resident.hiddenNodes?.size || 0,
     }),

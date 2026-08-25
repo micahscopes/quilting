@@ -234,6 +234,37 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'upload_composed_model_to_compute') {
+    try {
+      lodJobGeneration += 1;
+      wasm.cancel_animated_lods();
+      wasm.reset_animated_lod_delta();
+      const instances = new Float32Array(data.instances);
+      const faceNodes = new Int32Array(data.faceNodes);
+      const ok = wasm.upload_composed_model_to_compute(
+        instances,
+        faceNodes,
+        data.totalVertices,
+        data.primaryFaces,
+      );
+      self.postMessage({
+        type: 'composed_model_uploaded_to_compute',
+        id,
+        ok,
+        numFaces: faceNodes.length,
+        topologyDomains: new Set(faceNodes).size,
+      });
+    } catch (error) {
+      self.postMessage({
+        type: 'composed_model_uploaded_to_compute',
+        id,
+        ok: false,
+        error: error?.message || String(error),
+      });
+    }
+    return;
+  }
+
   if (type === 'sample_stretch_range') {
     const range = wasm.sample_stretch_range(new Float32Array(data.mobius));
     self.postMessage({ type: 'stretch_range', id, min: range[0], max: range[1] });
@@ -245,7 +276,7 @@ self.onmessage = async function(e) {
     wasm.cancel_animated_lods();
     const {
       t, mobius, subjectStates, density, minPx, vpMatrix, vpWidth, vpHeight,
-      tessDensity, screenAtten, minPxSub, skipAnimation, capturePose,
+      tessDensity, screenAtten, minPxSub, skipAnimation, capturePose, faceLimit,
     } = data;
     const wt0 = performance.now();
     // Set tess params before compute
@@ -260,6 +291,7 @@ self.onmessage = async function(e) {
         skipAnimation ? -1.0 : t,  // t < 0 signals: skip animation, use rest pose
         new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
         new Float32Array(subjectStates || []),
+        faceLimit || 0,
         density || 20.0,
         minPx || 0.0,
         new Float32Array(vpMatrix || new Array(16).fill(0)),
@@ -320,6 +352,8 @@ self.onmessage = async function(e) {
           pose_time: result.pose_time,
           pose_matrices: result.pose_matrices || null,
           pose_morph_weights: result.pose_morph_weights || null,
+          classified_faces: result.classified_faces,
+          resident_faces: result.resident_faces,
         }, transfers);
       } else {
         let gpuState = 'unknown';
