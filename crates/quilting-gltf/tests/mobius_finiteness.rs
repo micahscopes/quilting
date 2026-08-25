@@ -18,7 +18,7 @@
 //! the f32 cancellation cliff, and sample patch INTERIORS (barycentric grid),
 //! not just corners.
 //!
-//! Run with:  cargo test -p quilting-core --test mobius_finiteness
+//! Run with:  cargo test -p quilting-gltf --test mobius_finiteness
 
 use quilting_core::evaluate::{compute_instances_with_uvs, MAX_LOD, MIN_LOD};
 use quilting_core::quaternion::{Mobius, Quat};

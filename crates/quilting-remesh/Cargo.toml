@@ -14,13 +14,13 @@ description = "VSA clustering and QB patch fitting — turns a dense triangle me
 meshopt-prototype = ["dep:meshopt"]
 
 [dependencies]
-quilting-core = { path = "../quilting-core" }
-quilting-mesh = { path = "../quilting-mesh" }
+quilting-core = { version = "0.1.0", path = "../quilting-core" }
+quilting-mesh = { version = "0.1.0", path = "../quilting-mesh" }
 meshopt = { version = "0.6.2", optional = true }
 
 # Only the `remesh_glb` / `experiments` example harnesses need these. Keeping them
 # out of [dependencies] keeps quilting-gltf off the wasm build graph.
 [dev-dependencies]
-quilting-gltf = { path = "../quilting-gltf" }
+quilting-gltf = { version = "0.1.0", path = "../quilting-gltf" }
 rand = "0.8"
 rand_pcg = "0.3"

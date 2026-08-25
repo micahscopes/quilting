@@ -9,5 +9,5 @@ description = "Conformally equivariant round-side spatial queries for Quilting"
 readme = "README.md"
 
 [dependencies]
-quilting-core = { path = "../quilting-core" }
+quilting-core = { version = "0.1.0", path = "../quilting-core" }
 serde = { version = "1", features = ["derive"] }
