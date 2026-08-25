@@ -34,6 +34,8 @@ const BUILD_INPUT_ROOT_FILES: &[&str] = &[
     "hyperscope_worker.js",
     "hyperscope_focus.mjs",
     "spacemouse.mjs",
+    "local_peer_browser.mjs",
+    "asset_effect_host.mjs",
     "horse.glb",
     "ant.glb",
     "examples/hyperscape-blender-demo.glb",
@@ -666,8 +668,8 @@ fn path_for_report(path: &Path) -> String {
 mod tests {
     use super::{
         local_uri_to_relative_path, update_build_input_fingerprint, validate_glb_header,
-        validate_release_html, DistributionPolicy, OfflinePreflightReport, FNV1A_128_OFFSET,
-        REQUIRED_RUNTIME_FILES,
+        validate_release_html, DistributionPolicy, OfflinePreflightReport, BUILD_INPUT_ROOT_FILES,
+        FNV1A_128_OFFSET, REQUIRED_RUNTIME_FILES,
     };
     use std::path::PathBuf;
 
@@ -684,6 +686,16 @@ mod tests {
             assert!(
                 !REQUIRED_RUNTIME_FILES.contains(&retired),
                 "retired standalone package returned to the release contract: {retired}",
+            );
+        }
+    }
+
+    #[test]
+    fn build_receipt_includes_copied_browser_adapters() {
+        for adapter in ["local_peer_browser.mjs", "asset_effect_host.mjs"] {
+            assert!(
+                BUILD_INPUT_ROOT_FILES.contains(&adapter),
+                "copied browser adapter is absent from the release receipt: {adapter}",
             );
         }
     }
