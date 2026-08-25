@@ -869,12 +869,39 @@ assert.throws(
   /identity does not match/,
 );
 assert.equal(
+  selectionApp.anchorFocus(
+    selectedAsset, selectedEntity, selectedBoundCenter, 2, selectedPivot, 1.25, 0.8, 'linear',
+  ),
+  selectionIncumbent.anchorFocus(
+    selectedAsset, selectedEntity, selectedBoundCenter, 2, selectedPivot, 1.25, 0.8, 'linear',
+  ),
+);
+assertNavigationParity(selectionApp.tickNavigation(0.25), selectionIncumbent.tick(0.25));
+const beforeSelectedGesture = selectionApp.navigationSnapshot();
+assert.ok(beforeSelectedGesture.focus.radius > 2 && beforeSelectedGesture.focus.radius < 2.5);
+assert.equal(
+  selectionApp.refitFocusAndToggleInversion(0.6, 'smootherstep'),
+  selectionIncumbent.refitFocusAndToggleInversion(0.6, 'smootherstep'),
+);
+const selectedGesture = selectionApp.tickNavigation(0);
+assertNavigationParity(selectedGesture, selectionIncumbent.tick(0));
+assert.equal(selectedGesture.focus.inversion_enabled, true);
+assert.equal(selectedGesture.focus.focus_transition_remaining, 0.6);
+assert.equal(selectedGesture.selected_focus.margin, 1.25);
+assertNavigationParity(selectionApp.tickNavigation(0.6), selectionIncumbent.tick(0.6));
+assert.ok(Math.abs(selectionApp.navigationSnapshot().focus.radius - 2.5) <= 1e-12);
+assert.equal(
+  selectionApp.setInversionEnabled(false),
+  selectionIncumbent.setInversionEnabled(false),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.equal(
   selectionApp.setInversionEnabled(true),
   selectionIncumbent.setInversionEnabled(true),
 );
 assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
-assert.deepEqual(selectionApp.navigationSnapshot().selected_focus.output_pivot, [1, 0, 0]);
-assert.equal(selectionApp.navigationSnapshot().selected_focus.output_radius, 0.5);
+assert.deepEqual(selectionApp.navigationSnapshot().selected_focus.output_pivot, [1.5625, 0, 0]);
+assert.equal(selectionApp.navigationSnapshot().selected_focus.output_radius, 0.78125);
 
 assert.equal(
   selectionApp.detachFocus(),

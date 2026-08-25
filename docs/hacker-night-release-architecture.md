@@ -346,6 +346,14 @@ node, and applies the selected focus packet directly to the resident renderer
 without round-tripping the sphere through JavaScript. Delayed RAF callbacks
 retain the selection event fence until their timestamp reaches the event, so
 background/main-thread backlog cannot double-integrate pre-selection time.
+The selected-object inversion gesture is now one
+`RefitFocusAndToggleInversion` action: Rust restarts an existing anchored fit,
+toggles the reflection chart, and transports camera, in-flight transitions,
+and surface-following state under one rollback boundary. A pole rejects that
+whole action. Shadow mode compares the incumbent gesture; Rust mode consumes
+the same coherent camera/focus snapshot adapter as presentation while retaining
+the selected identity and pole-safe derived pivot. No separate browser focus
+transition runs in the Rust branch.
 Unresolved assets and free/manual focus edits deliberately remain on the browser
 path; the release default stays `js` until the narrower cutover has soaked.
 

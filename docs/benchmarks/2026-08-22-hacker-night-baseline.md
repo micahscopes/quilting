@@ -1725,3 +1725,40 @@ The uncommitted selection/inversion bridge experiment was deliberately parked
 as `stash@{0}` rather than shipped. Release defaults remain the proven
 selection and walk paths; post-presentation work should replace the browser
 bridge with one typed Rust semantic-action ingress before changing authority.
+
+## Atomic selected-inversion ingress
+
+The next 2026-08-25 slice replaced that parked browser coordinator with the
+typed Rust ingress. `RefitFocusAndToggleInversion` restarts an anchored fit and
+toggles spherical inversion as one navigation action. Camera, camera/surface
+transitions, selected focus, and reflection state roll back together at a pole.
+Replay schema 0.10 records the new action explicitly; 0.9 traces remain
+readable but reject that newer vocabulary instead of silently reinterpreting
+it.
+
+The browser retains `selectionimpl=js|shadow|rust` and the default remains
+`js`. Shadow and Rust modes each make one semantic admission plus one zero-time
+snapshot at the gesture boundary. During a live fit, the existing application
+frame lane returns one compact snapshot per transition frame and returns none
+after settling. Presentation and selected-focus authority now share one
+camera/focus snapshot adapter; the selected path additionally preserves the
+stable asset/entity identity and maps an output pivot/radius to absence at a
+reflection pole.
+
+Target Chrome selected the 984-face horse and exercised the real semantic
+gesture hook in both modes. Shadow mode recorded one accepted dispatch and one
+comparison with zero gesture, selection-transition, renderer-packet, or
+application mismatch. Rust mode started the 0.7-second fit, applied five
+identity-checked renderer packets in the background-throttled sample, settled
+with zero renderer error or mismatch, and retained a clean warning/error
+console. These counts describe boundary behavior, not foreground frame rate.
+
+The optimized consolidated WASM changed from 6,600,059 to 6,599,278 bytes
+(-781); gzip changed from 2,322,181 to 2,318,831 bytes (-3,350). The exact
+clean-source receipt is 173 files / 20,704,230 bytes with fingerprint
+`2a29d7b6cc1527158c3d20158c2b5148`. A provenance defect found during this
+measurement was fixed separately: ignored crate-local `pkg`/`target` outputs
+no longer enter the source receipt, so a long-lived checkout and a detached
+worktree cannot disagree merely because wasm-pack left an 18.5-MiB package
+behind. Strict noncommercial-mixed preflight passed over the staged 19-file /
+23.46-MiB offline bundle.

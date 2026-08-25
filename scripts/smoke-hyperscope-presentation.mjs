@@ -43,6 +43,70 @@ assert.ok(
   'selection handoff must stop focus/lens mutations of the inactive presentation observer',
 );
 
+const selectedInversionIngress = browserSource.slice(
+  browserSource.indexOf('function dispatchAppSelectedInversionGesture('),
+  browserSource.indexOf('function clearSelectedObject('),
+);
+for (const semanticStep of [
+  'advanceRustApplicationClockToSelectionEvent(nowMs);',
+  'rustAppShadow.refitFocusAndToggleInversion(',
+  'const navigation = rustAppShadow.tickNavigation(0);',
+  "? 'inversionGestureAccepts'",
+]) {
+  assert.ok(
+    selectedInversionIngress.includes(semanticStep),
+    `selected inversion ingress is missing ${semanticStep}`,
+  );
+}
+
+const selectedInversionGesture = browserSource.slice(
+  browserSource.indexOf('function fitOrToggleInversionToSelection('),
+  browserSource.indexOf('function advanceFocusTransitions('),
+);
+assert.ok(
+  selectedInversionGesture.indexOf('dispatchAppSelectedInversionGesture(nowMs)')
+    < selectedInversionGesture.indexOf('anchorFocusSphereToSelection(nowMs)'),
+  'the typed Rust gesture must be admitted before the incumbent fallback mutates focus',
+);
+assert.ok(
+  selectedInversionGesture.includes("RUST_SELECTION_IMPLEMENTATION === 'rust'"),
+  'selected inversion must retain an explicit Rust authority branch',
+);
+assert.ok(
+  selectedInversionGesture.includes('applyRustSelectedFocusNavigation(rustGesture.navigation)'),
+  'Rust authority must apply the coherent camera/focus snapshot',
+);
+assert.ok(
+  browserSource.includes('globalThis.__hyperscopeSelection = Object.freeze({'),
+  'target-browser acceptance must use the real semantic selection gesture path',
+);
+
+const rustSelectionFrame = browserSource.slice(
+  browserSource.indexOf('function advanceRustApplicationFrame('),
+  browserSource.indexOf('function compareAppPresentationPose('),
+);
+assert.ok(
+  rustSelectionFrame.indexOf('applyRustSelectedFocusNavigation(navigation)')
+    < rustSelectionFrame.indexOf('applyRustAppFocusToRenderer(navigation)'),
+  'each Rust selection frame must apply navigation before the identity-checked renderer packet',
+);
+
+const sharedNavigationAdapter = browserSource.slice(
+  browserSource.indexOf('function applyRustNavigationSnapshot('),
+  browserSource.indexOf('function tickRustPresentation('),
+);
+for (const adapterStep of [
+  'function applyRustPresentationNavigation(snapshot)',
+  'function applyRustSelectedFocusNavigation(snapshot)',
+  'selection.outputAnchor = selectedFocus?.output_pivot',
+  'selection.outputRadius = Number.isFinite(selectedFocus?.output_radius)',
+]) {
+  assert.ok(
+    sharedNavigationAdapter.includes(adapterStep),
+    `shared navigation adapter is missing ${adapterStep}`,
+  );
+}
+
 const controller = new HyperscopeNavigation();
 const presentation = controller.loadPresentation(readFileSync(manifestPath, 'utf8'));
 assert.equal(presentation.cues.length, 6);
