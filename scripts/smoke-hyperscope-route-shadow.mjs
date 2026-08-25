@@ -27,7 +27,7 @@ assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'rust'
 assert.equal(specs.find(spec => spec.key === 'assetimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
@@ -59,7 +59,9 @@ for (const authorityStep of [
   );
 }
 for (const sceneExtractionStep of [
-  "const requested = new URLSearchParams(location.search).get('sceneimpl') || 'js';",
+  "const requested = new URLSearchParams(location.search).get('sceneimpl') || 'rust';",
+  "? requested : 'rust';",
+  "sceneimpl: 'rust'",
   'rustAppShadow.extractActivePresentationScene(',
   'JSON.stringify(presentationBindings)',
   "rustNode.source === 'authored_absolute'",
@@ -117,6 +119,16 @@ assert.deepEqual(
   canonicalizeHyperscopeRoute([['presentimpl', 'js']]).pairs,
   [['presentimpl', 'js']],
   'canonical routes must retain an explicit presentation rollback',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['sceneimpl', 'rust']]).pairs,
+  [],
+  'canonical routes must omit the Rust scene-authority default',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['sceneimpl', 'js']]).pairs,
+  [['sceneimpl', 'js']],
+  'canonical routes must retain an explicit scene-extraction rollback',
 );
 const startupAdapter = browserSource.slice(
   browserSource.indexOf("phase('wasm', [], async () =>"),

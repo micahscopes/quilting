@@ -154,7 +154,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("roundshadow", "0", Toggle),
     spec!("appshadow", "0", Toggle),
     spec!("assetimpl", "rust", Implementation),
-    spec!("sceneimpl", "js", Implementation),
+    spec!("sceneimpl", "rust", Implementation),
     spec!("routeshadow", "0", Toggle),
     spec!("routeimpl", "js", Implementation),
     spec!("rendershadow", "0", Toggle),
@@ -388,6 +388,17 @@ mod tests {
 
         let rollback_route = HyperscopeRoute::from_pairs([("presentimpl", "js")]);
         assert_eq!(rollback_route.canonical_pairs(), vec![("presentimpl", "js")]);
+        assert!(rollback_route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rust_scene_authority_is_default_with_an_explicit_js_rollback() {
+        let default_route = HyperscopeRoute::from_pairs([("sceneimpl", "rust")]);
+        assert_eq!(default_route.value("sceneimpl"), Some("rust"));
+        assert!(default_route.canonical_pairs().is_empty());
+
+        let rollback_route = HyperscopeRoute::from_pairs([("sceneimpl", "js")]);
+        assert_eq!(rollback_route.canonical_pairs(), vec![("sceneimpl", "js")]);
         assert!(rollback_route.diagnostics().is_empty());
     }
 

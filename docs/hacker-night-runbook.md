@@ -31,16 +31,17 @@ translation `[3,4,5]`. Blender must project the remote camera, inversion sphere,
 and bound selection into at least 166 transient overlay segments without
 creating an object.
 
-For the composed final cue, append `sceneimpl=shadow` to compare Rust ordinary
-node extraction while retaining the incumbent renderer path, or explicitly use
-`sceneimpl=rust` for the measured authority path. Inspect
+For the composed final cue, the default `sceneimpl=rust` path makes Rust own
+ordinary node extraction. Append `sceneimpl=shadow` to compare it while
+retaining the incumbent renderer path. Inspect
 `globalThis.__hyperscopeSceneExtraction`: a healthy loaded fixture reports
 `state` as `observing` or `authoritative`, no fallback, no mismatches, and an
 empty unmatched-entity list. `lastCue` must equal the presentation cue,
 `semanticMismatches` must be zero, and `maximumOpacityError` should remain at
 or below `1e-6`. The adapter sends only layer/asset identity and resident node
 metadata; Rust owns layer TRS, visibility, opacity, and authored overrides.
-`sceneimpl=js` is the immediate rollback and is the default.
+`sceneimpl=js` is the immediate rollback; the explicit rollback value remains
+in the synchronized URL.
 
 `hyperscope-app` is the default presentation cue/transition authority. An
 ordinary `presentation=1` route should report `implementation: "rust"` and

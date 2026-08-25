@@ -1529,6 +1529,20 @@ offline preflight with identical source/build fingerprint
 separate cutover gate; renderer-wide wasm32 Clippy still reports the same 42
 pre-existing warnings outside this composition boundary.
 
+## Active presentation composition cutover
+
+The target-Chrome gate subsequently exercised explicit `sceneimpl=rust` on the
+release artifact before changing the canonical default. The composed final cue
+held both assets and 4,252 packed faces while 567 matrix and semantic checks
+reported zero mismatches, zero fallbacks, maximum matrix error
+`4.768371586472142e-8`, zero opacity error, and no console messages. Reverse,
+advance, and an explicit cue jump increased the evidence to 1,336 comparisons
+without changing those bounds or losing an asset. `sceneimpl=rust` is therefore
+the canonical default; `sceneimpl=js` remains a URL-persistent rollback and
+`sceneimpl=shadow` remains the non-authoritative comparison path. Extraction
+failure still returns the complete incumbent scene atomically and records the
+fallback rather than partially installing Rust output.
+
 ## Primary-scene asset effect authority
 
 The asset adapter now exposes `assetimpl=js|shadow|rust` as the 74th canonical

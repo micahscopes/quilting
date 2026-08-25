@@ -210,7 +210,8 @@ The first application boundary is now explicit:
   and Rust supplies layer TRS, effective visibility/opacity, and sorted node
   matrices. Unknown, missing, duplicate, mismatched, or semantic-bearing
   bindings fail atomically. The browser has a canonical
-  `sceneimpl=js|shadow|rust` rollback gate. `shadow` compares fallback matrices
+  `sceneimpl=js|shadow|rust` rollback gate, with `rust` as the canonical default
+  and explicit `js` rollback. `shadow` compares fallback matrices
   and layer render state while retaining JavaScript authority; authored
   absolute edits are counted as intentional overrides. `rust` feeds Rust
   matrices and layer state into both presentation rendering and LOD state,
