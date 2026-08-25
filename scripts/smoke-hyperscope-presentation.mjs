@@ -126,8 +126,11 @@ for (const requiredAnimationAdapterStep of [
   'primaryPresentationAnimation(snapshot)',
   'selectAnimationIndex(clipIndex)',
   'animTime = time;',
-  'animating_sig.set(Boolean(animation.playing));',
+  'animating_sig.set(playing);',
   'deltaSeconds * presentationAnimationSpeed',
+  'toggleAnimationPlaybackIntent()',
+  "e.code === 'Space'",
+  '!e.repeat',
 ]) {
   assert.ok(
     browserSource.includes(requiredAnimationAdapterStep),

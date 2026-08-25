@@ -2120,14 +2120,18 @@ async function applyPresentationAnimationState(snapshot = rustPresentationSnapsh
     $('time').value = animTime;
     $('time-v').textContent = animTime.toFixed(2);
     rebaseAnimationPoseContinuity();
-    animating_sig.set(Boolean(animation.playing));
+    const applicationPlayback = rustAppShadow?.snapshot()?.animationPlaying;
+    const playing = typeof applicationPlayback === 'boolean'
+      ? applicationPlayback
+      : Boolean(animation.playing);
+    animating_sig.set(playing);
     tickAnimation(animTime, animationPoseClockSeconds);
     debouncedLodRecompute();
     rustPresentationDiagnostics.activeAnimation = {
       layer: animation.layer,
       clip: animation.clip,
       timeSeconds: authoredTime,
-      playing: Boolean(animation.playing),
+      playing,
       speed: presentationAnimationSpeed,
     };
     rustPresentationDiagnostics.error = null;
@@ -2695,6 +2699,8 @@ const rustAppShadowDiagnostics = {
   presentationPoseComparisons: 0,
   presentationPoseMismatches: 0,
   maximumPresentationPoseError: 0,
+  animationPlaybackDispatches: 0,
+  animationPlaybackErrors: 0,
   mismatches: [],
   lastCommit: null,
   snapshot: null,
@@ -2706,10 +2712,64 @@ function ensureRustAppShadow(reason = 'shadow') {
   rustAppShadow = new HyperscopeAppShadow();
   globalThis.__hyperscopeAppShadowController = rustAppShadow;
   rustAppShadowDiagnostics.state = reason;
+  try {
+    const receipt = rustAppShadow.setAnimationPlaying(
+      rustAppShadowSequence,
+      animating_sig.peek(),
+    );
+    rustAppShadowDiagnostics.lastCommit = receipt.commit;
+  } catch (error) {
+    rustAppShadowDiagnostics.animationPlaybackErrors += 1;
+    recordAppShadowMismatch(
+      'animation_initialization',
+      error?.message || String(error),
+    );
+  }
   synchronizeRustApplicationPresentationFromBrowser();
   resetRustApplicationFrameClock();
   refreshAppShadowSnapshot();
   return rustAppShadow;
+}
+
+function setAnimationPlaybackIntent(playing) {
+  const requested = Boolean(playing);
+  if (!wasmOk.peek()) {
+    animating_sig.set(requested);
+    return requested;
+  }
+  try {
+    const app = ensureRustAppShadow('animation-playback');
+    const receipt = app.setAnimationPlaying(++rustAppShadowSequence, requested);
+    rustAppShadowDiagnostics.lastCommit = receipt.commit;
+    rustAppShadowDiagnostics.animationPlaybackDispatches += 1;
+    animating_sig.set(Boolean(receipt.playing));
+    refreshAppShadowSnapshot();
+    return Boolean(receipt.playing);
+  } catch (error) {
+    rustAppShadowDiagnostics.animationPlaybackErrors += 1;
+    recordAppShadowMismatch('animation_set', error?.message || String(error));
+    return animating_sig.peek();
+  }
+}
+
+function toggleAnimationPlaybackIntent() {
+  if (!wasmOk.peek()) {
+    animating_sig.set(!animating_sig.peek());
+    return animating_sig.peek();
+  }
+  try {
+    const app = ensureRustAppShadow('animation-playback');
+    const receipt = app.toggleAnimationPlaying(++rustAppShadowSequence);
+    rustAppShadowDiagnostics.lastCommit = receipt.commit;
+    rustAppShadowDiagnostics.animationPlaybackDispatches += 1;
+    animating_sig.set(Boolean(receipt.playing));
+    refreshAppShadowSnapshot();
+    return Boolean(receipt.playing);
+  } catch (error) {
+    rustAppShadowDiagnostics.animationPlaybackErrors += 1;
+    recordAppShadowMismatch('animation_toggle', error?.message || String(error));
+    return animating_sig.peek();
+  }
 }
 
 function appShadowUuid(prefix, ordinal) {
@@ -4369,11 +4429,19 @@ window.addEventListener('mousemove', e => {
 });
 window.addEventListener('keydown', e => {
   const editingText = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target?.tagName);
+  const interactiveTarget = editingText
+    || Boolean(e.target?.closest?.('button, [contenteditable="true"]'));
   const walkingKey = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft',
     'ArrowDown', 'ArrowRight', 'ShiftLeft', 'ShiftRight'].includes(e.code);
   if (surfaceWalk.active && walkingKey && !editingText) {
     surfaceWalkKeys.add(e.code);
     surfaceWalk.keys = Array.from(surfaceWalkKeys).sort();
+    e.preventDefault();
+    return;
+  }
+  if (e.code === 'Space' && !interactiveTarget && !e.repeat
+      && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    toggleAnimationPlaybackIntent();
     e.preventDefault();
     return;
   }
@@ -4982,7 +5050,11 @@ effect(() => {
 
 // --- Animation controls ---
 const animating_sig = signal(true, 'animate');
-bindToggle('animate-toggle', animating_sig);
+$('animate-toggle').classList.toggle('on', animating_sig.peek());
+$('animate-toggle').addEventListener('click', () => {
+  setAnimationPlaybackIntent(!animating_sig.peek());
+});
+effect(() => $('animate-toggle').classList.toggle('on', animating_sig.get()));
 effect(() => {
   const nextAnimating = animating_sig.get();
   const changed = animating !== nextAnimating;
@@ -5630,7 +5702,7 @@ applyParams = function(params) {
   lod.minPx.set(finite(params.minpx, 16, 1, 64));
   lod.atlas.set(integer(params.atlas, 7, 3, 9));
   lod.grading.set(params.lodratio === '4' ? '4' : '2');
-  animating_sig.set(params.animate !== '0');
+  setAnimationPlaybackIntent(params.animate !== '0');
   zoom = finite(params.zoom, 3, 0.1, 1000);
   rotX = finite(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
   rotY = finite(params.ry, 0.5, -1e6, 1e6);

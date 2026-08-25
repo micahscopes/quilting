@@ -15,8 +15,8 @@ use hyperscape_protocol::{
     RequestId, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
-    session_node_identity, AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore,
-    AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetStatus, AuthoredRevision,
+    session_node_identity, AnimationAction, AppCommit, AppEffect, AppEvent, AppFrameSnapshot,
+    AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetStatus, AuthoredRevision,
     CommitDisposition, EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress,
     LocalPeerLane, LocalPeerReceipt, NavigationSynchronization, PresentationAction,
     SemanticAction, Timed,
@@ -744,6 +744,23 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
+    /// Commit explicit playback intent from a browser control or restored URL.
+    #[wasm_bindgen(js_name = setAnimationPlaying)]
+    pub fn set_animation_playing(
+        &self,
+        sequence: u32,
+        playing: bool,
+    ) -> Result<JsValue, JsValue> {
+        self.dispatch_animation(sequence, AnimationAction::SetPlaying(playing))
+    }
+
+    /// Toggle playback atomically in the reducer so multiple input adapters do
+    /// not race a browser-side read/modify/write sequence.
+    #[wasm_bindgen(js_name = toggleAnimationPlaying)]
+    pub fn toggle_animation_playing(&self, sequence: u32) -> Result<JsValue, JsValue> {
+        self.dispatch_animation(sequence, AnimationAction::TogglePlaying)
+    }
+
     /// Atomically admit one transport-neutral authored checkpoint. The
     /// revision travels as decimal text so JavaScript cannot truncate a u64;
     /// commands retain the canonical protocol JSON shape shared with Blender.
@@ -1008,6 +1025,7 @@ impl HyperscopeAppShadow {
                 });
         to_js(&ShadowSnapshot {
             revision: summary.revision.to_string(),
+            animation_playing: summary.animation_playing,
             assets,
             loading_assets: summary.loading_assets,
             loading_primary_scene_asset: summary
@@ -1052,6 +1070,26 @@ impl Default for HyperscopeAppShadow {
 }
 
 impl HyperscopeAppShadow {
+    fn dispatch_animation(
+        &self,
+        sequence: u32,
+        action: AnimationAction,
+    ) -> Result<JsValue, JsValue> {
+        let commit = self
+            .store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: u64::from(sequence),
+                at_seconds: self.store.frame_snapshot().elapsed_seconds,
+                value: SemanticAction::Animate(action),
+            }))
+            .map_err(js_error)?;
+        let playing = self.store.summary_snapshot().animation_playing;
+        to_js(&ShadowAnimationPlaybackReceipt {
+            commit: shadow_commit(&commit),
+            playing,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn request_asset_scoped(
         &self,
@@ -1195,6 +1233,7 @@ enum ShadowEffect {
 #[serde(rename_all = "camelCase")]
 struct ShadowSnapshot {
     revision: String,
+    animation_playing: bool,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
     loading_primary_scene_asset: Option<String>,
@@ -1204,6 +1243,13 @@ struct ShadowSnapshot {
     authored_entities: Vec<ShadowAuthoredEntity>,
     diagnostics: Vec<ShadowDiagnostic>,
     presentation: Option<ShadowPresentation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAnimationPlaybackReceipt {
+    commit: ShadowCommit,
+    playing: bool,
 }
 
 #[derive(Serialize)]

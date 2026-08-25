@@ -75,12 +75,21 @@ impl<T> Timed<T> {
 pub enum SemanticAction {
     Navigate(NavigationAction),
     Present(PresentationAction),
+    Animate(AnimationAction),
     RequestAsset {
         request_id: RequestId,
         asset: AssetDescriptor,
         scope: AssetLoadScope,
     },
     CancelAsset(AssetId),
+}
+
+/// Renderer-independent playback intent. Animation pose evaluation remains a
+/// render/runtime concern; this state only decides whether scene time advances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationAction {
+    SetPlaying(bool),
+    TogglePlaying,
 }
 
 /// Concurrency policy for an asset acquisition request.
@@ -247,6 +256,7 @@ pub struct AppSummary {
     pub diagnostics: usize,
     pub presentation_loaded: bool,
     pub active_cue: Option<Uuid>,
+    pub animation_playing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,13 +415,14 @@ struct PresenceRecord {
 
 /// The reducer's complete mutable state. Fields remain private so adapters
 /// cannot bypass event ordering or effect-generation policy.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AppState {
     revision: u64,
     frame_elapsed_seconds: f64,
     navigation: NavigationController,
     presentation: Option<PresentationRuntime>,
     active_presentation: Option<PresentationSnapshot>,
+    animation_playing: bool,
     assets: BTreeMap<AssetId, AssetRecord>,
     primary_scene_load: Option<(RequestId, AssetId)>,
     presence: BTreeMap<PeerId, PresenceRecord>,
@@ -419,6 +430,26 @@ pub struct AppState {
     authored_assets: BTreeMap<AssetId, AssetDescriptor>,
     authored_entities: BTreeMap<EntityId, WireTransform>,
     diagnostics: VecDeque<DiagnosticReadModel>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            frame_elapsed_seconds: 0.0,
+            navigation: NavigationController::default(),
+            presentation: None,
+            active_presentation: None,
+            animation_playing: true,
+            assets: BTreeMap::new(),
+            primary_scene_load: None,
+            presence: BTreeMap::new(),
+            authored_projection_revision: None,
+            authored_assets: BTreeMap::new(),
+            authored_entities: BTreeMap::new(),
+            diagnostics: VecDeque::new(),
+        }
+    }
 }
 
 impl AppState {
@@ -486,6 +517,15 @@ impl AppState {
                             return Err(ReduceError::FuturePresentationInput);
                         }
                         self.apply_presentation_action(action)?;
+                    }
+                    SemanticAction::Animate(action) => {
+                        if !input_may_run_now {
+                            return Err(ReduceError::FutureAnimationInput);
+                        }
+                        self.animation_playing = match action {
+                            AnimationAction::SetPlaying(playing) => playing,
+                            AnimationAction::TogglePlaying => !self.animation_playing,
+                        };
                     }
                     SemanticAction::RequestAsset {
                         request_id,
@@ -758,6 +798,9 @@ impl AppState {
         .map_err(|error| ReduceError::Presentation(error.to_string()))?;
         self.presentation = Some(presentation);
         self.navigation = navigation;
+        if let [animation] = snapshot.animations.as_slice() {
+            self.animation_playing = animation.playing;
+        }
         self.active_presentation = Some(snapshot);
         Ok(())
     }
@@ -837,6 +880,7 @@ impl AppState {
                 .active_presentation
                 .as_ref()
                 .map(|snapshot| snapshot.cue_id),
+            animation_playing: self.animation_playing,
         }
     }
 
@@ -1091,6 +1135,7 @@ pub enum ReduceError {
     InvalidTime,
     FutureEffectInput,
     FuturePresentationInput,
+    FutureAnimationInput,
     Navigation(&'static str),
     NavigationState(String),
     Presentation(String),
@@ -1110,6 +1155,8 @@ impl fmt::Display for ReduceError {
             ),
             Self::FuturePresentationInput => formatter
                 .write_str("presentation input cannot be scheduled beyond the current app frame"),
+            Self::FutureAnimationInput => formatter
+                .write_str("animation input cannot be scheduled beyond the current app frame"),
             Self::Navigation(message) => write!(formatter, "navigation event failed: {message}"),
             Self::NavigationState(message) => {
                 write!(formatter, "navigation synchronization failed: {message}")
@@ -1206,6 +1253,46 @@ mod tests {
     fn presentation_fixture() -> Presentation {
         Presentation::from_json(hyperscape::HACKER_NIGHT_PRESENTATION_JSON)
         .unwrap()
+    }
+
+    #[test]
+    fn animation_playback_is_reducer_owned_and_cue_initialized() {
+        let store = AppStore::default();
+        assert!(store.summary_snapshot().animation_playing);
+
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 1,
+                at_seconds: 0.0,
+                value: SemanticAction::Animate(AnimationAction::SetPlaying(false)),
+            }))
+            .unwrap();
+        assert!(!store.summary_snapshot().animation_playing);
+
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 2,
+                at_seconds: 0.0,
+                value: SemanticAction::Animate(AnimationAction::TogglePlaying),
+            }))
+            .unwrap();
+        assert!(store.summary_snapshot().animation_playing);
+
+        let rejected = store.dispatch(AppEvent::Input(Timed {
+            sequence: 3,
+            at_seconds: 1.0,
+            value: SemanticAction::Animate(AnimationAction::SetPlaying(false)),
+        }));
+        assert_eq!(rejected, Err(ReduceError::FutureAnimationInput));
+        assert!(store.summary_snapshot().animation_playing);
+
+        let mut presentation = presentation_fixture();
+        presentation.cues[0].animations[0].playing = false;
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation))
+            .unwrap();
+        dispatch_presentation(&store, 4, 0.0, PresentationAction::Start).unwrap();
+        assert!(!store.summary_snapshot().animation_playing);
     }
 
     fn dispatch_presentation(

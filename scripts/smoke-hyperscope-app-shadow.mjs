@@ -209,6 +209,14 @@ assert.equal(
 );
 
 const app = new HyperscopeAppShadow();
+assert.equal(app.snapshot().animationPlaying, true);
+const pausedAnimation = app.setAnimationPlaying(90, false);
+assert.equal(pausedAnimation.playing, false);
+assert.equal(pausedAnimation.commit.disposition, 'applied');
+assert.equal(app.snapshot().animationPlaying, false);
+const resumedAnimation = app.toggleAnimationPlaying(91);
+assert.equal(resumedAnimation.playing, true);
+assert.equal(app.snapshot().animationPlaying, true);
 const asset = 'f0000000-0000-4000-8000-000000000001';
 const first = 'e0000000-0000-4000-8000-000000000001';
 const second = 'e0000000-0000-4000-8000-000000000002';
@@ -1581,6 +1589,7 @@ console.log(JSON.stringify({
   },
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
   presentationCue: finalSnapshot.presentation.active.cue_id,
+  animationPlaying: finalSnapshot.animationPlaying,
   navigationBoundaryParity: true,
   spaceMouseInputCases: {
     exhaustiveMapping: exhaustiveMappingCases,

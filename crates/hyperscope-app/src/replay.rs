@@ -6,8 +6,9 @@
 //! future render backends can consume the same oracle.
 
 use crate::{
-    AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope,
-    AssetStatus, AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick,
+    AnimationAction, AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion,
+    AssetLoadOutcome, AssetLoadScope, AssetStatus, AuthoredRevision, CommitDisposition,
+    EffectCompletion, FrameTick,
     NavigationSynchronization, PresentationAction, ReceivedPresence, SemanticAction, Timed,
 };
 use hyperscape::{
@@ -24,7 +25,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.10";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.11";
+pub const LEGACY_APP_REPLAY_VERSION_0_10: &str = "hyperscope-app-replay/0.10";
 pub const LEGACY_APP_REPLAY_VERSION_0_9: &str = "hyperscope-app-replay/0.9";
 pub const LEGACY_APP_REPLAY_VERSION_0_8: &str = "hyperscope-app-replay/0.8";
 pub const LEGACY_APP_REPLAY_VERSION_0_7: &str = "hyperscope-app-replay/0.7";
@@ -41,6 +43,7 @@ enum ReplaySchema {
     V0_8,
     V0_9,
     V0_10,
+    V0_11,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -82,6 +85,11 @@ pub enum AppReplayEvent {
         at_seconds: f64,
         action: ReplayPresentationAction,
     },
+    Animate {
+        sequence: u64,
+        at_seconds: f64,
+        action: ReplayAnimationAction,
+    },
     RequestAsset {
         sequence: u64,
         at_seconds: f64,
@@ -112,6 +120,22 @@ pub enum AppReplayEvent {
         elapsed_seconds: f64,
         delta_seconds: f64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ReplayAnimationAction {
+    SetPlaying { playing: bool },
+    TogglePlaying,
+}
+
+impl From<ReplayAnimationAction> for AnimationAction {
+    fn from(action: ReplayAnimationAction) -> Self {
+        match action {
+            ReplayAnimationAction::SetPlaying { playing } => Self::SetPlaying(playing),
+            ReplayAnimationAction::TogglePlaying => Self::TogglePlaying,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -621,6 +645,7 @@ pub struct AppReplayState {
     pub active_cue: Option<Uuid>,
     pub active_scene: Option<Uuid>,
     pub active_view: Option<Uuid>,
+    pub animation_playing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loading_primary_scene_asset: Option<AssetId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -776,7 +801,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_7 => ReplaySchema::V0_7,
         LEGACY_APP_REPLAY_VERSION_0_8 => ReplaySchema::V0_8,
         LEGACY_APP_REPLAY_VERSION_0_9 => ReplaySchema::V0_9,
-        APP_REPLAY_VERSION => ReplaySchema::V0_10,
+        LEGACY_APP_REPLAY_VERSION_0_10 => ReplaySchema::V0_10,
+        APP_REPLAY_VERSION => ReplaySchema::V0_11,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -904,6 +930,20 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             at_seconds: *at_seconds,
             value: SemanticAction::Present((*action).into()),
         })),
+        AppReplayEvent::Animate {
+            sequence,
+            at_seconds,
+            action,
+        } => {
+            if schema != ReplaySchema::V0_11 {
+                return Err("animation playback actions require app replay 0.11".to_owned());
+            }
+            Ok(AppEvent::Input(Timed {
+                sequence: *sequence,
+                at_seconds: *at_seconds,
+                value: SemanticAction::Animate((*action).into()),
+            }))
+        }
         AppReplayEvent::RequestAsset {
             sequence,
             at_seconds,
@@ -917,7 +957,9 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                 request_id: *request_id,
                 asset: asset.clone(),
                 scope: match schema {
-                    ReplaySchema::V0_9 | ReplaySchema::V0_10 => (*scope).into(),
+                    ReplaySchema::V0_9 | ReplaySchema::V0_10 | ReplaySchema::V0_11 => {
+                        (*scope).into()
+                    }
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -985,7 +1027,7 @@ fn navigation_action_for_replay_version(
     {
         return Err("camera lens/target-mode actions require replay 0.6".to_owned());
     }
-    if schema != ReplaySchema::V0_10
+    if !matches!(schema, ReplaySchema::V0_10 | ReplaySchema::V0_11)
         && matches!(
             action,
             ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1007,7 +1049,11 @@ fn navigation_action_for_replay_version(
     }
     if !matches!(
         schema,
-        ReplaySchema::V0_7 | ReplaySchema::V0_8 | ReplaySchema::V0_9 | ReplaySchema::V0_10
+        ReplaySchema::V0_7
+            | ReplaySchema::V0_8
+            | ReplaySchema::V0_9
+            | ReplaySchema::V0_10
+            | ReplaySchema::V0_11
     )
         && matches!(
             action,
@@ -1055,6 +1101,7 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         active_cue: active.map(|snapshot| snapshot.cue_id),
         active_scene: active.map(|snapshot| snapshot.scene_id),
         active_view: active.map(|snapshot| snapshot.view_id),
+        animation_playing: state.animation_playing,
         loading_primary_scene_asset: state.primary_scene_load.map(|(_, asset)| asset),
         loading_primary_scene_request: state.primary_scene_load.map(|(request, _)| request),
         assets: state
@@ -1192,6 +1239,7 @@ mod tests {
         assert_eq!(left.active_cue, right.active_cue);
         assert_eq!(left.active_scene, right.active_scene);
         assert_eq!(left.active_view, right.active_view);
+        assert_eq!(left.animation_playing, right.animation_playing);
         assert_eq!(
             left.loading_primary_scene_asset,
             right.loading_primary_scene_asset
@@ -1213,6 +1261,40 @@ mod tests {
         assert_eq!(left.navigation, right.navigation);
         assert_eq!(left.camera, right.camera);
         assert_eq!(left.focus, right.focus);
+    }
+
+    #[test]
+    fn replay_records_animation_playback_actions_and_rejects_legacy_use() {
+        let events = vec![
+            AppReplayEvent::Animate {
+                sequence: 1,
+                at_seconds: 0.0,
+                action: ReplayAnimationAction::SetPlaying { playing: false },
+            },
+            AppReplayEvent::Animate {
+                sequence: 2,
+                at_seconds: 0.0,
+                action: ReplayAnimationAction::TogglePlaying,
+            },
+        ];
+        let trace = run_app_replay(&AppReplayScript::new(events.clone())).unwrap();
+        assert!(!trace.records[0].state.animation_playing);
+        assert!(trace.records[1].state.animation_playing);
+        assert!(trace.records.iter().all(|record| matches!(
+            record.outcome,
+            AppReplayOutcome::Committed { .. }
+        )));
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_10.to_owned(),
+            events,
+        })
+        .unwrap();
+        assert!(legacy.records.iter().all(|record| matches!(
+            &record.outcome,
+            AppReplayOutcome::Rejected { error }
+                if error.contains("require app replay 0.11")
+        )));
     }
 
     fn committed_effects(record: &AppReplayRecord) -> &[AppReplayEffect] {
@@ -1295,6 +1377,7 @@ mod tests {
             AppEvent::Input(timed) => match &timed.value {
                 SemanticAction::Navigate(_) => "navigate",
                 SemanticAction::Present(_) => "present",
+                SemanticAction::Animate(_) => "animate",
                 SemanticAction::RequestAsset { .. } => "request_asset",
                 SemanticAction::CancelAsset(_) => "cancel_asset",
             },
