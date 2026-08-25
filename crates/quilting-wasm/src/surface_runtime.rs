@@ -8,11 +8,11 @@
 use std::collections::BTreeMap;
 
 use hyperscape::{
-    CameraRig, SphereReflectionState, StableEntityId, SurfaceAddress, SurfaceAdvance,
-    SurfaceAttachment, SurfaceDetachReason, SurfaceField, SurfaceSample, SurfaceWalkAttachRequest,
-    SurfaceWalkControls, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkRuntime,
-    SurfaceWalkStepRequest, SurfaceWalkUpdate, SurfaceWalker, SurfaceWalkerStatus,
-    TransitionEasing, TriangleAdjacency,
+    AnimatedSurfaceAnchor, CameraRig, SphereReflectionState, StableEntityId, SurfaceAddress,
+    SurfaceAdvance, SurfaceAttachment, SurfaceDetachReason, SurfaceField, SurfaceSample,
+    SurfaceWalkAttachRequest, SurfaceWalkControls, SurfaceWalkInput, SurfaceWalkMetrics,
+    SurfaceWalkRuntime, SurfaceWalkStepRequest, SurfaceWalkUpdate, SurfaceWalker,
+    SurfaceWalkerStatus, TransitionEasing, TriangleAdjacency,
 };
 use quilting_core::instance_layout;
 use quilting_core::patch::QBTriPatch;
@@ -138,6 +138,7 @@ impl SurfaceVelocityTracker {
 pub(crate) struct SurfaceRuntime {
     walker: SurfaceWalker,
     composed: SurfaceWalkRuntime,
+    camera_anchor: Option<AnimatedSurfaceAnchor>,
     adjacency: Option<TriangleAdjacency>,
     joint_indices: Vec<[u16; 4]>,
     joint_weights: Vec<[f32; 4]>,
@@ -149,9 +150,11 @@ pub(crate) struct SurfaceRuntime {
     pose_sample: Option<TimedPoseSample>,
     legacy_velocity: SurfaceVelocityTracker,
     composed_velocity: SurfaceVelocityTracker,
+    camera_anchor_velocity: SurfaceVelocityTracker,
     legacy_eye_height: f64,
     attachment_orientation_sign: i8,
     composed_attachment_orientation_sign: i8,
+    camera_anchor_orientation_sign: i8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,9 +192,26 @@ pub(crate) struct SurfaceWalkCameraSnapshot {
     pub up: [f64; 3],
     pub forward: [f64; 3],
     pub control_distance: f64,
+    pub semantic_target: Option<[f64; 3]>,
     pub vertical_fov_radians: f64,
     pub near: f64,
     pub far: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SurfaceCameraAnchorSnapshot {
+    pub status: &'static str,
+    pub detach_reason: Option<&'static str>,
+    pub node: Option<u32>,
+    pub face: Option<u32>,
+    pub barycentric: Option<[f64; 3]>,
+    pub output_position: Option<[f64; 3]>,
+    pub output_normal: Option<[f64; 3]>,
+    pub tangent_right: Option<[f64; 3]>,
+    pub tangent_forward: Option<[f64; 3]>,
+    pub surface_velocity: Option<[f64; 3]>,
+    pub camera: SurfaceWalkCameraSnapshot,
+    pub pose_sample: Option<SurfacePoseSampleSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -249,12 +269,15 @@ impl SurfaceRuntime {
     pub fn reset_geometry(&mut self) {
         self.walker = SurfaceWalker::default();
         self.composed = SurfaceWalkRuntime::default();
+        self.camera_anchor = None;
         self.adjacency = None;
         self.legacy_velocity.reset();
         self.composed_velocity.reset();
+        self.camera_anchor_velocity.reset();
         self.legacy_eye_height = 0.0;
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
+        self.camera_anchor_orientation_sign = 1;
     }
 
     pub fn set_skinning(&mut self, joint_indices: &[[u16; 4]], joint_weights: &[[f32; 4]]) {
@@ -346,8 +369,10 @@ impl SurfaceRuntime {
         self.pose_sample = None;
         self.legacy_velocity.reset();
         self.composed_velocity.reset();
+        self.camera_anchor_velocity.reset();
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
+        self.camera_anchor_orientation_sign = 1;
     }
 
     pub fn attachment_face(&self) -> Option<u32> {
@@ -360,6 +385,11 @@ impl SurfaceRuntime {
         self.composed
             .attachment()
             .map(|attachment| attachment.address.face)
+    }
+
+    pub fn camera_anchor_face(&self) -> Option<u32> {
+        self.camera_anchor
+            .map(|anchor| anchor.attachment().address.face)
     }
 
     /// Carry every output-chart surface-walk cache through
@@ -554,6 +584,9 @@ impl SurfaceRuntime {
         };
         let attachment = SurfaceAttachment::with_normal_sign(address, normal_sign)
             .map_err(|error| format!("invalid surface attachment: {error:?}"))?;
+        self.camera_anchor = None;
+        self.camera_anchor_velocity.reset();
+        self.camera_anchor_orientation_sign = 1;
         self.walker.attach(attachment);
         self.legacy_velocity.reset();
         self.legacy_eye_height = eye_height;
@@ -572,12 +605,198 @@ impl SurfaceRuntime {
     pub fn detach(&mut self) -> SurfaceRuntimeSnapshot {
         self.walker.detach(SurfaceDetachReason::Manual);
         self.composed.detach(SurfaceDetachReason::Manual);
+        self.camera_anchor = None;
         self.legacy_velocity.reset();
         self.composed_velocity.reset();
+        self.camera_anchor_velocity.reset();
         self.legacy_eye_height = 0.0;
         self.attachment_orientation_sign = 1;
         self.composed_attachment_orientation_sign = 1;
+        self.camera_anchor_orientation_sign = 1;
         detached_snapshot(SurfaceDetachReason::Manual)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_camera_anchor(
+        &mut self,
+        instances: &[f32],
+        num_faces: usize,
+        face_nodes: &[usize],
+        face: u32,
+        barycentric: [f64; 3],
+        camera: CameraRig,
+        orientation_sign: i8,
+        mobius: [f32; 16],
+        euclidean_model: [f32; 16],
+    ) -> Result<SurfaceCameraAnchorSnapshot, String> {
+        if face as usize >= num_faces || face_nodes.len() != num_faces {
+            return Err("surface face is outside the current model".into());
+        }
+        camera.validate().map_err(|error| error.to_string())?;
+        if self.adjacency.is_none() {
+            self.adjacency = Some(build_adjacency(instances, num_faces, face_nodes)?);
+        }
+        let node = face_nodes[face as usize];
+        let address = SurfaceAddress::new(runtime_entity_id(node), face, barycentric)
+            .map_err(|error| format!("invalid surface address: {error:?}"))?;
+        let adjacency = self
+            .adjacency
+            .as_ref()
+            .ok_or_else(|| "surface topology is unavailable".to_string())?;
+        let mut field = RuntimeSurfaceField {
+            instances,
+            face_nodes,
+            adjacency,
+            pose: PoseData {
+                joint_indices: &self.joint_indices,
+                joint_weights: &self.joint_weights,
+                morph_deltas: &self.morph_deltas,
+                morph_num_vertices: self.morph_num_vertices,
+                morph_num_targets: self.morph_num_targets,
+                joint_matrices: &self.joint_matrices,
+                morph_weights: &self.morph_weights,
+            },
+            mobius: mobius_from_array(mobius),
+            euclidean_model,
+            surface_velocity: [0.0; 3],
+        };
+        let sample = field
+            .sample(address)
+            .ok_or_else(|| "could not sample camera anchor".to_string())?;
+        let normal = sample
+            .normal()
+            .ok_or_else(|| "camera anchor has no stable normal".to_string())?;
+        let normal_sign = if dot(sub(camera.eye, sample.output_position), normal) < 0.0 {
+            -1
+        } else {
+            1
+        };
+        let attachment = SurfaceAttachment::with_normal_sign(address, normal_sign)
+            .map_err(|error| format!("invalid surface attachment: {error:?}"))?;
+        let anchor = AnimatedSurfaceAnchor::attach(attachment, sample, camera)
+            .map_err(|error| error.to_string())?;
+
+        self.walker.detach(SurfaceDetachReason::Manual);
+        self.composed.detach(SurfaceDetachReason::Manual);
+        self.legacy_velocity.reset();
+        self.composed_velocity.reset();
+        self.camera_anchor_velocity.reset();
+        self.camera_anchor_velocity
+            .commit(Some(sample.output_position), self.pose_sample);
+        self.camera_anchor = Some(anchor);
+        self.camera_anchor_orientation_sign = normalize_orientation_sign(orientation_sign);
+        Ok(camera_anchor_snapshot(
+            anchor,
+            sample,
+            camera,
+            node,
+            pose_sample_snapshot(self.pose_sample, self.camera_anchor_velocity),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_camera_anchor(
+        &mut self,
+        instances: &[f32],
+        face_nodes: &[usize],
+        camera: CameraRig,
+        capture_relative_camera: bool,
+        orientation_sign: i8,
+        mobius: [f32; 16],
+        euclidean_model: [f32; 16],
+    ) -> Result<SurfaceCameraAnchorSnapshot, String> {
+        let next_orientation_sign = normalize_orientation_sign(orientation_sign);
+        if self.camera_anchor_orientation_sign != next_orientation_sign {
+            return Err("camera anchor reflection transport is required before sampling".into());
+        }
+        let mut anchor = self
+            .camera_anchor
+            .ok_or_else(|| "surface camera anchor is detached".to_string())?;
+        if capture_relative_camera {
+            anchor
+                .recapture_camera(camera)
+                .map_err(|error| error.to_string())?;
+        }
+        let address = anchor.attachment().address;
+        let node = *face_nodes
+            .get(address.face as usize)
+            .ok_or_else(|| "surface face has no node identity".to_string())?;
+        let adjacency = self
+            .adjacency
+            .as_ref()
+            .ok_or_else(|| "surface topology is unavailable".to_string())?;
+        let mut field = RuntimeSurfaceField {
+            instances,
+            face_nodes,
+            adjacency,
+            pose: PoseData {
+                joint_indices: &self.joint_indices,
+                joint_weights: &self.joint_weights,
+                morph_deltas: &self.morph_deltas,
+                morph_num_vertices: self.morph_num_vertices,
+                morph_num_targets: self.morph_num_targets,
+                joint_matrices: &self.joint_matrices,
+                morph_weights: &self.morph_weights,
+            },
+            mobius: mobius_from_array(mobius),
+            euclidean_model,
+            surface_velocity: [0.0; 3],
+        };
+        let initial_sample = field
+            .sample(address)
+            .ok_or_else(|| "could not sample camera anchor".to_string())?;
+        let mut velocity_tracker = self.camera_anchor_velocity;
+        field.surface_velocity =
+            velocity_tracker.observe(initial_sample.output_position, self.pose_sample);
+        let sample = field
+            .sample(address)
+            .ok_or_else(|| "could not resample camera anchor velocity".to_string())?;
+        let followed = anchor
+            .follow_sample(sample)
+            .map_err(|error| error.to_string())?;
+        velocity_tracker.commit(Some(sample.output_position), self.pose_sample);
+
+        self.camera_anchor = Some(anchor);
+        self.camera_anchor_velocity = velocity_tracker;
+        Ok(camera_anchor_snapshot(
+            anchor,
+            sample,
+            followed.camera,
+            node,
+            pose_sample_snapshot(self.pose_sample, self.camera_anchor_velocity),
+        ))
+    }
+
+    pub fn transport_camera_anchor_between_reflections(
+        &mut self,
+        previous: SphereReflectionState,
+        next: SphereReflectionState,
+        transported_camera: CameraRig,
+    ) -> Result<bool, String> {
+        let Some(mut anchor) = self.camera_anchor else {
+            return Ok(false);
+        };
+        let previous_position = transport_optional_position(
+            self.camera_anchor_velocity.previous_output_position,
+            previous,
+            next,
+        )?;
+        anchor
+            .rebase_after_reflection_transport(previous, next, transported_camera)
+            .map_err(|error| error.to_string())?;
+        self.camera_anchor = Some(anchor);
+        self.camera_anchor_velocity
+            .begin_chart_transport(previous_position);
+        self.camera_anchor_orientation_sign *=
+            previous.orientation_sign() * next.orientation_sign();
+        Ok(true)
+    }
+
+    pub fn detach_camera_anchor(&mut self) -> bool {
+        let detached = self.camera_anchor.take().is_some();
+        self.camera_anchor_velocity.reset();
+        self.camera_anchor_orientation_sign = 1;
+        detached
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -642,6 +861,9 @@ impl SurfaceRuntime {
                 &mut field,
             )
             .map_err(|error| error.to_string())?;
+        self.camera_anchor = None;
+        self.camera_anchor_velocity.reset();
+        self.camera_anchor_orientation_sign = 1;
         self.composed_velocity.reset();
         self.composed_velocity.commit(
             update
@@ -1194,6 +1416,31 @@ fn composed_snapshot(
     }
 }
 
+fn camera_anchor_snapshot(
+    anchor: AnimatedSurfaceAnchor,
+    sample: SurfaceSample,
+    camera: CameraRig,
+    node: usize,
+    pose_sample: Option<SurfacePoseSampleSnapshot>,
+) -> SurfaceCameraAnchorSnapshot {
+    let frame = anchor.frame();
+    let attachment = anchor.attachment();
+    SurfaceCameraAnchorSnapshot {
+        status: "attached",
+        detach_reason: None,
+        node: Some(node as u32),
+        face: Some(attachment.address.face),
+        barycentric: Some(attachment.address.barycentric),
+        output_position: Some(frame.origin),
+        output_normal: Some(frame.normal),
+        tangent_right: Some(frame.tangent_right),
+        tangent_forward: Some(frame.tangent_forward),
+        surface_velocity: Some(sample.surface_velocity),
+        camera: camera_snapshot(camera),
+        pose_sample,
+    }
+}
+
 fn pose_sample_snapshot(
     pose: Option<TimedPoseSample>,
     tracker: SurfaceVelocityTracker,
@@ -1217,6 +1464,7 @@ fn camera_snapshot(camera: CameraRig) -> SurfaceWalkCameraSnapshot {
         up: basis.up,
         forward: basis.forward,
         control_distance: camera.control_distance,
+        semantic_target: camera.semantic_target,
         vertical_fov_radians: camera.lens.vertical_fov_radians,
         near: camera.lens.near,
         far: camera.lens.far,
@@ -1522,6 +1770,98 @@ mod tests {
             )
             .unwrap();
         assert!((snapshot.output_position.unwrap()[2] - 2.0).abs() < 1.0e-9);
+    }
+
+    #[wasm_bindgen_test]
+    fn fixed_camera_anchor_follows_pose_and_recaptures_navigation_edits() {
+        let instances = triangle_instances();
+        let mut runtime = SurfaceRuntime::default();
+        runtime.set_morph_targets(
+            &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            3,
+            1,
+        );
+        runtime
+            .set_timed_pose(&[], &[0.0], 0.0, 10.0, 1, 1)
+            .unwrap();
+        let camera = CameraRig::new(
+            [0.25, 0.25, 2.0],
+            CameraBasis::CANONICAL,
+            2.0,
+            None,
+            PerspectiveLens::default(),
+        )
+        .unwrap();
+        let attached = runtime
+            .attach_camera_anchor(
+                &instances,
+                1,
+                &[0],
+                0,
+                [0.5, 0.25, 0.25],
+                camera,
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        assert_near3(attached.output_position.unwrap(), [0.25, 0.25, 0.0], 1.0e-10);
+        assert_near3(attached.camera.eye, camera.eye, 1.0e-10);
+
+        runtime
+            .set_timed_pose(&[], &[1.0], 1.0, 10.0 + 1.0 / 60.0, 2, 1)
+            .unwrap();
+        let moved = runtime
+            .step_camera_anchor(
+                &instances,
+                &[0],
+                camera,
+                false,
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        assert_near3(moved.output_position.unwrap(), [1.25, 0.25, 0.0], 1.0e-10);
+        assert_near3(moved.camera.eye, [1.25, 0.25, 2.0], 1.0e-10);
+
+        let current_anchor = runtime.camera_anchor.unwrap();
+        let mut edited = current_anchor
+            .relative_camera()
+            .resolve(current_anchor.frame())
+            .unwrap();
+        edited.eye[1] += 0.75;
+        let recaptured = runtime
+            .step_camera_anchor(
+                &instances,
+                &[0],
+                edited,
+                true,
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        assert_near3(recaptured.camera.eye, edited.eye, 1.0e-10);
+
+        runtime
+            .set_timed_pose(&[], &[0.0], 0.0, 20.0, 1, 2)
+            .unwrap();
+        let returned = runtime
+            .step_camera_anchor(
+                &instances,
+                &[0],
+                edited,
+                false,
+                1,
+                identity_mobius(),
+                identity_matrix(),
+            )
+            .unwrap();
+        assert_near3(returned.output_position.unwrap(), [0.25, 0.25, 0.0], 1.0e-10);
+        assert_near3(returned.camera.eye, [0.25, 1.0, 2.0], 1.0e-10);
+        assert_eq!(returned.face, attached.face);
+        assert_eq!(returned.barycentric, attached.barycentric);
     }
 
     #[test]

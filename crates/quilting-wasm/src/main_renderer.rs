@@ -35,8 +35,8 @@ use quilting_core::source_bounds::source_focus_bounds;
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{
-    validate_pose_stamp, ComposedSurfaceWalkSnapshot, SurfaceRuntime, SurfaceRuntimeSnapshot,
-    SurfaceWalkReflectionTransportSnapshot,
+    validate_pose_stamp, ComposedSurfaceWalkSnapshot, SurfaceCameraAnchorSnapshot, SurfaceRuntime,
+    SurfaceRuntimeSnapshot, SurfaceWalkReflectionTransportSnapshot,
 };
 use crate::surface_walk::{ComposedSurfaceWalkResultJs, SurfaceWalkReflectionTransportResultJs};
 use hyperscape::interchange::{
@@ -1931,6 +1931,22 @@ fn surface_walk_camera(
     .map_err(|error| error.to_string())
 }
 
+fn surface_camera_anchor_camera(
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    parameters: &[f64],
+    semantic_target: &[f64],
+) -> Result<CameraRig, String> {
+    let mut camera = surface_walk_camera(eye, forward, up, parameters)?;
+    camera.semantic_target = match semantic_target {
+        [] => None,
+        values => Some(exact_vector3(values, "surface-anchor semantic target")?),
+    };
+    camera.validate().map_err(|error| error.to_string())?;
+    Ok(camera)
+}
+
 fn surface_walk_controls(values: &[f64]) -> Result<SurfaceWalkControls, String> {
     let [
         base_radii_per_second,
@@ -1988,6 +2004,21 @@ fn surface_walk_reflection_transport_to_js(
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
+fn surface_camera_anchor_snapshot_to_js(
+    snapshot: Result<SurfaceCameraAnchorSnapshot, String>,
+) -> JsValue {
+    match snapshot {
+        Ok(snapshot) => serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL),
+        Err(error) => {
+            warn!("Surface camera anchor: {error}");
+            let result = js_sys::Object::new();
+            js_sys::Reflect::set(&result, &"status".into(), &"error".into()).ok();
+            js_sys::Reflect::set(&result, &"error".into(), &error.into()).ok();
+            result.into()
+        }
+    }
+}
+
 /// Atomically carry topology-side state, the composed contact follower, and
 /// previous animated-contact samples into a new spherical-reflection chart.
 /// This export is deliberately independent of the render backend.
@@ -2015,6 +2046,172 @@ pub fn mr_transport_surface_walk_reflection(
             .transport_between_reflections(previous, next)
             .map_err(|error| JsValue::from_str(&error))?;
         surface_walk_reflection_transport_to_js(snapshot)
+    })
+}
+
+/// Attach an ordinary orbit/fly/drone camera to one animated material point.
+/// Unlike walking, this retains the source face and barycentric coordinate.
+#[wasm_bindgen(js_name = "mr_attachSurfaceCameraAnchor")]
+#[allow(clippy::too_many_arguments)]
+pub fn mr_attach_surface_camera_anchor(
+    face: u32,
+    barycentric: &[f64],
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    camera_parameters: &[f64],
+    semantic_target: &[f64],
+) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let Some(&node) = state.face_nodes.get(face as usize) else {
+            return surface_camera_anchor_snapshot_to_js(Err(
+                "surface face has no node".into(),
+            ));
+        };
+        let request = (|| {
+            let barycentric = exact_vector3(barycentric, "surface barycentric")?;
+            let camera = surface_camera_anchor_camera(
+                eye,
+                forward,
+                up,
+                camera_parameters,
+                semantic_target,
+            )?;
+            let conformal = conformal_state_for_node(state, node);
+            let orientation_sign = conformal.orientation_sign
+                * affine_orientation_sign(&conformal.euclidean_model);
+            let MainState {
+                surface_runtime,
+                cached_instances,
+                face_nodes,
+                num_faces,
+                ..
+            } = state;
+            surface_runtime.attach_camera_anchor(
+                cached_instances,
+                *num_faces,
+                face_nodes,
+                face,
+                barycentric,
+                camera,
+                orientation_sign,
+                conformal.mobius,
+                conformal.euclidean_model,
+            )
+        })();
+        surface_camera_anchor_snapshot_to_js(request)
+    })
+}
+
+/// Re-evaluate a fixed camera anchor against the latest accepted animation
+/// pose. `capture_relative_camera` records a navigation edit before following.
+#[wasm_bindgen(js_name = "mr_stepSurfaceCameraAnchor")]
+#[allow(clippy::too_many_arguments)]
+pub fn mr_step_surface_camera_anchor(
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    camera_parameters: &[f64],
+    semantic_target: &[f64],
+    capture_relative_camera: bool,
+) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let request = (|| {
+            let face = state
+                .surface_runtime
+                .camera_anchor_face()
+                .ok_or_else(|| "surface camera anchor is detached".to_string())?;
+            let node = *state
+                .face_nodes
+                .get(face as usize)
+                .ok_or_else(|| "attached face has no node".to_string())?;
+            let camera = surface_camera_anchor_camera(
+                eye,
+                forward,
+                up,
+                camera_parameters,
+                semantic_target,
+            )?;
+            let conformal = conformal_state_for_node(state, node);
+            let orientation_sign = conformal.orientation_sign
+                * affine_orientation_sign(&conformal.euclidean_model);
+            let MainState {
+                surface_runtime,
+                cached_instances,
+                face_nodes,
+                ..
+            } = state;
+            surface_runtime.step_camera_anchor(
+                cached_instances,
+                face_nodes,
+                camera,
+                capture_relative_camera,
+                orientation_sign,
+                conformal.mobius,
+                conformal.euclidean_model,
+            )
+        })();
+        surface_camera_anchor_snapshot_to_js(request)
+    })
+}
+
+/// Rebase fixed-anchor caches after the browser has transported the live
+/// camera exactly through a spherical-reflection chart change.
+#[wasm_bindgen(js_name = "mr_transportSurfaceCameraAnchorReflection")]
+#[allow(clippy::too_many_arguments)]
+pub fn mr_transport_surface_camera_anchor_reflection(
+    previous_enabled: bool,
+    previous_center: &[f64],
+    previous_radius: f64,
+    next_enabled: bool,
+    next_center: &[f64],
+    next_radius: f64,
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    camera_parameters: &[f64],
+    semantic_target: &[f64],
+) -> Result<bool, JsValue> {
+    let previous =
+        surface_walk_reflection_state(previous_enabled, previous_center, previous_radius)
+            .map_err(|error| JsValue::from_str(&error))?;
+    let next = surface_walk_reflection_state(next_enabled, next_center, next_radius)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let camera = surface_camera_anchor_camera(
+        eye,
+        forward,
+        up,
+        camera_parameters,
+        semantic_target,
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return Ok(false);
+        };
+        state
+            .surface_runtime
+            .transport_camera_anchor_between_reflections(previous, next, camera)
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_detachSurfaceCameraAnchor")]
+pub fn mr_detach_surface_camera_anchor() -> bool {
+    STATE.with(|state| {
+        state
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|state| state.surface_runtime.detach_camera_anchor())
     })
 }
 
