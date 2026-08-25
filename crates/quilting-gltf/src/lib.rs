@@ -15,6 +15,72 @@ pub const WRAP_MIRRORED_REPEAT: u32 = 0x8370;
 pub const HYPERSCAPE_TRACK_GLTF: &[u8] =
     include_bytes!("../fixtures/hyperscape-track.gltf");
 
+/// Bounded display metadata projected from a glTF asset.
+///
+/// `copyright` and `generator` are standard glTF fields. Sketchfab exports
+/// commonly place `title`, `author`, `license`, and `source` in
+/// `asset.extras`; retaining those known strings lets downstream applications
+/// present the model's own provenance without keeping arbitrary extras alive.
+/// The values remain authored metadata, not an independent verification of
+/// ownership or redistribution rights.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct GltfAssetMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copyright: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// Project standard glTF metadata and the known Sketchfab attribution fields.
+/// Invalid, non-object, or differently typed extras are ignored field by
+/// field; they must never prevent otherwise renderable geometry from loading.
+pub fn extract_asset_metadata(document: &gltf::Document) -> GltfAssetMetadata {
+    let asset = &document.as_json().asset;
+    let extras = asset
+        .extras
+        .as_ref()
+        .and_then(|extras| serde_json::from_str::<serde_json::Value>(extras.get()).ok());
+    let extra_string = |key: &str| {
+        extras
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|extras| extras.get(key))
+            .and_then(serde_json::Value::as_str)
+            .and_then(nonempty_metadata_string)
+    };
+
+    GltfAssetMetadata {
+        copyright: asset
+            .copyright
+            .as_deref()
+            .and_then(nonempty_metadata_string),
+        generator: asset
+            .generator
+            .as_deref()
+            .and_then(nonempty_metadata_string),
+        title: extra_string("title"),
+        author: extra_string("author"),
+        license: extra_string("license"),
+        source: extra_string("source"),
+    }
+}
+
+fn nonempty_metadata_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 /// Raw encoded image blob (PNG/JPEG bytes, not decoded).
 #[derive(Debug, Clone, Default)]
 pub struct RawImageBlob {
@@ -46,6 +112,7 @@ pub struct ImageData {
 /// All data extracted from a glTF/GLB file.
 #[derive(Debug)]
 pub struct GltfScene {
+    pub asset_metadata: GltfAssetMetadata,
     pub meshes: Vec<mesh::Mesh>,
     pub materials: Vec<material::PbrMaterial>,
     pub animations: Vec<animation::Animation>,
@@ -66,6 +133,7 @@ pub struct GltfScene {
 /// Designed for browser-native image decoding via createImageBitmap.
 #[derive(Debug)]
 pub struct GltfSceneRaw {
+    pub asset_metadata: GltfAssetMetadata,
     pub meshes: Vec<mesh::Mesh>,
     pub materials: Vec<material::PbrMaterial>,
     pub animations: Vec<animation::Animation>,
@@ -188,6 +256,7 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
         .map(|s| scene::extract_scene(&s))
         .collect();
 
+    let asset_metadata = extract_asset_metadata(&document);
     let default_scene = document.default_scene().map(|s| s.index());
     let hyperscape = hyperscape::extract_asset(&document)?;
 
@@ -266,6 +335,7 @@ pub fn load_gltf(data: &[u8]) -> Result<GltfScene, GltfError> {
     let texture_to_image: Vec<usize> = (0..tex_images.len()).collect();
 
     Ok(GltfScene {
+        asset_metadata,
         meshes,
         materials,
         animations,
@@ -313,6 +383,7 @@ pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
     let scenes: Vec<scene::Scene> = document.scenes()
         .map(|s| scene::extract_scene(&s))
         .collect();
+    let asset_metadata = extract_asset_metadata(&document);
     let default_scene = document.default_scene().map(|s| s.index());
     let hyperscape = hyperscape::extract_asset(&document)?;
 
@@ -372,6 +443,7 @@ pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
     let texture_to_image: Vec<usize> = (0..raw_textures.len()).collect();
 
     Ok(GltfSceneRaw {
+        asset_metadata,
         meshes, materials, animations, skins, scenes, nodes,
         raw_textures, texture_to_image, default_scene, hyperscape,
     })
@@ -380,6 +452,69 @@ pub fn load_gltf_raw(data: &[u8]) -> Result<GltfSceneRaw, GltfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_metadata_projects_standard_and_sketchfab_credit_fields() {
+        let json = serde_json::json!({
+            "asset": {
+                "version": "2.0",
+                "copyright": "  Copyright Example  ",
+                "generator": "Example Exporter",
+                "extras": {
+                    "title": "Example model",
+                    "author": "Example Author (https://example.test/author)",
+                    "license": "CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/)",
+                    "source": "https://example.test/model",
+                    "unrelated": { "large": "application payload" }
+                }
+            }
+        });
+        let document = gltf::Gltf::from_slice(&serde_json::to_vec(&json).unwrap())
+            .unwrap()
+            .document;
+
+        assert_eq!(
+            extract_asset_metadata(&document),
+            GltfAssetMetadata {
+                copyright: Some("Copyright Example".to_owned()),
+                generator: Some("Example Exporter".to_owned()),
+                title: Some("Example model".to_owned()),
+                author: Some("Example Author (https://example.test/author)".to_owned()),
+                license: Some(
+                    "CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/)".to_owned()
+                ),
+                source: Some("https://example.test/model".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_asset_extras_are_nonfatal_and_field_local() {
+        let json = serde_json::json!({
+            "asset": {
+                "version": "2.0",
+                "copyright": "standard credit",
+                "extras": {
+                    "title": "still useful",
+                    "author": 42,
+                    "license": "  ",
+                    "source": ["not", "a", "string"]
+                }
+            }
+        });
+        let document = gltf::Gltf::from_slice(&serde_json::to_vec(&json).unwrap())
+            .unwrap()
+            .document;
+
+        assert_eq!(
+            extract_asset_metadata(&document),
+            GltfAssetMetadata {
+                copyright: Some("standard credit".to_owned()),
+                title: Some("still useful".to_owned()),
+                ..GltfAssetMetadata::default()
+            }
+        );
+    }
 
     #[test]
     fn module_structure_compiles() {
