@@ -137,11 +137,18 @@ export class BrowserAssetEffectHost {
     return token.disposition;
   }
 
-  mayInstall(token) {
+  mayProcess(token) {
     if (this.implementation !== 'rust') return true;
-    if (!token || token.signal.aborted || token.superseded) return false;
-    if (token.disposition !== 'applied') return false;
+    if (!token || this.jobs.get(token.requestId) !== token) return false;
+    if (token.signal.aborted || token.superseded) return false;
     return token.scope !== 'primary_scene' || this.primary === token;
+  }
+
+  mayInstall(token) {
+    if (!this.mayProcess(token)) return false;
+    if (this.implementation !== 'rust') return true;
+    if (token.disposition !== 'applied') return false;
+    return true;
   }
 
   isExpectedCancellation(token, error) {

@@ -47,6 +47,9 @@ test('rust mode aborts and fences a superseded primary scene', () => {
     uri: 'horse.glb',
     scope: 'primary_scene',
   }).token;
+  assert.equal(first.disposition, null);
+  assert.equal(host.mayProcess(first), true);
+  assert.equal(host.mayInstall(first), false);
   host.recordCompletion(first, 'applied');
   assert.equal(host.mayInstall(first), true);
 
@@ -61,7 +64,10 @@ test('rust mode aborts and fences a superseded primary scene', () => {
     ],
   }).token;
   assert.equal(first.signal.aborted, true);
+  assert.equal(host.mayProcess(first), false);
   assert.equal(host.mayInstall(first), false);
+  assert.equal(host.mayProcess(second), true);
+  assert.equal(host.mayInstall(second), false);
   host.recordCompletion(second, 'applied');
   assert.equal(host.mayInstall(second), true);
 });
@@ -135,6 +141,7 @@ test('js mode preserves incumbent logical URIs without requiring Rust effects', 
   });
   assert.equal(token.uri, 'horse.glb');
   assert.deepEqual(mismatches, []);
+  assert.equal(host.mayProcess(token), true);
   assert.equal(host.mayInstall(token), true);
 });
 
