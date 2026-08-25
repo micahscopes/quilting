@@ -1675,3 +1675,53 @@ smokes, crate-scoped strict Clippy, and application rustdoc. The staged
 artifact passed strict noncommercial-mixed preflight over 23 files / 31.34 MiB
 with matching source/build fingerprint
 `e874d7f5250d8df19552cb36c8a05c6f`.
+
+## Presentation-freeze acceptance audit
+
+The 2026-08-25 freeze was checked from a detached, clean worktree at
+`c874fe8`, served on an isolated loopback port. The user-run `:8888` service
+and application tabs were not changed. Strict noncommercial-mixed preflight
+passed over the final 19-file / 23.46-MiB offline set. Its 173 build inputs
+total 20,688,441 bytes and have matching source/build fingerprint
+`10cfa8064da53dffab9fa4e005f0c356`.
+
+The installed Chrome DevTools MCP traversed all six presentation cues. Each
+cue retained both assets, 4,252 resident faces, nine topology domains, and one
+GPU LOD pass, with the expected visualization and no application mismatch,
+presentation failure, console warning, or console error. A direct reload of
+cue six restored the same two-asset PBR composition. The final exact artifact
+then reloaded cue one with Rust presentation and scene-extraction authority,
+the expected 984-face horse, build fingerprint above, and a clean console.
+
+A real `ant.glb` drag/drop while the deck was active exposed a release defect:
+the file was admitted while the old cue composition remained active, so the
+single-primary animation invariant rejected the result. The repaired behavior
+enters a clean ordinary-model route; Chrome observed the 9,768-face ant with
+one Rust request, one completion, no failure, and no warning or error. Browser
+Back remains the route-level return to the deck. Default JavaScript selection
+selected the horse and fitted its focus sphere, and default surface walking
+attached to animated horse face 57 without a console error.
+
+The real Blender/browser relay smoke received three browser frames, applied
+two Rust frames, projected translation `[3, 4, 5]`, and retained exact
+sequence `1787645284226591060` plus presence sequence
+`18446744073709551614`. Poll timers now detach settled abort listeners, so the
+smoke no longer emits the prior listener-leak warning.
+
+The final gate passed 63 browser-independent Node tests, all six checked
+browser/relay smoke programs, and all three deterministic Rust replay
+fingerprints. A foreground frame-rate claim is deliberately omitted: the
+isolated audit page stayed backgrounded to avoid selecting or disturbing the
+user's active tab, and Chrome throttled its animation callbacks accordingly.
+
+Four reviewable commits close the failures found during this freeze:
+
+- `bb0d493` removes retired WASM packages from release preflight;
+- `5ce9ba2` makes presentation drag/drop enter a clean model route;
+- `5d145cf` releases relay abort listeners after polling; and
+- `c874fe8` fingerprints the browser adapters copied into the release.
+
+The uncommitted selection/inversion bridge experiment was deliberately parked
+as `stash@{0}` rather than shipped. Release defaults remain the proven
+selection and walk paths; post-presentation work should replace the browser
+bridge with one typed Rust semantic-action ingress before changing authority.
