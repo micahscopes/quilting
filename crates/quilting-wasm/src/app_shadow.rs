@@ -159,6 +159,23 @@ impl HyperscopeAppShadow {
         hyperscope_web::asset_credits::mount_asset_credits(parent, self.store.clone());
     }
 
+    /// Mount the opt-in Leptos presentation card over the committed
+    /// presentation signal. Cue intent returns through the supplied browser
+    /// effect adapter until renderer adaptation also moves behind AppStore.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountPresentationCard)]
+    pub fn mount_presentation_card(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_action: js_sys::Function,
+    ) {
+        hyperscope_web::presentation_card::mount_presentation_card(
+            parent,
+            self.store.clone(),
+            on_action,
+        );
+    }
+
     #[wasm_bindgen(js_name = requestAsset)]
     #[allow(clippy::too_many_arguments)]
     pub fn request_asset(

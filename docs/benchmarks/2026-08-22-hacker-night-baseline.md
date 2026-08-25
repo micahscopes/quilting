@@ -2020,3 +2020,34 @@ feature crossover spent 690.7 ms. Renderer initialization accounted for
 attributing the cold-run gap to Leptos. The reproducible artifact delta above
 is the current size gate; a fresh-process repeated startup distribution remains
 required before migrating a large portion of the interface.
+
+## Leptos presentation-card projection
+
+The second authority island replaces an incumbent browser DOM projection
+rather than adding another status surface. A framework-neutral Rust view model
+projects the committed `PresentationReadModel`; its Leptos CSR component owns
+the visible card and observes `AppStore::presentation_signal()` directly.
+Previous and next buttons return only semantic `reverse` and `advance` intents
+through the temporary browser effect adapter. The old card remains available
+when the feature or mount method is absent.
+
+Relative to the asset-credit-only Leptos artifact, the presentation projection
+added 37,109 raw WASM bytes (+0.551%), 14,217 gzipped WASM bytes (+0.599%),
+3,780 raw JavaScript glue bytes (+2.122%), and 519 gzipped glue bytes (+1.834%).
+The combined compressed increment was 14,736 bytes (+0.614%). Both islands
+together measure 2,415,518 compressed bytes, 55,541 bytes (+2.353%) above the
+matched no-Leptos baseline. The exact Trunk build covered 191 source inputs
+totaling 20,857,530 bytes with fingerprint
+`f5e1b0e7652ab5b2486180ca06f3a9ad`.
+
+Chrome DevTools MCP exercised isolated feature-enabled and feature-absent
+release artifacts. The feature build reported `viewAuthority="hyperscope-web"`,
+one mount attempt, zero mount errors, one visible Rust card, and a hidden
+fallback. Advancing changed the cue, copy, progress, render mode, and canonical
+URL; reversing restored every observed initial value exactly. The feature-absent
+build reported `viewAuthority="browser-fallback"`, kept the Rust host empty and
+hidden, and passed the same exact round trip through the incumbent controls.
+Both runs retained zero renderer, scene, application, selection, focus,
+presentation-pose, and animation-playback mismatches or errors, with clean
+warning/error consoles. The five generated-WASM application, presentation,
+route, render, and walking smokes also passed against the feature artifact.

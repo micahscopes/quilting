@@ -69,21 +69,21 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 #drop-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:10;border:3px dashed #58a6ff;background:rgba(31,111,235,0.08);align-items:center;justify-content:center}
 #drop-overlay.active{display:flex}
 #drop-overlay span{font-size:18px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase;pointer-events:none}
-#presentation-card{display:none;position:absolute;left:28px;bottom:28px;z-index:8;width:min(520px,calc(100% - 56px));max-height:calc(100% - 56px);overflow:auto;padding:18px 20px;background:rgba(13,17,23,.88);border:1px solid rgba(88,166,255,.5);border-radius:10px;backdrop-filter:blur(12px);box-shadow:0 12px 40px rgba(0,0,0,.35)}
-#presentation-card.active{display:block}
-#presentation-eyebrow{font-size:10px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase}
-#presentation-heading{font-size:22px;line-height:1.15;margin-top:5px;color:#f0f6fc}
-#presentation-body{font-size:13px;line-height:1.5;margin-top:8px;color:#b1bac4}
-#presentation-footer{display:flex;align-items:center;gap:8px;margin-top:14px}
-#presentation-footer button{padding:5px 12px;border:1px solid #30363d;border-radius:4px;background:#21262d;color:#c9d1d9;cursor:pointer}
-#presentation-footer button:hover{border-color:#58a6ff;color:#fff}
-#presentation-progress{font-size:11px;color:#8b949e}
-#presentation-adapter-status{margin-left:auto;font-size:9px;color:#8b949e;text-align:right}
+.presentation-card{display:none;position:absolute;left:28px;bottom:28px;z-index:8;width:min(520px,calc(100% - 56px));max-height:calc(100% - 56px);overflow:auto;padding:18px 20px;background:rgba(13,17,23,.88);border:1px solid rgba(88,166,255,.5);border-radius:10px;backdrop-filter:blur(12px);box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.presentation-card.active{display:block}
+.presentation-eyebrow{font-size:10px;color:#58a6ff;letter-spacing:2px;text-transform:uppercase}
+.presentation-heading{font-size:22px;line-height:1.15;margin-top:5px;color:#f0f6fc}
+.presentation-body{font-size:13px;line-height:1.5;margin-top:8px;color:#b1bac4}
+.presentation-footer{display:flex;align-items:center;gap:8px;margin-top:14px}
+.presentation-footer button{padding:5px 12px;border:1px solid #30363d;border-radius:4px;background:#21262d;color:#c9d1d9;cursor:pointer}
+.presentation-footer button:hover{border-color:#58a6ff;color:#fff}
+.presentation-progress{font-size:11px;color:#8b949e}
+.presentation-adapter-status{margin-left:auto;font-size:9px;color:#8b949e;text-align:right}
 @media (max-height:600px){
-  #presentation-card{left:12px;bottom:12px;width:min(520px,calc(100% - 24px));max-height:calc(100% - 24px);padding:11px 13px}
-  #presentation-heading{font-size:18px;margin-top:3px}
-  #presentation-body{font-size:11px;line-height:1.35;margin-top:5px}
-  #presentation-footer{margin-top:8px}
+  .presentation-card{left:12px;bottom:12px;width:min(520px,calc(100% - 24px));max-height:calc(100% - 24px);padding:11px 13px}
+  .presentation-heading{font-size:18px;margin-top:3px}
+  .presentation-body{font-size:11px;line-height:1.35;margin-top:5px}
+  .presentation-footer{margin-top:8px}
 }
 </style>
 </head>
@@ -91,15 +91,16 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div id="drop-overlay"><span>Drop .glb / .gltf file here</span></div>
-  <section id="presentation-card" aria-live="polite">
-    <div id="presentation-eyebrow"></div>
-    <h2 id="presentation-heading"></h2>
-    <p id="presentation-body"></p>
-    <div id="presentation-footer">
+  <div id="presentation-card-rust" hidden></div>
+  <section class="presentation-card" id="presentation-card" aria-live="polite">
+    <div class="presentation-eyebrow" id="presentation-eyebrow"></div>
+    <h2 class="presentation-heading" id="presentation-heading"></h2>
+    <p class="presentation-body" id="presentation-body"></p>
+    <div class="presentation-footer" id="presentation-footer">
       <button id="presentation-previous" type="button" aria-label="Previous cue">←</button>
       <button id="presentation-next" type="button" aria-label="Next cue">→</button>
-      <span id="presentation-progress"></span>
-      <span id="presentation-adapter-status"></span>
+      <span class="presentation-progress" id="presentation-progress"></span>
+      <span class="presentation-adapter-status" id="presentation-adapter-status"></span>
     </div>
   </section>
 </div>
@@ -1788,10 +1789,15 @@ let rustPresentationManifest = null;
 let rustPresentationSnapshot = null;
 let rustPresentationTransitionActive = false;
 let rustPresentationLastLodAt = 0;
+let rustPresentationViewMountAttempted = false;
+let rustPresentationViewMounted = false;
 const rustPresentationDiagnostics = {
   enabled: RUST_PRESENTATION_ENABLED,
   implementation: RUST_PRESENTATION_IMPLEMENTATION,
   authority: RUST_PRESENTATION_IMPLEMENTATION === 'rust' ? 'hyperscope-app' : 'standalone',
+  viewAuthority: 'browser-fallback',
+  viewMountAttempts: 0,
+  viewMountErrors: 0,
   ready: false,
   assetsReady: false,
   assetPreflight: [],
@@ -2042,28 +2048,68 @@ function synchronizeRustApplicationPresentationFromBrowser() {
 
 function renderRustPresentationSnapshot(snapshot) {
   rustPresentationSnapshot = snapshot;
-  const text = snapshot?.text || {};
-  $('presentation-eyebrow').textContent = text.eyebrow || '';
-  $('presentation-heading').textContent = text.heading || '';
-  $('presentation-body').textContent = text.body || '';
-  const count = rustPresentationManifest?.cueCount
-    ?? rustPresentationManifest?.cues?.length
-    ?? 0;
-  $('presentation-progress').textContent = count
-    ? `${snapshot.cue_index + 1} / ${count}` : '';
-  $('presentation-previous').disabled = snapshot.cue_index <= 0;
-  $('presentation-next').disabled = snapshot.cue_index + 1 >= count;
   const assets = snapshot.required_assets || [];
   const layers = snapshot.layers || [];
-  $('presentation-adapter-status').textContent =
-    `${assets.length} desired asset${assets.length === 1 ? '' : 's'} · `
-    + `${layers.length} layer${layers.length === 1 ? '' : 's'}`
-    + (layers.length > 1 ? ' · composition pending' : '');
+  if (!rustPresentationViewMounted) {
+    const text = snapshot?.text || {};
+    $('presentation-eyebrow').textContent = text.eyebrow || '';
+    $('presentation-heading').textContent = text.heading || '';
+    $('presentation-body').textContent = text.body || '';
+    const count = rustPresentationManifest?.cueCount
+      ?? rustPresentationManifest?.cues?.length
+      ?? 0;
+    $('presentation-progress').textContent = count
+      ? `${snapshot.cue_index + 1} / ${count}` : '';
+    $('presentation-previous').disabled = snapshot.cue_index <= 0;
+    $('presentation-next').disabled = snapshot.cue_index + 1 >= count;
+    $('presentation-adapter-status').textContent =
+      `${assets.length} desired asset${assets.length === 1 ? '' : 's'} · `
+      + `${layers.length} layer${layers.length === 1 ? '' : 's'}`
+      + (layers.length > 1 ? ' · composition pending' : '');
+  }
   rustPresentationDiagnostics.activeCue = snapshot.cue_id;
   rustPresentationDiagnostics.desiredAssets = assets;
   rustPresentationDiagnostics.desiredLayers = layers;
   rustPresentationDiagnostics.multiAssetRendererPending = layers.length > 1;
   applyPresentationLayerState(snapshot);
+}
+
+function useBrowserPresentationView() {
+  const host = $('presentation-card-rust');
+  const fallback = $('presentation-card');
+  if (host) host.hidden = true;
+  if (fallback) fallback.hidden = false;
+  rustPresentationDiagnostics.viewAuthority = 'browser-fallback';
+}
+
+function ensureRustPresentationView() {
+  const host = $('presentation-card-rust');
+  const fallback = $('presentation-card');
+  if (rustPresentationViewMounted) {
+    host.hidden = false;
+    fallback.hidden = true;
+    rustPresentationDiagnostics.viewAuthority = 'hyperscope-web';
+    return true;
+  }
+  if (rustPresentationViewMountAttempted || !rustAppShadow) return false;
+  rustPresentationViewMountAttempted = true;
+  rustPresentationDiagnostics.viewMountAttempts += 1;
+  if (!host || !fallback || typeof rustAppShadow.mountPresentationCard !== 'function') {
+    return false;
+  }
+  try {
+    rustAppShadow.mountPresentationCard(host, action => activateRustPresentation(action));
+    rustPresentationViewMounted = true;
+    host.hidden = false;
+    fallback.hidden = true;
+    rustPresentationDiagnostics.viewAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    rustPresentationDiagnostics.viewMountErrors += 1;
+    recordAppShadowMismatch('presentation_view_mount', error?.message || String(error));
+    useBrowserPresentationView();
+    return false;
+  }
 }
 
 function presentationAppAuthority() {
@@ -2558,7 +2604,7 @@ async function initializeRustPresentation() {
     globalThis.__hyperscopePresentationAdvance = () => activateRustPresentation('advance');
     globalThis.__hyperscopePresentationReverse = () => activateRustPresentation('reverse');
     globalThis.__hyperscopePresentationJump = cueId => activateRustPresentation('jump', cueId);
-    $('presentation-card').classList.add('active');
+    if (!ensureRustPresentationView()) $('presentation-card').classList.add('active');
     rustPresentationDiagnostics.ready = true;
     const snapshot = initParams.cue
       ? activateRustPresentation('jump', initParams.cue)
@@ -2569,6 +2615,7 @@ async function initializeRustPresentation() {
   } catch (error) {
     rustPresentationDiagnostics.ready = false;
     rustPresentationDiagnostics.error = error?.message || String(error);
+    useBrowserPresentationView();
     $('presentation-card').classList.add('active');
     $('presentation-heading').textContent = 'Presentation unavailable';
     $('presentation-body').textContent = rustPresentationDiagnostics.error;
@@ -5747,6 +5794,7 @@ async function loadPatchLab(
   authoredLodStates = [];
   presentationComposition.ready = false;
   $('presentation-card').classList.remove('active');
+  $('presentation-card-rust').hidden = true;
   clearSelectedObject('Patch laboratory');
 
   try {
