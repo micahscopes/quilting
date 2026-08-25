@@ -14,3 +14,6 @@ pub mod durable_history;
 
 #[cfg(feature = "local-peer-relay")]
 pub mod local_peer_relay;
+
+#[cfg(feature = "presentation-card")]
+pub mod presentation_card;

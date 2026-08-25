@@ -10,10 +10,15 @@ description = "Optional browser-host adapters for Hyperscope"
 [features]
 default = []
 asset-credits = ["dep:hyperscape-protocol", "dep:hyperscope-app"]
+presentation-card = ["dep:hyperscope-app"]
 csr = [
     "asset-credits",
+    "presentation-card",
     "dep:futures-signals",
+    "dep:js-sys",
     "dep:leptos",
+    "dep:send_wrapper",
+    "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
     "dep:web-sys",
 ]
@@ -49,6 +54,10 @@ thiserror = { version = "2", optional = true }
 tiny_http = { version = "0.12", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
+[dev-dependencies]
+hyperscape = { version = "0.1.0", path = "../hyperscape" }
+uuid = "1"
+
 [[bin]]
 name = "hyperscope-local-peer-relay"
 path = "src/bin/local_peer_relay.rs"
@@ -60,6 +69,7 @@ futures-signals = { version = "0.3.34", default-features = false, optional = tru
 indexed_db_futures = { version = "=0.6.4", features = ["typed-arrays", "version-change"], optional = true }
 js-sys = { version = "0.3", optional = true }
 leptos = { version = "=0.8.20", default-features = false, features = ["csr"], optional = true }
+send_wrapper = { version = "0.6", optional = true }
 wasm-bindgen = { version = "=0.2.108", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", features = ["Element", "HtmlElement"], optional = true }
