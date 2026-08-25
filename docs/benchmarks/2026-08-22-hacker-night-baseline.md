@@ -1953,3 +1953,16 @@ disabled JavaScript route observation, shadow surface walking, zero application
 or scene mismatches, and zero frame errors. An ordinary URL retained Rust route,
 asset, scene, and presentation defaults plus JavaScript walk/selection defaults;
 the warning/error console remained empty.
+
+The final release rehearsal exposed one diagnostic ambiguity rather than a
+rendering defect: continuous horse animation immediately replaced the shared
+`lastSubjectRecords` value after the complete scene classification. Cadence now
+retains stable per-scope workload evidence alongside the backward-compatible
+most-recent fields. Against the exact staged artifact with fingerprint
+`f3f12481c3911384d8c4ab0f6588d24a`, Chrome reported nine scene subject records
+in one GPU pass and one primary-animation subject record in one GPU pass. Both
+assets, all 4,252 faces, and nine topology domains remained resident; asset,
+scene, route, and frame mismatch/error counts stayed zero and the console had
+no warnings or errors. The runbook now serves the strictly staged
+`dist-release/` rather than the development `dist/` so a known-good talk bundle
+cannot accidentally include local GLBs or stale development output.

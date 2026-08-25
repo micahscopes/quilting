@@ -195,7 +195,11 @@ for (const requiredSceneLodStep of [
   'faceLimit: primaryOnly ? currentPrimaryFaceCount : 0',
   'presentationComposition.primaryLodStates',
   'cadence.sceneClassifications += 1;',
+  'cadence.lastSceneSubjectRecords = subjectRecords;',
+  'cadence.lastSceneGpuPasses = gpuPasses;',
   'cadence.primaryAnimationClassifications += 1;',
+  'cadence.lastPrimaryAnimationSubjectRecords = subjectRecords;',
+  'cadence.lastPrimaryAnimationGpuPasses = gpuPasses;',
 ]) {
   assert.ok(
     compositionAdapter.includes(requiredSceneLodStep)

@@ -165,13 +165,13 @@ the default `permissive-only` policy, the horse remains a hard warning.
 The preflight has `--json` for an archival or scripted report. It is
 filesystem-only and cannot certify browser GPU/HID behavior.
 
-## 2. Serve the built directory
+## 2. Serve the exact staged directory
 
 The release directory has no network runtime dependency. Serve it over local
 HTTP rather than opening `index.html` as a `file:` URL:
 
 ```sh
-python3 -m http.server 8888 --directory dist
+python3 -m http.server 8888 --directory dist-release
 ```
 
 Open:
@@ -318,9 +318,13 @@ Use a fresh browser tab after the release build and verify:
   exception appears in the console;
 - the horse animates continuously and LOD does not flash to a stale low level;
 - on the final two-asset cue, `__hyperscopePresentation.lodCadence` reports a
-  scene classification with `lastSubjectRecords: 9` and `lastGpuPasses: 1`;
-  later `primary-animation` classifications report one subject without
-  implying that the static Blender-authored asset has left LOD residency;
+  scene classification with `lastSceneSubjectRecords: 9` and
+  `lastSceneGpuPasses: 1`; later animation-only classifications report
+  `lastPrimaryAnimationSubjectRecords: 1` and
+  `lastPrimaryAnimationGpuPasses: 1` without implying that the static
+  Blender-authored asset has left LOD residency. The unsuffixed `last*` fields
+  remain the most recent classification of either scope and will normally
+  return to the animation-only values while the horse is playing;
 - picking/selection tint and surface attachment use the visible object;
 - moving through all six cues leaves exactly one requested visualization mode
   active;
@@ -372,8 +376,8 @@ use `walkimpl=rust` only when explicitly demonstrating the migration.
    permissions during the talk.
 4. If a dropped model fails, go Back or reload the known deck URL—the checked-in
    assets are the rehearsed path.
-5. Keep a known-good copy of `dist/` made after a passing preflight. Do not run a
-   development rebuild during the presentation.
+5. Keep the exact `dist-release/` that passed strict preflight. Do not serve the
+   development `dist/` or run a rebuild during the presentation.
 
 ## 7. Release boundary
 
