@@ -45,6 +45,11 @@ const BUILD_INPUT_ROOT_FILES: &[&str] = &[
     "LICENSE-APACHE",
 ];
 const BUILD_INPUT_ROOT_DIRS: &[&str] = &["crates", "envmaps"];
+/// Generated crate-local outputs are not source inputs. In particular,
+/// wasm-pack may leave an ignored `pkg` directory in a long-lived checkout
+/// while a detached release worktree has none; including it makes otherwise
+/// identical source commits produce different receipts.
+const GENERATED_BUILD_INPUT_DIRS: &[&str] = &["pkg", "target"];
 const BUILD_RECEIPT_VERSION: &str = "hyperscope-build-inputs/0.1";
 const BUILD_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-path-length-content";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -254,6 +259,9 @@ fn collect_build_input_files(
         })?;
         let child = relative.join(entry.file_name());
         if file_type.is_dir() {
+            if generated_build_input_directory(&entry.file_name()) {
+                continue;
+            }
             collect_build_input_files(source_root, &child, paths)?;
         } else if file_type.is_file() {
             paths.push(child);
@@ -265,6 +273,11 @@ fn collect_build_input_files(
         }
     }
     Ok(())
+}
+
+fn generated_build_input_directory(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| GENERATED_BUILD_INPUT_DIRS.contains(&name))
 }
 
 fn update_fingerprint(fingerprint: &mut u128, bytes: &[u8]) {
@@ -667,10 +680,12 @@ fn path_for_report(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        local_uri_to_relative_path, update_build_input_fingerprint, validate_glb_header,
-        validate_release_html, DistributionPolicy, OfflinePreflightReport, BUILD_INPUT_ROOT_FILES,
-        FNV1A_128_OFFSET, REQUIRED_RUNTIME_FILES,
+        generated_build_input_directory, local_uri_to_relative_path,
+        update_build_input_fingerprint, validate_glb_header, validate_release_html,
+        DistributionPolicy, OfflinePreflightReport, BUILD_INPUT_ROOT_FILES, FNV1A_128_OFFSET,
+        REQUIRED_RUNTIME_FILES,
     };
+    use std::ffi::OsStr;
     use std::path::PathBuf;
 
     #[test]
@@ -697,6 +712,16 @@ mod tests {
                 BUILD_INPUT_ROOT_FILES.contains(&adapter),
                 "copied browser adapter is absent from the release receipt: {adapter}",
             );
+        }
+    }
+
+    #[test]
+    fn build_receipt_excludes_generated_crate_output_directories() {
+        for generated in ["pkg", "target"] {
+            assert!(generated_build_input_directory(OsStr::new(generated)));
+        }
+        for source in ["src", "examples", "benches"] {
+            assert!(!generated_build_input_directory(OsStr::new(source)));
         }
     }
 
