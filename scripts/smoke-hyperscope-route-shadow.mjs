@@ -23,7 +23,7 @@ assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation')
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
@@ -107,6 +107,16 @@ assert.deepEqual(
   canonicalizeHyperscopeRoute([['assetimpl', 'js']]).pairs,
   [['assetimpl', 'js']],
   'canonical routes must retain an explicit JavaScript rollback',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['presentimpl', 'rust']]).pairs,
+  [],
+  'canonical routes must omit the Rust presentation-authority default',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['presentimpl', 'js']]).pairs,
+  [['presentimpl', 'js']],
+  'canonical routes must retain an explicit presentation rollback',
 );
 const startupAdapter = browserSource.slice(
   browserSource.indexOf("phase('wasm', [], async () =>"),

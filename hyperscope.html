@@ -435,8 +435,8 @@ const RUST_NAVIGATION_SHADOW_ENABLED =
 const RUST_PRESENTATION_ENABLED =
   new URLSearchParams(location.search).get('presentation') === '1';
 const RUST_PRESENTATION_IMPLEMENTATION = (() => {
-  const requested = new URLSearchParams(location.search).get('presentimpl') || 'js';
-  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'js';
+  const requested = new URLSearchParams(location.search).get('presentimpl') || 'rust';
+  return ['js', 'shadow', 'rust'].includes(requested) ? requested : 'rust';
 })();
 const RUST_ROUND_SHADOW_ENABLED =
   new URLSearchParams(location.search).get('roundshadow') === '1';
@@ -892,7 +892,7 @@ const PARAM_DEFAULTS = {
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
-  presentimpl: 'js', assetimpl: 'rust', sceneimpl: 'js', routeimpl: 'js',
+  presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'js', routeimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',

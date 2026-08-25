@@ -150,7 +150,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("navshadow", "0", Toggle),
     spec!("presentation", "0", Toggle),
     spec!("cue", "", OptionalUuid),
-    spec!("presentimpl", "js", Implementation),
+    spec!("presentimpl", "rust", Implementation),
     spec!("roundshadow", "0", Toggle),
     spec!("appshadow", "0", Toggle),
     spec!("assetimpl", "rust", Implementation),
@@ -377,6 +377,17 @@ mod tests {
 
         let rollback_route = HyperscopeRoute::from_pairs([("assetimpl", "js")]);
         assert_eq!(rollback_route.canonical_pairs(), vec![("assetimpl", "js")]);
+        assert!(rollback_route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rust_presentation_authority_is_default_with_an_explicit_js_rollback() {
+        let default_route = HyperscopeRoute::from_pairs([("presentimpl", "rust")]);
+        assert_eq!(default_route.value("presentimpl"), Some("rust"));
+        assert!(default_route.canonical_pairs().is_empty());
+
+        let rollback_route = HyperscopeRoute::from_pairs([("presentimpl", "js")]);
+        assert_eq!(rollback_route.canonical_pairs(), vec![("presentimpl", "js")]);
         assert!(rollback_route.diagnostics().is_empty());
     }
 

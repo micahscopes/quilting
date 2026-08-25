@@ -42,12 +42,14 @@ or below `1e-6`. The adapter sends only layer/asset identity and resident node
 metadata; Rust owns layer TRS, visibility, opacity, and authored overrides.
 `sceneimpl=js` is the immediate rollback and is the default.
 
-Use `presentimpl=shadow` to compare the standalone presentation controller with
-the application reducer while retaining the established renderer path. Use
-`presentimpl=rust` to make `hyperscope-app` the sole cue/transition authority;
-`globalThis.__hyperscopePresentation` should report `implementation: "rust"`,
-`authority: "hyperscope-app"`, the expected cue UUID, and no error. Restore
-`presentimpl=js` for immediate orchestration rollback.
+`hyperscope-app` is the default presentation cue/transition authority. An
+ordinary `presentation=1` route should report `implementation: "rust"` and
+`authority: "hyperscope-app"` through
+`globalThis.__hyperscopePresentation`, reach the expected cue UUID without an
+error, and retain neither `presentimpl=rust` nor implied `appshadow=1` in the
+synchronized URL. Use `presentimpl=shadow` to compare AppStore against the
+standalone controller, or `presentimpl=js` for immediate orchestration
+rollback; the explicit rollback value must remain in the URL.
 
 Rust asset effects are the default authority: startup, drag/drop, and the
 authored demo share one primary-scene scope, obsolete fetches receive an abort
@@ -57,6 +59,7 @@ concurrency. Use `assetimpl=shadow` to compare Rust request, cancellation, and
 completion semantics while retaining incumbent behavior, or `assetimpl=js`
 for immediate loader rollback. Because Rust is the canonical default, only the
 non-default rollback value is retained in a synchronized URL.
+
 On an ordinary unflagged load,
 `globalThis.__hyperscopeAppShadowDiagnostics.assetImplementation` must be
 `"rust"`; startup should produce one request and one applied completion with an

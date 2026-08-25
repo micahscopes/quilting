@@ -93,14 +93,13 @@ The first application boundary is now explicit:
   cutover gate only: `navshadow=1` and the browser camera remain unchanged until
   live Chrome parity is measured.
 - `presentimpl=js|shadow|rust` is the presentation-orchestration rollback
-  boundary. The default browser-orchestrated path keeps the standalone Rust
-  presentation controller. Shadow mode advances both Rust implementations and
-  compares their complete cue and navigation projections. Rust mode allocates
-  only `hyperscope-app`, obtains asset metadata from its low-rate read model,
-  dispatches cue intent through `AppEvent`, and consumes the application frame
-  snapshot; it performs no standalone controller tick or semantic manifest
-  parse in the browser. Target-browser rendering remains the final cutover
-  gate before changing the default.
+  boundary. AppStore is now the canonical default, while an explicit
+  `presentimpl=js` remains the serialized rollback. Shadow mode advances both
+  Rust implementations and compares their complete cue and navigation
+  projections. Rust mode allocates only `hyperscope-app`, obtains asset
+  metadata from its low-rate read model, dispatches cue intent through
+  `AppEvent`, and consumes the application frame snapshot; it performs no
+  standalone controller tick or semantic manifest parse in the browser.
 - Effective spheroidal-focus authority now crosses that same ordered boundary.
   Rust `focus_enabled` denotes fuzzy post-processing enabled specifically in
   mode 3; modes 0–2 remain renderer-only blur choices, and the retained shared
@@ -324,9 +323,11 @@ The first application boundary is now explicit:
 This layer is not yet the complete browser authority. Primary asset request,
 cancellation, completion, and stale-install policy have crossed to Rust after
 their live cutover gate; file/network acquisition and renderer installation
-remain browser adapters. Navigation, selection, presentation, scene
-extraction, and URL state retain their separate shadow-and-rollback gates until
-each default cutover has equivalent evidence.
+remain browser adapters. Presentation cue and transition orchestration have
+also crossed to AppStore, while the browser still adapts the committed read
+model to DOM and renderer state. Navigation, selection, scene extraction, and
+URL state retain their separate shadow-and-rollback gates until each default
+cutover has equivalent evidence.
 The selection adapter now joins validated authored node UUIDs to explicit
 presentation asset IDs across packed composition offsets and mirrors mapped
 picks/detaches through the AppStore. Ready IndexedDB, dropped, startup, and

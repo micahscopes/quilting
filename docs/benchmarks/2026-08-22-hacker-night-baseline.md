@@ -1629,3 +1629,35 @@ passed strict noncommercial-mixed preflight over 23 files / 31.34 MiB with
 matching source/build fingerprint `f2e8c4358314964e728205f947f6925e`.
 Transitive strict Clippy still stops on the previously existing unnecessary
 cast in `quilting-mesh`; it is not attributed to this cutover.
+
+## AppStore presentation default cutover
+
+The measured `presentimpl=rust` path is now the canonical presentation mode.
+An ordinary `presentation=1` route allocates AppStore as the sole semantic
+controller; it does not instantiate or tick the standalone
+`HyperscopeNavigation` controller and it omits `presentimpl=rust` plus implied
+`appshadow=1` from synchronized URLs. Explicit `presentimpl=js` and
+`presentimpl=shadow` remain linkable rollback/comparison modes.
+
+The installed Chrome DevTools MCP exercised a fresh isolated optimized build
+on `127.0.0.1:8891`, again without touching `:8888`. The unflagged presentation
+reported `implementation: rust`, `authority: hyperscope-app`, and a
+`HyperscopeAppShadow` controller identical to the application controller. A
+real advance from cue 1 to cue 2 exposed 350 ms of transition time at the
+mid-sample, settled to zero over 28 application frames in the observed
+353.1 ms window, and added no application or pose mismatch. Jumping to the
+final cue settled over 73 frames with both 984- and 3,268-face assets resident,
+4,252 packed faces, no pending composition, and no presentation error.
+
+The isolated `presentimpl=js` rollback instantiated
+`HyperscopeNavigation`, remained distinct from the AppStore controller,
+preserved its URL flag, and completed one AppStore comparison with zero pose
+mismatch. Both the default and rollback pages had clean warning/error consoles.
+
+Validation passed 57 replay-enabled application tests, 62
+browser-independent tests, the unchanged presentation/navigation/orchestration
+fingerprints, presentation, route, application, render, and 600-frame walking
+smokes, crate-scoped strict Clippy, and application rustdoc. The staged
+artifact passed strict noncommercial-mixed preflight over 23 files / 31.34 MiB
+with matching source/build fingerprint
+`e874d7f5250d8df19552cb36c8a05c6f`.
