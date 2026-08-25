@@ -42,6 +42,17 @@ pub struct GltfAssetMetadata {
     pub source: Option<String>,
 }
 
+impl GltfAssetMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.copyright.is_none()
+            && self.generator.is_none()
+            && self.title.is_none()
+            && self.author.is_none()
+            && self.license.is_none()
+            && self.source.is_none()
+    }
+}
+
 /// Project standard glTF metadata and the known Sketchfab attribution fields.
 /// Invalid, non-object, or differently typed extras are ignored field by
 /// field; they must never prevent otherwise renderable geometry from loading.
@@ -514,6 +525,8 @@ mod tests {
                 ..GltfAssetMetadata::default()
             }
         );
+        assert!(!extract_asset_metadata(&document).is_empty());
+        assert!(GltfAssetMetadata::default().is_empty());
     }
 
     #[test]

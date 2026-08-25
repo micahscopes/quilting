@@ -1345,6 +1345,7 @@ dependencies = [
  "futures-signals",
  "hyperscape",
  "hyperscape-protocol",
+ "quilting-gltf",
  "serde",
  "serde_json",
  "uuid",

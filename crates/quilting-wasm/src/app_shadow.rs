@@ -16,10 +16,10 @@ use hyperscape_protocol::{
 };
 use hyperscope_app::{
     session_node_identity, AnimationAction, AppCommit, AppEffect, AppEvent, AppFrameSnapshot,
-    AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetStatus, AuthoredRevision,
-    CommitDisposition, EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress,
-    LocalPeerLane, LocalPeerReceipt, NavigationSynchronization, PresentationAction,
-    SemanticAction, Timed,
+    AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus,
+    AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick, LocalPeerDisposition,
+    LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSynchronization,
+    PresentationAction, SemanticAction, Timed,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -229,6 +229,28 @@ impl HyperscopeAppShadow {
             AssetLoadOutcome::Loaded {
                 byte_length: byte_length as usize,
                 content_digest: None,
+                metadata: AssetMetadata::default(),
+            },
+        )
+    }
+
+    #[wasm_bindgen(js_name = completeAssetLoadedWithMetadata)]
+    pub fn complete_asset_loaded_with_metadata(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        byte_length: u32,
+        metadata: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let metadata = serde_wasm_bindgen::from_value::<AssetMetadata>(metadata)
+            .map_err(|error| js_error(format!("asset metadata is invalid: {error}")))?;
+        self.complete_asset(
+            request_id,
+            asset_id,
+            AssetLoadOutcome::Loaded {
+                byte_length: byte_length as usize,
+                content_digest: None,
+                metadata,
             },
         )
     }
@@ -1451,6 +1473,8 @@ enum ShadowAssetStatus {
     },
     Ready {
         byte_length: usize,
+        #[serde(skip_serializing_if = "AssetMetadata::is_empty")]
+        metadata: AssetMetadata,
     },
     Failed {
         code: String,
@@ -1466,7 +1490,14 @@ impl From<AssetStatus> for ShadowAssetStatus {
             AssetStatus::Loading { request_id } => Self::Loading {
                 request_id: request_id.to_string(),
             },
-            AssetStatus::Ready { byte_length, .. } => Self::Ready { byte_length },
+            AssetStatus::Ready {
+                byte_length,
+                metadata,
+                ..
+            } => Self::Ready {
+                byte_length,
+                metadata,
+            },
             AssetStatus::Failed {
                 code,
                 message,

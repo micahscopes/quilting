@@ -277,12 +277,18 @@ assert.throws(
   'a stale completion must not grant session selection authority',
 );
 
-const applied = app.completeAssetLoaded(second, asset, 181_808);
+const applied = app.completeAssetLoadedWithMetadata(
+  second,
+  asset,
+  181_808,
+  authoredModel.asset_metadata,
+);
 assert.equal(applied.disposition, 'applied');
 const ready = app.snapshot();
 assert.equal(ready.loadingAssets, 0);
 assert.equal(ready.assets[0].status.state, 'ready');
 assert.equal(ready.assets[0].status.byte_length, 181_808);
+assert.deepEqual(ready.assets[0].status.metadata, authoredModel.asset_metadata);
 
 const primaryApp = new HyperscopeAppShadow();
 const primaryHorse = 'f0000000-0000-4000-8000-000000000010';

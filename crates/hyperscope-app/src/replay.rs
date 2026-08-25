@@ -7,9 +7,9 @@
 
 use crate::{
     AnimationAction, AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion,
-    AssetLoadOutcome, AssetLoadScope, AssetStatus, AuthoredRevision, CommitDisposition,
-    EffectCompletion, FrameTick,
-    NavigationSynchronization, PresentationAction, ReceivedPresence, SemanticAction, Timed,
+    AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision,
+    CommitDisposition, EffectCompletion, FrameTick, NavigationSynchronization, PresentationAction,
+    ReceivedPresence, SemanticAction, Timed,
 };
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
@@ -25,7 +25,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.11";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.12";
+pub const LEGACY_APP_REPLAY_VERSION_0_11: &str = "hyperscope-app-replay/0.11";
 pub const LEGACY_APP_REPLAY_VERSION_0_10: &str = "hyperscope-app-replay/0.10";
 pub const LEGACY_APP_REPLAY_VERSION_0_9: &str = "hyperscope-app-replay/0.9";
 pub const LEGACY_APP_REPLAY_VERSION_0_8: &str = "hyperscope-app-replay/0.8";
@@ -44,6 +45,7 @@ enum ReplaySchema {
     V0_9,
     V0_10,
     V0_11,
+    V0_12,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -168,6 +170,8 @@ pub enum ReplayAssetLoadOutcome {
         byte_length: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_digest: Option<[u8; 32]>,
+        #[serde(default, skip_serializing_if = "AssetMetadata::is_empty")]
+        metadata: AssetMetadata,
     },
     Failed {
         code: String,
@@ -184,10 +188,12 @@ impl TryFrom<ReplayAssetLoadOutcome> for AssetLoadOutcome {
             ReplayAssetLoadOutcome::Loaded {
                 byte_length,
                 content_digest,
+                metadata,
             } => Ok(Self::Loaded {
                 byte_length: usize::try_from(byte_length)
                     .map_err(|_| "asset byte length exceeds this target's address space")?,
                 content_digest,
+                metadata,
             }),
             ReplayAssetLoadOutcome::Failed {
                 code,
@@ -685,6 +691,8 @@ pub enum ReplayAssetStatus {
         byte_length: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_digest: Option<[u8; 32]>,
+        #[serde(default, skip_serializing_if = "AssetMetadata::is_empty")]
+        metadata: AssetMetadata,
     },
     Failed {
         code: String,
@@ -701,10 +709,12 @@ impl From<AssetStatus> for ReplayAssetStatus {
             AssetStatus::Ready {
                 byte_length,
                 content_digest,
+                metadata,
             } => Self::Ready {
                 byte_length: u64::try_from(byte_length)
                     .expect("supported Rust targets have at most 64-bit usize"),
                 content_digest,
+                metadata,
             },
             AssetStatus::Failed {
                 code,
@@ -802,7 +812,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_8 => ReplaySchema::V0_8,
         LEGACY_APP_REPLAY_VERSION_0_9 => ReplaySchema::V0_9,
         LEGACY_APP_REPLAY_VERSION_0_10 => ReplaySchema::V0_10,
-        APP_REPLAY_VERSION => ReplaySchema::V0_11,
+        LEGACY_APP_REPLAY_VERSION_0_11 => ReplaySchema::V0_11,
+        APP_REPLAY_VERSION => ReplaySchema::V0_12,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -935,7 +946,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             at_seconds,
             action,
         } => {
-            if schema != ReplaySchema::V0_11 {
+            if !matches!(schema, ReplaySchema::V0_11 | ReplaySchema::V0_12) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
             Ok(AppEvent::Input(Timed {
@@ -957,14 +968,14 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                 request_id: *request_id,
                 asset: asset.clone(),
                 scope: match schema {
-                    ReplaySchema::V0_9 | ReplaySchema::V0_10 | ReplaySchema::V0_11 => {
-                        (*scope).into()
-                    }
+                    ReplaySchema::V0_9
+                    | ReplaySchema::V0_10
+                    | ReplaySchema::V0_11
+                    | ReplaySchema::V0_12 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
-                            "primary_scene asset scope requires app replay schema 0.9"
-                                .to_owned(),
+                            "primary_scene asset scope requires app replay schema 0.9".to_owned(),
                         )
                     }
                 },
@@ -983,13 +994,22 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             request_id,
             asset_id,
             outcome,
-        } => Ok(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
-            AssetLoadCompletion {
-                request_id: *request_id,
-                asset_id: *asset_id,
-                outcome: outcome.clone().try_into()?,
-            },
-        ))),
+        } => {
+            if matches!(
+                outcome,
+                ReplayAssetLoadOutcome::Loaded { metadata, .. } if !metadata.is_empty()
+            ) && schema != ReplaySchema::V0_12
+            {
+                return Err("asset provenance requires app replay 0.12".to_owned());
+            }
+            Ok(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: *request_id,
+                    asset_id: *asset_id,
+                    outcome: outcome.clone().try_into()?,
+                },
+            )))
+        }
         AppReplayEvent::ReceivePresence {
             envelope,
             received_at_seconds,
@@ -1027,12 +1047,13 @@ fn navigation_action_for_replay_version(
     {
         return Err("camera lens/target-mode actions require replay 0.6".to_owned());
     }
-    if !matches!(schema, ReplaySchema::V0_10 | ReplaySchema::V0_11)
-        && matches!(
-            action,
-            ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
-        )
-    {
+    if !matches!(
+        schema,
+        ReplaySchema::V0_10 | ReplaySchema::V0_11 | ReplaySchema::V0_12
+    ) && matches!(
+        action,
+        ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
+    ) {
         return Err("selected inversion gesture requires replay 0.10".to_owned());
     }
     if schema == ReplaySchema::V0_4 {
@@ -1054,12 +1075,11 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_9
             | ReplaySchema::V0_10
             | ReplaySchema::V0_11
-    )
-        && matches!(
-            action,
-            ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
-        )
-    {
+            | ReplaySchema::V0_12
+    ) && matches!(
+        action,
+        ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
+    ) {
         return Err(
             "legacy focus anchor has an unscoped entity identity; add asset_id before replaying"
                 .to_owned(),
@@ -1838,6 +1858,67 @@ mod tests {
     }
 
     #[test]
+    fn replay_0_12_records_asset_provenance_without_reinterpreting_0_11() {
+        let asset = AssetDescriptor {
+            id: AssetId::from_u128(1).unwrap(),
+            uri: "credited.glb".to_owned(),
+            media_type: Some("model/gltf-binary".to_owned()),
+            content_digest: None,
+        };
+        let request_id = RequestId::from_u128(2).unwrap();
+        let metadata = AssetMetadata {
+            title: Some("Credited model".to_owned()),
+            author: Some("Example Artist".to_owned()),
+            license: Some("CC-BY-4.0".to_owned()),
+            source: Some("https://example.test/credited-model".to_owned()),
+            ..AssetMetadata::default()
+        };
+        let events = vec![
+            AppReplayEvent::RequestAsset {
+                sequence: 0,
+                at_seconds: 0.0,
+                request_id,
+                asset: asset.clone(),
+                scope: ReplayAssetLoadScope::Asset,
+            },
+            AppReplayEvent::CompleteAssetLoad {
+                request_id,
+                asset_id: asset.id,
+                outcome: ReplayAssetLoadOutcome::Loaded {
+                    byte_length: 42,
+                    content_digest: None,
+                    metadata: metadata.clone(),
+                },
+            },
+        ];
+
+        let current = run_app_replay(&AppReplayScript::new(events.clone())).unwrap();
+        assert_eq!(
+            current.records[1].state.assets[0].status,
+            ReplayAssetStatus::Ready {
+                byte_length: 42,
+                content_digest: None,
+                metadata,
+            }
+        );
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_11.to_owned(),
+            events,
+        })
+        .unwrap();
+        assert!(matches!(
+            legacy.records[1].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("asset provenance requires app replay 0.12")
+        ));
+        assert!(matches!(
+            legacy.records[1].state.assets[0].status,
+            ReplayAssetStatus::Loading { .. }
+        ));
+    }
+
+    #[test]
     fn replay_0_10_adds_the_atomic_selected_inversion_gesture() {
         let event = AppReplayEvent::Navigate {
             sequence: 0,
@@ -2136,6 +2217,7 @@ mod tests {
             ReplayAssetStatus::Ready {
                 byte_length: 2048,
                 content_digest: Some([7; 32]),
+                metadata: AssetMetadata::default(),
             }
         );
 

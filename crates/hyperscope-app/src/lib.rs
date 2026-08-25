@@ -29,6 +29,7 @@ use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId,
     EphemeralPresence, PeerId, PresenceEnvelope, RequestId, WireTransform,
 };
+pub use quilting_gltf::GltfAssetMetadata as AssetMetadata;
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -149,6 +150,7 @@ pub enum AssetLoadOutcome {
     Loaded {
         byte_length: usize,
         content_digest: Option<[u8; 32]>,
+        metadata: AssetMetadata,
     },
     Failed {
         code: String,
@@ -216,6 +218,7 @@ pub enum AssetStatus {
     Ready {
         byte_length: usize,
         content_digest: Option<[u8; 32]>,
+        metadata: AssetMetadata,
     },
     Failed {
         code: String,
@@ -672,9 +675,11 @@ impl AppState {
                         AssetLoadOutcome::Loaded {
                             byte_length,
                             content_digest,
+                            metadata,
                         } => AssetStatus::Ready {
                             byte_length,
                             content_digest,
+                            metadata,
                         },
                         AssetLoadOutcome::Failed {
                             code,
@@ -1380,6 +1385,7 @@ mod tests {
                     outcome: AssetLoadOutcome::Loaded {
                         byte_length: 100,
                         content_digest: None,
+                        metadata: AssetMetadata::default(),
                     },
                 },
             )))
@@ -1447,6 +1453,7 @@ mod tests {
                     outcome: AssetLoadOutcome::Loaded {
                         byte_length: 100,
                         content_digest: None,
+                        metadata: AssetMetadata::default(),
                     },
                 },
             )))
@@ -1465,6 +1472,7 @@ mod tests {
                     outcome: AssetLoadOutcome::Loaded {
                         byte_length: 200,
                         content_digest: None,
+                        metadata: AssetMetadata::default(),
                     },
                 },
             )))
@@ -1479,6 +1487,7 @@ mod tests {
             AssetStatus::Ready {
                 byte_length: 200,
                 content_digest: None,
+                metadata: AssetMetadata::default(),
             }
         );
     }
