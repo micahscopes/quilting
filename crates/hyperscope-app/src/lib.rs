@@ -78,8 +78,22 @@ pub enum SemanticAction {
     RequestAsset {
         request_id: RequestId,
         asset: AssetDescriptor,
+        scope: AssetLoadScope,
     },
     CancelAsset(AssetId),
+}
+
+/// Concurrency policy for an asset acquisition request.
+///
+/// Presentation layers and other independently composited resources use
+/// [`AssetLoadScope::Asset`]. Loads intended to replace the renderer's primary
+/// scene use [`AssetLoadScope::PrimaryScene`], which makes a later request
+/// cancel the preceding primary-scene request even when their asset IDs differ.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AssetLoadScope {
+    #[default]
+    Asset,
+    PrimaryScene,
 }
 
 /// Low-rate presentation intent. Cue activation and the navigation transition
@@ -223,6 +237,10 @@ pub struct AppSummary {
     pub authored_projection_revision: Option<u64>,
     pub assets: usize,
     pub loading_assets: usize,
+    /// The one in-flight load permitted to replace the renderer's primary
+    /// scene. This is ephemeral job state, not rendered-scene identity.
+    pub loading_primary_scene_asset: Option<AssetId>,
+    pub loading_primary_scene_request: Option<RequestId>,
     pub active_peers: usize,
     pub authored_assets: usize,
     pub authored_entities: usize,
@@ -395,6 +413,7 @@ pub struct AppState {
     presentation: Option<PresentationRuntime>,
     active_presentation: Option<PresentationSnapshot>,
     assets: BTreeMap<AssetId, AssetRecord>,
+    primary_scene_load: Option<(RequestId, AssetId)>,
     presence: BTreeMap<PeerId, PresenceRecord>,
     authored_projection_revision: Option<u64>,
     authored_assets: BTreeMap<AssetId, AssetDescriptor>,
@@ -468,7 +487,11 @@ impl AppState {
                         }
                         self.apply_presentation_action(action)?;
                     }
-                    SemanticAction::RequestAsset { request_id, asset } => {
+                    SemanticAction::RequestAsset {
+                        request_id,
+                        asset,
+                        scope,
+                    } => {
                         if !input_may_run_now {
                             return Err(ReduceError::FutureEffectInput);
                         }
@@ -478,6 +501,23 @@ impl AppState {
                         asset
                             .validate()
                             .map_err(|error| ReduceError::Wire(error.to_string()))?;
+                        let mut cancelled = Vec::new();
+                        if scope == AssetLoadScope::PrimaryScene {
+                            if let Some((previous_request, previous_asset)) =
+                                self.primary_scene_load.take()
+                            {
+                                if let Some(record) = self.assets.get_mut(&previous_asset) {
+                                    if record.status
+                                        == (AssetStatus::Loading {
+                                            request_id: previous_request,
+                                        })
+                                    {
+                                        record.status = AssetStatus::Cancelled;
+                                    }
+                                }
+                                cancelled.push((previous_request, previous_asset));
+                            }
+                        }
                         if let Some(AssetRecord {
                             status:
                                 AssetStatus::Loading {
@@ -486,9 +526,18 @@ impl AppState {
                             ..
                         }) = self.assets.get(&asset.id)
                         {
+                            let previous_request = *previous_request;
+                            if !cancelled.contains(&(previous_request, asset.id)) {
+                                cancelled.push((previous_request, asset.id));
+                            }
+                            if self.primary_scene_load == Some((previous_request, asset.id)) {
+                                self.primary_scene_load = None;
+                            }
+                        }
+                        for (request_id, asset_id) in cancelled {
                             effects.push(AppEffect::CancelAssetLoad {
-                                request_id: *previous_request,
-                                asset_id: asset.id,
+                                request_id,
+                                asset_id,
                             });
                         }
                         self.assets.insert(
@@ -498,6 +547,9 @@ impl AppState {
                                 status: AssetStatus::Loading { request_id },
                             },
                         );
+                        if scope == AssetLoadScope::PrimaryScene {
+                            self.primary_scene_load = Some((request_id, asset.id));
+                        }
                         effects.push(AppEffect::FetchAsset { request_id, asset });
                     }
                     SemanticAction::CancelAsset(asset_id) => {
@@ -513,6 +565,9 @@ impl AppState {
                                 request_id,
                                 asset_id,
                             });
+                            if self.primary_scene_load == Some((request_id, asset_id)) {
+                                self.primary_scene_load = None;
+                            }
                         }
                         record.status = AssetStatus::Cancelled;
                     }
@@ -564,6 +619,11 @@ impl AppState {
                         ),
                     );
                 } else {
+                    if self.primary_scene_load
+                        == Some((completion.request_id, completion.asset_id))
+                    {
+                        self.primary_scene_load = None;
+                    }
                     let record = self
                         .assets
                         .get_mut(&completion.asset_id)
@@ -766,6 +826,8 @@ impl AppState {
                 .values()
                 .filter(|record| matches!(record.status, AssetStatus::Loading { .. }))
                 .count(),
+            loading_primary_scene_asset: self.primary_scene_load.map(|(_, asset)| asset),
+            loading_primary_scene_request: self.primary_scene_load.map(|(request, _)| request),
             active_peers: self.presence.len(),
             authored_assets: self.authored_assets.len(),
             authored_entities: self.authored_entities.len(),
@@ -1167,11 +1229,31 @@ mod tests {
         request_id: RequestId,
         asset: AssetDescriptor,
     ) -> AppCommit {
+        dispatch_scoped_request(
+            store,
+            sequence,
+            request_id,
+            asset,
+            AssetLoadScope::Asset,
+        )
+    }
+
+    fn dispatch_scoped_request(
+        store: &AppStore,
+        sequence: u64,
+        request_id: RequestId,
+        asset: AssetDescriptor,
+        scope: AssetLoadScope,
+    ) -> AppCommit {
         store
             .dispatch(AppEvent::Input(Timed {
                 sequence,
                 at_seconds: 0.0,
-                value: SemanticAction::RequestAsset { request_id, asset },
+                value: SemanticAction::RequestAsset {
+                    request_id,
+                    asset,
+                    scope,
+                },
             }))
             .unwrap()
     }
@@ -1226,6 +1308,114 @@ mod tests {
             store.diagnostic_snapshot()[0].code,
             "stale_effect_completion"
         );
+    }
+
+    #[test]
+    fn primary_scene_requests_cancel_across_asset_ids_and_only_latest_can_settle() {
+        let store = AppStore::default();
+        let horse = asset(1, "horse.glb");
+        let chess = asset(2, "chess.glb");
+        let first = request(10);
+        let second = request(11);
+
+        dispatch_scoped_request(
+            &store,
+            1,
+            first,
+            horse.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        let replacement = dispatch_scoped_request(
+            &store,
+            2,
+            second,
+            chess.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        assert_eq!(
+            replacement.effects,
+            vec![
+                AppEffect::CancelAssetLoad {
+                    request_id: first,
+                    asset_id: horse.id,
+                },
+                AppEffect::FetchAsset {
+                    request_id: second,
+                    asset: chess.clone(),
+                },
+            ]
+        );
+        assert_eq!(
+            store.summary_snapshot().loading_primary_scene_asset,
+            Some(chess.id)
+        );
+        assert_eq!(
+            store.summary_snapshot().loading_primary_scene_request,
+            Some(second)
+        );
+
+        let stale = store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: first,
+                    asset_id: horse.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 100,
+                        content_digest: None,
+                    },
+                },
+            )))
+            .unwrap();
+        assert_eq!(stale.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(
+            store.summary_snapshot().loading_primary_scene_request,
+            Some(second)
+        );
+
+        let applied = store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: second,
+                    asset_id: chess.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 200,
+                        content_digest: None,
+                    },
+                },
+            )))
+            .unwrap();
+        assert_eq!(applied.disposition, CommitDisposition::Applied);
+        assert_eq!(store.summary_snapshot().loading_primary_scene_asset, None);
+
+        let assets = store.asset_snapshot();
+        assert_eq!(assets[0].status, AssetStatus::Cancelled);
+        assert_eq!(
+            assets[1].status,
+            AssetStatus::Ready {
+                byte_length: 200,
+                content_digest: None,
+            }
+        );
+    }
+
+    #[test]
+    fn per_asset_requests_remain_parallel_for_presentation_composition() {
+        let store = AppStore::default();
+        let horse = asset(1, "horse.glb");
+        let chess = asset(2, "chess.glb");
+
+        let first = dispatch_request(&store, 1, request(10), horse.clone());
+        let second = dispatch_request(&store, 2, request(11), chess.clone());
+        assert_eq!(first.effects.len(), 1);
+        assert_eq!(
+            second.effects,
+            vec![AppEffect::FetchAsset {
+                request_id: request(11),
+                asset: chess,
+            }]
+        );
+        assert_eq!(store.summary_snapshot().loading_assets, 2);
+        assert_eq!(store.summary_snapshot().loading_primary_scene_asset, None);
     }
 
     #[test]
@@ -1979,6 +2169,7 @@ mod tests {
             value: SemanticAction::RequestAsset {
                 request_id: request(25),
                 asset: asset(26, "future.glb"),
+                scope: AssetLoadScope::PrimaryScene,
             },
         }));
         assert_eq!(result, Err(ReduceError::FutureEffectInput));
