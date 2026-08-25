@@ -15,10 +15,6 @@ const REQUIRED_RUNTIME_FILES: &[&str] = &[
     "hyperscope_worker.js",
     "spacemouse.mjs",
     "hyperscope_focus.mjs",
-    "pkg/quilting_atlas_wasm.js",
-    "pkg/quilting_atlas_wasm_bg.wasm",
-    "pkg/quilting_worker_wasm.js",
-    "pkg/quilting_worker_wasm_bg.wasm",
     "pkg/quilting_wasm.js",
     "pkg/quilting_wasm_bg.wasm",
     "envmaps/rosendal_plains_1_1k.hdr",
@@ -670,9 +666,27 @@ fn path_for_report(path: &Path) -> String {
 mod tests {
     use super::{
         local_uri_to_relative_path, update_build_input_fingerprint, validate_glb_header,
-        validate_release_html, DistributionPolicy, FNV1A_128_OFFSET, OfflinePreflightReport,
+        validate_release_html, DistributionPolicy, OfflinePreflightReport, FNV1A_128_OFFSET,
+        REQUIRED_RUNTIME_FILES,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn runtime_manifest_uses_the_consolidated_wasm_package() {
+        assert!(REQUIRED_RUNTIME_FILES.contains(&"pkg/quilting_wasm.js"));
+        assert!(REQUIRED_RUNTIME_FILES.contains(&"pkg/quilting_wasm_bg.wasm"));
+        for retired in [
+            "pkg/quilting_atlas_wasm.js",
+            "pkg/quilting_atlas_wasm_bg.wasm",
+            "pkg/quilting_worker_wasm.js",
+            "pkg/quilting_worker_wasm_bg.wasm",
+        ] {
+            assert!(
+                !REQUIRED_RUNTIME_FILES.contains(&retired),
+                "retired standalone package returned to the release contract: {retired}",
+            );
+        }
+    }
 
     #[test]
     fn offline_uri_accepts_root_relative_and_relative_assets() {

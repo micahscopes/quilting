@@ -70,8 +70,8 @@ empty mismatch list. The synchronized URL must contain neither
 as disabled.
 
 The ordinary preflight must print `PASS`. It validates the Rust presentation
-document, byte-for-byte manifest freshness, every presentation GLB, the runtime
-JS/WASM pairs, environment maps, licenses, and generated Trunk
+document, byte-for-byte manifest freshness, every presentation GLB, the
+consolidated runtime JS/WASM pair, environment maps, licenses, and generated Trunk
 bootstrap. Trunk also embeds a deterministic receipt for the Rust, shader,
 HTML/module, and copied-asset inputs; preflight recomputes it and rejects a
 coherent but stale `dist/`. It reports the matching fingerprints and checked
