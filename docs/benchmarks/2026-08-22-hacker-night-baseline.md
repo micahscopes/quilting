@@ -1873,3 +1873,26 @@ authority, retained both assets and all 4,252 resident faces, and reached four
 authoritative route writes with no fallback, mismatch, frame error, warning,
 or console error. The isolated server and page were removed after the probe;
 the user-run `:8888` process was not touched.
+
+## Signed-zero camera-route oracle
+
+The first subsequent Rust-selection soak exposed two false route mismatches:
+camera interpolation produced small negative Euler values whose browser
+`toFixed(3)` draft was `-0.000`, while Rust correctly treated that number as
+the zero default and omitted it. The committed URL was already correct, but a
+healthy transition could therefore pollute the bounded mismatch log.
+
+`canonicalFixedRouteNumber` now maps only formatted signed zero to positive
+zero before the browser/Rust comparison; values that round away from zero are
+unchanged. The executable route smoke freezes `-0`, `-0.0004`, `0.0004`,
+`-0.0006`, and an ordinary nonzero value, and verifies that all seven camera
+values plus their defaults traverse the helper.
+
+An isolated release artifact carried fingerprint
+`3b74cc7aed6b5c1e8650d5348108d7f7` over 173 inputs and 20,705,875 bytes and
+passed ordinary offline preflight. Chrome loaded `rz=-0.0004`, retained that
+nonzero value during Rust startup admission, then serialized the rounded
+camera without `rz`. The browser and Rust queries both became
+`animate=0&anim=0`: two comparisons, one authoritative write, zero fallbacks,
+zero mismatches, and zero frame errors. The probe page, server, and artifact
+were removed without touching `:8888`.

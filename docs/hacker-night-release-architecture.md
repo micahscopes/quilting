@@ -174,7 +174,9 @@ The first application boundary is now explicit:
   The same switch admits valid startup pairs through Rust before model, Patch
   Lab, animation, or control state is applied; malformed startup input retains
   the incumbent browser path. DOM assignment and control-specific clamping
-  remain browser adapter work while that rollback is soaking.
+  remain browser adapter work while that rollback is soaking. Camera drafts
+  normalize rounded signed zero before comparison, so Rust numeric-default
+  equivalence does not create false parity failures.
 - `quilting-core::render` owns retained scene snapshots, logical frame
   commands, indexed submission accounting, and the bounded backend-parity
   observer. `rendershadow=1` extracts WebGL state only when the retained scene

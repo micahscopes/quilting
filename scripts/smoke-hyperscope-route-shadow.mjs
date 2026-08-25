@@ -35,6 +35,18 @@ assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
+const canonicalFixedSource = browserSource.match(
+  /function canonicalFixedRouteNumber\(value, fractionDigits\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(canonicalFixedSource, 'could not locate fixed route-number canonicalizer');
+const canonicalFixedRouteNumber = runInNewContext(
+  `${canonicalFixedSource}; canonicalFixedRouteNumber`,
+);
+assert.equal(canonicalFixedRouteNumber(-0, 3), '0.000');
+assert.equal(canonicalFixedRouteNumber(-0.0004, 3), '0.000');
+assert.equal(canonicalFixedRouteNumber(0.0004, 3), '0.000');
+assert.equal(canonicalFixedRouteNumber(-0.0006, 3), '-0.001');
+assert.equal(canonicalFixedRouteNumber(1.25, 2), '1.25');
 for (const routeDefaultStep of [
   "get('routeimpl') || 'rust'",
   "? requested : 'rust';",
@@ -86,6 +98,11 @@ const syncSource = browserSource.match(
   /function syncURL\(\) \{([\s\S]*?)\/\/ Apply URL params to controls on load/,
 )?.[1];
 assert.ok(syncSource, 'could not locate browser URL serializer');
+assert.equal(
+  Array.from(syncSource.matchAll(/canonicalFixedRouteNumber\(/g)).length,
+  14,
+  'every camera value and default must canonicalize signed zero before comparison',
+);
 const browserKeyOrder = Array.from(
   syncSource.matchAll(/(?:set|ss)\(\s*'([^']+)'/g),
   match => match[1],

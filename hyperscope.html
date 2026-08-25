@@ -942,6 +942,11 @@ function readParams(p = new URLSearchParams(location.search)) {
   };
 }
 
+function canonicalFixedRouteNumber(value, fractionDigits) {
+  const formatted = Number(value).toFixed(fractionDigits);
+  return Number(formatted) === 0 ? (0).toFixed(fractionDigits) : formatted;
+}
+
 let syncTimer = null;
 let urlSyncReady = false;
 function syncURL() {
@@ -1024,13 +1029,41 @@ function syncURL() {
       }
     } catch { /* signals not yet initialized */ }
     // Camera
-    set('zoom', zoom.toFixed(2), parseFloat(PARAM_DEFAULTS.zoom).toFixed(2));
-    set('rx', rotX.toFixed(3), parseFloat(PARAM_DEFAULTS.rx).toFixed(3));
-    set('ry', rotY.toFixed(3), parseFloat(PARAM_DEFAULTS.ry).toFixed(3));
-    set('rz', cameraRoll.toFixed(3), parseFloat(PARAM_DEFAULTS.rz).toFixed(3));
-    set('px', panX.toFixed(3), parseFloat(PARAM_DEFAULTS.px).toFixed(3));
-    set('py', panY.toFixed(3), parseFloat(PARAM_DEFAULTS.py).toFixed(3));
-    set('pz', panZ.toFixed(3), parseFloat(PARAM_DEFAULTS.pz).toFixed(3));
+    set(
+      'zoom',
+      canonicalFixedRouteNumber(zoom, 2),
+      canonicalFixedRouteNumber(PARAM_DEFAULTS.zoom, 2),
+    );
+    set(
+      'rx',
+      canonicalFixedRouteNumber(rotX, 3),
+      canonicalFixedRouteNumber(PARAM_DEFAULTS.rx, 3),
+    );
+    set(
+      'ry',
+      canonicalFixedRouteNumber(rotY, 3),
+      canonicalFixedRouteNumber(PARAM_DEFAULTS.ry, 3),
+    );
+    set(
+      'rz',
+      canonicalFixedRouteNumber(cameraRoll, 3),
+      canonicalFixedRouteNumber(PARAM_DEFAULTS.rz, 3),
+    );
+    set(
+      'px',
+      canonicalFixedRouteNumber(panX, 3),
+      canonicalFixedRouteNumber(PARAM_DEFAULTS.px, 3),
+    );
+    set(
+      'py',
+      canonicalFixedRouteNumber(panY, 3),
+      canonicalFixedRouteNumber(PARAM_DEFAULTS.py, 3),
+    );
+    set(
+      'pz',
+      canonicalFixedRouteNumber(panZ, 3),
+      canonicalFixedRouteNumber(PARAM_DEFAULTS.pz, 3),
+    );
     if (RUST_NAVIGATION_SHADOW_ENABLED) p.set('navshadow', '1');
     if (RUST_PRESENTATION_ENABLED) {
       p.set('presentation', '1');
