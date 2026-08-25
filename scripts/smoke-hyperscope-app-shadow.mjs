@@ -338,7 +338,7 @@ assert.throws(
 // integer range. Stale and malformed batches must leave the materialization
 // exactly unchanged.
 const authoredTransformEnvelope = JSON.parse(readFileSync(
-  `${repository}/fixtures/protocol/authored-set-transform-v0.1.json`,
+  `${repository}/crates/hyperscape-protocol/fixtures/authored-set-transform-v0.1.json`,
   'utf8',
 ));
 const authoredAsset = '62000000-0000-4000-8000-000000000001';
@@ -504,7 +504,7 @@ assert.equal(
 );
 
 const presenceEnvelope = JSON.parse(readFileSync(
-  `${repository}/fixtures/protocol/presence-camera-v0.1.json`,
+  `${repository}/crates/hyperscape-protocol/fixtures/presence-camera-v0.1.json`,
   'utf8',
 ));
 presenceEnvelope.header.message_id = '63000000-0000-4000-8000-000000000007';

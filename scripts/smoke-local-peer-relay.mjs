@@ -87,7 +87,7 @@ try {
   assert.equal(health.retainedFrames, 0);
 
   const envelope = JSON.parse(readFileSync(
-    `${repository}/fixtures/protocol/authored-set-transform-v0.1.json`,
+    `${repository}/crates/hyperscape-protocol/fixtures/authored-set-transform-v0.1.json`,
     'utf8',
   ));
   const frame = { lane: 'authored', envelope };
