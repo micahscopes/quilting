@@ -1280,7 +1280,7 @@ mode commits the canonical pair sequence returned through WASM; a diagnostic
 or bridge failure retains the complete browser-built query and increments a
 bounded fallback counter. Shadow mode compares without writing, and the
 default JavaScript mode performs no route WASM calls. Startup value application
-is deliberately unchanged and remains a later authority gate.
+was deliberately unchanged at this write-only checkpoint.
 
 Chrome DevTools MCP verified a fresh Rust-authority load and a subsequent wheel
 navigation update. Both writes had byte-identical browser, Rust, and committed
@@ -1298,3 +1298,16 @@ frame-rate traffic. The optimized WASM at this checkpoint is 6,287,430 bytes
 raw and 2,201,127 bytes under deterministic `gzip -9 -n`; no before/after size
 claim is inferred because the preceding composed-LOD checkpoint was not
 rebuilt as an isolated release artifact.
+
+The paired read-side checkpoint then routed valid startup pairs through the
+same Rust registry before model, Patch Lab, animation, or control state was
+applied. A valid link containing the alternate default spelling `zoom=3.00`
+reported `startupSource=rust`, omitted that default canonically, retained the
+requested mode and rotation, and recorded no mismatch. Shadow mode compared
+the same startup input while reporting `startupSource=browser`. A malformed
+`smlock=yes` link produced the exact `invalid_value` diagnostic, selected
+`startupSource=browser-fallback`, and preserved the incumbent interpretation;
+the subsequent ordinary state write normalized it to `smlock=0`. Default mode
+still performed zero startup or write-side route calls. This adds one
+non-frame-rate WASM call only when shadow or Rust route mode is explicitly
+selected.

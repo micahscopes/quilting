@@ -139,7 +139,10 @@ The first application boundary is now explicit:
   boundary for URL writes. Rust mode commits the validated canonical pair
   order; a bridge error or Rust diagnostic falls back to the unchanged browser
   query and records the fallback. `routeshadow=1` remains a legacy opt-in
-  observer. Startup value application remains a separate later cutover.
+  observer. The same switch admits valid startup pairs through Rust before
+  model, Patch Lab, animation, or control state is applied; malformed startup
+  input retains the incumbent browser path. DOM assignment and control-specific
+  clamping remain browser adapter work.
 - `quilting-core::render` owns retained scene snapshots, logical frame
   commands, indexed submission accounting, and the bounded backend-parity
   observer. `rendershadow=1` extracts WebGL state only when the retained scene

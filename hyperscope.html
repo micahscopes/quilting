@@ -453,11 +453,14 @@ const rustRouteShadowDiagnostics = {
   specs: null,
   lastBrowserQuery: null,
   lastRustQuery: null,
+  startupSource: RUST_ROUTE_SHADOW_ENABLED ? 'awaiting-wasm' : 'browser',
+  startupBrowserQuery: null,
+  startupRustQuery: null,
+  startupDiagnostics: [],
 };
 globalThis.__hyperscopeRouteShadowDiagnostics = rustRouteShadowDiagnostics;
 
-function compareRustRouteShadow(params) {
-  if (!RUST_ROUTE_SHADOW_ENABLED || !wasmOk.peek()) return null;
+function evaluateRustRoute(params, compareExact = true) {
   try {
     const result = canonicalizeHyperscopeRoute(Array.from(params.entries()));
     const browserQuery = params.toString();
@@ -466,7 +469,7 @@ function compareRustRouteShadow(params) {
     rustRouteShadowDiagnostics.rustDiagnostics = result.diagnostics;
     rustRouteShadowDiagnostics.lastBrowserQuery = browserQuery;
     rustRouteShadowDiagnostics.lastRustQuery = rustQuery;
-    if (browserQuery !== rustQuery || result.diagnostics.length) {
+    if ((compareExact && browserQuery !== rustQuery) || result.diagnostics.length) {
       const mismatches = rustRouteShadowDiagnostics.mismatches;
       if (mismatches.length === 64) mismatches.shift();
       mismatches.push({
@@ -486,6 +489,11 @@ function compareRustRouteShadow(params) {
     });
     return null;
   }
+}
+
+function compareRustRouteShadow(params) {
+  if (!RUST_ROUTE_SHADOW_ENABLED || !wasmOk.peek()) return null;
+  return evaluateRustRoute(params);
 }
 
 // ============================================================
@@ -858,8 +866,7 @@ const PARAM_DEFAULTS = {
   fqual: '2', fkaw: '1', fkoff: '15',
 };
 
-function readParams() {
-  const p = new URLSearchParams(location.search);
+function readParams(p = new URLSearchParams(location.search)) {
   const get = (k) => p.get(k) ?? PARAM_DEFAULTS[k];
   return {
     glb: get('glb'),
@@ -7289,10 +7296,11 @@ async function initializePresentationComposition() {
 }
 
 // --- Init ---
-// Read URL params — applied in wasm phase after mr_init
-const initParams = readParams();
+// Bootstrap platform flags and an inert camera preview from the raw query.
+// Rust route mode re-decodes valid pairs before any application state is set.
+let initParams = readParams();
 currentGlb = initParams.glb;
-const initialPatchLabShape = patchLabShape(initParams.lab);
+let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
 {
   const pf = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
@@ -7318,6 +7326,28 @@ phase('wasm', [], async () => {
   const compileFinished = performance.now();
   await init({ module_or_path: runtimeWasmModule });
   const instantiateFinished = performance.now();
+  if (RUST_ROUTE_SHADOW_ENABLED) {
+    rustRouteShadowDiagnostics.specs = hyperscopeControlSpecs();
+    const startupBrowserParams = new URLSearchParams(location.search);
+    const startupRoute = evaluateRustRoute(startupBrowserParams, false);
+    rustRouteShadowDiagnostics.startupBrowserQuery = startupBrowserParams.toString();
+    rustRouteShadowDiagnostics.startupRustQuery = startupRoute
+      ? new URLSearchParams(startupRoute.pairs).toString()
+      : null;
+    rustRouteShadowDiagnostics.startupDiagnostics = startupRoute?.diagnostics || [];
+    if (RUST_ROUTE_IMPLEMENTATION === 'rust') {
+      if (startupRoute && startupRoute.diagnostics.length === 0) {
+        initParams = readParams(new URLSearchParams(startupRoute.pairs));
+        currentGlb = initParams.glb;
+        initialPatchLabShape = patchLabShape(initParams.lab);
+        rustRouteShadowDiagnostics.startupSource = 'rust';
+      } else {
+        rustRouteShadowDiagnostics.startupSource = 'browser-fallback';
+      }
+    } else {
+      rustRouteShadowDiagnostics.startupSource = 'browser';
+    }
+  }
   $('stats').textContent = 'Initializing renderer...';
   if (!mr_init('cv')) throw 'renderer init failed';
   updateRoundShadowDiagnostics(mr_setRoundShadowEnabled(RUST_ROUND_SHADOW_ENABLED));
@@ -7345,7 +7375,6 @@ phase('wasm', [], async () => {
     refreshAppShadowSnapshot();
   }
   if (RUST_ROUTE_SHADOW_ENABLED) {
-    rustRouteShadowDiagnostics.specs = hyperscopeControlSpecs();
     rustRouteShadowDiagnostics.state =
       RUST_ROUTE_IMPLEMENTATION === 'rust' ? 'ready' : 'observing';
   }

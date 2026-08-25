@@ -52,6 +52,27 @@ for (const authorityStep of [
     `browser route authority adapter is missing ${authorityStep}`,
   );
 }
+const startupAdapter = browserSource.slice(
+  browserSource.indexOf("phase('wasm', [], async () =>"),
+  browserSource.indexOf("phase('workers', ['wasm'], async () =>"),
+);
+for (const startupStep of [
+  'const startupRoute = evaluateRustRoute(startupBrowserParams, false);',
+  'startupRoute && startupRoute.diagnostics.length === 0',
+  'initParams = readParams(new URLSearchParams(startupRoute.pairs));',
+  "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
+  'applyParams(initParams);',
+]) {
+  assert.ok(
+    startupAdapter.includes(startupStep),
+    `browser startup route adapter is missing ${startupStep}`,
+  );
+}
+assert.ok(
+  startupAdapter.indexOf('initParams = readParams(new URLSearchParams(startupRoute.pairs));')
+    < startupAdapter.indexOf('applyParams(initParams);'),
+  'Rust startup decoding must finish before browser state is applied',
+);
 
 const canonical = canonicalizeHyperscopeRoute([
   ['routeshadow', '1'],
