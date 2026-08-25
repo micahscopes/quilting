@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "Placeholder cdylib so Trunk has a crate to build; the real WASM comes from the wasm-pack hook"
 
 [lib]
