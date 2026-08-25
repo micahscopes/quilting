@@ -58,6 +58,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 .hs-diag h3{font-size:10px;color:#c9d1d9;margin-top:7px;text-transform:uppercase;letter-spacing:.7px}
 .hs-diag pre{font:9px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-word;color:#8b949e;margin-top:2px}
 .hs-warn{color:#f0883e!important}
+.asset-credit{margin-top:7px;color:#8b949e;font-size:10px;line-height:1.45}
+.asset-credit strong{color:#c9d1d9;font-weight:600}
+.asset-credit a,.asset-credit-note a{color:#58a6ff;text-decoration:none;overflow-wrap:anywhere}
+.asset-credit a:hover,.asset-credit-note a:hover{text-decoration:underline}
+.asset-credit-note{margin-top:7px;color:#6e7681;font-size:9px;line-height:1.4}
 .lab-note{font-size:9px;line-height:1.4;color:#6e7681;margin-top:5px}
 .lab-stats{font:9px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;color:#8b949e;margin-top:6px;white-space:normal}
 .lab-stats .ok{color:#3fb950}.lab-stats .promoted{color:#d29922}.lab-stats .val{color:#58a6ff}
@@ -348,6 +353,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="stats" id="stats">Loading WASM...</div>
   <div class="stats" id="hyperscape-diagnostics">Hyperscape: no authored scene</div>
+  <details class="hs-diag" id="asset-credits">
+    <summary>Asset credits <span id="asset-credit-count"></span></summary>
+    <div id="asset-credit-list" class="asset-credit-note">No credited asset loaded yet.</div>
+    <div class="asset-credit-note"><a href="ASSET_ATTRIBUTION.md" target="_blank" rel="noreferrer">Bundled asset attribution and redistribution notes</a></div>
+  </details>
   <details class="hs-diag" id="hyperscape-inspector" open>
     <summary>Conformal Scene Inspector</summary>
     <div class="btns" style="margin-top:6px"><button id="load-hyperscape-demo">Load authored demo</button></div>
@@ -429,7 +439,7 @@ import {
   BrowserLocalPeerRelay,
   DEFAULT_LOCAL_PEER_RELAY_URL,
 } from './local_peer_browser.mjs?rev=exact-frame-json-v1';
-import { BrowserAssetEffectHost } from './asset_effect_host.mjs?rev=rust-primary-load-v1';
+import { BrowserAssetEffectHost } from './asset_effect_host.mjs?rev=decoded-provenance-v1';
 
 function normalizeLegacyRouteShadow(params) {
   const normalized = new URLSearchParams(params);
@@ -2803,10 +2813,68 @@ function recordAppShadowMismatch(code, message) {
   mismatches.push({ code, message, atMs: performance.now() });
 }
 
+function assetCreditSourceLink(source) {
+  if (typeof source !== 'string' || source.length === 0) return null;
+  try {
+    const url = new URL(source, location.href);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderAssetCredits(snapshot) {
+  const list = $('asset-credit-list');
+  if (!list) return;
+  const credited = (snapshot?.assets || []).filter(asset => {
+    const status = asset?.status;
+    if (status?.state !== 'ready') return false;
+    const metadata = status.metadata;
+    return metadata && Object.values(metadata).some(value => typeof value === 'string' && value);
+  });
+  $('asset-credit-count').textContent = credited.length ? `(${credited.length})` : '';
+  if (credited.length === 0) {
+    list.className = 'asset-credit-note';
+    list.textContent = 'No embedded attribution metadata is available for the loaded asset.';
+    return;
+  }
+  list.className = '';
+  list.replaceChildren(...credited.map(asset => {
+    const metadata = asset.status.metadata;
+    const entry = document.createElement('div');
+    entry.className = 'asset-credit';
+    const heading = document.createElement('strong');
+    heading.textContent = metadata.title || asset.uri.split('/').filter(Boolean).pop() || asset.uri;
+    entry.append(heading);
+    for (const [label, value] of [
+      ['Author', metadata.author],
+      ['License', metadata.license],
+      ['Copyright', metadata.copyright],
+      ['Generator', metadata.generator],
+    ]) {
+      if (!value) continue;
+      entry.append(document.createElement('br'), `${label}: ${value}`);
+    }
+    const source = assetCreditSourceLink(metadata.source);
+    if (source) {
+      const link = document.createElement('a');
+      link.href = source;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = 'Source';
+      entry.append(document.createElement('br'), link);
+    } else if (metadata.source) {
+      entry.append(document.createElement('br'), `Source: ${metadata.source}`);
+    }
+    return entry;
+  }));
+}
+
 function refreshAppShadowSnapshot() {
   if (!rustAppShadow) return null;
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
+  renderAssetCredits(snapshot);
   return snapshot;
 }
 
@@ -3172,16 +3240,27 @@ function beginAppAssetShadow(uri, source, explicitAssetId = null, scope = 'asset
   }
 }
 
-function completeAppAssetShadow(token, buffer) {
+function completeAppAssetShadow(token, bufferOrByteLength, metadata = null) {
   if (!token || token.completed || !rustAppShadow) return 'unobserved';
   token.completed = true;
-  const byteLength = Number(buffer?.byteLength ?? 0);
+  const byteLength = Number(
+    typeof bufferOrByteLength === 'number'
+      ? bufferOrByteLength
+      : bufferOrByteLength?.byteLength ?? 0,
+  );
   if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > 0xffffffff) {
     recordAppShadowMismatch('byte_length', `${token.uri}: unsupported byte length ${byteLength}`);
     return 'invalid';
   }
   try {
-    const commit = rustAppShadow.completeAssetLoaded(token.requestId, token.assetId, byteLength);
+    const commit = metadata && typeof metadata === 'object'
+      ? rustAppShadow.completeAssetLoadedWithMetadata(
+        token.requestId,
+        token.assetId,
+        byteLength,
+        metadata,
+      )
+      : rustAppShadow.completeAssetLoaded(token.requestId, token.assetId, byteLength);
     rustAppShadowDiagnostics.loaded += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
@@ -3191,6 +3270,10 @@ function completeAppAssetShadow(token, buffer) {
     if (commit.disposition === 'applied'
         && (asset?.status?.state !== 'ready' || asset.status.byte_length !== byteLength)) {
       recordAppShadowMismatch('loaded_projection', `Rust ready projection diverged for ${token.uri}`);
+    }
+    if (commit.disposition === 'applied' && metadata
+        && JSON.stringify(asset?.status?.metadata || {}) !== JSON.stringify(metadata)) {
+      recordAppShadowMismatch('metadata_projection', `Rust provenance projection diverged for ${token.uri}`);
     }
     return commit.disposition;
   } catch (error) {
@@ -3227,6 +3310,12 @@ function failAppAssetShadow(token, code, error, retryable = false) {
     );
     return 'error';
   }
+}
+
+function appAssetMayProcess(token) {
+  const allowed = browserAssetEffectHost.mayProcess(token);
+  if (!allowed) rustAppShadowDiagnostics.preventedInstalls += 1;
+  return allowed;
 }
 
 function appAssetMayInstall(token) {
@@ -5165,13 +5254,12 @@ $('load-hyperscape-demo').addEventListener('click', async () => {
     const response = await fetch(assetShadow?.uri || uri, appAssetFetchOptions(assetShadow));
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     const buffer = await response.arrayBuffer();
-    const disposition = completeAppAssetShadow(assetShadow, buffer);
-    if (!appAssetMayInstall(assetShadow)) return;
+    if (!appAssetMayProcess(assetShadow)) return;
     await loadModel(
       buffer,
       uri,
       null,
-      disposition === 'applied' ? assetShadow?.assetId : null,
+      null,
       assetShadow,
     );
   } catch (error) {
@@ -6038,10 +6126,9 @@ wrapEl.addEventListener('drop', async e => {
     await waitForInitialPrimaryInstall();
     assetShadow = beginAppAssetShadow(file.name, 'drop', null, 'primary_scene');
     const buf = await file.arrayBuffer();
-    const disposition = completeAppAssetShadow(assetShadow, buf);
-    if (!appAssetMayInstall(assetShadow)) return;
+    if (!appAssetMayProcess(assetShadow)) return;
     await idbPut(IDB_GLB_STORE, file.name, buf);
-    if (!appAssetMayInstall(assetShadow)) return;
+    if (!appAssetMayProcess(assetShadow)) return;
     currentGlb = file.name;
     if (RUST_PRESENTATION_ENABLED) {
       location.assign(standaloneDroppedModelUrl(file.name));
@@ -6051,7 +6138,7 @@ wrapEl.addEventListener('drop', async e => {
       buf,
       file.name,
       null,
-      disposition === 'applied' ? assetShadow?.assetId : null,
+      null,
       assetShadow,
     );
     if (installed) syncURL();
@@ -6794,8 +6881,9 @@ async function loadModel(
   sessionAssetId = null,
   assetToken = null,
 ) {
-  return browserAssetEffectHost.runInstall(assetToken, async () => {
-    if (!appAssetMayInstall(assetToken)) return false;
+  return browserAssetEffectHost.runProcess(assetToken, async () => {
+    if (!appAssetMayProcess(assetToken)) return false;
+    const byteLength = Number(buffer?.byteLength ?? 0);
     patchLab.active = false;
     patchLab.animate = false;
     $('patch-lab-animate').classList.remove('on');
@@ -6803,13 +6891,19 @@ async function loadModel(
     remeshedMode = false;
     $('stats').textContent = `Loading ${filename}...`;
     const resp = await workerCall('load_gltf_data', { bytes: buffer }, [buffer]);
+    if (!appAssetMayProcess(assetToken)) return false;
+    const disposition = completeAppAssetShadow(
+      assetToken,
+      byteLength,
+      resp.result?.asset_metadata || {},
+    );
     if (!appAssetMayInstall(assetToken)) return false;
     meshInfo = resp.result;
     const uploaded = await finishModelUpload(
       resp.result,
       filename,
       durableAssetId,
-      sessionAssetId,
+      disposition === 'applied' ? assetToken?.assetId : sessionAssetId,
       assetToken,
     );
     if (!uploaded || !appAssetMayInstall(assetToken)) return false;
@@ -7839,7 +7933,6 @@ function maximumNodeId(faceNodes) {
 async function fetchPresentationGlb(asset) {
   const startedAt = performance.now();
   let assetShadow = null;
-  let buffer;
   try {
     assetShadow = beginAppAssetShadow(asset.uri, 'presentation', asset.id);
     const response = await fetch(
@@ -7847,21 +7940,25 @@ async function fetchPresentationGlb(asset) {
       appAssetFetchOptions(assetShadow),
     );
     if (!response.ok) throw new Error(`${asset.name}: HTTP ${response.status} for ${asset.uri}`);
-    buffer = await response.arrayBuffer();
-    completeAppAssetShadow(assetShadow, buffer);
-    if (!appAssetMayInstall(assetShadow)) {
+    const buffer = await response.arrayBuffer();
+    if (!appAssetMayProcess(assetShadow)) {
       throw new Error(`${asset.name}: obsolete presentation asset request`);
     }
+    const magic = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
+    if (magic.length !== 4 || magic[0] !== 0x67 || magic[1] !== 0x6c
+        || magic[2] !== 0x54 || magic[3] !== 0x46) {
+      throw new Error(`${asset.name}: ${asset.uri} is not a GLB`);
+    }
+    return {
+      buffer,
+      byteLength: buffer.byteLength,
+      fetchMs: performance.now() - startedAt,
+      assetToken: assetShadow,
+    };
   } catch (error) {
     failAppAssetShadow(assetShadow, 'presentation_fetch_failed', error, true);
     throw error;
   }
-  const magic = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
-  if (magic.length !== 4 || magic[0] !== 0x67 || magic[1] !== 0x6c
-      || magic[2] !== 0x54 || magic[3] !== 0x46) {
-    throw new Error(`${asset.name}: ${asset.uri} is not a GLB`);
-  }
-  return { buffer, fetchMs: performance.now() - startedAt };
 }
 
 function presentationGlbNodeMetadata(buffer) {
@@ -7898,6 +7995,17 @@ async function loadStaticPresentationAsset(asset, fetched) {
   );
   const info = loaded.result;
   if (!info) throw new Error(`${asset.name}: glTF parse returned no model`);
+  if (!appAssetMayProcess(fetched.assetToken)) {
+    throw new Error(`${asset.name}: obsolete presentation asset decode`);
+  }
+  completeAppAssetShadow(
+    fetched.assetToken,
+    fetched.byteLength,
+    info.asset_metadata || {},
+  );
+  if (!appAssetMayInstall(fetched.assetToken)) {
+    throw new Error(`${asset.name}: obsolete presentation asset completion`);
+  }
   if ((info.animations || []).length > 0) {
     throw new Error(`${asset.name}: animated secondary presentation assets are not supported yet`);
   }
@@ -8059,7 +8167,12 @@ async function initializePresentationComposition() {
   }));
   const secondary = [];
   for (const entry of fetched) {
-    secondary.push(await loadStaticPresentationAsset(entry.asset, entry.result));
+    try {
+      secondary.push(await loadStaticPresentationAsset(entry.asset, entry.result));
+    } catch (error) {
+      failAppAssetShadow(entry.result.assetToken, 'presentation_decode_failed', error);
+      throw error;
+    }
   }
 
   const primaryInstances = currentInstances;
@@ -8832,9 +8945,15 @@ phase('model', ['workers'], async () => {
       }
     }
     if (!buf) return null;
-    const disposition = completeAppAssetShadow(assetShadow, buf);
-    if (!appAssetMayInstall(assetShadow)) return null;
+    if (!appAssetMayProcess(assetShadow)) return null;
+    const byteLength = buf.byteLength;
     const resp = await workerCall('load_gltf_data', { bytes: buf }, [buf]);
+    if (!appAssetMayProcess(assetShadow)) return null;
+    const disposition = completeAppAssetShadow(
+      assetShadow,
+      byteLength,
+      resp.result?.asset_metadata || {},
+    );
     if (!appAssetMayInstall(assetShadow)) return null;
     return {
       result: resp.result,

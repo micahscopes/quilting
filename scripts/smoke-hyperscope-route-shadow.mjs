@@ -203,14 +203,15 @@ for (const assetAuthorityStep of [
   'const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);',
   'rustAppShadow.requestPrimaryAsset.bind(rustAppShadow)',
   'browserAssetEffectHost.begin({',
-  'browserAssetEffectHost.runInstall(assetToken, async () => {',
+  'browserAssetEffectHost.runProcess(assetToken, async () => {',
+  'rustAppShadow.completeAssetLoadedWithMetadata(',
   "beginAppAssetShadow(file.name, 'drop', null, 'primary_scene')",
   'function standaloneDroppedModelUrl(filename)',
   "url.searchParams.set('glb', filename);",
   'location.assign(standaloneDroppedModelUrl(file.name));',
   "beginAppAssetShadow(currentGlb, 'startup', null, 'primary_scene')",
   'fetch(candidate, appAssetFetchOptions(assetShadow))',
-  'if (!appAssetMayInstall(assetShadow)) return;',
+  'if (!appAssetMayProcess(assetShadow)) return;',
   "if (RUST_ASSET_IMPLEMENTATION === 'rust') throw error;",
 ]) {
   assert.ok(

@@ -189,3 +189,45 @@ test('rust mode serializes primary installations and skips a queued stale job', 
   assert.equal(await staleQueued, false);
   assert.deepEqual(order, ['first-start', 'first-end', 'second']);
 });
+
+test('rust mode serializes decode work before completion and skips stale jobs', async () => {
+  const host = new BrowserAssetEffectHost('rust');
+  const first = begin(host, {
+    requestId: 'request-1', assetId: 'horse', uri: 'horse.glb', scope: 'primary_scene',
+  }).token;
+  let releaseFirst;
+  const firstBlocked = new Promise(resolve => { releaseFirst = resolve; });
+  const order = [];
+  const firstProcess = host.runProcess(first, async () => {
+    order.push('first-start');
+    await firstBlocked;
+    order.push('first-end');
+    return true;
+  });
+  await Promise.resolve();
+
+  const second = begin(host, {
+    requestId: 'request-2',
+    assetId: 'chess',
+    uri: 'chess.glb',
+    scope: 'primary_scene',
+    effects: [
+      cancelEffect('request-1', 'horse'),
+      fetchEffect('request-2', 'chess', 'chess.glb'),
+    ],
+  }).token;
+  const secondProcess = host.runProcess(second, async () => {
+    order.push('second');
+    return true;
+  });
+  const staleQueued = host.runProcess(first, async () => {
+    order.push('stale');
+    return true;
+  });
+
+  releaseFirst();
+  assert.equal(await firstProcess, true);
+  assert.equal(await secondProcess, true);
+  assert.equal(await staleQueued, false);
+  assert.deepEqual(order, ['first-start', 'first-end', 'second']);
+});

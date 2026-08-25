@@ -156,6 +156,19 @@ export class BrowserAssetEffectHost {
     return token.signal.aborted || error?.name === 'AbortError';
   }
 
+  runProcess(token, operation) {
+    if (typeof operation !== 'function') {
+      throw new TypeError('asset processing must be a function');
+    }
+    if (this.implementation !== 'rust') return operation();
+    const turn = this.installTail.then(async () => {
+      if (!this.mayProcess(token)) return false;
+      return operation();
+    });
+    this.installTail = turn.catch(() => undefined);
+    return turn;
+  }
+
   runInstall(token, operation) {
     if (typeof operation !== 'function') {
       throw new TypeError('asset installation must be a function');
