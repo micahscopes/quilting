@@ -1817,7 +1817,7 @@ pub fn get_rest_pose_instances() -> JsValue {
 ///
 /// Walks ALL scene nodes, applies world transforms, merges all meshes.
 /// Returns a JS object with:
-///   { time_min, time_max, num_vertices, num_faces, materials, textures,
+///   { asset_metadata, time_min, time_max, num_vertices, num_faces, materials, textures,
 ///     face_node_indices, node_stable_entity_ids, node_world_transforms,
 ///     base_color, metallic, roughness }
 /// Built with js_sys to avoid serde overhead on large data.
@@ -2281,6 +2281,13 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
 
     // Build result object using js_sys (not serde) for speed
     let result = js_sys::Object::new();
+    let js_asset_metadata =
+        serde_wasm_bindgen::to_value(&scene.asset_metadata).unwrap_or(JsValue::NULL);
+    js_sys::Reflect::set(
+        &result,
+        &"asset_metadata".into(),
+        &js_asset_metadata,
+    ).unwrap();
     js_sys::Reflect::set(&result, &"time_min".into(), &JsValue::from_f64(time_min)).unwrap();
     js_sys::Reflect::set(&result, &"time_max".into(), &JsValue::from_f64(time_max)).unwrap();
     js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(n_verts as f64)).unwrap();

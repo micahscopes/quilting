@@ -96,7 +96,18 @@ function authoredTriangleGlb(stableEntityId) {
   ]);
   new Uint16Array(binary.buffer, 36, 3).set([0, 1, 2]);
   const document = {
-    asset: { version: '2.0' },
+    asset: {
+      version: '2.0',
+      copyright: 'Example model copyright',
+      generator: 'Hyperscope smoke fixture',
+      extras: {
+        title: 'Authored triangle',
+        author: 'Example Author (https://example.test/author)',
+        license: 'CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/)',
+        source: 'https://example.test/authored-triangle',
+        unrelated: { retained: false },
+      },
+    },
     buffers: [{ byteLength: 42 }],
     bufferViews: [
       { buffer: 0, byteOffset: 0, byteLength: 36, target: 34962 },
@@ -151,6 +162,14 @@ function authoredTriangleGlb(stableEntityId) {
 
 const authoredEntity = '71000000-0000-4000-8000-000000000001';
 const authoredModel = loadGltfData(authoredTriangleGlb(authoredEntity));
+assert.deepEqual(authoredModel.asset_metadata, {
+  copyright: 'Example model copyright',
+  generator: 'Hyperscope smoke fixture',
+  title: 'Authored triangle',
+  author: 'Example Author (https://example.test/author)',
+  license: 'CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/)',
+  source: 'https://example.test/authored-triangle',
+});
 assert.deepEqual(
   authoredModel.node_stable_entity_ids,
   [authoredEntity, null],
