@@ -1,0 +1,13 @@
+[package]
+name = "quilting-acceptance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Workspace-level acceptance tests for composed Quilting and Hyperscape artifacts"
+
+[dependencies]
+hyperscape = { path = "../hyperscape" }
+quilting-gltf = { path = "../quilting-gltf" }

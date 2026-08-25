@@ -869,35 +869,4 @@ mod tests {
         assert_eq!(graph_asset.unwrap(), asset);
     }
 
-    #[test]
-    fn checked_in_blender_demo_has_renderable_fallback_and_full_timeline() {
-        let bytes = include_bytes!("../../../examples/hyperscape-blender-demo.glb");
-        let scene = crate::load_gltf(bytes).unwrap();
-        assert!(!scene.meshes.is_empty());
-        assert!(scene
-            .nodes
-            .iter()
-            .any(|node| node.name.as_deref() == Some("HS_Traveler") && node.mesh.is_some()));
-        assert!(scene
-            .nodes
-            .iter()
-            .any(|node| node.name.as_deref() == Some("HS_ProjectionCamera")));
-
-        let asset = scene.hyperscape.unwrap();
-        assert_eq!(asset.payload.frames.len(), 3);
-        assert_eq!(asset.payload.walls.len(), 4);
-        assert_eq!(asset.payload.anchors.len(), 2);
-        assert_eq!(asset.payload.paths.len(), 1);
-        assert_eq!(asset.payload.paths[0].coordinate_frame, Some(0));
-        assert_eq!(
-            asset.payload.paths[0]
-                .transitions
-                .iter()
-                .map(|transition| transition.frame)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 0]
-        );
-        assert_eq!(asset.payload.constraints.len(), 2);
-        asset.validate().unwrap();
-    }
 }
