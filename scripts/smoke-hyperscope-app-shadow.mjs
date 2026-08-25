@@ -320,6 +320,115 @@ assert.throws(
 );
 assert.deepEqual(app.snapshot().authoredEntities, beforeInvalidAuthored.authoredEntities);
 
+// The generated application facade owns local-peer admission. A carrier only
+// supplies canonical JSON and receipt time; duplicate, stale, echo, atomic
+// failure, and TTL policy all remain in Rust.
+const peerApp = new HyperscopeAppShadow();
+const peerEntity = '63000000-0000-4000-8000-000000000001';
+const peerSender = '63000000-0000-4000-8000-000000000002';
+const peerEnvelope = structuredClone(authoredTransformEnvelope);
+peerEnvelope.header.message_id = '63000000-0000-4000-8000-000000000003';
+peerEnvelope.header.sender = peerSender;
+peerEnvelope.header.sequence = 10;
+peerEnvelope.command.entity = peerEntity;
+const peerFrame = { lane: 'authored', envelope: peerEnvelope };
+const peerApplied = peerApp.receiveLocalPeerEnvelope(0, JSON.stringify(peerFrame));
+assert.equal(peerApplied.lane, 'authored');
+assert.equal(peerApplied.disposition, 'applied');
+assert.equal(peerApplied.projectionRevision, '0');
+assert.equal(peerApplied.commit.disposition, 'applied');
+const peerAppliedRevision = peerApp.snapshot().revision;
+
+const peerDuplicate = peerApp.receiveLocalPeerEnvelope(0, JSON.stringify(peerFrame));
+assert.equal(peerDuplicate.disposition, 'ignored_duplicate');
+assert.equal(peerDuplicate.projectionRevision, undefined);
+assert.equal(peerDuplicate.commit, undefined);
+assert.equal(peerApp.snapshot().revision, peerAppliedRevision);
+
+const peerStaleEnvelope = structuredClone(peerEnvelope);
+peerStaleEnvelope.header.message_id = '63000000-0000-4000-8000-000000000004';
+peerStaleEnvelope.header.sequence = 9;
+peerStaleEnvelope.command.transform.translation = [9, 9, 9];
+const peerStale = peerApp.receiveLocalPeerEnvelope(0, JSON.stringify({
+  lane: 'authored',
+  envelope: peerStaleEnvelope,
+}));
+assert.equal(peerStale.disposition, 'ignored_stale');
+assert.equal(peerStale.commit, undefined);
+assert.equal(peerApp.snapshot().revision, peerAppliedRevision);
+
+const peerInvalidEnvelope = structuredClone(peerEnvelope);
+peerInvalidEnvelope.header.message_id = '63000000-0000-4000-8000-000000000005';
+peerInvalidEnvelope.header.sequence = 11;
+peerInvalidEnvelope.command.transform.scale = [0, 1, 1];
+const beforeInvalidPeer = peerApp.snapshot();
+assert.throws(
+  () => peerApp.receiveLocalPeerEnvelope(0, JSON.stringify({
+    lane: 'authored',
+    envelope: peerInvalidEnvelope,
+  })),
+  /transform must be finite with nonzero rotation and scale/,
+);
+assert.deepEqual(peerApp.snapshot(), beforeInvalidPeer);
+peerInvalidEnvelope.command.transform.scale = [1, 1, 1];
+const peerCorrected = peerApp.receiveLocalPeerEnvelope(0, JSON.stringify({
+  lane: 'authored',
+  envelope: peerInvalidEnvelope,
+}));
+assert.equal(peerCorrected.disposition, 'applied');
+assert.equal(peerCorrected.projectionRevision, '1');
+
+const localEnvelope = structuredClone(peerEnvelope);
+localEnvelope.header.message_id = '63000000-0000-4000-8000-000000000006';
+localEnvelope.header.sequence = 12;
+localEnvelope.command.transform.translation = [12, 0, 0];
+assert.equal(
+  peerApp.applyAuthoredRevision('2', JSON.stringify([localEnvelope])).disposition,
+  'applied',
+);
+peerApp.recordLocalAuthoredEnvelope(JSON.stringify(localEnvelope));
+const localEchoFrame = JSON.stringify({ lane: 'authored', envelope: localEnvelope });
+const peerEcho = peerApp.receiveLocalPeerEnvelope(0, localEchoFrame);
+assert.equal(peerEcho.disposition, 'ignored_echo');
+assert.equal(peerEcho.commit, undefined);
+assert.equal(
+  peerApp.receiveLocalPeerEnvelope(0, localEchoFrame).disposition,
+  'ignored_duplicate',
+  'a consumed local echo must remain retry-safe',
+);
+
+const presenceEnvelope = JSON.parse(readFileSync(
+  `${repository}/fixtures/protocol/presence-camera-v0.1.json`,
+  'utf8',
+));
+presenceEnvelope.header.message_id = '63000000-0000-4000-8000-000000000007';
+presenceEnvelope.header.sender = '63000000-0000-4000-8000-000000000008';
+presenceEnvelope.header.sequence = 1;
+presenceEnvelope.presence.ttl_millis = 100;
+presenceEnvelope.presence.selection = [peerEntity];
+const presenceFrame = JSON.stringify({ lane: 'presence', envelope: presenceEnvelope });
+const presenceApplied = peerApp.receiveLocalPeerEnvelope(5, presenceFrame);
+assert.equal(presenceApplied.lane, 'presence');
+assert.equal(presenceApplied.disposition, 'applied');
+assert.equal(presenceApplied.projectionRevision, undefined);
+assert.equal(presenceApplied.commit.publishedUi, false);
+const livePresence = peerApp.peerPresenceSnapshot();
+assert.equal(livePresence.elapsedSeconds, 0);
+assert.equal(livePresence.peers.length, 1);
+assert.equal(livePresence.peers[0].peerId, presenceEnvelope.header.sender);
+assert.equal(livePresence.peers[0].sequence, '1');
+assert.equal(livePresence.peers[0].expiresAtSeconds, 5.1);
+assert.deepEqual(livePresence.peers[0].presence.selection, [peerEntity]);
+assert.equal(
+  peerApp.receiveLocalPeerEnvelope(5.01, presenceFrame).disposition,
+  'ignored_stale',
+);
+peerApp.advanceFrame(5.2, 5.2);
+const expiredPresence = peerApp.peerPresenceSnapshot();
+assert.equal(expiredPresence.elapsedSeconds, 5.2);
+assert.deepEqual(expiredPresence.peers, []);
+peerApp.free();
+
 const identityMatrix = [
   1, 0, 0, 0,
   0, 1, 0, 0,
@@ -1272,6 +1381,15 @@ console.log(JSON.stringify({
   authoredAssets: finalSnapshot.authoredAssets.length,
   authoredEntities: finalSnapshot.authoredEntities.length,
   packedSceneNodes: extractedScene.nodes.length,
+  peerIngress: {
+    authored: peerApplied.disposition,
+    duplicate: peerDuplicate.disposition,
+    stale: peerStale.disposition,
+    corrected: peerCorrected.disposition,
+    echo: peerEcho.disposition,
+    presence: presenceApplied.disposition,
+    expiredPeers: expiredPresence.peers.length,
+  },
   diagnostics: ready.diagnostics.map(diagnostic => diagnostic.code),
   presentationCue: finalSnapshot.presentation.active.cue_id,
   navigationBoundaryParity: true,

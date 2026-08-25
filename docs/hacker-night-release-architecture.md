@@ -188,6 +188,13 @@ The first application boundary is now explicit:
   sequence tracking, and consuming local-echo memory reject retries without
   giving a relay reducer authority. Multi-writer authored convergence still
   requires `hyperscape-hhhs`; arrival order is never presented as causality.
+- Generated WASM owns one `LocalPeerIngress` beside its `AppStore`.
+  `receiveLocalPeerEnvelope` admits canonical JSON, while
+  `recordLocalAuthoredEnvelope` marks an already-applied outbound edit for echo
+  suppression. Ephemeral peers are sampled through `peerPresenceSnapshot`, a
+  deliberately separate high-rate lane whose sender sequences and local
+  expiries do not masquerade as the throttled UI read-model revision. These
+  methods select no carrier and add no browser state authority.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

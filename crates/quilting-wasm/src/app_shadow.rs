@@ -8,14 +8,18 @@ use hyperscape::{
     PackedNodeSource, PackedNodeTransformSource, Presentation, PresentationSnapshot,
     SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget,
 };
-use hyperscape_protocol::{AssetDescriptor, AssetId, AuthoredEnvelope, EntityId, RequestId};
+use hyperscape_protocol::{
+    AssetDescriptor, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, LocalPeerEnvelope,
+    RequestId,
+};
 use hyperscope_app::{
     session_node_identity, AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore,
     AssetLoadCompletion, AssetLoadOutcome, AssetStatus, AuthoredRevision, CommitDisposition,
-    EffectCompletion, FrameTick, NavigationSynchronization, PresentationAction, SemanticAction,
-    Timed,
+    EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
+    LocalPeerReceipt, NavigationSynchronization, PresentationAction, SemanticAction, Timed,
 };
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
@@ -57,6 +61,7 @@ pub fn map_space_mouse_camera_frame(
 #[wasm_bindgen]
 pub struct HyperscopeAppShadow {
     store: AppStore,
+    peer_ingress: RefCell<LocalPeerIngress>,
 }
 
 #[wasm_bindgen]
@@ -65,6 +70,7 @@ impl HyperscopeAppShadow {
     pub fn new() -> Self {
         Self {
             store: AppStore::default(),
+            peer_ingress: RefCell::new(LocalPeerIngress::default()),
         }
     }
 
@@ -656,6 +662,63 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
+    /// Admit one canonical local-peer frame through the Rust application
+    /// boundary. This method selects no carrier and gives no authority to
+    /// WebSocket arrival order: it is the direct-demo single-writer adapter.
+    #[wasm_bindgen(js_name = receiveLocalPeerEnvelope)]
+    pub fn receive_local_peer_envelope(
+        &self,
+        received_at_seconds: f64,
+        frame_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let envelope = serde_json::from_str::<LocalPeerEnvelope>(frame_json)
+            .map_err(|error| js_error(format!("local peer frame is invalid JSON: {error}")))?;
+        let receipt = self
+            .peer_ingress
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("local peer ingress is already active"))?
+            .accept(&self.store, envelope, received_at_seconds)
+            .map_err(js_error)?;
+        peer_receipt_to_js(&receipt)
+    }
+
+    /// Mark one already-applied local authored envelope before a carrier sends
+    /// it. A subsequent relay echo is consumed without a second reducer event.
+    #[wasm_bindgen(js_name = recordLocalAuthoredEnvelope)]
+    pub fn record_local_authored_envelope(&self, envelope_json: &str) -> Result<(), JsValue> {
+        let envelope =
+            serde_json::from_str::<AuthoredEnvelope>(envelope_json).map_err(|error| {
+                js_error(format!("local authored envelope is invalid JSON: {error}"))
+            })?;
+        self.peer_ingress
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("local peer ingress is already active"))?
+            .record_local_authored(&envelope)
+            .map_err(js_error)
+    }
+
+    /// Sample ephemeral peers independently from the throttled UI read-model
+    /// commit fence. Each peer carries its sender sequence and local expiry.
+    #[wasm_bindgen(js_name = peerPresenceSnapshot)]
+    pub fn peer_presence_snapshot(&self) -> Result<JsValue, JsValue> {
+        let elapsed_seconds = self.store.frame_snapshot().elapsed_seconds;
+        let peers = self
+            .store
+            .presence_snapshot()
+            .into_iter()
+            .map(|peer| ShadowPeerPresence {
+                peer_id: peer.peer.to_string(),
+                sequence: peer.sequence.to_string(),
+                expires_at_seconds: peer.expires_at_seconds,
+                presence: peer.presence,
+            })
+            .collect();
+        to_js(&ShadowPeerPresenceSnapshot {
+            elapsed_seconds,
+            peers,
+        })
+    }
+
     /// Resolve low-rate ordinary scene transforms through the same authored
     /// materialization observed by the application. The JSON input contains
     /// layer/asset/node packing metadata only; output is backend-neutral and
@@ -859,6 +922,31 @@ struct ShadowCommit {
     disposition: &'static str,
     published_ui: bool,
     effects: Vec<ShadowEffect>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowLocalPeerReceipt {
+    lane: &'static str,
+    disposition: &'static str,
+    projection_revision: Option<String>,
+    commit: Option<ShadowCommit>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPeerPresenceSnapshot {
+    elapsed_seconds: f64,
+    peers: Vec<ShadowPeerPresence>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPeerPresence {
+    peer_id: String,
+    sequence: String,
+    expires_at_seconds: f64,
+    presence: EphemeralPresence,
 }
 
 #[derive(Serialize)]
@@ -1153,6 +1241,10 @@ fn navigation_to_js(
 }
 
 fn commit_to_js(commit: &AppCommit) -> Result<JsValue, JsValue> {
+    to_js(&shadow_commit(commit))
+}
+
+fn shadow_commit(commit: &AppCommit) -> ShadowCommit {
     let effects = commit
         .effects
         .iter()
@@ -1171,7 +1263,7 @@ fn commit_to_js(commit: &AppCommit) -> Result<JsValue, JsValue> {
             },
         })
         .collect();
-    to_js(&ShadowCommit {
+    ShadowCommit {
         revision: commit.revision.to_string(),
         disposition: match commit.disposition {
             CommitDisposition::Applied => "applied",
@@ -1179,6 +1271,25 @@ fn commit_to_js(commit: &AppCommit) -> Result<JsValue, JsValue> {
         },
         published_ui: commit.published_ui,
         effects,
+    }
+}
+
+fn peer_receipt_to_js(receipt: &LocalPeerReceipt) -> Result<JsValue, JsValue> {
+    to_js(&ShadowLocalPeerReceipt {
+        lane: match receipt.lane {
+            LocalPeerLane::Authored => "authored",
+            LocalPeerLane::Presence => "presence",
+        },
+        disposition: match receipt.disposition {
+            LocalPeerDisposition::Applied => "applied",
+            LocalPeerDisposition::IgnoredStale => "ignored_stale",
+            LocalPeerDisposition::IgnoredDuplicate => "ignored_duplicate",
+            LocalPeerDisposition::IgnoredEcho => "ignored_echo",
+        },
+        projection_revision: receipt
+            .projection_revision
+            .map(|revision| revision.to_string()),
+        commit: receipt.commit.as_ref().map(shadow_commit),
     })
 }
 

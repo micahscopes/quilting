@@ -1423,3 +1423,23 @@ and rejects a presence payload relabeled as authored. The gate passed 51 app
 tests, 7 protocol tests, strict crate-local Clippy, warning-free
 rustdoc, and wasm32 app checking. This intentionally does not claim
 multi-writer convergence: that remains the HHHS adapter's job.
+
+## Generated local peer admission
+
+`HyperscopeAppShadow` now retains the Rust ingress next to its application
+store. Generated WASM accepts canonical `LocalPeerEnvelope` JSON, exposes a
+separate ephemeral presence sample, and records already-applied local authored
+envelopes solely for echo suppression. The low-rate application snapshot keeps
+its existing commit-fence meaning; presence carries its own peer sequence,
+receipt-relative expiry, and sampled application time.
+
+The generated oracle proved authored apply, exact duplicate rejection,
+sender-stale rejection, invalid-then-corrected atomic admission, consumed echo
+and repeated-echo behavior, presence admission, presence stale rejection, and
+TTL expiry. A release `wasm-pack build` succeeded, `wasm-pack test --node`
+passed four tests, and all five generated Node smokes passed. A wasm32 library
+check also passed. Ordinary crate-local Clippy attributed no warning to
+`app_shadow.rs`; strict whole-crate Clippy remains blocked by 42 existing
+renderer/runtime findings, and strict whole-crate rustdoc by eight existing
+broken-link findings. This checkpoint does not conceal those separate cleanup
+debts or select a Blender/browser carrier.
