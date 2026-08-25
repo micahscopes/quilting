@@ -32,7 +32,7 @@ local-peer-relay = [
 hhhs = { workspace = true, optional = true }
 hhhs-replica = { workspace = true, optional = true }
 hhhs-store = { workspace = true, optional = true }
-hyperscape-hhhs = { path = "../hyperscape-hhhs", optional = true }
+hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["raw_value"], optional = true }
 thiserror = { version = "2", optional = true }
@@ -52,5 +52,5 @@ wasm-bindgen = { version = "=0.2.106", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-hyperscape-protocol = { path = "../hyperscape-protocol" }
+hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 wasm-bindgen-test = "0.3"

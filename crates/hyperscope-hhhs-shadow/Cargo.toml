@@ -10,9 +10,9 @@ description = "Optional AppStore-to-HHHS authored-state parity observer for Hype
 [dependencies]
 hhhs.workspace = true
 hhhs-replica.workspace = true
-hyperscape-hhhs = { path = "../hyperscape-hhhs" }
-hyperscape-protocol = { path = "../hyperscape-protocol" }
-hyperscope-app = { path = "../hyperscope-app" }
+hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs" }
+hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
+hyperscope-app = { version = "0.1.0", path = "../hyperscope-app" }
 
 [dev-dependencies]
 futures = { version = "0.3", features = ["executor"] }

@@ -16,7 +16,7 @@ hhhs-reactive.workspace = true
 hhhs-replica.workspace = true
 hhhs-store.workspace = true
 hhhs-sync.workspace = true
-hyperscape-protocol = { path = "../hyperscape-protocol" }
+hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 uuid = "1"
