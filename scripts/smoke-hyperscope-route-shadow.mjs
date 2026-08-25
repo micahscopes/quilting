@@ -86,6 +86,9 @@ for (const assetAuthorityStep of [
   'browserAssetEffectHost.begin({',
   'browserAssetEffectHost.runInstall(assetToken, async () => {',
   "beginAppAssetShadow(file.name, 'drop', null, 'primary_scene')",
+  'function standaloneDroppedModelUrl(filename)',
+  "url.searchParams.set('glb', filename);",
+  'location.assign(standaloneDroppedModelUrl(file.name));',
   "beginAppAssetShadow(currentGlb, 'startup', null, 'primary_scene')",
   'fetch(candidate, appAssetFetchOptions(assetShadow))',
   'if (!appAssetMayInstall(assetShadow)) return;',
@@ -96,6 +99,20 @@ for (const assetAuthorityStep of [
     `browser asset authority adapter is missing ${assetAuthorityStep}`,
   );
 }
+const dropAdapter = browserSource.slice(
+  browserSource.indexOf('// --- File drop with overlay ---'),
+  browserSource.indexOf('// --- Environment maps (IBL) ---'),
+);
+assert.ok(
+  dropAdapter.indexOf('await idbPut(IDB_GLB_STORE, file.name, buf);')
+    < dropAdapter.indexOf('location.assign(standaloneDroppedModelUrl(file.name));'),
+  'presentation drop must persist the file before entering its standalone route',
+);
+assert.ok(
+  dropAdapter.indexOf('location.assign(standaloneDroppedModelUrl(file.name));')
+    < dropAdapter.indexOf('const installed = await loadModel('),
+  'presentation drop must leave the cue composition before attempting an in-place install',
+);
 assert.ok(
   browserSource.includes("if (EXPLICIT_RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');"),
   'implicit Rust asset authority must not pollute canonical URLs with appshadow=1',

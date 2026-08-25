@@ -209,7 +209,9 @@ interactive rather than locking the camera.
   `D`. The walker follows animated QB geometry and detaches safely when contact
   becomes invalid.
 - **Load a fallback model:** drag a local `.glb` onto the canvas or use the file
-  picker. This is a recovery/demo path, not part of the deterministic cue deck.
+  picker. From the cue deck, a drop opens a clean ordinary-model route after
+  persisting the file; Back returns to the exact deck URL. This is a
+  recovery/demo path, not part of the deterministic cue deck.
 - **Compare grading policy:** open
   `?lab=triangle&labfield=edges&laba=1&labb=6&labc=6`, then repeat with
   `&lodratio=4`. The page reload is intentional: diagnostics must report the
@@ -286,7 +288,7 @@ use `walkimpl=rust` only when explicitly demonstrating the migration.
    to reconstruct an improvised view on stage.
 3. If WebHID fails, continue with mouse/keyboard; do not change operating-system
    permissions during the talk.
-4. If a dropped model fails, return to the bundled presentation—the checked-in
+4. If a dropped model fails, go Back or reload the known deck URL—the checked-in
    assets are the rehearsed path.
 5. Keep a known-good copy of `dist/` made after a passing preflight. Do not run a
    development rebuild during the presentation.

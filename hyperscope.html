@@ -5571,6 +5571,13 @@ async function idbGet(store, name) {
 const wrapEl = $('wrap');
 const dropOverlay = $('drop-overlay');
 let dragCounter = 0;
+function standaloneDroppedModelUrl(filename) {
+  const url = new URL(location.href);
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set('glb', filename);
+  return url.href;
+}
 wrapEl.addEventListener('dragenter', e => { e.preventDefault(); dragCounter++; dropOverlay.classList.add('active'); });
 wrapEl.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
 wrapEl.addEventListener('dragleave', e => { e.preventDefault(); dragCounter--; if (dragCounter <= 0) { dragCounter = 0; dropOverlay.classList.remove('active'); } });
@@ -5594,6 +5601,10 @@ wrapEl.addEventListener('drop', async e => {
     await idbPut(IDB_GLB_STORE, file.name, buf);
     if (!appAssetMayInstall(assetShadow)) return;
     currentGlb = file.name;
+    if (RUST_PRESENTATION_ENABLED) {
+      location.assign(standaloneDroppedModelUrl(file.name));
+      return;
+    }
     const installed = await loadModel(
       buf,
       file.name,
