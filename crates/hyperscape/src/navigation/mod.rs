@@ -7,6 +7,7 @@
 pub(crate) mod action;
 mod camera;
 mod focus;
+mod surface_anchor;
 mod surface_walk;
 mod surface_walk_runtime;
 mod transition;
@@ -22,6 +23,10 @@ pub use camera::{
     SphereReflectionState,
 };
 pub use focus::{FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition};
+pub use surface_anchor::{
+    AnimatedSurfaceAnchor, SurfaceAnchorError, SurfaceAnchoredCameraFrame, SurfaceRelativeCamera,
+    SurfaceTangentFrame,
+};
 pub use surface_walk::{
     compose_surface_relative_forward, decompose_surface_relative_forward,
     scale_relative_near_plane, SurfaceRelativeView, SurfaceWalkContactFrame, SurfaceWalkController,
