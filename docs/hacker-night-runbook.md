@@ -309,6 +309,14 @@ every archive. A public bundle under the intended
 policy is ready only when the strict preflight has no errors or warnings and
 the browser smoke check passes on the target machine.
 
+A raw `git archive` is also a mixed-license source distribution because it
+contains the tracked horse, ant, and environment maps. Keep
+`ASSET_ATTRIBUTION.md` with it and label the horse terms explicitly. Do not call
+that archive MIT/Apache-only; a permissive-only code archive needs a separately
+reviewed exclusion or replacement policy. From a fresh source extraction,
+`cargo build --offline --locked` and `cargo test --offline --locked` must both
+pass without relying on ignored `pkg/` or `dist/` outputs.
+
 After that gate passes, make a deterministic transport archive at a new path:
 
 ```sh
