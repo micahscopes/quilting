@@ -19,10 +19,10 @@ The **Hyperscape** tab in the 3D View sidebar provides:
 
 The dependency-free `protocol.py` module also validates the same checked-in
 v0.1 authored/presence JSON fixtures as Rust. It supplies sender-local presence
-ordering with receipt-relative TTL and bounded authored-message echo
-suppression, but deliberately supplies no transport semantics. The optional
-local relay is a delivery-only adapter; HHHS can still wrap only authored
-envelopes without receiving viewport presence.
+ordering with receipt-relative TTL and bounded authored duplicate, stale, and
+echo suppression. The optional local relay remains a delivery-only adapter;
+HHHS can still wrap only authored envelopes without receiving viewport
+presence.
 
 For local bridge development, start the disabled-by-default relay and copy its
 printed bearer token into the browser and Blender adapters:
@@ -34,9 +34,24 @@ cargo run -p hyperscope-web --features local-peer-relay \
 
 It binds to `127.0.0.1:42117`, accepts only configured browser origins, retains
 a bounded in-memory suffix, and reports restart/history gaps rather than
-claiming persistence or repair. The Blender polling/main-thread adapter is a
-separate checkpoint; merely running the relay does not change the add-on or
-Hyperscope behavior.
+claiming persistence or repair. Merely running it changes no Blender or browser
+behavior: in the **Local Blender ↔ Hyperscope** panel, choose **Connect**, enter
+the printed token, and explicitly opt in. The token lives only in that operator
+and the active transport; it is not stored in the `.blend` or add-on
+preferences.
+
+The network worker only fills bounded queues. A Blender application timer
+validates and applies absolute ordinary-world TRS transforms on Blender's main
+thread. Bound objects are matched exclusively by their stable entity UUID;
+duplicates, invalid IDs, zero scale, and world shear are excluded instead of
+being approximated. Camera, selection, and animation time use the ephemeral
+presence lane. Timeline evaluation refreshes presence but is not converted
+into a stream of authored transforms.
+
+This bridge is intentionally a direct, arrival-ordered single-writer demo. Its
+cursor detects delivery gaps and process restarts but is not a scene revision.
+It has no durable storage, repair, capability delegation, or multi-writer
+convergence; those remain the future HHHS-backed session boundary.
 
 ## Install or build
 
@@ -104,6 +119,15 @@ exports it, imports it into a fresh file, and checks the authored collections:
 blender --background --factory-startup --python-exit-code 1 \
   --python tools/blender_hyperscape/tests/blender_roundtrip.py -- \
   /tmp/hyperscape-roundtrip.glb
+```
+
+The live-sync integration check proves local edit publication, echo
+suppression, remote transform application, ephemeral presence expiry,
+timeline isolation, and explicit shear rejection against a fake transport:
+
+```sh
+blender --background --factory-startup --python-exit-code 1 \
+  --python tools/blender_hyperscape/tests/blender_live_sync.py
 ```
 
 Regenerate the checked demo's `.blend`, `.gltf`, `.bin`, and `.glb` from the

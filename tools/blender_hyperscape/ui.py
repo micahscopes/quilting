@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import bpy
 
+from . import live_sync
+
 
 def _collection_header(layout, settings, collection: str) -> None:
     row = layout.row(align=True)
@@ -64,6 +66,47 @@ class HYPERSCAPE_PT_object(bpy.types.Panel):
         settings = context.scene.hyperscape
         layout.prop(settings, "frame_reparent_target", text="Re-anchor To")
         layout.operator("hyperscape.reanchor_object", icon="CON_TRACKTO")
+
+
+class HYPERSCAPE_PT_live_sync(bpy.types.Panel):
+    bl_label = "Local Blender ↔ Hyperscope"
+    bl_parent_id = "HYPERSCAPE_PT_scene"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+
+    def draw(self, _context):
+        layout = self.layout
+        status = live_sync.runtime_status()
+        if status.active:
+            layout.operator("hyperscape.live_sync_disconnect", icon="UNLINKED")
+        else:
+            layout.operator("hyperscape.live_sync_connect", icon="LINKED")
+        layout.label(text=f"State: {status.state}")
+        if status.peer_id:
+            layout.label(text=f"Peer: {status.peer_id[:8]}…")
+        layout.label(
+            text=(
+                f"{status.bound_entities} entities · "
+                f"{status.remote_peers} remote peers"
+            )
+        )
+        layout.label(
+            text=(
+                f"Authored: {status.authored_sent} sent · "
+                f"{status.authored_applied} applied · "
+                f"{status.authored_ignored} ignored"
+            )
+        )
+        if status.transport is not None:
+            layout.label(
+                text=(
+                    f"Delivery gaps/restarts: {status.transport.gaps}/"
+                    f"{status.transport.restarts}"
+                )
+            )
+        if status.detail:
+            layout.label(text=status.detail, icon="ERROR")
+        layout.label(text="Direct single-writer demo; HHHS owns durable repair.")
 
 
 class HYPERSCAPE_PT_frames(bpy.types.Panel):
@@ -225,6 +268,7 @@ class HYPERSCAPE_PT_constraints(bpy.types.Panel):
 CLASSES = (
     HYPERSCAPE_PT_scene,
     HYPERSCAPE_PT_object,
+    HYPERSCAPE_PT_live_sync,
     HYPERSCAPE_PT_frames,
     HYPERSCAPE_PT_walls,
     HYPERSCAPE_PT_anchors,

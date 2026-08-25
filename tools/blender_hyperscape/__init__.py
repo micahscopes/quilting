@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import demo, operators, properties, ui
+from . import demo, live_sync, operators, properties, ui
 
 
 bl_info = {
@@ -30,6 +30,7 @@ def register() -> None:
     properties.register()
     operators.register()
     demo.register()
+    live_sync.register()
     ui.register()
     bpy.types.TOPBAR_MT_file_import.append(_import_menu)
     bpy.types.TOPBAR_MT_file_export.append(_export_menu)
@@ -39,6 +40,7 @@ def unregister() -> None:
     bpy.types.TOPBAR_MT_file_export.remove(_export_menu)
     bpy.types.TOPBAR_MT_file_import.remove(_import_menu)
     ui.unregister()
+    live_sync.unregister()
     demo.unregister()
     operators.unregister()
     properties.unregister()

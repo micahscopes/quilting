@@ -256,6 +256,51 @@ def set_transform_envelope(
     return envelope
 
 
+def presence_envelope(
+    *,
+    message_id: str,
+    sender: str,
+    sequence: int,
+    ttl_millis: int,
+    camera: Mapping[str, Any] | None = None,
+    selection: Sequence[str] = (),
+    focus: Mapping[str, Any] | None = None,
+    active_cue: str | None = None,
+    animation_seconds: float | None = None,
+) -> dict[str, Any]:
+    presence: dict[str, Any] = {
+        "ttl_millis": ttl_millis,
+        "selection": [_uuid(entity, "selected entity ID") for entity in selection],
+    }
+    if camera is not None:
+        presence["camera"] = {
+            "eye": list(camera.get("eye", ())),
+            "forward": list(camera.get("forward", ())),
+            "up": list(camera.get("up", ())),
+        }
+    if focus is not None:
+        presence["focus"] = {
+            "center": list(focus.get("center", ())),
+            "radius": focus.get("radius"),
+            "inversion_enabled": focus.get("inversion_enabled"),
+        }
+    if active_cue is not None:
+        presence["active_cue"] = _uuid(active_cue, "active cue ID")
+    if animation_seconds is not None:
+        presence["animation_seconds"] = animation_seconds
+    envelope = {
+        "header": {
+            "version": dict(PROTOCOL_VERSION),
+            "message_id": _uuid(message_id, "message ID"),
+            "sender": _uuid(sender, "sender ID"),
+            "sequence": sequence,
+        },
+        "presence": presence,
+    }
+    validate_presence_envelope(envelope)
+    return envelope
+
+
 class PresenceInbox:
     """Latest sender-local presence with receipt-relative expiration."""
 
@@ -323,6 +368,75 @@ class AuthoredEchoGuard:
         self._known.remove(message_id)
         self._ordered.remove(message_id)
         return True
+
+
+class AuthoredInbox:
+    """Match Rust's bounded authored duplicate, stale, and echo policy."""
+
+    APPLIED = "applied"
+    IGNORED_DUPLICATE = "ignored_duplicate"
+    IGNORED_STALE = "ignored_stale"
+    IGNORED_ECHO = "ignored_echo"
+
+    def __init__(self, capacity: int = 4096) -> None:
+        if (
+            isinstance(capacity, bool)
+            or not isinstance(capacity, int)
+            or capacity <= 0
+        ):
+            raise HyperscapeProtocolError("authored inbox capacity must be positive")
+        self._capacity = capacity
+        self._seen_ordered: deque[str] = deque()
+        self._seen: set[str] = set()
+        self._sender_ordered: deque[str] = deque()
+        self._sender_sequences: dict[str, int] = {}
+        self._echoes = AuthoredEchoGuard(capacity)
+
+    def record_local(self, envelope: Mapping[str, Any]) -> None:
+        validate_authored_envelope(envelope)
+        header = envelope["header"]
+        self._echoes.record_local(header["message_id"])
+        self._observe_sender(header["sender"], header["sequence"])
+
+    def accept(self, envelope: Mapping[str, Any]) -> str:
+        validate_authored_envelope(envelope)
+        header = envelope["header"]
+        message_id = _uuid(header["message_id"], "message ID")
+        sender = _uuid(header["sender"], "sender ID")
+        sequence = int(header["sequence"])
+        if self._echoes.consume_echo(message_id):
+            self._remember(message_id)
+            self._observe_sender(sender, sequence)
+            return self.IGNORED_ECHO
+        if message_id in self._seen:
+            return self.IGNORED_DUPLICATE
+        if self._sender_sequences.get(sender, -1) >= sequence:
+            self._remember(message_id)
+            return self.IGNORED_STALE
+        self._remember(message_id)
+        self._observe_sender(sender, sequence)
+        return self.APPLIED
+
+    def _remember(self, message_id: str) -> None:
+        if message_id in self._seen:
+            return
+        if len(self._seen_ordered) == self._capacity:
+            self._seen.remove(self._seen_ordered.popleft())
+        self._seen_ordered.append(message_id)
+        self._seen.add(message_id)
+
+    def _observe_sender(self, sender: str, sequence: int) -> None:
+        sender = _uuid(sender, "sender ID")
+        if sender in self._sender_sequences:
+            self._sender_sequences[sender] = max(
+                self._sender_sequences[sender], sequence
+            )
+            return
+        if len(self._sender_ordered) == self._capacity:
+            expired = self._sender_ordered.popleft()
+            del self._sender_sequences[expired]
+        self._sender_ordered.append(sender)
+        self._sender_sequences[sender] = sequence
 
 
 def _length(vector: Sequence[float]) -> float:

@@ -122,6 +122,46 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(protocol.HyperscapeProtocolError, "lane"):
             protocol.local_peer_frame("durable_presence", presence)
 
+    def test_presence_constructor_matches_the_checked_in_rust_fixture(self) -> None:
+        _, fixture = self.fixture("presence-camera-v0.1.json")
+        constructed = protocol.presence_envelope(
+            message_id="00000000-0000-0000-0000-000000000001",
+            sender="00000000-0000-0000-0000-000000000002",
+            sequence=3,
+            ttl_millis=1500,
+            camera={
+                "eye": [0, 0, 3],
+                "forward": [0, 0, -1],
+                "up": [0, 1, 0],
+            },
+            selection=["00000000-0000-0000-0000-000000000005"],
+            animation_seconds=2,
+        )
+        self.assertEqual(constructed, fixture)
+
+    def test_authored_inbox_matches_rust_stale_duplicate_and_echo_policy(self) -> None:
+        _, first = self.fixture("authored-set-transform-v0.1.json")
+        inbox = protocol.AuthoredInbox(capacity=4)
+        inbox.record_local(first)
+        self.assertEqual(inbox.accept(first), protocol.AuthoredInbox.IGNORED_ECHO)
+        self.assertEqual(
+            inbox.accept(first),
+            protocol.AuthoredInbox.IGNORED_DUPLICATE,
+        )
+
+        stale = json.loads(json.dumps(first))
+        stale["header"]["message_id"] = "00000000-0000-0000-0000-000000000006"
+        stale["header"]["sequence"] -= 1
+        self.assertEqual(
+            inbox.accept(stale),
+            protocol.AuthoredInbox.IGNORED_STALE,
+        )
+
+        newer = json.loads(json.dumps(first))
+        newer["header"]["message_id"] = "00000000-0000-0000-0000-000000000007"
+        newer["header"]["sequence"] += 1
+        self.assertEqual(inbox.accept(newer), protocol.AuthoredInbox.APPLIED)
+
 
 if __name__ == "__main__":
     unittest.main()

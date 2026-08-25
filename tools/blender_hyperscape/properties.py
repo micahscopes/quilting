@@ -21,6 +21,26 @@ GENERATOR_TYPES = (
 )
 
 
+class HyperscapeAddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    relay_url: StringProperty(
+        name="Local Relay URL",
+        description="Loopback origin for the optional delivery-only peer relay",
+        default="http://127.0.0.1:42117",
+    )
+    peer_id: StringProperty(
+        name="Stable Blender Peer ID",
+        description="Installation-local UUID used as the protocol sender identity",
+    )
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.prop(self, "relay_url")
+        layout.prop(self, "peer_id")
+        layout.label(text="Bearer tokens are held only by the live connect operator.")
+
+
 class HyperscapeGenerator(bpy.types.PropertyGroup):
     kind: EnumProperty(name="Generator", items=GENERATOR_TYPES)
     offset: FloatVectorProperty(name="Offset", size=3, subtype="TRANSLATION")
@@ -135,6 +155,7 @@ class HyperscapeSceneSettings(bpy.types.PropertyGroup):
 
 
 CLASSES = (
+    HyperscapeAddonPreferences,
     HyperscapeGenerator,
     HyperscapeFrame,
     HyperscapeWall,
