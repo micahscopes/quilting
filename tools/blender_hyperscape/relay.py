@@ -240,7 +240,13 @@ class LocalRelayTransport:
             if not isinstance(item, Mapping):
                 raise RelayTransportError("relay delivery must be an object")
             cursor = _decimal_cursor(item.get("cursor"), "delivery cursor")
-            frame = item.get("frame")
+            frame_json = item.get("frameJson")
+            if not isinstance(frame_json, str):
+                raise RelayTransportError("relay delivery frame must be exact JSON text")
+            try:
+                frame = json.loads(frame_json)
+            except json.JSONDecodeError as error:
+                raise RelayTransportError("relay delivery frame is invalid JSON") from error
             if cursor != previous + 1 or cursor > latest:
                 raise RelayTransportError(
                     "relay delivery cursors must be contiguous through latest"

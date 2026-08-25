@@ -111,7 +111,7 @@ impl LocalPeerRelay {
             .take(limit)
             .map(|frame| RelayDelivery {
                 cursor: frame.cursor.to_string(),
-                frame: frame.frame.clone(),
+                frame_json: frame.frame.get().to_owned(),
             })
             .collect();
         let has_more = matching.next().is_some();
@@ -144,7 +144,10 @@ pub struct RelayBatch {
 #[derive(Debug, Clone, Serialize)]
 pub struct RelayDelivery {
     pub cursor: String,
-    pub frame: Box<RawValue>,
+    /// Exact application JSON. Carrying this as text avoids routing `u64`
+    /// sender sequences through JavaScript's lossy `Number` representation.
+    #[serde(rename = "frameJson")]
+    pub frame_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,10 +222,10 @@ mod tests {
         let source = r#"{"lane":"future","opaque":18446744073709551615}"#;
         relay.append_json(source).unwrap();
         let batch = relay.poll(0, 1).unwrap();
-        assert_eq!(batch.frames[0].frame.get(), source);
+        assert_eq!(batch.frames[0].frame_json, source);
         assert!(serde_json::to_string(&batch)
             .unwrap()
-            .contains(r#""opaque":18446744073709551615"#));
+            .contains(r#"\"opaque\":18446744073709551615"#));
     }
 
     #[test]

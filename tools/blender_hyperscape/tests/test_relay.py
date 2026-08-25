@@ -40,7 +40,10 @@ def batch(
     deliveries: list[tuple[int, dict]] | None = None,
 ) -> dict:
     frames = [
-        {"cursor": str(cursor), "frame": frame}
+        {
+            "cursor": str(cursor),
+            "frameJson": json.dumps(frame, separators=(",", ":"), allow_nan=False),
+        }
         for cursor, frame in (deliveries or [])
     ]
     oldest = frames[0]["cursor"] if frames else None

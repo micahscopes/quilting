@@ -201,6 +201,17 @@ The first application boundary is now explicit:
   decimal cursors make restart or retention gaps explicit. It neither parses
   protocol commands nor allocates authored projection revisions; a gap is
   degraded delivery, never counterfeit repair or convergence.
+- The browser carrier is disabled by default and owns only authenticated HTTP
+  delivery, a bounded ordered outbound queue, and restart-aware decimal
+  cursors. Relay batches carry application frames as exact JSON text, so
+  Blender's nanosecond-scale `u64` sequence never crosses JavaScript's lossy
+  numeric representation. Generated Rust/WASM performs semantic admission and
+  packed-scene extraction. The renderer receives only resolved ordinary-world
+  node matrices, including the presentation layer outside an authored absolute
+  transform, so the same result overrides active conformal source packets in
+  drawing, LOD, focus bounds, picking, and walking. This adapter deliberately
+  adds no browser durability or repair while HHHS v0.4.4 remains a provisional
+  downstream integration target.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

@@ -12,6 +12,7 @@
 <link data-trunk rel="copy-file" href="hyperscope_worker.js" />
 <link data-trunk rel="copy-file" href="spacemouse.mjs" />
 <link data-trunk rel="copy-file" href="hyperscope_focus.mjs" />
+<link data-trunk rel="copy-file" href="local_peer_browser.mjs" />
 <link data-trunk rel="copy-file" href="horse.glb" />
 <link data-trunk rel="copy-file" href="ant.glb" />
 <link data-trunk rel="copy-file" href="examples/hyperscape-blender-demo.glb" />
@@ -41,6 +42,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 .btns button:hover{background:#30363d;border-color:#58a6ff}
 .btns button.a{background:#1f6feb;color:#fff;border-color:#58a6ff}
 select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px}
+.peer-input{width:100%;padding:5px;font:11px ui-monospace,SFMono-Regular,Consolas,monospace;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;margin-bottom:5px}
 .section{border-bottom:1px solid #21262d;padding-bottom:8px}
 .toggle-row{display:flex;align-items:center;gap:8px}
 .toggle{position:relative;width:36px;height:20px;background:#30363d;border-radius:10px;cursor:pointer;transition:background 0.2s}
@@ -154,6 +156,14 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   <div class="section">
     <label>Animation</label>
     <select id="anim-sel"><option value="-1">None</option></select>
+  </div>
+
+  <div class="section" id="local-peer-section">
+    <label>Local Blender Peer (opt-in)</label>
+    <input class="peer-input" id="local-peer-url" type="url" value="http://127.0.0.1:42117" autocomplete="off" spellcheck="false" aria-label="Local peer relay URL">
+    <input class="peer-input" id="local-peer-token" type="password" value="" autocomplete="off" spellcheck="false" aria-label="Local peer bearer token" placeholder="Bearer token (never saved)">
+    <div class="btns"><button id="local-peer-connect" type="button">Connect</button></div>
+    <div class="lab-note" id="local-peer-status">Disabled · delivery only · no persistence or repair</div>
   </div>
 
   <div class="section">
@@ -366,7 +376,7 @@ import init, {
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
-  mr_setPresentationNodeStates, mr_sourceFocusBounds,
+  mr_setPresentationNodeStates, mr_setAuthoredNodeTransforms, mr_sourceFocusBounds,
   mr_pick, mr_pickSurface, mr_attachSurface, mr_stepSurface, mr_detachSurface,
   mr_attachSurfaceWalk, mr_stepSurfaceWalk, mr_transportSurfaceWalkReflection,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere, mr_debugFocusState,
@@ -411,6 +421,10 @@ import {
   transportCameraAcrossSphereReflections,
   transportPointAndDirectionsAcrossSphereReflections,
 } from './hyperscope_focus.mjs?rev=rust-selection-authority-v1';
+import {
+  BrowserLocalPeerRelay,
+  DEFAULT_LOCAL_PEER_RELAY_URL,
+} from './local_peer_browser.mjs?rev=exact-frame-json-v1';
 
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_SHADOW_ENABLED =
@@ -1748,13 +1762,18 @@ function matrixMaximumAbsoluteError(left, right) {
 
 function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
   const incumbent = new Map(nodeStates.map(state => [state.node, state.incumbentMatrix]));
-  if (RUST_SCENE_IMPLEMENTATION === 'js') return incumbent;
+  const authoredMatrices = new Map();
+  const localPeerAuthoritative = Boolean(localPeerRelay)
+    || localPeerDiagnostics.lastProjectionRevision !== null;
+  if (RUST_SCENE_IMPLEMENTATION === 'js' && !localPeerAuthoritative) {
+    return { matrices: incumbent, authoredMatrices };
+  }
   rustSceneExtractionDiagnostics.calls += 1;
   if (!rustAppShadow) {
     rustSceneExtractionDiagnostics.state = 'fallback';
     rustSceneExtractionDiagnostics.fallbackWrites += 1;
     rustSceneExtractionDiagnostics.lastError = 'Rust application boundary is unavailable';
-    return incumbent;
+    return { matrices: incumbent, authoredMatrices };
   }
   try {
     const extraction = rustAppShadow.extractPackedScene(JSON.stringify(packedInstances));
@@ -1800,8 +1819,19 @@ function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
     rustSceneExtractionDiagnostics.unmatchedAuthoredEntities =
       extraction.unmatchedAuthoredEntities;
     rustSceneExtractionDiagnostics.lastError = null;
-    if (RUST_SCENE_IMPLEMENTATION === 'rust') {
-      for (const [node, record] of rustNodes) incumbent.set(node, record.matrix);
+    if (localPeerAuthoritative) {
+      localPeerDiagnostics.lastProjectionRevision =
+        extraction.authoredProjectionRevision ?? null;
+      localPeerDiagnostics.unmatchedAuthoredEntities =
+        extraction.unmatchedAuthoredEntities;
+    }
+    if (RUST_SCENE_IMPLEMENTATION === 'rust' || localPeerAuthoritative) {
+      for (const [node, record] of rustNodes) {
+        incumbent.set(node, record.matrix);
+        if (record.source === 'authored_absolute') {
+          authoredMatrices.set(node, record.matrix);
+        }
+      }
       rustSceneExtractionDiagnostics.authoritativeWrites += rustNodes.size;
       rustSceneExtractionDiagnostics.state = 'authoritative';
     } else {
@@ -1816,7 +1846,7 @@ function resolvePresentationNodeMatrices(nodeStates, packedInstances) {
       message: rustSceneExtractionDiagnostics.lastError,
     });
   }
-  return incumbent;
+  return { matrices: incumbent, authoredMatrices };
 }
 
 function synchronizeRustApplicationPresentationFromBrowser() {
@@ -2098,7 +2128,8 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     }
     if (packedInstance) packedInstances.push(packedInstance);
   }
-  const matrices = resolvePresentationNodeMatrices(nodeStates, packedInstances);
+  const resolved = resolvePresentationNodeMatrices(nodeStates, packedInstances);
+  const matrices = resolved.matrices;
   const renderRecords = [];
   const lodRecords = [];
   const primaryLodRecords = [];
@@ -2114,6 +2145,14 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
   const applied = mr_setPresentationNodeStates(new Float32Array(renderRecords));
   if (!applied) {
     rustPresentationDiagnostics.error = 'renderer rejected presentation node state';
+    return false;
+  }
+  const authoredRecords = Array.from(
+    resolved.authoredMatrices,
+    ([node, matrix]) => [node, ...matrix],
+  ).flat();
+  if (!mr_setAuthoredNodeTransforms(new Float32Array(authoredRecords))) {
+    rustPresentationDiagnostics.error = 'renderer rejected authored node transforms';
     return false;
   }
   const focusTransformKey = renderRecords.join(',');
@@ -2443,6 +2482,17 @@ const rustAppShadowDiagnostics = {
   snapshot: null,
 };
 globalThis.__hyperscopeAppShadowDiagnostics = rustAppShadowDiagnostics;
+
+function ensureRustAppShadow(reason = 'shadow') {
+  if (rustAppShadow) return rustAppShadow;
+  rustAppShadow = new HyperscopeAppShadow();
+  globalThis.__hyperscopeAppShadowController = rustAppShadow;
+  rustAppShadowDiagnostics.state = reason;
+  synchronizeRustApplicationPresentationFromBrowser();
+  resetRustApplicationFrameClock();
+  refreshAppShadowSnapshot();
+  return rustAppShadow;
+}
 
 function appShadowUuid(prefix, ordinal) {
   const suffix = Math.trunc(ordinal).toString(16).padStart(12, '0');
@@ -6103,6 +6153,17 @@ function frame(ts) {
   previousFrameTs = ts;
   advanceFocusTransitions(ts);
   const appFrame = advanceRustApplicationFrame(ts, deltaSeconds, rawDeltaSeconds);
+  if (localPeerRelay && rustAppShadow && ts - localPeerLastPresenceUiAt >= 250) {
+    localPeerLastPresenceUiAt = ts;
+    try {
+      const presence = rustAppShadow.peerPresenceSnapshot();
+      localPeerDiagnostics.remotePeers = presence.peers.length;
+      renderLocalPeerStatus();
+    } catch (error) {
+      localPeerDiagnostics.lastError = error?.message || String(error);
+      renderLocalPeerStatus();
+    }
+  }
   if (hyperscapeActive) {
     const includeSceneDiagnostics = ts - lastSceneDiagnosticRenderAt >= 250;
     const snapshot = mr_tickHyperscape(deltaSeconds, includeSceneDiagnostics);
@@ -6721,6 +6782,7 @@ async function finishModelUpload(
   presentationComposition.lodTopologyDomains = 0;
   presentationComposition.primaryLodStates = [];
   presentationComposition.focusTransformKey = null;
+  localPeerFocusTransformKey = null;
   lodFullSceneDirty = true;
   rustPresentationDiagnostics.lodResidentFaces = 0;
   rustPresentationDiagnostics.lodTopologyDomains = 0;
@@ -6803,11 +6865,27 @@ async function finishModelUpload(
   if (reusedFaceNodes) modelPayloadTelemetry.avoidedFaceMetadataCopyBytes += faceNodes.byteLength;
   info.face_node_indices = null;
   mr_setFaceNodes(faceNodes);
-  if (currentModelSessionAssetId && rustAppShadow && !currentModelDurableAssetId) {
+  const currentSelectionNodes = uniqueNodeIds(faceNodes);
+  const currentIdentityAssetId = currentModelDurableAssetId || currentModelSessionAssetId;
+  if (currentIdentityAssetId && modelNodeStableEntityIds.some(Boolean)) {
+    try {
+      appendPackedNodeIdentities(
+        packedNodeIdentities,
+        currentIdentityAssetId,
+        modelNodeStableEntityIds,
+        currentSelectionNodes,
+      );
+    } catch (error) {
+      recordAppShadowMismatch(
+        'durable_selection_identity',
+        `${filename}: ${error?.message || String(error)}`,
+      );
+    }
+  } else if (currentModelSessionAssetId && rustAppShadow) {
     try {
       const identities = rustAppShadow.sessionNodeIdentities(
         currentModelSessionAssetId,
-        new Int32Array(uniqueNodeIds(faceNodes)),
+        new Int32Array(currentSelectionNodes),
       );
       for (const identity of identities) {
         packedNodeIdentities.set(identity.sourceNode, Object.freeze({
@@ -7034,6 +7112,7 @@ async function finishModelUpload(
 
   $('stats').innerHTML = `<span class="val">${filename}</span>: ${numFaces} faces`;
 
+  if (localPeerRelay) applyLocalPeerAuthoredProjection();
   // Trigger GPU LOD recompute with current tess params (screen attenuation, density)
   debouncedLodRecompute();
 }
@@ -7448,6 +7527,211 @@ async function initializePresentationComposition() {
   return true;
 }
 
+// ============================================================
+// Optional local Blender peer — delivery is JS, admission/projection is Rust.
+// Disabled until the user supplies a runtime-only bearer token.
+// ============================================================
+const LOCAL_PEER_LAYER_ID = 'e0000000-0000-4000-8000-000000000001';
+const localPeerDiagnostics = {
+  enabled: false,
+  state: 'disabled',
+  generation: null,
+  cursor: '0',
+  sentFrames: 0,
+  receivedFrames: 0,
+  appliedFrames: 0,
+  ignoredFrames: 0,
+  gaps: 0,
+  restarts: 0,
+  remotePeers: 0,
+  lastReceipt: null,
+  lastProjectionRevision: null,
+  unmatchedAuthoredEntities: [],
+  lastError: null,
+};
+let localPeerRelay = null;
+let localPeerFocusTransformKey = null;
+let localPeerLastPresenceUiAt = -Infinity;
+globalThis.__hyperscopeLocalPeerDiagnostics = localPeerDiagnostics;
+
+function currentModelIdentityAssetId() {
+  return currentModelDurableAssetId
+    || currentModelSessionAssetId
+    || appShadowAssetId(currentGlb);
+}
+
+function installCurrentModelStableIdentities(assetId) {
+  if (!modelNodeStableEntityIds.some(Boolean) || currentFaceNodes.length === 0) return 0;
+  const staged = new Map();
+  const nodes = uniqueNodeIds(currentFaceNodes);
+  const count = appendPackedNodeIdentities(
+    staged,
+    assetId,
+    modelNodeStableEntityIds,
+    nodes,
+  );
+  for (const [node, identity] of staged) packedNodeIdentities.set(node, identity);
+  return count;
+}
+
+function applyLocalPeerAuthoredProjection() {
+  if (!rustAppShadow || !meshInfo || currentFaceNodes.length === 0) return false;
+  if (presentationComposition.ready && rustPresentationSnapshot) {
+    return applyPresentationLayerState(rustPresentationSnapshot);
+  }
+  const assetId = currentModelIdentityAssetId();
+  installCurrentModelStableIdentities(assetId);
+  const nodes = uniqueNodeIds(currentFaceNodes);
+  const identityMatrix = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+  const packed = [{
+    layer: LOCAL_PEER_LAYER_ID,
+    asset: assetId,
+    layerTransform: {
+      translation: [0, 0, 0],
+      rotation: [1, 0, 0, 0],
+      scale: [1, 1, 1],
+    },
+    nodes: nodes.map(node => {
+      const identity = packedNodeIdentities.get(node);
+      return {
+        packedNode: node,
+        sourceNode: identity?.sourceNode ?? node,
+        entityId: identity?.durable ? identity.entityId : null,
+        sourceWorld: identityMatrix,
+      };
+    }),
+  }];
+  const extraction = rustAppShadow.extractPackedScene(JSON.stringify(packed));
+  const authoredRecords = [];
+  const authoredMatrices = new Map();
+  const mobius = Array.from(currentMobius || [
+    1, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 1, 0, 0, 0,
+  ]);
+  for (const node of extraction.nodes) {
+    if (node.source !== 'authored_absolute') continue;
+    authoredRecords.push(node.packedNode, ...node.matrix);
+    authoredMatrices.set(node.packedNode, node.matrix);
+  }
+  if (!mr_setAuthoredNodeTransforms(new Float32Array(authoredRecords))) {
+    throw new Error('renderer rejected local-peer authored node transforms');
+  }
+  const focusTransformKey = authoredRecords.join(',');
+  if (localPeerFocusTransformKey !== focusTransformKey) {
+    localPeerFocusTransformKey = focusTransformKey;
+    rebuildNodeFocusRecords();
+  }
+  authoredLodStates = Array.from(authoredMatrices, ([node, matrix]) => [
+    node,
+    ...mobius,
+    ...matrix,
+  ]).flat();
+  authoredLodPending = true;
+  authoredLodReasons.add('local-peer');
+  localPeerDiagnostics.lastProjectionRevision =
+    extraction.authoredProjectionRevision ?? null;
+  localPeerDiagnostics.unmatchedAuthoredEntities =
+    extraction.unmatchedAuthoredEntities;
+  debouncedLodRecompute();
+  return true;
+}
+
+function applyLocalPeerReceipt(receipt) {
+  localPeerDiagnostics.lastReceipt = receipt ?? null;
+  if (receipt?.lane === 'authored' && receipt.disposition === 'applied') {
+    refreshAppShadowSnapshot();
+    applyLocalPeerAuthoredProjection();
+  }
+  if (receipt?.lane === 'presence' && rustAppShadow) {
+    const presence = rustAppShadow.peerPresenceSnapshot();
+    localPeerDiagnostics.remotePeers = presence.peers.length;
+  }
+}
+
+function renderLocalPeerStatus(status = localPeerDiagnostics) {
+  const element = $('local-peer-status');
+  const button = $('local-peer-connect');
+  if (!element || !button) return;
+  button.textContent = localPeerRelay ? 'Disconnect' : 'Connect';
+  button.classList.toggle('a', Boolean(localPeerRelay));
+  const delivery = `${status.receivedFrames || 0} received · `
+    + `${status.appliedFrames || 0} applied · ${status.ignoredFrames || 0} ignored`;
+  const continuity = `${status.gaps || 0} gaps · ${status.restarts || 0} restarts`;
+  const presence = `${status.remotePeers || 0} remote peer${status.remotePeers === 1 ? '' : 's'}`;
+  element.textContent = status.lastError
+    ? `${status.state}: ${status.lastError}`
+    : `${status.state} · ${delivery} · ${continuity} · ${presence}`;
+  element.classList.toggle('hs-warn', Boolean(status.lastError)
+    || status.state === 'degraded');
+}
+
+function updateLocalPeerStatus(status) {
+  Object.assign(localPeerDiagnostics, status, { enabled: Boolean(localPeerRelay) });
+  renderLocalPeerStatus(localPeerDiagnostics);
+}
+
+function connectLocalPeer() {
+  if (localPeerRelay) return;
+  if (!wasmOk.peek()) throw new Error('Rust/WASM is not ready yet');
+  const tokenInput = $('local-peer-token');
+  const token = tokenInput.value;
+  tokenInput.value = '';
+  const app = ensureRustAppShadow('local-peer');
+  const candidate = new BrowserLocalPeerRelay({
+    baseUrl: $('local-peer-url').value || DEFAULT_LOCAL_PEER_RELAY_URL,
+    token,
+    app,
+    onReceipt: applyLocalPeerReceipt,
+    onStatus: updateLocalPeerStatus,
+  });
+  localPeerRelay = candidate;
+  localPeerLastPresenceUiAt = -Infinity;
+  updateLocalPeerStatus(candidate.snapshot());
+  candidate.start();
+}
+
+async function disconnectLocalPeer() {
+  const relay = localPeerRelay;
+  localPeerRelay = null;
+  if (relay) await relay.stop();
+  Object.assign(localPeerDiagnostics, {
+    enabled: false,
+    state: 'disabled',
+    lastError: null,
+    remotePeers: 0,
+  });
+  renderLocalPeerStatus();
+}
+
+$('local-peer-connect').addEventListener('click', async () => {
+  try {
+    if (localPeerRelay) await disconnectLocalPeer();
+    else connectLocalPeer();
+  } catch (error) {
+    localPeerDiagnostics.lastError = error?.message || String(error);
+    localPeerDiagnostics.state = 'error';
+    renderLocalPeerStatus();
+  }
+});
+window.addEventListener('beforeunload', () => { void localPeerRelay?.stop(); });
+globalThis.__hyperscopeLocalPeer = Object.freeze({
+  connect: connectLocalPeer,
+  disconnect: disconnectLocalPeer,
+  sendAppliedAuthoredEnvelope(envelopeJson) {
+    if (!localPeerRelay) throw new Error('local peer is disconnected');
+    return localPeerRelay.sendAppliedAuthoredEnvelope(envelopeJson);
+  },
+  sendPresenceEnvelope(envelopeJson) {
+    if (!localPeerRelay) throw new Error('local peer is disconnected');
+    return localPeerRelay.sendPresenceEnvelope(envelopeJson);
+  },
+});
+
 // --- Init ---
 // Bootstrap platform flags and an inert camera preview from the raw query.
 // Rust route mode re-decodes valid pairs before any application state is set.
@@ -7520,12 +7804,7 @@ phase('wasm', [], async () => {
   updatePatchLabControlVisibility();
   wasmOk.set(true); // THEN fire effects with correct values + WASM ready
   if (RUST_APP_SHADOW_ENABLED) {
-    rustAppShadow = new HyperscopeAppShadow();
-    globalThis.__hyperscopeAppShadowController = rustAppShadow;
-    rustAppShadowDiagnostics.state = 'observing';
-    synchronizeRustApplicationPresentationFromBrowser();
-    resetRustApplicationFrameClock();
-    refreshAppShadowSnapshot();
+    ensureRustAppShadow('observing');
   }
   if (RUST_ROUTE_SHADOW_ENABLED) {
     rustRouteShadowDiagnostics.state =

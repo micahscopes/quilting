@@ -91,10 +91,14 @@ try {
     'utf8',
   ));
   const frame = { lane: 'authored', envelope };
+  const frameJson = JSON.stringify(frame).replace(
+    /}$/,
+    ',"futureExact":18446744073709551615}',
+  );
   const postResponse = await fetch(`${base}/v1/frame`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify(frame),
+    body: frameJson,
   });
   assert.equal(postResponse.status, 202);
   const posted = await postResponse.json();
@@ -116,7 +120,10 @@ try {
   assert.equal(batch.hasMore, false);
   assert.equal(batch.latestCursor, '1');
   assert.equal(batch.frames[0].cursor, '1');
-  assert.deepEqual(batch.frames[0].frame, frame);
+  const decodedFrame = JSON.parse(batch.frames[0].frameJson);
+  assert.deepEqual(decodedFrame.envelope, envelope);
+  assert.equal(decodedFrame.lane, frame.lane);
+  assert.match(batch.frames[0].frameJson, /18446744073709551615/);
 
   const futureCursorResponse = await fetch(`${base}/v1/frames?after=99&limit=10`, { headers });
   assert.equal(futureCursorResponse.status, 200);

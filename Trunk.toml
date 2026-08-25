@@ -11,6 +11,7 @@ watch = [
     "hyperscope_worker.js",
     "spacemouse.mjs",
     "hyperscope_focus.mjs",
+    "local_peer_browser.mjs",
     "horse.glb",
     "ant.glb",
     "envmaps/",

@@ -263,6 +263,10 @@ struct MainState {
     /// It keeps distinct asset/node identity while the WebGL backend packs all
     /// resident faces into shared buffers.
     presentation_nodes: BTreeMap<usize, PresentationNodeState>,
+    /// Resolved ordinary-world node models admitted through the Rust
+    /// application boundary. These override glTF/conformal source packets
+    /// without changing the independently retained visibility or opacity.
+    authored_node_models: BTreeMap<usize, [f32; 16]>,
     // Screen-space refraction: framebuffer copy for transmission
     /// Mip-chained scene copy for the transmission/refraction blur pyramid.
     /// Distinct from `fuzzy_scene_*`: this one carries a full mip chain with
@@ -665,6 +669,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             hyperscape_packets: BTreeMap::new(),
             active_hyperscape_camera: None,
             presentation_nodes: BTreeMap::new(),
+            authored_node_models: BTreeMap::new(),
             scene_color_fbo: None,
             scene_color_tex: None,
             scene_color_size: (0, 0),
@@ -824,6 +829,43 @@ pub fn mr_set_presentation_node_states(records: &[f32]) -> bool {
     })
 }
 
+/// Apply resolved ordinary-world transforms already admitted/materialized by
+/// the Rust application boundary. Records are `[node, column_major_matrix x16]`.
+#[wasm_bindgen(js_name = "mr_setAuthoredNodeTransforms")]
+pub fn mr_set_authored_node_transforms(records: &[f32]) -> bool {
+    let (records, remainder) = records.as_chunks::<17>();
+    if !remainder.is_empty() {
+        warn!("Authored node-transform payload has an invalid length");
+        return false;
+    }
+    let mut next = BTreeMap::new();
+    for record in records {
+        let node = record[0];
+        if !node.is_finite()
+            || node < 0.0
+            || node.fract() != 0.0
+            || !record[1..17].iter().all(|value| value.is_finite())
+        {
+            warn!("Authored node-transform payload contains invalid values");
+            return false;
+        }
+        let mut euclidean_model = [0.0; 16];
+        euclidean_model.copy_from_slice(&record[1..]);
+        next.insert(node as usize, euclidean_model);
+    }
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        if state.authored_node_models != next {
+            state.authored_node_models = next;
+            state.render_commands_dirty = true;
+        }
+        true
+    })
+}
+
 fn clear_hyperscape_packets() {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
@@ -896,8 +938,8 @@ fn apply_hyperscape_packets(packets: &[GltfHyperscopePacket]) {
 }
 
 fn conformal_state_for_node(renderer: &MainState, node_index: usize) -> EntityConformalState {
-    if let Some(camera) = renderer.active_hyperscape_camera {
-        return renderer
+    let state = if let Some(camera) = renderer.active_hyperscape_camera {
+        renderer
             .hyperscape_packets
             .get(&(camera, node_index))
             .copied()
@@ -905,17 +947,29 @@ fn conformal_state_for_node(renderer: &MainState, node_index: usize) -> EntityCo
                 mobius: IDENTITY_MOBIUS,
                 orientation_sign: 1,
                 euclidean_model: IDENTITY_MATRIX,
-            });
-    }
-    let euclidean_model = renderer
-        .presentation_nodes
-        .get(&node_index)
-        .map_or(IDENTITY_MATRIX, |state| state.euclidean_model);
-    EntityConformalState {
+            })
+    } else {
+        let euclidean_model = renderer
+            .presentation_nodes
+            .get(&node_index)
+            .map_or(IDENTITY_MATRIX, |state| state.euclidean_model);
+        EntityConformalState {
             mobius: renderer.mobius,
             orientation_sign: renderer.mobius_orientation,
             euclidean_model,
+        }
+    };
+    resolved_node_model(state, renderer.authored_node_models.get(&node_index))
+}
+
+fn resolved_node_model(
+    mut state: EntityConformalState,
+    ordinary_world: Option<&[f32; 16]>,
+) -> EntityConformalState {
+    if let Some(ordinary_world) = ordinary_world {
+        state.euclidean_model = *ordinary_world;
     }
+    state
 }
 
 /// Derive selection and scene-scale bounds from the same Euclidean model
@@ -2381,6 +2435,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.render_shadow.asset_changed();
             st.render_shadow_scene_dirty = true;
             st.presentation_nodes.clear();
+            st.authored_node_models.clear();
             st.surface_runtime.reset_geometry();
             st.batch_groups.clear();
             st.batch_staging.clear();
@@ -4128,5 +4183,29 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
 
         gl.disable(glow::BLEND);
         gl.enable(glow::DEPTH_TEST);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn admitted_ordinary_world_model_overrides_conformal_source_only() {
+        let source = EntityConformalState {
+            mobius: IDENTITY_MOBIUS,
+            orientation_sign: -1,
+            euclidean_model: IDENTITY_MATRIX,
+        };
+        let mut admitted = IDENTITY_MATRIX;
+        admitted[12] = 3.0;
+        admitted[13] = -2.0;
+
+        let resolved = resolved_node_model(source, Some(&admitted));
+
+        assert_eq!(resolved.mobius, source.mobius);
+        assert_eq!(resolved.orientation_sign, source.orientation_sign);
+        assert_eq!(resolved.euclidean_model, admitted);
     }
 }

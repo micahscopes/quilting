@@ -112,6 +112,15 @@ The relay's authenticated HTTP surface has its own reproducible smoke:
 node scripts/smoke-local-peer-relay.mjs
 ```
 
+With Blender installed, the end-to-end carrier smoke starts an isolated relay
+and Blender profile, publishes a real object edit with a nanosecond-scale
+sequence, admits the exact JSON through generated Rust/WASM, and checks the
+resolved packed-scene matrix:
+
+```sh
+node scripts/smoke-blender-browser-relay.mjs
+```
+
 When Blender is installed, the headless integration script creates the demo,
 exports it, imports it into a fresh file, and checks the authored collections:
 

@@ -1462,3 +1462,17 @@ origin rejection (`403`), exact-origin preflight (`204`), authenticated health,
 canonical authored-frame delivery, invalid-JSON rejection, and future-cursor
 gap reporting. The test relay was stopped; the user-run `:8888` server was not
 touched.
+
+## Blender-to-browser local relay
+
+The disabled-by-default browser carrier now preserves application frames as
+exact JSON text, validates delivery generations/cursors with `BigInt`, and
+hands semantic admission directly to generated Rust/WASM. Eight carrier unit
+tests passed for configuration rejection, exact `u64` delivery, semantic
+failure atomicity, restart recovery, bounded-history degradation, ordered
+retry, presence validation, and clean stop. The real end-to-end smoke launched
+an ephemeral Rust relay plus an isolated Blender 5.1 process, published one
+absolute object edit and one presence frame, admitted both in Rust/WASM, and
+resolved translation `[3, 4, 5]` through packed-scene extraction. Its actual
+Blender sequence was `1787631571532014228`, safely above JavaScript's exact
+integer range. All temporary processes were stopped and `:8888` was untouched.
