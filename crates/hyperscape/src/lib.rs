@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 pub mod interchange;
 pub mod navigation;
+pub mod packed_scene;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod preflight;
 pub mod presentation;
@@ -36,6 +37,10 @@ pub use navigation::{
     SurfaceWalkMotion, SurfaceWalkRecoveryRequest, SurfaceWalkReflectionTransport,
     SurfaceWalkRuntime, SurfaceWalkRuntimeError, SurfaceWalkStepRequest, SurfaceWalkUpdate,
     TransitionEasing,
+};
+pub use packed_scene::{
+    extract_packed_scene, PackedAssetInstance, PackedNodeSource, PackedNodeTransform,
+    PackedNodeTransformSource, PackedSceneError, PackedSceneExtraction,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use preflight::{

@@ -1362,3 +1362,24 @@ smokes, and all three replay fingerprints remained green. Package-wide strict
 Clippy is not claimed here: the renderer has 42 pre-existing warnings under the
 current toolchain, outside this boundary's files. No socket, Blender callback,
 renderer matrix, or HHHS operation is inferred from admission alone.
+
+## Rust packed-scene extraction contract
+
+The first authored-scene extraction slice remains a pure function in
+`hyperscape`; it does not call a renderer, browser, or transport. It joins
+asset/layer/node runtime records to the application materialization by stable
+entity UUID, normalizes `(w,x,y,z)` quaternions, composes
+`presentation layer × (authored absolute source-world TRS or glTF world)`, and
+checks the final matrix at the `f32` backend boundary. Output is sorted by
+scene-wide packed node handle and separately reports valid authored entities
+whose assets are not resident.
+
+Five focused cases cover absolute replacement rather than accidental delta
+composition, outer presentation transforms, non-unit quaternion input,
+negative/nonuniform scale, deterministic ordering, repeated layers of one
+asset, unmatched edits, cross-asset identity ambiguity, duplicate packed
+handles, non-finite source matrices, malformed unmatched edits, and `f32`
+overflow. The checkpoint passed 95 Hyperscape tests, 6 protocol tests,
+crate-local strict Clippy, warning-free rustdoc, and a wasm32 library check.
+Transitive strict Clippy still reports one pre-existing unnecessary cast in
+`quilting-mesh`; it is not folded into this semantic checkpoint.

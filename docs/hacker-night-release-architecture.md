@@ -163,6 +163,14 @@ The first application boundary is now explicit:
   and exposes the key-sorted authored asset/entity projection in its bounded
   snapshot. It still chooses no socket and has no renderer authority; those
   remain separate extraction and transport cutovers.
+- `hyperscape::extract_packed_scene` now owns the first renderer-independent
+  durable-edit join. A protocol-v0.1 entity transform is an absolute ordinary
+  TRS in its source asset's world chart: it replaces that node's flattened
+  glTF world matrix, and the presentation-layer TRS remains outermost. The
+  result is packed-node sorted and backend neutral. Multiple layers may
+  instance one asset and receive the same edit; one entity UUID crossing asset
+  boundaries is rejected because the current command carries no asset ID.
+  Unmatched valid edits remain explicit so a later-resident asset can converge.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

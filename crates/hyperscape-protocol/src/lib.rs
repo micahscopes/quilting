@@ -183,6 +183,11 @@ pub enum AuthoredCommand {
     },
     SetEntityTransform {
         entity: EntityId,
+        /// Absolute ordinary TRS in the source asset's world chart. Render
+        /// extraction replaces the node's flattened glTF world transform with
+        /// this value before applying any presentation-layer transform. An
+        /// authoring adapter is responsible for basis conversion into the
+        /// source asset chart.
         transform: WireTransform,
     },
     RemoveEntity {
