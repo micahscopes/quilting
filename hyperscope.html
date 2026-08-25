@@ -355,9 +355,9 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <label id="fuzzy-bw-label">Bandwidth</label>
     <div class="sr"><input type="range" id="fuzzy-bw" min="1" max="50" step="0.1" value="15"><span class="v" id="fuzzy-bw-v">0.150</span></div>
     <label>Quality (blur passes)</label>
-    <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="2"><span class="v" id="fuzzy-quality-v">2</span></div>
+    <div class="sr"><input type="range" id="fuzzy-quality" min="1" max="4" step="1" value="1"><span class="v" id="fuzzy-quality-v">1</span></div>
     <label>Mask smooth (kawase passes)</label>
-    <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="1"><span class="v" id="fuzzy-kawase-v">1</span></div>
+    <div class="sr"><input type="range" id="fuzzy-kawase" min="0" max="4" step="1" value="3"><span class="v" id="fuzzy-kawase-v">3</span></div>
     <label>Mask smooth offset</label>
     <div class="sr"><input type="range" id="fuzzy-kawase-off" min="1" max="30" step="0.1" value="15"><span class="v" id="fuzzy-kawase-off-v">1.50</span></div>
   </div>
@@ -935,7 +935,7 @@ const PARAM_DEFAULTS = {
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
   fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
-  fqual: '2', fkaw: '1', fkoff: '15',
+  fqual: '1', fkaw: '3', fkoff: '15',
 };
 
 function readParams(p) {
@@ -5625,8 +5625,8 @@ const fz = {
   focus:     signal(62, 'ffocus'),
   bandwidth: signal(10, 'fbw'),
   normalize: signal(false, 'fnorm'),
-  quality:   signal(2, 'fqual'),
-  kawase:    signal(1, 'fkaw'),
+  quality:   signal(1, 'fqual'),
+  kawase:    signal(3, 'fkaw'),
   kawaseOff: signal(15, 'fkoff'),
 };
 bindToggle('fuzzy-toggle', fz.enabled);
@@ -6219,8 +6219,8 @@ applyParams = function(params) {
   fz.focus.set(finite(params.ffocus, 62, 0, 100));
   fz.bandwidth.set(finite(params.fbw, 10, 1, 50));
   fz.normalize.set(params.fnorm === '1');
-  fz.quality.set(integer(params.fqual, 2, 1, 4));
-  fz.kawase.set(integer(params.fkaw, 1, 0, 4));
+  fz.quality.set(integer(params.fqual, 1, 1, 4));
+  fz.kawase.set(integer(params.fkaw, 3, 0, 4));
   fz.kawaseOff.set(finite(params.fkoff, 15, 1, 30));
 };
 

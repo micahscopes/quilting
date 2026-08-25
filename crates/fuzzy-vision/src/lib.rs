@@ -80,9 +80,9 @@ impl Default for JfaConfig {
             blur_strength: 1.0,
             downsample: 2, // half-res JFA + bilinear upsample in firmness
             blur_mode: 1,
-            blur_passes: 2,
+            blur_passes: 1,
             use_mip_blur: false, // Gaussian pyramid or mip blur (experimental)
-            kawase_passes: 0,
+            kawase_passes: 3,
             kawase_offset: 0.75,
             precision: Precision::Float16,
             focus: 0.5,
