@@ -383,11 +383,14 @@ void main() {
     vec3 dm_b = mobius(mid_b);
     vec3 dm_c = mobius(mid_c);
 
-    // Deformed medians: vertex-to-opposite-midpoint distance in post-Möbius space.
-    // Captures both intrinsic geometry size and Möbius conformal stretch.
-    float med_a = distance(d0, dm_a);
-    float med_b = distance(d1, dm_b);
-    float med_c = distance(d2, dm_c);
+    // Logical edge order is a=(p1,p2), b=(p0,p2), c=(p0,p1). Sample each
+    // curved image edge corner -> transformed midpoint -> corner.
+    float source_l_a = distance(p1, p2);
+    float source_l_b = distance(p0, p2);
+    float source_l_c = distance(p0, p1);
+    float deformed_arc_a = distance(d1, dm_a) + distance(dm_a, d2);
+    float deformed_arc_b = distance(d0, dm_b) + distance(dm_b, d2);
+    float deformed_arc_c = distance(d0, dm_c) + distance(dm_c, d1);
 
     // Conformal primitive: exact closest approach of this face to the Möbius pole.
     // bot = c·q + d is affine ⇒ |bot|² convex ⇒ the max-dilation point (closest to
@@ -424,26 +427,29 @@ void main() {
         ? max(active_mob_k, 1e-12)
         : 1.0;
 
-    // Uniform per-face density demand from the largest median. Max prevents
-    // small-median sabotage on skinny triangles. A finite-pole patch also gets
-    // an exact interior conformal-curvature demand: this is world-space demand
-    // controlled by `density`, not screen attenuation.
-    float max_med = max(med_a, max(med_b, med_c)) / (target_size * intrinsic_similarity);
-    float source_l_max = 0.0;
+    // Keep density demand per physical edge. A finite-pole patch also gets an
+    // exact interior conformal-curvature demand per source-edge length; a
+    // needle's long edge must not force its short edge to the same resolution.
+    float world_demand_a = deformed_arc_a / (target_size * intrinsic_similarity);
+    float world_demand_b = deformed_arc_b / (target_size * intrinsic_similarity);
+    float world_demand_c = deformed_arc_c / (target_size * intrinsic_similarity);
     float lambda_star = 0.0;
-    float interior_world_demand = 0.0;
     if (patch_valid && min_bot_true < 1e-8) {
         // A genuine pole hit is maximum intrinsic demand. Screen attenuation
         // below remains authoritative because it is an explicit raster budget.
-        interior_world_demand = max_lod;
+        world_demand_a = max_lod;
+        world_demand_b = max_lod;
+        world_demand_c = max_lod;
     } else if (patch_valid) {
-        source_l_max = max(distance(p1, p2), max(distance(p0, p2), distance(p0, p1)));
         lambda_star = active_mob_k / max(dT2, 1e-30);
-        interior_world_demand = (lambda_star / intrinsic_similarity) * source_l_max / target_size;
+        float intrinsic_peak = lambda_star / (intrinsic_similarity * target_size);
+        world_demand_a = max(world_demand_a, intrinsic_peak * source_l_a);
+        world_demand_b = max(world_demand_b, intrinsic_peak * source_l_b);
+        world_demand_c = max(world_demand_c, intrinsic_peak * source_l_c);
     }
-    lod_a = clamp(snap_pow2(max(max_med, interior_world_demand)), 1.0, max_lod);
-    lod_b = lod_a;
-    lod_c = lod_a;
+    lod_a = clamp(snap_pow2(world_demand_a), 1.0, max_lod);
+    lod_b = clamp(snap_pow2(world_demand_b), 1.0, max_lod);
+    lod_c = clamp(snap_pow2(world_demand_c), 1.0, max_lod);
 
     // Screen-space attenuation. This computes the greatest subdivision count
     // that still leaves at least min_px pixels per sub-edge, then caps the
@@ -481,7 +487,7 @@ void main() {
 
         // Interior screen extent — robust analytic form (mirrors
         // conformal_edge_lods). The projected span at the max-dilation point x*
-        // is  λ*·ρ·L_max, where:
+        // is λ*·ρ·L_e for each physical source edge, where:
         //   • λ* = k / d_T²  is the CLOSED-FORM peak conformal scale. The old code
         //     estimated the peak by a per-edge boost and a finite-difference of F
         //     itself; both are near-singular next to the pole, so on animated
@@ -489,18 +495,20 @@ void main() {
         //     high-LoD starbursts. This form never differences the singular map.
         //   • ρ is the projection Jacobian at the well-conditioned IMAGE point
         //     y* = F(x*) — a benign point, not the pole — by finite differences.
-        // Applied to all three capacities via max (the atlas grades interior
-        // density as the geometric mean of the edges); far-from-pole faces have
-        // a tiny λ* so it stays inert with no gate. If y* is behind the near
-        // plane the face wraps past it — leave it to the rim + cull.
+        // Applied to each capacity via max; far-from-pole faces have a tiny λ*
+        // so it stays inert with no gate. If y* is behind the near plane the
+        // face wraps past it — leave it to the rim + cull.
         // Use the viewport diagonal as a finite containment budget for this
         // sampled capacity proxy. Exact visible-arc clipping is a separate
         // refinement; this bound prevents behind-camera points and pole
         // asymptotes from allocating unbounded off-raster subdivisions.
         float max_screen_extent = length(vec2(vp_width, vp_height));
-        float px_int = patch_valid && min_bot_true < 1e-8
+        float pole_px = patch_valid && min_bot_true < 1e-8
             ? max_screen_extent
             : 0.0;
+        float px_int_a = pole_px;
+        float px_int_b = pole_px;
+        float px_int_c = pole_px;
         if (patch_valid && min_bot_true >= 1e-8) {
             vec3 y_star = mobius_pure(x_star);
             vec4 cy = vp_matrix * vec4(y_star, 1.0);
@@ -517,12 +525,15 @@ void main() {
                         rho = max(rho, distance(sp, s0) / eps);
                     }
                 }
-                px_int = min(lambda_star * rho * source_l_max, max_screen_extent);
+                float projected_peak = lambda_star * rho;
+                px_int_a = min(projected_peak * source_l_a, max_screen_extent);
+                px_int_b = min(projected_peak * source_l_b, max_screen_extent);
+                px_int_c = min(projected_peak * source_l_c, max_screen_extent);
             }
         }
-        lod_a = min(lod_a, clamp(floor_pow2(min(max(px_a, px_int), max_screen_extent) / min_px), 1.0, max_lod));
-        lod_b = min(lod_b, clamp(floor_pow2(min(max(px_b, px_int), max_screen_extent) / min_px), 1.0, max_lod));
-        lod_c = min(lod_c, clamp(floor_pow2(min(max(px_c, px_int), max_screen_extent) / min_px), 1.0, max_lod));
+        lod_a = min(lod_a, clamp(floor_pow2(min(max(px_a, px_int_a), max_screen_extent) / min_px), 1.0, max_lod));
+        lod_b = min(lod_b, clamp(floor_pow2(min(max(px_b, px_int_b), max_screen_extent) / min_px), 1.0, max_lod));
+        lod_c = min(lod_c, clamp(floor_pow2(min(max(px_c, px_int_c), max_screen_extent) / min_px), 1.0, max_lod));
     }
 
     emit_face(vec4(log2(lod_a), log2(lod_b), log2(lod_c), 1.0));

@@ -376,8 +376,8 @@ pub fn compute_instances_with_uvs(
         ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt()
     };
 
-    // Per-face: transform edge midpoints through Möbius, compute deformed
-    // medians to determine per-edge LODs. 3 Möbius evals per face.
+    // Per-face: transform edge midpoints through Möbius, then determine each
+    // physical edge's own demand. 3 Möbius evals per face.
     let mut edge_lods_world: Vec<u32> = vec![0; num_half_edges];
     // Screen attenuation is an upper bound, kept separately from world and
     // conformal-curvature demand so it can never raise LOD. A shared edge takes
@@ -408,43 +408,45 @@ pub fn compute_instances_with_uvs(
         let dm_b = xm(v0, v2); // deformed midpoint of edge AC
         let dm_c = xm(v0, v1); // deformed midpoint of edge AB
 
-        // Deformed medians: vertex → opposite edge's deformed midpoint.
-        // median_a (A → mid(BC)) captures scaling of edges AB and AC.
-        // median_b (B → mid(AC)) captures scaling of edges AB and BC.
-        // median_c (C → mid(AB)) captures scaling of edges AC and BC.
-        let median_a = dist3(d0, dm_a);
-        let median_b = dist3(d1, dm_b);
-        let median_c = dist3(d2, dm_c);
-
-        // Match the GPU pass: a uniform face demand from the largest deformed
-        // median, lifted by the exact interior conformal dilation where a
-        // finite pole exists. This is density-driven world/curvature demand,
-        // not screen attenuation.
-        let mut world_demand = median_a.max(median_b).max(median_c)
-            / (target_size * intrinsic_similarity);
+        // Each curved edge is sampled corner → transformed midpoint → corner.
+        // Keeping the three demands distinct prevents a needle face's longest
+        // edge from forcing the same subdivisions onto its shortest edge.
+        let source_edges = [dist3(v1, v2), dist3(v0, v2), dist3(v0, v1)];
+        let deformed_arcs = [
+            dist3(d1, dm_a) + dist3(dm_a, d2),
+            dist3(d0, dm_b) + dist3(dm_b, d2),
+            dist3(d0, dm_c) + dist3(dm_c, d1),
+        ];
+        let mut world_demands = deformed_arcs.map(|arc| {
+            arc / (target_size * intrinsic_similarity)
+        });
         if let Some(patch) = ConformalPatch::new(transform, v0, v1, v2) {
             if patch.min_bot_sq < POLE_PROXIMITY_NORM_SQ {
                 // A pole hit is unbounded intrinsic demand, but the finite
                 // framebuffer remains an authoritative screen-space cap.
-                world_demand = MAX_LOD as f64;
+                world_demands = [MAX_LOD as f64; 3];
             } else {
-                let l_max = dist3(v1, v2).max(dist3(v0, v2)).max(dist3(v0, v1));
-                world_demand = world_demand.max(
-                    (patch.lambda_star / intrinsic_similarity) * l_max / target_size,
-                );
+                for edge in 0..3 {
+                    world_demands[edge] = world_demands[edge].max(
+                        (patch.lambda_star / intrinsic_similarity)
+                            * source_edges[edge] / target_size,
+                    );
+                }
             }
         }
-        let world_lod = snap_f64_to_power_of_2(world_demand).clamp(MIN_LOD, MAX_LOD);
+        let world_lods = world_demands.map(|demand| {
+            snap_f64_to_power_of_2(demand).clamp(MIN_LOD, MAX_LOD)
+        });
 
         // Map to half-edge canonical edges, take max across adjacent faces
         let he_base = fi * 3;
         // edge_a (v1→v2 = BC), edge_b (v2→v0 = CA), edge_c (v0→v1 = AB)
         edge_lods_world[canonical_edge(he_base + 1)] =
-            edge_lods_world[canonical_edge(he_base + 1)].max(world_lod);
+            edge_lods_world[canonical_edge(he_base + 1)].max(world_lods[0]);
         edge_lods_world[canonical_edge(he_base + 2)] =
-            edge_lods_world[canonical_edge(he_base + 2)].max(world_lod);
+            edge_lods_world[canonical_edge(he_base + 2)].max(world_lods[1]);
         edge_lods_world[canonical_edge(he_base)] =
-            edge_lods_world[canonical_edge(he_base)].max(world_lod);
+            edge_lods_world[canonical_edge(he_base)].max(world_lods[2]);
 
         if screen_atten_enabled {
             if let Some(screen) = screen {
@@ -685,6 +687,30 @@ mod tests {
                 assert!(l >= 1 && l <= 256, "LOD {} out of range", l);
             }
         }
+    }
+
+    #[test]
+    fn needle_face_keeps_per_edge_intrinsic_demand() {
+        let old_density = get_tess_density();
+        let old_screen_atten = get_screen_atten();
+        let vertices = vec![
+            [0.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0],
+            [0.0, 0.01, 0.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+
+        set_tess_params(64.0, false);
+        let instances = compute_instances(
+            &vertices,
+            &faces,
+            &Mobius::identity(),
+            None,
+            None,
+        );
+
+        assert_eq!(instances[0].edge_lods, [128, 1, 128]);
+        set_tess_params(old_density, old_screen_atten);
     }
 
     #[test]

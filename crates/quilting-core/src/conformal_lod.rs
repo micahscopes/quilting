@@ -264,8 +264,9 @@ fn floor_pow2(v: f64) -> f64 {
 ///
 /// Returns three edge LoDs in canonical order `[a=(v1,v2), b=(v0,v2), c=(v0,v1)]`.
 /// On top of the rim screen-arcs (corner→deformed-midpoint→corner), it adds
-/// an **interior extent** at the max-dilation point `x*` to all three edges
-/// (the atlas grades interior density as their geometric mean), plus the exact
+/// a per-edge **interior extent** at the max-dilation point `x*`; each capacity
+/// uses its own source-edge length so needle faces retain their anisotropy.
+/// This is combined with the exact
 /// pole guard `|c|²·d_T² < POLE_PROXIMITY_NORM_SQ ⇒ max_lod`.
 ///
 /// The GLSL twin in `lod_compute.vert.glsl` mirrors this; `min_lod`/`max_lod` are
@@ -312,24 +313,22 @@ pub fn conformal_edge_lods(
     };
     let contains_pole = patch.min_bot_sq < POLE_PROXIMITY_NORM_SQ;
 
-    let le = [d3(v1, v2), d3(v0, v2), d3(v0, v1)];
-    let l_max = le[0].max(le[1]).max(le[2]);
+    let source_edges = [d3(v1, v2), d3(v0, v2), d3(v0, v1)];
 
     // Interior extent — robust form, replacing the ill-conditioned gate +
     // finite-difference-of-F. The screen-space span at the max-dilation point
-    // x* is  λ* · ρ · L_max, where:
+    // x* is  λ* · ρ · L_e for each source edge, where:
     //   • λ* = patch.lambda_star = k / d_T²  is the CLOSED-FORM peak conformal
     //     scale (no differencing of the near-singular map — this was the source of
     //     the patchy, per-face-inconsistent LoD), and
     //   • ρ is the projection Jacobian at the well-conditioned IMAGE point
     //     y* = F(x*), found by finite differences there (a benign point, not the
     //     pole).
-    // Applied to all three capacities via `max`: the peak point needs them all,
-    // and faces far from the pole have a tiny λ* so it stays inert (no gate
-    // needed).
+    // Applied to each capacity via `max`; faces far from the pole have a tiny
+    // λ* so it stays inert (no gate needed).
     // If y* falls behind the camera the face wraps past the near plane — leave it
     // to the rim + the cull rather than emit a spurious spike.
-    let mut px_int = if contains_pole { screen_extent } else { 0.0 };
+    let mut px_int = if contains_pole { [screen_extent; 3] } else { [0.0; 3] };
     let y_star = m.apply(q_from(patch.x_star));
     if !contains_pole {
         if let Some(s0) = project(y_star) {
@@ -342,16 +341,18 @@ pub fn conformal_edge_lods(
                     rho = rho.max(s2(sp, s0) / eps);
                 }
             }
-            px_int = (patch.lambda_star * rho * l_max).min(screen_extent);
+            for edge in 0..3 {
+                px_int[edge] = (patch.lambda_star * rho * source_edges[edge]).min(screen_extent);
+            }
         }
     }
 
-    let drive = |px: Option<f64>| -> u32 {
-        let base = px.unwrap_or(0.0).max(px_int).min(screen_extent);
+    let drive = |px: Option<f64>, interior: f64| -> u32 {
+        let base = px.unwrap_or(0.0).max(interior).min(screen_extent);
         if base <= 0.0 {
             return min_lod;
         }
         clampl(base / min_px)
     };
-    [drive(px_a), drive(px_b), drive(px_c)]
+    [drive(px_a, px_int[0]), drive(px_b, px_int[1]), drive(px_c, px_int[2])]
 }

@@ -1297,10 +1297,18 @@ mod tests {
 
     #[test]
     fn pole_demand_is_bounded_by_screen_capacity() {
-        let demand = LOD_COMPUTE_VS.find("interior_world_demand = max_lod").unwrap();
+        let demand = LOD_COMPUTE_VS.find("world_demand_a = max_lod").unwrap();
         let attenuation = LOD_COMPUTE_VS.find("if (min_px > 0.0)").unwrap();
         assert!(demand < attenuation);
         assert!(!LOD_COMPUTE_VS[attenuation..].contains("lod_a = max_lod"));
+    }
+
+    #[test]
+    fn gpu_lod_keeps_skinny_face_demands_per_edge() {
+        assert!(LOD_COMPUTE_VS.contains("float source_l_a = distance(p1, p2)"));
+        assert!(LOD_COMPUTE_VS.contains("intrinsic_peak * source_l_b"));
+        assert!(LOD_COMPUTE_VS.contains("snap_pow2(world_demand_c)"));
+        assert!(LOD_COMPUTE_VS.contains("projected_peak * source_l_a"));
     }
 
     #[test]
@@ -1310,7 +1318,7 @@ mod tests {
         ));
         assert!(LOD_COMPUTE_VS.contains("max(active_mob_k, 1e-12)"));
         assert!(LOD_COMPUTE_VS.contains("target_size * intrinsic_similarity"));
-        assert!(LOD_COMPUTE_VS.contains("lambda_star / intrinsic_similarity"));
+        assert!(LOD_COMPUTE_VS.contains("lambda_star / (intrinsic_similarity * target_size)"));
     }
 
     #[test]
