@@ -159,6 +159,23 @@ impl HyperscopeAppShadow {
         hyperscope_web::asset_credits::mount_asset_credits(parent, self.store.clone());
     }
 
+    /// Mount the opt-in Leptos animation control over the committed summary
+    /// signal. Toggle intent returns through the temporary browser effect
+    /// adapter until all playback consumers observe AppStore directly.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountAnimationControl)]
+    pub fn mount_animation_control(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_action: js_sys::Function,
+    ) {
+        hyperscope_web::animation_control::mount_animation_control(
+            parent,
+            self.store.clone(),
+            on_action,
+        );
+    }
+
     /// Mount the opt-in Leptos presentation card over the committed
     /// presentation signal. Cue intent returns through the supplied browser
     /// effect adapter until renderer adaptation also moves behind AppStore.

@@ -23,6 +23,7 @@
 <link data-trunk rel="copy-file" href="LICENSE-APACHE" />
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{height:100%}
 body{background:#0d1117;color:#e6edf3;font-family:system-ui;overflow:hidden;display:flex}
 #wrap{flex:1;position:relative}
@@ -46,7 +47,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 .peer-input{width:100%;padding:5px;font:11px ui-monospace,SFMono-Regular,Consolas,monospace;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;margin-bottom:5px}
 .section{border-bottom:1px solid #21262d;padding-bottom:8px}
 .toggle-row{display:flex;align-items:center;gap:8px}
-.toggle{position:relative;width:36px;height:20px;background:#30363d;border-radius:10px;cursor:pointer;transition:background 0.2s}
+.toggle{position:relative;width:36px;height:20px;padding:0;border:0;flex:0 0 auto;appearance:none;background:#30363d;border-radius:10px;cursor:pointer;transition:background 0.2s}
 .toggle.on{background:#1f6feb}
 .toggle::after{content:'';position:absolute;width:16px;height:16px;border-radius:50%;background:#c9d1d9;top:2px;left:2px;transition:left 0.2s}
 .toggle.on::after{left:18px}
@@ -279,8 +280,9 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section">
-    <div class="toggle-row">
-      <div class="toggle on" id="animate-toggle"></div>
+    <div id="animation-control-rust" hidden></div>
+    <div class="toggle-row" id="animation-control-browser">
+      <button class="toggle on" id="animate-toggle" type="button" role="switch" aria-checked="true" aria-label="Pause animation" title="Animation playing"></button>
       <span class="toggle-label">Auto-animate</span>
     </div>
   </div>
@@ -2718,6 +2720,8 @@ let rustAppSelectionEventAtMs = null;
 let rustAppFrameElapsedSeconds = 0;
 let rustAssetCreditsMountAttempted = false;
 let rustAssetCreditsMounted = false;
+let rustAnimationControlMountAttempted = false;
+let rustAnimationControlMounted = false;
 const rustAppShadowAssetIds = new Map();
 const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);
 const rustAppShadowDiagnostics = {
@@ -2734,6 +2738,9 @@ const rustAppShadowDiagnostics = {
   assetCreditsAuthority: 'browser-fallback',
   assetCreditsMountAttempts: 0,
   assetCreditsMountErrors: 0,
+  animationControlAuthority: 'browser-fallback',
+  animationControlMountAttempts: 0,
+  animationControlMountErrors: 0,
   presentationLoads: 0,
   presentationComparisons: 0,
   navigationSynchronizations: 0,
@@ -2949,10 +2956,39 @@ function ensureRustAssetCreditsView() {
   }
 }
 
+function ensureRustAnimationControlView() {
+  if (rustAnimationControlMounted) return true;
+  if (rustAnimationControlMountAttempted || !rustAppShadow) return false;
+  rustAnimationControlMountAttempted = true;
+  rustAppShadowDiagnostics.animationControlMountAttempts += 1;
+  const host = $('animation-control-rust');
+  const fallback = $('animation-control-browser');
+  if (!host || !fallback || typeof rustAppShadow.mountAnimationControl !== 'function') {
+    return false;
+  }
+  try {
+    rustAppShadow.mountAnimationControl(host, action => {
+      if (action === 'toggle') toggleAnimationPlaybackIntent();
+    });
+    host.hidden = false;
+    fallback.hidden = true;
+    rustAnimationControlMounted = true;
+    rustAppShadowDiagnostics.animationControlAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    host.hidden = true;
+    fallback.hidden = false;
+    rustAppShadowDiagnostics.animationControlMountErrors += 1;
+    recordAppShadowMismatch('animation_control_mount', error?.message || String(error));
+    return false;
+  }
+}
+
 function refreshAppShadowSnapshot() {
   if (!rustAppShadow) return null;
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
+  ensureRustAnimationControlView();
   if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
   return snapshot;
 }
@@ -5420,7 +5456,14 @@ $('animate-toggle').classList.toggle('on', animating_sig.peek());
 $('animate-toggle').addEventListener('click', () => {
   setAnimationPlaybackIntent(!animating_sig.peek());
 });
-effect(() => $('animate-toggle').classList.toggle('on', animating_sig.get()));
+effect(() => {
+  const playing = animating_sig.get();
+  const toggle = $('animate-toggle');
+  toggle.classList.toggle('on', playing);
+  toggle.setAttribute('aria-checked', String(playing));
+  toggle.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
+  toggle.title = playing ? 'Animation playing' : 'Animation paused';
+});
 effect(() => {
   const nextAnimating = animating_sig.get();
   const changed = animating !== nextAnimating;
