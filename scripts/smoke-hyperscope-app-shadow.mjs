@@ -7,6 +7,7 @@ const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const {
   default: init,
+  encodeLocalPresenceEnvelope,
   HyperscopeAppShadow,
   HyperscopeNavigation,
   build_required_atlas: buildRequiredAtlas,
@@ -22,6 +23,57 @@ const { transportCameraAcrossSphereReflections } = await import(
   pathToFileURL(`${repository}/hyperscope_focus.mjs`).href
 );
 await init({ module_or_path: readFileSync(wasmPath) });
+
+const encodedPresence = encodeLocalPresenceEnvelope(
+  '75000000-0000-4000-8000-000000000001',
+  '75000000-0000-4000-8000-000000000002',
+  '18446744073709551615',
+  1500,
+  new Float64Array([8, 9, 10]),
+  new Float64Array([0, 0, -1]),
+  new Float64Array([0, 1, 0]),
+  '["75000000-0000-4000-8000-000000000003"]',
+  true,
+  new Float64Array([1, 2, 3]),
+  4,
+  true,
+  '',
+  2.5,
+);
+const decodedPresence = JSON.parse(encodedPresence);
+assert.match(encodedPresence, /"sequence":18446744073709551615/);
+assert.deepEqual(decodedPresence.presence.camera.eye, [8, 9, 10]);
+assert.deepEqual(decodedPresence.presence.focus, {
+  center: [1, 2, 3],
+  radius: 4,
+  inversion_enabled: true,
+});
+assert.throws(
+  () => encodeLocalPresenceEnvelope(
+    '75000000-0000-4000-8000-000000000001',
+    '75000000-0000-4000-8000-000000000002',
+    '18446744073709551616',
+    1500,
+    new Float64Array([0, 0, 3]),
+    new Float64Array([0, 0, -1]),
+    new Float64Array([0, 1, 0]),
+    '[]', false, new Float64Array(), 1, false, '', -1,
+  ),
+  /invalid decimal u64/,
+);
+assert.throws(
+  () => encodeLocalPresenceEnvelope(
+    '75000000-0000-4000-8000-000000000001',
+    '75000000-0000-4000-8000-000000000002',
+    '1',
+    0,
+    new Float64Array([0, 0, 3]),
+    new Float64Array([0, 0, -1]),
+    new Float64Array([0, 0, -1]),
+    '[]', false, new Float64Array(), 1, false, '', -1,
+  ),
+  /presence TTL|independent directions/,
+);
 
 assert.equal(requiredAtlasTriples(6, 2).length / 3, 19);
 assert.equal(requiredAtlasTriples(6, 4).length / 3, 34);
@@ -467,12 +519,30 @@ assert.equal(livePresence.peers[0].expiresAtSeconds, 5.1);
 assert.deepEqual(livePresence.peers[0].presence.selection, [peerEntity]);
 assert.equal(
   peerApp.receiveLocalPeerEnvelope(5.01, presenceFrame).disposition,
-  'ignored_stale',
+  'ignored_duplicate',
 );
 peerApp.advanceFrame(5.2, 5.2);
 const expiredPresence = peerApp.peerPresenceSnapshot();
 assert.equal(expiredPresence.elapsedSeconds, 5.2);
 assert.deepEqual(expiredPresence.peers, []);
+
+const localPresenceEnvelope = structuredClone(presenceEnvelope);
+localPresenceEnvelope.header.message_id = '63000000-0000-4000-8000-000000000009';
+localPresenceEnvelope.header.sender = '63000000-0000-4000-8000-00000000000a';
+peerApp.recordLocalPresenceEnvelope(JSON.stringify(localPresenceEnvelope));
+const localPresenceFrame = JSON.stringify({
+  lane: 'presence',
+  envelope: localPresenceEnvelope,
+});
+assert.equal(
+  peerApp.receiveLocalPeerEnvelope(5.3, localPresenceFrame).disposition,
+  'ignored_echo',
+);
+assert.deepEqual(peerApp.peerPresenceSnapshot().peers, []);
+assert.equal(
+  peerApp.receiveLocalPeerEnvelope(5.31, localPresenceFrame).disposition,
+  'ignored_duplicate',
+);
 peerApp.free();
 
 const identityMatrix = [

@@ -225,7 +225,9 @@ The first application boundary is now explicit:
 - Generated WASM owns one `LocalPeerIngress` beside its `AppStore`.
   `receiveLocalPeerEnvelope` admits canonical JSON, while
   `recordLocalAuthoredEnvelope` marks an already-applied outbound edit for echo
-  suppression. Ephemeral peers are sampled through `peerPresenceSnapshot`, a
+  suppression and `recordLocalPresenceEnvelope` validates an outbound sample
+  while consuming its later relay echo without admitting this process as its
+  own remote peer. Ephemeral peers are sampled through `peerPresenceSnapshot`, a
   deliberately separate high-rate lane whose sender sequences and local
   expiries do not masquerade as the throttled UI read-model revision. These
   methods select no carrier and add no browser state authority.
@@ -246,6 +248,21 @@ The first application boundary is now explicit:
   drawing, LOD, focus bounds, picking, and walking. This adapter deliberately
   adds no browser durability or repair while HHHS v0.4.4 remains a provisional
   downstream integration target.
+- The same opt-in carrier now publishes the live browser viewport in the
+  opposite direction. Until the general navigation cutover, the incumbent
+  browser controller supplies one semantic eye/forward/up, selection, focus,
+  cue, and animation sample; generated Rust/WASM parses UUIDs and decimal
+  `u64`, validates the complete protocol value, and emits canonical presence
+  JSON. Changed samples are bounded to 20 Hz and settled samples refresh every
+  500 ms under a 1,500 ms TTL. Receipt time and `AppEvent::Frame` use the same
+  application-clock epoch, so a disconnected received peer expires rather
+  than retaining a page-uptime offset. This is an explicit migration seam, not a
+  claim that default mouse navigation is already AppStore-authoritative.
+  Outbound echo suppression also avoids a second reducer event per sample.
+  Blender exposes detached TTL-filtered remote samples for a future viewport
+  draw adapter; it creates no helper datablocks and saves no presence in the
+  `.blend`. The real Blender/browser smoke proves both directions and preserves
+  near-`u64::MAX` sequences as exact JSON.
 - `hyperscope-app` exposes a versioned, adapter-independent replay format. A
   replay contains semantic events, each commit/rejection outcome, and a compact
   camera/focus/cue/asset/presence/diagnostic snapshot; it contains no DOM

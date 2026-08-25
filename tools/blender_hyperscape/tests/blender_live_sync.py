@@ -134,6 +134,12 @@ transport.incoming.append(
 )
 runtime.tick(bpy.context.scene, 10.4)
 assert runtime.status().remote_peers == 1
+remote_samples = runtime.remote_presence()
+assert remote_samples[0]["presence"]["selection"] == [obj.hyperscape.stable_id]
+remote_samples[0]["presence"]["selection"].clear()
+assert runtime.remote_presence()[0]["presence"]["selection"] == [
+    obj.hyperscape.stable_id
+]
 assert tuple(round(value, 6) for value in obj.matrix_world.translation) == (4.0, 5.0, 6.0)
 runtime.tick(bpy.context.scene, 12.0)
 assert runtime.status().remote_peers == 0

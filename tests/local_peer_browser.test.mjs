@@ -39,6 +39,7 @@ function appOracle({ reject = null } = {}) {
   return {
     received: [],
     recorded: [],
+    recordedPresence: [],
     receiveLocalPeerEnvelope(atSeconds, frameJson) {
       if (reject?.(frameJson)) throw new Error('deliberate Rust rejection');
       this.received.push({ atSeconds, frameJson });
@@ -49,6 +50,10 @@ function appOracle({ reject = null } = {}) {
     },
     recordLocalAuthoredEnvelope(envelopeJson) {
       this.recorded.push(envelopeJson);
+    },
+    recordLocalPresenceEnvelope(envelopeJson) {
+      if (reject?.(envelopeJson)) throw new Error('deliberate Rust rejection');
+      this.recordedPresence.push(envelopeJson);
     },
   };
 }
@@ -236,8 +241,8 @@ test('local presence is validated by Rust before it enters the outbound queue', 
   const relay = transport(app);
   relay.requestJson = async () => ({ generation: 'generation-a', cursor: '1' });
   const completion = relay.sendPresenceEnvelope(presenceEnvelope);
-  assert.equal(app.received.length, 1);
-  assert.match(app.received[0].frameJson, /"lane":"presence"/);
+  assert.equal(app.received.length, 0);
+  assert.deepEqual(app.recordedPresence, [presenceEnvelope]);
   await relay.flushOutbound();
   await completion;
 });

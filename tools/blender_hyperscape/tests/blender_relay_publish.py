@@ -51,10 +51,34 @@ try:
     status = runtime.status()
     assert status.authored_sent == 1
     assert transport.status().sent_frames >= 2
+
+    received_deadline = time.monotonic() + 8.0
+    received_started = time.monotonic()
+    while runtime.status().remote_peers < 1 and time.monotonic() < received_deadline:
+        runtime.tick(
+            bpy.context.scene,
+            10.0 + (time.monotonic() - received_started),
+        )
+        time.sleep(0.01)
+    remote = runtime.remote_presence()
+    assert len(remote) == 1
+    assert remote[0]["presence"]["camera"] == {
+        "eye": [8.0, 9.0, 10.0],
+        "forward": [0.0, 0.0, -1.0],
+        "up": [0.0, 1.0, 0.0],
+    }
+    assert remote[0]["presence"]["selection"] == [entity_id]
+    assert remote[0]["presence"]["focus"] == {
+        "center": [1.0, 2.0, 3.0],
+        "radius": 4.0,
+        "inversion_enabled": True,
+    }
+    assert remote[0]["presence"]["animation_seconds"] == 2.5
     print(json.dumps({
-        "marker": "Hyperscape Blender relay publish passed",
+        "marker": "Hyperscape Blender relay round trip passed",
         "authoredSent": status.authored_sent,
         "transportSent": transport.status().sent_frames,
+        "remotePeers": len(remote),
         "entity": entity_id,
     }))
 finally:

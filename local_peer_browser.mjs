@@ -30,7 +30,8 @@ export class BrowserLocalPeerRelay {
     this.#token = validateToken(token);
     if (!app
         || typeof app.receiveLocalPeerEnvelope !== 'function'
-        || typeof app.recordLocalAuthoredEnvelope !== 'function') {
+        || typeof app.recordLocalAuthoredEnvelope !== 'function'
+        || typeof app.recordLocalPresenceEnvelope !== 'function') {
       throw new BrowserLocalPeerRelayError(
         'browser relay requires the generated Rust/WASM peer application boundary',
       );
@@ -139,15 +140,14 @@ export class BrowserLocalPeerRelay {
   sendPresenceEnvelope(envelopeJson) {
     validateJsonText(envelopeJson, 'local presence envelope');
     this.reserveOutbound();
-    const frameJson = `{"lane":"presence","envelope":${envelopeJson}}`;
     try {
-      this.app.receiveLocalPeerEnvelope(this.nowSeconds(), frameJson);
+      this.app.recordLocalPresenceEnvelope(envelopeJson);
     } catch (error) {
       throw new BrowserLocalPeerRelayError(
         `Rust rejected the local presence envelope: ${errorMessage(error)}`,
       );
     }
-    return this.enqueue(frameJson);
+    return this.enqueue(`{"lane":"presence","envelope":${envelopeJson}}`);
   }
 
   reserveOutbound() {

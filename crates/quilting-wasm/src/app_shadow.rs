@@ -10,8 +10,9 @@ use hyperscape::{
     SurfaceAnchorTarget,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, LocalPeerEnvelope,
-    RequestId,
+    AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
+    FocusPresence, LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope,
+    RequestId, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
     session_node_identity, AppCommit, AppEffect, AppEvent, AppFrameSnapshot, AppStore,
@@ -55,6 +56,79 @@ pub fn map_space_mouse_camera_frame(
         horizon_lock_requested,
     )?;
     to_js(&ShadowMappedSpaceMouseFrame::from(mapped))
+}
+
+/// Encode one short-lived browser viewport sample through the canonical Rust
+/// protocol model. The browser still supplies its incumbent semantic camera
+/// until navigation authority moves into [`HyperscopeAppShadow`]; this
+/// boundary owns UUID/u64 parsing, presence-lane validation, and exact JSON.
+/// It never dispatches an application event or makes the sample durable.
+#[wasm_bindgen(js_name = encodeLocalPresenceEnvelope)]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_local_presence_envelope(
+    message_id: &str,
+    sender: &str,
+    sequence: &str,
+    ttl_millis: u32,
+    eye: &[f64],
+    forward: &[f64],
+    up: &[f64],
+    selection_json: &str,
+    include_focus: bool,
+    focus_center: &[f64],
+    focus_radius: f64,
+    inversion_enabled: bool,
+    active_cue: &str,
+    animation_seconds: f64,
+) -> Result<String, JsValue> {
+    let selection = serde_json::from_str::<Vec<EntityId>>(selection_json)
+        .map_err(|error| js_error(format!("presence selection is invalid JSON: {error}")))?;
+    let active_cue = if active_cue.is_empty() {
+        None
+    } else {
+        Some(MessageId::new(parse_uuid(active_cue, "active cue ID")?).map_err(js_error)?)
+    };
+    let animation_seconds = if animation_seconds < 0.0 {
+        None
+    } else {
+        Some(animation_seconds)
+    };
+    let focus = if include_focus {
+        Some(FocusPresence {
+            center: vector3(focus_center, "presence focus center")?,
+            radius: focus_radius,
+            inversion_enabled,
+        })
+    } else {
+        None
+    };
+    let envelope = PresenceEnvelope {
+        header: MessageHeader {
+            version: CURRENT_PROTOCOL_VERSION,
+            message_id: MessageId::new(parse_uuid(message_id, "presence message ID")?)
+                .map_err(js_error)?,
+            sender: PeerId::new(parse_uuid(sender, "presence sender ID")?)
+                .map_err(js_error)?,
+            sequence: sequence.parse::<u64>().map_err(|error| {
+                js_error(format!("presence sequence is invalid decimal u64: {error}"))
+            })?,
+        },
+        presence: EphemeralPresence {
+            ttl_millis,
+            camera: Some(CameraPresence {
+                eye: vector3(eye, "presence camera eye")?,
+                forward: vector3(forward, "presence camera forward")?,
+                up: vector3(up, "presence camera up")?,
+            }),
+            selection,
+            focus,
+            active_cue,
+            animation_seconds,
+        },
+    };
+    envelope.validate().map_err(js_error)?;
+    serde_json::to_string(&envelope)
+        .map_err(|error| js_error(format!("presence envelope could not be encoded: {error}")))
 }
 
 /// Opt-in WASM adapter for comparing browser asset jobs with the Rust app
@@ -715,6 +789,20 @@ impl HyperscopeAppShadow {
             .try_borrow_mut()
             .map_err(|_| JsValue::from_str("local peer ingress is already active"))?
             .record_local_authored(&envelope)
+            .map_err(js_error)
+    }
+
+    /// Validate one locally generated presence envelope and remember its
+    /// delivery echo without publishing this process as its own remote peer.
+    #[wasm_bindgen(js_name = recordLocalPresenceEnvelope)]
+    pub fn record_local_presence_envelope(&self, envelope_json: &str) -> Result<(), JsValue> {
+        let envelope = serde_json::from_str::<PresenceEnvelope>(envelope_json).map_err(|error| {
+            js_error(format!("local presence envelope is invalid JSON: {error}"))
+        })?;
+        self.peer_ingress
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("local peer ingress is already active"))?
+            .record_local_presence(&envelope)
             .map_err(js_error)
     }
 

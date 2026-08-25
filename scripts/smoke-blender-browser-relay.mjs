@@ -75,7 +75,11 @@ try {
   }, 'relay address');
 
   const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
-  const { default: init, HyperscopeAppShadow } = await import(packageUrl);
+  const {
+    default: init,
+    encodeLocalPresenceEnvelope,
+    HyperscopeAppShadow,
+  } = await import(packageUrl);
   await init({
     module_or_path: readFileSync(`${repository}/pkg/quilting_wasm_bg.wasm`),
   });
@@ -121,9 +125,7 @@ try {
   blender.stderr.setEncoding('utf8');
   blender.stdout.on('data', chunk => { blenderStdout += chunk; });
   blender.stderr.on('data', chunk => { blenderStderr += chunk; });
-  const blenderExit = await new Promise(resolve => blender.once('close', resolve));
-  assert.equal(blenderExit, 0, `${blenderStdout}\n${blenderStderr}`);
-  assert.match(blenderStdout, /Hyperscape Blender relay publish passed/);
+  const blenderExitPromise = new Promise(resolve => blender.once('close', resolve));
 
   await waitUntil(
     () => browserRelay.snapshot().appliedFrames >= 2,
@@ -141,6 +143,33 @@ try {
   const sequence = authoredFrame.match(/"sequence":([0-9]+)/)?.[1];
   assert.ok(sequence);
   assert.ok(BigInt(sequence) > BigInt(Number.MAX_SAFE_INTEGER));
+
+  const browserPresence = encodeLocalPresenceEnvelope(
+    '74000000-0000-4000-8000-000000000001',
+    '74000000-0000-4000-8000-000000000002',
+    '18446744073709551614',
+    1500,
+    new Float64Array([8, 9, 10]),
+    new Float64Array([0, 0, -1]),
+    new Float64Array([0, 1, 0]),
+    JSON.stringify([entity]),
+    true,
+    new Float64Array([1, 2, 3]),
+    4,
+    true,
+    '',
+    2.5,
+  );
+  const browserPresenceFrame = `{"lane":"presence","envelope":${browserPresence}}`;
+  await browserRelay.sendPresenceEnvelope(browserPresence);
+  await waitUntil(
+    () => exactFrames.includes(browserPresenceFrame),
+    'exact browser presence echo',
+  );
+
+  const blenderExit = await blenderExitPromise;
+  assert.equal(blenderExit, 0, `${blenderStdout}\n${blenderStderr}`);
+  assert.match(blenderStdout, /Hyperscape Blender relay round trip passed/);
 
   const identity = [
     1, 0, 0, 0,
@@ -168,9 +197,11 @@ try {
 
   summary = {
     blenderAuthoredFrames: 1,
+    browserPresenceFrames: 1,
     browserReceivedFrames: browserRelay.snapshot().receivedFrames,
     rustAppliedFrames: browserRelay.snapshot().appliedFrames,
     exactSequence: sequence,
+    exactBrowserPresenceSequence: '18446744073709551614',
     projectedTranslation: extraction.nodes[0].matrix.slice(12, 15),
   };
 } finally {

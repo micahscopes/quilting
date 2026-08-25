@@ -367,6 +367,7 @@ import init, {
   HyperscopeAppShadow,
   HyperscopeNavigation,
   canonicalizeHyperscopeRoute,
+  encodeLocalPresenceEnvelope,
   hyperscopeControlSpecs,
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
@@ -6365,11 +6366,14 @@ function frame(ts) {
   previousFrameTs = ts;
   advanceFocusTransitions(ts);
   const appFrame = advanceRustApplicationFrame(ts, deltaSeconds, rawDeltaSeconds);
+  if (localPeerRelay) publishLocalPeerPresence(ts);
   if (localPeerRelay && rustAppShadow && ts - localPeerLastPresenceUiAt >= 250) {
     localPeerLastPresenceUiAt = ts;
     try {
       const presence = rustAppShadow.peerPresenceSnapshot();
-      localPeerDiagnostics.remotePeers = presence.peers.length;
+      localPeerDiagnostics.remotePeers = presence.peers.filter(
+        peer => peer.peerId !== localPeerBrowserPeerId,
+      ).length;
       renderLocalPeerStatus();
     } catch (error) {
       localPeerDiagnostics.lastError = error?.message || String(error);
@@ -7767,6 +7771,10 @@ async function initializePresentationComposition() {
 // Disabled until the user supplies a runtime-only bearer token.
 // ============================================================
 const LOCAL_PEER_LAYER_ID = 'e0000000-0000-4000-8000-000000000001';
+const LOCAL_PEER_PRESENCE_MIN_INTERVAL_MS = 50;
+const LOCAL_PEER_PRESENCE_REFRESH_MS = 500;
+const LOCAL_PEER_PRESENCE_TTL_MS = 1500;
+let localPeerBrowserPeerId = null;
 const localPeerDiagnostics = {
   enabled: false,
   state: 'disabled',
@@ -7782,11 +7790,18 @@ const localPeerDiagnostics = {
   lastReceipt: null,
   lastProjectionRevision: null,
   unmatchedAuthoredEntities: [],
+  publishedPresenceFrames: 0,
+  lastPublishedPresenceAtMs: null,
   lastError: null,
 };
 let localPeerRelay = null;
 let localPeerFocusTransformKey = null;
 let localPeerLastPresenceUiAt = -Infinity;
+let localPeerPresenceSequence = 1n;
+let localPeerPresenceInFlight = false;
+let localPeerLastPresenceAttemptAt = -Infinity;
+let localPeerLastPresenceSentAt = -Infinity;
+let localPeerLastPresenceSignature = null;
 globalThis.__hyperscopeLocalPeerDiagnostics = localPeerDiagnostics;
 
 function currentModelIdentityAssetId() {
@@ -7884,7 +7899,82 @@ function applyLocalPeerReceipt(receipt) {
   }
   if (receipt?.lane === 'presence' && rustAppShadow) {
     const presence = rustAppShadow.peerPresenceSnapshot();
-    localPeerDiagnostics.remotePeers = presence.peers.length;
+    localPeerDiagnostics.remotePeers = presence.peers.filter(
+      peer => peer.peerId !== localPeerBrowserPeerId,
+    ).length;
+  }
+}
+
+function localPeerPresenceSample() {
+  const navigation = manualNavigationState();
+  const selectedEntity = selectedObject?.identity?.entityId;
+  const selection = selectedEntity ? [selectedEntity] : [];
+  return {
+    eye: navigation.eye,
+    forward: navigation.forward,
+    up: navigation.up,
+    selection,
+    includeFocus: navigation.focusEnabled
+      || navigation.inversionEnabled
+      || selection.length > 0,
+    focusCenter: navigation.focusCenter,
+    focusRadius: navigation.focusRadius,
+    inversionEnabled: navigation.inversionEnabled,
+    activeCue: rustPresentationSnapshot?.cue_id || '',
+    animationSeconds: Number.isFinite(animTime) ? Math.max(0, animTime) : -1,
+  };
+}
+
+function publishLocalPeerPresence(nowMs) {
+  if (!localPeerRelay || !rustAppShadow
+      || localPeerDiagnostics.state !== 'connected'
+      || localPeerPresenceInFlight
+      || nowMs - localPeerLastPresenceAttemptAt < LOCAL_PEER_PRESENCE_MIN_INTERVAL_MS) {
+    return;
+  }
+  const sample = localPeerPresenceSample();
+  const signature = JSON.stringify(sample);
+  if (signature === localPeerLastPresenceSignature
+      && nowMs - localPeerLastPresenceSentAt < LOCAL_PEER_PRESENCE_REFRESH_MS) {
+    return;
+  }
+  localPeerLastPresenceAttemptAt = nowMs;
+  try {
+    const sequence = localPeerPresenceSequence.toString();
+    const envelope = encodeLocalPresenceEnvelope(
+      crypto.randomUUID(),
+      localPeerBrowserPeerId,
+      sequence,
+      LOCAL_PEER_PRESENCE_TTL_MS,
+      new Float64Array(sample.eye),
+      new Float64Array(sample.forward),
+      new Float64Array(sample.up),
+      JSON.stringify(sample.selection),
+      sample.includeFocus,
+      new Float64Array(sample.focusCenter),
+      sample.focusRadius,
+      sample.inversionEnabled,
+      sample.activeCue,
+      sample.animationSeconds,
+    );
+    const completion = localPeerRelay.sendPresenceEnvelope(envelope);
+    localPeerPresenceSequence += 1n;
+    localPeerPresenceInFlight = true;
+    localPeerLastPresenceSignature = signature;
+    localPeerLastPresenceSentAt = nowMs;
+    localPeerDiagnostics.publishedPresenceFrames += 1;
+    localPeerDiagnostics.lastPublishedPresenceAtMs = nowMs;
+    void completion.catch(error => {
+      if (localPeerRelay) {
+        localPeerDiagnostics.lastError = error?.message || String(error);
+        renderLocalPeerStatus();
+      }
+    }).finally(() => {
+      localPeerPresenceInFlight = false;
+    });
+  } catch (error) {
+    localPeerDiagnostics.lastError = error?.message || String(error);
+    renderLocalPeerStatus();
   }
 }
 
@@ -7913,6 +8003,12 @@ function updateLocalPeerStatus(status) {
 function connectLocalPeer() {
   if (localPeerRelay) return;
   if (!wasmOk.peek()) throw new Error('Rust/WASM is not ready yet');
+  if (!localPeerBrowserPeerId) {
+    if (typeof globalThis.crypto?.randomUUID !== 'function') {
+      throw new Error('local peer presence requires crypto.randomUUID()');
+    }
+    localPeerBrowserPeerId = globalThis.crypto.randomUUID();
+  }
   const tokenInput = $('local-peer-token');
   const token = tokenInput.value;
   tokenInput.value = '';
@@ -7921,11 +8017,18 @@ function connectLocalPeer() {
     baseUrl: $('local-peer-url').value || DEFAULT_LOCAL_PEER_RELAY_URL,
     token,
     app,
+    // Presence expiry and AppEvent::Frame must share one monotonic epoch.
+    // performance.now() can predate a lazily-created AppStore by many seconds.
+    nowSeconds: () => rustAppFrameElapsedSeconds,
     onReceipt: applyLocalPeerReceipt,
     onStatus: updateLocalPeerStatus,
   });
   localPeerRelay = candidate;
   localPeerLastPresenceUiAt = -Infinity;
+  localPeerPresenceInFlight = false;
+  localPeerLastPresenceAttemptAt = -Infinity;
+  localPeerLastPresenceSentAt = -Infinity;
+  localPeerLastPresenceSignature = null;
   updateLocalPeerStatus(candidate.snapshot());
   candidate.start();
 }
@@ -7934,9 +8037,12 @@ async function disconnectLocalPeer() {
   const relay = localPeerRelay;
   localPeerRelay = null;
   if (relay) await relay.stop();
+  localPeerPresenceInFlight = false;
+  localPeerLastPresenceSignature = null;
   Object.assign(localPeerDiagnostics, {
     enabled: false,
     state: 'disabled',
+    queuedFrames: 0,
     lastError: null,
     remotePeers: 0,
   });

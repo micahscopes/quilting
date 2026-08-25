@@ -8,6 +8,7 @@ repair, and multi-writer convergence remain HHHS responsibilities.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import math
 import threading
@@ -194,6 +195,18 @@ class BlenderLiveSync:
             authored_ignored=self._authored_ignored,
             transport=transport_status,
         )
+
+    def remote_presence(self) -> tuple[Mapping[str, Any], ...]:
+        """Return detached live peer samples for viewport-only presentation.
+
+        The copies cannot mutate the sender-order/TTL inbox and are never
+        written into Blender datablocks, preferences, or the ``.blend`` file.
+        A future draw handler can consume this view without turning camera or
+        selection presence into authored scene state.
+        """
+
+        self._require_main_thread()
+        return tuple(copy.deepcopy(envelope) for envelope in self._remote_presence)
 
     def _admit_deliveries(
         self,

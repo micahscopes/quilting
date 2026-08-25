@@ -4,7 +4,9 @@
 //! convergence remains the responsibility of `hyperscape-hhhs`.
 
 use crate::{AppCommit, AppEvent, AppStore, AuthoredRevision, CommitDisposition, ReceivedPresence};
-use hyperscape_protocol::{AuthoredEnvelope, LocalPeerEnvelope, MessageId, PeerId};
+use hyperscape_protocol::{
+    AuthoredEnvelope, LocalPeerEnvelope, MessageId, PeerId, PresenceEnvelope,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -40,7 +42,9 @@ pub struct LocalPeerReceipt {
 #[derive(Debug, Clone)]
 pub struct LocalPeerIngress {
     seen_authored: BoundedMessageMemory,
+    seen_presence: BoundedMessageMemory,
     local_authored_echoes: BoundedMessageMemory,
+    local_presence_echoes: BoundedMessageMemory,
     authored_sender_sequences: BoundedSenderSequences,
 }
 
@@ -58,7 +62,9 @@ impl LocalPeerIngress {
         }
         Ok(Self {
             seen_authored: BoundedMessageMemory::new(message_capacity),
+            seen_presence: BoundedMessageMemory::new(message_capacity),
             local_authored_echoes: BoundedMessageMemory::new(message_capacity),
+            local_presence_echoes: BoundedMessageMemory::new(message_capacity),
             authored_sender_sequences: BoundedSenderSequences::new(message_capacity),
         })
     }
@@ -76,6 +82,20 @@ impl LocalPeerIngress {
             .insert(envelope.header.message_id);
         self.authored_sender_sequences
             .observe(envelope.header.sender, envelope.header.sequence);
+        Ok(())
+    }
+
+    /// Validate and remember one outbound local presence sample. Its relay
+    /// echo is consumed without admitting this process as its own remote peer.
+    pub fn record_local_presence(
+        &mut self,
+        envelope: &PresenceEnvelope,
+    ) -> Result<(), LocalPeerIngressError> {
+        envelope
+            .validate()
+            .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
+        self.local_presence_echoes
+            .insert(envelope.header.message_id);
         Ok(())
     }
 
@@ -149,12 +169,35 @@ impl LocalPeerIngress {
                 })
             }
             LocalPeerEnvelope::Presence(envelope) => {
+                let message_id = envelope.header.message_id;
+                envelope
+                    .presence
+                    .expires_at_seconds(received_at_seconds)
+                    .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
+                if self.local_presence_echoes.remove(message_id) {
+                    self.seen_presence.insert(message_id);
+                    return Ok(LocalPeerReceipt {
+                        lane: LocalPeerLane::Presence,
+                        disposition: LocalPeerDisposition::IgnoredEcho,
+                        projection_revision: None,
+                        commit: None,
+                    });
+                }
+                if self.seen_presence.contains(message_id) {
+                    return Ok(LocalPeerReceipt {
+                        lane: LocalPeerLane::Presence,
+                        disposition: LocalPeerDisposition::IgnoredDuplicate,
+                        projection_revision: None,
+                        commit: None,
+                    });
+                }
                 let commit = store
                     .dispatch(AppEvent::RemotePresence(ReceivedPresence {
                         envelope,
                         received_at_seconds,
                     }))
                     .map_err(|error| LocalPeerIngressError::Application(error.to_string()))?;
+                self.seen_presence.insert(message_id);
                 let disposition = commit_disposition(&commit);
                 Ok(LocalPeerReceipt {
                     lane: LocalPeerLane::Presence,
@@ -395,10 +438,10 @@ mod tests {
         assert_eq!(store.authored_scene_snapshot().projection_revision, Some(0));
         assert_eq!(
             ingress
-                .accept(&store, LocalPeerEnvelope::Presence(presence), 2.01)
+                .accept(&store, LocalPeerEnvelope::Presence(presence.clone()), 2.01)
                 .unwrap()
                 .disposition,
-            LocalPeerDisposition::IgnoredStale,
+            LocalPeerDisposition::IgnoredDuplicate,
         );
         store
             .dispatch(AppEvent::Frame(FrameTick {
@@ -407,6 +450,40 @@ mod tests {
             }))
             .unwrap();
         assert!(store.presence_snapshot().is_empty());
+
+        let local_presence = PresenceEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(97).unwrap(),
+                sender: PeerId::from_u128(98).unwrap(),
+                sequence: 1,
+            },
+            ..presence
+        };
+        ingress.record_local_presence(&local_presence).unwrap();
+        let revision = store.frame_snapshot().revision;
+        let receipt = ingress
+            .accept(
+                &store,
+                LocalPeerEnvelope::Presence(local_presence.clone()),
+                2.3,
+            )
+            .unwrap();
+        assert_eq!(receipt.disposition, LocalPeerDisposition::IgnoredEcho);
+        assert_eq!(receipt.commit, None);
+        assert_eq!(store.frame_snapshot().revision, revision);
+        assert!(store.presence_snapshot().is_empty());
+        assert_eq!(
+            ingress
+                .accept(
+                    &store,
+                    LocalPeerEnvelope::Presence(local_presence),
+                    2.31,
+                )
+                .unwrap()
+                .disposition,
+            LocalPeerDisposition::IgnoredDuplicate,
+        );
     }
 
     #[test]

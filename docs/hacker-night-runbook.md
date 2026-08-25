@@ -20,7 +20,14 @@ node scripts/smoke-hyperscope-app-shadow.mjs
 node scripts/smoke-surface-walk.mjs
 node scripts/smoke-hyperscope-route-shadow.mjs
 node scripts/smoke-render-shadow.mjs
+node scripts/smoke-local-peer-relay.mjs
 ```
+
+With Blender installed, also run
+`node scripts/smoke-blender-browser-relay.mjs`. It must report one
+Blender-authored edit, one browser presence frame, three received frames, the
+exact browser presence sequence `18446744073709551614`, and projected
+translation `[3,4,5]`.
 
 For the composed final cue, append `sceneimpl=shadow` to compare Rust ordinary
 node extraction while retaining the incumbent renderer path, or explicitly use
@@ -196,6 +203,14 @@ interactive rather than locking the camera.
   `&lodratio=4`. The page reload is intentional: diagnostics must report the
   active policy, zero shared-edge mismatches, the reconciled request, and the
   resulting resident triangle count from the matching cached atlas.
+- **Optional Blender presence:** start the loopback relay with the
+  `local-peer-relay` feature, then explicitly connect both clients using its
+  runtime-only token. Moving the browser camera should advance `sentFrames`
+  and `publishedPresenceFrames` at no more than 20 Hz; a settled view refreshes
+  every 500 ms. Disconnect, wait longer than the 1,500 ms TTL, and verify
+  `peerPresenceSnapshot().peers` no longer contains the browser sender. This
+  lane is delivery-only: it must not create HHHS history, browser persistence,
+  or Blender datablocks.
 
 ## 5. Browser smoke check
 
