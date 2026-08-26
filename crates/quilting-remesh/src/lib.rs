@@ -23,7 +23,8 @@
 //! `coarse_reduction` validates and conservatively backs off every reduction,
 //! then `coarse_patch_complex` assembles stable global correspondence.
 //! [`linear_fit`] supplies the area-weighted sparse shared-weight fit and
-//! [`conformal_optimizer`] scores the result under source and conformal probes.
+//! [`conformal_optimizer`] scores the result under source and conformal probes;
+//! `fitted_coarse_patch` owns the deterministic exact-chart retry policy.
 //! The path remains an offline measured candidate rather than a product entry
 //! point.
 //!
@@ -52,6 +53,8 @@ pub mod coarse_complex;
 pub mod coarse_reduction;
 #[cfg(feature = "meshopt-prototype")]
 pub mod coarse_patch_complex;
+#[cfg(feature = "meshopt-prototype")]
+pub mod fitted_coarse_patch;
 #[cfg(feature = "meshopt-prototype")]
 mod triangle_bvh;
 

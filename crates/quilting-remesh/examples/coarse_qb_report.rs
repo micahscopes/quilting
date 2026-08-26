@@ -19,15 +19,18 @@ use std::time::{Duration, Instant};
 
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_remesh::coarse_complex::{
-    split_disconnected_vertex_fans, ChartKey, CoarseComplexInput, SourceFaceId, SourceVertexId,
+    split_disconnected_vertex_fans, CoarseComplexInput, SourceFaceId, SourceVertexId,
 };
 use quilting_remesh::coarse_patch_complex::{
-    build_coarse_patch_complex_with_fallbacks, ChartReductionReport, CoarsePatchComplex,
-    CoarsePatchConfig, CorrespondenceSample,
+    ChartReductionReport, CoarsePatchComplex, CoarsePatchConfig, CorrespondenceSample,
 };
 use quilting_remesh::coarse_reduction::CoarseReductionConfig;
 use quilting_remesh::conformal_optimizer::{
-    score_patch_complex_weighted, ConformalProbe, FitScore, FitScoreConfig, ObjectiveWeights,
+    ConformalProbe, FitScore, FitScoreConfig, ObjectiveWeights,
+};
+use quilting_remesh::fitted_coarse_patch::{
+    fit_coarse_patch_complex_with_backoff, FittedCoarsePatchConfig, FittedCoarsePatchResult,
+    FittedQualityFallback,
 };
 use quilting_remesh::geometry;
 use quilting_remesh::linear_fit::{LinearFitConfig, LinearFitResult};
@@ -254,6 +257,7 @@ struct Success {
     selected_target_triangles: usize,
     total_backend_attempts: usize,
     total_rejected_backend_attempts: usize,
+    fitted_attempts: usize,
     chart_reports: Vec<ChartReductionReport>,
     fitted_quality_fallbacks: Vec<FittedQualityFallback>,
     split_vertices: usize,
@@ -272,16 +276,6 @@ struct Success {
     objective: f64,
     fit: LinearFitResult,
     score: FitScore,
-}
-
-#[derive(Clone, Debug)]
-struct FittedQualityFallback {
-    chart: usize,
-    key: ChartKey,
-    source_face: SourceFaceId,
-    source_sample_ordinal: u32,
-    measured_degrees: f64,
-    forced_all_remaining: bool,
 }
 
 fn main() {
@@ -463,131 +457,47 @@ fn process_part(
         .map_err(|error| format!("source-normalization: {error}"))?;
     let split_vertices = normalized.split_vertex_count();
 
-    let mut source_fallbacks = BTreeSet::new();
-    let mut fitted_quality_fallbacks = Vec::new();
-    let mut build_time = Duration::ZERO;
-    let mut fit_time = Duration::ZERO;
-    let mut context_time = Duration::ZERO;
-    let mut score_time = Duration::ZERO;
-    let mut total_backend_attempts = 0usize;
-    let mut total_rejected_backend_attempts = 0usize;
-    loop {
-        let build_start = Instant::now();
-        let complex = build_coarse_patch_complex_with_fallbacks(
-            &normalized.input(),
-            patch_config,
-            &source_fallbacks,
-        )
-        .map_err(|error| format!("coarse-complex: {error}"))?;
-        build_time += build_start.elapsed();
-        let build_backend_attempts = complex
-            .charts
-            .iter()
-            .try_fold(0usize, |total, chart| {
-                total.checked_add(chart.backend_attempts)
-            })
-            .ok_or_else(|| "per-build backend-attempt count overflowed".to_string())?;
-        let build_rejected_backend_attempts = complex
-            .charts
-            .iter()
-            .try_fold(0usize, |total, chart| {
-                total.checked_add(chart.rejected_candidates.len())
-            })
-            .ok_or_else(|| "per-build backend-rejection count overflowed".to_string())?;
-        total_backend_attempts = total_backend_attempts
-            .checked_add(build_backend_attempts)
-            .ok_or_else(|| "cumulative backend-attempt count overflowed".to_string())?;
-        total_rejected_backend_attempts = total_rejected_backend_attempts
-            .checked_add(build_rejected_backend_attempts)
-            .ok_or_else(|| "cumulative backend-rejection count overflowed".to_string())?;
-        let fit_start = Instant::now();
-        let fit = complex
-            .fit_shared_qb(fit_config)
-            .map_err(|error| format!("shared-fit: {error}"))?;
-        fit_time += fit_start.elapsed();
-        let context_start = Instant::now();
-        let context = complex
-            .fit_score_context(probes)
-            .map_err(|error| format!("score-context: {error}"))?;
-        context_time += context_start.elapsed();
-        let score_start = Instant::now();
-        let score = score_patch_complex_weighted(
-            &fit.patches,
-            &complex.triangles(),
-            &complex.weighted_score_samples(),
-            &context,
-            score_config,
-        )
-        .map_err(|error| format!("score: {error}"))?;
-        score_time += score_start.elapsed();
-        let objective = score.scalar_objective(&ObjectiveWeights::default());
-        if !objective.is_finite() {
-            return Err(format!(
-                "score-gate: non-finite objective (source_non_finite={} source_degenerate_normals={} source_near_singular={} source_invalid_patches={} probe_pole_near={})",
-                score.source.non_finite_samples,
-                score.source.degenerate_normal_samples,
-                score.weights.near_singular_patches,
-                score.weights.invalid_patches,
-                score
-                    .conformal_probes
-                    .iter()
-                    .map(|probe| probe.pole_near_samples)
-                    .sum::<usize>(),
-            ));
-        }
-        if score.source.normal_max_degrees
-            <= patch_config.reduction.maximum_normal_deviation_degrees
-        {
-            return Ok(success(
-                part,
-                &complex,
-                fit,
-                score,
-                objective,
-                fitted_quality_fallbacks,
-                total_backend_attempts,
-                total_rejected_backend_attempts,
-                split_vertices,
-                build_time,
-                fit_time,
-                context_time,
-                score_time,
-            ));
-        }
-        let sample_index = score.source.normal_max_sample.ok_or_else(|| {
-            "fit-quality gate reported excessive normal error without a sample".to_string()
-        })?;
-        let sample = complex
-            .correspondence
-            .get(sample_index)
-            .ok_or_else(|| format!("fit-quality gate references missing sample {sample_index}"))?;
-        let chart_index = sample.coarse_face_key.chart;
-        let chart = complex
-            .charts
-            .get(chart_index)
-            .ok_or_else(|| format!("fit-quality gate references missing chart {chart_index}"))?;
-        let forced_all_remaining = if source_fallbacks.insert(chart.key.clone()) {
-            false
-        } else {
-            let previous_count = source_fallbacks.len();
-            source_fallbacks.extend(complex.charts.iter().map(|chart| chart.key.clone()));
-            if source_fallbacks.len() == previous_count {
-                return Err(format!(
-                    "fit-quality gate still measures {:.3}° with every chart on exact source topology",
-                    score.source.normal_max_degrees,
-                ));
-            }
-            true
-        };
-        fitted_quality_fallbacks.push(FittedQualityFallback {
-            chart: chart_index,
-            key: chart.key.clone(),
-            source_face: sample.key.face,
-            source_sample_ordinal: sample.key.ordinal,
-            measured_degrees: score.source.normal_max_degrees,
-            forced_all_remaining,
-        });
-    }
+    let fitted = fit_coarse_patch_complex_with_backoff(
+        &normalized.input(),
+        &FittedCoarsePatchConfig {
+            patch: *patch_config,
+            fit: *fit_config,
+            score: *score_config,
+            objective_weights: ObjectiveWeights::default(),
+            maximum_fitted_normal_deviation_degrees: patch_config
+                .reduction
+                .maximum_normal_deviation_degrees,
+        },
+        probes,
+    )
+    .map_err(|error| error.to_string())?;
+    let FittedCoarsePatchResult {
+        complex,
+        fit,
+        score,
+        objective,
+        attempts,
+        total_backend_attempts,
+        total_rejected_backend_attempts,
+        fitted_quality_fallbacks,
+        timings,
+    } = fitted;
+    Ok(success(
+        part,
+        &complex,
+        fit,
+        score,
+        objective,
+        fitted_quality_fallbacks,
+        total_backend_attempts,
+        total_rejected_backend_attempts,
+        attempts,
+        split_vertices,
+        timings.build,
+        timings.fit,
+        timings.context,
+        timings.score,
+    ))
 }
 
 fn success(
@@ -599,6 +509,7 @@ fn success(
     fitted_quality_fallbacks: Vec<FittedQualityFallback>,
     total_backend_attempts: usize,
     total_rejected_backend_attempts: usize,
+    fitted_attempts: usize,
     split_vertices: usize,
     build_time: Duration,
     fit_time: Duration,
@@ -631,6 +542,7 @@ fn success(
             .sum(),
         total_backend_attempts,
         total_rejected_backend_attempts,
+        fitted_attempts,
         chart_reports: complex.charts.clone(),
         fitted_quality_fallbacks,
         split_vertices,
@@ -670,7 +582,7 @@ fn success(
 
 fn print_success(success: &Success) {
     println!(
-        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} backed_off_charts={} source_fallback_charts={} requested_chart_triangles={} selected_target_triangles={} total_backend_attempts={} total_rejected_backend_attempts={} split_vertices={} constrained_vertices={}",
+        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} backed_off_charts={} source_fallback_charts={} requested_chart_triangles={} selected_target_triangles={} fitted_attempts={} total_backend_attempts={} total_rejected_backend_attempts={} split_vertices={} constrained_vertices={}",
         success.source_faces,
         success.coarse_faces,
         success.source_faces as f64 / success.coarse_faces.max(1) as f64,
@@ -679,6 +591,7 @@ fn print_success(success: &Success) {
         success.source_fallback_charts,
         success.requested_chart_triangles,
         success.selected_target_triangles,
+        success.fitted_attempts,
         success.total_backend_attempts,
         success.total_rejected_backend_attempts,
         success.split_vertices,
@@ -727,12 +640,9 @@ fn print_success(success: &Success) {
     }
     for fallback in &success.fitted_quality_fallbacks {
         println!(
-            "  fitted-quality fallback action={} chart={} chart_source_faces={} source_face={:?} sample={} measured={:.3}deg",
-            if fallback.forced_all_remaining {
-                "force-all-remaining-exact"
-            } else {
-                "force-chart-exact"
-            },
+            "  fitted-quality fallback attempt={} action={} chart={} chart_source_faces={} source_face={:?} sample={} measured={:.3}deg",
+            fallback.attempt,
+            fallback.action,
             fallback.chart,
             fallback.key.source_faces.len(),
             fallback.source_face,
