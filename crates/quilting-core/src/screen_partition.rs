@@ -8,10 +8,15 @@
 //! leaf stream; WebGPU can compact the same logical leaves in compute.
 
 use crate::patch::{QBPatchDomain, QBTriPatch, RestrictedQBTriPatch};
-use crate::quaternion::{Quat, SINGULARITY_NORM_SQ};
+use crate::quaternion::SINGULARITY_NORM_SQ;
+use crate::screen_domain::{
+    denominator_norm_sq_range, diagnose_screen_domain, ScreenDomainClass,
+    ScreenDomainDiagnostic, ScreenDomainPolicy,
+};
 use crate::screen_metric::{
     patch_screen_edge_arc, patch_screen_metric, PatchEdge, ScreenArcOptions,
 };
+use std::collections::VecDeque;
 
 const METRIC_SAMPLES: [[f64; 3]; 7] = [
     [1.0, 0.0, 0.0],
@@ -36,6 +41,7 @@ pub struct ScreenPartitionPolicy {
     /// Hard bound for a WebGL2-compatible retained leaf stream.
     pub max_leaves: usize,
     pub arc_options: ScreenArcOptions,
+    pub domain_policy: ScreenDomainPolicy,
 }
 
 impl Default for ScreenPartitionPolicy {
@@ -52,6 +58,7 @@ impl Default for ScreenPartitionPolicy {
                 min_depth: 2,
                 max_depth: 12,
             },
+            domain_policy: ScreenDomainPolicy::default(),
         }
     }
 }
@@ -117,8 +124,18 @@ impl ScreenPatchDiagnostic {
 pub enum ScreenPatchLeafStatus {
     Accepted,
     BelowPixelExtent,
+    FullyFaded,
+    OutsideFrustum,
+    BoundaryDepthLimit,
+    BoundaryLeafBudget,
     DepthLimit,
     LeafBudget,
+}
+
+impl ScreenPatchLeafStatus {
+    pub fn is_drawable(self) -> bool {
+        !matches!(self, Self::FullyFaded | Self::OutsideFrustum)
+    }
 }
 
 /// Deterministic identity inside one source face's dyadic restriction tree.
@@ -151,7 +168,9 @@ impl ScreenPatchLeafId {
 pub struct ScreenPatchLeaf {
     pub id: ScreenPatchLeafId,
     pub restricted: RestrictedQBTriPatch,
-    pub diagnostic: ScreenPatchDiagnostic,
+    pub domain_diagnostic: ScreenDomainDiagnostic,
+    /// Present only when the complete leaf has a finite visible projection.
+    pub metric_diagnostic: Option<ScreenPatchDiagnostic>,
     pub status: ScreenPatchLeafStatus,
 }
 
@@ -167,6 +186,7 @@ pub struct ScreenPatchPartition {
 pub enum ScreenPartitionError {
     InvalidPolicy,
     InvalidProjection,
+    InvalidPatch,
 }
 
 impl std::fmt::Display for ScreenPartitionError {
@@ -174,6 +194,7 @@ impl std::fmt::Display for ScreenPartitionError {
         match self {
             Self::InvalidPolicy => write!(formatter, "invalid screen patch partition policy"),
             Self::InvalidProjection => write!(formatter, "invalid screen projection or viewport"),
+            Self::InvalidPatch => write!(formatter, "invalid screen patch controls"),
         }
     }
 }
@@ -188,63 +209,6 @@ fn finite_ratio(minimum: f64, maximum: f64) -> f64 {
     } else {
         maximum / minimum
     }
-}
-
-fn segment_origin_distance_sq(a: Quat, b: Quat) -> f64 {
-    let direction = b - a;
-    let parameter = (-a.dot(direction) / direction.norm_sq().max(1.0e-300)).clamp(0.0, 1.0);
-    (a + direction * parameter).norm_sq()
-}
-
-/// Exact closest approach of the affine quaternion denominator triangle to
-/// zero. This closes the principal hole in any finite screen-metric stencil:
-/// a narrow Möbius pole between samples is detected before refinement policy is
-/// allowed to accept the patch.
-fn min_denominator_norm_sq(patch: &QBTriPatch) -> f64 {
-    let [a, b, c] = patch.weights;
-    let ab = b - a;
-    let ac = c - a;
-    let scale = ab.norm_sq().max(ac.norm_sq()).max(1.0e-300);
-    let gram = ab.norm_sq() * ac.norm_sq() - ab.dot(ac).powi(2);
-    if gram <= 1.0e-24 * scale * scale {
-        return segment_origin_distance_sq(a, b)
-            .min(segment_origin_distance_sq(a, c))
-            .min(segment_origin_distance_sq(b, c));
-    }
-
-    let ap = -a;
-    let d1 = ab.dot(ap);
-    let d2 = ac.dot(ap);
-    if d1 <= 0.0 && d2 <= 0.0 {
-        return a.norm_sq();
-    }
-    let bp = -b;
-    let d3 = ab.dot(bp);
-    let d4 = ac.dot(bp);
-    if d3 >= 0.0 && d4 <= d3 {
-        return b.norm_sq();
-    }
-    let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        return (a + ab * (d1 / (d1 - d3))).norm_sq();
-    }
-    let cp = -c;
-    let d5 = ab.dot(cp);
-    let d6 = ac.dot(cp);
-    if d6 >= 0.0 && d5 <= d6 {
-        return c.norm_sq();
-    }
-    let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        return (a + ac * (d2 / (d2 - d6))).norm_sq();
-    }
-    let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        let bc = c - b;
-        return (b + bc * ((d4 - d3) / ((d4 - d3) + (d5 - d6)))).norm_sq();
-    }
-    let inverse_sum = 1.0 / (va + vb + vc);
-    (a + ab * (vb * inverse_sum) + ac * (vc * inverse_sum)).norm_sq()
 }
 
 pub fn diagnose_screen_patch(
@@ -262,7 +226,7 @@ pub fn diagnose_screen_patch(
     let mut min_area = f64::INFINITY;
     let mut max_area: f64 = 0.0;
     let mut directional_extent_px = [0.0f64; 3];
-    let min_denominator_norm_sq = min_denominator_norm_sq(transformed_patch);
+    let min_denominator_norm_sq = denominator_norm_sq_range(transformed_patch)[0];
     let mut unprojectable = min_denominator_norm_sq <= SINGULARITY_NORM_SQ;
     for barycentric in METRIC_SAMPLES {
         let metric = patch_screen_metric(
@@ -346,15 +310,19 @@ fn valid_policy(policy: ScreenPartitionPolicy) -> bool {
         && policy.arc_options.tolerance_px > 0.0
         && policy.arc_options.min_depth <= policy.arc_options.max_depth
         && policy.arc_options.max_depth <= 24
+        && policy.domain_policy.fade_zero_norm_sq.is_finite()
+        && policy.domain_policy.fade_zero_norm_sq >= 0.0
+        && policy.domain_policy.clip_relative_epsilon.is_finite()
+        && policy.domain_policy.clip_relative_epsilon >= 0.0
 }
 
 /// Partition an already transformed patch into exact rational leaves.
 ///
 /// The returned domains always refer to the original source patch. Refinement
-/// is deterministic and bounded; leaves marked `DepthLimit` or `LeafBudget`
-/// retain diagnostics recording that their requested sampled quality was not
-/// met. An exact denominator minimum prevents an interior pole being missed by
-/// the finite metric stencil.
+/// is deterministic and bounded. Exact quadratic domain tests cull fully faded
+/// or offscreen leaves and refine fade/frustum boundaries before any finite
+/// screen metric is requested. Limit statuses retain explicit evidence when a
+/// metric or domain boundary could not meet policy within the depth/budget.
 pub fn partition_screen_patch(
     transformed_patch: &QBTriPatch,
     view_projection: &[f64; 16],
@@ -373,40 +341,95 @@ pub fn partition_screen_patch(
     }
 
     let root = transformed_patch.restrict(QBPatchDomain::FULL);
-    let mut stack = vec![(root, ScreenPatchLeafId::ROOT)];
+    // Breadth-first refinement makes a hard leaf budget deterministic and
+    // prevents one early branch from reaching maximum depth while an equally
+    // important sibling is stranded coarse solely by traversal order.
+    let mut pending = VecDeque::from([(root, ScreenPatchLeafId::ROOT)]);
     let mut leaves = Vec::new();
     let mut split_nodes = 0usize;
     let mut max_depth_reached = 0u8;
     let mut unmet_leaves = 0usize;
 
-    while let Some((restricted, id)) = stack.pop() {
+    while let Some((restricted, id)) = pending.pop_front() {
         let depth = id.depth;
         max_depth_reached = max_depth_reached.max(depth);
-        let diagnostic = diagnose_screen_patch(
+        let domain_diagnostic = diagnose_screen_domain(
             &restricted.patch,
             view_projection,
-            viewport,
-            policy.arc_options,
+            policy.domain_policy,
+        )
+        .map_err(|error| match error {
+            crate::screen_domain::ScreenDomainError::InvalidProjection => {
+                ScreenPartitionError::InvalidProjection
+            }
+            crate::screen_domain::ScreenDomainError::InvalidPolicy => {
+                ScreenPartitionError::InvalidPolicy
+            }
+            crate::screen_domain::ScreenDomainError::NonFinitePatch => {
+                ScreenPartitionError::InvalidPatch
+            }
+        })?;
+
+        if matches!(
+            domain_diagnostic.class,
+            ScreenDomainClass::FullyFaded | ScreenDomainClass::OutsideFrustum
+        ) {
+            let status = if domain_diagnostic.class == ScreenDomainClass::FullyFaded {
+                ScreenPatchLeafStatus::FullyFaded
+            } else {
+                ScreenPatchLeafStatus::OutsideFrustum
+            };
+            leaves.push(ScreenPatchLeaf {
+                id,
+                restricted,
+                domain_diagnostic,
+                metric_diagnostic: None,
+                status,
+            });
+            continue;
+        }
+
+        let boundary = matches!(
+            domain_diagnostic.class,
+            ScreenDomainClass::FadeBoundary | ScreenDomainClass::ClipBoundary
         );
-        let below_pixel_extent = diagnostic.below_pixel_extent(policy);
-        let quality_met = diagnostic.meets_metric_limits(policy);
-        let must_split = depth < policy.min_depth || (!below_pixel_extent && !quality_met);
+        let metric_diagnostic = (!boundary).then(|| {
+            diagnose_screen_patch(
+                &restricted.patch,
+                view_projection,
+                viewport,
+                policy.arc_options,
+            )
+        });
+        let below_pixel_extent = metric_diagnostic
+            .is_some_and(|diagnostic| diagnostic.below_pixel_extent(policy));
+        let quality_met = metric_diagnostic
+            .is_some_and(|diagnostic| diagnostic.meets_metric_limits(policy));
+        let must_split = depth < policy.min_depth
+            || boundary
+            || (!below_pixel_extent && !quality_met);
         let can_split_depth = depth < policy.max_depth;
-        let can_split_budget = leaves.len() + stack.len() + 4 <= policy.max_leaves;
+        let can_split_budget = leaves.len() + pending.len() + 4 <= policy.max_leaves;
 
         if must_split && can_split_depth && can_split_budget {
             split_nodes += 1;
             let children = restricted.quarter();
-            for (child_index, child) in children.into_iter().enumerate().rev() {
+            for (child_index, child) in children.into_iter().enumerate() {
                 let child_id = id
                     .child(child_index as u8)
                     .expect("partition depth validation keeps leaf paths representable");
-                stack.push((child, child_id));
+                pending.push_back((child, child_id));
             }
             continue;
         }
 
-        let status = if below_pixel_extent && depth >= policy.min_depth {
+        let status = if boundary && !can_split_depth {
+            unmet_leaves += 1;
+            ScreenPatchLeafStatus::BoundaryDepthLimit
+        } else if boundary {
+            unmet_leaves += 1;
+            ScreenPatchLeafStatus::BoundaryLeafBudget
+        } else if below_pixel_extent && depth >= policy.min_depth {
             ScreenPatchLeafStatus::BelowPixelExtent
         } else if quality_met && depth >= policy.min_depth {
             ScreenPatchLeafStatus::Accepted
@@ -420,7 +443,8 @@ pub fn partition_screen_patch(
         leaves.push(ScreenPatchLeaf {
             id,
             restricted,
-            diagnostic,
+            domain_diagnostic,
+            metric_diagnostic,
             status,
         });
     }
@@ -561,12 +585,14 @@ mod tests {
         let worst_stretch = partition
             .leaves
             .iter()
-            .map(|leaf| leaf.diagnostic.stretch_ratio)
+            .filter_map(|leaf| leaf.metric_diagnostic)
+            .map(|diagnostic| diagnostic.stretch_ratio)
             .fold(1.0, f64::max);
         let worst_area = partition
             .leaves
             .iter()
-            .map(|leaf| leaf.diagnostic.area_ratio)
+            .filter_map(|leaf| leaf.metric_diagnostic)
+            .map(|diagnostic| diagnostic.area_ratio)
             .fold(1.0, f64::max);
         assert!(worst_stretch <= policy.max_stretch_ratio);
         assert!(worst_area <= policy.max_area_ratio);
@@ -622,8 +648,65 @@ mod tests {
             partition_screen_patch(&patch, &perspective(), [1600.0, 900.0], policy).unwrap();
         assert!(partition.unmet_leaves > 0);
         assert!(partition.leaves.iter().any(|leaf| {
-            leaf.diagnostic.min_denominator_norm_sq <= SINGULARITY_NORM_SQ
-                && leaf.status == ScreenPatchLeafStatus::DepthLimit
+            leaf.domain_diagnostic.denominator_norm_sq_range[0] <= SINGULARITY_NORM_SQ
+                && leaf.status == ScreenPatchLeafStatus::BoundaryDepthLimit
         }));
+    }
+
+    #[test]
+    fn camera_plane_boundary_is_refined_without_infinite_metric_requests() {
+        let patch = QBTriPatch::flat(
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [0.0, 0.4, 1.0],
+        );
+        let policy = ScreenPartitionPolicy {
+            max_depth: 6,
+            max_leaves: 4_096,
+            ignore_below_px: 0.0,
+            ..ScreenPartitionPolicy::default()
+        };
+        let partition =
+            partition_screen_patch(&patch, &perspective(), [1600.0, 900.0], policy).unwrap();
+        assert!(partition.leaves.len() <= policy.max_leaves);
+        assert!(partition.leaves.iter().any(|leaf| matches!(
+            leaf.status,
+            ScreenPatchLeafStatus::BoundaryDepthLimit
+                | ScreenPatchLeafStatus::OutsideFrustum
+        )));
+        assert!(partition.leaves.iter().all(|leaf| {
+            leaf.metric_diagnostic
+                .is_none_or(|diagnostic| !diagnostic.unprojectable)
+        }));
+        assert!(partition.leaves.iter().any(|leaf| {
+            leaf.status == ScreenPatchLeafStatus::BoundaryDepthLimit
+                && leaf.metric_diagnostic.is_none()
+                && leaf.status.is_drawable()
+        }));
+    }
+
+    #[test]
+    fn exactly_zero_fade_band_is_culled_without_metric_work() {
+        let positions = [
+            Quat::from_point(-0.2, -0.2, -2.0),
+            Quat::from_point(0.2, -0.2, -2.0),
+            Quat::from_point(0.0, 0.2, -2.0),
+        ];
+        let patch = QBTriPatch::new(
+            positions,
+            [Quat::new(0.005, 0.0, 0.0, 0.0); 3],
+        );
+        let partition = partition_screen_patch(
+            &patch,
+            &perspective(),
+            [1600.0, 900.0],
+            ScreenPartitionPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(partition.leaves.len(), 1);
+        assert_eq!(partition.leaves[0].status, ScreenPatchLeafStatus::FullyFaded);
+        assert!(!partition.leaves[0].status.is_drawable());
+        assert!(partition.leaves[0].metric_diagnostic.is_none());
+        assert_eq!(partition.unmet_leaves, 0);
     }
 }

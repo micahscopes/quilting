@@ -68,6 +68,7 @@ pub mod render;
 pub mod render_pipeline;
 pub mod source_bounds;
 pub mod screen_metric;
+pub mod screen_domain;
 pub mod screen_partition;
 pub mod screen_leaf_lod;
 

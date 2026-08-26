@@ -152,23 +152,28 @@ pub(crate) fn measure_adaptive_screen_patch(
     .map_err(|error| error.to_string())?
     .resident[0];
 
-    let mut saturated_metric_leaves = 0u32;
-    let requested = partition
+    let drawable_leaves = partition
         .leaves
+        .iter()
+        .filter(|leaf| leaf.status.is_drawable())
+        .collect::<Vec<_>>();
+    let mut saturated_metric_leaves = 0u32;
+    let requested = drawable_leaves
         .iter()
         .map(|leaf| {
-            leaf.diagnostic
-                .edge_subdivision_demand(request.max_px_per_segment, max_atlas_lod)
-                .unwrap_or_else(|| {
-                    saturated_metric_leaves += 1;
-                    [max_atlas_lod; 3]
-                })
+            leaf.metric_diagnostic.map_or([1; 3], |diagnostic| {
+                diagnostic
+                    .edge_subdivision_demand(request.max_px_per_segment, max_atlas_lod)
+                    .unwrap_or_else(|| {
+                        saturated_metric_leaves += 1;
+                        [max_atlas_lod; 3]
+                    })
+            })
         })
         .collect::<Vec<_>>();
-    let topology = partition
-        .leaves
+    let topology = drawable_leaves
         .iter()
-        .map(ScreenLeafTopology::from)
+        .map(|leaf| ScreenLeafTopology::from(*leaf))
         .collect::<Vec<_>>();
     let reconciled = reconcile_screen_leaf_lods(
         &topology,
@@ -184,20 +189,28 @@ pub(crate) fn measure_adaptive_screen_patch(
     let mut worst_leaf_area_ratio = 1.0_f64;
     let mut max_local_metric_segment_px = 0.0_f64;
     let mut min_local_metric_segment_px = f64::INFINITY;
-    for (leaf, resident) in partition.leaves.iter().zip(&reconciled.resident) {
+    for leaf in &partition.leaves {
         let status = match leaf.status {
             ScreenPatchLeafStatus::Accepted => "accepted",
             ScreenPatchLeafStatus::BelowPixelExtent => "belowPixelExtent",
+            ScreenPatchLeafStatus::FullyFaded => "fullyFaded",
+            ScreenPatchLeafStatus::OutsideFrustum => "outsideFrustum",
+            ScreenPatchLeafStatus::BoundaryDepthLimit => "boundaryDepthLimit",
+            ScreenPatchLeafStatus::BoundaryLeafBudget => "boundaryLeafBudget",
             ScreenPatchLeafStatus::DepthLimit => "depthLimit",
             ScreenPatchLeafStatus::LeafBudget => "leafBudget",
         };
         *status_histogram.entry(status).or_default() += 1;
         *depth_histogram.entry(leaf.id.depth).or_default() += 1;
-        worst_leaf_stretch_ratio = worst_leaf_stretch_ratio.max(leaf.diagnostic.stretch_ratio);
-        worst_leaf_area_ratio = worst_leaf_area_ratio.max(leaf.diagnostic.area_ratio);
+    }
+    for (leaf, resident) in drawable_leaves.iter().zip(&reconciled.resident) {
+        let Some(diagnostic) = leaf.metric_diagnostic else {
+            continue;
+        };
+        worst_leaf_stretch_ratio = worst_leaf_stretch_ratio.max(diagnostic.stretch_ratio);
+        worst_leaf_area_ratio = worst_leaf_area_ratio.max(diagnostic.area_ratio);
         for edge in 0..3 {
-            let extent =
-                leaf.diagnostic.edge_arc_px[edge].max(leaf.diagnostic.directional_extent_px[edge]);
+            let extent = diagnostic.edge_arc_px[edge].max(diagnostic.directional_extent_px[edge]);
             let segment = extent / f64::from(resident[edge]);
             if segment.is_finite() {
                 max_local_metric_segment_px = max_local_metric_segment_px.max(segment);
@@ -269,7 +282,7 @@ pub(crate) fn measure_adaptive_screen_patch(
         min_local_metric_segment_px,
         atlas_keys: atlas_keys.len() as u32,
         missing_atlas_keys,
-        adaptive_instances: partition.leaves.len() as u64,
+        adaptive_instances: drawable_leaves.len() as u64,
         adaptive_triangles,
     })
 }
