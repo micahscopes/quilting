@@ -38,6 +38,59 @@ pub struct CoarseComplexInput<'a> {
     pub locked_edges: &'a [[usize; 2]],
 }
 
+/// Provenance for one topological vertex after explicitly separating
+/// disconnected face fans that reused the same authored buffer vertex.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SourceVertexFanKey {
+    pub source_vertex: SourceVertexId,
+    pub source_faces: Vec<SourceFaceId>,
+}
+
+/// Owned, reorder-stable source accepted by [`CoarseComplexInput`].
+///
+/// This is an opt-in import normalization, not a position weld. Exact authored
+/// indices remain authoritative; only disconnected incidence components at one
+/// index are separated. `vertex_provenance` retains the original stable vertex
+/// and the stable face fan that produced every normalized vertex.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FanSplitSource {
+    pub positions: Vec<[f64; 3]>,
+    pub triangles: Vec<[usize; 3]>,
+    pub source_vertex_ids: Vec<SourceVertexId>,
+    pub source_face_ids: Vec<SourceFaceId>,
+    pub face_domains: Vec<u32>,
+    pub locked_edges: Vec<[usize; 2]>,
+    pub vertex_provenance: Vec<SourceVertexFanKey>,
+}
+
+impl FanSplitSource {
+    pub fn input(&self) -> CoarseComplexInput<'_> {
+        CoarseComplexInput {
+            positions: &self.positions,
+            triangles: &self.triangles,
+            source_vertex_ids: &self.source_vertex_ids,
+            source_face_ids: &self.source_face_ids,
+            face_domains: &self.face_domains,
+            locked_edges: &self.locked_edges,
+        }
+    }
+
+    pub fn split_vertex_count(&self) -> usize {
+        self.vertex_provenance
+            .iter()
+            .filter(|key| !key.source_faces.is_empty())
+            .count()
+            .saturating_sub(
+                self.vertex_provenance
+                    .iter()
+                    .filter(|key| !key.source_faces.is_empty())
+                    .map(|key| key.source_vertex)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+            )
+    }
+}
+
 /// Reorder-stable authoritative identity for one connected cut chart.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ChartKey {
@@ -337,6 +390,161 @@ fn source_edges(input: &CoarseComplexInput<'_>) -> BTreeMap<Edge, Vec<EdgeIncide
         }
     }
     edges
+}
+
+/// Separate disconnected incidence fans that reuse one authored vertex index.
+///
+/// Many render-oriented glTF buffers legally reuse one index for sheets that
+/// meet only at a point. Such a bow-tie is not a 2-manifold vertex and cannot
+/// participate in a watertight coarse complex. This normalization derives fan
+/// membership only from authored indices and stable face IDs; it never merges
+/// vertices by position. All normalized IDs are assigned by sorted
+/// [`SourceVertexFanKey`], making the result independent of buffer order.
+pub fn split_disconnected_vertex_fans(
+    input: &CoarseComplexInput<'_>,
+) -> Result<FanSplitSource, CoarseComplexError> {
+    validate_input(input)?;
+    let edges = source_edges(input);
+    for (&source_edge, incident) in &edges {
+        if incident.len() > 2 {
+            return Err(CoarseComplexError::NonManifoldEdge {
+                edge: [source_edge.0, source_edge.1],
+                incident: incident.len(),
+            });
+        }
+        if incident.len() == 2
+            && (incident[0].from != incident[1].to || incident[0].to != incident[1].from)
+        {
+            return Err(CoarseComplexError::InconsistentWinding {
+                edge: [source_edge.0, source_edge.1],
+            });
+        }
+    }
+
+    let mut incident_faces = vec![BTreeSet::<usize>::new(); input.positions.len()];
+    let mut fan_neighbors = vec![BTreeMap::<usize, BTreeSet<usize>>::new(); input.positions.len()];
+    for (face, triangle) in input.triangles.iter().enumerate() {
+        for &vertex in triangle {
+            incident_faces[vertex].insert(face);
+        }
+    }
+    for (&source_edge, incident) in &edges {
+        if let [left, right] = incident.as_slice() {
+            for vertex in [source_edge.0, source_edge.1] {
+                fan_neighbors[vertex]
+                    .entry(left.face)
+                    .or_default()
+                    .insert(right.face);
+                fan_neighbors[vertex]
+                    .entry(right.face)
+                    .or_default()
+                    .insert(left.face);
+            }
+        }
+    }
+
+    let mut corner_keys = BTreeMap::<(usize, usize), SourceVertexFanKey>::new();
+    let mut keys = Vec::<SourceVertexFanKey>::new();
+    for vertex in 0..input.positions.len() {
+        let mut remaining = incident_faces[vertex].clone();
+        if remaining.is_empty() {
+            keys.push(SourceVertexFanKey {
+                source_vertex: input.source_vertex_ids[vertex],
+                source_faces: Vec::new(),
+            });
+            continue;
+        }
+        while let Some(&seed) = remaining.iter().next() {
+            let mut component = BTreeSet::new();
+            let mut frontier = vec![seed];
+            while let Some(face) = frontier.pop() {
+                if !component.insert(face) {
+                    continue;
+                }
+                remaining.remove(&face);
+                frontier.extend(
+                    fan_neighbors[vertex]
+                        .get(&face)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
+            }
+            let key = SourceVertexFanKey {
+                source_vertex: input.source_vertex_ids[vertex],
+                source_faces: component
+                    .iter()
+                    .map(|face| input.source_face_ids[*face])
+                    .collect(),
+            };
+            for face in component {
+                corner_keys.insert((face, vertex), key.clone());
+            }
+            keys.push(key);
+        }
+    }
+    keys.sort_unstable();
+    let key_to_vertex = keys
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(vertex, key)| (key, vertex))
+        .collect::<BTreeMap<_, _>>();
+    let source_positions = input
+        .source_vertex_ids
+        .iter()
+        .copied()
+        .zip(input.positions.iter().copied())
+        .collect::<BTreeMap<_, _>>();
+    let positions = keys
+        .iter()
+        .map(|key| source_positions[&key.source_vertex])
+        .collect::<Vec<_>>();
+    let source_vertex_ids = (0..keys.len())
+        .map(|vertex| {
+            u64::try_from(vertex)
+                .map(SourceVertexId)
+                .map_err(|_| CoarseComplexError::CountOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let triangles = input
+        .triangles
+        .iter()
+        .enumerate()
+        .map(|(face, triangle)| triangle.map(|vertex| key_to_vertex[&corner_keys[&(face, vertex)]]))
+        .collect::<Vec<_>>();
+
+    let mut locked_edges = BTreeSet::new();
+    for &locked in input.locked_edges {
+        let source_edge = edge(locked[0], locked[1]);
+        let incident = edges
+            .get(&source_edge)
+            .ok_or(CoarseComplexError::LockedEdgeAbsent {
+                edge: [source_edge.0, source_edge.1],
+            })?;
+        for incidence in incident {
+            let mut normalized = [
+                key_to_vertex[&corner_keys[&(incidence.face, source_edge.0)]],
+                key_to_vertex[&corner_keys[&(incidence.face, source_edge.1)]],
+            ];
+            normalized.sort_unstable();
+            locked_edges.insert(normalized);
+        }
+    }
+
+    let result = FanSplitSource {
+        positions,
+        triangles,
+        source_vertex_ids,
+        source_face_ids: input.source_face_ids.to_vec(),
+        face_domains: input.face_domains.to_vec(),
+        locked_edges: locked_edges.into_iter().collect(),
+        vertex_provenance: keys,
+    };
+    // The explicit normalization must earn acceptance from the same strict
+    // topology contract used by every downstream caller.
+    cut_source_topology(&result.input())?;
+    Ok(result)
 }
 
 fn non_manifold_vertex(
@@ -1065,6 +1273,78 @@ mod tests {
             }),
             Err(CoarseComplexError::NonManifoldVertex { vertex: 0 })
         ));
+    }
+
+    #[test]
+    fn explicit_fan_split_normalizes_a_bow_tie_without_position_welding() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ];
+        let triangles = [[0, 1, 2], [0, 3, 4]];
+        let (vertex_ids, face_ids) = ids(positions.len(), triangles.len());
+        let split = split_disconnected_vertex_fans(&CoarseComplexInput {
+            positions: &positions,
+            triangles: &triangles,
+            source_vertex_ids: &vertex_ids,
+            source_face_ids: &face_ids,
+            face_domains: &[0, 0],
+            locked_edges: &[],
+        })
+        .unwrap();
+
+        assert_eq!(split.positions.len(), positions.len() + 1);
+        assert_eq!(split.split_vertex_count(), 1);
+        let center_fans = split
+            .vertex_provenance
+            .iter()
+            .filter(|key| key.source_vertex == vertex_ids[0])
+            .collect::<Vec<_>>();
+        assert_eq!(center_fans.len(), 2);
+        assert_eq!(center_fans[0].source_faces.len(), 1);
+        assert_eq!(center_fans[1].source_faces.len(), 1);
+        assert_ne!(split.triangles[0][0], split.triangles[1][0]);
+        cut_source_topology(&split.input()).unwrap();
+
+        let vertex_order = [4usize, 3, 2, 1, 0];
+        let mut old_to_new = [0usize; 5];
+        for (new, old) in vertex_order.into_iter().enumerate() {
+            old_to_new[old] = new;
+        }
+        let reordered_positions = vertex_order.map(|old| positions[old]);
+        let reordered_vertex_ids = vertex_order.map(|old| vertex_ids[old]);
+        let reordered_triangles = [
+            triangles[1].map(|vertex| old_to_new[vertex]),
+            triangles[0].map(|vertex| old_to_new[vertex]),
+        ];
+        let reordered_face_ids = [face_ids[1], face_ids[0]];
+        let reordered = split_disconnected_vertex_fans(&CoarseComplexInput {
+            positions: &reordered_positions,
+            triangles: &reordered_triangles,
+            source_vertex_ids: &reordered_vertex_ids,
+            source_face_ids: &reordered_face_ids,
+            face_domains: &[0, 0],
+            locked_edges: &[],
+        })
+        .unwrap();
+        let signature = |source: &FanSplitSource| {
+            source
+                .triangles
+                .iter()
+                .zip(&source.source_face_ids)
+                .map(|(triangle, face)| {
+                    (
+                        *face,
+                        triangle.map(|vertex| source.vertex_provenance[vertex].clone()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(split.vertex_provenance, reordered.vertex_provenance);
+        assert_eq!(signature(&split), signature(&reordered));
     }
 
     #[test]

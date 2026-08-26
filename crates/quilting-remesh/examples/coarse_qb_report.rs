@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use quilting_core::quaternion::{Mobius, Quat};
-use quilting_remesh::coarse_complex::{CoarseComplexInput, SourceFaceId, SourceVertexId};
+use quilting_remesh::coarse_complex::{
+    split_disconnected_vertex_fans, CoarseComplexInput, SourceFaceId, SourceVertexId,
+};
 use quilting_remesh::coarse_patch_complex::{
     build_coarse_patch_complex, CoarsePatchComplex, CoarsePatchConfig,
 };
@@ -216,6 +218,7 @@ struct Success {
     source_faces: usize,
     coarse_faces: usize,
     charts: usize,
+    split_vertices: usize,
     constrained_vertices: usize,
     correspondence_rms: f64,
     correspondence_max: f64,
@@ -399,9 +402,12 @@ fn process_part(
         face_domains: &domains,
         locked_edges: &[],
     };
+    let normalized = split_disconnected_vertex_fans(&input)
+        .map_err(|error| format!("source-normalization: {error}"))?;
+    let split_vertices = normalized.split_vertex_count();
 
     let build_start = Instant::now();
-    let complex = build_coarse_patch_complex(&input, patch_config)
+    let complex = build_coarse_patch_complex(&normalized.input(), patch_config)
         .map_err(|error| format!("coarse-complex: {error}"))?;
     let build_time = build_start.elapsed();
     let fit_start = Instant::now();
@@ -445,6 +451,7 @@ fn process_part(
         fit,
         score,
         objective,
+        split_vertices,
         build_time,
         fit_time,
         context_time,
@@ -458,6 +465,7 @@ fn success(
     fit: LinearFitResult,
     score: FitScore,
     objective: f64,
+    split_vertices: usize,
     build_time: Duration,
     fit_time: Duration,
     context_time: Duration,
@@ -467,6 +475,7 @@ fn success(
         source_faces: part.triangles.len(),
         coarse_faces: complex.faces.len(),
         charts: complex.charts.len(),
+        split_vertices,
         constrained_vertices: complex
             .vertices
             .iter()
@@ -488,11 +497,12 @@ fn success(
 
 fn print_success(success: &Success) {
     println!(
-        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} constrained_vertices={}",
+        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} split_vertices={} constrained_vertices={}",
         success.source_faces,
         success.coarse_faces,
         success.source_faces as f64 / success.coarse_faces.max(1) as f64,
         success.charts,
+        success.split_vertices,
         success.constrained_vertices,
     );
     println!(
