@@ -10,7 +10,8 @@ description = "VSA clustering and QB patch fitting — turns a dense triangle me
 [features]
 # Experimental only. The core conformal/QB scorer and deterministic connected
 # clusterer do not require C++; this feature adds meshoptimizer's meshlet order
-# as an optional seed order for comparison.
+# as an optional seed order and constrained interior reduction inside
+# provenance-safe source charts.
 meshopt-prototype = ["dep:meshopt"]
 
 [dependencies]

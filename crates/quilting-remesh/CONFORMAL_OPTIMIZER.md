@@ -19,12 +19,14 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    unchanged membership has an unchanged identity after source-buffer
    reordering. Hash collisions must eventually be resolved by retaining the
    sorted membership as the authoritative identity.
-3. **Optionally borrow meshoptimizer ordering.** With the
+3. **Optionally borrow meshoptimizer machinery.** With the
    `meshopt-prototype` feature, `cluster_meshopt_seeded` uses `meshopt` 0.6.2's
    `build_meshlets` result only as a seed order, then runs the same
-   constraint-aware grower. The crate is MIT OR Apache-2.0 and vendors
-   meshoptimizer 0.25. It is intentionally optional: current upstream
-   meshoptimizer is newer, and its meshlet cost is not a QB fitting objective.
+   constraint-aware grower. `coarse_reduction` separately uses constrained
+   simplification only inside Quilting-owned cut charts. The crate is MIT OR
+   Apache-2.0 and vendors meshoptimizer 0.25. It is intentionally optional:
+   current upstream meshoptimizer is newer, and its meshlet or Euclidean error
+   is not itself a QB fitting objective.
 4. **Construct a shared coarse complex (in progress).** `coarse_complex` now
    requires typed stable vertex/face IDs, validates finite nondegenerate
    consistently wound manifold input, derives cut edges from source borders,
@@ -34,10 +36,15 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    induced cut. Emitted charts are revalidated for manifold vertex links,
    consistent winding, connectedness, and degree-two locked boundaries. This is
    backend-neutral ownership: no simplifier can half-join or silently weld a
-   source edge. The next checkpoint runs constrained triangle reduction inside
-   those charts and records deterministic source correspondence. Independent
-   per-cluster corner selection remains insufficient because it cannot
-   guarantee matching patch boundaries.
+   source edge. `coarse_reduction` now normalizes each chart before the f32
+   backend call, locks every emitted boundary, fails on stable-ID collisions in
+   backend position space, and revalidates exact boundary identity, winding,
+   vertex links, connectivity, Euler characteristic, and boundary components.
+   Requested and achieved triangle counts remain distinct because an owned
+   boundary can impose a conservative floor. The next checkpoint welds chart
+   results by stable source identity and records deterministic source
+   correspondence. Independent per-cluster corner selection remains
+   insufficient because it cannot guarantee matching patch boundaries.
 5. **Fit existing first-order triangular QB patches.** Parameterize source
    samples onto coarse triangles, then feed `linear_global_fit_full`. Its one
    quaternion weight per coarse vertex is exactly the ownership rule required
@@ -112,9 +119,11 @@ atlas, WASM, or shader change is needed for this experiment.
 
 ## Known limitations
 
-- The source chart/corner-cut topology exists, but constrained triangle
-  reduction and source-to-coarse correspondence are not connected yet. A good
-  cluster score does not by itself produce a patch.
+- Source charts now have validated constrained interior reduction, but global
+  identity-based welding and source-to-coarse correspondence are not connected
+  yet. Boundary locks deliberately retain the complete authored cut polyline;
+  shared boundary coarsening is a later optimization. A good cluster score does
+  not by itself produce a patch.
 - The spatial/normal growth weights are heuristics. Meshoptimizer ordering may
   improve locality but is not assumed to improve QB fit quality.
 - Probe normals use the exact Möbius differential on an oriented tangent frame;

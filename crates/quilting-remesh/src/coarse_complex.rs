@@ -453,12 +453,33 @@ fn close_cut_edges(
     cuts
 }
 
-fn finish_cut_chart(
+pub(crate) fn validate_cut_chart(
     vertices: &mut [CutVertex],
     triangles: &[[usize; 3]],
 ) -> Result<Vec<[usize; 2]>, CoarseComplexError> {
+    if triangles.is_empty() {
+        return Err(CoarseComplexError::InvalidCutChart("it has no faces"));
+    }
+    let positions = vertices
+        .iter()
+        .map(|vertex| vertex.position)
+        .collect::<Vec<_>>();
     let mut edges = BTreeMap::<Edge, Vec<EdgeIncident>>::new();
     for (face, triangle) in triangles.iter().enumerate() {
+        if triangle.iter().any(|vertex| *vertex >= vertices.len()) {
+            return Err(CoarseComplexError::InvalidCutChart(
+                "a face references a missing vertex",
+            ));
+        }
+        let normal_length = geometry::vec3_len(geometry::face_normal(&positions, *triangle));
+        if triangle[0] == triangle[1]
+            || triangle[1] == triangle[2]
+            || triangle[2] == triangle[0]
+            || !normal_length.is_finite()
+            || normal_length <= f64::MIN_POSITIVE
+        {
+            return Err(CoarseComplexError::InvalidCutChart("a face is degenerate"));
+        }
         for local in 0..3 {
             let from = triangle[local];
             let to = triangle[(local + 1) % 3];
@@ -485,6 +506,17 @@ fn finish_cut_chart(
     if non_manifold_vertex(vertices.len(), triangles, &edges).is_some() {
         return Err(CoarseComplexError::InvalidCutChart(
             "a vertex link is not one path or cycle",
+        ));
+    }
+    let mut used = vec![false; vertices.len()];
+    for triangle in triangles {
+        for &vertex in triangle {
+            used[vertex] = true;
+        }
+    }
+    if used.iter().any(|value| !*value) {
+        return Err(CoarseComplexError::InvalidCutChart(
+            "the compact topology contains an unused vertex",
         ));
     }
 
@@ -690,7 +722,7 @@ pub fn cut_source_topology(
                 ]
             })
             .collect::<Vec<_>>();
-        let boundary_edges = finish_cut_chart(&mut vertices, &triangles)?;
+        let boundary_edges = validate_cut_chart(&mut vertices, &triangles)?;
         charts.push(CutChart {
             key,
             vertices,
