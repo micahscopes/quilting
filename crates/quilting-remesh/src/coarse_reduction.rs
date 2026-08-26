@@ -272,8 +272,13 @@ fn validate_backend_geometry(
     source: &CutChart,
     positions: &NormalizedPositions,
 ) -> Result<(), CoarseReductionError> {
-    let mut owners = BTreeMap::<[u32; 3], SourceVertexId>::new();
-    for (vertex, position) in source.vertices.iter().zip(&positions.quantized) {
+    let mut owners = BTreeMap::<[u32; 3], (SourceVertexId, [f64; 3])>::new();
+    for ((vertex, position), exact) in source
+        .vertices
+        .iter()
+        .zip(&positions.quantized)
+        .zip(&positions.exact)
+    {
         if position.iter().any(|component| !component.is_finite()) {
             return Err(CoarseReductionError::InvalidBackendGeometry {
                 chart: source.key.clone(),
@@ -287,8 +292,13 @@ fn validate_backend_geometry(
                 component.to_bits()
             }
         });
-        if let Some(owner) = owners.insert(bits, vertex.key.source_vertex) {
-            if owner != vertex.key.source_vertex {
+        if let Some((owner, owner_exact)) = owners.insert(bits, (vertex.key.source_vertex, *exact))
+        {
+            // meshoptimizer deliberately represents exact position-sharing
+            // vertices as attribute wedges. Only reject a collision introduced
+            // by our f64 -> f32 backend conversion; rejecting exact wedges makes
+            // ordinary glTF UV/normal seams impossible to simplify.
+            if owner_exact != *exact {
                 return Err(CoarseReductionError::PositionCollision {
                     chart: source.key.clone(),
                     left: owner,
@@ -844,6 +854,27 @@ mod tests {
             Err(CoarseReductionError::PositionCollision { left, right, .. })
                 if left != right
         ));
+    }
+
+    #[test]
+    fn exact_position_wedges_are_valid_meshopt_input() {
+        let source = grid(2);
+        let mut chart = cut_source_topology(&input(&source))
+            .unwrap()
+            .charts
+            .remove(0);
+        let mut wedge = chart.vertices[0].clone();
+        wedge.key.source_vertex = SourceVertexId(999_999);
+        chart.vertices.push(wedge);
+        let wedge_index = chart.vertices.len() - 1;
+        let replaced = chart.triangles[1]
+            .iter_mut()
+            .find(|vertex| **vertex == 0)
+            .expect("the second grid triangle uses vertex zero");
+        *replaced = wedge_index;
+
+        let positions = normalized_positions(&chart).unwrap();
+        validate_backend_geometry(&chart, &positions).unwrap();
     }
 
     #[test]
