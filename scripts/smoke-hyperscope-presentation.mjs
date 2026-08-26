@@ -138,6 +138,26 @@ for (const requiredAnimationAdapterStep of [
   );
 }
 
+const lodAdapter = browserSource.slice(
+  browserSource.indexOf('async function recomputeLods()'),
+  browserSource.indexOf('async function loadModel('),
+);
+for (const requiredPoseGate of [
+  'const lodPoseAnimated = animating && gpuSkinned;',
+  't: lodPoseAnimated ? animTime : 0',
+  'skipAnimation: !lodPoseAnimated',
+  'capturePose: RUST_ROUND_SHADOW_ENABLED && lodPoseAnimated && !roundAuthoredScene',
+]) {
+  assert.ok(
+    lodAdapter.includes(requiredPoseGate),
+    `LOD animation work must be gated by a resident deforming pose: ${requiredPoseGate}`,
+  );
+}
+assert.ok(
+  !lodAdapter.includes('const lodAnimated = animating;'),
+  'global playback intent must not classify a static asset as pose animated',
+);
+
 for (const requiredAnimatedAnchorStep of [
   'mr_attachSurfaceCameraAnchor',
   'mr_stepSurfaceCameraAnchor',

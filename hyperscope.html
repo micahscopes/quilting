@@ -7012,7 +7012,11 @@ async function recomputeLods() {
   lodFullSceneDirty = false;
   const lodT0 = performance.now();
   try {
-    const lodAnimated = animating;
+    // Playback intent alone does not imply a deforming pose. Static assets keep
+    // the global play toggle enabled so a later animated load starts playing,
+    // but they must not enter the animation evaluator or the opt-in round-index
+    // pose refit path.
+    const lodPoseAnimated = animating && gpuSkinned;
     const roundTransformKind = mob.xform.peek();
     const roundTransformCenter = [
       mob.mx.peek() / 10,
@@ -7043,15 +7047,15 @@ async function recomputeLods() {
     const tp = getTessParams();
 
     const resp = await workerCall('compute_animated_lods', {
-      t: lodAnimated ? animTime : 0, mobius: lodMobius, density: tp.density, minPx: tp.minPx,
+      t: lodPoseAnimated ? animTime : 0, mobius: lodMobius, density: tp.density, minPx: tp.minPx,
       subjectStates: primaryOnly
         ? presentationComposition.primaryLodStates
         : authoredLodStates,
       faceLimit: primaryOnly ? currentPrimaryFaceCount : 0,
       vpMatrix: vp, vpWidth: w, vpHeight: h,
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
-      skipAnimation: !lodAnimated,
-      capturePose: RUST_ROUND_SHADOW_ENABLED && lodAnimated && !roundAuthoredScene,
+      skipAnimation: !lodPoseAnimated,
+      capturePose: RUST_ROUND_SHADOW_ENABLED && lodPoseAnimated && !roundAuthoredScene,
     });
     const tWorkerDone = performance.now();
     const wt = resp.timing || {};
@@ -7187,7 +7191,7 @@ async function recomputeLods() {
             roundTransformKind,
             new Float32Array(roundTransformCenter),
             roundTransformRadius,
-            lodAnimated,
+            lodPoseAnimated,
             roundAuthoredScene,
             !!wt.full_snapshot,
             Number.isFinite(resp.pose_time) ? resp.pose_time : Number.NaN,
