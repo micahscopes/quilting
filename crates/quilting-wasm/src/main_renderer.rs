@@ -286,6 +286,9 @@ struct MainState {
     /// Material/node/atlas changes require a rebuild even when face topology
     /// classifications are unchanged.
     batch_layout_dirty: bool,
+    /// Monotonic identity for every input that changes render-batch
+    /// membership independently of adaptive leaf topology.
+    batch_layout_revision: u64,
     batch_update_stats: BatchUpdateStats,
     face_materials: Vec<usize>,
     /// Stable ordinary glTF node index for each source triangle.
@@ -807,6 +810,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             adaptive_batch_transition_pending: false,
             surface_runtime: SurfaceRuntime::default(),
             batch_layout_dirty: true,
+            batch_layout_revision: 1,
             batch_update_stats: BatchUpdateStats::default(),
             face_materials: Vec::new(),
             face_nodes: Vec::new(),
@@ -2741,9 +2745,15 @@ fn compare_adaptive_root_shadow(state: &mut MainState, initial: batch::ResidentL
 /// candidate has passed every CPU-side invariant and atlas/work budget. Any
 /// unavailable input or rejected plan is recorded and leaves those legacy
 /// groups untouched.
-fn apply_adaptive_screen_plan(state: &mut MainState, initial: batch::ResidentLod) {
+fn apply_adaptive_screen_plan(
+    state: &mut MainState,
+    initial: batch::ResidentLod,
+    reusable_groups: Option<
+        &mut BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    >,
+) -> bool {
     let Some(config) = state.adaptive_picked.config() else {
-        return;
+        return false;
     };
     let candidate_inputs = (|| -> Result<_, String> {
         if state.screen_topology_cache.is_none() {
@@ -2885,7 +2895,7 @@ fn apply_adaptive_screen_plan(state: &mut MainState, initial: batch::ResidentLod
         Ok(inputs) => inputs,
         Err(error) => {
             state.adaptive_picked.record_fallback(error);
-            return;
+            return false;
         }
     };
     let selected_patches = selected_faces
@@ -2898,6 +2908,7 @@ fn apply_adaptive_screen_plan(state: &mut MainState, initial: batch::ResidentLod
         })
         .collect::<Vec<_>>();
     let max_face_edge_ratio = state.lod_grading.ratio();
+    let batch_layout_revision = state.batch_layout_revision;
     let MainState {
         adaptive_picked,
         screen_topology_cache,
@@ -2910,26 +2921,30 @@ fn apply_adaptive_screen_plan(state: &mut MainState, initial: batch::ResidentLod
     } = state;
     let Some(topology) = screen_topology_cache.as_ref() else {
         adaptive_picked.record_fallback("adaptive source topology disappeared");
-        return;
+        return false;
     };
-    let _ = adaptive_picked.plan_selected_and_group(
-        &selected_patches,
-        selection_diagnostic,
-        max_partition_leaves,
-        &view_projection,
-        viewport,
-        pose_stamp,
-        requested_face_lods,
-        initial,
-        topology,
-        max_atlas_lod,
-        max_face_edge_ratio,
-        &atlas_triangle_counts,
-        face_materials,
-        face_nodes,
-        face_render_nodes,
-        batch_groups,
-    );
+    adaptive_picked
+        .plan_selected_and_group(
+            &selected_patches,
+            selection_diagnostic,
+            max_partition_leaves,
+            &view_projection,
+            viewport,
+            pose_stamp,
+            requested_face_lods,
+            initial,
+            topology,
+            max_atlas_lod,
+            max_face_edge_ratio,
+            &atlas_triangle_counts,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            batch_layout_revision,
+            reusable_groups,
+            batch_groups,
+        )
+        .unwrap_or(false)
 }
 
 #[wasm_bindgen(js_name = "mr_setRoundShadowEnabled")]
@@ -3358,7 +3373,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
                 ..
             } = st;
             round_shadow.rebuild(cached_instances, *num_faces);
-            st.batch_layout_dirty = true;
+            mark_batch_layout_dirty(st);
         }
     });
 }
@@ -3922,7 +3937,7 @@ pub fn mr_set_face_materials(materials: &[i32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             st.face_materials = materials.iter().map(|&m| if m >= 0 { m as usize } else { 0 }).collect();
-            st.batch_layout_dirty = true;
+            mark_batch_layout_dirty(st);
         }
     });
 }
@@ -4010,7 +4025,7 @@ pub fn mr_upload_tess_atlas(
             batch.destroy(state.renderer.gl());
         }
         state.render_commands_dirty = true;
-        state.batch_layout_dirty = true;
+        mark_batch_layout_dirty(state);
         TESS_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.clear();
@@ -4459,6 +4474,11 @@ fn upload_batch_groups_transactionally(
     Ok(stats)
 }
 
+fn mark_batch_layout_dirty(state: &mut MainState) {
+    state.batch_layout_dirty = true;
+    state.batch_layout_revision = state.batch_layout_revision.wrapping_add(1);
+}
+
 /// Reconstruct the complete source-face grouping from the last coherent
 /// classifier snapshot. Adaptive replanning always starts here so any CPU-side
 /// rejection can publish a known crack-free root fallback rather than retain a
@@ -4551,13 +4571,25 @@ fn publish_adaptive_batch_groups(
             // exact CPU membership map as well; a desired candidate is not
             // authoritative until every corresponding resource has published.
             state.batch_groups = previous_batch_groups;
-            state.batch_layout_dirty = true;
+            mark_batch_layout_dirty(state);
             AdaptiveBatchPublication {
                 published: false,
                 resources_changed: false,
             }
         }
     }
+}
+
+fn commit_reused_adaptive_groups(state: &mut MainState) {
+    state.adaptive_picked.commit_publication();
+    state.adaptive_batch_transition_pending = false;
+    state.batch_layout_dirty = false;
+    state.batch_update_stats.adaptive_refresh_noops = state
+        .batch_update_stats
+        .adaptive_refresh_noops
+        .saturating_add(1);
+    state.batch_update_stats.last_missing_atlas_entries = 0;
+    state.batch_update_stats.last_gpu_failures = 0;
 }
 
 /// Re-evaluate an enabled picked frontier against the latest retained root
@@ -4594,20 +4626,25 @@ fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
     );
     perf_mark("batch-bucket-start");
     let initial = bounded_standby_resident_lod();
-    let previous_batch_groups = std::mem::take(&mut state.batch_groups);
+    let mut previous_batch_groups = std::mem::take(&mut state.batch_groups);
     rebuild_legacy_batch_groups(state, initial);
     if state.adaptive_root_shadow.is_enabled() {
         compare_adaptive_root_shadow(state, initial);
     }
-    if state.adaptive_picked.is_enabled() {
-        apply_adaptive_screen_plan(state, initial);
-    }
+    let groups_reused = state.adaptive_picked.is_enabled()
+        && apply_adaptive_screen_plan(state, initial, Some(&mut previous_batch_groups));
     perf_mark("batch-bucket-end");
     perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
     perf_mark("batch-group-end");
     perf_measure("batch-group", "batch-group-start", "batch-group-end");
     state.adaptive_batch_transition_pending = true;
     perf_mark("batch-upload-start");
+    if groups_reused {
+        commit_reused_adaptive_groups(state);
+        perf_mark("batch-upload-end");
+        perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
+        return true;
+    }
     let publication = publish_adaptive_batch_groups(state, false, previous_batch_groups);
     if publication.published && !publication.resources_changed {
         state.batch_update_stats.adaptive_refresh_noops = state
@@ -4793,16 +4830,19 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         let force_upload = state.batch_layout_dirty;
         let transactional_upload =
             state.adaptive_picked.is_enabled() || state.adaptive_batch_transition_pending;
-        let previous_batch_groups = transactional_upload
+        let mut previous_batch_groups = transactional_upload
             .then(|| std::mem::take(&mut state.batch_groups));
         perf_mark("batch-bucket-start");
         rebuild_legacy_batch_groups(state, initial_resident);
         if state.adaptive_root_shadow.is_enabled() {
             compare_adaptive_root_shadow(state, initial_resident);
         }
-        if state.adaptive_picked.is_enabled() {
-            apply_adaptive_screen_plan(state, initial_resident);
-        }
+        let groups_reused = state.adaptive_picked.is_enabled()
+            && apply_adaptive_screen_plan(
+                state,
+                initial_resident,
+                previous_batch_groups.as_mut(),
+            );
         perf_mark("batch-bucket-end");
         perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
         perf_mark("batch-group-end");
@@ -4812,6 +4852,12 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         // membership remain valid. Only changed buckets repack or upload their
         // source streams; capacity growth rebuilds that bucket alone.
         perf_mark("batch-upload-start");
+        if groups_reused {
+            commit_reused_adaptive_groups(state);
+            perf_mark("batch-upload-end");
+            perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
+            return;
+        }
         if transactional_upload {
             let _ = publish_adaptive_batch_groups(
                 state,

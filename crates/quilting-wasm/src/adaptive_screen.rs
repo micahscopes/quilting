@@ -300,6 +300,10 @@ pub(crate) struct AdaptivePickedRuntime {
     frontier_cache_hits: u64,
     frontier_cache_misses: u64,
     reconciliation_cache: AdaptiveReconciliationCache,
+    published_group_signature: Option<AdaptiveGroupSignature>,
+    pending_group_signature: Option<AdaptiveGroupSignature>,
+    group_cache_hits: u64,
+    group_cache_misses: u64,
     last_timings: AdaptivePlanTimings,
     lod_scratch: ScreenMeshLeafLodScratch,
     candidate_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
@@ -362,7 +366,15 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     frontier_cache_misses: u64,
     reconciliation_cache_hits: u64,
     reconciliation_cache_misses: u64,
+    group_cache_hits: u64,
+    group_cache_misses: u64,
     last_timings: AdaptivePlanTimings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdaptiveGroupSignature {
+    reconciliation_generation: u64,
+    batch_layout_revision: u64,
 }
 
 #[derive(Default)]
@@ -371,6 +383,7 @@ struct AdaptiveReconciliationCache {
     max_face_edge_ratio: u32,
     max_atlas_lod: u32,
     result: Option<ScreenLeafLodResult>,
+    generation: u64,
     hits: u64,
     misses: u64,
 }
@@ -387,7 +400,7 @@ impl AdaptiveReconciliationCache {
         requested_lods: &[[u32; 3]],
         max_face_edge_ratio: u32,
         max_atlas_lod: u32,
-    ) -> Result<&'a ScreenLeafLodResult, String> {
+    ) -> Result<(&'a ScreenLeafLodResult, u64, bool), String> {
         let matches = self.result.is_some()
             && self.max_face_edge_ratio == max_face_edge_ratio
             && self.max_atlas_lod == max_atlas_lod
@@ -403,11 +416,17 @@ impl AdaptiveReconciliationCache {
             self.max_face_edge_ratio = max_face_edge_ratio;
             self.max_atlas_lod = max_atlas_lod;
             self.result = Some(result);
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| "adaptive reconciliation generation overflow".to_string())?;
             self.misses = self.misses.saturating_add(1);
         }
-        self.result
+        let result = self
+            .result
             .as_ref()
-            .ok_or_else(|| "adaptive reconciliation cache is unavailable".to_string())
+            .ok_or_else(|| "adaptive reconciliation cache is unavailable".to_string())?;
+        Ok((result, self.generation, matches))
     }
 }
 
@@ -511,6 +530,10 @@ impl AdaptivePickedRuntime {
         self.frontier_cache_hits = 0;
         self.frontier_cache_misses = 0;
         self.reconciliation_cache = AdaptiveReconciliationCache::default();
+        self.published_group_signature = None;
+        self.pending_group_signature = None;
+        self.group_cache_hits = 0;
+        self.group_cache_misses = 0;
         self.last_timings = AdaptivePlanTimings::default();
         self.candidate_groups.clear();
         self.clear_pending_publication();
@@ -557,6 +580,7 @@ impl AdaptivePickedRuntime {
         self.pending_grading_promotions = 0;
         self.pending_reconciliation_iterations = 0;
         self.pending_pose_stamp = None;
+        self.pending_group_signature = None;
         self.pending_selected_faces.clear();
     }
 
@@ -577,6 +601,7 @@ impl AdaptivePickedRuntime {
                 &mut self.last_published_faces,
                 &mut self.pending_selected_faces,
             );
+            self.published_group_signature = self.pending_group_signature.take();
         } else if let Some(error) = self.pending_fallback_error.take() {
             self.last_error = Some(error);
             self.last_plan = None;
@@ -587,6 +612,7 @@ impl AdaptivePickedRuntime {
             self.last_reconciliation_iterations = 0;
             self.last_pose_stamp = None;
             self.last_published_faces.clear();
+            self.published_group_signature = None;
         } else if self.pending_legacy {
             self.last_error = None;
             self.last_plan = None;
@@ -597,6 +623,7 @@ impl AdaptivePickedRuntime {
             self.last_reconciliation_iterations = 0;
             self.last_pose_stamp = None;
             self.last_published_faces.clear();
+            self.published_group_signature = None;
         } else {
             return;
         }
@@ -672,8 +699,11 @@ impl AdaptivePickedRuntime {
             face_materials,
             face_nodes,
             face_render_nodes,
+            0,
+            None,
             live_groups,
         )
+        .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -694,8 +724,12 @@ impl AdaptivePickedRuntime {
         face_materials: &[usize],
         face_nodes: &[usize],
         face_render_nodes: &[usize],
+        batch_layout_revision: u64,
+        mut reusable_groups: Option<
+            &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+        >,
         live_groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if self.has_pending_publication() {
             return Err("adaptive plan is already awaiting publication".into());
         }
@@ -752,12 +786,14 @@ impl AdaptivePickedRuntime {
                 .ok_or_else(|| "adaptive frontier cache is unavailable".to_string())?;
             let frontier_ms = browser_now_ms() - frontier_start;
             let reconcile_start = browser_now_ms();
-            let reconciled = self.reconciliation_cache.resolve(
-                frontier,
-                &plan.requested_lods,
-                max_face_edge_ratio,
-                max_atlas_lod,
-            )?;
+            let (reconciled, reconciliation_generation, _) = self
+                .reconciliation_cache
+                .resolve(
+                    frontier,
+                    &plan.requested_lods,
+                    max_face_edge_ratio,
+                    max_atlas_lod,
+                )?;
             let reconcile_ms = browser_now_ms() - reconcile_start;
             let atlas_work_start = browser_now_ms();
             let mut triangles = 0u64;
@@ -776,16 +812,43 @@ impl AdaptivePickedRuntime {
             }
             let atlas_work_ms = browser_now_ms() - atlas_work_start;
             let group_start = browser_now_ms();
-            group_resident_screen_leaves_into(
-                frontier,
-                &reconciled.resident,
-                face_materials,
-                face_nodes,
-                face_render_nodes,
-                &mut self.lod_scratch,
-                &mut self.candidate_groups,
-            )
-            .map_err(|error| error.to_string())?;
+            let group_signature = AdaptiveGroupSignature {
+                reconciliation_generation,
+                batch_layout_revision,
+            };
+            let groups_reused = if self.published_group_signature == Some(group_signature) {
+                if let Some(groups) = reusable_groups.as_deref_mut() {
+                    std::mem::swap(live_groups, groups);
+                    self.group_cache_hits = self.group_cache_hits.saturating_add(1);
+                    true
+                } else {
+                    group_resident_screen_leaves_into(
+                        frontier,
+                        &reconciled.resident,
+                        face_materials,
+                        face_nodes,
+                        face_render_nodes,
+                        &mut self.lod_scratch,
+                        &mut self.candidate_groups,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    self.group_cache_misses = self.group_cache_misses.saturating_add(1);
+                    false
+                }
+            } else {
+                group_resident_screen_leaves_into(
+                    frontier,
+                    &reconciled.resident,
+                    face_materials,
+                    face_nodes,
+                    face_render_nodes,
+                    &mut self.lod_scratch,
+                    &mut self.candidate_groups,
+                )
+                .map_err(|error| error.to_string())?;
+                self.group_cache_misses = self.group_cache_misses.saturating_add(1);
+                false
+            };
             let group_ms = browser_now_ms() - group_start;
             let timings = AdaptivePlanTimings {
                 total_ms: browser_now_ms() - total_start,
@@ -804,14 +867,26 @@ impl AdaptivePickedRuntime {
                 plan.diagnostic,
                 plan.selected_faces.clone(),
                 reconciliation,
+                group_signature,
+                groups_reused,
                 triangles,
                 timings,
             ))
         })();
 
         match attempt {
-            Ok((diagnostic, selected_faces, reconciliation, triangles, timings)) => {
-                std::mem::swap(live_groups, &mut self.candidate_groups);
+            Ok((
+                diagnostic,
+                selected_faces,
+                reconciliation,
+                group_signature,
+                groups_reused,
+                triangles,
+                timings,
+            )) => {
+                if !groups_reused {
+                    std::mem::swap(live_groups, &mut self.candidate_groups);
+                }
                 self.pending_plan = Some(diagnostic);
                 self.pending_selection = selection_diagnostic;
                 self.pending_selected_faces = selected_faces;
@@ -820,8 +895,9 @@ impl AdaptivePickedRuntime {
                 self.pending_grading_promotions = reconciliation.1;
                 self.pending_reconciliation_iterations = reconciliation.2;
                 self.pending_pose_stamp = current_pose_stamp;
+                self.pending_group_signature = Some(group_signature);
                 self.last_timings = timings;
-                Ok(())
+                Ok(groups_reused)
             }
             Err(error) => {
                 self.fallbacks = self.fallbacks.saturating_add(1);
@@ -906,6 +982,8 @@ impl AdaptivePickedRuntime {
             frontier_cache_misses: self.frontier_cache_misses,
             reconciliation_cache_hits: self.reconciliation_cache.hits,
             reconciliation_cache_misses: self.reconciliation_cache.misses,
+            group_cache_hits: self.group_cache_hits,
+            group_cache_misses: self.group_cache_misses,
             last_timings: self.last_timings,
         }
     }
@@ -1539,6 +1617,8 @@ mod tests {
                 &[0; 2],
                 &[0; 2],
                 &[0; 2],
+                0,
+                None,
                 &mut groups,
             )
             .unwrap();
@@ -1562,6 +1642,8 @@ mod tests {
             &[0; 2],
             &[0; 2],
             &[0; 2],
+            0,
+            None,
             &mut groups,
         );
         assert_eq!(
@@ -1581,6 +1663,66 @@ mod tests {
         assert_eq!(snapshot.last_plan.unwrap().selected_faces, 2);
         assert_eq!(snapshot.last_selection.unwrap().selected_faces, 2);
         assert_eq!(snapshot.last_triangles, 2);
+
+        let mut previous_groups = std::mem::take(&mut groups);
+        let reused = runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                2,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((4, 1)),
+                &[Some(resident); 2],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 2],
+                &[0; 2],
+                &[0; 2],
+                0,
+                Some(&mut previous_groups),
+                &mut groups,
+            )
+            .unwrap();
+        assert!(reused);
+        assert_eq!(groups, staged_groups);
+        assert!(previous_groups.is_empty());
+        assert_eq!(runtime.snapshot().group_cache_hits, 1);
+        assert_eq!(runtime.snapshot().group_cache_misses, 1);
+        runtime.commit_publication();
+
+        let mut previous_groups = std::mem::take(&mut groups);
+        let reused = runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                2,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((5, 1)),
+                &[Some(resident); 2],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 2],
+                &[0; 2],
+                &[0; 2],
+                1,
+                Some(&mut previous_groups),
+                &mut groups,
+            )
+            .unwrap();
+        assert!(!reused);
+        assert_eq!(groups, staged_groups);
+        assert_eq!(previous_groups, staged_groups);
+        assert_eq!(runtime.snapshot().group_cache_hits, 1);
+        assert_eq!(runtime.snapshot().group_cache_misses, 2);
+        runtime.commit_publication();
     }
 
     #[wasm_bindgen_test]
@@ -1658,6 +1800,8 @@ mod tests {
                 &[0, 0],
                 &[0, 1],
                 &[0, 1],
+                0,
+                None,
                 &mut groups,
             )
             .unwrap();
