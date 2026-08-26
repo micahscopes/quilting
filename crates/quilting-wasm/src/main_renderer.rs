@@ -35,7 +35,8 @@ use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::screen_leaf_lod::ScreenMeshTopologyCache;
 use quilting_core::source_bounds::source_focus_bounds;
 use crate::adaptive_screen::{
-    measure_adaptive_screen_patch, AdaptiveRootShadow, AdaptiveScreenRequest,
+    measure_adaptive_screen_patch, AdaptivePickedConfig, AdaptivePickedRuntime,
+    AdaptiveRootShadow, AdaptiveScreenRequest,
 };
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
@@ -268,6 +269,13 @@ struct MainState {
     screen_topology_cache: Option<ScreenMeshTopologyCache>,
     /// Opt-in all-root equivalence gate. It never mutates draw membership.
     adaptive_root_shadow: AdaptiveRootShadow,
+    /// Explicit, bounded live proof that replaces one picked source face with
+    /// a reconciled dyadic frontier. Every failed candidate leaves the legacy
+    /// root grouping live.
+    adaptive_picked: AdaptivePickedRuntime,
+    /// Keep the next adaptive enable/disable handoff rollback-safe even when
+    /// the configured mode is being cleared before legacy groups are rebuilt.
+    adaptive_batch_transition_pending: bool,
     /// Rust-authoritative stable source address and output-chart walker. The
     /// adjacency layer is built lazily on first attachment.
     surface_runtime: SurfaceRuntime,
@@ -278,6 +286,10 @@ struct MainState {
     face_materials: Vec<usize>,
     /// Stable ordinary glTF node index for each source triangle.
     face_nodes: Vec<usize>,
+    /// Metadata staged for the next immutable instance upload. Active
+    /// picking, focus, welding, and batches continue to observe `face_nodes`
+    /// until both CPU embedding and the face-data texture upload succeed.
+    pending_face_nodes: Option<Vec<usize>>,
     /// Render-state representative for each source triangle. Ordinary legacy
     /// glTF geometry is world-baked and shares one sentinel state; explicitly
     /// authored/presented nodes remain distinct.
@@ -785,11 +797,14 @@ pub fn mr_init(canvas_id: &str) -> bool {
             lod_topology: None,
             screen_topology_cache: None,
             adaptive_root_shadow: AdaptiveRootShadow::default(),
+            adaptive_picked: AdaptivePickedRuntime::default(),
+            adaptive_batch_transition_pending: false,
             surface_runtime: SurfaceRuntime::default(),
             batch_layout_dirty: true,
             batch_update_stats: BatchUpdateStats::default(),
             face_materials: Vec::new(),
             face_nodes: Vec::new(),
+            pending_face_nodes: None,
             face_render_nodes: Vec::new(),
             materials: Vec::new(),
             num_faces: 0,
@@ -2716,6 +2731,105 @@ fn compare_adaptive_root_shadow(state: &mut MainState, initial: batch::ResidentL
     );
 }
 
+/// Replace the freshly rebuilt legacy groups only after one complete adaptive
+/// candidate has passed every CPU-side invariant and atlas/work budget. Any
+/// unavailable input or rejected plan is recorded and leaves those legacy
+/// groups untouched.
+fn apply_adaptive_picked_plan(state: &mut MainState, initial: batch::ResidentLod) {
+    let Some(face) = state.adaptive_picked.face() else {
+        return;
+    };
+    let candidate_inputs = (|| -> Result<_, String> {
+        let face_index = face as usize;
+        if face_index >= state.num_faces {
+            return Err(format!(
+                "adaptive face {face} is outside the {}-face scene",
+                state.num_faces,
+            ));
+        }
+        if state.screen_topology_cache.is_none() {
+            return Err("adaptive source topology is unavailable".to_string());
+        }
+        let view_projection = state
+            .last_visibility_mvp
+            .ok_or_else(|| "no rendered camera is available for adaptive planning".to_string())?
+            .map(f64::from);
+        let viewport = [
+            f64::from(state.viewport_size.0.max(1)),
+            f64::from(state.viewport_size.1.max(1)),
+        ];
+        let node = state.face_nodes.get(face_index).copied().unwrap_or(0);
+        let conformal = conformal_state_for_node(state, node);
+        let patch = state.surface_runtime.output_patch_for_face(
+            &state.cached_instances,
+            face_index,
+            conformal.mobius,
+            conformal.euclidean_model,
+        )?;
+        let (max_atlas_lod, atlas_triangle_counts) = TESS_CACHE.with(|cache| -> Result<_, String> {
+            let cache = cache.borrow();
+            let maximum = cache
+                .keys()
+                .flat_map(|key| key.iter().copied())
+                .max()
+                .ok_or_else(|| "tessellation atlas is unavailable".to_string())?;
+            let counts = cache
+                .iter()
+                .map(|(key, patch)| (*key, patch.num_tri_indices.max(0) as u64 / 3))
+                .collect::<BTreeMap<_, _>>();
+            Ok((maximum, counts))
+        })?;
+        Ok((
+            patch,
+            view_projection,
+            viewport,
+            state.surface_runtime.pose_stamp(),
+            max_atlas_lod,
+            atlas_triangle_counts,
+        ))
+    })();
+
+    let (patch, view_projection, viewport, pose_stamp, max_atlas_lod, atlas_triangle_counts) =
+        match candidate_inputs {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                state.adaptive_picked.record_fallback(error);
+                return;
+            }
+        };
+    let max_face_edge_ratio = state.lod_grading.ratio();
+    let MainState {
+        adaptive_picked,
+        screen_topology_cache,
+        requested_face_lods,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        batch_groups,
+        ..
+    } = state;
+    let Some(topology) = screen_topology_cache.as_ref() else {
+        adaptive_picked.record_fallback("adaptive source topology disappeared");
+        return;
+    };
+    let _ = adaptive_picked.plan_and_group(
+        &patch,
+        &view_projection,
+        viewport,
+        pose_stamp,
+        requested_face_lods,
+        initial,
+        topology,
+        max_atlas_lod,
+        max_face_edge_ratio,
+        &atlas_triangle_counts,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        batch_groups,
+    );
+}
+
 #[wasm_bindgen(js_name = "mr_setRoundShadowEnabled")]
 pub fn mr_set_round_shadow_enabled(enabled: bool) -> JsValue {
     STATE.with(|state| {
@@ -2771,7 +2885,9 @@ pub fn mr_set_adaptive_root_shadow_enabled(enabled: bool) -> JsValue {
                 Err(error) => state.adaptive_root_shadow.record_unavailable(error),
             }
         } else if !enabled {
-            state.screen_topology_cache = None;
+            if !state.adaptive_picked.is_enabled() {
+                state.screen_topology_cache = None;
+            }
             state.adaptive_root_shadow.reset_topology();
         }
         if enabled
@@ -2791,6 +2907,110 @@ pub fn mr_adaptive_root_shadow_diagnostics() -> JsValue {
     STATE.with(|state| {
         state.borrow().as_ref().map_or(JsValue::NULL, |state| {
             serde_wasm_bindgen::to_value(&state.adaptive_root_shadow.snapshot())
+                .unwrap_or(JsValue::NULL)
+        })
+    })
+}
+
+/// Configure the first live metric-adaptive path for one stable source face.
+///
+/// The browser must request a normal LOD recomputation after configuration.
+/// Until that classification arrives the current root batches remain live.
+/// Every candidate is bounded by selected-leaf, scene-leaf, atlas, and
+/// triangle budgets; changed GL buckets are staged before atomic publication.
+#[wasm_bindgen(js_name = "mr_setAdaptivePickedFace")]
+pub fn mr_set_adaptive_picked_face(
+    face: u32,
+    min_px_per_segment: f64,
+    max_px_per_segment: f64,
+    max_depth: u32,
+    max_selected_leaves: u32,
+    max_total_leaves: u32,
+    max_triangles: u32,
+) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return adaptive_screen_diagnostic_error("renderer is not initialized");
+        };
+        if face as usize >= state.num_faces {
+            return adaptive_screen_diagnostic_error(format!(
+                "face {face} is outside the {}-face scene",
+                state.num_faces,
+            ));
+        }
+        if !min_px_per_segment.is_finite()
+            || min_px_per_segment <= 0.0
+            || !max_px_per_segment.is_finite()
+            || max_px_per_segment < min_px_per_segment
+        {
+            return adaptive_screen_diagnostic_error(
+                "adaptive pixel ceiling must be finite and at least the positive pixel floor",
+            );
+        }
+        let Ok(max_depth) = u8::try_from(max_depth) else {
+            return adaptive_screen_diagnostic_error("adaptive depth is outside u8 range");
+        };
+        if max_depth > instance_layout::BATCH_LEAF_MAX_DEPTH {
+            return adaptive_screen_diagnostic_error(format!(
+                "adaptive depth exceeds the packed leaf limit of {}",
+                instance_layout::BATCH_LEAF_MAX_DEPTH,
+            ));
+        }
+        if max_selected_leaves == 0
+            || max_total_leaves < state.num_faces as u32
+            || max_triangles == 0
+        {
+            return adaptive_screen_diagnostic_error(
+                "adaptive budgets require a positive selected/triangle cap and at least one scene leaf per source face",
+            );
+        }
+        if state.screen_topology_cache.is_none() {
+            match build_screen_topology_cache(state.lod_topology.as_ref()) {
+                Ok(cache) => state.screen_topology_cache = Some(cache),
+                Err(error) => return adaptive_screen_diagnostic_error(error),
+            }
+        }
+        state.adaptive_picked.configure(AdaptivePickedConfig {
+            face,
+            min_px_per_segment,
+            max_px_per_segment,
+            policy: ScreenPartitionPolicy {
+                max_depth,
+                max_leaves: max_selected_leaves as usize,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_total_leaves: max_total_leaves as usize,
+            max_triangles: u64::from(max_triangles),
+            pose_stamp: state.surface_runtime.pose_stamp(),
+        });
+        state.adaptive_batch_transition_pending = true;
+        serde_wasm_bindgen::to_value(&state.adaptive_picked.snapshot()).unwrap_or(JsValue::NULL)
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_clearAdaptivePickedFace")]
+pub fn mr_clear_adaptive_picked_face() -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let changed = state.adaptive_picked.is_enabled();
+        state.adaptive_picked.clear();
+        if !state.adaptive_root_shadow.is_enabled() {
+            state.screen_topology_cache = None;
+        }
+        state.adaptive_batch_transition_pending |= changed;
+        serde_wasm_bindgen::to_value(&state.adaptive_picked.snapshot()).unwrap_or(JsValue::NULL)
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_adaptivePickedDiagnostics")]
+pub fn mr_adaptive_picked_diagnostics() -> JsValue {
+    STATE.with(|state| {
+        state.borrow().as_ref().map_or(JsValue::NULL, |state| {
+            serde_wasm_bindgen::to_value(&state.adaptive_picked.snapshot())
                 .unwrap_or(JsValue::NULL)
         })
     })
@@ -2884,14 +3104,18 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             let num_faces = num_faces as usize;
-            if st.face_nodes.len() != num_faces {
-                st.face_nodes = vec![0; num_faces];
+            let mut next_face_nodes = st
+                .pending_face_nodes
+                .clone()
+                .unwrap_or_else(|| st.face_nodes.clone());
+            if next_face_nodes.len() != num_faces {
+                next_face_nodes = vec![0; num_faces];
             }
             let mut next_instances = instances.to_vec();
             if let Err(error) = embed_face_node_ids(
                 &mut next_instances,
                 num_faces,
-                &st.face_nodes,
+                &next_face_nodes,
             ) {
                 warn!("Could not embed source-face node identity: {error}");
                 return;
@@ -2902,6 +3126,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             }
             st.cached_instances = next_instances;
             st.num_faces = num_faces;
+            st.face_nodes = next_face_nodes;
+            st.pending_face_nodes = None;
             st.patch_prepare_dirty = true;
             st.render_shadow.asset_changed();
             st.render_shadow_scene_dirty = true;
@@ -2924,6 +3150,10 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
                 &st.face_nodes,
             );
             st.adaptive_root_shadow.reset_topology();
+            // Picked face IDs and their captured animation pose are local to
+            // one immutable asset epoch.
+            st.adaptive_picked.clear();
+            st.adaptive_batch_transition_pending = false;
             st.screen_topology_cache = None;
             if st.adaptive_root_shadow.is_enabled() {
                 match build_screen_topology_cache(st.lod_topology.as_ref()) {
@@ -3488,11 +3718,19 @@ pub fn mr_set_face_materials(materials: &[i32]) {
 pub fn mr_set_face_nodes(nodes: &[i32]) {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
-            renderer.face_nodes = nodes
+            let next = nodes
                 .iter()
                 .map(|&node| if node >= 0 { node as usize } else { 0 })
-                .collect();
-            renderer.batch_layout_dirty = true;
+                .collect::<Vec<_>>();
+            if renderer.face_nodes == next {
+                renderer.pending_face_nodes = None;
+                return;
+            }
+            // Face-node identity participates in picking, focus, exact seam
+            // welding, and render-state grouping. Keep the active epoch
+            // untouched until mr_setInstanceData embeds and uploads these IDs
+            // together with their matching immutable controls.
+            renderer.pending_face_nodes = Some(next);
         }
     });
 }
@@ -3902,6 +4140,110 @@ pub fn mr_upload_env_maps(
     });
 }
 
+#[derive(Default)]
+struct TransactionalBatchUploadStats {
+    retained: usize,
+    created: usize,
+    reallocated: usize,
+    retired: usize,
+    uploaded_instances: usize,
+}
+
+struct TransactionalBatchUploadFailure {
+    message: String,
+    missing_atlas_entries: usize,
+    failures: usize,
+}
+
+/// Stage every changed bucket in fresh GL resources. Existing buckets are not
+/// mutated or retired until the whole candidate exists, so allocation,
+/// packing, and atlas failures restore the exact previously published epoch.
+fn upload_batch_groups_transactionally(
+    state: &mut MainState,
+    force_upload: bool,
+) -> Result<TransactionalBatchUploadStats, TransactionalBatchUploadFailure> {
+    let gl = state.renderer.gl();
+    let mut previous_batches = std::mem::take(&mut state.batches);
+    let mut reused_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();
+    let mut staged_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();
+    let mut stats = TransactionalBatchUploadStats::default();
+    let stride = instance_layout::BATCH_TOPOLOGY_STRIDE;
+    let max_batch_size = state.batch_groups.values().map(Vec::len).max().unwrap_or(0);
+    state.batch_staging.resize(max_batch_size * stride, 0.0);
+
+    let attempt = TESS_CACHE.with(|cache| -> Result<(), TransactionalBatchUploadFailure> {
+        let cache = cache.borrow();
+        for (&key, members) in &state.batch_groups {
+            let tess = cache.get(&key.lod).ok_or_else(|| TransactionalBatchUploadFailure {
+                message: format!("adaptive batch needs missing atlas patch {:?}", key.lod),
+                missing_atlas_entries: 1,
+                failures: 0,
+            })?;
+            let membership_changed = previous_batches
+                .get(&key)
+                .is_none_or(|batch| batch.members != *members);
+            if !force_upload && !membership_changed {
+                stats.retained += 1;
+                let previous = previous_batches.remove(&key).ok_or_else(|| {
+                    TransactionalBatchUploadFailure {
+                        message: format!("retained adaptive batch {key:?} disappeared"),
+                        missing_atlas_entries: 0,
+                        failures: 1,
+                    }
+                })?;
+                reused_batches.insert(key, previous);
+                continue;
+            }
+
+            let batch_floats = fill_batch_instance_data(
+                key,
+                members,
+                &mut state.batch_staging,
+            )
+            .map_err(|error| TransactionalBatchUploadFailure {
+                message: format!("could not pack adaptive batch {key:?}: {error}"),
+                missing_atlas_entries: 0,
+                failures: 1,
+            })?;
+            let staged = create_gpu_batch(
+                gl,
+                tess,
+                key,
+                members,
+                &state.batch_staging[..batch_floats],
+            )
+            .map_err(|error| TransactionalBatchUploadFailure {
+                message: format!("could not stage adaptive batch {key:?}: {error}"),
+                missing_atlas_entries: 0,
+                failures: 1,
+            })?;
+            stats.reallocated += usize::from(previous_batches.contains_key(&key));
+            stats.created += 1;
+            stats.uploaded_instances += members.len();
+            staged_batches.insert(key, staged);
+        }
+        Ok(())
+    });
+
+    if let Err(failure) = attempt {
+        for (_, batch) in staged_batches {
+            batch.destroy(gl);
+        }
+        previous_batches.append(&mut reused_batches);
+        state.batches = previous_batches;
+        return Err(failure);
+    }
+
+    reused_batches.append(&mut staged_batches);
+    stats.retired = previous_batches.len();
+    for (_, batch) in previous_batches {
+        batch.destroy(gl);
+    }
+    state.batches = reused_batches;
+    state.render_commands_dirty = true;
+    Ok(stats)
+}
+
 #[wasm_bindgen(js_name = "mr_buildBatches")]
 pub fn mr_build_batches(face_lods: &[f32]) {
     update_batches(face_lods, None);
@@ -3977,7 +4319,12 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         } else {
             state.classified_culled_faces
         };
-        let mut topology_changed = state.batch_layout_dirty;
+        // A picked plan is view-dependent even when the worker's raw root
+        // requests are unchanged. A pending enable/disable also needs one
+        // publication even after the config itself has been cleared.
+        let mut topology_changed = state.batch_layout_dirty
+            || state.adaptive_picked.is_enabled()
+            || state.adaptive_batch_transition_pending;
         state.lod_dirty_faces.clear();
         let record_count = face_indices.map_or(nf, <[u32]>::len);
         for record_index in 0..record_count {
@@ -4091,6 +4438,9 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         if state.adaptive_root_shadow.is_enabled() {
             compare_adaptive_root_shadow(state, initial_resident);
         }
+        if state.adaptive_picked.is_enabled() {
+            apply_adaptive_picked_plan(state, initial_resident);
+        }
         perf_mark("batch-bucket-end");
         perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
         perf_mark("batch-group-end");
@@ -4100,6 +4450,45 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         // membership remain valid. Only changed buckets repack or upload their
         // source streams; capacity growth rebuilds that bucket alone.
         perf_mark("batch-upload-start");
+        if state.adaptive_picked.is_enabled() || state.adaptive_batch_transition_pending {
+            match upload_batch_groups_transactionally(state, force_upload) {
+                Ok(stats) => {
+                    state.adaptive_picked.commit_publication();
+                    state.batch_update_stats.retained_buckets += stats.retained as u64;
+                    state.batch_update_stats.created_buckets += stats.created as u64;
+                    state.batch_update_stats.reallocated_buckets += stats.reallocated as u64;
+                    state.batch_update_stats.retired_buckets += stats.retired as u64;
+                    state.batch_update_stats.uploaded_instances += stats.uploaded_instances as u64;
+                    state.batch_update_stats.last_missing_atlas_entries = 0;
+                    state.batch_update_stats.last_gpu_failures = 0;
+                    state.adaptive_batch_transition_pending = false;
+                    state.batch_layout_dirty = false;
+                    debug!(
+                        "Transactionally published {} adaptive GPU batches ({} retained, {} staged, {} replacements, {} retired)",
+                        state.batches.len(), stats.retained, stats.created,
+                        stats.reallocated, stats.retired,
+                    );
+                }
+                Err(failure) => {
+                    warn!(
+                        "Adaptive GPU batch publication rolled back: {}",
+                        failure.message,
+                    );
+                    state.batch_update_stats.last_missing_atlas_entries =
+                        failure.missing_atlas_entries as u64;
+                    state.batch_update_stats.last_gpu_failures = failure.failures as u64;
+                    if state.adaptive_picked.is_enabled() {
+                        state
+                            .adaptive_picked
+                            .record_publication_failure(failure.message.clone());
+                    }
+                    state.batch_layout_dirty = true;
+                }
+            }
+            perf_mark("batch-upload-end");
+            perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
+            return;
+        }
         let gl = state.renderer.gl();
         let mut previous_batches = std::mem::take(&mut state.batches);
         let mut next_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();

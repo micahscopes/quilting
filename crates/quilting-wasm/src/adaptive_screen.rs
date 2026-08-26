@@ -21,6 +21,9 @@ use quilting_core::screen_partition::{
     diagnose_screen_patch, partition_screen_patch, ScreenPartitionPolicy, ScreenPatchDiagnostic,
     ScreenPatchLeafId, ScreenPatchLeafStatus,
 };
+use quilting_core::screen_plan::{
+    plan_picked_screen_mesh, PickedScreenMeshPlanDiagnostic, PickedScreenMeshPlanRequest,
+};
 use serde::Serialize;
 
 /// Disabled-by-default parity observer for the production batch handoff.
@@ -216,6 +219,320 @@ impl AdaptiveRootShadow {
             last_shadow_batches: self.last_shadow_batches,
             last_legacy_instances: self.last_legacy_instances,
             last_shadow_instances: self.last_shadow_instances,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AdaptivePickedConfig {
+    pub face: u32,
+    pub min_px_per_segment: f64,
+    pub max_px_per_segment: f64,
+    pub policy: ScreenPartitionPolicy,
+    pub max_total_leaves: usize,
+    pub max_triangles: u64,
+    pub pose_stamp: Option<(u32, u32)>,
+}
+
+/// Explicit, bounded live proof for one picked face in a paused pose.
+///
+/// Candidate groups are assembled off to the side and swapped with the
+/// renderer's legacy groups only after partitioning, welded reconciliation,
+/// atlas validation, and work-budget validation all succeed.
+#[derive(Default)]
+pub(crate) struct AdaptivePickedRuntime {
+    config: Option<AdaptivePickedConfig>,
+    source_lod_scratch: Vec<[u32; 3]>,
+    lod_scratch: ScreenMeshLeafLodScratch,
+    candidate_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    attempts: u64,
+    installs: u64,
+    fallbacks: u64,
+    last_error: Option<String>,
+    last_plan: Option<PickedScreenMeshPlanDiagnostic>,
+    last_triangles: u64,
+    last_shared_edge_promotions: u64,
+    last_grading_promotions: u64,
+    last_reconciliation_iterations: u64,
+    pending_plan: Option<PickedScreenMeshPlanDiagnostic>,
+    pending_triangles: u64,
+    pending_shared_edge_promotions: u64,
+    pending_grading_promotions: u64,
+    pending_reconciliation_iterations: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AdaptivePickedSnapshot<'a> {
+    enabled: bool,
+    state: &'static str,
+    face: Option<u32>,
+    min_px_per_segment: Option<f64>,
+    max_px_per_segment: Option<f64>,
+    max_depth: Option<u8>,
+    max_selected_leaves: Option<u64>,
+    max_total_leaves: Option<u64>,
+    max_triangles: Option<u64>,
+    pose_revision: Option<u32>,
+    pose_continuity_epoch: Option<u32>,
+    attempts: u64,
+    installs: u64,
+    fallbacks: u64,
+    last_error: Option<&'a str>,
+    last_plan: Option<PickedScreenMeshPlanDiagnosticSnapshot>,
+    last_triangles: u64,
+    last_shared_edge_promotions: u64,
+    last_grading_promotions: u64,
+    last_reconciliation_iterations: u64,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedScreenMeshPlanDiagnosticSnapshot {
+    source_faces: u32,
+    selected_leaves: u32,
+    total_leaves: u32,
+    split_nodes: u32,
+    max_depth_reached: u8,
+    unmet_leaves: u32,
+    saturated_metric_leaves: u32,
+    omitted_culled_leaves: u32,
+}
+
+impl From<PickedScreenMeshPlanDiagnostic> for PickedScreenMeshPlanDiagnosticSnapshot {
+    fn from(diagnostic: PickedScreenMeshPlanDiagnostic) -> Self {
+        Self {
+            source_faces: diagnostic.source_faces,
+            selected_leaves: diagnostic.selected_leaves,
+            total_leaves: diagnostic.total_leaves,
+            split_nodes: diagnostic.split_nodes,
+            max_depth_reached: diagnostic.max_depth_reached,
+            unmet_leaves: diagnostic.unmet_leaves,
+            saturated_metric_leaves: diagnostic.saturated_metric_leaves,
+            omitted_culled_leaves: diagnostic.omitted_culled_leaves,
+        }
+    }
+}
+
+impl AdaptivePickedRuntime {
+    pub(crate) fn configure(&mut self, config: AdaptivePickedConfig) {
+        self.config = Some(config);
+        self.last_error = None;
+        self.last_plan = None;
+        self.last_triangles = 0;
+        self.last_shared_edge_promotions = 0;
+        self.last_grading_promotions = 0;
+        self.last_reconciliation_iterations = 0;
+        self.clear_pending_publication();
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.config = None;
+        self.last_error = None;
+        self.last_plan = None;
+        self.last_triangles = 0;
+        self.candidate_groups.clear();
+        self.clear_pending_publication();
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.config.is_some()
+    }
+
+    pub(crate) fn face(&self) -> Option<u32> {
+        self.config.map(|config| config.face)
+    }
+
+    pub(crate) fn record_fallback(&mut self, error: impl Into<String>) {
+        if self.config.is_none() {
+            return;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.fallbacks = self.fallbacks.saturating_add(1);
+        self.last_error = Some(error.into());
+        self.last_plan = None;
+        self.last_triangles = 0;
+        self.last_shared_edge_promotions = 0;
+        self.last_grading_promotions = 0;
+        self.last_reconciliation_iterations = 0;
+        self.clear_pending_publication();
+    }
+
+    fn clear_pending_publication(&mut self) {
+        self.pending_plan = None;
+        self.pending_triangles = 0;
+        self.pending_shared_edge_promotions = 0;
+        self.pending_grading_promotions = 0;
+        self.pending_reconciliation_iterations = 0;
+    }
+
+    /// Commit diagnostics only after the renderer has published every staged
+    /// GL bucket. CPU grouping alone is not a visible install.
+    pub(crate) fn commit_publication(&mut self) {
+        let Some(plan) = self.pending_plan.take() else {
+            return;
+        };
+        self.installs = self.installs.saturating_add(1);
+        self.last_error = None;
+        self.last_plan = Some(plan);
+        self.last_triangles = self.pending_triangles;
+        self.last_shared_edge_promotions = self.pending_shared_edge_promotions;
+        self.last_grading_promotions = self.pending_grading_promotions;
+        self.last_reconciliation_iterations = self.pending_reconciliation_iterations;
+        self.clear_pending_publication();
+    }
+
+    pub(crate) fn record_publication_failure(&mut self, error: impl Into<String>) {
+        if self.pending_plan.is_some() {
+            self.fallbacks = self.fallbacks.saturating_add(1);
+        }
+        self.clear_pending_publication();
+        self.last_error = Some(error.into());
+        self.last_plan = None;
+        self.last_triangles = 0;
+        self.last_shared_edge_promotions = 0;
+        self.last_grading_promotions = 0;
+        self.last_reconciliation_iterations = 0;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn plan_and_group(
+        &mut self,
+        transformed_patch: &QBTriPatch,
+        view_projection: &[f64; 16],
+        viewport: [f64; 2],
+        current_pose_stamp: Option<(u32, u32)>,
+        source_requests: &[Option<ResidentLod>],
+        standby: ResidentLod,
+        topology: &ScreenMeshTopologyCache,
+        max_atlas_lod: u32,
+        max_face_edge_ratio: u32,
+        atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        live_groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    ) -> Result<(), String> {
+        self.attempts = self.attempts.saturating_add(1);
+        self.clear_pending_publication();
+        let Some(config) = self.config else {
+            return Err("picked adaptive screen mode is disabled".into());
+        };
+        let attempt = (|| -> Result<_, String> {
+            if current_pose_stamp != config.pose_stamp {
+                return Err("animation pose changed after picked adaptive mode was armed".into());
+            }
+            self.source_lod_scratch.clear();
+            self.source_lod_scratch.extend(
+                source_requests
+                    .iter()
+                    .map(|request| request.unwrap_or(standby).edge_lods()),
+            );
+            let plan = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+                selected_face: config.face,
+                transformed_patch,
+                view_projection,
+                viewport,
+                min_px_per_segment: config.min_px_per_segment,
+                max_px_per_segment: config.max_px_per_segment,
+                policy: config.policy,
+                max_atlas_lod,
+                retain_culled_leaves: true,
+                max_total_leaves: config.max_total_leaves,
+                source_requested_lods: &self.source_lod_scratch,
+            })
+            .map_err(|error| error.to_string())?;
+            let frontier = ScreenMeshLeafFrontier::build(&plan.leaves, topology)
+                .map_err(|error| error.to_string())?;
+            let reconciled = frontier
+                .reconcile_lods(&plan.requested_lods, max_face_edge_ratio, max_atlas_lod)
+                .map_err(|error| error.to_string())?;
+            let mut triangles = 0u64;
+            for (leaf_index, lods) in reconciled.resident.iter().copied().enumerate() {
+                let key = canonical_form(lods).res;
+                let triangle_count = atlas_triangle_counts.get(&key).ok_or_else(|| {
+                    format!("adaptive leaf {leaf_index} needs missing atlas patch {key:?}")
+                })?;
+                triangles = triangles.saturating_add(*triangle_count);
+            }
+            if triangles > config.max_triangles {
+                return Err(format!(
+                    "adaptive plan needs {triangles} triangles; budget is {}",
+                    config.max_triangles,
+                ));
+            }
+            group_resident_screen_leaves_into(
+                &frontier,
+                &reconciled.resident,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                &mut self.lod_scratch,
+                &mut self.candidate_groups,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok((plan.diagnostic, reconciled, triangles))
+        })();
+
+        match attempt {
+            Ok((diagnostic, reconciled, triangles)) => {
+                std::mem::swap(live_groups, &mut self.candidate_groups);
+                self.last_error = None;
+                self.pending_plan = Some(diagnostic);
+                self.pending_triangles = triangles;
+                self.pending_shared_edge_promotions = reconciled.shared_edge_promotions as u64;
+                self.pending_grading_promotions = reconciled.grading_promotions as u64;
+                self.pending_reconciliation_iterations = reconciled.iterations as u64;
+                Ok(())
+            }
+            Err(error) => {
+                self.fallbacks = self.fallbacks.saturating_add(1);
+                self.clear_pending_publication();
+                self.last_error = Some(error.clone());
+                self.last_plan = None;
+                self.last_triangles = 0;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> AdaptivePickedSnapshot<'_> {
+        let state = if self.config.is_none() {
+            "disabled"
+        } else if self.last_error.is_some() {
+            "fallback"
+        } else if self.pending_plan.is_some() {
+            "staged"
+        } else if self.last_plan.is_some() {
+            "active"
+        } else {
+            "configured"
+        };
+        AdaptivePickedSnapshot {
+            enabled: self.config.is_some(),
+            state,
+            face: self.config.map(|config| config.face),
+            min_px_per_segment: self.config.map(|config| config.min_px_per_segment),
+            max_px_per_segment: self.config.map(|config| config.max_px_per_segment),
+            max_depth: self.config.map(|config| config.policy.max_depth),
+            max_selected_leaves: self.config.map(|config| config.policy.max_leaves as u64),
+            max_total_leaves: self.config.map(|config| config.max_total_leaves as u64),
+            max_triangles: self.config.map(|config| config.max_triangles),
+            pose_revision: self
+                .config
+                .and_then(|config| config.pose_stamp.map(|stamp| stamp.0)),
+            pose_continuity_epoch: self
+                .config
+                .and_then(|config| config.pose_stamp.map(|stamp| stamp.1)),
+            attempts: self.attempts,
+            installs: self.installs,
+            fallbacks: self.fallbacks,
+            last_error: self.last_error.as_deref(),
+            last_plan: self.last_plan.map(Into::into),
+            last_triangles: self.last_triangles,
+            last_shared_edge_promotions: self.last_shared_edge_promotions,
+            last_grading_promotions: self.last_grading_promotions,
+            last_reconciliation_iterations: self.last_reconciliation_iterations,
         }
     }
 }

@@ -27,6 +27,11 @@ pub struct PickedScreenMeshPlanRequest<'a> {
     pub max_px_per_segment: f64,
     pub policy: ScreenPartitionPolicy,
     pub max_atlas_lod: u32,
+    /// Keep leaves classified as fully faded/outside the sampled view at
+    /// their inherited source density. Live renderers use this so camera
+    /// motion between asynchronous classifications cannot expose a hole; a
+    /// frozen diagnostic/export may omit them to measure the exact view.
+    pub retain_culled_leaves: bool,
     /// Scene-wide instance bound after replacing the selected root.
     pub max_total_leaves: usize,
     /// Raw, unpromoted source-face requests in logical A/B/C edge order.
@@ -174,8 +179,8 @@ pub fn inherited_source_edge_lods(
 
 /// Build a bounded current-view frontier that adapts one selected face and
 /// retains every other source face as one root leaf. Selected leaves proven
-/// fully faded or outside the supplied static view are omitted; a renderer
-/// must rebuild before treating a changed camera as authoritative.
+/// fully faded or outside the supplied static view are either omitted for a
+/// frozen-view measurement or retained at inherited density for a live view.
 ///
 /// The output is raw request state. Shared-edge promotion and within-leaf
 /// grading are intentionally deferred to [`crate::screen_leaf_lod`] so every
@@ -219,16 +224,16 @@ pub fn plan_picked_screen_mesh(
             leaves: partition.unmet_leaves,
         });
     }
-    let drawable_leaves = partition
+    let included_leaves = partition
         .leaves
         .iter()
-        .filter(|leaf| leaf.status.is_drawable())
+        .filter(|leaf| request.retain_culled_leaves || leaf.status.is_drawable())
         .collect::<Vec<_>>();
     let total_capacity = request
         .source_requested_lods
         .len()
         .checked_sub(1)
-        .and_then(|roots| roots.checked_add(drawable_leaves.len()))
+        .and_then(|roots| roots.checked_add(included_leaves.len()))
         .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
     if request.max_total_leaves == 0 || total_capacity > request.max_total_leaves {
         return Err(PickedScreenMeshPlanError::LeafBudgetExceeded {
@@ -253,18 +258,22 @@ pub fn plan_picked_screen_mesh(
             continue;
         }
 
-        for leaf in &drawable_leaves {
+        for leaf in &included_leaves {
             let inherited =
                 inherited_source_edge_lods(leaf.id, leaf.restricted.domain, source_lods)?;
-            let diagnostic = leaf
-                .metric_diagnostic
-                .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
-            let screen = diagnostic
-                .edge_subdivision_demand(request.max_px_per_segment, request.max_atlas_lod)
-                .ok_or_else(|| {
-                    saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
-                    PickedScreenMeshPlanError::UnresolvedMetric
-                })?;
+            let screen = if leaf.status.is_drawable() {
+                let diagnostic = leaf
+                    .metric_diagnostic
+                    .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
+                diagnostic
+                    .edge_subdivision_demand(request.max_px_per_segment, request.max_atlas_lod)
+                    .ok_or_else(|| {
+                        saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
+                        PickedScreenMeshPlanError::UnresolvedMetric
+                    })?
+            } else {
+                [1; 3]
+            };
             leaves.push(ScreenMeshLeafTopology::from_leaf(source_face_u32, leaf));
             requested_lods.push(std::array::from_fn(|edge| {
                 inherited[edge].max(screen[edge])
@@ -274,7 +283,7 @@ pub fn plan_picked_screen_mesh(
 
     let source_faces = u32::try_from(request.source_requested_lods.len())
         .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
-    let selected_leaves = u32::try_from(drawable_leaves.len())
+    let selected_leaves = u32::try_from(included_leaves.len())
         .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
     let total_leaves =
         u32::try_from(leaves.len()).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
@@ -293,7 +302,7 @@ pub fn plan_picked_screen_mesh(
                 .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
             saturated_metric_leaves,
             omitted_culled_leaves: u32::try_from(
-                partition.leaves.len().saturating_sub(drawable_leaves.len()),
+                partition.leaves.len().saturating_sub(included_leaves.len()),
             )
             .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
         },
@@ -342,6 +351,7 @@ mod tests {
             max_px_per_segment: 10_000.0,
             policy,
             max_atlas_lod: 64,
+            retain_culled_leaves: false,
             max_total_leaves: 16,
             source_requested_lods: &[[2, 2, 2], [2, 4, 8], [4, 4, 4]],
         })
@@ -374,6 +384,7 @@ mod tests {
             max_px_per_segment: 16.0,
             policy: ScreenPartitionPolicy::default(),
             max_atlas_lod: 64,
+            retain_culled_leaves: false,
             max_total_leaves: 16,
             source_requested_lods: &[[3, 1, 1]],
         })
@@ -397,6 +408,7 @@ mod tests {
             max_px_per_segment: 64.0,
             policy: ScreenPartitionPolicy::default(),
             max_atlas_lod: 64,
+            retain_culled_leaves: false,
             max_total_leaves: 16,
             source_requested_lods: &[[64, 64, 64]],
         })
@@ -406,6 +418,31 @@ mod tests {
         assert!(plan.requested_lods.is_empty());
         assert_eq!(plan.diagnostic.selected_leaves, 0);
         assert_eq!(plan.diagnostic.omitted_culled_leaves, 1);
+    }
+
+    #[test]
+    fn live_plan_retains_culled_selected_leaves_at_inherited_density() {
+        let patch = QBTriPatch::flat([4.0, 0.0, 0.0], [5.0, 0.0, 0.0], [4.0, 1.0, 0.0]);
+        let plan = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+            selected_face: 0,
+            transformed_patch: &patch,
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 64.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_total_leaves: 16,
+            source_requested_lods: &[[8, 4, 2]],
+        })
+        .unwrap();
+
+        assert_eq!(plan.leaves.len(), 1);
+        assert_eq!(plan.leaves[0].id, ScreenPatchLeafId::ROOT);
+        assert_eq!(plan.requested_lods, [[8, 4, 2]]);
+        assert_eq!(plan.diagnostic.selected_leaves, 1);
+        assert_eq!(plan.diagnostic.omitted_culled_leaves, 0);
     }
 
     #[test]
@@ -420,6 +457,7 @@ mod tests {
             max_px_per_segment: 16.0,
             policy: ScreenPartitionPolicy::default(),
             max_atlas_lod: 64,
+            retain_culled_leaves: false,
             max_total_leaves: 16,
             source_requested_lods: &[[2, 2, 2]],
         };

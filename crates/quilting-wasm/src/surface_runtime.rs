@@ -375,6 +375,15 @@ impl SurfaceRuntime {
         self.camera_anchor_orientation_sign = 1;
     }
 
+    /// Exact semantic pose identity currently backing CPU patch
+    /// reconstruction. Static geometry has no stamp. Retained adaptive plans
+    /// capture this pair so a later animation sample cannot silently reuse a
+    /// partition measured against different controls.
+    pub fn pose_stamp(&self) -> Option<(u32, u32)> {
+        self.pose_sample
+            .map(|sample| (sample.revision, sample.continuity_epoch))
+    }
+
     pub fn attachment_face(&self) -> Option<u32> {
         self.walker
             .attachment()
