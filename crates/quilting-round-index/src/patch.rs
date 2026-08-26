@@ -254,17 +254,42 @@ pub fn conservative_patch_source_bound(patch: &PatchControl) -> Option<RoundSide
         if !denominator_distance.is_finite() || denominator_distance <= DENOMINATOR_GUARD {
             return None;
         }
-        let numerator_radius = patch
-            .positions
+        let numerators: [Quat; 3] = std::array::from_fn(|corner| {
+            let point = patch.positions[corner];
+            let weight = patch.weights[corner];
+            let point = Quat::from_point(point[0], point[1], point[2]);
+            let weight = Quat::new(weight[0], weight[1], weight[2], weight[3]);
+            point * weight
+        });
+        let denominator_sum = denominators.into_iter().fold(Quat::ZERO, |sum, weight| {
+            sum + Quat::new(weight[0], weight[1], weight[2], weight[3])
+        });
+        let denominator_sum_norm_sq = denominator_sum.norm_sq();
+        if denominator_sum_norm_sq <= DENOMINATOR_GUARD * DENOMINATOR_GUARD {
+            return None;
+        }
+        let numerator_sum = numerators
             .iter()
+            .copied()
+            .fold(Quat::ZERO, |sum, value| sum + value);
+        // For q = N D^-1 and any quaternion c,
+        // q - c = (N - cD) D^-1. Choosing c at the barycentric center
+        // cancels the average residual and keeps translated patches local.
+        // Use the mathematical inverse directly: Quat::inv deliberately has
+        // a renderer-oriented pole sentinel below its own guard threshold.
+        let denominator_sum_inverse = denominator_sum.conj() / denominator_sum_norm_sq;
+        let center_quaternion = numerator_sum * denominator_sum_inverse;
+        let radius = numerators
+            .iter()
+            .copied()
             .zip(patch.weights)
-            .map(|(&point, weight)| {
-                let point = Quat::from_point(point[0], point[1], point[2]);
-                let weight = Quat::new(weight[0], weight[1], weight[2], weight[3]);
-                (point * weight).norm()
+            .map(|(numerator, weight)| {
+                let denominator = Quat::new(weight[0], weight[1], weight[2], weight[3]);
+                (numerator - center_quaternion * denominator).norm()
             })
-            .fold(0.0_f64, f64::max);
-        ([0.0; 3], numerator_radius / denominator_distance)
+            .fold(0.0_f64, f64::max)
+            / denominator_distance;
+        (center_quaternion.to_point(), radius)
     };
     if !radius.is_finite() {
         return None;
@@ -476,6 +501,62 @@ mod tests {
     }
 
     #[test]
+    fn recentered_rational_bound_is_translation_local_and_contains_dense_samples() {
+        let patch = PatchControl {
+            face: 11,
+            positions: [
+                [99.75, -0.2, 0.1],
+                [100.4, -0.1, -0.15],
+                [100.05, 0.35, 0.2],
+            ],
+            weights: [
+                [1.0, 0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0, 0.0],
+            ],
+        };
+        let bound = conservative_patch_source_bound(&patch).unwrap();
+        let RoundWallGeometry::Sphere { center, radius } = bound.geometry() else {
+            panic!("a finite patch bound must be a sphere");
+        };
+        assert!(
+            center[0] > 99.0,
+            "center should follow the translated patch: {center:?}"
+        );
+        assert!(
+            radius < 2.0,
+            "translated local patch should have a local radius: {radius}"
+        );
+
+        let denominator_distance = origin_to_quaternion_triangle(patch.weights);
+        let old_origin_radius = patch
+            .positions
+            .iter()
+            .zip(patch.weights)
+            .map(|(&point, weight)| {
+                let point = Quat::from_point(point[0], point[1], point[2]);
+                let weight = Quat::new(weight[0], weight[1], weight[2], weight[3]);
+                (point * weight).norm()
+            })
+            .fold(0.0_f64, f64::max)
+            / denominator_distance;
+        assert!(radius * 100.0 < old_origin_radius);
+
+        for u_step in 0..=64 {
+            for v_step in 0..=(64 - u_step) {
+                let u = f64::from(u_step) / 64.0;
+                let v = f64::from(v_step) / 64.0;
+                let barycentric = [1.0 - u - v, u, v];
+                let point = evaluate_rational_patch(&patch, barycentric).unwrap();
+                assert!(
+                    bound.contains(point).unwrap(),
+                    "sample {barycentric:?} at {point:?} escaped center {center:?}, radius {radius}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hierarchy_prunes_separated_patch_subtrees() {
         let patches = (-64..64)
             .enumerate()
@@ -562,5 +643,23 @@ mod tests {
                 actual: 1
             })
         ));
+    }
+
+    fn evaluate_rational_patch(patch: &PatchControl, barycentric: [f64; 3]) -> Option<[f64; 3]> {
+        let mut numerator = Quat::ZERO;
+        let mut denominator = Quat::ZERO;
+        for (corner, coefficient) in barycentric.into_iter().enumerate() {
+            let point = patch.positions[corner];
+            let weight = patch.weights[corner];
+            let point = Quat::from_point(point[0], point[1], point[2]);
+            let weight = Quat::new(weight[0], weight[1], weight[2], weight[3]);
+            numerator = numerator + point * weight * coefficient;
+            denominator = denominator + weight * coefficient;
+        }
+        let norm_sq = denominator.norm_sq();
+        if norm_sq <= DENOMINATOR_GUARD * DENOMINATOR_GUARD {
+            return None;
+        }
+        Some((numerator * denominator.conj() / norm_sq).to_point())
     }
 }

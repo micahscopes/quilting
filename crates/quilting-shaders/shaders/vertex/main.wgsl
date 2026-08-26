@@ -385,12 +385,13 @@ fn origin_to_quaternion_triangle(a: vec4<f32>, b: vec4<f32>, c: vec4<f32>) -> f3
 }
 
 // Conservative bound for a genuine rational QB patch after the current
-// Möbius transform. For barycentric lambda, the fused evaluator is N/D where
-// N and D each range over a quaternion triangle. Triangle inequality bounds
-// |N| by the largest numerator control norm; the exact distance from the
-// denominator triangle to zero lower-bounds |D|. Therefore the whole patch is
-// inside an origin-centred ball of radius max|N_i|/min|D|. A denominator
-// triangle touching zero is a possible pole and deliberately remains visible.
+// Möbius transform. For barycentric lambda, the fused evaluator is q = N/D,
+// where N and D each range over a quaternion triangle. For any quaternion c,
+// q-c = (N-cD)D^-1. Choosing c at the barycentric center cancels the average
+// residual, so translated patches retain local rather than origin-centered
+// bounds. The exact distance from the denominator triangle to zero lower-
+// bounds |D|. A denominator triangle touching zero is a possible pole and
+// deliberately remains visible.
 fn rational_patch_outside_frustum(
     p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>,
     w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>,
@@ -415,14 +416,39 @@ fn rational_patch_outside_frustum(
     if !(denominator_distance > 1e-8) {
         return false;
     }
-    let numerator_radius = max(
-        length(numerator0),
-        max(length(numerator1), length(numerator2)),
+    let denominator_sum = denominator0 + denominator1 + denominator2;
+    let denominator_sum_norm_sq = dot(denominator_sum, denominator_sum);
+    if !(denominator_sum_norm_sq > 1e-16) {
+        return false;
+    }
+    let numerator_sum = numerator0 + numerator1 + numerator2;
+    let center_quaternion = qmul(numerator_sum, qconj(denominator_sum))
+        / denominator_sum_norm_sq;
+    if !finite_vec4(center_quaternion) {
+        return false;
+    }
+    let residual_radius = max(
+        length(numerator0 - qmul(center_quaternion, denominator0)),
+        max(
+            length(numerator1 - qmul(center_quaternion, denominator1)),
+            length(numerator2 - qmul(center_quaternion, denominator2)),
+        ),
     );
-    // Rendering clamps evaluated positions to POSITION_CLAMP, so the smaller
-    // of the analytic radius and that clamp remains conservative.
-    let radius = min(POSITION_CLAMP, numerator_radius / denominator_distance * 1.01 + 1e-6);
-    return sphere_outside_frustum(vec3<f32>(0.0), radius);
+    let radius = residual_radius / denominator_distance * 1.01 + 1e-6;
+    let center = center_quaternion.yzw;
+    if !finite_vec3(center) || !(radius >= 0.0 && radius < 1e30) {
+        return false;
+    }
+
+    // eval_mobius_qb later clamps positions radially into the origin-centered
+    // POSITION_CLAMP ball. That operation cannot change this local bound only
+    // when the complete analytic ball is already inside the clamp ball. For a
+    // farther patch, retain the clamp ball itself rather than incorrectly
+    // taking the smaller of two spheres with different centers.
+    if length(center) + radius <= POSITION_CLAMP {
+        return sphere_outside_frustum(center, radius);
+    }
+    return sphere_outside_frustum(vec3<f32>(0.0), POSITION_CLAMP);
 }
 
 fn patch_outside_frustum(

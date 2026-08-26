@@ -139,6 +139,15 @@ The correct WebGPU solution is same-pose compaction, not weakening this
 residency rule. A future predictive WebGL policy would need a proven swept
 frustum/pose bound and must retain the hidden last-valid topology.
 
+For a genuine rational patch `q = N D^-1`, visibility centers its analytic
+ball at the barycentric-center quotient `c = (ΣN_i)(ΣD_i)^-1` and bounds the
+residual with `max|N_i-cD_i| / min|D|`. This is translation-local while
+remaining conservative over the complete barycentric domain. The later radial
+`POSITION_CLAMP` can move a far point outside that local ball, so the renderer
+uses the recentered ball only when it is wholly inside the origin-centered
+clamp ball; otherwise it fails closed to the clamp ball instead of taking an
+invalid minimum between differently centered spheres.
+
 ## Work outside the frame loop
 
 - glTF parsing, image decode, static face textures, adjacency, and skinning

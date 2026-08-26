@@ -2051,3 +2051,42 @@ Both runs retained zero renderer, scene, application, selection, focus,
 presentation-pose, and animation-playback mismatches or errors, with clean
 warning/error consoles. The five generated-WASM application, presentation,
 route, render, and walking smokes also passed against the feature artifact.
+
+## Recentered rational-patch visibility bound
+
+On 2026-08-26, the rational QB visibility carrier changed from the
+origin-centered `max|N_i| / min|D|` ball to the translation-local residual
+bound centered at `c = (ΣN_i)(ΣD_i)^-1`, with radius
+`max|N_i-cD_i| / min|D|`. A translated rational-patch fixture reduced the
+bound radius by more than 100× while a 2,145-point barycentric grid remained
+strictly contained. Rust round-index tests, WGSL composition/GLSL emission,
+the WASM target check, 13 generated-WASM tests, 197 Quilting core tests, and 15
+conformal-LOD integration tests passed.
+
+The installed Chrome DevTools MCP then compared the opt-in round hierarchy
+against the completed worker visibility snapshot. The ordinary inverted chess
+view was intentionally retained as a counterexample to overclaiming: all
+94,628 patches survived both classifiers, the hierarchy visited all 189,255
+nodes, and the query took 262.6 ms. In that compactified view the complete
+scene intersects the guarded frustum broadly; the source records also use the
+common-weight flat path, so this is not evidence that the new genuine-rational
+carrier regressed or improved that view.
+
+Controlled static offscreen views distinguished the implementation from that
+view-dependent result:
+
+| Scene and transform | Round candidates | Worker survivors | Visited / pruned nodes | Query |
+| --- | ---: | ---: | ---: | ---: |
+| 94,628-face chess, identity | 0 | 0 | 1 / 1 | 0.7 ms |
+| 94,628-face chess, sphere reflection | 72 | 82 | 335 / 96 | 1.1 ms |
+| 984-face horse, sphere reflection | 0 | 0 | 15 / 8 | < 0.1 ms |
+
+The ten chess faces retained only by the worker had no strictly visible point
+among the round observer's seven fixed QB samples; the observer reported zero
+sampled false negatives in every run. This is relative-conservatism evidence,
+not a replacement for the analytic carrier proof. The static chess hierarchy
+still took about 1.0–1.1 seconds to build, while the animated representative
+view took 1,126.6 ms to refit all 94,628 leaves and 94,627 internal nodes.
+Consequently the round hierarchy remains a disabled shadow oracle; the local
+shader carrier is useful independently, but a full animated CPU refit is not a
+live-frame strategy.
