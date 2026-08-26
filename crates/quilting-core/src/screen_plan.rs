@@ -103,12 +103,21 @@ pub struct AdaptiveScreenMeshPlanDiagnostic {
     pub boundary_fallback_faces: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AdaptiveScreenMeshPlan {
     pub selected_faces: Vec<u32>,
     pub leaves: Vec<ScreenMeshLeafTopology>,
     pub requested_lods: Vec<[u32; 3]>,
     pub diagnostic: AdaptiveScreenMeshPlanDiagnostic,
+}
+
+impl AdaptiveScreenMeshPlan {
+    fn clear_retain_capacity(&mut self) {
+        self.selected_faces.clear();
+        self.leaves.clear();
+        self.requested_lods.clear();
+        self.diagnostic = AdaptiveScreenMeshPlanDiagnostic::default();
+    }
 }
 
 /// One source-ordered root face considered for current-view adaptation.
@@ -445,6 +454,32 @@ pub fn inherited_source_edge_lods(
 pub fn plan_adaptive_screen_mesh(
     request: AdaptiveScreenMeshPlanRequest<'_>,
 ) -> Result<AdaptiveScreenMeshPlan, AdaptiveScreenMeshPlanError> {
+    let mut output = AdaptiveScreenMeshPlan::default();
+    plan_adaptive_screen_mesh_into(request, &mut output)?;
+    Ok(output)
+}
+
+/// Rebuild a bounded adaptive plan while retaining the caller's allocation.
+///
+/// On failure the output is empty, so a caller cannot accidentally publish a
+/// preceding or partially rebuilt plan. Its vector capacities remain
+/// available for the next measured pose.
+pub fn plan_adaptive_screen_mesh_into(
+    request: AdaptiveScreenMeshPlanRequest<'_>,
+    output: &mut AdaptiveScreenMeshPlan,
+) -> Result<(), AdaptiveScreenMeshPlanError> {
+    output.clear_retain_capacity();
+    let result = plan_adaptive_screen_mesh_reusing(request, output);
+    if result.is_err() {
+        output.clear_retain_capacity();
+    }
+    result
+}
+
+fn plan_adaptive_screen_mesh_reusing(
+    request: AdaptiveScreenMeshPlanRequest<'_>,
+    output: &mut AdaptiveScreenMeshPlan,
+) -> Result<(), AdaptiveScreenMeshPlanError> {
     if request.source_requested_lods.is_empty() {
         return Err(PickedScreenMeshPlanError::EmptyScene);
     }
@@ -502,9 +537,18 @@ pub fn plan_adaptive_screen_mesh(
     // retained-output budget. If the output budget is crossed, keep counting
     // bounded partitions without retaining more records so the final error
     // reports the exact required leaf count.
-    let mut selected_faces = Vec::with_capacity(selected_patches.len());
-    let mut leaves = Vec::new();
-    let mut requested_lods = Vec::new();
+    let AdaptiveScreenMeshPlan {
+        selected_faces,
+        leaves,
+        requested_lods,
+        diagnostic,
+    } = output;
+    selected_faces.reserve(selected_patches.len());
+    let retained_capacity = request
+        .max_total_leaves
+        .min(fixed_roots.saturating_add(request.max_partition_leaves));
+    leaves.reserve(retained_capacity);
+    requested_lods.reserve(retained_capacity);
     let mut output_viable =
         request.max_total_leaves != 0 && fixed_roots <= request.max_total_leaves;
     let mut selected_leaves = 0usize;
@@ -650,27 +694,23 @@ pub fn plan_adaptive_screen_mesh(
         u32::try_from(selected_leaves).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
     let total_leaves =
         u32::try_from(leaves.len()).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
-    Ok(AdaptiveScreenMeshPlan {
-        selected_faces,
-        leaves,
-        requested_lods,
-        diagnostic: AdaptiveScreenMeshPlanDiagnostic {
-            source_faces,
-            selected_faces: selected_face_count,
-            selected_leaves: selected_leaf_count,
-            total_leaves,
-            split_nodes: u32::try_from(split_nodes)
-                .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
-            max_depth_reached,
-            unmet_leaves: u32::try_from(unmet_leaves)
-                .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
-            saturated_metric_leaves,
-            omitted_culled_leaves: u32::try_from(omitted_culled_leaves)
-                .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
-            boundary_fallback_faces: u32::try_from(boundary_fallback_faces)
-                .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
-        },
-    })
+    *diagnostic = AdaptiveScreenMeshPlanDiagnostic {
+        source_faces,
+        selected_faces: selected_face_count,
+        selected_leaves: selected_leaf_count,
+        total_leaves,
+        split_nodes: u32::try_from(split_nodes)
+            .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
+        max_depth_reached,
+        unmet_leaves: u32::try_from(unmet_leaves)
+            .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
+        saturated_metric_leaves,
+        omitted_culled_leaves: u32::try_from(omitted_culled_leaves)
+            .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
+        boundary_fallback_faces: u32::try_from(boundary_fallback_faces)
+            .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
+    };
+    Ok(())
 }
 
 /// Compatibility wrapper for callers that adapt exactly one picked face.
@@ -933,6 +973,67 @@ mod tests {
             .iter()
             .all(|leaf| leaf.id == ScreenPatchLeafId::ROOT));
         assert_eq!(plan.requested_lods, [[2, 4, 8], [8, 4, 2]]);
+    }
+
+    #[test]
+    fn adaptive_plan_into_reuses_storage_and_clears_failed_output() {
+        let source_lods = [[2, 4, 8]; 32];
+        let request = AdaptiveScreenMeshPlanRequest {
+            selected_patches: &[],
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 64.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 1,
+            max_total_leaves: source_lods.len(),
+            source_requested_lods: &source_lods,
+        };
+        let mut output = AdaptiveScreenMeshPlan::default();
+        plan_adaptive_screen_mesh_into(request, &mut output).unwrap();
+        let capacities = (
+            output.selected_faces.capacity(),
+            output.leaves.capacity(),
+            output.requested_lods.capacity(),
+        );
+
+        plan_adaptive_screen_mesh_into(request, &mut output).unwrap();
+        assert_eq!(output.leaves.len(), source_lods.len());
+        assert_eq!(
+            capacities,
+            (
+                output.selected_faces.capacity(),
+                output.leaves.capacity(),
+                output.requested_lods.capacity(),
+            ),
+        );
+
+        let error = plan_adaptive_screen_mesh_into(
+            AdaptiveScreenMeshPlanRequest {
+                max_atlas_lod: 3,
+                ..request
+            },
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error, PickedScreenMeshPlanError::InvalidAtlasLod);
+        assert!(output.selected_faces.is_empty());
+        assert!(output.leaves.is_empty());
+        assert!(output.requested_lods.is_empty());
+        assert_eq!(
+            output.diagnostic,
+            AdaptiveScreenMeshPlanDiagnostic::default(),
+        );
+        assert_eq!(
+            capacities,
+            (
+                output.selected_faces.capacity(),
+                output.leaves.capacity(),
+                output.requested_lods.capacity(),
+            ),
+        );
     }
 
     #[test]

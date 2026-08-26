@@ -23,9 +23,9 @@ use quilting_core::screen_partition::{
     ScreenPatchLeafId, ScreenPatchLeafStatus,
 };
 use quilting_core::screen_plan::{
-    inherited_source_edge_lods, plan_adaptive_screen_mesh,
-    AdaptiveScreenFaceSelectionDiagnostic, AdaptiveScreenMeshPlanDiagnostic,
-    AdaptiveScreenMeshPlanRequest, SelectedScreenPatch,
+    inherited_source_edge_lods, plan_adaptive_screen_mesh_into,
+    AdaptiveScreenFaceSelectionDiagnostic, AdaptiveScreenMeshPlan,
+    AdaptiveScreenMeshPlanDiagnostic, AdaptiveScreenMeshPlanRequest, SelectedScreenPatch,
 };
 use serde::Serialize;
 
@@ -296,6 +296,7 @@ pub(crate) struct AdaptivePickedRuntime {
     /// and animation changes commonly alter only requested LoDs, so rebuilding
     /// this mesh-sized structure on every refresh is avoidable work.
     frontier: Option<ScreenMeshLeafFrontier>,
+    plan_scratch: AdaptiveScreenMeshPlan,
     frontier_cache_hits: u64,
     frontier_cache_misses: u64,
     reconciliation_cache: AdaptiveReconciliationCache,
@@ -506,6 +507,7 @@ impl AdaptivePickedRuntime {
         self.last_pose_stamp = None;
         self.last_published_faces.clear();
         self.frontier = None;
+        self.plan_scratch = AdaptiveScreenMeshPlan::default();
         self.frontier_cache_hits = 0;
         self.frontier_cache_misses = 0;
         self.reconciliation_cache = AdaptiveReconciliationCache::default();
@@ -711,20 +713,24 @@ impl AdaptivePickedRuntime {
                     .map(|request| request.unwrap_or(standby).edge_lods()),
             );
             let mesh_plan_start = browser_now_ms();
-            let plan = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
-                selected_patches,
-                view_projection,
-                viewport,
-                min_px_per_segment: config.min_px_per_segment,
-                max_px_per_segment: config.max_px_per_segment,
-                policy: config.policy,
-                max_atlas_lod,
-                retain_culled_leaves: true,
-                max_partition_leaves,
-                max_total_leaves: config.max_total_leaves,
-                source_requested_lods: &self.source_lod_scratch,
-            })
+            plan_adaptive_screen_mesh_into(
+                AdaptiveScreenMeshPlanRequest {
+                    selected_patches,
+                    view_projection,
+                    viewport,
+                    min_px_per_segment: config.min_px_per_segment,
+                    max_px_per_segment: config.max_px_per_segment,
+                    policy: config.policy,
+                    max_atlas_lod,
+                    retain_culled_leaves: true,
+                    max_partition_leaves,
+                    max_total_leaves: config.max_total_leaves,
+                    source_requested_lods: &self.source_lod_scratch,
+                },
+                &mut self.plan_scratch,
+            )
             .map_err(|error| error.to_string())?;
+            let plan = &self.plan_scratch;
             let mesh_plan_ms = browser_now_ms() - mesh_plan_start;
             let frontier_start = browser_now_ms();
             let frontier_matches = self
@@ -796,7 +802,7 @@ impl AdaptivePickedRuntime {
             );
             Ok((
                 plan.diagnostic,
-                plan.selected_faces,
+                plan.selected_faces.clone(),
                 reconciliation,
                 triangles,
                 timings,
