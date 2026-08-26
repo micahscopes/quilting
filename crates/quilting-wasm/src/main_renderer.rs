@@ -35,8 +35,8 @@ use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::screen_leaf_lod::ScreenMeshTopologyCache;
 use quilting_core::source_bounds::source_focus_bounds;
 use crate::adaptive_screen::{
-    measure_adaptive_screen_patch, AdaptivePickedConfig, AdaptivePickedRuntime,
-    AdaptiveRootShadow, AdaptiveScreenRequest,
+    measure_adaptive_screen_patch, AdaptivePickedConfig, AdaptivePickedRefreshSnapshot,
+    AdaptivePickedRuntime, AdaptiveRootShadow, AdaptiveScreenRequest,
 };
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
@@ -471,6 +471,8 @@ fn resolve_auxiliary_program(
 struct BatchUpdateStats {
     calls: u64,
     unchanged_calls: u64,
+    adaptive_refresh_calls: u64,
+    adaptive_refresh_noops: u64,
     retained_buckets: u64,
     updated_buckets: u64,
     created_buckets: u64,
@@ -2982,10 +2984,9 @@ pub fn mr_set_adaptive_picked_face(
             },
             max_total_leaves: max_total_leaves as usize,
             max_triangles: u64::from(max_triangles),
-            pose_stamp: state.surface_runtime.pose_stamp(),
         });
         state.adaptive_batch_transition_pending = true;
-        serde_wasm_bindgen::to_value(&state.adaptive_picked.snapshot()).unwrap_or(JsValue::NULL)
+        adaptive_picked_snapshot_js(state, None)
     })
 }
 
@@ -2997,12 +2998,14 @@ pub fn mr_clear_adaptive_picked_face() -> JsValue {
             return JsValue::NULL;
         };
         let changed = state.adaptive_picked.is_enabled();
-        state.adaptive_picked.clear();
+        if changed {
+            state.adaptive_picked.stage_clear();
+        }
         if !state.adaptive_root_shadow.is_enabled() {
             state.screen_topology_cache = None;
         }
         state.adaptive_batch_transition_pending |= changed;
-        serde_wasm_bindgen::to_value(&state.adaptive_picked.snapshot()).unwrap_or(JsValue::NULL)
+        adaptive_picked_snapshot_js(state, None)
     })
 }
 
@@ -3010,8 +3013,7 @@ pub fn mr_clear_adaptive_picked_face() -> JsValue {
 pub fn mr_adaptive_picked_diagnostics() -> JsValue {
     STATE.with(|state| {
         state.borrow().as_ref().map_or(JsValue::NULL, |state| {
-            serde_wasm_bindgen::to_value(&state.adaptive_picked.snapshot())
-                .unwrap_or(JsValue::NULL)
+            adaptive_picked_snapshot_js(state, None)
         })
     })
 }
@@ -3316,6 +3318,8 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
         for (name, value) in [
             ("batchBuildCalls", batch_stats.calls),
             ("unchangedBatchBuildCalls", batch_stats.unchanged_calls),
+            ("adaptiveBatchRefreshCalls", batch_stats.adaptive_refresh_calls),
+            ("adaptiveBatchRefreshNoops", batch_stats.adaptive_refresh_noops),
             ("retainedBatchBuckets", batch_stats.retained_buckets),
             ("updatedBatchBuckets", batch_stats.updated_buckets),
             ("createdBatchBuckets", batch_stats.created_buckets),
@@ -3451,6 +3455,15 @@ fn adaptive_screen_diagnostic_error(message: impl Into<String>) -> JsValue {
         "ok": false,
         "error": message.into(),
     }))
+    .unwrap_or(JsValue::NULL)
+}
+
+fn adaptive_picked_snapshot_js(state: &MainState, refresh_published: Option<bool>) -> JsValue {
+    serde_wasm_bindgen::to_value(&AdaptivePickedRefreshSnapshot {
+        snapshot: state.adaptive_picked.snapshot(),
+        transition_pending: state.adaptive_batch_transition_pending,
+        refresh_published,
+    })
     .unwrap_or(JsValue::NULL)
 }
 
@@ -4240,8 +4253,183 @@ fn upload_batch_groups_transactionally(
         batch.destroy(gl);
     }
     state.batches = reused_batches;
-    state.render_commands_dirty = true;
+    if stats.created != 0 || stats.retired != 0 {
+        state.render_commands_dirty = true;
+    }
     Ok(stats)
+}
+
+/// Reconstruct the complete source-face grouping from the last coherent
+/// classifier snapshot. Adaptive replanning always starts here so any CPU-side
+/// rejection can publish a known crack-free root fallback rather than retain a
+/// partially assembled frontier.
+fn rebuild_legacy_batch_groups(state: &mut MainState, initial: batch::ResidentLod) {
+    let nf = state.num_faces;
+    if let Some(topology) = state.lod_topology.as_ref() {
+        batch::rebuild_resident_vertex_lods(
+            &state.resident_face_lods,
+            topology,
+            initial,
+            &mut state.resident_vertex_lod_scratch,
+            &mut state.resident_vertex_lods,
+        );
+    } else {
+        state.resident_vertex_lods.resize(nf, [1; 3]);
+        for (face, vertex_lods) in state.resident_vertex_lods.iter_mut().enumerate() {
+            let edges = state.resident_face_lods[face]
+                .unwrap_or(initial)
+                .edge_lods();
+            *vertex_lods = [
+                edges[1].max(edges[2]),
+                edges[0].max(edges[2]),
+                edges[0].max(edges[1]),
+            ];
+        }
+    }
+    rebuild_face_render_nodes(state);
+    batch::group_resident_faces_into(
+        &state.resident_face_lods,
+        &state.resident_vertex_lods,
+        &state.face_materials,
+        &state.face_nodes,
+        &state.face_render_nodes,
+        initial,
+        &mut state.batch_groups,
+    );
+}
+
+/// Publish the desired adaptive-or-fallback grouping and update diagnostics as
+/// one epoch. The upload routine preserves the exact prior GL map on failure;
+/// adaptive diagnostics become active only after the replacement map exists.
+#[derive(Clone, Copy)]
+struct AdaptiveBatchPublication {
+    published: bool,
+    resources_changed: bool,
+}
+
+fn publish_adaptive_batch_groups(
+    state: &mut MainState,
+    force_upload: bool,
+    previous_batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+) -> AdaptiveBatchPublication {
+    match upload_batch_groups_transactionally(state, force_upload) {
+        Ok(stats) => {
+            state.adaptive_picked.commit_publication();
+            state.batch_update_stats.retained_buckets += stats.retained as u64;
+            state.batch_update_stats.created_buckets += stats.created as u64;
+            state.batch_update_stats.reallocated_buckets += stats.reallocated as u64;
+            state.batch_update_stats.retired_buckets += stats.retired as u64;
+            state.batch_update_stats.uploaded_instances += stats.uploaded_instances as u64;
+            state.batch_update_stats.last_missing_atlas_entries = 0;
+            state.batch_update_stats.last_gpu_failures = 0;
+            state.adaptive_batch_transition_pending = false;
+            state.batch_layout_dirty = false;
+            debug!(
+                "Transactionally published {} adaptive GPU batches ({} retained, {} staged, {} replacements, {} retired)",
+                state.batches.len(), stats.retained, stats.created,
+                stats.reallocated, stats.retired,
+            );
+            AdaptiveBatchPublication {
+                published: true,
+                resources_changed: stats.created != 0 || stats.retired != 0,
+            }
+        }
+        Err(failure) => {
+            warn!(
+                "Adaptive GPU batch publication rolled back: {}",
+                failure.message,
+            );
+            state.batch_update_stats.last_missing_atlas_entries =
+                failure.missing_atlas_entries as u64;
+            state.batch_update_stats.last_gpu_failures = failure.failures as u64;
+            if state.adaptive_picked.has_pending_publication() {
+                state
+                    .adaptive_picked
+                    .record_publication_failure(failure.message.clone());
+            }
+            // The GL transaction restored the previous GPU epoch. Restore its
+            // exact CPU membership map as well; a desired candidate is not
+            // authoritative until every corresponding resource has published.
+            state.batch_groups = previous_batch_groups;
+            state.batch_layout_dirty = true;
+            AdaptiveBatchPublication {
+                published: false,
+                resources_changed: false,
+            }
+        }
+    }
+}
+
+/// Re-evaluate an enabled picked frontier against the latest retained root
+/// classification, rendered camera, and accepted animation pose. This covers
+/// sparse worker completions whose source-face LOD delta is empty: the root
+/// request may be unchanged even though the within-patch screen metric moved.
+fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
+    if !state.adaptive_picked.is_enabled() && !state.adaptive_batch_transition_pending {
+        return false;
+    }
+    let nf = state.num_faces;
+    if state.requested_face_lods.len() != nf
+        || state.resident_face_lods.len() != nf
+        || state.face_nodes.len() != nf
+    {
+        state.adaptive_picked.record_refresh_failure(
+            "retained source classification is incomplete for adaptive refresh",
+        );
+        return false;
+    }
+    state.batch_update_stats.calls = state.batch_update_stats.calls.saturating_add(1);
+    state.batch_update_stats.adaptive_refresh_calls =
+        state.batch_update_stats.adaptive_refresh_calls.saturating_add(1);
+    perf_mark("batch-group-start");
+    perf_mark("batch-retain-start");
+    perf_mark("batch-retain-end");
+    perf_measure("batch-retain", "batch-retain-start", "batch-retain-end");
+    perf_mark("batch-balance-start");
+    perf_mark("batch-balance-end");
+    perf_measure(
+        "batch-balance",
+        "batch-balance-start",
+        "batch-balance-end",
+    );
+    perf_mark("batch-bucket-start");
+    let initial = bounded_standby_resident_lod();
+    let previous_batch_groups = std::mem::take(&mut state.batch_groups);
+    rebuild_legacy_batch_groups(state, initial);
+    if state.adaptive_root_shadow.is_enabled() {
+        compare_adaptive_root_shadow(state, initial);
+    }
+    if state.adaptive_picked.is_enabled() {
+        apply_adaptive_picked_plan(state, initial);
+    }
+    perf_mark("batch-bucket-end");
+    perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
+    perf_mark("batch-group-end");
+    perf_measure("batch-group", "batch-group-start", "batch-group-end");
+    state.adaptive_batch_transition_pending = true;
+    perf_mark("batch-upload-start");
+    let publication = publish_adaptive_batch_groups(state, false, previous_batch_groups);
+    if publication.published && !publication.resources_changed {
+        state.batch_update_stats.adaptive_refresh_noops = state
+            .batch_update_stats
+            .adaptive_refresh_noops
+            .saturating_add(1);
+    }
+    perf_mark("batch-upload-end");
+    perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
+    publication.published
+}
+
+#[wasm_bindgen(js_name = "mr_refreshAdaptivePicked")]
+pub fn mr_refresh_adaptive_picked() -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let published = refresh_adaptive_picked_batches(state);
+        adaptive_picked_snapshot_js(state, Some(published))
+    })
 }
 
 #[wasm_bindgen(js_name = "mr_buildBatches")]
@@ -4403,38 +4591,12 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         }
 
         let force_upload = state.batch_layout_dirty;
+        let transactional_upload =
+            state.adaptive_picked.is_enabled() || state.adaptive_batch_transition_pending;
+        let previous_batch_groups = transactional_upload
+            .then(|| std::mem::take(&mut state.batch_groups));
         perf_mark("batch-bucket-start");
-        if let Some(topology) = state.lod_topology.as_ref() {
-            batch::rebuild_resident_vertex_lods(
-                &state.resident_face_lods,
-                topology,
-                initial_resident,
-                &mut state.resident_vertex_lod_scratch,
-                &mut state.resident_vertex_lods,
-            );
-        } else {
-            state.resident_vertex_lods.resize(nf, [1; 3]);
-            for (face, vertex_lods) in state.resident_vertex_lods.iter_mut().enumerate() {
-                let edges = state.resident_face_lods[face]
-                    .unwrap_or(initial_resident)
-                    .edge_lods();
-                *vertex_lods = [
-                    edges[1].max(edges[2]),
-                    edges[0].max(edges[2]),
-                    edges[0].max(edges[1]),
-                ];
-            }
-        }
-        rebuild_face_render_nodes(state);
-        batch::group_resident_faces_into(
-            &state.resident_face_lods,
-            &state.resident_vertex_lods,
-            &state.face_materials,
-            &state.face_nodes,
-            &state.face_render_nodes,
-            initial_resident,
-            &mut state.batch_groups,
-        );
+        rebuild_legacy_batch_groups(state, initial_resident);
         if state.adaptive_root_shadow.is_enabled() {
             compare_adaptive_root_shadow(state, initial_resident);
         }
@@ -4450,41 +4612,12 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         // membership remain valid. Only changed buckets repack or upload their
         // source streams; capacity growth rebuilds that bucket alone.
         perf_mark("batch-upload-start");
-        if state.adaptive_picked.is_enabled() || state.adaptive_batch_transition_pending {
-            match upload_batch_groups_transactionally(state, force_upload) {
-                Ok(stats) => {
-                    state.adaptive_picked.commit_publication();
-                    state.batch_update_stats.retained_buckets += stats.retained as u64;
-                    state.batch_update_stats.created_buckets += stats.created as u64;
-                    state.batch_update_stats.reallocated_buckets += stats.reallocated as u64;
-                    state.batch_update_stats.retired_buckets += stats.retired as u64;
-                    state.batch_update_stats.uploaded_instances += stats.uploaded_instances as u64;
-                    state.batch_update_stats.last_missing_atlas_entries = 0;
-                    state.batch_update_stats.last_gpu_failures = 0;
-                    state.adaptive_batch_transition_pending = false;
-                    state.batch_layout_dirty = false;
-                    debug!(
-                        "Transactionally published {} adaptive GPU batches ({} retained, {} staged, {} replacements, {} retired)",
-                        state.batches.len(), stats.retained, stats.created,
-                        stats.reallocated, stats.retired,
-                    );
-                }
-                Err(failure) => {
-                    warn!(
-                        "Adaptive GPU batch publication rolled back: {}",
-                        failure.message,
-                    );
-                    state.batch_update_stats.last_missing_atlas_entries =
-                        failure.missing_atlas_entries as u64;
-                    state.batch_update_stats.last_gpu_failures = failure.failures as u64;
-                    if state.adaptive_picked.is_enabled() {
-                        state
-                            .adaptive_picked
-                            .record_publication_failure(failure.message.clone());
-                    }
-                    state.batch_layout_dirty = true;
-                }
-            }
+        if transactional_upload {
+            let _ = publish_adaptive_batch_groups(
+                state,
+                force_upload,
+                previous_batch_groups.unwrap_or_default(),
+            );
             perf_mark("batch-upload-end");
             perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
             return;

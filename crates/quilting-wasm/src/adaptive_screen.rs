@@ -231,10 +231,10 @@ pub(crate) struct AdaptivePickedConfig {
     pub policy: ScreenPartitionPolicy,
     pub max_total_leaves: usize,
     pub max_triangles: u64,
-    pub pose_stamp: Option<(u32, u32)>,
 }
 
-/// Explicit, bounded live proof for one picked face in a paused pose.
+/// Explicit, bounded live proof for one picked face in the latest accepted
+/// pose. Each completed plan records the exact pose revision it measured.
 ///
 /// Candidate groups are assembled off to the side and swapped with the
 /// renderer's legacy groups only after partitioning, welded reconciliation,
@@ -249,16 +249,22 @@ pub(crate) struct AdaptivePickedRuntime {
     installs: u64,
     fallbacks: u64,
     last_error: Option<String>,
+    last_publication_error: Option<String>,
     last_plan: Option<PickedScreenMeshPlanDiagnostic>,
     last_triangles: u64,
     last_shared_edge_promotions: u64,
     last_grading_promotions: u64,
     last_reconciliation_iterations: u64,
+    last_pose_stamp: Option<(u32, u32)>,
+    last_published_face: Option<u32>,
     pending_plan: Option<PickedScreenMeshPlanDiagnostic>,
+    pending_fallback_error: Option<String>,
+    pending_legacy: bool,
     pending_triangles: u64,
     pending_shared_edge_promotions: u64,
     pending_grading_promotions: u64,
     pending_reconciliation_iterations: u64,
+    pending_pose_stamp: Option<(u32, u32)>,
 }
 
 #[derive(Serialize)]
@@ -275,15 +281,27 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     max_triangles: Option<u64>,
     pose_revision: Option<u32>,
     pose_continuity_epoch: Option<u32>,
+    published_face: Option<u32>,
     attempts: u64,
     installs: u64,
     fallbacks: u64,
     last_error: Option<&'a str>,
+    last_publication_error: Option<&'a str>,
     last_plan: Option<PickedScreenMeshPlanDiagnosticSnapshot>,
     last_triangles: u64,
     last_shared_edge_promotions: u64,
     last_grading_promotions: u64,
     last_reconciliation_iterations: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AdaptivePickedRefreshSnapshot<'a> {
+    #[serde(flatten)]
+    pub snapshot: AdaptivePickedSnapshot<'a>,
+    pub transition_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_published: Option<bool>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -317,26 +335,39 @@ impl From<PickedScreenMeshPlanDiagnostic> for PickedScreenMeshPlanDiagnosticSnap
 impl AdaptivePickedRuntime {
     pub(crate) fn configure(&mut self, config: AdaptivePickedConfig) {
         self.config = Some(config);
-        self.last_error = None;
-        self.last_plan = None;
-        self.last_triangles = 0;
-        self.last_shared_edge_promotions = 0;
-        self.last_grading_promotions = 0;
-        self.last_reconciliation_iterations = 0;
         self.clear_pending_publication();
     }
 
     pub(crate) fn clear(&mut self) {
         self.config = None;
         self.last_error = None;
+        self.last_publication_error = None;
         self.last_plan = None;
         self.last_triangles = 0;
+        self.last_shared_edge_promotions = 0;
+        self.last_grading_promotions = 0;
+        self.last_reconciliation_iterations = 0;
+        self.last_pose_stamp = None;
+        self.last_published_face = None;
         self.candidate_groups.clear();
         self.clear_pending_publication();
     }
 
+    /// Request a transactional return to the retained legacy root grouping.
+    /// Published diagnostics remain intact until that handoff succeeds.
+    pub(crate) fn stage_clear(&mut self) {
+        self.config = None;
+        self.candidate_groups.clear();
+        self.clear_pending_publication();
+        self.pending_legacy = true;
+    }
+
     pub(crate) fn is_enabled(&self) -> bool {
         self.config.is_some()
+    }
+
+    pub(crate) fn has_pending_publication(&self) -> bool {
+        self.pending_plan.is_some() || self.pending_fallback_error.is_some() || self.pending_legacy
     }
 
     pub(crate) fn face(&self) -> Option<u32> {
@@ -349,50 +380,79 @@ impl AdaptivePickedRuntime {
         }
         self.attempts = self.attempts.saturating_add(1);
         self.fallbacks = self.fallbacks.saturating_add(1);
-        self.last_error = Some(error.into());
-        self.last_plan = None;
-        self.last_triangles = 0;
-        self.last_shared_edge_promotions = 0;
-        self.last_grading_promotions = 0;
-        self.last_reconciliation_iterations = 0;
         self.clear_pending_publication();
+        self.pending_fallback_error = Some(error.into());
     }
 
     fn clear_pending_publication(&mut self) {
         self.pending_plan = None;
+        self.pending_fallback_error = None;
+        self.pending_legacy = false;
         self.pending_triangles = 0;
         self.pending_shared_edge_promotions = 0;
         self.pending_grading_promotions = 0;
         self.pending_reconciliation_iterations = 0;
+        self.pending_pose_stamp = None;
     }
 
     /// Commit diagnostics only after the renderer has published every staged
     /// GL bucket. CPU grouping alone is not a visible install.
     pub(crate) fn commit_publication(&mut self) {
-        let Some(plan) = self.pending_plan.take() else {
+        if let Some(plan) = self.pending_plan.take() {
+            self.installs = self.installs.saturating_add(1);
+            self.last_error = None;
+            self.last_plan = Some(plan);
+            self.last_triangles = self.pending_triangles;
+            self.last_shared_edge_promotions = self.pending_shared_edge_promotions;
+            self.last_grading_promotions = self.pending_grading_promotions;
+            self.last_reconciliation_iterations = self.pending_reconciliation_iterations;
+            self.last_pose_stamp = self.pending_pose_stamp;
+            self.last_published_face = self.config.map(|config| config.face);
+        } else if let Some(error) = self.pending_fallback_error.take() {
+            self.last_error = Some(error);
+            self.last_plan = None;
+            self.last_triangles = 0;
+            self.last_shared_edge_promotions = 0;
+            self.last_grading_promotions = 0;
+            self.last_reconciliation_iterations = 0;
+            self.last_pose_stamp = None;
+            self.last_published_face = None;
+        } else if self.pending_legacy {
+            self.last_error = None;
+            self.last_plan = None;
+            self.last_triangles = 0;
+            self.last_shared_edge_promotions = 0;
+            self.last_grading_promotions = 0;
+            self.last_reconciliation_iterations = 0;
+            self.last_pose_stamp = None;
+            self.last_published_face = None;
+        } else {
             return;
-        };
-        self.installs = self.installs.saturating_add(1);
-        self.last_error = None;
-        self.last_plan = Some(plan);
-        self.last_triangles = self.pending_triangles;
-        self.last_shared_edge_promotions = self.pending_shared_edge_promotions;
-        self.last_grading_promotions = self.pending_grading_promotions;
-        self.last_reconciliation_iterations = self.pending_reconciliation_iterations;
+        }
+        self.last_publication_error = None;
         self.clear_pending_publication();
     }
 
     pub(crate) fn record_publication_failure(&mut self, error: impl Into<String>) {
-        if self.pending_plan.is_some() {
+        if self.pending_plan.is_some() || self.pending_fallback_error.is_some() {
             self.fallbacks = self.fallbacks.saturating_add(1);
         }
+        let retry_legacy = self.pending_legacy;
         self.clear_pending_publication();
-        self.last_error = Some(error.into());
-        self.last_plan = None;
-        self.last_triangles = 0;
-        self.last_shared_edge_promotions = 0;
-        self.last_grading_promotions = 0;
-        self.last_reconciliation_iterations = 0;
+        self.pending_legacy = retry_legacy;
+        self.last_publication_error = Some(error.into());
+    }
+
+    pub(crate) fn record_refresh_failure(&mut self, error: impl Into<String>) {
+        if self.config.is_none() && !self.pending_legacy {
+            return;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.fallbacks = self.fallbacks.saturating_add(1);
+        let retry_legacy = self.pending_legacy;
+        self.clear_pending_publication();
+        self.pending_legacy = retry_legacy;
+        self.last_publication_error = Some(error.into());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -419,9 +479,6 @@ impl AdaptivePickedRuntime {
             return Err("picked adaptive screen mode is disabled".into());
         };
         let attempt = (|| -> Result<_, String> {
-            if current_pose_stamp != config.pose_stamp {
-                return Err("animation pose changed after picked adaptive mode was armed".into());
-            }
             self.source_lod_scratch.clear();
             self.source_lod_scratch.extend(
                 source_requests
@@ -477,20 +534,18 @@ impl AdaptivePickedRuntime {
         match attempt {
             Ok((diagnostic, reconciled, triangles)) => {
                 std::mem::swap(live_groups, &mut self.candidate_groups);
-                self.last_error = None;
                 self.pending_plan = Some(diagnostic);
                 self.pending_triangles = triangles;
                 self.pending_shared_edge_promotions = reconciled.shared_edge_promotions as u64;
                 self.pending_grading_promotions = reconciled.grading_promotions as u64;
                 self.pending_reconciliation_iterations = reconciled.iterations as u64;
+                self.pending_pose_stamp = current_pose_stamp;
                 Ok(())
             }
             Err(error) => {
                 self.fallbacks = self.fallbacks.saturating_add(1);
                 self.clear_pending_publication();
-                self.last_error = Some(error.clone());
-                self.last_plan = None;
-                self.last_triangles = 0;
+                self.pending_fallback_error = Some(error.clone());
                 Err(error)
             }
         }
@@ -498,11 +553,23 @@ impl AdaptivePickedRuntime {
 
     pub(crate) fn snapshot(&self) -> AdaptivePickedSnapshot<'_> {
         let state = if self.config.is_none() {
-            "disabled"
+            if self.pending_legacy && self.last_publication_error.is_some() {
+                "rollback-disable"
+            } else if self.pending_legacy {
+                "staged-disable"
+            } else {
+                "disabled"
+            }
+        } else if self.pending_plan.is_some() || self.pending_fallback_error.is_some() {
+            "staged"
+        } else if self.last_publication_error.is_some() {
+            if self.last_plan.is_some() {
+                "rollback-active"
+            } else {
+                "rollback-fallback"
+            }
         } else if self.last_error.is_some() {
             "fallback"
-        } else if self.pending_plan.is_some() {
-            "staged"
         } else if self.last_plan.is_some() {
             "active"
         } else {
@@ -519,15 +586,19 @@ impl AdaptivePickedRuntime {
             max_total_leaves: self.config.map(|config| config.max_total_leaves as u64),
             max_triangles: self.config.map(|config| config.max_triangles),
             pose_revision: self
-                .config
-                .and_then(|config| config.pose_stamp.map(|stamp| stamp.0)),
+                .pending_pose_stamp
+                .or(self.last_pose_stamp)
+                .map(|stamp| stamp.0),
             pose_continuity_epoch: self
-                .config
-                .and_then(|config| config.pose_stamp.map(|stamp| stamp.1)),
+                .pending_pose_stamp
+                .or(self.last_pose_stamp)
+                .map(|stamp| stamp.1),
+            published_face: self.last_published_face,
             attempts: self.attempts,
             installs: self.installs,
             fallbacks: self.fallbacks,
             last_error: self.last_error.as_deref(),
+            last_publication_error: self.last_publication_error.as_deref(),
             last_plan: self.last_plan.map(Into::into),
             last_triangles: self.last_triangles,
             last_shared_edge_promotions: self.last_shared_edge_promotions,
@@ -805,4 +876,109 @@ pub(crate) fn measure_adaptive_screen_patch(
         adaptive_instances: drawable_leaves.len() as u64,
         adaptive_triangles,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    const IDENTITY: [f64; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+
+    #[wasm_bindgen_test]
+    fn picked_runtime_replans_and_publishes_new_pose_revisions() {
+        let positions = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
+        let source =
+            quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(&positions, &[[0, 1, 2]]);
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let resident = ResidentLod {
+            canonical: [1; 3],
+            perm_index: 0,
+            parity_bucket: 0,
+        };
+        let mut atlas_triangles = BTreeMap::new();
+        atlas_triangles.insert([1; 3], 1);
+        let mut groups = BTreeMap::new();
+        let mut runtime = AdaptivePickedRuntime::default();
+        runtime.configure(AdaptivePickedConfig {
+            face: 0,
+            min_px_per_segment: 1.0,
+            max_px_per_segment: 10_000.0,
+            policy: ScreenPartitionPolicy {
+                max_depth: 0,
+                max_leaves: 1,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_total_leaves: 1,
+            max_triangles: 1,
+        });
+
+        let mut plan = |runtime: &mut AdaptivePickedRuntime, stamp| {
+            runtime
+                .plan_and_group(
+                    &patch,
+                    &IDENTITY,
+                    [640.0, 480.0],
+                    Some(stamp),
+                    &[Some(resident)],
+                    resident,
+                    &topology,
+                    1,
+                    4,
+                    &atlas_triangles,
+                    &[0],
+                    &[0],
+                    &[0],
+                    &mut groups,
+                )
+                .unwrap();
+        };
+
+        plan(&mut runtime, (7, 2));
+        assert_eq!(runtime.snapshot().state, "staged");
+        runtime.commit_publication();
+        assert_eq!(runtime.snapshot().pose_revision, Some(7));
+
+        plan(&mut runtime, (8, 2));
+        runtime.record_publication_failure("synthetic upload rollback");
+        let rolled_back = runtime.snapshot();
+        assert_eq!(rolled_back.state, "rollback-active");
+        assert_eq!(rolled_back.pose_revision, Some(7));
+        assert_eq!(rolled_back.installs, 1);
+        assert_eq!(
+            rolled_back.last_publication_error,
+            Some("synthetic upload rollback"),
+        );
+
+        plan(&mut runtime, (8, 2));
+        runtime.commit_publication();
+        let snapshot = runtime.snapshot();
+        assert_eq!(snapshot.state, "active");
+        assert_eq!(snapshot.pose_revision, Some(8));
+        assert_eq!(snapshot.pose_continuity_epoch, Some(2));
+        assert_eq!(runtime.snapshot().installs, 2);
+
+        runtime.stage_clear();
+        let staged_disable = runtime.snapshot();
+        assert_eq!(staged_disable.state, "staged-disable");
+        assert_eq!(staged_disable.published_face, Some(0));
+        assert_eq!(staged_disable.pose_revision, Some(8));
+        runtime.record_refresh_failure("synthetic disable refresh rejection");
+        let rolled_back_disable = runtime.snapshot();
+        assert_eq!(rolled_back_disable.state, "rollback-disable");
+        assert_eq!(rolled_back_disable.published_face, Some(0));
+        assert_eq!(
+            rolled_back_disable.last_publication_error,
+            Some("synthetic disable refresh rejection"),
+        );
+        assert!(runtime.has_pending_publication());
+        runtime.commit_publication();
+        let disabled = runtime.snapshot();
+        assert_eq!(disabled.state, "disabled");
+        assert_eq!(disabled.published_face, None);
+        assert_eq!(disabled.pose_revision, None);
+    }
 }

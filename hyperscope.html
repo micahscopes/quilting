@@ -398,7 +398,8 @@ import init, {
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
   mr_setAdaptiveRootShadowEnabled, mr_adaptiveRootShadowDiagnostics,
-  mr_setAdaptivePickedFace, mr_clearAdaptivePickedFace, mr_adaptivePickedDiagnostics,
+  mr_setAdaptivePickedFace, mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
+  mr_adaptivePickedDiagnostics,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
@@ -718,7 +719,7 @@ globalThis.__hyperscopeAdaptiveRootShadow = adaptiveRootShadowDiagnostics;
 
 // Explicit DevTools controller for the first bounded live adaptive path. It
 // deliberately has no second render-state implementation: Rust owns the
-// configured face, pose stamp, partition, reconciliation, budgets, and
+// configured face, measured pose stamp, partition, reconciliation, budgets, and
 // fallback. This adapter only resolves the current browser selection and asks
 // the existing LOD scheduler for a fresh classification.
 const adaptivePickedDiagnostics = {
@@ -727,9 +728,6 @@ const adaptivePickedDiagnostics = {
   enable(options = {}) {
     if (lodInFlight) {
       return { ok: false, error: 'Wait for the current LOD classification before arming' };
-    }
-    if (animating) {
-      return { ok: false, error: 'Pause animation before arming picked adaptive LoD' };
     }
     if (!lod.screenAtten.peek()) {
       return { ok: false, error: 'Enable the pixel floor before arming picked adaptive LoD' };
@@ -7048,6 +7046,16 @@ async function recomputeLods() {
           mr_updateBatches(faceIndices, faceLods);
           recordPresentationLodUpdate(faceIndices);
           appliedClassification = true;
+        } else if (adaptivePickedDiagnostics.snapshot?.enabled
+            || adaptivePickedDiagnostics.snapshot?.transitionPending) {
+          // Root requests can remain byte-identical while animation or camera
+          // motion changes the metric inside the selected patch. Replan from
+          // the retained coherent root snapshot instead of waiting for an
+          // unrelated source-face delta.
+          clearBatchMeasures();
+          adaptivePickedDiagnostics.snapshot = mr_refreshAdaptivePicked();
+          appliedClassification =
+            adaptivePickedDiagnostics.snapshot?.refreshPublished === true;
         }
       } else if (presentationComposition.ready) {
         // Convert an occasional full classification of either the packed scene
@@ -7103,7 +7111,8 @@ async function recomputeLods() {
         if (RUST_ADAPTIVE_ROOT_SHADOW_ENABLED) {
           adaptiveRootShadowDiagnostics.snapshot = mr_adaptiveRootShadowDiagnostics();
         }
-        if (adaptivePickedDiagnostics.snapshot?.enabled) {
+        if (adaptivePickedDiagnostics.snapshot?.enabled
+            || adaptivePickedDiagnostics.snapshot?.transitionPending) {
           adaptivePickedDiagnostics.snapshot = mr_adaptivePickedDiagnostics();
         }
       }
