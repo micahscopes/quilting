@@ -5577,11 +5577,11 @@ async function selectAnimationIndex(idx) {
     if (blockGeneration !== animationPoseBlockGeneration) return;
     const rp = rpResp.data || rpResp;
     if (rp && rp.instances) {
-      setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
       const animationNodes = modelFaceNodes.length === rp.num_faces
         ? modelFaceNodes
         : new Int32Array(rp.num_faces);
       mr_setFaceNodes(animationNodes);
+      setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
       mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
     }
     await workerCall('upload_model_to_compute', {});
@@ -5900,9 +5900,9 @@ async function loadPatchLab(
     currentInstances = new Float32Array(result.instances.buffer || result.instances);
     currentFaceNodes = new Int32Array(result.num_faces);
     currentPrimaryFaceCount = result.num_faces;
+    mr_setFaceNodes(currentFaceNodes);
     setRendererInstanceData(currentInstances, result.num_faces);
     mr_setFaceMaterials(new Int32Array(result.face_materials.buffer || result.face_materials));
-    mr_setFaceNodes(currentFaceNodes);
     rebuildNodeFocusRecords();
 
     // Shape selection starts from a stable inspection frame. Geometry edits
@@ -6014,9 +6014,9 @@ async function loadTestShape(shape, p1, p2) {
     clearSelectedObject();
     currentInstances = new Float32Array(r.instances.buffer || r.instances);
     currentFaceNodes = new Int32Array(r.num_faces);
+    mr_setFaceNodes(currentFaceNodes);
     setRendererInstanceData(currentInstances, r.num_faces);
     mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
-    mr_setFaceNodes(currentFaceNodes);
     rebuildNodeFocusRecords();
     mr_buildBatches(new Float32Array(r.face_lods.buffer || r.face_lods));
     $('remesh-stats').textContent = `${shape}: ${r.num_vertices} verts, ${r.num_faces} faces`;
@@ -6045,9 +6045,9 @@ $('remesh-btn').addEventListener('click', async () => {
         clearSelectedObject();
         currentInstances = new Float32Array(r.instances.buffer || r.instances);
         currentFaceNodes = new Int32Array(r.num_faces);
+        mr_setFaceNodes(currentFaceNodes);
         setRendererInstanceData(currentInstances, r.num_faces);
         mr_setFaceMaterials(new Int32Array(r.face_materials.buffer || r.face_materials));
-        mr_setFaceNodes(currentFaceNodes);
         rebuildNodeFocusRecords();
         mr_buildBatches(new Float32Array(r.face_lods.buffer || r.face_lods));
         remeshedMode = true;
@@ -6070,13 +6070,13 @@ $('remesh-clear-btn').addEventListener('click', async () => {
   if (rp && rp.instances) {
     clearSelectedObject();
     currentInstances = new Float32Array(rp.instances.buffer || rp.instances);
-    setRendererInstanceData(currentInstances, rp.num_faces);
     const restoredNodes = modelFaceNodes.length === rp.num_faces
       ? modelFaceNodes
       : new Int32Array(rp.num_faces);
     currentFaceNodes = restoredNodes;
     if (modelFaceMaterials.length === rp.num_faces) mr_setFaceMaterials(modelFaceMaterials);
     mr_setFaceNodes(currentFaceNodes);
+    setRendererInstanceData(currentInstances, rp.num_faces);
     rebuildNodeFocusRecords();
     mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
   }

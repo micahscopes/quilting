@@ -205,7 +205,6 @@ struct VertexOutput {
 struct PatchPrepareInput {
     @location(7) lod_info: vec4<f32>,
     @location(8) face_info: vec4<f32>,
-    @location(14) node_info: vec4<f32>,
 }
 
 struct PreparedPatchOutput {
@@ -464,7 +463,7 @@ fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
         vert_lod,
         face_data_load(face_index, 8),
         uv2_prepare,
-        vec4<f32>(face_data_load(face_index, 10).xyz, in.node_info.x),
+        face_data_load(face_index, 10),
         face_data_load(face_index, 11),
         face_data_load(face_index, 12),
     );

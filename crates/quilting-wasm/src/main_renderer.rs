@@ -521,13 +521,33 @@ fn fill_batch_instance_data(
             vertex_lods[0],
             vertex_lods[1],
             vertex_lods[2],
-            member.node_index as f32,
-            0.0,
-            0.0,
-            0.0,
         ]);
     }
     Ok(required)
+}
+
+fn embed_face_node_ids(
+    instances: &mut [f32],
+    num_faces: usize,
+    face_nodes: &[usize],
+) -> Result<(), String> {
+    let required = num_faces
+        .checked_mul(instance_layout::STRIDE)
+        .ok_or_else(|| "source-face instance size overflow".to_string())?;
+    if instances.len() < required || face_nodes.len() != num_faces {
+        return Err(format!(
+            "cannot embed {} face nodes into {} floats for {num_faces} faces",
+            face_nodes.len(),
+            instances.len(),
+        ));
+    }
+    for (face, &node) in face_nodes.iter().enumerate() {
+        if node > 16_777_216 {
+            return Err(format!("source node {node} exceeds exact f32 identity range"));
+        }
+        instances[face * instance_layout::STRIDE + instance_layout::offset::NODE_ID] = node as f32;
+    }
+    Ok(())
 }
 
 fn create_gpu_batch(
@@ -2667,11 +2687,23 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             let num_faces = num_faces as usize;
-            if let Err(error) = st.renderer.upload_face_data_texture(instances, num_faces) {
+            if st.face_nodes.len() != num_faces {
+                st.face_nodes = vec![0; num_faces];
+            }
+            let mut next_instances = instances.to_vec();
+            if let Err(error) = embed_face_node_ids(
+                &mut next_instances,
+                num_faces,
+                &st.face_nodes,
+            ) {
+                warn!("Could not embed source-face node identity: {error}");
+                return;
+            }
+            if let Err(error) = st.renderer.upload_face_data_texture(&next_instances, num_faces) {
                 warn!("Could not upload immutable source-face data: {error}");
                 return;
             }
-            st.cached_instances = instances.to_vec();
+            st.cached_instances = next_instances;
             st.num_faces = num_faces;
             st.render_shadow.asset_changed();
             st.render_shadow_scene_dirty = true;
@@ -2688,9 +2720,6 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.classified_culled_faces = st.num_faces;
             st.lod_dirty_faces.clear();
             st.lod_balance_scratch = batch::ResidentLodBalanceScratch::default();
-            if st.face_nodes.len() != st.num_faces {
-                st.face_nodes = vec![0; st.num_faces];
-            }
             st.lod_topology = build_instance_lod_topology(
                 &st.cached_instances,
                 st.num_faces,
@@ -4460,7 +4489,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn compact_batch_record_keeps_semantic_node_separate_from_render_state() {
+    fn stable_face_record_keeps_semantic_node_separate_from_render_state() {
         let resident = batch::ResidentLod::uniform(2);
         let key = batch::RenderBatchKey::from_resident(resident, 7, usize::MAX);
         let members = [batch::RenderBatchMember {
@@ -4481,6 +4510,14 @@ mod tests {
 
         assert_eq!(written, instance_layout::BATCH_TOPOLOGY_STRIDE);
         assert_eq!(staging[instance_layout::batch_offset::FACE_ID], 23.0);
-        assert_eq!(staging[instance_layout::batch_offset::NODE_ID], 91.0);
+
+        let mut instances = vec![0.0; 24 * instance_layout::STRIDE];
+        let mut nodes = vec![0; 24];
+        nodes[23] = 91;
+        embed_face_node_ids(&mut instances, 24, &nodes).unwrap();
+        assert_eq!(
+            instances[23 * instance_layout::STRIDE + instance_layout::offset::NODE_ID],
+            91.0,
+        );
     }
 }
