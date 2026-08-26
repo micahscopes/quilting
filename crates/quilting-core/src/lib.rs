@@ -35,6 +35,8 @@
 //!   descriptions suitable for functional planning and backend memoization.
 //! - [`source_bounds`] — backend-neutral post-model, pre-conformal bounds for
 //!   selection, focus fitting, spatial indexing, and navigation scale.
+//! - [`screen_plan`] — bounded backend-neutral scene frontiers that combine
+//!   raw source LoD requests with metric-adaptive dyadic patch restriction.
 //!
 //! # Invariants worth knowing before editing
 //!
@@ -71,6 +73,7 @@ pub mod screen_metric;
 pub mod screen_domain;
 pub mod screen_partition;
 pub mod screen_leaf_lod;
+pub mod screen_plan;
 
 pub use atlas::TessellationAtlas;
 pub use evaluate::FaceInstance;
