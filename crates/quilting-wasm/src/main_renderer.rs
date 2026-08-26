@@ -3089,6 +3089,166 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
     })
 }
 
+/// Read-only per-source-node LOD diagnostics for browser regression checks.
+///
+/// Aggregate scene histograms hide the exact failure mode of mixed-density
+/// assets such as the chess set: a handful of broad board patches coexist with
+/// tens of thousands of small piece patches. Keep this query off the frame path
+/// and derive it only when DevTools or a test explicitly requests it.
+#[wasm_bindgen(js_name = "mr_debugResidentLodNodes")]
+pub fn mr_debug_resident_lod_nodes() -> JsValue {
+    #[derive(Default)]
+    struct NodeLodDiagnostics {
+        node: u32,
+        faces: u32,
+        visible_faces: u32,
+        missing_requested: u32,
+        missing_resident: u32,
+        anisotropic_faces: u32,
+        max_edge_ratio: u32,
+        resident_triangles: u64,
+        min_source_edge: f64,
+        max_source_edge: f64,
+        max_source_edge_aspect: f64,
+        requested_lod_histogram: BTreeMap<String, u32>,
+        resident_lod_histogram: BTreeMap<String, u32>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct NodeLodDiagnosticsOutput {
+        node: u32,
+        faces: u32,
+        visible_faces: u32,
+        missing_requested: u32,
+        missing_resident: u32,
+        anisotropic_faces: u32,
+        max_edge_ratio: u32,
+        resident_triangles: u64,
+        min_source_edge: f64,
+        max_source_edge: f64,
+        max_source_edge_aspect: f64,
+        requested_lod_histogram: Vec<(String, u32)>,
+        resident_lod_histogram: Vec<(String, u32)>,
+    }
+
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else {
+            return JsValue::NULL;
+        };
+        let mut nodes = BTreeMap::<usize, NodeLodDiagnostics>::new();
+        TESS_CACHE.with(|cache| {
+            let cache = cache.borrow();
+            for face in 0..state.num_faces {
+                let node = state.face_nodes.get(face).copied().unwrap_or(0);
+                let diagnostics = nodes.entry(node).or_insert_with(|| NodeLodDiagnostics {
+                    node: node as u32,
+                    min_source_edge: f64::INFINITY,
+                    max_edge_ratio: 1,
+                    ..NodeLodDiagnostics::default()
+                });
+                diagnostics.faces += 1;
+                diagnostics.visible_faces += u32::from(
+                    state
+                        .classified_face_visibility
+                        .get(face)
+                        .copied()
+                        .unwrap_or(false),
+                );
+
+                match state.requested_face_lods.get(face).and_then(|lod| *lod) {
+                    Some(requested) => {
+                        let [minimum, middle, maximum] = requested.canonical;
+                        *diagnostics
+                            .requested_lod_histogram
+                            .entry(format!("{minimum}/{middle}/{maximum}"))
+                            .or_default() += 1;
+                    }
+                    None => diagnostics.missing_requested += 1,
+                }
+
+                match state.resident_face_lods.get(face).and_then(|lod| *lod) {
+                    Some(resident) => {
+                        let [minimum, middle, maximum] = resident.canonical;
+                        *diagnostics
+                            .resident_lod_histogram
+                            .entry(format!("{minimum}/{middle}/{maximum}"))
+                            .or_default() += 1;
+                        let ratio = maximum / minimum.max(1);
+                        diagnostics.max_edge_ratio = diagnostics.max_edge_ratio.max(ratio);
+                        diagnostics.anisotropic_faces += u32::from(ratio > 1);
+                        diagnostics.resident_triangles += cache
+                            .get(&resident.canonical)
+                            .map_or(0, |patch| patch.num_tri_indices.max(0) as u64 / 3);
+                    }
+                    None => diagnostics.missing_resident += 1,
+                }
+
+                let base = face * instance_layout::STRIDE + instance_layout::offset::POSITIONS;
+                let position = |corner: usize| -> Option<[f64; 3]> {
+                    let offset = base + corner * 4 + 1;
+                    Some([
+                        *state.cached_instances.get(offset)? as f64,
+                        *state.cached_instances.get(offset + 1)? as f64,
+                        *state.cached_instances.get(offset + 2)? as f64,
+                    ])
+                };
+                let distance = |a: [f64; 3], b: [f64; 3]| {
+                    ((a[0] - b[0]).powi(2)
+                        + (a[1] - b[1]).powi(2)
+                        + (a[2] - b[2]).powi(2))
+                    .sqrt()
+                };
+                if let (Some(p0), Some(p1), Some(p2)) =
+                    (position(0), position(1), position(2))
+                {
+                    let edges = [distance(p1, p2), distance(p0, p2), distance(p0, p1)];
+                    let minimum = edges.into_iter().fold(f64::INFINITY, f64::min);
+                    let maximum = edges.into_iter().fold(0.0_f64, f64::max);
+                    if minimum.is_finite() && maximum.is_finite() {
+                        diagnostics.min_source_edge = diagnostics.min_source_edge.min(minimum);
+                        diagnostics.max_source_edge = diagnostics.max_source_edge.max(maximum);
+                        diagnostics.max_source_edge_aspect = diagnostics
+                            .max_source_edge_aspect
+                            .max(maximum / minimum.max(1.0e-30));
+                    }
+                }
+            }
+        });
+        let output = nodes
+            .into_values()
+            .map(|mut diagnostics| {
+                if !diagnostics.min_source_edge.is_finite() {
+                    diagnostics.min_source_edge = 0.0;
+                }
+                NodeLodDiagnosticsOutput {
+                    node: diagnostics.node,
+                    faces: diagnostics.faces,
+                    visible_faces: diagnostics.visible_faces,
+                    missing_requested: diagnostics.missing_requested,
+                    missing_resident: diagnostics.missing_resident,
+                    anisotropic_faces: diagnostics.anisotropic_faces,
+                    max_edge_ratio: diagnostics.max_edge_ratio,
+                    resident_triangles: diagnostics.resident_triangles,
+                    min_source_edge: diagnostics.min_source_edge,
+                    max_source_edge: diagnostics.max_source_edge,
+                    max_source_edge_aspect: diagnostics.max_source_edge_aspect,
+                    requested_lod_histogram: diagnostics
+                        .requested_lod_histogram
+                        .into_iter()
+                        .collect(),
+                    resident_lod_histogram: diagnostics
+                        .resident_lod_histogram
+                        .into_iter()
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        serde_wasm_bindgen::to_value(&output).unwrap_or(JsValue::NULL)
+    })
+}
+
 #[wasm_bindgen(js_name = "mr_setFaceMaterials")]
 pub fn mr_set_face_materials(materials: &[i32]) {
     STATE.with(|s| {
