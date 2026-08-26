@@ -20,6 +20,7 @@ pub(crate) struct NearestTriangle {
     pub stable_index: usize,
     pub barycentric: [f64; 3],
     pub squared_distance: f64,
+    pub orientation: [f64; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -123,6 +124,33 @@ impl TriangleBvh {
         counters: &mut SearchCounters,
         maximum_candidate_tests: usize,
     ) -> Result<Option<NearestTriangle>, SearchError> {
+        self.nearest_filtered(
+            point,
+            Some(source_orientation),
+            scratch,
+            counters,
+            maximum_candidate_tests,
+        )
+    }
+
+    pub fn nearest(
+        &self,
+        point: [f64; 3],
+        scratch: &mut SearchScratch,
+        counters: &mut SearchCounters,
+        maximum_candidate_tests: usize,
+    ) -> Result<Option<NearestTriangle>, SearchError> {
+        self.nearest_filtered(point, None, scratch, counters, maximum_candidate_tests)
+    }
+
+    fn nearest_filtered(
+        &self,
+        point: [f64; 3],
+        source_orientation: Option<[f64; 3]>,
+        scratch: &mut SearchScratch,
+        counters: &mut SearchCounters,
+        maximum_candidate_tests: usize,
+    ) -> Result<Option<NearestTriangle>, SearchError> {
         let Some(root) = self.root else {
             return Ok(None);
         };
@@ -155,7 +183,9 @@ impl TriangleBvh {
                             });
                         }
                         counters.candidate_tests = attempted;
-                        if geometry::vec3_dot(source_orientation, triangle.orientation) <= 0.0 {
+                        if source_orientation.is_some_and(|source| {
+                            geometry::vec3_dot(source, triangle.orientation) <= 0.0
+                        }) {
                             continue;
                         }
                         let barycentric = closest_barycentric(point, triangle.positions);
@@ -172,6 +202,7 @@ impl TriangleBvh {
                                 stable_index: triangle.stable_index,
                                 barycentric,
                                 squared_distance,
+                                orientation: triangle.orientation,
                             });
                         }
                     }
@@ -364,6 +395,7 @@ mod tests {
                     stable_index: triangle.stable_index,
                     barycentric,
                     squared_distance,
+                    orientation: triangle.orientation,
                 });
             }
         }
@@ -487,6 +519,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(hit.stable_index, 3);
+    }
+
+    #[test]
+    fn unfiltered_search_does_not_hide_a_nearer_opposite_face() {
+        let mut near = triangle(1, 0.0);
+        near.orientation = [0.0, 0.0, -1.0];
+        let far = triangle(2, 2.0);
+        let bvh = TriangleBvh::new(vec![near, far]);
+        let mut scratch = SearchScratch::default();
+        let mut counters = SearchCounters::default();
+        let unfiltered = bvh
+            .nearest([0.2, 0.2, 0.0], &mut scratch, &mut counters, usize::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unfiltered.stable_index, 1);
+
+        let compatible = bvh
+            .nearest_orientation_compatible(
+                [0.2, 0.2, 0.0],
+                [0.0, 0.0, 1.0],
+                &mut scratch,
+                &mut counters,
+                usize::MAX,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(compatible.stable_index, 2);
     }
 
     #[test]

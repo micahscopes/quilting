@@ -11,7 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::coarse_complex::{
     cut_source_topology, validate_cut_chart, ChartKey, CoarseComplexError, CoarseComplexInput,
-    CutChart, CutEdge, CutVertex, CutVertexKey, SourceVertexId,
+    CutChart, CutEdge, CutVertex, CutVertexKey, SourceFaceId, SourceVertexId,
+};
+use crate::triangle_bvh::{
+    IndexedTriangle, SearchCounters, SearchError, SearchScratch, TriangleBvh,
 };
 
 /// Per-chart reduction policy. Targets are requests: locked chart boundaries
@@ -23,6 +26,11 @@ pub struct CoarseReductionConfig {
     /// Maximum meshoptimizer error relative to each normalized chart extent,
     /// in `[0, 1]`.
     pub target_error: f32,
+    /// Maximum source normal deviation from the true nearest reduced triangle
+    /// at four deterministic interior samples per source face, in degrees.
+    /// This is a sampled geometric-quality gate, not a fold-free certificate
+    /// and not part of meshoptimizer's position error.
+    pub maximum_normal_deviation_degrees: f64,
 }
 
 impl Default for CoarseReductionConfig {
@@ -30,6 +38,7 @@ impl Default for CoarseReductionConfig {
         Self {
             target_ratio: 0.25,
             target_error: 0.01,
+            maximum_normal_deviation_degrees: 60.0,
         }
     }
 }
@@ -50,8 +59,9 @@ pub struct ReducedChart {
     /// assumed to be monotone, so this is not claimed to be the globally
     /// smallest valid target.
     pub selected_target_triangles: usize,
-    /// True when every attempted backend candidate failed and the independently
-    /// validated exact source chart was selected instead.
+    /// True when the independently validated exact source chart was selected,
+    /// either because every attempted backend candidate failed or because a
+    /// later complete-fit quality gate requested exact topology.
     pub used_source_fallback: bool,
     /// Number of meshoptimizer candidates evaluated for this chart.
     pub backend_attempts: usize,
@@ -61,14 +71,28 @@ pub struct ReducedChart {
     /// Relative meshoptimizer error in normalized chart coordinates. `None`
     /// means exact source topology was selected without a backend result.
     pub backend_result_error: Option<f32>,
+    /// Maximum sampled linear-normal deviation retained for calibration. This
+    /// is zero for exact-source fallback.
+    pub maximum_normal_deviation_degrees: f64,
 }
 
 /// Compact, actionable evidence for one rejected meshoptimizer candidate.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RejectedReductionCandidate {
     pub target_triangles: usize,
     pub category: ReductionRejectionCategory,
     pub reason: &'static str,
+    pub quality: Option<ReductionQualityEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReductionQualityEvidence {
+    pub source_face: SourceFaceId,
+    pub source_sample_ordinal: u8,
+    pub matched_coarse_face: usize,
+    pub measured_millidegrees: u32,
+    pub maximum_millidegrees: u32,
+    pub normalized_squared_distance: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -77,6 +101,7 @@ pub enum ReductionRejectionCategory {
     InvalidMeshoptOutput,
     InvalidReducedTopology,
     BoundaryChanged,
+    GeometricQuality,
     Unexpected,
 }
 
@@ -87,6 +112,7 @@ impl std::fmt::Display for ReductionRejectionCategory {
             Self::InvalidMeshoptOutput => "invalid-meshopt-output",
             Self::InvalidReducedTopology => "invalid-reduced-topology",
             Self::BoundaryChanged => "boundary-changed",
+            Self::GeometricQuality => "geometric-quality",
             Self::Unexpected => "unexpected-candidate-error",
         };
         formatter.write_str(name)
@@ -105,6 +131,8 @@ pub enum CoarseReductionError {
     Topology(CoarseComplexError),
     InvalidTargetRatio(f64),
     InvalidTargetError(f32),
+    InvalidMaximumNormalDeviation(f64),
+    UnknownSourceFallback(ChartKey),
     CountOverflow,
     IndexOverflow {
         chart: ChartKey,
@@ -129,6 +157,15 @@ pub enum CoarseReductionError {
     BoundaryChanged {
         chart: ChartKey,
     },
+    GeometricQualityExceeded {
+        chart: ChartKey,
+        source_face: SourceFaceId,
+        source_sample_ordinal: u8,
+        matched_coarse_face: usize,
+        measured_millidegrees: u32,
+        maximum_millidegrees: u32,
+        normalized_squared_distance: f64,
+    },
 }
 
 impl std::fmt::Display for CoarseReductionError {
@@ -141,6 +178,15 @@ impl std::fmt::Display for CoarseReductionError {
             Self::InvalidTargetError(value) => {
                 write!(formatter, "coarse reduction error {value} is not in [0, 1]")
             }
+            Self::InvalidMaximumNormalDeviation(value) => write!(
+                formatter,
+                "maximum normal deviation {value} is not in [0, 90] degrees",
+            ),
+            Self::UnknownSourceFallback(chart) => write!(
+                formatter,
+                "requested source fallback chart {:?} is not present",
+                chart.source_faces,
+            ),
             Self::CountOverflow => write!(formatter, "coarse reduction dimensions overflow usize"),
             Self::IndexOverflow { chart } => write!(
                 formatter,
@@ -172,6 +218,22 @@ impl std::fmt::Display for CoarseReductionError {
                 "reduction changed an owned boundary in chart {:?}",
                 chart.source_faces,
             ),
+            Self::GeometricQualityExceeded {
+                chart,
+                source_face,
+                source_sample_ordinal,
+                matched_coarse_face,
+                measured_millidegrees,
+                maximum_millidegrees,
+                normalized_squared_distance,
+            } => write!(
+                formatter,
+                "reduced chart {:?} source face {source_face:?} sample {source_sample_ordinal} nearest coarse face {matched_coarse_face} has {:.3}° linear-normal deviation (limit {:.3}°) at normalized squared distance {:.6e}",
+                chart.source_faces,
+                *measured_millidegrees as f64 / 1_000.0,
+                *maximum_millidegrees as f64 / 1_000.0,
+                normalized_squared_distance,
+            ),
         }
     }
 }
@@ -188,8 +250,20 @@ type Edge = (usize, usize);
 type CompactChart = (Vec<CutVertex>, Vec<[usize; 3]>, Vec<[usize; 2]>);
 
 struct NormalizedPositions {
+    center: [f64; 3],
+    extent: f64,
     exact: Vec<[f64; 3]>,
     quantized: Vec<[f32; 3]>,
+}
+
+impl NormalizedPositions {
+    fn point(&self, position: [f64; 3]) -> [f64; 3] {
+        [
+            (position[0] - self.center[0]) / self.extent,
+            (position[1] - self.center[1]) / self.extent,
+            (position[2] - self.center[2]) / self.extent,
+        ]
+    }
 }
 
 fn edge(left: usize, right: usize) -> Edge {
@@ -214,6 +288,13 @@ fn validate_config(config: &CoarseReductionConfig) -> Result<(), CoarseReduction
     if !config.target_error.is_finite() || config.target_error < 0.0 || config.target_error > 1.0 {
         return Err(CoarseReductionError::InvalidTargetError(
             config.target_error,
+        ));
+    }
+    if !config.maximum_normal_deviation_degrees.is_finite()
+        || !(0.0..=90.0).contains(&config.maximum_normal_deviation_degrees)
+    {
+        return Err(CoarseReductionError::InvalidMaximumNormalDeviation(
+            config.maximum_normal_deviation_degrees,
         ));
     }
     Ok(())
@@ -257,7 +338,12 @@ fn normalized_positions(chart: &CutChart) -> Result<NormalizedPositions, CoarseR
         .iter()
         .map(|position| position.map(|component| component as f32))
         .collect();
-    Ok(NormalizedPositions { exact, quantized })
+    Ok(NormalizedPositions {
+        center,
+        extent,
+        exact,
+        quantized,
+    })
 }
 
 fn requested_triangles(input_triangles: usize, ratio: f64) -> Result<usize, CoarseReductionError> {
@@ -313,6 +399,7 @@ fn rejection_evidence(
     target_triangles: usize,
     error: CoarseReductionError,
 ) -> RejectedReductionCandidate {
+    let mut quality = None;
     let (category, reason) = match error {
         CoarseReductionError::CountOverflow => (
             ReductionRejectionCategory::CountOverflow,
@@ -328,6 +415,28 @@ fn rejection_evidence(
             ReductionRejectionCategory::BoundaryChanged,
             "stable chart boundary changed",
         ),
+        CoarseReductionError::GeometricQualityExceeded {
+            source_face,
+            source_sample_ordinal,
+            matched_coarse_face,
+            measured_millidegrees,
+            maximum_millidegrees,
+            normalized_squared_distance,
+            ..
+        } => {
+            quality = Some(ReductionQualityEvidence {
+                source_face,
+                source_sample_ordinal,
+                matched_coarse_face,
+                measured_millidegrees,
+                maximum_millidegrees,
+                normalized_squared_distance,
+            });
+            (
+                ReductionRejectionCategory::GeometricQuality,
+                "source interior sample exceeds the linear-normal deviation limit",
+            )
+        }
         _ => (
             ReductionRejectionCategory::Unexpected,
             "candidate evaluation returned an unexpected error category",
@@ -337,6 +446,7 @@ fn rejection_evidence(
         target_triangles,
         category,
         reason,
+        quality,
     }
 }
 
@@ -527,6 +637,101 @@ fn validate_meshopt_output_geometry(
     Ok(())
 }
 
+fn millidegrees(degrees: f64) -> u32 {
+    (degrees.clamp(0.0, 180.0) * 1_000.0).round() as u32
+}
+
+const QUALITY_SAMPLE_BARYCENTRICS: [[f64; 3]; 4] = [
+    [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
+    [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+    [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
+    [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+];
+
+fn validate_candidate_quality(
+    source: &CutChart,
+    positions: &NormalizedPositions,
+    candidate_vertices: &[CutVertex],
+    candidate_triangles: &[[usize; 3]],
+    maximum_normal_deviation_degrees: f64,
+) -> Result<f64, CoarseReductionError> {
+    let candidate_index = TriangleBvh::new(
+        candidate_triangles
+            .iter()
+            .enumerate()
+            .map(|(stable_index, triangle)| {
+                let triangle =
+                    triangle.map(|vertex| positions.point(candidate_vertices[vertex].position));
+                IndexedTriangle {
+                    stable_index,
+                    positions: triangle,
+                    orientation: crate::geometry::vec3_cross(
+                        crate::geometry::vec3_sub(triangle[1], triangle[0]),
+                        crate::geometry::vec3_sub(triangle[2], triangle[0]),
+                    ),
+                }
+            })
+            .collect(),
+    );
+    let mut scratch = SearchScratch::default();
+    let mut counters = SearchCounters::default();
+    let minimum_cosine = if maximum_normal_deviation_degrees == 90.0 {
+        0.0
+    } else {
+        maximum_normal_deviation_degrees.to_radians().cos()
+    };
+    let mut maximum_measured_degrees = 0.0f64;
+    for (local_face, triangle) in source.triangles.iter().enumerate() {
+        let source_triangle = triangle.map(|vertex| positions.exact[vertex]);
+        let source_orientation = crate::geometry::vec3_cross(
+            crate::geometry::vec3_sub(source_triangle[1], source_triangle[0]),
+            crate::geometry::vec3_sub(source_triangle[2], source_triangle[0]),
+        );
+        for (sample_ordinal, barycentric) in QUALITY_SAMPLE_BARYCENTRICS.iter().enumerate() {
+            let sample = [
+                source_triangle[0][0] * barycentric[0]
+                    + source_triangle[1][0] * barycentric[1]
+                    + source_triangle[2][0] * barycentric[2],
+                source_triangle[0][1] * barycentric[0]
+                    + source_triangle[1][1] * barycentric[1]
+                    + source_triangle[2][1] * barycentric[2],
+                source_triangle[0][2] * barycentric[0]
+                    + source_triangle[1][2] * barycentric[1]
+                    + source_triangle[2][2] * barycentric[2],
+            ];
+            let hit = candidate_index
+                .nearest(sample, &mut scratch, &mut counters, usize::MAX)
+                .map_err(|error| match error {
+                    SearchError::CountOverflow | SearchError::CandidateBudgetExceeded { .. } => {
+                        CoarseReductionError::CountOverflow
+                    }
+                })?
+                .ok_or_else(|| CoarseReductionError::InvalidMeshoptOutput {
+                    chart: source.key.clone(),
+                    reason: "the validated candidate has no triangle for quality sampling",
+                })?;
+            let denominator = crate::geometry::vec3_len(source_orientation)
+                * crate::geometry::vec3_len(hit.orientation);
+            let cosine =
+                crate::geometry::vec3_dot(source_orientation, hit.orientation) / denominator;
+            let measured_degrees = cosine.clamp(-1.0, 1.0).acos().to_degrees();
+            if !cosine.is_finite() || cosine < minimum_cosine {
+                return Err(CoarseReductionError::GeometricQualityExceeded {
+                    chart: source.key.clone(),
+                    source_face: source.key.source_faces[local_face],
+                    source_sample_ordinal: sample_ordinal as u8,
+                    matched_coarse_face: hit.stable_index,
+                    measured_millidegrees: millidegrees(measured_degrees),
+                    maximum_millidegrees: millidegrees(maximum_normal_deviation_degrees),
+                    normalized_squared_distance: hit.squared_distance,
+                });
+            }
+            maximum_measured_degrees = maximum_measured_degrees.max(measured_degrees);
+        }
+    }
+    Ok(maximum_measured_degrees)
+}
+
 fn compact_and_validate(
     source: &CutChart,
     indices: &[u32],
@@ -602,6 +807,7 @@ fn compact_and_validate(
 fn reduce_chart(
     source: &CutChart,
     config: &CoarseReductionConfig,
+    force_source: bool,
 ) -> Result<ReducedChart, CoarseReductionError> {
     if source.vertices.len() > u32::MAX as usize {
         return Err(CoarseReductionError::IndexOverflow {
@@ -628,9 +834,10 @@ fn reduce_chart(
     let input_index_count = indices.len();
     let requested = requested_triangles(source_triangles, config.target_ratio)?;
     let (source_vertices, source_faces, source_boundary) = compact_and_validate(source, &indices)?;
-    let source_value = (source_vertices, source_faces, source_boundary, None);
+    let source_value = (source_vertices, source_faces, source_boundary, None, 0.0);
     let (selected_target_triangles, selected, backend_attempts, rejected_candidates) = if requested
         < source_triangles
+        && !force_source
     {
         let positions = normalized_positions(source)?;
         validate_backend_geometry(source, &positions)?;
@@ -667,7 +874,20 @@ fn reduce_chart(
             }
             validate_meshopt_output_geometry(source, &positions, &result)?;
             let (vertices, triangles, boundary_edges) = compact_and_validate(source, &result)?;
-            Ok((vertices, triangles, boundary_edges, Some(result_error)))
+            let maximum_normal_deviation_degrees = validate_candidate_quality(
+                source,
+                &positions,
+                &vertices,
+                &triangles,
+                config.maximum_normal_deviation_degrees,
+            )?;
+            Ok((
+                vertices,
+                triangles,
+                boundary_edges,
+                Some(result_error),
+                maximum_normal_deviation_degrees,
+            ))
         })
     } else {
         (source_triangles, source_value, 0, Vec::new())
@@ -676,7 +896,13 @@ fn reduce_chart(
         .into_iter()
         .map(|(target, error)| rejection_evidence(target, error))
         .collect::<Vec<_>>();
-    let (vertices, triangles, boundary_edges, backend_result_error) = selected;
+    let (
+        vertices,
+        triangles,
+        boundary_edges,
+        backend_result_error,
+        maximum_normal_deviation_degrees,
+    ) = selected;
     let used_source_fallback = requested < source_triangles && backend_result_error.is_none();
     Ok(ReducedChart {
         key: source.key.clone(),
@@ -690,6 +916,7 @@ fn reduce_chart(
         backend_attempts,
         rejected_candidates,
         backend_result_error,
+        maximum_normal_deviation_degrees,
     })
 }
 
@@ -699,12 +926,31 @@ pub fn reduce_source_charts(
     input: &CoarseComplexInput<'_>,
     config: &CoarseReductionConfig,
 ) -> Result<ReducedSourceCharts, CoarseReductionError> {
+    reduce_source_charts_with_fallbacks(input, config, &BTreeSet::new())
+}
+
+/// Reduce source charts while selecting exact source topology for the named
+/// charts. This supports deterministic fit-quality backoff after a complete QB
+/// fit exposes a defect that linear reduction validation cannot see.
+pub fn reduce_source_charts_with_fallbacks(
+    input: &CoarseComplexInput<'_>,
+    config: &CoarseReductionConfig,
+    source_fallbacks: &BTreeSet<ChartKey>,
+) -> Result<ReducedSourceCharts, CoarseReductionError> {
     validate_config(config)?;
     let topology = cut_source_topology(input)?;
+    let available = topology
+        .charts
+        .iter()
+        .map(|chart| chart.key.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(missing) = source_fallbacks.difference(&available).next() {
+        return Err(CoarseReductionError::UnknownSourceFallback(missing.clone()));
+    }
     let charts = topology
         .charts
         .iter()
-        .map(|chart| reduce_chart(chart, config))
+        .map(|chart| reduce_chart(chart, config, source_fallbacks.contains(&chart.key)))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ReducedSourceCharts {
         charts,
@@ -767,8 +1013,14 @@ mod tests {
         usize,
         bool,
         usize,
-        Vec<(usize, ReductionRejectionCategory, &'static str)>,
+        Vec<(
+            usize,
+            ReductionRejectionCategory,
+            &'static str,
+            Option<(SourceFaceId, u8, usize, u32, u32, u64)>,
+        )>,
         Option<u32>,
+        u64,
     );
 
     struct Grid {
@@ -859,10 +1111,21 @@ mod tests {
                                 candidate.target_triangles,
                                 candidate.category,
                                 candidate.reason,
+                                candidate.quality.map(|quality| {
+                                    (
+                                        quality.source_face,
+                                        quality.source_sample_ordinal,
+                                        quality.matched_coarse_face,
+                                        quality.measured_millidegrees,
+                                        quality.maximum_millidegrees,
+                                        quality.normalized_squared_distance.to_bits(),
+                                    )
+                                }),
                             )
                         })
                         .collect(),
                     chart.backend_result_error.map(f32::to_bits),
+                    chart.maximum_normal_deviation_degrees.to_bits(),
                 )
             })
             .collect()
@@ -921,6 +1184,7 @@ mod tests {
             &CoarseReductionConfig {
                 target_ratio: 0.25,
                 target_error: 1.0,
+                ..CoarseReductionConfig::default()
             },
         )
         .unwrap();
@@ -949,6 +1213,7 @@ mod tests {
             &CoarseReductionConfig {
                 target_ratio: 0.25,
                 target_error: 1.0,
+                ..CoarseReductionConfig::default()
             },
         )
         .unwrap();
@@ -964,10 +1229,40 @@ mod tests {
             &CoarseReductionConfig {
                 target_ratio: 0.25,
                 target_error: 1.0,
+                ..CoarseReductionConfig::default()
             },
         )
         .unwrap();
         assert_eq!(signature(&reduced), signature(&tiny_reduced));
+    }
+
+    #[test]
+    fn stable_chart_key_can_force_an_exact_source_fallback() {
+        let source = grid(5);
+        let ordinary =
+            reduce_source_charts(&input(&source), &CoarseReductionConfig::default()).unwrap();
+        let key = ordinary.charts[0].key.clone();
+        let forced = reduce_source_charts_with_fallbacks(
+            &input(&source),
+            &CoarseReductionConfig::default(),
+            &BTreeSet::from([key.clone()]),
+        )
+        .unwrap();
+        assert_eq!(forced.charts[0].triangles.len(), source.triangles.len());
+        assert!(forced.charts[0].used_source_fallback);
+        assert_eq!(forced.charts[0].backend_attempts, 0);
+        assert_eq!(forced.charts[0].maximum_normal_deviation_degrees, 0.0);
+
+        let mut missing = key;
+        missing.domain = u32::MAX;
+        assert!(matches!(
+            reduce_source_charts_with_fallbacks(
+                &input(&source),
+                &CoarseReductionConfig::default(),
+                &BTreeSet::from([missing.clone()]),
+            ),
+            Err(CoarseReductionError::UnknownSourceFallback(chart)) if chart == missing
+        ));
     }
 
     #[test]
@@ -997,6 +1292,7 @@ mod tests {
             &CoarseReductionConfig {
                 target_ratio: 0.5,
                 target_error: 1.0,
+                ..CoarseReductionConfig::default()
             },
         )
         .unwrap();
@@ -1042,6 +1338,7 @@ mod tests {
                 &CoarseReductionConfig {
                     target_ratio: 0.5,
                     target_error: 1.0,
+                    ..CoarseReductionConfig::default()
                 },
             ),
             Err(CoarseReductionError::PositionCollision { left, right, .. })
@@ -1098,6 +1395,7 @@ mod tests {
                 &CoarseReductionConfig {
                     target_ratio: 0.5,
                     target_error: 1.0,
+                    ..CoarseReductionConfig::default()
                 },
             ),
             Err(CoarseReductionError::InvalidBackendGeometry {
@@ -1124,6 +1422,31 @@ mod tests {
             validate_meshopt_output_geometry(&chart, &positions, &[0, 1, 2]),
             Err(CoarseReductionError::InvalidMeshoptOutput {
                 reason: "an output triangle becomes degenerate after f32 normalization",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn sampled_normal_gate_rejects_a_nearby_folded_candidate() {
+        let source = grid(2);
+        let chart = cut_source_topology(&input(&source))
+            .unwrap()
+            .charts
+            .remove(0);
+        let positions = normalized_positions(&chart).unwrap();
+        let exact =
+            validate_candidate_quality(&chart, &positions, &chart.vertices, &chart.triangles, 60.0)
+                .unwrap();
+        assert!(exact < 1.0e-8);
+
+        let mut folded = chart.vertices.clone();
+        folded[3].position[2] = 10.0;
+        assert!(matches!(
+            validate_candidate_quality(&chart, &positions, &folded, &chart.triangles, 60.0),
+            Err(CoarseReductionError::GeometricQualityExceeded {
+                measured_millidegrees: 84_289..,
+                maximum_millidegrees: 60_000,
                 ..
             })
         ));
@@ -1169,6 +1492,16 @@ mod tests {
                 },
             ),
             Err(CoarseReductionError::InvalidTargetError(value)) if value.is_nan()
+        ));
+        assert!(matches!(
+            reduce_source_charts(
+                &input(&source),
+                &CoarseReductionConfig {
+                    maximum_normal_deviation_degrees: 90.1,
+                    ..CoarseReductionConfig::default()
+                },
+            ),
+            Err(CoarseReductionError::InvalidMaximumNormalDeviation(90.1))
         ));
     }
 }

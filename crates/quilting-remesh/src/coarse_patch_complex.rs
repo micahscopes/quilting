@@ -14,7 +14,7 @@ use crate::coarse_complex::{
     CutVertexKey, SourceFaceId, SourceVertexId,
 };
 use crate::coarse_reduction::{
-    reduce_source_charts, CoarseReductionConfig, CoarseReductionError, ReducedChart,
+    reduce_source_charts_with_fallbacks, CoarseReductionConfig, CoarseReductionError, ReducedChart,
     ReducedSourceCharts, RejectedReductionCandidate,
 };
 use crate::geometry;
@@ -94,6 +94,7 @@ pub struct ChartReductionReport {
     pub backend_attempts: usize,
     pub rejected_candidates: Vec<RejectedReductionCandidate>,
     pub backend_result_error: Option<f32>,
+    pub maximum_normal_deviation_degrees: f64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -496,6 +497,7 @@ fn assemble(
             backend_attempts: chart.backend_attempts,
             rejected_candidates: chart.rejected_candidates.clone(),
             backend_result_error: chart.backend_result_error,
+            maximum_normal_deviation_degrees: chart.maximum_normal_deviation_degrees,
         });
         for triangle in &chart.triangles {
             let global = rotate_face(
@@ -835,6 +837,17 @@ pub fn build_coarse_patch_complex(
     input: &CoarseComplexInput<'_>,
     config: &CoarsePatchConfig,
 ) -> Result<CoarsePatchComplex, CoarsePatchError> {
+    build_coarse_patch_complex_with_fallbacks(input, config, &BTreeSet::new())
+}
+
+/// Build a coarse complex while retaining exact source topology for selected
+/// stable charts. Callers can use this after a complete shared fit reveals a
+/// sampled quality defect that reduction-only validation cannot predict.
+pub fn build_coarse_patch_complex_with_fallbacks(
+    input: &CoarseComplexInput<'_>,
+    config: &CoarsePatchConfig,
+    source_fallbacks: &BTreeSet<ChartKey>,
+) -> Result<CoarsePatchComplex, CoarsePatchError> {
     validate_config(config)?;
     let sample_count = input
         .triangles
@@ -852,7 +865,7 @@ pub fn build_coarse_patch_complex(
             maximum: config.maximum_correspondence_samples,
         });
     }
-    let reduced = reduce_source_charts(input, &config.reduction)?;
+    let reduced = reduce_source_charts_with_fallbacks(input, &config.reduction, source_fallbacks)?;
     let assembled = assemble(input, &reduced)?;
     let (correspondence, correspondence_diagnostics) =
         correspondence(input, &reduced.charts, &assembled, config)?;
@@ -945,6 +958,7 @@ mod tests {
             reduction: CoarseReductionConfig {
                 target_ratio: 0.25,
                 target_error: 1.0,
+                ..CoarseReductionConfig::default()
             },
             correspondence_subdivisions: 2,
             max_correspondence_distance_ratio: 0.1,
@@ -1046,6 +1060,7 @@ mod tests {
                 reduction: CoarseReductionConfig {
                     target_ratio: 1.0,
                     target_error: 0.0,
+                    ..CoarseReductionConfig::default()
                 },
                 correspondence_subdivisions: 1,
                 max_correspondence_distance_ratio: 0.1,
@@ -1103,6 +1118,7 @@ mod tests {
                 reduction: CoarseReductionConfig {
                     target_ratio: 1.0,
                     target_error: 0.0,
+                    ..CoarseReductionConfig::default()
                 },
                 correspondence_subdivisions: 1,
                 max_correspondence_distance_ratio: 0.1,
@@ -1147,6 +1163,7 @@ mod tests {
                 reduction: CoarseReductionConfig {
                     target_ratio: 1.0,
                     target_error: 0.0,
+                    ..CoarseReductionConfig::default()
                 },
                 correspondence_subdivisions: 1,
                 max_correspondence_distance_ratio: 0.1,
