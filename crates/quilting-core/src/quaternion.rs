@@ -275,6 +275,29 @@ impl Mobius {
         (self.a * x + self.b) * (self.c * x + self.d).inv()
     }
 
+    /// Apply the exact differential of this Möbius map at `x` to tangent `v`.
+    ///
+    /// For `F(x) = (a x + b) (c x + d)⁻¹`, differentiating the quotient gives
+    ///
+    /// `D F(x)[v] = (a - F(x)c) v (c x + d)⁻¹`.
+    ///
+    /// Returns `None` where the denominator is inside the shared CPU/GPU pole
+    /// guard, because the mathematical map has no finite differential there.
+    #[inline]
+    pub fn try_apply_differential(&self, x: Quat, v: Quat) -> Option<Quat> {
+        let denominator = self.c * x + self.d;
+        if denominator.norm_sq() < SINGULARITY_NORM_SQ {
+            return None;
+        }
+        let denominator_inverse = denominator.inv();
+        let mapped = (self.a * x + self.b) * denominator_inverse;
+        let differential = (self.a - mapped * self.c) * v * denominator_inverse;
+        [differential.w, differential.x, differential.y, differential.z]
+            .iter()
+            .all(|component| component.is_finite())
+            .then_some(differential)
+    }
+
     /// Local conformal length scale at `x`.
     ///
     /// For `F(x) = (a x + b) (c x + d)⁻¹`, the differential sends a tangent
@@ -411,6 +434,56 @@ mod tests {
     fn approx_eq(a: Quat, b: Quat) -> bool {
         (a.w - b.w).abs() < EPS && (a.x - b.x).abs() < EPS
             && (a.y - b.y).abs() < EPS && (a.z - b.z).abs() < EPS
+    }
+
+    fn assert_differential_matches_central_difference(map: Mobius, point: Quat, tangent: Quat) {
+        let epsilon = 1.0e-6;
+        let finite_difference =
+            (map.apply(point + tangent * epsilon) - map.apply(point - tangent * epsilon))
+                / (2.0 * epsilon);
+        let analytic = map.try_apply_differential(point, tangent).unwrap();
+        let scale = finite_difference.norm().max(analytic.norm()).max(1.0);
+        assert!(
+            (analytic - finite_difference).norm() <= 2.0e-8 * scale,
+            "analytic {analytic:?}, finite difference {finite_difference:?}",
+        );
+    }
+
+    #[test]
+    fn exact_differential_matches_rotation_scale_and_reflection() {
+        let point = Quat::from_point(0.7, -0.4, 1.2);
+        let tangent = Quat::from_point(-0.3, 0.9, 0.2);
+        assert_differential_matches_central_difference(
+            Mobius::rotation(0.2, -0.7, 0.4, 0.9),
+            point,
+            tangent,
+        );
+        assert_differential_matches_central_difference(Mobius::scale(7.0), point, tangent);
+        assert_differential_matches_central_difference(
+            Mobius::sphere_reflection(Quat::from_point(2.0, 0.5, -1.0), 1.7),
+            point,
+            tangent,
+        );
+    }
+
+    #[test]
+    fn differential_obeys_composition_and_is_undefined_at_a_pole() {
+        let first = Mobius::sphere_reflection(Quat::from_point(2.0, -0.5, 0.3), 1.7);
+        let second = Mobius::rotation(-0.4, 0.8, 0.2, 0.6);
+        let combined = second.compose(&first);
+        let point = Quat::from_point(0.2, 0.7, -1.1);
+        let tangent = Quat::from_point(0.3, -0.1, 0.9);
+        let intermediate_point = first.apply(point);
+        let intermediate_tangent = first.try_apply_differential(point, tangent).unwrap();
+        let staged = second
+            .try_apply_differential(intermediate_point, intermediate_tangent)
+            .unwrap();
+        let direct = combined.try_apply_differential(point, tangent).unwrap();
+        let scale = staged.norm().max(direct.norm()).max(1.0);
+        assert!((staged - direct).norm() <= 1.0e-11 * scale);
+        assert!(Mobius::inversion()
+            .try_apply_differential(Quat::ZERO, tangent)
+            .is_none());
     }
 
     #[test]
