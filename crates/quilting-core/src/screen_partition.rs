@@ -80,6 +80,17 @@ pub struct ScreenPatchDiagnostic {
     pub unprojectable: bool,
 }
 
+/// One local power-of-two LoD decision inside a requested screen-pixel band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenSubdivisionBand {
+    pub demand: [u32; 3],
+    pub capacity: [u32; 3],
+    pub requested: [u32; 3],
+    /// At least one edge has no power-of-two level satisfying both bounds.
+    /// The pixel floor remains authoritative in that case.
+    pub saturated: bool,
+}
+
 impl ScreenPatchDiagnostic {
     fn below_pixel_extent(&self, policy: ScreenPartitionPolicy) -> bool {
         let max_directional_extent = self
@@ -151,6 +162,44 @@ impl ScreenPatchDiagnostic {
             };
             capacity.clamp(1, lod_cap)
         }))
+    }
+
+    /// Resolve inherited density against this leaf's local pixel band.
+    ///
+    /// The source request retains world/curvature intent, the floor is a hard
+    /// raster-capacity ceiling, and the optional pixel ceiling raises quality
+    /// only within that capacity. Returning all three arrays keeps diagnostic
+    /// oracles bit-for-bit aligned with live planning.
+    pub fn resolve_subdivision_band(
+        &self,
+        inherited: [u32; 3],
+        min_px_per_segment: f64,
+        max_px_per_segment: f64,
+        max_lod: u32,
+    ) -> Option<ScreenSubdivisionBand> {
+        if inherited
+            .iter()
+            .any(|lod| !lod.is_power_of_two() || *lod > max_lod)
+        {
+            return None;
+        }
+        let demand = self.edge_subdivision_demand(max_px_per_segment, max_lod)?;
+        let capacity = self.edge_subdivision_capacity(min_px_per_segment, max_lod)?;
+        let saturated = demand
+            .iter()
+            .zip(capacity)
+            .any(|(demand, capacity)| *demand > capacity);
+        let requested = std::array::from_fn(|edge| {
+            inherited[edge]
+                .min(capacity[edge])
+                .max(demand[edge].min(capacity[edge]))
+        });
+        Some(ScreenSubdivisionBand {
+            demand,
+            capacity,
+            requested,
+            saturated,
+        })
     }
 }
 

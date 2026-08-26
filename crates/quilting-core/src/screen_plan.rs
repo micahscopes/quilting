@@ -530,9 +530,14 @@ pub fn plan_adaptive_screen_mesh(
             request.viewport,
             request.policy,
         )?;
-        if partition.unmet_leaves != 0 {
+        let unresolved_boundary_leaves = partition
+            .leaves
+            .iter()
+            .filter(|leaf| leaf.status.is_drawable() && leaf.metric_diagnostic.is_none())
+            .count();
+        if unresolved_boundary_leaves != 0 {
             return Err(PickedScreenMeshPlanError::UnmetPartition {
-                leaves: partition.unmet_leaves,
+                leaves: unresolved_boundary_leaves,
             });
         }
         split_nodes = split_nodes
@@ -571,28 +576,22 @@ pub fn plan_adaptive_screen_mesh(
                     let diagnostic = leaf
                         .metric_diagnostic
                         .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
-                    let demand = diagnostic
-                        .edge_subdivision_demand(request.max_px_per_segment, request.max_atlas_lod)
+                    let band = diagnostic
+                        .resolve_subdivision_band(
+                            inherited,
+                            request.min_px_per_segment,
+                            request.max_px_per_segment,
+                            request.max_atlas_lod,
+                        )
                         .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
-                    let capacity = diagnostic
-                        .edge_subdivision_capacity(request.min_px_per_segment, request.max_atlas_lod)
-                        .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
-                    if demand
-                        .iter()
-                        .zip(capacity)
-                        .any(|(demand, capacity)| *demand > capacity)
-                    {
+                    if band.saturated {
                         // A discrete power-of-two level cannot satisfy both
                         // sides of this local pixel band. Preserve the existing
                         // pixel-floor authority (never add known subpixel
                         // density) and report the unsatisfied quality ceiling.
                         saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
                     }
-                    std::array::from_fn(|edge| {
-                        inherited[edge]
-                            .min(capacity[edge])
-                            .max(demand[edge].min(capacity[edge]))
-                    })
+                    band.requested
                 } else {
                     // A live-view plan retains culled leaves because the render
                     // GPU can resurrect them before the asynchronous classifier.
@@ -687,6 +686,7 @@ pub fn plan_picked_screen_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quaternion::{Mobius, Quat};
 
     #[test]
     fn face_selector_keeps_the_most_expensive_visible_roots() {
@@ -1007,6 +1007,95 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert!(absolute_maxima.len() > 1);
         assert!(absolute_maxima.iter().all(|exponent| *exponent < 6));
+    }
+
+    #[test]
+    fn sphere_reflection_frontier_localizes_the_root_peak_after_reconciliation() {
+        let positions = [
+            [-1.0, -1.0, -3.0],
+            [1.0, -1.0, -3.0],
+            [-1.0, 1.0, -3.0],
+        ];
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]).transform(
+            &Mobius::sphere_reflection(Quat::from_point(-0.2, -0.1, -2.8), 1.0),
+        );
+        let plan = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+            selected_face: 0,
+            transformed_patch: &patch,
+            view_projection: &PERSPECTIVE,
+            viewport: [1600.0, 900.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 32.0,
+            policy: ScreenPartitionPolicy {
+                max_depth: 5,
+                max_leaves: 64,
+                ignore_below_px: 0.0,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_total_leaves: 64,
+            source_requested_lods: &[[64; 3]],
+        })
+        .unwrap();
+        assert!(plan.leaves.len() > 1);
+        assert!(plan.leaves.len() <= 64);
+        assert!(plan.diagnostic.unmet_leaves > 0);
+
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2]],
+        );
+        let topology =
+            crate::screen_leaf_lod::ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let frontier =
+            crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(&plan.leaves, &topology).unwrap();
+        let reconciled = frontier
+            .reconcile_lods(&plan.requested_lods, 4, 64)
+            .unwrap();
+        let absolute_exponents = reconciled
+            .resident
+            .iter()
+            .zip(&plan.leaves)
+            .flat_map(|(lods, leaf)| {
+                lods
+                    .map(|lod| lod.trailing_zeros() + u32::from(leaf.id.depth))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(absolute_exponents.len() > 1);
+        assert!(absolute_exponents.iter().any(|exponent| *exponent < 6));
+    }
+
+    #[test]
+    fn unresolved_camera_boundary_still_fails_closed() {
+        let patch = QBTriPatch::flat(
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [0.0, 0.4, 1.0],
+        );
+        let error = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+            selected_face: 0,
+            transformed_patch: &patch,
+            view_projection: &PERSPECTIVE,
+            viewport: [1600.0, 900.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 32.0,
+            policy: ScreenPartitionPolicy {
+                max_depth: 2,
+                max_leaves: 16,
+                ignore_below_px: 0.0,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_total_leaves: 16,
+            source_requested_lods: &[[64; 3]],
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PickedScreenMeshPlanError::UnmetPartition { leaves } if leaves > 0
+        ));
     }
 
     #[test]

@@ -22,8 +22,9 @@ use quilting_core::screen_partition::{
     ScreenPatchLeafId, ScreenPatchLeafStatus,
 };
 use quilting_core::screen_plan::{
-    plan_adaptive_screen_mesh, AdaptiveScreenFaceSelectionDiagnostic,
-    AdaptiveScreenMeshPlanDiagnostic, AdaptiveScreenMeshPlanRequest, SelectedScreenPatch,
+    inherited_source_edge_lods, plan_adaptive_screen_mesh,
+    AdaptiveScreenFaceSelectionDiagnostic, AdaptiveScreenMeshPlanDiagnostic,
+    AdaptiveScreenMeshPlanRequest, SelectedScreenPatch,
 };
 use serde::Serialize;
 
@@ -777,9 +778,11 @@ pub(crate) struct AdaptiveScreenRequest<'a> {
     pub patch: &'a QBTriPatch,
     pub view_projection: [f64; 16],
     pub viewport: [f64; 2],
+    pub min_px_per_segment: f64,
     pub max_px_per_segment: f64,
     pub policy: ScreenPartitionPolicy,
     pub max_face_edge_ratio: u32,
+    pub source_requested_lod: [u32; 3],
     pub current_resident_lod: Option<[u32; 3]>,
     pub atlas_triangle_counts: &'a BTreeMap<[u32; 3], u64>,
 }
@@ -822,6 +825,7 @@ pub(crate) struct AdaptiveScreenPatchSnapshot {
     pub face: u32,
     pub node: u32,
     pub viewport: [u32; 2],
+    pub min_px_per_segment: f64,
     pub max_px_per_segment: f64,
     pub max_atlas_lod: u32,
     pub max_face_edge_ratio: u32,
@@ -867,8 +871,12 @@ fn lod_histogram(lods: &[[u32; 3]]) -> Vec<(String, u32)> {
 pub(crate) fn measure_adaptive_screen_patch(
     request: AdaptiveScreenRequest<'_>,
 ) -> Result<AdaptiveScreenPatchSnapshot, String> {
-    if !request.max_px_per_segment.is_finite() || request.max_px_per_segment <= 0.0 {
-        return Err("maximum pixels per segment must be finite and positive".into());
+    if !request.min_px_per_segment.is_finite()
+        || request.min_px_per_segment <= 0.0
+        || !request.max_px_per_segment.is_finite()
+        || request.max_px_per_segment < request.min_px_per_segment
+    {
+        return Err("pixel band must be finite, positive, and ordered".into());
     }
     let max_atlas_lod = request
         .atlas_triangle_counts
@@ -889,10 +897,26 @@ pub(crate) fn measure_adaptive_screen_patch(
         request.policy,
     )
     .map_err(|error| error.to_string())?;
+    let unresolved_boundary_leaves = partition
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.status.is_drawable() && leaf.metric_diagnostic.is_none())
+        .count();
+    if unresolved_boundary_leaves != 0 {
+        return Err(format!(
+            "adaptive partition has {unresolved_boundary_leaves} unresolved drawable boundary leaves",
+        ));
+    }
 
-    let single_patch_requested_lod = root_metric
-        .edge_subdivision_demand(request.max_px_per_segment, max_atlas_lod)
-        .unwrap_or([max_atlas_lod; 3]);
+    let root_band = root_metric
+        .resolve_subdivision_band(
+            request.source_requested_lod,
+            request.min_px_per_segment,
+            request.max_px_per_segment,
+            max_atlas_lod,
+        )
+        .ok_or_else(|| "root screen metric cannot resolve the requested pixel band".to_string())?;
+    let single_patch_requested_lod = root_band.requested;
     let single_patch_lod = reconcile_screen_leaf_lods(
         &[ScreenLeafTopology {
             id: ScreenPatchLeafId::ROOT,
@@ -914,14 +938,34 @@ pub(crate) fn measure_adaptive_screen_patch(
     let requested = drawable_leaves
         .iter()
         .map(|leaf| {
-            leaf.metric_diagnostic.map_or([1; 3], |diagnostic| {
-                diagnostic
-                    .edge_subdivision_demand(request.max_px_per_segment, max_atlas_lod)
-                    .unwrap_or_else(|| {
-                        saturated_metric_leaves += 1;
-                        [max_atlas_lod; 3]
-                    })
-            })
+            let diagnostic = leaf
+                .metric_diagnostic
+                .expect("unresolved drawable boundaries were rejected above");
+            let inherited = inherited_source_edge_lods(
+                leaf.id,
+                leaf.restricted.domain,
+                request.source_requested_lod,
+            )
+            .ok();
+            let band = inherited.and_then(|inherited| {
+                diagnostic.resolve_subdivision_band(
+                    inherited,
+                    request.min_px_per_segment,
+                    request.max_px_per_segment,
+                    max_atlas_lod,
+                )
+            });
+            match band {
+                Some(band) => {
+                    saturated_metric_leaves = saturated_metric_leaves
+                        .saturating_add(u32::from(band.saturated));
+                    band.requested
+                }
+                None => {
+                    saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
+                    [max_atlas_lod; 3]
+                }
+            }
         })
         .collect::<Vec<_>>();
     let topology = drawable_leaves
@@ -999,7 +1043,9 @@ pub(crate) fn measure_adaptive_screen_patch(
     let quality_met = partition.unmet_leaves == 0
         && saturated_metric_leaves == 0
         && missing_atlas_keys.is_empty()
-        && max_local_metric_segment_px <= request.max_px_per_segment;
+        && max_local_metric_segment_px <= request.max_px_per_segment * (1.0 + 1.0e-9)
+        && (min_local_metric_segment_px == 0.0
+            || min_local_metric_segment_px >= request.min_px_per_segment * (1.0 - 1.0e-9));
 
     Ok(AdaptiveScreenPatchSnapshot {
         ok: true,
@@ -1007,6 +1053,7 @@ pub(crate) fn measure_adaptive_screen_patch(
         face: request.face,
         node: request.node,
         viewport: [request.viewport[0] as u32, request.viewport[1] as u32],
+        min_px_per_segment: request.min_px_per_segment,
         max_px_per_segment: request.max_px_per_segment,
         max_atlas_lod,
         max_face_edge_ratio: request.max_face_edge_ratio,
@@ -1048,6 +1095,89 @@ mod tests {
     const IDENTITY: [f64; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
+    const PERSPECTIVE: [f64; 16] = [
+        0.974_278_579,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.732_050_808,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.000_200_02,
+        -1.0,
+        0.0,
+        0.0,
+        -0.020_002_000_2,
+        0.0,
+    ];
+
+    #[wasm_bindgen_test]
+    fn measurement_oracle_uses_the_live_floor_capacity_resolver() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let atlas_triangle_counts = BTreeMap::from([
+            ([1, 1, 2], 2),
+            // Establish the same maximum atlas level as the live renderer.
+            ([16, 32, 64], 1),
+        ]);
+        let snapshot = measure_adaptive_screen_patch(AdaptiveScreenRequest {
+            face: 0,
+            node: 0,
+            patch: &patch,
+            view_projection: IDENTITY,
+            viewport: [200.0, 200.0],
+            min_px_per_segment: 60.0,
+            max_px_per_segment: 90.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_face_edge_ratio: 4,
+            source_requested_lod: [64; 3],
+            current_resident_lod: Some([64; 3]),
+            atlas_triangle_counts: &atlas_triangle_counts,
+        })
+        .unwrap();
+
+        assert_eq!(snapshot.single_patch_requested_lod, [2, 1, 1]);
+        assert_eq!(snapshot.saturated_metric_leaves, 1);
+        assert!(!snapshot.quality_met);
+        assert!(snapshot.min_local_metric_segment_px >= snapshot.min_px_per_segment);
+        assert!(snapshot.max_local_metric_segment_px > snapshot.max_px_per_segment);
+    }
+
+    #[wasm_bindgen_test]
+    fn measurement_oracle_rejects_the_same_unresolved_boundaries_as_live_planning() {
+        let patch = QBTriPatch::flat(
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [0.0, 0.4, 1.0],
+        );
+        let atlas_triangle_counts = BTreeMap::from([([16, 32, 64], 1)]);
+        let result = measure_adaptive_screen_patch(AdaptiveScreenRequest {
+            face: 0,
+            node: 0,
+            patch: &patch,
+            view_projection: PERSPECTIVE,
+            viewport: [1600.0, 900.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 32.0,
+            policy: ScreenPartitionPolicy {
+                max_depth: 2,
+                max_leaves: 16,
+                ignore_below_px: 0.0,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_face_edge_ratio: 4,
+            source_requested_lod: [64; 3],
+            current_resident_lod: Some([64; 3]),
+            atlas_triangle_counts: &atlas_triangle_counts,
+        });
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("unresolved boundary measurement unexpectedly succeeded"),
+        };
+        assert!(error.contains("unresolved drawable boundary leaves"));
+    }
 
     #[wasm_bindgen_test]
     fn picked_runtime_replans_and_publishes_new_pose_revisions() {

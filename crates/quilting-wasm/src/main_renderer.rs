@@ -3648,14 +3648,14 @@ fn adaptive_picked_snapshot_js(state: &MainState, refresh_published: Option<bool
 /// Measure one current posed patch under the exact renderer camera and
 /// conformal state, without changing residency or issuing GPU work.
 ///
-/// Pass `face = -1` to inspect the last picked face. `max_px_per_segment` is
-/// the optional pixel ceiling: unlike the existing pixel floor it may request
-/// more tessellation. Adaptive restriction localizes that request so a small
-/// highly stretched region does not force the whole source patch to its worst
-/// LoD.
+/// Pass `face = -1` to inspect the last picked face. The diagnostic resolves
+/// the same local pixel floor/capacity and ceiling/demand band as the live
+/// adaptive planner so it can serve as an acceptance oracle rather than a
+/// demand-only estimate.
 #[wasm_bindgen(js_name = "mr_debugAdaptiveScreenPatch")]
 pub fn mr_debug_adaptive_screen_patch(
     face: i32,
+    min_px_per_segment: f64,
     max_px_per_segment: f64,
     max_depth: u32,
     max_leaves: u32,
@@ -3707,6 +3707,16 @@ pub fn mr_debug_adaptive_screen_patch(
             .get(face_index)
             .and_then(|resident| *resident)
             .map(|resident| resident.edge_lods());
+        let Some(source_requested_lod) = state
+            .requested_face_lods
+            .get(face_index)
+            .and_then(|requested| *requested)
+            .map(|requested| requested.edge_lods())
+        else {
+            return adaptive_screen_diagnostic_error(
+                "source face has no completed LoD classification",
+            );
+        };
         let atlas_triangle_counts = TESS_CACHE.with(|cache| {
             cache
                 .borrow()
@@ -3722,9 +3732,11 @@ pub fn mr_debug_adaptive_screen_patch(
             patch: &patch,
             view_projection,
             viewport,
+            min_px_per_segment,
             max_px_per_segment,
             policy,
             max_face_edge_ratio: state.lod_grading.ratio(),
+            source_requested_lod,
             current_resident_lod,
             atlas_triangle_counts: &atlas_triangle_counts,
         };
