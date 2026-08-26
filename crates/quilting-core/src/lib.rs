@@ -71,7 +71,7 @@ pub mod screen_metric;
 
 pub use atlas::TessellationAtlas;
 pub use evaluate::FaceInstance;
-pub use patch::QBTriPatch;
+pub use patch::{QBPatchDomain, QBTriPatch, RestrictedQBTriPatch};
 pub use permutation::canonical_form;
 pub use quaternion::{Mobius, Quat};
 pub use conformal::{

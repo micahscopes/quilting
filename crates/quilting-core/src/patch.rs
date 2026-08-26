@@ -34,6 +34,78 @@ pub struct PatchDifferential {
     pub tangent_v: [f64; 3],
 }
 
+/// One triangle in the barycentric parameter domain of a source QB patch.
+///
+/// Keeping the source-domain corners beside a restricted patch lets render
+/// extraction interpolate UVs, normals, skinning inputs, and stable surface
+/// addresses without inventing child mesh identity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QBPatchDomain {
+    pub corners: [[f64; 3]; 3],
+}
+
+impl QBPatchDomain {
+    pub const FULL: Self = Self {
+        corners: [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    };
+
+    /// Map barycentrics in this child triangle back to the source patch.
+    pub fn map_barycentric(&self, child: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|coordinate| {
+            child[0] * self.corners[0][coordinate]
+                + child[1] * self.corners[1][coordinate]
+                + child[2] * self.corners[2][coordinate]
+        })
+    }
+
+    /// Express a domain nested inside this domain in source coordinates.
+    pub fn compose(&self, child: Self) -> Self {
+        Self {
+            corners: child.corners.map(|corner| self.map_barycentric(corner)),
+        }
+    }
+
+    /// Dyadic 1-to-4 split. Every child retains the parent's orientation and
+    /// neighboring children contain numerically identical shared endpoints.
+    pub fn quarter(&self) -> [Self; 4] {
+        let midpoint = |a: [f64; 3], b: [f64; 3]| {
+            std::array::from_fn(|coordinate| 0.5 * (a[coordinate] + b[coordinate]))
+        };
+        let [p0, p1, p2] = self.corners;
+        let p01 = midpoint(p0, p1);
+        let p02 = midpoint(p0, p2);
+        let p12 = midpoint(p1, p2);
+        [
+            Self { corners: [p0, p01, p02] },
+            Self { corners: [p01, p1, p12] },
+            Self { corners: [p02, p12, p2] },
+            Self { corners: [p01, p12, p02] },
+        ]
+    }
+}
+
+/// Exact rational restriction paired with its location in the source patch.
+#[derive(Debug, Clone, Copy)]
+pub struct RestrictedQBTriPatch {
+    pub patch: QBTriPatch,
+    pub domain: QBPatchDomain,
+}
+
+impl RestrictedQBTriPatch {
+    /// Split again while retaining coordinates in the original source patch.
+    pub fn quarter(&self) -> [Self; 4] {
+        QBPatchDomain::FULL.quarter().map(|local_domain| {
+            let patch = self.patch.restrict(local_domain).patch;
+            let domain = self.domain.compose(local_domain);
+            Self { patch, domain }
+        })
+    }
+}
+
 impl QBTriPatch {
     pub fn new(positions: [Quat; 3], weights: [Quat; 3]) -> Self {
         Self { positions, weights }
@@ -87,6 +159,38 @@ impl QBTriPatch {
             tangent_u: tangent_u.to_point(),
             tangent_v: tangent_v.to_point(),
         }
+    }
+
+    /// Restrict this degree-one rational patch to a barycentric subtriangle.
+    ///
+    /// Numerator and denominator controls are restricted homogeneously before
+    /// converting back to `(position, weight)`. The result is another exact QB
+    /// patch, not a sampled polynomial approximation.
+    pub fn restrict(&self, domain: QBPatchDomain) -> RestrictedQBTriPatch {
+        let weighted_positions: [Quat; 3] = std::array::from_fn(|index| {
+            self.positions[index] * self.weights[index]
+        });
+        let mut positions = [Quat::ZERO; 3];
+        let mut weights = [Quat::ZERO; 3];
+        for (corner_index, barycentric) in domain.corners.into_iter().enumerate() {
+            let numerator = weighted_positions[0] * barycentric[0]
+                + weighted_positions[1] * barycentric[1]
+                + weighted_positions[2] * barycentric[2];
+            let denominator = self.weights[0] * barycentric[0]
+                + self.weights[1] * barycentric[1]
+                + self.weights[2] * barycentric[2];
+            positions[corner_index] = numerator * denominator.inv();
+            weights[corner_index] = denominator;
+        }
+        RestrictedQBTriPatch {
+            patch: Self { positions, weights },
+            domain,
+        }
+    }
+
+    /// Exact dyadic 1-to-4 restriction in the full source domain.
+    pub fn quarter(&self) -> [RestrictedQBTriPatch; 4] {
+        QBPatchDomain::FULL.quarter().map(|domain| self.restrict(domain))
     }
 
     /// Evaluate surface point with normal (via finite differences).
@@ -350,5 +454,118 @@ mod tests {
             differential.tangent_v,
             std::array::from_fn(|axis| finite_v[axis] - point_rate[axis]),
         ));
+    }
+
+    fn assert_quat_near(actual: Quat, expected: Quat, tolerance: f64) {
+        let scale = expected.norm().max(1.0);
+        let error = (actual - expected).norm();
+        assert!(
+            error <= tolerance * scale,
+            "actual={actual:?} expected={expected:?} error={error:e}"
+        );
+    }
+
+    #[test]
+    fn rational_restriction_reproduces_parent_parameterization() {
+        let patch = QBTriPatch::flat(
+            [-0.7, -0.4, -3.0],
+            [0.9, -0.2, -3.4],
+            [-0.1, 0.8, -2.8],
+        )
+        .transform(&Mobius::sphere_reflection(
+            Quat::from_point(0.2, -0.1, -1.4),
+            0.9,
+        ));
+        let domain = QBPatchDomain {
+            corners: [
+                [0.65, 0.20, 0.15],
+                [0.10, 0.75, 0.15],
+                [0.15, 0.10, 0.75],
+            ],
+        };
+        let child = patch.restrict(domain);
+        for local in [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.2, 0.3, 0.5],
+            [0.72, 0.11, 0.17],
+        ] {
+            let source = domain.map_barycentric(local);
+            let expected = patch.eval(source[1], source[2]);
+            let actual = child.patch.eval(local[1], local[2]);
+            assert_quat_near(actual, expected, 2.0e-12);
+        }
+    }
+
+    #[test]
+    fn rational_restriction_commutes_with_mobius_transform() {
+        let patch = QBTriPatch::flat(
+            [-0.8, -0.5, -3.2],
+            [0.9, -0.4, -3.0],
+            [-0.3, 0.8, -3.4],
+        );
+        let domain = QBPatchDomain {
+            corners: [
+                [0.5, 0.3, 0.2],
+                [0.1, 0.8, 0.1],
+                [0.2, 0.1, 0.7],
+            ],
+        };
+        let transform =
+            Mobius::sphere_reflection(Quat::from_point(0.1, -0.1, -2.2), 0.8);
+        let restrict_then_transform = patch.restrict(domain).patch.transform(&transform);
+        let transform_then_restrict = patch.transform(&transform).restrict(domain).patch;
+        for local in [[0.2, 0.3, 0.5], [0.7, 0.1, 0.2], [0.1, 0.8, 0.1]] {
+            assert_quat_near(
+                restrict_then_transform.eval(local[1], local[2]),
+                transform_then_restrict.eval(local[1], local[2]),
+                3.0e-12,
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_quarters_retain_source_domains_and_shared_edges() {
+        let patch = QBTriPatch::new(
+            [
+                Quat::from_point(-0.5, -0.2, -2.0),
+                Quat::from_point(0.8, -0.1, -2.5),
+                Quat::from_point(-0.1, 0.9, -2.2),
+            ],
+            [
+                Quat::new(1.0, 0.1, 0.0, 0.0),
+                Quat::new(0.9, 0.0, -0.1, 0.1),
+                Quat::new(1.1, -0.1, 0.1, 0.0),
+            ],
+        );
+        let parent_domain = QBPatchDomain {
+            corners: [
+                [0.8, 0.1, 0.1],
+                [0.2, 0.7, 0.1],
+                [0.2, 0.1, 0.7],
+            ],
+        };
+        let children = patch.restrict(parent_domain).quarter();
+        assert_eq!(children[0].domain.corners[1], children[3].domain.corners[0]);
+        assert_eq!(children[0].domain.corners[2], children[3].domain.corners[2]);
+
+        for t in [0.0, 0.2, 0.5, 0.9, 1.0] {
+            // Child 0 edge p1->p2 is child 3 edge p0->p2.
+            assert_quat_near(
+                children[0].patch.eval(1.0 - t, t),
+                children[3].patch.eval(0.0, t),
+                3.0e-12,
+            );
+        }
+        for child in children {
+            let local = [0.2, 0.3, 0.5];
+            let source = child.domain.map_barycentric(local);
+            assert_quat_near(
+                child.patch.eval(local[1], local[2]),
+                patch.eval(source[1], source[2]),
+                3.0e-12,
+            );
+        }
     }
 }
