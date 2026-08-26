@@ -67,8 +67,15 @@ pub struct FittedQualityFallback {
     /// One-based fit attempt that produced this fallback.
     pub attempt: usize,
     pub action: FittedQualityBackoffAction,
+    /// The worst chart which triggered this escalation.
     pub chart: usize,
+    /// Stable identity of the chart which triggered this escalation.
     pub key: ChartKey,
+    /// Exact chart identities newly switched to source topology by this
+    /// action. `ForceChartExact` contains `key`; the force-all action records
+    /// every previously reduced chart it changed rather than implying that
+    /// only the repeated worst chart was affected.
+    pub newly_forced_keys: Vec<ChartKey>,
     pub source_face: SourceFaceId,
     pub source_sample_ordinal: u32,
     pub measured_degrees: f64,
@@ -257,12 +264,19 @@ fn retry_fitted_quality<T>(
                 chart_count: attempt.chart_keys.len(),
             },
         )?;
-        let action = if source_fallbacks.insert(key.clone()) {
-            FittedQualityBackoffAction::ForceChartExact
+        let (action, newly_forced_keys) = if source_fallbacks.insert(key.clone()) {
+            (
+                FittedQualityBackoffAction::ForceChartExact,
+                vec![key.clone()],
+            )
         } else {
-            let previous_count = source_fallbacks.len();
-            source_fallbacks.extend(attempt.chart_keys.iter().cloned());
-            if source_fallbacks.len() == previous_count {
+            let newly_forced_keys = attempt
+                .chart_keys
+                .iter()
+                .filter(|candidate| !source_fallbacks.contains(*candidate))
+                .cloned()
+                .collect::<Vec<_>>();
+            if newly_forced_keys.is_empty() {
                 return Err(FittedCoarsePatchError::AllExactSourceQualityExceeded {
                     chart: worst.chart,
                     key,
@@ -272,13 +286,18 @@ fn retry_fitted_quality<T>(
                     fallbacks,
                 });
             }
-            FittedQualityBackoffAction::ForceAllRemainingExact
+            source_fallbacks.extend(newly_forced_keys.iter().cloned());
+            (
+                FittedQualityBackoffAction::ForceAllRemainingExact,
+                newly_forced_keys,
+            )
         };
         fallbacks.push(FittedQualityFallback {
             attempt: attempts,
             action,
             chart: worst.chart,
             key,
+            newly_forced_keys,
             source_face: worst.source_face,
             source_sample_ordinal: worst.source_sample_ordinal,
             measured_degrees: worst.measured_degrees,
@@ -501,18 +520,21 @@ mod tests {
             FittedQualityBackoffAction::ForceChartExact
         );
         assert_eq!(fallbacks[0].key, keys[0]);
+        assert_eq!(fallbacks[0].newly_forced_keys, [keys[0].clone()]);
         assert_eq!(fallbacks[1].attempt, 2);
         assert_eq!(
             fallbacks[1].action,
             FittedQualityBackoffAction::ForceChartExact
         );
         assert_eq!(fallbacks[1].key, keys[1]);
+        assert_eq!(fallbacks[1].newly_forced_keys, [keys[1].clone()]);
         assert_eq!(fallbacks[2].attempt, 3);
         assert_eq!(
             fallbacks[2].action,
             FittedQualityBackoffAction::ForceAllRemainingExact
         );
         assert_eq!(fallbacks[2].key, keys[1]);
+        assert_eq!(fallbacks[2].newly_forced_keys, [keys[2].clone()]);
     }
 
     #[test]

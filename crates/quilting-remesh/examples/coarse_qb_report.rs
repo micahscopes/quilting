@@ -652,11 +652,12 @@ fn print_success(success: &Success) {
     }
     for fallback in &success.fitted_quality_fallbacks {
         println!(
-            "  fitted-quality fallback attempt={} action={} chart={} chart_source_faces={} source_face={:?} sample={} measured={:.3}deg",
+            "  fitted-quality fallback attempt={} action={} trigger_chart={} trigger_chart_source_faces={} newly_forced_charts={} source_face={:?} sample={} measured={:.3}deg",
             fallback.attempt,
             fallback.action,
             fallback.chart,
             fallback.key.source_faces.len(),
+            fallback.newly_forced_keys.len(),
             fallback.source_face,
             fallback.source_sample_ordinal,
             fallback.measured_degrees,
