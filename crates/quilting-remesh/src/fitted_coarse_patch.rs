@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::coarse_complex::{ChartKey, CoarseComplexInput, SourceFaceId};
 use crate::coarse_patch_complex::{
-    build_coarse_patch_complex_with_fallbacks, CoarsePatchComplex, CoarsePatchConfig,
-    CoarsePatchError,
+    CoarsePatchComplex, CoarsePatchConfig, CoarsePatchError, PreparedCoarsePatchBuilder,
 };
 use crate::conformal_optimizer::{
     score_patch_complex_weighted, ConformalProbe, FitScore, FitScoreConfig, ObjectiveWeights,
@@ -93,6 +92,8 @@ pub struct FittedCoarsePatchResult {
     pub attempts: usize,
     pub total_backend_attempts: usize,
     pub total_rejected_backend_attempts: usize,
+    pub total_reduction_cache_hits: usize,
+    pub total_reduction_cache_misses: usize,
     pub fitted_quality_fallbacks: Vec<FittedQualityFallback>,
     pub timings: FittedCoarsePatchTimings,
 }
@@ -308,43 +309,41 @@ pub fn fit_coarse_patch_complex_with_backoff(
     }
 
     let mut timings = FittedCoarsePatchTimings::default();
+    let prepare_start = Instant::now();
+    let mut builder = PreparedCoarsePatchBuilder::new(input, &config.patch)
+        .map_err(FittedCoarsePatchError::Build)?;
+    timings.build = timings.build.saturating_add(prepare_start.elapsed());
     let mut total_backend_attempts = 0usize;
     let mut total_rejected_backend_attempts = 0usize;
+    let mut total_reduction_cache_hits = 0usize;
+    let mut total_reduction_cache_misses = 0usize;
     let retried = retry_fitted_quality(|source_fallbacks| {
         let build_start = Instant::now();
-        let complex =
-            build_coarse_patch_complex_with_fallbacks(input, &config.patch, source_fallbacks)
-                .map_err(FittedCoarsePatchError::Build)?;
+        let build = builder
+            .build_with_fallbacks(source_fallbacks)
+            .map_err(FittedCoarsePatchError::Build)?;
         timings.build = timings.build.saturating_add(build_start.elapsed());
-
-        let build_backend_attempts = complex
-            .charts
-            .iter()
-            .try_fold(0usize, |total, chart| {
-                total.checked_add(chart.backend_attempts)
-            })
-            .ok_or(FittedCoarsePatchError::CounterOverflow(
-                "per-build backend-attempt count",
-            ))?;
-        let build_rejected_backend_attempts = complex
-            .charts
-            .iter()
-            .try_fold(0usize, |total, chart| {
-                total.checked_add(chart.rejected_candidates.len())
-            })
-            .ok_or(FittedCoarsePatchError::CounterOverflow(
-                "per-build backend-rejection count",
-            ))?;
         total_backend_attempts = total_backend_attempts
-            .checked_add(build_backend_attempts)
+            .checked_add(build.reduction_cache.backend_attempts)
             .ok_or(FittedCoarsePatchError::CounterOverflow(
                 "cumulative backend-attempt count",
             ))?;
         total_rejected_backend_attempts = total_rejected_backend_attempts
-            .checked_add(build_rejected_backend_attempts)
+            .checked_add(build.reduction_cache.rejected_backend_attempts)
             .ok_or(FittedCoarsePatchError::CounterOverflow(
                 "cumulative backend-rejection count",
             ))?;
+        total_reduction_cache_hits = total_reduction_cache_hits
+            .checked_add(build.reduction_cache.chart_hits)
+            .ok_or(FittedCoarsePatchError::CounterOverflow(
+                "cumulative reduction-cache hit count",
+            ))?;
+        total_reduction_cache_misses = total_reduction_cache_misses
+            .checked_add(build.reduction_cache.chart_misses)
+            .ok_or(FittedCoarsePatchError::CounterOverflow(
+                "cumulative reduction-cache miss count",
+            ))?;
+        let complex = build.complex;
 
         let fit_start = Instant::now();
         let fit = complex
@@ -428,6 +427,8 @@ pub fn fit_coarse_patch_complex_with_backoff(
         attempts: retried.attempts,
         total_backend_attempts,
         total_rejected_backend_attempts,
+        total_reduction_cache_hits,
+        total_reduction_cache_misses,
         fitted_quality_fallbacks: retried.fallbacks,
         timings,
     })
@@ -597,6 +598,11 @@ mod tests {
         assert!(result.objective.is_finite());
         assert!(result.score.source.normal_max_degrees < 1.0e-8);
         assert_eq!(result.fit.patches.len(), result.complex.faces.len());
+        assert_eq!(result.total_reduction_cache_hits, 0);
+        assert_eq!(
+            result.total_reduction_cache_misses,
+            result.complex.charts.len()
+        );
     }
 
     #[test]

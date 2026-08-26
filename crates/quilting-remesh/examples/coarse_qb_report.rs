@@ -257,6 +257,8 @@ struct Success {
     selected_target_triangles: usize,
     total_backend_attempts: usize,
     total_rejected_backend_attempts: usize,
+    total_reduction_cache_hits: usize,
+    total_reduction_cache_misses: usize,
     fitted_attempts: usize,
     chart_reports: Vec<ChartReductionReport>,
     fitted_quality_fallbacks: Vec<FittedQualityFallback>,
@@ -479,6 +481,8 @@ fn process_part(
         attempts,
         total_backend_attempts,
         total_rejected_backend_attempts,
+        total_reduction_cache_hits,
+        total_reduction_cache_misses,
         fitted_quality_fallbacks,
         timings,
     } = fitted;
@@ -491,6 +495,8 @@ fn process_part(
         fitted_quality_fallbacks,
         total_backend_attempts,
         total_rejected_backend_attempts,
+        total_reduction_cache_hits,
+        total_reduction_cache_misses,
         attempts,
         split_vertices,
         timings.build,
@@ -509,6 +515,8 @@ fn success(
     fitted_quality_fallbacks: Vec<FittedQualityFallback>,
     total_backend_attempts: usize,
     total_rejected_backend_attempts: usize,
+    total_reduction_cache_hits: usize,
+    total_reduction_cache_misses: usize,
     fitted_attempts: usize,
     split_vertices: usize,
     build_time: Duration,
@@ -542,6 +550,8 @@ fn success(
             .sum(),
         total_backend_attempts,
         total_rejected_backend_attempts,
+        total_reduction_cache_hits,
+        total_reduction_cache_misses,
         fitted_attempts,
         chart_reports: complex.charts.clone(),
         fitted_quality_fallbacks,
@@ -582,7 +592,7 @@ fn success(
 
 fn print_success(success: &Success) {
     println!(
-        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} backed_off_charts={} source_fallback_charts={} requested_chart_triangles={} selected_target_triangles={} fitted_attempts={} total_backend_attempts={} total_rejected_backend_attempts={} split_vertices={} constrained_vertices={}",
+        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} backed_off_charts={} source_fallback_charts={} requested_chart_triangles={} selected_target_triangles={} fitted_attempts={} total_backend_attempts={} total_rejected_backend_attempts={} reduction_cache_hits={} reduction_cache_misses={} split_vertices={} constrained_vertices={}",
         success.source_faces,
         success.coarse_faces,
         success.source_faces as f64 / success.coarse_faces.max(1) as f64,
@@ -594,6 +604,8 @@ fn print_success(success: &Success) {
         success.fitted_attempts,
         success.total_backend_attempts,
         success.total_rejected_backend_attempts,
+        success.total_reduction_cache_hits,
+        success.total_reduction_cache_misses,
         success.split_vertices,
         success.constrained_vertices,
     );

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::coarse_complex::{
     cut_source_topology, validate_cut_chart, ChartKey, CoarseComplexError, CoarseComplexInput,
-    CutChart, CutEdge, CutVertex, CutVertexKey, SourceFaceId, SourceVertexId,
+    CutChart, CutEdge, CutSourceTopology, CutVertex, CutVertexKey, SourceFaceId, SourceVertexId,
 };
 use crate::triangle_bvh::{
     IndexedTriangle, SearchCounters, SearchError, SearchScratch, TriangleBvh,
@@ -142,6 +142,103 @@ impl std::fmt::Display for ReductionRejectionCategory {
 pub struct ReducedSourceCharts {
     pub charts: Vec<ReducedChart>,
     pub cut_edges: Vec<CutEdge>,
+}
+
+/// Actual chart-reduction work performed by one prepared build. Cache hits do
+/// not repeat meshoptimizer or sampled quality validation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReductionCacheDiagnostics {
+    pub chart_hits: usize,
+    pub chart_misses: usize,
+    pub backend_attempts: usize,
+    pub rejected_backend_attempts: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedReductionResult {
+    pub reduced: ReducedSourceCharts,
+    pub cache: ReductionCacheDiagnostics,
+}
+
+/// A validated source cut plus memoized ordinary and exact chart reductions.
+/// Stable chart identity makes the cache independent of source buffer order.
+pub struct PreparedCoarseReduction {
+    config: CoarseReductionConfig,
+    topology: CutSourceTopology,
+    available: BTreeSet<ChartKey>,
+    cache: BTreeMap<(ChartKey, bool), ReducedChart>,
+}
+
+impl PreparedCoarseReduction {
+    pub fn new(
+        input: &CoarseComplexInput<'_>,
+        config: &CoarseReductionConfig,
+    ) -> Result<Self, CoarseReductionError> {
+        validate_config(config)?;
+        let topology = cut_source_topology(input)?;
+        let available = topology
+            .charts
+            .iter()
+            .map(|chart| chart.key.clone())
+            .collect();
+        Ok(Self {
+            config: *config,
+            topology,
+            available,
+            cache: BTreeMap::new(),
+        })
+    }
+
+    pub fn chart_count(&self) -> usize {
+        self.topology.charts.len()
+    }
+
+    /// Build one chart set, reusing every exact or reduced chart already
+    /// computed under this immutable source/configuration pair.
+    pub fn reduce_with_fallbacks(
+        &mut self,
+        source_fallbacks: &BTreeSet<ChartKey>,
+    ) -> Result<PreparedReductionResult, CoarseReductionError> {
+        if let Some(missing) = source_fallbacks.difference(&self.available).next() {
+            return Err(CoarseReductionError::UnknownSourceFallback(missing.clone()));
+        }
+        let mut diagnostics = ReductionCacheDiagnostics::default();
+        let mut charts = Vec::with_capacity(self.topology.charts.len());
+        for source in &self.topology.charts {
+            let force_source = source_fallbacks.contains(&source.key);
+            let cache_key = (source.key.clone(), force_source);
+            if let Some(chart) = self.cache.get(&cache_key) {
+                diagnostics.chart_hits = diagnostics
+                    .chart_hits
+                    .checked_add(1)
+                    .ok_or(CoarseReductionError::CountOverflow)?;
+                charts.push(chart.clone());
+                continue;
+            }
+            let chart = reduce_chart(source, &self.config, force_source)?;
+            diagnostics.chart_misses = diagnostics
+                .chart_misses
+                .checked_add(1)
+                .ok_or(CoarseReductionError::CountOverflow)?;
+            diagnostics.backend_attempts = diagnostics
+                .backend_attempts
+                .checked_add(chart.backend_attempts)
+                .ok_or(CoarseReductionError::CountOverflow)?;
+            diagnostics.rejected_backend_attempts = diagnostics
+                .rejected_backend_attempts
+                .checked_add(chart.rejected_candidates.len())
+                .ok_or(CoarseReductionError::CountOverflow)?;
+            self.cache.insert(cache_key, chart.clone());
+            charts.push(chart);
+        }
+        Ok(PreparedReductionResult {
+            reduced: ReducedSourceCharts {
+                charts,
+                cut_edges: self.topology.cut_edges.clone(),
+            },
+            cache: diagnostics,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1070,25 +1167,9 @@ pub fn reduce_source_charts_with_fallbacks(
     config: &CoarseReductionConfig,
     source_fallbacks: &BTreeSet<ChartKey>,
 ) -> Result<ReducedSourceCharts, CoarseReductionError> {
-    validate_config(config)?;
-    let topology = cut_source_topology(input)?;
-    let available = topology
-        .charts
-        .iter()
-        .map(|chart| chart.key.clone())
-        .collect::<BTreeSet<_>>();
-    if let Some(missing) = source_fallbacks.difference(&available).next() {
-        return Err(CoarseReductionError::UnknownSourceFallback(missing.clone()));
-    }
-    let charts = topology
-        .charts
-        .iter()
-        .map(|chart| reduce_chart(chart, config, source_fallbacks.contains(&chart.key)))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ReducedSourceCharts {
-        charts,
-        cut_edges: topology.cut_edges,
-    })
+    PreparedCoarseReduction::new(input, config)?
+        .reduce_with_fallbacks(source_fallbacks)
+        .map(|result| result.reduced)
 }
 
 #[cfg(test)]
@@ -1406,6 +1487,75 @@ mod tests {
             ),
             Err(CoarseReductionError::UnknownSourceFallback(chart)) if chart == missing
         ));
+    }
+
+    #[test]
+    fn prepared_reduction_reuses_unchanged_stable_charts() {
+        let mut source = grid(5);
+        for (face, domain) in source.domains.iter_mut().enumerate() {
+            let cell_x = (face / 2) % 4;
+            *domain = u32::from(cell_x >= 2);
+        }
+        let config = CoarseReductionConfig {
+            target_ratio: 0.25,
+            target_error: 1.0,
+            ..CoarseReductionConfig::default()
+        };
+        let mut prepared = PreparedCoarseReduction::new(&input(&source), &config).unwrap();
+        assert_eq!(prepared.chart_count(), 2);
+
+        let first = prepared.reduce_with_fallbacks(&BTreeSet::new()).unwrap();
+        assert_eq!(first.cache.chart_hits, 0);
+        assert_eq!(first.cache.chart_misses, 2);
+        assert_eq!(
+            first.cache.backend_attempts,
+            first
+                .reduced
+                .charts
+                .iter()
+                .map(|chart| chart.backend_attempts)
+                .sum::<usize>()
+        );
+
+        let repeated = prepared.reduce_with_fallbacks(&BTreeSet::new()).unwrap();
+        assert_eq!(signature(&first.reduced), signature(&repeated.reduced));
+        assert_eq!(
+            repeated.cache,
+            ReductionCacheDiagnostics {
+                chart_hits: 2,
+                chart_misses: 0,
+                backend_attempts: 0,
+                rejected_backend_attempts: 0,
+            }
+        );
+
+        let forced_key = first.reduced.charts[0].key.clone();
+        let forced = prepared
+            .reduce_with_fallbacks(&BTreeSet::from([forced_key.clone()]))
+            .unwrap();
+        assert_eq!(forced.cache.chart_hits, 1);
+        assert_eq!(forced.cache.chart_misses, 1);
+        assert_eq!(forced.cache.backend_attempts, 0);
+        assert_eq!(forced.cache.rejected_backend_attempts, 0);
+        assert!(
+            forced
+                .reduced
+                .charts
+                .iter()
+                .find(|chart| chart.key == forced_key)
+                .unwrap()
+                .used_source_fallback
+        );
+
+        let forced_repeated = prepared
+            .reduce_with_fallbacks(&BTreeSet::from([forced_key]))
+            .unwrap();
+        assert_eq!(
+            signature(&forced.reduced),
+            signature(&forced_repeated.reduced)
+        );
+        assert_eq!(forced_repeated.cache.chart_hits, 2);
+        assert_eq!(forced_repeated.cache.chart_misses, 0);
     }
 
     #[test]

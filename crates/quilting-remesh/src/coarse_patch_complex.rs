@@ -14,8 +14,8 @@ use crate::coarse_complex::{
     CutVertexKey, SourceFaceId, SourceVertexId,
 };
 use crate::coarse_reduction::{
-    reduce_source_charts_with_fallbacks, CoarseReductionConfig, CoarseReductionError, ReducedChart,
-    ReducedSourceCharts, RejectedReductionCandidate,
+    CoarseReductionConfig, CoarseReductionError, PreparedCoarseReduction, ReducedChart,
+    ReducedSourceCharts, ReductionCacheDiagnostics, RejectedReductionCandidate,
 };
 use crate::geometry;
 use crate::triangle_bvh::{
@@ -158,6 +158,96 @@ pub struct CoarsePatchComplex {
     pub cut_edges: Vec<StableCutEdge>,
     pub correspondence: Vec<CorrespondenceSample>,
     pub correspondence_diagnostics: CorrespondenceDiagnostics,
+}
+
+#[derive(Clone, Debug)]
+pub struct CoarsePatchBuild {
+    pub complex: CoarsePatchComplex,
+    pub reduction_cache: ReductionCacheDiagnostics,
+}
+
+/// Immutable source/configuration preparation plus stable chart-reduction
+/// memoization for fitted-quality retries.
+pub struct PreparedCoarsePatchBuilder<'a> {
+    input: CoarseComplexInput<'a>,
+    config: CoarsePatchConfig,
+    reduction: PreparedCoarseReduction,
+    source_vertices: Vec<SourceReferenceVertex>,
+}
+
+impl<'a> PreparedCoarsePatchBuilder<'a> {
+    pub fn new(
+        input: &CoarseComplexInput<'a>,
+        config: &CoarsePatchConfig,
+    ) -> Result<Self, CoarsePatchError> {
+        validate_config(config)?;
+        let sample_count = input
+            .triangles
+            .len()
+            .checked_mul(
+                config
+                    .correspondence_subdivisions
+                    .checked_mul(config.correspondence_subdivisions)
+                    .ok_or(CoarsePatchError::CountOverflow)?,
+            )
+            .ok_or(CoarsePatchError::CountOverflow)?;
+        if sample_count > config.maximum_correspondence_samples {
+            return Err(CoarsePatchError::SampleBudgetExceeded {
+                requested: sample_count,
+                maximum: config.maximum_correspondence_samples,
+            });
+        }
+        let reduction = PreparedCoarseReduction::new(input, &config.reduction)?;
+        let referenced_source_vertices = input
+            .triangles
+            .iter()
+            .flat_map(|triangle| triangle.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut source_vertices = referenced_source_vertices
+            .into_iter()
+            .map(|vertex| SourceReferenceVertex {
+                source_vertex: input.source_vertex_ids[vertex],
+                position: input.positions[vertex],
+            })
+            .collect::<Vec<_>>();
+        source_vertices.sort_by_key(|vertex| vertex.source_vertex);
+        Ok(Self {
+            input: *input,
+            config: *config,
+            reduction,
+            source_vertices,
+        })
+    }
+
+    pub fn build(&mut self) -> Result<CoarsePatchBuild, CoarsePatchError> {
+        self.build_with_fallbacks(&BTreeSet::new())
+    }
+
+    pub fn build_with_fallbacks(
+        &mut self,
+        source_fallbacks: &BTreeSet<ChartKey>,
+    ) -> Result<CoarsePatchBuild, CoarsePatchError> {
+        let prepared = self.reduction.reduce_with_fallbacks(source_fallbacks)?;
+        let assembled = assemble(&self.input, &prepared.reduced)?;
+        let (correspondence, correspondence_diagnostics) = correspondence(
+            &self.input,
+            &prepared.reduced.charts,
+            &assembled,
+            &self.config,
+        )?;
+        Ok(CoarsePatchBuild {
+            complex: CoarsePatchComplex {
+                source_vertices: self.source_vertices.clone(),
+                vertices: assembled.vertices,
+                faces: assembled.faces,
+                charts: assembled.charts,
+                cut_edges: assembled.cut_edges,
+                correspondence,
+                correspondence_diagnostics,
+            },
+            reduction_cache: prepared.cache,
+        })
+    }
 }
 
 impl CoarsePatchComplex {
@@ -854,49 +944,9 @@ pub fn build_coarse_patch_complex_with_fallbacks(
     config: &CoarsePatchConfig,
     source_fallbacks: &BTreeSet<ChartKey>,
 ) -> Result<CoarsePatchComplex, CoarsePatchError> {
-    validate_config(config)?;
-    let sample_count = input
-        .triangles
-        .len()
-        .checked_mul(
-            config
-                .correspondence_subdivisions
-                .checked_mul(config.correspondence_subdivisions)
-                .ok_or(CoarsePatchError::CountOverflow)?,
-        )
-        .ok_or(CoarsePatchError::CountOverflow)?;
-    if sample_count > config.maximum_correspondence_samples {
-        return Err(CoarsePatchError::SampleBudgetExceeded {
-            requested: sample_count,
-            maximum: config.maximum_correspondence_samples,
-        });
-    }
-    let reduced = reduce_source_charts_with_fallbacks(input, &config.reduction, source_fallbacks)?;
-    let assembled = assemble(input, &reduced)?;
-    let (correspondence, correspondence_diagnostics) =
-        correspondence(input, &reduced.charts, &assembled, config)?;
-    let referenced_source_vertices = input
-        .triangles
-        .iter()
-        .flat_map(|triangle| triangle.iter().copied())
-        .collect::<BTreeSet<_>>();
-    let mut source_vertices = referenced_source_vertices
-        .into_iter()
-        .map(|vertex| SourceReferenceVertex {
-            source_vertex: input.source_vertex_ids[vertex],
-            position: input.positions[vertex],
-        })
-        .collect::<Vec<_>>();
-    source_vertices.sort_by_key(|vertex| vertex.source_vertex);
-    Ok(CoarsePatchComplex {
-        source_vertices,
-        vertices: assembled.vertices,
-        faces: assembled.faces,
-        charts: assembled.charts,
-        cut_edges: assembled.cut_edges,
-        correspondence,
-        correspondence_diagnostics,
-    })
+    PreparedCoarsePatchBuilder::new(input, config)?
+        .build_with_fallbacks(source_fallbacks)
+        .map(|build| build.complex)
 }
 
 #[cfg(test)]
@@ -1051,6 +1101,30 @@ mod tests {
         }
         let cyclic_complex = build_coarse_patch_complex(&input(&cyclic), &config()).unwrap();
         assert_eq!(complex, cyclic_complex);
+    }
+
+    #[test]
+    fn prepared_builder_reuses_chart_reductions_without_changing_correspondence() {
+        let source = grid(5);
+        let mut builder = PreparedCoarsePatchBuilder::new(&input(&source), &config()).unwrap();
+        let first = builder.build().unwrap();
+        let repeated = builder.build().unwrap();
+
+        assert_eq!(first.complex, repeated.complex);
+        assert_eq!(first.reduction_cache.chart_hits, 0);
+        assert_eq!(
+            first.reduction_cache.chart_misses,
+            first.complex.charts.len()
+        );
+        assert_eq!(
+            repeated.reduction_cache,
+            ReductionCacheDiagnostics {
+                chart_hits: first.complex.charts.len(),
+                chart_misses: 0,
+                backend_attempts: 0,
+                rejected_backend_attempts: 0,
+            }
+        );
     }
 
     #[test]
