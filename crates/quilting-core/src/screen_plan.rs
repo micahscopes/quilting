@@ -21,13 +21,13 @@ pub struct PickedScreenMeshPlanRequest<'a> {
     pub transformed_patch: &'a QBTriPatch,
     pub view_projection: &'a [f64; 16],
     pub viewport: [f64; 2],
-    /// Existing screen-attenuation floor. Raw source requests already obey
-    /// this cap, but retaining it here lets the planner reject an impossible
-    /// requested band rather than silently choosing one side.
+    /// Existing screen-attenuation floor. Each leaf recomputes the greatest
+    /// power-of-two LoD that fits this local raster capacity, allowing a root
+    /// request driven by one high-dilation region to demote elsewhere.
     pub min_px_per_segment: f64,
     /// Optional tessellation-density ceiling, in pixels per local atlas edge
-    /// segment. This adds detail; it is distinct from the classifier's
-    /// pixels-per-subtriangle floor, which can only remove detail.
+    /// segment. This supplies a local quality demand inside the floor's
+    /// capacity; a power-of-two band gap is reported as metric saturation.
     pub max_px_per_segment: f64,
     pub policy: ScreenPartitionPolicy,
     pub max_atlas_lod: u32,
@@ -567,23 +567,41 @@ pub fn plan_adaptive_screen_mesh(
             {
                 let inherited =
                     inherited_source_edge_lods(leaf.id, leaf.restricted.domain, source_lods)?;
-                let screen = if leaf.status.is_drawable() {
+                let local_request = if leaf.status.is_drawable() {
                     let diagnostic = leaf
                         .metric_diagnostic
                         .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
-                    diagnostic
+                    let demand = diagnostic
                         .edge_subdivision_demand(request.max_px_per_segment, request.max_atlas_lod)
-                        .ok_or_else(|| {
-                            saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
-                            PickedScreenMeshPlanError::UnresolvedMetric
-                        })?
+                        .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
+                    let capacity = diagnostic
+                        .edge_subdivision_capacity(request.min_px_per_segment, request.max_atlas_lod)
+                        .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
+                    if demand
+                        .iter()
+                        .zip(capacity)
+                        .any(|(demand, capacity)| *demand > capacity)
+                    {
+                        // A discrete power-of-two level cannot satisfy both
+                        // sides of this local pixel band. Preserve the existing
+                        // pixel-floor authority (never add known subpixel
+                        // density) and report the unsatisfied quality ceiling.
+                        saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
+                    }
+                    std::array::from_fn(|edge| {
+                        inherited[edge]
+                            .min(capacity[edge])
+                            .max(demand[edge].min(capacity[edge]))
+                    })
                 } else {
-                    [1; 3]
+                    // A live-view plan retains culled leaves because the render
+                    // GPU can resurrect them before the asynchronous classifier.
+                    // With no finite local metric, inherited density is the
+                    // only safe self-describing standby.
+                    inherited
                 };
                 leaves.push(ScreenMeshLeafTopology::from_leaf(source_face_u32, leaf));
-                requested_lods.push(std::array::from_fn(|edge| {
-                    inherited[edge].max(screen[edge])
-                }));
+                requested_lods.push(local_request);
             }
         }
         selected_leaves = next_selected_leaves;
@@ -825,6 +843,25 @@ mod tests {
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
 
+    const PERSPECTIVE: [f64; 16] = [
+        0.974_278_579,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.732_050_808,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.000_200_02,
+        -1.0,
+        0.0,
+        0.0,
+        -0.020_002_000_2,
+        0.0,
+    ];
+
     #[test]
     fn inherited_density_scales_and_rotates_with_the_dyadic_child() {
         let children = QBPatchDomain::FULL.quarter();
@@ -906,6 +943,96 @@ mod tests {
         assert_eq!(plan.requested_lods[4], [4, 1, 2]);
         assert_eq!(plan.leaves[5].source_face, 2);
         assert_eq!(plan.requested_lods[5], [4, 4, 4]);
+    }
+
+    #[test]
+    fn local_pixel_capacity_demotes_low_scale_children_after_root_demand() {
+        let positions = [
+            [-0.5, -0.5, -2.0],
+            [0.5, -0.5, -2.0],
+            [-0.5, 0.5, -8.0],
+        ];
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let plan = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+            selected_face: 0,
+            transformed_patch: &patch,
+            view_projection: &PERSPECTIVE,
+            viewport: [1600.0, 900.0],
+            min_px_per_segment: 32.0,
+            max_px_per_segment: 10_000.0,
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_stretch_ratio: 1.0e12,
+                max_area_ratio: 1.0e12,
+                ignore_below_px: 0.0,
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_total_leaves: 4,
+            source_requested_lods: &[[64; 3]],
+        })
+        .unwrap();
+        assert_eq!(plan.leaves.len(), 4);
+        assert!(plan
+            .requested_lods
+            .iter()
+            .flatten()
+            .any(|lod| *lod < 32));
+
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2]],
+        );
+        let topology =
+            crate::screen_leaf_lod::ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let frontier =
+            crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(&plan.leaves, &topology).unwrap();
+        let reconciled = frontier
+            .reconcile_lods(&plan.requested_lods, 4, 64)
+            .unwrap();
+        let absolute_maxima = reconciled
+            .resident
+            .iter()
+            .zip(&plan.leaves)
+            .map(|(lods, leaf)| {
+                lods
+                    .iter()
+                    .map(|lod| lod.trailing_zeros() + u32::from(leaf.id.depth))
+                    .max()
+                    .unwrap()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(absolute_maxima.len() > 1);
+        assert!(absolute_maxima.iter().all(|exponent| *exponent < 6));
+    }
+
+    #[test]
+    fn unrepresentable_local_pixel_band_preserves_floor_and_reports_saturation() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let plan = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+            selected_face: 0,
+            transformed_patch: &patch,
+            view_projection: &IDENTITY,
+            viewport: [200.0, 200.0],
+            min_px_per_segment: 60.0,
+            max_px_per_segment: 90.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_total_leaves: 1,
+            source_requested_lods: &[[64; 3]],
+        })
+        .unwrap();
+
+        // The two 100px cardinal edges have no power-of-two subdivision
+        // count satisfying both 60px <= segment <= 90px. Keep the existing
+        // floor authoritative, report the ceiling miss, and avoid silently
+        // manufacturing subpixel density.
+        assert_eq!(plan.requested_lods, [[2, 1, 1]]);
+        assert_eq!(plan.diagnostic.saturated_metric_leaves, 1);
     }
 
     #[test]

@@ -10,7 +10,7 @@
 use crate::patch::{QBPatchDomain, QBTriPatch, RestrictedQBTriPatch};
 use crate::quaternion::SINGULARITY_NORM_SQ;
 use crate::screen_domain::{
-    denominator_norm_sq_range, diagnose_screen_domain, ScreenDomainClass,
+    denominator_norm_sq_minimum, diagnose_screen_domain, ScreenDomainClass,
     ScreenDomainDiagnostic, ScreenDomainPolicy,
 };
 use crate::screen_metric::{
@@ -82,7 +82,12 @@ pub struct ScreenPatchDiagnostic {
 
 impl ScreenPatchDiagnostic {
     fn below_pixel_extent(&self, policy: ScreenPartitionPolicy) -> bool {
-        !self.unprojectable && self.max_edge_arc_px <= policy.ignore_below_px
+        let max_directional_extent = self
+            .directional_extent_px
+            .into_iter()
+            .fold(0.0, f64::max);
+        !self.unprojectable
+            && self.max_edge_arc_px.max(max_directional_extent) <= policy.ignore_below_px
     }
 
     fn meets_metric_limits(&self, policy: ScreenPartitionPolicy) -> bool {
@@ -116,6 +121,35 @@ impl ScreenPatchDiagnostic {
                     .min(u32::MAX as f64) as u32
             };
             requested.clamp(1, lod_cap)
+        }))
+    }
+
+    /// Per-edge upper LoD capacity imposed by a minimum-pixels-per-segment
+    /// floor. Unlike [`Self::edge_subdivision_demand`], this can only remove
+    /// density from an inherited world/curvature request.
+    pub fn edge_subdivision_capacity(
+        &self,
+        min_px_per_segment: f64,
+        max_lod: u32,
+    ) -> Option<[u32; 3]> {
+        if self.unprojectable
+            || !min_px_per_segment.is_finite()
+            || min_px_per_segment <= 0.0
+            || max_lod == 0
+        {
+            return None;
+        }
+        let lod_cap = 1u32 << (31 - max_lod.leading_zeros());
+        Some(std::array::from_fn(|edge| {
+            let length = self.edge_arc_px[edge].max(self.directional_extent_px[edge]);
+            let capacity = if length < min_px_per_segment {
+                1
+            } else {
+                2f64
+                    .powf((length / min_px_per_segment).log2().floor())
+                    .min(u32::MAX as f64) as u32
+            };
+            capacity.clamp(1, lod_cap)
         }))
     }
 }
@@ -259,9 +293,13 @@ pub fn diagnose_screen_patch(
     let mut min_area = f64::INFINITY;
     let mut max_area: f64 = 0.0;
     let mut directional_extent_px = [0.0f64; 3];
-    let min_denominator_norm_sq = denominator_norm_sq_range(transformed_patch)[0];
+    let (min_denominator_norm_sq, maximum_dilation_barycentric) =
+        denominator_norm_sq_minimum(transformed_patch);
     let mut unprojectable = min_denominator_norm_sq <= SINGULARITY_NORM_SQ;
-    for barycentric in METRIC_SAMPLES {
+    for barycentric in METRIC_SAMPLES
+        .into_iter()
+        .chain(std::iter::once(maximum_dilation_barycentric))
+    {
         let metric = patch_screen_metric(
             transformed_patch,
             barycentric[1],
@@ -600,6 +638,14 @@ mod tests {
         );
         // A non-power-of-two atlas cap admits only its resident lower power.
         assert_eq!(diagnostic.edge_subdivision_demand(64.0, 6), Some([4, 2, 4]),);
+        assert_eq!(
+            diagnostic.edge_subdivision_capacity(32.0, 512),
+            Some([4, 2, 8]),
+        );
+        assert_eq!(
+            diagnostic.edge_subdivision_capacity(64.0, 512),
+            Some([2, 1, 4]),
+        );
     }
 
     #[test]
@@ -653,6 +699,76 @@ mod tests {
             .map(|leaf| domain_area(leaf.restricted.domain))
             .sum::<f64>();
         assert!((covered_area - 0.5).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn interior_inversion_peak_is_probed_even_when_it_misses_the_fixed_stencil() {
+        let source = QBTriPatch::flat(
+            [-1.0, -1.0, -3.0],
+            [1.0, -1.0, -3.0],
+            [-1.0, 1.0, -3.0],
+        );
+        let patch = source.transform(&Mobius::sphere_reflection(
+            Quat::from_point(-0.2, -0.1, -2.8),
+            1.0,
+        ));
+        let viewport = [1600.0, 900.0];
+        let projection = perspective();
+        let (minimum_denominator_norm_sq, maximum_dilation_barycentric) =
+            denominator_norm_sq_minimum(&patch);
+        let denominator = patch.weights[0] * maximum_dilation_barycentric[0]
+            + patch.weights[1] * maximum_dilation_barycentric[1]
+            + patch.weights[2] * maximum_dilation_barycentric[2];
+        assert!((denominator.norm_sq() - minimum_denominator_norm_sq).abs() < 1.0e-12);
+        assert!(maximum_dilation_barycentric
+            .iter()
+            .all(|coordinate| *coordinate >= 0.0));
+        assert!((maximum_dilation_barycentric.into_iter().sum::<f64>() - 1.0).abs() < 1.0e-12);
+        assert!(METRIC_SAMPLES.iter().all(|sample| {
+            sample
+                .iter()
+                .zip(maximum_dilation_barycentric)
+                .any(|(left, right)| (*left - right).abs() > 1.0e-6)
+        }));
+
+        let maximum_directional_extent = |barycentric: [f64; 3]| {
+            let metric = patch_screen_metric(
+                &patch,
+                barycentric[1],
+                barycentric[2],
+                &projection,
+                viewport,
+            )
+            .unwrap();
+            [[-1.0, 1.0], [0.0, 1.0], [1.0, 0.0]]
+                .map(|direction| metric.length(direction))
+                .into_iter()
+                .fold(0.0, f64::max)
+        };
+        let fixed_stencil_max = METRIC_SAMPLES
+            .map(maximum_directional_extent)
+            .into_iter()
+            .fold(0.0, f64::max);
+        let interior_max = maximum_directional_extent(maximum_dilation_barycentric);
+        assert!(interior_max > 1.2 * fixed_stencil_max);
+
+        let diagnostic = diagnose_screen_patch(
+            &patch,
+            &projection,
+            viewport,
+            ScreenArcOptions::default(),
+        );
+        let max_directional_extent = diagnostic
+            .directional_extent_px
+            .into_iter()
+            .fold(0.0, f64::max);
+        assert!(max_directional_extent >= interior_max);
+        assert!(max_directional_extent > diagnostic.max_edge_arc_px);
+        let interior_threshold = 0.5 * (max_directional_extent + diagnostic.max_edge_arc_px);
+        assert!(!diagnostic.below_pixel_extent(ScreenPartitionPolicy {
+            ignore_below_px: interior_threshold,
+            ..ScreenPartitionPolicy::default()
+        }));
     }
 
     #[test]

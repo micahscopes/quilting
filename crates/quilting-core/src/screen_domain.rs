@@ -77,10 +77,89 @@ impl std::fmt::Display for ScreenDomainError {
 
 impl std::error::Error for ScreenDomainError {}
 
-fn segment_origin_distance_sq(a: Quat, b: Quat) -> f64 {
+fn segment_origin_minimum(a: Quat, b: Quat) -> (f64, f64) {
     let direction = b - a;
     let parameter = (-a.dot(direction) / direction.norm_sq().max(1.0e-300)).clamp(0.0, 1.0);
-    (a + direction * parameter).norm_sq()
+    ((a + direction * parameter).norm_sq(), parameter)
+}
+
+/// Exact minimum of `|Σ bᵢ weightᵢ|²` over the closed barycentric simplex,
+/// together with one barycentric point attaining it.
+///
+/// For a Möbius-transformed Euclidean triangle this is also the point of
+/// greatest conformal dilation. Returning the witness lets screen-space
+/// diagnostics probe that interior extremum instead of hoping a fixed sample
+/// stencil happens to land near it.
+pub fn denominator_norm_sq_minimum(patch: &QBTriPatch) -> (f64, [f64; 3]) {
+    let [a, b, c] = patch.weights;
+    let ab = b - a;
+    let ac = c - a;
+    let scale = ab.norm_sq().max(ac.norm_sq()).max(1.0e-300);
+    let gram = ab.norm_sq() * ac.norm_sq() - ab.dot(ac).powi(2);
+    if gram <= 1.0e-24 * scale * scale {
+        let (ab_value, ab_parameter) = segment_origin_minimum(a, b);
+        let (ac_value, ac_parameter) = segment_origin_minimum(a, c);
+        let (bc_value, bc_parameter) = segment_origin_minimum(b, c);
+        return [
+            (ab_value, [1.0 - ab_parameter, ab_parameter, 0.0]),
+            (ac_value, [1.0 - ac_parameter, 0.0, ac_parameter]),
+            (bc_value, [0.0, 1.0 - bc_parameter, bc_parameter]),
+        ]
+        .into_iter()
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .expect("three simplex edges are always present");
+    }
+
+    let ap = -a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (a.norm_sq(), [1.0, 0.0, 0.0]);
+    }
+    let bp = -b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return (b.norm_sq(), [0.0, 1.0, 0.0]);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let parameter = d1 / (d1 - d3);
+        return (
+            (a + ab * parameter).norm_sq(),
+            [1.0 - parameter, parameter, 0.0],
+        );
+    }
+    let cp = -c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return (c.norm_sq(), [0.0, 0.0, 1.0]);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let parameter = d2 / (d2 - d6);
+        return (
+            (a + ac * parameter).norm_sq(),
+            [1.0 - parameter, 0.0, parameter],
+        );
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let parameter = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        let bc = c - b;
+        return (
+            (b + bc * parameter).norm_sq(),
+            [0.0, 1.0 - parameter, parameter],
+        );
+    }
+
+    let inverse_sum = 1.0 / (va + vb + vc);
+    let barycentric = [va * inverse_sum, vb * inverse_sum, vc * inverse_sum];
+    (
+        (a + ab * barycentric[1] + ac * barycentric[2]).norm_sq(),
+        barycentric,
+    )
 }
 
 /// Exact range of `|Σ bᵢ weightᵢ|²` over the closed barycentric simplex.
@@ -88,55 +167,7 @@ fn segment_origin_distance_sq(a: Quat, b: Quat) -> f64 {
 /// quaternion triangle. Convexity places the maximum at a vertex.
 pub fn denominator_norm_sq_range(patch: &QBTriPatch) -> [f64; 2] {
     let [a, b, c] = patch.weights;
-    let ab = b - a;
-    let ac = c - a;
-    let scale = ab.norm_sq().max(ac.norm_sq()).max(1.0e-300);
-    let gram = ab.norm_sq() * ac.norm_sq() - ab.dot(ac).powi(2);
-    let minimum = if gram <= 1.0e-24 * scale * scale {
-        segment_origin_distance_sq(a, b)
-            .min(segment_origin_distance_sq(a, c))
-            .min(segment_origin_distance_sq(b, c))
-    } else {
-        let ap = -a;
-        let d1 = ab.dot(ap);
-        let d2 = ac.dot(ap);
-        if d1 <= 0.0 && d2 <= 0.0 {
-            a.norm_sq()
-        } else {
-            let bp = -b;
-            let d3 = ab.dot(bp);
-            let d4 = ac.dot(bp);
-            if d3 >= 0.0 && d4 <= d3 {
-                b.norm_sq()
-            } else {
-                let vc = d1 * d4 - d3 * d2;
-                if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-                    (a + ab * (d1 / (d1 - d3))).norm_sq()
-                } else {
-                    let cp = -c;
-                    let d5 = ab.dot(cp);
-                    let d6 = ac.dot(cp);
-                    if d6 >= 0.0 && d5 <= d6 {
-                        c.norm_sq()
-                    } else {
-                        let vb = d5 * d2 - d1 * d6;
-                        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-                            (a + ac * (d2 / (d2 - d6))).norm_sq()
-                        } else {
-                            let va = d3 * d6 - d5 * d4;
-                            if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-                                let bc = c - b;
-                                (b + bc * ((d4 - d3) / ((d4 - d3) + (d5 - d6)))).norm_sq()
-                            } else {
-                                let inverse_sum = 1.0 / (va + vb + vc);
-                                (a + ab * (vb * inverse_sum) + ac * (vc * inverse_sum)).norm_sq()
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
+    let minimum = denominator_norm_sq_minimum(patch).0;
     [minimum, a.norm_sq().max(b.norm_sq()).max(c.norm_sq())]
 }
 
