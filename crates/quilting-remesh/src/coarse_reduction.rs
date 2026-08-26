@@ -338,6 +338,68 @@ fn validate_backend_geometry(
     Ok(())
 }
 
+fn validate_meshopt_output_geometry(
+    source: &CutChart,
+    positions: &NormalizedPositions,
+    indices: &[u32],
+) -> Result<(), CoarseReductionError> {
+    if indices.is_empty() || !indices.len().is_multiple_of(3) {
+        return Err(CoarseReductionError::InvalidMeshoptOutput {
+            chart: source.key.clone(),
+            reason: "the index count is empty or not divisible by three",
+        });
+    }
+    for triangle in indices.chunks_exact(3) {
+        let vertices = [
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        ];
+        if vertices
+            .iter()
+            .any(|vertex| *vertex >= source.vertices.len())
+        {
+            return Err(CoarseReductionError::InvalidMeshoptOutput {
+                chart: source.key.clone(),
+                reason: "an index references a missing chart vertex",
+            });
+        }
+        let a = positions.quantized[vertices[0]];
+        let b = positions.quantized[vertices[1]];
+        let c = positions.quantized[vertices[2]];
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let quantized_normal = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        if quantized_normal.iter().all(|component| *component == 0.0)
+            || quantized_normal
+                .iter()
+                .any(|component| !component.is_finite())
+        {
+            return Err(CoarseReductionError::InvalidMeshoptOutput {
+                chart: source.key.clone(),
+                reason: "an output triangle becomes degenerate after f32 normalization",
+            });
+        }
+        let exact_normal = crate::geometry::vec3_cross(
+            crate::geometry::vec3_sub(positions.exact[vertices[1]], positions.exact[vertices[0]]),
+            crate::geometry::vec3_sub(positions.exact[vertices[2]], positions.exact[vertices[0]]),
+        );
+        let quantized_normal = quantized_normal.map(f64::from);
+        let orientation = crate::geometry::vec3_dot(exact_normal, quantized_normal);
+        if !orientation.is_finite() || orientation <= 0.0 {
+            return Err(CoarseReductionError::InvalidMeshoptOutput {
+                chart: source.key.clone(),
+                reason: "an output triangle flips after f32 normalization",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn compact_and_validate(
     source: &CutChart,
     indices: &[u32],
@@ -441,11 +503,14 @@ fn reduce_chart(
         .checked_mul(3)
         .ok_or(CoarseReductionError::CountOverflow)?;
     let mut result_error = 0.0f32;
-    let result = if target_indices == indices.len() {
-        indices
+    let backend_positions = if target_indices == indices.len() {
+        None
     } else {
         let positions = normalized_positions(source)?;
         validate_backend_geometry(source, &positions)?;
+        Some(positions)
+    };
+    let result = if let Some(positions) = &backend_positions {
         let locks = source
             .vertices
             .iter()
@@ -460,12 +525,17 @@ fn reduce_chart(
             meshopt::SimplifyOptions::LockBorder,
             Some(&mut result_error),
         )
+    } else {
+        indices
     };
     if !result_error.is_finite() || result_error < 0.0 || result.len() > input_index_count {
         return Err(CoarseReductionError::InvalidMeshoptOutput {
             chart: source.key.clone(),
             reason: "the reported error or output size is invalid",
         });
+    }
+    if let Some(positions) = &backend_positions {
+        validate_meshopt_output_geometry(source, positions, &result)?;
     }
     let (vertices, triangles, boundary_edges) = compact_and_validate(source, &result)?;
     Ok(ReducedChart {
@@ -808,6 +878,28 @@ mod tests {
             ),
             Err(CoarseReductionError::InvalidBackendGeometry {
                 reason: "a source triangle becomes degenerate after f32 normalization",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn meshopt_output_triangle_may_not_become_collinear_in_f32_space() {
+        let source = grid(2);
+        let mut chart = cut_source_topology(&input(&source))
+            .unwrap()
+            .charts
+            .remove(0);
+        chart.vertices[0].position = [0.0, 0.0, 0.0];
+        chart.vertices[1].position = [0.4, 1.0e-50, 0.0];
+        chart.vertices[2].position = [1.0, 0.0, 0.0];
+        chart.vertices[3].position = [1.0, 1.0, 0.0];
+        let positions = normalized_positions(&chart).unwrap();
+        validate_backend_geometry(&chart, &positions).unwrap();
+        assert!(matches!(
+            validate_meshopt_output_geometry(&chart, &positions, &[0, 1, 2]),
+            Err(CoarseReductionError::InvalidMeshoptOutput {
+                reason: "an output triangle becomes degenerate after f32 normalization",
                 ..
             })
         ));

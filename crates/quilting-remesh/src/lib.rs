@@ -46,6 +46,8 @@ pub mod conformal_optimizer;
 pub mod coarse_complex;
 #[cfg(feature = "meshopt-prototype")]
 pub mod coarse_reduction;
+#[cfg(feature = "meshopt-prototype")]
+pub mod coarse_patch_complex;
 
 use quilting_core::patch::QBTriPatch;
 

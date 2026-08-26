@@ -27,7 +27,7 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    Apache-2.0 and vendors meshoptimizer 0.25. It is intentionally optional:
    current upstream meshoptimizer is newer, and its meshlet or Euclidean error
    is not itself a QB fitting objective.
-4. **Construct a shared coarse complex (in progress).** `coarse_complex` now
+4. **Construct a shared coarse complex.** `coarse_complex` now
    requires typed stable vertex/face IDs, validates finite nondegenerate
    consistently wound manifold input, derives cut edges from source borders,
    domains, and explicit locks, and splits face-corner fans across those edges.
@@ -41,10 +41,14 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    backend position space, and revalidates exact boundary identity, winding,
    vertex links, connectivity, Euler characteristic, and boundary components.
    Requested and achieved triangle counts remain distinct because an owned
-   boundary can impose a conservative floor. The next checkpoint welds chart
-   results by stable source identity and records deterministic source
-   correspondence. Independent per-cluster corner selection remains
-   insufficient because it cannot guarantee matching patch boundaries.
+   boundary can impose a conservative floor. `coarse_patch_complex` welds the
+   retained chart copies by stable source identity, revalidates the global
+   oriented manifold and cut-edge incidence, and emits deterministic
+   equal-area source quadrature with normalized surface weights and
+   chart-restricted closest-point barycentrics. Sample and candidate-test
+   budgets bound the temporary brute-force matcher. Independent per-cluster
+   corner selection remains insufficient because it cannot guarantee matching
+   patch boundaries.
 5. **Fit existing first-order triangular QB patches.** Parameterize source
    samples onto coarse triangles, then feed `linear_global_fit_full`. Its one
    quaternion weight per coarse vertex is exactly the ownership rule required
@@ -56,9 +60,12 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    iterative recurrence alone—is the convergence gate. Structural,
    non-convergence, non-finite, and exact closed-domain
    denominator-conditioning failures are explicit. The output
-   remains the current `QBTriPatch` (three positions plus three quaternion weights), directly
-   consumable by canonical tessellation. Higher-order triangular rational
-   patches are explicitly deferred.
+   remains the current `QBTriPatch` (three positions plus three quaternion
+   weights), directly consumable by canonical tessellation. The next adapter
+   must scale each four-row sample block by the square root of its normalized
+   surface weight, propagate the same measure into scoring, and retune
+   regularization against that unit-total data objective. Higher-order
+   triangular rational patches are explicitly deferred.
 6. **Score before accepting.** `score_patch_complex` reports source-space
    positional/normal error, a user-supplied envelope of representative Möbius
    transforms, shared-edge cracks, and rational-denominator conditioning. It
@@ -101,15 +108,16 @@ scalar objective.
 
 ## Integration seam
 
-The prototype's `ClusterSet` can feed a future boundary-complex builder. That
-builder should emit:
+`coarse_patch_complex::build_coarse_patch_complex` now provides the stable
+positions, faces, provenance, cut records, and area-aware correspondences for
+the weighted fitter. The remaining seam is intentionally narrow:
 
 ```text
 CoarsePatchComplex {
-    stable_vertices: Vec<(StableVertexId, position, shared_weight)>,
-    faces: Vec<[StableVertexId; 3]>,
-    source_samples: Vec<(face, barycentric, position, normal)>,
-    source_clusters: Vec<ClusterId>,
+    vertices: Vec<CoarseVertex>,
+    faces: Vec<CoarseFace>,
+    correspondence: Vec<CorrespondenceSample>,
+    ...
 }
 ```
 
@@ -119,11 +127,13 @@ atlas, WASM, or shader change is needed for this experiment.
 
 ## Known limitations
 
-- Source charts now have validated constrained interior reduction, but global
-  identity-based welding and source-to-coarse correspondence are not connected
-  yet. Boundary locks deliberately retain the complete authored cut polyline;
-  shared boundary coarsening is a later optimization. A good cluster score does
-  not by itself produce a patch.
+- Surface weights are emitted but not yet consumed by fitting or conformal
+  scoring; until that adapter lands, the end-to-end path has not removed
+  triangulation-density bias. Boundary locks deliberately retain the complete
+  authored cut polyline; shared boundary coarsening is a later optimization.
+- Correspondence is chart-restricted, orientation-filtered, and deterministic,
+  but still brute-force and geometrically nearest. Production-scale meshes need
+  a chart BVH, and near-coincident folded sheets need a topology-aware policy.
 - The spatial/normal growth weights are heuristics. Meshoptimizer ordering may
   improve locality but is not assumed to improve QB fit quality.
 - Probe normals use the exact Möbius differential on an oriented tangent frame;
