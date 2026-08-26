@@ -45,10 +45,12 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    retained chart copies by stable source identity, revalidates the global
    oriented manifold and cut-edge incidence, and emits deterministic
    equal-area source quadrature with normalized surface weights and
-   chart-restricted closest-point barycentrics. Sample and candidate-test
-   budgets bound the temporary brute-force matcher. Independent per-cluster
-   corner selection remains insufficient because it cannot guarantee matching
-   patch boundaries.
+   chart-restricted closest-point barycentrics. A deterministic per-chart
+   triangle BVH returns the same stable nearest hit as exhaustive search while
+   sample and actual candidate-test budgets remain hard guards. Diagnostics
+   retain exhaustive work, indexed work, and node visits. Independent
+   per-cluster corner selection remains insufficient because it cannot
+   guarantee matching patch boundaries.
 5. **Fit existing first-order triangular QB patches.** Parameterize source
    samples onto coarse triangles, then feed
    `CoarsePatchComplex::fit_shared_qb`. Its one
@@ -160,9 +162,9 @@ rejection target/category/reason stay visible in `ChartReductionReport`.
   invariance tests. Its default regularization and acceptance thresholds still
   need real-asset calibration. Boundary locks deliberately retain the complete
   authored cut polyline; shared boundary coarsening is a later optimization.
-- Correspondence is chart-restricted, orientation-filtered, and deterministic,
-  but still brute-force and geometrically nearest. Production-scale meshes need
-  a chart BVH, and near-coincident folded sheets need a topology-aware policy.
+- Correspondence is chart-restricted, orientation-filtered, deterministic, and
+  accelerated by an exact nearest-triangle BVH. It remains geometrically
+  nearest; near-coincident folded sheets need a topology-aware policy.
 - The spatial/normal growth weights are heuristics. Meshoptimizer ordering may
   improve locality but is not assumed to improve QB fit quality.
 - Probe normals use the exact Möbius differential on an oriented tangent frame;

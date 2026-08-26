@@ -18,6 +18,9 @@ use crate::coarse_reduction::{
     ReducedSourceCharts, RejectedReductionCandidate,
 };
 use crate::geometry;
+use crate::triangle_bvh::{
+    IndexedTriangle, SearchCounters, SearchError, SearchScratch, TriangleBvh,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoarsePatchConfig {
@@ -30,8 +33,8 @@ pub struct CoarsePatchConfig {
     /// Hard allocation guard until correspondence gains an area-stratified
     /// sampler.
     pub maximum_correspondence_samples: usize,
-    /// Hard brute-force work guard until correspondence gains a spatial index.
-    /// One candidate test projects one source sample onto one coarse triangle.
+    /// Hard indexed-search work guard. One candidate test visits one coarse
+    /// triangle from a BVH leaf for one source sample.
     pub maximum_candidate_tests: usize,
 }
 
@@ -130,6 +133,13 @@ pub struct CorrespondenceSample {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CorrespondenceDiagnostics {
     pub sample_count: usize,
+    /// Exact candidate count the previous chart-local exhaustive search would
+    /// have visited for the same samples and coarse topology.
+    pub exhaustive_candidate_tests: u128,
+    /// Coarse triangles actually visited in BVH leaves.
+    pub candidate_tests: usize,
+    /// BVH nodes visited, including nodes rejected by their lower bound.
+    pub bvh_node_visits: usize,
     pub weighted_rms_distance_ratio: f64,
     pub maximum_distance_ratio: f64,
     pub total_surface_weight: f64,
@@ -262,7 +272,7 @@ impl std::fmt::Display for CoarsePatchError {
             ),
             Self::CandidateTestBudgetExceeded { requested, maximum } => write!(
                 formatter,
-                "correspondence requests {requested} candidate tests, exceeding budget {maximum}",
+                "indexed correspondence reached candidate test {requested}, exceeding budget {maximum}",
             ),
             Self::CountOverflow => write!(formatter, "coarse patch dimensions overflow usize"),
             Self::ReducedInputMismatch(reason) => {
@@ -598,51 +608,6 @@ fn normalize_direction(vector: [f64; 3]) -> Option<[f64; 3]> {
     (length.is_finite() && length > 0.0).then(|| geometry::vec3_scale(scaled, length.recip()))
 }
 
-fn closest_barycentric(point: [f64; 3], triangle: [[f64; 3]; 3]) -> [f64; 3] {
-    let a = triangle[0];
-    let b = triangle[1];
-    let c = triangle[2];
-    let ab = geometry::vec3_sub(b, a);
-    let ac = geometry::vec3_sub(c, a);
-    let ap = geometry::vec3_sub(point, a);
-    let d1 = geometry::vec3_dot(ab, ap);
-    let d2 = geometry::vec3_dot(ac, ap);
-    if d1 <= 0.0 && d2 <= 0.0 {
-        return [1.0, 0.0, 0.0];
-    }
-    let bp = geometry::vec3_sub(point, b);
-    let d3 = geometry::vec3_dot(ab, bp);
-    let d4 = geometry::vec3_dot(ac, bp);
-    if d3 >= 0.0 && d4 <= d3 {
-        return [0.0, 1.0, 0.0];
-    }
-    let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        let parameter = d1 / (d1 - d3);
-        return [1.0 - parameter, parameter, 0.0];
-    }
-    let cp = geometry::vec3_sub(point, c);
-    let d5 = geometry::vec3_dot(ab, cp);
-    let d6 = geometry::vec3_dot(ac, cp);
-    if d6 >= 0.0 && d5 <= d6 {
-        return [0.0, 0.0, 1.0];
-    }
-    let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        let parameter = d2 / (d2 - d6);
-        return [1.0 - parameter, 0.0, parameter];
-    }
-    let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
-        let parameter = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return [0.0, 1.0 - parameter, parameter];
-    }
-    let inverse = 1.0 / (va + vb + vc);
-    let second = vb * inverse;
-    let third = vc * inverse;
-    [1.0 - second - third, second, third]
-}
-
 fn lattice_centroids(subdivisions: usize) -> Result<Vec<[f64; 3]>, CoarsePatchError> {
     let count = subdivisions
         .checked_mul(subdivisions)
@@ -735,42 +700,44 @@ fn correspondence(
         .len()
         .checked_mul(lattice.len())
         .ok_or(CoarsePatchError::CountOverflow)?;
-    let candidate_tests =
+    let exhaustive_candidate_tests =
         reduced
             .iter()
             .enumerate()
-            .try_fold(0usize, |total, (chart_index, chart)| {
-                chart
-                    .source_faces
-                    .len()
-                    .checked_mul(lattice.len())
-                    .and_then(|samples| samples.checked_mul(chart_faces[chart_index].len()))
-                    .and_then(|tests| total.checked_add(tests))
+            .try_fold(0u128, |total, (chart_index, chart)| {
+                let chart_tests = (chart.source_faces.len() as u128)
+                    .checked_mul(lattice.len() as u128)
+                    .and_then(|samples| samples.checked_mul(chart_faces[chart_index].len() as u128))
+                    .ok_or(CoarsePatchError::CountOverflow)?;
+                total
+                    .checked_add(chart_tests)
                     .ok_or(CoarsePatchError::CountOverflow)
             })?;
-    if candidate_tests > config.maximum_candidate_tests {
-        return Err(CoarsePatchError::CandidateTestBudgetExceeded {
-            requested: candidate_tests,
-            maximum: config.maximum_candidate_tests,
-        });
-    }
     let mut samples = Vec::with_capacity(sample_capacity);
+    let mut search_counters = SearchCounters::default();
+    let mut search_scratch = SearchScratch::default();
     let mut weighted_squared = 0.0;
     let mut maximum_distance = 0.0f64;
     for (chart_index, chart) in reduced.iter().enumerate() {
         let frame = chart_frame(input, &chart.source_faces)?;
-        let coarse_candidates = chart_faces[chart_index]
-            .iter()
-            .map(|&coarse_face| {
-                let face = &assembled.faces[coarse_face];
-                let triangle = face.vertices.map(|vertex| frame.point(positions[vertex]));
-                let normal = geometry::vec3_cross(
-                    geometry::vec3_sub(triangle[1], triangle[0]),
-                    geometry::vec3_sub(triangle[2], triangle[0]),
-                );
-                (coarse_face, triangle, normal)
-            })
-            .collect::<Vec<_>>();
+        let coarse_index = TriangleBvh::new(
+            chart_faces[chart_index]
+                .iter()
+                .map(|&coarse_face| {
+                    let face = &assembled.faces[coarse_face];
+                    let triangle = face.vertices.map(|vertex| frame.point(positions[vertex]));
+                    let normal = geometry::vec3_cross(
+                        geometry::vec3_sub(triangle[1], triangle[0]),
+                        geometry::vec3_sub(triangle[2], triangle[0]),
+                    );
+                    IndexedTriangle {
+                        stable_index: coarse_face,
+                        positions: triangle,
+                        orientation: normal,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
         for &source_face in &chart.source_faces {
             let triangle_indices = canonical_source_triangle(input, source_face);
             let source_triangle = triangle_indices.map(|vertex| input.positions[vertex]);
@@ -789,25 +756,29 @@ fn correspondence(
                 };
                 let target = barycentric_point(source_triangle, source_barycentric);
                 let target_normalized = barycentric_point(source_normalized, source_barycentric);
-                let mut best: Option<(usize, [f64; 3], f64)> = None;
-                for &(coarse_face, coarse_triangle, coarse_normal) in &coarse_candidates {
-                    if geometry::vec3_dot(source_normal, coarse_normal) <= 0.0 {
-                        continue;
-                    }
-                    let barycentric = closest_barycentric(target_normalized, coarse_triangle);
-                    let closest = barycentric_point(coarse_triangle, barycentric);
-                    let delta = geometry::vec3_sub(target_normalized, closest);
-                    let squared_distance = geometry::vec3_dot(delta, delta);
-                    if best
-                        .as_ref()
-                        .is_none_or(|candidate| squared_distance < candidate.2)
-                    {
-                        best = Some((coarse_face, barycentric, squared_distance));
-                    }
-                }
-                let Some((coarse_face, coarse_barycentric, squared_distance)) = best else {
+                let best = coarse_index
+                    .nearest_orientation_compatible(
+                        target_normalized,
+                        source_normal,
+                        &mut search_scratch,
+                        &mut search_counters,
+                        config.maximum_candidate_tests,
+                    )
+                    .map_err(|error| match error {
+                        SearchError::CountOverflow => CoarsePatchError::CountOverflow,
+                        SearchError::CandidateBudgetExceeded { attempted, maximum } => {
+                            CoarsePatchError::CandidateTestBudgetExceeded {
+                                requested: attempted,
+                                maximum,
+                            }
+                        }
+                    })?;
+                let Some(best) = best else {
                     return Err(CoarsePatchError::NoCompatibleFace(key));
                 };
+                let coarse_face = best.stable_index;
+                let coarse_barycentric = best.barycentric;
+                let squared_distance = best.squared_distance;
                 let distance_ratio = squared_distance.sqrt();
                 let surface_weight = face_weights[source_face] / per_face_samples;
                 if !distance_ratio.is_finite()
@@ -847,6 +818,9 @@ fn correspondence(
         samples,
         CorrespondenceDiagnostics {
             sample_count,
+            exhaustive_candidate_tests,
+            candidate_tests: search_counters.candidate_tests,
+            bvh_node_visits: search_counters.node_visits,
             weighted_rms_distance_ratio: weighted_squared.sqrt(),
             maximum_distance_ratio: maximum_distance,
             total_surface_weight,
@@ -1185,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_correspondence_policy_fails_before_reduction() {
+    fn invalid_correspondence_policy_and_work_budgets_fail_closed() {
         let source = grid(2);
         assert!(matches!(
             build_coarse_patch_complex(
@@ -1249,7 +1223,7 @@ mod tests {
                 },
             ),
             Err(CoarsePatchError::CandidateTestBudgetExceeded {
-                requested: 16,
+                requested: 2,
                 maximum: 1,
             })
         ));

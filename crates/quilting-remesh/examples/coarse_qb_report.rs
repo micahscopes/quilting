@@ -229,6 +229,9 @@ struct Success {
     constrained_vertices: usize,
     correspondence_rms: f64,
     correspondence_max: f64,
+    correspondence_exhaustive_candidate_tests: u128,
+    correspondence_candidate_tests: usize,
+    correspondence_bvh_node_visits: usize,
     build_time: Duration,
     fit_time: Duration,
     context_time: Duration,
@@ -523,6 +526,11 @@ fn success(
             .correspondence_diagnostics
             .weighted_rms_distance_ratio,
         correspondence_max: complex.correspondence_diagnostics.maximum_distance_ratio,
+        correspondence_exhaustive_candidate_tests: complex
+            .correspondence_diagnostics
+            .exhaustive_candidate_tests,
+        correspondence_candidate_tests: complex.correspondence_diagnostics.candidate_tests,
+        correspondence_bvh_node_visits: complex.correspondence_diagnostics.bvh_node_visits,
         build_time,
         fit_time,
         context_time,
@@ -572,8 +580,14 @@ fn print_success(success: &Success) {
         }
     }
     println!(
-        "  correspondence relative_rms={:.6e} relative_max={:.6e}",
-        success.correspondence_rms, success.correspondence_max,
+        "  correspondence relative_rms={:.6e} relative_max={:.6e} exhaustive_candidate_tests={} candidate_tests={} candidate_reduction={:.3}x bvh_node_visits={}",
+        success.correspondence_rms,
+        success.correspondence_max,
+        success.correspondence_exhaustive_candidate_tests,
+        success.correspondence_candidate_tests,
+        success.correspondence_exhaustive_candidate_tests as f64
+            / success.correspondence_candidate_tests.max(1) as f64,
+        success.correspondence_bvh_node_visits,
     );
     println!(
         "  fit iterations={} algebraic_rms={:.6e} max_weight_dev={:.6e} min_relative_denominator={:.6e}",

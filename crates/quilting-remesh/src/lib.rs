@@ -52,6 +52,8 @@ pub mod coarse_complex;
 pub mod coarse_reduction;
 #[cfg(feature = "meshopt-prototype")]
 pub mod coarse_patch_complex;
+#[cfg(feature = "meshopt-prototype")]
+mod triangle_bvh;
 
 use quilting_core::patch::QBTriPatch;
 
