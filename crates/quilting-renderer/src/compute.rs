@@ -9,6 +9,7 @@
 //! directly consumable by group_into_batches.
 
 use glow::HasContext;
+use quilting_core::instance_layout;
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_mesh::HalfEdgeMesh;
 use std::collections::HashMap;
@@ -27,6 +28,152 @@ pub const FLOATS_PER_FACE_PASS1: usize = 4;
 
 /// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) = 6 floats per face.
 pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
+
+/// Backend-neutral source payload consumed by one LOD classifier residency.
+///
+/// WebGL2 uploads these arrays into textures; a WebGPU backend can upload the
+/// same validated data into storage buffers. The payload deliberately contains
+/// no context handles, atlas ownership, or per-frame pose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LodModelData {
+    pub positions: Vec<f32>,
+    pub faces: Vec<[u32; 3]>,
+    pub joint_indices: Vec<[u16; 4]>,
+    pub joint_weights: Vec<[f32; 4]>,
+    pub morph_deltas: Vec<f32>,
+    pub num_morph_targets: usize,
+    pub face_nodes: Vec<usize>,
+}
+
+/// Primary-asset animation data embedded into a packed multi-asset LOD model.
+/// Static secondary vertices receive zero joint weights and zero morph deltas.
+#[derive(Clone, Copy, Debug)]
+pub struct LodAnimationSource<'a> {
+    pub primary_vertices: usize,
+    pub joint_indices: Option<&'a [[u16; 4]]>,
+    pub joint_weights: Option<&'a [[f32; 4]]>,
+    /// Target-major `xyz` deltas for exactly `primary_vertices` per target.
+    pub morph_deltas: &'a [f32],
+    pub num_morph_targets: usize,
+}
+
+/// Reconstruct one face-indexed LOD model from the renderer's immutable source
+/// instances. This is the shared worker/main-renderer/WebGPU packing boundary.
+pub fn build_composed_lod_model(
+    instances: &[f32],
+    face_nodes: &[usize],
+    total_vertices: usize,
+    primary_faces: usize,
+    animation: LodAnimationSource<'_>,
+) -> Result<LodModelData, String> {
+    let num_faces = instances.len() / instance_layout::STRIDE;
+    if instances.len() != num_faces * instance_layout::STRIDE || num_faces == 0 {
+        return Err("composed LOD instances are malformed".to_string());
+    }
+    if face_nodes.len() != num_faces {
+        return Err("composed LOD face ownership does not match instances".to_string());
+    }
+    if primary_faces > num_faces {
+        return Err("composed LOD primary face boundary exceeds resident topology".to_string());
+    }
+    if animation.primary_vertices > total_vertices {
+        return Err("composed LOD primary vertex boundary exceeds resident vertices".to_string());
+    }
+
+    let position_scalars = total_vertices
+        .checked_mul(3)
+        .ok_or_else(|| "composed LOD position payload size overflow".to_string())?;
+    let mut positions = vec![0.0f32; position_scalars];
+    let mut position_seen = vec![false; total_vertices];
+    let mut faces = Vec::with_capacity(num_faces);
+    for face in 0..num_faces {
+        let instance = &instances[
+            face * instance_layout::STRIDE..(face + 1) * instance_layout::STRIDE
+        ];
+        let mut vertices = [0u32; 3];
+        for (corner, vertex_slot) in vertices.iter_mut().enumerate() {
+            let offset = instance_layout::offset::POSITIONS + corner * 4;
+            let encoded = instance[offset];
+            if !encoded.is_finite() || encoded < 0.0 || encoded.fract() != 0.0
+                || encoded as usize >= total_vertices
+            {
+                return Err(format!("composed LOD face {face} has invalid vertex index"));
+            }
+            let vertex = encoded as usize;
+            if vertex > u32::MAX as usize {
+                return Err(format!("composed LOD face {face} has an unrepresentable vertex index"));
+            }
+            let position = [instance[offset + 1], instance[offset + 2], instance[offset + 3]];
+            if !position.iter().all(|coordinate| coordinate.is_finite()) {
+                return Err(format!("composed LOD vertex {vertex} has a non-finite position"));
+            }
+            if position_seen[vertex] {
+                let resident = &positions[vertex * 3..vertex * 3 + 3];
+                if resident != position.as_slice() {
+                    return Err(format!(
+                        "composed LOD vertex {vertex} has inconsistent source positions"
+                    ));
+                }
+            } else {
+                positions[vertex * 3..vertex * 3 + 3].copy_from_slice(&position);
+                position_seen[vertex] = true;
+            }
+            *vertex_slot = vertex as u32;
+        }
+        faces.push(vertices);
+    }
+
+    let mut joint_indices = vec![[0u16; 4]; total_vertices];
+    let mut joint_weights = vec![[0.0f32; 4]; total_vertices];
+    match (animation.joint_indices, animation.joint_weights) {
+        (Some(indices), Some(weights))
+            if indices.len() == animation.primary_vertices
+                && weights.len() == animation.primary_vertices =>
+        {
+            if !weights.iter().flatten().all(|weight| weight.is_finite()) {
+                return Err("composed LOD primary skinning payload is non-finite".to_string());
+            }
+            joint_indices[..animation.primary_vertices].copy_from_slice(indices);
+            joint_weights[..animation.primary_vertices].copy_from_slice(weights);
+        }
+        (None, None) => {}
+        _ => return Err("composed LOD primary skinning payload is incomplete".to_string()),
+    }
+
+    let expected_primary_morphs = animation.num_morph_targets
+        .checked_mul(animation.primary_vertices)
+        .and_then(|count| count.checked_mul(3))
+        .ok_or_else(|| "composed LOD morph payload size overflow".to_string())?;
+    if animation.morph_deltas.len() != expected_primary_morphs {
+        return Err("composed LOD primary morph payload has the wrong length".to_string());
+    }
+    if !animation.morph_deltas.iter().all(|delta| delta.is_finite()) {
+        return Err("composed LOD primary morph payload is non-finite".to_string());
+    }
+    let total_morphs = animation.num_morph_targets
+        .checked_mul(total_vertices)
+        .and_then(|count| count.checked_mul(3))
+        .ok_or_else(|| "composed LOD resident morph payload size overflow".to_string())?;
+    let mut morph_deltas = vec![0.0f32; total_morphs];
+    for target in 0..animation.num_morph_targets {
+        let source_start = target * animation.primary_vertices * 3;
+        let destination_start = target * total_vertices * 3;
+        morph_deltas[destination_start..destination_start + animation.primary_vertices * 3]
+            .copy_from_slice(&animation.morph_deltas[
+                source_start..source_start + animation.primary_vertices * 3
+            ]);
+    }
+
+    Ok(LodModelData {
+        positions,
+        faces,
+        joint_indices,
+        joint_weights,
+        morph_deltas,
+        num_morph_targets: animation.num_morph_targets,
+        face_nodes: face_nodes.to_vec(),
+    })
+}
 
 /// Per-node state consumed by the composed-scene LOD pass. The four Möbius
 /// quaternions and four model-matrix columns are packed without transposition.
@@ -1215,6 +1362,7 @@ fn bytemuck_cast_slice_mut(data: &mut [f32]) -> &mut [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quilting_core::instance_layout::InstanceWriter;
     use std::cell::RefCell;
 
     fn subject_record(node: f32, marker: f32) -> Vec<f32> {
@@ -1396,6 +1544,100 @@ mod tests {
         let (positions, faces) = coincident_square();
         assert!(build_scoped_lod_adjacency(&positions, &faces, &[0]).is_err());
         assert!(build_scoped_lod_adjacency(&positions, &faces, &[0, 1, 2]).is_err());
+    }
+
+    fn two_face_instances() -> Vec<f32> {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let mut instances = vec![0.0; 2 * instance_layout::STRIDE];
+        for (face, vertices) in [[0, 1, 2], [1, 3, 2]].into_iter().enumerate() {
+            let mut writer = InstanceWriter::new(&mut instances, face);
+            for (corner, vertex) in vertices.into_iter().enumerate() {
+                writer.set_position(corner, vertex, positions[vertex as usize]);
+            }
+        }
+        instances
+    }
+
+    #[test]
+    fn composed_model_extends_primary_animation_with_static_secondary_vertices() {
+        let instances = two_face_instances();
+        let joint_indices = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]];
+        let joint_weights = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+            [0.25, 0.25, 0.25, 0.25],
+        ];
+        let morph_deltas = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+        let model = build_composed_lod_model(
+            &instances,
+            &[4, 9],
+            4,
+            1,
+            LodAnimationSource {
+                primary_vertices: 3,
+                joint_indices: Some(&joint_indices),
+                joint_weights: Some(&joint_weights),
+                morph_deltas: &morph_deltas,
+                num_morph_targets: 1,
+            },
+        ).unwrap();
+
+        assert_eq!(model.faces, [[0, 1, 2], [1, 3, 2]]);
+        assert_eq!(model.face_nodes, [4, 9]);
+        assert_eq!(model.positions[9..12], [1.0, 1.0, 0.0]);
+        assert_eq!(&model.joint_indices[..3], &joint_indices);
+        assert_eq!(model.joint_indices[3], [0; 4]);
+        assert_eq!(&model.joint_weights[..3], &joint_weights);
+        assert_eq!(model.joint_weights[3], [0.0; 4]);
+        assert_eq!(&model.morph_deltas[..9], &morph_deltas);
+        assert_eq!(model.morph_deltas[9..12], [0.0; 3]);
+    }
+
+    #[test]
+    fn composed_model_rejects_inconsistent_shared_vertex_positions() {
+        let mut instances = two_face_instances();
+        let second_face_vertex_one = instance_layout::STRIDE + instance_layout::offset::POSITIONS;
+        instances[second_face_vertex_one + 1] = 2.0;
+        let error = build_composed_lod_model(
+            &instances,
+            &[0, 0],
+            4,
+            1,
+            LodAnimationSource {
+                primary_vertices: 0,
+                joint_indices: None,
+                joint_weights: None,
+                morph_deltas: &[],
+                num_morph_targets: 0,
+            },
+        ).unwrap_err();
+        assert_eq!(error, "composed LOD vertex 1 has inconsistent source positions");
+    }
+
+    #[test]
+    fn composed_model_rejects_partial_animation_payloads() {
+        let instances = two_face_instances();
+        let joint_indices = [[0; 4]; 2];
+        let joint_weights = [[0.0; 4]; 3];
+        let error = build_composed_lod_model(
+            &instances,
+            &[0, 0],
+            4,
+            1,
+            LodAnimationSource {
+                primary_vertices: 3,
+                joint_indices: Some(&joint_indices),
+                joint_weights: Some(&joint_weights),
+                morph_deltas: &[],
+                num_morph_targets: 0,
+            },
+        ).unwrap_err();
+        assert_eq!(error, "composed LOD primary skinning payload is incomplete");
     }
 
 }

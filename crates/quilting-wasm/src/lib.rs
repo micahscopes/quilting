@@ -20,7 +20,8 @@ use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
 use quilting_renderer::compute::{
-    build_lod_subject_states, build_scoped_lod_adjacency, LodCompute, StagedLodReadback,
+    build_composed_lod_model, build_lod_subject_states, build_scoped_lod_adjacency,
+    LodAnimationSource, LodCompute, LodModelData, StagedLodReadback,
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -184,16 +185,6 @@ struct LodComputeModel {
     num_faces: usize,
     num_vertices: u32,
     node_first_faces: HashMap<usize, usize>,
-}
-
-struct LodComputeUpload {
-    positions: Vec<f32>,
-    faces: Vec<[u32; 3]>,
-    joint_indices: Vec<[u16; 4]>,
-    joint_weights: Vec<[f32; 4]>,
-    morph_deltas: Vec<f32>,
-    num_morph_targets: usize,
-    face_nodes: Vec<usize>,
 }
 
 thread_local! {
@@ -431,7 +422,7 @@ fn lod_mesh_radius(positions: &[f32], faces: &[[u32; 3]]) -> Result<f64, String>
     Ok(radius.max(1e-6))
 }
 
-fn upload_lod_compute_model(upload: LodComputeUpload) -> Result<bool, String> {
+fn upload_lod_compute_model(upload: LodModelData) -> Result<bool, String> {
     let num_vertices = upload.positions.len() / 3;
     if upload.positions.len() != num_vertices * 3 || num_vertices == 0 {
         return Err("LOD position payload is malformed".to_string());
@@ -561,7 +552,7 @@ pub fn refresh_lod_compute_atlas() -> Result<bool, JsValue> {
     Ok(uploaded)
 }
 
-fn stored_gltf_lod_upload(data: &StoredGltfData) -> Result<LodComputeUpload, String> {
+fn stored_gltf_lod_upload(data: &StoredGltfData) -> Result<LodModelData, String> {
     let combined = &data.combined;
     let num_vertices = combined.positions.len();
     let mut positions = vec![0.0f32; num_vertices * 3];
@@ -594,7 +585,7 @@ fn stored_gltf_lod_upload(data: &StoredGltfData) -> Result<LodComputeUpload, Str
     if data.face_node_indices.len() != faces.len() {
         return Err("stored glTF has incomplete face ownership".to_string());
     }
-    Ok(LodComputeUpload {
+    Ok(LodModelData {
         positions,
         faces,
         joint_indices,
@@ -611,58 +602,11 @@ fn composed_lod_upload(
     face_nodes: &[i32],
     total_vertices: u32,
     primary_faces: u32,
-) -> Result<LodComputeUpload, String> {
-    let num_faces = instances.len() / instance_layout::STRIDE;
-    if instances.len() != num_faces * instance_layout::STRIDE || num_faces == 0 {
-        return Err("composed LOD instances are malformed".to_string());
-    }
-    if face_nodes.len() != num_faces {
-        return Err("composed LOD face ownership does not match instances".to_string());
-    }
+) -> Result<LodModelData, String> {
     if primary_faces as usize != data.combined.triangles.len() {
         return Err("composed LOD primary face boundary does not match the retained model".to_string());
     }
     let num_vertices = total_vertices as usize;
-    if num_vertices < data.combined.positions.len() {
-        return Err("composed LOD vertex count truncates the primary asset".to_string());
-    }
-    let mut positions = vec![0.0f32; num_vertices * 3];
-    let mut position_seen = vec![false; num_vertices];
-    let mut faces = Vec::with_capacity(num_faces);
-    for face in 0..num_faces {
-        let instance = &instances[
-            face * instance_layout::STRIDE..(face + 1) * instance_layout::STRIDE
-        ];
-        let mut vertices = [0u32; 3];
-        for corner in 0..3 {
-            let offset = instance_layout::offset::POSITIONS + corner * 4;
-            let encoded = instance[offset];
-            if !encoded.is_finite() || encoded < 0.0 || encoded.fract() != 0.0
-                || encoded as usize >= num_vertices
-            {
-                return Err(format!("composed LOD face {face} has invalid vertex index"));
-            }
-            let vertex = encoded as usize;
-            let position = [instance[offset + 1], instance[offset + 2], instance[offset + 3]];
-            if !position.iter().all(|coordinate| coordinate.is_finite()) {
-                return Err(format!("composed LOD vertex {vertex} has a non-finite position"));
-            }
-            if position_seen[vertex] {
-                let resident = &positions[vertex * 3..vertex * 3 + 3];
-                if resident != position.as_slice() {
-                    return Err(format!(
-                        "composed LOD vertex {vertex} has inconsistent source positions"
-                    ));
-                }
-            } else {
-                positions[vertex * 3..vertex * 3 + 3].copy_from_slice(&position);
-                position_seen[vertex] = true;
-            }
-            vertices[corner] = vertex as u32;
-        }
-        faces.push(vertices);
-    }
-
     let face_nodes: Vec<usize> = face_nodes.iter().enumerate()
         .map(|(face, &node)| {
             usize::try_from(node)
@@ -670,41 +614,40 @@ fn composed_lod_upload(
         })
         .collect::<Result<_, _>>()?;
     let primary_vertices = data.combined.positions.len();
-    let mut joint_indices = vec![[0u16; 4]; num_vertices];
-    let mut joint_weights = vec![[0.0f32; 4]; num_vertices];
-    match (
+    let skinning = match (
         data.combined.joint_indices.as_ref(),
         data.combined.joint_weights.as_ref(),
     ) {
         (Some(indices), Some(weights)) if indices.len() == primary_vertices
-            && weights.len() == primary_vertices => {
-                joint_indices[..primary_vertices].copy_from_slice(indices);
-                joint_weights[..primary_vertices].copy_from_slice(weights);
-            }
-        (None, None) => {}
+            && weights.len() == primary_vertices => Some((indices.as_slice(), weights.as_slice())),
+        (None, None) => None,
         _ => return Err("retained primary model has incomplete skinning data".to_string()),
-    }
+    };
     let num_morph_targets = data.combined.morph_targets.len();
-    let mut morph_deltas = vec![0.0f32; num_morph_targets * num_vertices * 3];
+    let mut primary_morph_deltas = vec![0.0f32; num_morph_targets * primary_vertices * 3];
     for (target_index, target) in data.combined.morph_targets.iter().enumerate() {
         for vertex in 0..primary_vertices {
             let delta = target.get(vertex).copied().unwrap_or([0.0; 3]);
-            let offset = (target_index * num_vertices + vertex) * 3;
+            let offset = (target_index * primary_vertices + vertex) * 3;
             for axis in 0..3 {
-                morph_deltas[offset + axis] =
+                primary_morph_deltas[offset + axis] =
                     delta[axis] as f32 * data.norm_scale as f32;
             }
         }
     }
-    Ok(LodComputeUpload {
-        positions,
-        faces,
-        joint_indices,
-        joint_weights,
-        morph_deltas,
-        num_morph_targets,
-        face_nodes,
-    })
+    build_composed_lod_model(
+        instances,
+        &face_nodes,
+        num_vertices,
+        primary_faces as usize,
+        LodAnimationSource {
+            primary_vertices,
+            joint_indices: skinning.map(|(indices, _)| indices),
+            joint_weights: skinning.map(|(_, weights)| weights),
+            morph_deltas: &primary_morph_deltas,
+            num_morph_targets,
+        },
+    )
 }
 
 /// Upload static animation data to the GPU compute context for per-frame LOD.
