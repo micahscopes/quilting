@@ -865,8 +865,12 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // Current resident per-vertex LODs are max-reconciled over the welded
     // topology. Log interpolation is therefore smooth inside a face and C0
     // continuous across every shared edge, independent of atlas permutation.
+    // These are absolute source-domain resolutions at this resident patch's
+    // three corners. Adaptive leaves therefore interpolate in their local
+    // barycentric chart; using source_bary would apply the restriction twice
+    // and create false density seams between leaves of different depths.
     let log_vertex_lod = log2(max(in.vert_lod.xyz, vec3<f32>(1.0)));
-    out.density = dot(source_bary, log_vertex_lod) / 10.0;
+    out.density = dot(bary, log_vertex_lod) / 10.0;
 
     let uv0 = in.uv01.xy;
     let uv1 = in.uv01.zw;

@@ -106,6 +106,10 @@ pub enum ScreenLeafLodError {
         leaf_index: usize,
         key: [u32; 3],
     },
+    AbsoluteLodOverflow {
+        leaf_index: usize,
+        edge_index: usize,
+    },
 }
 
 impl std::fmt::Display for ScreenLeafLodError {
@@ -135,6 +139,13 @@ impl std::fmt::Display for ScreenLeafLodError {
             Self::MissingAtlasPatch { leaf_index, key } => write!(
                 formatter,
                 "adaptive leaf {leaf_index} needs missing atlas patch {key:?}"
+            ),
+            Self::AbsoluteLodOverflow {
+                leaf_index,
+                edge_index,
+            } => write!(
+                formatter,
+                "adaptive leaf {leaf_index} edge {edge_index} absolute LoD overflows u32"
             ),
         }
     }
@@ -177,42 +188,50 @@ struct QuantizedEdgeSpan {
     span: EdgeSpan,
 }
 
+fn quantized_domain_corners(
+    leaf_index: usize,
+    id: ScreenPatchLeafId,
+    domain: QBPatchDomain,
+    global_depth: u8,
+) -> Result<[[u32; 3]; 3], ScreenLeafLodError> {
+    if global_depth > 16 || id.depth > global_depth || id.domain() != Some(domain) {
+        return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+    }
+    let denominator = 1u32 << id.depth;
+    let global_scale = 1u32 << (global_depth - id.depth);
+    let mut corners = [[0u32; 3]; 3];
+    for (corner_index, barycentric) in domain.corners.into_iter().enumerate() {
+        let mut sum = 0u32;
+        for coordinate in 0..3 {
+            let scaled = barycentric[coordinate] * f64::from(denominator);
+            let rounded = scaled.round();
+            if !scaled.is_finite()
+                || rounded < 0.0
+                || rounded > f64::from(denominator)
+                || (scaled - rounded).abs() > 1.0e-9
+            {
+                return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+            }
+            let numerator = rounded as u32;
+            corners[corner_index][coordinate] = numerator * global_scale;
+            sum += numerator;
+        }
+        if sum != denominator {
+            return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+        }
+    }
+    Ok(corners)
+}
+
 fn quantized_edge_spans(
     leaves: impl IntoIterator<Item = (usize, ScreenPatchLeafId, QBPatchDomain)>,
     global_depth: u8,
 ) -> Result<Vec<QuantizedEdgeSpan>, ScreenLeafLodError> {
-    if global_depth > 16 {
-        return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
-    }
     let mut edges = Vec::new();
     let edge_corners = [(1usize, 2usize), (0, 2), (0, 1)];
     for (leaf_index, id, domain) in leaves {
-        if id.depth > global_depth || id.domain() != Some(domain) {
-            return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
-        }
-        let denominator = 1u32 << id.depth;
+        let corners = quantized_domain_corners(leaf_index, id, domain, global_depth)?;
         let global_scale = 1u32 << (global_depth - id.depth);
-        let mut corners = [[0u32; 3]; 3];
-        for (corner_index, barycentric) in domain.corners.into_iter().enumerate() {
-            let mut sum = 0u32;
-            for coordinate in 0..3 {
-                let scaled = barycentric[coordinate] * f64::from(denominator);
-                let rounded = scaled.round();
-                if !scaled.is_finite()
-                    || rounded < 0.0
-                    || rounded > f64::from(denominator)
-                    || (scaled - rounded).abs() > 1.0e-9
-                {
-                    return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
-                }
-                let numerator = rounded as u32;
-                corners[corner_index][coordinate] = numerator * global_scale;
-                sum += numerator;
-            }
-            if sum != denominator {
-                return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
-            }
-        }
 
         for (edge_index, (first, second)) in edge_corners.into_iter().enumerate() {
             let a = corners[first];
@@ -333,6 +352,223 @@ fn mesh_topology_lines(
         spans.sort_by_key(|span| (span.start, span.end, span.leaf_index, span.edge_index));
     }
     Ok(lines)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MeshVertexKey {
+    SourceVertex(u32),
+    SourceEdge {
+        canonical_half_edge: u32,
+        parameter: u32,
+    },
+    FaceInterior {
+        source_face: u32,
+        barycentric: [u32; 3],
+    },
+}
+
+fn find_vertex_root(parents: &mut [u32], vertex: u32) -> u32 {
+    let mut root = vertex;
+    while parents[root as usize] != root {
+        root = parents[root as usize];
+    }
+    let mut current = vertex;
+    while parents[current as usize] != current {
+        let next = parents[current as usize];
+        parents[current as usize] = root;
+        current = next;
+    }
+    root
+}
+
+fn union_vertices(parents: &mut [u32], first: u32, second: u32) {
+    let first_root = find_vertex_root(parents, first);
+    let second_root = find_vertex_root(parents, second);
+    if first_root == second_root {
+        return;
+    }
+    let (minimum, maximum) = if first_root < second_root {
+        (first_root, second_root)
+    } else {
+        (second_root, first_root)
+    };
+    parents[maximum as usize] = minimum;
+}
+
+/// Canonicalize source vertices joined only through actual half-edge twins.
+/// Exact-welded glTF seams retain their distinct attribute vertices, but a
+/// joined opposing edge proves that its corresponding endpoints are the same
+/// geometric points for resident-density visualization.
+fn canonical_source_vertices(
+    source_topology: &quilting_mesh::HalfEdgeMesh,
+) -> Result<Vec<u32>, ScreenLeafLodError> {
+    let mut parents = (0..source_topology.num_vertices).collect::<Vec<_>>();
+    for half_edge in 0..source_topology.half_edges.len() as u32 {
+        let Some(twin) = source_topology.twin(half_edge) else {
+            continue;
+        };
+        if half_edge >= twin {
+            continue;
+        }
+        let edge = &source_topology.half_edges[half_edge as usize];
+        let opposing = &source_topology.half_edges[twin as usize];
+        let from = source_topology.half_edges[edge.prev as usize].vertex;
+        let to = edge.vertex;
+        let opposing_from = source_topology.half_edges[opposing.prev as usize].vertex;
+        let opposing_to = opposing.vertex;
+        if [from, to, opposing_from, opposing_to]
+            .into_iter()
+            .any(|vertex| vertex >= source_topology.num_vertices)
+        {
+            return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
+        }
+        union_vertices(&mut parents, from, opposing_to);
+        union_vertices(&mut parents, to, opposing_from);
+    }
+    for vertex in 0..source_topology.num_vertices {
+        parents[vertex as usize] = find_vertex_root(&mut parents, vertex);
+    }
+    Ok(parents)
+}
+
+fn mesh_vertex_key(
+    leaf_index: usize,
+    leaf: ScreenMeshLeafTopology,
+    corner: [u32; 3],
+    global_denominator: u32,
+    source_topology: &quilting_mesh::HalfEdgeMesh,
+    canonical_vertices: &[u32],
+) -> Result<MeshVertexKey, ScreenLeafLodError> {
+    if leaf.source_face >= source_topology.num_faces {
+        return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+    }
+    let zero_axes = (0..3).filter(|&axis| corner[axis] == 0).collect::<Vec<_>>();
+    match zero_axes.as_slice() {
+        [first, second] => {
+            let source_corner = 3usize - first - second;
+            if corner[source_corner] != global_denominator {
+                return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+            }
+            let source_vertex = source_topology.face_vertices(leaf.source_face)[source_corner];
+            let canonical = canonical_vertices
+                .get(source_vertex as usize)
+                .copied()
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })?;
+            Ok(MeshVertexKey::SourceVertex(canonical))
+        }
+        [source_edge] => {
+            let source_edge = *source_edge;
+            let half_edges = source_topology.face_half_edges(leaf.source_face);
+            let half_edge = half_edges[(source_edge + 1) % 3];
+            let canonical_half_edge = source_topology.canonical_edge(half_edge);
+            let parameter_axis = (source_edge + 2) % 3;
+            let mut parameter = corner[parameter_axis];
+            if half_edge != canonical_half_edge {
+                parameter = global_denominator - parameter;
+            }
+            Ok(MeshVertexKey::SourceEdge {
+                canonical_half_edge,
+                parameter,
+            })
+        }
+        [] => Ok(MeshVertexKey::FaceInterior {
+            source_face: leaf.source_face,
+            barycentric: corner,
+        }),
+        _ => Err(ScreenLeafLodError::InvalidTopology { leaf_index }),
+    }
+}
+
+/// Rebuild the C0-continuous resident-density field for adaptive leaves.
+///
+/// Leaf-local edge LoDs are first converted to absolute source-domain dyadic
+/// resolutions (`local_lod * 2^leaf_depth`). Every physical leaf vertex then
+/// receives the maximum incident resolution, including across exact-welded
+/// glTF attribute seams. The result is backend-neutral and independent of
+/// atlas permutation; shaders should interpolate it in leaf-local barycentric
+/// coordinates.
+pub fn rebuild_screen_mesh_leaf_vertex_lods(
+    leaves: &[ScreenMeshLeafTopology],
+    resident: &[[u32; 3]],
+    source_topology: &quilting_mesh::HalfEdgeMesh,
+) -> Result<Vec<[u32; 3]>, ScreenLeafLodError> {
+    if leaves.len() != resident.len() {
+        return Err(ScreenLeafLodError::LengthMismatch);
+    }
+    let global_depth = leaves.iter().map(|leaf| leaf.id.depth).max().unwrap_or(0);
+    let global_denominator = 1u32
+        .checked_shl(u32::from(global_depth))
+        .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+    let canonical_vertices = canonical_source_vertices(source_topology)?;
+    let mut keys = Vec::<[MeshVertexKey; 3]>::with_capacity(leaves.len());
+    let mut vertex_max = BTreeMap::<MeshVertexKey, u32>::new();
+
+    for (leaf_index, (leaf, edge_lods)) in leaves
+        .iter()
+        .copied()
+        .zip(resident.iter().copied())
+        .enumerate()
+    {
+        let corners = quantized_domain_corners(leaf_index, leaf.id, leaf.domain, global_depth)?;
+        let mut absolute_edges = [0u32; 3];
+        for (edge_index, local_lod) in edge_lods.into_iter().enumerate() {
+            if !local_lod.is_power_of_two() {
+                return Err(ScreenLeafLodError::InvalidLod {
+                    leaf_index,
+                    edge_index,
+                });
+            }
+            absolute_edges[edge_index] = local_lod.checked_shl(u32::from(leaf.id.depth)).ok_or(
+                ScreenLeafLodError::AbsoluteLodOverflow {
+                    leaf_index,
+                    edge_index,
+                },
+            )?;
+        }
+        let corner_lods = [
+            absolute_edges[1].max(absolute_edges[2]),
+            absolute_edges[0].max(absolute_edges[2]),
+            absolute_edges[0].max(absolute_edges[1]),
+        ];
+        let leaf_keys = [
+            mesh_vertex_key(
+                leaf_index,
+                leaf,
+                corners[0],
+                global_denominator,
+                source_topology,
+                &canonical_vertices,
+            )?,
+            mesh_vertex_key(
+                leaf_index,
+                leaf,
+                corners[1],
+                global_denominator,
+                source_topology,
+                &canonical_vertices,
+            )?,
+            mesh_vertex_key(
+                leaf_index,
+                leaf,
+                corners[2],
+                global_denominator,
+                source_topology,
+                &canonical_vertices,
+            )?,
+        ];
+        for (key, lod) in leaf_keys.into_iter().zip(corner_lods) {
+            vertex_max
+                .entry(key)
+                .and_modify(|maximum| *maximum = (*maximum).max(lod))
+                .or_insert(lod);
+        }
+        keys.push(leaf_keys);
+    }
+
+    Ok(keys
+        .into_iter()
+        .map(|leaf_keys| leaf_keys.map(|key| vertex_max[&key]))
+        .collect())
 }
 
 fn lod_exponent(lod: u32) -> Option<u8> {
@@ -683,5 +919,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn adaptive_vertex_lods_use_absolute_resolution_across_mixed_depths() {
+        let leaves = mixed_depth_partition()
+            .into_iter()
+            .map(|leaf| ScreenMeshLeafTopology {
+                source_face: 0,
+                id: leaf.id,
+                domain: leaf.domain,
+            })
+            .collect::<Vec<_>>();
+        let topology = quilting_mesh::HalfEdgeMesh::from_triangles(3, &[[0, 1, 2]]);
+        let vertex_lods =
+            rebuild_screen_mesh_leaf_vertex_lods(&leaves, &vec![[1; 3]; leaves.len()], &topology)
+                .unwrap();
+
+        // The three retained depth-1 corner leaves each touch two vertices of
+        // the depth-2 centre refinement. Max reduction promotes those shared
+        // physical vertices to absolute resolution four, while the authored
+        // source corner remains at absolute resolution two.
+        for lods in &vertex_lods[..3] {
+            let mut sorted = *lods;
+            sorted.sort_unstable();
+            assert_eq!(sorted, [2, 4, 4]);
+        }
+        for lods in &vertex_lods[3..] {
+            assert_eq!(*lods, [4; 3]);
+        }
+    }
+
+    #[test]
+    fn adaptive_vertex_lods_cross_exact_welded_attribute_seams() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let topology = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [4, 3, 5]],
+        );
+        let leaves = [
+            ScreenMeshLeafTopology {
+                source_face: 0,
+                id: ScreenPatchLeafId::ROOT,
+                domain: QBPatchDomain::FULL,
+            },
+            ScreenMeshLeafTopology {
+                source_face: 1,
+                id: ScreenPatchLeafId::ROOT,
+                domain: QBPatchDomain::FULL,
+            },
+        ];
+        let vertex_lods =
+            rebuild_screen_mesh_leaf_vertex_lods(&leaves, &[[2, 1, 16], [1, 1, 2]], &topology)
+                .unwrap();
+
+        // Face 0's edge-C demand reaches the duplicated [1, 0, 0] endpoint;
+        // the exact-welded twin must carry it to face 1's distinct attribute
+        // vertex. The other shared endpoint remains at the shared edge LoD.
+        assert_eq!(vertex_lods[0][1], 16);
+        assert_eq!(vertex_lods[1][1], 16);
+        assert_eq!(vertex_lods[0][2], 2);
+        assert_eq!(vertex_lods[1][0], 2);
     }
 }
