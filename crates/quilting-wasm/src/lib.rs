@@ -1,4 +1,5 @@
 mod app_shadow;
+mod adaptive_screen;
 mod auxiliary_programs;
 pub mod main_renderer;
 mod navigation;

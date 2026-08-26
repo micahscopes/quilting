@@ -31,7 +31,9 @@ use quilting_core::render::{
     RenderFrameOptions, RenderGeometry, RenderSceneSnapshot, RenderStyle,
     RenderSubmissionStats, RenderView,
 };
+use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::source_bounds::source_focus_bounds;
+use crate::adaptive_screen::{measure_adaptive_screen_patch, AdaptiveScreenRequest};
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{
@@ -3086,6 +3088,104 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             &serde_wasm_bindgen::to_value(&examples).unwrap_or(JsValue::NULL),
         ).ok();
         result.into()
+    })
+}
+
+fn adaptive_screen_diagnostic_error(message: impl Into<String>) -> JsValue {
+    serde_wasm_bindgen::to_value(&serde_json::json!({
+        "ok": false,
+        "error": message.into(),
+    }))
+    .unwrap_or(JsValue::NULL)
+}
+
+/// Measure one current posed patch under the exact renderer camera and
+/// conformal state, without changing residency or issuing GPU work.
+///
+/// Pass `face = -1` to inspect the last picked face. `max_px_per_segment` is
+/// the optional pixel ceiling: unlike the existing pixel floor it may request
+/// more tessellation. Adaptive restriction localizes that request so a small
+/// highly stretched region does not force the whole source patch to its worst
+/// LoD.
+#[wasm_bindgen(js_name = "mr_debugAdaptiveScreenPatch")]
+pub fn mr_debug_adaptive_screen_patch(
+    face: i32,
+    max_px_per_segment: f64,
+    max_depth: u32,
+    max_leaves: u32,
+) -> JsValue {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else {
+            return adaptive_screen_diagnostic_error("renderer is not initialized");
+        };
+        let resolved_face = if face < 0 { state.highlight_face } else { face };
+        let Ok(face_index) = usize::try_from(resolved_face) else {
+            return adaptive_screen_diagnostic_error("no picked face is available");
+        };
+        if face_index >= state.num_faces {
+            return adaptive_screen_diagnostic_error(format!(
+                "face {face_index} is outside the {}-face scene",
+                state.num_faces,
+            ));
+        }
+        let Some(view_projection) = state.last_visibility_mvp else {
+            return adaptive_screen_diagnostic_error("no rendered camera is available");
+        };
+        let Ok(max_depth) = u8::try_from(max_depth) else {
+            return adaptive_screen_diagnostic_error("adaptive depth is outside u8 range");
+        };
+        let policy = ScreenPartitionPolicy {
+            max_depth,
+            max_leaves: max_leaves as usize,
+            ..ScreenPartitionPolicy::default()
+        };
+        let viewport = [
+            state.viewport_size.0.max(1) as f64,
+            state.viewport_size.1.max(1) as f64,
+        ];
+        let view_projection = view_projection.map(f64::from);
+        let node = state.face_nodes.get(face_index).copied().unwrap_or(0);
+        let conformal = conformal_state_for_node(state, node);
+        let patch = match state.surface_runtime.output_patch_for_face(
+            &state.cached_instances,
+            face_index,
+            conformal.mobius,
+            conformal.euclidean_model,
+        ) {
+            Ok(patch) => patch,
+            Err(error) => return adaptive_screen_diagnostic_error(error),
+        };
+        let current_resident_lod = state
+            .resident_face_lods
+            .get(face_index)
+            .and_then(|resident| *resident)
+            .map(|resident| resident.edge_lods());
+        let atlas_triangle_counts = TESS_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .iter()
+                .map(|(key, patch)| {
+                    (*key, patch.num_tri_indices.max(0) as u64 / 3)
+                })
+                .collect::<BTreeMap<_, _>>()
+        });
+        let request = AdaptiveScreenRequest {
+            face: face_index as u32,
+            node: node as u32,
+            patch: &patch,
+            view_projection,
+            viewport,
+            max_px_per_segment,
+            policy,
+            max_face_edge_ratio: state.lod_grading.ratio(),
+            current_resident_lod,
+            atlas_triangle_counts: &atlas_triangle_counts,
+        };
+        match measure_adaptive_screen_patch(request) {
+            Ok(snapshot) => serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL),
+            Err(error) => adaptive_screen_diagnostic_error(error),
+        }
     })
 }
 

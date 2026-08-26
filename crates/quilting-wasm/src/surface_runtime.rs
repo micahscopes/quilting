@@ -522,6 +522,37 @@ impl SurfaceRuntime {
             .collect()
     }
 
+    /// Reconstruct one patch in the exact output chart consumed by rendering.
+    ///
+    /// This deliberately follows the shader order—current morph/skin pose,
+    /// ordinary affine model, then Möbius transformation—so camera-dependent
+    /// CPU oracles can measure the same surface without rebuilding every face.
+    pub fn output_patch_for_face(
+        &self,
+        instances: &[f32],
+        face: usize,
+        mobius: [f32; 16],
+        euclidean_model: [f32; 16],
+    ) -> Result<QBTriPatch, String> {
+        let pose = PoseData {
+            joint_indices: &self.joint_indices,
+            joint_weights: &self.joint_weights,
+            morph_deltas: &self.morph_deltas,
+            morph_num_vertices: self.morph_num_vertices,
+            morph_num_targets: self.morph_num_targets,
+            joint_matrices: &self.joint_matrices,
+            morph_weights: &self.morph_weights,
+        };
+        output_patch_for_pose(
+            instances,
+            face,
+            pose,
+            mobius_from_array(mobius),
+            euclidean_model,
+        )
+        .ok_or_else(|| format!("could not reconstruct output patch for face {face}"))
+    }
+
     pub fn attach(
         &mut self,
         instances: &[f32],
@@ -1124,32 +1155,48 @@ impl SurfaceField for RuntimeSurfaceField<'_> {
 
 impl RuntimeSurfaceField<'_> {
     fn patch(&self, face: usize) -> Option<QBTriPatch> {
-        let base = face.checked_mul(instance_layout::STRIDE)?;
-        let record = self.instances.get(base..base + instance_layout::STRIDE)?;
-        let mut positions = [Quat::ZERO; 3];
-        let mut weights = [Quat::ZERO; 3];
-        for corner in 0..3 {
-            let position_offset = instance_layout::offset::POSITIONS + corner * 4;
-            let vertex = checked_vertex_index(record[position_offset]).ok()?;
-            let rest = [
-                record[position_offset + 1] as f64,
-                record[position_offset + 2] as f64,
-                record[position_offset + 3] as f64,
-            ];
-            let posed = self.pose.posed_position(vertex, rest)?;
-            let modeled = apply_affine(self.euclidean_model, posed)?;
-            positions[corner] = Quat::from_point(modeled[0], modeled[1], modeled[2]);
-
-            let weight_offset = instance_layout::offset::WEIGHTS + corner * 4;
-            weights[corner] = Quat::new(
-                record[weight_offset] as f64,
-                record[weight_offset + 1] as f64,
-                record[weight_offset + 2] as f64,
-                record[weight_offset + 3] as f64,
-            );
-        }
-        Some(QBTriPatch::new(positions, weights).transform(&self.mobius))
+        output_patch_for_pose(
+            self.instances,
+            face,
+            self.pose,
+            self.mobius,
+            self.euclidean_model,
+        )
     }
+}
+
+fn output_patch_for_pose(
+    instances: &[f32],
+    face: usize,
+    pose: PoseData<'_>,
+    mobius: Mobius,
+    euclidean_model: [f32; 16],
+) -> Option<QBTriPatch> {
+    let base = face.checked_mul(instance_layout::STRIDE)?;
+    let record = instances.get(base..base + instance_layout::STRIDE)?;
+    let mut positions = [Quat::ZERO; 3];
+    let mut weights = [Quat::ZERO; 3];
+    for corner in 0..3 {
+        let position_offset = instance_layout::offset::POSITIONS + corner * 4;
+        let vertex = checked_vertex_index(record[position_offset]).ok()?;
+        let rest = [
+            record[position_offset + 1] as f64,
+            record[position_offset + 2] as f64,
+            record[position_offset + 3] as f64,
+        ];
+        let posed = pose.posed_position(vertex, rest)?;
+        let modeled = apply_affine(euclidean_model, posed)?;
+        positions[corner] = Quat::from_point(modeled[0], modeled[1], modeled[2]);
+
+        let weight_offset = instance_layout::offset::WEIGHTS + corner * 4;
+        weights[corner] = Quat::new(
+            record[weight_offset] as f64,
+            record[weight_offset + 1] as f64,
+            record[weight_offset + 2] as f64,
+            record[weight_offset + 3] as f64,
+        );
+    }
+    Some(QBTriPatch::new(positions, weights).transform(&mobius))
 }
 
 #[derive(Clone, Copy)]
@@ -1708,6 +1755,38 @@ mod tests {
             length(sub(left, right)) <= tolerance,
             "left={left:?}, right={right:?}, tolerance={tolerance}"
         );
+    }
+
+    #[test]
+    fn one_face_output_patch_matches_render_transform_order() {
+        let instances = triangle_instances();
+        let runtime = SurfaceRuntime::default();
+        let model = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.25, -0.5, -3.0, 1.0,
+        ];
+        let reflection = sphere_reflection_mobius([0.1, -0.2, -2.0], 1.3);
+        let reconstructed = runtime
+            .output_patch_for_face(&instances, 0, reflection, model)
+            .unwrap();
+        let expected = QBTriPatch::flat(
+            [0.25, -0.5, -3.0],
+            [2.25, -0.5, -3.0],
+            [0.25, 2.5, -3.0],
+        )
+        .transform(&mobius_from_array(reflection));
+
+        for barycentric in [[1.0, 0.0, 0.0], [0.2, 0.3, 0.5], [0.0, 1.0, 0.0]] {
+            assert_near3(
+                reconstructed
+                    .eval(barycentric[1], barycentric[2])
+                    .to_point(),
+                expected.eval(barycentric[1], barycentric[2]).to_point(),
+                1.0e-12,
+            );
+        }
     }
 
     #[test]
