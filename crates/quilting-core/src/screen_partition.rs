@@ -116,10 +116,36 @@ pub enum ScreenPatchLeafStatus {
     LeafBudget,
 }
 
+/// Deterministic identity inside one source face's dyadic restriction tree.
+/// Pair this with the stable source face ID; do not promote it to scene/entity
+/// identity or persist it independently of the refinement policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScreenPatchLeafId {
+    pub depth: u8,
+    /// Two child bits per level, oldest level in the most significant used
+    /// pair. Depth is stored separately so root and repeated child zero remain
+    /// distinct.
+    pub path: u32,
+}
+
+impl ScreenPatchLeafId {
+    pub const ROOT: Self = Self { depth: 0, path: 0 };
+
+    pub fn child(self, child_index: u8) -> Option<Self> {
+        if child_index >= 4 || self.depth >= 16 {
+            return None;
+        }
+        Some(Self {
+            depth: self.depth + 1,
+            path: (self.path << 2) | u32::from(child_index),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenPatchLeaf {
+    pub id: ScreenPatchLeafId,
     pub restricted: RestrictedQBTriPatch,
-    pub depth: u8,
     pub diagnostic: ScreenPatchDiagnostic,
     pub status: ScreenPatchLeafStatus,
 }
@@ -334,13 +360,14 @@ pub fn partition_screen_patch(
     }
 
     let root = transformed_patch.restrict(QBPatchDomain::FULL);
-    let mut stack = vec![(root, 0u8)];
+    let mut stack = vec![(root, ScreenPatchLeafId::ROOT)];
     let mut leaves = Vec::new();
     let mut split_nodes = 0usize;
     let mut max_depth_reached = 0u8;
     let mut unmet_leaves = 0usize;
 
-    while let Some((restricted, depth)) = stack.pop() {
+    while let Some((restricted, id)) = stack.pop() {
+        let depth = id.depth;
         max_depth_reached = max_depth_reached.max(depth);
         let diagnostic = diagnose_screen_patch(
             &restricted.patch,
@@ -357,8 +384,11 @@ pub fn partition_screen_patch(
         if must_split && can_split_depth && can_split_budget {
             split_nodes += 1;
             let children = restricted.quarter();
-            for child in children.into_iter().rev() {
-                stack.push((child, depth + 1));
+            for (child_index, child) in children.into_iter().enumerate().rev() {
+                let child_id = id
+                    .child(child_index as u8)
+                    .expect("partition depth validation keeps leaf paths representable");
+                stack.push((child, child_id));
             }
             continue;
         }
@@ -375,8 +405,8 @@ pub fn partition_screen_patch(
             ScreenPatchLeafStatus::LeafBudget
         };
         leaves.push(ScreenPatchLeaf {
+            id,
             restricted,
-            depth,
             diagnostic,
             status,
         });
@@ -446,6 +476,23 @@ mod tests {
         assert_eq!(partition.split_nodes, 0);
         assert_eq!(partition.unmet_leaves, 0);
         assert_eq!(partition.leaves[0].status, ScreenPatchLeafStatus::Accepted);
+        assert_eq!(partition.leaves[0].id, ScreenPatchLeafId::ROOT);
+    }
+
+    #[test]
+    fn dyadic_leaf_paths_are_depth_qualified_and_bounded() {
+        let root = ScreenPatchLeafId::ROOT;
+        let zero = root.child(0).unwrap();
+        let nested_zero = zero.child(0).unwrap();
+        assert_ne!(root, zero);
+        assert_ne!(zero, nested_zero);
+        assert_eq!(nested_zero, ScreenPatchLeafId { depth: 2, path: 0 });
+        assert!(root.child(4).is_none());
+        let mut deepest = root;
+        for child in 0..16 {
+            deepest = deepest.child(child % 4).unwrap();
+        }
+        assert!(deepest.child(0).is_none());
     }
 
     #[test]
@@ -491,6 +538,12 @@ mod tests {
         assert!(partition.leaves.len() < 512);
         assert_eq!(partition.leaves.len(), 1 + 3 * partition.split_nodes);
         assert_eq!(partition.unmet_leaves, 0);
+        let identities = partition
+            .leaves
+            .iter()
+            .map(|leaf| leaf.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(identities.len(), partition.leaves.len());
         let worst_stretch = partition
             .leaves
             .iter()
