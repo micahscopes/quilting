@@ -16,7 +16,7 @@
 //! | 16..20 | 64    | 5           | rational QB weight w1            |
 //! | 20..24 | 80    | 6           | rational QB weight w2            |
 //! | 24..28 | 96    | 7           | edge LODs + permutation index    |
-//! | 28..32 | 112   | 8           | vertex LODs + source face ID     |
+//! | 28..32 | 112   | 8           | corner density LoDs + source face ID |
 //! | 32..36 | 128   | 9           | uv01 `(u0, v0, u1, v1)`          |
 //! | 36..40 | 144   | 10          | uv2 + preparation `(u2,v2,reserved,prepared)` |
 //! | 40..44 | 160   | 11          | n0 `(x, y, z, semantic_node_id)` |
@@ -71,7 +71,7 @@ pub const BATCH_TOPOLOGY_STRIDE_BYTES: usize = BATCH_TOPOLOGY_STRIDE * 4;
 /// Preparation-pass attributes as `(location, byte_offset, components)`.
 pub const BATCH_TOPOLOGY_ATTR_MAP: [(u32, i32, i32); 3] = [
     (7, 0, 4),  // edge LODs + permutation
-    (8, 16, 4), // source face ID + current per-vertex visualization LODs
+    (8, 16, 4), // source face ID + physical-corner density overrides
     (1, 32, 2), // adaptive leaf depth + two-bit dyadic path
 ];
 
@@ -85,7 +85,7 @@ pub mod offset {
     pub const EDGE_LODS: usize = 24;
     /// Per-instance S3 permutation index, stored in `lod_info.w`.
     pub const PERM_INDEX: usize = EDGE_LODS + 3;
-    /// Three vertex LODs followed by the stable source face ID.
+    /// Three physical-corner density overrides followed by the source face ID.
     pub const VERTEX_LODS: usize = 28;
     /// Original source-face index, stored in `vert_lod.w` for picking.
     pub const FACE_ID: usize = VERTEX_LODS + 3;
@@ -106,7 +106,7 @@ pub mod offset {
 pub mod batch_offset {
     /// Three face-local edge LODs followed by the S3 permutation index.
     pub const EDGE_LODS: usize = 0;
-    /// Stable source face ID followed by current per-vertex visualization LODs.
+    /// Stable source face ID followed by physical-corner density overrides.
     pub const FACE_ID: usize = 4;
     pub const VERTEX_LODS: usize = 5;
     /// Dyadic leaf depth. Zero selects the complete authored source face.
@@ -126,7 +126,7 @@ pub const ATTR_MAP: [(u32, i32); 13] = [
     (5, 64),   // w1
     (6, 80),   // w2
     (7, 96),   // edge LODs
-    (8, 112),  // vertex LODs
+    (8, 112),  // corner density LoDs
     (9, 128),  // uv01
     (10, 144), // uv2
     (11, 160), // n0

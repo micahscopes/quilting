@@ -4,6 +4,7 @@
 
 #import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
 #import quilting::surface::qb_eval::eval_qb
+#import quilting::viz::density::edge_log2_density
 
 struct Uniforms {
     mvp: mat4x4<f32>,
@@ -737,8 +738,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let prepared = in.uv2_pad.w > 0.5;
     let adaptive = prepared && in.p0.x < -0.5;
     var source_bary = bary;
+    var leaf_lod_scale = 1.0;
     if adaptive {
         let leaf_depth = -in.p0.x - 1.0;
+        leaf_lod_scale = exp2(leaf_depth);
         let domain = dyadic_leaf_domain(vec2<f32>(leaf_depth, in.p1.x));
         source_bary = bary.x * domain.c0 + bary.y * domain.c1 + bary.z * domain.c2;
     }
@@ -862,15 +865,25 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
 
-    // Current resident per-vertex LODs are max-reconciled over the welded
-    // topology. Log interpolation is therefore smooth inside a face and C0
-    // continuous across every shared edge, independent of atlas permutation.
-    // These are absolute source-domain resolutions at this resident patch's
-    // three corners. Adaptive leaves therefore interpolate in their local
-    // barycentric chart; using source_bary would apply the restriction twice
-    // and create false density seams between leaves of different depths.
-    let log_vertex_lod = log2(max(in.vert_lod.xyz, vec3<f32>(1.0)));
-    out.density = dot(bary, log_vertex_lod) / 10.0;
+    // Visualize the same local edge-density field Rust uses to sample atlas
+    // patches. Reconciliation makes shared edge resolutions equal. Scaling a
+    // leaf-local LoD by 2^depth converts it to absolute source-domain units,
+    // so coarse/fine boundaries and all S3 atlas permutations have the same
+    // trace without inventing hanging-node vertex state.
+    let absolute_edge_lods = max(in.lod_info.xyz * leaf_lod_scale, vec3<f32>(1.0));
+    var visual_log_density = edge_log2_density(bary, absolute_edge_lods);
+    // At a conforming physical corner, incident edges from several patches may
+    // disagree; the prepared compatibility field carries their welded maximum.
+    // At a nonconforming hanging corner it instead carries the containing
+    // coarse edge's resolution. Interior samples use the edge field above.
+    if bary.x > 0.999999 {
+        visual_log_density = log2(max(in.vert_lod.x, 1.0));
+    } else if bary.y > 0.999999 {
+        visual_log_density = log2(max(in.vert_lod.y, 1.0));
+    } else if bary.z > 0.999999 {
+        visual_log_density = log2(max(in.vert_lod.z, 1.0));
+    }
+    out.density = max(visual_log_density, 0.0) / 10.0;
 
     let uv0 = in.uv01.xy;
     let uv1 = in.uv01.zw;

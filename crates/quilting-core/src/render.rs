@@ -130,6 +130,22 @@ impl RenderSceneSnapshot {
                 }
             }
         }
+        for &(face_index, leaf_id) in &patches {
+            for ancestor_depth in 0..leaf_id.depth {
+                let ancestor = leaf_id
+                    .ancestor_at_depth(ancestor_depth)
+                    .expect("validated leaf has every shallower ancestor");
+                if patches.contains(&(face_index, ancestor)) {
+                    return Err(RenderContractError::OverlappingPatch {
+                        face_index,
+                        ancestor_depth,
+                        ancestor_path: ancestor.path,
+                        descendant_depth: leaf_id.depth,
+                        descendant_path: leaf_id.path,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -682,6 +698,13 @@ pub enum RenderContractError {
         leaf_depth: u8,
         leaf_path: u32,
     },
+    OverlappingPatch {
+        face_index: u32,
+        ancestor_depth: u8,
+        ancestor_path: u32,
+        descendant_depth: u8,
+        descendant_path: u32,
+    },
     BatchCountOverflow,
     InstanceCountOverflow,
     SceneRevisionMismatch { frame: u64, scene: u64 },
@@ -727,6 +750,16 @@ impl fmt::Display for RenderContractError {
             } => write!(
                 formatter,
                 "adaptive leaf {leaf_depth}:{leaf_path} of source face {face_index} occurs more than once"
+            ),
+            Self::OverlappingPatch {
+                face_index,
+                ancestor_depth,
+                ancestor_path,
+                descendant_depth,
+                descendant_path,
+            } => write!(
+                formatter,
+                "adaptive leaf {ancestor_depth}:{ancestor_path} overlaps descendant {descendant_depth}:{descendant_path} on source face {face_index}"
             ),
             Self::BatchCountOverflow => formatter.write_str("render batch count exceeds u32"),
             Self::InstanceCountOverflow => formatter.write_str("render instance count exceeds u32"),
@@ -1005,6 +1038,23 @@ mod tests {
                 face_index: 0,
                 leaf_depth: first.depth,
                 leaf_path: first.path,
+            })
+        );
+
+        let mut overlapping = scene();
+        let root_member = overlapping.batches[0].members[0];
+        overlapping.batches[0].members.push(RenderBatchMember {
+            leaf_id: first,
+            ..root_member
+        });
+        assert_eq!(
+            overlapping.validate(),
+            Err(RenderContractError::OverlappingPatch {
+                face_index: 0,
+                ancestor_depth: 0,
+                ancestor_path: 0,
+                descendant_depth: first.depth,
+                descendant_path: first.path,
             })
         );
     }

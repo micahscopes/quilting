@@ -2,9 +2,10 @@
 
 // Edge-based density interpolation and viridis colormap.
 
-// Product-of-bary-coords weighting with geometric mean in log space.
-// Matches the Rust tri_edge_weight formula.
-fn edge_density(bary: vec3<f32>, res: vec3<f32>) -> f32 {
+// Product-of-bary-coords weighting with a geometric mean in log space.
+// Matches Rust's tri_edge_density formula without an avoidable exp/log pair
+// when the caller wants the logarithmic visualization value.
+fn edge_log2_density(bary: vec3<f32>, res: vec3<f32>) -> f32 {
     let x = bary.x;
     let y = bary.y;
     let z = bary.z;
@@ -13,10 +14,13 @@ fn edge_density(bary: vec3<f32>, res: vec3<f32>) -> f32 {
     let e2 = x * y; // edge C
     let sum = e0 + e1 + e2;
     if sum < 1e-10 {
-        return max(res.x, max(res.y, res.z));
+        return log2(max(res.x, max(res.y, res.z)));
     }
-    let log_res = (e0 * log(max(res.x, 1.0)) + e1 * log(max(res.y, 1.0)) + e2 * log(max(res.z, 1.0))) / sum;
-    return exp(log_res);
+    return (e0 * log2(max(res.x, 1.0)) + e1 * log2(max(res.y, 1.0)) + e2 * log2(max(res.z, 1.0))) / sum;
+}
+
+fn edge_density(bary: vec3<f32>, res: vec3<f32>) -> f32 {
+    return exp2(edge_log2_density(bary, res));
 }
 
 // Viridis-like colormap: dark purple → blue → teal → green → yellow

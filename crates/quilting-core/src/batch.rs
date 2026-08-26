@@ -7,7 +7,10 @@ use quilting_mesh::HalfEdgeMesh;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::screen_leaf_lod::{ScreenLeafLodError, ScreenMeshLeafTopology};
+use crate::screen_leaf_lod::{
+    rebuild_screen_mesh_leaf_vertex_lods, validate_screen_mesh_leaf_antichain,
+    ScreenLeafLodError, ScreenMeshLeafTopology,
+};
 use crate::screen_partition::ScreenPatchLeafId;
 
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
@@ -195,9 +198,10 @@ pub struct RenderBatchMember {
     /// source-face-indexed resident array.
     pub edge_lods: [u32; 3],
     pub permutation_index: u8,
-    /// Current resident LOD at each source-face vertex. Keeping this in the
-    /// retained membership makes visualization-only changes invalidate the
-    /// affected GPU stream even when its atlas key and permutation do not.
+    /// Compatibility corner maxima in absolute source-domain units. The
+    /// normative density visualization is derived from reconciled edge LoDs;
+    /// this retained field stays populated until the prepared-record ABI can
+    /// remove it behind backend-equivalence gates.
     pub vertex_lods: [u32; 3],
 }
 
@@ -306,12 +310,13 @@ pub fn group_resident_faces_into(
 ///
 /// Authored face identity supplies material, semantic node, and render node;
 /// dyadic leaf identity remains only the ephemeral drawable-patch suffix.
-/// Parallel leaf arrays are deliberately validated instead of being silently
-/// truncated, because dropping one leaf would create a geometric hole.
+/// Leaf topology and LoDs are deliberately validated instead of being
+/// silently truncated, because dropping or overlapping one leaf creates a
+/// geometric hole or a double-rendered region.
 pub fn group_resident_screen_leaves(
     leaves: &[ScreenMeshLeafTopology],
     resident_edge_lods: &[[u32; 3]],
-    leaf_vertex_lods: &[[u32; 3]],
+    source_topology: &HalfEdgeMesh,
     face_materials: &[usize],
     face_nodes: &[usize],
     face_render_nodes: &[usize],
@@ -320,7 +325,7 @@ pub fn group_resident_screen_leaves(
     group_resident_screen_leaves_into(
         leaves,
         resident_edge_lods,
-        leaf_vertex_lods,
+        source_topology,
         face_materials,
         face_nodes,
         face_render_nodes,
@@ -333,31 +338,28 @@ pub fn group_resident_screen_leaves(
 pub fn group_resident_screen_leaves_into(
     leaves: &[ScreenMeshLeafTopology],
     resident_edge_lods: &[[u32; 3]],
-    leaf_vertex_lods: &[[u32; 3]],
+    source_topology: &HalfEdgeMesh,
     face_materials: &[usize],
     face_nodes: &[usize],
     face_render_nodes: &[usize],
     groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
 ) -> Result<(), ScreenLeafLodError> {
-    if leaves.len() != resident_edge_lods.len() || leaves.len() != leaf_vertex_lods.len() {
+    if leaves.len() != resident_edge_lods.len() {
         return Err(ScreenLeafLodError::LengthMismatch);
     }
-    for (leaf_index, (leaf, edge_lods)) in leaves
-        .iter()
-        .copied()
-        .zip(resident_edge_lods.iter().copied())
-        .enumerate()
-    {
-        if leaf.id.domain() != Some(leaf.domain) {
-            return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
-        }
-        for (edge_index, lod) in edge_lods.into_iter().enumerate() {
-            if !lod.is_power_of_two() {
-                return Err(ScreenLeafLodError::InvalidLod {
-                    leaf_index,
-                    edge_index,
-                });
-            }
+    validate_screen_mesh_leaf_antichain(leaves)?;
+    let leaf_vertex_lods =
+        rebuild_screen_mesh_leaf_vertex_lods(leaves, resident_edge_lods, source_topology)?;
+    for (leaf_index, leaf) in leaves.iter().copied().enumerate() {
+        let source_face = leaf.source_face as usize;
+        if source_face >= face_materials.len()
+            || source_face >= face_nodes.len()
+            || source_face >= face_render_nodes.len()
+        {
+            return Err(ScreenLeafLodError::MissingFaceMetadata {
+                leaf_index,
+                source_face: leaf.source_face,
+            });
         }
     }
     for members in groups.values_mut() {
@@ -371,12 +373,9 @@ pub fn group_resident_screen_leaves_into(
     {
         let source_face = leaf.source_face as usize;
         let resident = ResidentLod::from_edge_lods(edge_lods);
-        let material_index = face_materials.get(source_face).copied().unwrap_or(0);
-        let node_index = face_nodes.get(source_face).copied().unwrap_or(0);
-        let render_node_index = face_render_nodes
-            .get(source_face)
-            .copied()
-            .unwrap_or(node_index);
+        let material_index = face_materials[source_face];
+        let node_index = face_nodes[source_face];
+        let render_node_index = face_render_nodes[source_face];
         let key = RenderBatchKey::from_resident(resident, material_index, render_node_index);
         groups.entry(key).or_default().push(RenderBatchMember {
             face_index: leaf.source_face,
@@ -1139,10 +1138,11 @@ mod tests {
                 domain: second_id.domain().unwrap(),
             },
         ];
+        let topology = HalfEdgeMesh::from_triangles(4, &[[0, 1, 2], [2, 1, 3]]);
         let groups = group_resident_screen_leaves(
             &leaves,
             &[[2, 4, 8]; 2],
-            &[[8; 3]; 2],
+            &topology,
             &[3, 7],
             &[11, 13],
             &[17, 19],
@@ -1168,10 +1168,11 @@ mod tests {
             id,
             domain: id.domain().unwrap(),
         }];
+        let topology = HalfEdgeMesh::from_triangles(3, &[[0, 1, 2]]);
         let error = group_resident_screen_leaves(
             &leaves,
             &[],
-            &[[1; 3]],
+            &topology,
             &[0],
             &[0],
             &[0],
@@ -1182,7 +1183,7 @@ mod tests {
         let mut retained = group_resident_screen_leaves(
             &leaves,
             &[[1; 3]],
-            &[[1; 3]],
+            &topology,
             &[0],
             &[0],
             &[0],
@@ -1192,7 +1193,7 @@ mod tests {
         let error = group_resident_screen_leaves_into(
             &leaves,
             &[[3, 1, 1]],
-            &[[1; 3]],
+            &topology,
             &[0],
             &[0],
             &[0],
@@ -1200,6 +1201,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, ScreenLeafLodError::InvalidLod { .. }));
+        assert_eq!(retained, before);
+
+        let overlapping = [
+            ScreenMeshLeafTopology {
+                source_face: 0,
+                id: ScreenPatchLeafId::ROOT,
+                domain: crate::patch::QBPatchDomain::FULL,
+            },
+            leaves[0],
+        ];
+        let error = group_resident_screen_leaves_into(
+            &overlapping,
+            &[[1; 3]; 2],
+            &topology,
+            &[0],
+            &[0],
+            &[0],
+            &mut retained,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ScreenLeafLodError::OverlappingLeaves { .. }));
+        assert_eq!(retained, before);
+
+        let duplicate = [leaves[0], leaves[0]];
+        let error = group_resident_screen_leaves_into(
+            &duplicate,
+            &[[1; 3]; 2],
+            &topology,
+            &[0],
+            &[0],
+            &[0],
+            &mut retained,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ScreenLeafLodError::OverlappingLeaves { .. }));
+        assert_eq!(retained, before);
+
+        let missing = [leaves[0]];
+        let error = group_resident_screen_leaves_into(
+            &missing,
+            &[[1; 3]],
+            &topology,
+            &[],
+            &[],
+            &[],
+            &mut retained,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ScreenLeafLodError::MissingFaceMetadata { .. }));
         assert_eq!(retained, before);
     }
 

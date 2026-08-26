@@ -183,6 +183,18 @@ impl ScreenPatchLeafId {
         }
         Some(domain)
     }
+
+    /// Recover this dyadic cell's ancestor at `depth`, including itself.
+    pub fn ancestor_at_depth(self, depth: u8) -> Option<Self> {
+        if depth > self.depth || self.domain().is_none() {
+            return None;
+        }
+        let removed_levels = u32::from(self.depth - depth);
+        Some(Self {
+            depth,
+            path: (u64::from(self.path) >> (2 * removed_levels)) as u32,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -559,6 +571,14 @@ mod tests {
             .compose(QBPatchDomain::FULL.quarter()[1]);
         assert_eq!(path.domain(), Some(expected));
         assert!(ScreenPatchLeafId { depth: 0, path: 1 }.domain().is_none());
+        assert_eq!(root.ancestor_at_depth(0), Some(root));
+        assert_eq!(deepest.ancestor_at_depth(0), Some(root));
+        assert_eq!(nested_zero.ancestor_at_depth(1), Some(zero));
+        assert_eq!(zero.ancestor_at_depth(2), None);
+        assert_eq!(
+            ScreenPatchLeafId { depth: 0, path: 1 }.ancestor_at_depth(0),
+            None
+        );
     }
 
     #[test]

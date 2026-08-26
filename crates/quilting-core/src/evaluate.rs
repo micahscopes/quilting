@@ -78,7 +78,7 @@ pub struct FaceInstance {
     /// edge_c = edge opposite vertex 2 (connecting verts 0,1)
     pub edge_lods: [u32; 3],
     /// Per-vertex LOD levels [v0, v1, v2] — max of all edges meeting at each vertex.
-    /// Used for smooth density visualization that's continuous across face boundaries.
+    /// Used as physical-corner overrides for edge-based density visualization.
     pub vertex_lods: [u32; 3],
     /// Per-vertex texture coordinates [uv0, uv1, uv2].
     /// Sourced from glTF TEXCOORD_0; defaults to (0,0) when absent.
@@ -643,7 +643,7 @@ impl FaceInstance {
         out[25] = self.edge_lods[1] as f32;
         out[26] = self.edge_lods[2] as f32;
         out[27] = 0.0;
-        // vec4 #8: vertex LODs (for smooth density visualization)
+        // vec4 #8: physical-corner overrides for density visualization
         out[28] = self.vertex_lods[0] as f32;
         out[29] = self.vertex_lods[1] as f32;
         out[30] = self.vertex_lods[2] as f32;
