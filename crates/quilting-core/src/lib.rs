@@ -67,6 +67,7 @@ pub mod educational;
 pub mod render;
 pub mod render_pipeline;
 pub mod source_bounds;
+pub mod screen_metric;
 
 pub use atlas::TessellationAtlas;
 pub use evaluate::FaceInstance;
