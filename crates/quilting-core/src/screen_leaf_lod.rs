@@ -27,6 +27,27 @@ impl From<&ScreenPatchLeaf> for ScreenLeafTopology {
     }
 }
 
+/// One adaptive leaf located in the welded authored-mesh topology. Source
+/// identity remains separate from the ephemeral dyadic path so two faces may
+/// choose different refinement trees while still negotiating their common
+/// physical boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenMeshLeafTopology {
+    pub source_face: u32,
+    pub id: ScreenPatchLeafId,
+    pub domain: QBPatchDomain,
+}
+
+impl ScreenMeshLeafTopology {
+    pub fn from_leaf(source_face: u32, leaf: &ScreenPatchLeaf) -> Self {
+        Self {
+            source_face,
+            id: leaf.id,
+            domain: leaf.restricted.domain,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenLeafLodResult {
     pub resident: Vec<[u32; 3]>,
@@ -127,6 +148,18 @@ struct LineKey {
     constant_numerator: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MeshLineKey {
+    Interior {
+        source_face: u32,
+        constant_axis: u8,
+        constant_numerator: u32,
+    },
+    SourceBoundary {
+        canonical_half_edge: u32,
+    },
+}
+
 #[derive(Clone, Copy, Debug)]
 struct EdgeSpan {
     leaf_index: usize,
@@ -136,23 +169,31 @@ struct EdgeSpan {
     depth: u8,
 }
 
-fn topology_lines(
-    leaves: &[ScreenLeafTopology],
-) -> Result<BTreeMap<LineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
-    let global_depth = leaves.iter().map(|leaf| leaf.id.depth).max().unwrap_or(0);
+#[derive(Clone, Copy, Debug)]
+struct QuantizedEdgeSpan {
+    constant_axis: u8,
+    constant_numerator: u32,
+    endpoints: [[u32; 3]; 2],
+    span: EdgeSpan,
+}
+
+fn quantized_edge_spans(
+    leaves: impl IntoIterator<Item = (usize, ScreenPatchLeafId, QBPatchDomain)>,
+    global_depth: u8,
+) -> Result<Vec<QuantizedEdgeSpan>, ScreenLeafLodError> {
     if global_depth > 16 {
         return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
     }
-    let mut lines = BTreeMap::<LineKey, Vec<EdgeSpan>>::new();
+    let mut edges = Vec::new();
     let edge_corners = [(1usize, 2usize), (0, 2), (0, 1)];
-    for (leaf_index, leaf) in leaves.iter().enumerate() {
-        if leaf.id.depth > global_depth {
+    for (leaf_index, id, domain) in leaves {
+        if id.depth > global_depth || id.domain() != Some(domain) {
             return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
         }
-        let denominator = 1u32 << leaf.id.depth;
-        let global_scale = 1u32 << (global_depth - leaf.id.depth);
+        let denominator = 1u32 << id.depth;
+        let global_scale = 1u32 << (global_depth - id.depth);
         let mut corners = [[0u32; 3]; 3];
-        for (corner_index, barycentric) in leaf.domain.corners.into_iter().enumerate() {
+        for (corner_index, barycentric) in domain.corners.into_iter().enumerate() {
             let mut sum = 0u32;
             for coordinate in 0..3 {
                 let scaled = barycentric[coordinate] * f64::from(denominator);
@@ -185,20 +226,108 @@ fn topology_lines(
             if start == end || end - start != global_scale {
                 return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
             }
-            lines
-                .entry(LineKey {
-                    constant_axis: constant_axis as u8,
-                    constant_numerator: a[constant_axis],
-                })
-                .or_default()
-                .push(EdgeSpan {
+            edges.push(QuantizedEdgeSpan {
+                constant_axis: constant_axis as u8,
+                constant_numerator: a[constant_axis],
+                endpoints: [a, b],
+                span: EdgeSpan {
                     leaf_index,
                     edge_index,
                     start,
                     end,
-                    depth: leaf.id.depth,
-                });
+                    depth: id.depth,
+                },
+            });
         }
+    }
+    Ok(edges)
+}
+
+fn topology_lines(
+    leaves: &[ScreenLeafTopology],
+) -> Result<BTreeMap<LineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
+    let global_depth = leaves.iter().map(|leaf| leaf.id.depth).max().unwrap_or(0);
+    let mut lines = BTreeMap::<LineKey, Vec<EdgeSpan>>::new();
+    let edges = quantized_edge_spans(
+        leaves
+            .iter()
+            .enumerate()
+            .map(|(index, leaf)| (index, leaf.id, leaf.domain)),
+        global_depth,
+    )?;
+    for edge in edges {
+        lines
+            .entry(LineKey {
+                constant_axis: edge.constant_axis,
+                constant_numerator: edge.constant_numerator,
+            })
+            .or_default()
+            .push(edge.span);
+    }
+    for spans in lines.values_mut() {
+        spans.sort_by_key(|span| (span.start, span.end, span.leaf_index, span.edge_index));
+    }
+    Ok(lines)
+}
+
+fn mesh_topology_lines(
+    leaves: &[ScreenMeshLeafTopology],
+    source_topology: &quilting_mesh::HalfEdgeMesh,
+) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
+    let global_depth = leaves.iter().map(|leaf| leaf.id.depth).max().unwrap_or(0);
+    let global_denominator = 1u32
+        .checked_shl(u32::from(global_depth))
+        .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+    let edges = quantized_edge_spans(
+        leaves
+            .iter()
+            .enumerate()
+            .map(|(index, leaf)| (index, leaf.id, leaf.domain)),
+        global_depth,
+    )?;
+    let mut lines = BTreeMap::<MeshLineKey, Vec<EdgeSpan>>::new();
+    for edge in edges {
+        let leaf = &leaves[edge.span.leaf_index];
+        if leaf.source_face >= source_topology.num_faces {
+            return Err(ScreenLeafLodError::InvalidTopology {
+                leaf_index: edge.span.leaf_index,
+            });
+        }
+        let (key, span) = if edge.constant_numerator == 0 {
+            let source_edge = usize::from(edge.constant_axis);
+            let half_edges = source_topology.face_half_edges(leaf.source_face);
+            // Half-edge i runs from source corner i to i+1; logical edge A/B/C
+            // is opposite source corner 0/1/2 respectively.
+            let half_edge = half_edges[(source_edge + 1) % 3];
+            let twin = source_topology.twin(half_edge);
+            let canonical_half_edge = twin.map_or(half_edge, |other| half_edge.min(other));
+            let parameter_axis = (source_edge + 2) % 3;
+            let mut first = edge.endpoints[0][parameter_axis];
+            let mut second = edge.endpoints[1][parameter_axis];
+            if half_edge != canonical_half_edge {
+                first = global_denominator - first;
+                second = global_denominator - second;
+            }
+            let mut span = edge.span;
+            span.start = first.min(second);
+            span.end = first.max(second);
+            (
+                MeshLineKey::SourceBoundary {
+                    canonical_half_edge,
+                },
+                span,
+            )
+        } else {
+            (
+                MeshLineKey::Interior {
+                    source_face: leaf.source_face,
+                    constant_axis: edge.constant_axis,
+                    constant_numerator: edge.constant_numerator,
+                },
+                edge.span,
+            )
+        };
+        lines.entry(key).or_default().push(span);
     }
     for spans in lines.values_mut() {
         spans.sort_by_key(|span| (span.start, span.end, span.leaf_index, span.edge_index));
@@ -263,8 +392,8 @@ fn reconcile_component(
     Ok(promotions)
 }
 
-fn reconcile_lines(
-    lines: &BTreeMap<LineKey, Vec<EdgeSpan>>,
+fn reconcile_lines<K: Ord>(
+    lines: &BTreeMap<K, Vec<EdgeSpan>>,
     resident: &mut [[u32; 3]],
     max_lod: u32,
 ) -> Result<usize, ScreenLeafLodError> {
@@ -313,15 +442,14 @@ fn apply_grading(
     Ok(promotions)
 }
 
-/// Reconcile local leaf LoDs across one-to-many shared edges and within-leaf
-/// atlas grading. Inputs and outputs use logical edge order A/B/C.
-pub fn reconcile_screen_leaf_lods(
-    leaves: &[ScreenLeafTopology],
+fn reconcile_lods<K: Ord>(
+    depths: &[u8],
+    lines: &BTreeMap<K, Vec<EdgeSpan>>,
     requested: &[[u32; 3]],
     max_face_edge_ratio: u32,
     max_lod: u32,
 ) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
-    if leaves.len() != requested.len() {
+    if depths.len() != requested.len() {
         return Err(ScreenLeafLodError::LengthMismatch);
     }
     if max_face_edge_ratio < 2
@@ -342,14 +470,13 @@ pub fn reconcile_screen_leaf_lods(
         }
     }
 
-    let lines = topology_lines(leaves)?;
     let mut resident = requested.to_vec();
     let mut iterations = 0usize;
     let mut shared_edge_promotions = 0usize;
     let mut grading_promotions = 0usize;
     loop {
         iterations += 1;
-        let shared = reconcile_lines(&lines, &mut resident, max_lod)?;
+        let shared = reconcile_lines(lines, &mut resident, max_lod)?;
         let graded = apply_grading(&mut resident, max_face_edge_ratio, max_lod)?;
         shared_edge_promotions += shared;
         grading_promotions += graded;
@@ -358,12 +485,10 @@ pub fn reconcile_screen_leaf_lods(
         }
     }
 
-    let max_absolute_exponent = leaves
+    let max_absolute_exponent = depths
         .iter()
         .zip(&resident)
-        .flat_map(|(leaf, lods)| {
-            lods.map(|lod| leaf.id.depth.saturating_add(lod.trailing_zeros() as u8))
-        })
+        .flat_map(|(&depth, lods)| lods.map(|lod| depth.saturating_add(lod.trailing_zeros() as u8)))
         .max()
         .unwrap_or(0);
     Ok(ScreenLeafLodResult {
@@ -373,6 +498,36 @@ pub fn reconcile_screen_leaf_lods(
         grading_promotions,
         max_absolute_exponent,
     })
+}
+
+/// Reconcile local leaf LoDs across one-to-many shared edges inside one source
+/// patch and apply within-leaf atlas grading. Inputs and outputs use logical
+/// edge order A/B/C.
+pub fn reconcile_screen_leaf_lods(
+    leaves: &[ScreenLeafTopology],
+    requested: &[[u32; 3]],
+    max_face_edge_ratio: u32,
+    max_lod: u32,
+) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
+    let lines = topology_lines(leaves)?;
+    let depths = leaves.iter().map(|leaf| leaf.id.depth).collect::<Vec<_>>();
+    reconcile_lods(&depths, &lines, requested, max_face_edge_ratio, max_lod)
+}
+
+/// Reconcile adaptive leaves across both their source-face interiors and the
+/// welded authored-mesh boundaries. Different neighboring faces may choose
+/// different dyadic trees; overlapping physical edge intervals still receive
+/// one absolute sampling resolution.
+pub fn reconcile_screen_mesh_leaf_lods(
+    leaves: &[ScreenMeshLeafTopology],
+    requested: &[[u32; 3]],
+    source_topology: &quilting_mesh::HalfEdgeMesh,
+    max_face_edge_ratio: u32,
+    max_lod: u32,
+) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
+    let lines = mesh_topology_lines(leaves, source_topology)?;
+    let depths = leaves.iter().map(|leaf| leaf.id.depth).collect::<Vec<_>>();
+    reconcile_lods(&depths, &lines, requested, max_face_edge_ratio, max_lod)
 }
 
 #[cfg(test)]
@@ -485,5 +640,48 @@ mod tests {
         let error =
             reconcile_screen_leaf_lods(&[root, deep], &[[1; 3], [512; 3]], 4, 512).unwrap_err();
         assert!(matches!(error, ScreenLeafLodError::AtlasCapExceeded { .. }));
+    }
+
+    #[test]
+    fn different_face_trees_reconcile_over_welded_source_edges() {
+        let source_topology =
+            quilting_mesh::HalfEdgeMesh::from_triangles(4, &[[0, 1, 2], [2, 1, 3]]);
+        let quarters = QBPatchDomain::FULL.quarter();
+        let mut leaves = (0..4u8)
+            .map(|child| ScreenMeshLeafTopology {
+                source_face: 0,
+                id: ScreenPatchLeafId::ROOT.child(child).unwrap(),
+                domain: quarters[child as usize],
+            })
+            .collect::<Vec<_>>();
+        leaves.push(ScreenMeshLeafTopology {
+            source_face: 1,
+            id: ScreenPatchLeafId::ROOT,
+            domain: QBPatchDomain::FULL,
+        });
+        let mut requested = vec![[1; 3]; leaves.len()];
+        // Face 1 logical edge C is the complete physical edge shared with
+        // face 0 logical edge A, which is represented by two depth-1 spans.
+        requested[4][2] = 8;
+
+        let result =
+            reconcile_screen_mesh_leaf_lods(&leaves, &requested, &source_topology, 4, 512).unwrap();
+        assert!(result.shared_edge_promotions >= 2);
+        assert_eq!(result.resident[4][2], 8);
+
+        let lines = mesh_topology_lines(&leaves, &source_topology).unwrap();
+        for spans in lines.values() {
+            for (index, a) in spans.iter().enumerate() {
+                for b in &spans[index + 1..] {
+                    if a.start < b.end && b.start < a.end {
+                        let absolute_a = a.depth
+                            + result.resident[a.leaf_index][a.edge_index].trailing_zeros() as u8;
+                        let absolute_b = b.depth
+                            + result.resident[b.leaf_index][b.edge_index].trailing_zeros() as u8;
+                        assert_eq!(absolute_a, absolute_b, "overlapping spans {a:?} / {b:?}");
+                    }
+                }
+            }
+        }
     }
 }
