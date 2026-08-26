@@ -76,6 +76,7 @@ pub struct PickedScreenMeshPlanDiagnostic {
     pub unmet_leaves: u32,
     pub saturated_metric_leaves: u32,
     pub omitted_culled_leaves: u32,
+    pub boundary_fallback_faces: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +98,9 @@ pub struct AdaptiveScreenMeshPlanDiagnostic {
     pub unmet_leaves: u32,
     pub saturated_metric_leaves: u32,
     pub omitted_culled_leaves: u32,
+    /// Selected faces retained as source roots because a drawable camera/fade
+    /// boundary remained unresolved within the bounded partition policy.
+    pub boundary_fallback_faces: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -498,7 +502,7 @@ pub fn plan_adaptive_screen_mesh(
     // retained-output budget. If the output budget is crossed, keep counting
     // bounded partitions without retaining more records so the final error
     // reports the exact required leaf count.
-    let selected_faces = selected_patches.keys().copied().collect::<Vec<_>>();
+    let mut selected_faces = Vec::with_capacity(selected_patches.len());
     let mut leaves = Vec::new();
     let mut requested_lods = Vec::new();
     let mut output_viable =
@@ -509,6 +513,8 @@ pub fn plan_adaptive_screen_mesh(
     let mut unmet_leaves = 0usize;
     let mut saturated_metric_leaves = 0u32;
     let mut omitted_culled_leaves = 0usize;
+    let mut fallback_roots = 0usize;
+    let mut boundary_fallback_faces = 0usize;
 
     for (source_face, source_lods) in request.source_requested_lods.iter().copied().enumerate() {
         let source_face_u32 =
@@ -535,11 +541,6 @@ pub fn plan_adaptive_screen_mesh(
             .iter()
             .filter(|leaf| leaf.status.is_drawable() && leaf.metric_diagnostic.is_none())
             .count();
-        if unresolved_boundary_leaves != 0 {
-            return Err(PickedScreenMeshPlanError::UnmetPartition {
-                leaves: unresolved_boundary_leaves,
-            });
-        }
         split_nodes = split_nodes
             .checked_add(partition.split_nodes)
             .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
@@ -547,6 +548,29 @@ pub fn plan_adaptive_screen_mesh(
         unmet_leaves = unmet_leaves
             .checked_add(partition.unmet_leaves)
             .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+        if unresolved_boundary_leaves != 0 {
+            boundary_fallback_faces = boundary_fallback_faces
+                .checked_add(1)
+                .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+            fallback_roots = fallback_roots
+                .checked_add(1)
+                .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+            let next_total_leaves = fixed_roots
+                .checked_add(fallback_roots)
+                .and_then(|roots| roots.checked_add(selected_leaves))
+                .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+            output_viable &= next_total_leaves <= request.max_total_leaves;
+            if output_viable {
+                leaves.push(ScreenMeshLeafTopology {
+                    source_face: source_face_u32,
+                    id: ScreenPatchLeafId::ROOT,
+                    domain: QBPatchDomain::FULL,
+                });
+                requested_lods.push(source_lods);
+            }
+            continue;
+        }
+        selected_faces.push(source_face_u32);
 
         let included_leaf_count = partition
             .leaves
@@ -560,7 +584,8 @@ pub fn plan_adaptive_screen_mesh(
             .checked_add(included_leaf_count)
             .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
         let next_total_leaves = fixed_roots
-            .checked_add(next_selected_leaves)
+            .checked_add(fallback_roots)
+            .and_then(|roots| roots.checked_add(next_selected_leaves))
             .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
         output_viable &= next_total_leaves <= request.max_total_leaves;
 
@@ -607,7 +632,8 @@ pub fn plan_adaptive_screen_mesh(
     }
 
     let total_capacity = fixed_roots
-        .checked_add(selected_leaves)
+        .checked_add(fallback_roots)
+        .and_then(|roots| roots.checked_add(selected_leaves))
         .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
     if !output_viable {
         return Err(PickedScreenMeshPlanError::LeafBudgetExceeded {
@@ -640,6 +666,8 @@ pub fn plan_adaptive_screen_mesh(
                 .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
             saturated_metric_leaves,
             omitted_culled_leaves: u32::try_from(omitted_culled_leaves)
+                .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
+            boundary_fallback_faces: u32::try_from(boundary_fallback_faces)
                 .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
         },
     })
@@ -679,6 +707,7 @@ pub fn plan_picked_screen_mesh(
             unmet_leaves: plan.diagnostic.unmet_leaves,
             saturated_metric_leaves: plan.diagnostic.saturated_metric_leaves,
             omitted_culled_leaves: plan.diagnostic.omitted_culled_leaves,
+            boundary_fallback_faces: plan.diagnostic.boundary_fallback_faces,
         },
     })
 }
@@ -1067,13 +1096,13 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_camera_boundary_still_fails_closed() {
+    fn unresolved_camera_boundary_falls_back_to_its_source_root() {
         let patch = QBTriPatch::flat(
             [-0.3, -0.3, -2.0],
             [0.3, -0.3, -2.0],
             [0.0, 0.4, 1.0],
         );
-        let error = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+        let plan = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
             selected_face: 0,
             transformed_patch: &patch,
             view_projection: &PERSPECTIVE,
@@ -1091,11 +1120,68 @@ mod tests {
             max_total_leaves: 16,
             source_requested_lods: &[[64; 3]],
         })
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            PickedScreenMeshPlanError::UnmetPartition { leaves } if leaves > 0
-        ));
+        .unwrap();
+        assert_eq!(plan.leaves.len(), 1);
+        assert_eq!(plan.leaves[0].id, ScreenPatchLeafId::ROOT);
+        assert_eq!(plan.requested_lods, [[64; 3]]);
+        assert_eq!(plan.diagnostic.selected_leaves, 0);
+        assert_eq!(plan.diagnostic.boundary_fallback_faces, 1);
+        assert!(plan.diagnostic.unmet_leaves > 0);
+    }
+
+    #[test]
+    fn one_boundary_face_does_not_discard_other_adaptive_faces() {
+        let boundary = QBTriPatch::flat(
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [0.0, 0.4, 1.0],
+        );
+        let finite = QBTriPatch::flat(
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [-0.3, 0.3, -2.0],
+        );
+        let selected = [
+            SelectedScreenPatch {
+                source_face: 1,
+                transformed_patch: &finite,
+            },
+            SelectedScreenPatch {
+                source_face: 0,
+                transformed_patch: &boundary,
+            },
+        ];
+        let plan = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
+            selected_patches: &selected,
+            view_projection: &PERSPECTIVE,
+            viewport: [1600.0, 900.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 32.0,
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
+                ignore_below_px: 0.0,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 8,
+            max_total_leaves: 5,
+            source_requested_lods: &[[64; 3], [8; 3]],
+        })
+        .unwrap();
+
+        assert_eq!(plan.selected_faces, [1]);
+        assert_eq!(plan.diagnostic.selected_faces, 1);
+        assert_eq!(plan.diagnostic.boundary_fallback_faces, 1);
+        assert_eq!(plan.diagnostic.selected_leaves, 4);
+        assert_eq!(plan.diagnostic.total_leaves, 5);
+        assert_eq!(plan.leaves[0].source_face, 0);
+        assert_eq!(plan.leaves[0].id, ScreenPatchLeafId::ROOT);
+        assert!(plan.leaves[1..]
+            .iter()
+            .all(|leaf| leaf.source_face == 1 && leaf.id.depth == 1));
     }
 
     #[test]

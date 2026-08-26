@@ -370,6 +370,7 @@ struct AdaptiveScreenMeshPlanDiagnosticSnapshot {
     unmet_leaves: u32,
     saturated_metric_leaves: u32,
     omitted_culled_leaves: u32,
+    boundary_fallback_faces: u32,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -408,6 +409,7 @@ impl From<AdaptiveScreenMeshPlanDiagnostic> for AdaptiveScreenMeshPlanDiagnostic
             unmet_leaves: diagnostic.unmet_leaves,
             saturated_metric_leaves: diagnostic.saturated_metric_leaves,
             omitted_culled_leaves: diagnostic.omitted_culled_leaves,
+            boundary_fallback_faces: diagnostic.boundary_fallback_faces,
         }
     }
 }
@@ -840,6 +842,7 @@ pub(crate) struct AdaptiveScreenPatchSnapshot {
     pub max_depth_reached: u8,
     pub unmet_leaves: u32,
     pub saturated_metric_leaves: u32,
+    pub boundary_fallback_faces: u32,
     leaf_status_histogram: Vec<(&'static str, u32)>,
     leaf_depth_histogram: Vec<(u8, u32)>,
     requested_lod_histogram: Vec<(String, u32)>,
@@ -902,21 +905,22 @@ pub(crate) fn measure_adaptive_screen_patch(
         .iter()
         .filter(|leaf| leaf.status.is_drawable() && leaf.metric_diagnostic.is_none())
         .count();
-    if unresolved_boundary_leaves != 0 {
-        return Err(format!(
-            "adaptive partition has {unresolved_boundary_leaves} unresolved drawable boundary leaves",
-        ));
-    }
-
-    let root_band = root_metric
-        .resolve_subdivision_band(
-            request.source_requested_lod,
-            request.min_px_per_segment,
-            request.max_px_per_segment,
-            max_atlas_lod,
-        )
-        .ok_or_else(|| "root screen metric cannot resolve the requested pixel band".to_string())?;
-    let single_patch_requested_lod = root_band.requested;
+    let boundary_fallback_faces = u32::from(unresolved_boundary_leaves != 0);
+    let single_patch_requested_lod = if boundary_fallback_faces != 0 {
+        request.source_requested_lod
+    } else {
+        root_metric
+            .resolve_subdivision_band(
+                request.source_requested_lod,
+                request.min_px_per_segment,
+                request.max_px_per_segment,
+                max_atlas_lod,
+            )
+            .ok_or_else(|| {
+                "root screen metric cannot resolve the requested pixel band".to_string()
+            })?
+            .requested
+    };
     let single_patch_lod = reconcile_screen_leaf_lods(
         &[ScreenLeafTopology {
             id: ScreenPatchLeafId::ROOT,
@@ -935,43 +939,54 @@ pub(crate) fn measure_adaptive_screen_patch(
         .filter(|leaf| leaf.status.is_drawable())
         .collect::<Vec<_>>();
     let mut saturated_metric_leaves = 0u32;
-    let requested = drawable_leaves
-        .iter()
-        .map(|leaf| {
-            let diagnostic = leaf
-                .metric_diagnostic
-                .expect("unresolved drawable boundaries were rejected above");
-            let inherited = inherited_source_edge_lods(
-                leaf.id,
-                leaf.restricted.domain,
-                request.source_requested_lod,
-            )
-            .ok();
-            let band = inherited.and_then(|inherited| {
-                diagnostic.resolve_subdivision_band(
-                    inherited,
-                    request.min_px_per_segment,
-                    request.max_px_per_segment,
-                    max_atlas_lod,
+    let (topology, requested) = if boundary_fallback_faces != 0 {
+        (
+            vec![ScreenLeafTopology {
+                id: ScreenPatchLeafId::ROOT,
+                domain: QBPatchDomain::FULL,
+            }],
+            vec![request.source_requested_lod],
+        )
+    } else {
+        let requested = drawable_leaves
+            .iter()
+            .map(|leaf| {
+                let diagnostic = leaf
+                    .metric_diagnostic
+                    .expect("finite drawable leaves were checked above");
+                let inherited = inherited_source_edge_lods(
+                    leaf.id,
+                    leaf.restricted.domain,
+                    request.source_requested_lod,
                 )
-            });
-            match band {
-                Some(band) => {
-                    saturated_metric_leaves = saturated_metric_leaves
-                        .saturating_add(u32::from(band.saturated));
-                    band.requested
+                .ok();
+                let band = inherited.and_then(|inherited| {
+                    diagnostic.resolve_subdivision_band(
+                        inherited,
+                        request.min_px_per_segment,
+                        request.max_px_per_segment,
+                        max_atlas_lod,
+                    )
+                });
+                match band {
+                    Some(band) => {
+                        saturated_metric_leaves = saturated_metric_leaves
+                            .saturating_add(u32::from(band.saturated));
+                        band.requested
+                    }
+                    None => {
+                        saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
+                        [max_atlas_lod; 3]
+                    }
                 }
-                None => {
-                    saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
-                    [max_atlas_lod; 3]
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-    let topology = drawable_leaves
-        .iter()
-        .map(|leaf| ScreenLeafTopology::from(*leaf))
-        .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
+        let topology = drawable_leaves
+            .iter()
+            .map(|leaf| ScreenLeafTopology::from(*leaf))
+            .collect::<Vec<_>>();
+        (topology, requested)
+    };
     let reconciled = reconcile_screen_leaf_lods(
         &topology,
         &requested,
@@ -1000,19 +1015,22 @@ pub(crate) fn measure_adaptive_screen_patch(
         *status_histogram.entry(status).or_default() += 1;
         *depth_histogram.entry(leaf.id.depth).or_default() += 1;
     }
-    for (leaf, resident) in drawable_leaves.iter().zip(&reconciled.resident) {
-        let Some(diagnostic) = leaf.metric_diagnostic else {
-            continue;
-        };
-        worst_leaf_stretch_ratio = worst_leaf_stretch_ratio.max(diagnostic.stretch_ratio);
-        worst_leaf_area_ratio = worst_leaf_area_ratio.max(diagnostic.area_ratio);
-        for edge in 0..3 {
-            let extent = diagnostic.edge_arc_px[edge].max(diagnostic.directional_extent_px[edge]);
-            let segment = extent / f64::from(resident[edge]);
-            if segment.is_finite() {
-                max_local_metric_segment_px = max_local_metric_segment_px.max(segment);
-                if segment > 0.0 {
-                    min_local_metric_segment_px = min_local_metric_segment_px.min(segment);
+    if boundary_fallback_faces == 0 {
+        for (leaf, resident) in drawable_leaves.iter().zip(&reconciled.resident) {
+            let Some(diagnostic) = leaf.metric_diagnostic else {
+                continue;
+            };
+            worst_leaf_stretch_ratio = worst_leaf_stretch_ratio.max(diagnostic.stretch_ratio);
+            worst_leaf_area_ratio = worst_leaf_area_ratio.max(diagnostic.area_ratio);
+            for edge in 0..3 {
+                let extent =
+                    diagnostic.edge_arc_px[edge].max(diagnostic.directional_extent_px[edge]);
+                let segment = extent / f64::from(resident[edge]);
+                if segment.is_finite() {
+                    max_local_metric_segment_px = max_local_metric_segment_px.max(segment);
+                    if segment > 0.0 {
+                        min_local_metric_segment_px = min_local_metric_segment_px.min(segment);
+                    }
                 }
             }
         }
@@ -1040,7 +1058,8 @@ pub(crate) fn measure_adaptive_screen_patch(
             .copied()
     };
     let missing_atlas_keys = missing_atlas.into_keys().collect::<Vec<_>>();
-    let quality_met = partition.unmet_leaves == 0
+    let quality_met = boundary_fallback_faces == 0
+        && partition.unmet_leaves == 0
         && saturated_metric_leaves == 0
         && missing_atlas_keys.is_empty()
         && max_local_metric_segment_px <= request.max_px_per_segment * (1.0 + 1.0e-9)
@@ -1068,6 +1087,7 @@ pub(crate) fn measure_adaptive_screen_patch(
         max_depth_reached: partition.max_depth_reached,
         unmet_leaves: partition.unmet_leaves as u32,
         saturated_metric_leaves,
+        boundary_fallback_faces,
         leaf_status_histogram: status_histogram.into_iter().collect(),
         leaf_depth_histogram: depth_histogram.into_iter().collect(),
         requested_lod_histogram: lod_histogram(&requested),
@@ -1082,7 +1102,7 @@ pub(crate) fn measure_adaptive_screen_patch(
         min_local_metric_segment_px,
         atlas_keys: atlas_keys.len() as u32,
         missing_atlas_keys,
-        adaptive_instances: drawable_leaves.len() as u64,
+        adaptive_instances: reconciled.resident.len() as u64,
         adaptive_triangles,
     })
 }
@@ -1146,14 +1166,14 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn measurement_oracle_rejects_the_same_unresolved_boundaries_as_live_planning() {
+    fn measurement_oracle_reports_the_live_source_root_boundary_fallback() {
         let patch = QBTriPatch::flat(
             [-0.3, -0.3, -2.0],
             [0.3, -0.3, -2.0],
             [0.0, 0.4, 1.0],
         );
         let atlas_triangle_counts = BTreeMap::from([([16, 32, 64], 1)]);
-        let result = measure_adaptive_screen_patch(AdaptiveScreenRequest {
+        let snapshot = measure_adaptive_screen_patch(AdaptiveScreenRequest {
             face: 0,
             node: 0,
             patch: &patch,
@@ -1171,12 +1191,21 @@ mod tests {
             source_requested_lod: [64; 3],
             current_resident_lod: Some([64; 3]),
             atlas_triangle_counts: &atlas_triangle_counts,
-        });
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("unresolved boundary measurement unexpectedly succeeded"),
-        };
-        assert!(error.contains("unresolved drawable boundary leaves"));
+        })
+        .unwrap();
+        assert_eq!(snapshot.boundary_fallback_faces, 1);
+        assert_eq!(snapshot.single_patch_requested_lod, [64; 3]);
+        assert_eq!(snapshot.single_patch_resident_lod, [64; 3]);
+        assert_eq!(
+            snapshot.requested_lod_histogram,
+            vec![("64/64/64".into(), 1)]
+        );
+        assert_eq!(
+            snapshot.resident_lod_histogram,
+            vec![("64/64/64".into(), 1)]
+        );
+        assert_eq!(snapshot.adaptive_instances, 1);
+        assert!(!snapshot.quality_met);
     }
 
     #[wasm_bindgen_test]
@@ -1392,5 +1421,101 @@ mod tests {
         assert_eq!(snapshot.last_plan.unwrap().selected_faces, 2);
         assert_eq!(snapshot.last_selection.unwrap().selected_faces, 2);
         assert_eq!(snapshot.last_triangles, 2);
+    }
+
+    #[wasm_bindgen_test]
+    fn runtime_keeps_other_faces_adaptive_when_one_boundary_falls_back() {
+        let positions = [
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [0.0, 0.4, -2.0],
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [-0.3, 0.3, -2.0],
+        ];
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [3, 4, 5]],
+        );
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let boundary = QBTriPatch::flat(
+            [-0.3, -0.3, -2.0],
+            [0.3, -0.3, -2.0],
+            [0.0, 0.4, 1.0],
+        );
+        let finite = QBTriPatch::flat(positions[3], positions[4], positions[5]);
+        let selected = [
+            SelectedScreenPatch {
+                source_face: 0,
+                transformed_patch: &boundary,
+            },
+            SelectedScreenPatch {
+                source_face: 1,
+                transformed_patch: &finite,
+            },
+        ];
+        let resident = ResidentLod::uniform(1);
+        let atlas_triangles = BTreeMap::from([([1; 3], 1)]);
+        let mut groups = BTreeMap::new();
+        let mut runtime = AdaptivePickedRuntime::default();
+        runtime.configure(AdaptivePickedConfig {
+            selection: AdaptiveScreenSelection::CurrentView {
+                max_faces: 2,
+                max_partition_leaves: 2,
+            },
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 32.0,
+            policy: ScreenPartitionPolicy {
+                max_depth: 0,
+                max_leaves: 1,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_total_leaves: 2,
+            max_triangles: 2,
+        });
+
+        runtime
+            .plan_selected_and_group(
+                &selected,
+                Some(AdaptiveScreenFaceSelectionDiagnostic {
+                    examined_faces: 2,
+                    visible_faces: 2,
+                    selected_faces: 2,
+                    partition_face_capacity: 2,
+                    omitted_by_capacity: 0,
+                    selected_root_triangles: 2,
+                }),
+                2,
+                &PERSPECTIVE,
+                [1600.0, 900.0],
+                Some((1, 0)),
+                &[Some(resident); 2],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0, 0],
+                &[0, 1],
+                &[0, 1],
+                &mut groups,
+            )
+            .unwrap();
+        runtime.commit_publication();
+
+        let snapshot = runtime.snapshot();
+        assert_eq!(snapshot.published_faces, [1]);
+        let plan = snapshot.last_plan.unwrap();
+        assert_eq!(plan.selected_faces, 1);
+        assert_eq!(plan.boundary_fallback_faces, 1);
+        let members = groups.values().flatten().collect::<Vec<_>>();
+        assert_eq!(members.len(), 2);
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.face_index)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([0, 1]),
+        );
     }
 }
