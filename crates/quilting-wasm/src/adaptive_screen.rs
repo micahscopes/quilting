@@ -28,6 +28,8 @@ use quilting_core::screen_plan::{
 };
 use serde::Serialize;
 
+use crate::round_shadow::browser_now_ms;
+
 /// Disabled-by-default parity observer for the production batch handoff.
 ///
 /// An all-root adaptive frontier must be exactly equivalent to legacy
@@ -295,6 +297,7 @@ pub(crate) struct AdaptivePickedRuntime {
     frontier: Option<ScreenMeshLeafFrontier>,
     frontier_cache_hits: u64,
     frontier_cache_misses: u64,
+    last_timings: AdaptivePlanTimings,
     lod_scratch: ScreenMeshLeafLodScratch,
     candidate_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     attempts: u64,
@@ -354,6 +357,18 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     last_reconciliation_iterations: u64,
     frontier_cache_hits: u64,
     frontier_cache_misses: u64,
+    last_timings: AdaptivePlanTimings,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdaptivePlanTimings {
+    total_ms: f64,
+    mesh_plan_ms: f64,
+    frontier_ms: f64,
+    reconcile_ms: f64,
+    atlas_work_ms: f64,
+    group_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -443,6 +458,7 @@ impl AdaptivePickedRuntime {
         self.frontier = None;
         self.frontier_cache_hits = 0;
         self.frontier_cache_misses = 0;
+        self.last_timings = AdaptivePlanTimings::default();
         self.candidate_groups.clear();
         self.clear_pending_publication();
     }
@@ -636,12 +652,14 @@ impl AdaptivePickedRuntime {
             return Err("adaptive screen mode is disabled".into());
         };
         let attempt = (|| -> Result<_, String> {
+            let total_start = browser_now_ms();
             self.source_lod_scratch.clear();
             self.source_lod_scratch.extend(
                 source_requests
                     .iter()
                     .map(|request| request.unwrap_or(standby).edge_lods()),
             );
+            let mesh_plan_start = browser_now_ms();
             let plan = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
                 selected_patches,
                 view_projection,
@@ -656,6 +674,8 @@ impl AdaptivePickedRuntime {
                 source_requested_lods: &self.source_lod_scratch,
             })
             .map_err(|error| error.to_string())?;
+            let mesh_plan_ms = browser_now_ms() - mesh_plan_start;
+            let frontier_start = browser_now_ms();
             let frontier_matches = self
                 .frontier
                 .as_ref()
@@ -672,9 +692,13 @@ impl AdaptivePickedRuntime {
                 .frontier
                 .as_ref()
                 .ok_or_else(|| "adaptive frontier cache is unavailable".to_string())?;
+            let frontier_ms = browser_now_ms() - frontier_start;
+            let reconcile_start = browser_now_ms();
             let reconciled = frontier
                 .reconcile_lods(&plan.requested_lods, max_face_edge_ratio, max_atlas_lod)
                 .map_err(|error| error.to_string())?;
+            let reconcile_ms = browser_now_ms() - reconcile_start;
+            let atlas_work_start = browser_now_ms();
             let mut triangles = 0u64;
             for (leaf_index, lods) in reconciled.resident.iter().copied().enumerate() {
                 let key = canonical_form(lods).res;
@@ -689,6 +713,8 @@ impl AdaptivePickedRuntime {
                     config.max_triangles,
                 ));
             }
+            let atlas_work_ms = browser_now_ms() - atlas_work_start;
+            let group_start = browser_now_ms();
             group_resident_screen_leaves_into(
                 frontier,
                 &reconciled.resident,
@@ -699,11 +725,26 @@ impl AdaptivePickedRuntime {
                 &mut self.candidate_groups,
             )
             .map_err(|error| error.to_string())?;
-            Ok((plan.diagnostic, plan.selected_faces, reconciled, triangles))
+            let group_ms = browser_now_ms() - group_start;
+            let timings = AdaptivePlanTimings {
+                total_ms: browser_now_ms() - total_start,
+                mesh_plan_ms,
+                frontier_ms,
+                reconcile_ms,
+                atlas_work_ms,
+                group_ms,
+            };
+            Ok((
+                plan.diagnostic,
+                plan.selected_faces,
+                reconciled,
+                triangles,
+                timings,
+            ))
         })();
 
         match attempt {
-            Ok((diagnostic, selected_faces, reconciled, triangles)) => {
+            Ok((diagnostic, selected_faces, reconciled, triangles, timings)) => {
                 std::mem::swap(live_groups, &mut self.candidate_groups);
                 self.pending_plan = Some(diagnostic);
                 self.pending_selection = selection_diagnostic;
@@ -713,6 +754,7 @@ impl AdaptivePickedRuntime {
                 self.pending_grading_promotions = reconciled.grading_promotions as u64;
                 self.pending_reconciliation_iterations = reconciled.iterations as u64;
                 self.pending_pose_stamp = current_pose_stamp;
+                self.last_timings = timings;
                 Ok(())
             }
             Err(error) => {
@@ -796,6 +838,7 @@ impl AdaptivePickedRuntime {
             last_reconciliation_iterations: self.last_reconciliation_iterations,
             frontier_cache_hits: self.frontier_cache_hits,
             frontier_cache_misses: self.frontier_cache_misses,
+            last_timings: self.last_timings,
         }
     }
 }
