@@ -202,6 +202,16 @@ struct MainState {
     render_commands_dirty: bool,
     render_command_builds: u64,
     render_calls: u64,
+    /// Prepared patch records depend on view-projection, pose, retained batch
+    /// membership, and per-entity transforms—not on time by itself. Reuse them
+    /// across idle frames instead of rewriting the complete 52-float stream.
+    patch_prepare_dirty: bool,
+    last_prepared_mvp: Option<[f32; 16]>,
+    last_prepared_command_build: u64,
+    patch_prepare_frames: u64,
+    skipped_patch_prepare_frames: u64,
+    patch_prepare_calls: u64,
+    last_prepared_patch_instances: u64,
     pbr_draw_calls: u64,
     pbr_material_updates: u64,
     pbr_vertex_uniform_updates: u64,
@@ -550,6 +560,16 @@ fn embed_face_node_ids(
     Ok(())
 }
 
+fn patch_preparation_needed(
+    dirty: bool,
+    last_mvp: Option<[f32; 16]>,
+    last_command_build: u64,
+    mvp: [f32; 16],
+    command_build: u64,
+) -> bool {
+    dirty || last_mvp != Some(mvp) || last_command_build != command_build
+}
+
 fn create_gpu_batch(
     gl: &glow::Context,
     tess: &TessBuffers,
@@ -675,6 +695,13 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_commands_dirty: true,
             render_command_builds: 0,
             render_calls: 0,
+            patch_prepare_dirty: true,
+            last_prepared_mvp: None,
+            last_prepared_command_build: 0,
+            patch_prepare_frames: 0,
+            skipped_patch_prepare_frames: 0,
+            patch_prepare_calls: 0,
+            last_prepared_patch_instances: 0,
             pbr_draw_calls: 0,
             pbr_material_updates: 0,
             pbr_vertex_uniform_updates: 0,
@@ -2705,6 +2732,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             }
             st.cached_instances = next_instances;
             st.num_faces = num_faces;
+            st.patch_prepare_dirty = true;
             st.render_shadow.asset_changed();
             st.render_shadow_scene_dirty = true;
             st.presentation_nodes.clear();
@@ -2904,6 +2932,16 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ("lastGpuBatchFailures", batch_stats.last_gpu_failures),
             ("renderCommandBuilds", state.render_command_builds),
             ("renderCalls", state.render_calls),
+            ("patchPrepareFrames", state.patch_prepare_frames),
+            (
+                "skippedPatchPrepareFrames",
+                state.skipped_patch_prepare_frames,
+            ),
+            ("patchPrepareCalls", state.patch_prepare_calls),
+            (
+                "lastPreparedPatchInstances",
+                state.last_prepared_patch_instances,
+            ),
             ("pbrDrawCalls", state.pbr_draw_calls),
             ("pbrMaterialUpdates", state.pbr_material_updates),
             (
@@ -3308,6 +3346,7 @@ pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], 
         match state.renderer.upload_skinning_texture(&ji, &jw) {
             Ok(()) => {
                 state.surface_runtime.set_skinning(&ji, &jw);
+                state.patch_prepare_dirty = true;
                 debug!("Skinning texture uploaded: {} vertices", nv);
             }
             Err(error) => warn!("Skinning texture upload failed: {}", error),
@@ -3327,6 +3366,7 @@ pub fn mr_upload_morph_texture(deltas: &[f32], num_vertices: u32, num_targets: u
         match state.renderer.upload_morph_texture(deltas, nv, nt) {
             Ok(()) => {
                 state.surface_runtime.set_morph_targets(deltas, nv, nt);
+                state.patch_prepare_dirty = true;
                 debug!("Morph texture uploaded: {} vertices × {} targets", nv, nt);
             }
             Err(error) => warn!("Morph texture upload failed: {}", error),
@@ -3778,6 +3818,7 @@ pub fn mr_upload_animation_pose(
         st.renderer
             .joint_ubo()
             .upload(st.renderer.gl(), matrices, morph_weights, skin_tex_w);
+        st.patch_prepare_dirty = true;
         st.render_shadow.pose_changed();
         Ok(true)
     })
@@ -3793,6 +3834,7 @@ pub fn mr_clear_animation_state() {
             state.renderer.joint_ubo().clear(state.renderer.gl());
             state.renderer.clear_animation_textures();
             state.surface_runtime.clear_animation();
+            state.patch_prepare_dirty = true;
             state.render_shadow.pose_changed();
         }
     });
@@ -3819,6 +3861,31 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         sync_render_batches(state);
         refresh_render_shadow_scene(state);
+        let prepare_needed = patch_preparation_needed(
+            state.patch_prepare_dirty,
+            state.last_prepared_mvp,
+            state.last_prepared_command_build,
+            camera.mvp,
+            state.render_command_builds,
+        );
+        if prepare_needed {
+            state.patch_prepare_dirty = false;
+            state.last_prepared_mvp = Some(camera.mvp);
+            state.last_prepared_command_build = state.render_command_builds;
+            state.patch_prepare_frames = state.patch_prepare_frames.saturating_add(1);
+            state.patch_prepare_calls = state
+                .patch_prepare_calls
+                .saturating_add(state.batches.len() as u64);
+            state.last_prepared_patch_instances = state
+                .render_batches
+                .iter()
+                .map(|batch| batch.mesh.num_instances.max(0) as u64)
+                .sum();
+        } else {
+            state.skipped_patch_prepare_frames =
+                state.skipped_patch_prepare_frames.saturating_add(1);
+            state.last_prepared_patch_instances = 0;
+        }
         let has_transmission = if matches!(state.render_mode, RenderMode::Pbr) {
             let default_material = PbrParams::default();
             state.render_batches.iter().any(|batch| {
@@ -3850,14 +3917,16 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         // Deform and classify each patch once. Every subsequent material,
         // wire, normal, and pick draw consumes these prepared records without
         // CPU visibility readback or repeated position skinning.
-        for (gpu_batch, render_batch) in state.batches.values().zip(render_batches) {
-            state.renderer.prepare_patch_batch(
-                &camera,
-                render_batch,
-                gpu_batch.prepare_vao,
-                gpu_batch.instances.prepared_buf,
-                0,
-            );
+        if prepare_needed {
+            for (gpu_batch, render_batch) in state.batches.values().zip(render_batches) {
+                state.renderer.prepare_patch_batch(
+                    &camera,
+                    render_batch,
+                    gpu_batch.prepare_vao,
+                    gpu_batch.instances.prepared_buf,
+                    0,
+                );
+            }
         }
 
         // Mode-specific UBO setup
@@ -4519,5 +4588,18 @@ mod tests {
             instances[23 * instance_layout::STRIDE + instance_layout::offset::NODE_ID],
             91.0,
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn patch_preparation_reuses_only_an_exact_idle_frame() {
+        let mut mvp = [0.0; 16];
+        mvp[0] = 1.0;
+        assert!(!patch_preparation_needed(false, Some(mvp), 7, mvp, 7));
+        assert!(patch_preparation_needed(true, Some(mvp), 7, mvp, 7));
+        assert!(patch_preparation_needed(false, None, 7, mvp, 7));
+        assert!(patch_preparation_needed(false, Some(mvp), 6, mvp, 7));
+        let mut moved = mvp;
+        moved[12] = 0.25;
+        assert!(patch_preparation_needed(false, Some(mvp), 7, moved, 7));
     }
 }
