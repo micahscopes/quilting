@@ -15,7 +15,7 @@ use crate::coarse_complex::{
 };
 use crate::coarse_reduction::{
     reduce_source_charts, CoarseReductionConfig, CoarseReductionError, ReducedChart,
-    ReducedSourceCharts,
+    ReducedSourceCharts, RejectedReductionCandidate,
 };
 use crate::geometry;
 
@@ -85,8 +85,12 @@ pub struct CoarseFace {
 pub struct ChartReductionReport {
     pub key: ChartKey,
     pub requested_triangles: usize,
+    pub selected_target_triangles: usize,
     pub achieved_triangles: usize,
-    pub result_error: f32,
+    pub used_source_fallback: bool,
+    pub backend_attempts: usize,
+    pub rejected_candidates: Vec<RejectedReductionCandidate>,
+    pub backend_result_error: Option<f32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -476,8 +480,12 @@ fn assemble(
         charts.push(ChartReductionReport {
             key: chart.key.clone(),
             requested_triangles: chart.requested_triangles,
+            selected_target_triangles: chart.selected_target_triangles,
             achieved_triangles: chart.triangles.len(),
-            result_error: chart.result_error,
+            used_source_fallback: chart.used_source_fallback,
+            backend_attempts: chart.backend_attempts,
+            rejected_candidates: chart.rejected_candidates.clone(),
+            backend_result_error: chart.backend_result_error,
         });
         for triangle in &chart.triangles {
             let global = rotate_face(

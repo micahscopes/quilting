@@ -22,7 +22,7 @@ use quilting_remesh::coarse_complex::{
     split_disconnected_vertex_fans, CoarseComplexInput, SourceFaceId, SourceVertexId,
 };
 use quilting_remesh::coarse_patch_complex::{
-    build_coarse_patch_complex, CoarsePatchComplex, CoarsePatchConfig,
+    build_coarse_patch_complex, ChartReductionReport, CoarsePatchComplex, CoarsePatchConfig,
 };
 use quilting_remesh::coarse_reduction::CoarseReductionConfig;
 use quilting_remesh::conformal_optimizer::{
@@ -218,6 +218,13 @@ struct Success {
     source_faces: usize,
     coarse_faces: usize,
     charts: usize,
+    backed_off_charts: usize,
+    source_fallback_charts: usize,
+    requested_chart_triangles: usize,
+    selected_target_triangles: usize,
+    backend_attempts: usize,
+    rejected_backend_attempts: usize,
+    chart_reports: Vec<ChartReductionReport>,
     split_vertices: usize,
     constrained_vertices: usize,
     correspondence_rms: f64,
@@ -475,6 +482,37 @@ fn success(
         source_faces: part.triangles.len(),
         coarse_faces: complex.faces.len(),
         charts: complex.charts.len(),
+        backed_off_charts: complex
+            .charts
+            .iter()
+            .filter(|chart| chart.selected_target_triangles > chart.requested_triangles)
+            .count(),
+        source_fallback_charts: complex
+            .charts
+            .iter()
+            .filter(|chart| chart.used_source_fallback)
+            .count(),
+        requested_chart_triangles: complex
+            .charts
+            .iter()
+            .map(|chart| chart.requested_triangles)
+            .sum(),
+        selected_target_triangles: complex
+            .charts
+            .iter()
+            .map(|chart| chart.selected_target_triangles)
+            .sum(),
+        backend_attempts: complex
+            .charts
+            .iter()
+            .map(|chart| chart.backend_attempts)
+            .sum(),
+        rejected_backend_attempts: complex
+            .charts
+            .iter()
+            .map(|chart| chart.rejected_candidates.len())
+            .sum(),
+        chart_reports: complex.charts.clone(),
         split_vertices,
         constrained_vertices: complex
             .vertices
@@ -497,14 +535,42 @@ fn success(
 
 fn print_success(success: &Success) {
     println!(
-        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} split_vertices={} constrained_vertices={}",
+        "  OK source_faces={} coarse_faces={} reduction={:.3}x charts={} backed_off_charts={} source_fallback_charts={} requested_chart_triangles={} selected_target_triangles={} backend_attempts={} rejected_backend_attempts={} split_vertices={} constrained_vertices={}",
         success.source_faces,
         success.coarse_faces,
         success.source_faces as f64 / success.coarse_faces.max(1) as f64,
         success.charts,
+        success.backed_off_charts,
+        success.source_fallback_charts,
+        success.requested_chart_triangles,
+        success.selected_target_triangles,
+        success.backend_attempts,
+        success.rejected_backend_attempts,
         success.split_vertices,
         success.constrained_vertices,
     );
+    for (chart_index, chart) in success.chart_reports.iter().enumerate() {
+        println!(
+            "  chart={} source_faces={} requested={} selected={} achieved={} backend_attempts={} source_fallback={} backend_error={}",
+            chart_index,
+            chart.key.source_faces.len(),
+            chart.requested_triangles,
+            chart.selected_target_triangles,
+            chart.achieved_triangles,
+            chart.backend_attempts,
+            chart.used_source_fallback,
+            chart
+                .backend_result_error
+                .map(|error| format!("{error:.6e}"))
+                .unwrap_or_else(|| "source".to_string()),
+        );
+        for rejection in &chart.rejected_candidates {
+            println!(
+                "    rejected target={} category={} reason={}",
+                rejection.target_triangles, rejection.category, rejection.reason,
+            );
+        }
+    }
     println!(
         "  correspondence relative_rms={:.6e} relative_max={:.6e}",
         success.correspondence_rms, success.correspondence_max,

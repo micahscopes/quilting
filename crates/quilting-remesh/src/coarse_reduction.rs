@@ -44,8 +44,53 @@ pub struct ReducedChart {
     pub boundary_edges: Vec<[usize; 2]>,
     pub source_faces: Vec<usize>,
     pub requested_triangles: usize,
-    /// Relative meshoptimizer error in normalized chart coordinates.
-    pub result_error: f32,
+    /// Target selected by the deterministic backoff search after complete
+    /// output validation. This can exceed `requested_triangles`; the exact
+    /// source count is the fail-closed upper bound. Candidate validity is not
+    /// assumed to be monotone, so this is not claimed to be the globally
+    /// smallest valid target.
+    pub selected_target_triangles: usize,
+    /// True when every attempted backend candidate failed and the independently
+    /// validated exact source chart was selected instead.
+    pub used_source_fallback: bool,
+    /// Number of meshoptimizer candidates evaluated for this chart.
+    pub backend_attempts: usize,
+    /// Candidates rejected by geometry, topology, or boundary validation,
+    /// retained in deterministic attempt order.
+    pub rejected_candidates: Vec<RejectedReductionCandidate>,
+    /// Relative meshoptimizer error in normalized chart coordinates. `None`
+    /// means exact source topology was selected without a backend result.
+    pub backend_result_error: Option<f32>,
+}
+
+/// Compact, actionable evidence for one rejected meshoptimizer candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RejectedReductionCandidate {
+    pub target_triangles: usize,
+    pub category: ReductionRejectionCategory,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ReductionRejectionCategory {
+    CountOverflow,
+    InvalidMeshoptOutput,
+    InvalidReducedTopology,
+    BoundaryChanged,
+    Unexpected,
+}
+
+impl std::fmt::Display for ReductionRejectionCategory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::CountOverflow => "count-overflow",
+            Self::InvalidMeshoptOutput => "invalid-meshopt-output",
+            Self::InvalidReducedTopology => "invalid-reduced-topology",
+            Self::BoundaryChanged => "boundary-changed",
+            Self::Unexpected => "unexpected-candidate-error",
+        };
+        formatter.write_str(name)
+    }
 }
 
 /// Validated chart-local reduction plus the authoritative source cut records.
@@ -221,6 +266,78 @@ fn requested_triangles(input_triangles: usize, ratio: f64) -> Result<usize, Coar
         return Err(CoarseReductionError::CountOverflow);
     }
     Ok((requested as usize).clamp(1, input_triangles))
+}
+
+fn backoff_to_valid<T, E>(
+    requested: usize,
+    source_target: usize,
+    source_value: T,
+    mut evaluate: impl FnMut(usize) -> Result<T, E>,
+) -> (usize, T, usize, Vec<(usize, E)>) {
+    debug_assert!(requested <= source_target);
+    if requested == source_target {
+        return (source_target, source_value, 0, Vec::new());
+    }
+    let mut accepted_target = source_target;
+    let mut accepted = source_value;
+    let mut rejected_target = requested.saturating_sub(1);
+    let mut attempts = 0usize;
+    let mut rejections = Vec::new();
+    // This is a bounded deterministic probe schedule, not a proof that
+    // candidate validity is monotone. It first tries the requested target and
+    // then bisects the remaining interval toward the independently validated
+    // exact source fallback. The selected result is the most aggressive valid
+    // candidate this schedule actually attempted, not a global minimum.
+    while accepted_target.saturating_sub(rejected_target) > 1 {
+        let target = if rejected_target + 1 == requested {
+            requested
+        } else {
+            rejected_target + (accepted_target - rejected_target) / 2
+        };
+        attempts += 1;
+        match evaluate(target) {
+            Ok(value) => {
+                accepted_target = target;
+                accepted = value;
+            }
+            Err(error) => {
+                rejections.push((target, error));
+                rejected_target = target;
+            }
+        }
+    }
+    (accepted_target, accepted, attempts, rejections)
+}
+
+fn rejection_evidence(
+    target_triangles: usize,
+    error: CoarseReductionError,
+) -> RejectedReductionCandidate {
+    let (category, reason) = match error {
+        CoarseReductionError::CountOverflow => (
+            ReductionRejectionCategory::CountOverflow,
+            "target index count overflows usize",
+        ),
+        CoarseReductionError::InvalidMeshoptOutput { reason, .. } => {
+            (ReductionRejectionCategory::InvalidMeshoptOutput, reason)
+        }
+        CoarseReductionError::InvalidReducedChart { reason, .. } => {
+            (ReductionRejectionCategory::InvalidReducedTopology, reason)
+        }
+        CoarseReductionError::BoundaryChanged { .. } => (
+            ReductionRejectionCategory::BoundaryChanged,
+            "stable chart boundary changed",
+        ),
+        _ => (
+            ReductionRejectionCategory::Unexpected,
+            "candidate evaluation returned an unexpected error category",
+        ),
+    };
+    RejectedReductionCandidate {
+        target_triangles,
+        category,
+        reason,
+    }
 }
 
 fn rotate_triangle(mut triangle: [usize; 3]) -> [usize; 3] {
@@ -507,47 +624,60 @@ fn reduce_chart(
             })?);
         }
     }
+    let source_triangles = source.triangles.len();
     let input_index_count = indices.len();
-    let requested = requested_triangles(source.triangles.len(), config.target_ratio)?;
-    let target_indices = requested
-        .checked_mul(3)
-        .ok_or(CoarseReductionError::CountOverflow)?;
-    let mut result_error = 0.0f32;
-    let backend_positions = if target_indices == indices.len() {
-        None
-    } else {
+    let requested = requested_triangles(source_triangles, config.target_ratio)?;
+    let (source_vertices, source_faces, source_boundary) = compact_and_validate(source, &indices)?;
+    let source_value = (source_vertices, source_faces, source_boundary, None);
+    let (selected_target_triangles, selected, backend_attempts, rejected_candidates) = if requested
+        < source_triangles
+    {
         let positions = normalized_positions(source)?;
         validate_backend_geometry(source, &positions)?;
-        Some(positions)
-    };
-    let result = if let Some(positions) = &backend_positions {
         let locks = source
             .vertices
             .iter()
             .map(|vertex| vertex.boundary_locked)
             .collect::<Vec<_>>();
-        meshopt::simplify_with_locks_decoder(
-            &indices,
-            &positions.quantized,
-            &locks,
-            target_indices,
-            config.target_error,
-            meshopt::SimplifyOptions::LockBorder,
-            Some(&mut result_error),
-        )
+        backoff_to_valid(requested, source_triangles, source_value, |target| {
+            let target_indices = target
+                .checked_mul(3)
+                .ok_or(CoarseReductionError::CountOverflow)?;
+            let mut result_error = 0.0f32;
+            let result = meshopt::simplify_with_locks_decoder(
+                &indices,
+                &positions.quantized,
+                &locks,
+                target_indices,
+                config.target_error,
+                meshopt::SimplifyOptions::LockBorder,
+                Some(&mut result_error),
+            );
+            if !result_error.is_finite() || result_error < 0.0 || result.len() > input_index_count {
+                return Err(CoarseReductionError::InvalidMeshoptOutput {
+                    chart: source.key.clone(),
+                    reason: "the reported error or output size is invalid",
+                });
+            }
+            if result_error > config.target_error {
+                return Err(CoarseReductionError::InvalidMeshoptOutput {
+                    chart: source.key.clone(),
+                    reason: "the reported error exceeds the configured target error",
+                });
+            }
+            validate_meshopt_output_geometry(source, &positions, &result)?;
+            let (vertices, triangles, boundary_edges) = compact_and_validate(source, &result)?;
+            Ok((vertices, triangles, boundary_edges, Some(result_error)))
+        })
     } else {
-        indices
+        (source_triangles, source_value, 0, Vec::new())
     };
-    if !result_error.is_finite() || result_error < 0.0 || result.len() > input_index_count {
-        return Err(CoarseReductionError::InvalidMeshoptOutput {
-            chart: source.key.clone(),
-            reason: "the reported error or output size is invalid",
-        });
-    }
-    if let Some(positions) = &backend_positions {
-        validate_meshopt_output_geometry(source, positions, &result)?;
-    }
-    let (vertices, triangles, boundary_edges) = compact_and_validate(source, &result)?;
+    let rejected_candidates = rejected_candidates
+        .into_iter()
+        .map(|(target, error)| rejection_evidence(target, error))
+        .collect::<Vec<_>>();
+    let (vertices, triangles, boundary_edges, backend_result_error) = selected;
+    let used_source_fallback = requested < source_triangles && backend_result_error.is_none();
     Ok(ReducedChart {
         key: source.key.clone(),
         vertices,
@@ -555,7 +685,11 @@ fn reduce_chart(
         boundary_edges,
         source_faces: source.source_faces.clone(),
         requested_triangles: requested,
-        result_error,
+        selected_target_triangles,
+        used_source_fallback,
+        backend_attempts,
+        rejected_candidates,
+        backend_result_error,
     })
 }
 
@@ -583,13 +717,58 @@ mod tests {
     use super::*;
     use crate::coarse_complex::{SourceFaceId, SourceVertexId};
 
+    #[test]
+    fn deterministic_backoff_finds_the_boundary_for_a_monotone_fixture() {
+        let mut attempted = Vec::new();
+        let (target, value, attempts, rejections) = backoff_to_valid(15, 60, 60, |candidate| {
+            attempted.push(candidate);
+            if candidate >= 57 {
+                Ok(candidate)
+            } else {
+                Err(())
+            }
+        });
+        assert_eq!(target, 57);
+        assert_eq!(value, 57);
+        assert_eq!(attempts, attempted.len());
+        assert_eq!(rejections.len(), attempted.len() - 1);
+        assert_eq!(rejections.first(), Some(&(15, ())));
+        assert_eq!(attempted.first(), Some(&15));
+        assert!(attempted.contains(&56));
+
+        let (target, value, attempts, rejections) =
+            backoff_to_valid(15, 60, 60, |_| Err::<usize, ()>(()));
+        assert_eq!((target, value), (60, 60));
+        assert_eq!(attempts, rejections.len());
+    }
+
+    #[test]
+    fn deterministic_backoff_does_not_claim_an_unprobed_global_minimum() {
+        let mut attempted = Vec::new();
+        let (target, value, _, _) = backoff_to_valid(15, 60, 60, |candidate| {
+            attempted.push(candidate);
+            if candidate == 20 || candidate >= 57 {
+                Ok(candidate)
+            } else {
+                Err(())
+            }
+        });
+        assert_eq!((target, value), (57, 57));
+        assert!(!attempted.contains(&20));
+        assert!(attempted.contains(&57));
+    }
+
     type ReductionSignature = (
         ChartKey,
         Vec<CutVertexKey>,
         Vec<[CutVertexKey; 3]>,
         Vec<[CutVertexKey; 2]>,
         usize,
-        u32,
+        usize,
+        bool,
+        usize,
+        Vec<(usize, ReductionRejectionCategory, &'static str)>,
+        Option<u32>,
     );
 
     struct Grid {
@@ -669,7 +848,21 @@ mod tests {
                         .map(|boundary| stable_edge(&chart.vertices, *boundary))
                         .collect(),
                     chart.requested_triangles,
-                    chart.result_error.to_bits(),
+                    chart.selected_target_triangles,
+                    chart.used_source_fallback,
+                    chart.backend_attempts,
+                    chart
+                        .rejected_candidates
+                        .iter()
+                        .map(|candidate| {
+                            (
+                                candidate.target_triangles,
+                                candidate.category,
+                                candidate.reason,
+                            )
+                        })
+                        .collect(),
+                    chart.backend_result_error.map(f32::to_bits),
                 )
             })
             .collect()

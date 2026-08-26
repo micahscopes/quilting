@@ -140,6 +140,20 @@ positions. Canonical tessellation already accepts the resulting
 `Vec<QBTriPatch>`. No renderer, atlas, WASM, or shader change is needed for this
 experiment.
 
+Render-oriented source buffers may explicitly pass through
+`split_disconnected_vertex_fans` first. It separates only disconnected
+incidence components of the same authored vertex and retains their stable
+face-fan provenance; it never position-welds coincident vertices. Exact
+position-sharing attribute wedges remain valid meshoptimizer input, while
+distinct f64 positions that alias after f32 normalization still fail closed.
+Each chart treats the requested reduction ratio as a lower target: a bounded,
+deterministic probe schedule backs invalid backend candidates toward the exact
+source until geometry, winding, manifold, Euler, and stable-boundary validation
+all pass. Backend validity is not assumed monotone, so the selected target is
+only the most aggressive valid candidate actually attempted. Requested and
+selected targets, exact-source fallback, backend error, attempt count, and each
+rejection target/category/reason stay visible in `ChartReductionReport`.
+
 ## Known limitations
 
 - Area measure now reaches fitting and scoring, with sample-splitting

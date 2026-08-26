@@ -18,10 +18,14 @@
 //! **QB-aware candidate path.** [`coarse_complex`] validates stable authored
 //! identity and oriented topology, turns boundaries/domains/explicit locks into
 //! corner-cut simplification charts, and prevents a backend from welding those
-//! ownership seams. [`conformal_optimizer`] supplies deterministic clustering
-//! and conformal scoring; [`linear_fit`] supplies the sparse global shared-weight
-//! fit. Topology reduction and provenance correspondence are being connected
-//! between those foundations before this path becomes a product entry point.
+//! ownership seams. Its explicit fan-split import normalization separates
+//! render-buffer bow ties without position welding. With `meshopt-prototype`,
+//! `coarse_reduction` validates and conservatively backs off every reduction,
+//! then `coarse_patch_complex` assembles stable global correspondence.
+//! [`linear_fit`] supplies the area-weighted sparse shared-weight fit and
+//! [`conformal_optimizer`] scores the result under source and conformal probes.
+//! The path remains an offline measured candidate rather than a product entry
+//! point.
 //!
 //! Fitting curved QB patches to arbitrary meshes is an open problem in this
 //! codebase, not a solved one. The candidate path therefore remains explicit
