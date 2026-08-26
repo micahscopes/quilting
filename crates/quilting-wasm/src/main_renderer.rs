@@ -4945,6 +4945,7 @@ mod tests {
         let key = batch::RenderBatchKey::from_resident(resident, 7, usize::MAX);
         let members = [batch::RenderBatchMember {
             face_index: 23,
+            leaf_id: quilting_core::screen_partition::ScreenPatchLeafId::ROOT,
             node_index: 91,
             permutation_index: 0,
             vertex_lods: [2; 3],

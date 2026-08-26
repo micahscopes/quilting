@@ -77,7 +77,7 @@ pub struct RenderSceneSnapshot {
 impl RenderSceneSnapshot {
     pub fn validate(&self) -> Result<(), RenderContractError> {
         let mut previous = None;
-        let mut faces = BTreeSet::new();
+        let mut patches = BTreeSet::new();
         for (batch_index, batch) in self.batches.iter().enumerate() {
             if previous.is_some_and(|key| key >= batch.key) {
                 return Err(RenderContractError::BatchOrder { batch_index });
@@ -108,14 +108,22 @@ impl RenderSceneSnapshot {
                         .vertex_lods
                         .into_iter()
                         .any(|lod| lod == 0 || !lod.is_power_of_two())
+                    || member.leaf_id.domain().is_none()
                 {
                     return Err(RenderContractError::InvalidBatchMember {
                         batch_index,
                         face_index: member.face_index,
                     });
                 }
-                if !faces.insert(member.face_index) {
-                    return Err(RenderContractError::DuplicateFace(member.face_index));
+                if !patches.insert(member.patch_id()) {
+                    if member.leaf_id == crate::screen_partition::ScreenPatchLeafId::ROOT {
+                        return Err(RenderContractError::DuplicateFace(member.face_index));
+                    }
+                    return Err(RenderContractError::DuplicatePatch {
+                        face_index: member.face_index,
+                        leaf_depth: member.leaf_id.depth,
+                        leaf_path: member.leaf_id.path,
+                    });
                 }
             }
         }
@@ -666,6 +674,11 @@ pub enum RenderContractError {
     InvalidBatchMember { batch_index: usize, face_index: u32 },
     BatchOrder { batch_index: usize },
     DuplicateFace(u32),
+    DuplicatePatch {
+        face_index: u32,
+        leaf_depth: u8,
+        leaf_path: u32,
+    },
     BatchCountOverflow,
     InstanceCountOverflow,
     SceneRevisionMismatch { frame: u64, scene: u64 },
@@ -704,6 +717,14 @@ impl fmt::Display for RenderContractError {
                     "source face {face} occurs in multiple render batches"
                 )
             }
+            Self::DuplicatePatch {
+                face_index,
+                leaf_depth,
+                leaf_path,
+            } => write!(
+                formatter,
+                "adaptive leaf {leaf_depth}:{leaf_path} of source face {face_index} occurs more than once"
+            ),
             Self::BatchCountOverflow => formatter.write_str("render batch count exceeds u32"),
             Self::InstanceCountOverflow => formatter.write_str("render instance count exceeds u32"),
             Self::SceneRevisionMismatch { frame, scene } => write!(
@@ -768,6 +789,7 @@ mod tests {
             },
             members: vec![RenderBatchMember {
                 face_index,
+                leaf_id: crate::screen_partition::ScreenPatchLeafId::ROOT,
                 node_index: 0,
                 permutation_index: 0,
                 vertex_lods: [2; 3],
@@ -953,6 +975,34 @@ mod tests {
             frame.validate(&scene),
             Err(RenderContractError::SceneRevisionMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn validation_distinguishes_adaptive_leaves_from_authored_faces() {
+        let mut adaptive = scene();
+        let first = crate::screen_partition::ScreenPatchLeafId::ROOT
+            .child(0)
+            .unwrap();
+        let second = crate::screen_partition::ScreenPatchLeafId::ROOT
+            .child(1)
+            .unwrap();
+        adaptive.batches[0].members[0].leaf_id = first;
+        let first_member = adaptive.batches[0].members[0];
+        adaptive.batches[0].members.push(RenderBatchMember {
+            leaf_id: second,
+            ..first_member
+        });
+        assert_eq!(adaptive.validate(), Ok(()));
+
+        adaptive.batches[0].members[1].leaf_id = first;
+        assert_eq!(
+            adaptive.validate(),
+            Err(RenderContractError::DuplicatePatch {
+                face_index: 0,
+                leaf_depth: first.depth,
+                leaf_path: first.path,
+            })
+        );
     }
 
     #[test]

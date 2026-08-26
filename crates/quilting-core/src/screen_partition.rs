@@ -162,6 +162,27 @@ impl ScreenPatchLeafId {
             path: (self.path << 2) | u32::from(child_index),
         })
     }
+
+    /// Recover the exact source-barycentric domain encoded by this path.
+    /// Invalid manually-constructed paths are rejected; IDs produced through
+    /// [`Self::child`] always round-trip.
+    pub fn domain(self) -> Option<QBPatchDomain> {
+        let used_bits = u32::from(self.depth) * 2;
+        if self.depth > 16
+            || (used_bits == 0 && self.path != 0)
+            || (used_bits > 0 && u64::from(self.path) >= (1_u64 << used_bits))
+        {
+            return None;
+        }
+        let children = QBPatchDomain::FULL.quarter();
+        let mut domain = QBPatchDomain::FULL;
+        for level in 0..self.depth {
+            let shift = 2 * u32::from(self.depth - level - 1);
+            let child = ((self.path >> shift) & 3) as usize;
+            domain = domain.compose(children[child]);
+        }
+        Some(domain)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -530,6 +551,14 @@ mod tests {
             deepest = deepest.child(child % 4).unwrap();
         }
         assert!(deepest.child(0).is_none());
+        assert_eq!(root.domain(), Some(QBPatchDomain::FULL));
+        let path = root.child(3).unwrap().child(2).unwrap().child(1).unwrap();
+        let expected = QBPatchDomain::FULL
+            .compose(QBPatchDomain::FULL.quarter()[3])
+            .compose(QBPatchDomain::FULL.quarter()[2])
+            .compose(QBPatchDomain::FULL.quarter()[1]);
+        assert_eq!(path.domain(), Some(expected));
+        assert!(ScreenPatchLeafId { depth: 0, path: 1 }.domain().is_none());
     }
 
     #[test]

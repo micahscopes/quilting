@@ -7,6 +7,8 @@ use quilting_mesh::HalfEdgeMesh;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::screen_partition::ScreenPatchLeafId;
+
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
 /// which is the normative definition — do not restate the number here.
 pub use crate::instance_layout::STRIDE as INSTANCE_STRIDE;
@@ -179,6 +181,10 @@ impl RenderBatchKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderBatchMember {
     pub face_index: u32,
+    /// Ephemeral dyadic identity within the stable source face. Legacy source
+    /// triangles use `ROOT`; adaptive extraction may emit several distinct
+    /// leaves without pretending they are separate authored entities.
+    pub leaf_id: ScreenPatchLeafId,
     /// Stable semantic glTF node identity. Unlike the render-state
     /// representative in [`RenderBatchKey`], this survives draw consolidation
     /// for picking, selection, attribution, and future scene extraction.
@@ -188,6 +194,12 @@ pub struct RenderBatchMember {
     /// retained membership makes visualization-only changes invalidate the
     /// affected GPU stream even when its atlas key and permutation do not.
     pub vertex_lods: [u32; 3],
+}
+
+impl RenderBatchMember {
+    pub fn patch_id(self) -> (u32, ScreenPatchLeafId) {
+        (self.face_index, self.leaf_id)
+    }
 }
 
 /// Rebuild the C0-continuous resident LOD field used by diagnostic shading.
@@ -274,6 +286,7 @@ pub fn group_resident_faces_into(
         );
         groups.entry(key).or_default().push(RenderBatchMember {
             face_index: face_index as u32,
+            leaf_id: ScreenPatchLeafId::ROOT,
             node_index: face_nodes.get(face_index).copied().unwrap_or(0),
             permutation_index: resident.perm_index.min(5) as u8,
             vertex_lods: face_vertex_lods.get(face_index).copied().unwrap_or([1; 3]),
