@@ -8296,6 +8296,20 @@ function maximumNodeId(faceNodes) {
   return maximum;
 }
 
+function bakedPresentationNodeWorldTransforms(faceNodes) {
+  const nodeCount = maximumNodeId(faceNodes) + 1;
+  const transforms = new Float32Array(Math.max(0, nodeCount) * 16);
+  for (const node of uniqueNodeIds(faceNodes)) {
+    if (node < 0) continue;
+    const offset = node * 16;
+    transforms[offset] = 1;
+    transforms[offset + 5] = 1;
+    transforms[offset + 10] = 1;
+    transforms[offset + 15] = 1;
+  }
+  return transforms;
+}
+
 async function fetchPresentationGlb(asset) {
   const startedAt = performance.now();
   let assetShadow = null;
@@ -8404,10 +8418,16 @@ async function loadStaticPresentationAsset(asset, fetched) {
     ? info.node_stable_entity_ids.slice()
     : [];
   info.node_stable_entity_ids = null;
-  const nodeWorldTransforms = info.node_world_transforms instanceof Float32Array
+  let nodeWorldTransforms = info.node_world_transforms instanceof Float32Array
     ? info.node_world_transforms
     : new Float32Array(info.node_world_transforms || 0);
   info.node_world_transforms = null;
+  // Ordinary glTF coordinates were already baked into the returned instances,
+  // so their presentation transform is identity. Authored Hyperscape assets
+  // remain node-local and must supply their exact source-world matrices.
+  if (nodeWorldTransforms.length === 0 && info.has_hyperscape !== true) {
+    nodeWorldTransforms = bakedPresentationNodeWorldTransforms(faceNodes);
+  }
   const numVertices = Number(skin?.num_vertices || info.num_vertices) || 0;
   if (instances.length !== faceCount * 52 || faceLods.length < faceCount * 6
       || faceMaterials.length !== faceCount || faceNodes.length !== faceCount

@@ -115,7 +115,29 @@ for (const adapterStep of [
 
 const controller = new HyperscopeNavigation();
 const presentation = controller.loadPresentation(readFileSync(manifestPath, 'utf8'));
-assert.equal(presentation.cues.length, 6);
+assert.equal(presentation.assets.length, 5);
+assert.equal(presentation.cues.length, 8);
+assert.deepEqual(
+  presentation.assets.slice(2).map(asset => asset.uri),
+  [
+    '/polytopes/4-simplex.glb',
+    '/polytopes/tesseract.glb',
+    '/polytopes/16-cell.glb',
+  ],
+);
+assert.deepEqual(
+  presentation.cues.map(cue => cue.id),
+  [
+    'e0000000-0000-4000-8000-000000000007',
+    'e0000000-0000-4000-8000-000000000008',
+    'e0000000-0000-4000-8000-000000000009',
+    'e0000000-0000-4000-8000-00000000000a',
+    'e0000000-0000-4000-8000-000000000001',
+    'e0000000-0000-4000-8000-000000000004',
+    'e0000000-0000-4000-8000-000000000006',
+    'e0000000-0000-4000-8000-000000000002',
+  ],
+);
 
 const first = controller.startPresentation();
 assert.equal(first.cue_id, presentation.cues[0].id);
@@ -188,6 +210,17 @@ for (const requiredAuthorityStep of [
   assert.ok(
     browserSource.includes(requiredAuthorityStep),
     `browser presentation authority gate is missing ${requiredAuthorityStep}`,
+  );
+}
+
+for (const requiredBakedSecondaryStep of [
+  'function bakedPresentationNodeWorldTransforms(faceNodes)',
+  'if (nodeWorldTransforms.length === 0 && info.has_hyperscape !== true)',
+  'nodeWorldTransforms = bakedPresentationNodeWorldTransforms(faceNodes);',
+]) {
+  assert.ok(
+    browserSource.includes(requiredBakedSecondaryStep),
+    `ordinary baked presentation assets are missing ${requiredBakedSecondaryStep}`,
   );
 }
 

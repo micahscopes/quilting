@@ -1923,6 +1923,7 @@ mod tests {
         let fixture = presentation_fixture();
         let presentation_id = fixture.id;
         let presentation_assets = fixture.assets.clone();
+        let cue_count = fixture.cues.len();
         let first_cue = fixture.cues[0].id;
 
         store
@@ -1932,7 +1933,7 @@ mod tests {
         assert_eq!(store.summary_snapshot().active_cue, None);
         let loaded = store.presentation_snapshot().unwrap();
         assert_eq!(loaded.presentation_id, presentation_id);
-        assert_eq!(loaded.cue_count, 6);
+        assert_eq!(loaded.cue_count, cue_count);
         assert_eq!(loaded.assets, presentation_assets);
         assert_eq!(loaded.active, None);
 
@@ -2031,11 +2032,32 @@ mod tests {
             ))
             .unwrap();
         let fixture = presentation_fixture();
-        let expected = fixture.views[0].camera.to_camera_rig().unwrap();
+        let horse_cue = fixture
+            .cues
+            .iter()
+            .find(|cue| {
+                cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000001").unwrap()
+            })
+            .unwrap();
+        let horse_cue_id = horse_cue.id;
+        let expected = fixture
+            .views
+            .iter()
+            .find(|view| view.id == horse_cue.view)
+            .unwrap()
+            .camera
+            .to_camera_rig()
+            .unwrap();
         store
             .dispatch(AppEvent::PresentationLoaded(fixture))
             .unwrap();
-        dispatch_presentation(&store, 0, 0.0, PresentationAction::Start).unwrap();
+        dispatch_presentation(
+            &store,
+            0,
+            0.0,
+            PresentationAction::JumpToCue(horse_cue_id),
+        )
+        .unwrap();
         store
             .dispatch_navigation(NavigationAction::SetSemanticTargetEnabled(false))
             .unwrap();

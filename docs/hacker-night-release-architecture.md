@@ -314,8 +314,8 @@ The first application boundary is now explicit:
   The orchestration oracle covers asset effects, stale completion, failures,
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
-  atomic rejection, and transition cadence invariance. The six-cue golden is
-  `fnv1a-128-json:ea73662b9602640b487943ba2d9880f7`;
+  atomic rejection, and transition cadence invariance. The eight-cue golden is
+  `fnv1a-128-json:7afada676bfe2aaacdd1ec753ab1bdf8`;
   the navigation golden is
   `fnv1a-128-json:632127d93ad2417225544b3d14819302`; the orchestration
   golden is `fnv1a-128-json:9bc89c319883e25f7e91d001656d924b`.

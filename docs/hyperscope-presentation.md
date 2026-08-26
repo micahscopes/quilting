@@ -3,7 +3,7 @@
 `hyperscape` owns presentation sequencing and view transitions; a browser is
 an adapter for asset I/O, renderer commands, text, and input. The checked-in
 [`hacker-night.presentation.json`](../crates/hyperscape/fixtures/hacker-night.presentation.json)
-is the first two-asset fixture, and
+is the checked five-asset fixture, and
 [`hyperscope-presentation-0.1.schema.json`](schema/hyperscope-presentation-0.1.schema.json)
 describes its portable JSON shape.
 
@@ -104,16 +104,23 @@ authored overrides, unmatched entities, fallbacks, and bounded mismatches at
 `globalThis.__hyperscopeSceneExtraction`.
 
 The checked-in story follows the renderer's actual data flow rather than
-embedding the historical demo renderer. Its first five cues step through the
-animated QB surface with PBR patch boundaries, the reused tessellation wire
-topology, shared-edge LOD colors, analytic normals, and conformal stretch. A
-sixth cue returns to PBR and composes the Blender-authored scene. Each surface
-visualization is selected by the Rust-validated cue document and translated to
-one existing Hyperscope render mode; ambiguous combinations are rejected.
-Each cue also resolves an explicit tessellation policy. The checked-in LOD cue
-uses the ordinary screen-attenuation path with a coarse 64-pixel subdivision
-threshold, making projected-size differences readable without inventing a
-presentation-only tessellator. Other cues use the 16-pixel runtime default.
+embedding the historical demo renderer. Four opening cues introduce projected
+4D cell complexes before the animated horse: 4-simplex patch boundaries,
+tesseract atlas wire topology, the same tesseract under screen-space LOD, and
+analytic normals on a projected 16-cell. Three horse cues then show animated
+QB patches, shared-edge LOD, and conformal stretch. An eighth cue returns to
+PBR and composes the Blender-authored scene. Each surface visualization is
+selected by the Rust-validated cue document and translated to one existing
+Hyperscope render mode; ambiguous combinations are rejected.
+
+The polytope fixtures are deterministic static GLBs generated from
+`quilting_core::polytope4`. Their closed 3-cell shells are separated before 4D
+projection so the resulting triangle surfaces remain honest manifold inputs to
+the ordinary Quilting pipeline. The tesseract comparison deliberately keeps
+one camera: its wire cue disables attenuation at a fixed density of 12, then
+its LOD cue enables the ordinary path with an 8-pixel subdivision floor. The
+horse LOD cue uses the 16-pixel runtime default for a more legible multi-level
+split. No presentation-only tessellator or 4D renderer is involved.
 
 `control_net` remains reserved in the interchange format but is not claimed by
 the browser adapter yet. A faithful version needs explicit source/control
@@ -121,13 +128,15 @@ geometry in the main renderer rather than the historical demo's second bespoke
 draw path. Unsupported overlay requests are visible in
 `__hyperscopePresentation.unsupportedOverlays`.
 
-The six checked-in cues were rehearsed in Chrome against the release build.
-Patch-boundary, wire, normal, conformal-stretch, and final PBR composition
-shots remained recognizable and unobscured. The coarse LOD cue showed a clear
-two-level split between the cyan body and darker legs/underside; it should be
-described as a shared-edge resolution boundary, not as a many-band heatmap.
-The inversion cue used a stable off-mesh sphere, produced a legible red/blue
-stretch gradient, and completed camera transport with no pole diagnostic.
+The eight checked-in cues have a deterministic Rust replay oracle and a Node
+adapter smoke. A Chrome/WebGL2 development-build rehearsal on 2026-08-27
+advanced through every cue and ended with all five assets ready, 4,432 packed
+and LOD-resident faces, 12 topology domains, one GPU scene-classification pass,
+no application or extraction mismatch, and no console warning or error. The
+final scene-extraction matrix disagreement was bounded by
+`4.768371586472142e-8`. This is the checked development baseline, not a
+substitute for repeating the same inspection against the exact staged release
+directory on the presentation machine.
 
 The Tuesday adapter deliberately supports one animated primary asset plus
 static, untextured secondary assets. Animated or textured secondary assets fail

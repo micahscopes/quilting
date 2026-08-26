@@ -1470,7 +1470,9 @@ mod tests {
 
     #[test]
     fn walkthrough_trace_is_deterministic_and_json_roundtrips() {
-        let script = presentation_walkthrough_replay(fixture());
+        let presentation = fixture();
+        let expected_records = 2 + presentation.cues.len() * 2;
+        let script = presentation_walkthrough_replay(presentation);
         let encoded_script = serde_json::to_string(&script).unwrap();
         let decoded_script: AppReplayScript = serde_json::from_str(&encoded_script).unwrap();
         assert_eq!(decoded_script, script);
@@ -1478,7 +1480,7 @@ mod tests {
         let first = run_app_replay(&script).unwrap();
         let second = run_app_replay(&decoded_script).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.records.len(), 14);
+        assert_eq!(first.records.len(), expected_records);
         assert!(first.records.iter().all(|record| matches!(
             record.outcome,
             AppReplayOutcome::Committed {

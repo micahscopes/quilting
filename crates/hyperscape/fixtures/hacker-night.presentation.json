@@ -14,6 +14,24 @@
       "name": "Authored Hyperscape scene",
       "uri": "/hyperscape-blender-demo.glb",
       "load": "on_cue"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000003",
+      "name": "Projected 4-simplex",
+      "uri": "/polytopes/4-simplex.glb",
+      "load": "on_cue"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000004",
+      "name": "Projected tesseract",
+      "uri": "/polytopes/tesseract.glb",
+      "load": "on_cue"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000005",
+      "name": "Projected 16-cell",
+      "uri": "/polytopes/16-cell.glb",
+      "load": "on_cue"
     }
   ],
   "scenes": [
@@ -37,8 +55,8 @@
           "name": "Horse foreground",
           "asset": "a0000000-0000-4000-8000-000000000001",
           "transform": {
-            "translation": [-1.8, 0.8, 0.0],
-            "scale": [0.8, 0.8, 0.8]
+            "translation": [-1.2, 0.0, 0.0],
+            "scale": [0.9, 0.9, 0.9]
           }
         },
         {
@@ -46,9 +64,60 @@
           "name": "Blender-authored neighborhood",
           "asset": "a0000000-0000-4000-8000-000000000002",
           "transform": {
-            "translation": [3.5, 0.0, 0.0],
-            "scale": [0.4, 0.4, 0.4]
+            "translation": [1.7, 0.0, 0.0],
+            "scale": [0.25, 0.25, 0.25]
           }
+        }
+      ]
+    },
+    {
+      "id": "b0000000-0000-4000-8000-000000000003",
+      "name": "Projected 4-simplex cells",
+      "layers": [
+        {
+          "id": "c0000000-0000-4000-8000-000000000004",
+          "name": "Resident animated primary",
+          "asset": "a0000000-0000-4000-8000-000000000001",
+          "visible": false
+        },
+        {
+          "id": "c0000000-0000-4000-8000-000000000005",
+          "name": "Projected 4-simplex",
+          "asset": "a0000000-0000-4000-8000-000000000003"
+        }
+      ]
+    },
+    {
+      "id": "b0000000-0000-4000-8000-000000000004",
+      "name": "Projected tesseract cells",
+      "layers": [
+        {
+          "id": "c0000000-0000-4000-8000-000000000006",
+          "name": "Resident animated primary",
+          "asset": "a0000000-0000-4000-8000-000000000001",
+          "visible": false
+        },
+        {
+          "id": "c0000000-0000-4000-8000-000000000007",
+          "name": "Projected tesseract",
+          "asset": "a0000000-0000-4000-8000-000000000004"
+        }
+      ]
+    },
+    {
+      "id": "b0000000-0000-4000-8000-000000000005",
+      "name": "Projected 16-cell cells",
+      "layers": [
+        {
+          "id": "c0000000-0000-4000-8000-000000000008",
+          "name": "Resident animated primary",
+          "asset": "a0000000-0000-4000-8000-000000000001",
+          "visible": false
+        },
+        {
+          "id": "c0000000-0000-4000-8000-000000000009",
+          "name": "Projected 16-cell",
+          "asset": "a0000000-0000-4000-8000-000000000005"
         }
       ]
     }
@@ -75,9 +144,10 @@
       "id": "d0000000-0000-4000-8000-000000000002",
       "name": "Composed scene",
       "camera": {
-        "eye": [0.5, 1.5, 9.0],
-        "control_distance": 9.0,
-        "semantic_target": [0.5, 0.5, 0.0]
+        "eye": [0.6, 1.2, 6.3],
+        "orientation": [0.9969, -0.0787, 0.0, 0.0],
+        "control_distance": 6.3,
+        "semantic_target": [0.6, 0.2, 0.0]
       },
       "focus": {
         "center": [0.0, 0.0, 0.0],
@@ -110,9 +180,162 @@
         "coordinate": 0.5,
         "angular_aperture": 0.1
       }
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000004",
+      "name": "Projected 4-simplex overview",
+      "camera": {
+        "eye": [0.0, 0.0, 4.2],
+        "control_distance": 4.2,
+        "semantic_target": [0.0, 0.0, 0.0]
+      },
+      "focus": {
+        "center": [0.0, 0.0, 0.0],
+        "radius": 1.8,
+        "enabled": false,
+        "inversion_enabled": false,
+        "coordinate": 0.5,
+        "angular_aperture": 0.1
+      }
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000005",
+      "name": "Projected tesseract overview",
+      "camera": {
+        "eye": [0.15, 0.1, 4.4],
+        "control_distance": 4.4,
+        "semantic_target": [0.0, 0.0, 0.0]
+      },
+      "focus": {
+        "center": [0.0, 0.0, 0.0],
+        "radius": 1.8,
+        "enabled": false,
+        "inversion_enabled": false,
+        "coordinate": 0.5,
+        "angular_aperture": 0.1
+      }
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000006",
+      "name": "Projected 16-cell overview",
+      "camera": {
+        "eye": [-0.1, 0.1, 4.3],
+        "control_distance": 4.3,
+        "semantic_target": [0.0, 0.0, 0.0]
+      },
+      "focus": {
+        "center": [0.0, 0.0, 0.0],
+        "radius": 1.8,
+        "enabled": false,
+        "inversion_enabled": false,
+        "coordinate": 0.5,
+        "angular_aperture": 0.1
+      }
     }
   ],
   "cues": [
+    {
+      "id": "e0000000-0000-4000-8000-000000000007",
+      "scene": "b0000000-0000-4000-8000-000000000003",
+      "view": "d0000000-0000-4000-8000-000000000004",
+      "text": {
+        "eyebrow": "From triangles to cells",
+        "heading": "Five tetrahedra describe a 4-simplex",
+        "body": "Each coarse triangle becomes one ordinary Quilting patch. The five closed tetrahedral shells preserve the 4D polytope's cell incidence after projection into three dimensions."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000004",
+          "clip": "horse_A_",
+          "playing": false,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["patch_boundaries"],
+      "transition": {
+        "duration_seconds": 0.7,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-000000000008",
+      "scene": "b0000000-0000-4000-8000-000000000004",
+      "view": "d0000000-0000-4000-8000-000000000005",
+      "text": {
+        "eyebrow": "Four-dimensional topology",
+        "heading": "A tesseract becomes eight honest cell shells",
+        "body": "The wire view exposes the canonical barycentric atlas stamped onto the projected cubical cells, before screen-space attenuation changes their resident density."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000006",
+          "clip": "horse_A_",
+          "playing": false,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["wireframe"],
+      "tessellation": {
+        "density": 12.0,
+        "screen_attenuation": false,
+        "min_pixels_per_subdivision": 16.0
+      },
+      "transition": {
+        "duration_seconds": 0.55,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-000000000009",
+      "scene": "b0000000-0000-4000-8000-000000000004",
+      "view": "d0000000-0000-4000-8000-000000000005",
+      "text": {
+        "eyebrow": "Screen-space LOD",
+        "heading": "The same cells spend triangles where they are visible",
+        "body": "Color now shows resident tessellation levels. Projected size sets a lower bound on pixels per subdivision while shared edges still reconcile to one crack-free resolution."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000006",
+          "clip": "horse_A_",
+          "playing": false,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["lod"],
+      "tessellation": {
+        "density": 100.0,
+        "screen_attenuation": true,
+        "min_pixels_per_subdivision": 8.0
+      },
+      "transition": {
+        "duration_seconds": 0.45,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "id": "e0000000-0000-4000-8000-00000000000a",
+      "scene": "b0000000-0000-4000-8000-000000000005",
+      "view": "d0000000-0000-4000-8000-000000000006",
+      "text": {
+        "eyebrow": "Sixteen cells",
+        "heading": "Analytic patch normals survive the projection",
+        "body": "The 16-cell is represented as sixteen closed tetrahedral shells. Quilting evaluates each projected triangle through the same patch and derivative machinery used for an authored model."
+      },
+      "animations": [
+        {
+          "layer": "c0000000-0000-4000-8000-000000000008",
+          "clip": "horse_A_",
+          "playing": false,
+          "speed": 1.0
+        }
+      ],
+      "overlays": ["normals"],
+      "transition": {
+        "duration_seconds": 0.65,
+        "easing": "smoother_step"
+      }
+    },
     {
       "id": "e0000000-0000-4000-8000-000000000001",
       "scene": "b0000000-0000-4000-8000-000000000001",
@@ -137,29 +360,6 @@
       }
     },
     {
-      "id": "e0000000-0000-4000-8000-000000000003",
-      "scene": "b0000000-0000-4000-8000-000000000001",
-      "view": "d0000000-0000-4000-8000-000000000001",
-      "text": {
-        "eyebrow": "The atlas",
-        "heading": "One canonical topology, stamped across every face",
-        "body": "WebGL2 cannot generate geometry in the shader. Quilting reuses prebuilt barycentric triangle patterns, then evaluates each face as an instanced curved patch."
-      },
-      "animations": [
-        {
-          "layer": "c0000000-0000-4000-8000-000000000001",
-          "clip": "horse_A_",
-          "playing": true,
-          "speed": 1.0
-        }
-      ],
-      "overlays": ["wireframe"],
-      "transition": {
-        "duration_seconds": 0.45,
-        "easing": "smoother_step"
-      }
-    },
-    {
       "id": "e0000000-0000-4000-8000-000000000004",
       "scene": "b0000000-0000-4000-8000-000000000001",
       "view": "d0000000-0000-4000-8000-000000000001",
@@ -180,31 +380,8 @@
       "tessellation": {
         "density": 100.0,
         "screen_attenuation": true,
-        "min_pixels_per_subdivision": 64.0
+        "min_pixels_per_subdivision": 16.0
       },
-      "transition": {
-        "duration_seconds": 0.45,
-        "easing": "smoother_step"
-      }
-    },
-    {
-      "id": "e0000000-0000-4000-8000-000000000005",
-      "scene": "b0000000-0000-4000-8000-000000000001",
-      "view": "d0000000-0000-4000-8000-000000000001",
-      "text": {
-        "eyebrow": "QB surfaces",
-        "heading": "Curvature and normals are evaluated analytically",
-        "body": "The vertex shader evaluates the rational quaternionic-Bezier surface and its derivatives. No CPU remeshing is needed when the conformal map changes."
-      },
-      "animations": [
-        {
-          "layer": "c0000000-0000-4000-8000-000000000001",
-          "clip": "horse_A_",
-          "playing": true,
-          "speed": 1.0
-        }
-      ],
-      "overlays": ["normals"],
       "transition": {
         "duration_seconds": 0.45,
         "easing": "smoother_step"

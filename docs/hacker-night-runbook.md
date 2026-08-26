@@ -1,6 +1,6 @@
 # Hyperscope hacker-night runbook
 
-This is the exact offline-friendly path for the checked-in six-cue Quilting
+This is the exact offline-friendly path for the checked-in eight-cue Quilting
 presentation. Rehearse these commands and this URL on the presentation machine;
 do not rely on a development tab with cached assets.
 
@@ -57,7 +57,7 @@ and the checked bundle size. It rejects a coherent but stale `dist/` as well as
 missing presentation/runtime assets. The three replay commands must print:
 
 ```text
-PASS fnv1a-128-json:ea73662b9602640b487943ba2d9880f7
+PASS fnv1a-128-json:7afada676bfe2aaacdd1ec753ab1bdf8
 PASS fnv1a-128-json:632127d93ad2417225544b3d14819302
 PASS fnv1a-128-json:9bc89c319883e25f7e91d001656d924b
 ```
@@ -133,24 +133,30 @@ WebHID is unavailable.
 ## 3. Rehearse the story
 
 Advance with Right Arrow, Page Down, or the on-screen right arrow. Reverse with
-Left Arrow or Page Up. Verify all six cues in order:
+Left Arrow or Page Up. Verify all eight cues in order:
 
 After advancing, copy the URL and reload it once. Its `cue` UUID must restore
 the same numbered cue rather than returning to cue one.
 
-1. **Curved patches, continuously animated** — visible patch boundaries on the
-   animated horse.
-2. **One canonical topology** — the wire view shows the atlas topology stamped
-   across faces.
-3. **A shared edge chooses one resolution** — the coarse 64-pixel threshold
-   should show a stable two-level LOD split without open seams.
-4. **Curvature and normals are evaluated analytically** — the horse remains
-   recognizable in the normals view.
-5. **The Möbius map folds into each patch's weights** — inversion and the
+1. **Five tetrahedra describe a 4-simplex** — the projected cell shells are
+   centered and every triangular patch boundary is visible.
+2. **A tesseract becomes eight honest cell shells** — the wire view shows the
+   unattenuated canonical atlas topology on all eight projected cubical cells.
+3. **The same cells spend triangles where they are visible** — the camera does
+   not move; LOD color and an 8-pixel subdivision floor replace the fixed wire
+   view without opening seams.
+4. **Analytic patch normals survive the projection** — the projected 16-cell
+   remains legible as sixteen tetrahedral shells in normals mode.
+5. **Curved patches, continuously animated** — the horse appears for the first
+   time with visible patch boundaries and animation playing.
+6. **A shared edge chooses one resolution** — the horse's 16-pixel floor shows
+   a stable multi-level LOD split without open seams.
+7. **The Möbius map folds into each patch's weights** — inversion and the
    red/blue stretch field complete without a pole warning.
-6. **Scenes stay composable** — PBR returns and both the animated horse and
-   Blender-authored scene are visible; diagnostics report 2 assets and 4,252
-   faces.
+8. **One scene, distinct assets** — PBR returns and both the animated horse and
+   Blender-authored scene are visible. The three polytope assets remain packed
+   but hidden rather than being destructively unloaded; diagnostics report 5
+   resident assets and 4,432 packed faces.
 
 Keep the sidebar available during rehearsal so a presenter can inspect or
 recover state, then collapse it for the talk if desired. The text card remains
@@ -161,7 +167,7 @@ interactive rather than locking the camera.
 Prepare three views before the audience arrives rather than configuring them
 during the talk:
 
-1. Open the six-cue deck at the known URL from section 2 and leave it on cue
+1. Open the eight-cue deck at the known URL from section 2 and leave it on cue
    one.
 2. Open the Patch Lab comparison from section 4 in a second browser tab. Keep
    both the 2:1 URL and its `lodratio=4` variant in browser history.
@@ -170,24 +176,25 @@ during the talk:
 
 The short talk path is:
 
-1. Advance through cues one to five without leaving the canvas: animated patch
-   boundaries, reusable atlas topology, shared-edge LOD, analytic normals, then
-   the conformal stretch field.
-2. Advance to cue six and show that the horse and Blender neighborhood remain
+1. Advance through cues one to four without leaving the canvas: projected
+   4-simplex cells, reusable atlas topology, screen-space LOD, and the 16-cell.
+2. Advance through cues five to seven: animated horse patches, shared-edge LOD,
+   then the conformal stretch field.
+3. Advance to cue eight and show that the horse and Blender neighborhood remain
    distinct authored assets in one renderer scene.
-3. Move one bound object in Blender. Its corresponding Hyperscope object should
+4. Move one bound object in Blender. Its corresponding Hyperscope object should
    move without reloading the GLB or replacing the presentation.
-4. Move the Hyperscope camera or select an authored object. Blender should show
+5. Move the Hyperscope camera or select an authored object. Blender should show
    the transient remote camera, focus/inversion sphere, and selection bounds
    without creating or saving Blender objects.
-5. Return to Hyperscope for one interaction: select, invert, or attach to a
+6. Return to Hyperscope for one interaction: select, invert, or attach to a
    surface and walk. Use only the interaction rehearsed on the presentation
    machine.
-6. If time permits, switch to the prepared Patch Lab tab and compare the 2:1
+7. If time permits, switch to the prepared Patch Lab tab and compare the 2:1
    and 4:1 resident triangle counts.
 
 Do not improvise relay setup, HID permissions, or a development rebuild while
-speaking. If live sync is unavailable, continue with cue six as the composed
+speaking. If live sync is unavailable, continue with cue eight as the composed
 scene finale; the checked-in scene demonstrates the same asset and identity
 boundary without the optional carrier.
 
@@ -263,7 +270,7 @@ Use a fresh browser tab after the release build and verify:
   exception appears in the console;
 - the horse animates continuously and LOD does not flash to a stale low level;
 - on the final two-asset cue, `__hyperscopePresentation.lodCadence` reports a
-  scene classification with `lastSceneSubjectRecords: 9` and
+  scene classification with `lastSceneSubjectRecords: 12` and
   `lastSceneGpuPasses: 1`; later animation-only classifications report
   `lastPrimaryAnimationSubjectRecords: 1` and
   `lastPrimaryAnimationGpuPasses: 1` without implying that the static
@@ -271,13 +278,21 @@ Use a fresh browser tab after the release build and verify:
   remain the most recent classification of either scope and will normally
   return to the animation-only values while the horse is playing;
 - picking/selection tint and surface attachment use the visible object;
-- moving through all six cues leaves exactly one requested visualization mode
+- moving through all eight cues leaves exactly one requested visualization mode
   active;
 - the final cue reports no failed or unsupported required asset;
 - reloading with the network disabled still succeeds through local HTTP.
 
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.
+
+The 2026-08-27 Chrome/WebGL2 development rehearsal is the comparison baseline.
+It completed all eight cues with `ready: true`, `assetsReady: true`, five
+resident assets, 4,432 packed and LOD-resident faces, 12 topology domains, one
+GPU scene-classification pass over 12 subject records, zero application or
+scene-extraction mismatches, and no console warning or error. The staged build
+must equal those topology and authority results; a development-server pass does
+not waive this release-build check.
 
 Selection and surface walking deliberately retain their rehearsed JavaScript
 defaults for the talk. Do not add `selectionimpl=rust` or `walkimpl=rust` on

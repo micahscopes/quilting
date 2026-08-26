@@ -22,21 +22,15 @@ pub struct PresentationCardViewModel {
     pub can_advance: bool,
     pub desired_assets: usize,
     pub layers: usize,
-    pub composition_pending: bool,
 }
 
 impl PresentationCardViewModel {
     pub fn adapter_status(&self) -> String {
         let asset_suffix = if self.desired_assets == 1 { "" } else { "s" };
         let layer_suffix = if self.layers == 1 { "" } else { "s" };
-        let pending = if self.composition_pending {
-            " · composition pending"
-        } else {
-            ""
-        };
         format!(
-            "{} desired asset{} · {} layer{}{}",
-            self.desired_assets, asset_suffix, self.layers, layer_suffix, pending
+            "{} desired asset{} · {} layer{}",
+            self.desired_assets, asset_suffix, self.layers, layer_suffix
         )
     }
 }
@@ -61,7 +55,6 @@ pub fn project_presentation_card(
         can_advance: active.cue_index + 1 < presentation.cue_count,
         desired_assets: active.required_assets.len(),
         layers: active.layers.len(),
-        composition_pending: active.layers.len() > 1,
     })
 }
 
@@ -133,10 +126,6 @@ mod tests {
         assert!(card.can_advance);
         assert_eq!(card.desired_assets, 0);
         assert_eq!(card.layers, 2);
-        assert!(card.composition_pending);
-        assert_eq!(
-            card.adapter_status(),
-            "0 desired assets · 2 layers · composition pending"
-        );
+        assert_eq!(card.adapter_status(), "0 desired assets · 2 layers");
     }
 }

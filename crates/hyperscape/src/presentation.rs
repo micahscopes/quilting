@@ -992,6 +992,53 @@ mod tests {
     }
 
     #[test]
+    fn fixture_opens_with_projected_polytopes_before_the_animated_horse() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let mut navigation = NavigationController::default();
+        let presentation = runtime.presentation();
+        assert_eq!(presentation.assets.len(), 5);
+        assert_eq!(presentation.cues.len(), 8);
+        assert_eq!(
+            presentation
+                .assets
+                .iter()
+                .skip(2)
+                .map(|asset| asset.uri.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "/polytopes/4-simplex.glb",
+                "/polytopes/tesseract.glb",
+                "/polytopes/16-cell.glb",
+            ],
+        );
+        assert_eq!(
+            presentation.cues[0].id,
+            Uuid::parse_str("e0000000-0000-4000-8000-000000000007").unwrap(),
+        );
+        assert_eq!(
+            presentation.cues[4].id,
+            Uuid::parse_str("e0000000-0000-4000-8000-000000000001").unwrap(),
+        );
+
+        let opening = runtime.activate_index(0, &mut navigation).unwrap();
+        assert_eq!(opening.required_assets.len(), 2);
+        assert_eq!(opening.layers.len(), 2);
+        assert!(!opening.layers[0].visible);
+        assert!(opening.layers[1].visible);
+        assert_eq!(opening.animations.len(), 1);
+        assert!(!opening.animations[0].playing);
+        assert_eq!(opening.overlays, [PresentationOverlay::PatchBoundaries]);
+
+        let topology = runtime.activate_index(1, &mut navigation).unwrap();
+        assert_eq!(topology.overlays, [PresentationOverlay::Wireframe]);
+        assert!(!topology.tessellation.screen_attenuation);
+        let lod = runtime.activate_index(2, &mut navigation).unwrap();
+        assert_eq!(lod.overlays, [PresentationOverlay::Lod]);
+        assert!(lod.tessellation.screen_attenuation);
+        assert_eq!(lod.tessellation.min_pixels_per_subdivision, 8.0);
+    }
+
+    #[test]
     fn cue_transition_reaches_authored_composition_camera() {
         fn run(steps: &[f64]) -> NavigationController {
             let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
@@ -1088,7 +1135,17 @@ mod tests {
     fn educational_inversion_cue_crosses_a_safe_stable_sphere() {
         let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
         let mut navigation = NavigationController::default();
-        runtime.activate_index(0, &mut navigation).unwrap();
+        let horse_index = runtime
+            .presentation()
+            .cues
+            .iter()
+            .position(|cue| {
+                cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000001").unwrap()
+            })
+            .unwrap();
+        runtime
+            .activate_index(horse_index, &mut navigation)
+            .unwrap();
         runtime.tick_navigation(&mut navigation, 0.7).unwrap();
 
         let inversion_index = runtime
@@ -1141,7 +1198,7 @@ mod tests {
         assert_eq!(snapshot.overlays, vec![PresentationOverlay::Lod]);
         assert_eq!(snapshot.tessellation.density, 100.0);
         assert!(snapshot.tessellation.screen_attenuation);
-        assert_eq!(snapshot.tessellation.min_pixels_per_subdivision, 64.0);
+        assert_eq!(snapshot.tessellation.min_pixels_per_subdivision, 16.0);
     }
 
     #[test]
@@ -1159,10 +1216,26 @@ mod tests {
             ..CameraRig::default()
         };
 
-        runtime.activate_index(0, &mut navigation).unwrap();
+        let horse_index = runtime
+            .presentation()
+            .cues
+            .iter()
+            .position(|cue| {
+                cue.id == Uuid::parse_str("e0000000-0000-4000-8000-000000000001").unwrap()
+            })
+            .unwrap();
+        runtime
+            .activate_index(horse_index, &mut navigation)
+            .unwrap();
         runtime.tick_navigation(&mut navigation, 0.7).unwrap();
 
-        let expected = runtime.presentation().views[0]
+        let horse_view = runtime.presentation().cues[horse_index].view;
+        let expected = runtime
+            .presentation()
+            .views
+            .iter()
+            .find(|view| view.id == horse_view)
+            .unwrap()
             .camera
             .to_camera_rig()
             .unwrap();
