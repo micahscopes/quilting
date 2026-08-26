@@ -15,9 +15,17 @@
 //! that it no longer fits anything: it hand-builds a flat patch through each
 //! cluster's three corner vertices. It survives as a segmentation baseline.
 //!
+//! **QB-aware candidate path.** [`coarse_complex`] validates stable authored
+//! identity and oriented topology, turns boundaries/domains/explicit locks into
+//! corner-cut simplification charts, and prevents a backend from welding those
+//! ownership seams. [`conformal_optimizer`] supplies deterministic clustering
+//! and conformal scoring; [`linear_fit`] supplies the sparse global shared-weight
+//! fit. Topology reduction and provenance correspondence are being connected
+//! between those foundations before this path becomes a product entry point.
+//!
 //! Fitting curved QB patches to arbitrary meshes is an open problem in this
-//! codebase, not a solved one. [`c_estimator`] and the round-trip invariants in
-//! [`roundtrip`] are the parts worth building on.
+//! codebase, not a solved one. The candidate path therefore remains explicit
+//! and measurable instead of replacing the legacy path prematurely.
 
 pub mod geometry;
 pub mod linalg;
@@ -35,6 +43,7 @@ pub mod c_estimator;
 pub mod global_fit;
 pub mod linear_fit;
 pub mod conformal_optimizer;
+pub mod coarse_complex;
 
 use quilting_core::patch::QBTriPatch;
 

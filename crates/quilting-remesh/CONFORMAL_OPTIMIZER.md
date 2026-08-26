@@ -25,11 +25,19 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    constraint-aware grower. The crate is MIT OR Apache-2.0 and vendors
    meshoptimizer 0.25. It is intentionally optional: current upstream
    meshoptimizer is newer, and its meshlet cost is not a QB fitting objective.
-4. **Construct a shared coarse complex (not implemented yet).** Reduce cluster
-   boundary loops to stable coarse vertices and triangulate the cluster
-   adjacency graph. Boundary vertices and edges must have one owner in the
-   coarse complex. Independent per-cluster corner selection is insufficient:
-   it cannot guarantee matching patch boundaries.
+4. **Construct a shared coarse complex (in progress).** `coarse_complex` now
+   requires typed stable vertex/face IDs, validates finite nondegenerate
+   consistently wound manifold input, derives cut edges from source borders,
+   domains, and explicit locks, and splits face-corner fans across those edges.
+   A deterministic whole-edge closure extends an open interior seam to a source
+   boundary or closed cut network, recording every conservative extension as an
+   induced cut. Emitted charts are revalidated for manifold vertex links,
+   consistent winding, connectedness, and degree-two locked boundaries. This is
+   backend-neutral ownership: no simplifier can half-join or silently weld a
+   source edge. The next checkpoint runs constrained triangle reduction inside
+   those charts and records deterministic source correspondence. Independent
+   per-cluster corner selection remains insufficient because it cannot
+   guarantee matching patch boundaries.
 5. **Fit existing first-order triangular QB patches.** Parameterize source
    samples onto coarse triangles, then feed `linear_global_fit_full`. Its one
    quaternion weight per coarse vertex is exactly the ownership rule required
@@ -104,8 +112,9 @@ atlas, WASM, or shader change is needed for this experiment.
 
 ## Known limitations
 
-- Cluster growth does not yet build the shared triangular coarse complex, so a
-  good cluster score does not by itself produce a patch.
+- The source chart/corner-cut topology exists, but constrained triangle
+  reduction and source-to-coarse correspondence are not connected yet. A good
+  cluster score does not by itself produce a patch.
 - The spatial/normal growth weights are heuristics. Meshoptimizer ordering may
   improve locality but is not assumed to improve QB fit quality.
 - Probe normals use the exact Möbius differential on an oriented tangent frame;
