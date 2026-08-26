@@ -366,6 +366,9 @@ self.onmessage = async function(e) {
         self.postMessage({
           type: 'animated_lods', id,
           lods: result.lods, indices: result.indices || null, timing,
+          delta_epoch: result.delta_epoch,
+          delta_base_revision: result.delta_base_revision,
+          delta_revision: result.delta_revision,
           pose_time: result.pose_time,
           pose_matrices: result.pose_matrices || null,
           pose_morph_weights: result.pose_morph_weights || null,

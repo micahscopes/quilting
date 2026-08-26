@@ -34,7 +34,7 @@ pub fn encode_face_lod_delta(
     changed_faces.clear();
     changed_lods.clear();
 
-    if previous.len() != current.len() || current.len() % FACE_LOD_STRIDE != 0 {
+    if previous.len() != current.len() || !current.len().is_multiple_of(FACE_LOD_STRIDE) {
         previous.clear();
         previous.extend_from_slice(current);
         changed_lods.extend_from_slice(current);
@@ -51,6 +51,159 @@ pub fn encode_face_lod_delta(
         }
     }
     false
+}
+
+/// Monotonic identity of one full or sparse face-LOD publication.
+///
+/// A sparse publication is only meaningful relative to `base_revision` in the
+/// same epoch. Resetting the encoder advances `epoch`, and the next publication
+/// is a self-contained revision-one snapshot. This makes skipped/crossed
+/// worker messages detectable instead of silently applying a delta to the
+/// wrong resident topology.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FaceLodDeltaSequence {
+    pub epoch: u32,
+    pub base_revision: u32,
+    pub revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceLodDeltaError {
+    InvalidPayload,
+    TooManyFaces,
+    InvalidSequence,
+    MissingBase,
+}
+
+impl std::fmt::Display for FaceLodDeltaError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPayload => write!(formatter, "face LOD payload has an invalid stride"),
+            Self::TooManyFaces => write!(formatter, "face LOD payload exceeds u32 indexing"),
+            Self::InvalidSequence => write!(formatter, "face LOD delta sequence is invalid"),
+            Self::MissingBase => write!(formatter, "face LOD delta does not extend the resident base"),
+        }
+    }
+}
+
+impl std::error::Error for FaceLodDeltaError {}
+
+/// Borrowed full/sparse publication produced by [`FaceLodDeltaEncoder`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EncodedFaceLodDelta<'a> {
+    pub sequence: FaceLodDeltaSequence,
+    pub full_snapshot: bool,
+    pub changed_faces: &'a [u32],
+    pub lods: &'a [f32],
+}
+
+/// Retained classifier baseline and reusable sparse-delta work storage.
+#[derive(Clone, Debug)]
+pub struct FaceLodDeltaEncoder {
+    epoch: u32,
+    revision: u32,
+    previous: Vec<f32>,
+    changed_faces: Vec<u32>,
+    changed_lods: Vec<f32>,
+}
+
+impl Default for FaceLodDeltaEncoder {
+    fn default() -> Self {
+        Self {
+            epoch: 1,
+            revision: 0,
+            previous: Vec::new(),
+            changed_faces: Vec::new(),
+            changed_lods: Vec::new(),
+        }
+    }
+}
+
+impl FaceLodDeltaEncoder {
+    /// Start a new publication epoch. The next encoded result is necessarily a
+    /// full revision-one snapshot, even when its face count is unchanged.
+    pub fn reset(&mut self) {
+        self.epoch = self.epoch.checked_add(1).unwrap_or(1);
+        self.revision = 0;
+        self.previous.clear();
+        self.changed_faces.clear();
+        self.changed_lods.clear();
+    }
+
+    pub fn encode(
+        &mut self,
+        current: &[f32],
+    ) -> Result<EncodedFaceLodDelta<'_>, FaceLodDeltaError> {
+        if !current.len().is_multiple_of(FACE_LOD_STRIDE) {
+            return Err(FaceLodDeltaError::InvalidPayload);
+        }
+        if current.len() / FACE_LOD_STRIDE > u32::MAX as usize {
+            return Err(FaceLodDeltaError::TooManyFaces);
+        }
+        if self.revision == u32::MAX {
+            self.reset();
+        }
+        let base_revision = self.revision;
+        let full_snapshot = encode_face_lod_delta(
+            current,
+            &mut self.previous,
+            &mut self.changed_faces,
+            &mut self.changed_lods,
+        );
+        self.revision += 1;
+        Ok(EncodedFaceLodDelta {
+            sequence: FaceLodDeltaSequence {
+                epoch: self.epoch,
+                base_revision,
+                revision: self.revision,
+            },
+            full_snapshot,
+            changed_faces: &self.changed_faces,
+            lods: &self.changed_lods,
+        })
+    }
+}
+
+/// Receiver-side oracle for full/sparse publication continuity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FaceLodDeltaCursor {
+    epoch: u32,
+    revision: u32,
+}
+
+impl FaceLodDeltaCursor {
+    pub fn sequence(self) -> Option<(u32, u32)> {
+        (self.revision > 0).then_some((self.epoch, self.revision))
+    }
+
+    /// Validate and accept a publication identity. A revision-one full
+    /// snapshot is an explicit stream reset; every other message must extend
+    /// the exact accepted base in the same epoch.
+    pub fn accept(
+        &mut self,
+        sequence: FaceLodDeltaSequence,
+        full_snapshot: bool,
+    ) -> Result<bool, FaceLodDeltaError> {
+        let expected_revision = sequence.base_revision.checked_add(1);
+        if sequence.epoch == 0
+            || sequence.revision == 0
+            || expected_revision != Some(sequence.revision) {
+            return Err(FaceLodDeltaError::InvalidSequence);
+        }
+        let reset = full_snapshot
+            && sequence.base_revision == 0
+            && sequence.revision == 1;
+        if !reset
+            && (self.revision == 0
+                || sequence.epoch != self.epoch
+                || sequence.base_revision != self.revision)
+        {
+            return Err(FaceLodDeltaError::MissingBase);
+        }
+        self.epoch = sequence.epoch;
+        self.revision = sequence.revision;
+        Ok(reset)
+    }
 }
 
 /// Canonical tessellation topology requested or kept resident for one face.
@@ -999,6 +1152,73 @@ mod tests {
         assert_eq!(faces, [1]);
         assert_eq!(lods, changed[6..12]);
         assert_eq!(previous, changed);
+    }
+
+    #[test]
+    fn sequenced_face_lod_delta_advances_across_empty_and_sparse_publications() {
+        let initial = [
+            2.0, 2.0, 2.0, 0.0, 1.0, 3.0,
+            4.0, 4.0, 8.0, 2.0, -1.0, 7.0,
+        ];
+        let mut encoder = FaceLodDeltaEncoder::default();
+        let mut cursor = FaceLodDeltaCursor::default();
+
+        let full = encoder.encode(&initial).unwrap();
+        assert!(full.full_snapshot);
+        assert_eq!(full.sequence, FaceLodDeltaSequence {
+            epoch: 1, base_revision: 0, revision: 1,
+        });
+        assert!(cursor.accept(full.sequence, full.full_snapshot).unwrap());
+
+        let empty = encoder.encode(&initial).unwrap();
+        assert!(!empty.full_snapshot);
+        assert!(empty.changed_faces.is_empty());
+        assert!(empty.lods.is_empty());
+        assert_eq!(empty.sequence.base_revision, 1);
+        assert!(!cursor.accept(empty.sequence, empty.full_snapshot).unwrap());
+
+        let mut changed = initial;
+        changed[6..12].copy_from_slice(&[8.0, 8.0, 8.0, 0.0, 1.0, 9.0]);
+        let sparse = encoder.encode(&changed).unwrap();
+        assert_eq!(sparse.changed_faces, [1]);
+        assert_eq!(sparse.lods, &changed[6..12]);
+        assert_eq!(sparse.sequence.base_revision, 2);
+        assert!(!cursor.accept(sparse.sequence, sparse.full_snapshot).unwrap());
+        assert_eq!(cursor.sequence(), Some((1, 3)));
+    }
+
+    #[test]
+    fn face_lod_delta_cursor_rejects_gaps_and_recovers_from_explicit_reset() {
+        let mut cursor = FaceLodDeltaCursor::default();
+        assert_eq!(
+            cursor.accept(
+                FaceLodDeltaSequence { epoch: 4, base_revision: 1, revision: 2 },
+                false,
+            ),
+            Err(FaceLodDeltaError::MissingBase),
+        );
+        assert!(cursor.accept(
+            FaceLodDeltaSequence { epoch: 4, base_revision: 0, revision: 1 },
+            true,
+        ).unwrap());
+        assert_eq!(
+            cursor.accept(
+                FaceLodDeltaSequence { epoch: 4, base_revision: 2, revision: 3 },
+                false,
+            ),
+            Err(FaceLodDeltaError::MissingBase),
+        );
+        assert!(cursor.accept(
+            FaceLodDeltaSequence { epoch: 5, base_revision: 0, revision: 1 },
+            true,
+        ).unwrap());
+        assert_eq!(cursor.sequence(), Some((5, 1)));
+    }
+
+    #[test]
+    fn face_lod_delta_encoder_rejects_partial_records() {
+        let error = FaceLodDeltaEncoder::default().encode(&[1.0; 5]).unwrap_err();
+        assert_eq!(error, FaceLodDeltaError::InvalidPayload);
     }
 
     fn balance_resident_lods_reference(

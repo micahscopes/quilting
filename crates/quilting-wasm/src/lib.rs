@@ -173,13 +173,6 @@ struct PendingLodPose {
     morph_weights: Vec<f32>,
 }
 
-#[derive(Default)]
-struct AnimatedLodDeltaState {
-    previous: Vec<f32>,
-    changed_faces: Vec<u32>,
-    changed_lods: Vec<f32>,
-}
-
 #[derive(Clone)]
 struct LodComputeModel {
     num_faces: usize,
@@ -191,8 +184,8 @@ thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     static PENDING_ANIMATED_LODS: RefCell<Option<PendingAnimatedLods>> = RefCell::new(None);
-    static ANIMATED_LOD_DELTA: RefCell<AnimatedLodDeltaState> =
-        RefCell::new(AnimatedLodDeltaState::default());
+    static ANIMATED_LOD_DELTA: RefCell<batch::FaceLodDeltaEncoder> =
+        RefCell::new(batch::FaceLodDeltaEncoder::default());
     static LOD_COMPUTE_MODEL: RefCell<Option<LodComputeModel>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
@@ -1040,20 +1033,27 @@ pub fn poll_animated_lods() -> JsValue {
         perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
         let result = ANIMATED_LOD_DELTA.with(|delta| {
             let mut delta = delta.borrow_mut();
-            let AnimatedLodDeltaState { previous, changed_faces, changed_lods } = &mut *delta;
-            let full_snapshot = batch::encode_face_lod_delta(
-                &gpu_class,
-                previous,
-                changed_faces,
-                changed_lods,
-            );
-            let lods = js_sys::Float32Array::new_with_length(changed_lods.len() as u32);
-            lods.copy_from(changed_lods);
-            let indices = if full_snapshot {
+            let encoded = match delta.encode(&gpu_class) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    let result = js_sys::Object::new();
+                    js_sys::Reflect::set(
+                        &result,
+                        &"error".into(),
+                        &JsValue::from_str(&error.to_string()),
+                    ).ok();
+                    return result;
+                }
+            };
+            let lods = js_sys::Float32Array::new_with_length(encoded.lods.len() as u32);
+            lods.copy_from(encoded.lods);
+            let indices = if encoded.full_snapshot {
                 None
             } else {
-                let indices = js_sys::Uint32Array::new_with_length(changed_faces.len() as u32);
-                indices.copy_from(changed_faces);
+                let indices = js_sys::Uint32Array::new_with_length(
+                    encoded.changed_faces.len() as u32,
+                );
+                indices.copy_from(encoded.changed_faces);
                 Some(indices)
             };
             let result = js_sys::Object::new();
@@ -1064,16 +1064,31 @@ pub fn poll_animated_lods() -> JsValue {
             js_sys::Reflect::set(
                 &result,
                 &"changed_faces".into(),
-                &JsValue::from_f64(if full_snapshot {
+                &JsValue::from_f64(if encoded.full_snapshot {
                     gpu_class.len() as f64 / batch::FACE_LOD_STRIDE as f64
                 } else {
-                    changed_faces.len() as f64
+                    encoded.changed_faces.len() as f64
                 }),
             ).ok();
             js_sys::Reflect::set(
                 &result,
                 &"full_snapshot".into(),
-                &JsValue::from_bool(full_snapshot),
+                &JsValue::from_bool(encoded.full_snapshot),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"delta_epoch".into(),
+                &JsValue::from_f64(encoded.sequence.epoch as f64),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"delta_base_revision".into(),
+                &JsValue::from_f64(encoded.sequence.base_revision as f64),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"delta_revision".into(),
+                &JsValue::from_f64(encoded.sequence.revision as f64),
             ).ok();
             js_sys::Reflect::set(
                 &result,
@@ -1129,7 +1144,7 @@ pub fn poll_animated_lods() -> JsValue {
 /// Reset the retained classification snapshot at a model/topology boundary.
 #[wasm_bindgen]
 pub fn reset_animated_lod_delta() {
-    ANIMATED_LOD_DELTA.with(|delta| delta.borrow_mut().previous.clear());
+    ANIMATED_LOD_DELTA.with(|delta| delta.borrow_mut().reset());
 }
 
 /// Cancel and release a pending asynchronous LOD job, if any.
