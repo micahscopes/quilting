@@ -40,12 +40,14 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    patches are explicitly deferred.
 6. **Score before accepting.** `score_patch_complex` reports source-space
    positional/normal error, a user-supplied envelope of representative Möbius
-   transforms, shared-edge cracks, and rational-denominator conditioning.
-   `FitScore::scalar_objective` is a tunable candidate ranking, not a theorem.
+   transforms, shared-edge cracks, and rational-denominator conditioning. It
+   rejects non-finite inputs, degenerate/inconsistently wound faces, and
+   non-manifold coarse edges before measuring. `FitScore::scalar_objective` is
+   a tunable candidate ranking, not a theorem.
 
 ## Objective
 
-The source term reports Euclidean RMS/max position error and unoriented normal
+The source term reports Euclidean RMS/max position error and oriented normal
 error in the persistent pre-Möbius material chart. It is a fitting diagnostic,
 not the runtime walking/physics distance. Every conformal probe transforms both
 the target samples and the QB patches, then reports raw active/output-chart
@@ -61,16 +63,20 @@ angles and round geometry, but not Euclidean distance or nearest-neighbor
 ordering; there is no universal conformally invariant Euclidean fitting error.
 Near a pole, arbitrarily small source errors can be magnified arbitrarily. Such
 cases must be rejected or handled conservatively, not hidden by normalization.
+The configured pole threshold is a hard exclusion from this finite-Euclidean
+objective, and is measured relative to the Möbius matrix/input scale so an
+equivalent common real gauge does not change the verdict.
 
 Boundary error samples every shared coarse edge from both incident patches,
 both in the source chart and after every probe; exact shared ownership should
 keep it zero, while output-chart sampling exposes numerical amplification near
-a pole. Weight conditioning samples the rational denominator over every
-parameter triangle and divides by the largest corner-weight norm, making the
-reported minimum insensitive to a common real gauge scale. It is likewise
+a pole. Weight conditioning computes the exact minimum and maximum squared norm
+of the affine quaternion denominator over the closed parameter triangle, then
+divides by the largest corner-weight norm. The result is insensitive to a
+common real weight scale and cannot miss a zero between grid samples. It is
 evaluated both in the source material chart and after every probe transforms
-the patch weights. This is a practical guard, not a proof that the denominator
-is pole-free between samples.
+the patch weights. A near-zero exact minimum is a hard rejection from the
+scalar objective.
 
 ## Integration seam
 
@@ -96,10 +102,11 @@ atlas, WASM, or shader change is needed for this experiment.
   good cluster score does not by itself produce a patch.
 - The spatial/normal growth weights are heuristics. Meshoptimizer ordering may
   improve locality but is not assumed to improve QB fit quality.
-- Probe normals use a finite-difference Möbius differential and are compared
-  unoriented, accommodating orientation-reversing sphere reflection.
-- Denominator conditioning is sampled, not certified. A future interval or
-  Bernstein-form bound should be authoritative.
+- Probe normals use the exact Möbius differential on an oriented tangent frame;
+  sphere reflection reverses that frame naturally. Flipped candidate normals
+  therefore score as 180°, not 0°.
+- The denominator range is exact for first-order QB patches. Position, normal,
+  and crack error remain sampled diagnostics rather than Hausdorff bounds.
 - Animated fitting needs pose-envelope samples and stable source identities;
   this prototype scores static sample sets.
 - UVs, normals, skinning, morphs, and materials are represented only by domain

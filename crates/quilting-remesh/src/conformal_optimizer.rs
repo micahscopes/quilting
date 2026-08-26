@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use quilting_core::patch::QBTriPatch;
 use quilting_core::quaternion::{Mobius, Quat};
+use quilting_core::screen_domain::denominator_norm_sq_range;
 
 use crate::geometry;
 
@@ -95,6 +96,16 @@ pub enum OptimizerError {
     DomainCount { expected: usize, actual: usize },
     DuplicateStableFaceId(u64),
     InvalidSamplePatch { sample: usize, patch: usize },
+    EmptyPatchComplex,
+    EmptySamples,
+    NonFinitePatch { patch: usize },
+    NonFiniteSample { sample: usize },
+    InvalidSampleBarycentric { sample: usize },
+    InvalidSampleNormal { sample: usize },
+    InvalidProbeTransform { probe: usize },
+    DegenerateCoarseFace { face: usize },
+    NonManifoldCoarseEdge { edge: [usize; 2], incident: usize },
+    InconsistentCoarseWinding { edge: [usize; 2] },
     PatchFaceCount { patches: usize, faces: usize },
     Meshopt(String),
 }
@@ -119,6 +130,39 @@ impl std::fmt::Display for OptimizerError {
             Self::InvalidSamplePatch { sample, patch } => {
                 write!(f, "sample {sample} references missing patch {patch}")
             }
+            Self::EmptyPatchComplex => write!(f, "QB patch complex is empty"),
+            Self::EmptySamples => write!(f, "QB patch score requires source samples"),
+            Self::NonFinitePatch { patch } => {
+                write!(f, "QB patch {patch} has non-finite controls")
+            }
+            Self::NonFiniteSample { sample } => {
+                write!(f, "fit sample {sample} has non-finite data")
+            }
+            Self::InvalidSampleBarycentric { sample } => {
+                write!(
+                    f,
+                    "fit sample {sample} lies outside the barycentric simplex"
+                )
+            }
+            Self::InvalidSampleNormal { sample } => {
+                write!(f, "fit sample {sample} has a degenerate target normal")
+            }
+            Self::InvalidProbeTransform { probe } => {
+                write!(f, "conformal probe {probe} has non-finite coefficients")
+            }
+            Self::DegenerateCoarseFace { face } => {
+                write!(f, "coarse face {face} repeats a vertex")
+            }
+            Self::NonManifoldCoarseEdge { edge, incident } => write!(
+                f,
+                "coarse edge {}–{} has {incident} incident faces",
+                edge[0], edge[1],
+            ),
+            Self::InconsistentCoarseWinding { edge } => write!(
+                f,
+                "coarse edge {}–{} has inconsistent face winding",
+                edge[0], edge[1],
+            ),
             Self::PatchFaceCount { patches, faces } => {
                 write!(
                     f,
@@ -622,17 +666,23 @@ pub struct ConformalProbe {
 #[derive(Debug, Clone, Copy)]
 pub struct FitScoreConfig {
     pub edge_steps: usize,
-    pub denominator_grid: usize,
-    /// `|c*x+d|` below this value is reported as pole-near.
+    /// `|c*x+d| / (|c||x|+|d|)` below this value is reported as
+    /// pole-near and excluded from the finite-Euclidean objective. The
+    /// relative form is invariant under a common real scale of the Möbius
+    /// matrix.
     pub pole_epsilon: f64,
+    /// Exact minimum QB denominator divided by the largest control-weight
+    /// norm below which a patch is rejected as ill-conditioned. Unlike
+    /// `pole_epsilon`, this is invariant under a common weight scale.
+    pub relative_denominator_epsilon: f64,
 }
 
 impl Default for FitScoreConfig {
     fn default() -> Self {
         Self {
             edge_steps: 16,
-            denominator_grid: 16,
             pole_epsilon: 1e-5,
+            relative_denominator_epsilon: 1e-5,
         }
     }
 }
@@ -641,6 +691,7 @@ impl Default for FitScoreConfig {
 pub struct EuclideanError {
     pub sample_count: usize,
     pub non_finite_samples: usize,
+    pub degenerate_normal_samples: usize,
     pub position_rms: f64,
     pub position_max: f64,
     pub position_relative_rms: f64,
@@ -665,6 +716,7 @@ pub struct ProbeError {
 pub struct BoundaryAgreement {
     pub shared_edge_count: usize,
     pub sampled_pair_count: usize,
+    pub invalid_pair_count: usize,
     pub rms_gap: f64,
     pub max_gap: f64,
 }
@@ -674,6 +726,7 @@ pub struct WeightConditioning {
     pub min_relative_denominator: f64,
     pub max_denominator_ratio: f64,
     pub near_singular_patches: usize,
+    pub invalid_patches: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -710,6 +763,36 @@ impl Default for ObjectiveWeights {
 
 impl FitScore {
     pub fn scalar_objective(&self, weights: &ObjectiveWeights) -> f64 {
+        let invalid_error = |error: &EuclideanError| {
+            error.non_finite_samples > 0
+                || error.degenerate_normal_samples > 0
+                || !error.position_relative_rms.is_finite()
+                || !error.normal_rms_degrees.is_finite()
+        };
+        let invalid_boundary = |boundary: &BoundaryAgreement| {
+            boundary.invalid_pair_count > 0
+                || !boundary.rms_gap.is_finite()
+                || !boundary.max_gap.is_finite()
+        };
+        let invalid_conditioning = |conditioning: &WeightConditioning| {
+            conditioning.invalid_patches > 0
+                || conditioning.near_singular_patches > 0
+                || !conditioning.min_relative_denominator.is_finite()
+                || !conditioning.max_denominator_ratio.is_finite()
+        };
+        if invalid_error(&self.source)
+            || invalid_boundary(&self.boundary)
+            || invalid_conditioning(&self.weights)
+            || self.conformal_probes.iter().any(|probe| {
+                invalid_error(&probe.error)
+                    || invalid_boundary(&probe.boundary)
+                    || invalid_conditioning(&probe.weights)
+                    || probe.pole_near_samples > 0
+                    || !probe.peak_local_dilation.is_finite()
+            })
+        {
+            return f64::INFINITY;
+        }
         let conformal_envelope = self
             .conformal_probes
             .iter()
@@ -730,20 +813,64 @@ impl FitScore {
         } else {
             f64::INFINITY
         };
-        weights.source_relative_position * self.source.position_relative_rms
+        let objective = weights.source_relative_position * self.source.position_relative_rms
             + weights.source_normal_radians * self.source.normal_rms_degrees.to_radians()
             + weights.conformal_relative_envelope * conformal_envelope
             + weights.boundary_gap * worst_boundary
-            + weights.denominator_penalty * denominator_penalty
+            + weights.denominator_penalty * denominator_penalty;
+        if objective.is_finite() {
+            objective
+        } else {
+            f64::INFINITY
+        }
     }
 }
 
-fn normalize(vector: [f64; 3]) -> [f64; 3] {
-    geometry::vec3_normalize(vector)
+fn finite_quat(value: Quat) -> bool {
+    [value.w, value.x, value.y, value.z]
+        .iter()
+        .all(|component| component.is_finite())
 }
 
-fn transformed_normal(transform: &Mobius, point: [f64; 3], normal: [f64; 3]) -> [f64; 3] {
-    let n = normalize(normal);
+fn finite_vec3(value: [f64; 3]) -> bool {
+    value.iter().all(|component| component.is_finite())
+}
+
+fn relative_mobius_denominator(transform: &Mobius, point: Quat) -> Option<f64> {
+    let denominator = transform.c * point + transform.d;
+    let scale = transform.c.norm() * point.norm() + transform.d.norm();
+    if !finite_quat(denominator) || !scale.is_finite() {
+        return None;
+    }
+    Some(denominator.norm() / scale.max(f64::MIN_POSITIVE))
+}
+
+fn normalize_checked(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let scale = vector
+        .iter()
+        .map(|component| component.abs())
+        .fold(0.0_f64, f64::max);
+    if !scale.is_finite() || scale == 0.0 {
+        return None;
+    }
+    let scaled = geometry::vec3_scale(vector, scale.recip());
+    let length = geometry::vec3_len(scaled);
+    (length.is_finite() && length > 0.0).then(|| geometry::vec3_scale(scaled, length.recip()))
+}
+
+fn normal_from_tangents(tangent_u: [f64; 3], tangent_v: [f64; 3]) -> Option<[f64; 3]> {
+    let tangent_u = normalize_checked(tangent_u)?;
+    let tangent_v = normalize_checked(tangent_v)?;
+    normalize_checked(geometry::vec3_cross(tangent_u, tangent_v))
+}
+
+fn transformed_normal(
+    transform: &Mobius,
+    point: [f64; 3],
+    normal: [f64; 3],
+    pole_epsilon: f64,
+) -> Option<[f64; 3]> {
+    let n = normalize_checked(normal)?;
     let reference = if n[0].abs() <= n[1].abs() && n[0].abs() <= n[2].abs() {
         [1.0, 0.0, 0.0]
     } else if n[1].abs() <= n[2].abs() {
@@ -751,97 +878,152 @@ fn transformed_normal(transform: &Mobius, point: [f64; 3], normal: [f64; 3]) -> 
     } else {
         [0.0, 0.0, 1.0]
     };
-    let tangent_a = normalize(geometry::vec3_cross(n, reference));
-    let tangent_b = normalize(geometry::vec3_cross(n, tangent_a));
+    let tangent_a = normalize_checked(geometry::vec3_cross(n, reference))?;
+    let tangent_b = normalize_checked(geometry::vec3_cross(n, tangent_a))?;
     let source = Quat::from_point(point[0], point[1], point[2]);
-    let epsilon = 1e-6 * point.iter().map(|value| value.abs()).fold(1.0, f64::max);
-    let mapped = transform.apply(source).to_point();
-    let map_offset = |tangent: [f64; 3]| {
-        let displaced = geometry::vec3_add(point, geometry::vec3_scale(tangent, epsilon));
-        geometry::vec3_sub(
-            transform
-                .apply(Quat::from_point(displaced[0], displaced[1], displaced[2]))
-                .to_point(),
-            mapped,
-        )
+    if relative_mobius_denominator(transform, source)? < pole_epsilon {
+        return None;
+    }
+    let map_tangent = |tangent: [f64; 3]| {
+        transform
+            .try_apply_differential(source, Quat::from_point(tangent[0], tangent[1], tangent[2]))
+            .map(Quat::to_point)
     };
-    normalize(geometry::vec3_cross(
-        map_offset(tangent_a),
-        map_offset(tangent_b),
-    ))
+    let tangent_a = map_tangent(tangent_a)?;
+    let tangent_b = map_tangent(tangent_b)?;
+    if !finite_vec3(tangent_a) || !finite_vec3(tangent_b) {
+        return None;
+    }
+    normal_from_tangents(tangent_a, tangent_b)
 }
 
 fn target_extent(points: &[[f64; 3]]) -> f64 {
     if points.is_empty() {
         return 1.0;
     }
-    mesh_diagonal(points).max(1e-12)
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    for point in points {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(point[axis]);
+            maximum[axis] = maximum[axis].max(point[axis]);
+        }
+    }
+    let diagonal = (maximum[0] - minimum[0])
+        .hypot(maximum[1] - minimum[1])
+        .hypot(maximum[2] - minimum[2]);
+    if diagonal.is_finite() && diagonal > 0.0 {
+        diagonal
+    } else {
+        1.0
+    }
 }
 
 fn measure_error(
-    patches: &[QBTriPatch],
+    candidate_patches: &[QBTriPatch],
     samples: &[FitSample],
     transform: Option<&Mobius>,
+    pole_epsilon: f64,
 ) -> EuclideanError {
-    let transformed_patches: Vec<QBTriPatch> = match transform {
-        Some(map) => patches.iter().map(|patch| patch.transform(map)).collect(),
-        None => patches.to_vec(),
-    };
-    let targets: Vec<[f64; 3]> = samples
+    let targets: Vec<Option<[f64; 3]>> = samples
         .iter()
         .map(|sample| match transform {
-            Some(map) => map
-                .apply(Quat::from_point(
+            Some(map) => {
+                let point = Quat::from_point(
                     sample.target_position[0],
                     sample.target_position[1],
                     sample.target_position[2],
-                ))
-                .to_point(),
-            None => sample.target_position,
+                );
+                relative_mobius_denominator(map, point)
+                    .is_some_and(|denominator| denominator >= pole_epsilon)
+                    .then(|| map.apply(point).to_point())
+                    .filter(|target| finite_vec3(*target))
+            }
+            None => Some(sample.target_position),
         })
         .collect();
-    let extent = target_extent(&targets);
+    let finite_targets: Vec<[f64; 3]> = targets.iter().flatten().copied().collect();
+    let extent = target_extent(&finite_targets);
     let mut position_sum_sq = 0.0;
     let mut position_max = 0.0_f64;
     let mut normal_sum_sq = 0.0;
     let mut normal_max = 0.0_f64;
-    let mut finite_count = 0usize;
+    let mut finite_position_count = 0usize;
+    let mut finite_normal_count = 0usize;
     let mut non_finite_samples = 0usize;
+    let mut degenerate_normal_samples = 0usize;
     for (sample_index, sample) in samples.iter().enumerate() {
         let bary = sample.barycentric;
-        let surface = transformed_patches[sample.patch_index].eval_with_normal(bary[1], bary[2]);
-        let target = targets[sample_index];
-        if !surface.position.iter().all(|value| value.is_finite())
-            || !target.iter().all(|value| value.is_finite())
+        let differential =
+            candidate_patches[sample.patch_index].eval_differential(bary[1], bary[2]);
+        let Some(target) = targets[sample_index] else {
+            non_finite_samples += 1;
+            continue;
+        };
+        if !finite_vec3(differential.position)
+            || !finite_vec3(differential.tangent_u)
+            || !finite_vec3(differential.tangent_v)
         {
             non_finite_samples += 1;
             continue;
         }
-        let distance = geometry::vec3_dist(surface.position, target);
+        let distance = geometry::vec3_dist(differential.position, target);
+        if !distance.is_finite() {
+            non_finite_samples += 1;
+            continue;
+        }
         position_sum_sq += distance * distance;
         position_max = position_max.max(distance);
+        finite_position_count += 1;
+        let surface_normal = normal_from_tangents(differential.tangent_u, differential.tangent_v);
         let target_normal = match transform {
-            Some(map) => transformed_normal(map, sample.target_position, sample.target_normal),
-            None => normalize(sample.target_normal),
+            Some(map) => transformed_normal(
+                map,
+                sample.target_position,
+                sample.target_normal,
+                pole_epsilon,
+            ),
+            None => normalize_checked(sample.target_normal),
         };
-        let dot = geometry::vec3_dot(normalize(surface.normal), target_normal)
-            .abs()
-            .clamp(0.0, 1.0);
+        let (Some(surface_normal), Some(target_normal)) = (surface_normal, target_normal) else {
+            degenerate_normal_samples += 1;
+            continue;
+        };
+        let dot = geometry::vec3_dot(surface_normal, target_normal).clamp(-1.0, 1.0);
         let angle = dot.acos().to_degrees();
         normal_sum_sq += angle * angle;
         normal_max = normal_max.max(angle);
-        finite_count += 1;
+        finite_normal_count += 1;
     }
-    let denominator = finite_count.max(1) as f64;
-    let position_rms = (position_sum_sq / denominator).sqrt();
+    let invalid_positions = non_finite_samples > 0 || finite_position_count != samples.len();
+    let invalid_normals =
+        invalid_positions || degenerate_normal_samples > 0 || finite_normal_count != samples.len();
+    let position_rms = if invalid_positions {
+        f64::INFINITY
+    } else {
+        (position_sum_sq / finite_position_count as f64).sqrt()
+    };
     EuclideanError {
         sample_count: samples.len(),
         non_finite_samples,
+        degenerate_normal_samples,
         position_rms,
-        position_max,
+        position_max: if invalid_positions {
+            f64::INFINITY
+        } else {
+            position_max
+        },
         position_relative_rms: position_rms / extent,
-        normal_rms_degrees: (normal_sum_sq / denominator).sqrt(),
-        normal_max_degrees: normal_max,
+        normal_rms_degrees: if invalid_normals {
+            f64::INFINITY
+        } else {
+            (normal_sum_sq / finite_normal_count as f64).sqrt()
+        },
+        normal_max_degrees: if invalid_normals {
+            f64::INFINITY
+        } else {
+            normal_max
+        },
     }
 }
 
@@ -879,6 +1061,7 @@ fn measure_boundaries(
     }
     let mut shared_edge_count = 0;
     let mut sampled_pair_count = 0;
+    let mut invalid_pair_count = 0;
     let mut sum_sq = 0.0;
     let mut max_gap = 0.0_f64;
     let steps = steps.max(1);
@@ -893,7 +1076,15 @@ fn measure_boundaries(
             let t = sample as f64 / steps as f64;
             let pa = patch_edge_point(&patches[a], coarse_faces[a], from, to, t);
             let pb = patch_edge_point(&patches[b], coarse_faces[b], from, to, t);
+            if !finite_vec3(pa) || !finite_vec3(pb) {
+                invalid_pair_count += 1;
+                continue;
+            }
             let gap = geometry::vec3_dist(pa, pb);
+            if !gap.is_finite() {
+                invalid_pair_count += 1;
+                continue;
+            }
             sum_sq += gap * gap;
             max_gap = max_gap.max(gap);
             sampled_pair_count += 1;
@@ -902,20 +1093,28 @@ fn measure_boundaries(
     BoundaryAgreement {
         shared_edge_count,
         sampled_pair_count,
-        rms_gap: (sum_sq / sampled_pair_count.max(1) as f64).sqrt(),
-        max_gap,
+        invalid_pair_count,
+        rms_gap: if invalid_pair_count > 0 {
+            f64::INFINITY
+        } else {
+            (sum_sq / sampled_pair_count.max(1) as f64).sqrt()
+        },
+        max_gap: if invalid_pair_count > 0 {
+            f64::INFINITY
+        } else {
+            max_gap
+        },
     }
 }
 
 fn measure_weight_conditioning(
     patches: &[QBTriPatch],
-    grid: usize,
     near_singular_threshold: f64,
 ) -> WeightConditioning {
-    let grid = grid.max(1);
     let mut min_relative = f64::INFINITY;
     let mut max_ratio = 0.0_f64;
     let mut near_singular_patches = 0;
+    let mut invalid_patches = 0;
     for patch in patches {
         let weight_scale = patch
             .weights
@@ -923,19 +1122,20 @@ fn measure_weight_conditioning(
             .map(|weight| weight.norm())
             .fold(0.0, f64::max)
             .max(1e-300);
-        let mut patch_min = f64::INFINITY;
-        let mut patch_max = 0.0_f64;
-        for i in 0..=grid {
-            for j in 0..=(grid - i) {
-                let u = i as f64 / grid as f64;
-                let v = j as f64 / grid as f64;
-                let w = 1.0 - u - v;
-                let denominator =
-                    (w * patch.weights[0] + u * patch.weights[1] + v * patch.weights[2]).norm();
-                patch_min = patch_min.min(denominator);
-                patch_max = patch_max.max(denominator);
-            }
+        let [minimum_squared, maximum_squared] = denominator_norm_sq_range(patch);
+        if !weight_scale.is_finite()
+            || !minimum_squared.is_finite()
+            || !maximum_squared.is_finite()
+            || minimum_squared < 0.0
+            || maximum_squared < 0.0
+        {
+            invalid_patches += 1;
+            min_relative = 0.0;
+            max_ratio = f64::INFINITY;
+            continue;
         }
+        let patch_min = minimum_squared.sqrt();
+        let patch_max = maximum_squared.sqrt();
         let relative = patch_min / weight_scale;
         min_relative = min_relative.min(relative);
         if patch_min > 0.0 {
@@ -954,7 +1154,37 @@ fn measure_weight_conditioning(
         min_relative_denominator: min_relative,
         max_denominator_ratio: max_ratio,
         near_singular_patches,
+        invalid_patches,
     }
+}
+
+fn validate_coarse_topology(coarse_faces: &[[usize; 3]]) -> Result<(), OptimizerError> {
+    let mut edge_directions: BTreeMap<Edge, Vec<bool>> = BTreeMap::new();
+    for (face_index, face) in coarse_faces.iter().enumerate() {
+        if face[0] == face[1] || face[1] == face[2] || face[2] == face[0] {
+            return Err(OptimizerError::DegenerateCoarseFace { face: face_index });
+        }
+        for local in 0..3 {
+            let from = face[local];
+            let to = face[(local + 1) % 3];
+            edge_directions
+                .entry(edge(from, to))
+                .or_default()
+                .push(from < to);
+        }
+    }
+    for ((from, to), directions) in edge_directions {
+        if directions.len() > 2 {
+            return Err(OptimizerError::NonManifoldCoarseEdge {
+                edge: [from, to],
+                incident: directions.len(),
+            });
+        }
+        if directions.len() == 2 && directions[0] == directions[1] {
+            return Err(OptimizerError::InconsistentCoarseWinding { edge: [from, to] });
+        }
+    }
+    Ok(())
 }
 
 /// Score an existing first-order QB patch complex.
@@ -969,11 +1199,40 @@ pub fn score_patch_complex(
     probes: &[ConformalProbe],
     config: &FitScoreConfig,
 ) -> Result<FitScore, OptimizerError> {
+    if patches.is_empty() {
+        return Err(OptimizerError::EmptyPatchComplex);
+    }
+    if samples.is_empty() {
+        return Err(OptimizerError::EmptySamples);
+    }
+    if !config.pole_epsilon.is_finite() || config.pole_epsilon <= 0.0 {
+        return Err(OptimizerError::InvalidConfig(
+            "pole_epsilon must be finite and positive",
+        ));
+    }
+    if !config.relative_denominator_epsilon.is_finite()
+        || config.relative_denominator_epsilon <= 0.0
+    {
+        return Err(OptimizerError::InvalidConfig(
+            "relative_denominator_epsilon must be finite and positive",
+        ));
+    }
     if patches.len() != coarse_faces.len() {
         return Err(OptimizerError::PatchFaceCount {
             patches: patches.len(),
             faces: coarse_faces.len(),
         });
+    }
+    validate_coarse_topology(coarse_faces)?;
+    for (patch_index, patch) in patches.iter().enumerate() {
+        if patch
+            .positions
+            .iter()
+            .chain(patch.weights.iter())
+            .any(|value| !finite_quat(*value))
+        {
+            return Err(OptimizerError::NonFinitePatch { patch: patch_index });
+        }
     }
     for (sample_index, sample) in samples.iter().enumerate() {
         if sample.patch_index >= patches.len() {
@@ -982,8 +1241,45 @@ pub fn score_patch_complex(
                 patch: sample.patch_index,
             });
         }
+        if !finite_vec3(sample.barycentric)
+            || !finite_vec3(sample.target_position)
+            || !finite_vec3(sample.target_normal)
+        {
+            return Err(OptimizerError::NonFiniteSample {
+                sample: sample_index,
+            });
+        }
+        let barycentric_sum = sample.barycentric.iter().sum::<f64>();
+        if sample
+            .barycentric
+            .iter()
+            .any(|coordinate| *coordinate < -1e-10 || *coordinate > 1.0 + 1e-10)
+            || (barycentric_sum - 1.0).abs() > 1e-9
+        {
+            return Err(OptimizerError::InvalidSampleBarycentric {
+                sample: sample_index,
+            });
+        }
+        if normalize_checked(sample.target_normal).is_none() {
+            return Err(OptimizerError::InvalidSampleNormal {
+                sample: sample_index,
+            });
+        }
     }
-    let source = measure_error(patches, samples, None);
+    for (probe_index, probe) in probes.iter().enumerate() {
+        if [
+            probe.transform.a,
+            probe.transform.b,
+            probe.transform.c,
+            probe.transform.d,
+        ]
+        .iter()
+        .any(|value| !finite_quat(*value))
+        {
+            return Err(OptimizerError::InvalidProbeTransform { probe: probe_index });
+        }
+    }
+    let source = measure_error(patches, samples, None, config.pole_epsilon);
     let conformal_probes = probes
         .iter()
         .map(|probe| {
@@ -999,8 +1295,9 @@ pub fn score_patch_complex(
                     sample.target_position[1],
                     sample.target_position[2],
                 );
-                let denominator = probe.transform.c * point + probe.transform.d;
-                if denominator.norm() < config.pole_epsilon {
+                if relative_mobius_denominator(&probe.transform, point)
+                    .is_none_or(|denominator| denominator < config.pole_epsilon)
+                {
                     pole_near_samples += 1;
                 }
                 peak_local_dilation =
@@ -1008,12 +1305,16 @@ pub fn score_patch_complex(
             }
             ProbeError {
                 name: probe.name.clone(),
-                error: measure_error(patches, samples, Some(&probe.transform)),
+                error: measure_error(
+                    &transformed_patches,
+                    samples,
+                    Some(&probe.transform),
+                    config.pole_epsilon,
+                ),
                 boundary: measure_boundaries(&transformed_patches, coarse_faces, config.edge_steps),
                 weights: measure_weight_conditioning(
                     &transformed_patches,
-                    config.denominator_grid,
-                    config.pole_epsilon,
+                    config.relative_denominator_epsilon,
                 ),
                 peak_local_dilation,
                 pole_near_samples,
@@ -1024,7 +1325,7 @@ pub fn score_patch_complex(
         source,
         conformal_probes,
         boundary: measure_boundaries(patches, coarse_faces, config.edge_steps),
-        weights: measure_weight_conditioning(patches, config.denominator_grid, config.pole_epsilon),
+        weights: measure_weight_conditioning(patches, config.relative_denominator_epsilon),
     })
 }
 
@@ -1263,6 +1564,164 @@ mod tests {
         assert!(exact.boundary.max_gap < 1e-10);
         assert!(cracked.boundary.max_gap > 1e-4);
         assert!(cracked.conformal_probes[0].boundary.max_gap > 7.9 * cracked.boundary.max_gap);
+    }
+
+    fn sample_from_patch(patch: &QBTriPatch, barycentric: [f64; 3]) -> FitSample {
+        let differential = patch.eval_differential(barycentric[1], barycentric[2]);
+        FitSample {
+            patch_index: 0,
+            barycentric,
+            target_position: differential.position,
+            target_normal: normal_from_tangents(differential.tangent_u, differential.tangent_v)
+                .unwrap(),
+        }
+    }
+
+    #[test]
+    fn normal_error_preserves_orientation() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let mut sample = sample_from_patch(&patch, [1.0 / 3.0; 3]);
+        sample.target_normal = geometry::vec3_scale(sample.target_normal, -1.0);
+        let score =
+            score_patch_complex(&[patch], &[[0, 1, 2]], &[sample], &[], &Default::default())
+                .unwrap();
+        assert!((score.source.normal_rms_degrees - 180.0).abs() < 1e-10);
+        assert!((score.source.normal_max_degrees - 180.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn normal_scoring_is_not_tied_to_scene_scale() {
+        let scale = 1e-100;
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [scale, 0.0, 0.0], [0.0, scale, 0.0]);
+        let sample = sample_from_patch(&patch, [1.0 / 3.0; 3]);
+        let score =
+            score_patch_complex(&[patch], &[[0, 1, 2]], &[sample], &[], &Default::default())
+                .unwrap();
+        assert_eq!(score.source.degenerate_normal_samples, 0);
+        assert_eq!(score.source.normal_rms_degrees, 0.0);
+        assert!(score.scalar_objective(&Default::default()).is_finite());
+    }
+
+    #[test]
+    fn exact_conditioning_detects_an_unsampled_denominator_zero() {
+        let mut patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        // The zero lies at irrational parameter 1 / (1 + sqrt(2)) on edge
+        // 0→1. A regular denominator grid does not, in general, visit it.
+        patch.weights[1] = Quat::new(-2.0_f64.sqrt(), 0.0, 0.0, 0.0);
+        let sample = sample_from_patch(&patch, [1.0, 0.0, 0.0]);
+        let score =
+            score_patch_complex(&[patch], &[[0, 1, 2]], &[sample], &[], &Default::default())
+                .unwrap();
+        assert!(score.weights.min_relative_denominator < 1e-12);
+        assert_eq!(score.weights.near_singular_patches, 1);
+        assert!(score.scalar_objective(&Default::default()).is_infinite());
+    }
+
+    #[test]
+    fn a_probe_pole_cannot_win_by_dropping_invalid_samples() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let sample = sample_from_patch(&patch, [1.0, 0.0, 0.0]);
+        let score = score_patch_complex(
+            &[patch],
+            &[[0, 1, 2]],
+            &[sample],
+            &[ConformalProbe {
+                name: "pole-on-sample".into(),
+                transform: Mobius::inversion(),
+            }],
+            &Default::default(),
+        )
+        .unwrap();
+        let probe = &score.conformal_probes[0];
+        assert_eq!(probe.error.non_finite_samples, 1);
+        assert!(probe.error.position_rms.is_infinite());
+        assert!(score.scalar_objective(&Default::default()).is_infinite());
+    }
+
+    #[test]
+    fn equivalent_mobius_matrix_scales_have_the_same_finite_score() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let sample = sample_from_patch(&patch, [1.0 / 3.0; 3]);
+        let gauge = 1e-6;
+        let score = score_patch_complex(
+            &[patch],
+            &[[0, 1, 2]],
+            &[sample],
+            &[ConformalProbe {
+                name: "gauge-scaled-identity".into(),
+                transform: Mobius::new(
+                    gauge * Quat::ONE,
+                    Quat::ZERO,
+                    Quat::ZERO,
+                    gauge * Quat::ONE,
+                ),
+            }],
+            &Default::default(),
+        )
+        .unwrap();
+        let probe = &score.conformal_probes[0];
+        assert_eq!(probe.pole_near_samples, 0);
+        assert!(probe.error.position_rms < 1e-12);
+        assert!(probe.error.normal_rms_degrees < 1e-8);
+        assert!(score.scalar_objective(&Default::default()).is_finite());
+    }
+
+    #[test]
+    fn reflected_candidate_and_target_normals_agree_exactly() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let sample = sample_from_patch(&patch, [0.2, 0.3, 0.5]);
+        let score = score_patch_complex(
+            &[patch],
+            &[[0, 1, 2]],
+            &[sample],
+            &[ConformalProbe {
+                name: "reflection".into(),
+                transform: Mobius::sphere_reflection(Quat::from_point(2.0, -1.0, 3.0), 1.5),
+            }],
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(score.conformal_probes[0].error.normal_rms_degrees < 1e-8);
+    }
+
+    #[test]
+    fn malformed_coarse_topology_is_rejected_instead_of_scoring_crack_free() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let sample = sample_from_patch(&patch, [1.0 / 3.0; 3]);
+        assert!(matches!(
+            score_patch_complex(
+                &[patch; 3],
+                &[[0, 1, 2], [1, 0, 3], [0, 1, 4]],
+                &[sample],
+                &[],
+                &Default::default(),
+            ),
+            Err(OptimizerError::NonManifoldCoarseEdge {
+                edge: [0, 1],
+                incident: 3,
+            })
+        ));
+        assert!(matches!(
+            score_patch_complex(
+                &[patch; 2],
+                &[[0, 1, 2], [0, 1, 3]],
+                &[sample],
+                &[],
+                &Default::default(),
+            ),
+            Err(OptimizerError::InconsistentCoarseWinding { edge: [0, 1] })
+        ));
+    }
+
+    #[test]
+    fn malformed_fit_inputs_are_rejected_before_scoring() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let mut sample = sample_from_patch(&patch, [1.0 / 3.0; 3]);
+        sample.target_position[0] = f64::NAN;
+        assert!(matches!(
+            score_patch_complex(&[patch], &[[0, 1, 2]], &[sample], &[], &Default::default(),),
+            Err(OptimizerError::NonFiniteSample { sample: 0 })
+        ));
     }
 
     #[cfg(feature = "meshopt-prototype")]
