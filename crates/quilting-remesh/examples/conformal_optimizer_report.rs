@@ -229,9 +229,10 @@ fn report_fit() {
         &linear_samples,
         &LinearFitConfig {
             tikhonov: 1e-10,
-            cond_iters: 0,
+            ..LinearFitConfig::default()
         },
-    );
+    )
+    .expect("exact shared QB fixture fit");
     let fit_elapsed = fit_start.elapsed();
     let flat: Vec<QBTriPatch> = faces
         .iter()

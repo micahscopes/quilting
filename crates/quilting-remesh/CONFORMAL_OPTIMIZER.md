@@ -34,8 +34,14 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    samples onto coarse triangles, then feed `linear_global_fit_full`. Its one
    quaternion weight per coarse vertex is exactly the ownership rule required
    for C0 boundaries: neighboring patches share the two positions and weights
-   defining their common rational edge. The output remains the current
-   `QBTriPatch` (three positions plus three quaternion weights), directly
+   defining their common rational edge. The fitter normalizes scene scale,
+   column-equilibrates the augmented system, pins one stable gauge vertex per
+   connected component, and uses sparse LSQR without forming condition-squared
+   normal equations. An explicitly recomputed relative normal residual—not the
+   iterative recurrence alone—is the convergence gate. Structural,
+   non-convergence, non-finite, and exact closed-domain
+   denominator-conditioning failures are explicit. The output
+   remains the current `QBTriPatch` (three positions plus three quaternion weights), directly
    consumable by canonical tessellation. Higher-order triangular rational
    patches are explicitly deferred.
 6. **Score before accepting.** `score_patch_complex` reports source-space
@@ -112,6 +118,11 @@ atlas, WASM, or shader change is needed for this experiment.
 - UVs, normals, skinning, morphs, and materials are represented only by domain
   barriers here. A production optimizer must propagate the complete attribute
   streams.
+- Sparse LSQR preserves the at-most-twelve nonzeros in each sample equation and
+  one nonzero in each regularization row. It is iterative: difficult production
+  complexes still need convergence/workload telemetry and may eventually
+  justify a mature sparse QR or LSMR backend. Returning to dense normal
+  equations is not an acceptable speedup.
 
 ## Initial reproducible measurements
 
@@ -122,11 +133,11 @@ benchmark):
 
 | Fixture/method | Source faces | Clusters/patches | RMS position | Max position | Boundary max | Time |
 |---|---:|---:|---:|---:|---:|---:|
-| sphere / connected growth | 320 | 14 | — | — | — | 1,270 µs |
-| sphere / meshopt-seeded growth | 320 | 13 | — | — | — | 1,687 µs |
-| cylinder / connected growth | 576 | 20 | — | — | — | 4,688 µs |
-| cylinder / meshopt-seeded growth | 576 | 20 | — | — | — | 5,417 µs |
-| exact sphere / shared linear QB fit | samples on 8 patches | 8 | < 1e-9 | < 1e-9 | 0 | 157 µs fit |
+| sphere / connected growth | 320 | 14 | — | — | — | 1,723 µs |
+| sphere / meshopt-seeded growth | 320 | 13 | — | — | — | 3,276 µs |
+| cylinder / connected growth | 576 | 20 | — | — | — | 7,347 µs |
+| cylinder / meshopt-seeded growth | 576 | 20 | — | — | — | 10,813 µs |
+| exact sphere / shared sparse-LSQR QB fit | samples on 8 patches | 8 | < 1e-9 | < 1e-9 | 0 | 1,960 µs fit |
 | exact sphere / flat baseline | samples on 8 patches | 8 | 0.028240 | 0.060696 | 0 | — |
 
 The shared QB fit also stayed below `1e-9` positional error after a scale-by-8
@@ -137,3 +148,17 @@ These fixtures are intentionally favorable exact-QB ground truth. They prove
 the API and diagnostics are wired correctly, not that arbitrary production
 meshes will fit this well. Meshoptimizer seeding was slower at this tiny scale;
 its value, if any, needs larger real meshes and fit-quality measurements.
+The earlier 157 µs fit used dense normal equations. A subsequent
+column-pivoted dense QR reference was numerically sound but did not finish the
+full `curved_vs_flat` run in 60 seconds: it discarded the matrix's sparse
+structure and swept every trailing dense column. The sparse-LSQR replacement
+completed that entire 12-fit example—including 78-, 90-, and 140-patch coarse
+fixtures plus their input construction—in 0.165–0.67 seconds across repeated
+cached-binary runs on the same development machine. This is encouraging
+engineering evidence, not a stable benchmark; the upstream QEM fixture builder
+also resolves some symmetric ties nondeterministically.
+
+`curved_vs_flat` labels its denominator diagnostic `sample|bot|`: its legacy
+correspondence margin can produce affine barycentrics just outside a coarse
+triangle. That sampled extrapolated value may therefore fall below the fitter's
+exact in-domain relative-denominator guard without contradiction.

@@ -15,7 +15,7 @@
 //!     patches are genuinely non-planar)
 //!   * the maximum C0 edge gap — sampled from BOTH patches sharing each edge;
 //!     ≈ machine-epsilon proves watertightness
-//!   * estimated condition number of the normal matrix AᵀA
+//!   * the accepted sparse LSQR relative normal residual
 //!   * blow-up count — samples where the rational patch ran off to infinity
 
 use quilting_core::patch::QBTriPatch;
@@ -55,13 +55,13 @@ fn main() {
     println!();
     println!(
         "{:<26} {:>10} {:>11} {:>11} {:>11} {:>9} {:>8}",
-        "case", "max|w-1|", "curvatureDev", "min|bot|", "C0 gap", "cond(AtA)", "blowups"
+        "case", "max|w-1|", "curvatureDev", "sample|bot|", "C0 gap", "normalRes", "blowups"
     );
     println!("{}", "-".repeat(26 + 10 + 11 * 3 + 9 + 8 + 6));
     for c in &cases {
         println!(
             "{:<26} {:>10.3} {:>11.3e} {:>11.3e} {:>11.3e} {:>9.2e} {:>8}",
-            c.name, c.max_weight_dev, c.curvature_dev, c.min_bot, c.c0_gap, c.condition_number, c.blowups
+            c.name, c.max_weight_dev, c.curvature_dev, c.min_bot, c.c0_gap, c.relative_normal_residual, c.blowups
         );
     }
     println!();
@@ -95,7 +95,7 @@ struct CaseResult {
     max_weight_dev: f64,
     curvature_dev: f64,
     c0_gap: f64,
-    condition_number: f64,
+    relative_normal_residual: f64,
     blowups: usize,
     min_bot: f64,
 }
@@ -107,7 +107,8 @@ fn run_case(
     samples: &[Sample],
     cfg: &LinearFitConfig,
 ) -> CaseResult {
-    let res = linear_fit::linear_global_fit_full(coarse_pos, coarse_faces, samples, cfg);
+    let res = linear_fit::linear_global_fit_full(coarse_pos, coarse_faces, samples, cfg)
+        .expect("shared QB fixture fit");
     let flat = flat_patches(coarse_pos, coarse_faces);
 
     let scale = geometry::bounding_radius(coarse_pos).max(1e-9);
@@ -124,7 +125,7 @@ fn run_case(
         max_weight_dev: res.max_weight_dev,
         curvature_dev: curvature_deviation(&res.patches, &flat),
         c0_gap: max_c0_edge_gap(&res.patches, coarse_faces, 16),
-        condition_number: res.condition_number,
+        relative_normal_residual: res.relative_normal_residual,
         blowups,
         min_bot: min_denominator(&res.patches, samples),
     }
@@ -178,7 +179,10 @@ fn sphere_ground_truth_case() -> CaseResult {
         }
     }
     // Tiny Tikhonov to show the near-exactness the canary is capable of.
-    let cfg = LinearFitConfig { tikhonov: 1e-12, cond_iters: 200 };
+    let cfg = LinearFitConfig {
+        tikhonov: 1e-12,
+        ..LinearFitConfig::default()
+    };
     run_case("sphere (QB ground truth)", &coarse_pos, &coarse_faces, &samples, &cfg)
 }
 
@@ -208,8 +212,12 @@ fn tikhonov_sweep() {
     println!("Tikhonov sweep on sphere (icosphere→QEM)   flat RMS = {flat_rms:.3e}");
     println!("{:>12} {:>12} {:>12} {:>12}", "tau", "curvedRMS", "min|bot|", "max|w-1|");
     for &tau in &[1e-12, 1e-8, 1e-4, 1e-2, 1e-1, 1.0, 10.0, 100.0] {
-        let cfg = LinearFitConfig { tikhonov: tau, cond_iters: 0 };
-        let res = linear_fit::linear_global_fit_full(&coarse_pos, &coarse_faces, &samples, &cfg);
+        let cfg = LinearFitConfig {
+            tikhonov: tau,
+            ..LinearFitConfig::default()
+        };
+        let res = linear_fit::linear_global_fit_full(&coarse_pos, &coarse_faces, &samples, &cfg)
+            .expect("shared QB sweep fit");
         let (rms, _, _) = sample_error(&res.patches, &samples, scale);
         let mb = min_denominator(&res.patches, &samples);
         println!("{:>12.1e} {:>12.3e} {:>12.3e} {:>12.3e}", tau, rms, mb, res.max_weight_dev);
