@@ -444,9 +444,6 @@ pub fn plan_adaptive_screen_mesh(
     if request.source_requested_lods.is_empty() {
         return Err(PickedScreenMeshPlanError::EmptyScene);
     }
-    if request.selected_patches.is_empty() {
-        return Err(PickedScreenMeshPlanError::InvalidSelectedFace);
-    }
     let mut selected_patches = BTreeMap::new();
     for selected in request.selected_patches {
         if selected.source_face as usize >= request.source_requested_lods.len() {
@@ -842,6 +839,34 @@ mod tests {
             inherited_source_edge_lods(centre, children[3], [2, 4, 8]).unwrap(),
             [4, 1, 2],
         );
+    }
+
+    #[test]
+    fn empty_automatic_selection_is_an_all_root_plan() {
+        let plan = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
+            selected_patches: &[],
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 64.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 1,
+            max_total_leaves: 2,
+            source_requested_lods: &[[2, 4, 8], [8, 4, 2]],
+        })
+        .unwrap();
+
+        assert!(plan.selected_faces.is_empty());
+        assert_eq!(plan.diagnostic.selected_faces, 0);
+        assert_eq!(plan.diagnostic.selected_leaves, 0);
+        assert_eq!(plan.diagnostic.total_leaves, 2);
+        assert!(plan
+            .leaves
+            .iter()
+            .all(|leaf| leaf.id == ScreenPatchLeafId::ROOT));
+        assert_eq!(plan.requested_lods, [[2, 4, 8], [8, 4, 2]]);
     }
 
     #[test]
