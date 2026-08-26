@@ -543,7 +543,6 @@ impl AdaptivePickedRuntime {
     /// Published diagnostics remain intact until that handoff succeeds.
     pub(crate) fn stage_clear(&mut self) {
         self.config = None;
-        self.candidate_groups.clear();
         self.clear_pending_publication();
         self.pending_legacy = true;
     }
@@ -554,6 +553,23 @@ impl AdaptivePickedRuntime {
 
     pub(crate) fn has_pending_publication(&self) -> bool {
         self.pending_plan.is_some() || self.pending_fallback_error.is_some() || self.pending_legacy
+    }
+
+    pub(crate) fn has_pending_plan(&self) -> bool {
+        self.pending_plan.is_some()
+    }
+
+    pub(crate) fn take_group_rollback(
+        &mut self,
+    ) -> BTreeMap<RenderBatchKey, Vec<RenderBatchMember>> {
+        std::mem::take(&mut self.candidate_groups)
+    }
+
+    pub(crate) fn recycle_group_scratch(
+        &mut self,
+        groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    ) {
+        self.candidate_groups = groups;
     }
 
     pub(crate) fn config(&self) -> Option<AdaptivePickedConfig> {
@@ -700,6 +716,7 @@ impl AdaptivePickedRuntime {
             face_nodes,
             face_render_nodes,
             0,
+            false,
             None,
             live_groups,
         )
@@ -725,6 +742,7 @@ impl AdaptivePickedRuntime {
         face_nodes: &[usize],
         face_render_nodes: &[usize],
         batch_layout_revision: u64,
+        published_groups_are_live: bool,
         mut reusable_groups: Option<
             &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
         >,
@@ -817,7 +835,10 @@ impl AdaptivePickedRuntime {
                 batch_layout_revision,
             };
             let groups_reused = if self.published_group_signature == Some(group_signature) {
-                if let Some(groups) = reusable_groups.as_deref_mut() {
+                if published_groups_are_live {
+                    self.group_cache_hits = self.group_cache_hits.saturating_add(1);
+                    true
+                } else if let Some(groups) = reusable_groups.as_deref_mut() {
                     std::mem::swap(live_groups, groups);
                     self.group_cache_hits = self.group_cache_hits.saturating_add(1);
                     true
@@ -1618,6 +1639,7 @@ mod tests {
                 &[0; 2],
                 &[0; 2],
                 0,
+                false,
                 None,
                 &mut groups,
             )
@@ -1643,6 +1665,7 @@ mod tests {
             &[0; 2],
             &[0; 2],
             0,
+            false,
             None,
             &mut groups,
         );
@@ -1664,7 +1687,6 @@ mod tests {
         assert_eq!(snapshot.last_selection.unwrap().selected_faces, 2);
         assert_eq!(snapshot.last_triangles, 2);
 
-        let mut previous_groups = std::mem::take(&mut groups);
         let reused = runtime
             .plan_selected_and_group(
                 &selected,
@@ -1683,18 +1705,17 @@ mod tests {
                 &[0; 2],
                 &[0; 2],
                 0,
-                Some(&mut previous_groups),
+                true,
+                None,
                 &mut groups,
             )
             .unwrap();
         assert!(reused);
         assert_eq!(groups, staged_groups);
-        assert!(previous_groups.is_empty());
         assert_eq!(runtime.snapshot().group_cache_hits, 1);
         assert_eq!(runtime.snapshot().group_cache_misses, 1);
         runtime.commit_publication();
 
-        let mut previous_groups = std::mem::take(&mut groups);
         let reused = runtime
             .plan_selected_and_group(
                 &selected,
@@ -1713,12 +1734,14 @@ mod tests {
                 &[0; 2],
                 &[0; 2],
                 1,
-                Some(&mut previous_groups),
+                true,
+                None,
                 &mut groups,
             )
             .unwrap();
         assert!(!reused);
         assert_eq!(groups, staged_groups);
+        let previous_groups = runtime.take_group_rollback();
         assert_eq!(previous_groups, staged_groups);
         assert_eq!(runtime.snapshot().group_cache_hits, 1);
         assert_eq!(runtime.snapshot().group_cache_misses, 2);
@@ -1801,6 +1824,7 @@ mod tests {
                 &[0, 1],
                 &[0, 1],
                 0,
+                false,
                 None,
                 &mut groups,
             )

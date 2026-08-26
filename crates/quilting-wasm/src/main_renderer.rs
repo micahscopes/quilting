@@ -2748,6 +2748,7 @@ fn compare_adaptive_root_shadow(state: &mut MainState, initial: batch::ResidentL
 fn apply_adaptive_screen_plan(
     state: &mut MainState,
     initial: batch::ResidentLod,
+    published_groups_are_live: bool,
     reusable_groups: Option<
         &mut BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     >,
@@ -2941,6 +2942,7 @@ fn apply_adaptive_screen_plan(
             face_nodes,
             face_render_nodes,
             batch_layout_revision,
+            published_groups_are_live,
             reusable_groups,
             batch_groups,
         )
@@ -4535,6 +4537,9 @@ fn publish_adaptive_batch_groups(
     match upload_batch_groups_transactionally(state, force_upload) {
         Ok(stats) => {
             state.adaptive_picked.commit_publication();
+            state
+                .adaptive_picked
+                .recycle_group_scratch(previous_batch_groups);
             state.batch_update_stats.retained_buckets += stats.retained as u64;
             state.batch_update_stats.created_buckets += stats.created as u64;
             state.batch_update_stats.reallocated_buckets += stats.reallocated as u64;
@@ -4592,6 +4597,57 @@ fn commit_reused_adaptive_groups(state: &mut MainState) {
     state.batch_update_stats.last_gpu_failures = 0;
 }
 
+struct AdaptiveGroupPreparation {
+    reused_published: bool,
+    previous_groups: Option<
+        BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    >,
+}
+
+fn prepare_adaptive_batch_groups(
+    state: &mut MainState,
+    initial: batch::ResidentLod,
+) -> AdaptiveGroupPreparation {
+    let enabled = state.adaptive_picked.is_enabled();
+    let root_shadow_enabled = state.adaptive_root_shadow.is_enabled();
+    let mut attempted_live = false;
+
+    if enabled && !root_shadow_enabled {
+        attempted_live = true;
+        if apply_adaptive_screen_plan(state, initial, true, None) {
+            return AdaptiveGroupPreparation {
+                reused_published: true,
+                previous_groups: None,
+            };
+        }
+        if state.adaptive_picked.has_pending_plan() {
+            return AdaptiveGroupPreparation {
+                reused_published: false,
+                previous_groups: Some(state.adaptive_picked.take_group_rollback()),
+            };
+        }
+    }
+
+    let mut previous_groups = std::mem::take(&mut state.batch_groups);
+    rebuild_legacy_batch_groups(state, initial);
+    if root_shadow_enabled {
+        compare_adaptive_root_shadow(state, initial);
+    }
+    if enabled
+        && !attempted_live
+        && apply_adaptive_screen_plan(state, initial, false, Some(&mut previous_groups))
+    {
+        return AdaptiveGroupPreparation {
+            reused_published: true,
+            previous_groups: None,
+        };
+    }
+    AdaptiveGroupPreparation {
+        reused_published: false,
+        previous_groups: Some(previous_groups),
+    }
+}
+
 /// Re-evaluate an enabled picked frontier against the latest retained root
 /// classification, rendered camera, and accepted animation pose. This covers
 /// sparse worker completions whose source-face LOD delta is empty: the root
@@ -4626,26 +4682,26 @@ fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
     );
     perf_mark("batch-bucket-start");
     let initial = bounded_standby_resident_lod();
-    let mut previous_batch_groups = std::mem::take(&mut state.batch_groups);
-    rebuild_legacy_batch_groups(state, initial);
-    if state.adaptive_root_shadow.is_enabled() {
-        compare_adaptive_root_shadow(state, initial);
-    }
-    let groups_reused = state.adaptive_picked.is_enabled()
-        && apply_adaptive_screen_plan(state, initial, Some(&mut previous_batch_groups));
+    let prepared = prepare_adaptive_batch_groups(state, initial);
     perf_mark("batch-bucket-end");
     perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
     perf_mark("batch-group-end");
     perf_measure("batch-group", "batch-group-start", "batch-group-end");
     state.adaptive_batch_transition_pending = true;
     perf_mark("batch-upload-start");
-    if groups_reused {
+    if prepared.reused_published {
         commit_reused_adaptive_groups(state);
         perf_mark("batch-upload-end");
         perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
         return true;
     }
-    let publication = publish_adaptive_batch_groups(state, false, previous_batch_groups);
+    let publication = publish_adaptive_batch_groups(
+        state,
+        false,
+        prepared
+            .previous_groups
+            .expect("non-reused adaptive preparation retains rollback groups"),
+    );
     if publication.published && !publication.resources_changed {
         state.batch_update_stats.adaptive_refresh_noops = state
             .batch_update_stats
@@ -4830,19 +4886,16 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         let force_upload = state.batch_layout_dirty;
         let transactional_upload =
             state.adaptive_picked.is_enabled() || state.adaptive_batch_transition_pending;
-        let mut previous_batch_groups = transactional_upload
-            .then(|| std::mem::take(&mut state.batch_groups));
         perf_mark("batch-bucket-start");
-        rebuild_legacy_batch_groups(state, initial_resident);
-        if state.adaptive_root_shadow.is_enabled() {
-            compare_adaptive_root_shadow(state, initial_resident);
-        }
-        let groups_reused = state.adaptive_picked.is_enabled()
-            && apply_adaptive_screen_plan(
-                state,
-                initial_resident,
-                previous_batch_groups.as_mut(),
-            );
+        let adaptive_preparation = if transactional_upload {
+            Some(prepare_adaptive_batch_groups(state, initial_resident))
+        } else {
+            rebuild_legacy_batch_groups(state, initial_resident);
+            if state.adaptive_root_shadow.is_enabled() {
+                compare_adaptive_root_shadow(state, initial_resident);
+            }
+            None
+        };
         perf_mark("batch-bucket-end");
         perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
         perf_mark("batch-group-end");
@@ -4852,17 +4905,23 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         // membership remain valid. Only changed buckets repack or upload their
         // source streams; capacity growth rebuilds that bucket alone.
         perf_mark("batch-upload-start");
-        if groups_reused {
+        if adaptive_preparation
+            .as_ref()
+            .is_some_and(|prepared| prepared.reused_published)
+        {
             commit_reused_adaptive_groups(state);
             perf_mark("batch-upload-end");
             perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
             return;
         }
         if transactional_upload {
+            let previous_batch_groups = adaptive_preparation
+                .and_then(|prepared| prepared.previous_groups)
+                .expect("non-reused adaptive preparation retains rollback groups");
             let _ = publish_adaptive_batch_groups(
                 state,
                 force_upload,
-                previous_batch_groups.unwrap_or_default(),
+                previous_batch_groups,
             );
             perf_mark("batch-upload-end");
             perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
