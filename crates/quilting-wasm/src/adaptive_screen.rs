@@ -14,8 +14,9 @@ use quilting_core::batch::{
 use quilting_core::patch::{QBPatchDomain, QBTriPatch};
 use quilting_core::permutation::canonical_form;
 use quilting_core::screen_leaf_lod::{
-    reconcile_screen_leaf_lods, ScreenLeafTopology, ScreenMeshLeafFrontier,
-    ScreenMeshLeafLodScratch, ScreenMeshLeafTopology, ScreenMeshTopologyCache,
+    reconcile_screen_leaf_lods, ScreenLeafLodResult, ScreenLeafTopology,
+    ScreenMeshLeafFrontier, ScreenMeshLeafLodScratch, ScreenMeshLeafTopology,
+    ScreenMeshTopologyCache,
 };
 use quilting_core::screen_partition::{
     diagnose_screen_patch, partition_screen_patch, ScreenPartitionPolicy, ScreenPatchDiagnostic,
@@ -297,6 +298,7 @@ pub(crate) struct AdaptivePickedRuntime {
     frontier: Option<ScreenMeshLeafFrontier>,
     frontier_cache_hits: u64,
     frontier_cache_misses: u64,
+    reconciliation_cache: AdaptiveReconciliationCache,
     last_timings: AdaptivePlanTimings,
     lod_scratch: ScreenMeshLeafLodScratch,
     candidate_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
@@ -357,7 +359,55 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     last_reconciliation_iterations: u64,
     frontier_cache_hits: u64,
     frontier_cache_misses: u64,
+    reconciliation_cache_hits: u64,
+    reconciliation_cache_misses: u64,
     last_timings: AdaptivePlanTimings,
+}
+
+#[derive(Default)]
+struct AdaptiveReconciliationCache {
+    requested_lods: Vec<[u32; 3]>,
+    max_face_edge_ratio: u32,
+    max_atlas_lod: u32,
+    result: Option<ScreenLeafLodResult>,
+    hits: u64,
+    misses: u64,
+}
+
+impl AdaptiveReconciliationCache {
+    fn invalidate(&mut self) {
+        self.requested_lods.clear();
+        self.result = None;
+    }
+
+    fn resolve<'a>(
+        &'a mut self,
+        frontier: &ScreenMeshLeafFrontier,
+        requested_lods: &[[u32; 3]],
+        max_face_edge_ratio: u32,
+        max_atlas_lod: u32,
+    ) -> Result<&'a ScreenLeafLodResult, String> {
+        let matches = self.result.is_some()
+            && self.max_face_edge_ratio == max_face_edge_ratio
+            && self.max_atlas_lod == max_atlas_lod
+            && self.requested_lods == requested_lods;
+        if matches {
+            self.hits = self.hits.saturating_add(1);
+        } else {
+            let result = frontier
+                .reconcile_lods(requested_lods, max_face_edge_ratio, max_atlas_lod)
+                .map_err(|error| error.to_string())?;
+            self.requested_lods.clear();
+            self.requested_lods.extend_from_slice(requested_lods);
+            self.max_face_edge_ratio = max_face_edge_ratio;
+            self.max_atlas_lod = max_atlas_lod;
+            self.result = Some(result);
+            self.misses = self.misses.saturating_add(1);
+        }
+        self.result
+            .as_ref()
+            .ok_or_else(|| "adaptive reconciliation cache is unavailable".to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -458,6 +508,7 @@ impl AdaptivePickedRuntime {
         self.frontier = None;
         self.frontier_cache_hits = 0;
         self.frontier_cache_misses = 0;
+        self.reconciliation_cache = AdaptiveReconciliationCache::default();
         self.last_timings = AdaptivePlanTimings::default();
         self.candidate_groups.clear();
         self.clear_pending_publication();
@@ -686,6 +737,7 @@ impl AdaptivePickedRuntime {
                 let frontier = ScreenMeshLeafFrontier::build(&plan.leaves, topology)
                     .map_err(|error| error.to_string())?;
                 self.frontier = Some(frontier);
+                self.reconciliation_cache.invalidate();
                 self.frontier_cache_misses = self.frontier_cache_misses.saturating_add(1);
             }
             let frontier = self
@@ -694,9 +746,12 @@ impl AdaptivePickedRuntime {
                 .ok_or_else(|| "adaptive frontier cache is unavailable".to_string())?;
             let frontier_ms = browser_now_ms() - frontier_start;
             let reconcile_start = browser_now_ms();
-            let reconciled = frontier
-                .reconcile_lods(&plan.requested_lods, max_face_edge_ratio, max_atlas_lod)
-                .map_err(|error| error.to_string())?;
+            let reconciled = self.reconciliation_cache.resolve(
+                frontier,
+                &plan.requested_lods,
+                max_face_edge_ratio,
+                max_atlas_lod,
+            )?;
             let reconcile_ms = browser_now_ms() - reconcile_start;
             let atlas_work_start = browser_now_ms();
             let mut triangles = 0u64;
@@ -734,25 +789,30 @@ impl AdaptivePickedRuntime {
                 atlas_work_ms,
                 group_ms,
             };
+            let reconciliation = (
+                reconciled.shared_edge_promotions as u64,
+                reconciled.grading_promotions as u64,
+                reconciled.iterations as u64,
+            );
             Ok((
                 plan.diagnostic,
                 plan.selected_faces,
-                reconciled,
+                reconciliation,
                 triangles,
                 timings,
             ))
         })();
 
         match attempt {
-            Ok((diagnostic, selected_faces, reconciled, triangles, timings)) => {
+            Ok((diagnostic, selected_faces, reconciliation, triangles, timings)) => {
                 std::mem::swap(live_groups, &mut self.candidate_groups);
                 self.pending_plan = Some(diagnostic);
                 self.pending_selection = selection_diagnostic;
                 self.pending_selected_faces = selected_faces;
                 self.pending_triangles = triangles;
-                self.pending_shared_edge_promotions = reconciled.shared_edge_promotions as u64;
-                self.pending_grading_promotions = reconciled.grading_promotions as u64;
-                self.pending_reconciliation_iterations = reconciled.iterations as u64;
+                self.pending_shared_edge_promotions = reconciliation.0;
+                self.pending_grading_promotions = reconciliation.1;
+                self.pending_reconciliation_iterations = reconciliation.2;
                 self.pending_pose_stamp = current_pose_stamp;
                 self.last_timings = timings;
                 Ok(())
@@ -838,6 +898,8 @@ impl AdaptivePickedRuntime {
             last_reconciliation_iterations: self.last_reconciliation_iterations,
             frontier_cache_hits: self.frontier_cache_hits,
             frontier_cache_misses: self.frontier_cache_misses,
+            reconciliation_cache_hits: self.reconciliation_cache.hits,
+            reconciliation_cache_misses: self.reconciliation_cache.misses,
             last_timings: self.last_timings,
         }
     }
@@ -1307,7 +1369,7 @@ mod tests {
             max_triangles: 1,
         });
 
-        let mut plan = |runtime: &mut AdaptivePickedRuntime, stamp| {
+        let mut plan = |runtime: &mut AdaptivePickedRuntime, stamp, grading_ratio| {
             runtime
                 .plan_and_group(
                     &patch,
@@ -1318,7 +1380,7 @@ mod tests {
                     resident,
                     &topology,
                     1,
-                    4,
+                    grading_ratio,
                     &atlas_triangles,
                     &[0],
                     &[0],
@@ -1328,18 +1390,22 @@ mod tests {
                 .unwrap();
         };
 
-        plan(&mut runtime, (7, 2));
+        plan(&mut runtime, (7, 2), 4);
         assert_eq!(runtime.snapshot().state, "staged");
         assert_eq!(runtime.snapshot().frontier_cache_hits, 0);
         assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
+        assert_eq!(runtime.snapshot().reconciliation_cache_hits, 0);
+        assert_eq!(runtime.snapshot().reconciliation_cache_misses, 1);
         runtime.commit_publication();
         assert_eq!(runtime.snapshot().pose_revision, Some(7));
         assert_eq!(runtime.snapshot().published_faces, [0]);
         assert_eq!(runtime.snapshot().last_plan.unwrap().selected_faces, 1);
 
-        plan(&mut runtime, (8, 2));
+        plan(&mut runtime, (8, 2), 4);
         assert_eq!(runtime.snapshot().frontier_cache_hits, 1);
         assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
+        assert_eq!(runtime.snapshot().reconciliation_cache_hits, 1);
+        assert_eq!(runtime.snapshot().reconciliation_cache_misses, 1);
         runtime.record_publication_failure("synthetic upload rollback");
         let rolled_back = runtime.snapshot();
         assert_eq!(rolled_back.state, "rollback-active");
@@ -1350,9 +1416,11 @@ mod tests {
             Some("synthetic upload rollback"),
         );
 
-        plan(&mut runtime, (8, 2));
+        plan(&mut runtime, (8, 2), 4);
         assert_eq!(runtime.snapshot().frontier_cache_hits, 2);
         assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
+        assert_eq!(runtime.snapshot().reconciliation_cache_hits, 2);
+        assert_eq!(runtime.snapshot().reconciliation_cache_misses, 1);
         runtime.commit_publication();
         let snapshot = runtime.snapshot();
         assert_eq!(snapshot.state, "active");
@@ -1360,12 +1428,22 @@ mod tests {
         assert_eq!(snapshot.pose_continuity_epoch, Some(2));
         assert_eq!(runtime.snapshot().installs, 2);
 
+        // A grading-policy change is a real reconciliation input even when
+        // this one-leaf fixture happens to produce the same resident LoDs.
+        plan(&mut runtime, (9, 2), 2);
+        assert_eq!(runtime.snapshot().frontier_cache_hits, 3);
+        assert_eq!(runtime.snapshot().reconciliation_cache_hits, 2);
+        assert_eq!(runtime.snapshot().reconciliation_cache_misses, 2);
+        runtime.commit_publication();
+        assert_eq!(runtime.snapshot().pose_revision, Some(9));
+        assert_eq!(runtime.snapshot().installs, 3);
+
         runtime.stage_clear();
         let staged_disable = runtime.snapshot();
         assert_eq!(staged_disable.state, "staged-disable");
         assert_eq!(staged_disable.published_face, Some(0));
         assert_eq!(staged_disable.published_faces, [0]);
-        assert_eq!(staged_disable.pose_revision, Some(8));
+        assert_eq!(staged_disable.pose_revision, Some(9));
         runtime.record_refresh_failure("synthetic disable refresh rejection");
         let rolled_back_disable = runtime.snapshot();
         assert_eq!(rolled_back_disable.state, "rollback-disable");
