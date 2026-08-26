@@ -461,27 +461,7 @@ fn upload_lod_compute_model(upload: LodComputeUpload) -> Result<bool, String> {
     let face_indices: Vec<f32> = upload.faces.iter()
         .flat_map(|face| face.map(|vertex| vertex as f32))
         .collect();
-    let atlas = ATLAS.with(|atlas_cell| {
-        let atlas_cell = atlas_cell.borrow();
-        let atlas = atlas_cell.as_ref()?;
-        const LUT_SIZE: usize = 1200;
-        let mut lut = vec![255u8; LUT_SIZE];
-        let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
-        keys.sort();
-        for (index, key) in keys.iter().enumerate().take(255) {
-            let ea = (key[0] as f64).log2().round() as usize;
-            let eb = (key[1] as f64).log2().round() as usize;
-            let ec = (key[2] as f64).log2().round() as usize;
-            let lut_key = ea + eb * 10 + ec * 100;
-            if lut_key < LUT_SIZE {
-                lut[lut_key] = index as u8;
-            }
-        }
-        let max_lod = keys.last()
-            .map(|key| *key.iter().max().expect("atlas key has three edges"))
-            .unwrap_or(512) as f32;
-        Some((lut, keys, max_lod))
-    }).ok_or_else(|| "LOD atlas is not resident".to_string())?;
+    let atlas = lod_atlas_snapshot()?;
 
     let uploaded = GPU_COMPUTE.with(|gpu_compute| {
         let mut gpu_compute = gpu_compute.borrow_mut();
@@ -524,10 +504,60 @@ fn upload_lod_compute_model(upload: LodComputeUpload) -> Result<bool, String> {
     };
     LOD_COMPUTE_MODEL.with(|current| *current.borrow_mut() = Some(model));
     LOD_MESH_RADIUS.with(|radius| *radius.borrow_mut() = mesh_radius);
+    install_lod_atlas_snapshot(atlas);
+    Ok(true)
+}
+
+fn lod_atlas_snapshot() -> Result<(Vec<u8>, Vec<[u32; 3]>, f32), String> {
+    ATLAS.with(|atlas_cell| {
+        let atlas_cell = atlas_cell.borrow();
+        let atlas = atlas_cell
+            .as_ref()
+            .ok_or_else(|| "LOD atlas is not resident".to_string())?;
+        const LUT_SIZE: usize = 1200;
+        let mut lut = vec![255u8; LUT_SIZE];
+        let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
+        keys.sort();
+        for (index, key) in keys.iter().enumerate().take(255) {
+            let ea = (key[0] as f64).log2().round() as usize;
+            let eb = (key[1] as f64).log2().round() as usize;
+            let ec = (key[2] as f64).log2().round() as usize;
+            let lut_key = ea + eb * 10 + ec * 100;
+            if lut_key < LUT_SIZE {
+                lut[lut_key] = index as u8;
+            }
+        }
+        let max_lod = keys.last()
+            .map(|key| *key.iter().max().expect("atlas key has three edges"))
+            .unwrap_or(512) as f32;
+        Ok((lut, keys, max_lod))
+    })
+}
+
+fn install_lod_atlas_snapshot(atlas: (Vec<u8>, Vec<[u32; 3]>, f32)) {
     LOD_MAX.with(|max| *max.borrow_mut() = atlas.2);
     LOD_ATLAS_KEYS.with(|keys| *keys.borrow_mut() = atlas.1);
     reset_animated_lod_delta();
-    Ok(true)
+}
+
+/// Refresh only the atlas lookup used by the retained GPU classifier.
+/// Geometry, animation textures, and adjacency remain resident. Callers must
+/// cancel an in-flight classification before replacing this texture.
+#[wasm_bindgen]
+pub fn refresh_lod_compute_atlas() -> Result<bool, JsValue> {
+    let atlas = lod_atlas_snapshot().map_err(|error| JsValue::from_str(&error))?;
+    let uploaded = GPU_COMPUTE.with(|gpu_compute| {
+        let mut gpu_compute = gpu_compute.borrow_mut();
+        let Some((gl, compute)) = gpu_compute.as_mut() else {
+            return false;
+        };
+        compute.upload_atlas_lut(gl, &atlas.0);
+        true
+    });
+    if uploaded {
+        install_lod_atlas_snapshot(atlas);
+    }
+    Ok(uploaded)
 }
 
 fn stored_gltf_lod_upload(data: &StoredGltfData) -> Result<LodComputeUpload, String> {

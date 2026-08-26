@@ -209,7 +209,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     </div>
     <label>Pixel floor per sub-edge</label>
     <div class="sr"><input type="range" id="min-px-sub" min="1" max="64" value="16" step="0.1"><span class="v" id="min-px-sub-v">16.0</span></div>
-    <label>Atlas resolution (reload to apply)</label>
+    <label>Atlas resolution</label>
     <div class="sr"><input type="range" id="atlas-exp" min="3" max="9" value="7" step="1"><span class="v" id="atlas-exp-v">7</span></div>
     <label>Within-face grading (reload to apply)</label>
     <div class="btns" id="lod-ratio-btns">
@@ -5699,11 +5699,16 @@ const lod = {
   grading: signal('2', 'lodratio'),
 };
 let activeLodGradingRatio = 2;
+let residentAtlasExponent = null;
 bindSlider('res', lod.res, v => v === 0 ? 'auto' : String(1 << v));
 bindSlider('tess-density', lod.density, v => v.toFixed(0));
 bindSlider('min-px-sub', lod.minPx, v => v.toFixed(1));
 bindToggle('screen-atten-toggle', lod.screenAtten);
-bindSlider('atlas-exp', lod.atlas, v => v.toFixed(0));
+bindSlider('atlas-exp', lod.atlas, v => v.toFixed(0), () => {
+  updatePatchLabControlVisibility();
+  scheduleResidentAtlasRebuild();
+  syncURL();
+});
 bindBtnGroup('lod-ratio-btns', lod.grading);
 
 // --- Rust-backed educational patch laboratory ---
@@ -5741,7 +5746,8 @@ function updatePatchLabControlVisibility() {
   document.querySelectorAll('#patch-lab-shapes button').forEach(button => {
     button.classList.toggle('a', patchLab.active && button.dataset.shape === patchLab.shape);
   });
-  const atlasExp = Math.max(0, Math.min(9, Math.round(lod.atlas.peek())));
+  const atlasExp = residentAtlasExponent
+    ?? Math.max(0, Math.min(9, Math.round(lod.atlas.peek())));
   for (const id of ['patch-lab-min', 'patch-lab-max', 'patch-lab-edge-a', 'patch-lab-edge-b', 'patch-lab-edge-c']) {
     $(id).max = atlasExp;
     if (parseInt($(id).value, 10) > atlasExp) $(id).value = atlasExp;
@@ -5757,7 +5763,8 @@ function updatePatchLabControlVisibility() {
 }
 
 function patchLabLodRequest() {
-  const atlasExp = Math.max(0, Math.min(9, Math.round(lod.atlas.peek())));
+  const atlasExp = residentAtlasExponent
+    ?? Math.max(0, Math.min(9, Math.round(lod.atlas.peek())));
   const directEdges = $('patch-lab-field').value === 'edges';
   let minExp = directEdges ? 0 : Math.min(parseInt($('patch-lab-min').value, 10), atlasExp);
   let maxExp = directEdges ? atlasExp : Math.min(parseInt($('patch-lab-max').value, 10), atlasExp);
@@ -8933,16 +8940,151 @@ phase('workers', ['wasm'], async () => {
   }
 });
 
-function cacheGeneratedAtlasAfterStartup(cacheKey, packed) {
+let residentAtlasDebounceTimer = null;
+let residentAtlasRebuildInFlight = false;
+let residentAtlasPendingExponent = null;
+const residentAtlasDiagnostics = {
+  requestedExponent: null,
+  residentExponent: null,
+  inFlight: false,
+  builds: 0,
+  skippedStaleBuilds: 0,
+  last: null,
+  error: null,
+};
+globalThis.__hyperscopeResidentAtlas = residentAtlasDiagnostics;
+
+function scheduleResidentAtlasRebuild() {
+  const exponent = Math.max(3, Math.min(9, Math.round(lod.atlas.peek())));
+  residentAtlasPendingExponent = exponent;
+  residentAtlasDiagnostics.requestedExponent = exponent;
+  clearTimeout(residentAtlasDebounceTimer);
+  residentAtlasDebounceTimer = setTimeout(() => {
+    residentAtlasDebounceTimer = null;
+    void rebuildResidentAtlas();
+  }, 250);
+}
+
+async function rebuildResidentAtlas() {
+  if (residentAtlasRebuildInFlight || !phaseReady('atlas')) return;
+  residentAtlasRebuildInFlight = true;
+  residentAtlasDiagnostics.inFlight = true;
+  try {
+    while (residentAtlasPendingExponent != null) {
+      const exponent = residentAtlasPendingExponent;
+      residentAtlasPendingExponent = null;
+      if (exponent === residentAtlasExponent) continue;
+      const previousExponent = residentAtlasExponent;
+      const flatTriples = required_tessellation_atlas_triples(
+        exponent,
+        activeLodGradingRatio,
+      );
+      if (!flatTriples.length) {
+        throw new Error(`no atlas patches are reachable at ${activeLodGradingRatio}:1`);
+      }
+      const requestedPatches = flatTriples.length / 3;
+      $('atlas-exp-v').textContent = `${exponent} …`;
+      $('stats').textContent = `Building ${requestedPatches} reachable atlas patches…`;
+      const startedAt = performance.now();
+      const build = await workerCall('build_required_atlas', {
+        maxLodExp: exponent,
+        maxFaceEdgeRatio: activeLodGradingRatio,
+      });
+      const generationMs = Number(build.ms) || 0;
+      if (build.error) throw new Error(build.error);
+      if (residentAtlasPendingExponent != null
+          && residentAtlasPendingExponent !== exponent) {
+        residentAtlasDiagnostics.skippedStaleBuilds += 1;
+        continue;
+      }
+
+      const packedResponse = await workerCall('export_patches', {});
+      const packed = packedResponse.atlas ?? packedResponse.patches;
+      if (!packed?.patches || !packed?.bary || !packed?.tris || !packed?.lines
+          || packed.patches.length !== requestedPatches * 7) {
+        throw new Error('live tessellation atlas export was incomplete');
+      }
+      if (residentAtlasPendingExponent != null
+          && residentAtlasPendingExponent !== exponent) {
+        residentAtlasDiagnostics.skippedStaleBuilds += 1;
+        continue;
+      }
+
+      const refresh = await workerCall('refresh_lod_compute_atlas', {});
+      if (!refresh.ok) {
+        throw new Error(refresh.error || 'LOD worker rejected the replacement atlas');
+      }
+      if (residentAtlasPendingExponent != null
+          && residentAtlasPendingExponent !== exponent) {
+        residentAtlasDiagnostics.skippedStaleBuilds += 1;
+        continue;
+      }
+
+      const uploadStartedAt = performance.now();
+      if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
+        throw new Error('renderer rejected the replacement tessellation atlas');
+      }
+      const uploadMs = performance.now() - uploadStartedAt;
+      residentAtlasExponent = exponent;
+      residentAtlasDiagnostics.residentExponent = exponent;
+      residentAtlasDiagnostics.builds += 1;
+      residentAtlasDiagnostics.error = null;
+      residentAtlasDiagnostics.last = {
+        previousExponent,
+        exponent,
+        requestedPatches,
+        packedPatches: packed.patches.length / 7,
+        vertices: packed.bary.length / 3,
+        triangleIndices: packed.tris.length,
+        lineIndices: packed.lines.length,
+        transferBytes: packed.patches.byteLength + packed.bary.byteLength
+          + packed.tris.byteLength + packed.lines.byteLength,
+        generationMs,
+        uploadMs,
+        totalMs: performance.now() - startedAt,
+      };
+      updatePatchLabControlVisibility();
+      if (patchLab.active) {
+        await updatePatchLabLods();
+      } else if (meshInfo) {
+        lodFullSceneDirty = true;
+        debouncedLodRecompute();
+      }
+      $('stats').textContent = `Atlas LoD ${exponent} resident · ${requestedPatches} patches`;
+    }
+  } catch (error) {
+    residentAtlasDiagnostics.error = error?.message || String(error);
+    console.error('Live tessellation atlas replacement failed:', error);
+    $('stats').textContent = `Atlas replacement failed: ${residentAtlasDiagnostics.error}`;
+  } finally {
+    residentAtlasRebuildInFlight = false;
+    residentAtlasDiagnostics.inFlight = false;
+    $('atlas-exp-v').textContent = String(residentAtlasExponent ?? lod.atlas.peek());
+    if (residentAtlasPendingExponent != null
+        && residentAtlasPendingExponent !== residentAtlasExponent) {
+      queueMicrotask(rebuildResidentAtlas);
+    }
+  }
+}
+
+function cacheGeneratedAtlasAfterStartup(cacheKey, packed, expectedExponent) {
   void (async () => {
     // Serialization and IndexedDB persistence are not render prerequisites.
     // Keep them off the startup critical path and wait until the first model
     // has been uploaded before asking the retained worker for another payload.
     await gate(phases.render.done);
+    // A live rebuild replaces the retained worker atlas before the renderer
+    // adopts it. Never serialize that transient atlas under the startup key.
+    if (residentAtlasRebuildInFlight
+        || residentAtlasPendingExponent != null
+        || residentAtlasExponent !== expectedExponent) return;
     const serializeStartedAt = performance.now();
     const exported = await workerCall('export_atlas_bytes', {});
     const serialized = exported.bytes;
-    if (!serialized?.byteLength) return;
+    if (!serialized?.byteLength
+        || residentAtlasRebuildInFlight
+        || residentAtlasPendingExponent != null
+        || residentAtlasExponent !== expectedExponent) return;
     const serializeFinishedAt = performance.now();
     if (startupDiagnostics.atlas?.cacheKey === cacheKey) {
       startupDiagnostics.atlas.serializedBytes = serialized.byteLength;
@@ -9048,6 +9190,9 @@ phase('atlas', ['workers'], async () => {
     throw new Error('GPU rejected the packed tessellation atlas upload');
   }
   const uploadMs = performance.now() - uploadStartedAt;
+  residentAtlasExponent = ATLAS_EXP;
+  residentAtlasDiagnostics.requestedExponent = ATLAS_EXP;
+  residentAtlasDiagnostics.residentExponent = ATLAS_EXP;
   startupDiagnostics.atlas = {
     requestedPatches: allTriples.length,
     maxFaceEdgeRatio: activeLodGradingRatio,
@@ -9070,7 +9215,11 @@ phase('atlas', ['workers'], async () => {
     cacheWritten: source === 'indexeddb',
   };
   if (source === 'generated') {
-    cacheGeneratedAtlasAfterStartup(cacheKey, packed);
+    cacheGeneratedAtlasAfterStartup(cacheKey, packed, ATLAS_EXP);
+  }
+  if (residentAtlasPendingExponent != null
+      && residentAtlasPendingExponent !== residentAtlasExponent) {
+    setTimeout(rebuildResidentAtlas, 0);
   }
 });
 

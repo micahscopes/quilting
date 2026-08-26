@@ -77,6 +77,23 @@ self.onmessage = async function(e) {
     return;
   }
 
+  if (type === 'refresh_lod_compute_atlas') {
+    try {
+      lodJobGeneration += 1;
+      wasm.cancel_animated_lods();
+      const ok = wasm.refresh_lod_compute_atlas();
+      self.postMessage({ type: 'lod_compute_atlas_refreshed', id, ok });
+    } catch (error) {
+      self.postMessage({
+        type: 'lod_compute_atlas_refreshed',
+        id,
+        ok: false,
+        error: error?.message || String(error),
+      });
+    }
+    return;
+  }
+
   if (type === 'build_atlas_subset') {
     const { maxLodExp, mode, workerIndex, numWorkers } = data;
     const ms = wasm.build_atlas_subset(maxLodExp, mode, workerIndex, numWorkers);
