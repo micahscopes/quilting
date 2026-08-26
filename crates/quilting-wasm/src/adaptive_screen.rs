@@ -22,7 +22,8 @@ use quilting_core::screen_partition::{
     ScreenPatchLeafId, ScreenPatchLeafStatus,
 };
 use quilting_core::screen_plan::{
-    plan_picked_screen_mesh, PickedScreenMeshPlanDiagnostic, PickedScreenMeshPlanRequest,
+    plan_adaptive_screen_mesh, AdaptiveScreenMeshPlanDiagnostic, AdaptiveScreenMeshPlanRequest,
+    SelectedScreenPatch,
 };
 use serde::Serialize;
 
@@ -250,14 +251,15 @@ pub(crate) struct AdaptivePickedRuntime {
     fallbacks: u64,
     last_error: Option<String>,
     last_publication_error: Option<String>,
-    last_plan: Option<PickedScreenMeshPlanDiagnostic>,
+    last_plan: Option<AdaptiveScreenMeshPlanDiagnostic>,
     last_triangles: u64,
     last_shared_edge_promotions: u64,
     last_grading_promotions: u64,
     last_reconciliation_iterations: u64,
     last_pose_stamp: Option<(u32, u32)>,
-    last_published_face: Option<u32>,
-    pending_plan: Option<PickedScreenMeshPlanDiagnostic>,
+    last_published_faces: Vec<u32>,
+    pending_plan: Option<AdaptiveScreenMeshPlanDiagnostic>,
+    pending_selected_faces: Vec<u32>,
     pending_fallback_error: Option<String>,
     pending_legacy: bool,
     pending_triangles: u64,
@@ -282,12 +284,13 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     pose_revision: Option<u32>,
     pose_continuity_epoch: Option<u32>,
     published_face: Option<u32>,
+    published_faces: &'a [u32],
     attempts: u64,
     installs: u64,
     fallbacks: u64,
     last_error: Option<&'a str>,
     last_publication_error: Option<&'a str>,
-    last_plan: Option<PickedScreenMeshPlanDiagnosticSnapshot>,
+    last_plan: Option<AdaptiveScreenMeshPlanDiagnosticSnapshot>,
     last_triangles: u64,
     last_shared_edge_promotions: u64,
     last_grading_promotions: u64,
@@ -306,8 +309,9 @@ pub(crate) struct AdaptivePickedRefreshSnapshot<'a> {
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PickedScreenMeshPlanDiagnosticSnapshot {
+struct AdaptiveScreenMeshPlanDiagnosticSnapshot {
     source_faces: u32,
+    selected_faces: u32,
     selected_leaves: u32,
     total_leaves: u32,
     split_nodes: u32,
@@ -317,10 +321,11 @@ struct PickedScreenMeshPlanDiagnosticSnapshot {
     omitted_culled_leaves: u32,
 }
 
-impl From<PickedScreenMeshPlanDiagnostic> for PickedScreenMeshPlanDiagnosticSnapshot {
-    fn from(diagnostic: PickedScreenMeshPlanDiagnostic) -> Self {
+impl From<AdaptiveScreenMeshPlanDiagnostic> for AdaptiveScreenMeshPlanDiagnosticSnapshot {
+    fn from(diagnostic: AdaptiveScreenMeshPlanDiagnostic) -> Self {
         Self {
             source_faces: diagnostic.source_faces,
+            selected_faces: diagnostic.selected_faces,
             selected_leaves: diagnostic.selected_leaves,
             total_leaves: diagnostic.total_leaves,
             split_nodes: diagnostic.split_nodes,
@@ -348,7 +353,7 @@ impl AdaptivePickedRuntime {
         self.last_grading_promotions = 0;
         self.last_reconciliation_iterations = 0;
         self.last_pose_stamp = None;
-        self.last_published_face = None;
+        self.last_published_faces.clear();
         self.candidate_groups.clear();
         self.clear_pending_publication();
     }
@@ -393,6 +398,7 @@ impl AdaptivePickedRuntime {
         self.pending_grading_promotions = 0;
         self.pending_reconciliation_iterations = 0;
         self.pending_pose_stamp = None;
+        self.pending_selected_faces.clear();
     }
 
     /// Commit diagnostics only after the renderer has published every staged
@@ -407,7 +413,10 @@ impl AdaptivePickedRuntime {
             self.last_grading_promotions = self.pending_grading_promotions;
             self.last_reconciliation_iterations = self.pending_reconciliation_iterations;
             self.last_pose_stamp = self.pending_pose_stamp;
-            self.last_published_face = self.config.map(|config| config.face);
+            std::mem::swap(
+                &mut self.last_published_faces,
+                &mut self.pending_selected_faces,
+            );
         } else if let Some(error) = self.pending_fallback_error.take() {
             self.last_error = Some(error);
             self.last_plan = None;
@@ -416,7 +425,7 @@ impl AdaptivePickedRuntime {
             self.last_grading_promotions = 0;
             self.last_reconciliation_iterations = 0;
             self.last_pose_stamp = None;
-            self.last_published_face = None;
+            self.last_published_faces.clear();
         } else if self.pending_legacy {
             self.last_error = None;
             self.last_plan = None;
@@ -425,7 +434,7 @@ impl AdaptivePickedRuntime {
             self.last_grading_promotions = 0;
             self.last_reconciliation_iterations = 0;
             self.last_pose_stamp = None;
-            self.last_published_face = None;
+            self.last_published_faces.clear();
         } else {
             return;
         }
@@ -473,10 +482,58 @@ impl AdaptivePickedRuntime {
         face_render_nodes: &[usize],
         live_groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     ) -> Result<(), String> {
+        let config = self
+            .config
+            .ok_or_else(|| "picked adaptive screen mode is disabled".to_string())?;
+        let selected = [SelectedScreenPatch {
+            source_face: config.face,
+            transformed_patch,
+        }];
+        self.plan_selected_and_group(
+            &selected,
+            config.policy.max_leaves,
+            view_projection,
+            viewport,
+            current_pose_stamp,
+            source_requests,
+            standby,
+            topology,
+            max_atlas_lod,
+            max_face_edge_ratio,
+            atlas_triangle_counts,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            live_groups,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn plan_selected_and_group(
+        &mut self,
+        selected_patches: &[SelectedScreenPatch<'_>],
+        max_partition_leaves: usize,
+        view_projection: &[f64; 16],
+        viewport: [f64; 2],
+        current_pose_stamp: Option<(u32, u32)>,
+        source_requests: &[Option<ResidentLod>],
+        standby: ResidentLod,
+        topology: &ScreenMeshTopologyCache,
+        max_atlas_lod: u32,
+        max_face_edge_ratio: u32,
+        atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        live_groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    ) -> Result<(), String> {
+        if self.has_pending_publication() {
+            return Err("adaptive plan is already awaiting publication".into());
+        }
         self.attempts = self.attempts.saturating_add(1);
         self.clear_pending_publication();
         let Some(config) = self.config else {
-            return Err("picked adaptive screen mode is disabled".into());
+            return Err("adaptive screen mode is disabled".into());
         };
         let attempt = (|| -> Result<_, String> {
             self.source_lod_scratch.clear();
@@ -485,9 +542,8 @@ impl AdaptivePickedRuntime {
                     .iter()
                     .map(|request| request.unwrap_or(standby).edge_lods()),
             );
-            let plan = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
-                selected_face: config.face,
-                transformed_patch,
+            let plan = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
+                selected_patches,
                 view_projection,
                 viewport,
                 min_px_per_segment: config.min_px_per_segment,
@@ -495,6 +551,7 @@ impl AdaptivePickedRuntime {
                 policy: config.policy,
                 max_atlas_lod,
                 retain_culled_leaves: true,
+                max_partition_leaves,
                 max_total_leaves: config.max_total_leaves,
                 source_requested_lods: &self.source_lod_scratch,
             })
@@ -528,13 +585,14 @@ impl AdaptivePickedRuntime {
                 &mut self.candidate_groups,
             )
             .map_err(|error| error.to_string())?;
-            Ok((plan.diagnostic, reconciled, triangles))
+            Ok((plan.diagnostic, plan.selected_faces, reconciled, triangles))
         })();
 
         match attempt {
-            Ok((diagnostic, reconciled, triangles)) => {
+            Ok((diagnostic, selected_faces, reconciled, triangles)) => {
                 std::mem::swap(live_groups, &mut self.candidate_groups);
                 self.pending_plan = Some(diagnostic);
+                self.pending_selected_faces = selected_faces;
                 self.pending_triangles = triangles;
                 self.pending_shared_edge_promotions = reconciled.shared_edge_promotions as u64;
                 self.pending_grading_promotions = reconciled.grading_promotions as u64;
@@ -575,6 +633,10 @@ impl AdaptivePickedRuntime {
         } else {
             "configured"
         };
+        let published_face = match self.last_published_faces.as_slice() {
+            [face] => Some(*face),
+            _ => None,
+        };
         AdaptivePickedSnapshot {
             enabled: self.config.is_some(),
             state,
@@ -593,7 +655,8 @@ impl AdaptivePickedRuntime {
                 .pending_pose_stamp
                 .or(self.last_pose_stamp)
                 .map(|stamp| stamp.1),
-            published_face: self.last_published_face,
+            published_face,
+            published_faces: &self.last_published_faces,
             attempts: self.attempts,
             installs: self.installs,
             fallbacks: self.fallbacks,
@@ -941,6 +1004,8 @@ mod tests {
         assert_eq!(runtime.snapshot().state, "staged");
         runtime.commit_publication();
         assert_eq!(runtime.snapshot().pose_revision, Some(7));
+        assert_eq!(runtime.snapshot().published_faces, [0]);
+        assert_eq!(runtime.snapshot().last_plan.unwrap().selected_faces, 1);
 
         plan(&mut runtime, (8, 2));
         runtime.record_publication_failure("synthetic upload rollback");
@@ -965,6 +1030,7 @@ mod tests {
         let staged_disable = runtime.snapshot();
         assert_eq!(staged_disable.state, "staged-disable");
         assert_eq!(staged_disable.published_face, Some(0));
+        assert_eq!(staged_disable.published_faces, [0]);
         assert_eq!(staged_disable.pose_revision, Some(8));
         runtime.record_refresh_failure("synthetic disable refresh rejection");
         let rolled_back_disable = runtime.snapshot();
@@ -979,6 +1045,113 @@ mod tests {
         let disabled = runtime.snapshot();
         assert_eq!(disabled.state, "disabled");
         assert_eq!(disabled.published_face, None);
+        assert!(disabled.published_faces.is_empty());
         assert_eq!(disabled.pose_revision, None);
+    }
+
+    #[wasm_bindgen_test]
+    fn runtime_groups_one_transactional_multi_face_frontier() {
+        let positions = [
+            [-0.5, -0.5, 0.0],
+            [0.5, -0.5, 0.0],
+            [-0.5, 0.5, 0.0],
+            [0.5, 0.5, 0.0],
+        ];
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [2, 1, 3]],
+        );
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let patches = [
+            QBTriPatch::flat(positions[0], positions[1], positions[2]),
+            QBTriPatch::flat(positions[2], positions[1], positions[3]),
+        ];
+        let selected = [
+            SelectedScreenPatch {
+                source_face: 1,
+                transformed_patch: &patches[1],
+            },
+            SelectedScreenPatch {
+                source_face: 0,
+                transformed_patch: &patches[0],
+            },
+        ];
+        let resident = ResidentLod {
+            canonical: [1; 3],
+            perm_index: 0,
+            parity_bucket: 0,
+        };
+        let atlas_triangles = BTreeMap::from([([1; 3], 1)]);
+        let mut groups = BTreeMap::new();
+        let mut runtime = AdaptivePickedRuntime::default();
+        runtime.configure(AdaptivePickedConfig {
+            face: 0,
+            min_px_per_segment: 1.0,
+            max_px_per_segment: 10_000.0,
+            policy: ScreenPartitionPolicy {
+                max_depth: 0,
+                max_leaves: 1,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_total_leaves: 2,
+            max_triangles: 2,
+        });
+
+        runtime
+            .plan_selected_and_group(
+                &selected,
+                2,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((3, 1)),
+                &[Some(resident); 2],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 2],
+                &[0; 2],
+                &[0; 2],
+                &mut groups,
+            )
+            .unwrap();
+        assert_eq!(groups.values().map(Vec::len).sum::<usize>(), 2);
+        assert_eq!(runtime.snapshot().state, "staged");
+
+        let staged_groups = groups.clone();
+        let second_plan = runtime.plan_selected_and_group(
+            &selected,
+            2,
+            &IDENTITY,
+            [640.0, 480.0],
+            Some((4, 1)),
+            &[Some(resident); 2],
+            resident,
+            &topology,
+            1,
+            4,
+            &atlas_triangles,
+            &[0; 2],
+            &[0; 2],
+            &[0; 2],
+            &mut groups,
+        );
+        assert_eq!(
+            second_plan.unwrap_err(),
+            "adaptive plan is already awaiting publication",
+        );
+        assert_eq!(groups, staged_groups);
+        assert_eq!(runtime.snapshot().state, "staged");
+        assert_eq!(runtime.snapshot().pose_revision, Some(3));
+        assert_eq!(runtime.snapshot().attempts, 1);
+
+        runtime.commit_publication();
+        let snapshot = runtime.snapshot();
+        assert_eq!(snapshot.state, "active");
+        assert_eq!(snapshot.published_face, None);
+        assert_eq!(snapshot.published_faces, [0, 1]);
+        assert_eq!(snapshot.last_plan.unwrap().selected_faces, 2);
+        assert_eq!(snapshot.last_triangles, 2);
     }
 }
