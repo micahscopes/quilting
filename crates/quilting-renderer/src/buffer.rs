@@ -420,11 +420,11 @@ pub fn create_patch_input_vao(
         let vao = gl.create_vertex_array().map_err(|e| format!("patch input vao: {e}"))?;
         gl.bind_vertex_array(Some(vao));
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(*topology_buf));
-        for &(loc, attr_offset) in &instance_layout::BATCH_TOPOLOGY_ATTR_MAP {
+        for &(loc, attr_offset, components) in &instance_layout::BATCH_TOPOLOGY_ATTR_MAP {
             gl.enable_vertex_attrib_array(loc);
             gl.vertex_attrib_pointer_f32(
                 loc,
-                4,
+                components,
                 glow::FLOAT,
                 false,
                 instance_layout::BATCH_TOPOLOGY_STRIDE_BYTES as i32,

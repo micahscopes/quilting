@@ -28,7 +28,9 @@
 //! - The first component of each position is a **vertex index**, not the
 //!   quaternion scalar part. GPU skinning uses it to look up the deformed
 //!   vertex. The rest of the codebase stores quaternions `(w, x, y, z)`, so
-//!   this slot is the one deliberate exception.
+//!   this slot is the one deliberate exception. GPU-prepared adaptive leaves
+//!   instead tag `p0.x` with negative `(depth + 1)` and store the dyadic path
+//!   in `p1.x`; their normals have already been posed before restriction.
 //! - Locations 4, 5, 6 carry the source patch's rational QB weights. Ordinary
 //!   triangle meshes use identity weights; fitted/remeshed patches must retain
 //!   their non-identity weights through preparation and rendering. The shader
@@ -51,18 +53,26 @@ pub const VISIBILITY_STRIDE_BYTES: usize = 4;
 /// guarantees at least 16 vertex attributes, so location 14 remains portable.
 pub const VISIBILITY_ATTR_LOCATION: u32 = 14;
 
-/// Floats in the topology-only record streamed when a face changes draw
-/// bucket. Static control points, UVs, and normals live in a renderer-owned
-/// per-face texture and are fetched by `FACE_ID` during patch preparation.
-pub const BATCH_TOPOLOGY_STRIDE: usize = 8;
+/// Greatest adaptive-leaf depth whose two-bit path is exactly representable
+/// in one topology-stream `f32`. Depth 12 consumes all 24 integer-significand
+/// bits; deeper CPU oracle paths must be refined or represented differently by
+/// a backend rather than silently rounded here.
+pub const BATCH_LEAF_MAX_DEPTH: u8 = 12;
+
+/// Floats in the topology-only record streamed when a patch changes draw
+/// bucket. Static source-face controls, UVs, and normals live in a
+/// renderer-owned texture and are fetched by `FACE_ID`; leaf depth/path then
+/// select an exact dyadic restriction during patch preparation.
+pub const BATCH_TOPOLOGY_STRIDE: usize = 10;
 
 /// Bytes per topology-only batch record.
 pub const BATCH_TOPOLOGY_STRIDE_BYTES: usize = BATCH_TOPOLOGY_STRIDE * 4;
 
-/// Preparation-pass attributes as `(location, byte_offset)`.
-pub const BATCH_TOPOLOGY_ATTR_MAP: [(u32, i32); 2] = [
-    (7, 0),  // edge LODs + permutation
-    (8, 16), // source face ID + current per-vertex visualization LODs
+/// Preparation-pass attributes as `(location, byte_offset, components)`.
+pub const BATCH_TOPOLOGY_ATTR_MAP: [(u32, i32, i32); 3] = [
+    (7, 0, 4),  // edge LODs + permutation
+    (8, 16, 4), // source face ID + current per-vertex visualization LODs
+    (1, 32, 2), // adaptive leaf depth + two-bit dyadic path
 ];
 
 /// Float offsets of each field within one instance.
@@ -99,6 +109,10 @@ pub mod batch_offset {
     /// Stable source face ID followed by current per-vertex visualization LODs.
     pub const FACE_ID: usize = 4;
     pub const VERTEX_LODS: usize = 5;
+    /// Dyadic leaf depth. Zero selects the complete authored source face.
+    pub const LEAF_DEPTH: usize = 8;
+    /// Two child bits per level, oldest pair first.
+    pub const LEAF_PATH: usize = 9;
 }
 
 /// Instanced vertex attributes as `(location, byte_offset)`.
@@ -238,12 +252,18 @@ mod tests {
     }
 
     #[test]
-    fn topology_record_is_two_aligned_vec4s() {
-        assert_eq!(BATCH_TOPOLOGY_STRIDE, 8);
-        assert_eq!(BATCH_TOPOLOGY_STRIDE_BYTES, 32);
+    fn topology_record_has_two_vec4s_and_leaf_identity() {
+        assert_eq!(BATCH_TOPOLOGY_STRIDE, 10);
+        assert_eq!(BATCH_TOPOLOGY_STRIDE_BYTES, 40);
         assert_eq!(batch_offset::EDGE_LODS, 0);
         assert_eq!(batch_offset::FACE_ID, 4);
-        assert_eq!(BATCH_TOPOLOGY_ATTR_MAP, [(7, 0), (8, 16)]);
+        assert_eq!(batch_offset::LEAF_DEPTH, 8);
+        assert_eq!(batch_offset::LEAF_PATH, 9);
+        assert_eq!(
+            BATCH_TOPOLOGY_ATTR_MAP,
+            [(7, 0, 4), (8, 16, 4), (1, 32, 2)],
+        );
+        assert_eq!(BATCH_LEAF_MAX_DEPTH, 12);
     }
 
     #[test]

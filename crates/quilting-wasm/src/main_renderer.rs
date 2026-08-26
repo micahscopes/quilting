@@ -521,6 +521,14 @@ fn fill_batch_instance_data(
 
     for (instance_index, member) in members.iter().enumerate() {
         let face = member.face_index as usize;
+        if member.leaf_id.depth > instance_layout::BATCH_LEAF_MAX_DEPTH
+            || member.leaf_id.domain().is_none()
+        {
+            return Err(format!(
+                "face {face} has unsupported adaptive leaf {}:{}",
+                member.leaf_id.depth, member.leaf_id.path,
+            ));
+        }
         let resident = residents.get(face).and_then(|resident| *resident)
             .ok_or_else(|| format!("face {face} has no resident LOD"))?;
         if resident.canonical != key.lod
@@ -542,6 +550,8 @@ fn fill_batch_instance_data(
             vertex_lods[0],
             vertex_lods[1],
             vertex_lods[2],
+            member.leaf_id.depth as f32,
+            member.leaf_id.path as f32,
         ]);
     }
     Ok(required)
@@ -4943,7 +4953,7 @@ mod tests {
     fn stable_face_record_keeps_semantic_node_separate_from_render_state() {
         let resident = batch::ResidentLod::uniform(2);
         let key = batch::RenderBatchKey::from_resident(resident, 7, usize::MAX);
-        let members = [batch::RenderBatchMember {
+        let mut members = [batch::RenderBatchMember {
             face_index: 23,
             leaf_id: quilting_core::screen_partition::ScreenPatchLeafId::ROOT,
             node_index: 91,
@@ -4962,6 +4972,25 @@ mod tests {
 
         assert_eq!(written, instance_layout::BATCH_TOPOLOGY_STRIDE);
         assert_eq!(staging[instance_layout::batch_offset::FACE_ID], 23.0);
+        assert_eq!(staging[instance_layout::batch_offset::LEAF_DEPTH], 0.0);
+        assert_eq!(staging[instance_layout::batch_offset::LEAF_PATH], 0.0);
+
+        members[0].leaf_id = quilting_core::screen_partition::ScreenPatchLeafId {
+            depth: instance_layout::BATCH_LEAF_MAX_DEPTH,
+            path: (1 << 24) - 1,
+        };
+        fill_batch_instance_data(
+            &[Some(resident); 24],
+            key,
+            &members,
+            &mut staging,
+        )
+        .unwrap();
+        assert_eq!(staging[instance_layout::batch_offset::LEAF_DEPTH], 12.0);
+        assert_eq!(
+            staging[instance_layout::batch_offset::LEAF_PATH],
+            16_777_215.0,
+        );
 
         let mut instances = vec![0.0; 24 * instance_layout::STRIDE];
         let mut nodes = vec![0; 24];
