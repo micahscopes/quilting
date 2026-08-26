@@ -82,11 +82,11 @@ fn bind_pbr_material_state(
     has_env_map: bool,
     env_mip_count: f32,
     bind_transmission: bool,
-    selected: bool,
+    selected_node: i32,
     focus_sphere: [f32; 4],
     focus_field_enabled: bool,
 ) {
-    let selection_tint = if selected {
+    let selection_tint = if selected_node >= 0 {
         [0.16, 0.78, 1.0, 0.13]
     } else {
         [0.0; 4]
@@ -98,7 +98,12 @@ fn bind_pbr_material_state(
         env_mip_count,
         selection_tint,
         focus_sphere,
-        [if focus_field_enabled { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        [
+            if focus_field_enabled { 1.0 } else { 0.0 },
+            selected_node as f32,
+            0.0,
+            0.0,
+        ],
     );
     renderer.pbr_ubo().bind(gl);
 
@@ -249,6 +254,10 @@ struct MainState {
     face_materials: Vec<usize>,
     /// Stable ordinary glTF node index for each source triangle.
     face_nodes: Vec<usize>,
+    /// Render-state representative for each source triangle. Ordinary legacy
+    /// glTF geometry is world-baked and shares one sentinel state; explicitly
+    /// authored/presented nodes remain distinct.
+    face_render_nodes: Vec<usize>,
     materials: Vec<PbrParams>,
     num_faces: usize,
     render_mode: RenderMode,
@@ -445,7 +454,7 @@ struct GpuBatch {
     members: Vec<batch::RenderBatchMember>,
     perm_parity: f32,
     material_index: usize,
-    node_index: usize,
+    render_node_index: usize,
 }
 
 impl GpuBatch {
@@ -512,6 +521,10 @@ fn fill_batch_instance_data(
             vertex_lods[0],
             vertex_lods[1],
             vertex_lods[2],
+            member.node_index as f32,
+            0.0,
+            0.0,
+            0.0,
         ]);
     }
     Ok(required)
@@ -554,7 +567,7 @@ fn create_gpu_batch(
         members: members.to_vec(),
         perm_parity: key.parity(),
         material_index: key.material_index,
-        node_index: key.node_index,
+        render_node_index: key.render_node_index,
     })
 }
 
@@ -585,6 +598,11 @@ const IDENTITY_MOBIUS: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
     0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
 ];
+
+/// Draw-state identity for ordinary glTF primitives whose node transforms were
+/// already baked into the source positions by the loader. No semantic glTF
+/// node can equal this value.
+const SHARED_WORLD_BAKED_RENDER_NODE: usize = usize::MAX;
 
 #[wasm_bindgen(js_name = "mr_init")]
 pub fn mr_init(canvas_id: &str) -> bool {
@@ -663,6 +681,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             batch_update_stats: BatchUpdateStats::default(),
             face_materials: Vec::new(),
             face_nodes: Vec::new(),
+            face_render_nodes: Vec::new(),
             materials: Vec::new(),
             num_faces: 0,
             render_mode: RenderMode::Pbr,
@@ -825,8 +844,10 @@ pub fn mr_set_presentation_node_states(records: &[f32]) -> bool {
             return false;
         };
         if state.presentation_nodes != next {
+            let grouping_changed = state.presentation_nodes.keys().ne(next.keys());
             state.presentation_nodes = next;
             state.render_commands_dirty = true;
+            state.batch_layout_dirty |= grouping_changed;
         }
         true
     })
@@ -862,8 +883,10 @@ pub fn mr_set_authored_node_transforms(records: &[f32]) -> bool {
             return false;
         };
         if state.authored_node_models != next {
+            let grouping_changed = state.authored_node_models.keys().ne(next.keys());
             state.authored_node_models = next;
             state.render_commands_dirty = true;
+            state.batch_layout_dirty |= grouping_changed;
         }
         true
     })
@@ -872,6 +895,7 @@ pub fn mr_set_authored_node_transforms(records: &[f32]) -> bool {
 fn clear_hyperscape_packets() {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
+            renderer.batch_layout_dirty |= renderer.active_hyperscape_camera.is_some();
             renderer.hyperscape_packets.clear();
             renderer.active_hyperscape_camera = None;
             renderer.render_commands_dirty = true;
@@ -937,6 +961,8 @@ fn apply_hyperscape_packets(packets: &[GltfHyperscopePacket]) {
         renderer.render_commands_dirty |= packets_changed
             || renderer.active_hyperscape_camera != previous_camera
             || (renderer.mobius, renderer.mobius_orientation) != previous_global;
+        renderer.batch_layout_dirty |= renderer.active_hyperscape_camera.is_some()
+            != previous_camera.is_some();
     });
 }
 
@@ -963,6 +989,21 @@ fn conformal_state_for_node(renderer: &MainState, node_index: usize) -> EntityCo
         }
     };
     resolved_node_model(state, renderer.authored_node_models.get(&node_index))
+}
+
+fn rebuild_face_render_nodes(renderer: &mut MainState) {
+    renderer.face_render_nodes.clear();
+    renderer.face_render_nodes.reserve(renderer.face_nodes.len());
+    for &node in &renderer.face_nodes {
+        let needs_distinct_render_state = renderer.active_hyperscape_camera.is_some()
+            || renderer.presentation_nodes.contains_key(&node)
+            || renderer.authored_node_models.contains_key(&node);
+        renderer.face_render_nodes.push(if needs_distinct_render_state {
+            node
+        } else {
+            SHARED_WORLD_BAKED_RENDER_NODE
+        });
+    }
 }
 
 fn resolved_node_model(
@@ -1019,12 +1060,12 @@ fn sync_render_batches(renderer: &mut MainState) {
     render_batches.clear();
     render_batches.reserve(renderer.batches.len());
     for batch in renderer.batches.values() {
-        let conformal = conformal_state_for_node(renderer, batch.node_index);
+        let conformal = conformal_state_for_node(renderer, batch.render_node_index);
         let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
         let mut mesh = MeshDraw::from(&batch.mesh);
         if renderer
             .presentation_nodes
-            .get(&batch.node_index)
+            .get(&batch.render_node_index)
             .is_some_and(|state| !state.visible || state.opacity <= 0.0)
         {
             mesh.num_instances = 0;
@@ -1033,7 +1074,7 @@ fn sync_render_batches(renderer: &mut MainState) {
             mesh,
             perm_parity: batch.perm_parity,
             material_index: batch.material_index,
-            node_index: batch.node_index,
+            render_node_index: batch.render_node_index,
             mobius: conformal.mobius,
             orientation_sign: conformal.orientation_sign * euclidean_orientation,
             euclidean_model: conformal.euclidean_model,
@@ -1060,7 +1101,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
         renderer.batches.iter().zip(&renderer.render_batches)
     {
         if gpu_batch.material_index != render_batch.material_index
-            || gpu_batch.node_index != render_batch.node_index
+            || gpu_batch.render_node_index != render_batch.render_node_index
         {
             return Err("retained GPU batch metadata does not match its render view".to_string());
         }
@@ -3381,7 +3422,6 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         let state = match state.as_mut() { Some(s) => s, None => return };
-        let gl = state.renderer.gl();
         state.batch_update_stats.calls += 1;
 
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
@@ -3539,11 +3579,13 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
                 ];
             }
         }
+        rebuild_face_render_nodes(state);
         batch::group_resident_faces_into(
             &state.resident_face_lods,
             &state.resident_vertex_lods,
             &state.face_materials,
             &state.face_nodes,
+            &state.face_render_nodes,
             initial_resident,
             &mut state.batch_groups,
         );
@@ -3556,6 +3598,7 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         // membership remain valid. Only changed buckets repack or upload their
         // source streams; capacity growth rebuilds that bucket alone.
         perf_mark("batch-upload-start");
+        let gl = state.renderer.gl();
         let mut previous_batches = std::mem::take(&mut state.batches);
         let mut next_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();
         let mut retained = 0usize;
@@ -3889,7 +3932,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 let mut submission_stats = RenderSubmissionStats::default();
                 let mut material_updates = 0u64;
                 let mut vertex_uniform_updates = 0u64;
-                let mut active_material: Option<(usize, bool)> = None;
+                let mut active_material: Option<(usize, i32)> = None;
                 let mut active_vertex_state: Option<&RenderBatch> = None;
 
                 // Pass 1: opaque non-transmission
@@ -3911,9 +3954,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         }
                     }
 
-                    let selected = state.selected_node >= 0
-                        && batch.node_index == state.selected_node as usize;
-                    if active_material != Some((material_slot, selected)) {
+                    if active_material != Some((material_slot, state.selected_node)) {
                         bind_pbr_material_state(
                             gl,
                             &state.renderer,
@@ -3923,11 +3964,11 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             has_env,
                             env_mips,
                             false,
-                            selected,
+                            state.selected_node,
                             state.focus_sphere,
                             state.focus_field_enabled,
                         );
-                        active_material = Some((material_slot, selected));
+                        active_material = Some((material_slot, state.selected_node));
                         material_updates += 1;
                     }
 
@@ -4134,9 +4175,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         }
                     }
 
-                    let selected = state.selected_node >= 0
-                        && batch.node_index == state.selected_node as usize;
-                    if active_material != Some((material_slot, selected)) {
+                    if active_material != Some((material_slot, state.selected_node)) {
                         bind_pbr_material_state(
                             gl,
                             &state.renderer,
@@ -4146,11 +4185,11 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             has_env,
                             env_mips,
                             true,
-                            selected,
+                            state.selected_node,
                             state.focus_sphere,
                             state.focus_field_enabled,
                         );
-                        active_material = Some((material_slot, selected));
+                        active_material = Some((material_slot, state.selected_node));
                         material_updates += 1;
                     }
 
@@ -4418,5 +4457,30 @@ mod tests {
         assert_eq!(resolved.mobius, source.mobius);
         assert_eq!(resolved.orientation_sign, source.orientation_sign);
         assert_eq!(resolved.euclidean_model, admitted);
+    }
+
+    #[wasm_bindgen_test]
+    fn compact_batch_record_keeps_semantic_node_separate_from_render_state() {
+        let resident = batch::ResidentLod::uniform(2);
+        let key = batch::RenderBatchKey::from_resident(resident, 7, usize::MAX);
+        let members = [batch::RenderBatchMember {
+            face_index: 23,
+            node_index: 91,
+            permutation_index: 0,
+            vertex_lods: [2; 3],
+        }];
+        let mut staging = [0.0; instance_layout::BATCH_TOPOLOGY_STRIDE];
+
+        let written = fill_batch_instance_data(
+            &[Some(resident); 24],
+            key,
+            &members,
+            &mut staging,
+        )
+        .unwrap();
+
+        assert_eq!(written, instance_layout::BATCH_TOPOLOGY_STRIDE);
+        assert_eq!(staging[instance_layout::batch_offset::FACE_ID], 23.0);
+        assert_eq!(staging[instance_layout::batch_offset::NODE_ID], 91.0);
     }
 }

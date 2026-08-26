@@ -43,15 +43,16 @@ pub const STRIDE_BYTES: usize = STRIDE * 4;
 /// Floats in the topology-only record streamed when a face changes draw
 /// bucket. Static control points, UVs, and normals live in a renderer-owned
 /// per-face texture and are fetched by `FACE_ID` during patch preparation.
-pub const BATCH_TOPOLOGY_STRIDE: usize = 8;
+pub const BATCH_TOPOLOGY_STRIDE: usize = 12;
 
 /// Bytes per topology-only batch record.
 pub const BATCH_TOPOLOGY_STRIDE_BYTES: usize = BATCH_TOPOLOGY_STRIDE * 4;
 
 /// Preparation-pass attributes as `(location, byte_offset)`.
-pub const BATCH_TOPOLOGY_ATTR_MAP: [(u32, i32); 2] = [
+pub const BATCH_TOPOLOGY_ATTR_MAP: [(u32, i32); 3] = [
     (7, 0),  // edge LODs + permutation
     (8, 16), // source face ID + current per-vertex visualization LODs
+    (14, 32), // stable semantic source node ID + reserved values
 ];
 
 /// Float offsets of each field within one instance.
@@ -85,6 +86,8 @@ pub mod batch_offset {
     /// Stable source face ID followed by current per-vertex visualization LODs.
     pub const FACE_ID: usize = 4;
     pub const VERTEX_LODS: usize = 5;
+    /// Stable semantic source node, kept independent of draw-state grouping.
+    pub const NODE_ID: usize = 8;
 }
 
 /// Instanced vertex attributes as `(location, byte_offset)`.
@@ -216,12 +219,13 @@ mod tests {
     }
 
     #[test]
-    fn topology_record_is_two_aligned_vec4s() {
-        assert_eq!(BATCH_TOPOLOGY_STRIDE, 8);
-        assert_eq!(BATCH_TOPOLOGY_STRIDE_BYTES, 32);
+    fn topology_record_is_three_aligned_vec4s() {
+        assert_eq!(BATCH_TOPOLOGY_STRIDE, 12);
+        assert_eq!(BATCH_TOPOLOGY_STRIDE_BYTES, 48);
         assert_eq!(batch_offset::EDGE_LODS, 0);
         assert_eq!(batch_offset::FACE_ID, 4);
-        assert_eq!(BATCH_TOPOLOGY_ATTR_MAP, [(7, 0), (8, 16)]);
+        assert_eq!(batch_offset::NODE_ID, 8);
+        assert_eq!(BATCH_TOPOLOGY_ATTR_MAP, [(7, 0), (8, 16), (14, 32)]);
     }
 
     #[test]

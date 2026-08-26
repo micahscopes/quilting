@@ -122,6 +122,7 @@ struct FragInput {
     @location(9) fade: f32,
     @location(12) mobius_stretch: f32,
     @location(13) source_position_ws: vec3<f32>,
+    @location(14) @interpolate(flat) node_id: f32,
 }
 
 struct PbrOutput {
@@ -152,6 +153,12 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         0.0,
         focus_geodesic,
         pbr.focus_field_params.x > 0.5,
+    );
+    let selection_amount = select(
+        0.0,
+        pbr.selection_tint.a,
+        pbr.focus_field_params.y >= 0.0
+            && abs(in.node_id - pbr.focus_field_params.y) < 0.5,
     );
 
     var n = normalize(in.normal_vs);
@@ -197,7 +204,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         var unlit_color = base.rgb;
         // Gamma correction (base is already linear from sRGB conversion above)
         unlit_color = pow(unlit_color, vec3<f32>(1.0 / 2.2));
-        unlit_color = mix(unlit_color, pbr.selection_tint.rgb, pbr.selection_tint.a);
+        unlit_color = mix(unlit_color, pbr.selection_tint.rgb, selection_amount);
         return PbrOutput(vec4<f32>(unlit_color, alpha), vec4<f32>(in.mobius_stretch, dof_depth, focus_field, 1.0));
     }
 
@@ -454,7 +461,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     color = clamp((exposed * a) / (exposed * b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
     // Gamma correction
     color = pow(color, vec3<f32>(1.0 / 2.2));
-    color = mix(color, pbr.selection_tint.rgb, pbr.selection_tint.a);
+    color = mix(color, pbr.selection_tint.rgb, selection_amount);
 
     return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, dof_depth, focus_field, 1.0));
 }

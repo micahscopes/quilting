@@ -121,7 +121,10 @@ pub struct RenderBatchKey {
     pub lod: [u32; 3],
     pub parity_bucket: u8,
     pub material_index: usize,
-    pub node_index: usize,
+    /// Representative node whose render transform/state is shared by every
+    /// member. This is deliberately distinct from each member's semantic
+    /// source node so world-baked glTF primitives can share one draw bucket.
+    pub render_node_index: usize,
 }
 
 impl Ord for RenderBatchKey {
@@ -132,13 +135,13 @@ impl Ord for RenderBatchKey {
         // expensive pipeline/resource state across adjacent draws.
         (
             self.material_index,
-            self.node_index,
+            self.render_node_index,
             self.lod,
             self.parity_bucket,
         )
             .cmp(&(
                 other.material_index,
-                other.node_index,
+                other.render_node_index,
                 other.lod,
                 other.parity_bucket,
             ))
@@ -155,13 +158,13 @@ impl RenderBatchKey {
     pub fn from_resident(
         resident: ResidentLod,
         material_index: usize,
-        node_index: usize,
+        render_node_index: usize,
     ) -> Self {
         Self {
             lod: resident.canonical,
             parity_bucket: resident.parity_bucket.min(1) as u8,
             material_index,
-            node_index,
+            render_node_index,
         }
     }
 
@@ -176,6 +179,10 @@ impl RenderBatchKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderBatchMember {
     pub face_index: u32,
+    /// Stable semantic glTF node identity. Unlike the render-state
+    /// representative in [`RenderBatchKey`], this survives draw consolidation
+    /// for picking, selection, attribution, and future scene extraction.
+    pub node_index: usize,
     pub permutation_index: u8,
     /// Current resident LOD at each source-face vertex. Keeping this in the
     /// retained membership makes visualization-only changes invalidate the
@@ -224,6 +231,7 @@ pub fn group_resident_faces(
     face_vertex_lods: &[[u32; 3]],
     face_materials: &[usize],
     face_nodes: &[usize],
+    face_render_nodes: &[usize],
     initial: ResidentLod,
 ) -> BTreeMap<RenderBatchKey, Vec<RenderBatchMember>> {
     let mut groups = BTreeMap::<RenderBatchKey, Vec<RenderBatchMember>>::new();
@@ -232,6 +240,7 @@ pub fn group_resident_faces(
         face_vertex_lods,
         face_materials,
         face_nodes,
+        face_render_nodes,
         initial,
         &mut groups,
     );
@@ -245,6 +254,7 @@ pub fn group_resident_faces_into(
     face_vertex_lods: &[[u32; 3]],
     face_materials: &[usize],
     face_nodes: &[usize],
+    face_render_nodes: &[usize],
     initial: ResidentLod,
     groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
 ) {
@@ -256,10 +266,15 @@ pub fn group_resident_faces_into(
         let key = RenderBatchKey::from_resident(
             resident,
             face_materials.get(face_index).copied().unwrap_or(0),
-            face_nodes.get(face_index).copied().unwrap_or(0),
+            face_render_nodes
+                .get(face_index)
+                .copied()
+                .or_else(|| face_nodes.get(face_index).copied())
+                .unwrap_or(0),
         );
         groups.entry(key).or_default().push(RenderBatchMember {
             face_index: face_index as u32,
+            node_index: face_nodes.get(face_index).copied().unwrap_or(0),
             permutation_index: resident.perm_index.min(5) as u8,
             vertex_lods: face_vertex_lods.get(face_index).copied().unwrap_or([1; 3]),
         });
@@ -984,6 +999,7 @@ mod tests {
             &[[8, 8, 8], [8, 8, 8], [4, 4, 4]],
             &[3, 3, 7],
             &[11, 11, 12],
+            &[11, 11, 12],
             ResidentLod::uniform(1),
         );
 
@@ -992,9 +1008,30 @@ mod tests {
             .find(|(key, _)| key.lod == [2, 4, 8])
             .unwrap();
         assert_eq!(anisotropic.0.material_index, 3);
-        assert_eq!(anisotropic.0.node_index, 11);
+        assert_eq!(anisotropic.0.render_node_index, 11);
+        assert_eq!(anisotropic.1[0].node_index, 11);
         assert_eq!(anisotropic.1.iter().map(|member| member.face_index).collect::<Vec<_>>(), vec![0, 1]);
         assert_ne!(anisotropic.1[0].permutation_index, anisotropic.1[1].permutation_index);
+    }
+
+    #[test]
+    fn render_state_grouping_preserves_semantic_node_identity() {
+        let groups = group_resident_faces(
+            &[Some(ResidentLod::uniform(1)); 3],
+            &[[1; 3]; 3],
+            &[4; 3],
+            &[101, 202, 303],
+            &[usize::MAX; 3],
+            ResidentLod::uniform(1),
+        );
+
+        assert_eq!(groups.len(), 1);
+        let (key, members) = groups.first_key_value().unwrap();
+        assert_eq!(key.render_node_index, usize::MAX);
+        assert_eq!(
+            members.iter().map(|member| member.node_index).collect::<Vec<_>>(),
+            vec![101, 202, 303],
+        );
     }
 
     #[test]
@@ -1003,19 +1040,19 @@ mod tests {
             lod: [64, 64, 64],
             parity_bucket: 1,
             material_index: 2,
-            node_index: 9,
+            render_node_index: 9,
         };
         let low_lod_later_material = RenderBatchKey {
             lod: [1, 1, 1],
             parity_bucket: 0,
             material_index: 3,
-            node_index: 0,
+            render_node_index: 0,
         };
         let same_material_later_node = RenderBatchKey {
             lod: [1, 1, 1],
             parity_bucket: 0,
             material_index: 2,
-            node_index: 10,
+            render_node_index: 10,
         };
 
         assert!(high_lod_first_material < low_lod_later_material);
@@ -1034,11 +1071,13 @@ mod tests {
             &[[8, 8, 8]],
             &[0],
             &[0],
+            &[0],
             ResidentLod::uniform(1),
         );
         let second = group_resident_faces(
             &[Some(b)],
             &[[8, 8, 8]],
+            &[0],
             &[0],
             &[0],
             ResidentLod::uniform(1),
@@ -1056,6 +1095,7 @@ mod tests {
             &[[4, 4, 4]; 8],
             &[0; 8],
             &[0; 8],
+            &[0; 8],
             ResidentLod::uniform(1),
             &mut groups,
         );
@@ -1064,6 +1104,7 @@ mod tests {
         group_resident_faces_into(
             &[Some(resident); 2],
             &[[4, 4, 4]; 2],
+            &[0; 2],
             &[0; 2],
             &[0; 2],
             ResidentLod::uniform(1),
@@ -1098,12 +1139,14 @@ mod tests {
             &face_vertex_lods,
             &[0, 0],
             &[0, 0],
+            &[0, 0],
             ResidentLod::uniform(1),
         );
         face_vertex_lods[0][0] *= 2;
         let second = group_resident_faces(
             &residents,
             &face_vertex_lods,
+            &[0, 0],
             &[0, 0],
             &[0, 0],
             ResidentLod::uniform(1),

@@ -764,10 +764,11 @@ mod tests {
                 lod: [2, 2, 2],
                 parity_bucket: 0,
                 material_index,
-                node_index: 0,
+                render_node_index: 0,
             },
             members: vec![RenderBatchMember {
                 face_index,
+                node_index: 0,
                 permutation_index: 0,
                 vertex_lods: [2; 3],
             }],
