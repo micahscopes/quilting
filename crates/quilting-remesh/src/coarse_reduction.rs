@@ -31,6 +31,9 @@ pub struct CoarseReductionConfig {
     /// This is a sampled geometric-quality gate, not a fold-free certificate
     /// and not part of meshoptimizer's position error.
     pub maximum_normal_deviation_degrees: f64,
+    /// Hard BVH leaf-candidate budget for one reduced-chart quality check.
+    /// Source samples are retained once per chart across backoff attempts.
+    pub maximum_quality_candidate_tests: usize,
 }
 
 impl Default for CoarseReductionConfig {
@@ -39,6 +42,7 @@ impl Default for CoarseReductionConfig {
             target_ratio: 0.25,
             target_error: 0.01,
             maximum_normal_deviation_degrees: 60.0,
+            maximum_quality_candidate_tests: 50_000_000,
         }
     }
 }
@@ -74,6 +78,14 @@ pub struct ReducedChart {
     /// Maximum sampled linear-normal deviation retained for calibration. This
     /// is zero for exact-source fallback.
     pub maximum_normal_deviation_degrees: f64,
+    /// Source samples actually queried for the selected reduced candidate.
+    /// Exact-source fallback is independently validated and reports zero.
+    pub quality_sample_count: usize,
+    /// Reduced triangles visited in BVH leaves while validating the selected
+    /// candidate.
+    pub quality_candidate_tests: usize,
+    /// BVH nodes visited while validating the selected candidate.
+    pub quality_bvh_node_visits: usize,
 }
 
 /// Compact, actionable evidence for one rejected meshoptimizer candidate.
@@ -83,6 +95,10 @@ pub struct RejectedReductionCandidate {
     pub category: ReductionRejectionCategory,
     pub reason: &'static str,
     pub quality: Option<ReductionQualityEvidence>,
+    /// Completed reduced-triangle tests before this candidate was rejected.
+    pub quality_candidate_tests: usize,
+    /// BVH nodes visited before this candidate was rejected.
+    pub quality_bvh_node_visits: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,6 +118,7 @@ pub enum ReductionRejectionCategory {
     InvalidReducedTopology,
     BoundaryChanged,
     GeometricQuality,
+    QualityWorkBudget,
     Unexpected,
 }
 
@@ -113,6 +130,7 @@ impl std::fmt::Display for ReductionRejectionCategory {
             Self::InvalidReducedTopology => "invalid-reduced-topology",
             Self::BoundaryChanged => "boundary-changed",
             Self::GeometricQuality => "geometric-quality",
+            Self::QualityWorkBudget => "quality-work-budget",
             Self::Unexpected => "unexpected-candidate-error",
         };
         formatter.write_str(name)
@@ -132,6 +150,7 @@ pub enum CoarseReductionError {
     InvalidTargetRatio(f64),
     InvalidTargetError(f32),
     InvalidMaximumNormalDeviation(f64),
+    InvalidQualityCandidateTestBudget(usize),
     UnknownSourceFallback(ChartKey),
     CountOverflow,
     IndexOverflow {
@@ -165,6 +184,14 @@ pub enum CoarseReductionError {
         measured_millidegrees: u32,
         maximum_millidegrees: u32,
         normalized_squared_distance: f64,
+        quality_candidate_tests: usize,
+        quality_bvh_node_visits: usize,
+    },
+    QualityCandidateTestBudgetExceeded {
+        chart: ChartKey,
+        requested: usize,
+        maximum: usize,
+        quality_bvh_node_visits: usize,
     },
 }
 
@@ -181,6 +208,10 @@ impl std::fmt::Display for CoarseReductionError {
             Self::InvalidMaximumNormalDeviation(value) => write!(
                 formatter,
                 "maximum normal deviation {value} is not in [0, 90] degrees",
+            ),
+            Self::InvalidQualityCandidateTestBudget(value) => write!(
+                formatter,
+                "quality candidate-test budget {value} is zero",
             ),
             Self::UnknownSourceFallback(chart) => write!(
                 formatter,
@@ -226,6 +257,8 @@ impl std::fmt::Display for CoarseReductionError {
                 measured_millidegrees,
                 maximum_millidegrees,
                 normalized_squared_distance,
+                quality_candidate_tests: _,
+                quality_bvh_node_visits: _,
             } => write!(
                 formatter,
                 "reduced chart {:?} source face {source_face:?} sample {source_sample_ordinal} nearest coarse face {matched_coarse_face} has {:.3}° linear-normal deviation (limit {:.3}°) at normalized squared distance {:.6e}",
@@ -233,6 +266,16 @@ impl std::fmt::Display for CoarseReductionError {
                 *measured_millidegrees as f64 / 1_000.0,
                 *maximum_millidegrees as f64 / 1_000.0,
                 normalized_squared_distance,
+            ),
+            Self::QualityCandidateTestBudgetExceeded {
+                chart,
+                requested,
+                maximum,
+                ..
+            } => write!(
+                formatter,
+                "reduced chart {:?} quality search requested candidate test {requested} beyond limit {maximum}",
+                chart.source_faces,
             ),
         }
     }
@@ -254,6 +297,22 @@ struct NormalizedPositions {
     extent: f64,
     exact: Vec<[f64; 3]>,
     quantized: Vec<[f32; 3]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct QualitySample {
+    source_face: SourceFaceId,
+    source_sample_ordinal: u8,
+    point: [f64; 3],
+    orientation: [f64; 3],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct QualityValidation {
+    sample_count: usize,
+    candidate_tests: usize,
+    bvh_node_visits: usize,
+    maximum_normal_deviation_degrees: f64,
 }
 
 impl NormalizedPositions {
@@ -296,6 +355,9 @@ fn validate_config(config: &CoarseReductionConfig) -> Result<(), CoarseReduction
         return Err(CoarseReductionError::InvalidMaximumNormalDeviation(
             config.maximum_normal_deviation_degrees,
         ));
+    }
+    if config.maximum_quality_candidate_tests == 0 {
+        return Err(CoarseReductionError::InvalidQualityCandidateTestBudget(0));
     }
     Ok(())
 }
@@ -400,6 +462,8 @@ fn rejection_evidence(
     error: CoarseReductionError,
 ) -> RejectedReductionCandidate {
     let mut quality = None;
+    let mut quality_candidate_tests = 0;
+    let mut quality_bvh_node_visits = 0;
     let (category, reason) = match error {
         CoarseReductionError::CountOverflow => (
             ReductionRejectionCategory::CountOverflow,
@@ -422,8 +486,12 @@ fn rejection_evidence(
             measured_millidegrees,
             maximum_millidegrees,
             normalized_squared_distance,
+            quality_candidate_tests: candidate_tests,
+            quality_bvh_node_visits: node_visits,
             ..
         } => {
+            quality_candidate_tests = candidate_tests;
+            quality_bvh_node_visits = node_visits;
             quality = Some(ReductionQualityEvidence {
                 source_face,
                 source_sample_ordinal,
@@ -437,6 +505,18 @@ fn rejection_evidence(
                 "source interior sample exceeds the linear-normal deviation limit",
             )
         }
+        CoarseReductionError::QualityCandidateTestBudgetExceeded {
+            maximum,
+            quality_bvh_node_visits: node_visits,
+            ..
+        } => {
+            quality_candidate_tests = maximum;
+            quality_bvh_node_visits = node_visits;
+            (
+                ReductionRejectionCategory::QualityWorkBudget,
+                "quality search exceeded its reduced-triangle candidate-test budget",
+            )
+        }
         _ => (
             ReductionRejectionCategory::Unexpected,
             "candidate evaluation returned an unexpected error category",
@@ -447,6 +527,8 @@ fn rejection_evidence(
         category,
         reason,
         quality,
+        quality_candidate_tests,
+        quality_bvh_node_visits,
     }
 }
 
@@ -648,13 +730,59 @@ const QUALITY_SAMPLE_BARYCENTRICS: [[f64; 3]; 4] = [
     [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
 ];
 
-fn validate_candidate_quality(
+fn quality_samples(
     source: &CutChart,
     positions: &NormalizedPositions,
+) -> Result<Vec<QualitySample>, CoarseReductionError> {
+    let sample_count = source
+        .triangles
+        .len()
+        .checked_mul(QUALITY_SAMPLE_BARYCENTRICS.len())
+        .ok_or(CoarseReductionError::CountOverflow)?;
+    let mut samples = Vec::with_capacity(sample_count);
+    for (local_face, triangle) in source.triangles.iter().enumerate() {
+        let source_face = *source.key.source_faces.get(local_face).ok_or(
+            CoarseReductionError::InvalidBackendGeometry {
+                chart: source.key.clone(),
+                reason: "its stable source-face table does not match its triangles",
+            },
+        )?;
+        let source_triangle = triangle.map(|vertex| positions.exact[vertex]);
+        let orientation = crate::geometry::vec3_cross(
+            crate::geometry::vec3_sub(source_triangle[1], source_triangle[0]),
+            crate::geometry::vec3_sub(source_triangle[2], source_triangle[0]),
+        );
+        for (sample_ordinal, barycentric) in QUALITY_SAMPLE_BARYCENTRICS.iter().enumerate() {
+            samples.push(QualitySample {
+                source_face,
+                source_sample_ordinal: sample_ordinal as u8,
+                point: [
+                    source_triangle[0][0] * barycentric[0]
+                        + source_triangle[1][0] * barycentric[1]
+                        + source_triangle[2][0] * barycentric[2],
+                    source_triangle[0][1] * barycentric[0]
+                        + source_triangle[1][1] * barycentric[1]
+                        + source_triangle[2][1] * barycentric[2],
+                    source_triangle[0][2] * barycentric[0]
+                        + source_triangle[1][2] * barycentric[1]
+                        + source_triangle[2][2] * barycentric[2],
+                ],
+                orientation,
+            });
+        }
+    }
+    Ok(samples)
+}
+
+fn validate_candidate_quality(
+    chart: &ChartKey,
+    positions: &NormalizedPositions,
+    samples: &[QualitySample],
     candidate_vertices: &[CutVertex],
     candidate_triangles: &[[usize; 3]],
     maximum_normal_deviation_degrees: f64,
-) -> Result<f64, CoarseReductionError> {
+    maximum_candidate_tests: usize,
+) -> Result<QualityValidation, CoarseReductionError> {
     let candidate_index = TriangleBvh::new(
         candidate_triangles
             .iter()
@@ -681,55 +809,54 @@ fn validate_candidate_quality(
         maximum_normal_deviation_degrees.to_radians().cos()
     };
     let mut maximum_measured_degrees = 0.0f64;
-    for (local_face, triangle) in source.triangles.iter().enumerate() {
-        let source_triangle = triangle.map(|vertex| positions.exact[vertex]);
-        let source_orientation = crate::geometry::vec3_cross(
-            crate::geometry::vec3_sub(source_triangle[1], source_triangle[0]),
-            crate::geometry::vec3_sub(source_triangle[2], source_triangle[0]),
-        );
-        for (sample_ordinal, barycentric) in QUALITY_SAMPLE_BARYCENTRICS.iter().enumerate() {
-            let sample = [
-                source_triangle[0][0] * barycentric[0]
-                    + source_triangle[1][0] * barycentric[1]
-                    + source_triangle[2][0] * barycentric[2],
-                source_triangle[0][1] * barycentric[0]
-                    + source_triangle[1][1] * barycentric[1]
-                    + source_triangle[2][1] * barycentric[2],
-                source_triangle[0][2] * barycentric[0]
-                    + source_triangle[1][2] * barycentric[1]
-                    + source_triangle[2][2] * barycentric[2],
-            ];
-            let hit = candidate_index
-                .nearest(sample, &mut scratch, &mut counters, usize::MAX)
-                .map_err(|error| match error {
-                    SearchError::CountOverflow | SearchError::CandidateBudgetExceeded { .. } => {
-                        CoarseReductionError::CountOverflow
+    for sample in samples {
+        let hit = candidate_index
+            .nearest(
+                sample.point,
+                &mut scratch,
+                &mut counters,
+                maximum_candidate_tests,
+            )
+            .map_err(|error| match error {
+                SearchError::CountOverflow => CoarseReductionError::CountOverflow,
+                SearchError::CandidateBudgetExceeded { attempted, maximum } => {
+                    CoarseReductionError::QualityCandidateTestBudgetExceeded {
+                        chart: chart.clone(),
+                        requested: attempted,
+                        maximum,
+                        quality_bvh_node_visits: counters.node_visits,
                     }
-                })?
-                .ok_or_else(|| CoarseReductionError::InvalidMeshoptOutput {
-                    chart: source.key.clone(),
-                    reason: "the validated candidate has no triangle for quality sampling",
-                })?;
-            let denominator = crate::geometry::vec3_len(source_orientation)
-                * crate::geometry::vec3_len(hit.orientation);
-            let cosine =
-                crate::geometry::vec3_dot(source_orientation, hit.orientation) / denominator;
-            let measured_degrees = cosine.clamp(-1.0, 1.0).acos().to_degrees();
-            if !cosine.is_finite() || cosine < minimum_cosine {
-                return Err(CoarseReductionError::GeometricQualityExceeded {
-                    chart: source.key.clone(),
-                    source_face: source.key.source_faces[local_face],
-                    source_sample_ordinal: sample_ordinal as u8,
-                    matched_coarse_face: hit.stable_index,
-                    measured_millidegrees: millidegrees(measured_degrees),
-                    maximum_millidegrees: millidegrees(maximum_normal_deviation_degrees),
-                    normalized_squared_distance: hit.squared_distance,
-                });
-            }
-            maximum_measured_degrees = maximum_measured_degrees.max(measured_degrees);
+                }
+            })?
+            .ok_or_else(|| CoarseReductionError::InvalidMeshoptOutput {
+                chart: chart.clone(),
+                reason: "the validated candidate has no triangle for quality sampling",
+            })?;
+        let denominator = crate::geometry::vec3_len(sample.orientation)
+            * crate::geometry::vec3_len(hit.orientation);
+        let cosine = crate::geometry::vec3_dot(sample.orientation, hit.orientation) / denominator;
+        let measured_degrees = cosine.clamp(-1.0, 1.0).acos().to_degrees();
+        if !cosine.is_finite() || cosine < minimum_cosine {
+            return Err(CoarseReductionError::GeometricQualityExceeded {
+                chart: chart.clone(),
+                source_face: sample.source_face,
+                source_sample_ordinal: sample.source_sample_ordinal,
+                matched_coarse_face: hit.stable_index,
+                measured_millidegrees: millidegrees(measured_degrees),
+                maximum_millidegrees: millidegrees(maximum_normal_deviation_degrees),
+                normalized_squared_distance: hit.squared_distance,
+                quality_candidate_tests: counters.candidate_tests,
+                quality_bvh_node_visits: counters.node_visits,
+            });
         }
+        maximum_measured_degrees = maximum_measured_degrees.max(measured_degrees);
     }
-    Ok(maximum_measured_degrees)
+    Ok(QualityValidation {
+        sample_count: samples.len(),
+        candidate_tests: counters.candidate_tests,
+        bvh_node_visits: counters.node_visits,
+        maximum_normal_deviation_degrees: maximum_measured_degrees,
+    })
 }
 
 fn compact_and_validate(
@@ -834,13 +961,20 @@ fn reduce_chart(
     let input_index_count = indices.len();
     let requested = requested_triangles(source_triangles, config.target_ratio)?;
     let (source_vertices, source_faces, source_boundary) = compact_and_validate(source, &indices)?;
-    let source_value = (source_vertices, source_faces, source_boundary, None, 0.0);
+    let source_value = (
+        source_vertices,
+        source_faces,
+        source_boundary,
+        None,
+        QualityValidation::default(),
+    );
     let (selected_target_triangles, selected, backend_attempts, rejected_candidates) = if requested
         < source_triangles
         && !force_source
     {
         let positions = normalized_positions(source)?;
         validate_backend_geometry(source, &positions)?;
+        let quality_samples = quality_samples(source, &positions)?;
         let locks = source
             .vertices
             .iter()
@@ -874,19 +1008,21 @@ fn reduce_chart(
             }
             validate_meshopt_output_geometry(source, &positions, &result)?;
             let (vertices, triangles, boundary_edges) = compact_and_validate(source, &result)?;
-            let maximum_normal_deviation_degrees = validate_candidate_quality(
-                source,
+            let quality = validate_candidate_quality(
+                &source.key,
                 &positions,
+                &quality_samples,
                 &vertices,
                 &triangles,
                 config.maximum_normal_deviation_degrees,
+                config.maximum_quality_candidate_tests,
             )?;
             Ok((
                 vertices,
                 triangles,
                 boundary_edges,
                 Some(result_error),
-                maximum_normal_deviation_degrees,
+                quality,
             ))
         })
     } else {
@@ -896,13 +1032,7 @@ fn reduce_chart(
         .into_iter()
         .map(|(target, error)| rejection_evidence(target, error))
         .collect::<Vec<_>>();
-    let (
-        vertices,
-        triangles,
-        boundary_edges,
-        backend_result_error,
-        maximum_normal_deviation_degrees,
-    ) = selected;
+    let (vertices, triangles, boundary_edges, backend_result_error, quality) = selected;
     let used_source_fallback = requested < source_triangles && backend_result_error.is_none();
     Ok(ReducedChart {
         key: source.key.clone(),
@@ -916,7 +1046,10 @@ fn reduce_chart(
         backend_attempts,
         rejected_candidates,
         backend_result_error,
-        maximum_normal_deviation_degrees,
+        maximum_normal_deviation_degrees: quality.maximum_normal_deviation_degrees,
+        quality_sample_count: quality.sample_count,
+        quality_candidate_tests: quality.candidate_tests,
+        quality_bvh_node_visits: quality.bvh_node_visits,
     })
 }
 
@@ -1004,24 +1137,33 @@ mod tests {
         assert!(attempted.contains(&57));
     }
 
-    type ReductionSignature = (
-        ChartKey,
-        Vec<CutVertexKey>,
-        Vec<[CutVertexKey; 3]>,
-        Vec<[CutVertexKey; 2]>,
-        usize,
-        usize,
-        bool,
-        usize,
-        Vec<(
-            usize,
-            ReductionRejectionCategory,
-            &'static str,
-            Option<(SourceFaceId, u8, usize, u32, u32, u64)>,
-        )>,
-        Option<u32>,
-        u64,
-    );
+    #[derive(Debug, PartialEq)]
+    struct RejectionSignature {
+        target_triangles: usize,
+        category: ReductionRejectionCategory,
+        reason: &'static str,
+        quality: Option<(SourceFaceId, u8, usize, u32, u32, u64)>,
+        quality_candidate_tests: usize,
+        quality_bvh_node_visits: usize,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ReductionSignature {
+        key: ChartKey,
+        vertices: Vec<CutVertexKey>,
+        triangles: Vec<[CutVertexKey; 3]>,
+        boundary_edges: Vec<[CutVertexKey; 2]>,
+        requested_triangles: usize,
+        selected_target_triangles: usize,
+        used_source_fallback: bool,
+        backend_attempts: usize,
+        rejected_candidates: Vec<RejectionSignature>,
+        backend_result_error: Option<u32>,
+        maximum_normal_deviation_bits: u64,
+        quality_sample_count: usize,
+        quality_candidate_tests: usize,
+        quality_bvh_node_visits: usize,
+    }
 
     struct Grid {
         positions: Vec<[f64; 3]>,
@@ -1081,52 +1223,53 @@ mod tests {
         topology
             .charts
             .iter()
-            .map(|chart| {
-                (
-                    chart.key.clone(),
-                    chart
-                        .vertices
-                        .iter()
-                        .map(|vertex| vertex.key.clone())
-                        .collect(),
-                    chart
-                        .triangles
-                        .iter()
-                        .map(|triangle| triangle.map(|vertex| chart.vertices[vertex].key.clone()))
-                        .collect(),
-                    chart
-                        .boundary_edges
-                        .iter()
-                        .map(|boundary| stable_edge(&chart.vertices, *boundary))
-                        .collect(),
-                    chart.requested_triangles,
-                    chart.selected_target_triangles,
-                    chart.used_source_fallback,
-                    chart.backend_attempts,
-                    chart
-                        .rejected_candidates
-                        .iter()
-                        .map(|candidate| {
+            .map(|chart| ReductionSignature {
+                key: chart.key.clone(),
+                vertices: chart
+                    .vertices
+                    .iter()
+                    .map(|vertex| vertex.key.clone())
+                    .collect(),
+                triangles: chart
+                    .triangles
+                    .iter()
+                    .map(|triangle| triangle.map(|vertex| chart.vertices[vertex].key.clone()))
+                    .collect(),
+                boundary_edges: chart
+                    .boundary_edges
+                    .iter()
+                    .map(|boundary| stable_edge(&chart.vertices, *boundary))
+                    .collect(),
+                requested_triangles: chart.requested_triangles,
+                selected_target_triangles: chart.selected_target_triangles,
+                used_source_fallback: chart.used_source_fallback,
+                backend_attempts: chart.backend_attempts,
+                rejected_candidates: chart
+                    .rejected_candidates
+                    .iter()
+                    .map(|candidate| RejectionSignature {
+                        target_triangles: candidate.target_triangles,
+                        category: candidate.category,
+                        reason: candidate.reason,
+                        quality: candidate.quality.map(|quality| {
                             (
-                                candidate.target_triangles,
-                                candidate.category,
-                                candidate.reason,
-                                candidate.quality.map(|quality| {
-                                    (
-                                        quality.source_face,
-                                        quality.source_sample_ordinal,
-                                        quality.matched_coarse_face,
-                                        quality.measured_millidegrees,
-                                        quality.maximum_millidegrees,
-                                        quality.normalized_squared_distance.to_bits(),
-                                    )
-                                }),
+                                quality.source_face,
+                                quality.source_sample_ordinal,
+                                quality.matched_coarse_face,
+                                quality.measured_millidegrees,
+                                quality.maximum_millidegrees,
+                                quality.normalized_squared_distance.to_bits(),
                             )
-                        })
-                        .collect(),
-                    chart.backend_result_error.map(f32::to_bits),
-                    chart.maximum_normal_deviation_degrees.to_bits(),
-                )
+                        }),
+                        quality_candidate_tests: candidate.quality_candidate_tests,
+                        quality_bvh_node_visits: candidate.quality_bvh_node_visits,
+                    })
+                    .collect(),
+                backend_result_error: chart.backend_result_error.map(f32::to_bits),
+                maximum_normal_deviation_bits: chart.maximum_normal_deviation_degrees.to_bits(),
+                quality_sample_count: chart.quality_sample_count,
+                quality_candidate_tests: chart.quality_candidate_tests,
+                quality_bvh_node_visits: chart.quality_bvh_node_visits,
             })
             .collect()
     }
@@ -1435,18 +1578,39 @@ mod tests {
             .charts
             .remove(0);
         let positions = normalized_positions(&chart).unwrap();
-        let exact =
-            validate_candidate_quality(&chart, &positions, &chart.vertices, &chart.triangles, 60.0)
-                .unwrap();
-        assert!(exact < 1.0e-8);
+        let samples = quality_samples(&chart, &positions).unwrap();
+        let exact = validate_candidate_quality(
+            &chart.key,
+            &positions,
+            &samples,
+            &chart.vertices,
+            &chart.triangles,
+            60.0,
+            usize::MAX,
+        )
+        .unwrap();
+        assert!(exact.maximum_normal_deviation_degrees < 1.0e-8);
+        assert_eq!(exact.sample_count, source.triangles.len() * 4);
+        assert!(exact.candidate_tests >= exact.sample_count);
+        assert!(exact.bvh_node_visits >= exact.sample_count);
 
         let mut folded = chart.vertices.clone();
         folded[3].position[2] = 10.0;
         assert!(matches!(
-            validate_candidate_quality(&chart, &positions, &folded, &chart.triangles, 60.0),
+            validate_candidate_quality(
+                &chart.key,
+                &positions,
+                &samples,
+                &folded,
+                &chart.triangles,
+                60.0,
+                usize::MAX,
+            ),
             Err(CoarseReductionError::GeometricQualityExceeded {
                 measured_millidegrees: 84_289..,
                 maximum_millidegrees: 60_000,
+                quality_candidate_tests: 1..,
+                quality_bvh_node_visits: 1..,
                 ..
             })
         ));
@@ -1503,5 +1667,57 @@ mod tests {
             ),
             Err(CoarseReductionError::InvalidMaximumNormalDeviation(90.1))
         ));
+        assert!(matches!(
+            reduce_source_charts(
+                &input(&source),
+                &CoarseReductionConfig {
+                    maximum_quality_candidate_tests: 0,
+                    ..CoarseReductionConfig::default()
+                },
+            ),
+            Err(CoarseReductionError::InvalidQualityCandidateTestBudget(0))
+        ));
+    }
+
+    #[test]
+    fn quality_work_budget_fails_closed_with_deterministic_evidence() {
+        let source = grid(5);
+        let reduced = reduce_source_charts(
+            &input(&source),
+            &CoarseReductionConfig {
+                target_ratio: 0.25,
+                target_error: 1.0,
+                maximum_quality_candidate_tests: 1,
+                ..CoarseReductionConfig::default()
+            },
+        )
+        .unwrap();
+        let chart = &reduced.charts[0];
+        assert!(chart.used_source_fallback);
+        assert_eq!(chart.triangles.len(), source.triangles.len());
+        assert_eq!(chart.quality_sample_count, 0);
+        assert_eq!(chart.quality_candidate_tests, 0);
+        assert_eq!(chart.quality_bvh_node_visits, 0);
+        assert_eq!(chart.backend_attempts, chart.rejected_candidates.len());
+        assert!(!chart.rejected_candidates.is_empty());
+        assert!(chart.rejected_candidates.iter().all(|candidate| {
+            candidate.category == ReductionRejectionCategory::QualityWorkBudget
+                && candidate.quality.is_none()
+                && candidate.quality_candidate_tests == 1
+                && candidate.quality_bvh_node_visits > 0
+        }));
+
+        let reordered_source = reversed_buffers(&source);
+        let reordered = reduce_source_charts(
+            &input(&reordered_source),
+            &CoarseReductionConfig {
+                target_ratio: 0.25,
+                target_error: 1.0,
+                maximum_quality_candidate_tests: 1,
+                ..CoarseReductionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(signature(&reduced), signature(&reordered));
     }
 }

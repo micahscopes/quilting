@@ -95,6 +95,9 @@ pub struct ChartReductionReport {
     pub rejected_candidates: Vec<RejectedReductionCandidate>,
     pub backend_result_error: Option<f32>,
     pub maximum_normal_deviation_degrees: f64,
+    pub quality_sample_count: usize,
+    pub quality_candidate_tests: usize,
+    pub quality_bvh_node_visits: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -498,6 +501,9 @@ fn assemble(
             rejected_candidates: chart.rejected_candidates.clone(),
             backend_result_error: chart.backend_result_error,
             maximum_normal_deviation_degrees: chart.maximum_normal_deviation_degrees,
+            quality_sample_count: chart.quality_sample_count,
+            quality_candidate_tests: chart.quality_candidate_tests,
+            quality_bvh_node_visits: chart.quality_bvh_node_visits,
         });
         for triangle in &chart.triangles {
             let global = rotate_face(

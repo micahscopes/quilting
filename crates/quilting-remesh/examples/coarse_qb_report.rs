@@ -47,6 +47,7 @@ struct Config {
     maximum_normal_deviation_degrees: f64,
     subdivisions: usize,
     maximum_samples: usize,
+    maximum_quality_candidate_tests: usize,
     maximum_candidate_tests: usize,
     probe_sphere: Option<([f64; 3], f64)>,
     only_part: Option<usize>,
@@ -67,6 +68,7 @@ impl Config {
             maximum_normal_deviation_degrees: 60.0,
             subdivisions: 2,
             maximum_samples: 1_000_000,
+            maximum_quality_candidate_tests: 50_000_000,
             maximum_candidate_tests: 50_000_000,
             probe_sphere: None,
             only_part: None,
@@ -100,6 +102,13 @@ impl Config {
                     config.maximum_samples = next_value(&mut args, &flag)?
                         .parse()
                         .map_err(|_| "--maximum-samples must be a positive integer".to_string())?;
+                }
+                "--maximum-quality-candidate-tests" => {
+                    config.maximum_quality_candidate_tests =
+                        next_value(&mut args, &flag)?.parse().map_err(|_| {
+                            "--maximum-quality-candidate-tests must be a positive integer"
+                                .to_string()
+                        })?;
                 }
                 "--maximum-candidate-tests" => {
                     config.maximum_candidate_tests =
@@ -154,7 +163,10 @@ impl Config {
         if !(1..=64).contains(&config.subdivisions) {
             return Err("--subdivisions must be in 1..=64".to_string());
         }
-        if config.maximum_samples == 0 || config.maximum_candidate_tests == 0 {
+        if config.maximum_samples == 0
+            || config.maximum_quality_candidate_tests == 0
+            || config.maximum_candidate_tests == 0
+        {
             return Err("sample and candidate-test budgets must be positive".to_string());
         }
         Ok(config)
@@ -169,6 +181,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 fn usage() -> String {
     "usage: coarse_qb_report <asset.glb> [--ratio 0.25] [--error 0.01] \
      [--max-normal-deviation 60] [--subdivisions 2] [--maximum-samples N] \
+     [--maximum-quality-candidate-tests N] \
      [--maximum-candidate-tests N] \
      [--probe-sphere X Y Z R] [--part N] [--list-only]"
         .to_string()
@@ -316,12 +329,13 @@ fn run(config: &Config) -> Result<(), String> {
         scene.skins.len(),
     );
     println!(
-        "policy: ratio={:.6} error={:.6} sampled_normal_limit={:.3}deg subdivisions={} sample_budget={} candidate_budget={}",
+        "policy: ratio={:.6} error={:.6} sampled_normal_limit={:.3}deg subdivisions={} sample_budget={} quality_candidate_budget={} correspondence_candidate_budget={}",
         config.target_ratio,
         config.target_error,
         config.maximum_normal_deviation_degrees,
         config.subdivisions,
         config.maximum_samples,
+        config.maximum_quality_candidate_tests,
         config.maximum_candidate_tests,
     );
 
@@ -357,6 +371,7 @@ fn run(config: &Config) -> Result<(), String> {
             target_ratio: config.target_ratio,
             target_error: config.target_error,
             maximum_normal_deviation_degrees: config.maximum_normal_deviation_degrees,
+            maximum_quality_candidate_tests: config.maximum_quality_candidate_tests,
         },
         correspondence_subdivisions: config.subdivisions,
         maximum_correspondence_samples: config.maximum_samples,
@@ -671,7 +686,7 @@ fn print_success(success: &Success) {
     );
     for (chart_index, chart) in success.chart_reports.iter().enumerate() {
         println!(
-            "  final_chart={} source_faces={} requested={} selected={} achieved={} backend_attempts={} source_fallback={} backend_error={} sampled_normal_max={:.3}deg",
+            "  final_chart={} source_faces={} requested={} selected={} achieved={} backend_attempts={} source_fallback={} backend_error={} sampled_normal_max={:.3}deg quality_samples={} quality_candidate_tests={} quality_bvh_node_visits={}",
             chart_index,
             chart.key.source_faces.len(),
             chart.requested_triangles,
@@ -684,11 +699,18 @@ fn print_success(success: &Success) {
                 .map(|error| format!("{error:.6e}"))
                 .unwrap_or_else(|| "source".to_string()),
             chart.maximum_normal_deviation_degrees,
+            chart.quality_sample_count,
+            chart.quality_candidate_tests,
+            chart.quality_bvh_node_visits,
         );
         for rejection in &chart.rejected_candidates {
             println!(
-                "    rejected target={} category={} reason={}",
-                rejection.target_triangles, rejection.category, rejection.reason,
+                "    rejected target={} category={} reason={} quality_candidate_tests={} quality_bvh_node_visits={}",
+                rejection.target_triangles,
+                rejection.category,
+                rejection.reason,
+                rejection.quality_candidate_tests,
+                rejection.quality_bvh_node_visits,
             );
             if let Some(quality) = rejection.quality {
                 println!(
