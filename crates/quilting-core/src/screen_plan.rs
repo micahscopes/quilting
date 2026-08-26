@@ -1,9 +1,12 @@
 //! Bounded scene plans for metric-adaptive QB patch restriction.
 //!
-//! A live WebGL2 proof may adapt one selected source face while retaining one
-//! root leaf for every other face. Keeping this assembly backend-neutral makes
-//! the resulting leaf/request stream reusable by WebGPU and prevents browser
-//! state from becoming a second geometry authority.
+//! A live renderer may adapt a bounded set of selected source faces while
+//! retaining one root leaf for every other face. Keeping this assembly
+//! backend-neutral makes the resulting leaf/request stream reusable by WebGL2
+//! and WebGPU and prevents browser state from becoming a second geometry
+//! authority.
+
+use std::collections::BTreeMap;
 
 use crate::patch::{QBPatchDomain, QBTriPatch};
 use crate::screen_leaf_lod::ScreenMeshLeafTopology;
@@ -38,6 +41,30 @@ pub struct PickedScreenMeshPlanRequest<'a> {
     pub source_requested_lods: &'a [[u32; 3]],
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedScreenPatch<'a> {
+    pub source_face: u32,
+    pub transformed_patch: &'a QBTriPatch,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveScreenMeshPlanRequest<'a> {
+    /// Distinct source faces to replace with metric-adaptive dyadic leaves.
+    pub selected_patches: &'a [SelectedScreenPatch<'a>],
+    pub view_projection: &'a [f64; 16],
+    pub viewport: [f64; 2],
+    pub min_px_per_segment: f64,
+    pub max_px_per_segment: f64,
+    pub policy: ScreenPartitionPolicy,
+    pub max_atlas_lod: u32,
+    pub retain_culled_leaves: bool,
+    /// Conservative scene-wide bound on the sum of per-face partition
+    /// frontier capacities before culled leaves are filtered from the output.
+    pub max_partition_leaves: usize,
+    pub max_total_leaves: usize,
+    pub source_requested_lods: &'a [[u32; 3]],
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PickedScreenMeshPlanDiagnostic {
     pub source_faces: u32,
@@ -58,10 +85,32 @@ pub struct PickedScreenMeshPlan {
     pub diagnostic: PickedScreenMeshPlanDiagnostic,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdaptiveScreenMeshPlanDiagnostic {
+    pub source_faces: u32,
+    pub selected_faces: u32,
+    pub selected_leaves: u32,
+    pub total_leaves: u32,
+    pub split_nodes: u32,
+    pub max_depth_reached: u8,
+    pub unmet_leaves: u32,
+    pub saturated_metric_leaves: u32,
+    pub omitted_culled_leaves: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptiveScreenMeshPlan {
+    pub selected_faces: Vec<u32>,
+    pub leaves: Vec<ScreenMeshLeafTopology>,
+    pub requested_lods: Vec<[u32; 3]>,
+    pub diagnostic: AdaptiveScreenMeshPlanDiagnostic,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickedScreenMeshPlanError {
     EmptyScene,
     InvalidSelectedFace,
+    DuplicateSelectedFace { face: u32 },
     InvalidPixelBand,
     ImpossiblePixelBand,
     InvalidAtlasLod,
@@ -69,16 +118,27 @@ pub enum PickedScreenMeshPlanError {
     InvalidLeafDomain,
     UnmetPartition { leaves: usize },
     UnresolvedMetric,
+    PartitionBudgetExceeded { requested: usize, maximum: usize },
     LeafBudgetExceeded { requested: usize, maximum: usize },
     Partition(ScreenPartitionError),
     CountOverflow,
 }
+
+/// Representation-neutral name for the compatibility error type retained by
+/// the original one-face planner API.
+pub type AdaptiveScreenMeshPlanError = PickedScreenMeshPlanError;
 
 impl std::fmt::Display for PickedScreenMeshPlanError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyScene => write!(formatter, "adaptive screen plan requires a source scene"),
             Self::InvalidSelectedFace => write!(formatter, "selected adaptive face is unavailable"),
+            Self::DuplicateSelectedFace { face } => {
+                write!(
+                    formatter,
+                    "adaptive face {face} was selected more than once"
+                )
+            }
             Self::InvalidPixelBand => {
                 write!(
                     formatter,
@@ -111,6 +171,10 @@ impl std::fmt::Display for PickedScreenMeshPlanError {
                     "drawable adaptive leaf has no finite screen metric"
                 )
             }
+            Self::PartitionBudgetExceeded { requested, maximum } => write!(
+                formatter,
+                "adaptive planning may examine {requested} leaves; work budget is {maximum}",
+            ),
             Self::LeafBudgetExceeded { requested, maximum } => write!(
                 formatter,
                 "adaptive plan needs {requested} leaves; scene budget is {maximum}",
@@ -177,8 +241,8 @@ pub fn inherited_source_edge_lods(
     Ok(inherited)
 }
 
-/// Build a bounded current-view frontier that adapts one selected face and
-/// retains every other source face as one root leaf. Selected leaves proven
+/// Build a bounded current-view frontier that adapts one or more selected faces
+/// and retains every other source face as one root leaf. Selected leaves proven
 /// fully faded or outside the supplied static view are either omitted for a
 /// frozen-view measurement or retained at inherited density for a live view.
 ///
@@ -188,15 +252,28 @@ pub fn inherited_source_edge_lods(
 /// A renderer must still reject reconciliation overflow, missing atlas keys,
 /// and an excessive reconciled vertex/triangle/byte workload before swapping
 /// this plan into live residency.
-pub fn plan_picked_screen_mesh(
-    request: PickedScreenMeshPlanRequest<'_>,
-) -> Result<PickedScreenMeshPlan, PickedScreenMeshPlanError> {
+pub fn plan_adaptive_screen_mesh(
+    request: AdaptiveScreenMeshPlanRequest<'_>,
+) -> Result<AdaptiveScreenMeshPlan, AdaptiveScreenMeshPlanError> {
     if request.source_requested_lods.is_empty() {
         return Err(PickedScreenMeshPlanError::EmptyScene);
     }
-    let selected_face = request.selected_face as usize;
-    if selected_face >= request.source_requested_lods.len() {
+    if request.selected_patches.is_empty() {
         return Err(PickedScreenMeshPlanError::InvalidSelectedFace);
+    }
+    let mut selected_patches = BTreeMap::new();
+    for selected in request.selected_patches {
+        if selected.source_face as usize >= request.source_requested_lods.len() {
+            return Err(PickedScreenMeshPlanError::InvalidSelectedFace);
+        }
+        if selected_patches
+            .insert(selected.source_face, selected.transformed_patch)
+            .is_some()
+        {
+            return Err(PickedScreenMeshPlanError::DuplicateSelectedFace {
+                face: selected.source_face,
+            });
+        }
     }
     if !request.min_px_per_segment.is_finite()
         || request.min_px_per_segment <= 0.0
@@ -213,98 +290,195 @@ pub fn plan_picked_screen_mesh(
     }
     validate_source_lods(request.source_requested_lods, request.max_atlas_lod)?;
 
-    let partition = partition_screen_patch(
-        request.transformed_patch,
-        request.view_projection,
-        request.viewport,
-        request.policy,
-    )?;
-    if partition.unmet_leaves != 0 {
-        return Err(PickedScreenMeshPlanError::UnmetPartition {
-            leaves: partition.unmet_leaves,
+    let maximum_partition_leaves = request
+        .selected_patches
+        .len()
+        .checked_mul(request.policy.max_leaves)
+        .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+    if request.max_partition_leaves == 0 || maximum_partition_leaves > request.max_partition_leaves
+    {
+        return Err(PickedScreenMeshPlanError::PartitionBudgetExceeded {
+            requested: maximum_partition_leaves,
+            maximum: request.max_partition_leaves,
         });
     }
-    let included_leaves = partition
-        .leaves
-        .iter()
-        .filter(|leaf| request.retain_culled_leaves || leaf.status.is_drawable())
-        .collect::<Vec<_>>();
-    let total_capacity = request
+
+    let fixed_roots = request
         .source_requested_lods
         .len()
-        .checked_sub(1)
-        .and_then(|roots| roots.checked_add(included_leaves.len()))
+        .checked_sub(selected_patches.len())
         .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
-    if request.max_total_leaves == 0 || total_capacity > request.max_total_leaves {
+
+    // Process selected patches in source order and write a viable plan
+    // directly. The full metric partition is dropped before the next face is
+    // examined, bounding peak memory to one per-face partition plus the
+    // retained-output budget. If the output budget is crossed, keep counting
+    // bounded partitions without retaining more records so the final error
+    // reports the exact required leaf count.
+    let selected_faces = selected_patches.keys().copied().collect::<Vec<_>>();
+    let mut leaves = Vec::new();
+    let mut requested_lods = Vec::new();
+    let mut output_viable =
+        request.max_total_leaves != 0 && fixed_roots <= request.max_total_leaves;
+    let mut selected_leaves = 0usize;
+    let mut split_nodes = 0usize;
+    let mut max_depth_reached = 0u8;
+    let mut unmet_leaves = 0usize;
+    let mut saturated_metric_leaves = 0u32;
+    let mut omitted_culled_leaves = 0usize;
+
+    for (source_face, source_lods) in request.source_requested_lods.iter().copied().enumerate() {
+        let source_face_u32 =
+            u32::try_from(source_face).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
+        let Some(transformed_patch) = selected_patches.get(&source_face_u32) else {
+            if output_viable {
+                leaves.push(ScreenMeshLeafTopology {
+                    source_face: source_face_u32,
+                    id: ScreenPatchLeafId::ROOT,
+                    domain: QBPatchDomain::FULL,
+                });
+                requested_lods.push(source_lods);
+            }
+            continue;
+        };
+        let partition = partition_screen_patch(
+            transformed_patch,
+            request.view_projection,
+            request.viewport,
+            request.policy,
+        )?;
+        if partition.unmet_leaves != 0 {
+            return Err(PickedScreenMeshPlanError::UnmetPartition {
+                leaves: partition.unmet_leaves,
+            });
+        }
+        split_nodes = split_nodes
+            .checked_add(partition.split_nodes)
+            .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+        max_depth_reached = max_depth_reached.max(partition.max_depth_reached);
+        unmet_leaves = unmet_leaves
+            .checked_add(partition.unmet_leaves)
+            .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+
+        let included_leaf_count = partition
+            .leaves
+            .iter()
+            .filter(|leaf| request.retain_culled_leaves || leaf.status.is_drawable())
+            .count();
+        omitted_culled_leaves = omitted_culled_leaves
+            .checked_add(partition.leaves.len().saturating_sub(included_leaf_count))
+            .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+        let next_selected_leaves = selected_leaves
+            .checked_add(included_leaf_count)
+            .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+        let next_total_leaves = fixed_roots
+            .checked_add(next_selected_leaves)
+            .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+        output_viable &= next_total_leaves <= request.max_total_leaves;
+
+        if output_viable {
+            for leaf in partition
+                .leaves
+                .iter()
+                .filter(|leaf| request.retain_culled_leaves || leaf.status.is_drawable())
+            {
+                let inherited =
+                    inherited_source_edge_lods(leaf.id, leaf.restricted.domain, source_lods)?;
+                let screen = if leaf.status.is_drawable() {
+                    let diagnostic = leaf
+                        .metric_diagnostic
+                        .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
+                    diagnostic
+                        .edge_subdivision_demand(request.max_px_per_segment, request.max_atlas_lod)
+                        .ok_or_else(|| {
+                            saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
+                            PickedScreenMeshPlanError::UnresolvedMetric
+                        })?
+                } else {
+                    [1; 3]
+                };
+                leaves.push(ScreenMeshLeafTopology::from_leaf(source_face_u32, leaf));
+                requested_lods.push(std::array::from_fn(|edge| {
+                    inherited[edge].max(screen[edge])
+                }));
+            }
+        }
+        selected_leaves = next_selected_leaves;
+    }
+
+    let total_capacity = fixed_roots
+        .checked_add(selected_leaves)
+        .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+    if !output_viable {
         return Err(PickedScreenMeshPlanError::LeafBudgetExceeded {
             requested: total_capacity,
             maximum: request.max_total_leaves,
         });
     }
-    let mut leaves = Vec::with_capacity(total_capacity);
-    let mut requested_lods = Vec::with_capacity(total_capacity);
-    let mut saturated_metric_leaves = 0u32;
-
-    for (source_face, source_lods) in request.source_requested_lods.iter().copied().enumerate() {
-        let source_face_u32 =
-            u32::try_from(source_face).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
-        if source_face != selected_face {
-            leaves.push(ScreenMeshLeafTopology {
-                source_face: source_face_u32,
-                id: ScreenPatchLeafId::ROOT,
-                domain: QBPatchDomain::FULL,
-            });
-            requested_lods.push(source_lods);
-            continue;
-        }
-
-        for leaf in &included_leaves {
-            let inherited =
-                inherited_source_edge_lods(leaf.id, leaf.restricted.domain, source_lods)?;
-            let screen = if leaf.status.is_drawable() {
-                let diagnostic = leaf
-                    .metric_diagnostic
-                    .ok_or(PickedScreenMeshPlanError::UnresolvedMetric)?;
-                diagnostic
-                    .edge_subdivision_demand(request.max_px_per_segment, request.max_atlas_lod)
-                    .ok_or_else(|| {
-                        saturated_metric_leaves = saturated_metric_leaves.saturating_add(1);
-                        PickedScreenMeshPlanError::UnresolvedMetric
-                    })?
-            } else {
-                [1; 3]
-            };
-            leaves.push(ScreenMeshLeafTopology::from_leaf(source_face_u32, leaf));
-            requested_lods.push(std::array::from_fn(|edge| {
-                inherited[edge].max(screen[edge])
-            }));
-        }
-    }
 
     let source_faces = u32::try_from(request.source_requested_lods.len())
         .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
-    let selected_leaves = u32::try_from(included_leaves.len())
+    let selected_face_count = u32::try_from(selected_faces.len())
         .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
+    let selected_leaf_count =
+        u32::try_from(selected_leaves).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
     let total_leaves =
         u32::try_from(leaves.len()).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
-    Ok(PickedScreenMeshPlan {
-        selected_face: request.selected_face,
+    Ok(AdaptiveScreenMeshPlan {
+        selected_faces,
         leaves,
         requested_lods,
-        diagnostic: PickedScreenMeshPlanDiagnostic {
+        diagnostic: AdaptiveScreenMeshPlanDiagnostic {
             source_faces,
-            selected_leaves,
+            selected_faces: selected_face_count,
+            selected_leaves: selected_leaf_count,
             total_leaves,
-            split_nodes: u32::try_from(partition.split_nodes)
+            split_nodes: u32::try_from(split_nodes)
                 .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
-            max_depth_reached: partition.max_depth_reached,
-            unmet_leaves: u32::try_from(partition.unmet_leaves)
+            max_depth_reached,
+            unmet_leaves: u32::try_from(unmet_leaves)
                 .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
             saturated_metric_leaves,
-            omitted_culled_leaves: u32::try_from(
-                partition.leaves.len().saturating_sub(included_leaves.len()),
-            )
-            .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
+            omitted_culled_leaves: u32::try_from(omitted_culled_leaves)
+                .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?,
+        },
+    })
+}
+
+/// Compatibility wrapper for callers that adapt exactly one picked face.
+pub fn plan_picked_screen_mesh(
+    request: PickedScreenMeshPlanRequest<'_>,
+) -> Result<PickedScreenMeshPlan, PickedScreenMeshPlanError> {
+    let selected = [SelectedScreenPatch {
+        source_face: request.selected_face,
+        transformed_patch: request.transformed_patch,
+    }];
+    let plan = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
+        selected_patches: &selected,
+        view_projection: request.view_projection,
+        viewport: request.viewport,
+        min_px_per_segment: request.min_px_per_segment,
+        max_px_per_segment: request.max_px_per_segment,
+        policy: request.policy,
+        max_atlas_lod: request.max_atlas_lod,
+        retain_culled_leaves: request.retain_culled_leaves,
+        max_partition_leaves: request.policy.max_leaves.max(1),
+        max_total_leaves: request.max_total_leaves,
+        source_requested_lods: request.source_requested_lods,
+    })?;
+    Ok(PickedScreenMeshPlan {
+        selected_face: request.selected_face,
+        leaves: plan.leaves,
+        requested_lods: plan.requested_lods,
+        diagnostic: PickedScreenMeshPlanDiagnostic {
+            source_faces: plan.diagnostic.source_faces,
+            selected_leaves: plan.diagnostic.selected_leaves,
+            total_leaves: plan.diagnostic.total_leaves,
+            split_nodes: plan.diagnostic.split_nodes,
+            max_depth_reached: plan.diagnostic.max_depth_reached,
+            unmet_leaves: plan.diagnostic.unmet_leaves,
+            saturated_metric_leaves: plan.diagnostic.saturated_metric_leaves,
+            omitted_culled_leaves: plan.diagnostic.omitted_culled_leaves,
         },
     })
 }
@@ -370,6 +544,210 @@ mod tests {
         assert_eq!(plan.requested_lods[4], [4, 1, 2]);
         assert_eq!(plan.leaves[5].source_face, 2);
         assert_eq!(plan.requested_lods[5], [4, 4, 4]);
+    }
+
+    #[test]
+    fn multi_face_plan_builds_one_weldable_frontier() {
+        let positions = [
+            [-0.5, -0.5, 0.0],
+            [0.5, -0.5, 0.0],
+            [-0.5, 0.5, 0.0],
+            [0.5, 0.5, 0.0],
+        ];
+        let first = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let second = QBTriPatch::flat(positions[2], positions[1], positions[3]);
+        let selected = [
+            SelectedScreenPatch {
+                source_face: 1,
+                transformed_patch: &second,
+            },
+            SelectedScreenPatch {
+                source_face: 0,
+                transformed_patch: &first,
+            },
+        ];
+        let plan = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
+            selected_patches: &selected,
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 10_000.0,
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 8,
+            max_total_leaves: 8,
+            source_requested_lods: &[[2, 4, 8], [8, 4, 2]],
+        })
+        .unwrap();
+
+        assert_eq!(plan.selected_faces, [0, 1]);
+        assert_eq!(plan.diagnostic.source_faces, 2);
+        assert_eq!(plan.diagnostic.selected_faces, 2);
+        assert_eq!(plan.diagnostic.selected_leaves, 8);
+        assert_eq!(plan.diagnostic.total_leaves, 8);
+        assert!(plan.leaves[..4]
+            .iter()
+            .all(|leaf| leaf.source_face == 0 && leaf.id.depth == 1));
+        assert!(plan.leaves[4..]
+            .iter()
+            .all(|leaf| leaf.source_face == 1 && leaf.id.depth == 1));
+
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [2, 1, 3]],
+        );
+        let topology =
+            crate::screen_leaf_lod::ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let frontier =
+            crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(&plan.leaves, &topology).unwrap();
+        let reconciled = frontier
+            .reconcile_lods(&plan.requested_lods, 4, 64)
+            .unwrap();
+        assert_eq!(reconciled.resident.len(), 8);
+    }
+
+    #[test]
+    fn multi_face_plan_rejects_duplicate_source_identity() {
+        let patch = QBTriPatch::flat([-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]);
+        let selected = [
+            SelectedScreenPatch {
+                source_face: 0,
+                transformed_patch: &patch,
+            },
+            SelectedScreenPatch {
+                source_face: 0,
+                transformed_patch: &patch,
+            },
+        ];
+        let error = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
+            selected_patches: &selected,
+            view_projection: &IDENTITY,
+            // Structural identity is validated before numeric policy fields,
+            // so a bad duplicate cannot be hidden by another request error.
+            viewport: [f64::NAN, 0.0],
+            min_px_per_segment: 0.0,
+            max_px_per_segment: 64.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 16,
+            max_total_leaves: 16,
+            source_requested_lods: &[[1; 3]],
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PickedScreenMeshPlanError::DuplicateSelectedFace { face: 0 },
+        );
+    }
+
+    #[test]
+    fn multi_face_plan_rejects_partition_work_above_the_global_bound() {
+        let first = QBTriPatch::flat([-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]);
+        let second = QBTriPatch::flat([-0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0]);
+        let selected = [
+            SelectedScreenPatch {
+                source_face: 0,
+                transformed_patch: &first,
+            },
+            SelectedScreenPatch {
+                source_face: 1,
+                transformed_patch: &second,
+            },
+        ];
+        let error = plan_adaptive_screen_mesh(AdaptiveScreenMeshPlanRequest {
+            selected_patches: &selected,
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 64.0,
+            policy: ScreenPartitionPolicy {
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 7,
+            max_total_leaves: 32,
+            source_requested_lods: &[[1; 3]; 2],
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            PickedScreenMeshPlanError::PartitionBudgetExceeded {
+                requested: 8,
+                maximum: 7,
+            },
+        );
+    }
+
+    #[test]
+    fn picked_plan_rejects_invalid_identity_before_numeric_fields() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]);
+        let error = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+            selected_face: 1,
+            transformed_patch: &patch,
+            view_projection: &IDENTITY,
+            viewport: [f64::NAN, 0.0],
+            min_px_per_segment: 0.0,
+            max_px_per_segment: -1.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 3,
+            retain_culled_leaves: false,
+            max_total_leaves: 0,
+            source_requested_lods: &[[3; 3]],
+        })
+        .unwrap_err();
+
+        assert_eq!(error, PickedScreenMeshPlanError::InvalidSelectedFace);
+    }
+
+    #[test]
+    fn picked_plan_validates_partition_before_reporting_exact_leaf_budget() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]);
+        let request = PickedScreenMeshPlanRequest {
+            selected_face: 0,
+            transformed_patch: &patch,
+            view_projection: &IDENTITY,
+            viewport: [f64::NAN, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 64.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_total_leaves: 1,
+            source_requested_lods: &[[1; 3]; 3],
+        };
+        assert_eq!(
+            plan_picked_screen_mesh(request).unwrap_err(),
+            PickedScreenMeshPlanError::Partition(ScreenPartitionError::InvalidProjection),
+        );
+
+        let error = plan_picked_screen_mesh(PickedScreenMeshPlanRequest {
+            viewport: [640.0, 480.0],
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            ..request
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PickedScreenMeshPlanError::LeafBudgetExceeded {
+                requested: 6,
+                maximum: 1,
+            },
+        );
     }
 
     #[test]
