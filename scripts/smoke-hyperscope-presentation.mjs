@@ -12,9 +12,18 @@ const {
   default: init,
   HyperscopeNavigation,
   load_patch_lab,
+  mr_acceptLodDeltaSequence,
   update_patch_lab_lods,
 } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
+
+assert.equal(mr_acceptLodDeltaSequence(91, 0, 1, true), true);
+assert.equal(mr_acceptLodDeltaSequence(91, 1, 2, false), false);
+assert.throws(
+  () => mr_acceptLodDeltaSequence(91, 3, 4, false),
+  /does not extend the resident base/,
+);
+assert.equal(mr_acceptLodDeltaSequence(92, 0, 1, true), true);
 
 const cueActivation = browserSource.slice(
   browserSource.indexOf('function activateRustPresentation('),
@@ -169,10 +178,27 @@ for (const requiredPoseGate of [
   't: lodPoseAnimated ? animTime : 0',
   'skipAnimation: !lodPoseAnimated',
   'capturePose: RUST_ROUND_SHADOW_ENABLED && lodPoseAnimated && !roundAuthoredScene',
+  'acceptLodDeltaSequence(resp, !!wt.full_snapshot);',
+  'const resetDelta = lodDeltaResetPending;',
 ]) {
   assert.ok(
     lodAdapter.includes(requiredPoseGate),
     `LOD animation work must be gated by a resident deforming pose: ${requiredPoseGate}`,
+  );
+}
+assert.ok(
+  browserSource.includes('lodDeltaResetPending = true;'),
+  'a rejected sparse publication must force a full worker snapshot',
+);
+for (const requiredWorkerDeltaStep of [
+  'if (resetDelta) wasm.reset_animated_lod_delta();',
+  'delta_epoch: result.delta_epoch',
+  'delta_base_revision: result.delta_base_revision',
+  'delta_revision: result.delta_revision',
+]) {
+  assert.ok(
+    workerSource.includes(requiredWorkerDeltaStep),
+    `LOD worker is missing sequenced-delta recovery: ${requiredWorkerDeltaStep}`,
   );
 }
 assert.ok(

@@ -294,8 +294,10 @@ self.onmessage = async function(e) {
     const {
       t, mobius, subjectStates, density, minPx, vpMatrix, vpWidth, vpHeight,
       tessDensity, screenAtten, minPxSub, skipAnimation, capturePose, faceLimit,
+      resetDelta,
     } = data;
     const wt0 = performance.now();
+    if (resetDelta) wasm.reset_animated_lod_delta();
     // Set tess params before compute
     if (tessDensity != null) {
       wasm.set_tess_params(tessDensity, !!screenAtten);

@@ -704,6 +704,8 @@ struct PresentationNodeState {
 
 thread_local! {
     static STATE: RefCell<Option<MainState>> = RefCell::new(None);
+    static LOD_DELTA_CURSOR: RefCell<batch::FaceLodDeltaCursor> =
+        RefCell::new(batch::FaceLodDeltaCursor::default());
     static TESS_CACHE: RefCell<std::collections::HashMap<[u32; 3], TessBuffers>> =
         RefCell::new(std::collections::HashMap::new());
     /// Owns the immutable buffers referenced by `TESS_CACHE` patch slices.
@@ -4728,6 +4730,30 @@ pub fn mr_refresh_adaptive_picked() -> JsValue {
 #[wasm_bindgen(js_name = "mr_buildBatches")]
 pub fn mr_build_batches(face_lods: &[f32]) {
     update_batches(face_lods, None);
+}
+
+/// Admit one worker publication before any of its records reach resident
+/// renderer state. Sparse results must extend the exact accepted base; a
+/// revision-one full snapshot explicitly resets the stream after model changes,
+/// worker recovery, or a future backend cutover.
+#[wasm_bindgen(js_name = "mr_acceptLodDeltaSequence")]
+pub fn mr_accept_lod_delta_sequence(
+    epoch: u32,
+    base_revision: u32,
+    revision: u32,
+    full_snapshot: bool,
+) -> Result<bool, JsValue> {
+    LOD_DELTA_CURSOR.with(|cursor| {
+        cursor.borrow_mut().accept(
+            batch::FaceLodDeltaSequence {
+                epoch,
+                base_revision,
+                revision,
+            },
+            full_snapshot,
+        )
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+    })
 }
 
 /// Apply changed worker classifications without copying or scanning a full

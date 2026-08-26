@@ -395,6 +395,7 @@ import init, {
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
+  mr_acceptLodDeltaSequence,
   mr_setLodGradingRatio,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
@@ -656,6 +657,10 @@ const lodTelemetry = {
   canceled: 0,
   errors: 0,
   fullSnapshots: 0,
+  deltaEpoch: 0,
+  deltaRevision: 0,
+  deltaResets: 0,
+  deltaMismatches: 0,
   inFlight: false,
   dirty: false,
   lastSummaryAtMs: performance.now(),
@@ -6965,6 +6970,30 @@ async function evaluateAnimationPose(request) {
 
 let lodDirty = false; // set true when camera moves while LOD is in flight
 let lodFullSceneDirty = true;
+let lodDeltaResetPending = false;
+
+function acceptLodDeltaSequence(response, fullSnapshot) {
+  const epoch = Number(response.delta_epoch);
+  const baseRevision = Number(response.delta_base_revision);
+  const revision = Number(response.delta_revision);
+  try {
+    const reset = mr_acceptLodDeltaSequence(
+      epoch,
+      baseRevision,
+      revision,
+      fullSnapshot,
+    );
+    lodTelemetry.deltaEpoch = epoch;
+    lodTelemetry.deltaRevision = revision;
+    if (reset) lodTelemetry.deltaResets += 1;
+  } catch (error) {
+    lodTelemetry.deltaMismatches += 1;
+    lodDeltaResetPending = true;
+    lodFullSceneDirty = true;
+    lodDirty = true;
+    throw new Error(`LOD delta sequence rejected: ${error}`);
+  }
+}
 
 function debouncedLodRecompute(scope = 'scene') {
   if (remeshedMode || patchLab.active) return;
@@ -7047,6 +7076,7 @@ async function recomputeLods() {
     const vp = mulM4(proj, view, lodVp);
     const tp = getTessParams();
 
+    const resetDelta = lodDeltaResetPending;
     const resp = await workerCall('compute_animated_lods', {
       t: lodPoseAnimated ? animTime : 0, mobius: lodMobius, density: tp.density, minPx: tp.minPx,
       subjectStates: primaryOnly
@@ -7057,7 +7087,9 @@ async function recomputeLods() {
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
       skipAnimation: !lodPoseAnimated,
       capturePose: RUST_ROUND_SHADOW_ENABLED && lodPoseAnimated && !roundAuthoredScene,
+      resetDelta,
     });
+    if (resetDelta) lodDeltaResetPending = false;
     const tWorkerDone = performance.now();
     const wt = resp.timing || {};
     const workerPhases = wt.wasm_phases || {};
@@ -7073,6 +7105,7 @@ async function recomputeLods() {
     // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
     // discarding the completed result would starve continuously animated scenes.
     if (resp.lods && !remeshedMode) {
+      acceptLodDeltaSequence(resp, !!wt.full_snapshot);
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       if (presentationComposition.ready) {
         const classifiedFaces = Number(resp.classified_faces)
