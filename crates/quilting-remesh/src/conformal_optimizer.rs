@@ -96,6 +96,8 @@ pub enum OptimizerError {
     DomainCount { expected: usize, actual: usize },
     DuplicateStableFaceId(u64),
     InvalidSamplePatch { sample: usize, patch: usize },
+    InvalidSampleWeight { sample: usize },
+    InvalidTotalSurfaceWeight,
     EmptyPatchComplex,
     EmptySamples,
     NonFinitePatch { patch: usize },
@@ -129,6 +131,15 @@ impl std::fmt::Display for OptimizerError {
             Self::DuplicateStableFaceId(id) => write!(f, "duplicate stable source-face ID {id}"),
             Self::InvalidSamplePatch { sample, patch } => {
                 write!(f, "sample {sample} references missing patch {patch}")
+            }
+            Self::InvalidSampleWeight { sample } => {
+                write!(
+                    f,
+                    "fit sample {sample} has a non-positive or non-finite weight"
+                )
+            }
+            Self::InvalidTotalSurfaceWeight => {
+                write!(f, "weighted fit surface measure must sum to one")
             }
             Self::EmptyPatchComplex => write!(f, "QB patch complex is empty"),
             Self::EmptySamples => write!(f, "QB patch score requires source samples"),
@@ -656,6 +667,68 @@ pub struct FitSample {
     pub target_normal: [f64; 3],
 }
 
+/// A scoring sample carrying normalized source-surface measure.
+#[derive(Debug, Clone, Copy)]
+pub struct WeightedFitSample {
+    pub patch_index: usize,
+    pub barycentric: [f64; 3],
+    pub target_position: [f64; 3],
+    pub target_normal: [f64; 3],
+    pub surface_weight: f64,
+}
+
+trait ScoreSampleData {
+    fn patch_index(&self) -> usize;
+    fn barycentric(&self) -> [f64; 3];
+    fn target_position(&self) -> [f64; 3];
+    fn target_normal(&self) -> [f64; 3];
+    fn surface_weight(&self) -> f64;
+}
+
+impl ScoreSampleData for FitSample {
+    fn patch_index(&self) -> usize {
+        self.patch_index
+    }
+
+    fn barycentric(&self) -> [f64; 3] {
+        self.barycentric
+    }
+
+    fn target_position(&self) -> [f64; 3] {
+        self.target_position
+    }
+
+    fn target_normal(&self) -> [f64; 3] {
+        self.target_normal
+    }
+
+    fn surface_weight(&self) -> f64 {
+        1.0
+    }
+}
+
+impl ScoreSampleData for WeightedFitSample {
+    fn patch_index(&self) -> usize {
+        self.patch_index
+    }
+
+    fn barycentric(&self) -> [f64; 3] {
+        self.barycentric
+    }
+
+    fn target_position(&self) -> [f64; 3] {
+        self.target_position
+    }
+
+    fn target_normal(&self) -> [f64; 3] {
+        self.target_normal
+    }
+
+    fn surface_weight(&self) -> f64 {
+        self.surface_weight
+    }
+}
+
 /// A representative authored transform in the conformal robustness envelope.
 #[derive(Debug, Clone)]
 pub struct ConformalProbe {
@@ -684,6 +757,26 @@ impl Default for FitScoreConfig {
             pole_epsilon: 1e-5,
             relative_denominator_epsilon: 1e-5,
         }
+    }
+}
+
+/// Candidate-independent probes and length scales for weighted errors.
+///
+/// These are computed from the authoritative source geometry, not from the
+/// candidate patches or quadrature samples, so a candidate cannot improve its
+/// score by expanding its own control net and changing sample density cannot
+/// move the denominator. The probe list is owned by the context so extents
+/// cannot be accidentally reused with reordered or different transforms.
+#[derive(Debug, Clone)]
+pub struct FitScoreContext {
+    source_extent: f64,
+    probes: Vec<ConformalProbe>,
+    probe_extents: Vec<f64>,
+}
+
+impl FitScoreContext {
+    pub fn probes(&self) -> &[ConformalProbe] {
+        &self.probes
     }
 }
 
@@ -898,8 +991,12 @@ fn transformed_normal(
 }
 
 fn target_extent(points: &[[f64; 3]]) -> f64 {
+    strict_extent(points).unwrap_or(1.0)
+}
+
+fn strict_extent(points: &[[f64; 3]]) -> Option<f64> {
     if points.is_empty() {
-        return 1.0;
+        return None;
     }
     let mut minimum = [f64::INFINITY; 3];
     let mut maximum = [f64::NEG_INFINITY; 3];
@@ -912,50 +1009,92 @@ fn target_extent(points: &[[f64; 3]]) -> f64 {
     let diagonal = (maximum[0] - minimum[0])
         .hypot(maximum[1] - minimum[1])
         .hypot(maximum[2] - minimum[2]);
-    if diagonal.is_finite() && diagonal > 0.0 {
-        diagonal
-    } else {
-        1.0
-    }
+    (diagonal.is_finite() && diagonal > 0.0).then_some(diagonal)
 }
 
-fn measure_error(
+/// Precompute candidate-independent source and output-chart normalization
+/// scales for weighted scoring. Keeping this separate lets callers memoize the
+/// transformed source bounds while comparing several candidate fits.
+pub fn fit_score_context_from_source(
+    source_positions: &[[f64; 3]],
+    probes: &[ConformalProbe],
+) -> Result<FitScoreContext, OptimizerError> {
+    if source_positions.is_empty()
+        || source_positions
+            .iter()
+            .any(|position| !finite_vec3(*position))
+    {
+        return Err(OptimizerError::InvalidConfig(
+            "score extent source positions must be finite and nonempty",
+        ));
+    }
+    let source = strict_extent(source_positions).ok_or(OptimizerError::InvalidConfig(
+        "score extent source geometry must have positive extent",
+    ))?;
+    let probe_extents = probes
+        .iter()
+        .map(|probe| {
+            let positions = source_positions
+                .iter()
+                .map(|position| {
+                    let point = Quat::from_point(position[0], position[1], position[2]);
+                    let transformed = probe.transform.apply(point).to_point();
+                    finite_vec3(transformed).then_some(transformed).ok_or(
+                        OptimizerError::InvalidConfig(
+                            "a conformal probe has no finite source extent",
+                        ),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            strict_extent(&positions).ok_or(OptimizerError::InvalidConfig(
+                "a conformal probe has non-positive source extent",
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(FitScoreContext {
+        source_extent: source,
+        probes: probes.to_vec(),
+        probe_extents,
+    })
+}
+
+fn measure_error<S: ScoreSampleData>(
     candidate_patches: &[QBTriPatch],
-    samples: &[FitSample],
+    samples: &[S],
     transform: Option<&Mobius>,
     pole_epsilon: f64,
+    characteristic_extent: Option<f64>,
 ) -> EuclideanError {
     let targets: Vec<Option<[f64; 3]>> = samples
         .iter()
         .map(|sample| match transform {
             Some(map) => {
-                let point = Quat::from_point(
-                    sample.target_position[0],
-                    sample.target_position[1],
-                    sample.target_position[2],
-                );
+                let target = sample.target_position();
+                let point = Quat::from_point(target[0], target[1], target[2]);
                 relative_mobius_denominator(map, point)
                     .is_some_and(|denominator| denominator >= pole_epsilon)
                     .then(|| map.apply(point).to_point())
                     .filter(|target| finite_vec3(*target))
             }
-            None => Some(sample.target_position),
+            None => Some(sample.target_position()),
         })
         .collect();
     let finite_targets: Vec<[f64; 3]> = targets.iter().flatten().copied().collect();
-    let extent = target_extent(&finite_targets);
+    let extent = characteristic_extent.unwrap_or_else(|| target_extent(&finite_targets));
     let mut position_sum_sq = 0.0;
     let mut position_max = 0.0_f64;
     let mut normal_sum_sq = 0.0;
     let mut normal_max = 0.0_f64;
     let mut finite_position_count = 0usize;
     let mut finite_normal_count = 0usize;
+    let mut finite_position_weight = 0.0;
+    let mut finite_normal_weight = 0.0;
     let mut non_finite_samples = 0usize;
     let mut degenerate_normal_samples = 0usize;
     for (sample_index, sample) in samples.iter().enumerate() {
-        let bary = sample.barycentric;
+        let bary = sample.barycentric();
         let differential =
-            candidate_patches[sample.patch_index].eval_differential(bary[1], bary[2]);
+            candidate_patches[sample.patch_index()].eval_differential(bary[1], bary[2]);
         let Some(target) = targets[sample_index] else {
             non_finite_samples += 1;
             continue;
@@ -972,18 +1111,19 @@ fn measure_error(
             non_finite_samples += 1;
             continue;
         }
-        position_sum_sq += distance * distance;
+        position_sum_sq += sample.surface_weight() * distance * distance;
         position_max = position_max.max(distance);
         finite_position_count += 1;
+        finite_position_weight += sample.surface_weight();
         let surface_normal = normal_from_tangents(differential.tangent_u, differential.tangent_v);
         let target_normal = match transform {
             Some(map) => transformed_normal(
                 map,
-                sample.target_position,
-                sample.target_normal,
+                sample.target_position(),
+                sample.target_normal(),
                 pole_epsilon,
             ),
-            None => normalize_checked(sample.target_normal),
+            None => normalize_checked(sample.target_normal()),
         };
         let (Some(surface_normal), Some(target_normal)) = (surface_normal, target_normal) else {
             degenerate_normal_samples += 1;
@@ -991,9 +1131,10 @@ fn measure_error(
         };
         let dot = geometry::vec3_dot(surface_normal, target_normal).clamp(-1.0, 1.0);
         let angle = dot.acos().to_degrees();
-        normal_sum_sq += angle * angle;
+        normal_sum_sq += sample.surface_weight() * angle * angle;
         normal_max = normal_max.max(angle);
         finite_normal_count += 1;
+        finite_normal_weight += sample.surface_weight();
     }
     let invalid_positions = non_finite_samples > 0 || finite_position_count != samples.len();
     let invalid_normals =
@@ -1001,7 +1142,7 @@ fn measure_error(
     let position_rms = if invalid_positions {
         f64::INFINITY
     } else {
-        (position_sum_sq / finite_position_count as f64).sqrt()
+        (position_sum_sq / finite_position_weight).sqrt()
     };
     EuclideanError {
         sample_count: samples.len(),
@@ -1017,7 +1158,7 @@ fn measure_error(
         normal_rms_degrees: if invalid_normals {
             f64::INFINITY
         } else {
-            (normal_sum_sq / finite_normal_count as f64).sqrt()
+            (normal_sum_sq / finite_normal_weight).sqrt()
         },
         normal_max_degrees: if invalid_normals {
             f64::INFINITY
@@ -1199,6 +1340,37 @@ pub fn score_patch_complex(
     probes: &[ConformalProbe],
     config: &FitScoreConfig,
 ) -> Result<FitScore, OptimizerError> {
+    score_patch_complex_weighted_impl(patches, coarse_faces, samples, None, probes, config, false)
+}
+
+/// Score a patch complex against a unit-total source-surface measure.
+pub fn score_patch_complex_weighted(
+    patches: &[QBTriPatch],
+    coarse_faces: &[[usize; 3]],
+    samples: &[WeightedFitSample],
+    context: &FitScoreContext,
+    config: &FitScoreConfig,
+) -> Result<FitScore, OptimizerError> {
+    score_patch_complex_weighted_impl(
+        patches,
+        coarse_faces,
+        samples,
+        Some(context),
+        context.probes(),
+        config,
+        true,
+    )
+}
+
+fn score_patch_complex_weighted_impl<S: ScoreSampleData>(
+    patches: &[QBTriPatch],
+    coarse_faces: &[[usize; 3]],
+    samples: &[S],
+    context: Option<&FitScoreContext>,
+    probes: &[ConformalProbe],
+    config: &FitScoreConfig,
+    require_unit_total: bool,
+) -> Result<FitScore, OptimizerError> {
     if patches.is_empty() {
         return Err(OptimizerError::EmptyPatchComplex);
     }
@@ -1216,6 +1388,25 @@ pub fn score_patch_complex(
         return Err(OptimizerError::InvalidConfig(
             "relative_denominator_epsilon must be finite and positive",
         ));
+    }
+    if require_unit_total {
+        let Some(context) = context else {
+            return Err(OptimizerError::InvalidConfig(
+                "weighted scoring requires candidate-independent extents",
+            ));
+        };
+        if !context.source_extent.is_finite()
+            || context.source_extent <= 0.0
+            || context.probe_extents.len() != probes.len()
+            || context
+                .probe_extents
+                .iter()
+                .any(|extent| !extent.is_finite() || *extent <= 0.0)
+        {
+            return Err(OptimizerError::InvalidConfig(
+                "weighted score extents must be finite, positive, and match probes",
+            ));
+        }
     }
     if patches.len() != coarse_faces.len() {
         return Err(OptimizerError::PatchFaceCount {
@@ -1235,23 +1426,29 @@ pub fn score_patch_complex(
         }
     }
     for (sample_index, sample) in samples.iter().enumerate() {
-        if sample.patch_index >= patches.len() {
+        if sample.patch_index() >= patches.len() {
             return Err(OptimizerError::InvalidSamplePatch {
                 sample: sample_index,
-                patch: sample.patch_index,
+                patch: sample.patch_index(),
             });
         }
-        if !finite_vec3(sample.barycentric)
-            || !finite_vec3(sample.target_position)
-            || !finite_vec3(sample.target_normal)
+        if !finite_vec3(sample.barycentric())
+            || !finite_vec3(sample.target_position())
+            || !finite_vec3(sample.target_normal())
         {
             return Err(OptimizerError::NonFiniteSample {
                 sample: sample_index,
             });
         }
-        let barycentric_sum = sample.barycentric.iter().sum::<f64>();
+        if !sample.surface_weight().is_finite() || sample.surface_weight() <= 0.0 {
+            return Err(OptimizerError::InvalidSampleWeight {
+                sample: sample_index,
+            });
+        }
+        let barycentric = sample.barycentric();
+        let barycentric_sum = barycentric.iter().sum::<f64>();
         if sample
-            .barycentric
+            .barycentric()
             .iter()
             .any(|coordinate| *coordinate < -1e-10 || *coordinate > 1.0 + 1e-10)
             || (barycentric_sum - 1.0).abs() > 1e-9
@@ -1260,11 +1457,21 @@ pub fn score_patch_complex(
                 sample: sample_index,
             });
         }
-        if normalize_checked(sample.target_normal).is_none() {
+        if normalize_checked(sample.target_normal()).is_none() {
             return Err(OptimizerError::InvalidSampleNormal {
                 sample: sample_index,
             });
         }
+    }
+    let total_surface_weight = samples
+        .iter()
+        .map(ScoreSampleData::surface_weight)
+        .sum::<f64>();
+    if !total_surface_weight.is_finite()
+        || total_surface_weight <= 0.0
+        || (require_unit_total && (total_surface_weight - 1.0).abs() > 1.0e-9)
+    {
+        return Err(OptimizerError::InvalidTotalSurfaceWeight);
     }
     for (probe_index, probe) in probes.iter().enumerate() {
         if [
@@ -1279,10 +1486,12 @@ pub fn score_patch_complex(
             return Err(OptimizerError::InvalidProbeTransform { probe: probe_index });
         }
     }
-    let source = measure_error(patches, samples, None, config.pole_epsilon);
+    let source_extent = context.map(|context| context.source_extent);
+    let source = measure_error(patches, samples, None, config.pole_epsilon, source_extent);
     let conformal_probes = probes
         .iter()
-        .map(|probe| {
+        .enumerate()
+        .map(|(probe_index, probe)| {
             let transformed_patches: Vec<QBTriPatch> = patches
                 .iter()
                 .map(|patch| patch.transform(&probe.transform))
@@ -1290,11 +1499,8 @@ pub fn score_patch_complex(
             let mut peak_local_dilation = 0.0_f64;
             let mut pole_near_samples = 0;
             for sample in samples {
-                let point = Quat::from_point(
-                    sample.target_position[0],
-                    sample.target_position[1],
-                    sample.target_position[2],
-                );
+                let target = sample.target_position();
+                let point = Quat::from_point(target[0], target[1], target[2]);
                 if relative_mobius_denominator(&probe.transform, point)
                     .is_none_or(|denominator| denominator < config.pole_epsilon)
                 {
@@ -1310,6 +1516,7 @@ pub fn score_patch_complex(
                     samples,
                     Some(&probe.transform),
                     config.pole_epsilon,
+                    context.map(|context| context.probe_extents[probe_index]),
                 ),
                 boundary: measure_boundaries(&transformed_patches, coarse_faces, config.edge_steps),
                 weights: measure_weight_conditioning(
@@ -1348,6 +1555,14 @@ mod tests {
             face_domains: domains,
             locked_edges: &[],
         }
+    }
+
+    fn score_context(patches: &[QBTriPatch], probes: &[ConformalProbe]) -> FitScoreContext {
+        let positions = patches
+            .iter()
+            .flat_map(|patch| patch.positions.iter().map(|position| position.to_point()))
+            .collect::<Vec<_>>();
+        fit_score_context_from_source(&positions, probes).unwrap()
     }
 
     fn cluster_memberships(set: &ClusterSet) -> Vec<Vec<u64>> {
@@ -1550,6 +1765,157 @@ mod tests {
     }
 
     #[test]
+    fn weighted_score_is_invariant_to_splitting_sample_measure() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let mut first = sample_from_patch(&patch, [0.2, 0.3, 0.5]);
+        let mut second = sample_from_patch(&patch, [0.4, 0.4, 0.2]);
+        first.target_position[2] += 0.1;
+        second.target_position[2] += 0.2;
+        first.target_normal = [
+            10.0_f64.to_radians().sin(),
+            0.0,
+            10.0_f64.to_radians().cos(),
+        ];
+        second.target_normal = [
+            30.0_f64.to_radians().sin(),
+            0.0,
+            30.0_f64.to_radians().cos(),
+        ];
+        let weighted = [
+            WeightedFitSample {
+                patch_index: first.patch_index,
+                barycentric: first.barycentric,
+                target_position: first.target_position,
+                target_normal: first.target_normal,
+                surface_weight: 0.75,
+            },
+            WeightedFitSample {
+                patch_index: second.patch_index,
+                barycentric: second.barycentric,
+                target_position: second.target_position,
+                target_normal: second.target_normal,
+                surface_weight: 0.25,
+            },
+        ];
+        let split = [
+            WeightedFitSample {
+                surface_weight: 0.375,
+                ..weighted[0]
+            },
+            WeightedFitSample {
+                surface_weight: 0.375,
+                ..weighted[0]
+            },
+            weighted[1],
+        ];
+        let probes = [ConformalProbe {
+            name: "nonuniform-reflection".into(),
+            transform: Mobius::sphere_reflection(Quat::from_point(2.0, -1.0, 3.0), 1.5),
+        }];
+        let context = score_context(&[patch], &probes);
+        let score = score_patch_complex_weighted(
+            &[patch],
+            &[[0, 1, 2]],
+            &weighted,
+            &context,
+            &Default::default(),
+        )
+        .unwrap();
+        let split_score = score_patch_complex_weighted(
+            &[patch],
+            &[[0, 1, 2]],
+            &split,
+            &context,
+            &Default::default(),
+        )
+        .unwrap();
+        let unweighted = score_patch_complex(
+            &[patch],
+            &[[0, 1, 2]],
+            &[first, second],
+            &probes,
+            &Default::default(),
+        )
+        .unwrap();
+        assert!((score.source.position_rms - 0.0175_f64.sqrt()).abs() < 1.0e-14);
+        assert!((score.source.position_rms - split_score.source.position_rms).abs() < 1.0e-14);
+        assert!(
+            (score.source.normal_rms_degrees - split_score.source.normal_rms_degrees).abs()
+                < 1.0e-14
+        );
+        assert!((score.source.normal_rms_degrees - 300.0_f64.sqrt()).abs() < 1.0e-12);
+        assert!(
+            (score.conformal_probes[0].error.position_relative_rms
+                - split_score.conformal_probes[0].error.position_relative_rms)
+                .abs()
+                < 1.0e-12
+        );
+        assert!(
+            (score.conformal_probes[0].error.normal_rms_degrees
+                - split_score.conformal_probes[0].error.normal_rms_degrees)
+                .abs()
+                < 1.0e-10
+        );
+        assert!((unweighted.source.position_rms - score.source.position_rms).abs() > 1.0e-2);
+    }
+
+    #[test]
+    fn weighted_relative_score_does_not_use_quadrature_bounds() {
+        let patch = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let sample = |barycentric: [f64; 3], surface_weight| {
+            let mut target_position = patch.eval(barycentric[1], barycentric[2]).to_point();
+            target_position[2] += 0.1;
+            WeightedFitSample {
+                patch_index: 0,
+                barycentric,
+                target_position,
+                target_normal: [0.0, 0.0, 1.0],
+                surface_weight,
+            }
+        };
+        let one = [sample([1.0 / 3.0; 3], 1.0)];
+        let four = [
+            sample([2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0], 0.25),
+            sample([1.0 / 3.0; 3], 0.25),
+            sample([1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0], 0.25),
+            sample([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], 0.25),
+        ];
+        let probes = [ConformalProbe {
+            name: "scale-two".into(),
+            transform: Mobius::scale(2.0),
+        }];
+        let context = score_context(&[patch], &probes);
+        let score_one = score_patch_complex_weighted(
+            &[patch],
+            &[[0, 1, 2]],
+            &one,
+            &context,
+            &Default::default(),
+        )
+        .unwrap();
+        let score_four = score_patch_complex_weighted(
+            &[patch],
+            &[[0, 1, 2]],
+            &four,
+            &context,
+            &Default::default(),
+        )
+        .unwrap();
+        assert!((score_one.source.position_rms - 0.1).abs() < 1.0e-14);
+        assert!(
+            (score_one.source.position_relative_rms - score_four.source.position_relative_rms)
+                .abs()
+                < 1.0e-14
+        );
+        assert!(
+            (score_one.conformal_probes[0].error.position_relative_rms
+                - score_four.conformal_probes[0].error.position_relative_rms)
+                .abs()
+                < 1.0e-14
+        );
+    }
+
+    #[test]
     fn boundary_metric_detects_independent_weight_ownership() {
         let (mut patches, faces, samples) = sphere_fixture();
         let exact =
@@ -1721,6 +2087,42 @@ mod tests {
         assert!(matches!(
             score_patch_complex(&[patch], &[[0, 1, 2]], &[sample], &[], &Default::default(),),
             Err(OptimizerError::NonFiniteSample { sample: 0 })
+        ));
+
+        let valid = sample_from_patch(&patch, [1.0 / 3.0; 3]);
+        let weighted = WeightedFitSample {
+            patch_index: valid.patch_index,
+            barycentric: valid.barycentric,
+            target_position: valid.target_position,
+            target_normal: valid.target_normal,
+            surface_weight: 1.0,
+        };
+        let context = score_context(&[patch], &[]);
+        assert!(matches!(
+            score_patch_complex_weighted(
+                &[patch],
+                &[[0, 1, 2]],
+                &[WeightedFitSample {
+                    surface_weight: 0.0,
+                    ..weighted
+                }],
+                &context,
+                &Default::default(),
+            ),
+            Err(OptimizerError::InvalidSampleWeight { sample: 0 })
+        ));
+        assert!(matches!(
+            score_patch_complex_weighted(
+                &[patch],
+                &[[0, 1, 2]],
+                &[WeightedFitSample {
+                    surface_weight: 0.5,
+                    ..weighted
+                }],
+                &context,
+                &Default::default(),
+            ),
+            Err(OptimizerError::InvalidTotalSurfaceWeight)
         ));
     }
 

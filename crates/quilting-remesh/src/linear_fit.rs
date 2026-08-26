@@ -63,13 +63,72 @@ pub struct Sample {
     pub target: [f64; 3],
 }
 
+/// A [`Sample`] carrying normalized source-surface measure.
+///
+/// Weighted fits require all `surface_weight` values to be finite, positive,
+/// and sum to one. Each four-row quaternion residual block is scaled by the
+/// square root of this value, making the least-squares objective invariant to
+/// splitting one source region into more samples with the same total measure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WeightedSample {
+    pub face_index: usize,
+    pub bary: [f64; 3],
+    pub target: [f64; 3],
+    pub surface_weight: f64,
+}
+
+trait FitSampleData {
+    fn face_index(&self) -> usize;
+    fn bary(&self) -> [f64; 3];
+    fn target(&self) -> [f64; 3];
+    fn surface_weight(&self) -> f64;
+}
+
+impl FitSampleData for Sample {
+    fn face_index(&self) -> usize {
+        self.face_index
+    }
+
+    fn bary(&self) -> [f64; 3] {
+        self.bary
+    }
+
+    fn target(&self) -> [f64; 3] {
+        self.target
+    }
+
+    fn surface_weight(&self) -> f64 {
+        1.0
+    }
+}
+
+impl FitSampleData for WeightedSample {
+    fn face_index(&self) -> usize {
+        self.face_index
+    }
+
+    fn bary(&self) -> [f64; 3] {
+        self.bary
+    }
+
+    fn target(&self) -> [f64; 3] {
+        self.target
+    }
+
+    fn surface_weight(&self) -> f64 {
+        self.surface_weight
+    }
+}
+
 /// Tuning for [`linear_global_fit_full`].
 #[derive(Debug, Clone, Copy)]
 pub struct LinearFitConfig {
     /// Tikhonov weight pulling every free vertex weight toward `Quat::ONE`.
     /// Coordinates are normalized by the complete fit extent first, so this is
-    /// dimensionless. Keep it tiny so it only breaks ties / stabilizes
-    /// under-sampled vertices rather than biasing the fit toward flat.
+    /// dimensionless. In the weighted API it is relative to a unit-total data
+    /// objective; the compatibility API retains its legacy summed objective.
+    /// Keep it tiny so it only breaks ties / stabilizes under-sampled vertices
+    /// rather than biasing the fit toward flat.
     pub tikhonov: f64,
     /// Reject a fitted patch when its exact minimum affine-denominator norm,
     /// divided by the largest corner-weight norm, falls below this value.
@@ -136,6 +195,10 @@ pub enum LinearFitError {
         sample: usize,
         face: usize,
     },
+    InvalidSampleWeight {
+        sample: usize,
+    },
+    InvalidTotalSurfaceWeight(f64),
     NonFiniteSample {
         sample: usize,
     },
@@ -176,6 +239,13 @@ impl std::fmt::Display for LinearFitError {
             Self::InvalidSampleFace { sample, face } => {
                 write!(formatter, "fit sample {sample} references missing face {face}")
             }
+            Self::InvalidSampleWeight { sample } => {
+                write!(formatter, "fit sample {sample} has a non-positive or non-finite weight")
+            }
+            Self::InvalidTotalSurfaceWeight(value) => write!(
+                formatter,
+                "weighted fit surface measure must sum to one, got {value}",
+            ),
             Self::NonFiniteSample { sample } => {
                 write!(formatter, "fit sample {sample} is non-finite")
             }
@@ -244,6 +314,45 @@ pub fn linear_global_fit_full(
     samples: &[Sample],
     config: &LinearFitConfig,
 ) -> Result<LinearFitResult, LinearFitError> {
+    linear_global_fit_weighted_impl(coarse_pos, coarse_faces, samples, config, false)
+}
+
+/// Fit and return patches using a unit-total source-surface measure.
+pub fn linear_global_fit_weighted(
+    coarse_pos: &[[f64; 3]],
+    coarse_faces: &[[usize; 3]],
+    samples: &[WeightedSample],
+) -> Result<Vec<QBTriPatch>, LinearFitError> {
+    Ok(linear_global_fit_weighted_full(
+        coarse_pos,
+        coarse_faces,
+        samples,
+        &LinearFitConfig::default(),
+    )?
+    .patches)
+}
+
+/// Full source-area-weighted fit.
+///
+/// Unlike [`linear_global_fit_full`], the data objective has unit total
+/// measure. Consequently [`LinearFitConfig::tikhonov`] is independent of
+/// source tessellation density and sample count.
+pub fn linear_global_fit_weighted_full(
+    coarse_pos: &[[f64; 3]],
+    coarse_faces: &[[usize; 3]],
+    samples: &[WeightedSample],
+    config: &LinearFitConfig,
+) -> Result<LinearFitResult, LinearFitError> {
+    linear_global_fit_weighted_impl(coarse_pos, coarse_faces, samples, config, true)
+}
+
+fn linear_global_fit_weighted_impl<S: FitSampleData>(
+    coarse_pos: &[[f64; 3]],
+    coarse_faces: &[[usize; 3]],
+    samples: &[S],
+    config: &LinearFitConfig,
+    require_unit_total: bool,
+) -> Result<LinearFitResult, LinearFitError> {
     if coarse_pos.is_empty() {
         return Err(LinearFitError::EmptyPositions);
     }
@@ -290,29 +399,53 @@ pub fn linear_global_fit_full(
         }
     }
     for (sample_index, sample) in samples.iter().enumerate() {
-        if sample.face_index >= coarse_faces.len() {
+        if sample.face_index() >= coarse_faces.len() {
             return Err(LinearFitError::InvalidSampleFace {
                 sample: sample_index,
-                face: sample.face_index,
+                face: sample.face_index(),
             });
         }
         if sample
-            .bary
+            .bary()
             .iter()
-            .chain(sample.target.iter())
+            .chain(sample.target().iter())
             .any(|component| !component.is_finite())
         {
             return Err(LinearFitError::NonFiniteSample {
                 sample: sample_index,
             });
         }
-        let barycentric_sum = sample.bary.iter().sum::<f64>();
+        if !sample.surface_weight().is_finite() || sample.surface_weight() <= 0.0 {
+            return Err(LinearFitError::InvalidSampleWeight {
+                sample: sample_index,
+            });
+        }
+        let barycentric_sum = sample.bary().iter().sum::<f64>();
         if (barycentric_sum - 1.0).abs() > 1e-9 {
             return Err(LinearFitError::InvalidBarycentric {
                 sample: sample_index,
             });
         }
     }
+    let total_surface_weight = samples
+        .iter()
+        .map(FitSampleData::surface_weight)
+        .sum::<f64>();
+    if !total_surface_weight.is_finite() || total_surface_weight <= 0.0 {
+        return Err(LinearFitError::InvalidTotalSurfaceWeight(
+            total_surface_weight,
+        ));
+    }
+    if require_unit_total && (total_surface_weight - 1.0).abs() > 1.0e-9 {
+        return Err(LinearFitError::InvalidTotalSurfaceWeight(
+            total_surface_weight,
+        ));
+    }
+    let objective_weight_scale = if require_unit_total {
+        total_surface_weight.recip()
+    } else {
+        1.0
+    };
 
     let v = coarse_pos.len();
     // Pin the lowest vertex in every connected component to ONE. Each component
@@ -348,8 +481,11 @@ pub fn linear_global_fit_full(
     let inverse_coordinate_scale = fit_coordinate_scale(coarse_pos, samples).recip();
 
     for s in samples {
-        let face = coarse_faces[s.face_index];
-        let xk = Quat::from_point(s.target[0], s.target[1], s.target[2]);
+        let face = coarse_faces[s.face_index()];
+        let target = s.target();
+        let bary = s.bary();
+        let xk = Quat::from_point(target[0], target[1], target[2]);
+        let sample_scale = (s.surface_weight() * objective_weight_scale).sqrt();
 
         // Per-vertex 4×4 blocks Bᵥ = λ_{k,v} · L(pᵥ − Xₖ).
         let mut blocks: [[[f64; 4]; 4]; 3] = [[[0.0; 4]; 4]; 3];
@@ -357,7 +493,7 @@ pub fn linear_global_fit_full(
             let vtx = face[i];
             let p = Quat::from_point(coarse_pos[vtx][0], coarse_pos[vtx][1], coarse_pos[vtx][2]);
             let l = left_mul_matrix(p - xk);
-            let lam = s.bary[i];
+            let lam = bary[i];
             for r in 0..4 {
                 for c in 0..4 {
                     blocks[i][r][c] = lam * l[r][c];
@@ -380,7 +516,7 @@ pub fn linear_global_fit_full(
         // Write the four real residual equations directly. Each row touches at
         // most three quaternion weights (twelve scalar columns).
         for residual_component in 0..4 {
-            rhs.push(d[residual_component] * inverse_coordinate_scale);
+            rhs.push(d[residual_component] * inverse_coordinate_scale * sample_scale);
             for local_vertex in 0..3 {
                 let Some(free_vertex) = free(face[local_vertex]) else {
                     continue;
@@ -389,7 +525,7 @@ pub fn linear_global_fit_full(
                     blocks[local_vertex][residual_component].iter().enumerate()
                 {
                     let column = free_vertex * 4 + weight_component;
-                    let value = coefficient * inverse_coordinate_scale;
+                    let value = coefficient * inverse_coordinate_scale * sample_scale;
                     if value != 0.0 {
                         column_indices.push(column);
                         values.push(value);
@@ -470,9 +606,13 @@ pub fn linear_global_fit_full(
         })
         .collect::<Vec<_>>();
 
-    let algebraic_residual_rms =
-        algebraic_residual_rms(coarse_pos, coarse_faces, samples, &weights)
-            * inverse_coordinate_scale;
+    let algebraic_residual_rms = weighted_algebraic_residual_rms(
+        coarse_pos,
+        coarse_faces,
+        samples,
+        &weights,
+        objective_weight_scale,
+    ) * inverse_coordinate_scale;
     let min_relative_denominator =
         validate_patch_denominators(&patches, config.relative_denominator_epsilon)?;
 
@@ -488,17 +628,20 @@ pub fn linear_global_fit_full(
     })
 }
 
-fn fit_coordinate_scale(coarse_pos: &[[f64; 3]], samples: &[Sample]) -> f64 {
+fn fit_coordinate_scale<S: FitSampleData>(coarse_pos: &[[f64; 3]], samples: &[S]) -> f64 {
     let mut minimum = [f64::INFINITY; 3];
     let mut maximum = [f64::NEG_INFINITY; 3];
-    for point in coarse_pos
-        .iter()
-        .chain(samples.iter().map(|sample| &sample.target))
-    {
+    let mut include = |point: [f64; 3]| {
         for axis in 0..3 {
             minimum[axis] = minimum[axis].min(point[axis]);
             maximum[axis] = maximum[axis].max(point[axis]);
         }
+    };
+    for &point in coarse_pos {
+        include(point);
+    }
+    for sample in samples {
+        include(sample.target());
     }
     let extent = (maximum[0] - minimum[0])
         .hypot(maximum[1] - minimum[1])
@@ -809,17 +952,21 @@ fn scale_vector(values: &mut [f64], factor: f64) {
     }
 }
 
-fn algebraic_residual_rms(
+fn weighted_algebraic_residual_rms<S: FitSampleData>(
     coarse_pos: &[[f64; 3]],
     coarse_faces: &[[usize; 3]],
-    samples: &[Sample],
+    samples: &[S],
     weights: &[Quat],
+    objective_weight_scale: f64,
 ) -> f64 {
-    let sum_squared = samples
+    let weighted_sum_squared = samples
         .iter()
         .map(|sample| {
-            let target = Quat::from_point(sample.target[0], sample.target[1], sample.target[2]);
-            let face = coarse_faces[sample.face_index];
+            let target_position = sample.target();
+            let bary = sample.bary();
+            let target =
+                Quat::from_point(target_position[0], target_position[1], target_position[2]);
+            let face = coarse_faces[sample.face_index()];
             let residual = (0..3).fold(Quat::ZERO, |residual, local| {
                 let vertex = face[local];
                 let position = Quat::from_point(
@@ -827,12 +974,16 @@ fn algebraic_residual_rms(
                     coarse_pos[vertex][1],
                     coarse_pos[vertex][2],
                 );
-                residual + ((position - target) * weights[vertex]) * sample.bary[local]
+                residual + ((position - target) * weights[vertex]) * bary[local]
             });
-            residual.norm_sq()
+            residual.norm_sq() * sample.surface_weight() * objective_weight_scale
         })
         .sum::<f64>();
-    (sum_squared / samples.len() as f64).sqrt()
+    let total_weight = samples
+        .iter()
+        .map(|sample| sample.surface_weight() * objective_weight_scale)
+        .sum::<f64>();
+    (weighted_sum_squared / total_weight).sqrt()
 }
 
 /// The 4×4 real matrix `L(q)` of quaternion **left**-multiplication: for any
@@ -1046,6 +1197,95 @@ mod tests {
     }
 
     #[test]
+    fn weighted_fit_is_invariant_to_splitting_sample_measure() {
+        let (coarse_pos, coarse_faces, samples, _truth) = octahedron_sphere();
+        let unit = 1.0 / samples.len() as f64;
+        let weighted = samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                let mut target = sample.target;
+                if index.is_multiple_of(7) {
+                    target[0] += 0.01;
+                    target[2] -= 0.005;
+                }
+                WeightedSample {
+                    face_index: sample.face_index,
+                    bary: sample.bary,
+                    target,
+                    surface_weight: unit,
+                }
+            })
+            .collect::<Vec<_>>();
+        let split = weighted
+            .iter()
+            .enumerate()
+            .flat_map(|(index, sample)| {
+                if index.is_multiple_of(3) {
+                    let half = WeightedSample {
+                        surface_weight: sample.surface_weight * 0.5,
+                        ..*sample
+                    };
+                    vec![half, half]
+                } else {
+                    vec![*sample]
+                }
+            })
+            .collect::<Vec<_>>();
+        let config = LinearFitConfig {
+            tikhonov: 1.0e-8,
+            ..LinearFitConfig::default()
+        };
+        let original =
+            linear_global_fit_weighted_full(&coarse_pos, &coarse_faces, &weighted, &config)
+                .unwrap();
+        let subdivided =
+            linear_global_fit_weighted_full(&coarse_pos, &coarse_faces, &split, &config).unwrap();
+        for (left, right) in original
+            .vertex_weights
+            .iter()
+            .zip(&subdivided.vertex_weights)
+        {
+            assert!((*left - *right).norm() < 1.0e-8, "{left:?} != {right:?}");
+        }
+        assert!(
+            (original.algebraic_residual_rms - subdivided.algebraic_residual_rms).abs() < 1.0e-10
+        );
+
+        let legacy = weighted
+            .iter()
+            .map(|sample| Sample {
+                face_index: sample.face_index,
+                bary: sample.bary,
+                target: sample.target,
+            })
+            .collect::<Vec<_>>();
+        let duplicated_legacy = split
+            .iter()
+            .map(|sample| Sample {
+                face_index: sample.face_index,
+                bary: sample.bary,
+                target: sample.target,
+            })
+            .collect::<Vec<_>>();
+        let legacy_fit =
+            linear_global_fit_full(&coarse_pos, &coarse_faces, &legacy, &config).unwrap();
+        let duplicated_legacy_fit =
+            linear_global_fit_full(&coarse_pos, &coarse_faces, &duplicated_legacy, &config)
+                .unwrap();
+        let legacy_change = legacy_fit
+            .vertex_weights
+            .iter()
+            .zip(&duplicated_legacy_fit.vertex_weights)
+            .map(|(left, right)| (*left - *right).norm())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            legacy_change > 1.0e-8,
+            "fixture is not sensitive to duplicated unweighted rows: {legacy_change:e}",
+        );
+    }
+
+    #[test]
     fn shared_fit_is_stable_across_extreme_scene_scales() {
         let (coarse_pos, coarse_faces, samples, _truth) = octahedron_sphere();
         for scale in [1e-9, 1e9] {
@@ -1217,6 +1457,38 @@ mod tests {
             )
             .unwrap_err(),
             LinearFitError::InvalidMaxIterations,
+        );
+        let weighted = WeightedSample {
+            face_index: samples[0].face_index,
+            bary: samples[0].bary,
+            target: samples[0].target,
+            surface_weight: 1.0,
+        };
+        assert_eq!(
+            linear_global_fit_weighted_full(
+                &positions,
+                &faces,
+                &[WeightedSample {
+                    surface_weight: 0.0,
+                    ..weighted
+                }],
+                &LinearFitConfig::default(),
+            )
+            .unwrap_err(),
+            LinearFitError::InvalidSampleWeight { sample: 0 },
+        );
+        assert_eq!(
+            linear_global_fit_weighted_full(
+                &positions,
+                &faces,
+                &[WeightedSample {
+                    surface_weight: 0.5,
+                    ..weighted
+                }],
+                &LinearFitConfig::default(),
+            )
+            .unwrap_err(),
+            LinearFitError::InvalidTotalSurfaceWeight(0.5),
         );
     }
 

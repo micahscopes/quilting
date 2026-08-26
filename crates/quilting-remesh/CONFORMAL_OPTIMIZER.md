@@ -50,7 +50,8 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    corner selection remains insufficient because it cannot guarantee matching
    patch boundaries.
 5. **Fit existing first-order triangular QB patches.** Parameterize source
-   samples onto coarse triangles, then feed `linear_global_fit_full`. Its one
+   samples onto coarse triangles, then feed
+   `CoarsePatchComplex::fit_shared_qb`. Its one
    quaternion weight per coarse vertex is exactly the ownership rule required
    for C0 boundaries: neighboring patches share the two positions and weights
    defining their common rational edge. The fitter normalizes scene scale,
@@ -61,17 +62,24 @@ ordinary Euclidean mesh error is invariant under all Möbius transformations.
    non-convergence, non-finite, and exact closed-domain
    denominator-conditioning failures are explicit. The output
    remains the current `QBTriPatch` (three positions plus three quaternion
-   weights), directly consumable by canonical tessellation. The next adapter
-   must scale each four-row sample block by the square root of its normalized
-   surface weight, propagate the same measure into scoring, and retune
-   regularization against that unit-total data objective. Higher-order
-   triangular rational patches are explicitly deferred.
-6. **Score before accepting.** `score_patch_complex` reports source-space
+   weights), directly consumable by canonical tessellation.
+   `linear_global_fit_weighted_full` scales every four-row sample block by the
+   square root of its normalized surface measure; the legacy unweighted API
+   remains a compatibility wrapper with its original summed objective. The
+   weighted regularizer is defined against a unit-total data objective, so its
+   production value must be selected by real-asset benchmarks rather than by
+   source triangle count. Higher-order triangular rational patches are
+   explicitly deferred.
+6. **Score before accepting.** `score_patch_complex_weighted` reports source-space
    positional/normal error, a user-supplied envelope of representative Möbius
    transforms, shared-edge cracks, and rational-denominator conditioning. It
    rejects non-finite inputs, degenerate/inconsistently wound faces, and
-   non-manifold coarse edges before measuring. `FitScore::scalar_objective` is
-   a tunable candidate ranking, not a theorem.
+   non-manifold coarse edges before measuring. Relative weighted errors use a
+   separately memoizable `FitScoreContext` computed from authoritative source
+   positions. The context owns the exact probes and their source-derived
+   output extents together; neither mismatched probes, candidate controls, nor
+   quadrature bounds can change the denominator.
+   `FitScore::scalar_objective` is a tunable candidate ranking, not a theorem.
 
 ## Objective
 
@@ -79,12 +87,15 @@ The source term reports Euclidean RMS/max position error and oriented normal
 error in the persistent pre-Möbius material chart. It is a fitting diagnostic,
 not the runtime walking/physics distance. Every conformal probe transforms both
 the target samples and the QB patches, then reports raw active/output-chart
-Euclidean error, transformed-bounds-relative error, transformed denominator
-conditioning, peak local dilation, and pole-near sample count. The raw
-output-chart values are the perceived geometry and the appropriate input to
-runtime walking/physics tolerances. Useful probes include authored inversion
-spheres, dilations spanning expected scene scales, and pole positions near (but
-not on) the source surface.
+Euclidean error, source-reference-extent-relative error, transformed
+denominator conditioning, peak local dilation, and pole-near sample count. The
+area measure remains fixed to the source/material surface under every probe;
+this deliberately asks how the same authored material is represented after a
+map. An output-area RMS would instead reweight by the square of local conformal
+length scale. The raw output-chart values are the perceived geometry and the
+appropriate input to runtime walking/physics tolerances. Useful probes include
+authored inversion spheres, dilations spanning expected scene scales, and pole
+positions near (but not on) the source surface.
 
 The robustness envelope is deliberately empirical. Möbius maps preserve
 angles and round geometry, but not Euclidean distance or nearest-neighbor
@@ -121,15 +132,19 @@ CoarsePatchComplex {
 }
 ```
 
-`linear_global_fit_full` already covers the shared-weight solve; canonical
-tessellation already accepts the resulting `Vec<QBTriPatch>`. No renderer,
-atlas, WASM, or shader change is needed for this experiment.
+`CoarsePatchComplex::fit_shared_qb` converts these correspondences directly to
+the weighted shared solve; `weighted_score_samples` supplies the same measure
+and oriented source normals to conformal scoring, while `fit_score_context`
+derives candidate-independent normalization from retained stable source
+positions. Canonical tessellation already accepts the resulting
+`Vec<QBTriPatch>`. No renderer, atlas, WASM, or shader change is needed for this
+experiment.
 
 ## Known limitations
 
-- Surface weights are emitted but not yet consumed by fitting or conformal
-  scoring; until that adapter lands, the end-to-end path has not removed
-  triangulation-density bias. Boundary locks deliberately retain the complete
+- Area measure now reaches fitting and scoring, with sample-splitting
+  invariance tests. Its default regularization and acceptance thresholds still
+  need real-asset calibration. Boundary locks deliberately retain the complete
   authored cut polyline; shared boundary coarsening is a later optimization.
 - Correspondence is chart-restricted, orientation-filtered, and deterministic,
   but still brute-force and geometrically nearest. Production-scale meshes need

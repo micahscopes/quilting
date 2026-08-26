@@ -58,6 +58,14 @@ pub struct CoarseVertex {
     pub constrained: bool,
 }
 
+/// Stable authoritative source position retained for candidate-independent
+/// score normalization and provenance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceReferenceVertex {
+    pub source_vertex: SourceVertexId,
+    pub position: [f64; 3],
+}
+
 /// Stable within a [`CoarsePatchComplex`]. Chart reports are sorted by their
 /// authoritative [`ChartKey`], so the chart index is reorder-stable.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -104,6 +112,8 @@ pub struct CorrespondenceSample {
     /// to place the smallest stable source-vertex ID first.
     pub source_barycentric: [f64; 3],
     pub target: [f64; 3],
+    /// Oriented unit normal of the owning source triangle.
+    pub target_normal: [f64; 3],
     pub coarse_face: usize,
     pub coarse_face_key: CoarseFaceKey,
     pub coarse_barycentric: [f64; 3],
@@ -123,6 +133,7 @@ pub struct CorrespondenceDiagnostics {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoarsePatchComplex {
+    pub source_vertices: Vec<SourceReferenceVertex>,
     pub vertices: Vec<CoarseVertex>,
     pub faces: Vec<CoarseFace>,
     pub charts: Vec<ChartReductionReport>,
@@ -138,6 +149,58 @@ impl CoarsePatchComplex {
 
     pub fn triangles(&self) -> Vec<[usize; 3]> {
         self.faces.iter().map(|face| face.vertices).collect()
+    }
+
+    pub fn weighted_fit_samples(&self) -> Vec<crate::linear_fit::WeightedSample> {
+        self.correspondence
+            .iter()
+            .map(|sample| crate::linear_fit::WeightedSample {
+                face_index: sample.coarse_face,
+                bary: sample.coarse_barycentric,
+                target: sample.target,
+                surface_weight: sample.surface_weight,
+            })
+            .collect()
+    }
+
+    pub fn weighted_score_samples(&self) -> Vec<crate::conformal_optimizer::WeightedFitSample> {
+        self.correspondence
+            .iter()
+            .map(|sample| crate::conformal_optimizer::WeightedFitSample {
+                patch_index: sample.coarse_face,
+                barycentric: sample.coarse_barycentric,
+                target_position: sample.target,
+                target_normal: sample.target_normal,
+                surface_weight: sample.surface_weight,
+            })
+            .collect()
+    }
+
+    pub fn fit_score_context(
+        &self,
+        probes: &[crate::conformal_optimizer::ConformalProbe],
+    ) -> Result<
+        crate::conformal_optimizer::FitScoreContext,
+        crate::conformal_optimizer::OptimizerError,
+    > {
+        let positions = self
+            .source_vertices
+            .iter()
+            .map(|vertex| vertex.position)
+            .collect::<Vec<_>>();
+        crate::conformal_optimizer::fit_score_context_from_source(&positions, probes)
+    }
+
+    pub fn fit_shared_qb(
+        &self,
+        config: &crate::linear_fit::LinearFitConfig,
+    ) -> Result<crate::linear_fit::LinearFitResult, crate::linear_fit::LinearFitError> {
+        crate::linear_fit::linear_global_fit_weighted_full(
+            &self.positions(),
+            &self.triangles(),
+            &self.weighted_fit_samples(),
+            config,
+        )
     }
 }
 
@@ -161,6 +224,7 @@ pub enum CoarsePatchError {
     DuplicateFace(CoarseFaceKey),
     AssemblyTopology(CoarseComplexError),
     CutEdgeChanged([SourceVertexId; 2]),
+    InvalidSourceNormal(SourceFaceId),
     NoCompatibleFace(SourceSampleKey),
     CorrespondenceTooFar {
         sample: SourceSampleKey,
@@ -206,6 +270,9 @@ impl std::fmt::Display for CoarsePatchError {
             }
             Self::CutEdgeChanged(edge) => {
                 write!(formatter, "assembled cut edge {edge:?} has wrong incidence")
+            }
+            Self::InvalidSourceNormal(face) => {
+                write!(formatter, "source face {face:?} has no finite unit normal")
             }
             Self::NoCompatibleFace(sample) => write!(
                 formatter,
@@ -510,6 +577,19 @@ fn barycentric_point(triangle: [[f64; 3]; 3], barycentric: [f64; 3]) -> [f64; 3]
     ]
 }
 
+fn normalize_direction(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let scale = vector
+        .iter()
+        .map(|component| component.abs())
+        .fold(0.0_f64, f64::max);
+    if !scale.is_finite() || scale == 0.0 {
+        return None;
+    }
+    let scaled = geometry::vec3_scale(vector, scale.recip());
+    let length = geometry::vec3_len(scaled);
+    (length.is_finite() && length > 0.0).then(|| geometry::vec3_scale(scaled, length.recip()))
+}
+
 fn closest_barycentric(point: [f64; 3], triangle: [[f64; 3]; 3]) -> [f64; 3] {
     let a = triangle[0];
     let b = triangle[1];
@@ -691,6 +771,9 @@ fn correspondence(
                 geometry::vec3_sub(source_normalized[1], source_normalized[0]),
                 geometry::vec3_sub(source_normalized[2], source_normalized[0]),
             );
+            let target_normal = normalize_direction(source_normal).ok_or(
+                CoarsePatchError::InvalidSourceNormal(input.source_face_ids[source_face]),
+            )?;
             for (ordinal, &source_barycentric) in lattice.iter().enumerate() {
                 let key = SourceSampleKey {
                     face: input.source_face_ids[source_face],
@@ -721,6 +804,7 @@ fn correspondence(
                 let surface_weight = face_weights[source_face] / per_face_samples;
                 if !distance_ratio.is_finite()
                     || !surface_weight.is_finite()
+                    || surface_weight <= 0.0
                     || coarse_barycentric.iter().any(|value| !value.is_finite())
                 {
                     return Err(CoarsePatchError::NonFiniteCorrespondence(key));
@@ -738,6 +822,7 @@ fn correspondence(
                     key,
                     source_barycentric,
                     target,
+                    target_normal,
                     coarse_face,
                     coarse_face_key: assembled.faces[coarse_face].key,
                     coarse_barycentric,
@@ -789,7 +874,21 @@ pub fn build_coarse_patch_complex(
     let assembled = assemble(input, &reduced)?;
     let (correspondence, correspondence_diagnostics) =
         correspondence(input, &reduced.charts, &assembled, config)?;
+    let referenced_source_vertices = input
+        .triangles
+        .iter()
+        .flat_map(|triangle| triangle.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut source_vertices = referenced_source_vertices
+        .into_iter()
+        .map(|vertex| SourceReferenceVertex {
+            source_vertex: input.source_vertex_ids[vertex],
+            position: input.positions[vertex],
+        })
+        .collect::<Vec<_>>();
+    source_vertices.sort_by_key(|vertex| vertex.source_vertex);
     Ok(CoarsePatchComplex {
+        source_vertices,
         vertices: assembled.vertices,
         faces: assembled.faces,
         charts: assembled.charts,
@@ -923,7 +1022,22 @@ mod tests {
                 sample.coarse_face_key,
                 complex.faces[sample.coarse_face].key
             );
+            assert!((sample.target_normal[2] - 1.0).abs() < 1.0e-12);
         }
+        let fit = complex
+            .fit_shared_qb(&crate::linear_fit::LinearFitConfig::default())
+            .unwrap();
+        assert_eq!(fit.patches.len(), complex.faces.len());
+        let score = crate::conformal_optimizer::score_patch_complex_weighted(
+            &fit.patches,
+            &complex.triangles(),
+            &complex.weighted_score_samples(),
+            &complex.fit_score_context(&[]).unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(score.source.position_rms < 1.0e-12);
+        assert!(score.source.normal_rms_degrees < 1.0e-8);
 
         let reordered = reversed_buffers(&source);
         let reordered_complex = build_coarse_patch_complex(&input(&reordered), &config()).unwrap();
