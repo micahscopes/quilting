@@ -8,8 +8,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::screen_leaf_lod::{
-    rebuild_screen_mesh_leaf_vertex_lods, validate_screen_mesh_leaf_antichain,
-    ScreenLeafLodError, ScreenMeshLeafTopology,
+    ScreenLeafLodError, ScreenMeshLeafFrontier, ScreenMeshLeafLodScratch,
 };
 use crate::screen_partition::ScreenPatchLeafId;
 
@@ -314,21 +313,21 @@ pub fn group_resident_faces_into(
 /// silently truncated, because dropping or overlapping one leaf creates a
 /// geometric hole or a double-rendered region.
 pub fn group_resident_screen_leaves(
-    leaves: &[ScreenMeshLeafTopology],
+    frontier: &ScreenMeshLeafFrontier,
     resident_edge_lods: &[[u32; 3]],
-    source_topology: &HalfEdgeMesh,
     face_materials: &[usize],
     face_nodes: &[usize],
     face_render_nodes: &[usize],
 ) -> Result<BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>, ScreenLeafLodError> {
     let mut groups = BTreeMap::<RenderBatchKey, Vec<RenderBatchMember>>::new();
+    let mut lod_scratch = ScreenMeshLeafLodScratch::default();
     group_resident_screen_leaves_into(
-        leaves,
+        frontier,
         resident_edge_lods,
-        source_topology,
         face_materials,
         face_nodes,
         face_render_nodes,
+        &mut lod_scratch,
         &mut groups,
     )?;
     Ok(groups)
@@ -336,20 +335,19 @@ pub fn group_resident_screen_leaves(
 
 /// Retained-allocation variant of [`group_resident_screen_leaves`].
 pub fn group_resident_screen_leaves_into(
-    leaves: &[ScreenMeshLeafTopology],
+    frontier: &ScreenMeshLeafFrontier,
     resident_edge_lods: &[[u32; 3]],
-    source_topology: &HalfEdgeMesh,
     face_materials: &[usize],
     face_nodes: &[usize],
     face_render_nodes: &[usize],
+    lod_scratch: &mut ScreenMeshLeafLodScratch,
     groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
 ) -> Result<(), ScreenLeafLodError> {
+    let leaves = frontier.leaves();
     if leaves.len() != resident_edge_lods.len() {
         return Err(ScreenLeafLodError::LengthMismatch);
     }
-    validate_screen_mesh_leaf_antichain(leaves)?;
-    let leaf_vertex_lods =
-        rebuild_screen_mesh_leaf_vertex_lods(leaves, resident_edge_lods, source_topology)?;
+    let leaf_vertex_lods = frontier.rebuild_vertex_lods_into(resident_edge_lods, lod_scratch)?;
     for (leaf_index, leaf) in leaves.iter().copied().enumerate() {
         let source_face = leaf.source_face as usize;
         if source_face >= face_materials.len()
@@ -966,6 +964,9 @@ pub fn face_is_visible(face_lods: &[f32], face_index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen_leaf_lod::{
+        ScreenMeshLeafFrontier, ScreenMeshLeafTopology, ScreenMeshTopologyCache,
+    };
 
     #[test]
     fn face_lod_delta_emits_full_then_only_changed_records() {
@@ -1139,10 +1140,11 @@ mod tests {
             },
         ];
         let topology = HalfEdgeMesh::from_triangles(4, &[[0, 1, 2], [2, 1, 3]]);
+        let topology_cache = ScreenMeshTopologyCache::from_half_edge_mesh(&topology).unwrap();
+        let frontier = ScreenMeshLeafFrontier::build(&leaves, &topology_cache).unwrap();
         let groups = group_resident_screen_leaves(
-            &leaves,
+            &frontier,
             &[[2, 4, 8]; 2],
-            &topology,
             &[3, 7],
             &[11, 13],
             &[17, 19],
@@ -1169,10 +1171,11 @@ mod tests {
             domain: id.domain().unwrap(),
         }];
         let topology = HalfEdgeMesh::from_triangles(3, &[[0, 1, 2]]);
+        let topology_cache = ScreenMeshTopologyCache::from_half_edge_mesh(&topology).unwrap();
+        let frontier = ScreenMeshLeafFrontier::build(&leaves, &topology_cache).unwrap();
         let error = group_resident_screen_leaves(
-            &leaves,
+            &frontier,
             &[],
-            &topology,
             &[0],
             &[0],
             &[0],
@@ -1181,71 +1184,35 @@ mod tests {
         assert_eq!(error, ScreenLeafLodError::LengthMismatch);
 
         let mut retained = group_resident_screen_leaves(
-            &leaves,
+            &frontier,
             &[[1; 3]],
-            &topology,
             &[0],
             &[0],
             &[0],
         )
         .unwrap();
         let before = retained.clone();
+        let mut lod_scratch = ScreenMeshLeafLodScratch::default();
         let error = group_resident_screen_leaves_into(
-            &leaves,
+            &frontier,
             &[[3, 1, 1]],
-            &topology,
             &[0],
             &[0],
             &[0],
+            &mut lod_scratch,
             &mut retained,
         )
         .unwrap_err();
         assert!(matches!(error, ScreenLeafLodError::InvalidLod { .. }));
         assert_eq!(retained, before);
 
-        let overlapping = [
-            ScreenMeshLeafTopology {
-                source_face: 0,
-                id: ScreenPatchLeafId::ROOT,
-                domain: crate::patch::QBPatchDomain::FULL,
-            },
-            leaves[0],
-        ];
         let error = group_resident_screen_leaves_into(
-            &overlapping,
-            &[[1; 3]; 2],
-            &topology,
-            &[0],
-            &[0],
-            &[0],
-            &mut retained,
-        )
-        .unwrap_err();
-        assert!(matches!(error, ScreenLeafLodError::OverlappingLeaves { .. }));
-        assert_eq!(retained, before);
-
-        let duplicate = [leaves[0], leaves[0]];
-        let error = group_resident_screen_leaves_into(
-            &duplicate,
-            &[[1; 3]; 2],
-            &topology,
-            &[0],
-            &[0],
-            &[0],
-            &mut retained,
-        )
-        .unwrap_err();
-        assert!(matches!(error, ScreenLeafLodError::OverlappingLeaves { .. }));
-        assert_eq!(retained, before);
-
-        let missing = [leaves[0]];
-        let error = group_resident_screen_leaves_into(
-            &missing,
+            &frontier,
             &[[1; 3]],
-            &topology,
             &[],
             &[],
             &[],
+            &mut lod_scratch,
             &mut retained,
         )
         .unwrap_err();

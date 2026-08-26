@@ -346,10 +346,13 @@ fn topology_lines(
     Ok(lines)
 }
 
-fn mesh_topology_lines(
+fn mesh_topology_lines_with<F>(
     leaves: &[ScreenMeshLeafTopology],
-    source_topology: &quilting_mesh::HalfEdgeMesh,
-) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
+    mut face_edge: F,
+) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError>
+where
+    F: FnMut(u32, usize, usize) -> Result<CachedSourceEdge, ScreenLeafLodError>,
+{
     let global_depth = leaves.iter().map(|leaf| leaf.id.depth).max().unwrap_or(0);
     let global_denominator = 1u32
         .checked_shl(u32::from(global_depth))
@@ -364,23 +367,13 @@ fn mesh_topology_lines(
     let mut lines = BTreeMap::<MeshLineKey, Vec<EdgeSpan>>::new();
     for edge in edges {
         let leaf = &leaves[edge.span.leaf_index];
-        if leaf.source_face >= source_topology.num_faces {
-            return Err(ScreenLeafLodError::InvalidTopology {
-                leaf_index: edge.span.leaf_index,
-            });
-        }
         let (key, span) = if edge.constant_numerator == 0 {
             let source_edge = usize::from(edge.constant_axis);
-            let half_edges = source_topology.face_half_edges(leaf.source_face);
-            // Half-edge i runs from source corner i to i+1; logical edge A/B/C
-            // is opposite source corner 0/1/2 respectively.
-            let half_edge = half_edges[(source_edge + 1) % 3];
-            let twin = source_topology.twin(half_edge);
-            let canonical_half_edge = twin.map_or(half_edge, |other| half_edge.min(other));
+            let cached_edge = face_edge(leaf.source_face, source_edge, edge.span.leaf_index)?;
             let parameter_axis = (source_edge + 2) % 3;
             let mut first = edge.endpoints[0][parameter_axis];
             let mut second = edge.endpoints[1][parameter_axis];
-            if half_edge != canonical_half_edge {
+            if cached_edge.reversed() {
                 first = global_denominator - first;
                 second = global_denominator - second;
             }
@@ -389,7 +382,7 @@ fn mesh_topology_lines(
             span.end = first.max(second);
             (
                 MeshLineKey::SourceBoundary {
-                    canonical_half_edge,
+                    canonical_half_edge: cached_edge.canonical_half_edge(),
                 },
                 span,
             )
@@ -409,6 +402,30 @@ fn mesh_topology_lines(
         spans.sort_by_key(|span| (span.start, span.end, span.leaf_index, span.edge_index));
     }
     Ok(lines)
+}
+
+fn mesh_topology_lines(
+    leaves: &[ScreenMeshLeafTopology],
+    topology: &ScreenMeshTopologyCache,
+) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
+    mesh_topology_lines_with(leaves, |source_face, source_edge, leaf_index| {
+        topology.face_edge(source_face, source_edge, leaf_index)
+    })
+}
+
+fn mesh_topology_lines_from_half_edge_mesh(
+    leaves: &[ScreenMeshLeafTopology],
+    source_topology: &quilting_mesh::HalfEdgeMesh,
+) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
+    mesh_topology_lines_with(leaves, |source_face, source_edge, leaf_index| {
+        if source_face >= source_topology.num_faces {
+            return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+        }
+        let half_edge = source_topology.face_half_edges(source_face)[(source_edge + 1) % 3];
+        let canonical_half_edge = source_topology.canonical_edge(half_edge);
+        CachedSourceEdge::new(canonical_half_edge, half_edge != canonical_half_edge)
+            .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -488,17 +505,104 @@ fn canonical_source_vertices(
     Ok(parents)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CachedSourceEdge(u32);
+
+impl CachedSourceEdge {
+    const REVERSED: u32 = 1 << 31;
+
+    fn new(canonical_half_edge: u32, reversed: bool) -> Option<Self> {
+        (canonical_half_edge < Self::REVERSED).then_some(Self(
+            canonical_half_edge | if reversed { Self::REVERSED } else { 0 },
+        ))
+    }
+
+    fn canonical_half_edge(self) -> u32 {
+        self.0 & !Self::REVERSED
+    }
+
+    fn reversed(self) -> bool {
+        self.0 & Self::REVERSED != 0
+    }
+}
+
+/// Source-mesh identities needed by every camera-dependent adaptive frontier.
+/// Build this once with the welded half-edge mesh; leaf repartitioning then
+/// avoids rescanning the complete authored topology. The source
+/// [`quilting_mesh::HalfEdgeMesh`] must be treated as immutable while this
+/// cache or any frontier built from it remains in use; rebuild after mutation.
+#[derive(Debug)]
+pub struct ScreenMeshTopologyCache {
+    canonical_face_vertices: Vec<[u32; 3]>,
+    face_edges: Vec<[CachedSourceEdge; 3]>,
+}
+
+impl ScreenMeshTopologyCache {
+    pub fn from_half_edge_mesh(
+        source_topology: &quilting_mesh::HalfEdgeMesh,
+    ) -> Result<Self, ScreenLeafLodError> {
+        let canonical_vertices = canonical_source_vertices(source_topology)?;
+        let mut canonical_face_vertices = Vec::with_capacity(source_topology.num_faces as usize);
+        let mut face_edges = Vec::with_capacity(source_topology.num_faces as usize);
+        for source_face in 0..source_topology.num_faces {
+            let vertices = source_topology.face_vertices(source_face);
+            let mut canonical = [0u32; 3];
+            for (corner, vertex) in vertices.into_iter().enumerate() {
+                canonical[corner] = canonical_vertices
+                    .get(vertex as usize)
+                    .copied()
+                    .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+            }
+            canonical_face_vertices.push(canonical);
+            let half_edges = source_topology.face_half_edges(source_face);
+            let mut cached_edges = [CachedSourceEdge(0); 3];
+            for source_edge in 0..3 {
+                let half_edge = half_edges[(source_edge + 1) % 3];
+                let canonical_half_edge = source_topology.canonical_edge(half_edge);
+                cached_edges[source_edge] =
+                    CachedSourceEdge::new(canonical_half_edge, half_edge != canonical_half_edge)
+                        .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+            }
+            face_edges.push(cached_edges);
+        }
+        Ok(Self {
+            canonical_face_vertices,
+            face_edges,
+        })
+    }
+
+    fn face_vertices(
+        &self,
+        source_face: u32,
+        leaf_index: usize,
+    ) -> Result<[u32; 3], ScreenLeafLodError> {
+        self.canonical_face_vertices
+            .get(source_face as usize)
+            .copied()
+            .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })
+    }
+
+    fn face_edge(
+        &self,
+        source_face: u32,
+        source_edge: usize,
+        leaf_index: usize,
+    ) -> Result<CachedSourceEdge, ScreenLeafLodError> {
+        self.face_edges
+            .get(source_face as usize)
+            .and_then(|edges| edges.get(source_edge))
+            .copied()
+            .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })
+    }
+}
+
 fn mesh_vertex_key(
     leaf_index: usize,
     leaf: ScreenMeshLeafTopology,
     corner: [u32; 3],
     global_denominator: u32,
-    source_topology: &quilting_mesh::HalfEdgeMesh,
-    canonical_vertices: &[u32],
+    topology: &ScreenMeshTopologyCache,
 ) -> Result<MeshVertexKey, ScreenLeafLodError> {
-    if leaf.source_face >= source_topology.num_faces {
-        return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
-    }
     let zero_axes = (0..3).filter(|&axis| corner[axis] == 0).collect::<Vec<_>>();
     match zero_axes.as_slice() {
         [first, second] => {
@@ -506,25 +610,19 @@ fn mesh_vertex_key(
             if corner[source_corner] != global_denominator {
                 return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
             }
-            let source_vertex = source_topology.face_vertices(leaf.source_face)[source_corner];
-            let canonical = canonical_vertices
-                .get(source_vertex as usize)
-                .copied()
-                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })?;
+            let canonical = topology.face_vertices(leaf.source_face, leaf_index)?[source_corner];
             Ok(MeshVertexKey::SourceVertex(canonical))
         }
         [source_edge] => {
             let source_edge = *source_edge;
-            let half_edges = source_topology.face_half_edges(leaf.source_face);
-            let half_edge = half_edges[(source_edge + 1) % 3];
-            let canonical_half_edge = source_topology.canonical_edge(half_edge);
+            let edge = topology.face_edge(leaf.source_face, source_edge, leaf_index)?;
             let parameter_axis = (source_edge + 2) % 3;
             let mut parameter = corner[parameter_axis];
-            if half_edge != canonical_half_edge {
+            if edge.reversed() {
                 parameter = global_denominator - parameter;
             }
             Ok(MeshVertexKey::SourceEdge {
-                canonical_half_edge,
+                canonical_half_edge: edge.canonical_half_edge(),
                 parameter,
             })
         }
@@ -608,112 +706,226 @@ fn mesh_line_vertex_key(
     }
 }
 
-/// Physical-vertex corner overrides used beside the normative edge-density
-/// field. Conforming corners max-reduce all incident edges (including exact
-/// glTF attribute seams). A hanging corner instead inherits the absolute LoD
-/// of the coarser edge containing it, so the two atlas sample traces agree.
+/// Camera-dependent dyadic frontier with its welded line and corner incidence
+/// prepared once. Reconciliation and draw grouping share this object, avoiding
+/// a second topology reconstruction on every classification update.
+#[derive(Debug)]
+pub struct ScreenMeshLeafFrontier {
+    leaves: Vec<ScreenMeshLeafTopology>,
+    depths: Vec<u8>,
+    lines: BTreeMap<MeshLineKey, Vec<EdgeSpan>>,
+    corner_vertices: Vec<[usize; 3]>,
+    hanging_offsets: Vec<u32>,
+    hanging_sources: Vec<u32>,
+}
+
+/// Retained work buffers for converting reconciled edge LoDs into physical
+/// corner overrides. One renderer-owned value makes repeated grouping
+/// allocation-free when the frontier cardinalities are stable.
+#[derive(Debug, Default)]
+pub struct ScreenMeshLeafLodScratch {
+    absolute_edges: Vec<[u32; 3]>,
+    vertex_max: Vec<u32>,
+    hanging_lods: Vec<u32>,
+    corner_lods: Vec<[u32; 3]>,
+}
+
+impl ScreenMeshLeafFrontier {
+    pub fn build(
+        leaves: &[ScreenMeshLeafTopology],
+        topology: &ScreenMeshTopologyCache,
+    ) -> Result<Self, ScreenLeafLodError> {
+        validate_screen_mesh_leaf_antichain(leaves)?;
+        let global_depth = leaves.iter().map(|leaf| leaf.id.depth).max().unwrap_or(0);
+        let global_denominator = 1u32
+            .checked_shl(u32::from(global_depth))
+            .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+        let lines = mesh_topology_lines(leaves, topology)?;
+        let mut vertex_indices = BTreeMap::<MeshVertexKey, usize>::new();
+        let mut corner_vertices = Vec::<[usize; 3]>::with_capacity(leaves.len());
+
+        for (leaf_index, leaf) in leaves.iter().copied().enumerate() {
+            let corners = quantized_domain_corners(leaf_index, leaf.id, leaf.domain, global_depth)?;
+            let mut leaf_vertices = [0usize; 3];
+            for corner_index in 0..3 {
+                let key = mesh_vertex_key(
+                    leaf_index,
+                    leaf,
+                    corners[corner_index],
+                    global_denominator,
+                    topology,
+                )?;
+                leaf_vertices[corner_index] = if let Some(&index) = vertex_indices.get(&key) {
+                    index
+                } else {
+                    let index = vertex_indices.len();
+                    vertex_indices.insert(key, index);
+                    index
+                };
+            }
+            corner_vertices.push(leaf_vertices);
+        }
+
+        let mut hanging_pairs = Vec::<(usize, u32)>::new();
+        for (&line, spans) in &lines {
+            let endpoints = spans
+                .iter()
+                .flat_map(|span| [span.start, span.end])
+                .collect::<BTreeSet<_>>();
+            for span in spans {
+                for &parameter in endpoints.range((Excluded(span.start), Excluded(span.end))) {
+                    let key =
+                        mesh_line_vertex_key(line, parameter, global_denominator, span.leaf_index)?;
+                    let Some(&vertex_index) = vertex_indices.get(&key) else {
+                        return Err(ScreenLeafLodError::InvalidTopology {
+                            leaf_index: span.leaf_index,
+                        });
+                    };
+                    let leaf_index = u32::try_from(span.leaf_index)
+                        .ok()
+                        .filter(|index| *index <= u32::MAX >> 2)
+                        .ok_or(ScreenLeafLodError::InvalidTopology {
+                            leaf_index: span.leaf_index,
+                        })?;
+                    hanging_pairs.push((vertex_index, (leaf_index << 2) | span.edge_index as u32));
+                }
+            }
+        }
+        hanging_pairs.sort_unstable();
+        hanging_pairs.dedup();
+        let mut hanging_offsets = Vec::with_capacity(vertex_indices.len() + 1);
+        let mut hanging_sources = Vec::with_capacity(hanging_pairs.len());
+        let mut pair_index = 0usize;
+        for vertex_index in 0..vertex_indices.len() {
+            hanging_offsets.push(
+                u32::try_from(hanging_sources.len())
+                    .map_err(|_| ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?,
+            );
+            while pair_index < hanging_pairs.len() && hanging_pairs[pair_index].0 == vertex_index {
+                hanging_sources.push(hanging_pairs[pair_index].1);
+                pair_index += 1;
+            }
+        }
+        debug_assert_eq!(pair_index, hanging_pairs.len());
+        hanging_offsets.push(
+            u32::try_from(hanging_sources.len())
+                .map_err(|_| ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?,
+        );
+
+        Ok(Self {
+            leaves: leaves.to_vec(),
+            depths: leaves.iter().map(|leaf| leaf.id.depth).collect(),
+            lines,
+            corner_vertices,
+            hanging_offsets,
+            hanging_sources,
+        })
+    }
+
+    pub fn leaves(&self) -> &[ScreenMeshLeafTopology] {
+        &self.leaves
+    }
+
+    pub fn reconcile_lods(
+        &self,
+        requested: &[[u32; 3]],
+        max_face_edge_ratio: u32,
+        max_lod: u32,
+    ) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
+        reconcile_lods(
+            &self.depths,
+            &self.lines,
+            requested,
+            max_face_edge_ratio,
+            max_lod,
+        )
+    }
+
+    /// Physical-vertex corner overrides used beside the normative edge-density
+    /// field. Conforming corners max-reduce all incident edges; a hanging
+    /// corner inherits the absolute LoD of the coarser edge containing it.
+    pub fn rebuild_vertex_lods(
+        &self,
+        resident: &[[u32; 3]],
+    ) -> Result<Vec<[u32; 3]>, ScreenLeafLodError> {
+        let mut scratch = ScreenMeshLeafLodScratch::default();
+        self.rebuild_vertex_lods_into(resident, &mut scratch)?;
+        Ok(scratch.corner_lods)
+    }
+
+    pub fn rebuild_vertex_lods_into<'a>(
+        &self,
+        resident: &[[u32; 3]],
+        scratch: &'a mut ScreenMeshLeafLodScratch,
+    ) -> Result<&'a [[u32; 3]], ScreenLeafLodError> {
+        if self.leaves.len() != resident.len() {
+            return Err(ScreenLeafLodError::LengthMismatch);
+        }
+        scratch.absolute_edges.clear();
+        scratch.absolute_edges.reserve(self.leaves.len());
+        for (leaf_index, (leaf, lods)) in self
+            .leaves
+            .iter()
+            .copied()
+            .zip(resident.iter().copied())
+            .enumerate()
+        {
+            scratch
+                .absolute_edges
+                .push(absolute_leaf_edge_lods(leaf_index, leaf, lods)?);
+        }
+        scratch.vertex_max.clear();
+        let vertex_count = self.hanging_offsets.len().saturating_sub(1);
+        scratch.vertex_max.resize(vertex_count, 1);
+        for (leaf_index, vertices) in self.corner_vertices.iter().copied().enumerate() {
+            let edges = scratch.absolute_edges[leaf_index];
+            let corner_lods = [
+                edges[1].max(edges[2]),
+                edges[0].max(edges[2]),
+                edges[0].max(edges[1]),
+            ];
+            for (vertex, lod) in vertices.into_iter().zip(corner_lods) {
+                scratch.vertex_max[vertex] = scratch.vertex_max[vertex].max(lod);
+            }
+        }
+        scratch.hanging_lods.clear();
+        scratch.hanging_lods.reserve(vertex_count);
+        for vertex_index in 0..vertex_count {
+            let start = self.hanging_offsets[vertex_index] as usize;
+            let end = self.hanging_offsets[vertex_index + 1] as usize;
+            let mut maximum = 0u32;
+            for packed in &self.hanging_sources[start..end] {
+                let leaf_index = (packed >> 2) as usize;
+                let edge_index = (packed & 3) as usize;
+                maximum = maximum.max(scratch.absolute_edges[leaf_index][edge_index]);
+            }
+            scratch.hanging_lods.push(maximum);
+        }
+        scratch.corner_lods.clear();
+        scratch.corner_lods.reserve(self.corner_vertices.len());
+        for vertices in &self.corner_vertices {
+            scratch.corner_lods.push(vertices.map(|vertex| {
+                let hanging = scratch.hanging_lods[vertex];
+                if hanging == 0 {
+                    scratch.vertex_max[vertex]
+                } else {
+                    hanging
+                }
+            }));
+        }
+        Ok(&scratch.corner_lods)
+    }
+}
+
+/// Convenience path for callers that do not retain a source topology cache or
+/// adaptive frontier. Frequent classification paths should build both once.
 pub fn rebuild_screen_mesh_leaf_vertex_lods(
     leaves: &[ScreenMeshLeafTopology],
     resident: &[[u32; 3]],
     source_topology: &quilting_mesh::HalfEdgeMesh,
 ) -> Result<Vec<[u32; 3]>, ScreenLeafLodError> {
-    if leaves.len() != resident.len() {
-        return Err(ScreenLeafLodError::LengthMismatch);
-    }
-    let global_depth = leaves.iter().map(|leaf| leaf.id.depth).max().unwrap_or(0);
-    let global_denominator = 1u32
-        .checked_shl(u32::from(global_depth))
-        .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
-    let canonical_vertices = canonical_source_vertices(source_topology)?;
-    let lines = mesh_topology_lines(leaves, source_topology)?;
-    let absolute_edges = leaves
-        .iter()
-        .copied()
-        .zip(resident.iter().copied())
-        .enumerate()
-        .map(|(leaf_index, (leaf, lods))| absolute_leaf_edge_lods(leaf_index, leaf, lods))
-        .collect::<Result<Vec<_>, _>>()?;
-    let raw_corner_lods = absolute_edges
-        .iter()
-        .copied()
-        .map(|edges| {
-            [
-                edges[1].max(edges[2]),
-                edges[0].max(edges[2]),
-                edges[0].max(edges[1]),
-            ]
-        })
-        .collect::<Vec<_>>();
-    let mut keys = Vec::<[MeshVertexKey; 3]>::with_capacity(leaves.len());
-    let mut vertex_max = BTreeMap::<MeshVertexKey, u32>::new();
-
-    for (leaf_index, leaf) in leaves.iter().copied().enumerate() {
-        let corners = quantized_domain_corners(leaf_index, leaf.id, leaf.domain, global_depth)?;
-        let leaf_keys = [
-            mesh_vertex_key(
-                leaf_index,
-                leaf,
-                corners[0],
-                global_denominator,
-                source_topology,
-                &canonical_vertices,
-            )?,
-            mesh_vertex_key(
-                leaf_index,
-                leaf,
-                corners[1],
-                global_denominator,
-                source_topology,
-                &canonical_vertices,
-            )?,
-            mesh_vertex_key(
-                leaf_index,
-                leaf,
-                corners[2],
-                global_denominator,
-                source_topology,
-                &canonical_vertices,
-            )?,
-        ];
-        for (key, lod) in leaf_keys.into_iter().zip(raw_corner_lods[leaf_index]) {
-            vertex_max
-                .entry(key)
-                .and_modify(|maximum| *maximum = (*maximum).max(lod))
-                .or_insert(lod);
-        }
-        keys.push(leaf_keys);
-    }
-
-    let mut hanging_lods = BTreeMap::<MeshVertexKey, u32>::new();
-    for (&line, spans) in &lines {
-        let endpoints = spans
-            .iter()
-            .flat_map(|span| [span.start, span.end])
-            .collect::<BTreeSet<_>>();
-        for span in spans {
-            let edge_lod = absolute_edges[span.leaf_index][span.edge_index];
-            for &parameter in endpoints.range((Excluded(span.start), Excluded(span.end))) {
-                let key =
-                    mesh_line_vertex_key(line, parameter, global_denominator, span.leaf_index)?;
-                if !vertex_max.contains_key(&key) {
-                    return Err(ScreenLeafLodError::InvalidTopology {
-                        leaf_index: span.leaf_index,
-                    });
-                }
-                hanging_lods
-                    .entry(key)
-                    .and_modify(|lod| *lod = (*lod).max(edge_lod))
-                    .or_insert(edge_lod);
-            }
-        }
-    }
-
-    Ok(keys
-        .into_iter()
-        .map(|leaf_keys| {
-            leaf_keys.map(|key| hanging_lods.get(&key).copied().unwrap_or(vertex_max[&key]))
-        })
-        .collect())
+    let topology = ScreenMeshTopologyCache::from_half_edge_mesh(source_topology)?;
+    ScreenMeshLeafFrontier::build(leaves, &topology)?.rebuild_vertex_lods(resident)
 }
 
 fn lod_exponent(lod: u32) -> Option<u8> {
@@ -907,7 +1119,7 @@ pub fn reconcile_screen_mesh_leaf_lods(
     max_lod: u32,
 ) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
     validate_screen_mesh_leaf_antichain(leaves)?;
-    let lines = mesh_topology_lines(leaves, source_topology)?;
+    let lines = mesh_topology_lines_from_half_edge_mesh(leaves, source_topology)?;
     let depths = leaves.iter().map(|leaf| leaf.id.depth).collect::<Vec<_>>();
     reconcile_lods(&depths, &lines, requested, max_face_edge_ratio, max_lod)
 }
@@ -1056,12 +1268,17 @@ mod tests {
         // face 0 logical edge A, which is represented by two depth-1 spans.
         requested[4][2] = 8;
 
-        let result =
-            reconcile_screen_mesh_leaf_lods(&leaves, &requested, &source_topology, 4, 512).unwrap();
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source_topology).unwrap();
+        let frontier = ScreenMeshLeafFrontier::build(&leaves, &topology).unwrap();
+        let result = frontier.reconcile_lods(&requested, 4, 512).unwrap();
+        assert_eq!(
+            result,
+            reconcile_screen_mesh_leaf_lods(&leaves, &requested, &source_topology, 4, 512).unwrap()
+        );
         assert!(result.shared_edge_promotions >= 2);
         assert_eq!(result.resident[4][2], 8);
 
-        let lines = mesh_topology_lines(&leaves, &source_topology).unwrap();
+        let lines = mesh_topology_lines(&leaves, &topology).unwrap();
         for spans in lines.values() {
             for (index, a) in spans.iter().enumerate() {
                 for b in &spans[index + 1..] {
@@ -1090,12 +1307,39 @@ mod tests {
             }
         }
 
-        let corner_lods =
+        let corner_lods = frontier.rebuild_vertex_lods(&result.resident).unwrap();
+        assert_eq!(
+            corner_lods,
             rebuild_screen_mesh_leaf_vertex_lods(&leaves, &result.resident, &source_topology)
-                .unwrap();
+                .unwrap()
+        );
+        let mut scratch = ScreenMeshLeafLodScratch::default();
+        assert_eq!(
+            frontier
+                .rebuild_vertex_lods_into(&result.resident, &mut scratch)
+                .unwrap(),
+            corner_lods,
+        );
+        let capacities = (
+            scratch.absolute_edges.capacity(),
+            scratch.vertex_max.capacity(),
+            scratch.hanging_lods.capacity(),
+            scratch.corner_lods.capacity(),
+        );
+        frontier
+            .rebuild_vertex_lods_into(&result.resident, &mut scratch)
+            .unwrap();
+        assert_eq!(
+            capacities,
+            (
+                scratch.absolute_edges.capacity(),
+                scratch.vertex_max.capacity(),
+                scratch.hanging_lods.capacity(),
+                scratch.corner_lods.capacity(),
+            )
+        );
         let global_depth = 1;
         let global_denominator = 1 << global_depth;
-        let canonical_vertices = canonical_source_vertices(&source_topology).unwrap();
         let face_one_edge_c = source_topology.face_half_edges(1)[0];
         let shared_edge = source_topology.canonical_edge(face_one_edge_c);
         let mut hanging_corners = 0;
@@ -1103,17 +1347,12 @@ mod tests {
             let corners =
                 quantized_domain_corners(leaf_index, leaf.id, leaf.domain, global_depth).unwrap();
             for (corner_index, corner) in corners.into_iter().enumerate() {
-                if mesh_vertex_key(
-                    leaf_index,
-                    leaf,
-                    corner,
-                    global_denominator,
-                    &source_topology,
-                    &canonical_vertices,
-                ) == Ok(MeshVertexKey::SourceEdge {
-                    canonical_half_edge: shared_edge,
-                    parameter: 1,
-                }) {
+                if mesh_vertex_key(leaf_index, leaf, corner, global_denominator, &topology)
+                    == Ok(MeshVertexKey::SourceEdge {
+                        canonical_half_edge: shared_edge,
+                        parameter: 1,
+                    })
+                {
                     assert_eq!(corner_lods[leaf_index][corner_index], 8);
                     hanging_corners += 1;
                 }
@@ -1133,9 +1372,8 @@ mod tests {
             domain: id.domain().unwrap(),
         }];
         let topology = quilting_mesh::HalfEdgeMesh::from_triangles(3, &[[0, 1, 2]]);
-        let error =
-            rebuild_screen_mesh_leaf_vertex_lods(&leaves, &[[1 << 31, 1, 1]], &topology)
-                .unwrap_err();
+        let error = rebuild_screen_mesh_leaf_vertex_lods(&leaves, &[[1 << 31, 1, 1]], &topology)
+            .unwrap_err();
         assert_eq!(
             error,
             ScreenLeafLodError::AbsoluteLodOverflow {
