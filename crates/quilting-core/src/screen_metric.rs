@@ -75,6 +75,9 @@ pub struct ScreenEdgeArc {
     pub max_mapping_error_px: f64,
     pub evaluations: u32,
     pub max_depth_reached: bool,
+    /// The hard depth bound was reached before either the integration or
+    /// inverse-map error target was satisfied.
+    pub tolerance_unmet: bool,
     pub knots: Vec<ScreenArcKnot>,
 }
 
@@ -282,7 +285,7 @@ impl EdgeArcIntegrator<'_> {
         coarse: f64,
         depth: u8,
         tolerance_px: f64,
-        leaves: &mut Vec<(f64, f64, f64, f64, bool)>,
+        leaves: &mut Vec<(f64, f64, f64, f64, bool, bool)>,
     ) -> Result<(), ScreenArcError> {
         let middle = 0.5 * (start + end);
         let left_middle = 0.5 * (start + middle);
@@ -301,7 +304,16 @@ impl EdgeArcIntegrator<'_> {
             || at_limit
         {
             let corrected = (refined + (refined - coarse) / 15.0).max(0.0);
-            leaves.push((end, corrected, error, mapping_error, at_limit));
+            let tolerance_unmet =
+                at_limit && (error > tolerance_px || mapping_error > self.options.tolerance_px);
+            leaves.push((
+                end,
+                corrected,
+                error,
+                mapping_error,
+                at_limit,
+                tolerance_unmet,
+            ));
             return Ok(());
         }
 
@@ -384,16 +396,18 @@ pub fn patch_screen_edge_arc(
     let mut estimated_error_px = 0.0;
     let mut max_mapping_error_px: f64 = 0.0;
     let mut max_depth_reached = false;
+    let mut tolerance_unmet = false;
     let mut knots = Vec::with_capacity(leaves.len() + 1);
     knots.push(ScreenArcKnot {
         parameter: 0.0,
         cumulative_px: 0.0,
     });
-    for (parameter, length_px, error_px, mapping_error_px, at_limit) in leaves {
+    for (parameter, length_px, error_px, mapping_error_px, at_limit, unmet) in leaves {
         cumulative_px += length_px;
         estimated_error_px += error_px;
         max_mapping_error_px = max_mapping_error_px.max(mapping_error_px);
         max_depth_reached |= at_limit;
+        tolerance_unmet |= unmet;
         knots.push(ScreenArcKnot {
             parameter,
             cumulative_px,
@@ -405,6 +419,7 @@ pub fn patch_screen_edge_arc(
         max_mapping_error_px,
         evaluations: integrator.evaluations,
         max_depth_reached,
+        tolerance_unmet,
         knots,
     })
 }
@@ -573,5 +588,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, ScreenArcError::UnprojectableSample { .. }));
+    }
+
+    #[test]
+    fn arc_depth_limit_distinguishes_reached_from_unmet() {
+        let flat = QBTriPatch::flat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let options = ScreenArcOptions {
+            tolerance_px: 1.0e-9,
+            min_depth: 0,
+            max_depth: 0,
+        };
+        let constant =
+            patch_screen_edge_arc(&flat, PatchEdge::C, &identity, [200.0; 2], options).unwrap();
+        assert!(constant.max_depth_reached);
+        assert!(!constant.tolerance_unmet);
+
+        let perspective_patch =
+            QBTriPatch::flat([-1.0, 0.0, -2.0], [1.0, 0.0, -6.0], [0.0, 1.0, -2.0]);
+        let varying = patch_screen_edge_arc(
+            &perspective_patch,
+            PatchEdge::C,
+            &perspective(90.0_f64.to_radians(), 1.0, 0.01, 100.0),
+            [200.0; 2],
+            options,
+        )
+        .unwrap();
+        assert!(varying.max_depth_reached);
+        assert!(varying.tolerance_unmet);
     }
 }
