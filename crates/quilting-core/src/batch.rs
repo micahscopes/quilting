@@ -964,6 +964,7 @@ pub fn face_is_visible(face_lods: &[f32], face_index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::patch::QBPatchDomain;
     use crate::screen_leaf_lod::{
         ScreenMeshLeafFrontier, ScreenMeshLeafTopology, ScreenMeshTopologyCache,
     };
@@ -1121,6 +1122,54 @@ mod tests {
         assert_eq!(anisotropic.1[0].node_index, 11);
         assert_eq!(anisotropic.1.iter().map(|member| member.face_index).collect::<Vec<_>>(), vec![0, 1]);
         assert_ne!(anisotropic.1[0].permutation_index, anisotropic.1[1].permutation_index);
+    }
+
+    #[test]
+    fn all_root_adaptive_grouping_is_exactly_legacy_grouping() {
+        let topology = HalfEdgeMesh::from_triangles(4, &[[0, 1, 2], [2, 1, 3]]);
+        let residents = [
+            Some(ResidentLod::from_edge_lods([2, 4, 8])),
+            Some(ResidentLod::from_edge_lods([8, 4, 2])),
+        ];
+        let initial = ResidentLod::uniform(1);
+        let mut vertex_max = Vec::new();
+        let mut face_vertex_lods = Vec::new();
+        rebuild_resident_vertex_lods(
+            &residents,
+            &topology,
+            initial,
+            &mut vertex_max,
+            &mut face_vertex_lods,
+        );
+        let face_materials = [3, 7];
+        let face_nodes = [11, 13];
+        let face_render_nodes = [17, 19];
+        let legacy = group_resident_faces(
+            &residents,
+            &face_vertex_lods,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+            initial,
+        );
+
+        let leaves = [0, 1].map(|source_face| ScreenMeshLeafTopology {
+            source_face,
+            id: ScreenPatchLeafId::ROOT,
+            domain: QBPatchDomain::FULL,
+        });
+        let topology_cache = ScreenMeshTopologyCache::from_half_edge_mesh(&topology).unwrap();
+        let frontier = ScreenMeshLeafFrontier::build(&leaves, &topology_cache).unwrap();
+        let adaptive = group_resident_screen_leaves(
+            &frontier,
+            &residents.map(|resident| resident.unwrap().edge_lods()),
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+        )
+        .unwrap();
+
+        assert_eq!(adaptive, legacy);
     }
 
     #[test]

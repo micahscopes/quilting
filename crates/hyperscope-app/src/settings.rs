@@ -158,6 +158,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("sceneimpl", "rust", Implementation),
     spec!("routeimpl", "rust", Implementation),
     spec!("rendershadow", "0", Toggle),
+    spec!("adaptiveshadow", "0", Toggle),
 ];
 
 pub fn hyperscope_control_spec(key: &str) -> Option<&'static ControlSpec> {

@@ -32,8 +32,11 @@ use quilting_core::render::{
     RenderSubmissionStats, RenderView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
+use quilting_core::screen_leaf_lod::ScreenMeshTopologyCache;
 use quilting_core::source_bounds::source_focus_bounds;
-use crate::adaptive_screen::{measure_adaptive_screen_patch, AdaptiveScreenRequest};
+use crate::adaptive_screen::{
+    measure_adaptive_screen_patch, AdaptiveRootShadow, AdaptiveScreenRequest,
+};
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
 use crate::surface_runtime::{
@@ -260,6 +263,11 @@ struct MainState {
     /// Source-mesh adjacency used to keep retained asynchronous topology
     /// crack-free, including exact duplicate vertices at glTF attribute seams.
     lod_topology: Option<quilting_mesh::HalfEdgeMesh>,
+    /// Immutable welded identities reused by camera-dependent adaptive
+    /// frontiers. Rebuilt only when source geometry changes.
+    screen_topology_cache: Option<ScreenMeshTopologyCache>,
+    /// Opt-in all-root equivalence gate. It never mutates draw membership.
+    adaptive_root_shadow: AdaptiveRootShadow,
     /// Rust-authoritative stable source address and output-chart walker. The
     /// adjacency layer is built lazily on first attachment.
     surface_runtime: SurfaceRuntime,
@@ -775,6 +783,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             lod_dirty_faces: Vec::new(),
             lod_balance_scratch: batch::ResidentLodBalanceScratch::default(),
             lod_topology: None,
+            screen_topology_cache: None,
+            adaptive_root_shadow: AdaptiveRootShadow::default(),
             surface_runtime: SurfaceRuntime::default(),
             batch_layout_dirty: true,
             batch_update_stats: BatchUpdateStats::default(),
@@ -2652,6 +2662,60 @@ fn build_instance_lod_topology(
     ))
 }
 
+fn build_screen_topology_cache(
+    topology: Option<&quilting_mesh::HalfEdgeMesh>,
+) -> Result<ScreenMeshTopologyCache, String> {
+    ScreenMeshTopologyCache::from_half_edge_mesh(
+        topology.ok_or_else(|| "source LOD topology is unavailable".to_string())?,
+    )
+    .map_err(|error| format!("could not cache adaptive source topology: {error}"))
+}
+
+fn bounded_standby_resident_lod() -> batch::ResidentLod {
+    let lod = TESS_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache
+            .keys()
+            .filter(|lod| lod[0] >= 2)
+            .min_by_key(|lod| {
+                (
+                    lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]),
+                    **lod,
+                )
+            })
+            .or_else(|| {
+                cache.keys().min_by_key(|lod| {
+                    (
+                        lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]),
+                        **lod,
+                    )
+                })
+            })
+            .copied()
+    })
+    .unwrap_or([1; 3]);
+    batch::ResidentLod {
+        canonical: lod,
+        perm_index: 0,
+        parity_bucket: 0,
+    }
+}
+
+fn compare_adaptive_root_shadow(state: &mut MainState, initial: batch::ResidentLod) {
+    let Some(topology) = state.screen_topology_cache.as_ref() else {
+        return;
+    };
+    state.adaptive_root_shadow.compare(
+        topology,
+        &state.resident_face_lods,
+        initial,
+        &state.face_materials,
+        &state.face_nodes,
+        &state.face_render_nodes,
+        &state.batch_groups,
+    );
+}
+
 #[wasm_bindgen(js_name = "mr_setRoundShadowEnabled")]
 pub fn mr_set_round_shadow_enabled(enabled: bool) -> JsValue {
     STATE.with(|state| {
@@ -2684,6 +2748,51 @@ pub fn mr_set_render_shadow_enabled(enabled: bool) -> JsValue {
             refresh_render_shadow_scene(state);
         }
         state.render_shadow.to_js()
+    })
+}
+
+/// Enable the non-mutating all-root adaptive batch equivalence gate.
+///
+/// This is deliberately independent of the render shadow: it compares the
+/// legacy face grouping against the exact adaptive-frontier handoff that a
+/// future picked/full-scene mode will use, while leaving current GL batches
+/// untouched.
+#[wasm_bindgen(js_name = "mr_setAdaptiveRootShadowEnabled")]
+pub fn mr_set_adaptive_root_shadow_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        state.adaptive_root_shadow.set_enabled(enabled);
+        if enabled && state.num_faces > 0 && state.screen_topology_cache.is_none() {
+            match build_screen_topology_cache(state.lod_topology.as_ref()) {
+                Ok(cache) => state.screen_topology_cache = Some(cache),
+                Err(error) => state.adaptive_root_shadow.record_unavailable(error),
+            }
+        } else if !enabled {
+            state.screen_topology_cache = None;
+            state.adaptive_root_shadow.reset_topology();
+        }
+        if enabled
+            && state.num_faces > 0
+            && !state.batch_layout_dirty
+            && !state.batch_groups.is_empty()
+        {
+            compare_adaptive_root_shadow(state, bounded_standby_resident_lod());
+        }
+        serde_wasm_bindgen::to_value(&state.adaptive_root_shadow.snapshot())
+            .unwrap_or(JsValue::NULL)
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_adaptiveRootShadowDiagnostics")]
+pub fn mr_adaptive_root_shadow_diagnostics() -> JsValue {
+    STATE.with(|state| {
+        state.borrow().as_ref().map_or(JsValue::NULL, |state| {
+            serde_wasm_bindgen::to_value(&state.adaptive_root_shadow.snapshot())
+                .unwrap_or(JsValue::NULL)
+        })
     })
 }
 
@@ -2814,6 +2923,14 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
                 st.num_faces,
                 &st.face_nodes,
             );
+            st.adaptive_root_shadow.reset_topology();
+            st.screen_topology_cache = None;
+            if st.adaptive_root_shadow.is_enabled() {
+                match build_screen_topology_cache(st.lod_topology.as_ref()) {
+                    Ok(cache) => st.screen_topology_cache = Some(cache),
+                    Err(error) => st.adaptive_root_shadow.record_unavailable(error),
+                }
+            }
             st.batch_update_stats = BatchUpdateStats::default();
             if let Some(topology) = st.lod_topology.as_ref() {
                 info!(
@@ -3853,23 +3970,7 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
         // The current-pose render GPU can still resurrect one during an
         // asynchronous camera/animation frame, while avoiding the permanent
         // vertex cost and high-detail flash of arbitrary old topology.
-        let initial_resident_lod = TESS_CACHE.with(|tc| {
-            let tc = tc.borrow();
-            tc.keys()
-                .filter(|lod| lod[0] >= 2)
-                .min_by_key(|lod| {
-                    (lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]), **lod)
-                })
-                .or_else(|| tc.keys().min_by_key(|lod| {
-                    (lod[0].saturating_mul(lod[1]).saturating_mul(lod[2]), **lod)
-                }))
-                .copied()
-        }).unwrap_or([1; 3]);
-        let initial_resident = batch::ResidentLod {
-            canonical: initial_resident_lod,
-            perm_index: 0,
-            parity_bucket: 0,
-        };
+        let initial_resident = bounded_standby_resident_lod();
         let full_snapshot = face_indices.is_none();
         let mut culled = if full_snapshot {
             0
@@ -3987,6 +4088,9 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
             initial_resident,
             &mut state.batch_groups,
         );
+        if state.adaptive_root_shadow.is_enabled() {
+            compare_adaptive_root_shadow(state, initial_resident);
+        }
         perf_mark("batch-bucket-end");
         perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
         perf_mark("batch-group-end");

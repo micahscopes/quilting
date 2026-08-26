@@ -8,14 +8,217 @@
 
 use std::collections::BTreeMap;
 
+use quilting_core::batch::{
+    group_resident_screen_leaves_into, RenderBatchKey, RenderBatchMember, ResidentLod,
+};
 use quilting_core::patch::{QBPatchDomain, QBTriPatch};
 use quilting_core::permutation::canonical_form;
-use quilting_core::screen_leaf_lod::{reconcile_screen_leaf_lods, ScreenLeafTopology};
+use quilting_core::screen_leaf_lod::{
+    reconcile_screen_leaf_lods, ScreenLeafTopology, ScreenMeshLeafFrontier,
+    ScreenMeshLeafLodScratch, ScreenMeshLeafTopology, ScreenMeshTopologyCache,
+};
 use quilting_core::screen_partition::{
     diagnose_screen_patch, partition_screen_patch, ScreenPartitionPolicy, ScreenPatchDiagnostic,
     ScreenPatchLeafId, ScreenPatchLeafStatus,
 };
 use serde::Serialize;
+
+/// Disabled-by-default parity observer for the production batch handoff.
+///
+/// An all-root adaptive frontier must be exactly equivalent to legacy
+/// source-face grouping before any dyadic leaf is allowed to change live
+/// rendering. The observer retains its frontier, grouping map, and work
+/// buffers so repeated classifications measure the real steady-state path
+/// rather than allocator noise.
+#[derive(Default)]
+pub(crate) struct AdaptiveRootShadow {
+    enabled: bool,
+    frontier: Option<ScreenMeshLeafFrontier>,
+    root_lods: Vec<[u32; 3]>,
+    lod_scratch: ScreenMeshLeafLodScratch,
+    groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    comparisons: u64,
+    matches: u64,
+    mismatches: u64,
+    failures: u64,
+    last_match: Option<bool>,
+    last_error: Option<String>,
+    last_legacy_batches: u64,
+    last_shadow_batches: u64,
+    last_legacy_instances: u64,
+    last_shadow_instances: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AdaptiveRootShadowSnapshot<'a> {
+    enabled: bool,
+    state: &'static str,
+    comparisons: u64,
+    matches: u64,
+    mismatches: u64,
+    failures: u64,
+    last_match: Option<bool>,
+    last_error: Option<&'a str>,
+    last_legacy_batches: u64,
+    last_shadow_batches: u64,
+    last_legacy_instances: u64,
+    last_shadow_instances: u64,
+}
+
+impl AdaptiveRootShadow {
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        self.last_match = None;
+        self.last_error = None;
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Invalidate source-topology-dependent state. Batch keys from a previous
+    /// asset are not meaningful for the replacement and must not leak into
+    /// diagnostics if rebuilding its frontier fails.
+    pub(crate) fn reset_topology(&mut self) {
+        self.frontier = None;
+        self.root_lods.clear();
+        self.groups.clear();
+        self.last_match = None;
+        self.last_error = None;
+        self.last_legacy_batches = 0;
+        self.last_shadow_batches = 0;
+        self.last_legacy_instances = 0;
+        self.last_shadow_instances = 0;
+    }
+
+    pub(crate) fn record_unavailable(&mut self, error: impl Into<String>) {
+        if !self.enabled {
+            return;
+        }
+        self.failures = self.failures.saturating_add(1);
+        self.last_match = None;
+        self.last_error = Some(error.into());
+        self.last_legacy_batches = 0;
+        self.last_shadow_batches = 0;
+        self.last_legacy_instances = 0;
+        self.last_shadow_instances = 0;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compare(
+        &mut self,
+        topology: &ScreenMeshTopologyCache,
+        residents: &[Option<ResidentLod>],
+        initial: ResidentLod,
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        legacy_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.comparisons = self.comparisons.saturating_add(1);
+        let comparison = (|| -> Result<bool, String> {
+            if self
+                .frontier
+                .as_ref()
+                .is_none_or(|frontier| frontier.leaves().len() != residents.len())
+            {
+                let leaves = (0..residents.len())
+                    .map(|source_face| {
+                        Ok(ScreenMeshLeafTopology {
+                            source_face: u32::try_from(source_face)
+                                .map_err(|_| "adaptive root face identity exceeds u32")?,
+                            id: quilting_core::screen_partition::ScreenPatchLeafId::ROOT,
+                            domain: QBPatchDomain::FULL,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, &str>>()?;
+                self.frontier = Some(
+                    ScreenMeshLeafFrontier::build(&leaves, topology)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            self.root_lods.clear();
+            self.root_lods.extend(
+                residents
+                    .iter()
+                    .map(|resident| resident.unwrap_or(initial).edge_lods()),
+            );
+            group_resident_screen_leaves_into(
+                self.frontier
+                    .as_ref()
+                    .ok_or_else(|| "adaptive root frontier is unavailable".to_string())?,
+                &self.root_lods,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                &mut self.lod_scratch,
+                &mut self.groups,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(self.groups == *legacy_groups)
+        })();
+
+        self.last_legacy_batches = legacy_groups.len() as u64;
+        self.last_shadow_batches = self.groups.len() as u64;
+        self.last_legacy_instances = legacy_groups
+            .values()
+            .map(|members| members.len() as u64)
+            .sum();
+        self.last_shadow_instances = self
+            .groups
+            .values()
+            .map(|members| members.len() as u64)
+            .sum();
+        match comparison {
+            Ok(matches) => {
+                self.last_match = Some(matches);
+                self.last_error = None;
+                if matches {
+                    self.matches = self.matches.saturating_add(1);
+                } else {
+                    self.mismatches = self.mismatches.saturating_add(1);
+                }
+            }
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                self.last_match = None;
+                self.last_error = Some(error);
+            }
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> AdaptiveRootShadowSnapshot<'_> {
+        let state = if !self.enabled {
+            "disabled"
+        } else if self.last_error.is_some() {
+            "error"
+        } else {
+            match self.last_match {
+                Some(true) => "matching",
+                Some(false) => "mismatch",
+                None => "awaiting-classification",
+            }
+        };
+        AdaptiveRootShadowSnapshot {
+            enabled: self.enabled,
+            state,
+            comparisons: self.comparisons,
+            matches: self.matches,
+            mismatches: self.mismatches,
+            failures: self.failures,
+            last_match: self.last_match,
+            last_error: self.last_error.as_deref(),
+            last_legacy_batches: self.last_legacy_batches,
+            last_shadow_batches: self.last_shadow_batches,
+            last_legacy_instances: self.last_legacy_instances,
+            last_shadow_instances: self.last_shadow_instances,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct AdaptiveScreenRequest<'a> {

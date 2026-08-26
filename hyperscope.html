@@ -397,6 +397,7 @@ import init, {
   mr_setLodGradingRatio,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
+  mr_setAdaptiveRootShadowEnabled, mr_adaptiveRootShadowDiagnostics,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
@@ -509,6 +510,8 @@ const RUST_ROUTE_IMPLEMENTATION = implementationFromRoute(
 const RUST_ROUTE_SHADOW_ENABLED = RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
   initialBrowserParams.get('rendershadow') === '1';
+const RUST_ADAPTIVE_ROOT_SHADOW_ENABLED =
+  initialBrowserParams.get('adaptiveshadow') === '1';
 const SURFACE_WALK_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'walkimpl', 'js',
 );
@@ -706,6 +709,11 @@ const renderShadowDiagnostics = {
   },
 };
 globalThis.__hyperscopeRenderShadow = renderShadowDiagnostics;
+const adaptiveRootShadowDiagnostics = {
+  enabled: RUST_ADAPTIVE_ROOT_SHADOW_ENABLED,
+  snapshot: null,
+};
+globalThis.__hyperscopeAdaptiveRootShadow = adaptiveRootShadowDiagnostics;
 
 function updateRoundShadowDiagnostics(snapshot = mr_roundShadowDiagnostics()) {
   roundShadowDiagnostics.snapshot = snapshot;
@@ -1121,6 +1129,7 @@ function syncURL() {
     set('sceneimpl', RUST_SCENE_IMPLEMENTATION, PARAM_DEFAULTS.sceneimpl);
     set('routeimpl', RUST_ROUTE_IMPLEMENTATION, PARAM_DEFAULTS.routeimpl);
     if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
+    if (RUST_ADAPTIVE_ROOT_SHADOW_ENABLED) p.set('adaptiveshadow', '1');
     const rustRoute = compareRustRouteShadow(p);
     let committedParams = p;
     if (RUST_ROUTE_IMPLEMENTATION === 'rust') {
@@ -6992,6 +7001,9 @@ async function recomputeLods() {
           'batch-upload-start',
           'batch-upload-end',
         );
+        if (RUST_ADAPTIVE_ROOT_SHADOW_ENABLED) {
+          adaptiveRootShadowDiagnostics.snapshot = mr_adaptiveRootShadowDiagnostics();
+        }
       }
     } else if (!primaryOnly) {
       // Do not let an interrupted scene-level classification silently demote
@@ -8895,6 +8907,9 @@ phase('wasm', [], async () => {
   if (!mr_init('cv')) throw 'renderer init failed';
   updateRoundShadowDiagnostics(mr_setRoundShadowEnabled(RUST_ROUND_SHADOW_ENABLED));
   renderShadowDiagnostics.snapshot = mr_setRenderShadowEnabled(RUST_RENDER_SHADOW_ENABLED);
+  adaptiveRootShadowDiagnostics.snapshot = mr_setAdaptiveRootShadowEnabled(
+    RUST_ADAPTIVE_ROOT_SHADOW_ENABLED,
+  );
   const rendererFinished = performance.now();
   startupDiagnostics.wasm = {
     compileMs: compileFinished - compileStarted,
