@@ -59,6 +59,10 @@ impl Default for ScreenPartitionPolicy {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScreenPatchDiagnostic {
     pub edge_arc_px: [f64; 3],
+    /// Largest sampled pixel derivative in each logical edge direction over
+    /// the solid patch. This catches an interior dilation that boundary arc
+    /// length alone cannot see.
+    pub directional_extent_px: [f64; 3],
     pub max_edge_arc_px: f64,
     pub stretch_range: [f64; 2],
     pub stretch_ratio: f64,
@@ -96,7 +100,8 @@ impl ScreenPatchDiagnostic {
             return None;
         }
         let lod_cap = 1u32 << (31 - max_lod.leading_zeros());
-        Some(self.edge_arc_px.map(|length| {
+        Some(std::array::from_fn(|edge| {
+            let length = self.edge_arc_px[edge].max(self.directional_extent_px[edge]);
             let requested = if length <= max_px_per_segment {
                 1
             } else {
@@ -256,6 +261,7 @@ pub fn diagnose_screen_patch(
     let mut max_stretch: f64 = 0.0;
     let mut min_area = f64::INFINITY;
     let mut max_area: f64 = 0.0;
+    let mut directional_extent_px = [0.0f64; 3];
     let min_denominator_norm_sq = min_denominator_norm_sq(transformed_patch);
     let mut unprojectable = min_denominator_norm_sq <= SINGULARITY_NORM_SQ;
     for barycentric in METRIC_SAMPLES {
@@ -274,6 +280,12 @@ pub fn diagnose_screen_patch(
         max_stretch = max_stretch.max(metric.principal_stretch[1]);
         min_area = min_area.min(metric.area_scale);
         max_area = max_area.max(metric.area_scale);
+        for (edge, direction) in [[-1.0, 1.0], [0.0, 1.0], [1.0, 0.0]]
+            .into_iter()
+            .enumerate()
+        {
+            directional_extent_px[edge] = directional_extent_px[edge].max(metric.length(direction));
+        }
     }
 
     let mut edge_arc_px = [0.0; 3];
@@ -301,6 +313,7 @@ pub fn diagnose_screen_patch(
     }
     ScreenPatchDiagnostic {
         edge_arc_px,
+        directional_extent_px,
         max_edge_arc_px: edge_arc_px.into_iter().fold(0.0, f64::max),
         stretch_range: [min_stretch, max_stretch],
         stretch_ratio: if unprojectable {
@@ -499,6 +512,7 @@ mod tests {
     fn pixel_ceiling_demand_rounds_up_without_changing_floor_semantics() {
         let diagnostic = ScreenPatchDiagnostic {
             edge_arc_px: [63.0, 65.0, 257.0],
+            directional_extent_px: [129.0, 1.0, 1.0],
             max_edge_arc_px: 257.0,
             stretch_range: [1.0, 1.0],
             stretch_ratio: 1.0,
@@ -509,10 +523,10 @@ mod tests {
         };
         assert_eq!(
             diagnostic.edge_subdivision_demand(64.0, 512),
-            Some([1, 2, 8]),
+            Some([4, 2, 8]),
         );
         // A non-power-of-two atlas cap admits only its resident lower power.
-        assert_eq!(diagnostic.edge_subdivision_demand(64.0, 6), Some([1, 2, 4]),);
+        assert_eq!(diagnostic.edge_subdivision_demand(64.0, 6), Some([4, 2, 4]),);
     }
 
     #[test]

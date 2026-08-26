@@ -6,7 +6,9 @@
 //! collinear spans, promotes each group to one absolute resolution, applies the
 //! selected within-leaf grading ratio, and iterates to a fixed point.
 
+use crate::atlas::TessellationAtlas;
 use crate::patch::QBPatchDomain;
+use crate::permutation::canonical_form;
 use crate::screen_partition::{ScreenPatchLeaf, ScreenPatchLeafId};
 use std::collections::BTreeMap;
 
@@ -34,6 +36,34 @@ pub struct ScreenLeafLodResult {
     pub max_absolute_exponent: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScreenLeafAtlasWork {
+    pub instances: u64,
+    pub vertices: u64,
+    pub triangles: u64,
+}
+
+impl ScreenLeafLodResult {
+    /// Exact atlas work implied by the reconciled leaves, before material/pass
+    /// multiplication. This gives WebGL2 and WebGPU the same workload oracle.
+    pub fn atlas_work(
+        &self,
+        atlas: &TessellationAtlas,
+    ) -> Result<ScreenLeafAtlasWork, ScreenLeafLodError> {
+        let mut work = ScreenLeafAtlasWork::default();
+        for (leaf_index, edge_lods) in self.resident.iter().copied().enumerate() {
+            let key = canonical_form(edge_lods).res;
+            let Some(entry) = atlas.patches.get(&key) else {
+                return Err(ScreenLeafLodError::MissingAtlasPatch { leaf_index, key });
+            };
+            work.instances = work.instances.saturating_add(1);
+            work.vertices = work.vertices.saturating_add(entry.vertex_count as u64);
+            work.triangles = work.triangles.saturating_add(entry.triangle_count as u64);
+        }
+        Ok(work)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScreenLeafLodError {
     LengthMismatch,
@@ -50,6 +80,10 @@ pub enum ScreenLeafLodError {
         edge_index: usize,
         required_lod: u32,
         max_lod: u32,
+    },
+    MissingAtlasPatch {
+        leaf_index: usize,
+        key: [u32; 3],
     },
 }
 
@@ -76,6 +110,10 @@ impl std::fmt::Display for ScreenLeafLodError {
             } => write!(
                 formatter,
                 "adaptive leaf {leaf_index} edge {edge_index} needs LoD {required_lod}, atlas cap is {max_lod}"
+            ),
+            Self::MissingAtlasPatch { leaf_index, key } => write!(
+                formatter,
+                "adaptive leaf {leaf_index} needs missing atlas patch {key:?}"
             ),
         }
     }
@@ -340,6 +378,8 @@ pub fn reconcile_screen_leaf_lods(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atlas::BuildMode;
+    use crate::sampling::PatchConfig;
 
     fn mixed_depth_partition() -> Vec<ScreenLeafTopology> {
         let root = QBPatchDomain::FULL.quarter();
@@ -384,11 +424,32 @@ mod tests {
             reconcile_screen_leaf_lods(&leaves, &vec![[1; 3]; leaves.len()], 4, 512).unwrap();
         assert!(result.shared_edge_promotions > 0);
         assert_overlaps_match(&leaves, &result.resident);
-        for lods in result.resident {
+        for lods in &result.resident {
             let minimum = *lods.iter().min().unwrap();
             let maximum = *lods.iter().max().unwrap();
             assert!(maximum <= 4 * minimum);
         }
+        let mut keys = result
+            .resident
+            .iter()
+            .copied()
+            .map(|lods| canonical_form(lods).res)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut levels = keys.iter().flatten().copied().collect::<Vec<_>>();
+        levels.sort_unstable();
+        levels.dedup();
+        let atlas = TessellationAtlas::build_for_keys(
+            &levels,
+            &keys,
+            &PatchConfig::default(),
+            BuildMode::Hierarchical,
+        );
+        let work = result.atlas_work(&atlas).unwrap();
+        assert_eq!(work.instances, leaves.len() as u64);
+        assert!(work.vertices >= work.instances * 3);
+        assert!(work.triangles >= work.instances);
     }
 
     #[test]
