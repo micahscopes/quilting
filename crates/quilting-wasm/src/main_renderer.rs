@@ -3629,20 +3629,30 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
 }
 
 fn adaptive_screen_diagnostic_error(message: impl Into<String>) -> JsValue {
-    serde_wasm_bindgen::to_value(&serde_json::json!({
+    adaptive_browser_value(&serde_json::json!({
         "ok": false,
         "error": message.into(),
     }))
-    .unwrap_or(JsValue::NULL)
 }
 
 fn adaptive_picked_snapshot_js(state: &MainState, refresh_published: Option<bool>) -> JsValue {
-    serde_wasm_bindgen::to_value(&AdaptivePickedRefreshSnapshot {
+    adaptive_browser_value(&AdaptivePickedRefreshSnapshot {
         snapshot: state.adaptive_picked.snapshot(),
         transition_pending: state.adaptive_batch_transition_pending,
         refresh_published,
     })
-    .unwrap_or(JsValue::NULL)
+}
+
+/// Adaptive diagnostics are a browser-facing control contract, so even the
+/// flattened snapshot and error maps must cross the WASM boundary as ordinary
+/// JavaScript objects. The default serde-wasm-bindgen serializer represents
+/// maps as `Map`; property reads such as `snapshot.enabled` would then be
+/// silently undefined and the browser would never schedule the configured
+/// adaptive classification.
+fn adaptive_browser_value(value: &impl Serialize) -> JsValue {
+    value
+        .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
+        .unwrap_or(JsValue::NULL)
 }
 
 /// Measure one current posed patch under the exact renderer camera and

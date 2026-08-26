@@ -50,18 +50,28 @@ assert.equal(
 const rejectedAdaptiveConfiguration =
   mr_setAdaptivePickedFace(0, 16, 32, 5, 256, 256, 2_000_000);
 assert.equal(
-  rejectedAdaptiveConfiguration.get('ok'),
+  rejectedAdaptiveConfiguration instanceof Map,
+  false,
+  'browser control diagnostics must use property-readable objects',
+);
+assert.equal(
+  rejectedAdaptiveConfiguration.ok,
   false,
   'adaptive configuration should fail closed before renderer initialization',
 );
-assert.equal(rejectedAdaptiveConfiguration.get('error'), 'renderer is not initialized');
+assert.equal(rejectedAdaptiveConfiguration.error, 'renderer is not initialized');
 const rejectedCurrentViewConfiguration =
   mr_setAdaptiveCurrentView(16, 32, 5, 8, 64, 512, 512, 2_000_000);
 assert.equal(
-  rejectedCurrentViewConfiguration.get('ok'),
+  rejectedCurrentViewConfiguration instanceof Map,
+  false,
+  'current-view diagnostics must use the same browser object contract',
+);
+assert.equal(
+  rejectedCurrentViewConfiguration.ok,
   false,
   'current-view adaptive configuration should fail closed before renderer initialization',
 );
-assert.equal(rejectedCurrentViewConfiguration.get('error'), 'renderer is not initialized');
+assert.equal(rejectedCurrentViewConfiguration.error, 'renderer is not initialized');
 
 console.log(JSON.stringify({ generatedExports: true, inertBeforeRenderer: true }));
