@@ -289,6 +289,12 @@ pub(crate) struct AdaptivePickedConfig {
 pub(crate) struct AdaptivePickedRuntime {
     config: Option<AdaptivePickedConfig>,
     source_lod_scratch: Vec<[u32; 3]>,
+    /// Exact welded incidence for the last stable dyadic leaf topology. Camera
+    /// and animation changes commonly alter only requested LoDs, so rebuilding
+    /// this mesh-sized structure on every refresh is avoidable work.
+    frontier: Option<ScreenMeshLeafFrontier>,
+    frontier_cache_hits: u64,
+    frontier_cache_misses: u64,
     lod_scratch: ScreenMeshLeafLodScratch,
     candidate_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     attempts: u64,
@@ -346,6 +352,8 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     last_shared_edge_promotions: u64,
     last_grading_promotions: u64,
     last_reconciliation_iterations: u64,
+    frontier_cache_hits: u64,
+    frontier_cache_misses: u64,
 }
 
 #[derive(Serialize)]
@@ -432,6 +440,9 @@ impl AdaptivePickedRuntime {
         self.last_reconciliation_iterations = 0;
         self.last_pose_stamp = None;
         self.last_published_faces.clear();
+        self.frontier = None;
+        self.frontier_cache_hits = 0;
+        self.frontier_cache_misses = 0;
         self.candidate_groups.clear();
         self.clear_pending_publication();
     }
@@ -645,8 +656,22 @@ impl AdaptivePickedRuntime {
                 source_requested_lods: &self.source_lod_scratch,
             })
             .map_err(|error| error.to_string())?;
-            let frontier = ScreenMeshLeafFrontier::build(&plan.leaves, topology)
-                .map_err(|error| error.to_string())?;
+            let frontier_matches = self
+                .frontier
+                .as_ref()
+                .is_some_and(|frontier| frontier.leaves() == plan.leaves.as_slice());
+            if frontier_matches {
+                self.frontier_cache_hits = self.frontier_cache_hits.saturating_add(1);
+            } else {
+                let frontier = ScreenMeshLeafFrontier::build(&plan.leaves, topology)
+                    .map_err(|error| error.to_string())?;
+                self.frontier = Some(frontier);
+                self.frontier_cache_misses = self.frontier_cache_misses.saturating_add(1);
+            }
+            let frontier = self
+                .frontier
+                .as_ref()
+                .ok_or_else(|| "adaptive frontier cache is unavailable".to_string())?;
             let reconciled = frontier
                 .reconcile_lods(&plan.requested_lods, max_face_edge_ratio, max_atlas_lod)
                 .map_err(|error| error.to_string())?;
@@ -665,7 +690,7 @@ impl AdaptivePickedRuntime {
                 ));
             }
             group_resident_screen_leaves_into(
-                &frontier,
+                frontier,
                 &reconciled.resident,
                 face_materials,
                 face_nodes,
@@ -769,6 +794,8 @@ impl AdaptivePickedRuntime {
             last_shared_edge_promotions: self.last_shared_edge_promotions,
             last_grading_promotions: self.last_grading_promotions,
             last_reconciliation_iterations: self.last_reconciliation_iterations,
+            frontier_cache_hits: self.frontier_cache_hits,
+            frontier_cache_misses: self.frontier_cache_misses,
         }
     }
 }
@@ -1260,12 +1287,16 @@ mod tests {
 
         plan(&mut runtime, (7, 2));
         assert_eq!(runtime.snapshot().state, "staged");
+        assert_eq!(runtime.snapshot().frontier_cache_hits, 0);
+        assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
         runtime.commit_publication();
         assert_eq!(runtime.snapshot().pose_revision, Some(7));
         assert_eq!(runtime.snapshot().published_faces, [0]);
         assert_eq!(runtime.snapshot().last_plan.unwrap().selected_faces, 1);
 
         plan(&mut runtime, (8, 2));
+        assert_eq!(runtime.snapshot().frontier_cache_hits, 1);
+        assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
         runtime.record_publication_failure("synthetic upload rollback");
         let rolled_back = runtime.snapshot();
         assert_eq!(rolled_back.state, "rollback-active");
@@ -1277,6 +1308,8 @@ mod tests {
         );
 
         plan(&mut runtime, (8, 2));
+        assert_eq!(runtime.snapshot().frontier_cache_hits, 2);
+        assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
         runtime.commit_publication();
         let snapshot = runtime.snapshot();
         assert_eq!(snapshot.state, "active");
