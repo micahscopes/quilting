@@ -12,6 +12,7 @@ const {
   mr_debugFocusState,
   mr_refreshAdaptivePicked,
   mr_renderShadowDiagnostics,
+  mr_setAdaptiveCurrentView,
   mr_setAdaptivePickedFace,
   mr_setLodGradingRatio,
   mr_setRenderShadowEnabled,
@@ -54,5 +55,13 @@ assert.equal(
   'adaptive configuration should fail closed before renderer initialization',
 );
 assert.equal(rejectedAdaptiveConfiguration.get('error'), 'renderer is not initialized');
+const rejectedCurrentViewConfiguration =
+  mr_setAdaptiveCurrentView(16, 32, 5, 8, 64, 512, 512, 2_000_000);
+assert.equal(
+  rejectedCurrentViewConfiguration.get('ok'),
+  false,
+  'current-view adaptive configuration should fail closed before renderer initialization',
+);
+assert.equal(rejectedCurrentViewConfiguration.get('error'), 'renderer is not initialized');
 
 console.log(JSON.stringify({ generatedExports: true, inertBeforeRenderer: true }));

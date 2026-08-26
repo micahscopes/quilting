@@ -398,7 +398,8 @@ import init, {
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
   mr_setAdaptiveRootShadowEnabled, mr_adaptiveRootShadowDiagnostics,
-  mr_setAdaptivePickedFace, mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
+  mr_setAdaptivePickedFace, mr_setAdaptiveCurrentView,
+  mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
   mr_adaptivePickedDiagnostics,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
@@ -717,11 +718,11 @@ const adaptiveRootShadowDiagnostics = {
 };
 globalThis.__hyperscopeAdaptiveRootShadow = adaptiveRootShadowDiagnostics;
 
-// Explicit DevTools controller for the first bounded live adaptive path. It
-// deliberately has no second render-state implementation: Rust owns the
-// configured face, measured pose stamp, partition, reconciliation, budgets, and
-// fallback. This adapter only resolves the current browser selection and asks
-// the existing LOD scheduler for a fresh classification.
+// Explicit DevTools controller for bounded picked-face and automatic
+// current-view adaptation. It deliberately has no second render-state
+// implementation: Rust owns selection, measured pose stamps, partitioning,
+// reconciliation, budgets, and fallback. This adapter only supplies options
+// and asks the existing LOD scheduler for a fresh classification.
 const adaptivePickedDiagnostics = {
   snapshot: null,
   options: null,
@@ -749,7 +750,8 @@ const adaptivePickedDiagnostics = {
     );
     const maxTriangles = Number(options.maxTriangles ?? 2_000_000);
     this.options = {
-      face, floorPx, ceilingPx, maxDepth, maxSelectedLeaves, maxTotalLeaves, maxTriangles,
+      mode: 'picked', face, floorPx, ceilingPx, maxDepth,
+      maxSelectedLeaves, maxTotalLeaves, maxTriangles,
     };
     this.snapshot = mr_setAdaptivePickedFace(
       face,
@@ -757,6 +759,46 @@ const adaptivePickedDiagnostics = {
       ceilingPx,
       maxDepth,
       maxSelectedLeaves,
+      maxTotalLeaves,
+      maxTriangles,
+    );
+    if (this.snapshot?.enabled) debouncedLodRecompute();
+    return this.snapshot;
+  },
+  enableCurrentView(options = {}) {
+    if (lodInFlight) {
+      return { ok: false, error: 'Wait for the current LOD classification before arming' };
+    }
+    if (!lod.screenAtten.peek()) {
+      return { ok: false, error: 'Enable the pixel floor before arming adaptive LoD' };
+    }
+    const floorPx = Number(lod.minPx.peek());
+    if (options.floorPx != null && Number(options.floorPx) !== floorPx) {
+      return { ok: false, error: `floorPx must match the live pixel floor (${floorPx})` };
+    }
+    const ceilingPx = Number(options.ceilingPx ?? Math.max(floorPx, 32));
+    const maxDepth = Number(options.maxDepth ?? 5);
+    const maxSelectedFaces = Number(options.maxSelectedFaces ?? 8);
+    const maxSelectedLeaves = Number(options.maxSelectedLeaves ?? 64);
+    const maxPartitionLeaves = Number(
+      options.maxPartitionLeaves ?? maxSelectedFaces * maxSelectedLeaves,
+    );
+    const sourceFaces = currentFaceNodes.length;
+    const maxTotalLeaves = Number(
+      options.maxTotalLeaves ?? sourceFaces + maxPartitionLeaves,
+    );
+    const maxTriangles = Number(options.maxTriangles ?? 2_000_000);
+    this.options = {
+      mode: 'current-view', floorPx, ceilingPx, maxDepth, maxSelectedFaces,
+      maxSelectedLeaves, maxPartitionLeaves, maxTotalLeaves, maxTriangles,
+    };
+    this.snapshot = mr_setAdaptiveCurrentView(
+      floorPx,
+      ceilingPx,
+      maxDepth,
+      maxSelectedFaces,
+      maxSelectedLeaves,
+      maxPartitionLeaves,
       maxTotalLeaves,
       maxTriangles,
     );
@@ -782,11 +824,14 @@ const adaptivePickedDiagnostics = {
     }
     const currentFloor = Number(lod.minPx.peek());
     const configured = this.options || {
+      mode: this.snapshot.mode,
       face: this.snapshot.face,
       floorPx: this.snapshot.minPxPerSegment,
       ceilingPx: this.snapshot.maxPxPerSegment,
       maxDepth: this.snapshot.maxDepth,
       maxSelectedLeaves: this.snapshot.maxSelectedLeaves,
+      maxSelectedFaces: this.snapshot.maxSelectedFaces,
+      maxPartitionLeaves: this.snapshot.maxPartitionLeaves,
       maxTotalLeaves: this.snapshot.maxTotalLeaves,
       maxTriangles: this.snapshot.maxTriangles,
     };
@@ -797,19 +842,31 @@ const adaptivePickedDiagnostics = {
       ceilingPx: Math.max(currentFloor, Number(configured.ceilingPx)),
     };
     this.options = next;
-    this.snapshot = mr_setAdaptivePickedFace(
-      next.face,
-      next.floorPx,
-      next.ceilingPx,
-      next.maxDepth,
-      next.maxSelectedLeaves,
-      next.maxTotalLeaves,
-      next.maxTriangles,
-    );
+    this.snapshot = next.mode === 'current-view'
+      ? mr_setAdaptiveCurrentView(
+          next.floorPx,
+          next.ceilingPx,
+          next.maxDepth,
+          next.maxSelectedFaces,
+          next.maxSelectedLeaves,
+          next.maxPartitionLeaves,
+          next.maxTotalLeaves,
+          next.maxTriangles,
+        )
+      : mr_setAdaptivePickedFace(
+          next.face,
+          next.floorPx,
+          next.ceilingPx,
+          next.maxDepth,
+          next.maxSelectedLeaves,
+          next.maxTotalLeaves,
+          next.maxTriangles,
+        );
     return this.snapshot;
   },
 };
 globalThis.__hyperscopeAdaptivePicked = adaptivePickedDiagnostics;
+globalThis.__hyperscopeAdaptiveScreen = adaptivePickedDiagnostics;
 
 function updateRoundShadowDiagnostics(snapshot = mr_roundShadowDiagnostics()) {
   roundShadowDiagnostics.snapshot = snapshot;

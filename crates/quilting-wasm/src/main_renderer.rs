@@ -33,10 +33,14 @@ use quilting_core::render::{
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::screen_leaf_lod::ScreenMeshTopologyCache;
+use quilting_core::screen_plan::{
+    select_adaptive_screen_faces, AdaptiveScreenFaceCandidate,
+    AdaptiveScreenFaceSelectionPolicy, SelectedScreenPatch,
+};
 use quilting_core::source_bounds::source_focus_bounds;
 use crate::adaptive_screen::{
     measure_adaptive_screen_patch, AdaptivePickedConfig, AdaptivePickedRefreshSnapshot,
-    AdaptivePickedRuntime, AdaptiveRootShadow, AdaptiveScreenRequest,
+    AdaptivePickedRuntime, AdaptiveRootShadow, AdaptiveScreenRequest, AdaptiveScreenSelection,
 };
 use crate::render_shadow::RenderShadowObserver;
 use crate::round_shadow::{browser_now_ms, RoundShadowObserver};
@@ -2737,18 +2741,11 @@ fn compare_adaptive_root_shadow(state: &mut MainState, initial: batch::ResidentL
 /// candidate has passed every CPU-side invariant and atlas/work budget. Any
 /// unavailable input or rejected plan is recorded and leaves those legacy
 /// groups untouched.
-fn apply_adaptive_picked_plan(state: &mut MainState, initial: batch::ResidentLod) {
-    let Some(face) = state.adaptive_picked.face() else {
+fn apply_adaptive_screen_plan(state: &mut MainState, initial: batch::ResidentLod) {
+    let Some(config) = state.adaptive_picked.config() else {
         return;
     };
     let candidate_inputs = (|| -> Result<_, String> {
-        let face_index = face as usize;
-        if face_index >= state.num_faces {
-            return Err(format!(
-                "adaptive face {face} is outside the {}-face scene",
-                state.num_faces,
-            ));
-        }
         if state.screen_topology_cache.is_none() {
             return Err("adaptive source topology is unavailable".to_string());
         }
@@ -2760,14 +2757,6 @@ fn apply_adaptive_picked_plan(state: &mut MainState, initial: batch::ResidentLod
             f64::from(state.viewport_size.0.max(1)),
             f64::from(state.viewport_size.1.max(1)),
         ];
-        let node = state.face_nodes.get(face_index).copied().unwrap_or(0);
-        let conformal = conformal_state_for_node(state, node);
-        let patch = state.surface_runtime.output_patch_for_face(
-            &state.cached_instances,
-            face_index,
-            conformal.mobius,
-            conformal.euclidean_model,
-        )?;
         let (max_atlas_lod, atlas_triangle_counts) = TESS_CACHE.with(|cache| -> Result<_, String> {
             let cache = cache.borrow();
             let maximum = cache
@@ -2781,8 +2770,99 @@ fn apply_adaptive_picked_plan(state: &mut MainState, initial: batch::ResidentLod
                 .collect::<BTreeMap<_, _>>();
             Ok((maximum, counts))
         })?;
+        let (selected_faces, selection_diagnostic, max_partition_leaves) =
+            match config.selection {
+                AdaptiveScreenSelection::Picked { face } => {
+                    if face as usize >= state.num_faces {
+                        return Err(format!(
+                            "adaptive face {face} is outside the {}-face scene",
+                            state.num_faces,
+                        ));
+                    }
+                    (vec![face], None, config.policy.max_leaves)
+                }
+                AdaptiveScreenSelection::CurrentView {
+                    max_faces,
+                    max_partition_leaves,
+                } => {
+                    if state.classified_face_visibility.len() != state.num_faces
+                        || state.requested_face_lods.len() != state.num_faces
+                        || state.resident_face_lods.len() != state.num_faces
+                        || state.requested_face_lods.iter().any(Option::is_none)
+                        || state.resident_face_lods.iter().any(Option::is_none)
+                    {
+                        return Err(
+                            "current-view adaptive selection lacks a complete retained classification"
+                                .to_string(),
+                        );
+                    }
+                    if state.num_faces > u32::MAX as usize {
+                        return Err(
+                            "current-view adaptive source identity exceeds u32".to_string(),
+                        );
+                    }
+                    let candidates = (0..state.num_faces).map(|face_index| {
+                        let source_face = face_index as u32;
+                        // Keep the raw request as the planner's desired edge
+                        // topology, but price its root with the reconciled
+                        // resident key that actually exists in the bounded
+                        // atlas. Raw requests can exceed the atlas grading
+                        // ratio (for example 1/1/64) before shared-edge
+                        // promotion makes them resident.
+                        let requested = state.requested_face_lods[face_index]
+                            .expect("complete current-view request classification")
+                            .edge_lods();
+                        let resident = state.resident_face_lods[face_index]
+                            .expect("complete current-view resident classification");
+                        let visible = state.classified_face_visibility[face_index];
+                        let root_triangles = if visible {
+                            atlas_triangle_counts
+                                .get(&resident.canonical)
+                                .copied()
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        AdaptiveScreenFaceCandidate {
+                            source_face,
+                            visible,
+                            requested_lods: requested,
+                            root_triangles,
+                        }
+                    });
+                    let selection = select_adaptive_screen_faces(
+                        candidates,
+                        AdaptiveScreenFaceSelectionPolicy {
+                            max_faces,
+                            partition_policy: config.policy,
+                            max_partition_leaves,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                    (
+                        selection.faces,
+                        Some(selection.diagnostic),
+                        max_partition_leaves,
+                    )
+                }
+            };
+        let mut patches = Vec::with_capacity(selected_faces.len());
+        for &face in &selected_faces {
+            let face_index = face as usize;
+            let node = state.face_nodes.get(face_index).copied().unwrap_or(0);
+            let conformal = conformal_state_for_node(state, node);
+            patches.push(state.surface_runtime.output_patch_for_face(
+                &state.cached_instances,
+                face_index,
+                conformal.mobius,
+                conformal.euclidean_model,
+            )?);
+        }
         Ok((
-            patch,
+            selected_faces,
+            patches,
+            selection_diagnostic,
+            max_partition_leaves,
             view_projection,
             viewport,
             state.surface_runtime.pose_stamp(),
@@ -2791,14 +2871,32 @@ fn apply_adaptive_picked_plan(state: &mut MainState, initial: batch::ResidentLod
         ))
     })();
 
-    let (patch, view_projection, viewport, pose_stamp, max_atlas_lod, atlas_triangle_counts) =
-        match candidate_inputs {
-            Ok(inputs) => inputs,
-            Err(error) => {
-                state.adaptive_picked.record_fallback(error);
-                return;
-            }
-        };
+    let (
+        selected_faces,
+        patches,
+        selection_diagnostic,
+        max_partition_leaves,
+        view_projection,
+        viewport,
+        pose_stamp,
+        max_atlas_lod,
+        atlas_triangle_counts,
+    ) = match candidate_inputs {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            state.adaptive_picked.record_fallback(error);
+            return;
+        }
+    };
+    let selected_patches = selected_faces
+        .iter()
+        .copied()
+        .zip(patches.iter())
+        .map(|(source_face, transformed_patch)| SelectedScreenPatch {
+            source_face,
+            transformed_patch,
+        })
+        .collect::<Vec<_>>();
     let max_face_edge_ratio = state.lod_grading.ratio();
     let MainState {
         adaptive_picked,
@@ -2814,8 +2912,10 @@ fn apply_adaptive_picked_plan(state: &mut MainState, initial: batch::ResidentLod
         adaptive_picked.record_fallback("adaptive source topology disappeared");
         return;
     };
-    let _ = adaptive_picked.plan_and_group(
-        &patch,
+    let _ = adaptive_picked.plan_selected_and_group(
+        &selected_patches,
+        selection_diagnostic,
+        max_partition_leaves,
         &view_projection,
         viewport,
         pose_stamp,
@@ -2974,7 +3074,85 @@ pub fn mr_set_adaptive_picked_face(
             }
         }
         state.adaptive_picked.configure(AdaptivePickedConfig {
-            face,
+            selection: AdaptiveScreenSelection::Picked { face },
+            min_px_per_segment,
+            max_px_per_segment,
+            policy: ScreenPartitionPolicy {
+                max_depth,
+                max_leaves: max_selected_leaves as usize,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_total_leaves: max_total_leaves as usize,
+            max_triangles: u64::from(max_triangles),
+        });
+        state.adaptive_batch_transition_pending = true;
+        adaptive_picked_snapshot_js(state, None)
+    })
+}
+
+/// Configure bounded automatic adaptation of the most expensive roots in the
+/// latest retained visible classification. Selection, posed-patch extraction,
+/// partitioning, reconciliation, and publication remain Rust-owned.
+#[wasm_bindgen(js_name = "mr_setAdaptiveCurrentView")]
+pub fn mr_set_adaptive_current_view(
+    min_px_per_segment: f64,
+    max_px_per_segment: f64,
+    max_depth: u32,
+    max_selected_faces: u32,
+    max_selected_leaves: u32,
+    max_partition_leaves: u32,
+    max_total_leaves: u32,
+    max_triangles: u32,
+) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return adaptive_screen_diagnostic_error("renderer is not initialized");
+        };
+        if !min_px_per_segment.is_finite()
+            || min_px_per_segment <= 0.0
+            || !max_px_per_segment.is_finite()
+            || max_px_per_segment < min_px_per_segment
+        {
+            return adaptive_screen_diagnostic_error(
+                "adaptive pixel ceiling must be finite and at least the positive pixel floor",
+            );
+        }
+        let Ok(max_depth) = u8::try_from(max_depth) else {
+            return adaptive_screen_diagnostic_error("adaptive depth is outside u8 range");
+        };
+        if max_depth > instance_layout::BATCH_LEAF_MAX_DEPTH {
+            return adaptive_screen_diagnostic_error(format!(
+                "adaptive depth exceeds the packed leaf limit of {}",
+                instance_layout::BATCH_LEAF_MAX_DEPTH,
+            ));
+        }
+        let Ok(source_faces) = u32::try_from(state.num_faces) else {
+            return adaptive_screen_diagnostic_error(
+                "current-view adaptive source identity exceeds u32",
+            );
+        };
+        if max_selected_faces == 0
+            || max_selected_leaves == 0
+            || max_partition_leaves < max_selected_leaves
+            || max_total_leaves < source_faces
+            || max_triangles == 0
+        {
+            return adaptive_screen_diagnostic_error(
+                "current-view adaptive budgets require positive face/leaf/triangle caps, one per-face partition capacity, and at least one scene leaf per source face",
+            );
+        }
+        if state.screen_topology_cache.is_none() {
+            match build_screen_topology_cache(state.lod_topology.as_ref()) {
+                Ok(cache) => state.screen_topology_cache = Some(cache),
+                Err(error) => return adaptive_screen_diagnostic_error(error),
+            }
+        }
+        state.adaptive_picked.configure(AdaptivePickedConfig {
+            selection: AdaptiveScreenSelection::CurrentView {
+                max_faces: max_selected_faces as usize,
+                max_partition_leaves: max_partition_leaves as usize,
+            },
             min_px_per_segment,
             max_px_per_segment,
             policy: ScreenPartitionPolicy {
@@ -4400,7 +4578,7 @@ fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
         compare_adaptive_root_shadow(state, initial);
     }
     if state.adaptive_picked.is_enabled() {
-        apply_adaptive_picked_plan(state, initial);
+        apply_adaptive_screen_plan(state, initial);
     }
     perf_mark("batch-bucket-end");
     perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
@@ -4601,7 +4779,7 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
             compare_adaptive_root_shadow(state, initial_resident);
         }
         if state.adaptive_picked.is_enabled() {
-            apply_adaptive_picked_plan(state, initial_resident);
+            apply_adaptive_screen_plan(state, initial_resident);
         }
         perf_mark("batch-bucket-end");
         perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
