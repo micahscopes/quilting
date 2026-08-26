@@ -7,6 +7,7 @@ use quilting_mesh::HalfEdgeMesh;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::screen_leaf_lod::{ScreenLeafLodError, ScreenMeshLeafTopology};
 use crate::screen_partition::ScreenPatchLeafId;
 
 /// Instance data stride in floats. Re-exported from [`crate::instance_layout`],
@@ -298,6 +299,96 @@ pub fn group_resident_faces_into(
         });
     }
     groups.retain(|_, members| !members.is_empty());
+}
+
+/// Deterministically group reconciled adaptive leaves into the same
+/// backend-neutral draw buckets used by source-face residency.
+///
+/// Authored face identity supplies material, semantic node, and render node;
+/// dyadic leaf identity remains only the ephemeral drawable-patch suffix.
+/// Parallel leaf arrays are deliberately validated instead of being silently
+/// truncated, because dropping one leaf would create a geometric hole.
+pub fn group_resident_screen_leaves(
+    leaves: &[ScreenMeshLeafTopology],
+    resident_edge_lods: &[[u32; 3]],
+    leaf_vertex_lods: &[[u32; 3]],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    face_render_nodes: &[usize],
+) -> Result<BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>, ScreenLeafLodError> {
+    let mut groups = BTreeMap::<RenderBatchKey, Vec<RenderBatchMember>>::new();
+    group_resident_screen_leaves_into(
+        leaves,
+        resident_edge_lods,
+        leaf_vertex_lods,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        &mut groups,
+    )?;
+    Ok(groups)
+}
+
+/// Retained-allocation variant of [`group_resident_screen_leaves`].
+pub fn group_resident_screen_leaves_into(
+    leaves: &[ScreenMeshLeafTopology],
+    resident_edge_lods: &[[u32; 3]],
+    leaf_vertex_lods: &[[u32; 3]],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    face_render_nodes: &[usize],
+    groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+) -> Result<(), ScreenLeafLodError> {
+    if leaves.len() != resident_edge_lods.len() || leaves.len() != leaf_vertex_lods.len() {
+        return Err(ScreenLeafLodError::LengthMismatch);
+    }
+    for (leaf_index, (leaf, edge_lods)) in leaves
+        .iter()
+        .copied()
+        .zip(resident_edge_lods.iter().copied())
+        .enumerate()
+    {
+        if leaf.id.domain() != Some(leaf.domain) {
+            return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+        }
+        for (edge_index, lod) in edge_lods.into_iter().enumerate() {
+            if !lod.is_power_of_two() {
+                return Err(ScreenLeafLodError::InvalidLod {
+                    leaf_index,
+                    edge_index,
+                });
+            }
+        }
+    }
+    for members in groups.values_mut() {
+        members.clear();
+    }
+    for ((leaf, edge_lods), vertex_lods) in leaves
+        .iter()
+        .copied()
+        .zip(resident_edge_lods.iter().copied())
+        .zip(leaf_vertex_lods.iter().copied())
+    {
+        let source_face = leaf.source_face as usize;
+        let resident = ResidentLod::from_edge_lods(edge_lods);
+        let material_index = face_materials.get(source_face).copied().unwrap_or(0);
+        let node_index = face_nodes.get(source_face).copied().unwrap_or(0);
+        let render_node_index = face_render_nodes
+            .get(source_face)
+            .copied()
+            .unwrap_or(node_index);
+        let key = RenderBatchKey::from_resident(resident, material_index, render_node_index);
+        groups.entry(key).or_default().push(RenderBatchMember {
+            face_index: leaf.source_face,
+            leaf_id: leaf.id,
+            node_index,
+            edge_lods,
+            permutation_index: resident.perm_index.min(5) as u8,
+            vertex_lods,
+        });
+    }
+    groups.retain(|_, members| !members.is_empty());
+    Ok(())
 }
 
 /// Decode a visible request or choose the bounded offscreen standby topology.
@@ -1030,6 +1121,86 @@ mod tests {
         assert_eq!(anisotropic.1[0].node_index, 11);
         assert_eq!(anisotropic.1.iter().map(|member| member.face_index).collect::<Vec<_>>(), vec![0, 1]);
         assert_ne!(anisotropic.1[0].permutation_index, anisotropic.1[1].permutation_index);
+    }
+
+    #[test]
+    fn adaptive_leaves_keep_source_identity_inside_draw_buckets() {
+        let first_id = ScreenPatchLeafId::ROOT.child(0).unwrap();
+        let second_id = ScreenPatchLeafId::ROOT.child(1).unwrap();
+        let leaves = [
+            ScreenMeshLeafTopology {
+                source_face: 1,
+                id: first_id,
+                domain: first_id.domain().unwrap(),
+            },
+            ScreenMeshLeafTopology {
+                source_face: 1,
+                id: second_id,
+                domain: second_id.domain().unwrap(),
+            },
+        ];
+        let groups = group_resident_screen_leaves(
+            &leaves,
+            &[[2, 4, 8]; 2],
+            &[[8; 3]; 2],
+            &[3, 7],
+            &[11, 13],
+            &[17, 19],
+        )
+        .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        let (key, members) = groups.first_key_value().unwrap();
+        assert_eq!(key.material_index, 7);
+        assert_eq!(key.render_node_index, 19);
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|member| member.face_index == 1));
+        assert!(members.iter().all(|member| member.node_index == 13));
+        assert_eq!(members[0].patch_id(), (1, first_id));
+        assert_eq!(members[1].patch_id(), (1, second_id));
+    }
+
+    #[test]
+    fn adaptive_leaf_grouping_rejects_parallel_array_truncation() {
+        let id = ScreenPatchLeafId::ROOT.child(0).unwrap();
+        let leaves = [ScreenMeshLeafTopology {
+            source_face: 0,
+            id,
+            domain: id.domain().unwrap(),
+        }];
+        let error = group_resident_screen_leaves(
+            &leaves,
+            &[],
+            &[[1; 3]],
+            &[0],
+            &[0],
+            &[0],
+        )
+        .unwrap_err();
+        assert_eq!(error, ScreenLeafLodError::LengthMismatch);
+
+        let mut retained = group_resident_screen_leaves(
+            &leaves,
+            &[[1; 3]],
+            &[[1; 3]],
+            &[0],
+            &[0],
+            &[0],
+        )
+        .unwrap();
+        let before = retained.clone();
+        let error = group_resident_screen_leaves_into(
+            &leaves,
+            &[[3, 1, 1]],
+            &[[1; 3]],
+            &[0],
+            &[0],
+            &[0],
+            &mut retained,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ScreenLeafLodError::InvalidLod { .. }));
+        assert_eq!(retained, before);
     }
 
     #[test]
