@@ -6,7 +6,8 @@
 //! and WebGPU and prevents browser state from becoming a second geometry
 //! authority.
 
-use std::collections::BTreeMap;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::patch::{QBPatchDomain, QBTriPatch};
 use crate::screen_leaf_lod::ScreenMeshLeafTopology;
@@ -104,6 +105,191 @@ pub struct AdaptiveScreenMeshPlan {
     pub leaves: Vec<ScreenMeshLeafTopology>,
     pub requested_lods: Vec<[u32; 3]>,
     pub diagnostic: AdaptiveScreenMeshPlanDiagnostic,
+}
+
+/// One source-ordered root face considered for current-view adaptation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdaptiveScreenFaceCandidate {
+    pub source_face: u32,
+    pub visible: bool,
+    pub requested_lods: [u32; 3],
+    /// Exact triangle count of the candidate's current root atlas patch.
+    pub root_triangles: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveScreenFaceSelectionPolicy {
+    pub max_faces: usize,
+    /// The same partition policy that will be passed to the mesh planner.
+    pub partition_policy: ScreenPartitionPolicy,
+    pub max_partition_leaves: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdaptiveScreenFaceSelectionDiagnostic {
+    pub examined_faces: u64,
+    pub visible_faces: u64,
+    pub selected_faces: u64,
+    pub partition_face_capacity: u64,
+    pub omitted_by_capacity: u64,
+    pub selected_root_triangles: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdaptiveScreenFaceSelection {
+    /// Selected stable source identities in canonical ascending order.
+    pub faces: Vec<u32>,
+    pub diagnostic: AdaptiveScreenFaceSelectionDiagnostic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptiveScreenFaceSelectionError {
+    InvalidPolicy,
+    NonCanonicalSourceOrder { previous: u32, current: u32 },
+    InvalidRequestedLod { face: u32, edge: usize },
+    MissingRootTriangles { face: u32 },
+}
+
+impl std::fmt::Display for AdaptiveScreenFaceSelectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPolicy => write!(formatter, "adaptive face selection policy is invalid"),
+            Self::NonCanonicalSourceOrder { previous, current } => write!(
+                formatter,
+                "adaptive candidates are not strictly source ordered: {previous} then {current}",
+            ),
+            Self::InvalidRequestedLod { face, edge } => write!(
+                formatter,
+                "adaptive candidate face {face} edge {edge} has an invalid LoD",
+            ),
+            Self::MissingRootTriangles { face } => write!(
+                formatter,
+                "adaptive candidate face {face} has no resident root triangle count",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AdaptiveScreenFaceSelectionError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RankedAdaptiveScreenFace {
+    source_face: u32,
+    root_triangles: u64,
+    maximum_lod: u32,
+    lod_exponent_sum: u32,
+}
+
+impl Ord for RankedAdaptiveScreenFace {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.root_triangles
+            .cmp(&other.root_triangles)
+            .then_with(|| self.maximum_lod.cmp(&other.maximum_lod))
+            .then_with(|| self.lod_exponent_sum.cmp(&other.lod_exponent_sum))
+            // A lower stable source identity wins an otherwise exact tie.
+            .then_with(|| other.source_face.cmp(&self.source_face))
+    }
+}
+
+impl PartialOrd for RankedAdaptiveScreenFace {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Select the most expensive currently visible roots with bounded scratch.
+///
+/// Candidates must be strictly ordered by stable source identity. The
+/// selector keeps only the best `k` entries in a min-heap, so a large scene
+/// costs O(n log k) time and O(k) memory. The returned identities are sorted
+/// back into source order for deterministic pose extraction and planning.
+pub fn select_adaptive_screen_faces(
+    candidates: impl IntoIterator<Item = AdaptiveScreenFaceCandidate>,
+    policy: AdaptiveScreenFaceSelectionPolicy,
+) -> Result<AdaptiveScreenFaceSelection, AdaptiveScreenFaceSelectionError> {
+    if policy.max_faces == 0
+        || policy.partition_policy.max_leaves == 0
+        || policy.max_partition_leaves < policy.partition_policy.max_leaves
+    {
+        return Err(AdaptiveScreenFaceSelectionError::InvalidPolicy);
+    }
+    let partition_face_capacity =
+        (policy.max_partition_leaves / policy.partition_policy.max_leaves).min(policy.max_faces);
+    let mut selected = BinaryHeap::<Reverse<RankedAdaptiveScreenFace>>::new();
+    let mut previous_face = None;
+    let mut examined_faces = 0u64;
+    let mut visible_faces = 0u64;
+
+    for candidate in candidates {
+        examined_faces = examined_faces.saturating_add(1);
+        if let Some(previous) = previous_face {
+            if candidate.source_face <= previous {
+                return Err(AdaptiveScreenFaceSelectionError::NonCanonicalSourceOrder {
+                    previous,
+                    current: candidate.source_face,
+                });
+            }
+        }
+        previous_face = Some(candidate.source_face);
+        if !candidate.visible {
+            continue;
+        }
+        visible_faces = visible_faces.saturating_add(1);
+        for (edge, lod) in candidate.requested_lods.into_iter().enumerate() {
+            if !lod.is_power_of_two() {
+                return Err(AdaptiveScreenFaceSelectionError::InvalidRequestedLod {
+                    face: candidate.source_face,
+                    edge,
+                });
+            }
+        }
+        if candidate.root_triangles == 0 {
+            return Err(AdaptiveScreenFaceSelectionError::MissingRootTriangles {
+                face: candidate.source_face,
+            });
+        }
+
+        let ranked = RankedAdaptiveScreenFace {
+            source_face: candidate.source_face,
+            root_triangles: candidate.root_triangles,
+            maximum_lod: candidate.requested_lods.into_iter().max().unwrap_or(1),
+            lod_exponent_sum: candidate
+                .requested_lods
+                .into_iter()
+                .map(u32::trailing_zeros)
+                .sum(),
+        };
+        if selected.len() < partition_face_capacity {
+            selected.push(Reverse(ranked));
+        } else if selected.peek().is_some_and(|smallest| ranked > smallest.0) {
+            selected.pop();
+            selected.push(Reverse(ranked));
+        }
+    }
+
+    let mut ranked = selected
+        .into_iter()
+        .map(|Reverse(candidate)| candidate)
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by_key(|candidate| candidate.source_face);
+    let selected_root_triangles = ranked.iter().fold(0u64, |total, candidate| {
+        total.saturating_add(candidate.root_triangles)
+    });
+    let selected_faces = ranked.len() as u64;
+    Ok(AdaptiveScreenFaceSelection {
+        faces: ranked
+            .into_iter()
+            .map(|candidate| candidate.source_face)
+            .collect(),
+        diagnostic: AdaptiveScreenFaceSelectionDiagnostic {
+            examined_faces,
+            visible_faces,
+            selected_faces,
+            partition_face_capacity: partition_face_capacity as u64,
+            omitted_by_capacity: visible_faces.saturating_sub(selected_faces),
+            selected_root_triangles,
+        },
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -486,6 +672,157 @@ pub fn plan_picked_screen_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn face_selector_keeps_the_most_expensive_visible_roots() {
+        let selection = select_adaptive_screen_faces(
+            [
+                AdaptiveScreenFaceCandidate {
+                    source_face: 0,
+                    visible: true,
+                    requested_lods: [2, 2, 2],
+                    root_triangles: 8,
+                },
+                AdaptiveScreenFaceCandidate {
+                    source_face: 1,
+                    visible: false,
+                    requested_lods: [64, 64, 64],
+                    root_triangles: 8_192,
+                },
+                AdaptiveScreenFaceCandidate {
+                    source_face: 2,
+                    visible: true,
+                    requested_lods: [8, 8, 8],
+                    root_triangles: 128,
+                },
+                AdaptiveScreenFaceCandidate {
+                    source_face: 3,
+                    visible: true,
+                    requested_lods: [4, 4, 4],
+                    root_triangles: 32,
+                },
+            ],
+            AdaptiveScreenFaceSelectionPolicy {
+                max_faces: 2,
+                partition_policy: ScreenPartitionPolicy {
+                    max_leaves: 8,
+                    ..ScreenPartitionPolicy::default()
+                },
+                max_partition_leaves: 32,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selection.faces, [2, 3]);
+        assert_eq!(selection.diagnostic.examined_faces, 4);
+        assert_eq!(selection.diagnostic.visible_faces, 3);
+        assert_eq!(selection.diagnostic.selected_faces, 2);
+        assert_eq!(selection.diagnostic.partition_face_capacity, 2);
+        assert_eq!(selection.diagnostic.omitted_by_capacity, 1);
+        assert_eq!(selection.diagnostic.selected_root_triangles, 160);
+    }
+
+    #[test]
+    fn face_selector_uses_partition_capacity_and_stable_ties() {
+        let candidates = (0..4).map(|source_face| AdaptiveScreenFaceCandidate {
+            source_face,
+            visible: true,
+            requested_lods: [4, 4, 4],
+            root_triangles: 32,
+        });
+        let selection = select_adaptive_screen_faces(
+            candidates,
+            AdaptiveScreenFaceSelectionPolicy {
+                max_faces: 4,
+                partition_policy: ScreenPartitionPolicy {
+                    max_leaves: 8,
+                    ..ScreenPartitionPolicy::default()
+                },
+                max_partition_leaves: 16,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selection.faces, [0, 1]);
+        assert_eq!(selection.diagnostic.partition_face_capacity, 2);
+        assert_eq!(selection.diagnostic.omitted_by_capacity, 2);
+    }
+
+    #[test]
+    fn face_selector_rejects_noncanonical_or_invalid_visible_candidates() {
+        let policy = AdaptiveScreenFaceSelectionPolicy {
+            max_faces: 1,
+            partition_policy: ScreenPartitionPolicy {
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_partition_leaves: 4,
+        };
+        let duplicate = select_adaptive_screen_faces(
+            [
+                AdaptiveScreenFaceCandidate {
+                    source_face: 1,
+                    visible: false,
+                    requested_lods: [1; 3],
+                    root_triangles: 1,
+                },
+                AdaptiveScreenFaceCandidate {
+                    source_face: 1,
+                    visible: true,
+                    requested_lods: [1; 3],
+                    root_triangles: 1,
+                },
+            ],
+            policy,
+        )
+        .unwrap_err();
+        assert_eq!(
+            duplicate,
+            AdaptiveScreenFaceSelectionError::NonCanonicalSourceOrder {
+                previous: 1,
+                current: 1,
+            },
+        );
+
+        let invalid = select_adaptive_screen_faces(
+            [AdaptiveScreenFaceCandidate {
+                source_face: 0,
+                visible: true,
+                requested_lods: [1, 3, 1],
+                root_triangles: 1,
+            }],
+            policy,
+        )
+        .unwrap_err();
+        assert_eq!(
+            invalid,
+            AdaptiveScreenFaceSelectionError::InvalidRequestedLod { face: 0, edge: 1 },
+        );
+    }
+
+    #[test]
+    fn face_selector_can_return_an_empty_bounded_view() {
+        let selection = select_adaptive_screen_faces(
+            [AdaptiveScreenFaceCandidate {
+                source_face: 0,
+                visible: false,
+                requested_lods: [1; 3],
+                root_triangles: 0,
+            }],
+            AdaptiveScreenFaceSelectionPolicy {
+                max_faces: 1,
+                partition_policy: ScreenPartitionPolicy {
+                    max_leaves: 4,
+                    ..ScreenPartitionPolicy::default()
+                },
+                max_partition_leaves: 4,
+            },
+        )
+        .unwrap();
+        assert!(selection.faces.is_empty());
+        assert_eq!(selection.diagnostic.visible_faces, 0);
+        assert_eq!(selection.diagnostic.omitted_by_capacity, 0);
+    }
 
     const IDENTITY: [f64; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
