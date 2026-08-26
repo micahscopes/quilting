@@ -44,7 +44,7 @@ const BUILD_INPUT_ROOT_FILES: &[&str] = &[
     "LICENSE-MIT",
     "LICENSE-APACHE",
 ];
-const BUILD_INPUT_ROOT_DIRS: &[&str] = &["crates", "envmaps"];
+const BUILD_INPUT_ROOT_DIRS: &[&str] = &["crates", "envmaps", "examples/polytopes"];
 /// Generated crate-local outputs are not source inputs. In particular,
 /// wasm-pack may leave an ignored `pkg` directory in a long-lived checkout
 /// while a detached release worktree has none; including it makes otherwise

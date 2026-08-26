@@ -3,6 +3,7 @@ pub mod material;
 pub mod animation;
 pub mod scene;
 pub mod evaluator;
+pub mod export;
 pub mod hyperscape;
 
 use std::fmt;

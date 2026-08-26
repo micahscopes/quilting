@@ -16,6 +16,7 @@ watch = [
     "horse.glb",
     "ant.glb",
     "envmaps/",
+    "examples/polytopes/",
     "examples/hyperscape-blender-demo.glb",
     "crates/hyperscape/fixtures/hacker-night.presentation.json",
     "ASSET_ATTRIBUTION.md",
