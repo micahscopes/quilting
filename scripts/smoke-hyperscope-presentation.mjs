@@ -174,10 +174,15 @@ const lodAdapter = browserSource.slice(
   browserSource.indexOf('async function loadModel('),
 );
 for (const requiredPoseGate of [
-  'const lodPoseAnimated = animating && gpuSkinned;',
-  't: lodPoseAnimated ? animTime : 0',
+  'const lodPose = gpuSkinned ? animationPoseApplied : null;',
+  'const lodPoseAnimated = lodPose !== null;',
+  't: lodPose?.t ?? 0',
+  'poseSampleTime: lodPose?.sampleTime ?? 0',
+  'poseRevision: lodPose?.revision ?? 0',
+  'poseContinuityEpoch: lodPose?.continuityEpoch ?? 0',
   'skipAnimation: !lodPoseAnimated',
   'capturePose: RUST_ROUND_SHADOW_ENABLED && lodPoseAnimated && !roundAuthoredScene',
+  'acceptLodPoseStamp(resp, lodPose);',
   'acceptLodDeltaSequence(resp, !!wt.full_snapshot);',
   'const resetDelta = lodDeltaResetPending;',
 ]) {
@@ -191,10 +196,15 @@ assert.ok(
   'a rejected sparse publication must force a full worker snapshot',
 );
 for (const requiredWorkerDeltaStep of [
-  'if (resetDelta) wasm.reset_animated_lod_delta();',
+  'if (resetDelta',
+  'wasm.reset_animated_lod_delta();',
   'delta_epoch: result.delta_epoch',
   'delta_base_revision: result.delta_base_revision',
   'delta_revision: result.delta_revision',
+  'pose_sample_time: result.pose_sample_time',
+  'pose_revision: result.pose_revision',
+  'pose_continuity_epoch: result.pose_continuity_epoch',
+  'stampedPoseEpoch !== lodPoseContinuityEpoch',
 ]) {
   assert.ok(
     workerSource.includes(requiredWorkerDeltaStep),
@@ -204,6 +214,19 @@ for (const requiredWorkerDeltaStep of [
 assert.ok(
   !lodAdapter.includes('const lodAnimated = animating;'),
   'global playback intent must not classify a static asset as pose animated',
+);
+assert.ok(
+  browserSource.includes("debouncedLodRecompute('primary-animation');")
+    && browserSource.includes('animationPoseApplied = request;'),
+  'LOD scheduling must originate from the exact pose accepted by the renderer',
+);
+const animationFrame = browserSource.slice(
+  browserSource.indexOf('if (animating && !patchLab.active && gpuSkinned && meshInfo) {'),
+  browserSource.indexOf('if (patchLab.active && patchLab.animate'),
+);
+assert.ok(
+  !animationFrame.includes("debouncedLodRecompute('primary-animation')"),
+  'the RAF clock must not independently sample a different LOD pose',
 );
 
 for (const requiredAnimatedAnchorStep of [

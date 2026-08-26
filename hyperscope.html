@@ -661,6 +661,11 @@ const lodTelemetry = {
   deltaRevision: 0,
   deltaResets: 0,
   deltaMismatches: 0,
+  poseSubmittedRevision: 0,
+  poseCompletedRevision: 0,
+  poseContinuityEpoch: 0,
+  poseLagRevisions: 0,
+  poseMismatches: 0,
   inFlight: false,
   dirty: false,
   lastSummaryAtMs: performance.now(),
@@ -3681,6 +3686,7 @@ let animationPoseClockSeconds = 0;
 let animationPoseRevision = 0;
 let animationPoseContinuityEpoch = 1;
 let animationPosePending = null;
+let animationPoseApplied = null;
 let animationPoseBlocked = false;
 let animationPoseBlockGeneration = 0;
 let animInFlight = false;
@@ -6056,7 +6062,7 @@ async function loadPatchLab(
   gpuSkinned = false;
   presentationAnimationSpeed = 1;
   rebaseAnimationPoseContinuity({ resetClock: true });
-  mr_clearAnimationState();
+  clearRendererAnimationState();
   hyperscapeActive = false;
   authoredCamera = null;
   authoredLodStates = [];
@@ -6182,7 +6188,7 @@ async function loadTestShape(shape, p1, p2) {
   animationPoseBlocked = false;
   gpuSkinned = false;
   rebaseAnimationPoseContinuity({ resetClock: true });
-  mr_clearAnimationState();
+  clearRendererAnimationState();
   remeshedMode = true;
   $('remesh-stats').textContent = `Loading ${shape}...`;
   const resp = await workerCall('load_test_shape', { shape, param1: p1, param2: p2 });
@@ -6898,6 +6904,11 @@ function rebaseAnimationPoseContinuity({ resetClock = false } = {}) {
   return animationPoseContinuityEpoch;
 }
 
+function clearRendererAnimationState() {
+  animationPoseApplied = null;
+  mr_clearAnimationState();
+}
+
 function nextAnimationPoseRevision() {
   if (animationPoseRevision >= 0xffff_ffff) {
     rebaseAnimationPoseContinuity();
@@ -6944,7 +6955,7 @@ async function evaluateAnimationPose(request) {
         ? new Float32Array(resp.pose.morph_weights.buffer || resp.pose.morph_weights)
         : new Float32Array(0);
       if (matrices.length > 0 || morphW.length > 0) {
-        mr_uploadAnimationPose(
+        const accepted = mr_uploadAnimationPose(
           matrices,
           morphW,
           skinTexW,
@@ -6953,6 +6964,13 @@ async function evaluateAnimationPose(request) {
           request.revision,
           request.continuityEpoch,
         );
+        if (accepted) {
+          animationPoseApplied = request;
+          // Classify the exact pose that the renderer accepted. If a previous
+          // classification is still pending, the scheduler retains this as
+          // the single newest follow-up instead of sampling an unrelated clock.
+          debouncedLodRecompute('primary-animation');
+        }
       }
     }
   } catch (e) { console.warn('Animation tick error:', e); }
@@ -6987,12 +7005,41 @@ function acceptLodDeltaSequence(response, fullSnapshot) {
     lodTelemetry.deltaRevision = revision;
     if (reset) lodTelemetry.deltaResets += 1;
   } catch (error) {
-    lodTelemetry.deltaMismatches += 1;
-    lodDeltaResetPending = true;
-    lodFullSceneDirty = true;
-    lodDirty = true;
-    throw new Error(`LOD delta sequence rejected: ${error}`);
+    rejectLodPublication(`LOD delta sequence rejected: ${error}`);
   }
+}
+
+function rejectLodPublication(message) {
+  lodTelemetry.deltaMismatches += 1;
+  lodDeltaResetPending = true;
+  lodFullSceneDirty = true;
+  lodDirty = true;
+  throw new Error(message);
+}
+
+function acceptLodPoseStamp(response, request) {
+  if (!request) {
+    if (response.pose_revision != null || response.pose_continuity_epoch != null) {
+      rejectLodPublication('static LOD publication unexpectedly carried an animation pose');
+    }
+    return;
+  }
+  const matches = Number(response.pose_time) === request.t
+    && Number(response.pose_sample_time) === request.sampleTime
+    && Number(response.pose_revision) === request.revision
+    && Number(response.pose_continuity_epoch) === request.continuityEpoch;
+  if (!matches) {
+    lodTelemetry.poseMismatches += 1;
+    rejectLodPublication('LOD worker returned a mismatched pose stamp');
+  }
+  const current = animationPoseApplied;
+  if (!current || current.continuityEpoch !== request.continuityEpoch) {
+    lodTelemetry.poseMismatches += 1;
+    rejectLodPublication('LOD worker completed after its pose epoch was retired');
+  }
+  lodTelemetry.poseCompletedRevision = request.revision;
+  lodTelemetry.poseContinuityEpoch = request.continuityEpoch;
+  lodTelemetry.poseLagRevisions = Math.max(0, current.revision - request.revision);
 }
 
 function debouncedLodRecompute(scope = 'scene') {
@@ -7042,11 +7089,11 @@ async function recomputeLods() {
   lodFullSceneDirty = false;
   const lodT0 = performance.now();
   try {
-    // Playback intent alone does not imply a deforming pose. Static assets keep
-    // the global play toggle enabled so a later animated load starts playing,
-    // but they must not enter the animation evaluator or the opt-in round-index
-    // pose refit path.
-    const lodPoseAnimated = animating && gpuSkinned;
+    // Playback intent does not define geometry. Classify the most recent pose
+    // accepted by the renderer, including while paused; static or not-yet-posed
+    // assets stay on the rest path.
+    const lodPose = gpuSkinned ? animationPoseApplied : null;
+    const lodPoseAnimated = lodPose !== null;
     const roundTransformKind = mob.xform.peek();
     const roundTransformCenter = [
       mob.mx.peek() / 10,
@@ -7077,8 +7124,13 @@ async function recomputeLods() {
     const tp = getTessParams();
 
     const resetDelta = lodDeltaResetPending;
+    if (lodPose) lodTelemetry.poseSubmittedRevision = lodPose.revision;
     const resp = await workerCall('compute_animated_lods', {
-      t: lodPoseAnimated ? animTime : 0, mobius: lodMobius, density: tp.density, minPx: tp.minPx,
+      t: lodPose?.t ?? 0,
+      poseSampleTime: lodPose?.sampleTime ?? 0,
+      poseRevision: lodPose?.revision ?? 0,
+      poseContinuityEpoch: lodPose?.continuityEpoch ?? 0,
+      mobius: lodMobius, density: tp.density, minPx: tp.minPx,
       subjectStates: primaryOnly
         ? presentationComposition.primaryLodStates
         : authoredLodStates,
@@ -7105,6 +7157,7 @@ async function recomputeLods() {
     // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
     // discarding the completed result would starve continuously animated scenes.
     if (resp.lods && !remeshedMode) {
+      acceptLodPoseStamp(resp, lodPose);
       acceptLodDeltaSequence(resp, !!wt.full_snapshot);
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       if (presentationComposition.ready) {
@@ -7416,9 +7469,8 @@ function frame(ts) {
       $('time-v').textContent = animTime.toFixed(2);
     }
     tickAnimation(animTime, animationPoseClockSeconds);
-    // Keep LOD tracking the animated pose. The scheduler retains at most one
-    // in-flight GPU job plus one coalesced follow-up for the newest frame.
-    debouncedLodRecompute('primary-animation');
+    // The accepted renderer-pose callback schedules LOD from its exact stamped
+    // pose. Do not independently sample this RAF clock here.
   }
 
   if (patchLab.active && patchLab.animate && ts - patchLab.lastAnimatedAt >= 90) {
@@ -8000,7 +8052,7 @@ async function finishModelUpload(
 
   // A static model must not inherit joint/morph counts or textures from the
   // animated model that preceded it.
-  mr_clearAnimationState();
+  clearRendererAnimationState();
 
   // Populate animation selector
   const animSel = $('anim-sel');

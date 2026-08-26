@@ -2,6 +2,7 @@
 
 let wasm = null;
 let lodJobGeneration = 0;
+let lodPoseContinuityEpoch = 0;
 
 self.onmessage = async function(e) {
   const { type, data, id } = e.data;
@@ -294,10 +295,15 @@ self.onmessage = async function(e) {
     const {
       t, mobius, subjectStates, density, minPx, vpMatrix, vpWidth, vpHeight,
       tessDensity, screenAtten, minPxSub, skipAnimation, capturePose, faceLimit,
-      resetDelta,
+      resetDelta, poseSampleTime, poseRevision, poseContinuityEpoch,
     } = data;
     const wt0 = performance.now();
-    if (resetDelta) wasm.reset_animated_lod_delta();
+    const stampedPoseEpoch = Number(poseContinuityEpoch) || 0;
+    if (resetDelta
+        || (stampedPoseEpoch !== 0 && stampedPoseEpoch !== lodPoseContinuityEpoch)) {
+      wasm.reset_animated_lod_delta();
+    }
+    if (stampedPoseEpoch !== 0) lodPoseContinuityEpoch = stampedPoseEpoch;
     // Set tess params before compute
     if (tessDensity != null) {
       wasm.set_tess_params(tessDensity, !!screenAtten);
@@ -307,7 +313,10 @@ self.onmessage = async function(e) {
     let dispatched = false;
     try {
       dispatched = wasm.dispatch_animated_lods(
-        skipAnimation ? -1.0 : t,  // t < 0 signals: skip animation, use rest pose
+        skipAnimation ? -1.0 : t,  // t < 0: static or no accepted renderer pose
+        Number(poseSampleTime) || 0,
+        Number(poseRevision) || 0,
+        stampedPoseEpoch,
         new Float32Array(mobius || [1,0,0,0, 0,0,0,0, 0,0,0,0, 1,0,0,0]),
         new Float32Array(subjectStates || []),
         faceLimit || 0,
@@ -372,6 +381,9 @@ self.onmessage = async function(e) {
           delta_base_revision: result.delta_base_revision,
           delta_revision: result.delta_revision,
           pose_time: result.pose_time,
+          pose_sample_time: result.pose_sample_time,
+          pose_revision: result.pose_revision,
+          pose_continuity_epoch: result.pose_continuity_epoch,
           pose_matrices: result.pose_matrices || null,
           pose_morph_weights: result.pose_morph_weights || null,
           classified_faces: result.classified_faces,

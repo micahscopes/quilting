@@ -164,11 +164,19 @@ struct PendingAnimatedLods {
     classified_faces: usize,
     resident_faces: usize,
     subject_records: usize,
+    pose_stamp: Option<PendingLodPoseStamp>,
     pose: Option<PendingLodPose>,
 }
 
+#[derive(Clone, Copy)]
+struct PendingLodPoseStamp {
+    clip_time: f64,
+    sample_time: f64,
+    revision: u32,
+    continuity_epoch: u32,
+}
+
 struct PendingLodPose {
-    time: f64,
     joint_matrices: Vec<f32>,
     morph_weights: Vec<f32>,
 }
@@ -770,6 +778,9 @@ pub fn debug_gpu_compute_state() -> String {
 #[wasm_bindgen]
 pub fn dispatch_animated_lods(
     t: f64,
+    pose_sample_time: f64,
+    pose_revision: u32,
+    pose_continuity_epoch: u32,
     mobius: &[f32],
     subject_states: &[f32],
     face_limit: u32,
@@ -813,10 +824,29 @@ pub fn dispatch_animated_lods(
         perf_mark("lod-wasm-start");
 
         // 1. Evaluate animation pose at time t
-        // t < 0 signals "skip animation" — use rest pose for LOD so it matches
-        // the uninitialized rendering state when animation is paused.
+        // t < 0 signals "skip animation" for a static or not-yet-posed model.
+        // Paused animated models still provide their last accepted pose stamp.
         perf_mark("lod-anim-eval-start");
         let use_anim = t >= 0.0;
+        let pose_stamp = if use_anim {
+            if let Err(error) = surface_runtime::validate_pose_stamp(
+                t,
+                pose_sample_time,
+                pose_revision,
+                pose_continuity_epoch,
+            ) {
+                web_sys::console::warn_1(&format!("LOD pose stamp rejected: {error}").into());
+                return false;
+            }
+            Some(PendingLodPoseStamp {
+                clip_time: t,
+                sample_time: pose_sample_time,
+                revision: pose_revision,
+                continuity_epoch: pose_continuity_epoch,
+            })
+        } else {
+            None
+        };
         let pose = if use_anim {
             normalized_animation_pose(data, t.max(0.0))
         } else {
@@ -835,7 +865,6 @@ pub fn dispatch_animated_lods(
         // this asynchronous GPU classification. Capture it only on request;
         // the normal renderer path keeps its existing zero-clone behavior.
         let captured_pose = capture_pose.then(|| PendingLodPose {
-            time: t,
             joint_matrices: joint_matrices.to_vec(),
             morph_weights: morph_weights.to_vec(),
         });
@@ -958,6 +987,7 @@ pub fn dispatch_animated_lods(
                 classified_faces: num_faces,
                 resident_faces,
                 subject_records: extracted_states.len(),
+                pose_stamp,
                 pose: captured_pose,
             })
         });
@@ -1016,6 +1046,7 @@ pub fn poll_animated_lods() -> JsValue {
             classified_faces,
             resident_faces,
             subject_records,
+            pose_stamp,
             pose,
         } = job;
         unsafe { gl.delete_sync(fence); }
@@ -1110,13 +1141,30 @@ pub fn poll_animated_lods() -> JsValue {
                 &"gpu_passes".into(),
                 &JsValue::from_f64(1.0),
             ).ok();
-            if let Some(pose) = pose {
+            if let Some(stamp) = pose_stamp {
                 js_sys::Reflect::set(
                     &result,
                     &"pose_time".into(),
-                    &JsValue::from_f64(pose.time),
+                    &JsValue::from_f64(stamp.clip_time),
                 )
                 .ok();
+                js_sys::Reflect::set(
+                    &result,
+                    &"pose_sample_time".into(),
+                    &JsValue::from_f64(stamp.sample_time),
+                ).ok();
+                js_sys::Reflect::set(
+                    &result,
+                    &"pose_revision".into(),
+                    &JsValue::from_f64(stamp.revision as f64),
+                ).ok();
+                js_sys::Reflect::set(
+                    &result,
+                    &"pose_continuity_epoch".into(),
+                    &JsValue::from_f64(stamp.continuity_epoch as f64),
+                ).ok();
+            }
+            if let Some(pose) = pose {
                 let matrices = js_sys::Float32Array::new_with_length(
                     pose.joint_matrices.len() as u32,
                 );

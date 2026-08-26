@@ -95,8 +95,8 @@ assert.match(
 );
 assert.match(
   browserSource,
-  /workerCall\('evaluate_animation_frame', request\)[\s\S]*request\.continuityEpoch !== animationPoseContinuityEpoch[\s\S]*mr_uploadAnimationPose\([\s\S]*request\.sampleTime,[\s\S]*request\.revision,[\s\S]*request\.continuityEpoch,/,
-  'browser animation scheduling must reject old epochs and preserve the issued pose stamp',
+  /workerCall\('evaluate_animation_frame', request\)[\s\S]*request\.continuityEpoch !== animationPoseContinuityEpoch[\s\S]*const accepted = mr_uploadAnimationPose\([\s\S]*request\.sampleTime,[\s\S]*request\.revision,[\s\S]*request\.continuityEpoch,[\s\S]*animationPoseApplied = request;[\s\S]*debouncedLodRecompute\('primary-animation'\);/,
+  'browser animation scheduling must reject old epochs and classify the exact accepted pose stamp',
 );
 assert.match(
   browserSource,
