@@ -611,7 +611,9 @@ For each performance change, record the relevant subset of:
 The representative matrix is horse animation, chess-scale high face count,
 one small static asset, a pole-adjacent inversion, a mixed-material scene, and
 a two-GLB presentation scene. A result is not generalized beyond the path and
-browser actually measured.
+browser actually measured. The current staged presentation artifact is recorded
+in the
+[2026-08-27 hacker-night release evidence](benchmarks/2026-08-27-hacker-night-release.md).
 
 ## Migration sequence
 

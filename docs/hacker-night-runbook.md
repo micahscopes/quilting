@@ -286,13 +286,14 @@ Use a fresh browser tab after the release build and verify:
 The preload `integrity` warning emitted by Chrome for unsupported preload
 destinations is informational; a renderer initialization or asset error is not.
 
-The 2026-08-27 Chrome/WebGL2 development rehearsal is the comparison baseline.
-It completed all eight cues with `ready: true`, `assetsReady: true`, five
-resident assets, 4,432 packed and LOD-resident faces, 12 topology domains, one
-GPU scene-classification pass over 12 subject records, zero application or
-scene-extraction mismatches, and no console warning or error. The staged build
-must equal those topology and authority results; a development-server pass does
-not waive this release-build check.
+The 2026-08-27 isolated staged-release rehearsal is the comparison baseline. It
+completed all eight cues with `ready: true`, `assetsReady: true`, five resident
+assets, 4,432 packed and LOD-resident faces, 12 topology domains, one GPU
+scene-classification pass over 12 subject records, zero application or
+scene-extraction mismatches, and no console warning or error. Reloading its
+canonical final-cue URL restored cue eight directly. See the
+[staged-release evidence](benchmarks/2026-08-27-hacker-night-release.md) for
+the exact artifact gate and fresh-origin startup timings.
 
 Selection and surface walking deliberately retain their rehearsed JavaScript
 defaults for the talk. Do not add `selectionimpl=rust` or `walkimpl=rust` on

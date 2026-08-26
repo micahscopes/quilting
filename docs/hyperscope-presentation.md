@@ -52,15 +52,14 @@ cue validation, camera/focus transitions,
 and resolved layer state remain Rust-authoritative. The browser adapter fetches
 assets and translates the resolved snapshot into renderer commands.
 
-Presentation orchestration has an explicit rollback boundary. The default
-`presentimpl=js` keeps the browser-orchestrated standalone Rust controller;
-`presentimpl=shadow` advances that controller while comparing the complete
-cue and navigation result with `hyperscope-app`; and `presentimpl=rust` loads
-the manifest, dispatches cue actions, and advances transition time only through
-the application reducer. In Rust mode the AppStore read model supplies the
-asset catalog needed by the browser I/O adapter, so no second presentation
-controller or semantic JSON parse is retained. `presentimpl=js` remains the
-immediate rollback until target-browser rendering has been rechecked.
+Presentation orchestration has an explicit rollback boundary.
+`presentimpl=rust` is the default: it loads the manifest, dispatches cue
+actions, and advances transition time only through the application reducer.
+The AppStore read model supplies the asset catalog needed by the browser I/O
+adapter, so no second presentation controller or semantic JSON parse is
+retained. `presentimpl=shadow` compares that complete cue and navigation result
+with the browser-orchestrated standalone Rust controller, while
+`presentimpl=js` is the explicit serialized rollback.
 
 Every activated cue is serialized as its stable UUID in the `cue` URL
 parameter. Copying or reloading the URL therefore re-enters that exact cue
@@ -129,14 +128,13 @@ draw path. Unsupported overlay requests are visible in
 `__hyperscopePresentation.unsupportedOverlays`.
 
 The eight checked-in cues have a deterministic Rust replay oracle and a Node
-adapter smoke. A Chrome/WebGL2 development-build rehearsal on 2026-08-27
+adapter smoke. An isolated staged-release Chrome/WebGL2 rehearsal on 2026-08-27
 advanced through every cue and ended with all five assets ready, 4,432 packed
 and LOD-resident faces, 12 topology domains, one GPU scene-classification pass,
-no application or extraction mismatch, and no console warning or error. The
-final scene-extraction matrix disagreement was bounded by
-`4.768371586472142e-8`. This is the checked development baseline, not a
-substitute for repeating the same inspection against the exact staged release
-directory on the presentation machine.
+no application or extraction mismatch, and no console warning or error. A
+canonical reload restored the final cue directly. The complete artifact and
+startup evidence is recorded in the
+[staged-release benchmark](benchmarks/2026-08-27-hacker-night-release.md).
 
 The Tuesday adapter deliberately supports one animated primary asset plus
 static, untextured secondary assets. Animated or textured secondary assets fail
