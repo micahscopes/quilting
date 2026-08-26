@@ -35,14 +35,18 @@ encoding. The digest detects corruption; it is not an authority signature.
 
 ## Atomic-persistence gate
 
-The current pinned HHHS 0.4.3 open-authority API can prepare an authored entry,
-but unlike its presented-authority APIs it cannot attach a local projection
-checkpoint to that same `StorageTransaction`. Therefore the browser adapter
-must not yet claim crash-atomic persistence of the source checkpoint alongside
-the last command of a multi-command revision.
+The pinned HHHS 0.4.4 API now provides authority-neutral local co-transaction
+attachments, including open-authority preparation, for one admitted entry.
+That removes the upstream API blocker for binding a source checkpoint to an
+exact entry and post-admission history horizon, but this adapter has not yet
+wired that seam.
 
-Before this diagnostic coordinator becomes application authority, use an HHHS
-open-admission co-transaction attachment API (or an equivalent atomic batch)
-so the final authored entry and cursor checkpoint reach IndexedDB together.
-Until then, the portable codec and exact-horizon validation are ready, but live
-browser checkpoint persistence remains deliberately gated.
+A separate atomicity question remains: one source `AuthoredRevision` may carry
+several commands while the diagnostic shadow currently admits one HHHS entry
+per command. Attaching the cursor to the final entry would not prevent a
+durable prefix if an earlier entry succeeded and a later one failed. Before
+this coordinator becomes application authority, choose and test one bounded
+application-revision payload, a generic prepared batch, or an equivalent
+resumable design, then persist its exact-horizon checkpoint through the 0.4.4
+attachment seam. Until both pieces land, the portable codec and validation are
+ready but live browser checkpoint persistence remains deliberately gated.

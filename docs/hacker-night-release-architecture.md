@@ -33,16 +33,16 @@ WebGPU consume the same extracted logical view and render-command data.
 
 ### HHHS release boundary
 
-The current exact HHHS `0.4.3` dependency remains pinned while the upstream
-`0.4.4` candidate completes its durable-session, browser-journal, networking,
-acceptance, and downstream release gates. Hyperscope does not locally imitate
-the moving `hhhs-web-browser` storage journal or repair protocol. Camera,
-focus, selection, animation, cue time, asset jobs, and peer presence remain
-ephemeral application state. Explicit authored edits may enter a future HHHS
-durable-session adapter only after semantic validation; the opt-in local
-Blender relay remains a disposable transport with no durability or repair
-claim. This keeps the renderer independent of HHHS release cadence while
-leaving one deliberate durable authored-state seam.
+The exact HHHS `v0.4.4` dependency is pinned to its immutable release tag.
+HHHS now provides the browser journal/worker placement and local co-transaction
+attachment seams, but Hyperscope does not imitate or automatically adopt them
+inside its renderer. Camera, focus, selection, animation, cue time, asset jobs,
+and peer presence remain ephemeral application state. Explicit authored edits
+may enter the durable Replica adapter only after semantic validation and a
+whole-`AuthoredRevision` atomicity decision; the opt-in local Blender relay
+remains a disposable transport with no durability or repair claim. This keeps
+the renderer independent of HHHS release cadence while leaving one deliberate
+durable authored-state seam.
 
 ## Rust application migration status
 
@@ -255,8 +255,9 @@ The first application boundary is now explicit:
   node matrices, including the presentation layer outside an authored absolute
   transform, so the same result overrides active conformal source packets in
   drawing, LOD, focus bounds, picking, and walking. This adapter deliberately
-  adds no browser durability or repair while HHHS v0.4.4 remains a provisional
-  downstream integration target.
+  adds no browser durability or repair. The immutable HHHS v0.4.4 pin qualifies
+  the dependency boundary; adopting its worker/storage seam remains separate
+  application work.
 - The same opt-in carrier now publishes the live browser viewport in the
   opposite direction. Until the general navigation cutover, the incumbent
   browser controller supplies one semantic eye/forward/up, selection, focus,
