@@ -787,9 +787,15 @@ pub struct EuclideanError {
     pub degenerate_normal_samples: usize,
     pub position_rms: f64,
     pub position_max: f64,
+    /// Earliest sample attaining `position_max`, when the position score is
+    /// valid. Stable sample ordering makes this useful diagnostic evidence.
+    pub position_max_sample: Option<usize>,
     pub position_relative_rms: f64,
     pub normal_rms_degrees: f64,
     pub normal_max_degrees: f64,
+    /// Earliest sample attaining `normal_max_degrees`, when the normal score is
+    /// valid.
+    pub normal_max_sample: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1083,8 +1089,10 @@ fn measure_error<S: ScoreSampleData>(
     let extent = characteristic_extent.unwrap_or_else(|| target_extent(&finite_targets));
     let mut position_sum_sq = 0.0;
     let mut position_max = 0.0_f64;
+    let mut position_max_sample = None;
     let mut normal_sum_sq = 0.0;
     let mut normal_max = 0.0_f64;
+    let mut normal_max_sample = None;
     let mut finite_position_count = 0usize;
     let mut finite_normal_count = 0usize;
     let mut finite_position_weight = 0.0;
@@ -1112,7 +1120,10 @@ fn measure_error<S: ScoreSampleData>(
             continue;
         }
         position_sum_sq += sample.surface_weight() * distance * distance;
-        position_max = position_max.max(distance);
+        if position_max_sample.is_none() || distance > position_max {
+            position_max = distance;
+            position_max_sample = Some(sample_index);
+        }
         finite_position_count += 1;
         finite_position_weight += sample.surface_weight();
         let surface_normal = normal_from_tangents(differential.tangent_u, differential.tangent_v);
@@ -1132,7 +1143,10 @@ fn measure_error<S: ScoreSampleData>(
         let dot = geometry::vec3_dot(surface_normal, target_normal).clamp(-1.0, 1.0);
         let angle = dot.acos().to_degrees();
         normal_sum_sq += sample.surface_weight() * angle * angle;
-        normal_max = normal_max.max(angle);
+        if normal_max_sample.is_none() || angle > normal_max {
+            normal_max = angle;
+            normal_max_sample = Some(sample_index);
+        }
         finite_normal_count += 1;
         finite_normal_weight += sample.surface_weight();
     }
@@ -1154,6 +1168,11 @@ fn measure_error<S: ScoreSampleData>(
         } else {
             position_max
         },
+        position_max_sample: if invalid_positions {
+            None
+        } else {
+            position_max_sample
+        },
         position_relative_rms: position_rms / extent,
         normal_rms_degrees: if invalid_normals {
             f64::INFINITY
@@ -1164,6 +1183,11 @@ fn measure_error<S: ScoreSampleData>(
             f64::INFINITY
         } else {
             normal_max
+        },
+        normal_max_sample: if invalid_normals {
+            None
+        } else {
+            normal_max_sample
         },
     }
 }
@@ -1838,6 +1862,10 @@ mod tests {
         )
         .unwrap();
         assert!((score.source.position_rms - 0.0175_f64.sqrt()).abs() < 1.0e-14);
+        assert_eq!(score.source.position_max_sample, Some(1));
+        assert_eq!(score.source.normal_max_sample, Some(1));
+        assert_eq!(split_score.source.position_max_sample, Some(2));
+        assert_eq!(split_score.source.normal_max_sample, Some(2));
         assert!((score.source.position_rms - split_score.source.position_rms).abs() < 1.0e-14);
         assert!(
             (score.source.normal_rms_degrees - split_score.source.normal_rms_degrees).abs()
@@ -1953,6 +1981,8 @@ mod tests {
                 .unwrap();
         assert!((score.source.normal_rms_degrees - 180.0).abs() < 1e-10);
         assert!((score.source.normal_max_degrees - 180.0).abs() < 1e-10);
+        assert_eq!(score.source.position_max_sample, Some(0));
+        assert_eq!(score.source.normal_max_sample, Some(0));
     }
 
     #[test]

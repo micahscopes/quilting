@@ -23,11 +23,13 @@ use quilting_remesh::coarse_complex::{
 };
 use quilting_remesh::coarse_patch_complex::{
     build_coarse_patch_complex, ChartReductionReport, CoarsePatchComplex, CoarsePatchConfig,
+    CorrespondenceSample,
 };
 use quilting_remesh::coarse_reduction::CoarseReductionConfig;
 use quilting_remesh::conformal_optimizer::{
     score_patch_complex_weighted, ConformalProbe, FitScore, FitScoreConfig, ObjectiveWeights,
 };
+use quilting_remesh::geometry;
 use quilting_remesh::linear_fit::{LinearFitConfig, LinearFitResult};
 
 const IDENTITY: [f64; 16] = [
@@ -232,6 +234,8 @@ struct Success {
     correspondence_exhaustive_candidate_tests: u128,
     correspondence_candidate_tests: usize,
     correspondence_bvh_node_visits: usize,
+    source_position_max_sample: Option<CorrespondenceSample>,
+    source_normal_max_sample: Option<CorrespondenceSample>,
     build_time: Duration,
     fit_time: Duration,
     context_time: Duration,
@@ -531,6 +535,16 @@ fn success(
             .exhaustive_candidate_tests,
         correspondence_candidate_tests: complex.correspondence_diagnostics.candidate_tests,
         correspondence_bvh_node_visits: complex.correspondence_diagnostics.bvh_node_visits,
+        source_position_max_sample: score
+            .source
+            .position_max_sample
+            .and_then(|sample| complex.correspondence.get(sample))
+            .cloned(),
+        source_normal_max_sample: score
+            .source
+            .normal_max_sample
+            .and_then(|sample| complex.correspondence.get(sample))
+            .cloned(),
         build_time,
         fit_time,
         context_time,
@@ -605,6 +619,16 @@ fn print_success(success: &Success) {
         success.score.source.normal_max_degrees,
         success.objective,
     );
+    print_worst_sample(
+        "source_position_max",
+        success.source_position_max_sample.as_ref(),
+        &success.fit,
+    );
+    print_worst_sample(
+        "source_normal_max",
+        success.source_normal_max_sample.as_ref(),
+        &success.fit,
+    );
     println!(
         "  source_validity non_finite={} degenerate_normals={} boundary_invalid={} boundary_max={:.6e} near_singular={} invalid_patches={} min_relative_denominator={:.6e}",
         success.score.source.non_finite_samples,
@@ -642,6 +666,56 @@ fn print_success(success: &Success) {
         success.context_time.as_secs_f64(),
         success.score_time.as_secs_f64(),
     );
+}
+
+fn print_worst_sample(label: &str, sample: Option<&CorrespondenceSample>, fit: &LinearFitResult) {
+    let Some(sample) = sample else {
+        println!("  {label}_sample=unavailable");
+        return;
+    };
+    println!(
+        "  {label}_sample source_face={} ordinal={} coarse_face={} chart={} source_bary=({:.6},{:.6},{:.6}) coarse_bary=({:.6},{:.6},{:.6}) correspondence_distance={:.6e}",
+        sample.key.face.0,
+        sample.key.ordinal,
+        sample.coarse_face,
+        sample.coarse_face_key.chart,
+        sample.source_barycentric[0],
+        sample.source_barycentric[1],
+        sample.source_barycentric[2],
+        sample.coarse_barycentric[0],
+        sample.coarse_barycentric[1],
+        sample.coarse_barycentric[2],
+        sample.distance_ratio,
+    );
+    let patch = &fit.patches[sample.coarse_face];
+    let differential =
+        patch.eval_differential(sample.coarse_barycentric[1], sample.coarse_barycentric[2]);
+    let tangent_cross = geometry::vec3_cross(differential.tangent_u, differential.tangent_v);
+    let patch_normal = unit(tangent_cross);
+    let linear_positions = patch.positions.map(|position| position.to_point());
+    let linear_normal = unit(geometry::vec3_cross(
+        geometry::vec3_sub(linear_positions[1], linear_positions[0]),
+        geometry::vec3_sub(linear_positions[2], linear_positions[0]),
+    ));
+    let target_normal = unit(sample.target_normal);
+    println!(
+        "  {label}_frame linear_target_angle={:.6} fitted_target_angle={:.6} fitted_linear_angle={:.6} tangent_area={:.6e}",
+        angle_degrees(linear_normal, target_normal),
+        angle_degrees(patch_normal, target_normal),
+        angle_degrees(patch_normal, linear_normal),
+        geometry::vec3_len(tangent_cross),
+    );
+}
+
+fn unit(vector: [f64; 3]) -> [f64; 3] {
+    geometry::vec3_scale(vector, geometry::vec3_len(vector).recip())
+}
+
+fn angle_degrees(left: [f64; 3], right: [f64; 3]) -> f64 {
+    geometry::vec3_dot(left, right)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees()
 }
 
 fn probes_for(
