@@ -2090,3 +2090,51 @@ view took 1,126.6 ms to refit all 94,628 leaves and 94,627 internal nodes.
 Consequently the round hierarchy remains a disabled shadow oracle; the local
 shader carrier is useful independently, but a full animated CPU refit is not a
 live-frame strategy.
+
+## Current-view adaptive release decision
+
+On 2026-08-27, two of the saved pathological inverted-chess views were replayed
+through the bounded current-view adapter with a 35.4-pixel floor, 64-pixel
+ceiling, depth five, at most eight selected faces, at most 64 leaves per face,
+and a two-million-triangle transaction budget. The adapter was enabled and
+disabled through its public DevTools controller; screenshots were taken only
+after each complete atomic handoff.
+
+The close bowl/bevel view showed a real qualitative improvement: a visibly
+chunky inverted region received local dyadic detail without changing the rest
+of the scene. Its first transaction selected eight of 93,167 visible roots,
+published seven faces and 142 adaptive leaves, and installed 224,487 triangles.
+It took 909.4 ms: 34.9 ms planning, 633.3 ms cold frontier construction,
+172.2 ms reconciliation, 10.7 ms atlas work, and 55.3 ms grouping. An exact
+repeat reused all three retained caches and fell to 58.7 ms, of which 36.2 ms
+was still metric planning. The bounded partition reported 136 unmet leaves,
+23 power-of-two band saturations, and one whole-face boundary fallback.
+
+The broad edge-on view was a negative control. Only 110 roots were classified
+visible; eight were selected, but three hit the camera/fade boundary fallback
+and the five published faces remained one leaf each. The 477.6 ms cold
+transaction produced no visible difference from the non-adaptive screenshot.
+Its work was dominated by 381.9 ms of cold frontier construction. This is
+important evidence against promoting the path merely because it improves one
+hand-picked view.
+
+Current-view adaptation therefore remains an explicit diagnostic, not a URL or
+UI default. Before promotion it needs:
+
+- a candidate score which identifies within-patch screen-metric variation or
+  pole proximity rather than resolving a large equal-root-cost class by stable
+  source identity;
+- a sparse replacement/reconciliation path, or equivalent retained baseline,
+  which does not construct and group a 94,628-root frontier on first use;
+- a declared camera/fade-boundary policy that does not silently spend a
+  selected-face slot on a root fallback; and
+- repeated cold and moving-camera distributions plus screenshot comparisons
+  over the saved pathological views, with zero seam/permutation mismatches.
+
+The same Chrome run verified a separate observer correction. A static chess
+asset with global playback intent enabled now reports `animated=false`, zero
+pose reconstruction, and zero pose refit. A playing horse still refits all 984
+leaves from the captured pose; pausing performs one 984-leaf rest-pose refit,
+then the comparison count remains stable. Playback intent is application state,
+while the browser adapter's resident deforming-pose capability gates animation
+work.
