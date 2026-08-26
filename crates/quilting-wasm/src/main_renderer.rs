@@ -507,7 +507,6 @@ impl GpuBatch {
 }
 
 fn fill_batch_instance_data(
-    residents: &[Option<batch::ResidentLod>],
     key: batch::RenderBatchKey,
     members: &[batch::RenderBatchMember],
     staging: &mut [f32],
@@ -529,8 +528,7 @@ fn fill_batch_instance_data(
                 member.leaf_id.depth, member.leaf_id.path,
             ));
         }
-        let resident = residents.get(face).and_then(|resident| *resident)
-            .ok_or_else(|| format!("face {face} has no resident LOD"))?;
+        let resident = batch::ResidentLod::from_edge_lods(member.edge_lods);
         if resident.canonical != key.lod
             || resident.parity_bucket.min(1) as u8 != key.parity_bucket
             || resident.perm_index.min(5) as u8 != member.permutation_index
@@ -4033,7 +4031,6 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
                 }
 
                 let batch_floats = match fill_batch_instance_data(
-                    &state.resident_face_lods,
                     key,
                     members,
                     &mut state.batch_staging,
@@ -4957,13 +4954,13 @@ mod tests {
             face_index: 23,
             leaf_id: quilting_core::screen_partition::ScreenPatchLeafId::ROOT,
             node_index: 91,
+            edge_lods: [2; 3],
             permutation_index: 0,
             vertex_lods: [2; 3],
         }];
         let mut staging = [0.0; instance_layout::BATCH_TOPOLOGY_STRIDE];
 
         let written = fill_batch_instance_data(
-            &[Some(resident); 24],
             key,
             &members,
             &mut staging,
@@ -4980,7 +4977,6 @@ mod tests {
             path: (1 << 24) - 1,
         };
         fill_batch_instance_data(
-            &[Some(resident); 24],
             key,
             &members,
             &mut staging,

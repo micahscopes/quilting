@@ -101,7 +101,10 @@ impl RenderSceneSnapshot {
             batch.transform.validate()?;
             batch.active_instance_count()?;
             for member in &batch.members {
+                let member_lod = crate::batch::ResidentLod::from_edge_lods(member.edge_lods);
                 if member.permutation_index >= 6
+                    || member_lod.canonical != batch.key.lod
+                    || member_lod.perm_index.min(5) as u8 != member.permutation_index
                     || usize::from(perm_sign(member.permutation_index as usize) < 0)
                         != usize::from(batch.key.parity_bucket)
                     || member
@@ -791,6 +794,7 @@ mod tests {
                 face_index,
                 leaf_id: crate::screen_partition::ScreenPatchLeafId::ROOT,
                 node_index: 0,
+                edge_lods: [2; 3],
                 permutation_index: 0,
                 vertex_lods: [2; 3],
             }],

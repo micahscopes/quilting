@@ -189,6 +189,10 @@ pub struct RenderBatchMember {
     /// representative in [`RenderBatchKey`], this survives draw consolidation
     /// for picking, selection, attribution, and future scene extraction.
     pub node_index: usize,
+    /// Face-local edge resolutions for this drawable patch. Adaptive leaves
+    /// of one authored face may differ, so this cannot be recovered from a
+    /// source-face-indexed resident array.
+    pub edge_lods: [u32; 3],
     pub permutation_index: u8,
     /// Current resident LOD at each source-face vertex. Keeping this in the
     /// retained membership makes visualization-only changes invalidate the
@@ -288,6 +292,7 @@ pub fn group_resident_faces_into(
             face_index: face_index as u32,
             leaf_id: ScreenPatchLeafId::ROOT,
             node_index: face_nodes.get(face_index).copied().unwrap_or(0),
+            edge_lods: resident.edge_lods(),
             permutation_index: resident.perm_index.min(5) as u8,
             vertex_lods: face_vertex_lods.get(face_index).copied().unwrap_or([1; 3]),
         });
