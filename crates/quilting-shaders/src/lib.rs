@@ -225,10 +225,16 @@ pub fn compile_vertex_glsl_native() -> Result<String, Box<dyn std::error::Error>
 }
 
 /// Compile the backend-neutral prepared-patch entry point for WebGL2 transform
-/// feedback. It shares pose and visibility code with the render vertex shader.
+/// feedback.
 pub fn compile_patch_prepare_glsl_native() -> Result<String, Box<dyn std::error::Error>> {
     let module = compile_shader(sources::VERTEX_MAIN, HashMap::new())?;
     emit_glsl_native(&module, naga::ShaderStage::Vertex, "prepare_patches")
+}
+
+/// Compile the one-float camera-dependent visibility entry point.
+pub fn compile_patch_visibility_glsl_native() -> Result<String, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::VERTEX_MAIN, HashMap::new())?;
+    emit_glsl_native(&module, naga::ShaderStage::Vertex, "classify_patch_visibility")
 }
 
 /// Compile a fragment shader to GLSL ES 300 for native OpenGL/WebGL
@@ -303,6 +309,17 @@ mod tests {
             code.contains("_group_0_binding_4_vs"),
             "patch preparation must fetch immutable source-face data",
         );
+    }
+
+    #[test]
+    fn compile_patch_visibility_shader_to_glsl() {
+        let glsl = compile_patch_visibility_glsl_native();
+        assert!(glsl.is_ok(), "patch visibility failed: {:?}", glsl.err());
+        let code = glsl.unwrap();
+        assert!(code.contains("#version 300 es"));
+        assert!(code.contains("void main()"));
+        assert!(code.contains("_vs2fs_location0"));
+        assert!(code.contains("Uniforms_block_0Vertex"));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! must all agree; anything that hardcodes a stride or offset instead of using
 //! the constants here is a silent-corruption hazard.
 //!
-//! # Layout: 52 floats / 208 bytes / 13 instanced attributes
+//! # Prepared layout: 52 floats / 208 bytes / 13 instanced attributes
 //!
 //! | floats | bytes | `@location` | content                          |
 //! |--------|-------|-------------|----------------------------------|
@@ -18,7 +18,7 @@
 //! | 24..28 | 96    | 7           | edge LODs + permutation index    |
 //! | 28..32 | 112   | 8           | vertex LODs + source face ID     |
 //! | 32..36 | 128   | 9           | uv01 `(u0, v0, u1, v1)`          |
-//! | 36..40 | 144   | 10          | uv2 + preparation `(u2,v2,visible,prepared)` |
+//! | 36..40 | 144   | 10          | uv2 + preparation `(u2,v2,reserved,prepared)` |
 //! | 40..44 | 160   | 11          | n0 `(x, y, z, semantic_node_id)` |
 //! | 44..48 | 176   | 12          | n1                               |
 //! | 48..52 | 192   | 13          | n2                               |
@@ -33,12 +33,23 @@
 //!   triangle meshes use identity weights; fitted/remeshed patches must retain
 //!   their non-identity weights through preparation and rendering. The shader
 //!   combines these source weights with the current Möbius transform once.
+//! - Location 14 is a separate one-float instanced visibility stream. It is
+//!   intentionally absent from the 52-float prepared record because it changes
+//!   with the camera while posed geometry usually does not.
 
 /// Floats per face instance.
 pub const STRIDE: usize = 52;
 
 /// Bytes per face instance.
 pub const STRIDE_BYTES: usize = STRIDE * 4;
+
+/// One camera-dependent visibility scalar is stored beside, rather than
+/// inside, each prepared patch record.
+pub const VISIBILITY_STRIDE_BYTES: usize = 4;
+
+/// Instanced input location for the separate visibility scalar. WebGL2
+/// guarantees at least 16 vertex attributes, so location 14 remains portable.
+pub const VISIBILITY_ATTR_LOCATION: u32 = 14;
 
 /// Floats in the topology-only record streamed when a face changes draw
 /// bucket. Static control points, UVs, and normals live in a renderer-owned
@@ -70,8 +81,9 @@ pub mod offset {
     pub const FACE_ID: usize = VERTEX_LODS + 3;
     /// Six UV floats: `(u0, v0, u1, v1, u2, v2)`.
     pub const UVS: usize = 32;
-    /// Current-pose conservative visibility written by a GPU preparation pass.
-    pub const PREPARED_VISIBILITY: usize = UVS + 6;
+    /// Reserved preparation lane. Camera-dependent visibility lives in its own
+    /// one-float stream so camera motion does not rewrite this record.
+    pub const PREPARED_RESERVED: usize = UVS + 6;
     /// Nonzero when the record's positions and visibility have been prepared.
     pub const PREPARED_FLAG: usize = UVS + 7;
     /// Normal `i` occupies `NORMALS + i * 4`; `n0.w` carries semantic node ID.
@@ -174,9 +186,10 @@ impl<'a> InstanceWriter<'a> {
         }
     }
 
-    /// Mark a record as GPU-prepared and store its current-pose visibility.
-    pub fn set_prepared_visibility(&mut self, visible: bool) {
-        self.slice[offset::PREPARED_VISIBILITY] = if visible { 1.0 } else { 0.0 };
+    /// Mark a record as GPU-prepared. The camera-dependent visibility scalar
+    /// is owned by a separate stream.
+    pub fn mark_prepared(&mut self) {
+        self.slice[offset::PREPARED_RESERVED] = 0.0;
         self.slice[offset::PREPARED_FLAG] = 1.0;
     }
 
@@ -220,6 +233,8 @@ mod tests {
         locs.dedup();
         assert_eq!(locs.len(), ATTR_MAP.len(), "duplicate attribute location");
         assert_eq!(locs, (1..=13).collect::<Vec<_>>());
+        assert_eq!(VISIBILITY_ATTR_LOCATION, 14);
+        assert_eq!(VISIBILITY_STRIDE_BYTES, std::mem::size_of::<f32>());
     }
 
     #[test]
@@ -255,7 +270,7 @@ mod tests {
         w.set_vertex_lods([2.0, 3.0, 4.0]);
         w.set_face_id(123);
         w.set_uvs([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]);
-        w.set_prepared_visibility(true);
+        w.mark_prepared();
         w.set_normal(0, [0.0, 1.0, 0.0]);
         w.set_node_id(91);
 
@@ -268,7 +283,7 @@ mod tests {
         assert_eq!(&buf[b + offset::VERTEX_LODS..b + offset::VERTEX_LODS + 3], &[2.0, 3.0, 4.0]);
         assert_eq!(buf[b + offset::FACE_ID], 123.0);
         assert_eq!(&buf[b + 32..b + 38], &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
-        assert_eq!(buf[b + offset::PREPARED_VISIBILITY], 1.0);
+        assert_eq!(buf[b + offset::PREPARED_RESERVED], 0.0);
         assert_eq!(buf[b + offset::PREPARED_FLAG], 1.0);
         assert_eq!(&buf[b + 40..b + 43], &[0.0, 1.0, 0.0]);
         assert_eq!(buf[b + offset::NODE_ID], 91.0);

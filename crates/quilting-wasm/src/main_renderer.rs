@@ -14,8 +14,8 @@ use crate::auxiliary_programs::{
 
 use glow::HasContext;
 use quilting_renderer::buffer::{
-    create_patch_input_vao, EnvironmentMaps, MeshBuffers, MeshDraw, PbrParams,
-    PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
+    create_patch_input_vao, create_patch_visibility_input_vao, EnvironmentMaps, MeshBuffers,
+    MeshDraw, PbrParams, PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
@@ -202,16 +202,20 @@ struct MainState {
     render_commands_dirty: bool,
     render_command_builds: u64,
     render_calls: u64,
-    /// Prepared patch records depend on view-projection, pose, retained batch
-    /// membership, and per-entity transforms—not on time by itself. Reuse them
-    /// across idle frames instead of rewriting the complete 52-float stream.
+    /// Prepared patch records depend on pose, retained batch membership, and
+    /// per-entity affine transforms—not on the camera. Camera-dependent
+    /// classification lives in a separate one-float visibility stream.
     patch_prepare_dirty: bool,
-    last_prepared_mvp: Option<[f32; 16]>,
-    last_prepared_command_build: u64,
     patch_prepare_frames: u64,
     skipped_patch_prepare_frames: u64,
     patch_prepare_calls: u64,
     last_prepared_patch_instances: u64,
+    last_visibility_mvp: Option<[f32; 16]>,
+    last_visibility_command_build: u64,
+    patch_visibility_frames: u64,
+    skipped_patch_visibility_frames: u64,
+    patch_visibility_calls: u64,
+    last_visibility_patch_instances: u64,
     pbr_draw_calls: u64,
     pbr_material_updates: u64,
     pbr_vertex_uniform_updates: u64,
@@ -461,16 +465,20 @@ struct GpuBatch {
     instances: PersistentBatchInstances,
     mesh: MeshBuffers,
     prepare_vao: glow::VertexArray,
+    visibility_vao: glow::VertexArray,
     members: Vec<batch::RenderBatchMember>,
     perm_parity: f32,
     material_index: usize,
     render_node_index: usize,
+    pose_dirty: bool,
+    last_prepared_model: Option<[f32; 16]>,
 }
 
 impl GpuBatch {
     fn destroy(self, gl: &glow::Context) {
         unsafe {
             gl.delete_vertex_array(self.prepare_vao);
+            gl.delete_vertex_array(self.visibility_vao);
         }
         // Both render VAOs reference the persistent prepared-instance buffer.
         self.mesh.destroy_vaos_only(gl);
@@ -491,6 +499,7 @@ impl GpuBatch {
         self.mesh.num_instances = members.len() as i32;
         self.members.clear();
         self.members.extend_from_slice(members);
+        self.pose_dirty = true;
         Ok(())
     }
 }
@@ -561,13 +570,22 @@ fn embed_face_node_ids(
 }
 
 fn patch_preparation_needed(
-    dirty: bool,
+    global_dirty: bool,
+    batch_dirty: bool,
+    last_model: Option<[f32; 16]>,
+    model: [f32; 16],
+) -> bool {
+    global_dirty || batch_dirty || last_model != Some(model)
+}
+
+fn patch_visibility_needed(
+    pose_prepared: bool,
     last_mvp: Option<[f32; 16]>,
     last_command_build: u64,
     mvp: [f32; 16],
     command_build: u64,
 ) -> bool {
-    dirty || last_mvp != Some(mvp) || last_command_build != command_build
+    pose_prepared || last_mvp != Some(mvp) || last_command_build != command_build
 }
 
 fn create_gpu_batch(
@@ -586,16 +604,33 @@ fn create_gpu_batch(
             return Err(error);
         }
     };
-    let mesh = match MeshBuffers::from_shared(
+    let visibility_vao = match create_patch_visibility_input_vao(
+        gl,
+        &instances.prepared_buf,
+        0,
+    ) {
+        Ok(vao) => vao,
+        Err(error) => {
+            unsafe { gl.delete_vertex_array(prepare_vao); }
+            instances.destroy(gl);
+            return Err(error);
+        }
+    };
+    let mesh = match MeshBuffers::from_shared_with_visibility(
         gl,
         tess,
         &instances.prepared_buf,
+        0,
+        &instances.visibility_buf,
         0,
         members.len() as i32,
     ) {
         Ok(mesh) => mesh,
         Err(error) => {
-            unsafe { gl.delete_vertex_array(prepare_vao); }
+            unsafe {
+                gl.delete_vertex_array(prepare_vao);
+                gl.delete_vertex_array(visibility_vao);
+            }
             instances.destroy(gl);
             return Err(error);
         }
@@ -604,10 +639,13 @@ fn create_gpu_batch(
         instances,
         mesh,
         prepare_vao,
+        visibility_vao,
         members: members.to_vec(),
         perm_parity: key.parity(),
         material_index: key.material_index,
         render_node_index: key.render_node_index,
+        pose_dirty: true,
+        last_prepared_model: None,
     })
 }
 
@@ -696,12 +734,16 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_command_builds: 0,
             render_calls: 0,
             patch_prepare_dirty: true,
-            last_prepared_mvp: None,
-            last_prepared_command_build: 0,
             patch_prepare_frames: 0,
             skipped_patch_prepare_frames: 0,
             patch_prepare_calls: 0,
             last_prepared_patch_instances: 0,
+            last_visibility_mvp: None,
+            last_visibility_command_build: 0,
+            patch_visibility_frames: 0,
+            skipped_patch_visibility_frames: 0,
+            patch_visibility_calls: 0,
+            last_visibility_patch_instances: 0,
             pbr_draw_calls: 0,
             pbr_material_updates: 0,
             pbr_vertex_uniform_updates: 0,
@@ -1831,6 +1873,15 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                     0,
                 );
             }
+            for (batch, render_batch) in state.batches.values().zip(&state.render_batches) {
+                state.renderer.classify_patch_batch(
+                    &camera,
+                    render_batch,
+                    batch.visibility_vao,
+                    batch.instances.visibility_buf,
+                    0,
+                );
+            }
             gl.use_program(Some(state.renderer.programs().pick));
 
             for batch in &state.render_batches {
@@ -2942,6 +2993,16 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
                 "lastPreparedPatchInstances",
                 state.last_prepared_patch_instances,
             ),
+            ("patchVisibilityFrames", state.patch_visibility_frames),
+            (
+                "skippedPatchVisibilityFrames",
+                state.skipped_patch_visibility_frames,
+            ),
+            ("patchVisibilityCalls", state.patch_visibility_calls),
+            (
+                "lastVisibilityPatchInstances",
+                state.last_visibility_patch_instances,
+            ),
             ("pbrDrawCalls", state.pbr_draw_calls),
             ("pbrMaterialUpdates", state.pbr_material_updates),
             (
@@ -3861,30 +3922,67 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         sync_render_batches(state);
         refresh_render_shadow_scene(state);
-        let prepare_needed = patch_preparation_needed(
-            state.patch_prepare_dirty,
-            state.last_prepared_mvp,
-            state.last_prepared_command_build,
+        let prepare_all = state.patch_prepare_dirty;
+        if prepare_all {
+            // Hidden batches cannot dispatch through a zero-instance render
+            // view. Retain their local dirty bit so becoming visible later
+            // prepares the newest global animation/source pose.
+            for batch in state.batches.values_mut() {
+                batch.pose_dirty = true;
+            }
+        }
+        let (prepare_calls, prepared_instances) = state
+            .batches
+            .values()
+            .zip(&state.render_batches)
+            .filter(|(batch, render_batch)| {
+                render_batch.mesh.num_instances > 0
+                    && patch_preparation_needed(
+                        prepare_all,
+                        batch.pose_dirty,
+                        batch.last_prepared_model,
+                        render_batch.euclidean_model,
+                    )
+            })
+            .fold((0_u64, 0_u64), |(calls, instances), (_, render_batch)| {
+                (
+                    calls.saturating_add(1),
+                    instances.saturating_add(render_batch.mesh.num_instances as u64),
+                )
+            });
+        let prepare_needed = prepare_calls != 0;
+        let visibility_needed = patch_visibility_needed(
+            prepare_needed,
+            state.last_visibility_mvp,
+            state.last_visibility_command_build,
             camera.mvp,
             state.render_command_builds,
         );
         if prepare_needed {
-            state.patch_prepare_dirty = false;
-            state.last_prepared_mvp = Some(camera.mvp);
-            state.last_prepared_command_build = state.render_command_builds;
             state.patch_prepare_frames = state.patch_prepare_frames.saturating_add(1);
-            state.patch_prepare_calls = state
-                .patch_prepare_calls
+            state.patch_prepare_calls = state.patch_prepare_calls.saturating_add(prepare_calls);
+            state.last_prepared_patch_instances = prepared_instances;
+        } else {
+            state.skipped_patch_prepare_frames =
+                state.skipped_patch_prepare_frames.saturating_add(1);
+            state.last_prepared_patch_instances = 0;
+        }
+        if visibility_needed {
+            state.last_visibility_mvp = Some(camera.mvp);
+            state.last_visibility_command_build = state.render_command_builds;
+            state.patch_visibility_frames = state.patch_visibility_frames.saturating_add(1);
+            state.patch_visibility_calls = state
+                .patch_visibility_calls
                 .saturating_add(state.batches.len() as u64);
-            state.last_prepared_patch_instances = state
+            state.last_visibility_patch_instances = state
                 .render_batches
                 .iter()
                 .map(|batch| batch.mesh.num_instances.max(0) as u64)
                 .sum();
         } else {
-            state.skipped_patch_prepare_frames =
-                state.skipped_patch_prepare_frames.saturating_add(1);
-            state.last_prepared_patch_instances = 0;
+            state.skipped_patch_visibility_frames =
+                state.skipped_patch_visibility_frames.saturating_add(1);
+            state.last_visibility_patch_instances = 0;
         }
         let has_transmission = if matches!(state.render_mode, RenderMode::Pbr) {
             let default_material = PbrParams::default();
@@ -3914,16 +4012,40 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.renderer.joint_ubo().bind(gl);
         state.renderer.bind_vertex_textures();
 
-        // Deform and classify each patch once. Every subsequent material,
-        // wire, normal, and pick draw consumes these prepared records without
-        // CPU visibility readback or repeated position skinning.
+        // Deform each patch only when its pose/topology changes. Camera motion
+        // updates the separate one-float visibility stream below instead of
+        // rewriting this complete 52-float record.
         if prepare_needed {
+            let renderer = &state.renderer;
+            for (gpu_batch, render_batch) in state.batches.values_mut().zip(render_batches) {
+                if render_batch.mesh.num_instances > 0
+                    && patch_preparation_needed(
+                        prepare_all,
+                        gpu_batch.pose_dirty,
+                        gpu_batch.last_prepared_model,
+                        render_batch.euclidean_model,
+                    )
+                {
+                    renderer.prepare_patch_batch(
+                        &camera,
+                        render_batch,
+                        gpu_batch.prepare_vao,
+                        gpu_batch.instances.prepared_buf,
+                        0,
+                    );
+                    gpu_batch.pose_dirty = false;
+                    gpu_batch.last_prepared_model = Some(render_batch.euclidean_model);
+                }
+            }
+        }
+        state.patch_prepare_dirty = false;
+        if visibility_needed {
             for (gpu_batch, render_batch) in state.batches.values().zip(render_batches) {
-                state.renderer.prepare_patch_batch(
+                state.renderer.classify_patch_batch(
                     &camera,
                     render_batch,
-                    gpu_batch.prepare_vao,
-                    gpu_batch.instances.prepared_buf,
+                    gpu_batch.visibility_vao,
+                    gpu_batch.instances.visibility_buf,
                     0,
                 );
             }
@@ -4591,15 +4713,23 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn patch_preparation_reuses_only_an_exact_idle_frame() {
+    fn pose_preparation_and_visibility_have_independent_revisions() {
         let mut mvp = [0.0; 16];
         mvp[0] = 1.0;
-        assert!(!patch_preparation_needed(false, Some(mvp), 7, mvp, 7));
-        assert!(patch_preparation_needed(true, Some(mvp), 7, mvp, 7));
-        assert!(patch_preparation_needed(false, None, 7, mvp, 7));
-        assert!(patch_preparation_needed(false, Some(mvp), 6, mvp, 7));
+        assert!(!patch_preparation_needed(false, false, Some(mvp), mvp));
+        assert!(patch_preparation_needed(true, false, Some(mvp), mvp));
+        assert!(patch_preparation_needed(false, true, Some(mvp), mvp));
+        assert!(patch_preparation_needed(false, false, None, mvp));
+        assert!(!patch_visibility_needed(false, Some(mvp), 7, mvp, 7));
+        assert!(patch_visibility_needed(true, Some(mvp), 7, mvp, 7));
+        assert!(patch_visibility_needed(false, None, 7, mvp, 7));
+        assert!(patch_visibility_needed(false, Some(mvp), 6, mvp, 7));
         let mut moved = mvp;
         moved[12] = 0.25;
-        assert!(patch_preparation_needed(false, Some(mvp), 7, moved, 7));
+        assert!(!patch_preparation_needed(false, false, Some(mvp), mvp));
+        let mut moved_model = mvp;
+        moved_model[13] = 0.5;
+        assert!(patch_preparation_needed(false, false, Some(mvp), moved_model));
+        assert!(patch_visibility_needed(false, Some(mvp), 7, moved, 7));
     }
 }

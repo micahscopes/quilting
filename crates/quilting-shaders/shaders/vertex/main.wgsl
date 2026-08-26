@@ -172,6 +172,10 @@ struct VertexInput {
     @location(11) smooth_n0: vec4<f32>,  // (nx0, ny0, nz0, 0)
     @location(12) smooth_n1: vec4<f32>,  // (nx1, ny1, nz1, 0)
     @location(13) smooth_n2: vec4<f32>,  // (nx2, ny2, nz2, 0)
+    // Separate camera-dependent stream. Unprepared/fallback VAOs leave this
+    // attribute disabled at its WebGL default; it is consulted only when the
+    // 52-float record carries the prepared flag.
+    @location(14) prepared_visibility: f32,
 }
 
 struct VertexOutput {
@@ -222,6 +226,23 @@ struct PreparedPatchOutput {
     @location(10) smooth_n0: vec4<f32>,
     @location(11) smooth_n1: vec4<f32>,
     @location(12) smooth_n2: vec4<f32>,
+}
+
+// Camera-dependent classification consumes already-posed controls and writes
+// one float per patch. Keeping it separate prevents a view change from
+// rewriting the complete 52-float prepared record.
+struct PatchVisibilityInput {
+    @location(1) p0: vec4<f32>,
+    @location(2) p1: vec4<f32>,
+    @location(3) p2: vec4<f32>,
+    @location(4) w0: vec4<f32>,
+    @location(5) w1: vec4<f32>,
+    @location(6) w2: vec4<f32>,
+}
+
+struct PatchVisibilityOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) visibility: f32,
 }
 
 fn culled_vertex_output() -> VertexOutput {
@@ -444,14 +465,10 @@ fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
     let source_w0 = face_data_load(face_index, 3);
     let source_w1 = face_data_load(face_index, 4);
     let source_w2 = face_data_load(face_index, 5);
-    let visible = !patch_outside_frustum(
-        p0.yzw, p1.yzw, p2.yzw,
-        source_w0, source_w1, source_w2,
-    );
     let source_uv2 = face_data_load(face_index, 9);
     let uv2_prepare = vec4<f32>(
         source_uv2.xy,
-        select(0.0, 1.0, visible),
+        0.0,
         1.0,
     );
     let vert_lod = vec4<f32>(in.face_info.yzw, f32(face_index));
@@ -466,6 +483,18 @@ fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
         face_data_load(face_index, 10),
         face_data_load(face_index, 11),
         face_data_load(face_index, 12),
+    );
+}
+
+@vertex
+fn classify_patch_visibility(in: PatchVisibilityInput) -> PatchVisibilityOutput {
+    let visible = !patch_outside_frustum(
+        in.p0.yzw, in.p1.yzw, in.p2.yzw,
+        in.w0, in.w1, in.w2,
+    );
+    return PatchVisibilityOutput(
+        vec4<f32>(0.0),
+        select(0.0, 1.0, visible),
     );
 }
 
@@ -571,7 +600,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.fade = 1.0;
 
     let prepared = in.uv2_pad.w > 0.5;
-    if prepared && in.uv2_pad.z < 0.5 {
+    if prepared && in.prepared_visibility < 0.5 {
         return culled_vertex_output();
     }
 

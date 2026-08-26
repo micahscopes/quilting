@@ -21,7 +21,7 @@ use buffer::{
     FaceDataTexture, SkinningTexture, MorphTargetTexture,
 };
 use shader::{Programs, WebGlProgramKey, WebGlProgramMemo, WebGlProgramMemoDiagnostics};
-use prepare::PatchPreparer;
+use prepare::{PatchPreparer, PatchVisibilityClassifier};
 
 /// High-level renderer for the quilting pipeline.
 ///
@@ -38,6 +38,7 @@ pub struct Renderer {
     matcap_ubo: MatcapUniformBuf,
     joint_ubo: JointMatricesBuf,
     patch_preparer: PatchPreparer,
+    patch_visibility: PatchVisibilityClassifier,
     face_data_texture: Option<FaceDataTexture>,
     skinning_texture: Option<SkinningTexture>,
     morph_texture: Option<MorphTargetTexture>,
@@ -62,6 +63,7 @@ impl Renderer {
         let mut matcap_ubo: Option<MatcapUniformBuf> = None;
         let mut joint_ubo: Option<JointMatricesBuf> = None;
         let mut patch_preparer: Option<PatchPreparer> = None;
+        let mut patch_visibility: Option<PatchVisibilityClassifier> = None;
 
         let construction = (|| -> Result<(), String> {
             programs = Some(shader::compile_programs(&gl, &mut program_memo)?);
@@ -71,10 +73,14 @@ impl Renderer {
             matcap_ubo = Some(MatcapUniformBuf::new(&gl)?);
             joint_ubo = Some(JointMatricesBuf::new(&gl)?);
             patch_preparer = Some(PatchPreparer::new(&gl, &mut program_memo)?);
+            patch_visibility = Some(PatchVisibilityClassifier::new(&gl, &mut program_memo)?);
             Ok(())
         })();
 
         if let Err(error) = construction {
+            if let Some(resource) = patch_visibility {
+                resource.destroy(&gl);
+            }
             if let Some(resource) = patch_preparer {
                 resource.destroy(&gl);
             }
@@ -108,6 +114,8 @@ impl Renderer {
             joint_ubo: joint_ubo.expect("successful construction allocated joint UBO"),
             patch_preparer: patch_preparer
                 .expect("successful construction allocated patch preparer"),
+            patch_visibility: patch_visibility
+                .expect("successful construction allocated patch visibility classifier"),
             face_data_texture: None,
             skinning_texture: None,
             morph_texture: None,
@@ -179,6 +187,34 @@ impl Renderer {
             &batch.euclidean_normal,
         );
         self.patch_preparer.prepare_range(
+            &self.gl,
+            source_vao,
+            destination,
+            byte_offset,
+            batch.mesh.num_instances,
+        );
+    }
+
+    /// Classify one already-posed batch against the current conformal map and
+    /// camera, writing one visibility float per patch.
+    pub fn classify_patch_batch(
+        &self,
+        camera: &pass::Camera,
+        batch: &pass::RenderBatch,
+        source_vao: glow::VertexArray,
+        destination: glow::Buffer,
+        byte_offset: i32,
+    ) {
+        let batch_camera = pass::camera_for_batch(camera, batch);
+        pass::upload_batch_ubo(
+            &self.gl,
+            &self.vtx_ubo,
+            &batch_camera,
+            1,
+            &batch.euclidean_model,
+            &batch.euclidean_normal,
+        );
+        self.patch_visibility.classify_range(
             &self.gl,
             source_vao,
             destination,
@@ -330,6 +366,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         // Transform-feedback objects release their bindings before the memo
         // deletes every linked program and then every shared shader module.
+        self.patch_visibility.destroy(&self.gl);
         self.patch_preparer.destroy(&self.gl);
         self.program_memo.destroy(&self.gl);
         self.vtx_ubo.destroy(&self.gl);

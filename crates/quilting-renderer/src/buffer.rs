@@ -1,7 +1,8 @@
 //! GPU buffer management: VAO, VBO, IBO, instance buffers, and UBOs.
 //!
 //! - Vertex attribute 0: bary coords (vec3, per-vertex)
-//! - Attributes 1-13: per-instance vec4s read from the instance buffer
+//! - Attributes 1-13: per-instance vec4s read from the prepared-patch buffer
+//! - Attribute 14: optional per-instance visibility scalar
 //!
 //! The instance stride and per-attribute offsets come from
 //! [`quilting_core::instance_layout`] — never hardcode them here.
@@ -197,12 +198,50 @@ impl MeshBuffers {
         byte_offset: i32,
         num_instances: i32,
     ) -> Result<Self, String> {
+        Self::from_shared_inputs(gl, tess, shared_buf, byte_offset, None, num_instances)
+    }
+
+    /// Create render VAOs backed by a persistent prepared-patch buffer and a
+    /// separate one-float-per-instance visibility stream.
+    pub fn from_shared_with_visibility(
+        gl: &glow::Context,
+        tess: &TessBuffers,
+        shared_buf: &glow::Buffer,
+        byte_offset: i32,
+        visibility_buf: &glow::Buffer,
+        visibility_byte_offset: i32,
+        num_instances: i32,
+    ) -> Result<Self, String> {
+        Self::from_shared_inputs(
+            gl,
+            tess,
+            shared_buf,
+            byte_offset,
+            Some((visibility_buf, visibility_byte_offset)),
+            num_instances,
+        )
+    }
+
+    fn from_shared_inputs(
+        gl: &glow::Context,
+        tess: &TessBuffers,
+        shared_buf: &glow::Buffer,
+        byte_offset: i32,
+        visibility: Option<(&glow::Buffer, i32)>,
+        num_instances: i32,
+    ) -> Result<Self, String> {
         unsafe {
             let tri_vao = gl.create_vertex_array().map_err(|e| format!("tri vao: {e}"))?;
             setup_vao_offset(gl, tri_vao, &tess.bary_buf, &tess.tri_index_buf, shared_buf, byte_offset);
+            if let Some((visibility_buf, visibility_byte_offset)) = visibility {
+                attach_visibility(gl, tri_vao, visibility_buf, visibility_byte_offset);
+            }
 
             let line_vao = gl.create_vertex_array().map_err(|e| format!("line vao: {e}"))?;
             setup_vao_offset(gl, line_vao, &tess.bary_buf, &tess.line_index_buf, shared_buf, byte_offset);
+            if let Some((visibility_buf, visibility_byte_offset)) = visibility {
+                attach_visibility(gl, line_vao, visibility_buf, visibility_byte_offset);
+            }
 
             gl.bind_vertex_array(None);
 
@@ -326,6 +365,29 @@ unsafe fn setup_vao_offset(
     gl.bind_buffer(glow::ARRAY_BUFFER, None);
 }
 
+/// Attach the compact visibility stream to an existing render VAO.
+unsafe fn attach_visibility(
+    gl: &glow::Context,
+    vao: glow::VertexArray,
+    visibility_buf: &glow::Buffer,
+    byte_offset: i32,
+) {
+    gl.bind_vertex_array(Some(vao));
+    gl.bind_buffer(glow::ARRAY_BUFFER, Some(*visibility_buf));
+    gl.enable_vertex_attrib_array(instance_layout::VISIBILITY_ATTR_LOCATION);
+    gl.vertex_attrib_pointer_f32(
+        instance_layout::VISIBILITY_ATTR_LOCATION,
+        1,
+        glow::FLOAT,
+        false,
+        instance_layout::VISIBILITY_STRIDE_BYTES as i32,
+        byte_offset,
+    );
+    gl.vertex_attrib_divisor(instance_layout::VISIBILITY_ATTR_LOCATION, 1);
+    gl.bind_vertex_array(None);
+    gl.bind_buffer(glow::ARRAY_BUFFER, None);
+}
+
 /// Create a VAO binding tessellation geometry + persistent instance buffer.
 /// The instance attrib pointers start at byte offset 0 — call `bind_at_offset`
 /// before each batch draw to adjust.
@@ -376,12 +438,45 @@ pub fn create_patch_input_vao(
     }
 }
 
-/// Persistent topology and prepared GPU records owned by one logical batch.
-/// Membership changes update only the compact topology prefix; the GPU writes
-/// complete current-pose records into the prepared buffer every frame.
+/// Create a point-dispatch VAO that reads only posed control points and QB
+/// weights from the full prepared record. The visibility pass does not fetch
+/// source textures or repeat skinning/morph evaluation.
+pub fn create_patch_visibility_input_vao(
+    gl: &glow::Context,
+    prepared_buf: &glow::Buffer,
+    byte_offset: i32,
+) -> Result<glow::VertexArray, String> {
+    unsafe {
+        let vao = gl.create_vertex_array()
+            .map_err(|e| format!("patch visibility input vao: {e}"))?;
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(*prepared_buf));
+        for &(loc, attr_offset) in &instance_layout::ATTR_MAP[..6] {
+            gl.enable_vertex_attrib_array(loc);
+            gl.vertex_attrib_pointer_f32(
+                loc,
+                4,
+                glow::FLOAT,
+                false,
+                instance_layout::STRIDE_BYTES as i32,
+                byte_offset + attr_offset,
+            );
+            gl.vertex_attrib_divisor(loc, 0);
+        }
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        Ok(vao)
+    }
+}
+
+/// Persistent topology, prepared-patch, and visibility GPU records owned by one
+/// logical batch. Membership changes update only the compact topology prefix;
+/// pose/topology changes rewrite prepared records, while camera changes rewrite
+/// only the compact visibility stream.
 pub struct PersistentBatchInstances {
     pub topology_buf: glow::Buffer,
     pub prepared_buf: glow::Buffer,
+    pub visibility_buf: glow::Buffer,
     pub capacity_instances: usize,
 }
 
@@ -410,6 +505,11 @@ impl PersistentBatchInstances {
             .map_err(|_| format!("topology buffer capacity {topology_capacity} exceeds WebGL limits"))?;
         let prepared_capacity_i32 = i32::try_from(prepared_capacity)
             .map_err(|_| format!("prepared buffer capacity {prepared_capacity} exceeds WebGL limits"))?;
+        let visibility_capacity = capacity_instances
+            .checked_mul(instance_layout::VISIBILITY_STRIDE_BYTES)
+            .ok_or_else(|| "visibility buffer capacity overflow".to_string())?;
+        let visibility_capacity_i32 = i32::try_from(visibility_capacity)
+            .map_err(|_| format!("visibility buffer capacity {visibility_capacity} exceeds WebGL limits"))?;
         unsafe {
             let bytes = bytemuck_cast_slice(data);
             let topology_buf = gl.create_buffer().map_err(|e| format!("{e}"))?;
@@ -425,8 +525,16 @@ impl PersistentBatchInstances {
             })?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(prepared_buf));
             gl.buffer_data_size(glow::ARRAY_BUFFER, prepared_capacity_i32, glow::DYNAMIC_COPY);
+
+            let visibility_buf = gl.create_buffer().map_err(|error| {
+                gl.delete_buffer(prepared_buf);
+                gl.delete_buffer(topology_buf);
+                format!("patch visibility buffer: {error}")
+            })?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(visibility_buf));
+            gl.buffer_data_size(glow::ARRAY_BUFFER, visibility_capacity_i32, glow::DYNAMIC_COPY);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            Ok(Self { topology_buf, prepared_buf, capacity_instances })
+            Ok(Self { topology_buf, prepared_buf, visibility_buf, capacity_instances })
         }
     }
 
@@ -453,6 +561,7 @@ impl PersistentBatchInstances {
         unsafe {
             gl.delete_buffer(self.topology_buf);
             gl.delete_buffer(self.prepared_buf);
+            gl.delete_buffer(self.visibility_buf);
         }
     }
 }

@@ -1,9 +1,10 @@
 //! Backend-neutral patch preparation implemented with WebGL2 transform feedback.
 //!
-//! One point invocation consumes a compact topology record, fetches immutable
-//! source-face data by ID, and emits one prepared record with current-pose
-//! control points and conservative visibility. A future WebGPU backend can
-//! populate the same record from a compute pass.
+//! Pose preparation and view-dependent visibility are deliberately separate:
+//! one point invocation expands compact topology into a current-pose patch
+//! record, while a second invocation classifies that posed record into one
+//! visibility float. A future WebGPU backend can populate the same logical
+//! streams from compute passes.
 
 use glow::HasContext;
 use quilting_core::instance_layout;
@@ -38,25 +39,26 @@ const PREPARED_VARYINGS: [&str; 13] = [
     "_vs2fs_location11",
     "_vs2fs_location12",
 ];
+const VISIBILITY_VARYINGS: [&str; 1] = ["_vs2fs_location0"];
 
-/// Reusable WebGL2 preparation pipeline. Batch VAOs and destination buffers
-/// remain externally owned so rebuilding LOD groups does not rebuild shaders.
-pub struct PatchPreparer {
+struct TransformFeedbackPass {
     /// Non-owning handle retained by `WebGlProgramMemo` for the context epoch.
     program: glow::Program,
     transform_feedback: glow::TransformFeedback,
 }
 
-/// Pure shader, transform-feedback interface, and WebGL binding identity for
-/// the patch-preparation pass.
-pub fn patch_prepare_program_descriptor() -> Result<WebGlProgramKey, String> {
+fn transform_feedback_program_descriptor(
+    label: &str,
+    entry_point: &str,
+    varyings: &[&str],
+) -> Result<WebGlProgramKey, String> {
     let compiler_catalog_revision = quilting_shaders::compiler_catalog_revision();
     let vertex = ShaderModuleDescriptor::new(
-        "quilting patch preparation vertex",
+        format!("quilting {label} vertex"),
         quilting_shaders::sources::VERTEX_MAIN,
         Arc::clone(&compiler_catalog_revision),
         ShaderStage::Vertex,
-        "prepare_patches",
+        entry_point,
         ShaderTarget::GlslEs300 { adjust_coordinate_space: false },
         Vec::new(),
     )
@@ -74,7 +76,7 @@ pub fn patch_prepare_program_descriptor() -> Result<WebGlProgramKey, String> {
     let program = GraphicsProgramDescriptor::new(
         vertex,
         Some(fragment),
-        PREPARED_VARYINGS.iter().map(|varying| (*varying).into()).collect(),
+        varyings.iter().map(|varying| (*varying).into()).collect(),
     )
     .map_err(|error| error.to_string())?;
     let (uniform_blocks, samplers) = shared_vertex_binding_entries();
@@ -82,35 +84,55 @@ pub fn patch_prepare_program_descriptor() -> Result<WebGlProgramKey, String> {
     Ok(WebGlProgramKey::new(program, bindings))
 }
 
-impl PatchPreparer {
-    pub fn new(gl: &glow::Context, memo: &mut WebGlProgramMemo) -> Result<Self, String> {
-        let descriptor = patch_prepare_program_descriptor()
-            .map_err(|error| format!("patch preparation descriptor: {error}"))?;
+/// Pure shader, transform-feedback interface, and WebGL binding identity for
+/// the current-pose preparation pass.
+pub fn patch_prepare_program_descriptor() -> Result<WebGlProgramKey, String> {
+    transform_feedback_program_descriptor(
+        "patch preparation",
+        "prepare_patches",
+        &PREPARED_VARYINGS,
+    )
+}
+
+/// Pure descriptor for the camera-dependent one-float visibility pass.
+pub fn patch_visibility_program_descriptor() -> Result<WebGlProgramKey, String> {
+    transform_feedback_program_descriptor(
+        "patch visibility",
+        "classify_patch_visibility",
+        &VISIBILITY_VARYINGS,
+    )
+}
+
+impl TransformFeedbackPass {
+    fn new(
+        gl: &glow::Context,
+        memo: &mut WebGlProgramMemo,
+        descriptor: WebGlProgramKey,
+        label: &str,
+    ) -> Result<Self, String> {
         let program = memo.get_or_create(gl, descriptor)
-            .map_err(|error| format!("patch preparation program: {error}"))?;
+            .map_err(|error| format!("{label} program: {error}"))?;
 
         let transform_feedback = unsafe {
             gl.create_transform_feedback()
-                .map_err(|error| format!("patch transform feedback: {error}"))?
+                .map_err(|error| format!("{label} transform feedback: {error}"))?
         };
         Ok(Self { program, transform_feedback })
     }
 
-    /// Prepare a contiguous batch into the corresponding destination range.
-    /// GPU command ordering makes the result visible to subsequent render
-    /// draws without a CPU fence or readback.
-    pub fn prepare_range(
+    fn run_range(
         &self,
         gl: &glow::Context,
         source_vao: glow::VertexArray,
         destination: glow::Buffer,
         byte_offset: i32,
+        bytes_per_patch: i32,
         num_patches: i32,
     ) {
         if num_patches <= 0 {
             return;
         }
-        let byte_size = num_patches * instance_layout::STRIDE_BYTES as i32;
+        let byte_size = num_patches * bytes_per_patch;
         unsafe {
             gl.enable(glow::RASTERIZER_DISCARD);
             gl.use_program(Some(self.program));
@@ -144,10 +166,91 @@ impl PatchPreparer {
         }
     }
 
-    pub fn destroy(&self, gl: &glow::Context) {
+    fn destroy(&self, gl: &glow::Context) {
         unsafe {
             gl.delete_transform_feedback(self.transform_feedback);
         }
+    }
+}
+
+/// Reusable WebGL2 current-pose preparation pipeline. Batch VAOs and
+/// destination buffers remain externally owned.
+pub struct PatchPreparer(TransformFeedbackPass);
+
+impl PatchPreparer {
+    pub fn new(gl: &glow::Context, memo: &mut WebGlProgramMemo) -> Result<Self, String> {
+        let descriptor = patch_prepare_program_descriptor()
+            .map_err(|error| format!("patch preparation descriptor: {error}"))?;
+        Ok(Self(TransformFeedbackPass::new(
+            gl,
+            memo,
+            descriptor,
+            "patch preparation",
+        )?))
+    }
+
+    /// Prepare a contiguous batch into the corresponding destination range.
+    /// GPU command ordering makes the result visible to subsequent passes
+    /// without a CPU fence or readback.
+    pub fn prepare_range(
+        &self,
+        gl: &glow::Context,
+        source_vao: glow::VertexArray,
+        destination: glow::Buffer,
+        byte_offset: i32,
+        num_patches: i32,
+    ) {
+        self.0.run_range(
+            gl,
+            source_vao,
+            destination,
+            byte_offset,
+            instance_layout::STRIDE_BYTES as i32,
+            num_patches,
+        );
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        self.0.destroy(gl);
+    }
+}
+
+/// Reusable camera-dependent classifier. It reads prepared patch controls and
+/// emits exactly one float per patch.
+pub struct PatchVisibilityClassifier(TransformFeedbackPass);
+
+impl PatchVisibilityClassifier {
+    pub fn new(gl: &glow::Context, memo: &mut WebGlProgramMemo) -> Result<Self, String> {
+        let descriptor = patch_visibility_program_descriptor()
+            .map_err(|error| format!("patch visibility descriptor: {error}"))?;
+        Ok(Self(TransformFeedbackPass::new(
+            gl,
+            memo,
+            descriptor,
+            "patch visibility",
+        )?))
+    }
+
+    pub fn classify_range(
+        &self,
+        gl: &glow::Context,
+        source_vao: glow::VertexArray,
+        destination: glow::Buffer,
+        byte_offset: i32,
+        num_patches: i32,
+    ) {
+        self.0.run_range(
+            gl,
+            source_vao,
+            destination,
+            byte_offset,
+            instance_layout::VISIBILITY_STRIDE_BYTES as i32,
+            num_patches,
+        );
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        self.0.destroy(gl);
     }
 }
 
@@ -163,6 +266,18 @@ mod tests {
     #[test]
     fn transform_feedback_record_matches_instance_stride() {
         assert_eq!(PREPARED_VARYINGS.len() * 4, instance_layout::STRIDE);
+        assert_eq!(VISIBILITY_VARYINGS.len() * 4, instance_layout::VISIBILITY_STRIDE_BYTES);
+    }
+
+    #[test]
+    fn visibility_descriptor_is_a_one_float_camera_pass() {
+        let key = patch_visibility_program_descriptor().unwrap();
+        assert_eq!(key.program().vertex().entry_point(), "classify_patch_visibility");
+        assert_eq!(
+            key.program().transform_feedback_varyings()
+                .iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            VISIBILITY_VARYINGS,
+        );
     }
 
     #[test]
