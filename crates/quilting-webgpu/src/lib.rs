@@ -327,7 +327,111 @@ impl LodClassifierDevice {
         encoder.copy_buffer_to_buffer(&model.packed_records, 0, &model.readback, 0, readback_bytes);
         self.queue.submit([encoder.finish()]);
 
-        let slice = model.readback.slice(..readback_bytes);
+        self.readback_words(&model.readback, readback_bytes).await
+    }
+
+    /// Execute only the coherence/packing pass over caller-supplied
+    /// intermediates. This diagnostic boundary exists to compare the device
+    /// shader with the independent CPU pass-two oracle over a broad fixture
+    /// matrix; it allocates temporary buffers and is not a runtime fast path.
+    pub async fn reconcile_conformance_records(
+        &self,
+        pass1_records: &[[f32; 4]],
+        adjacency: &[[u32; 4]],
+        atlas_lut: &[u32],
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        let face_count = pass1_records.len();
+        if face_count == 0
+            || adjacency.len() != face_count.saturating_mul(3)
+            || atlas_lut.len() < 1_200
+            || atlas_lut.iter().any(|&index| index > u8::MAX as u32)
+        {
+            return Err(LodWebGpuError::Payload(
+                "pass-two conformance payload is malformed".to_string(),
+            ));
+        }
+        let face_count_u32 = u32::try_from(face_count).map_err(|_| {
+            LodWebGpuError::Payload("pass-two conformance face count exceeds u32".to_string())
+        })?;
+        let mut uniform_words = [0u32; 68];
+        uniform_words[64] = face_count_u32;
+        let uniform = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("LOD pass two conformance uniform"),
+                contents: bytemuck::cast_slice(&uniform_words),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let pass1 = storage_buffer(
+            &self.device,
+            "LOD pass two conformance records",
+            pass1_records,
+            false,
+        );
+        let adjacency = storage_buffer(
+            &self.device,
+            "LOD pass two conformance adjacency",
+            adjacency,
+            false,
+        );
+        let atlas = storage_buffer(
+            &self.device,
+            "LOD pass two conformance atlas",
+            atlas_lut,
+            false,
+        );
+        let output_bytes = face_count as u64 * PACKED_RECORD_BYTES;
+        let output = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("LOD pass two conformance output"),
+            size: output_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("LOD pass two conformance readback"),
+            size: output_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let layout = self.pass2_pipeline.get_bind_group_layout(0);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("LOD pass two conformance bindings"),
+            layout: &layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &pass1),
+                bind(2, &adjacency),
+                bind(3, &atlas),
+                bind(4, &output),
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("LOD pass two conformance encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("LOD pass two conformance dispatch"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pass2_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(face_count_u32.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output_bytes);
+        self.queue.submit([encoder.finish()]);
+
+        self.readback_words(&readback, output_bytes).await
+    }
+
+    async fn readback_words(
+        &self,
+        readback: &wgpu::Buffer,
+        readback_bytes: u64,
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        let slice = readback.slice(..readback_bytes);
+
         let (sender, receiver) = oneshot::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
@@ -343,7 +447,7 @@ impl LodClassifierDevice {
         let view = slice.get_mapped_range();
         let packed = bytemuck::cast_slice::<u8, u32>(&view).to_vec();
         drop(view);
-        model.readback.unmap();
+        readback.unmap();
         Ok(packed)
     }
 

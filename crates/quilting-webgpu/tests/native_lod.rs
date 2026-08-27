@@ -100,5 +100,33 @@ fn native_two_pass_classifier_matches_the_packed_cpu_oracle() {
             .await
             .unwrap();
         assert_eq!(actual, expected);
+
+        let pass1 = [
+            [1.0, 2.0, 3.0, 11.0],
+            [1.0, 3.0, 2.0, 12.0],
+            [2.0, 1.0, 3.0, 13.0],
+            [3.0, 1.0, 2.0, 14.0],
+            [2.0, 3.0, 1.0, 15.0],
+            [3.0, 2.0, 1.0, 16.0],
+            [4.0, 5.0, 6.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 4.0, 2.0],
+            [8.0, 8.0, 8.0, 0.0],
+        ];
+        let mut adjacency = vec![[u32::MAX, 0, 0, 0]; pass1.len() * 3];
+        // A visible neighbor promotes face 7's first edge; an invisible high
+        // neighbor on its second edge must not promote it.
+        adjacency[7 * 3] = [8, 2, 0, 0];
+        adjacency[7 * 3 + 1] = [9, 0, 0, 0];
+        let mut atlas_lut = vec![u8::MAX as u32; 1_200];
+        atlas_lut[321] = 17;
+        atlas_lut[411] = 29;
+        atlas_lut[654] = 31;
+        let expected = reconcile_and_pack_wgsl_lod_pass2(&pass1, &adjacency, &atlas_lut).unwrap();
+        let actual = classifier
+            .reconcile_conformance_records(&pass1, &adjacency, &atlas_lut)
+            .await
+            .unwrap();
+        assert_eq!(actual, expected);
     });
 }
