@@ -365,6 +365,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="stats" id="stats">Loading WASM...</div>
   <div class="stats" id="hyperscape-diagnostics">Hyperscape: no authored scene</div>
+  <div id="navigation-status-rust" hidden></div>
   <div id="asset-credits-rust" hidden></div>
   <details class="hs-diag" id="asset-credits">
     <summary>Asset credits <span id="asset-credit-count"></span></summary>
@@ -2883,6 +2884,7 @@ function applyRustSelectedFocusNavigation(snapshot) {
 
 function tickRustPresentation(deltaSeconds, nowMs, appFrame = null) {
   if (!rustPresentationTransitionActive) return;
+  const wasTransitionActive = rustPresentationTransitionActive;
   try {
     let navigation;
     if (presentationAppAuthority()) {
@@ -2917,6 +2919,9 @@ function tickRustPresentation(deltaSeconds, nowMs, appFrame = null) {
       navigation.focus.focus_transition_remaining || 0,
     );
     rustPresentationTransitionActive = remaining > 0;
+    if (wasTransitionActive && !rustPresentationTransitionActive && rustAppShadow) {
+      refreshAppShadowSnapshot();
+    }
     if (nowMs - rustPresentationLastLodAt >= 100) {
       rustPresentationLastLodAt = nowMs;
       debouncedLodRecompute();
@@ -3124,6 +3129,8 @@ let rustAssetCreditsMountAttempted = false;
 let rustAssetCreditsMounted = false;
 let rustAnimationControlMountAttempted = false;
 let rustAnimationControlMounted = false;
+let rustNavigationStatusMountAttempted = false;
+let rustNavigationStatusMounted = false;
 const rustAppShadowAssetIds = new Map();
 const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);
 const rustAppShadowDiagnostics = {
@@ -3143,6 +3150,9 @@ const rustAppShadowDiagnostics = {
   animationControlAuthority: 'browser-fallback',
   animationControlMountAttempts: 0,
   animationControlMountErrors: 0,
+  navigationStatusAuthority: 'unmounted',
+  navigationStatusMountAttempts: 0,
+  navigationStatusMountErrors: 0,
   presentationLoads: 0,
   presentationComparisons: 0,
   navigationSynchronizations: 0,
@@ -3403,11 +3413,36 @@ function ensureRustAnimationControlView() {
   }
 }
 
+function ensureRustNavigationStatusView() {
+  if (rustNavigationStatusMounted) return true;
+  if (rustNavigationStatusMountAttempted || !rustAppShadow) return false;
+  rustNavigationStatusMountAttempted = true;
+  rustAppShadowDiagnostics.navigationStatusMountAttempts += 1;
+  const host = $('navigation-status-rust');
+  if (!host || typeof rustAppShadow.mountNavigationStatus !== 'function') return false;
+  try {
+    rustAppShadow.mountNavigationStatus(host);
+    host.hidden = false;
+    rustNavigationStatusMounted = true;
+    rustAppShadowDiagnostics.navigationStatusAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    host.hidden = true;
+    rustAppShadowDiagnostics.navigationStatusMountErrors += 1;
+    recordAppShadowMismatch('navigation_status_mount', error?.message || String(error));
+    return false;
+  }
+}
+
 function refreshAppShadowSnapshot() {
   if (!rustAppShadow) return null;
+  if (typeof rustAppShadow.flushReadModels === 'function') {
+    rustAppShadow.flushReadModels();
+  }
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
   ensureRustAnimationControlView();
+  ensureRustNavigationStatusView();
   if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
   return snapshot;
 }
@@ -3605,6 +3640,7 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
     const navigation = needsSnapshot ? rustAppShadow.navigationSnapshot() : null;
     if (navigation) rustAppShadowDiagnostics.frameSnapshotCalls += 1;
     if (rustAppSelectionTransitionActive && navigation) {
+      const wasTransitionActive = rustAppSelectionTransitionActive;
       if (RUST_SELECTION_IMPLEMENTATION === 'rust') {
         applyRustSelectedFocusNavigation(navigation);
       }
@@ -3612,6 +3648,9 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
       compareAppSelectionTransitionFrame(navigation, nowMs);
       rustAppSelectionTransitionActive =
         Number(navigation.focus?.focus_transition_remaining || 0) > 0;
+      if (wasTransitionActive && !rustAppSelectionTransitionActive) {
+        refreshAppShadowSnapshot();
+      }
     }
     return { deltaSeconds, navigation };
   } catch (error) {

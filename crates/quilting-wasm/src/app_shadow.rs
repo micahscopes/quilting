@@ -176,6 +176,15 @@ impl HyperscopeAppShadow {
         );
     }
 
+    /// Mount the read-only Leptos navigation/focus status over the AppStore's
+    /// throttled navigation projection. Renderer frames remain on the direct
+    /// snapshot lane and never wait for this view.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountNavigationStatus)]
+    pub fn mount_navigation_status(&self, parent: web_sys::HtmlElement) {
+        hyperscope_web::navigation_status::mount_navigation_status(parent, self.store.clone());
+    }
+
     /// Mount the opt-in Leptos presentation card over the committed
     /// presentation signal. Cue intent returns through the supplied browser
     /// effect adapter until renderer adaptation also moves behind AppStore.
@@ -395,6 +404,13 @@ impl HyperscopeAppShadow {
             }))
             .map_err(js_error)?;
         Ok(())
+    }
+
+    /// Publish all throttled FRP read models at an adapter-selected low-rate
+    /// boundary. The summary revision is the final commit fence.
+    #[wasm_bindgen(js_name = flushReadModels)]
+    pub fn flush_read_models(&self) {
+        self.store.flush_read_models();
     }
 
     /// Replace settled camera/focus state before a low-rate authored

@@ -112,6 +112,13 @@ The first application boundary is now explicit:
   authored presentation snapshot suppresses the reciprocal signal adapter and
   cannot feed the same focus edit back into the queue. The browser renderer is
   still live authority while this measured gate soaks.
+- `AppStore` now publishes a throttled navigation projection before its summary
+  revision fence, separate from the immediate render/input frame snapshot. A
+  read-only Leptos CSR island consumes that FRP signal to show anchor, chart,
+  focus sphere, field, and lens status. The browser selects only the low-rate
+  flush boundary and mounts the host; it neither polls navigation nor owns a
+  second view model. Selection and presentation publish their settled endpoint
+  explicitly, while active frame integration remains allocation-light.
 - The normalized SpaceMouse camera gate freezes samples at
   a platform-neutral Rust boundary. Browser code retains only WebHID/report
   acquisition, device shaping/smoothing, button layers, and the
