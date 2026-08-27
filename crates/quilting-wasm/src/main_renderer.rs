@@ -36,8 +36,8 @@ use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
 use quilting_core::render::{
-    patch_preparation_needed, patch_visibility_needed, FocusFieldPacket, PbrDrawClass,
-    RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderGeometry, RenderPass,
+    patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
+    PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderPass,
     RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
@@ -7082,6 +7082,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         match state.render_style {
             RenderStyle::Pbr => {
+                let pbr_draw_passes = render_draw_passes(RenderStyle::Pbr);
+                let opaque_draw_pass = pbr_draw_passes[0];
+                let transparent_draw_pass = pbr_draw_passes[1];
+                debug_assert_eq!(opaque_draw_pass.pass, RenderPass::PbrOpaque);
+                debug_assert_eq!(transparent_draw_pass.pass, RenderPass::PbrTransparent);
+
                 // Env cubemaps: bind once (shared across all batches)
                 unsafe {
                     gl.active_texture(glow::TEXTURE0 + 5);
@@ -7184,7 +7190,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         &default_mat,
                         batch.material_index,
                     );
-                    if batch.pbr_class != PbrDrawClass::Opaque { continue; }
+                    if !opaque_draw_pass.batches.includes(batch.pbr_class) { continue; }
 
                     // glTF spec: cull back faces for single-sided materials
                     unsafe {
@@ -7237,8 +7243,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     record_indexed_submission(
                         &mut submission_stats,
                         batch_index,
-                        RenderPass::PbrOpaque,
-                        RenderGeometry::Triangles,
+                        opaque_draw_pass.pass,
+                        opaque_draw_pass.geometry,
                         batch.mesh.num_tri_indices,
                         batch.mesh.num_instances,
                     );
@@ -7393,7 +7399,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         &default_mat,
                         batch.material_index,
                     );
-                    if batch.pbr_class == PbrDrawClass::Opaque { continue; }
+                    if !transparent_draw_pass.batches.includes(batch.pbr_class) { continue; }
 
                     let is_blend = mat.alpha_mode > 1.5;
                     let is_transmission = mat.transmission_factor > 0.0;
@@ -7460,8 +7466,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     record_indexed_submission(
                         &mut submission_stats,
                         batch_index,
-                        RenderPass::PbrTransparent,
-                        RenderGeometry::Triangles,
+                        transparent_draw_pass.pass,
+                        transparent_draw_pass.geometry,
                         batch.mesh.num_tri_indices,
                         batch.mesh.num_instances,
                     );
