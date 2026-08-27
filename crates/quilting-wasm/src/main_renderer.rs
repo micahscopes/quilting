@@ -41,7 +41,9 @@ use quilting_core::render::{
     RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
-use quilting_core::screen_leaf_lod::ScreenMeshTopologyCache;
+use quilting_core::screen_leaf_lod::{
+    ScreenMeshNeighborhoodScratch, ScreenMeshTopologyCache,
+};
 use quilting_core::screen_plan::{
     select_adaptive_screen_faces, AdaptiveScreenFaceCandidate,
     AdaptiveScreenFaceSelectionPolicy, SelectedScreenPatch,
@@ -7131,6 +7133,83 @@ pub fn mr_measure_adaptive_component_closure(max_faces: u32) -> JsValue {
             unaffected_faces: unaffected_faces as u64,
             source_scan_reduction_percent,
             closure_face_sample: closure.into_iter().take(16).collect(),
+            elapsed_ms: browser_now_ms() - started,
+        })
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdaptiveFaceNeighborhoodMeasurement {
+    ok: bool,
+    selected_faces: Vec<u32>,
+    source_faces: u64,
+    edge_hops: u32,
+    reconciliation_faces: u64,
+    observed_faces: u64,
+    unaffected_faces: u64,
+    source_scan_reduction_percent: f64,
+    reconciliation_face_sample: Vec<u32>,
+    observed_face_sample: Vec<u32>,
+    elapsed_ms: f64,
+}
+
+/// Measure a candidate local reconciliation neighborhood and its one-ring
+/// corner-density observers. This is a read-only sizing diagnostic, not a
+/// publication certificate or a replacement for the complete oracle.
+#[wasm_bindgen(js_name = "mr_measureAdaptiveFaceNeighborhood")]
+pub fn mr_measure_adaptive_face_neighborhood(edge_hops: u32, max_faces: u32) -> JsValue {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else {
+            return adaptive_screen_diagnostic_error("renderer is not initialized");
+        };
+        if state.adaptive_batch_transition_pending {
+            return adaptive_screen_diagnostic_error(
+                "adaptive batch transition is awaiting publication",
+            );
+        }
+        let selected_faces = state.adaptive_picked.published_faces();
+        if selected_faces.is_empty() {
+            return adaptive_screen_diagnostic_error(
+                "adaptive face neighborhood has no published face selection",
+            );
+        }
+        let Some(topology) = state.screen_topology_cache.as_ref() else {
+            return adaptive_screen_diagnostic_error("adaptive source topology is unavailable");
+        };
+        let started = browser_now_ms();
+        let mut reconciliation = Vec::new();
+        let mut observed = Vec::new();
+        let mut scratch = ScreenMeshNeighborhoodScratch::default();
+        if let Err(error) = topology.collect_face_neighborhood(
+            selected_faces,
+            edge_hops,
+            max_faces as usize,
+            &mut reconciliation,
+            &mut observed,
+            &mut scratch,
+        ) {
+            return adaptive_screen_diagnostic_error(error.to_string());
+        }
+        let source_faces = state.num_faces;
+        let unaffected_faces = source_faces.saturating_sub(observed.len());
+        let source_scan_reduction_percent = if source_faces == 0 {
+            0.0
+        } else {
+            100.0 * unaffected_faces as f64 / source_faces as f64
+        };
+        adaptive_browser_value(&AdaptiveFaceNeighborhoodMeasurement {
+            ok: true,
+            selected_faces: selected_faces.to_vec(),
+            source_faces: source_faces as u64,
+            edge_hops,
+            reconciliation_faces: reconciliation.len() as u64,
+            observed_faces: observed.len() as u64,
+            unaffected_faces: unaffected_faces as u64,
+            source_scan_reduction_percent,
+            reconciliation_face_sample: reconciliation.into_iter().take(16).collect(),
+            observed_face_sample: observed.into_iter().take(16).collect(),
             elapsed_ms: browser_now_ms() - started,
         })
     })

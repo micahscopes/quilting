@@ -9,6 +9,7 @@ const {
   default: init,
   mr_adaptivePickedDiagnostics,
   mr_measureAdaptiveComponentClosure,
+  mr_measureAdaptiveFaceNeighborhood,
   mr_clearAdaptivePickedFace,
   mr_debugFocusState,
   mr_refreshAdaptivePicked,
@@ -69,6 +70,9 @@ assert.equal(
 const rejectedComponentClosure = mr_measureAdaptiveComponentClosure(1_000);
 assert.equal(rejectedComponentClosure.ok, false);
 assert.equal(rejectedComponentClosure.error, 'renderer is not initialized');
+const rejectedFaceNeighborhood = mr_measureAdaptiveFaceNeighborhood(6, 1_000);
+assert.equal(rejectedFaceNeighborhood.ok, false);
+assert.equal(rejectedFaceNeighborhood.error, 'renderer is not initialized');
 const rejectedAdaptiveConfiguration =
   mr_setAdaptivePickedFace(0, 16, 32, 5, 256, 256, 2_000_000);
 assert.equal(
