@@ -124,6 +124,19 @@ impl AnimationClock {
         }
         .validate()
     }
+
+    /// Map the unwrapped scene clock into one resident clip. This keeps loop
+    /// semantics backend-independent, including reverse playback across zero.
+    pub fn clip_time(self, time_min: f64, duration: f64) -> Option<f64> {
+        if !self.time_seconds.is_finite()
+            || !time_min.is_finite()
+            || !duration.is_finite()
+            || duration <= 0.0
+        {
+            return None;
+        }
+        Some(time_min + self.time_seconds.rem_euclid(duration))
+    }
 }
 
 /// Semantic animation transport edits. `SetClock` is the atomic restoration
@@ -1448,6 +1461,15 @@ mod tests {
 
         assert_eq!(clock_after(&[1.0]), clock_after(&[0.25, 0.25, 0.5]));
         assert_eq!(clock_after(&[1.0]).time_seconds, 1.5);
+        assert_eq!(
+            AnimationClock {
+                time_seconds: -0.25,
+                ..AnimationClock::default()
+            }
+            .clip_time(3.0, 2.0),
+            Some(4.75),
+        );
+        assert_eq!(AnimationClock::default().clip_time(0.0, 0.0), None);
 
         let store = AppStore::default();
         let before = store.frame_snapshot().animation;

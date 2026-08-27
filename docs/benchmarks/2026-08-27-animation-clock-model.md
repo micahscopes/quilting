@@ -44,6 +44,12 @@ to `[1, 1.75, -0.5]`, then exercised seek, speed, malformed-clock rejection,
 and output-length rejection. The complete existing application/WASM smoke
 remained green.
 
+Clip looping is also Rust-owned. `AnimationClock::clip_time` maps the unwrapped
+clock into a renderer-supplied finite positive clip range with Euclidean
+remainder, so reverse playback crosses zero correctly. Generated WASM writes
+`[playing, wrapped_clip_time, speed]`; the direct gate mapped unwrapped `1.75`
+into clip `[3, 5)` as `4.75` and rejected a zero-duration range.
+
 The WASM32 build check passed. Strict whole-`quilting-wasm` Clippy remains
 blocked by 45 pre-existing warnings across renderer, adaptive-screen, surface,
 and legacy loader code; none point to the animation facade. The narrower

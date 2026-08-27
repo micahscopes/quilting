@@ -253,6 +253,8 @@ assert.deepEqual(Array.from(animationPacket), [1, 2, -0.5]);
 animationClockApp.advanceFrameQuiet(0.5, 0.5);
 animationClockApp.writeAnimationClock(animationPacket);
 assert.deepEqual(Array.from(animationPacket), [1, 1.75, -0.5]);
+animationClockApp.writeAnimationSample(3, 2, animationPacket);
+assert.deepEqual(Array.from(animationPacket), [1, 4.75, -0.5]);
 const soughtAnimation = animationClockApp.seekAnimation(2, 0.25);
 assert.equal(soughtAnimation.timeSeconds, 0.25);
 const spedAnimation = animationClockApp.setAnimationSpeed(3, 2);
@@ -264,6 +266,10 @@ assert.throws(
 assert.throws(
   () => animationClockApp.writeAnimationClock(new Float64Array(2)),
   /exactly 3 numbers/,
+);
+assert.throws(
+  () => animationClockApp.writeAnimationSample(0, 0, animationPacket),
+  /finite and positive/,
 );
 assert.deepEqual(
   {

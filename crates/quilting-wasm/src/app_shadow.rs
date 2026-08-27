@@ -1028,6 +1028,33 @@ impl HyperscopeAppShadow {
         Ok(())
     }
 
+    /// Write `[playing, wrapped_clip_time, speed]` for one resident clip. Rust
+    /// owns reverse/forward loop semantics; the browser supplies only the
+    /// renderer-local clip range.
+    #[wasm_bindgen(js_name = writeAnimationSample)]
+    pub fn write_animation_sample(
+        &self,
+        time_min: f64,
+        duration: f64,
+        output: &mut [f64],
+    ) -> Result<(), JsValue> {
+        if output.len() != 3 {
+            return Err(JsValue::from_str(
+                "animation sample output must contain exactly 3 numbers",
+            ));
+        }
+        let animation = self.store.frame_snapshot().animation;
+        let time = animation
+            .clip_time(time_min, duration)
+            .ok_or_else(|| JsValue::from_str("animation clip range must be finite and positive"))?;
+        output.copy_from_slice(&[
+            if animation.playing { 1.0 } else { 0.0 },
+            time,
+            animation.speed,
+        ]);
+        Ok(())
+    }
+
     /// Atomically admit one transport-neutral authored checkpoint. The
     /// revision travels as decimal text so JavaScript cannot truncate a u64;
     /// commands retain the canonical protocol JSON shape shared with Blender.
