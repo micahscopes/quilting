@@ -25,6 +25,7 @@ const VISIBILITY_UNIFORM_BYTES: u64 = 16;
 const VISIBILITY_BATCH_RECORD_BYTES: u64 = 16;
 const VISIBILITY_RANGE_RECORD_BYTES: u64 = 20;
 const INDEXED_INDIRECT_RECORD_BYTES: u64 = 20;
+const DRAW_BATCH_INDEX_BYTES: u64 = 16;
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -122,6 +123,8 @@ pub struct LodClassifierModel {
 pub struct VisibilityCompactionScene {
     batch_count: u32,
     source_count: u32,
+    batch_index_uniform_stride: u32,
+    batch_index_uniform: wgpu::Buffer,
     source_visibility: wgpu::Buffer,
     compacted_source_instances: wgpu::Buffer,
     compacted_ranges: wgpu::Buffer,
@@ -439,6 +442,34 @@ impl LodClassifierDevice {
             .iter()
             .all(|record| std::mem::size_of_val(record) as u64 == VISIBILITY_BATCH_RECORD_BYTES));
 
+        let uniform_alignment = self
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment
+            .max(1);
+        let batch_index_uniform_stride = u32::try_from(
+            DRAW_BATCH_INDEX_BYTES.div_ceil(u64::from(uniform_alignment))
+                * u64::from(uniform_alignment),
+        )
+        .map_err(|_| LodWebGpuError::Payload("draw batch-index stride exceeds u32".to_string()))?;
+        let batch_index_bytes = u64::from(batch_count)
+            .checked_mul(u64::from(batch_index_uniform_stride))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("draw batch-index table is too large".to_string())
+            })?;
+        let mut batch_index_words = vec![0u8; batch_index_bytes];
+        for batch_index in 0..batch_count {
+            let offset = batch_index as usize * batch_index_uniform_stride as usize;
+            batch_index_words[offset..offset + 4].copy_from_slice(&batch_index.to_le_bytes());
+        }
+        let batch_index_uniform = buffer_init_or_zero(
+            &self.device,
+            "visibility draw batch indices",
+            &batch_index_words,
+            wgpu::BufferUsages::UNIFORM,
+        );
+
         let source_visibility = gpu_buffer(
             &self.device,
             "visibility compaction current visibility",
@@ -512,6 +543,8 @@ impl LodClassifierDevice {
         Ok(VisibilityCompactionScene {
             batch_count,
             source_count,
+            batch_index_uniform_stride,
+            batch_index_uniform,
             source_visibility,
             compacted_source_instances,
             compacted_ranges,
@@ -705,18 +738,48 @@ impl LodClassifierDevice {
         scene: &VisibilityCompactionScene,
         source_visibility: &[u8],
     ) -> Result<usize, LodWebGpuError> {
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("visibility indirect conformance shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                r#"
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("visibility indirect conformance shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    r#"
+                    struct DrawBatchIndex {
+                        batch_index: u32,
+                        _padding_0: u32,
+                        _padding_1: u32,
+                        _padding_2: u32,
+                    }
+
+                    struct CompactedBatchRange {
+                        batch_index: u32,
+                        source_first_instance: u32,
+                        source_instance_count: u32,
+                        compacted_first_instance: u32,
+                        compacted_instance_count: u32,
+                    }
+
+                    @group(0) @binding(0) var<uniform> draw_batch: DrawBatchIndex;
+                    @group(0) @binding(1) var<storage, read> ranges: array<CompactedBatchRange>;
+                    @group(0) @binding(2) var<storage, read> compacted_sources: array<u32>;
+
                     @vertex
-                    fn vertex_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+                    fn vertex_main(
+                        @builtin(vertex_index) vertex: u32,
+                        @builtin(instance_index) local_instance: u32,
+                    ) -> @builtin(position) vec4<f32> {
                         let positions = array<vec2<f32>, 3>(
                             vec2<f32>(-0.5, -0.5),
                             vec2<f32>(0.5, -0.5),
                             vec2<f32>(0.0, 0.5),
                         );
-                        return vec4<f32>(positions[vertex % 3u], 0.0, 1.0);
+                        let range = ranges[draw_batch.batch_index];
+                        let compacted_index = range.compacted_first_instance + local_instance;
+                        let source_instance = compacted_sources[compacted_index];
+                        let source_band = f32(source_instance % 11u) / 10.0;
+                        let position = positions[vertex % 3u] * 0.08
+                            + vec2<f32>(source_band * 1.8 - 0.9, 0.0);
+                        return vec4<f32>(position, 0.0, 1.0);
                     }
 
                     @fragment
@@ -724,14 +787,58 @@ impl LodClassifierDevice {
                         return vec4<f32>(0.25, 0.75, 1.0, 1.0);
                     }
                 "#
-                .into(),
-            ),
-        });
+                    .into(),
+                ),
+            });
+        let draw_layout = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("visibility compacted draw layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: std::num::NonZeroU64::new(DRAW_BATCH_INDEX_BYTES),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("visibility compacted draw pipeline layout"),
+                bind_group_layouts: &[Some(&draw_layout)],
+                immediate_size: 0,
+            });
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("visibility indirect conformance pipeline"),
-                layout: None,
+                layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vertex_main"),
@@ -754,6 +861,22 @@ impl LodClassifierDevice {
                 multiview_mask: None,
                 cache: None,
             });
+        let draw_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("visibility compacted draw bindings"),
+            layout: &draw_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &scene.batch_index_uniform,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(DRAW_BATCH_INDEX_BYTES),
+                    }),
+                },
+                bind(1, &scene.compacted_ranges),
+                bind(2, &scene.compacted_source_instances),
+            ],
+        });
         let indices = [0u32, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2];
         let index_buffer = self
             .device
@@ -806,6 +929,11 @@ impl LodClassifierDevice {
             pass.set_pipeline(&pipeline);
             pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             for batch_index in 0..scene.batch_count {
+                pass.set_bind_group(
+                    0,
+                    &draw_bind_group,
+                    &[batch_index * scene.batch_index_uniform_stride],
+                );
                 pass.draw_indexed_indirect(
                     &scene.indirect_arguments,
                     u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,
@@ -1183,6 +1311,17 @@ impl VisibilityCompactionScene {
 
     pub fn source_count(&self) -> u32 {
         self.source_count
+    }
+
+    /// Device-aligned stride for one 16-byte batch-index uniform record.
+    pub fn batch_index_uniform_stride(&self) -> u32 {
+        self.batch_index_uniform_stride
+    }
+
+    /// Static table whose record at `batch * stride` names that batch. Render
+    /// passes bind one record dynamically while ranges remain GPU-generated.
+    pub fn batch_index_uniform_buffer(&self) -> &wgpu::Buffer {
+        &self.batch_index_uniform
     }
 
     /// One `u32` visibility flag per stable source instance. A culling or LOD

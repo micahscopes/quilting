@@ -340,7 +340,12 @@ replacements, and emits stable survivor source IDs plus one range per
 indexed-indirect ABI. Portable records keep `first_instance` zero because a
 nonzero indirect value requires WebGPU's optional `indirect-first-instance`
 feature. The corresponding range record retains `compacted_first_instance`;
-the vertex stage combines that prefix with its local instance index.
+the vertex stage combines that prefix with its local instance index. The
+WebGPU residency therefore includes a device-aligned, static batch-index
+uniform table. Each CPU-issued batch draw selects one table record with a
+dynamic offset, while the vertex shader reads the GPU-written range and
+survivor-ID buffers. This preserves stable source-instance identity without a
+topology readback or the optional first-instance feature.
 `first_index` and `base_vertex` remain zero while each batch binds its own
 canonical atlas entry and may later be patched by a packed-atlas backend.
 
