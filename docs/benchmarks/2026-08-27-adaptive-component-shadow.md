@@ -533,6 +533,42 @@ generated-export smoke pass. This checkpoint deliberately does not skip the
 complete oracle; its purpose is to prove that the local object crossing the
 CPU/GPU transaction boundary is the object already shown structurally exact.
 
+## Sustained animation, camera, and inversion publication
+
+The horse then ran with physical neighborhood publication throughout live
+animation. Before the conformal transition, 1,438 consecutive epochs produced
+1,438 exact matches and 1,438 physical installs, with zero mismatches, boundary
+escapes, failures, or publication fallbacks. A synthetic pointer orbit changed
+the camera through the ordinary application event path. The terminal changed
+view used a non-empty sparse replacement: five suppressed root triangles plus
+seven overlay triangles composed to the same 1,254 triangles as the complete
+path.
+
+Entering spherical inversion exposed an expected-policy bug rather than an
+LoD discrepancy. At that transported view the current-view selector reported
+zero visible faces. The complete planner correctly emitted the unchanged root
+scene, but the bounded observer passed the empty seed set to its neighborhood
+query and counted `EmptyScene` as a failure. Complete rendering remained live,
+so no incorrect neighborhood reached the GPU.
+
+Commit `5c2222d` classifies this as an explicit empty-selection no-op. It does
+not construct a meaningless frontier, does not increment failures or
+fallbacks, and reports `complete-empty-selection`. After the change:
+
+- 315 consecutive inverted animated epochs produced 315 empty-selection
+  skips, zero failures, zero mismatches, and zero publication fallbacks;
+- returning to the identity chart resumed exact physical neighborhood
+  publication without reconfiguration;
+- the combined post-reload trace ended at 855 attempts: 305 exact physical
+  installs plus 550 expected empty-selection epochs, with zero neighborhood
+  failures or mismatches; and
+- Chrome reported no warnings or errors.
+
+One complete-renderer fallback occurred at the identity/inversion chart
+transition itself. It retained the preceding GPU epoch and was not a
+neighborhood plan, overlay, or publication failure. This is the intended
+transactional behavior for a temporarily unavailable candidate input.
+
 ## Decision
 
 The exact component overlay now has physical publication authority. Unchanged
@@ -545,7 +581,8 @@ preindexed, so another ineligibility cache is unwarranted. Fixed-boundary
 neighborhood planning, resident edges, baseline-composed corners, sparse
 overlay membership, atlas residency, triangle budgets, physical layered
 publication, and full-viewport output now match the complete oracle across the
-initial static, animated, camera, and inversion gates. The next gate is
-sustained exact physical publication during animation and camera/inversion
-changes, followed by a revocable neighborhood certificate and periodic oracle
-sampling. Only then may certified neighborhood epochs skip the complete path.
+static, sustained animated, camera-motion, and identity/inversion-transition
+gates. Empty adaptive selections are an explicit complete-path no-op rather
+than a false failure. The next gate is a revocable neighborhood certificate
+with periodic exact sampling. Only then may certified neighborhood epochs skip
+the complete path.
