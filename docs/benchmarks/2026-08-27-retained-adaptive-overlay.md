@@ -14,6 +14,15 @@ GPU grouping. Staged candidates, fallbacks, and rolled-back publications are
 rejected. Calling the diagnostic does not schedule frame work or mutate GPU
 resources.
 
+The second shadow revision also constructs retained baseline membership and
+compares baseline-minus-suppression plus overlay against the live complete
+grouping in two ways:
+
+- members sorted by stable `(source face, dyadic leaf)` identity, which proves
+  semantic/topological equivalence;
+- the literal baseline-draw-then-overlay-draw sequence, which exposes ordering
+  changes that can matter to alpha compositing.
+
 ## Pathological inverted chess view
 
 Source view:
@@ -51,6 +60,16 @@ complete grouping. The overlay result proves that retained publication is
 worth implementing, but it does not address the dominant complete-frontier
 construction yet.
 
+A follow-up ordering shadow on the same view found exact semantic membership:
+zero mismatched groups and zero mismatched members. Drawing the two physical
+layers consecutively changed the member order in 15 of 52 buckets, all using
+material 0. That chess material is opaque, so depth-tested color is insensitive
+to this order, but the result rules out treating the same composition as
+automatically equivalent for alpha-blended or transmissive materials. The
+follow-up diagnostic took 33.8 ms for overlay extraction and 33.2 ms for the
+full semantic/order comparison in that cold browser sample; neither operation
+runs per frame.
+
 ## Animated horse
 
 Source view:
@@ -78,16 +97,20 @@ the plan installed without fallback.
 
 ## Decision
 
-Use two retained renderer layers:
+Use two retained renderer layers for order-insensitive passes:
 
 1. Stable baseline root batches, filtered by the exact suppressed-face set.
 2. Independently owned adaptive overlay batches for every affected source face.
 
 Keep `RenderBatchKey` backend-neutral. WebGL2 and WebGPU may represent the two
 layers differently, but extraction must expose the same composition and draw
-ordering contract. Cut over behind shadow parity, then replace the diagnostic's
-complete scan with a bounded local closure that expands or falls back whenever
-adaptive influence reaches its boundary.
+ordering contract. Opaque PBR, matcap, wire, normals, LOD, and stretch can use
+the retained composition after image parity. Alpha-blended and transmissive
+buckets remain on the complete ordered path until an order-preserving
+compaction strategy or OIT makes their equivalence explicit. Cut over behind
+shadow parity, then replace the diagnostic's complete scan with a bounded local
+closure that expands or falls back whenever adaptive influence reaches its
+boundary.
 
 This optimization reduces CPU grouping, allocation, and upload work. It does
 not reduce the number of rendered patches or triangles; composed output remains

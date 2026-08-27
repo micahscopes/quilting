@@ -6,11 +6,12 @@
 //! into the live frame renderer before its workload and failure modes are
 //! understood.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use quilting_core::batch::{
-    group_resident_screen_leaves_into, group_resident_screen_overlay_into,
-    AdaptiveRenderOverlay, RenderBatchKey, RenderBatchMember, ResidentLod,
+    group_resident_faces_into, group_resident_screen_leaves_into,
+    group_resident_screen_overlay_into, AdaptiveRenderOverlay, RenderBatchKey,
+    RenderBatchMember, ResidentLod,
 };
 use quilting_core::patch::{QBPatchDomain, QBTriPatch};
 use quilting_core::permutation::canonical_form;
@@ -308,6 +309,9 @@ pub(crate) struct AdaptivePickedRuntime {
     last_timings: AdaptivePlanTimings,
     lod_scratch: ScreenMeshLeafLodScratch,
     overlay_shadow: AdaptiveRenderOverlay,
+    overlay_baseline_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    overlay_member_scratch: Vec<RenderBatchMember>,
+    overlay_complete_scratch: Vec<RenderBatchMember>,
     candidate_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     attempts: u64,
     installs: u64,
@@ -463,6 +467,14 @@ pub(crate) struct AdaptiveOverlayMeasurement {
     overlay_dyadic_members: u64,
     avoided_publication_members: u64,
     publication_member_reduction_percent: f64,
+    membership_match: bool,
+    membership_mismatch_groups: u64,
+    membership_mismatch_members: u64,
+    layer_order_match: bool,
+    layer_order_mismatch_groups: u64,
+    layer_order_mismatch_materials: Vec<usize>,
+    overlay_extraction_ms: f64,
+    parity_ms: f64,
     elapsed_ms: f64,
 }
 
@@ -565,6 +577,9 @@ impl AdaptivePickedRuntime {
         self.group_cache_misses = 0;
         self.last_timings = AdaptivePlanTimings::default();
         self.overlay_shadow = AdaptiveRenderOverlay::default();
+        self.overlay_baseline_groups.clear();
+        self.overlay_member_scratch.clear();
+        self.overlay_complete_scratch.clear();
         self.candidate_groups.clear();
         self.clear_pending_publication();
     }
@@ -706,7 +721,7 @@ impl AdaptivePickedRuntime {
     pub(crate) fn measure_published_overlay(
         &mut self,
         batch_layout_revision: u64,
-        complete_groups: usize,
+        complete_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
         baseline_residents: &[Option<ResidentLod>],
         baseline_vertex_lods: &[[u32; 3]],
         face_materials: &[usize],
@@ -762,6 +777,71 @@ impl AdaptivePickedRuntime {
             &mut self.overlay_shadow,
         )
         .map_err(|error| error.to_string())?;
+        let overlay_extraction_ms = browser_now_ms() - start;
+
+        let parity_start = browser_now_ms();
+        group_resident_faces_into(
+            baseline_residents,
+            baseline_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            &mut self.overlay_baseline_groups,
+        );
+        let keys = complete_groups
+            .keys()
+            .chain(self.overlay_baseline_groups.keys())
+            .chain(self.overlay_shadow.groups.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut membership_mismatch_groups = 0usize;
+        let mut membership_mismatch_members = 0usize;
+        let mut layer_order_mismatch_groups = 0usize;
+        let mut layer_order_mismatch_materials = BTreeSet::new();
+        for key in keys {
+            self.overlay_member_scratch.clear();
+            if let Some(roots) = self.overlay_baseline_groups.get(&key) {
+                self.overlay_member_scratch.extend(
+                    roots.iter().copied().filter(|member| {
+                        self.overlay_shadow
+                            .suppressed_faces
+                            .binary_search(&member.face_index)
+                            .is_err()
+                    }),
+                );
+            }
+            if let Some(replacements) = self.overlay_shadow.groups.get(&key) {
+                self.overlay_member_scratch
+                    .extend_from_slice(replacements);
+            }
+            let complete = complete_groups.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            if self.overlay_member_scratch != complete {
+                layer_order_mismatch_groups += 1;
+                layer_order_mismatch_materials.insert(key.material_index);
+            }
+
+            self.overlay_member_scratch
+                .sort_unstable_by_key(|member| member.patch_id());
+            self.overlay_complete_scratch.clear();
+            self.overlay_complete_scratch.extend_from_slice(complete);
+            self.overlay_complete_scratch
+                .sort_unstable_by_key(|member| member.patch_id());
+            if self.overlay_member_scratch != self.overlay_complete_scratch {
+                membership_mismatch_groups += 1;
+                membership_mismatch_members += self
+                    .overlay_member_scratch
+                    .iter()
+                    .zip(&self.overlay_complete_scratch)
+                    .filter(|(left, right)| left != right)
+                    .count()
+                    + self
+                        .overlay_member_scratch
+                        .len()
+                        .abs_diff(self.overlay_complete_scratch.len());
+            }
+        }
+        let parity_ms = browser_now_ms() - parity_start;
         let elapsed_ms = browser_now_ms() - start;
 
         let source_faces = baseline_residents.len();
@@ -798,7 +878,7 @@ impl AdaptivePickedRuntime {
             ok: true,
             source_faces: source_faces as u64,
             frontier_leaves: frontier_leaves as u64,
-            complete_groups: complete_groups as u64,
+            complete_groups: complete_groups.len() as u64,
             retained_root_faces: retained_root_faces as u64,
             suppressed_faces: suppressed_faces as u64,
             suppressed_face_sample: self
@@ -814,6 +894,16 @@ impl AdaptivePickedRuntime {
             overlay_dyadic_members: overlay_members.saturating_sub(overlay_root_members) as u64,
             avoided_publication_members: avoided_publication_members as u64,
             publication_member_reduction_percent,
+            membership_match: membership_mismatch_groups == 0,
+            membership_mismatch_groups: membership_mismatch_groups as u64,
+            membership_mismatch_members: membership_mismatch_members as u64,
+            layer_order_match: layer_order_mismatch_groups == 0,
+            layer_order_mismatch_groups: layer_order_mismatch_groups as u64,
+            layer_order_mismatch_materials: layer_order_mismatch_materials
+                .into_iter()
+                .collect(),
+            overlay_extraction_ms,
+            parity_ms,
             elapsed_ms,
         })
     }
@@ -1609,6 +1699,14 @@ mod tests {
         let mut atlas_triangles = BTreeMap::new();
         atlas_triangles.insert([1; 3], 1);
         let mut groups = BTreeMap::new();
+        let complete_groups = quilting_core::batch::group_resident_faces(
+            &[Some(resident)],
+            &[[1; 3]],
+            &[0],
+            &[0],
+            &[0],
+            resident,
+        );
         let mut runtime = AdaptivePickedRuntime::default();
         runtime.configure(AdaptivePickedConfig {
             selection: AdaptiveScreenSelection::Picked { face: 0 },
@@ -1657,7 +1755,7 @@ mod tests {
         let overlay = runtime
             .measure_published_overlay(
                 0,
-                1,
+                &complete_groups,
                 &[Some(resident)],
                 &[[1; 3]],
                 &[0],
@@ -1672,6 +1770,10 @@ mod tests {
         assert_eq!(overlay.suppressed_faces, 0);
         assert_eq!(overlay.overlay_members, 0);
         assert_eq!(overlay.avoided_publication_members, 1);
+        assert!(overlay.membership_match);
+        assert_eq!(overlay.membership_mismatch_groups, 0);
+        assert!(overlay.layer_order_match);
+        assert_eq!(overlay.layer_order_mismatch_groups, 0);
 
         plan(&mut runtime, (8, 2), 4);
         assert_eq!(runtime.snapshot().frontier_cache_hits, 1);
@@ -1682,7 +1784,7 @@ mod tests {
             runtime
                 .measure_published_overlay(
                     0,
-                    1,
+                    &complete_groups,
                     &[Some(resident)],
                     &[[1; 3]],
                     &[0],

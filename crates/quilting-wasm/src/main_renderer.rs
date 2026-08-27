@@ -6578,7 +6578,7 @@ pub fn mr_measure_adaptive_overlay() -> JsValue {
         } = state;
         match adaptive_picked.measure_published_overlay(
             *batch_layout_revision,
-            batch_groups.len(),
+            batch_groups,
             resident_face_lods,
             resident_vertex_lods,
             face_materials,
