@@ -498,6 +498,33 @@ while incumbent vertex reconstruction plus grouping measured approximately
 counterexample. It remains diagnostic-only until a rollback-safe authority path
 can skip rejected candidate work and periodically sample the complete oracle.
 
+### Post-selector WebGL2 submission boundary
+
+The selector trace also makes the next physical cost explicit. Its last chess
+classification conservatively rejected 83,062 of 94,628 source faces (87.78%),
+leaving 11,566 current-view candidates. WebGL2 nevertheless submitted all
+94,628 resident patch instances in 37 indexed bucket draws. Preparation marks
+the rejected patches invisible and the main vertex shader makes them
+out-of-clip, so this does not imply fragment or raster work for every patch; it
+does mean their resident atlas vertices are still invoked.
+
+Across 66 changed batch builds, WebGL2 uploaded 4,209,023 instance records and
+168,360,920 bytes: exactly 40 bytes per record, approximately 63,773 records
+and 2.55 MiB per build. Upload measured 8.5 ms p50 and 17.9 ms p95 in this run.
+The final wire submission represented 1,160,286 line primitives before
+current-pose vertex rejection. Shared-edge and GPU-batch failure counters
+remained zero.
+
+This is the backend boundary rather than another invitation to multiply
+`bufferSubData` calls: the measured WebGL2 scatter experiment above already
+reduced bytes while increasing upload time. The next backend slice should
+consume the existing prepared-patch visibility and `RenderBatchKey` contract,
+compact survivor instance IDs in storage, and emit per-bucket indexed-indirect
+arguments. A CPU oracle must freeze stable compaction order, suppressed-root
+handling, counts, and overflow before WGSL becomes authoritative. WebGL2 keeps
+the current degenerate-vertex fallback; it cannot provide the same submission
+contract without a count readback or a universal maximum-topology draw.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
