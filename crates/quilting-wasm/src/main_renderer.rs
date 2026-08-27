@@ -7124,11 +7124,12 @@ fn rebuild_legacy_batch_groups(
         .record(browser_now_ms() - render_node_started_ms);
     let vertex_lod_started_ms = browser_now_ms();
     if let Some(topology) = state.lod_topology.as_ref() {
-        batch::rebuild_resident_vertex_max(
+        batch::rebuild_resident_vertex_lods(
             &state.resident_face_lods,
             topology,
             initial,
             &mut state.resident_vertex_lod_scratch,
+            &mut state.resident_vertex_lods,
         );
     } else {
         state.resident_vertex_lods.resize(nf, [1; 3]);
@@ -7148,37 +7149,19 @@ fn rebuild_legacy_batch_groups(
         .vertex_lod_ms
         .record(browser_now_ms() - vertex_lod_started_ms);
     let group_member_started_ms = browser_now_ms();
-    if let Some(topology) = state.lod_topology.as_ref() {
-        let groups = match destination {
-            LegacyBatchDestination::Live => &mut state.batch_groups,
-            LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
-        };
-        batch::group_resident_faces_from_vertex_max_into(
-            &state.resident_face_lods,
-            topology,
-            &state.resident_vertex_lod_scratch,
-            &mut state.resident_vertex_lods,
-            &state.face_materials,
-            &state.face_nodes,
-            &state.face_render_nodes,
-            initial,
-            groups,
-        );
-    } else {
-        let groups = match destination {
-            LegacyBatchDestination::Live => &mut state.batch_groups,
-            LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
-        };
-        batch::group_resident_faces_into(
-            &state.resident_face_lods,
-            &state.resident_vertex_lods,
-            &state.face_materials,
-            &state.face_nodes,
-            &state.face_render_nodes,
-            initial,
-            groups,
-        );
-    }
+    let groups = match destination {
+        LegacyBatchDestination::Live => &mut state.batch_groups,
+        LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
+    };
+    batch::group_resident_faces_into(
+        &state.resident_face_lods,
+        &state.resident_vertex_lods,
+        &state.face_materials,
+        &state.face_nodes,
+        &state.face_render_nodes,
+        initial,
+        groups,
+    );
     state
         .batch_update_stats
         .group_member_ms
