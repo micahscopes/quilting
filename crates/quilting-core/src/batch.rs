@@ -323,6 +323,18 @@ impl ResidentLod {
     }
 }
 
+/// Backend-neutral classifier result for one source face.
+///
+/// WebGL worker floats, packed same-context WebGL output, and future WebGPU
+/// compute output all enter retained topology through this semantic record.
+/// Atlas residency is validated by the producing backend; batching needs only
+/// the requested topology and conservative visibility decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaceLodClassification {
+    pub requested: ResidentLod,
+    pub visible: bool,
+}
+
 /// Backend-neutral identity of one hardware draw/compaction bucket.
 ///
 /// WebGL2 uses this key to retain per-bucket attribute buffers and VAOs.
@@ -711,12 +723,45 @@ pub fn admit_face_lod_publication(
     previous_culled_faces: usize,
     buffers: FaceLodAdmissionBuffers<'_>,
 ) -> Result<FaceLodAdmissionResult, FaceLodPublicationError> {
-    let full_snapshot = face_indices.is_none();
     let records = face_indices.map_or(num_faces, <[u32]>::len);
     let expected_floats = records
         .checked_mul(FACE_LOD_STRIDE)
         .ok_or(FaceLodPublicationError::PayloadLength)?;
     if face_lods.len() != expected_floats {
+        return Err(FaceLodPublicationError::PayloadLength);
+    }
+
+    admit_face_lod_classification_publication(
+        records,
+        face_indices,
+        num_faces,
+        previous_culled_faces,
+        buffers,
+        |record_index| FaceLodClassification {
+            requested: requested_face_lod(face_lods, record_index, standby),
+            visible: face_is_visible(face_lods, record_index),
+        },
+    )
+}
+
+/// Admit already-decoded backend classifications without constructing the
+/// historical six-float transport payload.
+///
+/// `records` must cover every face for a full snapshot, or exactly the sparse
+/// index count. Structural validation completes before the callback is first
+/// invoked and before retained state changes. Producing backends must validate
+/// their own binary/texture ABI before calling this semantic boundary.
+pub fn admit_face_lod_classification_publication(
+    records: usize,
+    face_indices: Option<&[u32]>,
+    num_faces: usize,
+    previous_culled_faces: usize,
+    buffers: FaceLodAdmissionBuffers<'_>,
+    mut classification_at: impl FnMut(usize) -> FaceLodClassification,
+) -> Result<FaceLodAdmissionResult, FaceLodPublicationError> {
+    let full_snapshot = face_indices.is_none();
+    let expected_records = face_indices.map_or(num_faces, <[u32]>::len);
+    if records != expected_records {
         return Err(FaceLodPublicationError::PayloadLength);
     }
     if let Some(indices) = face_indices {
@@ -752,7 +797,8 @@ pub fn admit_face_lod_publication(
     let mut changed_records = 0;
     for record_index in 0..records {
         let face = face_indices.map_or(record_index, |indices| indices[record_index] as usize);
-        let visible = face_is_visible(face_lods, record_index);
+        let classification = classification_at(record_index);
+        let visible = classification.visible;
         if full_snapshot {
             buffers.visible[face] = visible;
             culled_faces += usize::from(!visible);
@@ -768,7 +814,7 @@ pub fn admit_face_lod_publication(
             }
         }
 
-        let requested = requested_face_lod(face_lods, record_index, standby);
+        let requested = classification.requested;
         let request_changed = buffers.requested[face] != Some(requested);
         buffers.requested[face] = Some(requested);
         if request_changed || buffers.resident[face].is_none() {
@@ -1375,6 +1421,74 @@ mod tests {
         assert!(demoted.topology_changed());
         assert_eq!(resident, vec![Some(standby); 2]);
         assert_eq!(demoted.culled_faces, 1);
+    }
+
+    #[test]
+    fn decoded_face_lod_publication_shares_the_atomic_admission_boundary() {
+        let classifications = [
+            FaceLodClassification {
+                requested: ResidentLod::from_edge_lods([2, 4, 8]),
+                visible: true,
+            },
+            FaceLodClassification {
+                requested: ResidentLod::uniform(16),
+                visible: false,
+            },
+        ];
+        let mut requested = Vec::new();
+        let mut resident = Vec::new();
+        let mut visible = Vec::new();
+        let mut dirty_faces = Vec::new();
+        let publication = admit_face_lod_classification_publication(
+            classifications.len(),
+            None,
+            classifications.len(),
+            0,
+            FaceLodAdmissionBuffers {
+                requested: &mut requested,
+                resident: &mut resident,
+                visible: &mut visible,
+                dirty_faces: &mut dirty_faces,
+            },
+            |index| classifications[index],
+        )
+        .unwrap();
+        assert_eq!(publication.changed_records, 2);
+        assert_eq!(publication.culled_faces, 1);
+        assert_eq!(
+            requested,
+            classifications.map(|classification| Some(classification.requested)),
+        );
+        assert_eq!(visible, vec![true, false]);
+
+        let retained_requested = requested.clone();
+        let retained_resident = resident.clone();
+        let retained_visible = visible.clone();
+        let retained_dirty = dirty_faces.clone();
+        let mut callback_calls = 0;
+        let error = admit_face_lod_classification_publication(
+            1,
+            None,
+            classifications.len(),
+            publication.culled_faces,
+            FaceLodAdmissionBuffers {
+                requested: &mut requested,
+                resident: &mut resident,
+                visible: &mut visible,
+                dirty_faces: &mut dirty_faces,
+            },
+            |_| {
+                callback_calls += 1;
+                classifications[0]
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, FaceLodPublicationError::PayloadLength);
+        assert_eq!(callback_calls, 0);
+        assert_eq!(requested, retained_requested);
+        assert_eq!(resident, retained_resident);
+        assert_eq!(visible, retained_visible);
+        assert_eq!(dirty_faces, retained_dirty);
     }
 
     #[test]

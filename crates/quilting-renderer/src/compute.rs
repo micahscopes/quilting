@@ -5,13 +5,13 @@
 //!   Pass 2: edge coherence (via adjacency texture) + canonical sort + atlas LUT
 //!
 //! Pass 1 renders directly to a texture for pass 2 to read.
-//! Pass 2 emits one lossless packed `u32` per face. Rust validates and expands
-//! it to the historical six-field classification
-//! (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) consumed by
-//! retained batching.
+//! Pass 2 emits one lossless packed `u32` per face. Rust authority admits the
+//! typed fields directly; shadow/worker parity can still expand them to the
+//! historical six-field classification
+//! (canon_a, canon_b, canon_c, perm_index, parity, atlas_index).
 
 use glow::HasContext;
-use quilting_core::instance_layout;
+use quilting_core::{batch, instance_layout};
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_mesh::HalfEdgeMesh;
 use std::collections::HashMap;
@@ -46,6 +46,32 @@ const PACKED_LOD_VISIBLE_BIT: u32 = 1 << 15;
 const PACKED_LOD_ATLAS_SHIFT: u32 = 16;
 const PACKED_LOD_USED_MASK: u32 = 0x00ff_ffff;
 
+/// Validated semantic fields carried by one packed classifier word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackedLodClassification {
+    pub canonical: [u32; 3],
+    pub permutation: u8,
+    pub parity_bucket: u8,
+    pub atlas_index: Option<u8>,
+}
+
+impl PackedLodClassification {
+    pub const fn visible(self) -> bool {
+        self.atlas_index.is_some()
+    }
+
+    pub fn into_face_lod_classification(self) -> batch::FaceLodClassification {
+        batch::FaceLodClassification {
+            requested: batch::ResidentLod {
+                canonical: self.canonical,
+                perm_index: self.permutation as usize,
+                parity_bucket: self.parity_bucket as usize,
+            },
+            visible: self.visible(),
+        }
+    }
+}
+
 /// Encode one shader-facing classifier record into the shared 24-bit ABI.
 /// Exponents are stored rather than their exact power-of-two `f32` values.
 pub fn pack_lod_classification(
@@ -72,10 +98,10 @@ pub fn pack_lod_classification(
     Ok(packed)
 }
 
-/// Decode one packed GPU record to the historical six-float batch ABI.
-pub fn unpack_lod_classification(
+/// Validate and decode one packed GPU record without expanding its ABI.
+pub fn unpack_lod_classification_fields(
     packed: u32,
-) -> Result<[f32; FLOATS_PER_FACE_OUTPUT], String> {
+) -> Result<PackedLodClassification, String> {
     if packed & !PACKED_LOD_USED_MASK != 0 {
         return Err("packed LOD record uses reserved high bits".to_string());
     }
@@ -91,20 +117,43 @@ pub fn unpack_lod_classification(
     if permutation > 5 {
         return Err("packed LOD record contains an invalid permutation".to_string());
     }
-    let parity = if matches!(permutation, 1 | 2 | 5) { -1.0 } else { 1.0 };
     let atlas_index = if packed & PACKED_LOD_VISIBLE_BIT == 0 {
-        -1.0
+        None
     } else {
-        ((packed >> PACKED_LOD_ATLAS_SHIFT) & u8::MAX as u32) as f32
+        Some(((packed >> PACKED_LOD_ATLAS_SHIFT) & u8::MAX as u32) as u8)
     };
-    Ok([
-        (1u32 << exponents[0]) as f32,
-        (1u32 << exponents[1]) as f32,
-        (1u32 << exponents[2]) as f32,
-        permutation as f32,
-        parity,
+    Ok(PackedLodClassification {
+        canonical: [
+            1u32 << exponents[0],
+            1u32 << exponents[1],
+            1u32 << exponents[2],
+        ],
+        permutation: permutation as u8,
+        parity_bucket: u8::from(matches!(permutation, 1 | 2 | 5)),
         atlas_index,
+    })
+}
+
+/// Decode one packed GPU record to the historical six-float shadow ABI.
+pub fn unpack_lod_classification(
+    packed: u32,
+) -> Result<[f32; FLOATS_PER_FACE_OUTPUT], String> {
+    let fields = unpack_lod_classification_fields(packed)?;
+    Ok([
+        fields.canonical[0] as f32,
+        fields.canonical[1] as f32,
+        fields.canonical[2] as f32,
+        fields.permutation as f32,
+        if fields.parity_bucket == 0 { 1.0 } else { -1.0 },
+        fields.atlas_index.map_or(-1.0, f32::from),
     ])
+}
+
+fn validate_packed_lod_classifications(packed: &[u32]) -> Result<(), String> {
+    for &record in packed {
+        unpack_lod_classification_fields(record)?;
+    }
+    Ok(())
 }
 
 fn decode_packed_lod_classifications(
@@ -1054,11 +1103,12 @@ pub struct LodCompute {
     // is accepted. Recycle its GPU staging buffers and CPU readback vectors
     // instead of allocating mesh-sized resources every classification.
     readback_buffers: Vec<ReadbackBuffer>,
-    readback_vectors: Vec<Vec<f32>>,
-    packed_readback_scratch: Vec<u32>,
+    readback_vectors: Vec<Vec<u32>>,
+    decoded_vectors: Vec<Vec<f32>>,
     readback_buffer_creations: u64,
     readback_buffer_reallocations: u64,
     readback_vector_creations: u64,
+    decoded_vector_creations: u64,
 }
 
 impl LodCompute {
@@ -1223,10 +1273,11 @@ impl LodCompute {
                 bound1: false,
                 readback_buffers: Vec::new(),
                 readback_vectors: Vec::new(),
-                packed_readback_scratch: Vec::new(),
+                decoded_vectors: Vec::new(),
                 readback_buffer_creations: 0,
                 readback_buffer_reallocations: 0,
                 readback_vector_creations: 0,
+                decoded_vector_creations: 0,
             })
         }
     }
@@ -1234,13 +1285,15 @@ impl LodCompute {
     pub fn has_pass1_texture(&self) -> bool { self.pass1_texture.is_some() }
     pub fn has_adjacency_texture(&self) -> bool { self.adjacency_texture.is_some() }
 
-    pub fn readback_pool_stats(&self) -> (usize, usize, u64, u64, u64) {
+    pub fn readback_pool_stats(&self) -> (usize, usize, usize, u64, u64, u64, u64) {
         (
             self.readback_buffers.len(),
             self.readback_vectors.len(),
+            self.decoded_vectors.len(),
             self.readback_buffer_creations,
             self.readback_buffer_reallocations,
             self.readback_vector_creations,
+            self.decoded_vector_creations,
         )
     }
 
@@ -1852,12 +1905,15 @@ impl LodCompute {
         }
     }
 
-    /// Read and decode a staging buffer after its fence has signaled.
+    /// Read and validate a staging buffer after its fence has signaled.
+    ///
+    /// The packed words remain the authoritative CPU representation. Call
+    /// [`Self::decode_readback_vector`] only for legacy/shadow comparison.
     pub fn finish_staged_readback(
         &mut self,
         gl: &glow::Context,
         staged: StagedLodReadback,
-    ) -> Result<Vec<f32>, String> {
+    ) -> Result<Vec<u32>, String> {
         let mut result = match self.readback_vectors.pop() {
             Some(result) => result,
             None => {
@@ -1865,25 +1921,39 @@ impl LodCompute {
                 Vec::new()
             }
         };
-        self.packed_readback_scratch.resize(staged.num_faces, 0);
+        result.resize(staged.num_faces, 0);
         unsafe {
             gl.bind_buffer(glow::COPY_READ_BUFFER, Some(staged.buffer.handle));
             gl.get_buffer_sub_data(
                 glow::COPY_READ_BUFFER,
                 0,
-                u32_slice_as_bytes_mut(&mut self.packed_readback_scratch),
+                u32_slice_as_bytes_mut(&mut result),
             );
             gl.bind_buffer(glow::COPY_READ_BUFFER, None);
         }
         self.readback_buffers.push(staged.buffer);
-        if let Err(error) = decode_packed_lod_classifications(
-            &self.packed_readback_scratch,
-            &mut result,
-        ) {
+        if let Err(error) = validate_packed_lod_classifications(&result) {
             self.readback_vectors.push(result);
             return Err(error);
         }
         Ok(result)
+    }
+
+    /// Expand packed records only for the retained six-float worker-parity
+    /// oracle. Renderer authority never needs this allocation or write pass.
+    pub fn decode_readback_vector(&mut self, packed: &[u32]) -> Result<Vec<f32>, String> {
+        let mut decoded = match self.decoded_vectors.pop() {
+            Some(decoded) => decoded,
+            None => {
+                self.decoded_vector_creations += 1;
+                Vec::new()
+            }
+        };
+        if let Err(error) = decode_packed_lod_classifications(packed, &mut decoded) {
+            self.decoded_vectors.push(decoded);
+            return Err(error);
+        }
+        Ok(decoded)
     }
 
     /// Return a staged result that will not be consumed to the retained pool.
@@ -1891,10 +1961,16 @@ impl LodCompute {
         self.readback_buffers.push(staged.buffer);
     }
 
-    /// Return a completed CPU payload after its JS transfer has been copied.
-    pub fn recycle_readback_vector(&mut self, mut result: Vec<f32>) {
+    /// Return a completed packed CPU payload to the retained pool.
+    pub fn recycle_readback_vector(&mut self, mut result: Vec<u32>) {
         result.clear();
         self.readback_vectors.push(result);
+    }
+
+    /// Return a legacy shadow decode to its separate retained pool.
+    pub fn recycle_decoded_vector(&mut self, mut result: Vec<f32>) {
+        result.clear();
+        self.decoded_vectors.push(result);
     }
 
     pub fn destroy(&self, gl: &glow::Context) {
@@ -2287,6 +2363,28 @@ mod tests {
                                 atlas_index,
                             )
                             .unwrap();
+                            let fields = unpack_lod_classification_fields(packed).unwrap();
+                            assert_eq!(
+                                fields.canonical,
+                                [1u32 << a, 1u32 << b, 1u32 << c],
+                            );
+                            assert_eq!(fields.permutation, permutation as u8);
+                            assert_eq!(
+                                fields.parity_bucket,
+                                u8::from(matches!(permutation, 1 | 2 | 5)),
+                            );
+                            assert_eq!(
+                                fields.atlas_index,
+                                atlas_index.map(|index| index as u8),
+                            );
+                            let semantic = fields.into_face_lod_classification();
+                            assert_eq!(semantic.requested.canonical, fields.canonical);
+                            assert_eq!(semantic.requested.perm_index, permutation as usize);
+                            assert_eq!(
+                                semantic.requested.parity_bucket,
+                                fields.parity_bucket as usize,
+                            );
+                            assert_eq!(semantic.visible, atlas_index.is_some());
                             let decoded = unpack_lod_classification(packed).unwrap();
                             assert_eq!(decoded[0], (1u32 << a) as f32);
                             assert_eq!(decoded[1], (1u32 << b) as f32);

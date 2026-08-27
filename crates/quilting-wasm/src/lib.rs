@@ -642,13 +642,21 @@ pub fn debug_gpu_compute_state() -> String {
         match gc.as_ref() {
             None => "GPU_COMPUTE is None".to_string(),
             Some((_gl, compute)) => {
-                let (gpu_pool, cpu_pool, gpu_created, gpu_resized, cpu_created) =
-                    compute.readback_pool_stats();
+                let (
+                    gpu_pool,
+                    packed_pool,
+                    decoded_pool,
+                    gpu_created,
+                    gpu_resized,
+                    packed_created,
+                    decoded_created,
+                ) = compute.readback_pool_stats();
                 format!(
-                "pass1_tex={} adj_tex={} readback_pool=gpu:{} cpu:{} created_gpu:{} resized_gpu:{} created_cpu:{}",
+                "pass1_tex={} adj_tex={} readback_pool=gpu:{} packed:{} decoded:{} created_gpu:{} resized_gpu:{} created_packed:{} created_decoded:{}",
                 compute.has_pass1_texture(),
                 compute.has_adjacency_texture(),
-                gpu_pool, cpu_pool, gpu_created, gpu_resized, cpu_created,
+                gpu_pool, packed_pool, decoded_pool, gpu_created, gpu_resized,
+                packed_created, decoded_created,
             )},
         }
     })
@@ -926,10 +934,18 @@ pub fn poll_animated_lods() -> JsValue {
         perf_measure("lod-gpu-wait", "lod-gpu-wait-start", "lod-gpu-wait-end");
         perf_mark("lod-gpu-readback-start");
         let gpu_readback_bytes = readback.byte_len();
-        let gpu_class = match compute.finish_staged_readback(gl, readback) {
+        let packed_class = match compute.finish_staged_readback(gl, readback) {
             Ok(classification) => classification,
             Err(error) => {
                 web_sys::console::warn_1(&format!("LOD packed readback failed: {error}").into());
+                return JsValue::NULL;
+            }
+        };
+        let gpu_class = match compute.decode_readback_vector(&packed_class) {
+            Ok(classification) => classification,
+            Err(error) => {
+                compute.recycle_readback_vector(packed_class);
+                web_sys::console::warn_1(&format!("LOD packed decode failed: {error}").into());
                 return JsValue::NULL;
             }
         };
@@ -1071,7 +1087,8 @@ pub fn poll_animated_lods() -> JsValue {
             }
             result
         });
-        compute.recycle_readback_vector(gpu_class);
+        compute.recycle_decoded_vector(gpu_class);
+        compute.recycle_readback_vector(packed_class);
         perf_mark("lod-wasm-end");
         perf_measure("lod-wasm-total", "lod-wasm-start", "lod-wasm-end");
         result.into()

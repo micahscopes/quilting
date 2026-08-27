@@ -78,16 +78,19 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
    geometry, conservative image extent, conformal interior demand, pole safety,
    and screen capacity.
 3. GPU pass 2 reconciles shared edges, canonicalizes the LOD triple, and emits
-   six floats per face.
+   one packed classification per face.
 4. Pass 2 losslessly packs its three four-bit exponents, three-bit
    permutation, one-bit visibility, and eight-bit atlas index into one `u32`
    per face; parity is derived from the permutation. The output is copied into
    staging, fenced, and polled without blocking the worker. Only after the
-   fence signals is this four-byte topology word read back and validated before
-   expansion to the retained six-field CPU record. Staging buffers, packed
-   scratch, and mesh-sized CPU vectors are retained and reused across jobs; the
-   steady-state path does not create or resize those resources.
-5. The WASM worker compares that snapshot with its retained previous result
+   fence signals is this four-byte topology word read back and validated.
+   Renderer-context authority admits its typed topology and visibility fields
+   directly into retained Rust state. Worker rollback and exact shadow parity
+   alone expand it to the historical six-field CPU record. Staging buffers,
+   packed readback vectors, and rollback-only decode vectors live in separate
+   retained pools; the steady-state authority path does not create, resize, or
+   write the mesh-sized float decode.
+5. The WASM worker expands and compares that snapshot with its retained previous result
    before creating any JavaScript typed array. The first coherent result after
    a model, animation, remesh, or compute-resource boundary transfers all
    faces; later results cross into JavaScript and transfer only changed
@@ -178,7 +181,9 @@ invalid minimum between differently centered spheres.
 
 The backend-independent pieces already live below the WebGL renderer:
 
-- `quilting_core::batch::{ResidentLod, RenderBatchKey, RenderBatchMember}`;
+- `quilting_core::batch::{FaceLodClassification, ResidentLod,
+  RenderBatchKey, RenderBatchMember}` and its atomic backend-publication
+  admission boundary;
 - `quilting_core::instance_layout`, including the eight-float topology record
   and 52-float prepared-patch record;
 - `quilting_core::render_pipeline`, whose immutable shader-module, bind-group,

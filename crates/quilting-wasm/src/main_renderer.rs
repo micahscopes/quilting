@@ -21,7 +21,8 @@ use quilting_renderer::compute::{
     apply_lod_classification_publication, build_composed_lod_model,
     compare_lod_classifications, exact_f32_slice_fingerprint, prepare_lod_atlas_lookup,
     prepare_lod_dispatch_state, prepare_lod_model, prepared_lod_model_fingerprint,
-    LodAtlasLookup, LodCompute, LodModelResidency, StagedLodReadback,
+    unpack_lod_classification_fields, LodAtlasLookup, LodCompute, LodModelResidency,
+    StagedLodReadback,
     FLOATS_PER_FACE_OUTPUT, PACKED_LOD_OUTPUT_BYTES_PER_FACE,
 };
 use quilting_renderer::pass::{
@@ -387,7 +388,7 @@ struct SameContextLod {
     pending: Option<SameContextLodPending>,
     completed: Option<SameContextLodCompleted>,
     authority_candidate: Option<SameContextLodAuthority>,
-    batch_candidate: Option<SameContextLodCompleted>,
+    batch_candidate: Option<SameContextLodDecodedCompleted>,
     worker_batch_publication: Option<SameContextLodRequestStamp>,
     worker_batch_snapshot: Option<SameContextLodBatchAuthoritySnapshot>,
     last_authority_stamp: Option<SameContextLodRequestStamp>,
@@ -407,9 +408,25 @@ impl SameContextLod {
             .take()
             .expect("authority LOD was checked");
         if !completed.stamp.same_identity(authority.stamp) {
-            self.compute.recycle_readback_vector(completed.lods);
+            self.compute.recycle_readback_vector(completed.packed);
             return Err("same-context LOD comparison stamps do not match".to_string());
         }
+        let lods = match self.compute.decode_readback_vector(&completed.packed) {
+            Ok(lods) => lods,
+            Err(error) => {
+                self.compute.recycle_readback_vector(completed.packed);
+                return Err(error);
+            }
+        };
+        self.compute.recycle_readback_vector(completed.packed);
+        self.diagnostics.legacy_float_decodes =
+            self.diagnostics.legacy_float_decodes.saturating_add(1);
+        self.diagnostics.last_legacy_float_decode_bytes =
+            lods.len().saturating_mul(std::mem::size_of::<f32>());
+        let completed = SameContextLodDecodedCompleted {
+            stamp: completed.stamp,
+            lods,
+        };
         if let (Some(completed_pose), Some(authority_pose)) =
             (completed.stamp.pose, authority.stamp.pose)
         {
@@ -454,7 +471,7 @@ impl SameContextLod {
         let parity = match parity {
             Ok(parity) => parity,
             Err(error) => {
-                self.compute.recycle_readback_vector(completed.lods);
+                self.compute.recycle_decoded_vector(completed.lods);
                 return Err(error);
             }
         };
@@ -477,12 +494,12 @@ impl SameContextLod {
             self.diagnostics.exact_comparisons =
                 self.diagnostics.exact_comparisons.saturating_add(1);
             if let Some(previous) = self.batch_candidate.replace(completed) {
-                self.compute.recycle_readback_vector(previous.lods);
+                self.compute.recycle_decoded_vector(previous.lods);
             }
         } else {
             self.diagnostics.mismatched_comparisons =
                 self.diagnostics.mismatched_comparisons.saturating_add(1);
-            self.compute.recycle_readback_vector(completed.lods);
+            self.compute.recycle_decoded_vector(completed.lods);
         }
         Ok(())
     }
@@ -505,7 +522,7 @@ impl SameContextLod {
             .is_some_and(|completed| completed.stamp.request_id == request_id)
         {
             let completed = self.completed.take().expect("completed LOD was checked");
-            self.compute.recycle_readback_vector(completed.lods);
+            self.compute.recycle_readback_vector(completed.packed);
             cancelled = true;
         }
         if self
@@ -524,7 +541,7 @@ impl SameContextLod {
                 .batch_candidate
                 .take()
                 .expect("batch candidate was checked");
-            self.compute.recycle_readback_vector(candidate.lods);
+            self.compute.recycle_decoded_vector(candidate.lods);
             cancelled = true;
         }
         if self
@@ -565,9 +582,11 @@ impl SameContextLod {
         let (
             readback_buffers,
             readback_vectors,
+            decoded_vectors,
             buffer_creations,
             buffer_reallocations,
             vector_creations,
+            decoded_vector_creations,
         ) = self.compute.readback_pool_stats();
         SameContextLodShadowSnapshot {
             ready: true,
@@ -609,6 +628,10 @@ impl SameContextLod {
             mismatched_raw_classifier_fingerprints: self
                 .diagnostics
                 .mismatched_raw_classifier_fingerprints,
+            legacy_float_decodes: self.diagnostics.legacy_float_decodes,
+            last_legacy_float_decode_bytes: self
+                .diagnostics
+                .last_legacy_float_decode_bytes,
             batch_semantic_comparisons: self.diagnostics.batch_semantic_comparisons,
             exact_batch_semantic_comparisons: self
                 .diagnostics
@@ -673,9 +696,11 @@ impl SameContextLod {
             last_error: self.diagnostics.last_error.clone(),
             readback_buffers,
             readback_vectors,
+            decoded_vectors,
             readback_buffer_creations: buffer_creations,
             readback_buffer_reallocations: buffer_reallocations,
             readback_vector_creations: vector_creations,
+            decoded_vector_creations,
         }
     }
 
@@ -685,10 +710,10 @@ impl SameContextLod {
             self.compute.discard_staged_readback(gl, pending.readback);
         }
         if let Some(completed) = self.completed.take() {
-            self.compute.recycle_readback_vector(completed.lods);
+            self.compute.recycle_readback_vector(completed.packed);
         }
         if let Some(candidate) = self.batch_candidate.take() {
-            self.compute.recycle_readback_vector(candidate.lods);
+            self.compute.recycle_decoded_vector(candidate.lods);
         }
         self.compute.destroy(gl);
     }
@@ -789,6 +814,11 @@ struct SameContextLodPending {
 
 struct SameContextLodCompleted {
     stamp: SameContextLodRequestStamp,
+    packed: Vec<u32>,
+}
+
+struct SameContextLodDecodedCompleted {
+    stamp: SameContextLodRequestStamp,
     lods: Vec<f32>,
 }
 
@@ -870,7 +900,7 @@ impl SameContextLodBatchShadow {
     #[allow(clippy::too_many_arguments)]
     fn apply(
         &mut self,
-        candidate: &SameContextLodCompleted,
+        candidate: &SameContextLodDecodedCompleted,
         num_faces: usize,
         topology: Option<&quilting_mesh::HalfEdgeMesh>,
         grading: batch::FaceLodGrading,
@@ -963,6 +993,8 @@ struct SameContextLodDiagnostics {
     mismatched_publication_fingerprints: u64,
     raw_classifier_fingerprint_comparisons: u64,
     mismatched_raw_classifier_fingerprints: u64,
+    legacy_float_decodes: u64,
+    last_legacy_float_decode_bytes: usize,
     batch_semantic_comparisons: u64,
     exact_batch_semantic_comparisons: u64,
     mismatched_batch_semantic_comparisons: u64,
@@ -1035,6 +1067,8 @@ struct SameContextLodShadowSnapshot {
     mismatched_publication_fingerprints: u64,
     raw_classifier_fingerprint_comparisons: u64,
     mismatched_raw_classifier_fingerprints: u64,
+    legacy_float_decodes: u64,
+    last_legacy_float_decode_bytes: usize,
     batch_semantic_comparisons: u64,
     exact_batch_semantic_comparisons: u64,
     mismatched_batch_semantic_comparisons: u64,
@@ -1076,9 +1110,11 @@ struct SameContextLodShadowSnapshot {
     last_error: Option<String>,
     readback_buffers: usize,
     readback_vectors: usize,
+    decoded_vectors: usize,
     readback_buffer_creations: u64,
     readback_buffer_reallocations: u64,
     readback_vector_creations: u64,
+    decoded_vector_creations: u64,
 }
 
 #[derive(Serialize)]
@@ -5033,14 +5069,14 @@ fn try_compare_same_context_lod_batches(state: &mut MainState) -> Result<(), Str
         lod.last_authority_stamp = None;
     }
     if !candidate_stamp.same_identity(worker_stamp) {
-        lod.compute.recycle_readback_vector(candidate.lods);
+        lod.compute.recycle_decoded_vector(candidate.lods);
         return Err("same-context and worker batch publication stamps do not match".to_string());
     }
     if worker_snapshot
         .as_ref()
         .is_some_and(|snapshot| !snapshot.stamp.same_identity(worker_stamp))
     {
-        lod.compute.recycle_readback_vector(candidate.lods);
+        lod.compute.recycle_decoded_vector(candidate.lods);
         return Err("delayed worker batch snapshot has the wrong stamp".to_string());
     }
 
@@ -5054,7 +5090,7 @@ fn try_compare_same_context_lod_batches(state: &mut MainState) -> Result<(), Str
         face_nodes,
         face_render_nodes,
     ) {
-        lod.compute.recycle_readback_vector(candidate.lods);
+        lod.compute.recycle_decoded_vector(candidate.lods);
         return Err(error);
     }
     let authority_requested = worker_snapshot
@@ -5141,7 +5177,7 @@ fn try_compare_same_context_lod_batches(state: &mut MainState) -> Result<(), Str
         lod.batch_shadow.visible.clone_from_slice(authority_visible);
         lod.batch_shadow.culled_faces = authority_culled;
     }
-    lod.compute.recycle_readback_vector(candidate.lods);
+    lod.compute.recycle_decoded_vector(candidate.lods);
     Ok(())
 }
 
@@ -5161,10 +5197,9 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
         if candidate.stamp.classified_faces == 0
             || candidate.stamp.classified_faces > resident_faces
             || candidate.stamp.classified_faces > u32::MAX as usize
-            || candidate.lods.len()
-                != candidate.stamp.classified_faces * FLOATS_PER_FACE_OUTPUT
+            || candidate.packed.len() != candidate.stamp.classified_faces
         {
-            lod.compute.recycle_readback_vector(candidate.lods);
+            lod.compute.recycle_readback_vector(candidate.packed);
             return Err(
                 "same-context authority produced an invalid classified prefix".to_string(),
             );
@@ -5190,17 +5225,25 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
             .diagnostics
             .stale_authoritative_completions
             .saturating_add(1);
-        lod.compute.recycle_readback_vector(candidate.lods);
+        lod.compute.recycle_readback_vector(candidate.packed);
         return Ok(());
     }
     if classified_faces == resident_faces {
-        update_batches_in_state(state, &candidate.lods, None);
+        update_batches_in_state(
+            state,
+            RetainedLodPublication::PackedWords(&candidate.packed),
+            None,
+        );
     } else {
         let classified_faces_u32 = u32::try_from(classified_faces)
             .expect("same-context authority prefix was range-checked");
         prefix_indices.clear();
         prefix_indices.extend(0..classified_faces_u32);
-        update_batches_in_state(state, &candidate.lods, Some(&prefix_indices));
+        update_batches_in_state(
+            state,
+            RetainedLodPublication::PackedWords(&candidate.packed),
+            Some(&prefix_indices),
+        );
     }
 
     let changed_faces = state.lod_dirty_faces.len();
@@ -5220,7 +5263,7 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
         pose.map_or(0, |pose| pose.revision);
     lod.diagnostics.last_authoritative_pose_continuity_epoch =
         pose.map_or(0, |pose| pose.continuity_epoch);
-    lod.compute.recycle_readback_vector(candidate.lods);
+    lod.compute.recycle_readback_vector(candidate.packed);
     Ok(())
 }
 
@@ -5483,7 +5526,7 @@ pub fn mr_poll_same_context_lod(authoritative: bool) -> Result<JsValue, JsValue>
             let ready_ms = browser_now_ms();
             let readback_started_ms = ready_ms;
             let readback_bytes = pending.readback.byte_len();
-            let lods = match lod.compute.finish_staged_readback(gl, pending.readback) {
+            let packed = match lod.compute.finish_staged_readback(gl, pending.readback) {
                 Ok(classification) => classification,
                 Err(error) => {
                     lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
@@ -5501,7 +5544,7 @@ pub fn mr_poll_same_context_lod(authoritative: bool) -> Result<JsValue, JsValue>
             lod.diagnostics.last_readback_bytes = readback_bytes;
             lod.completed = Some(SameContextLodCompleted {
                 stamp: pending.stamp,
-                lods,
+                packed,
             });
             if !authoritative {
                 if let Err(error) = lod.try_compare() {
@@ -6455,13 +6498,23 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         let state = match state.as_mut() { Some(s) => s, None => return };
-        update_batches_in_state(state, face_lods, face_indices);
+        update_batches_in_state(
+            state,
+            RetainedLodPublication::LegacyFloats(face_lods),
+            face_indices,
+        );
     });
+}
+
+#[derive(Clone, Copy)]
+enum RetainedLodPublication<'a> {
+    LegacyFloats(&'a [f32]),
+    PackedWords(&'a [u32]),
 }
 
 fn update_batches_in_state(
     state: &mut MainState,
-    face_lods: &[f32],
+    publication_payload: RetainedLodPublication<'_>,
     face_indices: Option<&[u32]>,
 ) {
         state.batch_update_stats.calls += 1;
@@ -6494,19 +6547,38 @@ fn update_batches_in_state(
         let mut topology_changed = state.batch_layout_dirty
             || state.adaptive_picked.is_enabled()
             || state.adaptive_batch_transition_pending;
-        let publication = batch::admit_face_lod_publication(
-            face_lods,
-            face_indices,
-            nf,
-            initial_resident,
-            state.classified_culled_faces,
-            batch::FaceLodAdmissionBuffers {
-                requested: &mut state.requested_face_lods,
-                resident: &mut state.resident_face_lods,
-                visible: &mut state.classified_face_visibility,
-                dirty_faces: &mut state.lod_dirty_faces,
-            },
-        );
+        let buffers = batch::FaceLodAdmissionBuffers {
+            requested: &mut state.requested_face_lods,
+            resident: &mut state.resident_face_lods,
+            visible: &mut state.classified_face_visibility,
+            dirty_faces: &mut state.lod_dirty_faces,
+        };
+        let publication = match publication_payload {
+            RetainedLodPublication::LegacyFloats(face_lods) => {
+                batch::admit_face_lod_publication(
+                    face_lods,
+                    face_indices,
+                    nf,
+                    initial_resident,
+                    state.classified_culled_faces,
+                    buffers,
+                )
+            }
+            RetainedLodPublication::PackedWords(words) => {
+                batch::admit_face_lod_classification_publication(
+                    words.len(),
+                    face_indices,
+                    nf,
+                    state.classified_culled_faces,
+                    buffers,
+                    |record_index| {
+                        let fields = unpack_lod_classification_fields(words[record_index])
+                            .expect("packed classifier words were validated at readback");
+                        fields.into_face_lod_classification()
+                    },
+                )
+            }
+        };
         perf_mark("batch-retain-end");
         perf_measure("batch-retain", "batch-retain-start", "batch-retain-end");
         let publication = match publication {

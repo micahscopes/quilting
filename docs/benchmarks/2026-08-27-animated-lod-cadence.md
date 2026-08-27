@@ -239,10 +239,10 @@ Both worker and renderer-context classifiers now emit one lossless `u32` per
 face from pass-2 transform feedback instead of six `f32`s. The low 24 bits
 carry three four-bit edge exponents, the three-bit S3 permutation, a visibility
 bit, and the eight-bit atlas index. Rust validates reserved bits and field
-ranges, derives parity from the permutation, and expands the word to the
-unchanged six-field retained batch ABI. The unit oracle exhaustively roundtrips
-all 30,000 combinations of the current exponent, permutation, visibility, and
-representative atlas-index domains and freezes one exact layout golden.
+ranges and derives parity from the permutation. The unit oracle exhaustively
+roundtrips all 30,000 combinations of the current exponent, permutation,
+visibility, and representative atlas-index domains and freezes one exact
+layout golden.
 
 Live Chrome evidence after the cut:
 
@@ -262,6 +262,36 @@ a claim that the corresponding wall-clock call is six times faster. Driver
 scheduling, fence cadence, validation, CPU expansion, and retained batch work
 remain separately visible in telemetry. `gpuReadbackBytes` records this GPU
 boundary while `lodTransferBytes` continues to mean WASM/JavaScript payload.
+
+### Direct packed authority admission
+
+Renderer-context authority now keeps the validated `u32` words packed through
+retained admission. `quilting_core::batch::FaceLodClassification` is the
+backend-neutral semantic record, and the admission boundary consumes one
+decoded record at a time without constructing a mesh-sized six-float vector.
+The historical expansion remains only in worker rollback and `lodimpl=shadow`,
+where exact worker-result fingerprints and field-by-field parity require it.
+
+For the 984-face animated prefix this removes a 23,616-byte CPU decode vector
+and its complete write pass from each authoritative publication. For the
+4,432-face composed scene it removes 106,368 bytes. The packed readback vector
+itself remains 3,936 or 17,728 bytes respectively and is retained in a separate
+pool. Diagnostics expose `legacy_float_decodes`,
+`last_legacy_float_decode_bytes`, `readback_vectors`, and `decoded_vectors`, so
+a Rust-authority run can prove that the rollback-only expansion stayed cold.
+This is a CPU traffic/allocation cut; it does not remove the WebGL2 fence or
+the four-byte-per-face GPU readback.
+
+The live Chrome gate made the distinction observable. A Rust-authority horse
+run reached 407 publications with one packed vector creation, zero decoded
+vector creations, zero legacy float decodes/bytes, matching model
+fingerprints, and no failures or console errors. The same temporary tab was
+then reloaded in shadow mode: 240/240 classifier comparisons were exact, the
+raw/publication/resident/visibility/cull/batch checks had zero mismatches, and
+the separate decoded pool was created once and reused. Each shadow decode was
+the expected 23,616 bytes for 984 faces. This proves both the cold production
+path and the still-live rollback oracle rather than inferring either from
+source structure.
 
 ## Remaining promotion work
 
