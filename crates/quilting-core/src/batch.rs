@@ -901,6 +901,43 @@ pub fn group_resident_faces(
     groups
 }
 
+fn root_batch_key(
+    residents: &[Option<ResidentLod>],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    face_render_nodes: &[usize],
+    initial: ResidentLod,
+    face_index: usize,
+) -> RenderBatchKey {
+    RenderBatchKey::from_resident(
+        residents.get(face_index).copied().flatten().unwrap_or(initial),
+        face_materials.get(face_index).copied().unwrap_or(0),
+        face_render_nodes
+            .get(face_index)
+            .copied()
+            .or_else(|| face_nodes.get(face_index).copied())
+            .unwrap_or(0),
+    )
+}
+
+fn root_batch_member(
+    residents: &[Option<ResidentLod>],
+    face_vertex_lods: &[[u32; 3]],
+    face_nodes: &[usize],
+    initial: ResidentLod,
+    face_index: usize,
+) -> RenderBatchMember {
+    let resident = residents.get(face_index).copied().flatten().unwrap_or(initial);
+    RenderBatchMember {
+        face_index: face_index as u32,
+        leaf_id: ScreenPatchLeafId::ROOT,
+        node_index: face_nodes.get(face_index).copied().unwrap_or(0),
+        edge_lods: resident.edge_lods(),
+        permutation_index: resident.perm_index.min(5) as u8,
+        vertex_lods: face_vertex_lods.get(face_index).copied().unwrap_or([1; 3]),
+    }
+}
+
 /// Rebuild draw-bucket memberships while retaining the map and vector
 /// allocations from the previous classification.
 pub fn group_resident_faces_into(
@@ -915,27 +952,275 @@ pub fn group_resident_faces_into(
     for members in groups.values_mut() {
         members.clear();
     }
-    for (face_index, resident) in residents.iter().enumerate() {
-        let resident = resident.unwrap_or(initial);
-        let key = RenderBatchKey::from_resident(
-            resident,
-            face_materials.get(face_index).copied().unwrap_or(0),
-            face_render_nodes
-                .get(face_index)
-                .copied()
-                .or_else(|| face_nodes.get(face_index).copied())
-                .unwrap_or(0),
+    for face_index in 0..residents.len() {
+        let key = root_batch_key(
+            residents,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            face_index,
         );
-        groups.entry(key).or_default().push(RenderBatchMember {
-            face_index: face_index as u32,
-            leaf_id: ScreenPatchLeafId::ROOT,
-            node_index: face_nodes.get(face_index).copied().unwrap_or(0),
-            edge_lods: resident.edge_lods(),
-            permutation_index: resident.perm_index.min(5) as u8,
-            vertex_lods: face_vertex_lods.get(face_index).copied().unwrap_or([1; 3]),
-        });
+        groups.entry(key).or_default().push(root_batch_member(
+            residents,
+            face_vertex_lods,
+            face_nodes,
+            initial,
+            face_index,
+        ));
     }
     groups.retain(|_, members| !members.is_empty());
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetainedRootGroupRefresh {
+    pub full_rebuild: bool,
+    pub affected_faces: usize,
+    pub dirty_buckets: usize,
+    pub rebuilt_members: usize,
+}
+
+/// Source-ordered root-bucket membership retained across sparse resident LOD
+/// updates. WebGL can rematerialize and upload only buckets touched by the
+/// exact corner-density closure while preserving byte-for-byte member order.
+#[derive(Default)]
+pub struct RetainedRootGroupIndex {
+    face_keys: Vec<Option<RenderBatchKey>>,
+    buckets: BTreeMap<RenderBatchKey, Vec<u32>>,
+    affected_faces: Vec<usize>,
+    dirty_keys: Vec<RenderBatchKey>,
+    removals: Vec<(RenderBatchKey, u32)>,
+    additions: Vec<(RenderBatchKey, u32)>,
+    merge_scratch: Vec<u32>,
+}
+
+impl RetainedRootGroupIndex {
+    pub fn indexed_faces(&self) -> usize {
+        self.face_keys.len()
+    }
+
+    pub fn bucket_count(&self) -> usize {
+        self.buckets.len()
+    }
+
+    fn coherent_with(
+        &self,
+        num_faces: usize,
+        groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    ) -> bool {
+        self.face_keys.len() == num_faces
+            && self.face_keys.iter().all(Option::is_some)
+            && self.buckets.len() == groups.len()
+            && self.buckets.iter().all(|(key, faces)| {
+                groups.get(key).is_some_and(|members| members.len() == faces.len())
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild(
+        &mut self,
+        residents: &[Option<ResidentLod>],
+        face_vertex_lods: &[[u32; 3]],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: ResidentLod,
+        groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    ) {
+        self.face_keys.clear();
+        self.face_keys.resize(residents.len(), None);
+        for faces in self.buckets.values_mut() {
+            faces.clear();
+        }
+        for members in groups.values_mut() {
+            members.clear();
+        }
+        for face_index in 0..residents.len() {
+            let key = root_batch_key(
+                residents,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                face_index,
+            );
+            self.face_keys[face_index] = Some(key);
+            self.buckets.entry(key).or_default().push(face_index as u32);
+            groups.entry(key).or_default().push(root_batch_member(
+                residents,
+                face_vertex_lods,
+                face_nodes,
+                initial,
+                face_index,
+            ));
+        }
+        self.buckets.retain(|_, faces| !faces.is_empty());
+        groups.retain(|_, members| !members.is_empty());
+    }
+
+    /// Refresh exact ordered groups from a sparse, source-face-indexed closure.
+    /// A missing/stale index or invalid face ID fails closed to one complete
+    /// rebuild; ordinary updates merge only affected faces into dirty buckets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_groups_from_faces(
+        &mut self,
+        residents: &[Option<ResidentLod>],
+        face_vertex_lods: &[[u32; 3]],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: ResidentLod,
+        affected_faces: &[usize],
+        groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    ) -> RetainedRootGroupRefresh {
+        self.affected_faces.clear();
+        self.affected_faces.extend_from_slice(affected_faces);
+        self.affected_faces.sort_unstable();
+        self.affected_faces.dedup();
+        let invalid_face = self
+            .affected_faces
+            .last()
+            .is_some_and(|face| *face >= residents.len());
+        if invalid_face || !self.coherent_with(residents.len(), groups) {
+            self.rebuild(
+                residents,
+                face_vertex_lods,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                groups,
+            );
+            self.affected_faces.clear();
+            self.affected_faces.extend(0..residents.len());
+            return RetainedRootGroupRefresh {
+                full_rebuild: true,
+                affected_faces: residents.len(),
+                dirty_buckets: groups.len(),
+                rebuilt_members: residents.len(),
+            };
+        }
+        if self.affected_faces.is_empty() {
+            return RetainedRootGroupRefresh::default();
+        }
+
+        self.dirty_keys.clear();
+        self.removals.clear();
+        self.additions.clear();
+        for &face_index in &self.affected_faces {
+            let old_key = self.face_keys[face_index]
+                .expect("a coherent root group index covers every source face");
+            let new_key = root_batch_key(
+                residents,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                face_index,
+            );
+            self.dirty_keys.push(old_key);
+            self.dirty_keys.push(new_key);
+            if old_key != new_key {
+                self.removals.push((old_key, face_index as u32));
+                self.additions.push((new_key, face_index as u32));
+                self.face_keys[face_index] = Some(new_key);
+            }
+        }
+        self.dirty_keys.sort_unstable();
+        self.dirty_keys.dedup();
+        self.removals.sort_unstable();
+        self.additions.sort_unstable();
+
+        let mut output = std::mem::take(&mut self.merge_scratch);
+        let mut rebuilt_members = 0usize;
+        for &key in &self.dirty_keys {
+            let removal_start = self.removals.partition_point(|entry| entry.0 < key);
+            let removal_end = self.removals.partition_point(|entry| entry.0 <= key);
+            let addition_start = self.additions.partition_point(|entry| entry.0 < key);
+            let addition_end = self.additions.partition_point(|entry| entry.0 <= key);
+            output.clear();
+            merge_root_bucket_faces(
+                self.buckets.get(&key).map(Vec::as_slice).unwrap_or(&[]),
+                &self.removals[removal_start..removal_end],
+                &self.additions[addition_start..addition_end],
+                &mut output,
+            );
+            if output.is_empty() {
+                self.buckets.remove(&key);
+                groups.remove(&key);
+                continue;
+            }
+
+            let bucket = self.buckets.entry(key).or_default();
+            std::mem::swap(bucket, &mut output);
+            let members = groups.entry(key).or_default();
+            members.clear();
+            members.reserve(bucket.len());
+            for &face in bucket.iter() {
+                members.push(root_batch_member(
+                    residents,
+                    face_vertex_lods,
+                    face_nodes,
+                    initial,
+                    face as usize,
+                ));
+            }
+            rebuilt_members += members.len();
+        }
+        self.merge_scratch = output;
+        RetainedRootGroupRefresh {
+            full_rebuild: false,
+            affected_faces: self.affected_faces.len(),
+            dirty_buckets: self.dirty_keys.len(),
+            rebuilt_members,
+        }
+    }
+}
+
+fn merge_root_bucket_faces(
+    current: &[u32],
+    removals: &[(RenderBatchKey, u32)],
+    additions: &[(RenderBatchKey, u32)],
+    output: &mut Vec<u32>,
+) {
+    let mut current_index = 0usize;
+    let mut removal_index = 0usize;
+    let mut addition_index = 0usize;
+    loop {
+        while current_index < current.len() {
+            while removal_index < removals.len()
+                && removals[removal_index].1 < current[current_index]
+            {
+                removal_index += 1;
+            }
+            if removal_index < removals.len()
+                && removals[removal_index].1 == current[current_index]
+            {
+                current_index += 1;
+                removal_index += 1;
+            } else {
+                break;
+            }
+        }
+        let current_face = current.get(current_index).copied();
+        let added_face = additions.get(addition_index).map(|entry| entry.1);
+        match (current_face, added_face) {
+            (None, None) => break,
+            (Some(face), None) => {
+                output.push(face);
+                current_index += 1;
+            }
+            (None, Some(face)) => {
+                output.push(face);
+                addition_index += 1;
+            }
+            (Some(current_face), Some(added_face)) => {
+                output.push(current_face.min(added_face));
+                current_index += usize::from(current_face <= added_face);
+                addition_index += usize::from(added_face <= current_face);
+            }
+        }
+    }
 }
 
 /// Materialize face-corner densities and deterministic root groups in one
@@ -3491,6 +3776,119 @@ mod tests {
         );
         assert_eq!(vertex_max, expected_vertex_max);
         assert_eq!(face_vertex_lods, expected_face_vertex_lods);
+    }
+
+    #[test]
+    fn retained_root_group_index_matches_complete_ordered_rebuilds() {
+        let initial = ResidentLod::uniform(1);
+        let mut residents = vec![
+            Some(ResidentLod::uniform(2)),
+            Some(ResidentLod::uniform(2)),
+            Some(ResidentLod::uniform(4)),
+            Some(ResidentLod::from_edge_lods([2, 4, 4])),
+            Some(ResidentLod::uniform(4)),
+            Some(ResidentLod::uniform(8)),
+        ];
+        let mut vertex_lods = vec![[2; 3], [2; 3], [4; 3], [4; 3], [4; 3], [8; 3]];
+        let mut materials = vec![0, 0, 0, 1, 0, 1];
+        let mut nodes = vec![10, 11, 12, 13, 14, 15];
+        let render_nodes = vec![0; residents.len()];
+        let mut groups = BTreeMap::new();
+        let mut index = RetainedRootGroupIndex::default();
+
+        let initialized = index.refresh_groups_from_faces(
+            &residents,
+            &vertex_lods,
+            &materials,
+            &nodes,
+            &render_nodes,
+            initial,
+            &[],
+            &mut groups,
+        );
+        assert!(initialized.full_rebuild);
+        assert_eq!(initialized.rebuilt_members, residents.len());
+        assert_eq!(index.indexed_faces(), residents.len());
+        assert_eq!(index.bucket_count(), groups.len());
+        assert_eq!(
+            groups,
+            group_resident_faces(
+                &residents,
+                &vertex_lods,
+                &materials,
+                &nodes,
+                &render_nodes,
+                initial,
+            ),
+        );
+
+        residents[1] = Some(ResidentLod::uniform(8));
+        vertex_lods[2] = [16, 4, 4];
+        nodes[2] = 99;
+        materials[4] = 3;
+        let refreshed = index.refresh_groups_from_faces(
+            &residents,
+            &vertex_lods,
+            &materials,
+            &nodes,
+            &render_nodes,
+            initial,
+            &[4, 2, 1, 1],
+            &mut groups,
+        );
+        assert!(!refreshed.full_rebuild);
+        assert_eq!(refreshed.affected_faces, 3);
+        assert!(refreshed.dirty_buckets >= 3);
+        assert_eq!(
+            groups,
+            group_resident_faces(
+                &residents,
+                &vertex_lods,
+                &materials,
+                &nodes,
+                &render_nodes,
+                initial,
+            ),
+        );
+
+        let stable = groups.clone();
+        assert_eq!(
+            index.refresh_groups_from_faces(
+                &residents,
+                &vertex_lods,
+                &materials,
+                &nodes,
+                &render_nodes,
+                initial,
+                &[],
+                &mut groups,
+            ),
+            RetainedRootGroupRefresh::default(),
+        );
+        assert_eq!(groups, stable);
+
+        let recovered = index.refresh_groups_from_faces(
+            &residents,
+            &vertex_lods,
+            &materials,
+            &nodes,
+            &render_nodes,
+            initial,
+            &[usize::MAX],
+            &mut groups,
+        );
+        assert!(recovered.full_rebuild);
+        assert_eq!(
+            groups,
+            group_resident_faces(
+                &residents,
+                &vertex_lods,
+                &materials,
+                &nodes,
+                &render_nodes,
+                initial,
+            ),
+        );
     }
 
     #[test]
