@@ -220,6 +220,172 @@ impl RenderSceneSnapshot {
     }
 }
 
+/// One backend-neutral range in the stable source-instance stream and its
+/// corresponding compacted survivor stream. WebGPU can write the survivor
+/// indices into storage and copy the compacted fields directly into per-bucket
+/// indirect arguments; WebGL2 retains its degenerate-vertex fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactedRenderBatchRange {
+    pub batch_index: u32,
+    pub source_first_instance: u32,
+    pub source_instance_count: u32,
+    pub compacted_first_instance: u32,
+    pub compacted_instance_count: u32,
+}
+
+/// Exact WebGPU/WebGL indexed-indirect field order. A backend that binds one
+/// atlas entry per bucket uses zero `first_index` and `base_vertex`; a packed
+/// atlas may patch those two backend-local fields without changing compaction.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedIndirectArguments {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
+    pub first_instance: u32,
+}
+
+/// Deterministic CPU oracle for same-pose GPU visibility compaction.
+/// `compacted_source_instances` stores flattened source-instance IDs in stable
+/// batch/member order; it does not copy patch records or tessellated geometry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibilityCompactionPlan {
+    pub scene_revision: u64,
+    pub source_instance_count: u32,
+    pub compacted_source_instances: Vec<u32>,
+    pub batches: Vec<CompactedRenderBatchRange>,
+}
+
+impl VisibilityCompactionPlan {
+    pub fn build(
+        scene: &RenderSceneSnapshot,
+        source_visibility: &[u8],
+    ) -> Result<Self, RenderContractError> {
+        scene.validate()?;
+        let expected_instances = scene.batches.iter().try_fold(0usize, |total, batch| {
+            total
+                .checked_add(batch.members.len())
+                .ok_or(RenderContractError::InstanceCountOverflow)
+        })?;
+        if source_visibility.len() != expected_instances {
+            return Err(RenderContractError::VisibilityLengthMismatch {
+                expected: expected_instances,
+                actual: source_visibility.len(),
+            });
+        }
+
+        let source_instance_count = expected_instances
+            .try_into()
+            .map_err(|_| RenderContractError::InstanceCountOverflow)?;
+        let mut compacted_source_instances = Vec::new();
+        let mut batches = Vec::with_capacity(scene.batches.len());
+        let mut source_first_instance = 0usize;
+        for (batch_index, batch) in scene.batches.iter().enumerate() {
+            let compacted_first_instance = compacted_source_instances.len();
+            for (member_index, member) in batch.members.iter().enumerate() {
+                let source_instance = source_first_instance + member_index;
+                let visibility = source_visibility[source_instance];
+                if visibility > 1 {
+                    return Err(RenderContractError::InvalidVisibilityValue {
+                        source_instance,
+                        value: visibility,
+                    });
+                }
+                let suppressed_root = batch.id.layer == RenderBatchLayer::RetainedRoot
+                    && scene
+                        .suppressed_root_faces
+                        .binary_search(&member.face_index)
+                        .is_ok();
+                if batch.enabled && visibility == 1 && !suppressed_root {
+                    compacted_source_instances.push(
+                        source_instance
+                            .try_into()
+                            .map_err(|_| RenderContractError::InstanceCountOverflow)?,
+                    );
+                }
+            }
+            let source_instance_count = batch
+                .members
+                .len()
+                .try_into()
+                .map_err(|_| RenderContractError::InstanceCountOverflow)?;
+            let compacted_instance_count = compacted_source_instances
+                .len()
+                .checked_sub(compacted_first_instance)
+                .expect("compaction output length is monotonic")
+                .try_into()
+                .map_err(|_| RenderContractError::InstanceCountOverflow)?;
+            batches.push(CompactedRenderBatchRange {
+                batch_index: batch_index
+                    .try_into()
+                    .map_err(|_| RenderContractError::BatchCountOverflow)?,
+                source_first_instance: source_first_instance
+                    .try_into()
+                    .map_err(|_| RenderContractError::InstanceCountOverflow)?,
+                source_instance_count,
+                compacted_first_instance: compacted_first_instance
+                    .try_into()
+                    .map_err(|_| RenderContractError::InstanceCountOverflow)?,
+                compacted_instance_count,
+            });
+            source_first_instance += batch.members.len();
+        }
+        Ok(Self {
+            scene_revision: scene.revision,
+            source_instance_count,
+            compacted_source_instances,
+            batches,
+        })
+    }
+
+    /// Produce one exact five-word indexed-indirect record per canonical batch.
+    /// The backend may issue only the records selected by the active draw pass;
+    /// zero-instance records remain useful for a fixed-size GPU argument table.
+    pub fn indexed_indirect_arguments(
+        &self,
+        scene: &RenderSceneSnapshot,
+        geometry: RenderGeometry,
+    ) -> Result<Vec<IndexedIndirectArguments>, RenderContractError> {
+        scene.validate()?;
+        if self.scene_revision != scene.revision {
+            return Err(RenderContractError::CompactionSceneRevisionMismatch {
+                plan: self.scene_revision,
+                scene: scene.revision,
+            });
+        }
+        if self.batches.len() != scene.batches.len() {
+            return Err(RenderContractError::CompactionBatchShapeMismatch);
+        }
+        self.batches
+            .iter()
+            .zip(&scene.batches)
+            .enumerate()
+            .map(|(batch_index, (range, batch))| {
+                if range.batch_index as usize != batch_index
+                    || range.source_instance_count as usize != batch.members.len()
+                {
+                    return Err(RenderContractError::CompactionBatchShapeMismatch);
+                }
+                let index_count = match geometry {
+                    RenderGeometry::Triangles => batch.triangle_index_count,
+                    RenderGeometry::Lines => batch.line_index_count,
+                };
+                Ok(IndexedIndirectArguments {
+                    index_count,
+                    instance_count: range.compacted_instance_count,
+                    first_index: 0,
+                    base_vertex: 0,
+                    first_instance: range.compacted_first_instance,
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FocusFieldPacket {
     pub sphere: [f32; 4],
@@ -963,6 +1129,10 @@ pub enum RenderContractError {
     },
     BatchCountOverflow,
     InstanceCountOverflow,
+    VisibilityLengthMismatch { expected: usize, actual: usize },
+    InvalidVisibilityValue { source_instance: usize, value: u8 },
+    CompactionSceneRevisionMismatch { plan: u64, scene: u64 },
+    CompactionBatchShapeMismatch,
     SceneRevisionMismatch { frame: u64, scene: u64 },
     CommandSequenceMismatch,
     CommandBatchMissing { batch_index: u32 },
@@ -1047,6 +1217,24 @@ impl fmt::Display for RenderContractError {
             ),
             Self::BatchCountOverflow => formatter.write_str("render batch count exceeds u32"),
             Self::InstanceCountOverflow => formatter.write_str("render instance count exceeds u32"),
+            Self::VisibilityLengthMismatch { expected, actual } => write!(
+                formatter,
+                "visibility stream has {actual} entries; expected {expected}"
+            ),
+            Self::InvalidVisibilityValue {
+                source_instance,
+                value,
+            } => write!(
+                formatter,
+                "visibility stream entry {source_instance} has non-binary value {value}"
+            ),
+            Self::CompactionSceneRevisionMismatch { plan, scene } => write!(
+                formatter,
+                "visibility compaction revision {plan} does not match scene {scene}"
+            ),
+            Self::CompactionBatchShapeMismatch => {
+                formatter.write_str("visibility compaction batch shape does not match the scene")
+            }
             Self::SceneRevisionMismatch { frame, scene } => write!(
                 formatter,
                 "render frame scene revision {frame} does not match snapshot {scene}"
@@ -1107,19 +1295,29 @@ mod tests {
                 material_index,
                 render_node_index: 0,
             }),
-            members: vec![RenderBatchMember {
+            members: vec![member(
                 face_index,
-                leaf_id: crate::screen_partition::ScreenPatchLeafId::ROOT,
-                node_index: 0,
-                edge_lods: [2; 3],
-                permutation_index: 0,
-                vertex_lods: [2; 3],
-            }],
+                crate::screen_partition::ScreenPatchLeafId::ROOT,
+            )],
             triangle_index_count: 6,
             line_index_count: 6,
             transform: transform(),
             enabled,
             pbr_class,
+        }
+    }
+
+    fn member(
+        face_index: u32,
+        leaf_id: crate::screen_partition::ScreenPatchLeafId,
+    ) -> RenderBatchMember {
+        RenderBatchMember {
+            face_index,
+            leaf_id,
+            node_index: 0,
+            edge_lods: [2; 3],
+            permutation_index: 0,
+            vertex_lods: [2; 3],
         }
     }
 
@@ -1165,6 +1363,133 @@ mod tests {
         moved_model[13] = 0.5;
         assert!(patch_preparation_needed(false, false, Some(mvp), moved_model));
         assert!(patch_visibility_needed(false, Some(mvp), 7, moved, 7));
+    }
+
+    #[test]
+    fn visibility_compaction_is_stable_and_emits_indirect_counts() {
+        assert_eq!(std::mem::size_of::<IndexedIndirectArguments>(), 20);
+        assert_eq!(std::mem::align_of::<IndexedIndirectArguments>(), 4);
+        let mut scene = scene();
+        scene.batches[0].members.push(member(
+            3,
+            crate::screen_partition::ScreenPatchLeafId::ROOT,
+        ));
+        let plan = VisibilityCompactionPlan::build(&scene, &[1, 0, 1, 1]).unwrap();
+        assert_eq!(plan.source_instance_count, 4);
+        assert_eq!(plan.compacted_source_instances, [0, 3]);
+        assert_eq!(
+            plan.batches,
+            [
+                CompactedRenderBatchRange {
+                    batch_index: 0,
+                    source_first_instance: 0,
+                    source_instance_count: 2,
+                    compacted_first_instance: 0,
+                    compacted_instance_count: 1,
+                },
+                CompactedRenderBatchRange {
+                    batch_index: 1,
+                    source_first_instance: 2,
+                    source_instance_count: 1,
+                    compacted_first_instance: 1,
+                    compacted_instance_count: 0,
+                },
+                CompactedRenderBatchRange {
+                    batch_index: 2,
+                    source_first_instance: 3,
+                    source_instance_count: 1,
+                    compacted_first_instance: 1,
+                    compacted_instance_count: 1,
+                },
+            ],
+        );
+        let arguments = plan
+            .indexed_indirect_arguments(&scene, RenderGeometry::Triangles)
+            .unwrap();
+        assert_eq!(
+            arguments,
+            [
+                IndexedIndirectArguments {
+                    index_count: 6,
+                    instance_count: 1,
+                    first_index: 0,
+                    base_vertex: 0,
+                    first_instance: 0,
+                },
+                IndexedIndirectArguments {
+                    index_count: 6,
+                    instance_count: 0,
+                    first_index: 0,
+                    base_vertex: 0,
+                    first_instance: 1,
+                },
+                IndexedIndirectArguments {
+                    index_count: 6,
+                    instance_count: 1,
+                    first_index: 0,
+                    base_vertex: 0,
+                    first_instance: 1,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn visibility_compaction_replaces_suppressed_roots_with_visible_leaves() {
+        let mut roots = batch(0, 0, PbrDrawClass::Opaque, true);
+        roots.id.layer = RenderBatchLayer::RetainedRoot;
+        roots.members.push(member(
+            1,
+            crate::screen_partition::ScreenPatchLeafId::ROOT,
+        ));
+        let mut overlay = batch(0, 0, PbrDrawClass::Opaque, true);
+        overlay.id.layer = RenderBatchLayer::AdaptiveOverlay;
+        overlay.members[0].leaf_id = crate::screen_partition::ScreenPatchLeafId::ROOT
+            .child(0)
+            .unwrap();
+        let scene = RenderSceneSnapshot {
+            revision: 11,
+            suppressed_root_faces: vec![0],
+            batches: vec![roots, overlay],
+        };
+        let plan = VisibilityCompactionPlan::build(&scene, &[1, 1, 1]).unwrap();
+        assert_eq!(plan.compacted_source_instances, [1, 2]);
+        assert_eq!(plan.batches[0].compacted_instance_count, 1);
+        assert_eq!(plan.batches[1].compacted_instance_count, 1);
+    }
+
+    #[test]
+    fn visibility_compaction_rejects_bad_streams_and_stale_scenes() {
+        let scene = scene();
+        assert_eq!(
+            VisibilityCompactionPlan::build(&scene, &[1, 0]),
+            Err(RenderContractError::VisibilityLengthMismatch {
+                expected: 3,
+                actual: 2,
+            }),
+        );
+        assert_eq!(
+            VisibilityCompactionPlan::build(&scene, &[1, 2, 1]),
+            Err(RenderContractError::InvalidVisibilityValue {
+                source_instance: 1,
+                value: 2,
+            }),
+        );
+        let mut plan = VisibilityCompactionPlan::build(&scene, &[1, 1, 1]).unwrap();
+        let mut newer_scene = scene.clone();
+        newer_scene.revision += 1;
+        assert_eq!(
+            plan.indexed_indirect_arguments(&newer_scene, RenderGeometry::Lines),
+            Err(RenderContractError::CompactionSceneRevisionMismatch {
+                plan: scene.revision,
+                scene: newer_scene.revision,
+            }),
+        );
+        plan.batches.pop();
+        assert_eq!(
+            plan.indexed_indirect_arguments(&scene, RenderGeometry::Lines),
+            Err(RenderContractError::CompactionBatchShapeMismatch),
+        );
     }
 
     #[test]
