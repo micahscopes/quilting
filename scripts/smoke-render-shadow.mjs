@@ -18,6 +18,7 @@ const {
   mr_setAdaptivePickedFace,
   mr_setAdaptiveComponentShadowEnabled,
   mr_setAdaptiveNeighborhoodShadowEnabled,
+  mr_setAdaptiveNeighborhoodPublicationEnabled,
   mr_setAdaptiveRetainedPublicationEnabled,
   mr_setAdaptiveRetainedShadowEnabled,
   mr_setLodGradingRatio,
@@ -67,6 +68,11 @@ assert.equal(
   mr_setAdaptiveNeighborhoodShadowEnabled(true),
   null,
   'adaptive neighborhood shadow should be inert before a renderer exists',
+);
+assert.equal(
+  mr_setAdaptiveNeighborhoodPublicationEnabled(true),
+  null,
+  'adaptive neighborhood publication should be inert before a renderer exists',
 );
 assert.equal(
   mr_setAdaptiveRetainedPublicationEnabled(true),

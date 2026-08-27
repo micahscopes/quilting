@@ -313,14 +313,21 @@ pub(crate) struct AdaptivePickedRuntime {
     component_shadow: AdaptiveComponentShadow,
     neighborhood_shadow: AdaptiveNeighborhoodShadow,
     component_publication_enabled: bool,
+    neighborhood_publication_enabled: bool,
     pending_component_shadow_staged: bool,
+    pending_neighborhood_shadow_staged: bool,
     pending_component_publication: bool,
+    pending_neighborhood_publication: bool,
     pending_component_authority: bool,
     published_component_publication: bool,
+    published_neighborhood_publication: bool,
     component_publication_installs: u64,
     component_authority_changed_installs: u64,
     component_publication_fallbacks: u64,
     component_publication_last_error: Option<String>,
+    neighborhood_publication_installs: u64,
+    neighborhood_publication_fallbacks: u64,
+    neighborhood_publication_last_error: Option<String>,
     lod_scratch: ScreenMeshLeafLodScratch,
     retained_shadow_enabled: bool,
     pending_overlay: AdaptiveRenderOverlay,
@@ -437,6 +444,11 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     component_publication_installs: u64,
     component_publication_fallbacks: u64,
     component_publication_last_error: Option<&'a str>,
+    neighborhood_publication_enabled: bool,
+    neighborhood_publication_state: &'static str,
+    neighborhood_publication_installs: u64,
+    neighborhood_publication_fallbacks: u64,
+    neighborhood_publication_last_error: Option<&'a str>,
     retained_shadow_enabled: bool,
     retained_shadow_state: &'static str,
     retained_shadow_suppressed_faces: u64,
@@ -643,9 +655,10 @@ impl AdaptiveNeighborhoodReconciliationCache {
     }
 }
 
-/// Disabled-by-default bounded recomputation observer. This owns no render
-/// authority: every successfully staged candidate forces the complete oracle
-/// to run in the same epoch before a match can be recorded.
+/// Disabled-by-default bounded recomputation observer. This never owns
+/// independent render authority: every successfully staged candidate forces
+/// the complete oracle to run in the same epoch before a match can be recorded.
+/// A separate publication gate may consume its exact overlay afterward.
 #[derive(Default)]
 struct AdaptiveNeighborhoodShadow {
     enabled: bool,
@@ -1082,6 +1095,19 @@ impl AdaptiveNeighborhoodShadow {
         } else {
             self.mismatches = self.mismatches.saturating_add(1);
         }
+    }
+
+    fn swap_exact_overlay(&mut self, target: &mut AdaptiveRenderOverlay) -> Result<(), String> {
+        if let Some(error) = self.last_error.as_deref() {
+            return Err(error.to_string());
+        }
+        if !self.last.is_some_and(|comparison| comparison.exact) {
+            return Err(
+                "adaptive neighborhood publication did not match the complete oracle".into(),
+            );
+        }
+        std::mem::swap(target, &mut self.overlay);
+        Ok(())
     }
 }
 
@@ -1948,14 +1974,21 @@ impl AdaptivePickedRuntime {
         self.component_shadow = AdaptiveComponentShadow::default();
         self.neighborhood_shadow = AdaptiveNeighborhoodShadow::default();
         self.component_publication_enabled = false;
+        self.neighborhood_publication_enabled = false;
         self.pending_component_shadow_staged = false;
+        self.pending_neighborhood_shadow_staged = false;
         self.pending_component_publication = false;
+        self.pending_neighborhood_publication = false;
         self.pending_component_authority = false;
         self.published_component_publication = false;
+        self.published_neighborhood_publication = false;
         self.component_publication_installs = 0;
         self.component_authority_changed_installs = 0;
         self.component_publication_fallbacks = 0;
         self.component_publication_last_error = None;
+        self.neighborhood_publication_installs = 0;
+        self.neighborhood_publication_fallbacks = 0;
+        self.neighborhood_publication_last_error = None;
         self.retained_shadow_enabled = false;
         self.pending_overlay = AdaptiveRenderOverlay::default();
         self.pending_overlay_signature = None;
@@ -2049,13 +2082,19 @@ impl AdaptivePickedRuntime {
 
     /// Toggle a read-only bounded-neighborhood oracle. This is intentionally
     /// independent of component publication: a staged neighborhood forces the
-    /// complete plan to execute and never supplies live groups.
+    /// complete plan to execute. Only the separate exact-publication gate may
+    /// consume its result.
     pub(crate) fn set_neighborhood_shadow_enabled(
         &mut self,
         enabled: bool,
     ) -> Result<bool, String> {
         if self.has_pending_publication() {
             return Err("adaptive publication is already staged".into());
+        }
+        if !enabled && self.neighborhood_publication_enabled {
+            return Err(
+                "adaptive neighborhood publication requires its exact shadow oracle".into(),
+            );
         }
         if enabled {
             self.set_retained_shadow_enabled(true)?;
@@ -2069,6 +2108,11 @@ impl AdaptivePickedRuntime {
     ) -> Result<bool, String> {
         if self.has_pending_publication() {
             return Err("adaptive publication is already staged".into());
+        }
+        if enabled && self.neighborhood_publication_enabled {
+            return Err(
+                "adaptive component and neighborhood publication are mutually exclusive".into(),
+            );
         }
         if enabled {
             self.set_component_shadow_enabled(true)?;
@@ -2092,6 +2136,38 @@ impl AdaptivePickedRuntime {
         self.component_publication_enabled
     }
 
+    pub(crate) fn set_neighborhood_publication_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        if self.has_pending_publication() {
+            return Err("adaptive publication is already staged".into());
+        }
+        if enabled && self.component_publication_enabled {
+            return Err(
+                "adaptive component and neighborhood publication are mutually exclusive".into(),
+            );
+        }
+        if enabled {
+            self.set_neighborhood_shadow_enabled(true)?;
+        }
+        let changed = self.neighborhood_publication_enabled != enabled;
+        self.neighborhood_publication_enabled = enabled;
+        self.pending_neighborhood_shadow_staged = false;
+        self.pending_neighborhood_publication = false;
+        self.neighborhood_publication_last_error = None;
+        if changed {
+            // Force one freshly neighborhood-derived overlay across the
+            // cutover boundary instead of inheriting an equal complete cache.
+            self.published_overlay_signature = None;
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn neighborhood_publication_enabled(&self) -> bool {
+        self.neighborhood_publication_enabled
+    }
+
     fn component_publication_state(&self) -> &'static str {
         if !self.component_publication_enabled {
             "disabled"
@@ -2105,6 +2181,43 @@ impl AdaptivePickedRuntime {
             "complete-ineligible"
         } else {
             "awaiting-exact-component"
+        }
+    }
+
+    fn neighborhood_publication_state(&self) -> &'static str {
+        if !self.neighborhood_publication_enabled {
+            "disabled"
+        } else if self.pending_neighborhood_publication {
+            "staged"
+        } else if self.published_neighborhood_publication {
+            "active"
+        } else if self.neighborhood_publication_last_error.is_some() {
+            "complete-fallback"
+        } else {
+            "awaiting-exact-neighborhood"
+        }
+    }
+
+    fn stage_exact_neighborhood_publication(&mut self) {
+        if !self.neighborhood_publication_enabled || !self.pending_neighborhood_shadow_staged {
+            return;
+        }
+        match self
+            .neighborhood_shadow
+            .swap_exact_overlay(&mut self.pending_overlay)
+        {
+            Ok(()) => {
+                self.pending_overlay_reuses_published = false;
+                self.pending_neighborhood_publication = true;
+                self.pending_component_publication = false;
+                self.neighborhood_publication_last_error = None;
+            }
+            Err(error) => {
+                self.pending_neighborhood_publication = false;
+                self.neighborhood_publication_fallbacks =
+                    self.neighborhood_publication_fallbacks.saturating_add(1);
+                self.neighborhood_publication_last_error = Some(error);
+            }
         }
     }
 
@@ -2125,7 +2238,9 @@ impl AdaptivePickedRuntime {
             self.pending_overlay_signature = None;
             self.pending_overlay_reuses_published = false;
             self.last_retained_shadow_stage_ms = 0.0;
-            return Ok(false);
+            // No retained overlay participates in complete publication, so
+            // complete-group reuse is sufficient for this epoch.
+            return Ok(true);
         }
         if self.pending_plan.is_none() {
             return Err("adaptive overlay has no staged plan".into());
@@ -2204,20 +2319,23 @@ impl AdaptivePickedRuntime {
                 atlas_triangle_counts,
                 self.pending_triangles,
             );
-            self.pending_component_publication = self.component_publication_enabled
-                && self.pending_component_shadow_staged
-                && self.published_component_publication;
-            if self.component_publication_enabled
-                && self.pending_component_shadow_staged
-                && !self.pending_component_publication
-            {
-                self.component_publication_fallbacks =
-                    self.component_publication_fallbacks.saturating_add(1);
-                self.component_publication_last_error = Some(
-                    "exact component overlay was not the published cache epoch".into(),
-                );
+            self.stage_exact_neighborhood_publication();
+            if !self.pending_neighborhood_publication {
+                self.pending_component_publication = self.component_publication_enabled
+                    && self.pending_component_shadow_staged
+                    && self.published_component_publication;
+                if self.component_publication_enabled
+                    && self.pending_component_shadow_staged
+                    && !self.pending_component_publication
+                {
+                    self.component_publication_fallbacks =
+                        self.component_publication_fallbacks.saturating_add(1);
+                    self.component_publication_last_error = Some(
+                        "exact component overlay was not the published cache epoch".into(),
+                    );
+                }
             }
-            return Ok(true);
+            return Ok(self.pending_overlay_reuses_published);
         }
         let stage_start = browser_now_ms();
         let frontier = self
@@ -2279,7 +2397,11 @@ impl AdaptivePickedRuntime {
             atlas_triangle_counts,
             self.pending_triangles,
         );
-        if self.component_publication_enabled && self.pending_component_shadow_staged {
+        self.stage_exact_neighborhood_publication();
+        if !self.pending_neighborhood_publication
+            && self.component_publication_enabled
+            && self.pending_component_shadow_staged
+        {
             match self
                 .component_shadow
                 .swap_exact_overlay(&mut self.pending_overlay)
@@ -2359,7 +2481,9 @@ impl AdaptivePickedRuntime {
         self.pending_overlay_signature = None;
         self.pending_overlay_reuses_published = false;
         self.pending_component_shadow_staged = false;
+        self.pending_neighborhood_shadow_staged = false;
         self.pending_component_publication = false;
+        self.pending_neighborhood_publication = false;
         self.pending_component_authority = false;
         self.pending_selected_faces.clear();
     }
@@ -2379,6 +2503,7 @@ impl AdaptivePickedRuntime {
     fn clear_published_overlay(&mut self) {
         self.published_overlay_signature = None;
         self.published_component_publication = false;
+        self.published_neighborhood_publication = false;
     }
 
     /// Commit diagnostics only after the renderer has published every staged
@@ -2394,11 +2519,14 @@ impl AdaptivePickedRuntime {
 
     fn commit_publication_mode(&mut self, retained_gpu_publication: bool) {
         let component_candidate = self.pending_component_publication;
+        let neighborhood_candidate = self.pending_neighborhood_publication;
         let component_authority = self.pending_component_authority;
         if let Some(plan) = self.pending_plan.take() {
             self.commit_pending_overlay();
             self.published_component_publication =
                 retained_gpu_publication && component_candidate;
+            self.published_neighborhood_publication =
+                retained_gpu_publication && neighborhood_candidate;
             if self.published_component_publication {
                 self.component_publication_installs =
                     self.component_publication_installs.saturating_add(1);
@@ -2411,6 +2539,19 @@ impl AdaptivePickedRuntime {
                 self.component_publication_fallbacks =
                     self.component_publication_fallbacks.saturating_add(1);
                 self.component_publication_last_error = Some(
+                    "retained GPU publication was unavailable; complete GPU epoch committed"
+                        .into(),
+                );
+            }
+            if self.published_neighborhood_publication {
+                self.neighborhood_publication_installs = self
+                    .neighborhood_publication_installs
+                    .saturating_add(1);
+            } else if neighborhood_candidate {
+                self.neighborhood_publication_fallbacks = self
+                    .neighborhood_publication_fallbacks
+                    .saturating_add(1);
+                self.neighborhood_publication_last_error = Some(
                     "retained GPU publication was unavailable; complete GPU epoch committed"
                         .into(),
                 );
@@ -2474,6 +2615,12 @@ impl AdaptivePickedRuntime {
             self.component_publication_fallbacks =
                 self.component_publication_fallbacks.saturating_add(1);
             self.component_publication_last_error = Some(error.clone());
+        }
+        if self.pending_neighborhood_publication {
+            self.neighborhood_publication_fallbacks = self
+                .neighborhood_publication_fallbacks
+                .saturating_add(1);
+            self.neighborhood_publication_last_error = Some(error.clone());
         }
         let retry_legacy = self.pending_legacy;
         self.clear_pending_publication();
@@ -2830,6 +2977,7 @@ impl AdaptivePickedRuntime {
                 max_face_edge_ratio,
                 max_atlas_lod,
             );
+            self.pending_neighborhood_shadow_staged = neighborhood_plan_staged;
             let (component_plan_staged, certified_component) =
                 match self.component_shadow.stage_plan(
                     plan_request,
@@ -3231,6 +3379,13 @@ impl AdaptivePickedRuntime {
             component_publication_fallbacks: self.component_publication_fallbacks,
             component_publication_last_error: self
                 .component_publication_last_error
+                .as_deref(),
+            neighborhood_publication_enabled: self.neighborhood_publication_enabled,
+            neighborhood_publication_state: self.neighborhood_publication_state(),
+            neighborhood_publication_installs: self.neighborhood_publication_installs,
+            neighborhood_publication_fallbacks: self.neighborhood_publication_fallbacks,
+            neighborhood_publication_last_error: self
+                .neighborhood_publication_last_error
                 .as_deref(),
             retained_shadow_enabled: self.retained_shadow_enabled,
             retained_shadow_state,
@@ -4299,6 +4454,12 @@ mod tests {
         runtime.set_component_publication_enabled(true).unwrap();
         runtime.set_neighborhood_shadow_enabled(true).unwrap();
         assert_eq!(
+            runtime
+                .set_neighborhood_publication_enabled(true)
+                .unwrap_err(),
+            "adaptive component and neighborhood publication are mutually exclusive",
+        );
+        assert_eq!(
             runtime.set_retained_shadow_enabled(false).unwrap_err(),
             "adaptive component shadow requires retained overlay shadow",
         );
@@ -4633,6 +4794,125 @@ mod tests {
         assert_eq!(fallback.component_authority_revocations, 1);
         assert!(fallback.component_authority_revoked);
         assert!(runtime.component_shadow.certificate.is_none());
+
+        runtime.set_component_publication_enabled(false).unwrap();
+        runtime
+            .set_neighborhood_publication_enabled(true)
+            .unwrap();
+        runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                4,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((6, 1)),
+                &[Some(resident); 3],
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                0,
+                0,
+                false,
+                true,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+        let neighborhood_overlay_reused = runtime
+            .stage_pending_overlay(
+                0,
+                &baseline_groups,
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                resident,
+                &atlas_triangles,
+            )
+            .unwrap();
+        assert!(!neighborhood_overlay_reused);
+        let neighborhood_staged = runtime.snapshot();
+        assert_eq!(neighborhood_staged.neighborhood_shadow_state, "match");
+        assert!(neighborhood_staged.neighborhood_publication_enabled);
+        assert_eq!(
+            neighborhood_staged.neighborhood_publication_state,
+            "staged",
+        );
+        assert_eq!(neighborhood_staged.neighborhood_publication_installs, 0);
+        assert_eq!(neighborhood_staged.neighborhood_publication_fallbacks, 0);
+        assert_eq!(neighborhood_staged.neighborhood_publication_last_error, None);
+        runtime.commit_publication();
+        let neighborhood_published = runtime.snapshot();
+        assert_eq!(
+            neighborhood_published.neighborhood_publication_state,
+            "active",
+        );
+        assert_eq!(neighborhood_published.neighborhood_publication_installs, 1);
+
+        runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                4,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((7, 1)),
+                &[Some(resident); 3],
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                0,
+                0,
+                false,
+                true,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+        // Corrupt only the neighborhood replacement boundary after the
+        // complete plan has staged. The complete overlay must remain the
+        // physical fallback rather than publishing an unproven local result.
+        runtime.neighborhood_shadow.plan.observed_faces.clear();
+        runtime
+            .stage_pending_overlay(
+                0,
+                &baseline_groups,
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                resident,
+                &atlas_triangles,
+            )
+            .unwrap();
+        runtime.commit_publication();
+        let neighborhood_fallback = runtime.snapshot();
+        assert_eq!(
+            neighborhood_fallback.neighborhood_publication_state,
+            "complete-fallback",
+        );
+        assert_eq!(neighborhood_fallback.neighborhood_publication_installs, 1);
+        assert_eq!(neighborhood_fallback.neighborhood_publication_fallbacks, 1);
+        assert!(neighborhood_fallback
+            .neighborhood_publication_last_error
+            .is_some());
     }
 
     #[wasm_bindgen_test]

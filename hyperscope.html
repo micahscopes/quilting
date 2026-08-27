@@ -410,6 +410,7 @@ import init, {
   mr_setAdaptiveRetainedShadowEnabled,
   mr_setAdaptiveComponentShadowEnabled,
   mr_setAdaptiveNeighborhoodShadowEnabled,
+  mr_setAdaptiveNeighborhoodPublicationEnabled,
   mr_setAdaptiveComponentPublicationEnabled,
   mr_setAdaptiveRetainedPublicationEnabled,
   mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
@@ -1081,6 +1082,16 @@ const adaptivePickedDiagnostics = {
     }
     this.snapshot = mr_setAdaptiveNeighborhoodShadowEnabled(Boolean(enabled));
     if (enabled && this.snapshot?.enabled && this.snapshot?.transitionPending) {
+      this.snapshot = mr_refreshAdaptivePicked();
+    }
+    return this.snapshot;
+  },
+  setNeighborhoodPublication(enabled = true) {
+    if (lodInFlight) {
+      return { ok: false, error: 'Wait for the current LOD classification before changing neighborhood publication' };
+    }
+    this.snapshot = mr_setAdaptiveNeighborhoodPublicationEnabled(Boolean(enabled));
+    if (this.snapshot?.enabled && this.snapshot?.transitionPending) {
       this.snapshot = mr_refreshAdaptivePicked();
     }
     return this.snapshot;

@@ -3822,7 +3822,7 @@ fn apply_adaptive_screen_plan(
         Ok(groups_reused) => groups_reused,
         Err(_) => return false,
     };
-    if let Err(error) = adaptive_picked.stage_pending_overlay(
+    let overlay_reused = match adaptive_picked.stage_pending_overlay(
         batch_layout_revision,
         baseline_batch_groups,
         resident_face_lods,
@@ -3833,10 +3833,13 @@ fn apply_adaptive_screen_plan(
         initial,
         &atlas_triangle_counts,
     ) {
-        adaptive_picked.reject_staged_overlay(groups_reused, batch_groups, error);
-        return false;
-    }
-    groups_reused
+        Ok(reused) => reused,
+        Err(error) => {
+            adaptive_picked.reject_staged_overlay(groups_reused, batch_groups, error);
+            return false;
+        }
+    };
+    groups_reused && overlay_reused
 }
 
 #[wasm_bindgen(js_name = "mr_setRoundShadowEnabled")]
@@ -4002,6 +4005,38 @@ pub fn mr_set_adaptive_neighborhood_shadow_enabled(enabled: bool) -> JsValue {
     })
 }
 
+/// Opt into neighborhood-derived retained-layer publication only after the
+/// same-epoch complete plan, overlay, atlas residency, and triangle budget all
+/// match. A mismatch keeps the complete overlay staged; a GPU failure keeps
+/// the prior GPU epoch. This does not yet let a neighborhood skip its oracle.
+#[wasm_bindgen(js_name = "mr_setAdaptiveNeighborhoodPublicationEnabled")]
+pub fn mr_set_adaptive_neighborhood_publication_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let changed = match state
+            .adaptive_picked
+            .set_neighborhood_publication_enabled(enabled)
+        {
+            Ok(changed) => changed,
+            Err(error) => return adaptive_screen_diagnostic_error(error),
+        };
+        let retained_changed = enabled && !state.adaptive_retained_publication_enabled;
+        if enabled {
+            state.adaptive_retained_publication_enabled = true;
+        }
+        if changed || retained_changed {
+            state.adaptive_retained_publication_error = None;
+            if state.adaptive_picked.is_enabled() {
+                state.adaptive_batch_transition_pending = true;
+            }
+        }
+        adaptive_picked_snapshot_js(state, None)
+    })
+}
+
 /// Opt into component-derived retained-layer publication behind the exact
 /// complete-plan oracle. A mismatch keeps the complete overlay staged; a GPU
 /// failure keeps the prior GPU epoch. Enabling this also opts into retained
@@ -4047,9 +4082,12 @@ pub fn mr_set_adaptive_retained_publication_enabled(enabled: bool) -> JsValue {
         if state.adaptive_picked.has_pending_publication() {
             return adaptive_screen_diagnostic_error("adaptive publication is already staged");
         }
-        if !enabled && state.adaptive_picked.component_publication_enabled() {
+        if !enabled
+            && (state.adaptive_picked.component_publication_enabled()
+                || state.adaptive_picked.neighborhood_publication_enabled())
+        {
             return adaptive_screen_diagnostic_error(
-                "adaptive component publication requires retained GPU publication",
+                "adaptive component or neighborhood publication requires retained GPU publication",
             );
         }
         if enabled {
