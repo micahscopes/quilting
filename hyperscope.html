@@ -1750,7 +1750,7 @@ let manualCameraInputRevision = 0;
 function markManualCameraInput(preserveRustCamera = false) {
   manualCameraInputRevision += 1;
   cameraFocusTransition = null;
-  rustAppReframeTransitionActive = false;
+  rustAppSelectedCameraTransitionKind = null;
   if (!preserveRustCamera) rustManualCameraActive = false;
   return manualCameraInputRevision;
 }
@@ -3334,7 +3334,7 @@ let rustAppShadowAssetOrdinal = 0;
 let rustAppPresentationPoseReady = false;
 let rustAppShadowSelectionQueued = false;
 let rustAppSelectionTransitionActive = false;
-let rustAppReframeTransitionActive = false;
+let rustAppSelectedCameraTransitionKind = null;
 let rustAppSelectionEventAtMs = null;
 let rustAppFrameElapsedSeconds = 0;
 let rustAssetCreditsMountAttempted = false;
@@ -3398,6 +3398,15 @@ const rustAppShadowDiagnostics = {
   inversionGestureRejects: 0,
   inversionGestureComparisons: 0,
   inversionGestureMismatches: 0,
+  aimDispatches: 0,
+  aimAccepts: 0,
+  aimRejects: 0,
+  aimFrames: 0,
+  aimComparisons: 0,
+  aimMismatches: 0,
+  aimMaximumError: 0,
+  aimAuthorityWrites: 0,
+  aimFallbackWrites: 0,
   reframeDispatches: 0,
   reframeAccepts: 0,
   reframeRejects: 0,
@@ -3793,7 +3802,7 @@ function compareAppSelectionTransitionFrame(navigation, nowMs) {
   }
 }
 
-function appReframeTransitionError(navigation, nowMs) {
+function appSelectedCameraTransitionError(navigation, nowMs) {
   const camera = navigation?.camera;
   if (!camera) return Infinity;
   const browser = manualNavigationState();
@@ -3840,21 +3849,22 @@ function appReframeTransitionError(navigation, nowMs) {
   return error;
 }
 
-function compareAppReframeTransitionFrame(navigation, nowMs) {
-  rustAppShadowDiagnostics.reframeFrames += 1;
-  rustAppShadowDiagnostics.reframeComparisons += 1;
-  const error = appReframeTransitionError(navigation, nowMs);
-  rustAppShadowDiagnostics.reframeMaximumError = Math.max(
-    rustAppShadowDiagnostics.reframeMaximumError,
+function compareAppSelectedCameraTransitionFrame(navigation, nowMs, kind) {
+  const prefix = kind === 'aim' ? 'aim' : 'reframe';
+  rustAppShadowDiagnostics[`${prefix}Frames`] += 1;
+  rustAppShadowDiagnostics[`${prefix}Comparisons`] += 1;
+  const error = appSelectedCameraTransitionError(navigation, nowMs);
+  rustAppShadowDiagnostics[`${prefix}MaximumError`] = Math.max(
+    rustAppShadowDiagnostics[`${prefix}MaximumError`],
     error,
   );
   if (error > RUST_NAVIGATION_SHADOW_TOLERANCE) {
-    rustAppShadowDiagnostics.reframeMismatches += 1;
-    const count = rustAppShadowDiagnostics.reframeMismatches;
+    rustAppShadowDiagnostics[`${prefix}Mismatches`] += 1;
+    const count = rustAppShadowDiagnostics[`${prefix}Mismatches`];
     if (count === 1 || (count & (count - 1)) === 0) {
       recordAppShadowMismatch(
-        'selection_reframe',
-        `Rust selected-camera reframe diverged by ${error}`,
+        `selection_${prefix}`,
+        `Rust selected-camera ${prefix} diverged by ${error}`,
       );
     }
   }
@@ -3916,7 +3926,7 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
   const deltaSeconds = selectionTransitionFrameDeltaSeconds(
     nowMs,
     selectionEventAtMs,
-    rustAppSelectionTransitionActive || rustAppReframeTransitionActive,
+    rustAppSelectionTransitionActive || rustAppSelectedCameraTransitionKind != null,
     rawFrameDeltaSeconds,
     frameDeltaSeconds,
   );
@@ -3938,7 +3948,7 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
       deltaSeconds,
     );
     const needsSnapshot = rustAppSelectionTransitionActive
-      || rustAppReframeTransitionActive
+      || rustAppSelectedCameraTransitionKind != null
       || (rustPresentationTransitionActive && rustAppPresentationPoseReady);
     const navigation = needsSnapshot ? rustAppShadow.navigationSnapshot() : null;
     if (navigation) rustAppShadowDiagnostics.frameSnapshotCalls += 1;
@@ -3955,21 +3965,30 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
         refreshAppShadowSnapshot();
       }
     }
-    if (rustAppReframeTransitionActive && navigation) {
-      const wasTransitionActive = rustAppReframeTransitionActive;
+    const selectedCameraTransitionKind = rustAppSelectedCameraTransitionKind;
+    if (selectedCameraTransitionKind && navigation) {
       if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
         if (applyRustCameraSnapshot(navigation)) {
           rustManualCameraActive = true;
-          rustAppShadowDiagnostics.reframeAuthorityWrites += 1;
+          rustAppShadowDiagnostics[`${selectedCameraTransitionKind}AuthorityWrites`] += 1;
         }
       } else if (RUST_NAVIGATION_IMPLEMENTATION === 'shadow') {
-        compareAppReframeTransitionFrame(navigation, nowMs);
+        compareAppSelectedCameraTransitionFrame(
+          navigation,
+          nowMs,
+          selectedCameraTransitionKind,
+        );
       }
-      rustAppReframeTransitionActive =
-        Number(navigation.camera?.camera_transition_remaining || 0) > 0;
-      if (wasTransitionActive && !rustAppReframeTransitionActive) {
+      const remainsActive = Number(
+        navigation.camera?.camera_transition_remaining || 0,
+      ) > 0;
+      rustAppSelectedCameraTransitionKind = remainsActive
+        ? selectedCameraTransitionKind
+        : null;
+      if (!remainsActive) {
         if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
-          selectionLabel(`Reframed node ${selectedObject?.node ?? '?'}`);
+          const verb = selectedCameraTransitionKind === 'aim' ? 'Aimed at' : 'Reframed';
+          selectionLabel(`${verb} node ${selectedObject?.node ?? '?'}`);
           debouncedLodRecompute();
           syncURL();
         }
@@ -5184,7 +5203,7 @@ function compareAppSelectedFocus(expected, actual) {
 function detachAppSelectionShadow(reason) {
   if (!rustAppShadowSelectionQueued) return false;
   rustAppSelectionTransitionActive = false;
-  rustAppReframeTransitionActive = false;
+  rustAppSelectedCameraTransitionKind = null;
   if (!rustAppShadow) {
     rustAppShadowSelectionQueued = false;
     return false;
@@ -5243,6 +5262,7 @@ function mirrorSelectedObjectToApp(nowMs = performance.now()) {
       'smootherstep',
     );
     const navigation = rustAppShadow.tickNavigation(0);
+    if (RUST_NAVIGATION_IMPLEMENTATION !== 'js') rustManualCameraActive = true;
     rustAppShadowSelectionQueued = true;
     rustAppSelectionTransitionActive =
       Number(navigation.focus?.focus_transition_remaining || 0) > 0;
@@ -5302,43 +5322,73 @@ function dispatchAppSelectedInversionGesture(nowMs = performance.now()) {
   }
 }
 
-function dispatchAppSelectedReframe(nowMs = performance.now()) {
+function dispatchAppSelectedCameraTransition(kind, nowMs = performance.now()) {
   if (RUST_NAVIGATION_IMPLEMENTATION === 'js'
       || !rustAppShadow || !rustAppShadowSelectionQueued || !selectedObject) {
     return { observed: false, accepted: false, navigation: null };
   }
+  const prefix = kind === 'aim' ? 'aim' : 'reframe';
   try {
     advanceRustApplicationClockToSelectionEvent(nowMs);
     const diagnosticCount = rustAppShadow.navigationSnapshot().diagnostics.length;
-    rustAppShadow.reframeSelection(
-      canvas.width / Math.max(canvas.height, 1),
-      SELECTION_FRAME_MARGIN,
-      focusTransitionCentiseconds.peek() / 100,
-      'smootherstep',
-    );
+    if (prefix === 'aim') {
+      rustAppShadow.aimAtSelection(
+        focusTransitionCentiseconds.peek() / 100,
+        'smootherstep',
+      );
+    } else {
+      rustAppShadow.reframeSelection(
+        canvas.width / Math.max(canvas.height, 1),
+        SELECTION_FRAME_MARGIN,
+        focusTransitionCentiseconds.peek() / 100,
+        'smootherstep',
+      );
+    }
     const navigation = rustAppShadow.tickNavigation(0);
-    const accepted = navigation.diagnostics.length === diagnosticCount
-      && Number(navigation.camera?.camera_transition_remaining || 0) > 0;
-    rustAppReframeTransitionActive = accepted;
-    rustAppShadowDiagnostics.reframeDispatches += 1;
-    rustAppShadowDiagnostics[accepted ? 'reframeAccepts' : 'reframeRejects'] += 1;
+    const accepted = navigation.diagnostics.length === diagnosticCount;
+    rustAppSelectedCameraTransitionKind = accepted
+      && Number(navigation.camera?.camera_transition_remaining || 0) > 0
+      ? prefix
+      : null;
+    rustAppShadowDiagnostics[`${prefix}Dispatches`] += 1;
+    rustAppShadowDiagnostics[accepted ? `${prefix}Accepts` : `${prefix}Rejects`] += 1;
     refreshAppShadowSnapshot();
-    return { observed: true, accepted, navigation };
+    return {
+      observed: true,
+      accepted,
+      navigation,
+      rejection: accepted ? null : navigation.diagnostics.at(-1),
+    };
   } catch (error) {
-    rustAppReframeTransitionActive = false;
-    rustAppShadowDiagnostics.reframeRejects += 1;
+    rustAppSelectedCameraTransitionKind = null;
+    rustAppShadowDiagnostics[`${prefix}Rejects`] += 1;
     recordAppShadowMismatch(
-      'selection_reframe_exception',
+      `selection_${prefix}_exception`,
       error?.message || String(error),
     );
     return { observed: true, accepted: false, navigation: null, error };
   }
 }
 
+function dispatchAppSelectedReframe(nowMs = performance.now()) {
+  return dispatchAppSelectedCameraTransition('reframe', nowMs);
+}
+
+function dispatchAppSelectedAim(nowMs = performance.now()) {
+  return dispatchAppSelectedCameraTransition('aim', nowMs);
+}
+
+function selectedCameraRejectionText(kind, result) {
+  const diagnostic = result?.rejection || '';
+  if (diagnostic.includes('reflection pole')) return `${kind} unchanged at pole`;
+  const reason = diagnostic.replace(/^navigation action \d+ failed:\s*/, '');
+  return reason ? `${kind} rejected: ${reason}` : `${kind} rejected`;
+}
+
 function clearSelectedObject(message = '') {
   detachAppSelectionShadow(message || 'browser selection clear');
   rustAppSelectionTransitionActive = false;
-  rustAppReframeTransitionActive = false;
+  rustAppSelectedCameraTransitionKind = null;
   selectedObject = null;
   manualCameraSemanticTargetEnabled = false;
   cameraFocusTransition = null;
@@ -5449,14 +5499,44 @@ function refreshSelectedObjectAnchor({ followObjectPivot = false } = {}) {
 }
 
 function beginObjectPivotFocus(target, nowMs = performance.now()) {
-  if (!target || spaceMouseNavigation.peek() !== 'object') return;
+  if (!target || spaceMouseNavigation.peek() !== 'object') return false;
+  if (RUST_NAVIGATION_IMPLEMENTATION !== 'js') advanceFocusTransitions(nowMs);
+  const rustAim = dispatchAppSelectedAim(nowMs);
+  if (RUST_NAVIGATION_IMPLEMENTATION === 'rust' && rustAim.observed) {
+    if (rustAim.accepted && applyRustCameraSnapshot(rustAim.navigation)) {
+      cameraFocusTransition = null;
+      rustManualCameraActive = true;
+      rustAppShadowDiagnostics.aimAuthorityWrites += 1;
+      const active = rustAppSelectedCameraTransitionKind === 'aim';
+      selectionLabel(
+        `${active ? 'Aiming at' : 'Aimed at'} node ${selectedObject.node}${active ? '…' : ''}`,
+      );
+      if (!active) {
+        debouncedLodRecompute();
+        syncURL();
+      }
+      return true;
+    }
+    if (!rustAim.error) {
+      selectionLabel(
+        `Node ${selectedObject.node} · ${selectedCameraRejectionText('aim', rustAim)}`,
+      );
+      return false;
+    }
+    rustAppShadowDiagnostics.aimFallbackWrites += 1;
+  } else if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
+    rustAppShadowDiagnostics.aimFallbackWrites += 1;
+  }
   manualCameraSemanticTargetEnabled = true;
   cameraFocusTransition = {
     start: [panX, panY, panZ],
     target: target.slice(),
     startedAt: nowMs,
     durationMs: focusTransitionCentiseconds.peek() * 10,
+    completionLabel: `Aimed at node ${selectedObject.node}`,
   };
+  selectionLabel(`Aiming at node ${selectedObject.node}…`);
+  return true;
 }
 
 function reframeSelectedObject(nowMs = performance.now()) {
@@ -5473,7 +5553,9 @@ function reframeSelectedObject(nowMs = performance.now()) {
       return true;
     }
     if (!rustReframe.error) {
-      selectionLabel(`Node ${selectedObject.node} · reframe unchanged at pole`);
+      selectionLabel(
+        `Node ${selectedObject.node} · ${selectedCameraRejectionText('reframe', rustReframe)}`,
+      );
       return false;
     }
     rustAppShadowDiagnostics.reframeFallbackWrites += 1;
@@ -5649,7 +5731,9 @@ canvas.addEventListener('mousedown', e => {
   mouseDragDistance = 0;
   lx = e.clientX;
   ly = e.clientY;
-  if (RUST_NAVIGATION_IMPLEMENTATION !== 'js' && !authoredCamera) {
+  if (RUST_NAVIGATION_IMPLEMENTATION !== 'js'
+      && !authoredCamera
+      && !rustManualCameraActive) {
     synchronizeRustManualCamera();
   }
 });
@@ -6064,6 +6148,10 @@ function fitOrToggleInversionToSelection(nowMs = performance.now()) {
 // selection or navigation state is exposed through this object.
 globalThis.__hyperscopeSelection = Object.freeze({
   selectViewCenter: () => selectObjectAtViewCenter(),
+  aim: () => beginObjectPivotFocus(
+    refreshSelectedObjectAnchor(),
+    performance.now(),
+  ),
   reframe: () => reframeSelectedObject(performance.now()),
   toggleInversion: () => fitOrToggleInversionToSelection(performance.now()),
 });
@@ -8598,7 +8686,9 @@ function frame(ts) {
       }
     } else if (spaceMouseMode === 'camera') {
       spaceMouseTranslationActive = false;
-      rustManualCameraActive = false;
+      // An idle HID report does not make the Rust camera stale. Browser-side
+      // camera mutations invalidate this flag at their actual write sites;
+      // motion activity is tracked independently above.
     }
   }
   if (spaceMouseMotionActive && ts - spaceMouseLastMotionAt >= 150) {

@@ -168,6 +168,10 @@ for (const navigationAuthorityStep of [
   "RUST_NAVIGATION_IMPLEMENTATION !== 'js'",
   'rustAppShadow.stepSpaceMouseCamera(',
   'rustAppShadow.stepPointerCamera(',
+  'rustAppShadow.aimAtSelection(',
+  'dispatchAppSelectedCameraTransition(',
+  'compareAppSelectedCameraTransitionFrame(',
+  'rustAppSelectedCameraTransitionKind',
   'spaceMouseAxes,\n          navigationMode,',
   "RUST_NAVIGATION_IMPLEMENTATION === 'rust' && rustCameraReady",
   'applyRustManualCameraPacket(rustManualCameraPacket)',
@@ -175,6 +179,8 @@ for (const navigationAuthorityStep of [
   "recordRustManualCameraComparison(rustManualCameraPacket, 'SpaceMouse')",
   'integratePointerCamera(dx, dy, e.shiftKey ? 1 : 0);',
   'integratePointerCamera(0, e.deltaY, 2);',
+  '&& !rustManualCameraActive) {',
+  'An idle HID report does not make the Rust camera stale.',
   'rustAppShadowDiagnostics.cameraFallbackWrites += 1;',
 ]) {
   assert.ok(

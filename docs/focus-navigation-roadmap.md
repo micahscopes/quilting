@@ -267,7 +267,7 @@ or sphere state.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.8
+6. **Persistence and replay — native oracle complete.** Replay version 0.16
    serializes asset-scoped stable entity references, selected source
    bounds/pivots, derived
    output-chart pivots/radii, detached spheres, camera rig state, and every
@@ -276,10 +276,12 @@ or sphere state.
    to the bound center, accepts 0.5 without that migration, accepts 0.6 camera
    policy actions, and rejects every pre-0.7 unscoped focus anchor rather than
    inventing asset scope. Checked navigation and
-   orchestration fixtures cover transition cadence, asset effects,
+   Version 0.16 adds selected-object aim without reinterpreting 0.15; selected
+   reframe entered at 0.15. Checked navigation and orchestration fixtures cover
+   transition cadence, asset effects,
    presence/authored lanes, deterministic authored asset/entity materialization,
-   and atomic rejection. Version 0.7 remains readable with its asset-scoped
-   focus semantics. Browser input capture and
+   and atomic rejection. Older supported schemas remain readable with their
+   original scoped semantics. Browser input capture and
    networking must carry semantic actions or authoritative state deltas, never
    raw HID reports.
 7. **WebGPU backend.** Upload the extracted focus packet as frame/view data,

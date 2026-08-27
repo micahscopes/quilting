@@ -81,7 +81,7 @@ The first application boundary is now explicit:
   compact comparison call per active cue-transition frame. The application
   clock now advances once per browser frame through a non-serializing boundary;
   it takes a navigation snapshot only during an active cue, mapped-selection,
-  or selected-camera reframe transition and makes no call when no Rust lane is
+  or selected-camera transition and makes no call when no Rust lane is
   active. Mapped selection
   interpolation uses the incumbent wall-clock timestamp, including throttled
   frames, and compares both browser focus state and the renderer's retained CPU
@@ -91,7 +91,8 @@ The first application boundary is now explicit:
   device-neutral actions through `AppStore`; the shared navigation queue owns
   their sequence and the application owns virtual time. The adapter exposes a
   parity-complete frame snapshot. `navimpl=js|shadow|rust` is the navigation
-  rollback boundary. SpaceMouse, pointer turntable, and selected-camera reframe
+  rollback boundary. SpaceMouse, pointer turntable, and selected-camera aim and
+  reframe
   have generated-WASM and live Chrome gates; JavaScript remains the default
   until the remaining camera gestures and arbitration paths carry equivalent
   evidence.
@@ -387,6 +388,17 @@ measured 40 transition frames with zero mismatches and `9.1e-12` maximum error;
 `navimpl=rust` completed with 39 Rust camera writes, exact independently
 recomputed distance, zero fallback, and no console errors. Invalid framing or
 a selected pivot at the reflection pole leaves the camera unchanged.
+Selected-object aiming is the companion replayable `AimAtSelection` action.
+It projects the selected source pivot into the active chart, preserves
+orientation, lens, and control distance, and uses the same target-orbit path as
+the incumbent Object-mode transition. Shadow mode measured 43 transition
+frames with zero mismatches and `9.1e-12` maximum error. A nontrivial Rust gate
+selected the horse, shift-panned through the real pointer path, retained the
+selected identity, and returned to the pivot in 45 Rust camera writes with
+zero fallback or diagnostics and an independently measured distance of
+`3.0000000000000013`. That gate also separated idle-HID state from camera
+staleness: neither an idle SpaceMouse nor a pointer press now destroys the
+selected anchor through an unnecessary full-state synchronization.
 Unresolved assets and free/manual focus-sphere geometry deliberately remain on
 the browser path. Mapped selected-object focus and the semantic spheroidal
 field crossed to the Rust default on 2026-08-27 after exact live
