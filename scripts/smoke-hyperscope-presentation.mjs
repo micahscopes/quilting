@@ -214,6 +214,11 @@ for (const sameContextResidencyStep of [
   'mr_uploadComposedLodModel(totalVertices, primaryFaces)',
   "? 'resident-authority-not-promoted'",
   ": 'resident-shadow'",
+  'mr_dispatchSameContextLod(',
+  'mr_pollSameContextLod()',
+  'mr_recordSameContextLodAuthority(',
+  'mr_cancelSameContextLod(sameContextRequest)',
+  'sameContextLodDiagnostics.effectiveAuthority = \'worker\';',
 ]) {
   assert.ok(
     browserSource.includes(sameContextResidencyStep),
@@ -228,6 +233,13 @@ for (const rustResidencyStep of [
   '.and_then(prepare_lod_model)',
   'LodCompute::new(state.renderer.gl(), model.residency.num_faces)',
   'clear_same_context_lod(state);',
+  'pub fn mr_dispatch_same_context_lod(',
+  'surface_runtime',
+  '.lod_pose_source(',
+  'pub fn mr_poll_same_context_lod()',
+  'apply_lod_classification_publication(',
+  'compare_lod_classifications(',
+  'pub fn mr_record_same_context_lod_authority(',
 ]) {
   assert.ok(
     mainRendererSource.includes(rustResidencyStep),

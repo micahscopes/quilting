@@ -397,6 +397,9 @@ import init, {
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_acceptLodDeltaSequence,
   mr_uploadComposedLodModel,
+  mr_dispatchSameContextLod, mr_pollSameContextLod,
+  mr_recordSameContextLodAuthority, mr_cancelSameContextLod,
+  mr_sameContextLodDiagnostics,
   mr_setLodGradingRatio,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
@@ -687,6 +690,71 @@ const sameContextLodDiagnostics = {
   errors: [],
 };
 globalThis.__hyperscopeSameContextLod = sameContextLodDiagnostics;
+let sameContextLodRequestId = 0;
+let sameContextLodPollScheduled = false;
+
+function nextSameContextLodRequestId() {
+  sameContextLodRequestId = sameContextLodRequestId >= 0xffffffff
+    ? 1 : sameContextLodRequestId + 1;
+  return sameContextLodRequestId;
+}
+
+function updateSameContextLodDiagnostics(snapshot) {
+  if (snapshot && typeof snapshot === 'object') {
+    Object.assign(sameContextLodDiagnostics, snapshot);
+  }
+  sameContextLodDiagnostics.requestedImplementation = LOD_IMPLEMENTATION;
+  sameContextLodDiagnostics.effectiveAuthority = 'worker';
+  return sameContextLodDiagnostics;
+}
+
+function refreshSameContextLodReadiness() {
+  if (LOD_IMPLEMENTATION === 'js') return false;
+  try {
+    updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
+    return sameContextLodDiagnostics.ready === true;
+  } catch {
+    // Model replacement retires context resources before the next composed
+    // residency is uploaded. This is an expected lifecycle gap, not a shadow
+    // failure and not a reason to perturb the worker authority.
+    sameContextLodDiagnostics.ready = false;
+    sameContextLodDiagnostics.residency = null;
+    sameContextLodDiagnostics.state = 'awaiting-residency';
+    return false;
+  }
+}
+
+function recordSameContextLodError(error) {
+  const message = error?.message || String(error);
+  sameContextLodDiagnostics.errors.push(message);
+  if (sameContextLodDiagnostics.errors.length > 16) {
+    sameContextLodDiagnostics.errors.splice(0, sameContextLodDiagnostics.errors.length - 16);
+  }
+  sameContextLodDiagnostics.state = 'shadow-error';
+}
+
+function absorbSameContextLodLifecycleGap(error) {
+  const message = error?.message || String(error);
+  if (message !== 'same-context LOD model is not resident') return false;
+  sameContextLodDiagnostics.ready = false;
+  sameContextLodDiagnostics.residency = null;
+  sameContextLodDiagnostics.state = 'awaiting-residency';
+  return true;
+}
+
+function scheduleSameContextLodPoll() {
+  if (LOD_IMPLEMENTATION === 'js' || sameContextLodPollScheduled) return;
+  sameContextLodPollScheduled = true;
+  requestAnimationFrame(() => {
+    sameContextLodPollScheduled = false;
+    try {
+      const snapshot = updateSameContextLodDiagnostics(mr_pollSameContextLod());
+      if (snapshot.pending_request_id != null) scheduleSameContextLodPoll();
+    } catch (error) {
+      if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
+    }
+  });
+}
 const lodMetricSums = Object.fromEntries(lodMetricNames.map(name => [name, 0]));
 const frameTelemetry = {
   frames: 0,
@@ -3744,10 +3812,11 @@ function uploadSameContextLodResidency(totalVertices, primaryFaces) {
     sameContextLodDiagnostics.state = LOD_IMPLEMENTATION === 'rust'
       ? 'resident-authority-not-promoted'
       : 'resident-shadow';
+    updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
     return residency;
   } catch (error) {
     sameContextLodDiagnostics.state = 'unavailable';
-    sameContextLodDiagnostics.errors.push(error?.message || String(error));
+    recordSameContextLodError(error);
     throw error;
   }
 }
@@ -7125,6 +7194,9 @@ async function recomputeLods() {
     && presentationComposition.primaryLodStates.length > 0;
   lodFullSceneDirty = false;
   const lodT0 = performance.now();
+  let sameContextRequest = 0;
+  let sameContextDispatched = false;
+  let sameContextAuthorityRecorded = false;
   try {
     // Playback intent does not define geometry. Classify the most recent pose
     // accepted by the renderer, including while paused; static or not-yet-posed
@@ -7162,6 +7234,34 @@ async function recomputeLods() {
 
     const resetDelta = lodDeltaResetPending;
     if (lodPose) lodTelemetry.poseSubmittedRevision = lodPose.revision;
+    const sameContextReady = refreshSameContextLodReadiness()
+      && currentFaceNodes.length > 0
+      && Number(sameContextLodDiagnostics.residency?.num_faces) === currentFaceNodes.length;
+    if (LOD_IMPLEMENTATION !== 'js' && sameContextReady) {
+      sameContextRequest = nextSameContextLodRequestId();
+      try {
+        sameContextDispatched = mr_dispatchSameContextLod(
+          sameContextRequest,
+          lodPoseAnimated,
+          lodPose?.t ?? 0,
+          lodPose?.sampleTime ?? 0,
+          lodPose?.revision ?? 0,
+          lodPose?.continuityEpoch ?? 0,
+          lodMobius,
+          primaryOnly ? presentationComposition.primaryLodStates : authoredLodStates,
+          primaryOnly ? currentPrimaryFaceCount : 0,
+          tp.density,
+          tp.minPx,
+          vp,
+          w,
+          h,
+        );
+        updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
+        if (sameContextDispatched) scheduleSameContextLodPoll();
+      } catch (error) {
+        if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
+      }
+    }
     const resp = await workerCall('compute_animated_lods', {
       t: lodPose?.t ?? 0,
       poseSampleTime: lodPose?.sampleTime ?? 0,
@@ -7197,9 +7297,35 @@ async function recomputeLods() {
       acceptLodPoseStamp(resp, lodPose);
       acceptLodDeltaSequence(resp, !!wt.full_snapshot);
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
+      const classifiedFaces = Number(resp.classified_faces)
+        || Math.floor(faceLods.length / 6);
+      const residentFaces = Number(resp.resident_faces)
+        || (presentationComposition.ready
+          ? presentationComposition.totalFaces : classifiedFaces);
+      const responseFaceIndices = resp.indices
+        ? new Uint32Array(resp.indices.buffer || resp.indices)
+        : new Uint32Array(0);
+      if (LOD_IMPLEMENTATION !== 'js' && sameContextRequest !== 0) {
+        try {
+          updateSameContextLodDiagnostics(mr_recordSameContextLodAuthority(
+            sameContextRequest,
+            lodPoseAnimated,
+            lodPose?.t ?? 0,
+            lodPose?.sampleTime ?? 0,
+            lodPose?.revision ?? 0,
+            lodPose?.continuityEpoch ?? 0,
+            faceLods,
+            responseFaceIndices,
+            !!wt.full_snapshot,
+            classifiedFaces,
+            residentFaces,
+          ));
+          sameContextAuthorityRecorded = true;
+        } catch (error) {
+          if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
+        }
+      }
       if (presentationComposition.ready) {
-        const classifiedFaces = Number(resp.classified_faces)
-          || Math.floor(faceLods.length / 6);
         const classificationScope =
           classifiedFaces === presentationComposition.totalFaces
             ? 'scene' : 'primary-animation';
@@ -7222,7 +7348,7 @@ async function recomputeLods() {
         }
       }
       if (resp.indices) {
-        const faceIndices = new Uint32Array(resp.indices.buffer || resp.indices);
+        const faceIndices = responseFaceIndices;
         if (faceLods.length !== faceIndices.length * 6) {
           throw new Error('sparse LOD payload does not match its face index count');
         }
@@ -7245,8 +7371,7 @@ async function recomputeLods() {
       } else if (presentationComposition.ready) {
         // Convert an occasional full classification of either the packed scene
         // or its animation-dirty primary prefix into renderer face updates.
-        const count = Number(resp.classified_faces) || Math.floor(faceLods.length / 6);
-        const residentFaces = Number(resp.resident_faces) || count;
+        const count = classifiedFaces;
         if (residentFaces !== presentationComposition.totalFaces) {
           throw new Error(
             `LOD worker has ${residentFaces}/${presentationComposition.totalFaces} resident faces`,
@@ -7356,6 +7481,14 @@ async function recomputeLods() {
     lodTelemetry.errors += 1;
     if (!primaryOnly) lodFullSceneDirty = true;
     console.warn('LOD recompute error:', e);
+  }
+  if (sameContextDispatched && !sameContextAuthorityRecorded) {
+    try {
+      mr_cancelSameContextLod(sameContextRequest);
+      updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
+    } catch (error) {
+      if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
+    }
   }
   lodInFlight = false;
   lodTelemetry.inFlight = false;

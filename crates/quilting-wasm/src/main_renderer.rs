@@ -18,8 +18,10 @@ use quilting_renderer::buffer::{
     MeshDraw, PbrParams, PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
 };
 use quilting_renderer::compute::{
-    build_composed_lod_model, prepare_lod_atlas_lookup, prepare_lod_model, LodAtlasLookup,
-    LodCompute, LodModelResidency,
+    apply_lod_classification_publication, build_composed_lod_model,
+    compare_lod_classifications, prepare_lod_atlas_lookup, prepare_lod_dispatch_state,
+    prepare_lod_model, LodAtlasLookup, LodCompute, LodModelResidency, StagedLodReadback,
+    FLOATS_PER_FACE_OUTPUT,
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
@@ -381,12 +383,278 @@ struct MainState {
 struct SameContextLod {
     compute: LodCompute,
     residency: LodModelResidency,
+    pending: Option<SameContextLodPending>,
+    completed: Option<SameContextLodCompleted>,
+    authority_candidate: Option<SameContextLodAuthority>,
+    authority_resident: Vec<f32>,
+    diagnostics: SameContextLodDiagnostics,
 }
 
 impl SameContextLod {
-    fn destroy(self, gl: &glow::Context) {
+    fn try_compare(&mut self) -> Result<(), String> {
+        if self.completed.is_none() || self.authority_candidate.is_none() {
+            return Ok(());
+        }
+        let completed = self.completed.take().expect("completed LOD was checked");
+        let authority = self
+            .authority_candidate
+            .take()
+            .expect("authority LOD was checked");
+        if !completed.stamp.same_identity(authority.stamp) {
+            self.compute.recycle_readback_vector(completed.lods);
+            return Err("same-context LOD comparison stamps do not match".to_string());
+        }
+        let parity = compare_lod_classifications(&authority.lods, &completed.lods);
+        self.compute.recycle_readback_vector(completed.lods);
+        let parity = parity?;
+        self.diagnostics.comparisons = self.diagnostics.comparisons.saturating_add(1);
+        self.diagnostics.last_compared_faces = parity.compared_faces;
+        self.diagnostics.last_mismatched_faces = parity.mismatched_faces;
+        self.diagnostics.last_mismatched_fields = parity.mismatched_fields;
+        self.diagnostics.last_exact = Some(parity.mismatched_fields == 0);
+        self.diagnostics.mismatch_examples = parity
+            .examples
+            .into_iter()
+            .map(|mismatch| SameContextLodMismatchSnapshot {
+                face: mismatch.face,
+                field: mismatch.field,
+                expected_bits: mismatch.expected_bits,
+                actual_bits: mismatch.actual_bits,
+            })
+            .collect();
+        if parity.mismatched_fields == 0 {
+            self.diagnostics.exact_comparisons =
+                self.diagnostics.exact_comparisons.saturating_add(1);
+        } else {
+            self.diagnostics.mismatched_comparisons =
+                self.diagnostics.mismatched_comparisons.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn cancel_request(&mut self, gl: &glow::Context, request_id: u32) -> bool {
+        let mut cancelled = false;
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.stamp.request_id == request_id)
+        {
+            let pending = self.pending.take().expect("pending LOD was checked");
+            unsafe { gl.delete_sync(pending.fence); }
+            self.compute.discard_staged_readback(gl, pending.readback);
+            cancelled = true;
+        }
+        if self
+            .completed
+            .as_ref()
+            .is_some_and(|completed| completed.stamp.request_id == request_id)
+        {
+            let completed = self.completed.take().expect("completed LOD was checked");
+            self.compute.recycle_readback_vector(completed.lods);
+            cancelled = true;
+        }
+        if self
+            .authority_candidate
+            .as_ref()
+            .is_some_and(|authority| authority.stamp.request_id == request_id)
+        {
+            self.authority_candidate = None;
+        }
+        if cancelled {
+            self.diagnostics.cancellations = self.diagnostics.cancellations.saturating_add(1);
+        }
+        cancelled
+    }
+
+    fn snapshot(&self) -> SameContextLodShadowSnapshot {
+        let state = if self.pending.is_some() {
+            "pending-gpu"
+        } else if self.completed.is_some() {
+            "awaiting-authority"
+        } else {
+            match self.diagnostics.last_exact {
+                Some(true) => "parity-exact",
+                Some(false) => "parity-mismatch",
+                None => "resident-shadow",
+            }
+        };
+        let (
+            readback_buffers,
+            readback_vectors,
+            buffer_creations,
+            buffer_reallocations,
+            vector_creations,
+        ) = self.compute.readback_pool_stats();
+        SameContextLodShadowSnapshot {
+            ready: true,
+            state,
+            pending_request_id: self.pending.as_ref().map(|pending| pending.stamp.request_id),
+            completed_request_id: self
+                .completed
+                .as_ref()
+                .map(|completed| completed.stamp.request_id),
+            authority_resident_faces: self.authority_resident.len() / FLOATS_PER_FACE_OUTPUT,
+            dispatches: self.diagnostics.dispatches,
+            skipped_busy: self.diagnostics.skipped_busy,
+            polls: self.diagnostics.polls,
+            completions: self.diagnostics.completions,
+            authority_updates: self.diagnostics.authority_updates,
+            comparisons: self.diagnostics.comparisons,
+            exact_comparisons: self.diagnostics.exact_comparisons,
+            mismatched_comparisons: self.diagnostics.mismatched_comparisons,
+            cancellations: self.diagnostics.cancellations,
+            failures: self.diagnostics.failures,
+            last_request_id: self.diagnostics.last_request_id,
+            last_classified_faces: self.diagnostics.last_classified_faces,
+            last_subject_records: self.diagnostics.last_subject_records,
+            last_dispatch_ms: self.diagnostics.last_dispatch_ms,
+            last_fence_poll_latency_ms: self.diagnostics.last_fence_poll_latency_ms,
+            last_readback_ms: self.diagnostics.last_readback_ms,
+            last_compared_faces: self.diagnostics.last_compared_faces,
+            last_mismatched_faces: self.diagnostics.last_mismatched_faces,
+            last_mismatched_fields: self.diagnostics.last_mismatched_fields,
+            mismatch_examples: self.diagnostics.mismatch_examples.clone(),
+            last_error: self.diagnostics.last_error.clone(),
+            readback_buffers,
+            readback_vectors,
+            readback_buffer_creations: buffer_creations,
+            readback_buffer_reallocations: buffer_reallocations,
+            readback_vector_creations: vector_creations,
+        }
+    }
+
+    fn destroy(mut self, gl: &glow::Context) {
+        if let Some(pending) = self.pending.take() {
+            unsafe { gl.delete_sync(pending.fence); }
+            self.compute.discard_staged_readback(gl, pending.readback);
+        }
+        if let Some(completed) = self.completed.take() {
+            self.compute.recycle_readback_vector(completed.lods);
+        }
         self.compute.destroy(gl);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SameContextLodPoseStamp {
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+}
+
+impl SameContextLodPoseStamp {
+    fn same_identity(self, other: Self) -> bool {
+        self.clip_time_seconds.to_bits() == other.clip_time_seconds.to_bits()
+            && self.sample_time_seconds.to_bits() == other.sample_time_seconds.to_bits()
+            && self.revision == other.revision
+            && self.continuity_epoch == other.continuity_epoch
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SameContextLodRequestStamp {
+    request_id: u32,
+    classified_faces: usize,
+    pose: Option<SameContextLodPoseStamp>,
+}
+
+impl SameContextLodRequestStamp {
+    fn same_identity(self, other: Self) -> bool {
+        self.request_id == other.request_id
+            && self.classified_faces == other.classified_faces
+            && match (self.pose, other.pose) {
+                (Some(left), Some(right)) => left.same_identity(right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+struct SameContextLodPending {
+    stamp: SameContextLodRequestStamp,
+    fence: glow::Fence,
+    readback: StagedLodReadback,
+    fence_started_ms: f64,
+}
+
+struct SameContextLodCompleted {
+    stamp: SameContextLodRequestStamp,
+    lods: Vec<f32>,
+}
+
+struct SameContextLodAuthority {
+    stamp: SameContextLodRequestStamp,
+    lods: Vec<f32>,
+}
+
+#[derive(Default)]
+struct SameContextLodDiagnostics {
+    dispatches: u64,
+    skipped_busy: u64,
+    polls: u64,
+    completions: u64,
+    authority_updates: u64,
+    comparisons: u64,
+    exact_comparisons: u64,
+    mismatched_comparisons: u64,
+    cancellations: u64,
+    failures: u64,
+    last_request_id: u32,
+    last_classified_faces: usize,
+    last_subject_records: usize,
+    last_dispatch_ms: f64,
+    last_fence_poll_latency_ms: f64,
+    last_readback_ms: f64,
+    last_compared_faces: usize,
+    last_mismatched_faces: usize,
+    last_mismatched_fields: usize,
+    last_exact: Option<bool>,
+    mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct SameContextLodMismatchSnapshot {
+    face: usize,
+    field: usize,
+    expected_bits: u32,
+    actual_bits: u32,
+}
+
+#[derive(Serialize)]
+struct SameContextLodShadowSnapshot {
+    ready: bool,
+    state: &'static str,
+    pending_request_id: Option<u32>,
+    completed_request_id: Option<u32>,
+    authority_resident_faces: usize,
+    dispatches: u64,
+    skipped_busy: u64,
+    polls: u64,
+    completions: u64,
+    authority_updates: u64,
+    comparisons: u64,
+    exact_comparisons: u64,
+    mismatched_comparisons: u64,
+    cancellations: u64,
+    failures: u64,
+    last_request_id: u32,
+    last_classified_faces: usize,
+    last_subject_records: usize,
+    last_dispatch_ms: f64,
+    last_fence_poll_latency_ms: f64,
+    last_readback_ms: f64,
+    last_compared_faces: usize,
+    last_mismatched_faces: usize,
+    last_mismatched_fields: usize,
+    mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
+    last_error: Option<String>,
+    readback_buffers: usize,
+    readback_vectors: usize,
+    readback_buffer_creations: u64,
+    readback_buffer_reallocations: u64,
+    readback_vector_creations: u64,
 }
 
 #[derive(Serialize)]
@@ -4155,6 +4423,11 @@ pub fn mr_upload_composed_lod_model(
         state.same_context_lod = Some(SameContextLod {
             compute,
             residency,
+            pending: None,
+            completed: None,
+            authority_candidate: None,
+            authority_resident: Vec::new(),
+            diagnostics: SameContextLodDiagnostics::default(),
         });
         let residency = &state
             .same_context_lod
@@ -4171,6 +4444,421 @@ pub fn mr_upload_composed_lod_model(
             atlas_max_lod: atlas.max_lod,
         })
         .map_err(|error| JsValue::from_str(&error.to_string()))
+    })
+}
+
+fn same_context_lod_request_stamp(
+    request_id: u32,
+    classified_faces: usize,
+    animated: bool,
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+) -> Result<SameContextLodRequestStamp, String> {
+    if request_id == 0 {
+        return Err("same-context LOD request ID must be nonzero".to_string());
+    }
+    if classified_faces == 0 {
+        return Err("same-context LOD request has no classified faces".to_string());
+    }
+    let pose = if animated {
+        validate_pose_stamp(
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+        )?;
+        Some(SameContextLodPoseStamp {
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+        })
+    } else {
+        None
+    };
+    Ok(SameContextLodRequestStamp {
+        request_id,
+        classified_faces,
+        pose,
+    })
+}
+
+fn same_context_lod_snapshot_value(lod: &SameContextLod) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&lod.snapshot())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn restore_renderer_after_lod_compute(gl: &glow::Context, viewport: (i32, i32)) {
+    unsafe {
+        gl.use_program(None);
+        gl.bind_vertex_array(None);
+        gl.bind_transform_feedback(glow::TRANSFORM_FEEDBACK, None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.disable(glow::RASTERIZER_DISCARD);
+        gl.enable(glow::DEPTH_TEST);
+        gl.enable(glow::BLEND);
+        gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        gl.viewport(0, 0, viewport.0.max(1), viewport.1.max(1));
+    }
+}
+
+/// Dispatch the exact worker-equivalent classifier on the renderer WebGL
+/// context. This is shadow-only: its result never mutates resident batches.
+#[allow(clippy::too_many_arguments)]
+#[wasm_bindgen(js_name = "mr_dispatchSameContextLod")]
+pub fn mr_dispatch_same_context_lod(
+    request_id: u32,
+    animated: bool,
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+    mobius: &[f32],
+    subject_states: &[f32],
+    face_limit: u32,
+    density: f32,
+    min_px: f32,
+    vp_matrix: &[f32],
+    vp_width: f32,
+    vp_height: f32,
+) -> Result<bool, JsValue> {
+    if mobius.len() != 16 || vp_matrix.len() != 16 {
+        return Err(JsValue::from_str(
+            "same-context LOD matrices must contain exactly 16 floats",
+        ));
+    }
+    if subject_states.len() % quilting_renderer::compute::SUBJECT_STATE_STRIDE != 0
+        || !mobius
+            .iter()
+            .chain(subject_states)
+            .chain(vp_matrix)
+            .all(|value| value.is_finite())
+        || !density.is_finite()
+        || density <= 0.0
+        || !min_px.is_finite()
+        || min_px < 0.0
+        || !vp_width.is_finite()
+        || vp_width <= 0.0
+        || !vp_height.is_finite()
+        || vp_height <= 0.0
+    {
+        return Err(JsValue::from_str(
+            "same-context LOD dispatch payload is malformed",
+        ));
+    }
+
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let max_lod = state
+            .lod_atlas_lookup
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("renderer LOD atlas is not resident"))?
+            .max_lod;
+        let viewport = state.viewport_size;
+        let MainState {
+            renderer,
+            surface_runtime,
+            same_context_lod,
+            ..
+        } = state;
+        let lod = same_context_lod
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("same-context LOD model is not resident"))?;
+        if lod.pending.is_some() || lod.completed.is_some() {
+            lod.diagnostics.skipped_busy = lod.diagnostics.skipped_busy.saturating_add(1);
+            return Ok(false);
+        }
+
+        let classified_faces = if face_limit == 0 {
+            lod.residency.num_faces
+        } else {
+            lod.residency.num_faces.min(face_limit as usize)
+        };
+        let stamp = same_context_lod_request_stamp(
+            request_id,
+            classified_faces,
+            animated,
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
+        let pose = if animated {
+            Some(
+                surface_runtime
+                    .lod_pose_source(
+                        clip_time_seconds,
+                        sample_time_seconds,
+                        revision,
+                        continuity_epoch,
+                    )
+                    .map_err(|error| JsValue::from_str(&error))?,
+            )
+        } else {
+            None
+        };
+        if let Some(pose) = pose {
+            let retained = SameContextLodPoseStamp {
+                clip_time_seconds: pose.clip_time_seconds,
+                sample_time_seconds: pose.sample_time_seconds,
+                revision: pose.revision,
+                continuity_epoch: pose.continuity_epoch,
+            };
+            if !stamp.pose.is_some_and(|request| request.same_identity(retained)) {
+                return Err(JsValue::from_str(
+                    "same-context LOD did not retain the requested renderer pose",
+                ));
+            }
+        }
+        let joint_matrices = pose.map_or(&[][..], |pose| pose.joint_matrices);
+        let morph_weights = pose.map_or(&[][..], |pose| pose.morph_weights);
+        let num_joints = u32::try_from(joint_matrices.len() / 16)
+            .map_err(|_| JsValue::from_str("same-context joint count exceeds the ABI"))?;
+        let num_morph_targets = u32::try_from(morph_weights.len())
+            .map_err(|_| JsValue::from_str("same-context morph count exceeds the ABI"))?;
+
+        let mut legacy_mobius = [0.0f32; 16];
+        legacy_mobius.copy_from_slice(mobius);
+        let mut vp = [0.0f32; 16];
+        vp.copy_from_slice(vp_matrix);
+        let dispatch_state = prepare_lod_dispatch_state(
+            subject_states,
+            &lod.residency,
+            classified_faces,
+            legacy_mobius,
+        );
+        let gl = renderer.gl();
+        if !joint_matrices.is_empty() {
+            lod.compute.upload_joint_matrices(gl, joint_matrices);
+        }
+        if !morph_weights.is_empty() {
+            lod.compute.upload_morph_weights(gl, morph_weights);
+        }
+
+        let dispatch_started_ms = browser_now_ms();
+        let dispatched = lod.compute.compute_lods(
+            gl,
+            classified_faces,
+            lod.residency.num_vertices,
+            num_joints,
+            num_morph_targets,
+            &dispatch_state.subjects,
+            dispatch_state.baseline_mobius,
+            dispatch_state.baseline_model,
+            dispatch_state.pole,
+            dispatch_state.mobius_power,
+            dispatch_state.c_norm_sq,
+            dispatch_state.has_pole,
+            density,
+            lod.residency.mesh_radius,
+            min_px,
+            max_lod,
+            &vp,
+            vp_width,
+            vp_height,
+        );
+        restore_renderer_after_lod_compute(gl, viewport);
+        let dispatched = dispatched.map_err(|error| JsValue::from_str(&error))?;
+        if dispatched != classified_faces {
+            return Err(JsValue::from_str(
+                "same-context LOD dispatch returned an incomplete face domain",
+            ));
+        }
+        let readback = lod
+            .compute
+            .stage_readback(gl, classified_faces)
+            .map_err(|error| JsValue::from_str(&error))?;
+        let fence = match unsafe { gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) } {
+            Ok(fence) => fence,
+            Err(error) => {
+                lod.compute.discard_staged_readback(gl, readback);
+                return Err(JsValue::from_str(&format!(
+                    "same-context LOD fence creation failed: {error}",
+                )));
+            }
+        };
+        unsafe { gl.flush(); }
+        let fence_started_ms = browser_now_ms();
+        lod.pending = Some(SameContextLodPending {
+            stamp,
+            fence,
+            readback,
+            fence_started_ms,
+        });
+        lod.diagnostics.dispatches = lod.diagnostics.dispatches.saturating_add(1);
+        lod.diagnostics.last_request_id = request_id;
+        lod.diagnostics.last_classified_faces = classified_faces;
+        lod.diagnostics.last_subject_records = dispatch_state.subjects.len();
+        lod.diagnostics.last_dispatch_ms = fence_started_ms - dispatch_started_ms;
+        lod.diagnostics.last_error = None;
+        Ok(true)
+    })
+}
+
+/// Poll one same-context shadow job without blocking the renderer.
+#[wasm_bindgen(js_name = "mr_pollSameContextLod")]
+pub fn mr_poll_same_context_lod() -> Result<JsValue, JsValue> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let MainState { renderer, same_context_lod, .. } = state;
+        let lod = same_context_lod
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("same-context LOD model is not resident"))?;
+        lod.diagnostics.polls = lod.diagnostics.polls.saturating_add(1);
+        let Some(fence) = lod.pending.as_ref().map(|pending| pending.fence) else {
+            return same_context_lod_snapshot_value(lod);
+        };
+        let gl = renderer.gl();
+        let status = unsafe { gl.client_wait_sync(fence, 0, 0) };
+        if status == glow::TIMEOUT_EXPIRED
+            || (status != glow::ALREADY_SIGNALED
+                && status != glow::CONDITION_SATISFIED
+                && status != glow::WAIT_FAILED)
+        {
+            return same_context_lod_snapshot_value(lod);
+        }
+
+        let pending = lod.pending.take().expect("same-context fence was present");
+        unsafe { gl.delete_sync(pending.fence); }
+        if status == glow::WAIT_FAILED {
+            lod.compute.discard_staged_readback(gl, pending.readback);
+            lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+            lod.diagnostics.last_error = Some("same-context LOD fence wait failed".to_string());
+            return same_context_lod_snapshot_value(lod);
+        }
+        let ready_ms = browser_now_ms();
+        let readback_started_ms = ready_ms;
+        let lods = lod.compute.finish_staged_readback(gl, pending.readback);
+        let readback_finished_ms = browser_now_ms();
+        lod.diagnostics.completions = lod.diagnostics.completions.saturating_add(1);
+        // This includes browser scheduling until the first signaling poll. It
+        // is deliberately not labeled GPU time; WebGL2 exposes no timestamp
+        // for the moment the fence became signaled.
+        lod.diagnostics.last_fence_poll_latency_ms = ready_ms - pending.fence_started_ms;
+        lod.diagnostics.last_readback_ms = readback_finished_ms - readback_started_ms;
+        lod.completed = Some(SameContextLodCompleted {
+            stamp: pending.stamp,
+            lods,
+        });
+        if let Err(error) = lod.try_compare() {
+            lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+            lod.diagnostics.last_error = Some(error);
+        }
+        same_context_lod_snapshot_value(lod)
+    })
+}
+
+/// Reconstruct the admitted worker snapshot and compare it with the matching
+/// same-context result. This never applies the shadow payload to batches.
+#[allow(clippy::too_many_arguments)]
+#[wasm_bindgen(js_name = "mr_recordSameContextLodAuthority")]
+pub fn mr_record_same_context_lod_authority(
+    request_id: u32,
+    animated: bool,
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+    lods: &[f32],
+    indices: &[u32],
+    full_snapshot: bool,
+    classified_faces: u32,
+    resident_faces: u32,
+) -> Result<JsValue, JsValue> {
+    let stamp = same_context_lod_request_stamp(
+        request_id,
+        classified_faces as usize,
+        animated,
+        clip_time_seconds,
+        sample_time_seconds,
+        revision,
+        continuity_epoch,
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let lod = state
+            .same_context_lod
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("same-context LOD model is not resident"))?;
+        if resident_faces as usize != lod.residency.num_faces {
+            return Err(JsValue::from_str(
+                "worker and same-context LOD residency shapes do not match",
+            ));
+        }
+        apply_lod_classification_publication(
+            &mut lod.authority_resident,
+            lods,
+            indices,
+            full_snapshot,
+            classified_faces as usize,
+            resident_faces as usize,
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
+        lod.diagnostics.authority_updates = lod.diagnostics.authority_updates.saturating_add(1);
+
+        let candidate = lod
+            .pending
+            .as_ref()
+            .map(|pending| pending.stamp)
+            .or_else(|| lod.completed.as_ref().map(|completed| completed.stamp));
+        if let Some(candidate) = candidate.filter(|candidate| candidate.request_id == request_id) {
+            if !candidate.same_identity(stamp) {
+                return Err(JsValue::from_str(
+                    "worker and same-context LOD request stamps do not match",
+                ));
+            }
+            let fields = stamp.classified_faces * FLOATS_PER_FACE_OUTPUT;
+            lod.authority_candidate = Some(SameContextLodAuthority {
+                stamp,
+                lods: lod.authority_resident[..fields].to_vec(),
+            });
+        }
+        if let Err(error) = lod.try_compare() {
+            lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+            lod.diagnostics.last_error = Some(error);
+        }
+        same_context_lod_snapshot_value(lod)
+    })
+}
+
+/// Cancel one shadow request whose worker authority failed or was retired.
+#[wasm_bindgen(js_name = "mr_cancelSameContextLod")]
+pub fn mr_cancel_same_context_lod(request_id: u32) -> bool {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else { return false };
+        let MainState { renderer, same_context_lod, .. } = state;
+        same_context_lod
+            .as_mut()
+            .is_some_and(|lod| lod.cancel_request(renderer.gl(), request_id))
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_sameContextLodDiagnostics")]
+pub fn mr_same_context_lod_diagnostics() -> Result<JsValue, JsValue> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let lod = state
+            .same_context_lod
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("same-context LOD model is not resident"))?;
+        same_context_lod_snapshot_value(lod)
     })
 }
 

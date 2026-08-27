@@ -51,6 +51,20 @@ struct TimedPoseSample {
     continuous: bool,
 }
 
+/// Exact retained pose payload accepted by the main renderer.
+///
+/// Same-context LOD must borrow this payload rather than evaluating animation
+/// independently or accepting a browser-owned matrix copy.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LodPoseSource<'a> {
+    pub joint_matrices: &'a [f32],
+    pub morph_weights: &'a [f32],
+    pub clip_time_seconds: f64,
+    pub sample_time_seconds: f64,
+    pub revision: u32,
+    pub continuity_epoch: u32,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct SurfaceVelocityTracker {
     previous_output_position: Option<[f64; 3]>,
@@ -325,6 +339,46 @@ impl SurfaceRuntime {
             joint_weights: skinning.map(|(_, weights)| weights),
             morph_deltas: &self.morph_deltas,
             num_morph_targets: self.morph_num_targets,
+        })
+    }
+
+    /// Borrow the exact accepted renderer pose matching one classifier request.
+    pub fn lod_pose_source(
+        &self,
+        clip_time_seconds: f64,
+        sample_time_seconds: f64,
+        revision: u32,
+        continuity_epoch: u32,
+    ) -> Result<LodPoseSource<'_>, String> {
+        validate_pose_stamp(
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+        )?;
+        let pose = self
+            .pose_sample
+            .ok_or_else(|| "renderer has no accepted animation pose".to_string())?;
+        let exact = pose.clip_time_seconds.to_bits() == clip_time_seconds.to_bits()
+            && pose.sample_time_seconds.to_bits() == sample_time_seconds.to_bits()
+            && pose.revision == revision
+            && pose.continuity_epoch == continuity_epoch;
+        if !exact {
+            return Err("LOD request does not match the accepted renderer pose".to_string());
+        }
+        if self.joint_matrices.len() % 16 != 0 {
+            return Err("renderer joint matrix payload is malformed".to_string());
+        }
+        if self.morph_weights.len() > self.morph_num_targets {
+            return Err("renderer morph weight payload exceeds resident targets".to_string());
+        }
+        Ok(LodPoseSource {
+            joint_matrices: &self.joint_matrices,
+            morph_weights: &self.morph_weights,
+            clip_time_seconds: pose.clip_time_seconds,
+            sample_time_seconds: pose.sample_time_seconds,
+            revision: pose.revision,
+            continuity_epoch: pose.continuity_epoch,
         })
     }
 
@@ -2643,5 +2697,28 @@ mod tests {
             runtime.lod_animation_source(3).unwrap_err(),
             "renderer LOD skinning source does not match resident vertices",
         );
+    }
+
+    #[test]
+    fn lod_pose_source_requires_the_exact_accepted_renderer_stamp() {
+        let mut runtime = SurfaceRuntime::default();
+        runtime.set_morph_targets(&[0.0; 9], 3, 1);
+        let matrices = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        runtime
+            .set_timed_pose(&matrices, &[0.5], 0.75, 12.5, 7, 3)
+            .unwrap();
+
+        let source = runtime.lod_pose_source(0.75, 12.5, 7, 3).unwrap();
+        assert_eq!(source.joint_matrices, &matrices);
+        assert_eq!(source.morph_weights, &[0.5]);
+        assert_eq!(source.clip_time_seconds, 0.75);
+        assert_eq!(source.sample_time_seconds, 12.5);
+        assert_eq!(source.revision, 7);
+        assert_eq!(source.continuity_epoch, 3);
+        assert!(runtime.lod_pose_source(0.5, 12.5, 7, 3).is_err());
+        assert!(runtime.lod_pose_source(0.75, 12.5, 8, 3).is_err());
     }
 }

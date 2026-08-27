@@ -385,6 +385,147 @@ pub struct LodDispatchState {
     pub has_pole: f32,
 }
 
+/// One exact mismatch between two backend LOD classification records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LodClassificationMismatch {
+    pub face: usize,
+    pub field: usize,
+    pub expected_bits: u32,
+    pub actual_bits: u32,
+}
+
+/// Exact parity report for two complete classifier prefixes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LodClassificationParity {
+    pub compared_faces: usize,
+    pub mismatched_faces: usize,
+    pub mismatched_fields: usize,
+    pub examples: Vec<LodClassificationMismatch>,
+}
+
+/// Apply one already-sequenced worker publication to a retained full snapshot.
+///
+/// A full publication may cover only the classified primary prefix of a
+/// composed scene. Sparse indices are likewise relative to that prefix. The
+/// caller remains responsible for admitting the delta sequence before this
+/// payload boundary; this function validates shape and applies it atomically.
+pub fn apply_lod_classification_publication(
+    resident: &mut Vec<f32>,
+    lods: &[f32],
+    indices: &[u32],
+    full_snapshot: bool,
+    classified_faces: usize,
+    resident_faces: usize,
+) -> Result<(), String> {
+    if classified_faces == 0 || resident_faces == 0 || classified_faces > resident_faces {
+        return Err("LOD publication has an invalid classified face domain".to_string());
+    }
+    let resident_fields = resident_faces
+        .checked_mul(FLOATS_PER_FACE_OUTPUT)
+        .ok_or_else(|| "LOD resident publication size overflow".to_string())?;
+    let classified_fields = classified_faces
+        .checked_mul(FLOATS_PER_FACE_OUTPUT)
+        .ok_or_else(|| "LOD classified publication size overflow".to_string())?;
+    if !lods.iter().all(|value| value.is_finite()) {
+        return Err("LOD publication contains non-finite fields".to_string());
+    }
+
+    if full_snapshot {
+        if !indices.is_empty() || lods.len() != classified_fields {
+            return Err("full LOD publication has inconsistent payload shape".to_string());
+        }
+        if resident.is_empty() {
+            if classified_faces != resident_faces {
+                return Err(
+                    "partial full LOD publication has no resident scene baseline".to_string(),
+                );
+            }
+        } else if resident.len() != resident_fields {
+            return Err("LOD resident snapshot has the wrong scene shape".to_string());
+        }
+
+        if resident.is_empty() {
+            resident.resize(resident_fields, 0.0);
+        }
+        resident[..classified_fields].copy_from_slice(lods);
+        return Ok(());
+    }
+
+    if resident.len() != resident_fields {
+        return Err("sparse LOD publication has no matching resident baseline".to_string());
+    }
+    if lods.len() != indices.len().saturating_mul(FLOATS_PER_FACE_OUTPUT) {
+        return Err("sparse LOD publication has inconsistent payload shape".to_string());
+    }
+    let mut previous = None;
+    for &face in indices {
+        let face = face as usize;
+        if face >= classified_faces {
+            return Err("sparse LOD publication references an unclassified face".to_string());
+        }
+        if previous.is_some_and(|previous| face <= previous) {
+            return Err("sparse LOD publication indices are not strictly increasing".to_string());
+        }
+        previous = Some(face);
+    }
+
+    for (record, &face) in lods.chunks_exact(FLOATS_PER_FACE_OUTPUT).zip(indices) {
+        let offset = face as usize * FLOATS_PER_FACE_OUTPUT;
+        resident[offset..offset + FLOATS_PER_FACE_OUTPUT].copy_from_slice(record);
+    }
+    Ok(())
+}
+
+/// Compare two exact GPU classifier prefixes without float tolerances.
+///
+/// Classifier fields are powers of two, small integer permutation/parity
+/// values, and an integer atlas index represented as `f32`; bit identity is
+/// therefore the appropriate WebGL2/WebGPU promotion gate.
+pub fn compare_lod_classifications(
+    expected: &[f32],
+    actual: &[f32],
+) -> Result<LodClassificationParity, String> {
+    if expected.len() != actual.len()
+        || expected.len() % FLOATS_PER_FACE_OUTPUT != 0
+    {
+        return Err("LOD parity payloads have different or partial shapes".to_string());
+    }
+    let mut mismatched_faces = 0usize;
+    let mut mismatched_fields = 0usize;
+    let mut examples = Vec::new();
+    for (face, (expected, actual)) in expected
+        .chunks_exact(FLOATS_PER_FACE_OUTPUT)
+        .zip(actual.chunks_exact(FLOATS_PER_FACE_OUTPUT))
+        .enumerate()
+    {
+        let mut face_mismatched = false;
+        for field in 0..FLOATS_PER_FACE_OUTPUT {
+            let expected_bits = expected[field].to_bits();
+            let actual_bits = actual[field].to_bits();
+            if expected_bits == actual_bits {
+                continue;
+            }
+            face_mismatched = true;
+            mismatched_fields += 1;
+            if examples.len() < 8 {
+                examples.push(LodClassificationMismatch {
+                    face,
+                    field,
+                    expected_bits,
+                    actual_bits,
+                });
+            }
+        }
+        mismatched_faces += usize::from(face_mismatched);
+    }
+    Ok(LodClassificationParity {
+        compared_faces: expected.len() / FLOATS_PER_FACE_OUTPUT,
+        mismatched_faces,
+        mismatched_fields,
+        examples,
+    })
+}
+
 /// Resolve legacy and composed-scene transforms once for every backend.
 pub fn prepare_lod_dispatch_state(
     packed_subjects: &[f32],
@@ -806,7 +947,11 @@ impl LodCompute {
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(output_buf2.get()));
             gl.buffer_data_size(glow::TRANSFORM_FEEDBACK_BUFFER,
                 (max_faces * FLOATS_PER_FACE_OUTPUT * 4) as i32,
-                glow::DYNAMIC_READ);
+                // Transform feedback writes this buffer every classification;
+                // staging then copies it GPU-to-GPU before the CPU-visible
+                // STREAM_READ buffer is fenced. READ here makes Chromium
+                // maintain and repeatedly discard an unnecessary shadow copy.
+                glow::DYNAMIC_COPY);
 
             let tf2 = StagedHandle::new(
                 gl,
@@ -1388,6 +1533,11 @@ impl LodCompute {
 
             // Clear FBO and render pass 1 (one point per face → one pixel of LOD exponents)
             // Use a sentinel clear value that would produce obviously wrong LOD if read
+            // The main renderer normally leaves alpha blending enabled. An
+            // invisible classifier record has alpha zero but must still write
+            // its bounded standby exponents, so this pass owns blend state
+            // explicitly instead of inheriting context history.
+            gl.disable(glow::BLEND);
             gl.clear_color(-1.0, -1.0, -1.0, 0.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
 
@@ -1824,6 +1974,86 @@ mod tests {
         assert_eq!(state.baseline_mobius[0], 1.0);
         assert_eq!(state.baseline_mobius[12], 1.0);
         assert_eq!(state.has_pole, 0.0);
+    }
+
+    #[test]
+    fn lod_publications_reconstruct_full_and_sparse_composed_prefixes() {
+        let scene = [
+            1.0, 1.0, 1.0, 0.0, 1.0, 3.0,
+            2.0, 2.0, 2.0, 1.0, 1.0, 4.0,
+            4.0, 4.0, 4.0, 2.0, 1.0, 5.0,
+        ];
+        let mut resident = Vec::new();
+        apply_lod_classification_publication(&mut resident, &scene, &[], true, 3, 3)
+            .unwrap();
+        assert_eq!(resident, scene);
+
+        let primary = [8.0, 8.0, 8.0, 3.0, 1.0, 6.0];
+        apply_lod_classification_publication(&mut resident, &primary, &[], true, 1, 3)
+            .unwrap();
+        assert_eq!(&resident[..6], &primary);
+        assert_eq!(&resident[6..], &scene[6..]);
+
+        let sparse = [16.0, 16.0, 16.0, 4.0, 1.0, 7.0];
+        apply_lod_classification_publication(
+            &mut resident,
+            &sparse,
+            &[1],
+            false,
+            2,
+            3,
+        )
+        .unwrap();
+        assert_eq!(&resident[6..12], &sparse);
+        assert_eq!(&resident[12..], &scene[12..]);
+    }
+
+    #[test]
+    fn lod_publications_fail_atomically_without_a_scene_baseline() {
+        let mut resident = Vec::new();
+        let error = apply_lod_classification_publication(
+            &mut resident,
+            &[1.0; FLOATS_PER_FACE_OUTPUT],
+            &[],
+            true,
+            1,
+            2,
+        )
+        .unwrap_err();
+        assert!(error.contains("no resident scene baseline"));
+        assert!(resident.is_empty());
+
+        let mut resident = vec![2.0; FLOATS_PER_FACE_OUTPUT * 2];
+        let before = resident.clone();
+        let error = apply_lod_classification_publication(
+            &mut resident,
+            &[4.0; FLOATS_PER_FACE_OUTPUT * 2],
+            &[1, 1],
+            false,
+            2,
+            2,
+        )
+        .unwrap_err();
+        assert!(error.contains("strictly increasing"));
+        assert_eq!(resident, before);
+    }
+
+    #[test]
+    fn lod_parity_is_bit_exact_and_reports_bounded_examples() {
+        let expected = vec![1.0; FLOATS_PER_FACE_OUTPUT * 3];
+        let mut actual = expected.clone();
+        actual[1] = 2.0;
+        actual[FLOATS_PER_FACE_OUTPUT + 2] = 4.0;
+        actual[FLOATS_PER_FACE_OUTPUT + 3] = 3.0;
+
+        let parity = compare_lod_classifications(&expected, &actual).unwrap();
+        assert_eq!(parity.compared_faces, 3);
+        assert_eq!(parity.mismatched_faces, 2);
+        assert_eq!(parity.mismatched_fields, 3);
+        assert_eq!(parity.examples.len(), 3);
+        assert_eq!(parity.examples[0].face, 0);
+        assert_eq!(parity.examples[1].face, 1);
+        assert!(compare_lod_classifications(&expected, &actual[..6]).is_err());
     }
 
     fn coincident_square() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
