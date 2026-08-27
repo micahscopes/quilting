@@ -488,6 +488,51 @@ gate: publish the neighborhood result only after same-epoch complete-oracle
 equality, retain the complete transaction as fallback, and compare final image
 output before allowing certified epochs to skip the oracle.
 
+## Exact-oracle physical neighborhood publication
+
+Commit `b703da6` adds that reversible gate. Neighborhood and component
+publication are mutually exclusive authorities. Enabling neighborhood
+publication also enables its exact shadow and retained GPU layering; disabling
+either dependency is rejected. Every neighborhood candidate still runs the
+complete plan and overlay in the same epoch. Only a full match may swap the
+neighborhood-built overlay into the pending GPU transaction. A plan, corner,
+overlay, atlas, or triangle-budget mismatch leaves the complete overlay staged,
+and a GPU upload failure preserves the preceding GPU epoch.
+
+The cutover also corrected retained-publication accounting. Complete group-map
+reuse and sparse-overlay reuse are separate facts. The renderer now skips a GPU
+transaction only when both are reused; a freshly neighborhood- or
+component-built overlay cannot be hidden behind an unchanged complete group
+signature.
+
+The first physical horse publication was exact and active with one install,
+zero fallbacks, and no console messages. The nontrivial skinny inverted chess
+view then published the bounded overlay with:
+
+| Physical chess publication | Value |
+| --- | ---: |
+| Reconciliation / observed / local leaves | 341 / 505 / 631 |
+| Complete leaves | 94,754 |
+| Suppressed baseline roots | 55 |
+| Replacement groups / members | 28 / 181 |
+| Baseline / suppressed / overlay triangles | 204,456 / 11,732 / 31,386 |
+| Composed / complete triangles | 224,110 / 224,110 |
+| Neighborhood installs / fallbacks | 1 / 0 |
+
+The viewport was captured once with the neighborhood-built overlay physically
+active and once after disabling its authority and publishing the complete
+overlay. Both PNG files had the identical SHA-256 digest
+`6e06eaf27721069225789b875bae007b0aeb053b387849321750ce069d4e9e19`.
+This is a byte-exact full-viewport image gate in addition to the structural
+comparison. Chrome reported no warnings or errors.
+
+The executable WASM suite remains 19 of 19, including successful exact
+neighborhood publication, deliberate post-plan boundary corruption, and
+complete-overlay fallback. Normal and Leptos-enabled WASM checks and the
+generated-export smoke pass. This checkpoint deliberately does not skip the
+complete oracle; its purpose is to prove that the local object crossing the
+CPU/GPU transaction boundary is the object already shown structurally exact.
+
 ## Decision
 
 The exact component overlay now has physical publication authority. Unchanged
@@ -498,8 +543,9 @@ transactional path. Whole-scene and oversized closures are expected policy
 outcomes rather than false failures. Component identity and size are already
 preindexed, so another ineligibility cache is unwarranted. Fixed-boundary
 neighborhood planning, resident edges, baseline-composed corners, sparse
-overlay membership, atlas residency, and triangle budgets now match the
-complete oracle across the initial static, animated, camera, and inversion
-gates. The next gate is same-epoch exact physical publication with the complete
-transaction retained as fallback, followed by image equivalence and sustained
+overlay membership, atlas residency, triangle budgets, physical layered
+publication, and full-viewport output now match the complete oracle across the
+initial static, animated, camera, and inversion gates. The next gate is
+sustained exact physical publication during animation and camera/inversion
+changes, followed by a revocable neighborhood certificate and periodic oracle
 sampling. Only then may certified neighborhood epochs skip the complete path.
