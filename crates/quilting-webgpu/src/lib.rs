@@ -8,9 +8,9 @@
 use futures_channel::oneshot;
 use quilting_renderer::compute::{
     pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words,
-    pack_wgsl_lod_subject_words, prepare_lod_atlas_lookup, prepare_lod_model,
-    reconcile_and_pack_wgsl_lod_pass2, LodAtlasLookup, LodDispatchState, LodModelData,
-    PreparedLodModel, WgslLodDispatchMetrics,
+    pack_wgsl_lod_subject_words, pack_wgsl_source_visibility_words, prepare_lod_atlas_lookup,
+    prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2, LodAtlasLookup, LodDispatchState,
+    LodModelData, PreparedLodModel, WgslLodDispatchMetrics, WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
@@ -21,6 +21,10 @@ const SUBJECT_RECORD_BYTES: u64 = 160;
 const JOINT_MATRIX_BYTES: u64 = 64;
 const PASS1_RECORD_BYTES: u64 = 16;
 const PACKED_RECORD_BYTES: u64 = 4;
+const VISIBILITY_UNIFORM_BYTES: u64 = 16;
+const VISIBILITY_BATCH_RECORD_BYTES: u64 = 16;
+const VISIBILITY_RANGE_RECORD_BYTES: u64 = 20;
+const INDEXED_INDIRECT_RECORD_BYTES: u64 = 20;
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -71,6 +75,19 @@ pub struct LodPose<'a> {
 pub struct LodDeviceConformance {
     pub full_pipeline_words: usize,
     pub coherence_words: usize,
+    pub compacted_source_words: usize,
+    pub compacted_range_words: usize,
+    pub indirect_argument_words: usize,
+}
+
+/// Diagnostic copy of the exact same-device visibility outputs. The retained
+/// GPU buffers remain suitable for direct storage/indirect consumption; this
+/// owned projection exists only for conformance gates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisibilityCompactionOutput {
+    pub compacted_source_instances: Vec<u32>,
+    pub compacted_ranges: Vec<[u32; 5]>,
+    pub indirect_arguments: Vec<[u32; 5]>,
 }
 
 /// Device-local pipelines shared by every uploaded classifier model.
@@ -79,6 +96,9 @@ pub struct LodClassifierDevice {
     queue: wgpu::Queue,
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
+    visibility_count_pipeline: wgpu::ComputePipeline,
+    visibility_scan_pipeline: wgpu::ComputePipeline,
+    visibility_scatter_pipeline: wgpu::ComputePipeline,
 }
 
 /// Retained device buffers for one immutable prepared model and atlas lookup.
@@ -96,6 +116,23 @@ pub struct LodClassifierModel {
     pass2_bind_group: wgpu::BindGroup,
 }
 
+/// Retained scene shape and output buffers for deterministic visibility
+/// compaction. Only `source_visibility` changes with the current pose.
+pub struct VisibilityCompactionScene {
+    batch_count: u32,
+    source_count: u32,
+    source_visibility: wgpu::Buffer,
+    compacted_source_instances: wgpu::Buffer,
+    compacted_ranges: wgpu::Buffer,
+    indirect_arguments: wgpu::Buffer,
+    source_readback: wgpu::Buffer,
+    range_readback: wgpu::Buffer,
+    indirect_readback: wgpu::Buffer,
+    count_bind_group: wgpu::BindGroup,
+    scan_bind_group: wgpu::BindGroup,
+    scatter_bind_group: wgpu::BindGroup,
+}
+
 impl LodClassifierDevice {
     /// Compile and retain the two flattened WGSL pipelines on an existing
     /// device. Device creation and adapter policy stay with the application.
@@ -104,6 +141,12 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let pass2_source = quilting_shaders::compile_lod_pass2_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let visibility_count_source = quilting_shaders::compile_visibility_count_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let visibility_scan_source = quilting_shaders::compile_visibility_scan_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let visibility_scatter_source = quilting_shaders::compile_visibility_scatter_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let pass1_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting LOD pass one"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(pass1_source)),
@@ -111,6 +154,18 @@ impl LodClassifierDevice {
         let pass2_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting LOD pass two"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(pass2_source)),
+        });
+        let visibility_count_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting visibility count"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_count_source)),
+        });
+        let visibility_scan_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting visibility scan"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_scan_source)),
+        });
+        let visibility_scatter_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting visibility scatter"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_scatter_source)),
         });
         let pass1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("quilting LOD pass one"),
@@ -128,11 +183,41 @@ impl LodClassifierDevice {
             compilation_options: Default::default(),
             cache: None,
         });
+        let visibility_count_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting visibility count"),
+                layout: None,
+                module: &visibility_count_module,
+                entry_point: Some(quilting_shaders::VISIBILITY_COUNT_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let visibility_scan_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting visibility scan"),
+                layout: None,
+                module: &visibility_scan_module,
+                entry_point: Some(quilting_shaders::VISIBILITY_SCAN_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let visibility_scatter_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting visibility scatter"),
+                layout: None,
+                module: &visibility_scatter_module,
+                entry_point: Some(quilting_shaders::VISIBILITY_SCATTER_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         Ok(Self {
             device,
             queue,
             pass1_pipeline,
             pass2_pipeline,
+            visibility_count_pipeline,
+            visibility_scan_pipeline,
+            visibility_scatter_pipeline,
         })
     }
 
@@ -230,9 +315,346 @@ impl LodClassifierDevice {
             )));
         }
 
+        let batch_zero_count = 130u32;
+        let mut source_visibility = Vec::with_capacity(137);
+        source_visibility.extend((0..batch_zero_count).map(|index| u8::from(index % 3 != 0)));
+        source_visibility.extend([1, 1, 1, 1, 0, 1, 1]);
+        let compaction_words = WgslVisibilityCompactionSceneWords {
+            uniform: [3, 137, 0, 0],
+            batches: vec![[0, 130, 6, 0], [130, 3, 12, 0], [133, 4, 18, 0]],
+            source_eligibility: [vec![1; 130], vec![0; 3], vec![1; 4]].concat(),
+        };
+        let mut expected_sources = (0..batch_zero_count)
+            .filter(|index| index % 3 != 0)
+            .collect::<Vec<_>>();
+        expected_sources.extend([133, 135, 136]);
+        let expected_ranges = vec![[0, 0, 130, 0, 86], [1, 130, 3, 86, 0], [2, 133, 4, 86, 3]];
+        let expected_indirect = vec![[6, 86, 0, 0, 0], [12, 0, 0, 0, 86], [18, 3, 0, 0, 86]];
+        let mut compaction = self.upload_visibility_compaction_scene(compaction_words)?;
+        let compacted = self
+            .compact_visibility(&mut compaction, &source_visibility)
+            .await?;
+        if compacted.compacted_source_instances != expected_sources
+            || compacted.compacted_ranges != expected_ranges
+            || compacted.indirect_arguments != expected_indirect
+        {
+            return Err(LodWebGpuError::Conformance(format!(
+                "visibility compaction mismatch: expected sources {expected_sources:?}, ranges \
+                 {expected_ranges:?}, indirect {expected_indirect:?}; got {compacted:?}"
+            )));
+        }
+
         Ok(LodDeviceConformance {
             full_pipeline_words,
             coherence_words: actual.len(),
+            compacted_source_words: compacted.compacted_source_instances.len(),
+            compacted_range_words: compacted.compacted_ranges.len() * 5,
+            indirect_argument_words: compacted.indirect_arguments.len() * 5,
+        })
+    }
+
+    /// Upload retained batch shape and static eligibility once. Output buffers
+    /// include `INDIRECT` usage now, so a later render pass can consume the
+    /// generated arguments without changing this residency contract.
+    pub fn upload_visibility_compaction_scene(
+        &self,
+        words: WgslVisibilityCompactionSceneWords,
+    ) -> Result<VisibilityCompactionScene, LodWebGpuError> {
+        let batch_count = words.uniform[0];
+        let source_count = words.uniform[1];
+        if words.uniform[2..] != [0, 0]
+            || words.batches.len() != batch_count as usize
+            || words.source_eligibility.len() != source_count as usize
+            || words.source_eligibility.iter().any(|&value| value > 1)
+        {
+            return Err(LodWebGpuError::Payload(
+                "visibility compaction scene shape is malformed".to_string(),
+            ));
+        }
+        let mut expected_first = 0u32;
+        for batch in &words.batches {
+            if batch[0] != expected_first || batch[3] != 0 {
+                return Err(LodWebGpuError::Payload(
+                    "visibility compaction batch ranges are not canonical".to_string(),
+                ));
+            }
+            expected_first = expected_first.checked_add(batch[1]).ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "visibility compaction source count exceeds u32".to_string(),
+                )
+            })?;
+        }
+        if expected_first != source_count {
+            return Err(LodWebGpuError::Payload(
+                "visibility compaction batches do not cover the source stream".to_string(),
+            ));
+        }
+
+        let uniform = buffer_init_or_zero(
+            &self.device,
+            "visibility compaction uniform",
+            bytemuck::cast_slice(&words.uniform),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let batches = buffer_init_or_zero(
+            &self.device,
+            "visibility compaction batches",
+            bytemuck::cast_slice(&words.batches),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let source_eligibility = buffer_init_or_zero(
+            &self.device,
+            "visibility compaction eligibility",
+            bytemuck::cast_slice(&words.source_eligibility),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let source_bytes = u64::from(source_count)
+            .checked_mul(PACKED_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("visibility source buffer is too large".to_string())
+            })?;
+        let batch_count_bytes = u64::from(batch_count)
+            .checked_mul(PACKED_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("visibility batch count buffer is too large".to_string())
+            })?;
+        let range_bytes = u64::from(batch_count)
+            .checked_mul(VISIBILITY_RANGE_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("visibility range buffer is too large".to_string())
+            })?;
+        let indirect_bytes = u64::from(batch_count)
+            .checked_mul(INDEXED_INDIRECT_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("visibility indirect buffer is too large".to_string())
+            })?;
+        debug_assert_eq!(
+            std::mem::size_of_val(&words.uniform) as u64,
+            VISIBILITY_UNIFORM_BYTES
+        );
+        debug_assert!(words
+            .batches
+            .iter()
+            .all(|record| std::mem::size_of_val(record) as u64 == VISIBILITY_BATCH_RECORD_BYTES));
+
+        let source_visibility = gpu_buffer(
+            &self.device,
+            "visibility compaction current visibility",
+            source_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let batch_counts = gpu_buffer(
+            &self.device,
+            "visibility compaction batch counts",
+            batch_count_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let compacted_source_instances = gpu_buffer(
+            &self.device,
+            "visibility compacted source instances",
+            source_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let compacted_ranges = gpu_buffer(
+            &self.device,
+            "visibility compacted ranges",
+            range_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let indirect_arguments = gpu_buffer(
+            &self.device,
+            "visibility indirect arguments",
+            indirect_bytes,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+        let source_readback = gpu_buffer(
+            &self.device,
+            "visibility source diagnostic readback",
+            source_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let range_readback = gpu_buffer(
+            &self.device,
+            "visibility range diagnostic readback",
+            range_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let indirect_readback = gpu_buffer(
+            &self.device,
+            "visibility indirect diagnostic readback",
+            indirect_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+
+        let count_layout = self.visibility_count_pipeline.get_bind_group_layout(0);
+        let count_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("visibility count bindings"),
+            layout: &count_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &batches),
+                bind(2, &source_eligibility),
+                bind(3, &source_visibility),
+                bind(4, &batch_counts),
+            ],
+        });
+        let scan_layout = self.visibility_scan_pipeline.get_bind_group_layout(0);
+        let scan_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("visibility scan bindings"),
+            layout: &scan_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &batches),
+                bind(2, &batch_counts),
+                bind(3, &compacted_ranges),
+                bind(4, &indirect_arguments),
+            ],
+        });
+        let scatter_layout = self.visibility_scatter_pipeline.get_bind_group_layout(0);
+        let scatter_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("visibility scatter bindings"),
+            layout: &scatter_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &batches),
+                bind(2, &source_eligibility),
+                bind(3, &source_visibility),
+                bind(4, &compacted_ranges),
+                bind(5, &compacted_source_instances),
+            ],
+        });
+
+        Ok(VisibilityCompactionScene {
+            batch_count,
+            source_count,
+            source_visibility,
+            compacted_source_instances,
+            compacted_ranges,
+            indirect_arguments,
+            source_readback,
+            range_readback,
+            indirect_readback,
+            count_bind_group,
+            scan_bind_group,
+            scatter_bind_group,
+        })
+    }
+
+    /// Execute count, deterministic batch scan, and stable parallel scatter in
+    /// one submission. Readback is diagnostic only; all three output buffers
+    /// remain resident for direct downstream rendering.
+    pub async fn compact_visibility(
+        &self,
+        scene: &mut VisibilityCompactionScene,
+        source_visibility: &[u8],
+    ) -> Result<VisibilityCompactionOutput, LodWebGpuError> {
+        let visibility = pack_wgsl_source_visibility_words(source_visibility, scene.source_count)
+            .map_err(LodWebGpuError::Payload)?;
+        if scene.batch_count == 0 {
+            return Ok(VisibilityCompactionOutput {
+                compacted_source_instances: Vec::new(),
+                compacted_ranges: Vec::new(),
+                indirect_arguments: Vec::new(),
+            });
+        }
+        self.queue.write_buffer(
+            &scene.source_visibility,
+            0,
+            bytemuck::cast_slice(&visibility),
+        );
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting visibility compaction"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting visibility count"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.visibility_count_pipeline);
+            pass.set_bind_group(0, &scene.count_bind_group, &[]);
+            pass.dispatch_workgroups(scene.batch_count, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting visibility scan"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.visibility_scan_pipeline);
+            pass.set_bind_group(0, &scene.scan_bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting visibility scatter"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.visibility_scatter_pipeline);
+            pass.set_bind_group(0, &scene.scatter_bind_group, &[]);
+            pass.dispatch_workgroups(scene.batch_count, 1, 1);
+        }
+
+        let source_bytes = u64::from(scene.source_count) * PACKED_RECORD_BYTES;
+        let range_bytes = u64::from(scene.batch_count) * VISIBILITY_RANGE_RECORD_BYTES;
+        let indirect_bytes = u64::from(scene.batch_count) * INDEXED_INDIRECT_RECORD_BYTES;
+        if source_bytes != 0 {
+            encoder.copy_buffer_to_buffer(
+                &scene.compacted_source_instances,
+                0,
+                &scene.source_readback,
+                0,
+                source_bytes,
+            );
+        }
+        encoder.copy_buffer_to_buffer(
+            &scene.compacted_ranges,
+            0,
+            &scene.range_readback,
+            0,
+            range_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            &scene.indirect_arguments,
+            0,
+            &scene.indirect_readback,
+            0,
+            indirect_bytes,
+        );
+        self.queue.submit([encoder.finish()]);
+
+        let compacted_ranges = words_to_five_records(
+            self.readback_words(&scene.range_readback, range_bytes)
+                .await?,
+            "visibility range",
+        )?;
+        let indirect_arguments = words_to_five_records(
+            self.readback_words(&scene.indirect_readback, indirect_bytes)
+                .await?,
+            "visibility indirect",
+        )?;
+        let survivor_count = compacted_ranges
+            .last()
+            .map_or(0u32, |range| range[3].saturating_add(range[4]));
+        if survivor_count > scene.source_count {
+            return Err(LodWebGpuError::Conformance(
+                "visibility compaction emitted too many survivors".to_string(),
+            ));
+        }
+        let mut compacted_source_instances = if source_bytes == 0 {
+            Vec::new()
+        } else {
+            self.readback_words(&scene.source_readback, source_bytes)
+                .await?
+        };
+        compacted_source_instances.truncate(survivor_count as usize);
+        Ok(VisibilityCompactionOutput {
+            compacted_source_instances,
+            compacted_ranges,
+            indirect_arguments,
         })
     }
 
@@ -578,11 +1000,76 @@ impl LodClassifierDevice {
     }
 }
 
+impl VisibilityCompactionScene {
+    pub fn batch_count(&self) -> u32 {
+        self.batch_count
+    }
+
+    pub fn source_count(&self) -> u32 {
+        self.source_count
+    }
+
+    /// Stable source-instance indirection consumed by a render vertex stage.
+    pub fn compacted_source_instances_buffer(&self) -> &wgpu::Buffer {
+        &self.compacted_source_instances
+    }
+
+    /// One 20-byte source/compacted range record per retained batch.
+    pub fn compacted_ranges_buffer(&self) -> &wgpu::Buffer {
+        &self.compacted_ranges
+    }
+
+    /// One exact 20-byte `DrawIndexedIndirect` record per retained batch.
+    pub fn indirect_arguments_buffer(&self) -> &wgpu::Buffer {
+        &self.indirect_arguments
+    }
+}
+
+fn words_to_five_records(words: Vec<u32>, label: &str) -> Result<Vec<[u32; 5]>, LodWebGpuError> {
+    if !words.len().is_multiple_of(5) {
+        return Err(LodWebGpuError::Mapping(format!(
+            "{label} readback does not contain five-word records"
+        )));
+    }
+    Ok(words
+        .chunks_exact(5)
+        .map(|record| [record[0], record[1], record[2], record[3], record[4]])
+        .collect())
+}
+
 fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
     }
+}
+
+fn buffer_init_or_zero(
+    device: &wgpu::Device,
+    label: &'static str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    let zero = [0u8; 4];
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: if contents.is_empty() { &zero } else { contents },
+        usage,
+    })
+}
+
+fn gpu_buffer(
+    device: &wgpu::Device,
+    label: &'static str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size.max(PACKED_RECORD_BYTES),
+        usage,
+        mapped_at_creation: false,
+    })
 }
 
 fn storage_buffer<T: bytemuck::Pod>(
@@ -626,8 +1113,15 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .await
         .map_err(browser_error)?;
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} coherence_words={}",
-        adapter_info.name, adapter_info.backend, report.full_pipeline_words, report.coherence_words,
+        "adapter={} backend={:?} full_pipeline_words={} coherence_words={} \
+         compacted_source_words={} compacted_range_words={} indirect_argument_words={}",
+        adapter_info.name,
+        adapter_info.backend,
+        report.full_pipeline_words,
+        report.coherence_words,
+        report.compacted_source_words,
+        report.compacted_range_words,
+        report.indirect_argument_words,
     ))
 }
 

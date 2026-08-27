@@ -1,11 +1,16 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+use quilting_core::batch::{RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember};
 use quilting_core::quaternion::{Mobius, Quat};
+use quilting_core::render::{
+    PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderGeometry, RenderSceneSnapshot,
+};
+use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
-    pack_lod_classification, prepare_lod_atlas_lookup, prepare_lod_dispatch_state,
-    prepare_lod_model, unpack_lod_classification_fields, LodAtlasLookup, LodDispatchState,
-    LodModelData, LodSubjectState, PackedLodClassification, PreparedLodModel,
-    WgslLodDispatchMetrics,
+    pack_lod_classification, pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup,
+    prepare_lod_dispatch_state, prepare_lod_model, unpack_lod_classification_fields,
+    wgsl_visibility_compaction_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
+    LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
 use quilting_webgpu::{LodClassifierDevice, LodPose};
 
@@ -38,6 +43,46 @@ fn identity_dispatch() -> LodDispatchState {
         mobius_power: 0.0,
         c_norm_sq: 0.0,
         has_pole: 0.0,
+    }
+}
+
+fn compaction_member(face_index: u32, leaf_id: ScreenPatchLeafId) -> RenderBatchMember {
+    RenderBatchMember {
+        face_index,
+        leaf_id,
+        node_index: 0,
+        edge_lods: [2; 3],
+        permutation_index: 0,
+        vertex_lods: [2; 3],
+    }
+}
+
+fn compaction_batch(
+    material_index: usize,
+    faces: impl IntoIterator<Item = u32>,
+    enabled: bool,
+) -> RenderBatchSnapshot {
+    RenderBatchSnapshot {
+        id: RenderBatchId::complete(RenderBatchKey {
+            lod: [2; 3],
+            parity_bucket: 0,
+            material_index,
+            render_node_index: 0,
+        }),
+        members: faces
+            .into_iter()
+            .map(|face| compaction_member(face, ScreenPatchLeafId::ROOT))
+            .collect(),
+        triangle_index_count: 6 * (material_index as u32 + 1),
+        line_index_count: 8 * (material_index as u32 + 1),
+        transform: RenderEntityTransform {
+            mobius: identity_mobius(),
+            orientation_sign: 1,
+            euclidean_model: identity_matrix(),
+            euclidean_normal: identity_matrix(),
+        },
+        enabled,
+        pbr_class: PbrDrawClass::Opaque,
     }
 }
 
@@ -124,6 +169,80 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let report = classifier.run_conformance_matrix().await.unwrap();
         assert_eq!(report.full_pipeline_words, 1);
         assert_eq!(report.coherence_words, 10);
+        assert_eq!(report.compacted_source_words, 89);
+        assert_eq!(report.compacted_range_words, 15);
+        assert_eq!(report.indirect_argument_words, 15);
+
+        let compaction_scene = RenderSceneSnapshot {
+            revision: 19,
+            suppressed_root_faces: Vec::new(),
+            batches: vec![
+                compaction_batch(0, 0..130, true),
+                compaction_batch(1, 130..133, false),
+                compaction_batch(2, 133..137, true),
+            ],
+        };
+        let mut source_visibility = (0..130)
+            .map(|index| u8::from(index % 3 != 0))
+            .collect::<Vec<_>>();
+        source_visibility.extend([1, 1, 1, 1, 0, 1, 1]);
+        let expected = wgsl_visibility_compaction_oracle_words(
+            &compaction_scene,
+            &source_visibility,
+            RenderGeometry::Triangles,
+        )
+        .unwrap();
+        let words = pack_wgsl_visibility_compaction_scene_words(
+            &compaction_scene,
+            RenderGeometry::Triangles,
+        )
+        .unwrap();
+        let mut resident = classifier
+            .upload_visibility_compaction_scene(words)
+            .unwrap();
+        let actual = classifier
+            .compact_visibility(&mut resident, &source_visibility)
+            .await
+            .unwrap();
+        assert_eq!(
+            actual.compacted_source_instances,
+            expected.compacted_source_instances,
+        );
+        assert_eq!(actual.compacted_ranges, expected.compacted_ranges);
+        assert_eq!(actual.indirect_arguments, expected.indirect_arguments);
+
+        let mut roots = compaction_batch(0, [0, 1], true);
+        roots.id.layer = RenderBatchLayer::RetainedRoot;
+        let mut overlay = compaction_batch(0, [0], true);
+        overlay.id.layer = RenderBatchLayer::AdaptiveOverlay;
+        overlay.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(0).unwrap();
+        let replacement_scene = RenderSceneSnapshot {
+            revision: 20,
+            suppressed_root_faces: vec![0],
+            batches: vec![roots, overlay],
+        };
+        let expected = wgsl_visibility_compaction_oracle_words(
+            &replacement_scene,
+            &[1, 1, 1],
+            RenderGeometry::Lines,
+        )
+        .unwrap();
+        let words =
+            pack_wgsl_visibility_compaction_scene_words(&replacement_scene, RenderGeometry::Lines)
+                .unwrap();
+        let mut resident = classifier
+            .upload_visibility_compaction_scene(words)
+            .unwrap();
+        let actual = classifier
+            .compact_visibility(&mut resident, &[1, 1, 1])
+            .await
+            .unwrap();
+        assert_eq!(
+            actual.compacted_source_instances,
+            expected.compacted_source_instances,
+        );
+        assert_eq!(actual.compacted_ranges, expected.compacted_ranges);
+        assert_eq!(actual.indirect_arguments, expected.indirect_arguments);
 
         let atlas = complete_atlas();
         let simple_triangle = || {
