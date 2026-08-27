@@ -4891,6 +4891,9 @@ function mirrorSelectedObjectToApp(nowMs = performance.now()) {
       sourcePivot: selectedObject.sourceAnchor,
       margin: target.margin,
     }, navigation.selected_focus);
+    if (RUST_SELECTION_IMPLEMENTATION === 'rust') {
+      applyRustSelectedFocusNavigation(navigation);
+    }
     applyRustAppFocusToRenderer(navigation);
     compareAppSelectionTransitionFrame(navigation, nowMs);
     refreshAppShadowSnapshot();
@@ -4988,14 +4991,7 @@ function pushFocusSphereState() {
   );
 }
 
-function anchorFocusSphereToSelection(nowMs = performance.now()) {
-  if (!selectedObject) return false;
-  const target = focusSphereFromBound(selectedObject.bound, FOCUS_SPHERE_MARGIN, 0.02);
-  if (!target) return false;
-  focusSphere.active = true;
-  focusSphere.anchorNode = selectedObject.node;
-  focusSphere.anchorRadius = selectedObject.bound.radius;
-  focusSphere.margin = target.margin;
+function prepareSelectionFocusField() {
   const enteringSpheroidalFocus = fz.mode.peek() !== '3';
   fz.enabled.set(true);
   fz.mode.set('3');
@@ -5004,6 +5000,17 @@ function anchorFocusSphereToSelection(nowMs = performance.now()) {
     fz.focus.set(50);
     fz.bandwidth.set(10);
   }
+}
+
+function anchorFocusSphereToSelection(nowMs = performance.now()) {
+  if (!selectedObject) return false;
+  const target = focusSphereFromBound(selectedObject.bound, FOCUS_SPHERE_MARGIN, 0.02);
+  if (!target) return false;
+  focusSphere.active = true;
+  focusSphere.anchorNode = selectedObject.node;
+  focusSphere.anchorRadius = selectedObject.bound.radius;
+  focusSphere.margin = target.margin;
+  prepareSelectionFocusField();
   focusSphereTransition = {
     start: { center: focusSphere.center.slice(), radius: focusSphere.radius },
     target,
@@ -5112,8 +5119,18 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   mr_setSelectedNode(node);
   mr_highlightFace(highlightFace ? faceId : -1);
   const selectedAtMs = performance.now();
-  anchorFocusSphereToSelection(selectedAtMs);
-  mirrorSelectedObjectToApp(selectedAtMs);
+  if (RUST_SELECTION_IMPLEMENTATION === 'rust') {
+    // Preserve the incumbent field defaults at the adapter boundary, then let
+    // the application reducer own the only sphere transition. Unmapped local
+    // assets retain the exact browser fallback instead of becoming inert.
+    prepareSelectionFocusField();
+    if (mirrorSelectedObjectToApp(selectedAtMs) !== 'mapped') {
+      anchorFocusSphereToSelection(selectedAtMs);
+    }
+  } else {
+    anchorFocusSphereToSelection(selectedAtMs);
+    mirrorSelectedObjectToApp(selectedAtMs);
+  }
   selectionLabel();
   console.log(
     `Selected glTF node ${node} from face ${faceId}`
