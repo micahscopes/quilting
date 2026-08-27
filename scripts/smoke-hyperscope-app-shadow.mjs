@@ -20,7 +20,7 @@ const {
 const { mapSpaceMouseNavigationAxes } = await import(
   pathToFileURL(`${repository}/spacemouse.mjs`).href
 );
-const { transportCameraAcrossSphereReflections } = await import(
+const { framedSphereDistance, transportCameraAcrossSphereReflections } = await import(
   pathToFileURL(`${repository}/hyperscope_focus.mjs`).href
 );
 await init({ module_or_path: readFileSync(wasmPath) });
@@ -907,6 +907,60 @@ assert.deepEqual(selectionApp.navigationSnapshot().selected_focus, {
   output_pivot: [4, 0, 0],
   output_radius: 2,
 });
+const reframeAspect = 16 / 9;
+const reframeMargin = 1.15;
+const reframeDuration = 0.7;
+const beforeSelectedReframe = selectionApp.navigationSnapshot();
+assert.equal(
+  selectionApp.reframeSelection(
+    reframeAspect, reframeMargin, reframeDuration, 'smootherstep',
+  ),
+  selectionIncumbent.reframeSelection(
+    reframeAspect, reframeMargin, reframeDuration, 'smootherstep',
+  ),
+);
+assert.deepEqual(
+  selectionApp.navigationSnapshot().camera,
+  beforeSelectedReframe.camera,
+  'semantic reframe remains queued until the shared frame boundary',
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.equal(
+  selectionApp.navigationSnapshot().camera.camera_transition_remaining,
+  reframeDuration,
+);
+assertNavigationParity(selectionApp.tickNavigation(0.35), selectionIncumbent.tick(0.35));
+assertNavigationParity(selectionApp.tickNavigation(0.35), selectionIncumbent.tick(0.35));
+const reframedSelection = selectionApp.navigationSnapshot();
+const expectedReframeDistance = Math.min(
+  Math.max(
+    framedSphereDistance(2, reframeAspect, projectionLens[0], reframeMargin),
+    0.1,
+  ),
+  100,
+);
+assertArrayClose(reframedSelection.camera.eye, [4, 0, expectedReframeDistance]);
+assertArrayClose(reframedSelection.camera.semantic_target, [4, 0, 0]);
+assert.ok(
+  Math.abs(reframedSelection.camera.control_distance - expectedReframeDistance) <= 1e-12,
+);
+assert.equal(reframedSelection.camera.camera_transition_remaining, undefined);
+
+const beforeInvalidReframe = selectionApp.navigationSnapshot();
+assert.equal(
+  selectionApp.reframeSelection(0, reframeMargin, reframeDuration, 'smootherstep'),
+  selectionIncumbent.reframeSelection(0, reframeMargin, reframeDuration, 'smootherstep'),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.deepEqual(
+  selectionApp.navigationSnapshot().camera,
+  beforeInvalidReframe.camera,
+  'invalid framing must not partially mutate the camera',
+);
+assert.match(
+  selectionApp.navigationSnapshot().diagnostics.at(-1),
+  /camera framing radius, aspect, field of view, and margin are invalid/,
+);
 assert.equal(
   selectionApp.applyFocusToRenderer(17, selectedAsset, selectedEntity),
   false,
@@ -980,6 +1034,19 @@ assert.deepEqual(
 );
 assert.equal(selectionApp.navigationSnapshot().selected_focus.output_pivot, undefined);
 assert.equal(selectionApp.navigationSnapshot().selected_focus.output_radius, undefined);
+const beforePoleReframe = selectionApp.navigationSnapshot();
+assert.equal(
+  selectionApp.reframeSelection(1, 1.15, 0.7, 'smootherstep'),
+  selectionIncumbent.reframeSelection(1, 1.15, 0.7, 'smootherstep'),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.deepEqual(
+  selectionApp.navigationSnapshot().camera,
+  beforePoleReframe.camera,
+  'a selected pivot at the reflection pole must leave the camera untouched',
+);
+assert.equal(selectionApp.navigationSnapshot().camera.camera_transition_remaining, undefined);
+assert.match(selectionApp.navigationSnapshot().diagnostics.at(-1), /reflection pole/);
 selectionApp.free();
 selectionIncumbent.free();
 

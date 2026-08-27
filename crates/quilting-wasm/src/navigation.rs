@@ -160,6 +160,24 @@ impl HyperscopeNavigation {
         })
     }
 
+    /// Frame the currently selected source-chart sphere in the active output
+    /// chart. Selection identity and conformal scale remain Rust-owned.
+    #[wasm_bindgen(js_name = reframeSelection)]
+    pub fn reframe_selection(
+        &mut self,
+        viewport_aspect: f64,
+        margin: f64,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        self.push(NavigationAction::ReframeSelection {
+            viewport_aspect,
+            margin,
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
     #[wasm_bindgen(js_name = beginSurfaceAnchorTransition)]
     #[allow(clippy::too_many_arguments)]
     pub fn begin_surface_anchor_transition(
