@@ -13,6 +13,7 @@ const {
   build_required_atlas: buildRequiredAtlas,
   export_all_patches: exportAllPatches,
   load_gltf_data: loadGltfData,
+  mapPointerTurntableFrame,
   mapSpaceMouseCameraFrame,
   required_tessellation_atlas_triples: requiredAtlasTriples,
 } = await import(packageUrl);
@@ -1336,6 +1337,87 @@ function rustSpaceMouseCameraFrame(normalizedAxes, sample) {
   );
 }
 
+function browserPointerTurntableFrame(deltaX, deltaY, gesture, controlDistance) {
+  if (gesture === 0) {
+    return { pan: [0, 0], pitch: -deltaY * 0.005, yaw: deltaX * 0.005, dolly_log: 0 };
+  }
+  if (gesture === 1) {
+    return {
+      pan: [
+        -deltaX * 0.003 * controlDistance,
+        -deltaY * 0.003 * controlDistance,
+      ],
+      pitch: 0,
+      yaw: 0,
+      dolly_log: 0,
+    };
+  }
+  return {
+    pan: [0, 0],
+    pitch: 0,
+    yaw: 0,
+    dolly_log: Math.log(deltaY > 0 ? 1.1 : 0.9),
+  };
+}
+
+function rotateVectorAroundAxis(vector, axis, angle) {
+  const length = Math.hypot(...axis);
+  const unit = axis.map(value => value / length);
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const dot = vector.reduce((sum, value, index) => sum + value * unit[index], 0);
+  const cross = [
+    unit[1] * vector[2] - unit[2] * vector[1],
+    unit[2] * vector[0] - unit[0] * vector[2],
+    unit[0] * vector[1] - unit[1] * vector[0],
+  ];
+  return vector.map((value, index) => (
+    value * cosine + cross[index] * sine + unit[index] * dot * (1 - cosine)
+  ));
+}
+
+function browserPointerCameraStep(camera, frame, semanticTargetEnabled) {
+  const pivot = camera.semanticTarget ?? camera.eye.map((value, index) => (
+    value + camera.forward[index] * camera.controlDistance
+  ));
+  const worldUp = [0, 1, 0];
+  const yawed = {
+    right: rotateVectorAroundAxis(camera.right, worldUp, frame.yaw),
+    up: rotateVectorAroundAxis(camera.up, worldUp, frame.yaw),
+    forward: rotateVectorAroundAxis(camera.forward, worldUp, frame.yaw),
+  };
+  const basis = {
+    right: rotateVectorAroundAxis(yawed.right, yawed.right, frame.pitch),
+    up: rotateVectorAroundAxis(yawed.up, yawed.right, frame.pitch),
+    forward: rotateVectorAroundAxis(yawed.forward, yawed.right, frame.pitch),
+  };
+  const translatedPivot = pivot.map((value, index) => (
+    value + basis.right[index] * frame.pan[0] + basis.up[index] * frame.pan[1]
+  ));
+  const controlDistance = Math.min(
+    100,
+    Math.max(0.1, camera.controlDistance * Math.exp(frame.dolly_log)),
+  );
+  return {
+    eye: translatedPivot.map((value, index) => (
+      value - basis.forward[index] * controlDistance
+    )),
+    ...basis,
+    controlDistance,
+    semanticTarget: semanticTargetEnabled ? translatedPivot : undefined,
+  };
+}
+
+function assertNumbersNear(actual, expected, tolerance = 2e-12) {
+  assert.equal(actual.length, expected.length);
+  for (let index = 0; index < actual.length; index++) {
+    assert.ok(
+      Math.abs(actual[index] - expected[index]) <= tolerance,
+      `numeric drift at ${index}: ${actual[index]} vs ${expected[index]}`,
+    );
+  }
+}
+
 const presets = ['hyperscope', 'object', 'fly', 'drone'];
 const normalizedAxes = new Float32Array([0.25, -0.5, 0.75, -1, 0.125, -0.25]);
 const spaceMouseAxisVectors = [new Float32Array(6)];
@@ -1665,6 +1747,131 @@ assert.equal(invalidSpaceMouseApp.navigationSnapshot().pending_actions, 0);
 assert.equal(invalidSpaceMouseApp.navigationSnapshot().preset, 'hyperscope');
 invalidSpaceMouseApp.free();
 
+let pointerMappingCases = 0;
+for (const gesture of [0, 1, 2]) {
+  for (const deltaX of [-40, 0, 17.5]) {
+    for (const deltaY of [-23.25, 0, 31]) {
+      for (const controlDistance of [0.1, 3, 100]) {
+        const actual = mapPointerTurntableFrame(
+          deltaX,
+          deltaY,
+          gesture,
+          controlDistance,
+        );
+        const expected = browserPointerTurntableFrame(
+          deltaX,
+          deltaY,
+          gesture,
+          controlDistance,
+        );
+        assertNumbersNear(actual.pan, expected.pan);
+        assertNumbersNear(
+          [actual.pitch, actual.yaw, actual.dolly_log],
+          [expected.pitch, expected.yaw, expected.dolly_log],
+        );
+        pointerMappingCases++;
+      }
+    }
+  }
+}
+
+const pointerCameraCases = [
+  { deltaX: 19, deltaY: -11, gesture: 0, semanticTargetEnabled: false },
+  { deltaX: -7, deltaY: 13, gesture: 1, semanticTargetEnabled: false },
+  { deltaX: 0, deltaY: 1, gesture: 2, semanticTargetEnabled: false },
+  { deltaX: -31, deltaY: 5, gesture: 0, semanticTargetEnabled: true },
+  { deltaX: 9, deltaY: -15, gesture: 1, semanticTargetEnabled: true },
+  { deltaX: 0, deltaY: -1, gesture: 2, semanticTargetEnabled: true },
+];
+const pointerCameraApp = new HyperscopeAppShadow();
+const pointerEye = new Float64Array([2, -1, 4]);
+const pointerForward = new Float64Array([0.36, -0.48, -0.8]);
+const pointerUp = new Float64Array([0.8, 0.6, 0]);
+pointerCameraApp.synchronizeNavigation(
+  pointerEye,
+  pointerForward,
+  pointerUp,
+  4,
+  new Float64Array(),
+  ...projectionLens,
+  focusCenter,
+  2,
+  false,
+  false,
+  0.5,
+  0.1,
+);
+let pointerOracle = {
+  eye: Array.from(pointerEye),
+  right: [0.48, -0.64, 0.6],
+  up: Array.from(pointerUp),
+  forward: Array.from(pointerForward),
+  controlDistance: 4,
+  semanticTarget: undefined,
+};
+for (const sample of pointerCameraCases) {
+  const expectedFrame = browserPointerTurntableFrame(
+    sample.deltaX,
+    sample.deltaY,
+    sample.gesture,
+    pointerOracle.controlDistance,
+  );
+  pointerOracle = browserPointerCameraStep(
+    pointerOracle,
+    expectedFrame,
+    sample.semanticTargetEnabled,
+  );
+  const packet = new Float64Array(17);
+  pointerCameraApp.stepPointerCamera(
+    sample.deltaX,
+    sample.deltaY,
+    sample.gesture,
+    sample.semanticTargetEnabled,
+    packet,
+  );
+  const snapshot = pointerCameraApp.navigationSnapshot();
+  assertSpaceMouseCameraPacket(packet, snapshot);
+  assertNumbersNear(snapshot.camera.eye, pointerOracle.eye);
+  assertNumbersNear(snapshot.camera.right, pointerOracle.right);
+  assertNumbersNear(snapshot.camera.up, pointerOracle.up);
+  assertNumbersNear(snapshot.camera.forward, pointerOracle.forward);
+  assert.ok(Math.abs(
+    snapshot.camera.control_distance - pointerOracle.controlDistance,
+  ) <= 2e-12);
+  if (pointerOracle.semanticTarget === undefined) {
+    assert.equal(snapshot.camera.semantic_target, undefined);
+  } else {
+    assertNumbersNear(snapshot.camera.semantic_target, pointerOracle.semanticTarget);
+  }
+  assert.equal(snapshot.pending_actions, 0);
+}
+pointerCameraApp.free();
+
+const invalidPointerApp = new HyperscopeAppShadow();
+const pointerPacket = new Float64Array(17).fill(789);
+const invalidPointerBefore = invalidPointerApp.navigationSnapshot();
+assert.throws(
+  () => invalidPointerApp.stepPointerCamera(NaN, 0, 0, false, pointerPacket),
+  /finite/,
+);
+assert.throws(
+  () => invalidPointerApp.stepPointerCamera(0, 0, 3, false, pointerPacket),
+  /pointer gesture/,
+);
+assert.throws(
+  () => invalidPointerApp.stepPointerCamera(
+    0,
+    0,
+    0,
+    false,
+    new Float64Array(16),
+  ),
+  /exactly 17 numbers/,
+);
+assert.deepEqual(Array.from(pointerPacket), new Array(17).fill(789));
+assertNavigationParity(invalidPointerApp.navigationSnapshot(), invalidPointerBefore);
+invalidPointerApp.free();
+
 const finalFrameTime = app.navigationSnapshot().elapsed_seconds + 0.1;
 app.advanceFrame(finalFrameTime, 0.1);
 assert.throws(
@@ -1711,5 +1918,9 @@ console.log(JSON.stringify({
     responsePolicy: responsePolicyCases,
     queuedCameraStates: spaceMouseCases.length,
     deterministicTraceFrames: traceFrames,
+  },
+  pointerInputCases: {
+    mapping: pointerMappingCases,
+    cameraStates: pointerCameraCases.length,
   },
 }));

@@ -17,10 +17,11 @@ pub use action::{
     ScheduledNavigationAction,
 };
 pub use camera::{
-    map_space_mouse_axes, map_space_mouse_camera, CameraBasis, CameraError, CameraRig,
-    MappedSpaceMouseFrame, NavigationAxes, NavigationFrame, NavigationPreset, PerspectiveLens,
-    ReflectionTransport, SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping,
-    SphereReflectionState, TurntableFrame,
+    map_pointer_turntable, map_space_mouse_axes, map_space_mouse_camera, CameraBasis, CameraError,
+    CameraRig, MappedSpaceMouseFrame, NavigationAxes, NavigationFrame, NavigationPreset,
+    PerspectiveLens, PointerTurntableGesture, PointerTurntableInput, ReflectionTransport,
+    SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping, SphereReflectionState,
+    TurntableFrame,
 };
 pub use focus::{FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition};
 pub use surface_anchor::{

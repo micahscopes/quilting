@@ -3,11 +3,12 @@ use crate::navigation::{
     synchronized_navigation_state, vector3, SelectedFocusJsSnapshot,
 };
 use hyperscape::{
-    extract_packed_scene, map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere,
-    LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame, NavigationPreset,
-    PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
-    PackedPresentationLayerBinding, Presentation, PresentationAsset, PresentationSnapshot,
-    SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget,
+    extract_packed_scene, map_pointer_turntable, map_space_mouse_camera, CameraBasis, CameraRig,
+    FocusSphere, LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame,
+    NavigationPreset, PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
+    PackedPresentationLayerBinding, PointerTurntableGesture, PointerTurntableInput, Presentation,
+    PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
+    SurfaceAnchorTarget, TurntableFrame,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
@@ -56,6 +57,19 @@ pub fn map_space_mouse_camera_frame(
         horizon_lock_requested,
     )?;
     to_js(&ShadowMappedSpaceMouseFrame::from(mapped))
+}
+
+/// Pure generated-WASM oracle for the incumbent pointer turntable response.
+/// Gesture 0 is orbit, 1 is shift-pan, and 2 is wheel dolly.
+#[wasm_bindgen(js_name = mapPointerTurntableFrame)]
+pub fn map_pointer_turntable_frame(
+    delta_x: f64,
+    delta_y: f64,
+    gesture: u8,
+    control_distance: f64,
+) -> Result<JsValue, JsValue> {
+    let frame = pointer_turntable_input(delta_x, delta_y, gesture, control_distance)?;
+    to_js(&ShadowTurntableFrame::from(frame))
 }
 
 /// Encode one short-lived browser viewport sample through the canonical Rust
@@ -566,12 +580,6 @@ impl HyperscopeAppShadow {
         horizon_lock_requested: bool,
         output: &mut [f64],
     ) -> Result<(), JsValue> {
-        const OUTPUT_LEN: usize = 17;
-        if output.len() != OUTPUT_LEN {
-            return Err(JsValue::from_str(
-                "SpaceMouse camera output must contain exactly 17 numbers",
-            ));
-        }
         let mapped = space_mouse_camera_input(
             normalized_axes,
             preset,
@@ -584,37 +592,40 @@ impl HyperscopeAppShadow {
             rotate_gain,
             horizon_lock_requested,
         )?;
-        let elapsed_seconds = self.store.frame_snapshot().elapsed_seconds;
-        let diagnostic_count = self.store.navigation_diagnostic_count();
-        self.dispatch_navigation(NavigationAction::ApplyCameraIntent {
-            preset: mapped.preset,
-            semantic_target_enabled: mapped.preset == NavigationPreset::Object,
-            frame: mapped.frame,
-        })?;
-        self.advance_frame_quiet(elapsed_seconds, 0.0)?;
-        if self.store.navigation_diagnostic_count() != diagnostic_count {
-            return Err(JsValue::from_str(
-                &self
-                    .store
-                    .last_navigation_diagnostic()
-                    .unwrap_or_else(|| "SpaceMouse camera intent was rejected".to_owned()),
-            ));
-        }
+        self.step_camera_action(
+            NavigationAction::ApplyCameraIntent {
+                preset: mapped.preset,
+                semantic_target_enabled: mapped.preset == NavigationPreset::Object,
+                frame: mapped.frame,
+            },
+            "SpaceMouse",
+            output,
+        )
+    }
 
-        let frame = self.store.frame_snapshot();
-        let basis = frame.camera.basis();
-        let mut packet = [0.0; OUTPUT_LEN];
-        packet[0..3].copy_from_slice(&frame.camera.eye);
-        packet[3..6].copy_from_slice(&basis.right);
-        packet[6..9].copy_from_slice(&basis.up);
-        packet[9..12].copy_from_slice(&basis.forward);
-        packet[12] = frame.camera.control_distance;
-        if let Some(target) = frame.camera.semantic_target {
-            packet[13] = 1.0;
-            packet[14..17].copy_from_slice(&target);
-        }
-        output.copy_from_slice(&packet);
-        Ok(())
+    /// Map and integrate one mouse/trackpad gesture through the same retained
+    /// camera packet used by SpaceMouse authority. Gesture 0 is orbit, 1 is
+    /// shift-pan, and 2 is wheel dolly. The browser supplies only platform
+    /// deltas and the current semantic-target policy.
+    #[wasm_bindgen(js_name = stepPointerCamera)]
+    pub fn step_pointer_camera(
+        &self,
+        delta_x: f64,
+        delta_y: f64,
+        gesture: u8,
+        semantic_target_enabled: bool,
+        output: &mut [f64],
+    ) -> Result<(), JsValue> {
+        let control_distance = self.store.frame_snapshot().camera.control_distance;
+        let frame = pointer_turntable_input(delta_x, delta_y, gesture, control_distance)?;
+        self.step_camera_action(
+            NavigationAction::ApplyTurntableIntent {
+                semantic_target_enabled,
+                frame,
+            },
+            "pointer",
+            output,
+        )
     }
 
     #[wasm_bindgen(js_name = transitionCamera)]
@@ -1242,6 +1253,47 @@ impl Default for HyperscopeAppShadow {
 }
 
 impl HyperscopeAppShadow {
+    fn step_camera_action(
+        &self,
+        action: NavigationAction,
+        input_name: &str,
+        output: &mut [f64],
+    ) -> Result<(), JsValue> {
+        const CAMERA_PACKET_LEN: usize = 17;
+        if output.len() != CAMERA_PACKET_LEN {
+            return Err(JsValue::from_str(&format!(
+                "{input_name} camera output must contain exactly 17 numbers"
+            )));
+        }
+        let elapsed_seconds = self.store.frame_snapshot().elapsed_seconds;
+        let diagnostic_count = self.store.navigation_diagnostic_count();
+        self.dispatch_navigation(action)?;
+        self.advance_frame_quiet(elapsed_seconds, 0.0)?;
+        if self.store.navigation_diagnostic_count() != diagnostic_count {
+            return Err(JsValue::from_str(
+                &self
+                    .store
+                    .last_navigation_diagnostic()
+                    .unwrap_or_else(|| format!("{input_name} camera intent was rejected")),
+            ));
+        }
+
+        let frame = self.store.frame_snapshot();
+        let basis = frame.camera.basis();
+        let mut packet = [0.0; CAMERA_PACKET_LEN];
+        packet[0..3].copy_from_slice(&frame.camera.eye);
+        packet[3..6].copy_from_slice(&basis.right);
+        packet[6..9].copy_from_slice(&basis.up);
+        packet[9..12].copy_from_slice(&basis.forward);
+        packet[12] = frame.camera.control_distance;
+        if let Some(target) = frame.camera.semantic_target {
+            packet[13] = 1.0;
+            packet[14..17].copy_from_slice(&target);
+        }
+        output.copy_from_slice(&packet);
+        Ok(())
+    }
+
     fn dispatch_animation(
         &self,
         sequence: u32,
@@ -1568,6 +1620,25 @@ struct ShadowNavigationFrame {
     horizon_locked: bool,
 }
 
+#[derive(Serialize)]
+struct ShadowTurntableFrame {
+    pan: [f64; 2],
+    pitch: f64,
+    yaw: f64,
+    dolly_log: f64,
+}
+
+impl From<TurntableFrame> for ShadowTurntableFrame {
+    fn from(frame: TurntableFrame) -> Self {
+        Self {
+            pan: frame.pan,
+            pitch: frame.pitch,
+            yaw: frame.yaw,
+            dolly_log: frame.dolly_log,
+        }
+    }
+}
+
 impl From<NavigationFrame> for ShadowNavigationFrame {
     fn from(frame: NavigationFrame) -> Self {
         Self {
@@ -1842,6 +1913,30 @@ fn space_mouse_camera_input(
         move_gain,
         rotate_gain,
         horizon_lock_requested,
+    })
+    .map_err(js_error)
+}
+
+fn pointer_turntable_input(
+    delta_x: f64,
+    delta_y: f64,
+    gesture: u8,
+    control_distance: f64,
+) -> Result<TurntableFrame, JsValue> {
+    let gesture = match gesture {
+        0 => PointerTurntableGesture::Orbit,
+        1 => PointerTurntableGesture::Pan,
+        2 => PointerTurntableGesture::Wheel,
+        _ => {
+            return Err(JsValue::from_str(
+                "pointer gesture must be 0 (orbit), 1 (pan), or 2 (wheel)",
+            ))
+        }
+    };
+    map_pointer_turntable(PointerTurntableInput {
+        delta: [delta_x, delta_y],
+        gesture,
+        control_distance,
     })
     .map_err(js_error)
 }

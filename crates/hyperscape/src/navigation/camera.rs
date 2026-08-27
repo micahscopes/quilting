@@ -530,6 +530,60 @@ impl TurntableFrame {
     }
 }
 
+/// Browser pointer gestures admitted by the turntable camera boundary.
+///
+/// The resulting [`TurntableFrame`] is device-neutral; this enum only freezes
+/// the incumbent pixel-delta response while browser authority is migrated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerTurntableGesture {
+    Orbit,
+    Pan,
+    Wheel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointerTurntableInput {
+    /// Browser movement deltas in CSS pixels. For wheel input only Y is used.
+    pub delta: [f64; 2],
+    pub gesture: PointerTurntableGesture,
+    /// Current Euclidean control distance used to make pan scale-relative.
+    pub control_distance: f64,
+}
+
+/// Convert the incumbent browser mouse/trackpad response into one semantic
+/// turntable frame. Keeping this mapping in Rust makes the JS, shadow, and
+/// authoritative routes compare the same constants and sign conventions.
+pub fn map_pointer_turntable(input: PointerTurntableInput) -> Result<TurntableFrame, CameraError> {
+    if input.delta.into_iter().any(|value| !value.is_finite()) {
+        return Err(CameraError::NonFinite);
+    }
+    if !input.control_distance.is_finite() || input.control_distance <= 0.0 {
+        return Err(CameraError::InvalidControlDistance);
+    }
+    Ok(match input.gesture {
+        PointerTurntableGesture::Orbit => TurntableFrame {
+            pitch: -input.delta[1] * 0.005,
+            yaw: input.delta[0] * 0.005,
+            ..TurntableFrame::default()
+        },
+        PointerTurntableGesture::Pan => TurntableFrame {
+            pan: [
+                -input.delta[0] * 0.003 * input.control_distance,
+                -input.delta[1] * 0.003 * input.control_distance,
+            ],
+            ..TurntableFrame::default()
+        },
+        PointerTurntableGesture::Wheel => TurntableFrame {
+            dolly_log: if input.delta[1] > 0.0 {
+                1.1_f64.ln()
+            } else {
+                0.9_f64.ln()
+            },
+            ..TurntableFrame::default()
+        },
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NavigationAxes {
     pub translation: [f64; 3],
@@ -1023,6 +1077,71 @@ mod tests {
             assert_eq!(camera.semantic_target.is_some(), semantic_target.is_some());
             // A rolled camera's pitch axis is not silently replaced by world X.
             assert!(basis.forward[0].abs() > 0.1);
+        }
+    }
+
+    #[test]
+    fn pointer_turntable_mapping_freezes_browser_response_and_signs() {
+        assert_eq!(
+            map_pointer_turntable(PointerTurntableInput {
+                delta: [12.0, -8.0],
+                gesture: PointerTurntableGesture::Orbit,
+                control_distance: 4.0,
+            })
+            .unwrap(),
+            TurntableFrame {
+                pitch: 0.04,
+                yaw: 0.06,
+                ..TurntableFrame::default()
+            }
+        );
+        let pan = map_pointer_turntable(PointerTurntableInput {
+            delta: [12.0, -8.0],
+            gesture: PointerTurntableGesture::Pan,
+            control_distance: 4.0,
+        })
+        .unwrap();
+        assert!((pan.pan[0] + 0.144).abs() < EPSILON);
+        assert!((pan.pan[1] - 0.096).abs() < EPSILON);
+        assert_eq!(pan.pitch, 0.0);
+        assert_eq!(pan.yaw, 0.0);
+        assert_eq!(pan.dolly_log, 0.0);
+        for (delta_y, factor) in [(1.0, 1.1_f64), (-1.0, 0.9_f64), (0.0, 0.9_f64)] {
+            let frame = map_pointer_turntable(PointerTurntableInput {
+                delta: [99.0, delta_y],
+                gesture: PointerTurntableGesture::Wheel,
+                control_distance: 4.0,
+            })
+            .unwrap();
+            assert!((frame.dolly_log - factor.ln()).abs() < EPSILON);
+        }
+    }
+
+    #[test]
+    fn pointer_turntable_mapping_rejects_invalid_boundary_values() {
+        for input in [
+            PointerTurntableInput {
+                delta: [f64::NAN, 0.0],
+                gesture: PointerTurntableGesture::Orbit,
+                control_distance: 1.0,
+            },
+            PointerTurntableInput {
+                delta: [0.0, f64::INFINITY],
+                gesture: PointerTurntableGesture::Pan,
+                control_distance: 1.0,
+            },
+        ] {
+            assert_eq!(map_pointer_turntable(input), Err(CameraError::NonFinite));
+        }
+        for control_distance in [0.0, -1.0, f64::NAN] {
+            assert_eq!(
+                map_pointer_turntable(PointerTurntableInput {
+                    delta: [0.0, 0.0],
+                    gesture: PointerTurntableGesture::Wheel,
+                    control_distance,
+                }),
+                Err(CameraError::InvalidControlDistance)
+            );
         }
     }
 
