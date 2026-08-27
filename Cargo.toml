@@ -16,6 +16,7 @@ members = [
     "crates/quilting-renderer",
     "crates/quilting-round-index",
     "crates/quilting-shaders",
+    "crates/quilting-webgpu",
     "crates/quilting-wasm",
     "crates/trunk-stub",
 ]

@@ -10,6 +10,11 @@ pub enum EntryPointStage {
     Fragment,
 }
 
+/// Entry names produced by the pinned Naga WGSL writer. Naga reserves the
+/// source spelling while flattening and deterministically appends `_`.
+pub const LOD_PASS1_DEVICE_ENTRY_POINT: &str = "classify_lod_pass1_";
+pub const LOD_PASS2_DEVICE_ENTRY_POINT: &str = "classify_lod_pass2_";
+
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
     // Library modules (imported by other shaders)
@@ -460,14 +465,30 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
 
     #[test]
     fn flattened_lod_compute_wgsl_is_standalone_and_reparseable() {
-        for (entry_point, source) in [
-            ("classify_lod_pass1", compile_lod_pass1_wgsl().unwrap()),
-            ("classify_lod_pass2", compile_lod_pass2_wgsl().unwrap()),
+        for (source_entry, device_entry, source) in [
+            (
+                "classify_lod_pass1",
+                LOD_PASS1_DEVICE_ENTRY_POINT,
+                compile_lod_pass1_wgsl().unwrap(),
+            ),
+            (
+                "classify_lod_pass2",
+                LOD_PASS2_DEVICE_ENTRY_POINT,
+                compile_lod_pass2_wgsl().unwrap(),
+            ),
         ] {
             assert!(!source.contains("#import"));
             assert!(!source.contains("#define_import_path"));
-            assert!(source.contains(entry_point));
+            assert!(source.contains(source_entry));
             let module = naga::front::wgsl::parse_str(&source).unwrap();
+            assert_eq!(
+                module
+                    .entry_points
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>(),
+                [device_entry],
+            );
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::empty(),

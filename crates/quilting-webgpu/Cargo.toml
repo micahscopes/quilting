@@ -1,0 +1,24 @@
+[package]
+name = "quilting-webgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shadow WebGPU backend and conformance executor for Quilting"
+
+[dependencies]
+bytemuck = "1"
+futures-channel = "0.3"
+quilting-renderer = { version = "0.1.0", path = "../quilting-renderer" }
+quilting-shaders = { version = "0.1.0", path = "../quilting-shaders" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "=29.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "gles", "wgsl"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+wgpu = { version = "=29.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
+
+[dev-dependencies]
+pollster = "0.4"
