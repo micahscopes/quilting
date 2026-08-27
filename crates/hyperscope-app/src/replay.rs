@@ -25,7 +25,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.12";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.13";
+pub const LEGACY_APP_REPLAY_VERSION_0_12: &str = "hyperscope-app-replay/0.12";
 pub const LEGACY_APP_REPLAY_VERSION_0_11: &str = "hyperscope-app-replay/0.11";
 pub const LEGACY_APP_REPLAY_VERSION_0_10: &str = "hyperscope-app-replay/0.10";
 pub const LEGACY_APP_REPLAY_VERSION_0_9: &str = "hyperscope-app-replay/0.9";
@@ -46,6 +47,7 @@ enum ReplaySchema {
     V0_10,
     V0_11,
     V0_12,
+    V0_13,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -217,6 +219,11 @@ pub enum ReplayNavigationAction {
     ApplyFrame {
         frame: ReplayNavigationFrame,
     },
+    ApplyCameraIntent {
+        preset: ReplayNavigationPreset,
+        semantic_target_enabled: bool,
+        frame: ReplayNavigationFrame,
+    },
     SetCamera {
         camera: AuthoredCamera,
     },
@@ -345,6 +352,18 @@ pub struct ReplaySurfaceAnchorTarget {
     pub normal: [f64; 3],
 }
 
+fn replay_navigation_frame(frame: ReplayNavigationFrame) -> Result<NavigationFrame, String> {
+    finite3(frame.translation, "navigation translation")?;
+    finite3(frame.rotation, "navigation rotation")?;
+    finite(frame.dolly_log, "navigation dolly")?;
+    Ok(NavigationFrame {
+        translation: frame.translation,
+        rotation: frame.rotation,
+        dolly_log: frame.dolly_log,
+        horizon_locked: frame.horizon_locked,
+    })
+}
+
 impl TryFrom<ReplayNavigationAction> for NavigationAction {
     type Error = String;
 
@@ -352,16 +371,17 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
         match action {
             ReplayNavigationAction::SetPreset { preset } => Ok(Self::SetPreset(preset.into())),
             ReplayNavigationAction::ApplyFrame { frame } => {
-                finite3(frame.translation, "navigation translation")?;
-                finite3(frame.rotation, "navigation rotation")?;
-                finite(frame.dolly_log, "navigation dolly")?;
-                Ok(Self::ApplyFrame(NavigationFrame {
-                    translation: frame.translation,
-                    rotation: frame.rotation,
-                    dolly_log: frame.dolly_log,
-                    horizon_locked: frame.horizon_locked,
-                }))
+                replay_navigation_frame(frame).map(Self::ApplyFrame)
             }
+            ReplayNavigationAction::ApplyCameraIntent {
+                preset,
+                semantic_target_enabled,
+                frame,
+            } => Ok(Self::ApplyCameraIntent {
+                preset: preset.into(),
+                semantic_target_enabled,
+                frame: replay_navigation_frame(frame)?,
+            }),
             ReplayNavigationAction::SetCamera { camera } => Ok(Self::SetCamera(
                 camera.to_camera_rig().map_err(|error| error.to_string())?,
             )),
@@ -814,7 +834,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_9 => ReplaySchema::V0_9,
         LEGACY_APP_REPLAY_VERSION_0_10 => ReplaySchema::V0_10,
         LEGACY_APP_REPLAY_VERSION_0_11 => ReplaySchema::V0_11,
-        APP_REPLAY_VERSION => ReplaySchema::V0_12,
+        LEGACY_APP_REPLAY_VERSION_0_12 => ReplaySchema::V0_12,
+        APP_REPLAY_VERSION => ReplaySchema::V0_13,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -947,7 +968,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             at_seconds,
             action,
         } => {
-            if !matches!(schema, ReplaySchema::V0_11 | ReplaySchema::V0_12) {
+            if !matches!(
+                schema,
+                ReplaySchema::V0_11 | ReplaySchema::V0_12 | ReplaySchema::V0_13
+            ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
             Ok(AppEvent::Input(Timed {
@@ -972,7 +996,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     ReplaySchema::V0_9
                     | ReplaySchema::V0_10
                     | ReplaySchema::V0_11
-                    | ReplaySchema::V0_12 => (*scope).into(),
+                    | ReplaySchema::V0_12
+                    | ReplaySchema::V0_13 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -999,7 +1024,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             if matches!(
                 outcome,
                 ReplayAssetLoadOutcome::Loaded { metadata, .. } if !metadata.is_empty()
-            ) && schema != ReplaySchema::V0_12
+            ) && !matches!(schema, ReplaySchema::V0_12 | ReplaySchema::V0_13)
             {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1039,6 +1064,11 @@ fn navigation_action_for_replay_version(
     mut action: ReplayNavigationAction,
     schema: ReplaySchema,
 ) -> Result<NavigationAction, String> {
+    if schema != ReplaySchema::V0_13
+        && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
+    {
+        return Err("atomic camera intent requires replay 0.13".to_owned());
+    }
     if matches!(schema, ReplaySchema::V0_4 | ReplaySchema::V0_5)
         && matches!(
             action,
@@ -1050,7 +1080,10 @@ fn navigation_action_for_replay_version(
     }
     if !matches!(
         schema,
-        ReplaySchema::V0_10 | ReplaySchema::V0_11 | ReplaySchema::V0_12
+        ReplaySchema::V0_10
+            | ReplaySchema::V0_11
+            | ReplaySchema::V0_12
+            | ReplaySchema::V0_13
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1077,6 +1110,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_10
             | ReplaySchema::V0_11
             | ReplaySchema::V0_12
+            | ReplaySchema::V0_13
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1331,6 +1365,7 @@ mod tests {
         match action {
             ReplayNavigationAction::SetPreset { .. } => "set_preset",
             ReplayNavigationAction::ApplyFrame { .. } => "apply_frame",
+            ReplayNavigationAction::ApplyCameraIntent { .. } => "apply_camera_intent",
             ReplayNavigationAction::SetCamera { .. } => "set_camera",
             ReplayNavigationAction::SetPerspectiveLens { .. } => "set_perspective_lens",
             ReplayNavigationAction::SetSemanticTargetEnabled { .. } => {
@@ -1368,6 +1403,7 @@ mod tests {
         match action {
             NavigationAction::SetPreset(_) => "set_preset",
             NavigationAction::ApplyFrame(_) => "apply_frame",
+            NavigationAction::ApplyCameraIntent { .. } => "apply_camera_intent",
             NavigationAction::SetCamera(_) => "set_camera",
             NavigationAction::SetPerspectiveLens(_) => "set_perspective_lens",
             NavigationAction::SetSemanticTargetEnabled(_) => "set_semantic_target_enabled",
@@ -1431,7 +1467,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_8).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_13).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -1571,6 +1607,7 @@ mod tests {
             covered,
             std::collections::BTreeSet::from([
                 "anchor_focus",
+                "apply_camera_intent",
                 "apply_frame",
                 "begin_surface_anchor_transition",
                 "cancel_surface_anchor_transition",
@@ -1595,7 +1632,7 @@ mod tests {
         assert_eq!(authoritative_covered, covered);
 
         let trace = run_app_replay(&script).unwrap();
-        assert_eq!(trace.records.len(), 33);
+        assert_eq!(trace.records.len(), 35);
         assert_eq!(trace.records[1].state.camera.eye, [0.0, 0.0, 4.0]);
         assert_eq!(trace.records[1].state.navigation.pending_actions, 1);
         assert_eq!(
@@ -1649,7 +1686,7 @@ mod tests {
         assert_semantic_state_eq(after, before);
         assert_eq!(after.navigation.preset, ReplayNavigationPreset::Fly);
         assert_eq!(after.navigation.pending_actions, 0);
-        assert_eq!(after.navigation.last_applied_sequence, Some(20));
+        assert_eq!(after.navigation.last_applied_sequence, Some(21));
         assert!(after.navigation.diagnostics.is_empty());
         assert_eq!(after.focus.selected, None);
         assert_eq!(after.reflection, ReplayReflection::Identity);
@@ -1919,6 +1956,53 @@ mod tests {
             legacy.records[1].state.assets[0].status,
             ReplayAssetStatus::Loading { .. }
         ));
+    }
+
+    #[test]
+    fn replay_0_13_adds_atomic_camera_intent_without_reinterpreting_0_12() {
+        let intent = AppReplayEvent::Navigate {
+            sequence: 0,
+            at_seconds: 0.0,
+            action: ReplayNavigationAction::ApplyCameraIntent {
+                preset: ReplayNavigationPreset::Object,
+                semantic_target_enabled: true,
+                frame: ReplayNavigationFrame {
+                    translation: [0.1, 0.0, 0.0],
+                    rotation: [0.0; 3],
+                    dolly_log: 0.0,
+                    horizon_locked: false,
+                },
+            },
+        };
+        let current = run_app_replay(&AppReplayScript::new(vec![
+            intent.clone(),
+            AppReplayEvent::Frame {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            },
+        ]))
+        .unwrap();
+        assert!(matches!(
+            current.records[0].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
+        assert_eq!(
+            current.records[1].state.navigation.preset,
+            ReplayNavigationPreset::Object
+        );
+        assert!(current.records[1].state.camera.semantic_target.is_some());
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_12.to_owned(),
+            events: vec![intent],
+        })
+        .unwrap();
+        assert!(matches!(
+            legacy.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires replay 0.13")
+        ));
+        assert_eq!(legacy.records[0].state.revision, 0);
     }
 
     #[test]

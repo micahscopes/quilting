@@ -16,6 +16,16 @@ use std::collections::VecDeque;
 pub enum NavigationAction {
     SetPreset(NavigationPreset),
     ApplyFrame(NavigationFrame),
+    /// Apply one device-independent camera sample together with the control
+    /// policy that gives it meaning. SpaceMouse, keyboard, gamepad, and XR
+    /// adapters can use this boundary without racing separate preset or point-
+    /// target actions. Validation, transition cancellation, and camera
+    /// integration either all commit or all roll back.
+    ApplyCameraIntent {
+        preset: NavigationPreset,
+        semantic_target_enabled: bool,
+        frame: NavigationFrame,
+    },
     SetCamera(CameraRig),
     /// Replace projection parameters without introducing lens zoom into the
     /// camera's Euclidean/conformal control distance.
@@ -363,6 +373,24 @@ fn apply_action(
                 .apply_navigation(runtime.preset, frame)
                 .map_err(|error| error.to_string())?;
         }
+        NavigationAction::ApplyCameraIntent {
+            preset,
+            semantic_target_enabled,
+            frame,
+        } => {
+            runtime.preset = preset;
+            apply_semantic_target_policy(
+                semantic_target_enabled,
+                runtime,
+                surface_walk,
+                camera,
+            )?;
+            runtime.camera_transition = None;
+            surface_walk.cancel_anchor_transition();
+            camera
+                .apply_navigation(preset, frame)
+                .map_err(|error| error.to_string())?;
+        }
         NavigationAction::SetCamera(target) => {
             target.validate().map_err(|error| error.to_string())?;
             runtime.camera_transition = None;
@@ -379,46 +407,7 @@ fn apply_action(
             surface_walk.set_perspective_lens(lens);
         }
         NavigationAction::SetSemanticTargetEnabled(enabled) => {
-            if enabled
-                && (surface_walk.is_active() || surface_walk.anchor_transition().is_some())
-            {
-                return Err(
-                    "point-target camera transport is unavailable while surface walking".into(),
-                );
-            }
-            if enabled && camera.semantic_target.is_none() {
-                let current_target = camera.view_target();
-                camera.semantic_target = Some(current_target);
-                if let Some(transition) = runtime.camera_transition.as_mut() {
-                    let target_target = transition.target.view_target();
-                    let linear = (transition.elapsed_seconds / transition.duration_seconds)
-                        .clamp(0.0, 1.0);
-                    let sampled = transition.easing.sample(linear);
-                    let remaining = 1.0 - sampled;
-                    let virtual_start = if remaining > 1.0e-12 {
-                        std::array::from_fn(|axis| {
-                            (current_target[axis] - sampled * target_target[axis]) / remaining
-                        })
-                    } else {
-                        current_target
-                    };
-                    if virtual_start.iter().any(|value| !value.is_finite()) {
-                        return Err("semantic target transition became non-finite".into());
-                    }
-                    // Preserve the existing eye/orientation/lens path while
-                    // choosing the unique finite-target start whose sample at
-                    // the current clock equals the live view target.
-                    transition.start.semantic_target = Some(virtual_start);
-                    transition.target.semantic_target = Some(target_target);
-                }
-            } else if !enabled {
-                camera.semantic_target = None;
-                if let Some(transition) = runtime.camera_transition.as_mut() {
-                    transition.start.semantic_target = None;
-                    transition.target.semantic_target = None;
-                }
-            }
-            camera.validate().map_err(|error| error.to_string())?;
+            apply_semantic_target_policy(enabled, runtime, surface_walk, camera)?;
         }
         NavigationAction::TransitionCamera {
             target,
@@ -546,6 +535,49 @@ fn apply_action(
         }
     }
     Ok(())
+}
+
+fn apply_semantic_target_policy(
+    enabled: bool,
+    runtime: &mut NavigationRuntime,
+    surface_walk: &SurfaceWalkRuntime,
+    camera: &mut CameraRig,
+) -> Result<(), String> {
+    if enabled && (surface_walk.is_active() || surface_walk.anchor_transition().is_some()) {
+        return Err("point-target camera transport is unavailable while surface walking".into());
+    }
+    if enabled && camera.semantic_target.is_none() {
+        let current_target = camera.view_target();
+        camera.semantic_target = Some(current_target);
+        if let Some(transition) = runtime.camera_transition.as_mut() {
+            let target_target = transition.target.view_target();
+            let linear = (transition.elapsed_seconds / transition.duration_seconds).clamp(0.0, 1.0);
+            let sampled = transition.easing.sample(linear);
+            let remaining = 1.0 - sampled;
+            let virtual_start = if remaining > 1.0e-12 {
+                std::array::from_fn(|axis| {
+                    (current_target[axis] - sampled * target_target[axis]) / remaining
+                })
+            } else {
+                current_target
+            };
+            if virtual_start.iter().any(|value| !value.is_finite()) {
+                return Err("semantic target transition became non-finite".into());
+            }
+            // Preserve the existing eye/orientation/lens path while choosing
+            // the unique finite-target start whose sample at the current clock
+            // equals the live view target.
+            transition.start.semantic_target = Some(virtual_start);
+            transition.target.semantic_target = Some(target_target);
+        }
+    } else if !enabled {
+        camera.semantic_target = None;
+        if let Some(transition) = runtime.camera_transition.as_mut() {
+            transition.start.semantic_target = None;
+            transition.target.semantic_target = None;
+        }
+    }
+    camera.validate().map_err(|error| error.to_string())
 }
 
 fn advance_navigation(
@@ -913,6 +945,53 @@ mod tests {
         assert_eq!(controller.camera.orientation, target.orientation);
         assert_eq!(controller.camera.control_distance, target.control_distance);
         assert_eq!(controller.camera.semantic_target, None);
+    }
+
+    #[test]
+    fn camera_intent_commits_preset_target_policy_and_frame_atomically() {
+        let mut controller = NavigationController::default();
+        controller
+            .push(NavigationAction::ApplyCameraIntent {
+                preset: NavigationPreset::Object,
+                semantic_target_enabled: true,
+                frame: NavigationFrame {
+                    translation: [0.2, -0.1, 0.0],
+                    rotation: [0.03, -0.04, 0.0],
+                    dolly_log: 0.1,
+                    horizon_locked: false,
+                },
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.runtime.preset, NavigationPreset::Object);
+        assert!(controller.camera.semantic_target.is_some());
+        assert_ne!(controller.camera.eye, CameraRig::default().eye);
+        assert_ne!(controller.camera.control_distance, CameraRig::default().control_distance);
+
+        let accepted_runtime = controller.runtime.clone();
+        let accepted_camera = controller.camera;
+        let accepted_walk = controller.surface_walk.clone();
+        controller
+            .push(NavigationAction::ApplyCameraIntent {
+                preset: NavigationPreset::Fly,
+                semantic_target_enabled: false,
+                frame: NavigationFrame {
+                    translation: [f64::NAN, 0.0, 0.0],
+                    ..NavigationFrame::default()
+                },
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.runtime.preset, accepted_runtime.preset);
+        assert_eq!(controller.camera, accepted_camera);
+        assert_eq!(controller.surface_walk, accepted_walk);
+        assert!(controller
+            .diagnostics
+            .0
+            .last()
+            .is_some_and(|message| message.contains("finite")));
     }
 
     #[test]

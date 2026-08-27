@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.10",
+  "version": "hyperscope-app-replay/0.13",
   "events": [
     {
       "type": "synchronize_navigation",
@@ -326,6 +326,27 @@
     {
       "type": "navigate",
       "sequence": 21,
+      "at_seconds": 3.05,
+      "action": {
+        "action": "apply_camera_intent",
+        "preset": "fly",
+        "semantic_target_enabled": true,
+        "frame": {
+          "translation": [0.01, -0.02, 0.03],
+          "rotation": [0.005, -0.004, 0.003],
+          "dollyLog": 0.0,
+          "horizonLocked": false
+        }
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 3.05,
+      "delta_seconds": 0.0
+    },
+    {
+      "type": "navigate",
+      "sequence": 22,
       "at_seconds": 3.05,
       "action": {
         "action": "anchor_focus",
