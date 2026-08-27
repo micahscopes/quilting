@@ -659,6 +659,20 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Move the finite control target to the current selected output-chart
+    /// pivot through the application reducer and shared virtual clock.
+    #[wasm_bindgen(js_name = aimAtSelection)]
+    pub fn aim_at_selection(
+        &self,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::AimAtSelection {
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
     /// Frame the currently selected source-chart sphere in the active output
     /// chart through the same atomic application reducer used by replay.
     #[wasm_bindgen(js_name = reframeSelection)]

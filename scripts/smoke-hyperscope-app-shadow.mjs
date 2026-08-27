@@ -841,6 +841,47 @@ for (const semanticTargetEnabled of [false, true]) {
   policyIncumbent.free();
 }
 
+// Selection-pivot aiming preserves camera distance/orientation while moving
+// the explicit target along the established browser target-orbit path.
+const aimApp = new HyperscopeAppShadow();
+const aimIncumbent = new HyperscopeNavigation();
+for (const candidate of [aimApp, aimIncumbent]) {
+  const synchronize = candidate instanceof HyperscopeAppShadow
+    ? candidate.synchronizeNavigation.bind(candidate)
+    : candidate.synchronizeState.bind(candidate);
+  synchronize(
+    eye, forward, up, 3, new Float64Array(), ...projectionLens,
+    focusCenter, 2, false, false, 0.5, 0.1,
+  );
+  candidate.anchorFocus(
+    '60000000-0000-4000-8000-000000000001',
+    '70000000-0000-4000-8000-000000000001',
+    new Float64Array([4, 0, 0]),
+    1,
+    new Float64Array([4, 0, 0]),
+    1.1,
+    0,
+    'linear',
+  );
+}
+assertNavigationParity(aimApp.tickNavigation(0), aimIncumbent.tick(0));
+assert.equal(
+  aimApp.aimAtSelection(0.6, 'smootherstep'),
+  aimIncumbent.aimAtSelection(0.6, 'smootherstep'),
+);
+assertNavigationParity(aimApp.tickNavigation(0), aimIncumbent.tick(0));
+assert.deepEqual(aimApp.navigationSnapshot().camera.semantic_target, [0, 0, 0]);
+const aimMidpoint = aimApp.tickNavigation(0.3);
+assertNavigationParity(aimMidpoint, aimIncumbent.tick(0.3));
+assertArrayClose(aimMidpoint.camera.semantic_target, [2, 0, 0]);
+assertArrayClose(aimMidpoint.camera.eye, [2, 0, 3]);
+assert.ok(Math.abs(aimMidpoint.camera.control_distance - 3) <= 1e-12);
+assertNavigationParity(aimApp.tickNavigation(0.3), aimIncumbent.tick(0.3));
+assertArrayClose(aimApp.navigationSnapshot().camera.semantic_target, [4, 0, 0]);
+assertArrayClose(aimApp.navigationSnapshot().camera.eye, [4, 0, 3]);
+aimApp.free();
+aimIncumbent.free();
+
 // Selection remains one source-chart identity while the derived pivot/radius
 // follows the active reflection chart. A selected pivot at the reflection pole
 // becomes absent without destroying the source selection.
@@ -1043,6 +1084,19 @@ assert.deepEqual(
 );
 assert.equal(selectionApp.navigationSnapshot().selected_focus.output_pivot, undefined);
 assert.equal(selectionApp.navigationSnapshot().selected_focus.output_radius, undefined);
+const beforePoleAim = selectionApp.navigationSnapshot();
+assert.equal(
+  selectionApp.aimAtSelection(0.7, 'smootherstep'),
+  selectionIncumbent.aimAtSelection(0.7, 'smootherstep'),
+);
+assertNavigationParity(selectionApp.tickNavigation(0), selectionIncumbent.tick(0));
+assert.deepEqual(
+  selectionApp.navigationSnapshot().camera,
+  beforePoleAim.camera,
+  'aiming at a selected reflection pole must leave the camera untouched',
+);
+assert.equal(selectionApp.navigationSnapshot().camera.camera_transition_remaining, undefined);
+assert.match(selectionApp.navigationSnapshot().diagnostics.at(-1), /reflection pole/);
 const beforePoleReframe = selectionApp.navigationSnapshot();
 assert.equal(
   selectionApp.reframeSelection(1, 1.15, 0.7, 'smootherstep'),

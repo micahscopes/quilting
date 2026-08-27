@@ -160,6 +160,20 @@ impl HyperscopeNavigation {
         })
     }
 
+    /// Move the finite control target to the current selected output-chart
+    /// pivot while preserving orientation, lens, and control distance.
+    #[wasm_bindgen(js_name = aimAtSelection)]
+    pub fn aim_at_selection(
+        &mut self,
+        duration_seconds: f64,
+        easing: &str,
+    ) -> Result<u64, JsValue> {
+        self.push(NavigationAction::AimAtSelection {
+            duration_seconds,
+            easing: parse_easing(easing)?,
+        })
+    }
+
     /// Frame the currently selected source-chart sphere in the active output
     /// chart. Selection identity and conformal scale remain Rust-owned.
     #[wasm_bindgen(js_name = reframeSelection)]

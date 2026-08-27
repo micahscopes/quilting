@@ -48,6 +48,12 @@ pub enum NavigationAction {
         duration_seconds: f64,
         easing: TransitionEasing,
     },
+    /// Move the camera's finite control target to the selected output-chart
+    /// pivot without changing orientation, lens, or control distance.
+    AimAtSelection {
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
     /// Frame the selected source bound around its selected pivot after
     /// projection into the active conformal chart. Selection projection,
     /// perspective fit, point-target policy, and transition start are one
@@ -447,21 +453,35 @@ fn apply_action(
             easing,
             false,
         )?,
+        NavigationAction::AimAtSelection {
+            duration_seconds,
+            easing,
+        } => {
+            let (output_pivot, _, _) = projected_selection(focus, runtime)?;
+            let target = camera
+                .targeted_at(output_pivot)
+                .map_err(|error| error.to_string())?;
+            begin_camera_transition(
+                runtime,
+                surface_walk,
+                camera,
+                target,
+                duration_seconds,
+                easing,
+                true,
+            )?;
+        }
         NavigationAction::ReframeSelection {
             viewport_aspect,
             margin,
             duration_seconds,
             easing,
         } => {
-            let anchor = focus
-                .anchor
-                .ok_or_else(|| "camera reframe requires a selected focus anchor".to_owned())?;
-            let projected = SphereReflectionState::Identity
-                .transport_point_and_directions(runtime.reflection, anchor.source_pivot, [])
-                .map_err(|error| error.to_string())?;
-            let output_radius = anchor.source_bound.radius * projected.local_scale;
+            let (output_pivot, output_scale, source_radius) =
+                projected_selection(focus, runtime)?;
+            let output_radius = source_radius * output_scale;
             let target = camera
-                .framed_sphere_target(projected.point, output_radius, viewport_aspect, margin)
+                .framed_sphere_target(output_pivot, output_radius, viewport_aspect, margin)
                 .map_err(|error| error.to_string())?;
             begin_camera_transition(
                 runtime,
@@ -575,6 +595,23 @@ fn apply_action(
         }
     }
     Ok(())
+}
+
+fn projected_selection(
+    focus: &FocusNavigation,
+    runtime: &NavigationRuntime,
+) -> Result<([f64; 3], f64, f64), String> {
+    let anchor = focus
+        .anchor
+        .ok_or_else(|| "selected camera action requires a selected focus anchor".to_owned())?;
+    let projected = SphereReflectionState::Identity
+        .transport_point_and_directions(runtime.reflection, anchor.source_pivot, [])
+        .map_err(|error| error.to_string())?;
+    Ok((
+        projected.point,
+        projected.local_scale,
+        anchor.source_bound.radius,
+    ))
 }
 
 fn begin_camera_transition(
@@ -874,6 +911,50 @@ mod tests {
     }
 
     #[test]
+    fn selected_aim_preserves_distance_and_is_cadence_independent() {
+        fn run(steps: &[f64]) -> NavigationController {
+            let mut controller = NavigationController::default();
+            controller
+                .focus
+                .anchor_to_pivot_with_easing(
+                    selection_identity(0x7000),
+                    FocusSphere::new([4.0, 0.0, 0.0], 1.0).unwrap(),
+                    [4.0, 0.0, 0.0],
+                    1.1,
+                    0.0,
+                    TransitionEasing::Linear,
+                )
+                .unwrap();
+            controller
+                .push(NavigationAction::AimAtSelection {
+                    duration_seconds: 1.0,
+                    easing: TransitionEasing::SmootherStep,
+                })
+                .unwrap();
+            controller.tick(0.0).unwrap();
+            for seconds in steps {
+                controller.tick(*seconds).unwrap();
+            }
+            controller
+        }
+
+        let midpoint = run(&[0.5]);
+        assert_eq!(midpoint.camera.semantic_target, Some([2.0, 0.0, 0.0]));
+        assert!((midpoint.camera.eye[0] - 2.0).abs() < 1.0e-12);
+        assert_eq!(midpoint.camera.eye[1], 0.0);
+        assert!((midpoint.camera.eye[2] - 3.0).abs() < 1.0e-12);
+        assert!((midpoint.camera.control_distance - 3.0).abs() < 1.0e-12);
+        let single = run(&[1.0]);
+        let partitioned = run(&[0.1; 10]);
+        assert_eq!(single.camera, partitioned.camera);
+        assert_eq!(single.camera.semantic_target, Some([4.0, 0.0, 0.0]));
+        assert_eq!(single.camera.eye, [4.0, 0.0, 3.0]);
+        assert_eq!(single.camera.control_distance, 3.0);
+        assert_eq!(single.runtime.camera_transition, None);
+        assert!(single.diagnostics.0.is_empty());
+    }
+
+    #[test]
     fn selected_reframe_uses_output_chart_scale_and_is_cadence_independent() {
         fn run(steps: &[f64]) -> NavigationController {
             let mut controller = NavigationController::default();
@@ -925,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_reframe_rejects_missing_or_pole_projected_selection_atomically() {
+    fn selected_camera_actions_reject_missing_or_pole_projected_selection_atomically() {
         let mut missing = NavigationController::default();
         let missing_before = missing.clone();
         missing
@@ -940,6 +1021,16 @@ mod tests {
         assert_eq!(missing.camera, missing_before.camera);
         assert_eq!(missing.focus, missing_before.focus);
         assert!(missing.diagnostics.0[0].contains("requires a selected focus anchor"));
+        missing
+            .push(NavigationAction::AimAtSelection {
+                duration_seconds: 0.7,
+                easing: TransitionEasing::SmootherStep,
+            })
+            .unwrap();
+        missing.tick(0.0).unwrap();
+        assert_eq!(missing.camera, missing_before.camera);
+        assert_eq!(missing.focus, missing_before.focus);
+        assert!(missing.diagnostics.0[1].contains("requires a selected focus anchor"));
 
         let mut pole = NavigationController::default();
         pole.focus
@@ -968,6 +1059,15 @@ mod tests {
         assert_eq!(pole.camera, pole_camera);
         assert_eq!(pole.runtime.camera_transition, None);
         assert!(pole.diagnostics.0[0].contains("reflection pole"));
+        pole.push(NavigationAction::AimAtSelection {
+            duration_seconds: 0.7,
+            easing: TransitionEasing::SmootherStep,
+        })
+        .unwrap();
+        pole.tick(0.0).unwrap();
+        assert_eq!(pole.camera, pole_camera);
+        assert_eq!(pole.runtime.camera_transition, None);
+        assert!(pole.diagnostics.0[1].contains("reflection pole"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.15",
+  "version": "hyperscope-app-replay/0.16",
   "events": [
     {
       "type": "synchronize_navigation",
@@ -222,6 +222,16 @@
       "sequence": 12,
       "at_seconds": 2.4,
       "action": {
+        "action": "aim_at_selection",
+        "duration_seconds": 0.0,
+        "easing": "smoother_step"
+      }
+    },
+    {
+      "type": "navigate",
+      "sequence": 13,
+      "at_seconds": 2.4,
+      "action": {
         "action": "reframe_selection",
         "viewport_aspect": 1.7777777777777777,
         "margin": 1.15,
@@ -236,7 +246,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 13,
+      "sequence": 14,
       "at_seconds": 2.4,
       "action": {
         "action": "refit_focus_and_toggle_inversion",
@@ -246,7 +256,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 14,
+      "sequence": 15,
       "at_seconds": 2.4,
       "action": {
         "action": "toggle_inversion"
@@ -259,7 +269,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 15,
+      "sequence": 16,
       "at_seconds": 2.8,
       "action": {
         "action": "scale_focus_log",
@@ -268,7 +278,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 16,
+      "sequence": 17,
       "at_seconds": 2.8,
       "action": {
         "action": "detach_focus"
@@ -276,7 +286,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 17,
+      "sequence": 18,
       "at_seconds": 2.8,
       "action": {
         "action": "translate_focus",
@@ -285,7 +295,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 18,
+      "sequence": 19,
       "at_seconds": 2.8,
       "action": {
         "action": "transition_free_focus_sphere",
@@ -304,7 +314,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 19,
+      "sequence": 20,
       "at_seconds": 3.05,
       "action": {
         "action": "toggle_inversion"
@@ -317,7 +327,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 20,
+      "sequence": 21,
       "at_seconds": 3.05,
       "action": {
         "action": "set_perspective_lens",
@@ -328,7 +338,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 21,
+      "sequence": 22,
       "at_seconds": 3.05,
       "action": {
         "action": "set_semantic_target_enabled",
@@ -342,7 +352,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 22,
+      "sequence": 23,
       "at_seconds": 3.05,
       "action": {
         "action": "apply_camera_intent",
@@ -363,7 +373,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 23,
+      "sequence": 24,
       "at_seconds": 3.05,
       "action": {
         "action": "apply_turntable_intent",
@@ -383,7 +393,7 @@
     },
     {
       "type": "navigate",
-      "sequence": 24,
+      "sequence": 25,
       "at_seconds": 3.05,
       "action": {
         "action": "anchor_focus",

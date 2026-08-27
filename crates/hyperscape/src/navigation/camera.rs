@@ -213,6 +213,22 @@ impl CameraRig {
             .unwrap_or_else(|| add(self.eye, scale(self.basis().forward, self.control_distance)))
     }
 
+    /// Preserve orientation, lens, and control distance while making one
+    /// finite output-chart point the explicit camera target.
+    pub fn targeted_at(&self, target: [f64; 3]) -> Result<Self, CameraError> {
+        if !finite3(target) {
+            return Err(CameraError::NonFinite);
+        }
+        let basis = self.basis();
+        CameraRig::new(
+            sub(target, scale(basis.forward, self.control_distance)),
+            basis,
+            self.control_distance,
+            Some(target),
+            self.lens,
+        )
+    }
+
     /// Build a point-target camera that contains an output-chart sphere in the
     /// narrower perspective axis while preserving orientation and lens.
     pub fn framed_sphere_target(
@@ -1237,6 +1253,17 @@ mod tests {
         assert_eq!(target.semantic_target, Some([2.0, 3.0, -4.0]));
         assert!((target.control_distance - landscape).abs() < EPSILON);
         assert_point_close(target.view_target(), [2.0, 3.0, -4.0]);
+
+        let aimed = camera.targeted_at([2.0, 3.0, -4.0]).unwrap();
+        assert_eq!(aimed.orientation, camera.orientation);
+        assert_eq!(aimed.lens, camera.lens);
+        assert_eq!(aimed.control_distance, camera.control_distance);
+        assert_eq!(aimed.semantic_target, Some([2.0, 3.0, -4.0]));
+        assert_point_close(aimed.view_target(), [2.0, 3.0, -4.0]);
+        assert_eq!(
+            camera.targeted_at([f64::NAN, 0.0, 0.0]),
+            Err(CameraError::NonFinite)
+        );
     }
 
     #[test]
