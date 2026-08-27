@@ -14,7 +14,7 @@ use crate::{
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
     NavigationPreset, PerspectiveLens, Presentation, SphereReflectionState, SurfaceAnchorTarget,
-    TransitionEasing,
+    TransitionEasing, TurntableFrame,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, PeerId,
@@ -25,7 +25,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.13";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.14";
+pub const LEGACY_APP_REPLAY_VERSION_0_13: &str = "hyperscope-app-replay/0.13";
 pub const LEGACY_APP_REPLAY_VERSION_0_12: &str = "hyperscope-app-replay/0.12";
 pub const LEGACY_APP_REPLAY_VERSION_0_11: &str = "hyperscope-app-replay/0.11";
 pub const LEGACY_APP_REPLAY_VERSION_0_10: &str = "hyperscope-app-replay/0.10";
@@ -48,6 +49,7 @@ enum ReplaySchema {
     V0_11,
     V0_12,
     V0_13,
+    V0_14,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -224,6 +226,10 @@ pub enum ReplayNavigationAction {
         semantic_target_enabled: bool,
         frame: ReplayNavigationFrame,
     },
+    ApplyTurntableIntent {
+        semantic_target_enabled: bool,
+        frame: ReplayTurntableFrame,
+    },
     SetCamera {
         camera: AuthoredCamera,
     },
@@ -340,6 +346,15 @@ pub struct ReplayNavigationFrame {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReplayTurntableFrame {
+    pub pan: [f64; 2],
+    pub pitch: f64,
+    pub yaw: f64,
+    pub dolly_log: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReplayFocusSphere {
     pub center: [f64; 3],
     pub radius: f64,
@@ -364,6 +379,21 @@ fn replay_navigation_frame(frame: ReplayNavigationFrame) -> Result<NavigationFra
     })
 }
 
+fn replay_turntable_frame(frame: ReplayTurntableFrame) -> Result<TurntableFrame, String> {
+    if frame.pan.into_iter().any(|value| !value.is_finite()) {
+        return Err("turntable pan must remain finite".to_owned());
+    }
+    finite(frame.pitch, "turntable pitch")?;
+    finite(frame.yaw, "turntable yaw")?;
+    finite(frame.dolly_log, "turntable dolly")?;
+    Ok(TurntableFrame {
+        pan: frame.pan,
+        pitch: frame.pitch,
+        yaw: frame.yaw,
+        dolly_log: frame.dolly_log,
+    })
+}
+
 impl TryFrom<ReplayNavigationAction> for NavigationAction {
     type Error = String;
 
@@ -381,6 +411,13 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 preset: preset.into(),
                 semantic_target_enabled,
                 frame: replay_navigation_frame(frame)?,
+            }),
+            ReplayNavigationAction::ApplyTurntableIntent {
+                semantic_target_enabled,
+                frame,
+            } => Ok(Self::ApplyTurntableIntent {
+                semantic_target_enabled,
+                frame: replay_turntable_frame(frame)?,
             }),
             ReplayNavigationAction::SetCamera { camera } => Ok(Self::SetCamera(
                 camera.to_camera_rig().map_err(|error| error.to_string())?,
@@ -835,7 +872,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_10 => ReplaySchema::V0_10,
         LEGACY_APP_REPLAY_VERSION_0_11 => ReplaySchema::V0_11,
         LEGACY_APP_REPLAY_VERSION_0_12 => ReplaySchema::V0_12,
-        APP_REPLAY_VERSION => ReplaySchema::V0_13,
+        LEGACY_APP_REPLAY_VERSION_0_13 => ReplaySchema::V0_13,
+        APP_REPLAY_VERSION => ReplaySchema::V0_14,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -912,7 +950,11 @@ pub fn app_replay_fingerprint(trace: &AppReplayTrace) -> Result<String, serde_js
     Ok(format!("{fingerprint:032x}"))
 }
 
-fn replay_event(store: &AppStore, event: &AppReplayEvent, schema: ReplaySchema) -> AppReplayOutcome {
+fn replay_event(
+    store: &AppStore,
+    event: &AppReplayEvent,
+    schema: ReplaySchema,
+) -> AppReplayOutcome {
     let result: Result<AppCommit, String> = replay_app_event(event, schema)
         .and_then(|event| store.dispatch(event).map_err(|error| error.to_string()));
     match result {
@@ -970,7 +1012,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
         } => {
             if !matches!(
                 schema,
-                ReplaySchema::V0_11 | ReplaySchema::V0_12 | ReplaySchema::V0_13
+                ReplaySchema::V0_11
+                    | ReplaySchema::V0_12
+                    | ReplaySchema::V0_13
+                    | ReplaySchema::V0_14
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
@@ -997,11 +1042,12 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_10
                     | ReplaySchema::V0_11
                     | ReplaySchema::V0_12
-                    | ReplaySchema::V0_13 => (*scope).into(),
+                    | ReplaySchema::V0_13
+                    | ReplaySchema::V0_14 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
-                            "primary_scene asset scope requires app replay schema 0.9".to_owned(),
+                            "primary_scene asset scope requires app replay schema 0.9".to_owned()
                         )
                     }
                 },
@@ -1024,8 +1070,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             if matches!(
                 outcome,
                 ReplayAssetLoadOutcome::Loaded { metadata, .. } if !metadata.is_empty()
-            ) && !matches!(schema, ReplaySchema::V0_12 | ReplaySchema::V0_13)
-            {
+            ) && !matches!(
+                schema,
+                ReplaySchema::V0_12 | ReplaySchema::V0_13 | ReplaySchema::V0_14
+            ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
             Ok(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
@@ -1064,10 +1112,15 @@ fn navigation_action_for_replay_version(
     mut action: ReplayNavigationAction,
     schema: ReplaySchema,
 ) -> Result<NavigationAction, String> {
-    if schema != ReplaySchema::V0_13
+    if !matches!(schema, ReplaySchema::V0_13 | ReplaySchema::V0_14)
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
         return Err("atomic camera intent requires replay 0.13".to_owned());
+    }
+    if schema != ReplaySchema::V0_14
+        && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
+    {
+        return Err("atomic turntable intent requires replay 0.14".to_owned());
     }
     if matches!(schema, ReplaySchema::V0_4 | ReplaySchema::V0_5)
         && matches!(
@@ -1084,6 +1137,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_11
             | ReplaySchema::V0_12
             | ReplaySchema::V0_13
+            | ReplaySchema::V0_14
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1111,6 +1165,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_11
             | ReplaySchema::V0_12
             | ReplaySchema::V0_13
+            | ReplaySchema::V0_14
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1280,10 +1335,8 @@ mod tests {
     const GOLDEN: &str = include_str!("../fixtures/hacker-night.replay.fingerprint");
     const NAVIGATION_FIXTURE: &str = include_str!("../fixtures/navigation.app-replay.json");
     const NAVIGATION_GOLDEN: &str = include_str!("../fixtures/navigation.replay.fingerprint");
-    const ORCHESTRATION_FIXTURE: &str =
-        include_str!("../fixtures/orchestration.app-replay.json");
-    const ORCHESTRATION_GOLDEN: &str =
-        include_str!("../fixtures/orchestration.replay.fingerprint");
+    const ORCHESTRATION_FIXTURE: &str = include_str!("../fixtures/orchestration.app-replay.json");
+    const ORCHESTRATION_GOLDEN: &str = include_str!("../fixtures/orchestration.replay.fingerprint");
     const UNKNOWN_CUE: &str = "f0000000-0000-4000-8000-000000000099";
 
     fn fixture() -> Presentation {
@@ -1335,10 +1388,10 @@ mod tests {
         let trace = run_app_replay(&AppReplayScript::new(events.clone())).unwrap();
         assert!(!trace.records[0].state.animation_playing);
         assert!(trace.records[1].state.animation_playing);
-        assert!(trace.records.iter().all(|record| matches!(
-            record.outcome,
-            AppReplayOutcome::Committed { .. }
-        )));
+        assert!(trace
+            .records
+            .iter()
+            .all(|record| matches!(record.outcome, AppReplayOutcome::Committed { .. })));
 
         let legacy = run_app_replay(&AppReplayScript {
             version: LEGACY_APP_REPLAY_VERSION_0_10.to_owned(),
@@ -1366,6 +1419,7 @@ mod tests {
             ReplayNavigationAction::SetPreset { .. } => "set_preset",
             ReplayNavigationAction::ApplyFrame { .. } => "apply_frame",
             ReplayNavigationAction::ApplyCameraIntent { .. } => "apply_camera_intent",
+            ReplayNavigationAction::ApplyTurntableIntent { .. } => "apply_turntable_intent",
             ReplayNavigationAction::SetCamera { .. } => "set_camera",
             ReplayNavigationAction::SetPerspectiveLens { .. } => "set_perspective_lens",
             ReplayNavigationAction::SetSemanticTargetEnabled { .. } => {
@@ -1404,6 +1458,7 @@ mod tests {
             NavigationAction::SetPreset(_) => "set_preset",
             NavigationAction::ApplyFrame(_) => "apply_frame",
             NavigationAction::ApplyCameraIntent { .. } => "apply_camera_intent",
+            NavigationAction::ApplyTurntableIntent { .. } => "apply_turntable_intent",
             NavigationAction::SetCamera(_) => "set_camera",
             NavigationAction::SetPerspectiveLens(_) => "set_perspective_lens",
             NavigationAction::SetSemanticTargetEnabled(_) => "set_semantic_target_enabled",
@@ -1467,7 +1522,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_13).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_14).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -1608,6 +1663,7 @@ mod tests {
             std::collections::BTreeSet::from([
                 "anchor_focus",
                 "apply_camera_intent",
+                "apply_turntable_intent",
                 "apply_frame",
                 "begin_surface_anchor_transition",
                 "cancel_surface_anchor_transition",
@@ -1632,7 +1688,7 @@ mod tests {
         assert_eq!(authoritative_covered, covered);
 
         let trace = run_app_replay(&script).unwrap();
-        assert_eq!(trace.records.len(), 35);
+        assert_eq!(trace.records.len(), 37);
         assert_eq!(trace.records[1].state.camera.eye, [0.0, 0.0, 4.0]);
         assert_eq!(trace.records[1].state.navigation.pending_actions, 1);
         assert_eq!(
@@ -1686,7 +1742,7 @@ mod tests {
         assert_semantic_state_eq(after, before);
         assert_eq!(after.navigation.preset, ReplayNavigationPreset::Fly);
         assert_eq!(after.navigation.pending_actions, 0);
-        assert_eq!(after.navigation.last_applied_sequence, Some(21));
+        assert_eq!(after.navigation.last_applied_sequence, Some(22));
         assert!(after.navigation.diagnostics.is_empty());
         assert_eq!(after.focus.selected, None);
         assert_eq!(after.reflection, ReplayReflection::Identity);
@@ -1992,6 +2048,16 @@ mod tests {
         );
         assert!(current.records[1].state.camera.semantic_target.is_some());
 
+        let replay_0_13 = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_13.to_owned(),
+            events: vec![intent.clone()],
+        })
+        .unwrap();
+        assert!(matches!(
+            replay_0_13.records[0].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
+
         let legacy = run_app_replay(&AppReplayScript {
             version: LEGACY_APP_REPLAY_VERSION_0_12.to_owned(),
             events: vec![intent],
@@ -2001,6 +2067,49 @@ mod tests {
             legacy.records[0].outcome,
             AppReplayOutcome::Rejected { ref error }
                 if error.contains("requires replay 0.13")
+        ));
+        assert_eq!(legacy.records[0].state.revision, 0);
+    }
+
+    #[test]
+    fn replay_0_14_adds_atomic_turntable_intent_without_reinterpreting_0_13() {
+        let intent = AppReplayEvent::Navigate {
+            sequence: 0,
+            at_seconds: 0.0,
+            action: ReplayNavigationAction::ApplyTurntableIntent {
+                semantic_target_enabled: false,
+                frame: ReplayTurntableFrame {
+                    pan: [0.1, -0.2],
+                    pitch: 0.03,
+                    yaw: -0.04,
+                    dolly_log: 0.1,
+                },
+            },
+        };
+        let current = run_app_replay(&AppReplayScript::new(vec![
+            intent.clone(),
+            AppReplayEvent::Frame {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            },
+        ]))
+        .unwrap();
+        assert!(matches!(
+            current.records[0].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
+        assert_ne!(current.records[1].state.camera.eye, [0.0, 0.0, 3.0]);
+        assert!(current.records[1].state.camera.semantic_target.is_none());
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_13.to_owned(),
+            events: vec![intent],
+        })
+        .unwrap();
+        assert!(matches!(
+            legacy.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires replay 0.14")
         ));
         assert_eq!(legacy.records[0].state.revision, 0);
     }
@@ -2134,10 +2243,7 @@ mod tests {
 
     #[test]
     fn legacy_replays_reject_0_6_camera_policy_actions() {
-        for version in [
-            LEGACY_APP_REPLAY_VERSION_0_4,
-            LEGACY_APP_REPLAY_VERSION_0_5,
-        ] {
+        for version in [LEGACY_APP_REPLAY_VERSION_0_4, LEGACY_APP_REPLAY_VERSION_0_5] {
             for action in [
                 ReplayNavigationAction::SetPerspectiveLens {
                     vertical_fov_radians: 1.2,
@@ -2341,10 +2447,8 @@ mod tests {
         assert_eq!(trace.records[13].state.authored_entities.len(), 1);
         assert_eq!(
             trace.records[13].state.authored_entities[0].entity,
-            EntityId::new(
-                Uuid::parse_str("e0000000-0000-4000-8000-000000000010").unwrap()
-            )
-            .unwrap()
+            EntityId::new(Uuid::parse_str("e0000000-0000-4000-8000-000000000010").unwrap())
+                .unwrap()
         );
         assert_eq!(
             trace.records[13].state.authored_entities[0]

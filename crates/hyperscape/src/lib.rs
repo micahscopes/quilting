@@ -38,6 +38,7 @@ pub use navigation::{
     SurfaceWalkFrame, SurfaceWalkInput, SurfaceWalkMetrics, SurfaceWalkMotion,
     SurfaceWalkRecoveryRequest, SurfaceWalkReflectionTransport, SurfaceWalkRuntime,
     SurfaceWalkRuntimeError, SurfaceWalkStepRequest, SurfaceWalkUpdate, TransitionEasing,
+    TurntableFrame,
 };
 pub use packed_scene::{
     extract_packed_presentation_scene, extract_packed_scene, PackedAssetInstance,

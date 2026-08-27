@@ -1,5 +1,5 @@
 {
-  "version": "hyperscope-app-replay/0.13",
+  "version": "hyperscope-app-replay/0.14",
   "events": [
     {
       "type": "synchronize_navigation",
@@ -347,6 +347,26 @@
     {
       "type": "navigate",
       "sequence": 22,
+      "at_seconds": 3.05,
+      "action": {
+        "action": "apply_turntable_intent",
+        "semantic_target_enabled": true,
+        "frame": {
+          "pan": [0.02, -0.01],
+          "pitch": 0.004,
+          "yaw": -0.003,
+          "dollyLog": 0.01
+        }
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 3.05,
+      "delta_seconds": 0.0
+    },
+    {
+      "type": "navigate",
+      "sequence": 23,
       "at_seconds": 3.05,
       "action": {
         "action": "anchor_focus",

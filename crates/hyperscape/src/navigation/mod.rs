@@ -20,7 +20,7 @@ pub use camera::{
     map_space_mouse_axes, map_space_mouse_camera, CameraBasis, CameraError, CameraRig,
     MappedSpaceMouseFrame, NavigationAxes, NavigationFrame, NavigationPreset, PerspectiveLens,
     ReflectionTransport, SpaceMouseCameraInput, SpaceMouseInputError, SpaceMouseMapping,
-    SphereReflectionState,
+    SphereReflectionState, TurntableFrame,
 };
 pub use focus::{FocusAnchor, FocusNavigation, FocusSphere, FocusSphereTransition};
 pub use surface_anchor::{

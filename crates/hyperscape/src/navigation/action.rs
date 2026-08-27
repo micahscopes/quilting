@@ -1,7 +1,7 @@
 use super::{
     CameraRig, CameraTransition, FocusNavigation, FocusSphere, NavigationFrame, NavigationPreset,
     PerspectiveLens, SphereReflectionState, SurfaceAnchorTarget, SurfaceWalkRuntime,
-    TransitionEasing,
+    TransitionEasing, TurntableFrame,
 };
 use crate::HyperscapeDiagnostics;
 use bevy_ecs::prelude::{Res, ResMut, Resource};
@@ -25,6 +25,13 @@ pub enum NavigationAction {
         preset: NavigationPreset,
         semantic_target_enabled: bool,
         frame: NavigationFrame,
+    },
+    /// Apply one pointer/trackpad-style orbit sample. Target policy, world-up
+    /// yaw, rolled local pitch, screen-plane pan, dolly, and transition
+    /// cancellation are one transaction.
+    ApplyTurntableIntent {
+        semantic_target_enabled: bool,
+        frame: TurntableFrame,
     },
     SetCamera(CameraRig),
     /// Replace projection parameters without introducing lens zoom into the
@@ -326,6 +333,7 @@ fn integrate_navigation_to(
             &scheduled.action,
             NavigationAction::SetSemanticTargetEnabled(_)
                 | NavigationAction::ApplyCameraIntent { .. }
+                | NavigationAction::ApplyTurntableIntent { .. }
         );
         let result =
             apply_action(scheduled.action, runtime, surface_walk, camera, focus).and_then(|()| {
@@ -380,16 +388,22 @@ fn apply_action(
             frame,
         } => {
             runtime.preset = preset;
-            apply_semantic_target_policy(
-                semantic_target_enabled,
-                runtime,
-                surface_walk,
-                camera,
-            )?;
+            apply_semantic_target_policy(semantic_target_enabled, runtime, surface_walk, camera)?;
             runtime.camera_transition = None;
             surface_walk.cancel_anchor_transition();
             camera
                 .apply_navigation(preset, frame)
+                .map_err(|error| error.to_string())?;
+        }
+        NavigationAction::ApplyTurntableIntent {
+            semantic_target_enabled,
+            frame,
+        } => {
+            apply_semantic_target_policy(semantic_target_enabled, runtime, surface_walk, camera)?;
+            runtime.camera_transition = None;
+            surface_walk.cancel_anchor_transition();
+            camera
+                .apply_turntable(frame)
                 .map_err(|error| error.to_string())?;
         }
         NavigationAction::SetCamera(target) => {
@@ -913,9 +927,7 @@ mod tests {
         let transition = controller.runtime.camera_transition.unwrap();
         assert!(transition.start.semantic_target.is_some());
         assert!(transition.target.semantic_target.is_some());
-        let resampled = transition.sample(
-            transition.elapsed_seconds / transition.duration_seconds,
-        );
+        let resampled = transition.sample(transition.elapsed_seconds / transition.duration_seconds);
         for (actual, expected) in resampled
             .semantic_target
             .unwrap()
@@ -972,7 +984,10 @@ mod tests {
             Some(0)
         );
         assert_ne!(controller.camera.eye, CameraRig::default().eye);
-        assert_ne!(controller.camera.control_distance, CameraRig::default().control_distance);
+        assert_ne!(
+            controller.camera.control_distance,
+            CameraRig::default().control_distance
+        );
 
         let accepted_runtime = controller.runtime.clone();
         let accepted_camera = controller.camera;
@@ -984,6 +999,57 @@ mod tests {
                 frame: NavigationFrame {
                     translation: [f64::NAN, 0.0, 0.0],
                     ..NavigationFrame::default()
+                },
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.runtime.preset, accepted_runtime.preset);
+        assert_eq!(
+            controller.runtime.last_semantic_target_policy_sequence,
+            Some(0)
+        );
+        assert_eq!(controller.camera, accepted_camera);
+        assert_eq!(controller.surface_walk, accepted_walk);
+        assert!(controller
+            .diagnostics
+            .0
+            .last()
+            .is_some_and(|message| message.contains("finite")));
+    }
+
+    #[test]
+    fn turntable_intent_commits_target_policy_and_pose_or_rolls_back() {
+        let mut controller = NavigationController::default();
+        controller
+            .push(NavigationAction::ApplyTurntableIntent {
+                semantic_target_enabled: true,
+                frame: TurntableFrame {
+                    pan: [0.2, -0.1],
+                    pitch: 0.03,
+                    yaw: -0.04,
+                    dolly_log: 0.1,
+                },
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert!(controller.camera.semantic_target.is_some());
+        assert_eq!(
+            controller.runtime.last_semantic_target_policy_sequence,
+            Some(0)
+        );
+        assert_ne!(controller.camera.eye, CameraRig::default().eye);
+        let accepted_runtime = controller.runtime.clone();
+        let accepted_camera = controller.camera;
+        let accepted_walk = controller.surface_walk.clone();
+
+        controller
+            .push(NavigationAction::ApplyTurntableIntent {
+                semantic_target_enabled: false,
+                frame: TurntableFrame {
+                    pan: [f64::NAN, 0.0],
+                    ..TurntableFrame::default()
                 },
             })
             .unwrap();

@@ -315,6 +315,29 @@ impl CameraRig {
         Ok(())
     }
 
+    /// Orbit around the current explicit or implicit view target using the
+    /// established pointer-camera convention: world-up yaw first, then pitch
+    /// around the newly rotated camera right axis. Pan is expressed in the
+    /// resulting screen plane and dolly is logarithmic.
+    pub fn apply_turntable(&mut self, frame: TurntableFrame) -> Result<(), CameraError> {
+        frame.validate()?;
+        let pivot = self.view_target();
+        self.rotate_about_world_axis([0.0, 1.0, 0.0], frame.yaw)?;
+        self.rotate_about_world_axis(self.basis().right, frame.pitch)?;
+        let basis = self.basis();
+        let pan_world = add(
+            scale(basis.right, frame.pan[0]),
+            scale(basis.up, frame.pan[1]),
+        );
+        let pivot = add(pivot, pan_world);
+        self.control_distance = (self.control_distance * frame.dolly_log.exp()).clamp(0.1, 100.0);
+        self.eye = sub(pivot, scale(basis.forward, self.control_distance));
+        if self.semantic_target.is_some() {
+            self.semantic_target = Some(pivot);
+        }
+        Ok(())
+    }
+
     pub fn move_drone(&mut self, delta: [f64; 3]) -> Result<(), CameraError> {
         if !finite3(delta) {
             return Err(CameraError::NonFinite);
@@ -476,6 +499,31 @@ impl Default for NavigationFrame {
 impl NavigationFrame {
     fn validate(self) -> Result<(), CameraError> {
         if !finite3(self.translation) || !finite3(self.rotation) || !self.dolly_log.is_finite() {
+            return Err(CameraError::NonFinite);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TurntableFrame {
+    /// World-distance deltas in the post-rotation screen right/up plane.
+    pub pan: [f64; 2],
+    /// Radians around the post-yaw camera right axis.
+    pub pitch: f64,
+    /// Radians around Euclidean world up.
+    pub yaw: f64,
+    /// Logarithmic control-distance delta.
+    pub dolly_log: f64,
+}
+
+impl TurntableFrame {
+    fn validate(self) -> Result<(), CameraError> {
+        if self.pan.into_iter().any(|value| !value.is_finite())
+            || !self.pitch.is_finite()
+            || !self.yaw.is_finite()
+            || !self.dolly_log.is_finite()
+        {
             return Err(CameraError::NonFinite);
         }
         Ok(())
@@ -932,6 +980,50 @@ mod tests {
             .unwrap();
         assert_point_close(orbit.view_target(), pivot);
         assert!((orbit.control_distance - 3.0 * 0.25_f64.exp()).abs() < EPS);
+    }
+
+    #[test]
+    fn turntable_uses_world_yaw_then_rolled_pitch_and_post_rotation_pan() {
+        let rolled = CameraBasis {
+            right: [0.0, -1.0, 0.0],
+            up: [1.0, 0.0, 0.0],
+            forward: [0.0, 0.0, -1.0],
+        };
+        for semantic_target in [None, Some([0.0, 0.0, 0.0])] {
+            let mut camera = CameraRig::new(
+                [0.0, 0.0, 3.0],
+                rolled,
+                3.0,
+                semantic_target,
+                PerspectiveLens::default(),
+            )
+            .unwrap();
+            let original_pivot = camera.view_target();
+            camera
+                .apply_turntable(TurntableFrame {
+                    pan: [0.4, -0.2],
+                    pitch: -0.1,
+                    yaw: 0.25,
+                    dolly_log: 0.3,
+                })
+                .unwrap();
+
+            let basis = camera.basis();
+            let expected_pivot = add(
+                original_pivot,
+                add(scale(basis.right, 0.4), scale(basis.up, -0.2)),
+            );
+            let expected_distance = 3.0 * 0.3_f64.exp();
+            assert_point_close(camera.view_target(), expected_pivot);
+            assert_point_close(
+                camera.eye,
+                sub(expected_pivot, scale(basis.forward, expected_distance)),
+            );
+            assert!((camera.control_distance - expected_distance).abs() < EPS);
+            assert_eq!(camera.semantic_target.is_some(), semantic_target.is_some());
+            // A rolled camera's pitch axis is not silently replaced by world X.
+            assert!(basis.forward[0].abs() > 0.1);
+        }
     }
 
     #[test]
