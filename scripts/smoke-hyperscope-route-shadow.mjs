@@ -22,6 +22,8 @@ assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'adaptiveshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
@@ -68,6 +70,42 @@ assert.equal(
   specs.some(spec => spec.key === 'routeshadow'),
   false,
   'the legacy route-shadow alias must not remain a canonical Rust control',
+);
+const legacyNavigationNormalizerSource = browserSource.match(
+  /function normalizeLegacyNavigationShadow\(params\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(
+  legacyNavigationNormalizerSource,
+  'could not locate legacy navigation-shadow normalizer',
+);
+const normalizeLegacyNavigationShadow = runInNewContext(
+  `${legacyNavigationNormalizerSource}; normalizeLegacyNavigationShadow`,
+  { URLSearchParams },
+);
+assert.equal(
+  normalizeLegacyNavigationShadow(new URLSearchParams('navshadow=1')).toString(),
+  'navimpl=shadow',
+);
+assert.equal(
+  normalizeLegacyNavigationShadow(
+    new URLSearchParams('navshadow=1&navimpl=js'),
+  ).toString(),
+  'navimpl=shadow',
+);
+assert.equal(
+  normalizeLegacyNavigationShadow(
+    new URLSearchParams('navshadow=1&navimpl=rust'),
+  ).toString(),
+  'navimpl=rust',
+);
+assert.equal(
+  normalizeLegacyNavigationShadow(new URLSearchParams('navshadow=0')).toString(),
+  '',
+);
+assert.equal(
+  specs.some(spec => spec.key === 'navshadow'),
+  false,
+  'the legacy navigation-shadow alias must not remain a canonical Rust control',
 );
 const implementationFromRouteSource = browserSource.match(
   /function implementationFromRoute\(params, key, defaultImplementation\) \{[\s\S]*?\n\}/,
@@ -124,6 +162,23 @@ for (const selectionDefaultStep of [
     `browser selection default is missing ${selectionDefaultStep}`,
   );
 }
+for (const navigationAuthorityStep of [
+  "implementationFromRoute(\n  initialNavigationParams, 'navimpl', 'js',\n)",
+  "navimpl: 'js'",
+  "RUST_NAVIGATION_IMPLEMENTATION !== 'js'",
+  'rustAppShadow.stepSpaceMouseCamera(',
+  'spaceMouseAxes,\n          navigationMode,',
+  "RUST_NAVIGATION_IMPLEMENTATION === 'rust' && rustCameraReady",
+  'applyRustSpaceMouseCameraPacket(rustSpaceMouseCameraPacket)',
+  "RUST_NAVIGATION_IMPLEMENTATION === 'shadow' && rustCameraReady",
+  'recordRustSpaceMouseCameraComparison(rustSpaceMouseCameraPacket)',
+  'rustAppShadowDiagnostics.cameraFallbackWrites += 1;',
+]) {
+  assert.ok(
+    browserSource.includes(navigationAuthorityStep),
+    `browser navigation authority adapter is missing ${navigationAuthorityStep}`,
+  );
+}
 const browserDefaultsSource = browserSource.match(
   /const PARAM_DEFAULTS = (\{[\s\S]*?\n\});/,
 )?.[1];
@@ -142,7 +197,6 @@ for (const [key, value] of Object.entries(browserDefaults)) {
   );
 }
 const implicitBrowserDefaults = {
-  navshadow: '0',
   presentation: '0',
   roundshadow: '0',
   appshadow: '0',

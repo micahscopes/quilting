@@ -479,6 +479,19 @@ function normalizeLegacyRouteShadow(params) {
   return normalized;
 }
 
+function normalizeLegacyNavigationShadow(params) {
+  const normalized = new URLSearchParams(params);
+  const legacyShadow = normalized.get('navshadow');
+  if (legacyShadow === null) return normalized;
+  normalized.delete('navshadow');
+  const explicitImplementation = normalized.get('navimpl');
+  if (legacyShadow === '1'
+      && (explicitImplementation === null || explicitImplementation === 'js')) {
+    normalized.set('navimpl', 'shadow');
+  }
+  return normalized;
+}
+
 function implementationFromRoute(params, key, defaultImplementation) {
   const requested = params.get(key) || defaultImplementation;
   return ['js', 'shadow', 'rust'].includes(requested)
@@ -487,10 +500,14 @@ function implementationFromRoute(params, key, defaultImplementation) {
 }
 
 const initialBrowserParams = new URLSearchParams(location.search);
-const initialRouteParams = normalizeLegacyRouteShadow(initialBrowserParams);
+const initialNavigationParams = normalizeLegacyNavigationShadow(initialBrowserParams);
+const initialRouteParams = normalizeLegacyRouteShadow(initialNavigationParams);
 const $ = id => document.getElementById(id);
+const RUST_NAVIGATION_IMPLEMENTATION = implementationFromRoute(
+  initialNavigationParams, 'navimpl', 'js',
+);
 const RUST_NAVIGATION_SHADOW_ENABLED =
-  initialBrowserParams.get('navshadow') === '1';
+  RUST_NAVIGATION_IMPLEMENTATION === 'shadow';
 const RUST_PRESENTATION_ENABLED =
   initialBrowserParams.get('presentation') === '1';
 const RUST_PRESENTATION_IMPLEMENTATION = implementationFromRoute(
@@ -511,6 +528,7 @@ const EXPLICIT_RUST_APP_SHADOW_ENABLED =
   initialBrowserParams.get('appshadow') === '1';
 const RUST_APP_SHADOW_ENABLED =
   EXPLICIT_RUST_APP_SHADOW_ENABLED
+  || RUST_NAVIGATION_IMPLEMENTATION !== 'js'
   || RUST_ASSET_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
@@ -1297,7 +1315,8 @@ const PARAM_DEFAULTS = {
   smlock: '1', smswap: '0', smbackground: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
-  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'rust',
+  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', navimpl: 'js',
+  selectionimpl: 'rust',
   presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'rust', routeimpl: 'rust',
   lodimpl: 'js',
   cue: '',
@@ -1418,6 +1437,7 @@ function syncURL() {
       ss('walkscale', walkScaleSteps, PARAM_DEFAULTS.walkscale);
       ss('walkheight', walkHeightSteps, PARAM_DEFAULTS.walkheight);
       set('walkimpl', SURFACE_WALK_IMPLEMENTATION, PARAM_DEFAULTS.walkimpl);
+      set('navimpl', RUST_NAVIGATION_IMPLEMENTATION, PARAM_DEFAULTS.navimpl);
       set('selectionimpl', RUST_SELECTION_IMPLEMENTATION, PARAM_DEFAULTS.selectionimpl);
       if (patchLab.active) {
         set('lab', patchLab.shape, PARAM_DEFAULTS.lab);
@@ -1473,7 +1493,6 @@ function syncURL() {
       canonicalFixedRouteNumber(panZ, 3),
       canonicalFixedRouteNumber(PARAM_DEFAULTS.pz, 3),
     );
-    if (RUST_NAVIGATION_SHADOW_ENABLED) p.set('navshadow', '1');
     if (RUST_PRESENTATION_ENABLED) {
       p.set('presentation', '1');
       set('cue', rustPresentationDiagnostics.activeCue || '', PARAM_DEFAULTS.cue);
@@ -1728,8 +1747,9 @@ const manualCameraBasisState = new Float64Array(9);
 let manualCameraBasisReady = false;
 let manualCameraInputRevision = 0;
 
-function markManualCameraInput() {
+function markManualCameraInput(preserveRustSpaceMouse = false) {
   manualCameraInputRevision += 1;
+  if (!preserveRustSpaceMouse) rustSpaceMouseCameraActive = false;
   return manualCameraInputRevision;
 }
 
@@ -1863,6 +1883,7 @@ const spaceMouseFlyAxes = new Float32Array(6);
 const spaceMouseNavigationAxes = new Float32Array(6);
 const spaceMouseWalkAxes = new Float32Array(6);
 const spaceMouseLocalRotation = new Float64Array(4);
+const rustSpaceMouseCameraPacket = new Float64Array(17);
 const spaceMouseNavigationOptions = {
   mode: 'hyperscope',
   swapYZ: false,
@@ -1878,7 +1899,7 @@ const spaceMouseWalkOptions = {
 
 let rustNavigationShadow = null;
 let rustNavigationShadowSnapshot = null;
-let rustNavigationShadowCameraActive = false;
+let rustSpaceMouseCameraActive = false;
 let rustFocusFieldSyncReady = false;
 let rustFocusFieldSyncScheduled = false;
 let rustFocusFieldSyncGeneration = 0;
@@ -1886,13 +1907,9 @@ let rustFocusFieldSignalApplyDepth = 0;
 let rustCommittedFocusField = null;
 const rustNavigationShadowDiagnostics = {
   enabled: RUST_NAVIGATION_SHADOW_ENABLED,
+  implementation: RUST_NAVIGATION_IMPLEMENTATION,
   ready: false,
-  samples: 0,
   resynchronizations: 0,
-  driftFrames: 0,
-  maxError: 0,
-  lastError: 0,
-  lastDrift: null,
   surfaceAnchorSamples: 0,
   surfaceAnchorDriftFrames: 0,
   surfaceAnchorMaxError: 0,
@@ -2137,49 +2154,6 @@ function manualNavigationState() {
   };
 }
 
-function navigationShadowError(snapshot, state = manualNavigationState()) {
-  if (!snapshot?.camera || !snapshot?.focus) return Infinity;
-  let error = Math.abs(snapshot.camera.control_distance - state.controlDistance);
-  const compare = (actual, expected) => {
-    if (!actual || actual.length !== expected.length) {
-      error = Infinity;
-      return;
-    }
-    for (let axis = 0; axis < expected.length; axis++) {
-      error = Math.max(error, Math.abs(actual[axis] - expected[axis]));
-    }
-  };
-  compare(snapshot.camera.eye, state.eye);
-  const snapshotHasTarget = snapshot.camera.semantic_target != null;
-  const stateHasTarget = state.semanticTarget != null;
-  if (!snapshotHasTarget || !stateHasTarget) {
-    if (snapshotHasTarget !== stateHasTarget) error = Infinity;
-  } else {
-    compare(snapshot.camera.semantic_target, state.semanticTarget);
-  }
-  compare(snapshot.camera.right, state.right);
-  compare(snapshot.camera.up, state.up);
-  compare(snapshot.camera.forward, state.forward);
-  error = Math.max(
-    error,
-    Math.abs(snapshot.camera.vertical_fov_radians - state.verticalFovRadians),
-    Math.abs(snapshot.camera.near - state.near),
-    Math.abs(snapshot.camera.far - state.far),
-  );
-  compare(snapshot.focus.center, state.focusCenter);
-  error = Math.max(
-    error,
-    Math.abs(snapshot.focus.radius - state.focusRadius),
-    Math.abs(snapshot.focus.focus_coordinate - state.focusCoordinate),
-    Math.abs(snapshot.focus.angular_aperture - state.focusAngularAperture),
-  );
-  if (snapshot.focus.focus_enabled !== state.focusEnabled
-      || snapshot.focus.inversion_enabled !== state.inversionEnabled) {
-    error = Infinity;
-  }
-  return error;
-}
-
 function navigationCameraFrameError(snapshot, frame) {
   if (!snapshot?.camera || !frame?.eye || !frame?.basis) return Infinity;
   let error = Math.abs(snapshot.camera.control_distance - frame.controlDistance);
@@ -2202,6 +2176,129 @@ function navigationCameraFrameError(snapshot, frame) {
   compare(snapshot.camera.right, frame.basis.slice(0, 3));
   compare(snapshot.camera.up, frame.basis.slice(3, 6));
   compare(snapshot.camera.forward, frame.basis.slice(6, 9));
+  return error;
+}
+
+function rustSpaceMouseCameraPacketError(packet, state = manualNavigationState()) {
+  if (!packet || packet.length !== 17) return Infinity;
+  let error = Math.abs(packet[12] - state.controlDistance);
+  const compare = (offset, expected) => {
+    for (let axis = 0; axis < expected.length; axis++) {
+      error = Math.max(error, Math.abs(packet[offset + axis] - expected[axis]));
+    }
+  };
+  compare(0, state.eye);
+  compare(3, state.right);
+  compare(6, state.up);
+  compare(9, state.forward);
+  const hasTarget = packet[13] === 1;
+  if (hasTarget !== (state.semanticTarget != null)) return Infinity;
+  if (hasTarget) compare(14, state.semanticTarget);
+  return error;
+}
+
+function synchronizeRustSpaceMouseCamera() {
+  if (RUST_NAVIGATION_IMPLEMENTATION === 'js' || authoredCamera) return false;
+  const app = ensureRustAppShadow('navigation-camera');
+  const state = manualNavigationState();
+  try {
+    rustAppShadowDiagnostics.lastCommit = app.synchronizeNavigation(
+      new Float64Array(state.eye),
+      new Float64Array(state.forward),
+      new Float64Array(state.up),
+      state.controlDistance,
+      new Float64Array(state.semanticTarget || []),
+      state.verticalFovRadians,
+      state.near,
+      state.far,
+      new Float64Array(state.focusCenter),
+      state.focusRadius,
+      state.focusEnabled,
+      state.inversionEnabled,
+      state.focusCoordinate,
+      state.focusAngularAperture,
+    );
+    rustSpaceMouseCameraActive = true;
+    rustAppShadowDiagnostics.cameraSynchronizations += 1;
+    return true;
+  } catch (error) {
+    rustSpaceMouseCameraActive = false;
+    rustAppShadowDiagnostics.cameraErrors += 1;
+    recordAppShadowMismatch('camera_sync', error?.message || String(error));
+    return false;
+  }
+}
+
+function stepRustSpaceMouseCamera(normalizedAxes, navigationMode, deltaSeconds) {
+  if (RUST_NAVIGATION_IMPLEMENTATION === 'js') return false;
+  if (!rustSpaceMouseCameraActive && !synchronizeRustSpaceMouseCamera()) return false;
+  try {
+    rustAppShadow.stepSpaceMouseCamera(
+      normalizedAxes,
+      navigationMode,
+      spaceMouseSwapYZ.peek(),
+      spaceMouseNavigationOptions.invertPan,
+      spaceMouseNavigationOptions.invertRotate,
+      deltaSeconds,
+      registeredSpaceMouseSpeed,
+      spaceMouseMove.peek() / 100,
+      spaceMouseRotate.peek() / 100,
+      spaceMouseLockHorizon.peek(),
+      rustSpaceMouseCameraPacket,
+    );
+    rustAppShadowDiagnostics.cameraSteps += 1;
+    return true;
+  } catch (error) {
+    rustSpaceMouseCameraActive = false;
+    rustAppShadowDiagnostics.cameraErrors += 1;
+    recordAppShadowMismatch('camera_step', error?.message || String(error));
+    return false;
+  }
+}
+
+function applyRustSpaceMouseCameraPacket(packet) {
+  if (!packet || packet.length !== 17 || (packet[13] !== 0 && packet[13] !== 1)) {
+    return false;
+  }
+  for (let axis = 0; axis < 9; axis++) {
+    manualCameraBasisState[axis] = packet[axis + 3];
+  }
+  manualCameraBasisReady = true;
+  zoom = packet[12];
+  if (packet[13] === 1) {
+    panX = packet[14];
+    panY = packet[15];
+    panZ = packet[16];
+    manualCameraSemanticTargetEnabled = true;
+  } else {
+    panX = packet[0] + packet[9] * zoom;
+    panY = packet[1] + packet[10] * zoom;
+    panZ = packet[2] + packet[11] * zoom;
+    manualCameraSemanticTargetEnabled = false;
+  }
+  syncManualCameraEuler();
+  rustAppShadowDiagnostics.cameraAuthorityWrites += 1;
+  return true;
+}
+
+function recordRustSpaceMouseCameraComparison(packet) {
+  const error = rustSpaceMouseCameraPacketError(packet);
+  rustAppShadowDiagnostics.cameraComparisons += 1;
+  rustAppShadowDiagnostics.cameraLastError = error;
+  rustAppShadowDiagnostics.cameraMaximumError = Math.max(
+    rustAppShadowDiagnostics.cameraMaximumError,
+    error,
+  );
+  if (error > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+    rustAppShadowDiagnostics.cameraMismatches += 1;
+    const count = rustAppShadowDiagnostics.cameraMismatches;
+    if (count === 1 || (count & (count - 1)) === 0) {
+      recordAppShadowMismatch(
+        'camera_drift',
+        `Rust SpaceMouse camera drifted by ${error}`,
+      );
+    }
+  }
   return error;
 }
 
@@ -2235,51 +2332,6 @@ function synchronizeRustNavigationShadow() {
     rustNavigationShadowDiagnostics.error = error?.message || String(error);
     console.warn('Rust navigation shadow synchronization failed:', error);
     return false;
-  }
-}
-
-function applyRustNavigationShadowFrame({
-  navigationMode,
-  translation,
-  rotation,
-  dollyLog,
-  horizonLocked,
-  deltaSeconds,
-}) {
-  if (!rustNavigationShadow) return;
-  try {
-    rustNavigationShadow.setPreset(navigationMode);
-    rustNavigationShadow.applyFrame(
-      new Float64Array(translation),
-      new Float64Array(rotation),
-      dollyLog,
-      horizonLocked,
-    );
-    rustNavigationShadowSnapshot = rustNavigationShadow.tick(deltaSeconds);
-    const error = navigationShadowError(rustNavigationShadowSnapshot);
-    rustNavigationShadowDiagnostics.samples += 1;
-    rustNavigationShadowDiagnostics.lastError = error;
-    rustNavigationShadowDiagnostics.maxError = Math.max(
-      rustNavigationShadowDiagnostics.maxError,
-      error,
-    );
-    if (error > RUST_NAVIGATION_SHADOW_TOLERANCE) {
-      rustNavigationShadowDiagnostics.driftFrames += 1;
-      rustNavigationShadowDiagnostics.lastDrift = {
-        error,
-        navigationMode,
-        browser: manualNavigationState(),
-        rust: rustNavigationShadowSnapshot,
-      };
-      const count = rustNavigationShadowDiagnostics.driftFrames;
-      if (count === 1 || (count & (count - 1)) === 0) {
-        console.warn('Rust navigation shadow drift:', rustNavigationShadowDiagnostics.lastDrift);
-      }
-    }
-  } catch (error) {
-    rustNavigationShadowDiagnostics.error = error?.message || String(error);
-    rustNavigationShadowCameraActive = false;
-    console.warn('Rust navigation shadow action failed:', error);
   }
 }
 
@@ -3239,6 +3291,16 @@ const rustAppShadowDiagnostics = {
   presentationLoads: 0,
   presentationComparisons: 0,
   navigationSynchronizations: 0,
+  cameraImplementation: RUST_NAVIGATION_IMPLEMENTATION,
+  cameraSynchronizations: 0,
+  cameraSteps: 0,
+  cameraComparisons: 0,
+  cameraMismatches: 0,
+  cameraMaximumError: 0,
+  cameraLastError: 0,
+  cameraAuthorityWrites: 0,
+  cameraFallbackWrites: 0,
+  cameraErrors: 0,
   focusFieldSynchronizations: 0,
   focusFieldBoundaryCalls: 0,
   focusFieldAuthorityWrites: 0,
@@ -4531,7 +4593,7 @@ function claimManualCameraFromActiveView({ preserveSemanticTarget = false } = {}
 function beginSurfaceWalkAnchorTransition(startFrame) {
   if (!startFrame?.eye || !startFrame?.basis) return false;
   cancelSurfaceWalkAnchorTransition();
-  rustNavigationShadowCameraActive = false;
+  rustSpaceMouseCameraActive = false;
   surfaceWalk.anchorTransition = {
     startEye: startFrame.eye.slice(),
     startBasis: startFrame.basis.slice(),
@@ -8025,7 +8087,7 @@ function frame(ts) {
       registeredInversionScale = Math.max(focusSphere.radius, 0.011);
     }
     previousSpaceMouseMode = spaceMouseMode;
-    rustNavigationShadowCameraActive = false;
+    rustSpaceMouseCameraActive = false;
   }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
   const flyAxes = mapSpaceMouseFlyAxes(spaceMouseAxes, spaceMouseFlyAxes);
@@ -8072,7 +8134,7 @@ function frame(ts) {
     let moving = false;
     for (let axis = 0; axis < 6; axis++) moving ||= spaceMouseAxes[axis] !== 0;
     if (moving) {
-      if (spaceMouseMode === 'camera' && !walkingSpaceMouse) markManualCameraInput();
+      if (spaceMouseMode === 'camera' && !walkingSpaceMouse) markManualCameraInput(true);
       const basis = manualCameraBasis(inputCameraBasis);
       const translating = Math.abs(navigationAxes[0]) + Math.abs(navigationAxes[1])
         + Math.abs(navigationAxes[2]) > 1e-5;
@@ -8113,7 +8175,7 @@ function frame(ts) {
         // frame is surface-local: X/Z provide strafe/walk, Y changes the eye
         // offset, Rx/Ry provide relative pitch/yaw, and twist changes both
         // body height and walking speed multiplicatively.
-        rustNavigationShadowCameraActive = false;
+        rustSpaceMouseCameraActive = false;
         spaceMouseTranslationActive = false;
         const walkNormal = surfaceWalk.filteredNormal
           || surfaceNormalize(Array.from(surfaceWalk.snapshot?.output_normal || []));
@@ -8140,7 +8202,13 @@ function frame(ts) {
           )));
         }
       } else if (spaceMouseMode === 'camera') {
-        manualCameraSemanticTargetEnabled = navigationMode === 'object';
+        const rustCameraReady = stepRustSpaceMouseCamera(
+          spaceMouseAxes,
+          navigationMode,
+          deltaSeconds,
+        );
+        const browserCameraAuthority = RUST_NAVIGATION_IMPLEMENTATION !== 'rust'
+          || !rustCameraReady;
         const pitch = navigationAxes[3] * rotateScale;
         const yaw = navigationAxes[4] * rotateScale;
         const roll = navigationAxes[5] * rotateScale;
@@ -8150,16 +8218,10 @@ function frame(ts) {
         const horizonLocked = navigationMode !== 'hyperscope'
           && (navigationPolicy.horizonLocked || spaceMouseLockHorizon.peek());
 
-        if (rustNavigationShadow) {
-          const priorError = navigationShadowError(rustNavigationShadowSnapshot);
-          if (!rustNavigationShadowCameraActive
-              || priorError > RUST_NAVIGATION_SHADOW_TOLERANCE) {
-            synchronizeRustNavigationShadow();
-          }
-          rustNavigationShadowCameraActive = true;
+        if (browserCameraAuthority) {
+          manualCameraSemanticTargetEnabled = navigationMode === 'object';
         }
-
-        if (navigationMode === 'hyperscope') {
+        if (browserCameraAuthority && navigationMode === 'hyperscope') {
           // Preserve the established Hyperscope integration order: translate
           // in the current local frame, then rotate while holding that newly
           // translated eye fixed.
@@ -8178,7 +8240,7 @@ function frame(ts) {
           panX = eyeX + rotated[6] * zoom;
           panY = eyeY + rotated[7] * zoom;
           panZ = eyeZ + rotated[8] * zoom;
-        } else if (navigationPolicy.orbit) {
+        } else if (browserCameraAuthority && navigationPolicy.orbit) {
           if (horizonLocked) rotateManualCameraHorizonLocked(pitch, yaw);
           else rotateManualCameraLocal(pitch, yaw, roll);
           const rotated = manualCameraBasis(inputCameraBasis);
@@ -8189,7 +8251,7 @@ function frame(ts) {
           panZ += (navigationAxes[0] * rotated[2] + navigationAxes[1] * rotated[5]) * moveScale;
           zoom *= Math.exp(navigationAxes[2] * (spaceMouseMove.peek() / 100) * deltaSeconds * 1.5);
           zoom = Math.max(0.1, Math.min(100, zoom));
-        } else {
+        } else if (browserCameraAuthority) {
           const eyeX = panX - basis[6] * zoom;
           const eyeY = panY - basis[7] * zoom;
           const eyeZ = panZ - basis[8] * zoom;
@@ -8232,23 +8294,21 @@ function frame(ts) {
               + navigationAxes[2] * rotated[8]) * moveScale;
           }
         }
-        const objectMode = navigationMode === 'object';
-        applyRustNavigationShadowFrame({
-          navigationMode,
-          translation: [
-            navigationAxes[0] * moveScale,
-            navigationAxes[1] * moveScale,
-            objectMode ? 0 : navigationAxes[2] * moveScale,
-          ],
-          rotation: [pitch, yaw, roll],
-          dollyLog: objectMode
-            ? navigationAxes[2] * (spaceMouseMove.peek() / 100) * deltaSeconds * 1.5
-            : 0,
-          horizonLocked,
-          deltaSeconds,
-        });
+        if (RUST_NAVIGATION_IMPLEMENTATION === 'rust' && rustCameraReady) {
+          if (!applyRustSpaceMouseCameraPacket(rustSpaceMouseCameraPacket)) {
+            rustSpaceMouseCameraActive = false;
+            rustAppShadowDiagnostics.cameraErrors += 1;
+            recordAppShadowMismatch('camera_packet', 'Rust returned an invalid camera packet');
+          } else {
+            recordRustSpaceMouseCameraComparison(rustSpaceMouseCameraPacket);
+          }
+        } else if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
+          rustAppShadowDiagnostics.cameraFallbackWrites += 1;
+        } else if (RUST_NAVIGATION_IMPLEMENTATION === 'shadow' && rustCameraReady) {
+          recordRustSpaceMouseCameraComparison(rustSpaceMouseCameraPacket);
+        }
       } else if (spaceMouseMode === 'inversion') {
-        rustNavigationShadowCameraActive = false;
+        rustSpaceMouseCameraActive = false;
         if (mob.xform.peek() !== 'sphere_reflection') mob.xform.set('sphere_reflection');
         focusSphere.active = true;
         focusSphereTransition = null;
@@ -8282,7 +8342,7 @@ function frame(ts) {
         const accepted = setFocusSphereGeometry({ center: nextCenter, radius: nextRadius });
         if (anchored && accepted) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       } else if (spaceMouseMode === 'depth-of-field') {
-        rustNavigationShadowCameraActive = false;
+        rustSpaceMouseCameraActive = false;
         fz.enabled.set(true);
         const moveSensitivity = spaceMouseMove.peek() / 100;
         const rotateSensitivity = spaceMouseRotate.peek() / 100;
@@ -8322,7 +8382,7 @@ function frame(ts) {
       }
     } else if (spaceMouseMode === 'camera') {
       spaceMouseTranslationActive = false;
-      rustNavigationShadowCameraActive = false;
+      rustSpaceMouseCameraActive = false;
     }
   }
   if (spaceMouseMotionActive && ts - spaceMouseLastMotionAt >= 150) {

@@ -129,6 +129,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("walkscale", "0", Number),
     spec!("walkheight", "0", Number),
     spec!("walkimpl", "js", Implementation),
+    spec!("navimpl", "js", Implementation),
     spec!("selectionimpl", "rust", Implementation),
     spec!("lab", "0", Text),
     spec!("labfield", "edges", Text),
@@ -148,7 +149,6 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("px", "0", Number),
     spec!("py", "0", Number),
     spec!("pz", "0", Number),
-    spec!("navshadow", "0", Toggle),
     spec!("presentation", "0", Toggle),
     spec!("cue", "", OptionalUuid),
     spec!("presentimpl", "rust", Implementation),
@@ -349,6 +349,7 @@ mod tests {
     fn implementation_routes_admit_only_measured_authority_modes() {
         for key in [
             "walkimpl",
+            "navimpl",
             "selectionimpl",
             "presentimpl",
             "assetimpl",
@@ -369,6 +370,21 @@ mod tests {
                     RouteDiagnosticCode::InvalidValue,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn navigation_cutover_keeps_javascript_default_and_both_measured_rust_routes() {
+        let default_route = HyperscopeRoute::from_pairs([("navimpl", "js")]);
+        assert!(default_route.canonical_pairs().is_empty());
+
+        for implementation in ["shadow", "rust"] {
+            let route = HyperscopeRoute::from_pairs([("navimpl", implementation)]);
+            assert_eq!(
+                route.canonical_pairs(),
+                vec![("navimpl", implementation)]
+            );
+            assert!(route.diagnostics().is_empty());
         }
     }
 
