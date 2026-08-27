@@ -10,8 +10,7 @@ use crate::atlas::TessellationAtlas;
 use crate::patch::QBPatchDomain;
 use crate::permutation::canonical_form;
 use crate::screen_partition::{ScreenPatchLeaf, ScreenPatchLeafId};
-use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::Excluded;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScreenLeafTopology {
@@ -448,6 +447,64 @@ enum MeshVertexKey {
     },
 }
 
+/// Dense source vertices dominate an all-root frontier, while edge/interior
+/// vertices exist only around adaptively split faces. Index the former
+/// directly and reserve ordered lookup for the sparse refined remainder.
+struct MeshVertexIndex {
+    source_vertices: Vec<usize>,
+    refined_vertices: BTreeMap<MeshVertexKey, usize>,
+    len: usize,
+}
+
+impl MeshVertexIndex {
+    const MISSING: usize = usize::MAX;
+
+    fn new(source_vertex_count: usize) -> Self {
+        Self {
+            source_vertices: vec![Self::MISSING; source_vertex_count],
+            refined_vertices: BTreeMap::new(),
+            len: 0,
+        }
+    }
+
+    fn get_or_insert(&mut self, key: MeshVertexKey) -> Option<usize> {
+        match key {
+            MeshVertexKey::SourceVertex(vertex) => {
+                let slot = self.source_vertices.get_mut(vertex as usize)?;
+                if *slot == Self::MISSING {
+                    *slot = self.len;
+                    self.len = self.len.checked_add(1)?;
+                }
+                Some(*slot)
+            }
+            _ => {
+                if let Some(&index) = self.refined_vertices.get(&key) {
+                    return Some(index);
+                }
+                let index = self.len;
+                self.len = self.len.checked_add(1)?;
+                self.refined_vertices.insert(key, index);
+                Some(index)
+            }
+        }
+    }
+
+    fn get(&self, key: &MeshVertexKey) -> Option<usize> {
+        match *key {
+            MeshVertexKey::SourceVertex(vertex) => self
+                .source_vertices
+                .get(vertex as usize)
+                .copied()
+                .filter(|&index| index != Self::MISSING),
+            _ => self.refined_vertices.get(key).copied(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
 fn find_vertex_root(parents: &mut [u32], vertex: u32) -> u32 {
     let mut root = vertex;
     while parents[root as usize] != root {
@@ -540,6 +597,7 @@ impl CachedSourceEdge {
 /// cache or any frontier built from it remains in use; rebuild after mutation.
 #[derive(Debug)]
 pub struct ScreenMeshTopologyCache {
+    source_vertex_count: usize,
     canonical_face_vertices: Vec<[u32; 3]>,
     face_edges: Vec<[CachedSourceEdge; 3]>,
 }
@@ -573,6 +631,7 @@ impl ScreenMeshTopologyCache {
             face_edges.push(cached_edges);
         }
         Ok(Self {
+            source_vertex_count: canonical_vertices.len(),
             canonical_face_vertices,
             face_edges,
         })
@@ -748,7 +807,7 @@ impl ScreenMeshLeafFrontier {
             .checked_shl(u32::from(global_depth))
             .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
         let lines = mesh_topology_lines(leaves, topology)?;
-        let mut vertex_indices = BTreeMap::<MeshVertexKey, usize>::new();
+        let mut vertex_indices = MeshVertexIndex::new(topology.source_vertex_count);
         let mut corner_vertices = Vec::<[usize; 3]>::with_capacity(leaves.len());
 
         for (leaf_index, leaf) in leaves.iter().copied().enumerate() {
@@ -762,28 +821,35 @@ impl ScreenMeshLeafFrontier {
                     global_denominator,
                     topology,
                 )?;
-                leaf_vertices[corner_index] = if let Some(&index) = vertex_indices.get(&key) {
-                    index
-                } else {
-                    let index = vertex_indices.len();
-                    vertex_indices.insert(key, index);
-                    index
-                };
+                leaf_vertices[corner_index] = vertex_indices
+                    .get_or_insert(key)
+                    .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })?;
             }
             corner_vertices.push(leaf_vertices);
         }
 
         let mut hanging_pairs = Vec::<(usize, u32)>::new();
+        let mut endpoints = Vec::<u32>::new();
         for (&line, spans) in &lines {
-            let endpoints = spans
-                .iter()
-                .flat_map(|span| [span.start, span.end])
-                .collect::<BTreeSet<_>>();
+            if spans.len() < 2
+                || spans
+                    .iter()
+                    .all(|span| span.start == spans[0].start && span.end == spans[0].end)
+            {
+                continue;
+            }
+            endpoints.clear();
+            endpoints.reserve(spans.len().saturating_mul(2));
+            endpoints.extend(spans.iter().flat_map(|span| [span.start, span.end]));
+            endpoints.sort_unstable();
+            endpoints.dedup();
             for span in spans {
-                for &parameter in endpoints.range((Excluded(span.start), Excluded(span.end))) {
+                let first_interior = endpoints.partition_point(|&value| value <= span.start);
+                let after_interior = endpoints.partition_point(|&value| value < span.end);
+                for &parameter in &endpoints[first_interior..after_interior] {
                     let key =
                         mesh_line_vertex_key(line, parameter, global_denominator, span.leaf_index)?;
-                    let Some(&vertex_index) = vertex_indices.get(&key) else {
+                    let Some(vertex_index) = vertex_indices.get(&key) else {
                         return Err(ScreenLeafLodError::InvalidTopology {
                             leaf_index: span.leaf_index,
                         });
