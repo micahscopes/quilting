@@ -20,7 +20,7 @@ use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
 use quilting_renderer::compute::{
-    build_composed_lod_model, build_lod_subject_states, prepare_lod_atlas_lookup,
+    build_composed_lod_model, prepare_lod_atlas_lookup, prepare_lod_dispatch_state,
     prepare_lod_model, LodAnimationSource, LodAtlasLookup, LodCompute, LodModelData,
     LodModelResidency, StagedLodReadback,
 };
@@ -689,10 +689,15 @@ pub fn dispatch_animated_lods(
         };
         let num_vertices = compute_model.num_vertices;
         let mesh_radius = compute_model.mesh_radius;
-        let extracted_states = build_lod_subject_states(
+        let mut legacy_mobius = [0.0f32; 16];
+        for (destination, &source) in legacy_mobius.iter_mut().zip(mobius) {
+            *destination = source;
+        }
+        let dispatch_state = prepare_lod_dispatch_state(
             subject_states,
-            &compute_model.node_first_faces,
+            &compute_model,
             num_faces,
+            legacy_mobius,
         );
 
         perf_mark("lod-wasm-start");
@@ -769,55 +774,21 @@ pub fn dispatch_animated_lods(
                 "lod-gpu-pose-upload-end",
             );
 
-            let mut legacy_mobius = [0.0f32; 16];
-            for (i, &v) in mobius.iter().take(16).enumerate() { legacy_mobius[i] = v; }
             let mut vp = [0.0f32; 16];
             for (i, &v) in vp_matrix.iter().take(16).enumerate() { vp[i] = v; }
 
             let max_lod = LOD_MAX.with(|m| *m.borrow());
-            let identity = [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
-            ];
-            let identity_mobius = [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0,
-                1.0, 0.0, 0.0, 0.0,
-            ];
-            let baseline = if extracted_states.is_empty() {
-                legacy_mobius
-            } else {
-                identity_mobius
-            };
-            let baseline_q = |offset: usize| {
-                Quat::new(
-                    baseline[offset] as f64,
-                    baseline[offset + 1] as f64,
-                    baseline[offset + 2] as f64,
-                    baseline[offset + 3] as f64,
-                )
-            };
-            let baseline_mobius = Mobius::new(
-                baseline_q(0), baseline_q(4), baseline_q(8), baseline_q(12),
-            );
-            let (pole, power, c_norm_sq, has_pole) = match baseline_mobius.pole() {
-                Some(h) => (
-                    [h.w as f32, h.x as f32, h.y as f32, h.z as f32],
-                    baseline_mobius.power() as f32,
-                    baseline_mobius.c.norm_sq() as f32,
-                    1.0,
-                ),
-                None => ([0.0; 4], 0.0, baseline_mobius.c.norm_sq() as f32, 0.0),
-            };
             perf_mark("lod-gpu-dispatch-start");
             let dispatched = compute.compute_lods(
                 gl, num_faces, num_vertices,
                 num_joints, num_morph,
-                &extracted_states,
-                baseline, identity, pole, power, c_norm_sq, has_pole,
+                &dispatch_state.subjects,
+                dispatch_state.baseline_mobius,
+                dispatch_state.baseline_model,
+                dispatch_state.pole,
+                dispatch_state.mobius_power,
+                dispatch_state.c_norm_sq,
+                dispatch_state.has_pole,
                 density, mesh_radius, min_px, max_lod,
                 &vp, vp_width, vp_height,
             );
@@ -860,7 +831,7 @@ pub fn dispatch_animated_lods(
                 readback,
                 classified_faces: num_faces,
                 resident_faces,
-                subject_records: extracted_states.len(),
+                subject_records: dispatch_state.subjects.len(),
                 pose_stamp,
                 pose: captured_pose,
             })

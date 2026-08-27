@@ -373,6 +373,75 @@ pub struct LodSubjectState {
     pub has_pole: f32,
 }
 
+/// Exact transform selection for one backend-neutral classifier dispatch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LodDispatchState {
+    pub subjects: Vec<LodSubjectState>,
+    pub baseline_mobius: [f32; 16],
+    pub baseline_model: [f32; 16],
+    pub pole: [f32; 4],
+    pub mobius_power: f32,
+    pub c_norm_sq: f32,
+    pub has_pole: f32,
+}
+
+/// Resolve legacy and composed-scene transforms once for every backend.
+pub fn prepare_lod_dispatch_state(
+    packed_subjects: &[f32],
+    residency: &LodModelResidency,
+    classified_faces: usize,
+    legacy_mobius: [f32; 16],
+) -> LodDispatchState {
+    let subjects = build_lod_subject_states(
+        packed_subjects,
+        &residency.node_first_faces,
+        classified_faces,
+    );
+    let baseline_mobius = if subjects.is_empty() {
+        legacy_mobius
+    } else {
+        [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0,
+        ]
+    };
+    let baseline_model = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let q = |offset: usize| {
+        Quat::new(
+            baseline_mobius[offset] as f64,
+            baseline_mobius[offset + 1] as f64,
+            baseline_mobius[offset + 2] as f64,
+            baseline_mobius[offset + 3] as f64,
+        )
+    };
+    let mobius = Mobius::new(q(0), q(4), q(8), q(12));
+    let (pole, mobius_power, c_norm_sq, has_pole) = match mobius.pole() {
+        Some(pole) => (
+            [pole.w as f32, pole.x as f32, pole.y as f32, pole.z as f32],
+            mobius.power() as f32,
+            mobius.c.norm_sq() as f32,
+            1.0,
+        ),
+        None => ([0.0; 4], 0.0, mobius.c.norm_sq() as f32, 0.0),
+    };
+    LodDispatchState {
+        subjects,
+        baseline_mobius,
+        baseline_model,
+        pole,
+        mobius_power,
+        c_norm_sq,
+        has_pole,
+    }
+}
+
 const SUBJECT_STATE_TEXELS: usize = 10;
 pub const SUBJECT_STATE_STRIDE: usize = 33;
 
@@ -1717,6 +1786,44 @@ mod tests {
         let states = build_lod_subject_states(&packed, &HashMap::from([(2, 0)]), 1);
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].model[0], 29.0);
+    }
+
+    #[test]
+    fn dispatch_state_uses_legacy_transform_without_composed_subjects() {
+        let legacy = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            1.0, 2.0, 3.0, 4.0,
+        ];
+        let residency = LodModelResidency {
+            num_faces: 1,
+            num_vertices: 3,
+            node_first_faces: HashMap::from([(7, 0)]),
+            mesh_radius: 1.0,
+        };
+        let state = prepare_lod_dispatch_state(&[], &residency, 1, legacy);
+        assert!(state.subjects.is_empty());
+        assert_eq!(state.baseline_mobius, legacy);
+        assert_eq!(state.baseline_model[0], 1.0);
+        assert_eq!(state.baseline_model[15], 1.0);
+    }
+
+    #[test]
+    fn dispatch_state_uses_identity_baseline_for_composed_subjects() {
+        let residency = LodModelResidency {
+            num_faces: 2,
+            num_vertices: 4,
+            node_first_faces: HashMap::from([(3, 0), (8, 1)]),
+            mesh_radius: 1.0,
+        };
+        let packed = [subject_record(3.0, 30.0), subject_record(8.0, 80.0)].concat();
+        let state = prepare_lod_dispatch_state(&packed, &residency, 1, [9.0; 16]);
+        assert_eq!(state.subjects.len(), 1);
+        assert_eq!(state.subjects[0].node, 3);
+        assert_eq!(state.baseline_mobius[0], 1.0);
+        assert_eq!(state.baseline_mobius[12], 1.0);
+        assert_eq!(state.has_pole, 0.0);
     }
 
     fn coincident_square() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
