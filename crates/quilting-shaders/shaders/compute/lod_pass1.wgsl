@@ -1,5 +1,6 @@
 #import quilting::math::quaternion::{qmul, qinv}
-#import quilting::compute::lod_types::{LodFaceRecord, LodSkinningRecord, LodPass1Record, LodSubjectState, LodDispatchUniforms}
+#import quilting::compute::lod_types::{LodFaceRecord, LodPass1Record, LodSubjectState, LodDispatchUniforms}
+#import quilting::compute::pose::animated_position
 
 // WebGPU form of the current WebGL2 LOD classifier's first pass. One compute
 // invocation owns one source face and emits one 16-byte intermediate record.
@@ -9,10 +10,7 @@
 @group(0) @binding(0) var<uniform> dispatch: LodDispatchUniforms;
 @group(0) @binding(1) var<storage, read> faces: array<LodFaceRecord>;
 @group(0) @binding(2) var<storage, read> positions: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> skinning: array<LodSkinningRecord>;
-@group(0) @binding(4) var<storage, read> joint_matrices: array<mat4x4<f32>>;
-@group(0) @binding(5) var<storage, read> morph_deltas: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read> morph_weights: array<f32>;
+// Bindings 3..6 are the shared dynamic-pose residency imported above.
 @group(0) @binding(7) var<storage, read> subject_states: array<LodSubjectState>;
 @group(0) @binding(8) var<storage, read_write> pass1_records: array<LodPass1Record>;
 
@@ -61,39 +59,13 @@ fn mobius_pure(subject: LodSubjectState, point: vec3<f32>) -> vec3<f32> {
 }
 
 fn fetch_animated_position(vertex: u32) -> vec3<f32> {
-    var position = positions[vertex].xyz;
-    let num_vertices = dispatch.counts.y;
-    let num_morph_targets = dispatch.counts.w;
-    for (var morph_target = 0u; morph_target < 64u; morph_target++) {
-        if morph_target >= num_morph_targets {
-            break;
-        }
-        let weight = morph_weights[morph_target];
-        if abs(weight) >= 1e-6 {
-            position += weight * morph_deltas[morph_target * num_vertices + vertex].xyz;
-        }
-    }
-
-    let num_joints = dispatch.counts.z;
-    if num_joints == 0u {
-        return position;
-    }
-    let influences = skinning[vertex];
-    var skinned = vec3<f32>(0.0);
-    var applied_weight = 0.0;
-    let homogeneous = vec4<f32>(position, 1.0);
-    for (var influence = 0u; influence < 4u; influence++) {
-        let weight = influences.joint_weights[influence];
-        let joint = influences.joint_indices[influence];
-        if weight >= 1e-6 && joint < num_joints {
-            applied_weight += weight;
-            skinned += weight * (joint_matrices[joint] * homogeneous).xyz;
-        }
-    }
-    if applied_weight <= 1e-6 {
-        return position;
-    }
-    return skinned;
+    return animated_position(
+        positions[vertex].xyz,
+        vertex,
+        dispatch.counts.y,
+        dispatch.counts.z,
+        dispatch.counts.w,
+    );
 }
 
 fn finite_vec3(value: vec3<f32>) -> bool {

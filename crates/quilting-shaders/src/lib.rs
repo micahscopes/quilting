@@ -17,6 +17,7 @@ pub const LOD_PASS2_DEVICE_ENTRY_POINT: &str = "classify_lod_pass2_";
 pub const VISIBILITY_COUNT_DEVICE_ENTRY_POINT: &str = "count_visible_instances";
 pub const VISIBILITY_SCAN_DEVICE_ENTRY_POINT: &str = "scan_visible_batches";
 pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instances";
+pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
 
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
@@ -28,6 +29,10 @@ pub mod sources {
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
     pub const LOD_TYPES: &str = include_str!("../shaders/compute/lod_types.wgsl");
+    pub const POSE: &str = include_str!("../shaders/compute/pose.wgsl");
+    pub const PATCH_PREPARE_TYPES: &str =
+        include_str!("../shaders/compute/patch_prepare_types.wgsl");
+    pub const PATCH_PREPARE_COMPUTE: &str = include_str!("../shaders/compute/patch_prepare.wgsl");
     pub const LOD_PASS1: &str = include_str!("../shaders/compute/lod_pass1.wgsl");
     pub const LOD_PASS2: &str = include_str!("../shaders/compute/lod_pass2.wgsl");
     pub const VISIBILITY_COMPACTION_TYPES: &str =
@@ -68,6 +73,11 @@ fn build_compiler_catalog_revision() -> Arc<str> {
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
+        ("quilting::compute::pose", sources::POSE),
+        (
+            "quilting::compute::patch_prepare_types",
+            sources::PATCH_PREPARE_TYPES,
+        ),
         (
             "quilting::compute::visibility_compaction_types",
             sources::VISIBILITY_COMPACTION_TYPES,
@@ -102,6 +112,11 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
+        ("quilting::compute::pose", sources::POSE),
+        (
+            "quilting::compute::patch_prepare_types",
+            sources::PATCH_PREPARE_TYPES,
+        ),
         (
             "quilting::compute::visibility_compaction_types",
             sources::VISIBILITY_COMPACTION_TYPES,
@@ -320,6 +335,16 @@ pub fn compile_lod_pass2_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_lod_pass2_module()?)
 }
 
+/// Compile and validate current-pose patch preparation for WebGPU storage.
+pub fn compile_patch_prepare_compute_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::PATCH_PREPARE_COMPUTE)
+}
+
+/// Standalone device WGSL for current-pose patch preparation.
+pub fn compile_patch_prepare_compute_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_patch_prepare_compute_module()?)
+}
+
 fn compile_validated_compute_module(
     source: &str,
 ) -> Result<naga::Module, Box<dyn std::error::Error>> {
@@ -393,6 +418,11 @@ mod tests {
             ("quilting::lighting::matcap", sources::MATCAP),
             ("quilting::viz::density", sources::DENSITY),
             ("quilting::compute::lod_types", sources::LOD_TYPES),
+            ("quilting::compute::pose", sources::POSE),
+            (
+                "quilting::compute::patch_prepare_types",
+                sources::PATCH_PREPARE_TYPES,
+            ),
             (
                 "quilting::compute::visibility_compaction_types",
                 sources::VISIBILITY_COMPACTION_TYPES,
@@ -459,6 +489,68 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .collect::<Vec<_>>(),
             (0..13).map(|slot| slot * 16).collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn patch_prepare_compute_storage_contract_is_exact() {
+        const PROBE: &str = r#"
+#import quilting::compute::patch_prepare_types::{PatchTopologyRecord, PatchSubjectState, PatchPrepareDispatch}
+
+@group(0) @binding(0) var<uniform> dispatch: PatchPrepareDispatch;
+@group(0) @binding(1) var<storage, read> topology: array<PatchTopologyRecord>;
+@group(0) @binding(2) var<storage, read> subjects: array<PatchSubjectState>;
+@group(0) @binding(3) var<storage, read_write> output: array<u32>;
+
+@compute @workgroup_size(1)
+fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    let record = topology[invocation.x];
+    output[invocation.x] = dispatch.counts.x
+        + record.subject_index
+        + u32(subjects[record.subject_index].model[0].x);
+}
+"#;
+        let module = compile_shader(PROBE, HashMap::new()).expect("patch compute ABI compiles");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("patch compute ABI validates");
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("patch compute ABI lays out");
+        for (name, expected_size, expected_offsets) in [
+            ("PatchTopologyRecord", 48, &[0, 16, 32, 40, 44][..]),
+            ("PatchSubjectState", 128, &[0, 64][..]),
+            ("PatchPrepareDispatch", 16, &[0][..]),
+        ] {
+            let (handle, ty) = module
+                .types
+                .iter()
+                .find(|(_, ty)| {
+                    ty.name.as_deref().is_some_and(|candidate| {
+                        candidate == name
+                            || candidate.starts_with(&format!("{name}X_naga_oil_mod_"))
+                    })
+                })
+                .unwrap_or_else(|| panic!("missing patch compute type {name}"));
+            let layout = layouter[handle];
+            assert_eq!(layout.size, expected_size, "{name} size");
+            assert_eq!(layout.to_stride(), expected_size, "{name} stride");
+            let naga::TypeInner::Struct { members, span } = &ty.inner else {
+                panic!("{name} is not a struct");
+            };
+            assert_eq!(*span, expected_size, "{name} declared span");
+            assert_eq!(
+                members
+                    .iter()
+                    .map(|member| member.offset)
+                    .collect::<Vec<_>>(),
+                expected_offsets,
+                "{name} member offsets",
+            );
+        }
     }
 
     #[test]
@@ -576,6 +668,28 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
             5,
+        );
+    }
+
+    #[test]
+    fn compile_patch_prepare_compute_shader() {
+        let module = compile_patch_prepare_compute_module()
+            .expect("patch preparation compute shader compiles and validates");
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name == "prepare_patch_instances")
+            .expect("patch preparation compute entry point");
+        assert_eq!(entry.stage, naga::ShaderStage::Compute);
+        assert_eq!(entry.workgroup_size, [64, 1, 1]);
+        assert_eq!(
+            module
+                .global_variables
+                .iter()
+                .filter(|(_, variable)| variable.binding.is_some())
+                .count(),
+            9,
+            "one uniform plus eight storage buffers stay inside WebGPU minimum limits",
         );
     }
 
@@ -698,6 +812,11 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 "classify_lod_pass2",
                 LOD_PASS2_DEVICE_ENTRY_POINT,
                 compile_lod_pass2_wgsl().unwrap(),
+            ),
+            (
+                "prepare_patch_instances",
+                PATCH_PREPARE_DEVICE_ENTRY_POINT,
+                compile_patch_prepare_compute_wgsl().unwrap(),
             ),
         ] {
             assert!(!source.contains("#import"));
