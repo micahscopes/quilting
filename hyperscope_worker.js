@@ -248,7 +248,8 @@ self.onmessage = async function(e) {
   if (type === 'upload_model_to_compute') {
     wasm.reset_animated_lod_delta();
     const ok = wasm.upload_model_to_compute();
-    self.postMessage({ type: 'model_uploaded_to_compute', id, ok });
+    const modelFingerprint = ok ? wasm.lod_compute_model_fingerprint() : '';
+    self.postMessage({ type: 'model_uploaded_to_compute', id, ok, modelFingerprint });
     return;
   }
 
@@ -269,6 +270,7 @@ self.onmessage = async function(e) {
         type: 'composed_model_uploaded_to_compute',
         id,
         ok,
+        modelFingerprint: ok ? wasm.lod_compute_model_fingerprint() : '',
         numFaces: faceNodes.length,
         topologyDomains: new Set(faceNodes).size,
       });
@@ -390,6 +392,7 @@ self.onmessage = async function(e) {
           resident_faces: result.resident_faces,
           subject_records: result.subject_records,
           gpu_passes: result.gpu_passes,
+          full_fingerprint: result.full_fingerprint,
         }, transfers);
       } else {
         let gpuState = 'unknown';

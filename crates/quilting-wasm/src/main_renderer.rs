@@ -19,8 +19,9 @@ use quilting_renderer::buffer::{
 };
 use quilting_renderer::compute::{
     apply_lod_classification_publication, build_composed_lod_model,
-    compare_lod_classifications, prepare_lod_atlas_lookup, prepare_lod_dispatch_state,
-    prepare_lod_model, LodAtlasLookup, LodCompute, LodModelResidency, StagedLodReadback,
+    compare_lod_classifications, exact_f32_slice_fingerprint, prepare_lod_atlas_lookup,
+    prepare_lod_dispatch_state, prepare_lod_model, prepared_lod_model_fingerprint,
+    LodAtlasLookup, LodCompute, LodModelResidency, StagedLodReadback,
     FLOATS_PER_FACE_OUTPUT,
 };
 use quilting_renderer::pass::{
@@ -386,7 +387,12 @@ struct SameContextLod {
     pending: Option<SameContextLodPending>,
     completed: Option<SameContextLodCompleted>,
     authority_candidate: Option<SameContextLodAuthority>,
+    batch_candidate: Option<SameContextLodCompleted>,
+    worker_batch_publication: Option<SameContextLodRequestStamp>,
+    worker_batch_snapshot: Option<SameContextLodBatchAuthoritySnapshot>,
+    last_authority_stamp: Option<SameContextLodRequestStamp>,
     authority_resident: Vec<f32>,
+    batch_shadow: SameContextLodBatchShadow,
     diagnostics: SameContextLodDiagnostics,
 }
 
@@ -404,9 +410,54 @@ impl SameContextLod {
             self.compute.recycle_readback_vector(completed.lods);
             return Err("same-context LOD comparison stamps do not match".to_string());
         }
+        if let (Some(completed_pose), Some(authority_pose)) =
+            (completed.stamp.pose, authority.stamp.pose)
+        {
+            self.diagnostics.pose_payload_comparisons =
+                self.diagnostics.pose_payload_comparisons.saturating_add(1);
+            let joint_mismatch = usize::from(
+                completed_pose.payload.map(|payload| payload.joint_matrices)
+                    != authority_pose.payload.map(|payload| payload.joint_matrices),
+            );
+            let morph_mismatch = usize::from(
+                completed_pose.payload.map(|payload| payload.morph_weights)
+                    != authority_pose.payload.map(|payload| payload.morph_weights),
+            );
+            self.diagnostics.last_joint_matrix_mismatches = joint_mismatch;
+            self.diagnostics.last_morph_weight_mismatches = morph_mismatch;
+            if joint_mismatch != 0 || morph_mismatch != 0 {
+                self.diagnostics.mismatched_pose_payload_comparisons = self
+                    .diagnostics
+                    .mismatched_pose_payload_comparisons
+                .saturating_add(1);
+            }
+        }
+        let completed_fingerprint = exact_f32_slice_fingerprint(&completed.lods);
+        let completed_fingerprint = format!(
+            "{}:{:016x}",
+            completed_fingerprint.0,
+            completed_fingerprint.1,
+        );
+        self.diagnostics.raw_classifier_fingerprint_comparisons = self
+            .diagnostics
+            .raw_classifier_fingerprint_comparisons
+            .saturating_add(1);
+        if completed_fingerprint != authority.worker_full_fingerprint {
+            self.diagnostics.mismatched_raw_classifier_fingerprints = self
+                .diagnostics
+                .mismatched_raw_classifier_fingerprints
+                .saturating_add(1);
+        }
+        self.diagnostics.last_same_context_full_fingerprint =
+            Some(completed_fingerprint);
         let parity = compare_lod_classifications(&authority.lods, &completed.lods);
-        self.compute.recycle_readback_vector(completed.lods);
-        let parity = parity?;
+        let parity = match parity {
+            Ok(parity) => parity,
+            Err(error) => {
+                self.compute.recycle_readback_vector(completed.lods);
+                return Err(error);
+            }
+        };
         self.diagnostics.comparisons = self.diagnostics.comparisons.saturating_add(1);
         self.diagnostics.last_compared_faces = parity.compared_faces;
         self.diagnostics.last_mismatched_faces = parity.mismatched_faces;
@@ -425,9 +476,13 @@ impl SameContextLod {
         if parity.mismatched_fields == 0 {
             self.diagnostics.exact_comparisons =
                 self.diagnostics.exact_comparisons.saturating_add(1);
+            if let Some(previous) = self.batch_candidate.replace(completed) {
+                self.compute.recycle_readback_vector(previous.lods);
+            }
         } else {
             self.diagnostics.mismatched_comparisons =
                 self.diagnostics.mismatched_comparisons.saturating_add(1);
+            self.compute.recycle_readback_vector(completed.lods);
         }
         Ok(())
     }
@@ -460,6 +515,31 @@ impl SameContextLod {
         {
             self.authority_candidate = None;
         }
+        if self
+            .batch_candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.stamp.request_id == request_id)
+        {
+            let candidate = self
+                .batch_candidate
+                .take()
+                .expect("batch candidate was checked");
+            self.compute.recycle_readback_vector(candidate.lods);
+            cancelled = true;
+        }
+        if self
+            .worker_batch_publication
+            .is_some_and(|stamp| stamp.request_id == request_id)
+        {
+            self.worker_batch_publication = None;
+            self.worker_batch_snapshot = None;
+        }
+        if self
+            .last_authority_stamp
+            .is_some_and(|stamp| stamp.request_id == request_id)
+        {
+            self.last_authority_stamp = None;
+        }
         if cancelled {
             self.diagnostics.cancellations = self.diagnostics.cancellations.saturating_add(1);
         }
@@ -471,6 +551,8 @@ impl SameContextLod {
             "pending-gpu"
         } else if self.completed.is_some() {
             "awaiting-authority"
+        } else if self.batch_candidate.is_some() {
+            "awaiting-batch-publication"
         } else {
             match self.diagnostics.last_exact {
                 Some(true) => "parity-exact",
@@ -493,6 +575,13 @@ impl SameContextLod {
                 .completed
                 .as_ref()
                 .map(|completed| completed.stamp.request_id),
+            batch_candidate_request_id: self
+                .batch_candidate
+                .as_ref()
+                .map(|candidate| candidate.stamp.request_id),
+            worker_batch_publication_request_id: self
+                .worker_batch_publication
+                .map(|stamp| stamp.request_id),
             authority_resident_faces: self.authority_resident.len() / FLOATS_PER_FACE_OUTPUT,
             dispatches: self.diagnostics.dispatches,
             skipped_busy: self.diagnostics.skipped_busy,
@@ -502,6 +591,35 @@ impl SameContextLod {
             comparisons: self.diagnostics.comparisons,
             exact_comparisons: self.diagnostics.exact_comparisons,
             mismatched_comparisons: self.diagnostics.mismatched_comparisons,
+            pose_payload_comparisons: self.diagnostics.pose_payload_comparisons,
+            mismatched_pose_payload_comparisons: self
+                .diagnostics
+                .mismatched_pose_payload_comparisons,
+            publication_fingerprint_comparisons: self
+                .diagnostics
+                .publication_fingerprint_comparisons,
+            mismatched_publication_fingerprints: self
+                .diagnostics
+                .mismatched_publication_fingerprints,
+            raw_classifier_fingerprint_comparisons: self
+                .diagnostics
+                .raw_classifier_fingerprint_comparisons,
+            mismatched_raw_classifier_fingerprints: self
+                .diagnostics
+                .mismatched_raw_classifier_fingerprints,
+            batch_semantic_comparisons: self.diagnostics.batch_semantic_comparisons,
+            exact_batch_semantic_comparisons: self
+                .diagnostics
+                .exact_batch_semantic_comparisons,
+            mismatched_batch_semantic_comparisons: self
+                .diagnostics
+                .mismatched_batch_semantic_comparisons,
+            batch_group_comparisons: self.diagnostics.batch_group_comparisons,
+            exact_batch_group_comparisons: self.diagnostics.exact_batch_group_comparisons,
+            mismatched_batch_group_comparisons: self
+                .diagnostics
+                .mismatched_batch_group_comparisons,
+            skipped_adaptive_batch_groups: self.diagnostics.skipped_adaptive_batch_groups,
             cancellations: self.diagnostics.cancellations,
             failures: self.diagnostics.failures,
             last_request_id: self.diagnostics.last_request_id,
@@ -513,6 +631,26 @@ impl SameContextLod {
             last_compared_faces: self.diagnostics.last_compared_faces,
             last_mismatched_faces: self.diagnostics.last_mismatched_faces,
             last_mismatched_fields: self.diagnostics.last_mismatched_fields,
+            last_joint_matrix_mismatches: self.diagnostics.last_joint_matrix_mismatches,
+            last_morph_weight_mismatches: self.diagnostics.last_morph_weight_mismatches,
+            last_worker_full_fingerprint: self
+                .diagnostics
+                .last_worker_full_fingerprint
+                .clone(),
+            last_reconstructed_full_fingerprint: self
+                .diagnostics
+                .last_reconstructed_full_fingerprint
+                .clone(),
+            last_same_context_full_fingerprint: self
+                .diagnostics
+                .last_same_context_full_fingerprint
+                .clone(),
+            last_requested_mismatches: self.diagnostics.last_requested_mismatches,
+            last_resident_mismatches: self.diagnostics.last_resident_mismatches,
+            last_visibility_mismatches: self.diagnostics.last_visibility_mismatches,
+            last_culled_mismatch: self.diagnostics.last_culled_mismatch,
+            last_batch_groups_compared: self.diagnostics.last_batch_groups_compared,
+            last_batch_group_mismatches: self.diagnostics.last_batch_group_mismatches,
             mismatch_examples: self.diagnostics.mismatch_examples.clone(),
             last_error: self.diagnostics.last_error.clone(),
             readback_buffers,
@@ -531,6 +669,9 @@ impl SameContextLod {
         if let Some(completed) = self.completed.take() {
             self.compute.recycle_readback_vector(completed.lods);
         }
+        if let Some(candidate) = self.batch_candidate.take() {
+            self.compute.recycle_readback_vector(candidate.lods);
+        }
         self.compute.destroy(gl);
     }
 }
@@ -541,6 +682,7 @@ struct SameContextLodPoseStamp {
     sample_time_seconds: f64,
     revision: u32,
     continuity_epoch: u32,
+    payload: Option<SameContextLodPosePayloadFingerprint>,
 }
 
 impl SameContextLodPoseStamp {
@@ -549,6 +691,42 @@ impl SameContextLodPoseStamp {
             && self.sample_time_seconds.to_bits() == other.sample_time_seconds.to_bits()
             && self.revision == other.revision
             && self.continuity_epoch == other.continuity_epoch
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SameContextLodF32Fingerprint {
+    len: usize,
+    hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SameContextLodPosePayloadFingerprint {
+    joint_matrices: SameContextLodF32Fingerprint,
+    morph_weights: SameContextLodF32Fingerprint,
+}
+
+fn same_context_lod_f32_fingerprint(values: &[f32]) -> SameContextLodF32Fingerprint {
+    let mut hash = 0xcbf29ce484222325u64;
+    for value in values {
+        for byte in value.to_bits().to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    SameContextLodF32Fingerprint {
+        len: values.len(),
+        hash,
+    }
+}
+
+fn same_context_lod_pose_payload_fingerprint(
+    joint_matrices: &[f32],
+    morph_weights: &[f32],
+) -> SameContextLodPosePayloadFingerprint {
+    SameContextLodPosePayloadFingerprint {
+        joint_matrices: same_context_lod_f32_fingerprint(joint_matrices),
+        morph_weights: same_context_lod_f32_fingerprint(morph_weights),
     }
 }
 
@@ -586,6 +764,156 @@ struct SameContextLodCompleted {
 struct SameContextLodAuthority {
     stamp: SameContextLodRequestStamp,
     lods: Vec<f32>,
+    worker_full_fingerprint: String,
+}
+
+struct SameContextLodBatchShadow {
+    requested: Vec<Option<batch::ResidentLod>>,
+    resident: Vec<Option<batch::ResidentLod>>,
+    visible: Vec<bool>,
+    culled_faces: usize,
+    dirty_faces: Vec<usize>,
+    balance_scratch: batch::ResidentLodBalanceScratch,
+    resident_vertex_lods: Vec<[u32; 3]>,
+    resident_vertex_lod_scratch: Vec<u32>,
+    batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    prefix_indices: Vec<u32>,
+}
+
+struct SameContextLodBatchAuthoritySnapshot {
+    stamp: SameContextLodRequestStamp,
+    requested: Vec<Option<batch::ResidentLod>>,
+    resident: Vec<Option<batch::ResidentLod>>,
+    visible: Vec<bool>,
+    culled_faces: usize,
+    batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+}
+
+impl SameContextLodBatchAuthoritySnapshot {
+    fn from_renderer(state: &MainState, stamp: SameContextLodRequestStamp) -> Self {
+        Self {
+            stamp,
+            requested: state.requested_face_lods.clone(),
+            resident: state.resident_face_lods.clone(),
+            visible: state.classified_face_visibility.clone(),
+            culled_faces: state.classified_culled_faces,
+            batch_groups: state.batch_groups.clone(),
+        }
+    }
+}
+
+impl SameContextLodBatchShadow {
+    fn from_renderer(state: &MainState, num_faces: usize) -> Self {
+        let requested = if state.requested_face_lods.len() == num_faces {
+            state.requested_face_lods.clone()
+        } else {
+            vec![None; num_faces]
+        };
+        let resident = if state.resident_face_lods.len() == num_faces {
+            state.resident_face_lods.clone()
+        } else {
+            vec![None; num_faces]
+        };
+        let (visible, culled_faces) = if state.classified_face_visibility.len() == num_faces {
+            (
+                state.classified_face_visibility.clone(),
+                state.classified_culled_faces.min(num_faces),
+            )
+        } else {
+            (vec![false; num_faces], num_faces)
+        };
+        Self {
+            requested,
+            resident,
+            visible,
+            culled_faces,
+            dirty_faces: Vec::new(),
+            balance_scratch: batch::ResidentLodBalanceScratch::default(),
+            resident_vertex_lods: Vec::new(),
+            resident_vertex_lod_scratch: Vec::new(),
+            batch_groups: BTreeMap::new(),
+            prefix_indices: Vec::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        candidate: &SameContextLodCompleted,
+        num_faces: usize,
+        topology: Option<&quilting_mesh::HalfEdgeMesh>,
+        grading: batch::FaceLodGrading,
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+    ) -> Result<(), String> {
+        let classified_faces = candidate.stamp.classified_faces;
+        let face_indices = if classified_faces == num_faces {
+            None
+        } else {
+            let classified_faces = u32::try_from(classified_faces)
+                .map_err(|_| "same-context LOD prefix exceeds u32 indexing")?;
+            self.prefix_indices.clear();
+            self.prefix_indices.extend(0..classified_faces);
+            Some(self.prefix_indices.as_slice())
+        };
+        let standby = bounded_standby_resident_lod();
+        let publication = batch::admit_face_lod_publication(
+            &candidate.lods,
+            face_indices,
+            num_faces,
+            standby,
+            self.culled_faces,
+            batch::FaceLodAdmissionBuffers {
+                requested: &mut self.requested,
+                resident: &mut self.resident,
+                visible: &mut self.visible,
+                dirty_faces: &mut self.dirty_faces,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.culled_faces = publication.culled_faces;
+        if let Some(topology) = topology {
+            batch::reconcile_resident_lods_from_requests_with_grading(
+                &self.requested,
+                &mut self.resident,
+                topology,
+                &self.dirty_faces,
+                &mut self.balance_scratch,
+                grading,
+            );
+            batch::rebuild_resident_vertex_lods(
+                &self.resident,
+                topology,
+                standby,
+                &mut self.resident_vertex_lod_scratch,
+                &mut self.resident_vertex_lods,
+            );
+        } else {
+            for &face in &self.dirty_faces {
+                self.resident[face] = self.requested[face];
+            }
+            self.resident_vertex_lods.resize(num_faces, [1; 3]);
+            for (face, vertex_lods) in self.resident_vertex_lods.iter_mut().enumerate() {
+                let edges = self.resident[face].unwrap_or(standby).edge_lods();
+                *vertex_lods = [
+                    edges[1].max(edges[2]),
+                    edges[0].max(edges[2]),
+                    edges[0].max(edges[1]),
+                ];
+            }
+        }
+        batch::group_resident_faces_into(
+            &self.resident,
+            &self.resident_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            standby,
+            &mut self.batch_groups,
+        );
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -598,6 +926,19 @@ struct SameContextLodDiagnostics {
     comparisons: u64,
     exact_comparisons: u64,
     mismatched_comparisons: u64,
+    pose_payload_comparisons: u64,
+    mismatched_pose_payload_comparisons: u64,
+    publication_fingerprint_comparisons: u64,
+    mismatched_publication_fingerprints: u64,
+    raw_classifier_fingerprint_comparisons: u64,
+    mismatched_raw_classifier_fingerprints: u64,
+    batch_semantic_comparisons: u64,
+    exact_batch_semantic_comparisons: u64,
+    mismatched_batch_semantic_comparisons: u64,
+    batch_group_comparisons: u64,
+    exact_batch_group_comparisons: u64,
+    mismatched_batch_group_comparisons: u64,
+    skipped_adaptive_batch_groups: u64,
     cancellations: u64,
     failures: u64,
     last_request_id: u32,
@@ -609,6 +950,17 @@ struct SameContextLodDiagnostics {
     last_compared_faces: usize,
     last_mismatched_faces: usize,
     last_mismatched_fields: usize,
+    last_joint_matrix_mismatches: usize,
+    last_morph_weight_mismatches: usize,
+    last_worker_full_fingerprint: Option<String>,
+    last_reconstructed_full_fingerprint: Option<String>,
+    last_same_context_full_fingerprint: Option<String>,
+    last_requested_mismatches: usize,
+    last_resident_mismatches: usize,
+    last_visibility_mismatches: usize,
+    last_culled_mismatch: bool,
+    last_batch_groups_compared: bool,
+    last_batch_group_mismatches: usize,
     last_exact: Option<bool>,
     mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
     last_error: Option<String>,
@@ -628,6 +980,8 @@ struct SameContextLodShadowSnapshot {
     state: &'static str,
     pending_request_id: Option<u32>,
     completed_request_id: Option<u32>,
+    batch_candidate_request_id: Option<u32>,
+    worker_batch_publication_request_id: Option<u32>,
     authority_resident_faces: usize,
     dispatches: u64,
     skipped_busy: u64,
@@ -637,6 +991,19 @@ struct SameContextLodShadowSnapshot {
     comparisons: u64,
     exact_comparisons: u64,
     mismatched_comparisons: u64,
+    pose_payload_comparisons: u64,
+    mismatched_pose_payload_comparisons: u64,
+    publication_fingerprint_comparisons: u64,
+    mismatched_publication_fingerprints: u64,
+    raw_classifier_fingerprint_comparisons: u64,
+    mismatched_raw_classifier_fingerprints: u64,
+    batch_semantic_comparisons: u64,
+    exact_batch_semantic_comparisons: u64,
+    mismatched_batch_semantic_comparisons: u64,
+    batch_group_comparisons: u64,
+    exact_batch_group_comparisons: u64,
+    mismatched_batch_group_comparisons: u64,
+    skipped_adaptive_batch_groups: u64,
     cancellations: u64,
     failures: u64,
     last_request_id: u32,
@@ -648,6 +1015,17 @@ struct SameContextLodShadowSnapshot {
     last_compared_faces: usize,
     last_mismatched_faces: usize,
     last_mismatched_fields: usize,
+    last_joint_matrix_mismatches: usize,
+    last_morph_weight_mismatches: usize,
+    last_worker_full_fingerprint: Option<String>,
+    last_reconstructed_full_fingerprint: Option<String>,
+    last_same_context_full_fingerprint: Option<String>,
+    last_requested_mismatches: usize,
+    last_resident_mismatches: usize,
+    last_visibility_mismatches: usize,
+    last_culled_mismatch: bool,
+    last_batch_groups_compared: bool,
+    last_batch_group_mismatches: usize,
     mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
     last_error: Option<String>,
     readback_buffers: usize,
@@ -664,6 +1042,7 @@ struct SameContextLodResidencySnapshot {
     num_vertices: u32,
     topology_domains: usize,
     mesh_radius: f32,
+    model_fingerprint: String,
     atlas_patches: usize,
     atlas_max_lod: f32,
 }
@@ -4407,6 +4786,7 @@ pub fn mr_upload_composed_lod_model(
         )
         .and_then(prepare_lod_model)
         .map_err(|error| JsValue::from_str(&error))?;
+        let model_fingerprint = prepared_lod_model_fingerprint(&model).stable_text();
         if model.residency.num_faces != state.num_faces {
             return Err(JsValue::from_str(
                 "same-context LOD residency does not match renderer topology",
@@ -4419,6 +4799,7 @@ pub fn mr_upload_composed_lod_model(
         let mut compute = LodCompute::new(state.renderer.gl(), model.residency.num_faces)
             .map_err(|error| JsValue::from_str(&error))?;
         let residency = compute.upload_model(state.renderer.gl(), &model, &atlas.lut);
+        let batch_shadow = SameContextLodBatchShadow::from_renderer(state, residency.num_faces);
         clear_same_context_lod(state);
         state.same_context_lod = Some(SameContextLod {
             compute,
@@ -4426,7 +4807,12 @@ pub fn mr_upload_composed_lod_model(
             pending: None,
             completed: None,
             authority_candidate: None,
+            batch_candidate: None,
+            worker_batch_publication: None,
+            worker_batch_snapshot: None,
+            last_authority_stamp: None,
             authority_resident: Vec::new(),
+            batch_shadow,
             diagnostics: SameContextLodDiagnostics::default(),
         });
         let residency = &state
@@ -4440,6 +4826,7 @@ pub fn mr_upload_composed_lod_model(
             num_vertices: residency.num_vertices,
             topology_domains: residency.node_first_faces.len(),
             mesh_radius: residency.mesh_radius,
+            model_fingerprint,
             atlas_patches: atlas.keys.len(),
             atlas_max_lod: atlas.max_lod,
         })
@@ -4474,6 +4861,54 @@ fn same_context_lod_request_stamp(
             sample_time_seconds,
             revision,
             continuity_epoch,
+            payload: None,
+        })
+    } else {
+        None
+    };
+    Ok(SameContextLodRequestStamp {
+        request_id,
+        classified_faces,
+        pose,
+    })
+}
+
+fn same_context_lod_authority_stamp(
+    request_id: u32,
+    classified_faces: usize,
+    animated: bool,
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+) -> Result<SameContextLodRequestStamp, String> {
+    if request_id != 0 {
+        return same_context_lod_request_stamp(
+            request_id,
+            classified_faces,
+            animated,
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+        );
+    }
+    if classified_faces == 0 {
+        return Err("same-context LOD authority has no classified faces".to_string());
+    }
+    let pose = if animated {
+        validate_pose_stamp(
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+        )?;
+        Some(SameContextLodPoseStamp {
+            clip_time_seconds,
+            sample_time_seconds,
+            revision,
+            continuity_epoch,
+            payload: None,
         })
     } else {
         None
@@ -4488,6 +4923,180 @@ fn same_context_lod_request_stamp(
 fn same_context_lod_snapshot_value(lod: &SameContextLod) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&lod.snapshot())
         .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn same_context_lod_slice_mismatches<T: PartialEq>(left: &[T], right: &[T]) -> usize {
+    let shared = left
+        .iter()
+        .zip(right)
+        .filter(|(left, right)| left != right)
+        .count();
+    shared + left.len().abs_diff(right.len())
+}
+
+fn same_context_lod_group_mismatches(
+    left: &BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    right: &BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+) -> usize {
+    let changed_or_missing = left
+        .iter()
+        .filter(|(key, members)| right.get(*key) != Some(*members))
+        .count();
+    changed_or_missing + right.keys().filter(|key| !left.contains_key(*key)).count()
+}
+
+/// Once an exact classifier pair and the matching worker batch publication are
+/// both present, dry-run the same Rust resident semantics and compare them with
+/// the live worker-applied state. GPU buffers remain untouched.
+fn try_compare_same_context_lod_batches(state: &mut MainState) -> Result<(), String> {
+    let compare_groups = !state.adaptive_picked.is_enabled()
+        && !state.adaptive_batch_transition_pending;
+    let MainState {
+        same_context_lod,
+        lod_topology,
+        lod_grading,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        requested_face_lods,
+        resident_face_lods,
+        classified_face_visibility,
+        classified_culled_faces,
+        batch_groups,
+        ..
+    } = state;
+    let Some(lod) = same_context_lod.as_mut() else {
+        return Ok(());
+    };
+    let (Some(candidate_stamp), Some(worker_stamp)) = (
+        lod.batch_candidate.as_ref().map(|candidate| candidate.stamp),
+        lod.worker_batch_publication,
+    ) else {
+        return Ok(());
+    };
+    let candidate = lod
+        .batch_candidate
+        .take()
+        .expect("same-context batch candidate was checked");
+    lod.worker_batch_publication = None;
+    let worker_snapshot = lod.worker_batch_snapshot.take();
+    if lod
+        .last_authority_stamp
+        .is_some_and(|stamp| stamp.same_identity(worker_stamp))
+    {
+        lod.last_authority_stamp = None;
+    }
+    if !candidate_stamp.same_identity(worker_stamp) {
+        lod.compute.recycle_readback_vector(candidate.lods);
+        return Err("same-context and worker batch publication stamps do not match".to_string());
+    }
+    if worker_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| !snapshot.stamp.same_identity(worker_stamp))
+    {
+        lod.compute.recycle_readback_vector(candidate.lods);
+        return Err("delayed worker batch snapshot has the wrong stamp".to_string());
+    }
+
+    let num_faces = lod.residency.num_faces;
+    if let Err(error) = lod.batch_shadow.apply(
+        &candidate,
+        num_faces,
+        lod_topology.as_ref(),
+        *lod_grading,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+    ) {
+        lod.compute.recycle_readback_vector(candidate.lods);
+        return Err(error);
+    }
+    let authority_requested = worker_snapshot
+        .as_ref()
+        .map_or(requested_face_lods.as_slice(), |snapshot| snapshot.requested.as_slice());
+    let authority_resident = worker_snapshot
+        .as_ref()
+        .map_or(resident_face_lods.as_slice(), |snapshot| snapshot.resident.as_slice());
+    let authority_visible = worker_snapshot
+        .as_ref()
+        .map_or(classified_face_visibility.as_slice(), |snapshot| snapshot.visible.as_slice());
+    let authority_culled = worker_snapshot
+        .as_ref()
+        .map_or(*classified_culled_faces, |snapshot| snapshot.culled_faces);
+    let authority_groups = worker_snapshot
+        .as_ref()
+        .map_or(&*batch_groups, |snapshot| &snapshot.batch_groups);
+    let requested_mismatches = same_context_lod_slice_mismatches(
+        &lod.batch_shadow.requested,
+        authority_requested,
+    );
+    let resident_mismatches = same_context_lod_slice_mismatches(
+        &lod.batch_shadow.resident,
+        authority_resident,
+    );
+    let visibility_mismatches = same_context_lod_slice_mismatches(
+        &lod.batch_shadow.visible,
+        authority_visible,
+    );
+    let culled_mismatch = lod.batch_shadow.culled_faces != authority_culled;
+    let semantic_exact = requested_mismatches == 0
+        && resident_mismatches == 0
+        && visibility_mismatches == 0
+        && !culled_mismatch;
+    lod.diagnostics.batch_semantic_comparisons =
+        lod.diagnostics.batch_semantic_comparisons.saturating_add(1);
+    if semantic_exact {
+        lod.diagnostics.exact_batch_semantic_comparisons = lod
+            .diagnostics
+            .exact_batch_semantic_comparisons
+            .saturating_add(1);
+    } else {
+        lod.diagnostics.mismatched_batch_semantic_comparisons = lod
+            .diagnostics
+            .mismatched_batch_semantic_comparisons
+            .saturating_add(1);
+    }
+    lod.diagnostics.last_requested_mismatches = requested_mismatches;
+    lod.diagnostics.last_resident_mismatches = resident_mismatches;
+    lod.diagnostics.last_visibility_mismatches = visibility_mismatches;
+    lod.diagnostics.last_culled_mismatch = culled_mismatch;
+
+    lod.diagnostics.last_batch_groups_compared = compare_groups;
+    if compare_groups {
+        let group_mismatches = same_context_lod_group_mismatches(
+            &lod.batch_shadow.batch_groups,
+            authority_groups,
+        );
+        lod.diagnostics.batch_group_comparisons =
+            lod.diagnostics.batch_group_comparisons.saturating_add(1);
+        if group_mismatches == 0 {
+            lod.diagnostics.exact_batch_group_comparisons = lod
+                .diagnostics
+                .exact_batch_group_comparisons
+                .saturating_add(1);
+        } else {
+            lod.diagnostics.mismatched_batch_group_comparisons = lod
+                .diagnostics
+                .mismatched_batch_group_comparisons
+                .saturating_add(1);
+        }
+        lod.diagnostics.last_batch_group_mismatches = group_mismatches;
+    } else {
+        lod.diagnostics.skipped_adaptive_batch_groups = lod
+            .diagnostics
+            .skipped_adaptive_batch_groups
+            .saturating_add(1);
+        lod.diagnostics.last_batch_group_mismatches = 0;
+    }
+
+    if !semantic_exact {
+        lod.batch_shadow.requested.clone_from_slice(authority_requested);
+        lod.batch_shadow.resident.clone_from_slice(authority_resident);
+        lod.batch_shadow.visible.clone_from_slice(authority_visible);
+        lod.batch_shadow.culled_faces = authority_culled;
+    }
+    lod.compute.recycle_readback_vector(candidate.lods);
+    Ok(())
 }
 
 fn restore_renderer_after_lod_compute(gl: &glow::Context, viewport: (i32, i32)) {
@@ -4579,7 +5188,7 @@ pub fn mr_dispatch_same_context_lod(
         } else {
             lod.residency.num_faces.min(face_limit as usize)
         };
-        let stamp = same_context_lod_request_stamp(
+        let mut stamp = same_context_lod_request_stamp(
             request_id,
             classified_faces,
             animated,
@@ -4609,6 +5218,7 @@ pub fn mr_dispatch_same_context_lod(
                 sample_time_seconds: pose.sample_time_seconds,
                 revision: pose.revision,
                 continuity_epoch: pose.continuity_epoch,
+                payload: None,
             };
             if !stamp.pose.is_some_and(|request| request.same_identity(retained)) {
                 return Err(JsValue::from_str(
@@ -4618,6 +5228,12 @@ pub fn mr_dispatch_same_context_lod(
         }
         let joint_matrices = pose.map_or(&[][..], |pose| pose.joint_matrices);
         let morph_weights = pose.map_or(&[][..], |pose| pose.morph_weights);
+        if let Some(pose_stamp) = stamp.pose.as_mut() {
+            pose_stamp.payload = Some(same_context_lod_pose_payload_fingerprint(
+                joint_matrices,
+                morph_weights,
+            ));
+        }
         let num_joints = u32::try_from(joint_matrices.len() / 16)
             .map_err(|_| JsValue::from_str("same-context joint count exceeds the ABI"))?;
         let num_morph_targets = u32::try_from(morph_weights.len())
@@ -4753,6 +5369,16 @@ pub fn mr_poll_same_context_lod() -> Result<JsValue, JsValue> {
             lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
             lod.diagnostics.last_error = Some(error);
         }
+        if let Err(error) = try_compare_same_context_lod_batches(state) {
+            if let Some(lod) = state.same_context_lod.as_mut() {
+                lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+                lod.diagnostics.last_error = Some(error);
+            }
+        }
+        let lod = state
+            .same_context_lod
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("same-context LOD model is not resident"))?;
         same_context_lod_snapshot_value(lod)
     })
 }
@@ -4773,8 +5399,11 @@ pub fn mr_record_same_context_lod_authority(
     full_snapshot: bool,
     classified_faces: u32,
     resident_faces: u32,
+    pose_joint_matrices: &[f32],
+    pose_morph_weights: &[f32],
+    worker_full_fingerprint: &str,
 ) -> Result<JsValue, JsValue> {
-    let stamp = same_context_lod_request_stamp(
+    let mut stamp = same_context_lod_authority_stamp(
         request_id,
         classified_faces as usize,
         animated,
@@ -4784,6 +5413,12 @@ pub fn mr_record_same_context_lod_authority(
         continuity_epoch,
     )
     .map_err(|error| JsValue::from_str(&error))?;
+    if let Some(pose_stamp) = stamp.pose.as_mut() {
+        pose_stamp.payload = Some(same_context_lod_pose_payload_fingerprint(
+            pose_joint_matrices,
+            pose_morph_weights,
+        ));
+    }
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let state = state
@@ -4808,6 +5443,23 @@ pub fn mr_record_same_context_lod_authority(
         )
         .map_err(|error| JsValue::from_str(&error))?;
         lod.diagnostics.authority_updates = lod.diagnostics.authority_updates.saturating_add(1);
+        lod.last_authority_stamp = (request_id != 0).then_some(stamp);
+        let fields = stamp.classified_faces * FLOATS_PER_FACE_OUTPUT;
+        let reconstructed = exact_f32_slice_fingerprint(&lod.authority_resident[..fields]);
+        let reconstructed = format!("{}:{:016x}", reconstructed.0, reconstructed.1);
+        lod.diagnostics.publication_fingerprint_comparisons = lod
+            .diagnostics
+            .publication_fingerprint_comparisons
+            .saturating_add(1);
+        if reconstructed != worker_full_fingerprint {
+            lod.diagnostics.mismatched_publication_fingerprints = lod
+                .diagnostics
+                .mismatched_publication_fingerprints
+                .saturating_add(1);
+        }
+        lod.diagnostics.last_worker_full_fingerprint =
+            Some(worker_full_fingerprint.to_string());
+        lod.diagnostics.last_reconstructed_full_fingerprint = Some(reconstructed);
 
         let candidate = lod
             .pending
@@ -4820,16 +5472,72 @@ pub fn mr_record_same_context_lod_authority(
                     "worker and same-context LOD request stamps do not match",
                 ));
             }
-            let fields = stamp.classified_faces * FLOATS_PER_FACE_OUTPUT;
             lod.authority_candidate = Some(SameContextLodAuthority {
                 stamp,
                 lods: lod.authority_resident[..fields].to_vec(),
+                worker_full_fingerprint: worker_full_fingerprint.to_string(),
             });
         }
         if let Err(error) = lod.try_compare() {
             lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
             lod.diagnostics.last_error = Some(error);
         }
+        same_context_lod_snapshot_value(lod)
+    })
+}
+
+/// Record that the admitted worker publication has finished mutating live
+/// resident/batch state. The matching exact same-context vector can now be
+/// dry-run through the shared Rust semantics and compared without touching GPU
+/// resources.
+#[wasm_bindgen(js_name = "mr_recordSameContextLodBatchPublication")]
+pub fn mr_record_same_context_lod_batch_publication(
+    request_id: u32,
+) -> Result<JsValue, JsValue> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let stamp = state
+            .same_context_lod
+            .as_ref()
+            .and_then(|lod| lod.last_authority_stamp)
+            .filter(|stamp| stamp.request_id == request_id)
+            .ok_or_else(|| {
+                JsValue::from_str("same-context LOD has no matching worker publication")
+            })?;
+        state
+            .same_context_lod
+            .as_mut()
+            .expect("same-context LOD stamp came from resident state")
+            .worker_batch_publication = Some(stamp);
+        if let Err(error) = try_compare_same_context_lod_batches(state) {
+            if let Some(lod) = state.same_context_lod.as_mut() {
+                lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+                lod.diagnostics.last_error = Some(error);
+            }
+        }
+        let needs_delayed_snapshot = state
+            .same_context_lod
+            .as_ref()
+            .is_some_and(|lod| {
+                lod.worker_batch_publication
+                    .is_some_and(|pending| pending.same_identity(stamp))
+                    && lod.worker_batch_snapshot.is_none()
+            });
+        if needs_delayed_snapshot {
+            let snapshot = SameContextLodBatchAuthoritySnapshot::from_renderer(state, stamp);
+            state
+                .same_context_lod
+                .as_mut()
+                .expect("same-context LOD publication remains resident")
+                .worker_batch_snapshot = Some(snapshot);
+        }
+        let lod = state
+            .same_context_lod
+            .as_ref()
+            .expect("same-context LOD stamp came from resident state");
         same_context_lod_snapshot_value(lod)
     })
 }
@@ -6771,5 +7479,15 @@ mod tests {
         moved_model[13] = 0.5;
         assert!(patch_preparation_needed(false, false, Some(mvp), moved_model));
         assert!(patch_visibility_needed(false, Some(mvp), 7, moved, 7));
+    }
+
+    #[wasm_bindgen_test]
+    fn unmatched_worker_publications_advance_the_shadow_baseline_only() {
+        assert!(same_context_lod_request_stamp(0, 3, false, 0.0, 0.0, 0, 0).is_err());
+        let authority =
+            same_context_lod_authority_stamp(0, 3, false, 0.0, 0.0, 0, 0).unwrap();
+        assert_eq!(authority.request_id, 0);
+        assert_eq!(authority.classified_faces, 3);
+        assert!(authority.pose.is_none());
     }
 }

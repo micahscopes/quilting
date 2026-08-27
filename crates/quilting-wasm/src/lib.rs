@@ -21,8 +21,9 @@ use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
 use quilting_renderer::compute::{
     build_composed_lod_model, prepare_lod_atlas_lookup, prepare_lod_dispatch_state,
-    prepare_lod_model, LodAnimationSource, LodAtlasLookup, LodCompute, LodModelData,
-    LodModelResidency, StagedLodReadback,
+    exact_f32_slice_fingerprint, prepare_lod_model, prepared_lod_model_fingerprint,
+    LodAnimationSource, LodAtlasLookup, LodCompute, LodModelData, LodModelResidency,
+    PreparedLodModelFingerprint, StagedLodReadback,
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -189,6 +190,8 @@ thread_local! {
     static ANIMATED_LOD_DELTA: RefCell<batch::FaceLodDeltaEncoder> =
         RefCell::new(batch::FaceLodDeltaEncoder::default());
     static LOD_COMPUTE_MODEL: RefCell<Option<LodModelResidency>> = RefCell::new(None);
+    static LOD_COMPUTE_MODEL_FINGERPRINT: RefCell<Option<PreparedLodModelFingerprint>> =
+        RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
@@ -374,6 +377,7 @@ thread_local! {
 
 fn upload_lod_compute_model(upload: LodModelData) -> Result<bool, String> {
     let prepared = prepare_lod_model(upload)?;
+    let fingerprint = prepared_lod_model_fingerprint(&prepared);
     let atlas = lod_atlas_snapshot()?;
 
     let residency = GPU_COMPUTE.with(|gpu_compute| {
@@ -387,8 +391,25 @@ fn upload_lod_compute_model(upload: LodModelData) -> Result<bool, String> {
         return Ok(false);
     };
     LOD_COMPUTE_MODEL.with(|current| *current.borrow_mut() = Some(residency));
+    LOD_COMPUTE_MODEL_FINGERPRINT.with(|current| {
+        *current.borrow_mut() = Some(fingerprint);
+    });
     install_lod_atlas_snapshot(atlas);
     Ok(true)
+}
+
+/// Exact immutable model identity retained by the worker classifier. The
+/// textual form preserves 64-bit hashes across the JavaScript number boundary.
+#[wasm_bindgen]
+pub fn lod_compute_model_fingerprint() -> String {
+    LOD_COMPUTE_MODEL_FINGERPRINT.with(|fingerprint| {
+        fingerprint
+            .borrow()
+            .as_ref()
+            .copied()
+            .map(PreparedLodModelFingerprint::stable_text)
+            .unwrap_or_default()
+    })
 }
 
 fn lod_atlas_snapshot() -> Result<LodAtlasLookup, String> {
@@ -905,6 +926,12 @@ pub fn poll_animated_lods() -> JsValue {
         perf_measure("lod-gpu-wait", "lod-gpu-wait-start", "lod-gpu-wait-end");
         perf_mark("lod-gpu-readback-start");
         let gpu_class = compute.finish_staged_readback(gl, readback);
+        let full_fingerprint = exact_f32_slice_fingerprint(&gpu_class);
+        let full_fingerprint = format!(
+            "{}:{:016x}",
+            full_fingerprint.0,
+            full_fingerprint.1,
+        );
         perf_mark("lod-gpu-readback-end");
         perf_measure("lod-gpu-readback", "lod-gpu-readback-start", "lod-gpu-readback-end");
         let result = ANIMATED_LOD_DELTA.with(|delta| {
@@ -985,6 +1012,11 @@ pub fn poll_animated_lods() -> JsValue {
                 &result,
                 &"gpu_passes".into(),
                 &JsValue::from_f64(1.0),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"full_fingerprint".into(),
+                &JsValue::from_str(&full_fingerprint),
             ).ok();
             if let Some(stamp) = pose_stamp {
                 js_sys::Reflect::set(
@@ -2146,6 +2178,9 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
     // The uploaded GPU topology belongs to the previous retained model until
     // upload_model_to_compute installs this model's validated shape.
     LOD_COMPUTE_MODEL.with(|model| *model.borrow_mut() = None);
+    LOD_COMPUTE_MODEL_FINGERPRINT.with(|fingerprint| {
+        *fingerprint.borrow_mut() = None;
+    });
     reset_animated_lod_delta();
 
     FACE_MATERIALS.with(|fm| *fm.borrow_mut() = face_material_indices);

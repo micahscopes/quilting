@@ -58,6 +58,110 @@ pub struct PreparedLodModel {
     pub residency: LodModelResidency,
 }
 
+/// Exact, backend-neutral identity for one prepared classifier model.
+///
+/// This deliberately hashes the uploaded bit patterns rather than semantic
+/// floating-point values. A worker WebGL2 context, renderer WebGL2 context,
+/// and future WebGPU backend must receive the same immutable model before
+/// per-frame output parity is meaningful.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedLodModelFingerprint {
+    pub positions: (usize, u64),
+    pub faces: (usize, u64),
+    pub joint_indices: (usize, u64),
+    pub joint_weights: (usize, u64),
+    pub morph_deltas: (usize, u64),
+    pub face_nodes: (usize, u64),
+    pub face_indices: (usize, u64),
+    pub adjacency: (usize, u64),
+    pub num_morph_targets: usize,
+    pub mesh_radius_bits: u32,
+}
+
+impl PreparedLodModelFingerprint {
+    /// Stable textual ABI suitable for diagnostics crossing a JS number
+    /// boundary without truncating 64-bit hashes.
+    pub fn stable_text(self) -> String {
+        format!(
+            "lod-model-v1:p{}:{:016x};f{}:{:016x};ji{}:{:016x};jw{}:{:016x};m{}:{:016x};n{}:{:016x};fi{}:{:016x};a{}:{:016x};mt{};r{:08x}",
+            self.positions.0,
+            self.positions.1,
+            self.faces.0,
+            self.faces.1,
+            self.joint_indices.0,
+            self.joint_indices.1,
+            self.joint_weights.0,
+            self.joint_weights.1,
+            self.morph_deltas.0,
+            self.morph_deltas.1,
+            self.face_nodes.0,
+            self.face_nodes.1,
+            self.face_indices.0,
+            self.face_indices.1,
+            self.adjacency.0,
+            self.adjacency.1,
+            self.num_morph_targets,
+            self.mesh_radius_bits,
+        )
+    }
+}
+
+fn exact_word_fingerprint(words: impl IntoIterator<Item = u64>) -> (usize, u64) {
+    let mut len = 0usize;
+    let mut hash = 0xcbf29ce484222325u64;
+    for word in words {
+        len = len.saturating_add(1);
+        for byte in word.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    (len, hash)
+}
+
+/// Exact bit fingerprint for a classifier payload. This is intentionally the
+/// same primitive used by prepared-model diagnostics, so a worker can stamp a
+/// full GPU result before sparse encoding without copying it across contexts.
+pub fn exact_f32_slice_fingerprint(values: &[f32]) -> (usize, u64) {
+    exact_word_fingerprint(values.iter().map(|value| u64::from(value.to_bits())))
+}
+
+/// Fingerprint every immutable array and scalar that reaches classifier GPU
+/// residency. Component hashes make any divergence immediately localizable.
+pub fn prepared_lod_model_fingerprint(
+    prepared: &PreparedLodModel,
+) -> PreparedLodModelFingerprint {
+    let model = &prepared.model;
+    PreparedLodModelFingerprint {
+        positions: exact_f32_slice_fingerprint(&model.positions),
+        faces: exact_word_fingerprint(
+            model.faces.iter().flatten().map(|&value| u64::from(value)),
+        ),
+        joint_indices: exact_word_fingerprint(
+            model
+                .joint_indices
+                .iter()
+                .flatten()
+                .map(|&value| u64::from(value)),
+        ),
+        joint_weights: exact_word_fingerprint(
+            model
+                .joint_weights
+                .iter()
+                .flatten()
+                .map(|value| u64::from(value.to_bits())),
+        ),
+        morph_deltas: exact_f32_slice_fingerprint(&model.morph_deltas),
+        face_nodes: exact_word_fingerprint(
+            model.face_nodes.iter().map(|&value| value as u64),
+        ),
+        face_indices: exact_f32_slice_fingerprint(&prepared.face_indices),
+        adjacency: exact_f32_slice_fingerprint(&prepared.adjacency),
+        num_morph_targets: model.num_morph_targets,
+        mesh_radius_bits: prepared.residency.mesh_radius.to_bits(),
+    }
+}
+
 /// Small retained identity for one uploaded classifier model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LodModelResidency {
@@ -2182,6 +2286,38 @@ mod tests {
         );
         assert_eq!(prepared.adjacency.len(), 2 * 3 * 4);
         assert_eq!(adjacent_edges(&prepared.adjacency), 0);
+    }
+
+    #[test]
+    fn prepared_model_fingerprint_is_exact_and_component_local() {
+        let model = build_composed_lod_model(
+            &two_face_instances(),
+            &[4, 9],
+            4,
+            1,
+            LodAnimationSource {
+                primary_vertices: 0,
+                joint_indices: None,
+                joint_weights: None,
+                morph_deltas: &[],
+                num_morph_targets: 0,
+            },
+        )
+        .unwrap();
+        let prepared = prepare_lod_model(model).unwrap();
+        let fingerprint = prepared_lod_model_fingerprint(&prepared);
+        assert_eq!(
+            fingerprint,
+            prepared_lod_model_fingerprint(&prepared.clone()),
+        );
+        assert!(fingerprint.stable_text().starts_with("lod-model-v1:"));
+
+        let mut changed = prepared.clone();
+        changed.model.joint_weights[0][0] = -0.0;
+        let changed = prepared_lod_model_fingerprint(&changed);
+        assert_eq!(changed.positions, fingerprint.positions);
+        assert_eq!(changed.faces, fingerprint.faces);
+        assert_ne!(changed.joint_weights, fingerprint.joint_weights);
     }
 
     #[test]

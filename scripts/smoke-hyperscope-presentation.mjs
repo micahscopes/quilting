@@ -193,7 +193,8 @@ for (const requiredPoseGate of [
   'poseRevision: lodPose?.revision ?? 0',
   'poseContinuityEpoch: lodPose?.continuityEpoch ?? 0',
   'skipAnimation: !lodPoseAnimated',
-  'capturePose: RUST_ROUND_SHADOW_ENABLED && lodPoseAnimated && !roundAuthoredScene',
+  'capturePose: lodPoseAnimated && (',
+  'RUST_ROUND_SHADOW_ENABLED && !roundAuthoredScene',
   'acceptLodPoseStamp(resp, lodPose);',
   'acceptLodDeltaSequence(resp, !!wt.full_snapshot);',
   'const resetDelta = lodDeltaResetPending;',
@@ -215,8 +216,12 @@ for (const sameContextResidencyStep of [
   "? 'resident-authority-not-promoted'",
   ": 'resident-shadow'",
   'mr_dispatchSameContextLod(',
+  "LOD_IMPLEMENTATION !== 'js' && sameContextReady",
+  'sameContextDispatched ? sameContextRequest : 0',
+  "resp.full_fingerprint || ''",
   'mr_pollSameContextLod()',
   'mr_recordSameContextLodAuthority(',
+  'mr_recordSameContextLodBatchPublication(sameContextRequest)',
   'mr_cancelSameContextLod(sameContextRequest)',
   'sameContextLodDiagnostics.effectiveAuthority = \'worker\';',
 ]) {
@@ -238,8 +243,15 @@ for (const rustResidencyStep of [
   '.lod_pose_source(',
   'pub fn mr_poll_same_context_lod()',
   'apply_lod_classification_publication(',
+  'same_context_lod_authority_stamp(',
+  'publication_fingerprint_comparisons',
   'compare_lod_classifications(',
   'pub fn mr_record_same_context_lod_authority(',
+  'pub fn mr_record_same_context_lod_batch_publication(',
+  'SameContextLodBatchAuthoritySnapshot',
+  'worker_batch_snapshot',
+  'delayed worker batch snapshot has the wrong stamp',
+  'try_compare_same_context_lod_batches(state)',
 ]) {
   assert.ok(
     mainRendererSource.includes(rustResidencyStep),
@@ -255,6 +267,7 @@ for (const requiredWorkerDeltaStep of [
   'pose_sample_time: result.pose_sample_time',
   'pose_revision: result.pose_revision',
   'pose_continuity_epoch: result.pose_continuity_epoch',
+  'full_fingerprint: result.full_fingerprint',
   'stampedPoseEpoch !== lodPoseContinuityEpoch',
 ]) {
   assert.ok(

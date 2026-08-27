@@ -398,7 +398,8 @@ import init, {
   mr_acceptLodDeltaSequence,
   mr_uploadComposedLodModel,
   mr_dispatchSameContextLod, mr_pollSameContextLod,
-  mr_recordSameContextLodAuthority, mr_cancelSameContextLod,
+  mr_recordSameContextLodAuthority, mr_recordSameContextLodBatchPublication,
+  mr_cancelSameContextLod,
   mr_sameContextLodDiagnostics,
   mr_setLodGradingRatio,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
@@ -687,6 +688,8 @@ const sameContextLodDiagnostics = {
   uploads: 0,
   uploadMs: 0,
   residency: null,
+  workerModelFingerprint: '',
+  modelFingerprintMatch: null,
   errors: [],
 };
 globalThis.__hyperscopeSameContextLod = sameContextLodDiagnostics;
@@ -712,7 +715,8 @@ function refreshSameContextLodReadiness() {
   if (LOD_IMPLEMENTATION === 'js') return false;
   try {
     updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
-    return sameContextLodDiagnostics.ready === true;
+    return sameContextLodDiagnostics.ready === true
+      && sameContextLodDiagnostics.modelFingerprintMatch !== false;
   } catch {
     // Model replacement retires context resources before the next composed
     // residency is uploaded. This is an expected lifecycle gap, not a shadow
@@ -3786,6 +3790,7 @@ let currentSkinData = null;
 let currentMaterialCount = 0;
 let currentTextureCount = 0;
 let currentPrimaryFaceCount = 0;
+let workerLodModelFingerprint = '';
 let modelNodeStableEntityIds = [];
 let packedNodeIdentities = new Map();
 let currentModelDurableAssetId = null;
@@ -3809,10 +3814,19 @@ function uploadSameContextLodResidency(totalVertices, primaryFaces) {
     sameContextLodDiagnostics.uploads += 1;
     sameContextLodDiagnostics.uploadMs = performance.now() - started;
     sameContextLodDiagnostics.residency = residency;
+    sameContextLodDiagnostics.workerModelFingerprint = workerLodModelFingerprint;
+    sameContextLodDiagnostics.modelFingerprintMatch =
+      typeof residency?.model_fingerprint === 'string'
+      && residency.model_fingerprint.length > 0
+      && residency.model_fingerprint === workerLodModelFingerprint;
     sameContextLodDiagnostics.state = LOD_IMPLEMENTATION === 'rust'
       ? 'resident-authority-not-promoted'
       : 'resident-shadow';
     updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
+    if (!sameContextLodDiagnostics.modelFingerprintMatch) {
+      sameContextLodDiagnostics.state = 'model-fingerprint-mismatch';
+      recordSameContextLodError('worker and renderer LoD model fingerprints do not match');
+    }
     return residency;
   } catch (error) {
     sameContextLodDiagnostics.state = 'unavailable';
@@ -5865,8 +5879,9 @@ async function selectAnimationIndex(idx) {
       setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
       mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
     }
-    await workerCall('upload_model_to_compute', {});
+    const computeUpload = await workerCall('upload_model_to_compute', {});
     if (blockGeneration !== animationPoseBlockGeneration) return;
+    workerLodModelFingerprint = computeUpload.modelFingerprint || '';
     uploadSameContextLodResidency(nv, rp.num_faces);
     $('stats').textContent = `Animation: ${$('anim-sel').selectedOptions[0].textContent}`;
     switched = true;
@@ -7275,7 +7290,10 @@ async function recomputeLods() {
       vpMatrix: vp, vpWidth: w, vpHeight: h,
       tessDensity: tp.density, screenAtten: tp.screen_atten, minPxSub: tp.minPx,
       skipAnimation: !lodPoseAnimated,
-      capturePose: RUST_ROUND_SHADOW_ENABLED && lodPoseAnimated && !roundAuthoredScene,
+      capturePose: lodPoseAnimated && (
+        LOD_IMPLEMENTATION !== 'js'
+        || (RUST_ROUND_SHADOW_ENABLED && !roundAuthoredScene)
+      ),
       resetDelta,
     });
     if (resetDelta) lodDeltaResetPending = false;
@@ -7305,10 +7323,10 @@ async function recomputeLods() {
       const responseFaceIndices = resp.indices
         ? new Uint32Array(resp.indices.buffer || resp.indices)
         : new Uint32Array(0);
-      if (LOD_IMPLEMENTATION !== 'js' && sameContextRequest !== 0) {
+      if (LOD_IMPLEMENTATION !== 'js' && sameContextReady) {
         try {
           updateSameContextLodDiagnostics(mr_recordSameContextLodAuthority(
-            sameContextRequest,
+            sameContextDispatched ? sameContextRequest : 0,
             lodPoseAnimated,
             lodPose?.t ?? 0,
             lodPose?.sampleTime ?? 0,
@@ -7319,8 +7337,17 @@ async function recomputeLods() {
             !!wt.full_snapshot,
             classifiedFaces,
             residentFaces,
+            resp.pose_matrices
+              ? new Float32Array(resp.pose_matrices.buffer || resp.pose_matrices)
+              : new Float32Array(0),
+            resp.pose_morph_weights
+              ? new Float32Array(
+                  resp.pose_morph_weights.buffer || resp.pose_morph_weights,
+                )
+              : new Float32Array(0),
+            resp.full_fingerprint || '',
           ));
-          sameContextAuthorityRecorded = true;
+          sameContextAuthorityRecorded = sameContextDispatched;
         } catch (error) {
           if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
         }
@@ -7430,6 +7457,15 @@ async function recomputeLods() {
       // Do not let an interrupted scene-level classification silently demote
       // subsequent animation ticks to the primary-only fast path.
       lodFullSceneDirty = true;
+    }
+    if (sameContextAuthorityRecorded) {
+      try {
+        updateSameContextLodDiagnostics(
+          mr_recordSameContextLodBatchPublication(sameContextRequest),
+        );
+      } catch (error) {
+        if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
+      }
     }
     if (RUST_ROUND_SHADOW_ENABLED && appliedClassification) {
       const unsupportedKey = roundAuthoredScene ? 'authored' : null;
@@ -8502,8 +8538,9 @@ async function finishModelUpload(
   }
 
   sectionStarted = performance.now();
-  await workerCall('upload_model_to_compute', {});
+  const computeUpload = await workerCall('upload_model_to_compute', {});
   if (!appAssetMayInstall(assetToken)) return false;
+  workerLodModelFingerprint = computeUpload.modelFingerprint || '';
   uploadTimings.computeUploadMs = performance.now() - sectionStarted;
   sectionStarted = performance.now();
   uploadSameContextLodResidency(
@@ -8773,6 +8810,7 @@ async function uploadPresentationCompositionToLodWorker(
   if (!response.ok) {
     throw new Error(response.error || 'packed presentation LOD upload failed');
   }
+  workerLodModelFingerprint = response.modelFingerprint || '';
   if (response.numFaces !== faceNodes.length
       || response.topologyDomains !== topologyDomains) {
     throw new Error('presentation LOD worker acknowledged the wrong scene shape');

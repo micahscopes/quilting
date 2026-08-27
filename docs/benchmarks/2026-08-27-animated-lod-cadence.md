@@ -38,8 +38,10 @@ model keeps classifying its last accepted deforming pose.
 
 The following passed against the source above:
 
-- `cargo test -p quilting-core --lib`: 200/200;
+- `cargo test -p quilting-core --lib`: 202/202;
+- `cargo test -p quilting-renderer --lib`: 55/55;
 - `cargo check -p quilting-wasm --target wasm32-unknown-unknown --features leptos-ui`;
+- `cargo test -p quilting-wasm --target wasm32-unknown-unknown --features leptos-ui --no-run`;
 - `node scripts/smoke-hyperscope-presentation.mjs`;
 - `node scripts/smoke-surface-walk.mjs`;
 - worker and extracted browser-module syntax checks;
@@ -130,6 +132,64 @@ shipping both is cheaper than the worker. Renderer tests passed 54/54, the
 WASM32 Leptos build check passed, the presentation/render/walk smokes passed,
 and the temporary tab was closed with the user's original chess URL preserved.
 
+### Exact publication and resident-batch gate
+
+The 54-comparison run above was not long enough to prove the asynchronous
+publication lifecycle. The extended gate therefore fingerprints the complete
+immutable prepared model, the worker's full GPU result before sparse encoding,
+the Rust-reconstructed authority snapshot, and the same-context full result.
+The prepared-model fingerprint includes exact float or integer bits for source
+positions and faces, joints and weights, morph deltas, face nodes, derived face
+indices, scoped adjacency, morph-target count, and mesh radius. It is a stable
+textual ABI so JavaScript cannot truncate a 64-bit fingerprint.
+
+The first long animated run appeared to find classifier divergence despite
+bit-exact pose and model fingerprints. The mismatch count was exactly equal to
+the number of worker publications that disagreed with Rust's reconstructed
+authority snapshot. The worker is allowed to publish while the same-context
+classifier is still busy, but the browser had recorded only publications that
+also obtained a shadow dispatch. The next sparse result therefore extended the
+worker's current revision while Rust applied it to an older baseline. Every
+worker publication now advances the immutable shadow authority; request ID
+zero explicitly means baseline-only observation and cannot create a parity
+candidate.
+
+That exposed a second, downstream timing artifact. A matching worker result
+could update live resident batches, a later unmatched publication could update
+them again, and only then could the earlier same-context batch candidate become
+available. Comparing that delayed candidate with mutable live batches produced
+transient semantic and group mismatches even though both classifiers agreed.
+The observer now takes an authority batch snapshot only in this delayed case
+and compares the candidate with the exact matching publication. Immediate
+comparisons retain the allocation-free live path.
+
+After both lifecycle corrections, a foreground standalone animated-horse run
+reported:
+
+- 5,288 exact classifier comparisons and zero classifier mismatches;
+- 5,288 exact pose-payload and raw-result fingerprint comparisons;
+- 5,384 exact publication-reconstruction fingerprint comparisons;
+- 5,288 exact resident batch-semantic and batch-group comparisons;
+- zero requested, resident, visibility, culling, or group mismatches;
+- zero failures and no bounded diagnostic errors.
+
+The complete worker and renderer model fingerprints were bit-exact. A separate
+composed-scene run retained all five presentation assets, 4,432 faces, 7,953
+vertices, and 12 topology domains. Its static full-scene classification was
+exact. The animated primary-prefix run then accumulated:
+
+- 2,950 exact classifier, pose, raw-result, and batch comparisons;
+- 3,024 exact reconstructed-publication comparisons;
+- 75 intentional busy skips and six topology/cue lifecycle cancellations;
+- zero classifier, publication, resident, visibility, culling, batch-semantic,
+  or batch-group mismatches;
+- zero classifier failures and zero scene-extraction semantic mismatches.
+
+Full-scene work used 12 subject records in one GPU pass; animated primary-prefix
+work used one subject record in one GPU pass. The worker remains live authority,
+so this proves semantic equivalence and lifecycle discipline rather than a
+performance win or authority cutover.
+
 ## Remaining promotion work
 
 The same-context implementation has earned correctness shadowing, not live
@@ -139,7 +199,8 @@ authority. Promotion still requires:
   views and animated horse, with frame percentiles rather than last values;
 - explicit accounting for duplicate-shadow overhead, full readback bytes,
   retained comparison memory, sparse batch updates, and skipped submissions;
-- a Rust-owned full/sparse resident publication that can update batches without
-  transferring mesh-sized payloads through JavaScript;
-- sustained zero pose, seam, permutation, grading, and lifecycle mismatches;
+- promotion of the now-proven Rust full/sparse resident and batch publication
+  behind the existing worker rollback, without transferring mesh-sized payloads
+  through JavaScript;
+- moving-camera screenshot gates for seams, permutations, and LOD grading;
 - an explicit worker rollback until the promoted path wins those gates.
