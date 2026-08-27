@@ -390,13 +390,15 @@ cannot silently invalidate pipeline creation.
 
 `quilting-webgpu` is the first executing device shadow. It is deliberately
 outside the WebGL2 authority path and owns only backend resources: a device and
-queue supplied by the caller, two retained compute pipelines, immutable model
-and atlas buffers, retained dynamic pose/subject buffers, and diagnostic
-staging. Uploading a model uses the existing word packers. A dispatch writes
-only the current uniform, dense subject rows, referenced joint-matrix prefix,
-and morph weights; it then encodes both passes and one diagnostic copy into a
-single command buffer. Extra unused glTF skin joints do not inflate retained
-storage or invalidate the full pose.
+queue supplied by the caller, five retained compute pipelines, immutable model,
+atlas, batch, and eligibility buffers, retained dynamic pose/subject buffers,
+and diagnostic staging. Uploading a model or scene uses the existing word
+packers. A classifier dispatch writes only the current uniform, dense subject
+rows, referenced joint-matrix prefix, and morph weights. Visibility compaction
+keeps source flags, survivor IDs, batch ranges, and indirect arguments on the
+device; its application-owned encoder seam can sit between a GPU visibility
+producer and render passes without a map/copy boundary. Extra unused glTF skin
+joints do not inflate retained storage or invalidate the full pose.
 
 The crate pins `wgpu` 29.0.1. That is the newest release line tested to compile
 against this workspace's exact wasm-bindgen 0.2.108 / js-sys 0.3.85 browser
@@ -406,13 +408,15 @@ regression gate rather than this isolated classifier cut.
 
 The narrow device gate now has three proven parts:
 
-- native Radeon 780M / RADV / Vulkan executed both passes and returned the
-  exact packed word produced by the CPU pass-two oracle; and
+- native Radeon 780M / RADV / Vulkan executed both classifier passes plus
+  count/scan/scatter compaction, matched the Rust oracles exactly, and consumed
+  the resulting ranges and survivor IDs through indexed-indirect draws; and
 - `cargo check -p quilting-webgpu --target wasm32-unknown-unknown` passes on
   the repository's pinned browser ABI; and
 - Chromium 150 requested a real `BrowserWebGpu` adapter and executed the same
-  reusable minimum matrix, returning one exact full-pipeline word and ten exact
-  coherence words with no console warnings or errors.
+  reusable matrix, returning one exact full-pipeline word, ten coherence words,
+  89 compacted survivor words, three five-word ranges, three five-word indirect
+  records, and three real indirect draws with no console warnings or errors.
 
 Ordinary native tests report an explicit skip when no adapter is visible.
 Setting `QUILTING_REQUIRE_WEBGPU=1` makes that condition a failure for a
@@ -426,18 +430,23 @@ joint animation moving a face across the frustum; and maximum-LOD saturation
 when a sphere-reflection pole lies inside a triangle. Pass two is bit-exact with
 its CPU oracle. Those pass-one cases currently freeze semantic invariants;
 finite non-interior poles, pole grazing, multi-face composed scenes,
-maximum-atlas boundaries, the expanded Chrome matrix, and exact WebGL2
-comparison remain promotion gates.
+maximum-atlas boundaries, and exact WebGL2 image/workload comparison remain
+promotion gates. The compaction fixture crosses three 64-lane chunks, preserves
+stable source order, covers a disabled bucket and retained-root replacement,
+and keeps indirect `first_instance` zero for baseline WebGPU portability.
 
-The WebGL2 GLSL programs and runtime authority remain untouched. Readback in
-`quilting-webgpu` is intentionally full and diagnostic; an authoritative
-backend must consume packed classifications on-device and copy only bounded,
-delayed telemetry to the CPU.
+The WebGL2 GLSL programs and runtime authority remain untouched. Classifier
+readback in `quilting-webgpu` is still full and diagnostic. Compaction readback
+uses temporary conformance staging only; live residency exposes the source
+visibility, compacted range/survivor, aligned batch-index, and indirect buffers
+for a no-readback render path. An authoritative backend should copy only
+bounded, delayed telemetry to the CPU.
 
-Only after that gate should same-device resident topology, visible-instance
-compaction, and indirect arguments be wired together. That later cut is what
-removes WebGL2's four-byte-per-face readback and rejected atlas vertex
-invocations; merely compiling WGSL does neither.
+The next cut is renderer integration: compute-prepared QB instance records,
+the production WGSL vertex/fragment pipelines, shared `RenderFrame` command
+ordering, and WebGL2 image/workload parity behind an explicit backend switch.
+That cut—not the already-proven shadow executor—is what finally removes the
+live four-byte-per-face readback and rejected atlas vertex invocations.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable
