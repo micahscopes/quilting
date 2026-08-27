@@ -405,10 +405,15 @@ Ordinary native tests report an explicit skip when no adapter is visible.
 Setting `QUILTING_REQUIRE_WEBGPU=1` makes that condition a failure for a
 hardware conformance lane. This is real native device evidence and browser
 compile evidence, but not yet browser execution or broad numeric parity. The
-current GPU fixture covers the complete two-pass path, atlas lookup, packed
-output, and unused skin joints; affine, finite-pole, pole-grazing, culled,
-skinned, morphed, composed-scene, seam, permutation, and maximum-atlas cases
-still need exact WebGPU-vs-CPU-vs-WebGL2 comparison in Chrome.
+native matrix now covers the complete two-pass path; all six S3 permutations;
+visible-only neighbor promotion; invisible standby records; atlas and priority
+packing; unused skin joints; current-pose culling; dense authored-subject
+selection; morph and joint animation moving a face across the frustum; and
+maximum-LOD saturation when a sphere-reflection pole lies inside a triangle.
+Pass two is bit-exact with its CPU oracle. Pass-one cases currently freeze
+semantic invariants; finite non-interior poles, pole grazing, multi-face
+composed scenes, maximum-atlas boundaries, and exact WebGL2 comparison still
+need a Chrome device gate.
 
 The WebGL2 GLSL programs and runtime authority remain untouched. Readback in
 `quilting-webgpu` is intentionally full and diagnostic; an authoritative

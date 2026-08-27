@@ -571,11 +571,18 @@ authority. It also sizes joint storage to the highest nonzero referenced
 influence while accepting a complete glTF pose containing additional unused
 joints.
 
-The native conformance fixture executed on AMD Radeon 780M Graphics, RADV Mesa
-26.0.5, Vulkan. Its packed result was bit-exact with the CPU pass-two oracle.
-The gate is mandatory when `QUILTING_REQUIRE_WEBGPU=1`; without that variable a
-machine with no visible adapter records an explicit skip rather than a false
-failure. The corresponding deterministic checks are:
+The native conformance matrix executed on AMD Radeon 780M Graphics, RADV Mesa
+26.0.5, Vulkan. The coherence cases cover all six S3 permutations,
+visible-only neighbor promotion, invisible standby records, adaptive priority,
+and multiple atlas keys; every packed result was bit-exact with the CPU
+pass-two oracle. Full two-pass cases cover unused skin joints, current-pose
+culling, dense authored-subject transforms, morph and joint motion across the
+frustum, and maximum-LOD saturation at an interior sphere-reflection pole.
+Those pass-one cases assert independent semantic invariants rather than a
+second floating-point implementation. The gate is mandatory when
+`QUILTING_REQUIRE_WEBGPU=1`; without that variable a machine with no visible
+adapter records an explicit skip rather than a false failure. The corresponding
+deterministic checks are:
 
 - `cargo test -p quilting-shaders`: 15/15;
 - `cargo test -p quilting-renderer`: 62/62;
@@ -587,13 +594,12 @@ failure. The corresponding deterministic checks are:
   leptos-ui`.
 
 This proves native device execution and browser-target compilation, not Chrome
-execution, performance, or broad scene parity. The next gate must compare final
-packed words over conformal/pole, culling, animation, morph, composed-subject,
-seam, S3 permutation, and atlas-boundary fixtures in Chrome, then compare the
-same packets with the established WebGL2 classifier. WebGL2 remains runtime
-authority until that evidence exists. Compaction and indirect submission are
-still separate work; this diagnostic executor continues to read every packed
-face word back.
+execution, performance, or broad scene parity. The next gate must run the same
+matrix in Chrome, add finite non-interior and grazing poles, multi-face composed
+scenes, and maximum-atlas boundaries, then compare the final packets with the
+established WebGL2 classifier. WebGL2 remains runtime authority until that
+evidence exists. Compaction and indirect submission are still separate work;
+this diagnostic executor continues to read every packed face word back.
 
 ## Remaining promotion work
 
