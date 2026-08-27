@@ -1922,12 +1922,16 @@ pub fn mr_set_matcap_style(style: &str) {
 pub fn mr_set_mobius(mobius: &[f32]) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
+            let grouping_changed = st.active_hyperscape_camera.is_some();
             st.hyperscape_packets.clear();
             st.active_hyperscape_camera = None;
             for (i, &v) in mobius.iter().take(16).enumerate() { st.mobius[i] = v; }
             let c_len_sq = st.mobius[8..12].iter().map(|value| value * value).sum::<f32>();
             st.mobius_orientation = if c_len_sq > 0.001 { -1 } else { 1 };
             st.render_commands_dirty = true;
+            if grouping_changed {
+                mark_batch_layout_dirty(st);
+            }
         }
     });
 }
@@ -1936,6 +1940,7 @@ pub fn mr_set_mobius(mobius: &[f32]) {
 pub fn mr_set_mobius_with_parity(mobius: &[f32], orientation_sign: i32) {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
+            let grouping_changed = renderer.active_hyperscape_camera.is_some();
             renderer.hyperscape_packets.clear();
             renderer.active_hyperscape_camera = None;
             for (index, &value) in mobius.iter().take(16).enumerate() {
@@ -1943,6 +1948,9 @@ pub fn mr_set_mobius_with_parity(mobius: &[f32], orientation_sign: i32) {
             }
             renderer.mobius_orientation = if orientation_sign < 0 { -1 } else { 1 };
             renderer.render_commands_dirty = true;
+            if grouping_changed {
+                mark_batch_layout_dirty(renderer);
+            }
         }
     });
 }
@@ -1991,7 +1999,9 @@ pub fn mr_set_presentation_node_states(records: &[f32]) -> bool {
             let grouping_changed = state.presentation_nodes.keys().ne(next.keys());
             state.presentation_nodes = next;
             state.render_commands_dirty = true;
-            state.batch_layout_dirty |= grouping_changed;
+            if grouping_changed {
+                mark_batch_layout_dirty(state);
+            }
         }
         true
     })
@@ -2030,7 +2040,9 @@ pub fn mr_set_authored_node_transforms(records: &[f32]) -> bool {
             let grouping_changed = state.authored_node_models.keys().ne(next.keys());
             state.authored_node_models = next;
             state.render_commands_dirty = true;
-            state.batch_layout_dirty |= grouping_changed;
+            if grouping_changed {
+                mark_batch_layout_dirty(state);
+            }
         }
         true
     })
@@ -2039,10 +2051,13 @@ pub fn mr_set_authored_node_transforms(records: &[f32]) -> bool {
 fn clear_hyperscape_packets() {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
-            renderer.batch_layout_dirty |= renderer.active_hyperscape_camera.is_some();
+            let grouping_changed = renderer.active_hyperscape_camera.is_some();
             renderer.hyperscape_packets.clear();
             renderer.active_hyperscape_camera = None;
             renderer.render_commands_dirty = true;
+            if grouping_changed {
+                mark_batch_layout_dirty(renderer);
+            }
         }
     });
 }
@@ -2105,8 +2120,9 @@ fn apply_hyperscape_packets(packets: &[GltfHyperscopePacket]) {
         renderer.render_commands_dirty |= packets_changed
             || renderer.active_hyperscape_camera != previous_camera
             || (renderer.mobius, renderer.mobius_orientation) != previous_global;
-        renderer.batch_layout_dirty |= renderer.active_hyperscape_camera.is_some()
-            != previous_camera.is_some();
+        if renderer.active_hyperscape_camera.is_some() != previous_camera.is_some() {
+            mark_batch_layout_dirty(renderer);
+        }
     });
 }
 
@@ -6964,14 +6980,21 @@ fn rebuild_legacy_batch_groups(
     destination: LegacyBatchDestination,
 ) {
     let nf = state.num_faces;
+    let render_node_started_ms = browser_now_ms();
+    if state.batch_layout_dirty || state.face_render_nodes.len() != state.face_nodes.len() {
+        rebuild_face_render_nodes(state);
+    }
+    state
+        .batch_update_stats
+        .render_node_ms
+        .record(browser_now_ms() - render_node_started_ms);
     let vertex_lod_started_ms = browser_now_ms();
     if let Some(topology) = state.lod_topology.as_ref() {
-        batch::rebuild_resident_vertex_lods(
+        batch::rebuild_resident_vertex_max(
             &state.resident_face_lods,
             topology,
             initial,
             &mut state.resident_vertex_lod_scratch,
-            &mut state.resident_vertex_lods,
         );
     } else {
         state.resident_vertex_lods.resize(nf, [1; 3]);
@@ -6990,26 +7013,38 @@ fn rebuild_legacy_batch_groups(
         .batch_update_stats
         .vertex_lod_ms
         .record(browser_now_ms() - vertex_lod_started_ms);
-    let render_node_started_ms = browser_now_ms();
-    rebuild_face_render_nodes(state);
-    state
-        .batch_update_stats
-        .render_node_ms
-        .record(browser_now_ms() - render_node_started_ms);
     let group_member_started_ms = browser_now_ms();
-    let groups = match destination {
-        LegacyBatchDestination::Live => &mut state.batch_groups,
-        LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
-    };
-    batch::group_resident_faces_into(
-        &state.resident_face_lods,
-        &state.resident_vertex_lods,
-        &state.face_materials,
-        &state.face_nodes,
-        &state.face_render_nodes,
-        initial,
-        groups,
-    );
+    if let Some(topology) = state.lod_topology.as_ref() {
+        let groups = match destination {
+            LegacyBatchDestination::Live => &mut state.batch_groups,
+            LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
+        };
+        batch::group_resident_faces_from_vertex_max_into(
+            &state.resident_face_lods,
+            topology,
+            &state.resident_vertex_lod_scratch,
+            &mut state.resident_vertex_lods,
+            &state.face_materials,
+            &state.face_nodes,
+            &state.face_render_nodes,
+            initial,
+            groups,
+        );
+    } else {
+        let groups = match destination {
+            LegacyBatchDestination::Live => &mut state.batch_groups,
+            LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
+        };
+        batch::group_resident_faces_into(
+            &state.resident_face_lods,
+            &state.resident_vertex_lods,
+            &state.face_materials,
+            &state.face_nodes,
+            &state.face_render_nodes,
+            initial,
+            groups,
+        );
+    }
     state
         .batch_update_stats
         .group_member_ms

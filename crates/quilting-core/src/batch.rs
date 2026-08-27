@@ -637,10 +637,29 @@ pub fn rebuild_resident_vertex_lods(
     face_vertex_lods: &mut Vec<[u32; 3]>,
 ) {
     let num_faces = residents.len().min(topology.num_faces as usize);
-    vertex_max.clear();
-    vertex_max.resize(topology.num_vertices as usize, 1);
+    rebuild_resident_vertex_max(residents, topology, initial, vertex_max);
     face_vertex_lods.clear();
     face_vertex_lods.resize(residents.len(), [1; 3]);
+
+    for (face, output) in face_vertex_lods.iter_mut().take(num_faces).enumerate() {
+        let vertices = topology.face_vertices(face as u32).map(|vertex| vertex as usize);
+        *output = vertices.map(|vertex| vertex_max[vertex]);
+    }
+}
+
+/// Rebuild compact-vertex density maxima without performing the second
+/// source-face walk. Backends that immediately regroup roots can consume this
+/// cache through [`group_resident_faces_from_vertex_max_into`] and avoid a
+/// separate face-vertex materialization pass.
+pub fn rebuild_resident_vertex_max(
+    residents: &[Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    initial: ResidentLod,
+    vertex_max: &mut Vec<u32>,
+) {
+    let num_faces = residents.len().min(topology.num_faces as usize);
+    vertex_max.clear();
+    vertex_max.resize(topology.num_vertices as usize, 1);
 
     for face in 0..num_faces {
         let [v0, v1, v2] = topology.face_vertices(face as u32).map(|vertex| vertex as usize);
@@ -648,10 +667,6 @@ pub fn rebuild_resident_vertex_lods(
         vertex_max[v0] = vertex_max[v0].max(edge_b).max(edge_c);
         vertex_max[v1] = vertex_max[v1].max(edge_a).max(edge_c);
         vertex_max[v2] = vertex_max[v2].max(edge_a).max(edge_b);
-    }
-    for (face, output) in face_vertex_lods.iter_mut().take(num_faces).enumerate() {
-        let vertices = topology.face_vertices(face as u32).map(|vertex| vertex as usize);
-        *output = vertices.map(|vertex| vertex_max[vertex]);
     }
 }
 
@@ -711,6 +726,61 @@ pub fn group_resident_faces_into(
             edge_lods: resident.edge_lods(),
             permutation_index: resident.perm_index.min(5) as u8,
             vertex_lods: face_vertex_lods.get(face_index).copied().unwrap_or([1; 3]),
+        });
+    }
+    groups.retain(|_, members| !members.is_empty());
+}
+
+/// Materialize face-corner densities and deterministic root groups in one
+/// source-face walk after [`rebuild_resident_vertex_max`].
+///
+/// This is semantically identical to `rebuild_resident_vertex_lods` followed
+/// by `group_resident_faces_into`; it only removes the redundant intermediate
+/// walk over every source face.
+#[allow(clippy::too_many_arguments)]
+pub fn group_resident_faces_from_vertex_max_into(
+    residents: &[Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    vertex_max: &[u32],
+    face_vertex_lods: &mut Vec<[u32; 3]>,
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    face_render_nodes: &[usize],
+    initial: ResidentLod,
+    groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+) {
+    let num_faces = residents.len().min(topology.num_faces as usize);
+    face_vertex_lods.clear();
+    face_vertex_lods.resize(residents.len(), [1; 3]);
+    for members in groups.values_mut() {
+        members.clear();
+    }
+    for (face_index, resident) in residents.iter().enumerate() {
+        let resident = resident.unwrap_or(initial);
+        let vertex_lods = if face_index < num_faces {
+            topology
+                .face_vertices(face_index as u32)
+                .map(|vertex| vertex_max.get(vertex as usize).copied().unwrap_or(1))
+        } else {
+            [1; 3]
+        };
+        face_vertex_lods[face_index] = vertex_lods;
+        let key = RenderBatchKey::from_resident(
+            resident,
+            face_materials.get(face_index).copied().unwrap_or(0),
+            face_render_nodes
+                .get(face_index)
+                .copied()
+                .or_else(|| face_nodes.get(face_index).copied())
+                .unwrap_or(0),
+        );
+        groups.entry(key).or_default().push(RenderBatchMember {
+            face_index: face_index as u32,
+            leaf_id: ScreenPatchLeafId::ROOT,
+            node_index: face_nodes.get(face_index).copied().unwrap_or(0),
+            edge_lods: resident.edge_lods(),
+            permutation_index: resident.perm_index.min(5) as u8,
+            vertex_lods,
         });
     }
     groups.retain(|_, members| !members.is_empty());
@@ -3076,6 +3146,62 @@ mod tests {
             ResidentLod::uniform(1),
         );
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn fused_vertex_materialization_and_root_grouping_is_exact() {
+        let topology = HalfEdgeMesh::from_triangles(4, &[[0, 1, 2], [2, 1, 3]]);
+        let residents = [
+            Some(ResidentLod::from_edge_lods([2, 4, 8])),
+            Some(ResidentLod::from_edge_lods([16, 2, 4])),
+        ];
+        let materials = [7, 9];
+        let nodes = [101, 202];
+        let render_nodes = [usize::MAX, 303];
+        let initial = ResidentLod::uniform(1);
+
+        let mut reference_vertex_max = Vec::new();
+        let mut reference_face_vertex_lods = Vec::new();
+        rebuild_resident_vertex_lods(
+            &residents,
+            &topology,
+            initial,
+            &mut reference_vertex_max,
+            &mut reference_face_vertex_lods,
+        );
+        let reference_groups = group_resident_faces(
+            &residents,
+            &reference_face_vertex_lods,
+            &materials,
+            &nodes,
+            &render_nodes,
+            initial,
+        );
+
+        let mut fused_vertex_max = Vec::new();
+        rebuild_resident_vertex_max(
+            &residents,
+            &topology,
+            initial,
+            &mut fused_vertex_max,
+        );
+        let mut fused_face_vertex_lods = Vec::new();
+        let mut fused_groups = BTreeMap::new();
+        group_resident_faces_from_vertex_max_into(
+            &residents,
+            &topology,
+            &fused_vertex_max,
+            &mut fused_face_vertex_lods,
+            &materials,
+            &nodes,
+            &render_nodes,
+            initial,
+            &mut fused_groups,
+        );
+
+        assert_eq!(fused_vertex_max, reference_vertex_max);
+        assert_eq!(fused_face_vertex_lods, reference_face_vertex_lods);
+        assert_eq!(fused_groups, reference_groups);
     }
 
     #[test]
