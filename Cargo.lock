@@ -3093,6 +3093,7 @@ dependencies = [
  "futures-channel",
  "getrandom 0.2.17",
  "pollster",
+ "quilting-core",
  "quilting-renderer",
  "quilting-shaders",
  "wgpu",
