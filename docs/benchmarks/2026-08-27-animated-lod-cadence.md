@@ -396,6 +396,84 @@ per changed bucket. That design must account for vertex-corner density
 propagation and deterministic member order before it can replace the complete
 rebuild.
 
+## Incremental retained-root grouping shadow
+
+Commits `f9e9515` through `5234f89` implement that representation without
+changing authority. Reconciliation exposes its complete twin-connected changed
+component. A retained compact-vertex-to-face CSR then expands that seed through
+all shared vertices, recomputes each touched maximum from every incident face,
+and returns every source face whose corner-density observation can change. A
+source-ordered root index applies removals and additions only to dirty batch
+buckets and rematerializes their compact member prefixes. This preserves the
+exact `BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>` result expected by the
+current WebGL2 uploader; it is not a scatter-upload revival.
+
+`rootgroupshadow=1` runs this candidate after the incumbent complete grouping
+and compares every ordered bucket member. The candidate is non-authoritative.
+Its timer includes incremental corner-density refresh and retained grouping,
+but stops before the complete reference comparison. The diagnostics separately
+report seed/closure faces, dirty buckets, rebuilt members, and retained vector
+payload capacities.
+
+The deterministic gate now includes 256 rounds of sparse resident, corner,
+material, and node churn over 257 faces. Every round matches a complete ordered
+rebuild. Token lifetime is bounded by simultaneously active keys plus one
+refresh's churn rather than session history. The current gate passes 224 core
+unit tests, 15 conformal integration tests, and the Leptos-enabled WASM32
+check.
+
+### Browser evidence and retained memory
+
+The first pathological chess run covered 94,628 faces and 20 settled camera
+gestures. All 21 comparisons were exact, with 20 incremental refreshes and no
+shared-edge, roundtrip, or GPU-batch failures. The last closure contained 6,266
+faces and rebuilt 47,172 members across 21 buckets. Candidate refresh measured
+4.8 ms p50 and 6.5 ms p95, compared with approximately 13.2 ms p50 for the
+incumbent vertex reconstruction plus root-member grouping in that run.
+
+A broader 64-gesture orbit/zoom run completed 65/65 exact comparisons and 64
+incremental refreshes. Before compacting retained keys, its index vector
+payload reached 12,595,952 bytes. The compaction work in `111abf0`, `eb995a0`,
+and `04384ec` then:
+
+- replaced per-face and per-dirty-entry `RenderBatchKey` copies with `u32`
+  tokens;
+- reclaimed inactive key tokens instead of retaining session history;
+- corrected capacity accounting for compact removal/addition entries; and
+- kept the one large merge-scratch allocation local instead of diffusing its
+  capacity through small buckets.
+
+The same saved route and 64-gesture script after compaction again completed
+65/65 exact comparisons. Initial full-build index payload was 1,307,728 bytes,
+down from 3,189,408 bytes before compaction. After churn it was 5,414,744 bytes,
+a 57.0% reduction from the earlier 12,595,952-byte run. These numbers cover
+reported vector payload only; allocator/B-tree nodes and the shadow's duplicate
+reference member map are deliberately excluded.
+
+The final sample's last closure contained 21,650 faces, dirtied 36 buckets, and
+rebuilt 47,456 members. Candidate refresh was 8.6 ms p50. Its 76.6/77.2 ms
+p90/p95 tail shows that synthetic orbit/zoom states can still make the exact
+closure expensive; it is not presented as a universal frame-time win. The
+incumbent vertex and root-member stages in the same run measured 4.0 and 7.1 ms
+p50 respectively. Changed-bucket upload remained separate at 6.2 ms p50 and
+13.8 ms p95. Shared-edge mismatches, missing residents, roundtrip failures,
+same-density jumps, and GPU-batch failures were all zero.
+
+The animated horse supplies the necessary counterexample. Its 984 faces form
+one connected component, so every changed seed expands to all 984 faces and all
+five buckets. A 332-comparison run was entirely exact, but the incremental path
+measured 0.4 ms p50 while the incumbent vertex-plus-group work was about 0.2 ms.
+Incrementality is therefore not promoted globally.
+
+The authority design must select between complete and retained grouping from a
+pre-work estimate, retain the complete path for small or full-closure models,
+and continue sampled complete comparisons after promotion. A selector needs
+evidence across both closure fraction and rebuilt-member fraction; face count
+alone is insufficient because the chess run rebuilt roughly half the scene's
+members while still sometimes winning. WebGL2 continues to upload one compact
+prefix per changed bucket. WebGPU remains the intended path for storage-buffer
+reconciliation, visible compaction, and indirect submission.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
