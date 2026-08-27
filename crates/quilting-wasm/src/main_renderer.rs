@@ -3802,6 +3802,7 @@ fn apply_adaptive_screen_plan(
             pose_stamp,
             requested_face_lods,
             resident_face_lods,
+            resident_vertex_lods,
             initial,
             topology,
             max_atlas_lod,

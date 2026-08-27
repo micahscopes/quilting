@@ -561,6 +561,7 @@ struct AdaptiveNeighborhoodShadowComparison {
     leaf_mismatches: u64,
     request_mismatches: u64,
     resident_mismatches: u64,
+    raw_vertex_mismatches: u64,
     vertex_mismatches: u64,
     boundary_escape: bool,
     exact: bool,
@@ -644,6 +645,7 @@ struct AdaptiveNeighborhoodShadow {
     last: Option<AdaptiveNeighborhoodShadowComparison>,
     plan: AdaptiveScreenNeighborhoodPlan,
     baseline_lods: Vec<[u32; 3]>,
+    baseline_vertex_lods: Vec<[u32; 3]>,
     frontier: Option<ScreenMeshLeafFrontier>,
     frontier_cache_hits: u64,
     frontier_cache_misses: u64,
@@ -699,6 +701,7 @@ impl AdaptiveNeighborhoodShadow {
         request: AdaptiveScreenMeshPlanRequest<'_>,
         topology: &ScreenMeshTopologyCache,
         baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
         standby: ResidentLod,
         max_face_edge_ratio: u32,
         max_atlas_lod: u32,
@@ -716,6 +719,14 @@ impl AdaptiveNeighborhoodShadow {
                 .iter()
                 .map(|resident| resident.unwrap_or(standby).edge_lods()),
         );
+        self.baseline_vertex_lods.clear();
+        self.baseline_vertex_lods
+            .extend_from_slice(baseline_vertex_lods);
+        if self.baseline_vertex_lods.len() != request.source_requested_lods.len() {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some("adaptive baseline corner LoD length differs from source faces".into());
+            return false;
+        }
         let edge_hops = adaptive_neighborhood_edge_hops(max_face_edge_ratio, max_atlas_lod);
         let plan_start = browser_now_ms();
         if let Err(error) = plan_adaptive_screen_neighborhood_into(
@@ -869,6 +880,7 @@ impl AdaptiveNeighborhoodShadow {
         let mut leaf_mismatches = 0usize;
         let mut request_mismatches = 0usize;
         let mut resident_mismatches = 0usize;
+        let mut raw_vertex_mismatches = 0usize;
         let mut vertex_mismatches = 0usize;
         let mut neighborhood_index = 0usize;
         for (complete_index, complete_leaf) in complete_plan.leaves.iter().copied().enumerate() {
@@ -898,9 +910,25 @@ impl AdaptiveNeighborhoodShadow {
                 resident.resident.get(neighborhood_index)
                     != complete_resident.resident.get(complete_index),
             );
+            let neighborhood_vertex = neighborhood_vertices.get(neighborhood_index).copied();
+            raw_vertex_mismatches += usize::from(
+                neighborhood_vertex.as_ref() != complete_vertices.get(complete_index),
+            );
+            let composed_vertex = if fixed {
+                neighborhood_vertex.and_then(|mut corner_lods| {
+                    let baseline = self
+                        .baseline_vertex_lods
+                        .get(complete_leaf.source_face as usize)?;
+                    for corner in 0..3 {
+                        corner_lods[corner] = corner_lods[corner].max(baseline[corner]);
+                    }
+                    Some(corner_lods)
+                })
+            } else {
+                neighborhood_vertex
+            };
             vertex_mismatches += usize::from(
-                neighborhood_vertices.get(neighborhood_index)
-                    != complete_vertices.get(complete_index),
+                composed_vertex.as_ref() != complete_vertices.get(complete_index),
             );
             neighborhood_index += 1;
         }
@@ -919,6 +947,7 @@ impl AdaptiveNeighborhoodShadow {
             .filter(|&&fixed| !fixed)
             .count();
         resident_mismatches += unvisited;
+        raw_vertex_mismatches += unvisited;
         vertex_mismatches += unvisited;
         let exact = diagnostic_match
             && selected_faces_match
@@ -933,6 +962,7 @@ impl AdaptiveNeighborhoodShadow {
         comparison.leaf_mismatches = leaf_mismatches as u64;
         comparison.request_mismatches = request_mismatches as u64;
         comparison.resident_mismatches = resident_mismatches as u64;
+        comparison.raw_vertex_mismatches = raw_vertex_mismatches as u64;
         comparison.vertex_mismatches = vertex_mismatches as u64;
         comparison.exact = exact;
         comparison.compare_ms = compare_ms;
@@ -2542,6 +2572,7 @@ impl AdaptivePickedRuntime {
         current_pose_stamp: Option<(u32, u32)>,
         source_requests: &[Option<ResidentLod>],
         baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
         standby: ResidentLod,
         topology: &ScreenMeshTopologyCache,
         max_atlas_lod: u32,
@@ -2572,6 +2603,7 @@ impl AdaptivePickedRuntime {
             current_pose_stamp,
             source_requests,
             baseline_residents,
+            baseline_vertex_lods,
             standby,
             topology,
             max_atlas_lod,
@@ -2601,6 +2633,7 @@ impl AdaptivePickedRuntime {
         current_pose_stamp: Option<(u32, u32)>,
         source_requests: &[Option<ResidentLod>],
         baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
         standby: ResidentLod,
         topology: &ScreenMeshTopologyCache,
         max_atlas_lod: u32,
@@ -2652,6 +2685,7 @@ impl AdaptivePickedRuntime {
                 plan_request,
                 topology,
                 baseline_residents,
+                baseline_vertex_lods,
                 standby,
                 max_face_edge_ratio,
                 max_atlas_lod,
@@ -3553,6 +3587,7 @@ mod tests {
                     Some(stamp),
                     &[Some(resident)],
                     &[Some(resident)],
+                    &[[1; 3]],
                     resident,
                     &topology,
                     1,
@@ -3764,6 +3799,7 @@ mod tests {
                 Some((3, 1)),
                 &[Some(resident); 2],
                 &[Some(resident); 2],
+                &[[1; 3]; 2],
                 resident,
                 &topology,
                 1,
@@ -3793,6 +3829,7 @@ mod tests {
             Some((4, 1)),
             &[Some(resident); 2],
             &[Some(resident); 2],
+            &[[1; 3]; 2],
             resident,
             &topology,
             1,
@@ -3836,6 +3873,7 @@ mod tests {
                 Some((4, 1)),
                 &[Some(resident); 2],
                 &[Some(resident); 2],
+                &[[1; 3]; 2],
                 resident,
                 &topology,
                 1,
@@ -3868,6 +3906,7 @@ mod tests {
                 Some((5, 1)),
                 &[Some(resident); 2],
                 &[Some(resident); 2],
+                &[[1; 3]; 2],
                 resident,
                 &topology,
                 1,
@@ -4007,6 +4046,7 @@ mod tests {
                 Some((3, 1)),
                 &[Some(resident); 2],
                 &[Some(resident); 2],
+                &[[1; 3]; 2],
                 resident,
                 &topology,
                 1,
@@ -4133,6 +4173,7 @@ mod tests {
                 Some((3, 1)),
                 &[Some(resident); 3],
                 &[Some(resident); 3],
+                &[[1; 3]; 3],
                 resident,
                 &topology,
                 1,
@@ -4216,6 +4257,7 @@ mod tests {
         assert_eq!(neighborhood.leaf_mismatches, 0);
         assert_eq!(neighborhood.request_mismatches, 0);
         assert_eq!(neighborhood.resident_mismatches, 0);
+        assert_eq!(neighborhood.raw_vertex_mismatches, 0);
         assert_eq!(neighborhood.vertex_mismatches, 0);
         assert!(neighborhood.exact);
 
@@ -4234,6 +4276,7 @@ mod tests {
                 Some((4, 1)),
                 &[Some(resident); 3],
                 &[Some(resident); 3],
+                &[[1; 3]; 3],
                 resident,
                 &topology,
                 1,
@@ -4305,6 +4348,7 @@ mod tests {
                 Some((5, 1)),
                 &[Some(resident); 3],
                 &[Some(resident); 3],
+                &[[1; 3]; 3],
                 resident,
                 &topology,
                 1,
@@ -4395,6 +4439,7 @@ mod tests {
                 Some((5, 1)),
                 &[Some(resident); 3],
                 &[Some(resident); 3],
+                &[[1; 3]; 3],
                 resident,
                 &topology,
                 1,
@@ -4508,6 +4553,7 @@ mod tests {
                 Some((1, 0)),
                 &[Some(resident); 2],
                 &[Some(resident); 2],
+                &[[1; 3]; 2],
                 resident,
                 &topology,
                 1,
