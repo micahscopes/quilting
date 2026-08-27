@@ -4916,6 +4916,140 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
     })
 }
 
+struct RootGroupingProbeInputs<'a> {
+    residents: &'a [Option<batch::ResidentLod>],
+    topology: &'a quilting_mesh::HalfEdgeMesh,
+    face_materials: &'a [usize],
+    face_nodes: &'a [usize],
+    face_render_nodes: &'a [usize],
+    initial: batch::ResidentLod,
+}
+
+#[derive(Default)]
+struct RootGroupingProbeScratch {
+    vertex_max: Vec<u32>,
+    face_vertex_lods: Vec<[u32; 3]>,
+    groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+}
+
+fn probe_separate_root_grouping(
+    inputs: &RootGroupingProbeInputs<'_>,
+    scratch: &mut RootGroupingProbeScratch,
+) -> f64 {
+    let started_ms = browser_now_ms();
+    batch::rebuild_resident_vertex_lods(
+        inputs.residents,
+        inputs.topology,
+        inputs.initial,
+        &mut scratch.vertex_max,
+        &mut scratch.face_vertex_lods,
+    );
+    batch::group_resident_faces_into(
+        inputs.residents,
+        &scratch.face_vertex_lods,
+        inputs.face_materials,
+        inputs.face_nodes,
+        inputs.face_render_nodes,
+        inputs.initial,
+        &mut scratch.groups,
+    );
+    browser_now_ms() - started_ms
+}
+
+fn probe_fused_root_grouping(
+    inputs: &RootGroupingProbeInputs<'_>,
+    scratch: &mut RootGroupingProbeScratch,
+) -> f64 {
+    let started_ms = browser_now_ms();
+    batch::rebuild_resident_vertex_max(
+        inputs.residents,
+        inputs.topology,
+        inputs.initial,
+        &mut scratch.vertex_max,
+    );
+    batch::group_resident_faces_from_vertex_max_into(
+        inputs.residents,
+        inputs.topology,
+        &scratch.vertex_max,
+        &mut scratch.face_vertex_lods,
+        inputs.face_materials,
+        inputs.face_nodes,
+        inputs.face_render_nodes,
+        inputs.initial,
+        &mut scratch.groups,
+    );
+    browser_now_ms() - started_ms
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RootGroupingProbeSnapshot {
+    ok: bool,
+    rounds: u32,
+    faces: usize,
+    separate_ms: Vec<f64>,
+    fused_ms: Vec<f64>,
+    exact_rounds: u32,
+    mismatched_rounds: u32,
+}
+
+/// Compare the historical three-walk root rebuild with the fused two-walk
+/// implementation over the exact current resident state. This is explicitly
+/// on-demand; neither algorithm mutates renderer residency or GPU resources.
+#[wasm_bindgen(js_name = "mr_measureRootGrouping")]
+pub fn mr_measure_root_grouping(rounds: u32) -> JsValue {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else { return JsValue::NULL };
+        let Some(topology) = state.lod_topology.as_ref() else { return JsValue::NULL };
+        if state.face_render_nodes.len() != state.num_faces {
+            return JsValue::NULL;
+        }
+        let rounds = rounds.clamp(1, 16);
+        let inputs = RootGroupingProbeInputs {
+            residents: &state.resident_face_lods,
+            topology,
+            face_materials: &state.face_materials,
+            face_nodes: &state.face_nodes,
+            face_render_nodes: &state.face_render_nodes,
+            initial: bounded_standby_resident_lod(),
+        };
+        let mut separate = RootGroupingProbeScratch::default();
+        let mut fused = RootGroupingProbeScratch::default();
+        // Production retains this scratch across publications. Prime both
+        // paths before sampling so allocator growth is not mistaken for the
+        // grouping cost that steady-state camera updates actually pay.
+        let _ = probe_separate_root_grouping(&inputs, &mut separate);
+        let _ = probe_fused_root_grouping(&inputs, &mut fused);
+        let mut separate_ms = Vec::with_capacity(rounds as usize);
+        let mut fused_ms = Vec::with_capacity(rounds as usize);
+        let mut exact_rounds = 0_u32;
+        for round in 0..rounds {
+            if round % 2 == 0 {
+                separate_ms.push(probe_separate_root_grouping(&inputs, &mut separate));
+                fused_ms.push(probe_fused_root_grouping(&inputs, &mut fused));
+            } else {
+                fused_ms.push(probe_fused_root_grouping(&inputs, &mut fused));
+                separate_ms.push(probe_separate_root_grouping(&inputs, &mut separate));
+            }
+            exact_rounds += u32::from(
+                separate.vertex_max == fused.vertex_max
+                    && separate.face_vertex_lods == fused.face_vertex_lods
+                    && separate.groups == fused.groups,
+            );
+        }
+        serde_wasm_bindgen::to_value(&RootGroupingProbeSnapshot {
+            ok: exact_rounds == rounds,
+            rounds,
+            faces: state.num_faces,
+            separate_ms,
+            fused_ms,
+            exact_rounds,
+            mismatched_rounds: rounds - exact_rounds,
+        }).unwrap_or(JsValue::NULL)
+    })
+}
+
 fn adaptive_screen_diagnostic_error(message: impl Into<String>) -> JsValue {
     adaptive_browser_value(&serde_json::json!({
         "ok": false,

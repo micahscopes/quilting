@@ -18,6 +18,7 @@ const {
   hyperscopeControlSpecs,
   load_patch_lab,
   mr_acceptLodDeltaSequence,
+  mr_measureRootGrouping,
   mr_resetRuntimeTimingDiagnostics,
   mr_runtimeTimingDiagnostics,
   mr_uploadComposedLodModel,
@@ -26,7 +27,9 @@ const {
 await init({ module_or_path: readFileSync(wasmPath) });
 
 assert.equal(typeof mr_uploadComposedLodModel, 'function');
+assert.equal(typeof mr_measureRootGrouping, 'function');
 assert.equal(typeof mr_runtimeTimingDiagnostics, 'function');
+assert.equal(mr_measureRootGrouping(4), null);
 assert.equal(typeof mr_resetRuntimeTimingDiagnostics, 'function');
 assert.throws(() => mr_runtimeTimingDiagnostics(), /renderer is not initialized/);
 assert.throws(() => mr_resetRuntimeTimingDiagnostics(), /renderer is not initialized/);

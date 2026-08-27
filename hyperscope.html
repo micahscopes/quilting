@@ -426,7 +426,7 @@ import init, {
   mr_attachSurfaceCameraAnchor, mr_stepSurfaceCameraAnchor,
   mr_transportSurfaceCameraAnchorReflection, mr_detachSurfaceCameraAnchor,
   mr_highlightFace, mr_setSelectedNode, mr_setFocusSphere, mr_debugFocusState,
-  mr_debugResidentLodEdges, mr_debugResidentLodNodes,
+  mr_debugResidentLodEdges, mr_debugResidentLodNodes, mr_measureRootGrouping,
   required_tessellation_atlas_triples,
 } from './pkg/quilting_wasm.js';
 import {
@@ -965,6 +965,7 @@ globalThis.__hyperscopeRuntimeDiagnostics = {
   model: modelPayloadTelemetry,
   residentLodEdges: mr_debugResidentLodEdges,
   residentLodNodes: mr_debugResidentLodNodes,
+  measureRootGrouping: mr_measureRootGrouping,
 };
 const roundShadowDiagnostics = {
   enabled: RUST_ROUND_SHADOW_ENABLED,
