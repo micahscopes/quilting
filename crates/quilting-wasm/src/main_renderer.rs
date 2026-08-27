@@ -5601,6 +5601,15 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         let state = match state.as_mut() { Some(s) => s, None => return };
+        update_batches_in_state(state, face_lods, face_indices);
+    });
+}
+
+fn update_batches_in_state(
+    state: &mut MainState,
+    face_lods: &[f32],
+    face_indices: Option<&[u32]>,
+) {
         state.batch_update_stats.calls += 1;
 
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
@@ -5849,7 +5858,6 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
             culled, lod_corrections, missing, failed,
         );
         state.batch_layout_dirty = missing != 0 || failed != 0;
-    });
 }
 
 #[wasm_bindgen(js_name = "mr_uploadAnimationPose")]
