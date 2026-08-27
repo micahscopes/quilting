@@ -1,7 +1,10 @@
 //! Render passes: configure GL state and issue draw calls per render mode.
 
 use glow::HasContext;
-use quilting_core::render::{RenderGeometry, RenderPass, RenderStyle, RenderSubmissionStats};
+use quilting_core::render::{
+    render_draw_passes, PbrDrawClass, RenderBatchSelection, RenderGeometry, RenderPass,
+    RenderStyle, RenderSubmissionStats,
+};
 
 use crate::buffer::{MeshBuffers, MeshDraw, VertexUniformBuf, WireUniformBuf};
 use crate::shader::Programs;
@@ -26,6 +29,8 @@ pub struct RenderBatch {
     pub perm_parity: f32,
     /// Material index (for PBR rendering).
     pub material_index: usize,
+    /// Shared semantic draw class used by the backend-neutral pass plan.
+    pub pbr_class: PbrDrawClass,
     /// Representative node for the render transform shared by this draw.
     /// Per-instance semantic node identity remains in the prepared patch data.
     pub render_node_index: usize,
@@ -182,10 +187,14 @@ fn draw_batches(
     vtx_ubo: &VertexUniformBuf,
     pass: RenderPass,
     geometry: RenderGeometry,
+    selection: RenderBatchSelection,
 ) -> RenderSubmissionStats {
     let mut stats = RenderSubmissionStats::default();
     let mut vertex_state = None;
     for (batch_index, batch) in batches.iter().enumerate() {
+        if !selection.includes(batch.pbr_class) {
+            continue;
+        }
         apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
         upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
@@ -249,7 +258,7 @@ pub fn record_indexed_submission(
     }
 }
 
-/// Render a frame with the given mode, camera, and batches.
+/// Render a frame using the backend-neutral ordered draw-pass plan.
 pub fn render_frame(
     gl: &glow::Context,
     programs: &Programs,
@@ -262,98 +271,31 @@ pub fn render_frame(
     let mut stats = RenderSubmissionStats::default();
     vtx_ubo.bind(gl);
 
-    let draw_pbr = style == RenderStyle::Pbr;
-    let draw_matcap = matches!(
-        style,
-        RenderStyle::Matcap | RenderStyle::MatcapWire | RenderStyle::Lod
-    );
-    let draw_wire = matches!(style, RenderStyle::Wire | RenderStyle::MatcapWire);
-    let draw_normals = style == RenderStyle::Normals;
-
-    // PBR pass (filled triangles with PBR shader)
-    if draw_pbr {
+    for draw_pass in render_draw_passes(style) {
+        let program = match draw_pass.pass {
+            RenderPass::PbrOpaque | RenderPass::PbrTransparent => programs.pbr,
+            RenderPass::Matcap | RenderPass::Lod => programs.matcap,
+            RenderPass::Wire => programs.wire,
+            RenderPass::Normals => programs.normals,
+            RenderPass::Stretch => programs.stretch,
+        };
         unsafe {
-            gl.use_program(Some(programs.pbr));
+            gl.use_program(Some(program));
+        }
+        if draw_pass.pass == RenderPass::Wire {
+            // All adaptive wire draws use the density heatmap; the fallback
+            // color is ignored by the shader and therefore frame-global state.
+            wire_ubo.upload(gl, [0.0; 3], true);
+            wire_ubo.bind(gl);
         }
         stats.merge(draw_batches(
             gl,
             camera,
             batches,
             vtx_ubo,
-            RenderPass::PbrOpaque,
-            RenderGeometry::Triangles,
-        ));
-    }
-
-    // Matcap/LOD pass (filled triangles)
-    if draw_matcap {
-        unsafe {
-            gl.use_program(Some(programs.matcap));
-        }
-
-        stats.merge(draw_batches(
-            gl,
-            camera,
-            batches,
-            vtx_ubo,
-            if style == RenderStyle::Lod {
-                RenderPass::Lod
-            } else {
-                RenderPass::Matcap
-            },
-            RenderGeometry::Triangles,
-        ));
-    }
-
-    // Wire pass (lines)
-    if draw_wire {
-        unsafe {
-            gl.use_program(Some(programs.wire));
-        }
-        // All adaptive wire draws use the density heatmap; the fallback color
-        // is ignored by the shader and therefore frame-global state.
-        wire_ubo.upload(gl, [0.0; 3], true);
-        wire_ubo.bind(gl);
-
-        stats.merge(draw_batches(
-            gl,
-            camera,
-            batches,
-            vtx_ubo,
-            RenderPass::Wire,
-            RenderGeometry::Lines,
-        ));
-    }
-
-    // Normals pass (filled triangles)
-    if draw_normals {
-        unsafe {
-            gl.use_program(Some(programs.normals));
-        }
-
-        stats.merge(draw_batches(
-            gl,
-            camera,
-            batches,
-            vtx_ubo,
-            RenderPass::Normals,
-            RenderGeometry::Triangles,
-        ));
-    }
-
-    // Stretch heatmap pass (filled triangles)
-    if style == RenderStyle::Stretch {
-        unsafe {
-            gl.use_program(Some(programs.stretch));
-        }
-
-        stats.merge(draw_batches(
-            gl,
-            camera,
-            batches,
-            vtx_ubo,
-            RenderPass::Stretch,
-            RenderGeometry::Triangles,
+            draw_pass.pass,
+            draw_pass.geometry,
+            draw_pass.batches,
         ));
     }
 

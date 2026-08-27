@@ -147,6 +147,14 @@ command by compacting visible instances and emitting indirect draw counts.
 The command contract deliberately says nothing about transform feedback,
 storage buffers, or GPU handles.
 
+`RenderStyle` also resolves to one canonical ordered `RenderDrawPassPlan`
+slice. Each pass names its geometry and semantic batch selection (`all`, PBR
+opaque, or PBR non-opaque). `RenderFrame` extraction and the WebGL2 dispatcher
+iterate this same plan; shader selection, material binding, and API resources
+remain backend-local. A future WebGPU dispatcher can therefore consume the
+same ordering and batch selection while lowering submission to compacted
+indirect draws.
+
 The invalidation predicate is shared as well: preparation changes with source
 pose, resident topology, or the entity's ordinary affine model; visibility
 changes with preparation, the view-projection matrix, or the resident batch

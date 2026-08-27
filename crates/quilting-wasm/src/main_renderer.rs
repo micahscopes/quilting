@@ -92,6 +92,16 @@ fn pbr_material_for_index<'a>(
     }
 }
 
+fn pbr_draw_class(material: &PbrParams) -> PbrDrawClass {
+    if material.transmission_factor > 0.0 {
+        PbrDrawClass::Transmission
+    } else if material.alpha_mode > 1.5 {
+        PbrDrawClass::Blend
+    } else {
+        PbrDrawClass::Opaque
+    }
+}
+
 fn bind_pbr_material_state(
     gl: &glow::Context,
     renderer: &Renderer,
@@ -1985,6 +1995,7 @@ fn sync_render_batches(renderer: &mut MainState) {
     let mut render_batches = std::mem::take(&mut renderer.render_batches);
     render_batches.clear();
     render_batches.reserve(renderer.batches.len());
+    let default_material = PbrParams::default();
     for batch in renderer.batches.values() {
         let conformal = conformal_state_for_node(renderer, batch.render_node_index);
         let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
@@ -1996,10 +2007,16 @@ fn sync_render_batches(renderer: &mut MainState) {
         {
             mesh.num_instances = 0;
         }
+        let (_, material) = pbr_material_for_index(
+            &renderer.materials,
+            &default_material,
+            batch.material_index,
+        );
         render_batches.push(RenderBatch {
             mesh,
             perm_parity: batch.perm_parity,
             material_index: batch.material_index,
+            pbr_class: pbr_draw_class(material),
             render_node_index: batch.render_node_index,
             mobius: conformal.mobius,
             orientation_sign: conformal.orientation_sign * euclidean_orientation,
@@ -2021,7 +2038,6 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
             renderer.render_batches.len(),
         ));
     }
-    let default_material = PbrParams::default();
     let mut batches = Vec::with_capacity(renderer.batches.len());
     for ((&key, gpu_batch), render_batch) in
         renderer.batches.iter().zip(&renderer.render_batches)
@@ -2035,18 +2051,6 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
             .map_err(|_| "render batch has a negative triangle index count".to_string())?;
         let line_index_count = u32::try_from(render_batch.mesh.num_line_indices)
             .map_err(|_| "render batch has a negative line index count".to_string())?;
-        let (_, material) = pbr_material_for_index(
-            &renderer.materials,
-            &default_material,
-            render_batch.material_index,
-        );
-        let pbr_class = if material.transmission_factor > 0.0 {
-            PbrDrawClass::Transmission
-        } else if material.alpha_mode > 1.5 {
-            PbrDrawClass::Blend
-        } else {
-            PbrDrawClass::Opaque
-        };
         batches.push(RenderBatchSnapshot {
             key,
             members: gpu_batch.members.clone(),
@@ -2059,7 +2063,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
                 euclidean_normal: render_batch.euclidean_normal,
             },
             enabled: render_batch.mesh.num_instances > 0,
-            pbr_class,
+            pbr_class: render_batch.pbr_class,
         });
     }
     Ok(RenderSceneSnapshot {
@@ -5907,6 +5911,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
                 st.materials.push(material);
             }
             info!("Set {} PBR materials", st.materials.len());
+            st.render_commands_dirty = true;
             st.render_shadow_scene_dirty = true;
         }
     });
@@ -5937,6 +5942,7 @@ pub fn mr_append_materials(data: &[f32], num_materials: u32) -> u32 {
             state.materials.len() as u32 - base,
             base,
         );
+        state.render_commands_dirty = true;
         state.render_shadow_scene_dirty = true;
         base
     })
@@ -7006,15 +7012,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             state.last_visibility_patch_instances = 0;
         }
         let has_transmission = if state.render_style == RenderStyle::Pbr {
-            let default_material = PbrParams::default();
-            state.render_batches.iter().any(|batch| {
-                let (_, material) = pbr_material_for_index(
-                    &state.materials,
-                    &default_material,
-                    batch.material_index,
-                );
-                material.transmission_factor > 0.0
-            })
+            state
+                .render_batches
+                .iter()
+                .any(|batch| batch.pbr_class == PbrDrawClass::Transmission)
         } else {
             false
         };
@@ -7183,7 +7184,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         &default_mat,
                         batch.material_index,
                     );
-                    if mat.alpha_mode > 1.5 || mat.transmission_factor > 0.0 { continue; }
+                    if batch.pbr_class != PbrDrawClass::Opaque { continue; }
 
                     // glTF spec: cull back faces for single-sided materials
                     unsafe {
@@ -7392,7 +7393,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         &default_mat,
                         batch.material_index,
                     );
-                    if mat.alpha_mode < 1.5 && mat.transmission_factor <= 0.0 { continue; }
+                    if batch.pbr_class == PbrDrawClass::Opaque { continue; }
 
                     let is_blend = mat.alpha_mode > 1.5;
                     let is_transmission = mat.transmission_factor > 0.0;

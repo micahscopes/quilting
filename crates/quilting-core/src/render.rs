@@ -251,6 +251,89 @@ pub enum RenderGeometry {
     Lines,
 }
 
+/// Backend-neutral selection applied by one ordered draw pass. Material and
+/// resource binding remain backend work; this only defines which retained
+/// batches participate in the pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderBatchSelection {
+    All,
+    PbrOpaque,
+    PbrNonOpaque,
+}
+
+impl RenderBatchSelection {
+    pub fn includes(self, pbr_class: PbrDrawClass) -> bool {
+        match self {
+            Self::All => true,
+            Self::PbrOpaque => pbr_class == PbrDrawClass::Opaque,
+            Self::PbrNonOpaque => pbr_class != PbrDrawClass::Opaque,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderDrawPassPlan {
+    pub pass: RenderPass,
+    pub geometry: RenderGeometry,
+    pub batches: RenderBatchSelection,
+}
+
+const PBR_DRAW_PASSES: [RenderDrawPassPlan; 2] = [
+    RenderDrawPassPlan {
+        pass: RenderPass::PbrOpaque,
+        geometry: RenderGeometry::Triangles,
+        batches: RenderBatchSelection::PbrOpaque,
+    },
+    RenderDrawPassPlan {
+        pass: RenderPass::PbrTransparent,
+        geometry: RenderGeometry::Triangles,
+        batches: RenderBatchSelection::PbrNonOpaque,
+    },
+];
+const MATCAP_DRAW_PASSES: [RenderDrawPassPlan; 1] = [RenderDrawPassPlan {
+    pass: RenderPass::Matcap,
+    geometry: RenderGeometry::Triangles,
+    batches: RenderBatchSelection::All,
+}];
+const WIRE_DRAW_PASSES: [RenderDrawPassPlan; 1] = [RenderDrawPassPlan {
+    pass: RenderPass::Wire,
+    geometry: RenderGeometry::Lines,
+    batches: RenderBatchSelection::All,
+}];
+const NORMAL_DRAW_PASSES: [RenderDrawPassPlan; 1] = [RenderDrawPassPlan {
+    pass: RenderPass::Normals,
+    geometry: RenderGeometry::Triangles,
+    batches: RenderBatchSelection::All,
+}];
+const MATCAP_WIRE_DRAW_PASSES: [RenderDrawPassPlan; 2] = [
+    MATCAP_DRAW_PASSES[0],
+    WIRE_DRAW_PASSES[0],
+];
+const LOD_DRAW_PASSES: [RenderDrawPassPlan; 1] = [RenderDrawPassPlan {
+    pass: RenderPass::Lod,
+    geometry: RenderGeometry::Triangles,
+    batches: RenderBatchSelection::All,
+}];
+const STRETCH_DRAW_PASSES: [RenderDrawPassPlan; 1] = [RenderDrawPassPlan {
+    pass: RenderPass::Stretch,
+    geometry: RenderGeometry::Triangles,
+    batches: RenderBatchSelection::All,
+}];
+
+/// Canonical ordered draw-pass plan shared by command extraction and concrete
+/// render backends. It deliberately excludes API objects and resource state.
+pub fn render_draw_passes(style: RenderStyle) -> &'static [RenderDrawPassPlan] {
+    match style {
+        RenderStyle::Pbr => &PBR_DRAW_PASSES,
+        RenderStyle::Matcap => &MATCAP_DRAW_PASSES,
+        RenderStyle::Wire => &WIRE_DRAW_PASSES,
+        RenderStyle::Normals => &NORMAL_DRAW_PASSES,
+        RenderStyle::MatcapWire => &MATCAP_WIRE_DRAW_PASSES,
+        RenderStyle::Lod => &LOD_DRAW_PASSES,
+        RenderStyle::Stretch => &STRETCH_DRAW_PASSES,
+    }
+}
+
 /// Backend-neutral accounting for indexed patch draws actually submitted by a
 /// renderer. Logical [`RenderCommand`]s predict this work; WebGL2 and WebGPU
 /// implementations populate the counters at their submission boundary so a
@@ -737,83 +820,18 @@ fn expected_commands(
         });
     }
 
-    match style {
-        RenderStyle::Pbr => {
-            append_draw_commands(
-                &mut commands,
-                batches,
-                RenderPass::PbrOpaque,
-                RenderGeometry::Triangles,
-                &|batch| batch.pbr_class == PbrDrawClass::Opaque,
-            )?;
-            if batches
-                .iter()
-                .any(|batch| batch.pbr_class == PbrDrawClass::Transmission)
-            {
-                commands.push(RenderCommand::BuildTransmissionPyramid);
-            }
-            append_draw_commands(
-                &mut commands,
-                batches,
-                RenderPass::PbrTransparent,
-                RenderGeometry::Triangles,
-                &|batch| batch.pbr_class != PbrDrawClass::Opaque,
-            )?;
-            if options.focus_postprocess {
-                commands.push(RenderCommand::FocusPostProcess);
-            }
+    let has_transmission = style == RenderStyle::Pbr
+        && batches
+            .iter()
+            .any(|batch| batch.pbr_class == PbrDrawClass::Transmission);
+    for draw_pass in render_draw_passes(style) {
+        if draw_pass.pass == RenderPass::PbrTransparent && has_transmission {
+            commands.push(RenderCommand::BuildTransmissionPyramid);
         }
-        RenderStyle::Matcap => append_draw_commands(
-            &mut commands,
-            batches,
-            RenderPass::Matcap,
-            RenderGeometry::Triangles,
-            &|_| true,
-        )?,
-        RenderStyle::Wire => append_draw_commands(
-            &mut commands,
-            batches,
-            RenderPass::Wire,
-            RenderGeometry::Lines,
-            &|_| true,
-        )?,
-        RenderStyle::Normals => append_draw_commands(
-            &mut commands,
-            batches,
-            RenderPass::Normals,
-            RenderGeometry::Triangles,
-            &|_| true,
-        )?,
-        RenderStyle::MatcapWire => {
-            append_draw_commands(
-                &mut commands,
-                batches,
-                RenderPass::Matcap,
-                RenderGeometry::Triangles,
-                &|_| true,
-            )?;
-            append_draw_commands(
-                &mut commands,
-                batches,
-                RenderPass::Wire,
-                RenderGeometry::Lines,
-                &|_| true,
-            )?;
-        }
-        RenderStyle::Lod => append_draw_commands(
-            &mut commands,
-            batches,
-            RenderPass::Lod,
-            RenderGeometry::Triangles,
-            &|_| true,
-        )?,
-        RenderStyle::Stretch => append_draw_commands(
-            &mut commands,
-            batches,
-            RenderPass::Stretch,
-            RenderGeometry::Triangles,
-            &|_| true,
-        )?,
+        append_draw_commands(&mut commands, batches, *draw_pass)?;
+    }
+    if style == RenderStyle::Pbr && options.focus_postprocess {
+        commands.push(RenderCommand::FocusPostProcess);
     }
     if style != RenderStyle::Pbr {
         if let Some(face_index) = options.highlight_face {
@@ -826,22 +844,20 @@ fn expected_commands(
 fn append_draw_commands(
     commands: &mut Vec<RenderCommand>,
     batches: &[RenderBatchSnapshot],
-    pass: RenderPass,
-    geometry: RenderGeometry,
-    include: &dyn Fn(&RenderBatchSnapshot) -> bool,
+    draw_pass: RenderDrawPassPlan,
 ) -> Result<(), RenderContractError> {
     for (batch_index, batch) in batches
         .iter()
         .enumerate()
-        .filter(|(_, batch)| include(batch))
+        .filter(|(_, batch)| draw_pass.batches.includes(batch.pbr_class))
     {
         commands.push(RenderCommand::DrawPatches {
             batch_index: batch_index
                 .try_into()
                 .map_err(|_| RenderContractError::BatchCountOverflow)?,
             instance_count: batch.active_instance_count()?,
-            pass,
-            geometry,
+            pass: draw_pass.pass,
+            geometry: draw_pass.geometry,
         });
     }
     Ok(())
