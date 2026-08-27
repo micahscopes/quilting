@@ -259,6 +259,11 @@ struct MainState {
     render_shadow: RenderShadowObserver,
     render_shadow_scene_dirty: bool,
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    /// Complete crack-free root grouping for the latest admitted source-face
+    /// classification. Adaptive publication keeps this separate from the live
+    /// complete frontier so rollback and retained-layer extraction never
+    /// confuse two CPU epochs.
+    baseline_batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
     /// Raw classifier request before shared-edge and within-face promotion.
@@ -1608,6 +1613,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_shadow: RenderShadowObserver::default(),
             render_shadow_scene_dirty: true,
             batch_groups: BTreeMap::new(),
+            baseline_batch_groups: BTreeMap::new(),
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
             requested_face_lods: Vec::new(),
@@ -3531,18 +3537,37 @@ fn bounded_standby_resident_lod() -> batch::ResidentLod {
     }
 }
 
-fn compare_adaptive_root_shadow(state: &mut MainState, initial: batch::ResidentLod) {
-    let Some(topology) = state.screen_topology_cache.as_ref() else {
+fn compare_adaptive_root_shadow(
+    state: &mut MainState,
+    initial: batch::ResidentLod,
+    source: LegacyBatchDestination,
+) {
+    let MainState {
+        adaptive_root_shadow,
+        screen_topology_cache,
+        resident_face_lods,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        batch_groups,
+        baseline_batch_groups,
+        ..
+    } = state;
+    let Some(topology) = screen_topology_cache.as_ref() else {
         return;
     };
-    state.adaptive_root_shadow.compare(
+    let groups = match source {
+        LegacyBatchDestination::Live => batch_groups,
+        LegacyBatchDestination::Baseline => baseline_batch_groups,
+    };
+    adaptive_root_shadow.compare(
         topology,
-        &state.resident_face_lods,
+        resident_face_lods,
         initial,
-        &state.face_materials,
-        &state.face_nodes,
-        &state.face_render_nodes,
-        &state.batch_groups,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        groups,
     );
 }
 
@@ -3826,7 +3851,17 @@ pub fn mr_set_adaptive_root_shadow_enabled(enabled: bool) -> JsValue {
             && !state.batch_layout_dirty
             && !state.batch_groups.is_empty()
         {
-            compare_adaptive_root_shadow(state, bounded_standby_resident_lod());
+            let initial = bounded_standby_resident_lod();
+            rebuild_legacy_batch_groups(
+                state,
+                initial,
+                LegacyBatchDestination::Baseline,
+            );
+            compare_adaptive_root_shadow(
+                state,
+                initial,
+                LegacyBatchDestination::Baseline,
+            );
         }
         serde_wasm_bindgen::to_value(&state.adaptive_root_shadow.snapshot())
             .unwrap_or(JsValue::NULL)
@@ -4145,6 +4180,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.authored_node_models.clear();
             st.surface_runtime.reset_geometry();
             st.batch_groups.clear();
+            st.baseline_batch_groups.clear();
             st.batch_staging.clear();
             st.requested_face_lods = vec![None; st.num_faces];
             st.resident_face_lods = vec![None; st.num_faces];
@@ -6314,7 +6350,17 @@ fn mark_batch_layout_dirty(state: &mut MainState) {
 /// classifier snapshot. Adaptive replanning always starts here so any CPU-side
 /// rejection can publish a known crack-free root fallback rather than retain a
 /// partially assembled frontier.
-fn rebuild_legacy_batch_groups(state: &mut MainState, initial: batch::ResidentLod) {
+#[derive(Clone, Copy)]
+enum LegacyBatchDestination {
+    Live,
+    Baseline,
+}
+
+fn rebuild_legacy_batch_groups(
+    state: &mut MainState,
+    initial: batch::ResidentLod,
+    destination: LegacyBatchDestination,
+) {
     let nf = state.num_faces;
     if let Some(topology) = state.lod_topology.as_ref() {
         batch::rebuild_resident_vertex_lods(
@@ -6338,6 +6384,10 @@ fn rebuild_legacy_batch_groups(state: &mut MainState, initial: batch::ResidentLo
         }
     }
     rebuild_face_render_nodes(state);
+    let groups = match destination {
+        LegacyBatchDestination::Live => &mut state.batch_groups,
+        LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
+    };
     batch::group_resident_faces_into(
         &state.resident_face_lods,
         &state.resident_vertex_lods,
@@ -6345,7 +6395,7 @@ fn rebuild_legacy_batch_groups(state: &mut MainState, initial: batch::ResidentLo
         &state.face_nodes,
         &state.face_render_nodes,
         initial,
-        &mut state.batch_groups,
+        groups,
     );
 }
 
@@ -6433,16 +6483,37 @@ struct AdaptiveGroupPreparation {
     >,
 }
 
+/// Put the complete root classification in the live slot and return the exact
+/// formerly live complete epoch for transactional GPU rollback. The baseline
+/// scratch is empty afterward and can be rebuilt without aliasing either map.
+fn stage_baseline_batch_groups(
+    live: &mut BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    baseline: &mut BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+) -> BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>> {
+    std::mem::swap(live, baseline);
+    std::mem::take(baseline)
+}
+
 fn prepare_adaptive_batch_groups(
     state: &mut MainState,
     initial: batch::ResidentLod,
 ) -> AdaptiveGroupPreparation {
     let enabled = state.adaptive_picked.is_enabled();
-    let root_shadow_enabled = state.adaptive_root_shadow.is_enabled();
-    let mut attempted_live = false;
 
-    if enabled && !root_shadow_enabled {
-        attempted_live = true;
+    // Keep the latest complete root classification independent of the live
+    // complete adaptive frontier. Planning may swap a candidate into the live
+    // map, but neither root-shadow observation nor fallback construction may
+    // overwrite the exact CPU epoch corresponding to the current GPU map.
+    rebuild_legacy_batch_groups(state, initial, LegacyBatchDestination::Baseline);
+    if state.adaptive_root_shadow.is_enabled() {
+        compare_adaptive_root_shadow(
+            state,
+            initial,
+            LegacyBatchDestination::Baseline,
+        );
+    }
+
+    if enabled {
         if apply_adaptive_screen_plan(state, initial, true, None) {
             return AdaptiveGroupPreparation {
                 reused_published: true,
@@ -6457,20 +6528,13 @@ fn prepare_adaptive_batch_groups(
         }
     }
 
-    let mut previous_groups = std::mem::take(&mut state.batch_groups);
-    rebuild_legacy_batch_groups(state, initial);
-    if root_shadow_enabled {
-        compare_adaptive_root_shadow(state, initial);
-    }
-    if enabled
-        && !attempted_live
-        && apply_adaptive_screen_plan(state, initial, false, Some(&mut previous_groups))
-    {
-        return AdaptiveGroupPreparation {
-            reused_published: true,
-            previous_groups: None,
-        };
-    }
+    // Planning was unavailable or rejected, or adaptive mode is being
+    // disabled. Stage the independently built roots while retaining the exact
+    // formerly live complete map for transactional GPU rollback.
+    let previous_groups = stage_baseline_batch_groups(
+        &mut state.batch_groups,
+        &mut state.baseline_batch_groups,
+    );
     AdaptiveGroupPreparation {
         reused_published: false,
         previous_groups: Some(previous_groups),
@@ -6796,9 +6860,17 @@ fn update_batches_in_state(
         let adaptive_preparation = if transactional_upload {
             Some(prepare_adaptive_batch_groups(state, initial_resident))
         } else {
-            rebuild_legacy_batch_groups(state, initial_resident);
+            rebuild_legacy_batch_groups(
+                state,
+                initial_resident,
+                LegacyBatchDestination::Live,
+            );
             if state.adaptive_root_shadow.is_enabled() {
-                compare_adaptive_root_shadow(state, initial_resident);
+                compare_adaptive_root_shadow(
+                    state,
+                    initial_resident,
+                    LegacyBatchDestination::Live,
+                );
             }
             None
         };
@@ -7880,5 +7952,42 @@ mod tests {
             Some((1, 3)),
         ));
         assert!(same_context_lod_pose_continuity_matches(None, None));
+    }
+
+    #[wasm_bindgen_test]
+    fn baseline_publication_retains_the_exact_live_rollback_epoch() {
+        let root_lod = batch::ResidentLod::uniform(1);
+        let adaptive_lod = batch::ResidentLod::uniform(2);
+        let root_key = batch::RenderBatchKey::from_resident(root_lod, 0, 0);
+        let adaptive_key = batch::RenderBatchKey::from_resident(adaptive_lod, 0, 0);
+        let root_member = batch::RenderBatchMember {
+            face_index: 7,
+            leaf_id: quilting_core::screen_partition::ScreenPatchLeafId::ROOT,
+            node_index: 0,
+            edge_lods: [1; 3],
+            permutation_index: 0,
+            vertex_lods: [1; 3],
+        };
+        let adaptive_member = batch::RenderBatchMember {
+            face_index: 7,
+            leaf_id: quilting_core::screen_partition::ScreenPatchLeafId {
+                depth: 1,
+                path: 2,
+            },
+            node_index: 0,
+            edge_lods: [2; 3],
+            permutation_index: 0,
+            vertex_lods: [2; 3],
+        };
+        let expected_baseline = BTreeMap::from([(root_key, vec![root_member])]);
+        let expected_live = BTreeMap::from([(adaptive_key, vec![adaptive_member])]);
+        let mut baseline = expected_baseline.clone();
+        let mut live = expected_live.clone();
+
+        let rollback = stage_baseline_batch_groups(&mut live, &mut baseline);
+
+        assert_eq!(live, expected_baseline);
+        assert_eq!(rollback, expected_live);
+        assert!(baseline.is_empty());
     }
 }
