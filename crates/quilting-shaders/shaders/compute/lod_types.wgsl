@@ -7,7 +7,7 @@
 
 struct LodFaceRecord {
     vertex_indices: vec3<u32>,
-    _padding: u32,
+    subject_index: u32,
 }
 
 struct LodSkinningRecord {

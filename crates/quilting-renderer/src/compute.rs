@@ -676,6 +676,222 @@ pub struct LodDispatchState {
     pub has_pole: f32,
 }
 
+/// Linear little-endian word records for WebGPU classifier residency.
+///
+/// These are deliberately plain integer arrays: callers can upload their byte
+/// representation without depending on Rust struct padding, while tests can
+/// compare the exact words against the WGSL storage contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslLodModelWords {
+    pub faces: Vec<[u32; 4]>,
+    pub positions: Vec<[u32; 4]>,
+    pub skinning: Vec<[u32; 8]>,
+    pub morph_deltas: Vec<[u32; 4]>,
+    pub adjacency: Vec<[u32; 4]>,
+}
+
+/// Per-dispatch values not already carried by `LodDispatchState` or the
+/// immutable prepared model. Matrices retain the column-major renderer ABI.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WgslLodDispatchMetrics {
+    pub view_projection: [f32; 16],
+    pub density: f32,
+    pub pixel_floor: f32,
+    pub max_lod: f32,
+    pub viewport: [f32; 2],
+    pub num_joints: u32,
+}
+
+fn wgsl_lod_subject_rows(
+    prepared: &PreparedLodModel,
+) -> Result<std::collections::BTreeMap<usize, u32>, String> {
+    let mut rows = std::collections::BTreeMap::new();
+    for &node in &prepared.model.face_nodes {
+        if !rows.contains_key(&node) {
+            let row = u32::try_from(rows.len())
+                .map_err(|_| "LOD subject table exceeds the WGSL ABI".to_string())?;
+            rows.insert(node, row);
+        }
+    }
+    Ok(rows)
+}
+
+/// Pack immutable classifier residency into the exact WGSL record strides.
+pub fn pack_wgsl_lod_model_words(
+    prepared: &PreparedLodModel,
+) -> Result<WgslLodModelWords, String> {
+    let model = &prepared.model;
+    let subject_rows = wgsl_lod_subject_rows(prepared)?;
+    let mut faces = Vec::with_capacity(model.faces.len());
+    for (&vertices, &node) in model.faces.iter().zip(&model.face_nodes) {
+        let subject = subject_rows[&node];
+        faces.push([vertices[0], vertices[1], vertices[2], subject]);
+    }
+
+    let mut positions = Vec::with_capacity(prepared.residency.num_vertices as usize);
+    for position in model.positions.chunks_exact(3) {
+        positions.push([
+            position[0].to_bits(),
+            position[1].to_bits(),
+            position[2].to_bits(),
+            0,
+        ]);
+    }
+
+    let mut skinning = Vec::with_capacity(model.joint_indices.len());
+    for (&indices, &weights) in model.joint_indices.iter().zip(&model.joint_weights) {
+        skinning.push([
+            u32::from(indices[0]),
+            u32::from(indices[1]),
+            u32::from(indices[2]),
+            u32::from(indices[3]),
+            weights[0].to_bits(),
+            weights[1].to_bits(),
+            weights[2].to_bits(),
+            weights[3].to_bits(),
+        ]);
+    }
+
+    let mut morph_deltas = Vec::with_capacity(
+        model
+            .num_morph_targets
+            .saturating_mul(prepared.residency.num_vertices as usize),
+    );
+    for delta in model.morph_deltas.chunks_exact(3) {
+        morph_deltas.push([
+            delta[0].to_bits(),
+            delta[1].to_bits(),
+            delta[2].to_bits(),
+            0,
+        ]);
+    }
+
+    let mut adjacency = Vec::with_capacity(model.faces.len().saturating_mul(3));
+    for edge in prepared.adjacency.chunks_exact(4) {
+        let neighbor = edge[0];
+        let neighbor_edge = edge[1];
+        if !neighbor.is_finite()
+            || neighbor.fract() != 0.0
+            || neighbor < -1.0
+            || neighbor > i32::MAX as f32
+            || !neighbor_edge.is_finite()
+            || neighbor_edge.fract() != 0.0
+            || !(0.0..=2.0).contains(&neighbor_edge)
+        {
+            return Err("LOD adjacency cannot be represented by the WGSL ABI".to_string());
+        }
+        adjacency.push([
+            (neighbor as i32) as u32,
+            neighbor_edge as u32,
+            0,
+            0,
+        ]);
+    }
+
+    Ok(WgslLodModelWords {
+        faces,
+        positions,
+        skinning,
+        morph_deltas,
+        adjacency,
+    })
+}
+
+/// Pack authored nodes into deterministic dense 160-byte WGSL rows. Missing
+/// dispatch states stay invalid (`conformal.w == 0`), while arbitrarily sparse
+/// scene-node IDs do not inflate GPU residency.
+pub fn pack_wgsl_lod_subject_words(
+    prepared: &PreparedLodModel,
+    dispatch: &LodDispatchState,
+) -> Result<Vec<[u32; 40]>, String> {
+    let subject_rows = wgsl_lod_subject_rows(prepared)?;
+    let mut packed = vec![[0; 40]; subject_rows.len().max(1)];
+    for state in &dispatch.subjects {
+        let row_index = subject_rows
+            .get(&state.node)
+            .ok_or_else(|| "LOD subject state has no resident face row".to_string())?;
+        let row = &mut packed[*row_index as usize];
+        for (destination, value) in row[..16].iter_mut().zip(state.mobius) {
+            *destination = value.to_bits();
+        }
+        for (destination, value) in row[16..32].iter_mut().zip(state.model) {
+            *destination = value.to_bits();
+        }
+        for (destination, value) in row[32..36].iter_mut().zip(state.pole) {
+            *destination = value.to_bits();
+        }
+        row[36] = state.mobius_power.to_bits();
+        row[37] = state.c_norm_sq.to_bits();
+        row[38] = state.has_pole.to_bits();
+        row[39] = 1.0f32.to_bits();
+    }
+    Ok(packed)
+}
+
+/// Pack the exact 272-byte `LodDispatchUniforms` block declared in WGSL.
+pub fn pack_wgsl_lod_dispatch_words(
+    prepared: &PreparedLodModel,
+    dispatch: &LodDispatchState,
+    metrics: WgslLodDispatchMetrics,
+) -> Result<[u32; 68], String> {
+    let float_inputs = dispatch
+        .baseline_mobius
+        .iter()
+        .chain(&dispatch.baseline_model)
+        .chain(&dispatch.pole)
+        .chain(&metrics.view_projection)
+        .copied()
+        .chain([
+            dispatch.mobius_power,
+            dispatch.c_norm_sq,
+            dispatch.has_pole,
+            metrics.density,
+            metrics.pixel_floor,
+            metrics.max_lod,
+            metrics.viewport[0],
+            metrics.viewport[1],
+            prepared.residency.mesh_radius,
+        ]);
+    if !float_inputs.clone().all(f32::is_finite)
+        || metrics.density <= 0.0
+        || metrics.max_lod < 1.0
+        || metrics.viewport.iter().any(|&extent| extent <= 0.0)
+    {
+        return Err("LOD dispatch cannot be represented by the WGSL ABI".to_string());
+    }
+
+    let mut words = [0u32; 68];
+    for (destination, value) in words[..16].iter_mut().zip(dispatch.baseline_mobius) {
+        *destination = value.to_bits();
+    }
+    for (destination, value) in words[16..32].iter_mut().zip(dispatch.baseline_model) {
+        *destination = value.to_bits();
+    }
+    for (destination, value) in words[32..36].iter_mut().zip(dispatch.pole) {
+        *destination = value.to_bits();
+    }
+    words[36] = dispatch.mobius_power.to_bits();
+    words[37] = dispatch.c_norm_sq.to_bits();
+    words[38] = dispatch.has_pole.to_bits();
+    words[39] = f32::from(!dispatch.subjects.is_empty()).to_bits();
+    for (destination, value) in words[40..56].iter_mut().zip(metrics.view_projection) {
+        *destination = value.to_bits();
+    }
+    words[56] = metrics.density.to_bits();
+    words[57] = prepared.residency.mesh_radius.to_bits();
+    words[58] = metrics.pixel_floor.to_bits();
+    words[59] = metrics.max_lod.to_bits();
+    words[60] = metrics.viewport[0].to_bits();
+    words[61] = metrics.viewport[1].to_bits();
+    words[64] = u32::try_from(prepared.residency.num_faces)
+        .map_err(|_| "LOD face count exceeds the WGSL ABI".to_string())?;
+    words[65] = prepared.residency.num_vertices;
+    words[66] = metrics.num_joints;
+    words[67] = u32::try_from(prepared.model.num_morph_targets)
+        .map_err(|_| "LOD morph target count exceeds the WGSL ABI".to_string())?;
+    Ok(words)
+}
+
 /// One exact mismatch between two backend LOD classification records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LodClassificationMismatch {
@@ -2263,6 +2479,125 @@ mod tests {
         assert!(LOD_COMPUTE_VS.contains("uniform highp sampler2D u_subject_states"));
         assert!(LOD_COMPUTE_VS.contains("int subject = int(texelFetch"));
         assert!(LOD_COMPUTE_VS.contains("active_model_matrix = mat4("));
+    }
+
+    #[test]
+    fn wgsl_classifier_payload_words_have_stable_layout_and_offsets() {
+        let prepared = prepare_lod_model(LodModelData {
+            positions: vec![1.0, -2.0, 3.0, 4.0, 5.0, 6.0, -7.0, 8.0, 9.0],
+            faces: vec![[0, 1, 2]],
+            joint_indices: vec![[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]],
+            joint_weights: vec![
+                [0.1, 0.2, 0.3, 0.4],
+                [0.5, 0.25, 0.125, 0.125],
+                [1.0, 0.0, 0.0, 0.0],
+            ],
+            morph_deltas: vec![
+                0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09,
+            ],
+            num_morph_targets: 1,
+            face_nodes: vec![2],
+        })
+        .unwrap();
+        let model = pack_wgsl_lod_model_words(&prepared).unwrap();
+        assert_eq!(model.faces, vec![[0, 1, 2, 0]]);
+        assert_eq!(model.positions[0], [1.0f32.to_bits(), (-2.0f32).to_bits(), 3.0f32.to_bits(), 0]);
+        assert_eq!(
+            model.skinning[0],
+            [
+                1,
+                2,
+                3,
+                4,
+                0.1f32.to_bits(),
+                0.2f32.to_bits(),
+                0.3f32.to_bits(),
+                0.4f32.to_bits(),
+            ],
+        );
+        assert_eq!(
+            model.morph_deltas[2],
+            [0.07f32.to_bits(), 0.08f32.to_bits(), 0.09f32.to_bits(), 0],
+        );
+        assert_eq!(model.adjacency, vec![[u32::MAX, 0, 0, 0]; 3]);
+        assert_eq!(std::mem::size_of_val(&model.faces[0]), 16);
+        assert_eq!(std::mem::size_of_val(&model.positions[0]), 16);
+        assert_eq!(std::mem::size_of_val(&model.skinning[0]), 32);
+        assert_eq!(std::mem::size_of_val(&model.morph_deltas[0]), 16);
+        assert_eq!(std::mem::size_of_val(&model.adjacency[0]), 16);
+
+        let dispatch = LodDispatchState {
+            subjects: vec![LodSubjectState {
+                node: 2,
+                mobius: [2.0; 16],
+                model: [3.0; 16],
+                pole: [4.0; 4],
+                mobius_power: 5.0,
+                c_norm_sq: 6.0,
+                has_pole: 1.0,
+            }],
+            baseline_mobius: [7.0; 16],
+            baseline_model: [8.0; 16],
+            pole: [9.0; 4],
+            mobius_power: 10.0,
+            c_norm_sq: 11.0,
+            has_pole: 1.0,
+        };
+        let subjects = pack_wgsl_lod_subject_words(&prepared, &dispatch).unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0][..16], [2.0f32.to_bits(); 16]);
+        assert_eq!(subjects[0][16..32], [3.0f32.to_bits(); 16]);
+        assert_eq!(subjects[0][32..36], [4.0f32.to_bits(); 4]);
+        assert_eq!(
+            &subjects[0][36..40],
+            &[
+                5.0f32.to_bits(),
+                6.0f32.to_bits(),
+                1.0f32.to_bits(),
+                1.0f32.to_bits(),
+            ],
+        );
+        assert_eq!(std::mem::size_of_val(&subjects[0]), 160);
+
+        let view_projection = std::array::from_fn(|index| 20.0 + index as f32);
+        let uniform = pack_wgsl_lod_dispatch_words(
+            &prepared,
+            &dispatch,
+            WgslLodDispatchMetrics {
+                view_projection,
+                density: 12.0,
+                pixel_floor: 13.0,
+                max_lod: 64.0,
+                viewport: [1920.0, 1080.0],
+                num_joints: 14,
+            },
+        )
+        .unwrap();
+        assert_eq!(std::mem::size_of_val(&uniform), 272);
+        assert_eq!(uniform[..16], [7.0f32.to_bits(); 16]);
+        assert_eq!(uniform[16..32], [8.0f32.to_bits(); 16]);
+        assert_eq!(uniform[32..36], [9.0f32.to_bits(); 4]);
+        assert_eq!(
+            &uniform[36..40],
+            &[
+                10.0f32.to_bits(),
+                11.0f32.to_bits(),
+                1.0f32.to_bits(),
+                1.0f32.to_bits(),
+            ],
+        );
+        assert_eq!(
+            &uniform[40..56],
+            &view_projection.map(f32::to_bits),
+        );
+        assert_eq!(uniform[56], 12.0f32.to_bits());
+        assert_eq!(uniform[57], prepared.residency.mesh_radius.to_bits());
+        assert_eq!(uniform[58], 13.0f32.to_bits());
+        assert_eq!(uniform[59], 64.0f32.to_bits());
+        assert_eq!(uniform[60], 1920.0f32.to_bits());
+        assert_eq!(uniform[61], 1080.0f32.to_bits());
+        assert_eq!(&uniform[62..64], &[0, 0]);
+        assert_eq!(&uniform[64..68], &[1, 3, 14, 1]);
     }
 
     #[test]
