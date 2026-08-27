@@ -6017,15 +6017,26 @@ canvas.addEventListener('mousedown', e => {
   }
 });
 window.addEventListener('mouseup', () => drag = false);
+// Visibility follows the rendered camera every frame. Tessellation topology
+// is substantially more expensive, especially when bounded adaptive leaves
+// must be reconciled and regrouped, so publish it once the pointer gesture
+// settles instead of turning every mouse report into another LOD transaction.
+const POINTER_LOD_SETTLE_MS = 100;
 let camDebounce = null;
+function schedulePointerLodSettle() {
+  clearTimeout(camDebounce);
+  camDebounce = setTimeout(() => {
+    debouncedLodRecompute();
+    syncURL();
+  }, POINTER_LOD_SETTLE_MS);
+}
 window.addEventListener('mousemove', e => {
   if (!drag) return;
   const dx = e.clientX - lx, dy = e.clientY - ly;
   mouseDragDistance += Math.hypot(dx, dy);
   lx = e.clientX; ly = e.clientY;
   integratePointerCamera(dx, dy, e.shiftKey ? 1 : 0);
-  clearTimeout(camDebounce);
-  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
+  schedulePointerLodSettle();
 });
 window.addEventListener('keydown', e => {
   const editingText = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target?.tagName);
@@ -6108,8 +6119,7 @@ canvas.addEventListener('wheel', e => {
     return;
   }
   integratePointerCamera(0, e.deltaY, 2);
-  clearTimeout(camDebounce);
-  camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
+  schedulePointerLodSettle();
 }, { passive: false });
 
 // Touch support

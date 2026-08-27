@@ -204,6 +204,16 @@ for (const requiredPoseGate of [
     `LOD animation work must be gated by a resident deforming pose: ${requiredPoseGate}`,
   );
 }
+
+assert.ok(
+  browserSource.includes('const POINTER_LOD_SETTLE_MS = 100;'),
+  'pointer LOD topology must use the measured trailing settle boundary',
+);
+assert.equal(
+  Array.from(browserSource.matchAll(/schedulePointerLodSettle\(\);/g)).length,
+  2,
+  'mouse drag and wheel must share one pointer LOD settle scheduler',
+);
 assert.ok(
   browserSource.includes('lodDeltaResetPending = true;'),
   'a rejected sparse publication must force a full worker snapshot',
