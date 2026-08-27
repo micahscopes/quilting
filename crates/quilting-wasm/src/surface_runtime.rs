@@ -17,6 +17,7 @@ use hyperscape::{
 use quilting_core::instance_layout;
 use quilting_core::patch::QBTriPatch;
 use quilting_core::{Mobius, Quat};
+use quilting_renderer::compute::LodAnimationSource;
 use quilting_round_index::PatchControl;
 use serde::Serialize;
 use uuid::Uuid;
@@ -292,6 +293,39 @@ impl SurfaceRuntime {
         self.morph_deltas.extend_from_slice(deltas);
         self.morph_num_vertices = num_vertices;
         self.morph_num_targets = num_targets;
+    }
+
+    /// Borrow the immutable animation payload already retained for walking and
+    /// patch preparation. A context-local LOD classifier must consume this
+    /// exact source instead of asking the browser to manufacture another copy.
+    pub fn lod_animation_source(
+        &self,
+        expected_vertices: usize,
+    ) -> Result<LodAnimationSource<'_>, String> {
+        let skinning = match (self.joint_indices.len(), self.joint_weights.len()) {
+            (0, 0) => None,
+            (indices, weights) if indices == expected_vertices && weights == expected_vertices => {
+                Some((self.joint_indices.as_slice(), self.joint_weights.as_slice()))
+            }
+            _ => return Err("renderer LOD skinning source does not match resident vertices".into()),
+        };
+        let expected_morph_scalars = self
+            .morph_num_targets
+            .checked_mul(expected_vertices)
+            .and_then(|count| count.checked_mul(3))
+            .ok_or_else(|| "renderer LOD morph source size overflow".to_string())?;
+        if self.morph_deltas.len() != expected_morph_scalars
+            || (self.morph_num_targets > 0 && self.morph_num_vertices != expected_vertices)
+        {
+            return Err("renderer LOD morph source does not match resident vertices".into());
+        }
+        Ok(LodAnimationSource {
+            primary_vertices: expected_vertices,
+            joint_indices: skinning.map(|(indices, _)| indices),
+            joint_weights: skinning.map(|(_, weights)| weights),
+            morph_deltas: &self.morph_deltas,
+            num_morph_targets: self.morph_num_targets,
+        })
     }
 
     #[cfg(test)]
@@ -2582,5 +2616,32 @@ mod tests {
             .iter()
             .all(|position| (position[2] - 2.0).abs() < 1.0e-9));
         assert_eq!(controls[0].weights, [[1.0, 0.0, 0.0, 0.0]; 3]);
+    }
+
+    #[test]
+    fn lod_animation_source_borrows_the_exact_renderer_payload() {
+        let mut runtime = SurfaceRuntime::default();
+        let joint_indices = [[0, 1, 2, 3]; 3];
+        let joint_weights = [[0.25; 4]; 3];
+        let morph_deltas = [0.125; 9];
+        runtime.set_skinning(&joint_indices, &joint_weights);
+        runtime.set_morph_targets(&morph_deltas, 3, 1);
+
+        let source = runtime.lod_animation_source(3).unwrap();
+        assert_eq!(source.primary_vertices, 3);
+        assert_eq!(source.joint_indices, Some(joint_indices.as_slice()));
+        assert_eq!(source.joint_weights, Some(joint_weights.as_slice()));
+        assert_eq!(source.morph_deltas, &morph_deltas);
+        assert_eq!(source.num_morph_targets, 1);
+    }
+
+    #[test]
+    fn lod_animation_source_rejects_a_stale_geometry_epoch() {
+        let mut runtime = SurfaceRuntime::default();
+        runtime.set_skinning(&[[0; 4]; 2], &[[0.0; 4]; 2]);
+        assert_eq!(
+            runtime.lod_animation_source(3).unwrap_err(),
+            "renderer LOD skinning source does not match resident vertices",
+        );
     }
 }

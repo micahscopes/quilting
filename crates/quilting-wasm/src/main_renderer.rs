@@ -17,6 +17,10 @@ use quilting_renderer::buffer::{
     create_patch_input_vao, create_patch_visibility_input_vao, EnvironmentMaps, MeshBuffers,
     MeshDraw, PbrParams, PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
 };
+use quilting_renderer::compute::{
+    build_composed_lod_model, prepare_lod_atlas_lookup, prepare_lod_model, LodAtlasLookup,
+    LodCompute, LodModelResidency,
+};
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
     camera_for_batch, record_indexed_submission, same_vertex_uniform_state, Camera, RenderBatch,
@@ -258,6 +262,11 @@ struct MainState {
     /// from the drawable standby/resident topology.
     classified_face_visibility: Vec<bool>,
     classified_culled_faces: usize,
+    /// Canonical atlas identity shared by worker and same-context classifiers.
+    lod_atlas_lookup: Option<LodAtlasLookup>,
+    /// Opt-in classifier residency on the renderer's own WebGL context. Until
+    /// shadow parity is proven, the worker remains the only live authority.
+    same_context_lod: Option<SameContextLod>,
     /// Opt-in observer for the conservative CPU round hierarchy. It never
     /// changes batch membership or draw calls.
     round_shadow: RoundShadowObserver,
@@ -369,6 +378,34 @@ struct MainState {
     highlight_prog: Option<glow::Program>,
 }
 
+struct SameContextLod {
+    compute: LodCompute,
+    residency: LodModelResidency,
+}
+
+impl SameContextLod {
+    fn destroy(self, gl: &glow::Context) {
+        self.compute.destroy(gl);
+    }
+}
+
+#[derive(Serialize)]
+struct SameContextLodResidencySnapshot {
+    ready: bool,
+    num_faces: usize,
+    num_vertices: u32,
+    topology_domains: usize,
+    mesh_radius: f32,
+    atlas_patches: usize,
+    atlas_max_lod: f32,
+}
+
+fn clear_same_context_lod(state: &mut MainState) {
+    if let Some(residency) = state.same_context_lod.take() {
+        residency.destroy(state.renderer.gl());
+    }
+}
+
 impl MainState {
     /// Retire one complete renderer epoch with the WebGL context that created
     /// its resources. This must run before a replacement state becomes visible.
@@ -385,6 +422,10 @@ impl MainState {
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, None);
             gl.bind_buffer(glow::UNIFORM_BUFFER, None);
+        }
+
+        if let Some(lod) = self.same_context_lod.take() {
+            lod.destroy(gl);
         }
 
         // RenderBatch/MeshDraw values are non-owning views into GpuBatch.
@@ -746,6 +787,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
         _ => return false,
     };
 
+    let _ = gl_ctx.get_extension("EXT_color_buffer_float");
+
     let gl = glow::Context::from_webgl2_context(gl_ctx);
     let renderer = match Renderer::new(gl) {
         Ok(r) => r,
@@ -802,6 +845,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             lod_grading: batch::FaceLodGrading::default(),
             classified_face_visibility: Vec::new(),
             classified_culled_faces: 0,
+            lod_atlas_lookup: None,
+            same_context_lod: None,
             round_shadow: RoundShadowObserver::default(),
             lod_dirty_faces: Vec::new(),
             lod_balance_scratch: batch::ResidentLodBalanceScratch::default(),
@@ -3323,6 +3368,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
                 warn!("Could not upload immutable source-face data: {error}");
                 return;
             }
+            clear_same_context_lod(st);
             st.cached_instances = next_instances;
             st.num_faces = num_faces;
             st.face_nodes = next_face_nodes;
@@ -4011,6 +4057,17 @@ pub fn mr_upload_tess_atlas(
         web_sys::console::error_1(&"packed tessellation metadata has an invalid index range".into());
         return false;
     }
+    let lod_lookup = match prepare_lod_atlas_lookup(
+        patches.chunks_exact(7).map(|patch| [patch[0], patch[1], patch[2]]),
+    ) {
+        Ok(lookup) => lookup,
+        Err(error) => {
+            web_sys::console::error_1(
+                &format!("packed tessellation atlas lookup: {error}").into(),
+            );
+            return false;
+        }
+    };
 
     STATE.with(|s| {
         let mut state = s.borrow_mut();
@@ -4045,7 +4102,75 @@ pub fn mr_upload_tess_atlas(
                 old.destroy(state.renderer.gl());
             }
         });
+        if let Some(same_context) = state.same_context_lod.as_mut() {
+            same_context
+                .compute
+                .upload_atlas_lut(state.renderer.gl(), &lod_lookup.lut);
+        }
+        state.lod_atlas_lookup = Some(lod_lookup);
         true
+    })
+}
+
+/// Prepare a classifier on the renderer's own WebGL context without changing
+/// live LOD authority. The browser calls this only for explicit shadow/Rust
+/// candidates; the incumbent worker remains untouched and rollback-safe.
+#[wasm_bindgen(js_name = "mr_uploadComposedLodModel")]
+pub fn mr_upload_composed_lod_model(
+    total_vertices: u32,
+    primary_faces: u32,
+) -> Result<JsValue, JsValue> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let total_vertices = total_vertices as usize;
+        let animation = state
+            .surface_runtime
+            .lod_animation_source(total_vertices)
+            .map_err(|error| JsValue::from_str(&error))?;
+        let model = build_composed_lod_model(
+            &state.cached_instances,
+            &state.face_nodes,
+            total_vertices,
+            primary_faces as usize,
+            animation,
+        )
+        .and_then(prepare_lod_model)
+        .map_err(|error| JsValue::from_str(&error))?;
+        if model.residency.num_faces != state.num_faces {
+            return Err(JsValue::from_str(
+                "same-context LOD residency does not match renderer topology",
+            ));
+        }
+        let atlas = state
+            .lod_atlas_lookup
+            .clone()
+            .ok_or_else(|| JsValue::from_str("renderer LOD atlas is not resident"))?;
+        let mut compute = LodCompute::new(state.renderer.gl(), model.residency.num_faces)
+            .map_err(|error| JsValue::from_str(&error))?;
+        let residency = compute.upload_model(state.renderer.gl(), &model, &atlas.lut);
+        clear_same_context_lod(state);
+        state.same_context_lod = Some(SameContextLod {
+            compute,
+            residency,
+        });
+        let residency = &state
+            .same_context_lod
+            .as_ref()
+            .expect("same-context LOD residency was just installed")
+            .residency;
+        serde_wasm_bindgen::to_value(&SameContextLodResidencySnapshot {
+            ready: true,
+            num_faces: residency.num_faces,
+            num_vertices: residency.num_vertices,
+            topology_domains: residency.node_first_faces.len(),
+            mesh_radius: residency.mesh_radius,
+            atlas_patches: atlas.keys.len(),
+            atlas_max_lod: atlas.max_lod,
+        })
+        .map_err(|error| JsValue::from_str(&error.to_string()))
     })
 }
 
@@ -4261,6 +4386,7 @@ pub fn mr_upload_skinning_texture(joint_indices: &[f32], joint_weights: &[f32], 
             .collect();
         match state.renderer.upload_skinning_texture(&ji, &jw) {
             Ok(()) => {
+                clear_same_context_lod(state);
                 state.surface_runtime.set_skinning(&ji, &jw);
                 state.patch_prepare_dirty = true;
                 debug!("Skinning texture uploaded: {} vertices", nv);
@@ -4281,6 +4407,7 @@ pub fn mr_upload_morph_texture(deltas: &[f32], num_vertices: u32, num_targets: u
         let nt = num_targets as usize;
         match state.renderer.upload_morph_texture(deltas, nv, nt) {
             Ok(()) => {
+                clear_same_context_lod(state);
                 state.surface_runtime.set_morph_targets(deltas, nv, nt);
                 state.patch_prepare_dirty = true;
                 debug!("Morph texture uploaded: {} vertices × {} targets", nv, nt);
@@ -5116,6 +5243,7 @@ pub fn mr_upload_animation_pose(
 pub fn mr_clear_animation_state() {
     STATE.with(|state| {
         if let Some(state) = state.borrow_mut().as_mut() {
+            clear_same_context_lod(state);
             state.renderer.joint_ubo().clear(state.renderer.gl());
             state.renderer.clear_animation_textures();
             state.surface_runtime.clear_animation();

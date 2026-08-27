@@ -157,6 +157,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("assetimpl", "rust", Implementation),
     spec!("sceneimpl", "rust", Implementation),
     spec!("routeimpl", "rust", Implementation),
+    spec!("lodimpl", "js", Implementation),
     spec!("rendershadow", "0", Toggle),
     spec!("adaptiveshadow", "0", Toggle),
 ];
@@ -353,6 +354,7 @@ mod tests {
             "assetimpl",
             "sceneimpl",
             "routeimpl",
+            "lodimpl",
         ] {
             for accepted in ["js", "shadow", "rust"] {
                 let route = HyperscopeRoute::from_pairs([(key, accepted)]);

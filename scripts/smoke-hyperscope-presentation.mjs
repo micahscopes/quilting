@@ -8,14 +8,26 @@ const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const manifestPath = `${repository}/crates/hyperscape/fixtures/hacker-night.presentation.json`;
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 const workerSource = readFileSync(`${repository}/hyperscope_worker.js`, 'utf8');
+const mainRendererSource = readFileSync(
+  `${repository}/crates/quilting-wasm/src/main_renderer.rs`,
+  'utf8',
+);
 const {
   default: init,
   HyperscopeNavigation,
+  hyperscopeControlSpecs,
   load_patch_lab,
   mr_acceptLodDeltaSequence,
+  mr_uploadComposedLodModel,
   update_patch_lab_lods,
 } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
+
+assert.equal(typeof mr_uploadComposedLodModel, 'function');
+assert.deepEqual(
+  hyperscopeControlSpecs().find(spec => spec.key === 'lodimpl'),
+  { key: 'lodimpl', defaultValue: 'js', kind: 'implementation' },
+);
 
 assert.equal(mr_acceptLodDeltaSequence(91, 0, 1, true), true);
 assert.equal(mr_acceptLodDeltaSequence(91, 1, 2, false), false);
@@ -195,6 +207,33 @@ assert.ok(
   browserSource.includes('lodDeltaResetPending = true;'),
   'a rejected sparse publication must force a full worker snapshot',
 );
+for (const sameContextResidencyStep of [
+  "initialBrowserParams, 'lodimpl', 'js'",
+  "effectiveAuthority: 'worker'",
+  'function uploadSameContextLodResidency(totalVertices, primaryFaces)',
+  'mr_uploadComposedLodModel(totalVertices, primaryFaces)',
+  "? 'resident-authority-not-promoted'",
+  ": 'resident-shadow'",
+]) {
+  assert.ok(
+    browserSource.includes(sameContextResidencyStep),
+    `same-context LOD residency is missing ${sameContextResidencyStep}`,
+  );
+}
+for (const rustResidencyStep of [
+  'same_context_lod: Option<SameContextLod>',
+  'prepare_lod_atlas_lookup(',
+  '.lod_animation_source(total_vertices)',
+  'build_composed_lod_model(',
+  '.and_then(prepare_lod_model)',
+  'LodCompute::new(state.renderer.gl(), model.residency.num_faces)',
+  'clear_same_context_lod(state);',
+]) {
+  assert.ok(
+    mainRendererSource.includes(rustResidencyStep),
+    `Rust same-context residency is missing ${rustResidencyStep}`,
+  );
+}
 for (const requiredWorkerDeltaStep of [
   'if (resetDelta',
   'wasm.reset_animated_lod_delta();',

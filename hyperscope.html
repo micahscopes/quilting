@@ -396,6 +396,7 @@ import init, {
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_acceptLodDeltaSequence,
+  mr_uploadComposedLodModel,
   mr_setLodGradingRatio,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
@@ -515,6 +516,9 @@ const RUST_ROUTE_IMPLEMENTATION = implementationFromRoute(
 const RUST_ROUTE_SHADOW_ENABLED = RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
   initialBrowserParams.get('rendershadow') === '1';
+const LOD_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'lodimpl', 'js',
+);
 const RUST_ADAPTIVE_ROOT_SHADOW_ENABLED =
   initialBrowserParams.get('adaptiveshadow') === '1';
 const SURFACE_WALK_IMPLEMENTATION = implementationFromRoute(
@@ -673,6 +677,16 @@ const lodTelemetry = {
   average: Object.fromEntries(lodMetricNames.map(name => [name, 0])),
   maximum: Object.fromEntries(lodMetricNames.map(name => [name, 0])),
 };
+const sameContextLodDiagnostics = {
+  requestedImplementation: LOD_IMPLEMENTATION,
+  effectiveAuthority: 'worker',
+  state: LOD_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-residency',
+  uploads: 0,
+  uploadMs: 0,
+  residency: null,
+  errors: [],
+};
+globalThis.__hyperscopeSameContextLod = sameContextLodDiagnostics;
 const lodMetricSums = Object.fromEntries(lodMetricNames.map(name => [name, 0]));
 const frameTelemetry = {
   frames: 0,
@@ -1105,6 +1119,7 @@ const PARAM_DEFAULTS = {
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
   presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'rust', routeimpl: 'rust',
+  lodimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -1143,6 +1158,7 @@ function readParams(p) {
     walkscale: get('walkscale'), walkheight: get('walkheight'), walkimpl: get('walkimpl'),
     selectionimpl: get('selectionimpl'),
     assetimpl: get('assetimpl'),
+    lodimpl: get('lodimpl'),
     cue: get('cue'),
     lab: get('lab'), labfield: get('labfield'),
     laba: get('laba'), labb: get('labb'), labc: get('labc'),
@@ -1292,6 +1308,7 @@ function syncURL() {
     set('assetimpl', RUST_ASSET_IMPLEMENTATION, PARAM_DEFAULTS.assetimpl);
     set('sceneimpl', RUST_SCENE_IMPLEMENTATION, PARAM_DEFAULTS.sceneimpl);
     set('routeimpl', RUST_ROUTE_IMPLEMENTATION, PARAM_DEFAULTS.routeimpl);
+    set('lodimpl', LOD_IMPLEMENTATION, PARAM_DEFAULTS.lodimpl);
     if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
     if (RUST_ADAPTIVE_ROOT_SHADOW_ENABLED) p.set('adaptiveshadow', '1');
     const rustRoute = compareRustRouteShadow(p);
@@ -3715,6 +3732,25 @@ const presentationComposition = {
   primaryLodStates: [],
   focusTransformKey: null,
 };
+
+function uploadSameContextLodResidency(totalVertices, primaryFaces) {
+  if (LOD_IMPLEMENTATION === 'js') return null;
+  const started = performance.now();
+  try {
+    const residency = mr_uploadComposedLodModel(totalVertices, primaryFaces);
+    sameContextLodDiagnostics.uploads += 1;
+    sameContextLodDiagnostics.uploadMs = performance.now() - started;
+    sameContextLodDiagnostics.residency = residency;
+    sameContextLodDiagnostics.state = LOD_IMPLEMENTATION === 'rust'
+      ? 'resident-authority-not-promoted'
+      : 'resident-shadow';
+    return residency;
+  } catch (error) {
+    sameContextLodDiagnostics.state = 'unavailable';
+    sameContextLodDiagnostics.errors.push(error?.message || String(error));
+    throw error;
+  }
+}
 const patchLab = {
   active: false,
   shape: 'triangle',
@@ -5762,6 +5798,7 @@ async function selectAnimationIndex(idx) {
     }
     await workerCall('upload_model_to_compute', {});
     if (blockGeneration !== animationPoseBlockGeneration) return;
+    uploadSameContextLodResidency(nv, rp.num_faces);
     $('stats').textContent = `Animation: ${$('anim-sel').selectedOptions[0].textContent}`;
     switched = true;
     syncURL();
@@ -8335,6 +8372,12 @@ async function finishModelUpload(
   await workerCall('upload_model_to_compute', {});
   if (!appAssetMayInstall(assetToken)) return false;
   uploadTimings.computeUploadMs = performance.now() - sectionStarted;
+  sectionStarted = performance.now();
+  uploadSameContextLodResidency(
+    currentSkinData?.numVertices || Number(meshInfo?.num_vertices) || 0,
+    numFaces,
+  );
+  uploadTimings.sameContextComputeUploadMs = performance.now() - sectionStarted;
 
   sectionStarted = performance.now();
   if (info.animations && info.animations.length > 0) {
@@ -8784,6 +8827,7 @@ async function initializePresentationComposition() {
   mr_setFaceNodes(faceNodes);
   setRendererInstanceData(instances, totalFaces);
   mr_buildBatches(faceLods);
+  uploadSameContextLodResidency(totalVertices, primaryFaces);
 
   packedNodeIdentities = composedNodeIdentities;
   presentationComposition.ready = true;
