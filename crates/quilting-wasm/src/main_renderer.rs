@@ -553,6 +553,8 @@ impl SameContextLod {
             "awaiting-authority"
         } else if self.batch_candidate.is_some() {
             "awaiting-batch-publication"
+        } else if self.diagnostics.authoritative_publications != 0 {
+            "authority-active"
         } else {
             match self.diagnostics.last_exact {
                 Some(true) => "parity-exact",
@@ -620,6 +622,10 @@ impl SameContextLod {
                 .diagnostics
                 .mismatched_batch_group_comparisons,
             skipped_adaptive_batch_groups: self.diagnostics.skipped_adaptive_batch_groups,
+            authoritative_publications: self.diagnostics.authoritative_publications,
+            stale_authoritative_completions: self
+                .diagnostics
+                .stale_authoritative_completions,
             cancellations: self.diagnostics.cancellations,
             failures: self.diagnostics.failures,
             last_request_id: self.diagnostics.last_request_id,
@@ -651,6 +657,16 @@ impl SameContextLod {
             last_culled_mismatch: self.diagnostics.last_culled_mismatch,
             last_batch_groups_compared: self.diagnostics.last_batch_groups_compared,
             last_batch_group_mismatches: self.diagnostics.last_batch_group_mismatches,
+            last_authoritative_faces: self.diagnostics.last_authoritative_faces,
+            last_authoritative_changed_faces: self
+                .diagnostics
+                .last_authoritative_changed_faces,
+            last_authoritative_pose_revision: self
+                .diagnostics
+                .last_authoritative_pose_revision,
+            last_authoritative_pose_continuity_epoch: self
+                .diagnostics
+                .last_authoritative_pose_continuity_epoch,
             mismatch_examples: self.diagnostics.mismatch_examples.clone(),
             last_error: self.diagnostics.last_error.clone(),
             readback_buffers,
@@ -727,6 +743,19 @@ fn same_context_lod_pose_payload_fingerprint(
     SameContextLodPosePayloadFingerprint {
         joint_matrices: same_context_lod_f32_fingerprint(joint_matrices),
         morph_weights: same_context_lod_f32_fingerprint(morph_weights),
+    }
+}
+
+fn same_context_lod_pose_continuity_matches(
+    candidate: Option<SameContextLodPoseStamp>,
+    retained: Option<(u32, u32)>,
+) -> bool {
+    match (candidate, retained) {
+        (None, None) => true,
+        (Some(candidate), Some((_revision, continuity_epoch))) => {
+            candidate.continuity_epoch == continuity_epoch
+        }
+        _ => false,
     }
 }
 
@@ -939,6 +968,8 @@ struct SameContextLodDiagnostics {
     exact_batch_group_comparisons: u64,
     mismatched_batch_group_comparisons: u64,
     skipped_adaptive_batch_groups: u64,
+    authoritative_publications: u64,
+    stale_authoritative_completions: u64,
     cancellations: u64,
     failures: u64,
     last_request_id: u32,
@@ -961,6 +992,10 @@ struct SameContextLodDiagnostics {
     last_culled_mismatch: bool,
     last_batch_groups_compared: bool,
     last_batch_group_mismatches: usize,
+    last_authoritative_faces: usize,
+    last_authoritative_changed_faces: usize,
+    last_authoritative_pose_revision: u32,
+    last_authoritative_pose_continuity_epoch: u32,
     last_exact: Option<bool>,
     mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
     last_error: Option<String>,
@@ -1004,6 +1039,8 @@ struct SameContextLodShadowSnapshot {
     exact_batch_group_comparisons: u64,
     mismatched_batch_group_comparisons: u64,
     skipped_adaptive_batch_groups: u64,
+    authoritative_publications: u64,
+    stale_authoritative_completions: u64,
     cancellations: u64,
     failures: u64,
     last_request_id: u32,
@@ -1026,6 +1063,10 @@ struct SameContextLodShadowSnapshot {
     last_culled_mismatch: bool,
     last_batch_groups_compared: bool,
     last_batch_group_mismatches: usize,
+    last_authoritative_faces: usize,
+    last_authoritative_changed_faces: usize,
+    last_authoritative_pose_revision: u32,
+    last_authoritative_pose_continuity_epoch: u32,
     mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
     last_error: Option<String>,
     readback_buffers: usize,
@@ -5099,6 +5140,85 @@ fn try_compare_same_context_lod_batches(state: &mut MainState) -> Result<(), Str
     Ok(())
 }
 
+/// Publish one renderer-context classifier completion directly into retained
+/// CPU residency and GPU batches. The full classifier vector never crosses
+/// the WASM boundary; JavaScript observes only the bounded diagnostic summary.
+fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), String> {
+    let (candidate, mut prefix_indices, resident_faces) = {
+        let lod = state
+            .same_context_lod
+            .as_mut()
+            .ok_or_else(|| "same-context LOD model is not resident".to_string())?;
+        let Some(candidate) = lod.completed.take() else {
+            return Ok(());
+        };
+        let resident_faces = lod.residency.num_faces;
+        if candidate.stamp.classified_faces == 0
+            || candidate.stamp.classified_faces > resident_faces
+            || candidate.stamp.classified_faces > u32::MAX as usize
+            || candidate.lods.len()
+                != candidate.stamp.classified_faces * FLOATS_PER_FACE_OUTPUT
+        {
+            lod.compute.recycle_readback_vector(candidate.lods);
+            return Err(
+                "same-context authority produced an invalid classified prefix".to_string(),
+            );
+        }
+        (
+            candidate,
+            std::mem::take(&mut lod.batch_shadow.prefix_indices),
+            resident_faces,
+        )
+    };
+
+    let classified_faces = candidate.stamp.classified_faces;
+    if !same_context_lod_pose_continuity_matches(
+        candidate.stamp.pose,
+        state.surface_runtime.pose_stamp(),
+    ) {
+        let lod = state
+            .same_context_lod
+            .as_mut()
+            .ok_or_else(|| "same-context LOD model was retired during publication".to_string())?;
+        lod.batch_shadow.prefix_indices = prefix_indices;
+        lod.diagnostics.stale_authoritative_completions = lod
+            .diagnostics
+            .stale_authoritative_completions
+            .saturating_add(1);
+        lod.compute.recycle_readback_vector(candidate.lods);
+        return Ok(());
+    }
+    if classified_faces == resident_faces {
+        update_batches_in_state(state, &candidate.lods, None);
+    } else {
+        let classified_faces_u32 = u32::try_from(classified_faces)
+            .expect("same-context authority prefix was range-checked");
+        prefix_indices.clear();
+        prefix_indices.extend(0..classified_faces_u32);
+        update_batches_in_state(state, &candidate.lods, Some(&prefix_indices));
+    }
+
+    let changed_faces = state.lod_dirty_faces.len();
+    let pose = candidate.stamp.pose;
+    let lod = state
+        .same_context_lod
+        .as_mut()
+        .ok_or_else(|| "same-context LOD model was retired during publication".to_string())?;
+    lod.batch_shadow.prefix_indices = prefix_indices;
+    lod.diagnostics.authoritative_publications = lod
+        .diagnostics
+        .authoritative_publications
+        .saturating_add(1);
+    lod.diagnostics.last_authoritative_faces = classified_faces;
+    lod.diagnostics.last_authoritative_changed_faces = changed_faces;
+    lod.diagnostics.last_authoritative_pose_revision =
+        pose.map_or(0, |pose| pose.revision);
+    lod.diagnostics.last_authoritative_pose_continuity_epoch =
+        pose.map_or(0, |pose| pose.continuity_epoch);
+    lod.compute.recycle_readback_vector(candidate.lods);
+    Ok(())
+}
+
 fn restore_renderer_after_lod_compute(gl: &glow::Context, viewport: (i32, i32)) {
     unsafe {
         gl.use_program(None);
@@ -5317,59 +5437,71 @@ pub fn mr_dispatch_same_context_lod(
     })
 }
 
-/// Poll one same-context shadow job without blocking the renderer.
+/// Poll one same-context job without blocking the renderer. In authority mode
+/// a completed full prefix is published directly into retained Rust batches;
+/// shadow mode instead waits for and compares the matching worker publication.
 #[wasm_bindgen(js_name = "mr_pollSameContextLod")]
-pub fn mr_poll_same_context_lod() -> Result<JsValue, JsValue> {
+pub fn mr_poll_same_context_lod(authoritative: bool) -> Result<JsValue, JsValue> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let state = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
-        let MainState { renderer, same_context_lod, .. } = state;
-        let lod = same_context_lod
-            .as_mut()
-            .ok_or_else(|| JsValue::from_str("same-context LOD model is not resident"))?;
-        lod.diagnostics.polls = lod.diagnostics.polls.saturating_add(1);
-        let Some(fence) = lod.pending.as_ref().map(|pending| pending.fence) else {
-            return same_context_lod_snapshot_value(lod);
-        };
-        let gl = renderer.gl();
-        let status = unsafe { gl.client_wait_sync(fence, 0, 0) };
-        if status == glow::TIMEOUT_EXPIRED
-            || (status != glow::ALREADY_SIGNALED
-                && status != glow::CONDITION_SATISFIED
-                && status != glow::WAIT_FAILED)
         {
-            return same_context_lod_snapshot_value(lod);
-        }
+            let MainState { renderer, same_context_lod, .. } = state;
+            let lod = same_context_lod
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("same-context LOD model is not resident"))?;
+            lod.diagnostics.polls = lod.diagnostics.polls.saturating_add(1);
+            let Some(fence) = lod.pending.as_ref().map(|pending| pending.fence) else {
+                return same_context_lod_snapshot_value(lod);
+            };
+            let gl = renderer.gl();
+            let status = unsafe { gl.client_wait_sync(fence, 0, 0) };
+            if status == glow::TIMEOUT_EXPIRED
+                || (status != glow::ALREADY_SIGNALED
+                    && status != glow::CONDITION_SATISFIED
+                    && status != glow::WAIT_FAILED)
+            {
+                return same_context_lod_snapshot_value(lod);
+            }
 
-        let pending = lod.pending.take().expect("same-context fence was present");
-        unsafe { gl.delete_sync(pending.fence); }
-        if status == glow::WAIT_FAILED {
-            lod.compute.discard_staged_readback(gl, pending.readback);
-            lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
-            lod.diagnostics.last_error = Some("same-context LOD fence wait failed".to_string());
-            return same_context_lod_snapshot_value(lod);
+            let pending = lod.pending.take().expect("same-context fence was present");
+            unsafe { gl.delete_sync(pending.fence); }
+            if status == glow::WAIT_FAILED {
+                lod.compute.discard_staged_readback(gl, pending.readback);
+                lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+                lod.diagnostics.last_error =
+                    Some("same-context LOD fence wait failed".to_string());
+                return same_context_lod_snapshot_value(lod);
+            }
+            let ready_ms = browser_now_ms();
+            let readback_started_ms = ready_ms;
+            let lods = lod.compute.finish_staged_readback(gl, pending.readback);
+            let readback_finished_ms = browser_now_ms();
+            lod.diagnostics.completions = lod.diagnostics.completions.saturating_add(1);
+            // This includes browser scheduling until the first signaling poll.
+            // It is deliberately not labeled GPU time; WebGL2 exposes no
+            // timestamp for the moment the fence became signaled.
+            lod.diagnostics.last_fence_poll_latency_ms = ready_ms - pending.fence_started_ms;
+            lod.diagnostics.last_readback_ms = readback_finished_ms - readback_started_ms;
+            lod.completed = Some(SameContextLodCompleted {
+                stamp: pending.stamp,
+                lods,
+            });
+            if !authoritative {
+                if let Err(error) = lod.try_compare() {
+                    lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+                    lod.diagnostics.last_error = Some(error);
+                }
+            }
         }
-        let ready_ms = browser_now_ms();
-        let readback_started_ms = ready_ms;
-        let lods = lod.compute.finish_staged_readback(gl, pending.readback);
-        let readback_finished_ms = browser_now_ms();
-        lod.diagnostics.completions = lod.diagnostics.completions.saturating_add(1);
-        // This includes browser scheduling until the first signaling poll. It
-        // is deliberately not labeled GPU time; WebGL2 exposes no timestamp
-        // for the moment the fence became signaled.
-        lod.diagnostics.last_fence_poll_latency_ms = ready_ms - pending.fence_started_ms;
-        lod.diagnostics.last_readback_ms = readback_finished_ms - readback_started_ms;
-        lod.completed = Some(SameContextLodCompleted {
-            stamp: pending.stamp,
-            lods,
-        });
-        if let Err(error) = lod.try_compare() {
-            lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
-            lod.diagnostics.last_error = Some(error);
-        }
-        if let Err(error) = try_compare_same_context_lod_batches(state) {
+        let publication = if authoritative {
+            publish_same_context_lod_completion(state)
+        } else {
+            try_compare_same_context_lod_batches(state)
+        };
+        if let Err(error) = publication {
             if let Some(lod) = state.same_context_lod.as_mut() {
                 lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
                 lod.diagnostics.last_error = Some(error);
@@ -7489,5 +7621,33 @@ mod tests {
         assert_eq!(authority.request_id, 0);
         assert_eq!(authority.classified_faces, 3);
         assert!(authority.pose.is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn authoritative_lod_accepts_revision_lag_only_inside_one_continuity_epoch() {
+        let candidate = SameContextLodPoseStamp {
+            clip_time_seconds: 0.25,
+            sample_time_seconds: 4.0,
+            revision: 7,
+            continuity_epoch: 3,
+            payload: None,
+        };
+        assert!(same_context_lod_pose_continuity_matches(
+            Some(candidate),
+            Some((9, 3)),
+        ));
+        assert!(!same_context_lod_pose_continuity_matches(
+            Some(candidate),
+            Some((1, 4)),
+        ));
+        assert!(!same_context_lod_pose_continuity_matches(
+            Some(candidate),
+            None,
+        ));
+        assert!(!same_context_lod_pose_continuity_matches(
+            None,
+            Some((1, 3)),
+        ));
+        assert!(same_context_lod_pose_continuity_matches(None, None));
     }
 }

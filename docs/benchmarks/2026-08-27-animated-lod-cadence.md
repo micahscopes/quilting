@@ -190,17 +190,62 @@ work used one subject record in one GPU pass. The worker remains live authority,
 so this proves semantic equivalence and lifecycle discipline rather than a
 performance win or authority cutover.
 
+## Renderer-context authority cut
+
+The next opt-in cut makes `lodimpl=rust` materially different from shadow mode.
+It dispatches only the classifier resident on the renderer's WebGL2 context,
+polls its fence without blocking, and publishes the completed full scene or
+animated primary prefix directly through retained Rust admission,
+reconciliation, adaptive planning, batch grouping, and GPU upload. The
+classifier vector never crosses the WASM boundary. JavaScript receives only a
+bounded diagnostic snapshot. `lodimpl=shadow` retains the exact dual-context
+gate above, while `lodimpl=js` remains the serialized worker rollback.
+
+An authority completion may lag the latest accepted animation revision, just
+as the worker completion does. Rust therefore accepts bounded revision lag
+inside the same continuity epoch, but rejects a completion after a clip wrap,
+scrub, model reset, or static/animated domain change. Requiring the exact latest
+revision was tested and rejected: poses advance faster than a fenced LOD pass,
+so that rule starved publication. A rapid paused-polytope/playing-horse cue
+round trip subsequently dropped four obsolete completions, published 298 valid
+successors, retained one-revision pose lag, and reported no failures.
+
+A foreground warm 15-second animated composed-scene window reported:
+
+- 854 renderer-context publications, approximately 57 per second;
+- 16.78 ms mean scheduling-through-publication time;
+- 13.73 ms mean scheduling-inclusive fence-poll latency;
+- 0.027 ms mean signaled readback call and 3.02 ms mean retained batch work;
+- 9.34 changed source faces per publication on average;
+- one accepted-pose revision of lag, zero failures, and zero LOD bytes crossing
+  JavaScript.
+
+These are one Chrome/WebGL2 observation, not cross-device performance claims.
+In particular, WebGL2 still reads the complete 984-face animated classifier
+prefix into WASM before sparse retained batch admission. Eliminating or
+compacting that GPU-to-CPU transfer remains separate from eliminating the
+worker-to-browser mesh payload.
+
+Rollback was exercised by forcing the prepared-model fingerprint gate false.
+The route changed effective authority to `worker`, armed both delta endpoints
+for one coherent full reset, transferred a 106,368-byte 4,432-face fallback
+snapshot, then resumed sparse worker publications with zero sequence or pose
+errors. An authority fence/readback/publication failure uses the same fallback
+boundary. A later matching model upload clears the failure latch.
+
 ## Remaining promotion work
 
-The same-context implementation has earned correctness shadowing, not live
-authority. Promotion still requires:
+The renderer-context implementation is now a real opt-in authority, but the
+default and release promotion still require:
 
 - a foreground moving-camera distribution across the saved inverted-chess
   views and animated horse, with frame percentiles rather than last values;
 - explicit accounting for duplicate-shadow overhead, full readback bytes,
   retained comparison memory, sparse batch updates, and skipped submissions;
-- promotion of the now-proven Rust full/sparse resident and batch publication
-  behind the existing worker rollback, without transferring mesh-sized payloads
-  through JavaScript;
+- GPU-side sparse result compaction or resident publication that reduces the
+  remaining full-prefix WebGL2 readback;
 - moving-camera screenshot gates for seams, permutations, and LOD grading;
-- an explicit worker rollback until the promoted path wins those gates.
+- longer all-cue, all-scale, inversion, adaptive, pause/scrub, and background
+  soak before changing the default away from `js`;
+- retention of the explicit worker rollback until the promoted path wins those
+  gates.

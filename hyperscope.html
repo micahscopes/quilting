@@ -695,6 +695,8 @@ const sameContextLodDiagnostics = {
 globalThis.__hyperscopeSameContextLod = sameContextLodDiagnostics;
 let sameContextLodRequestId = 0;
 let sameContextLodPollScheduled = false;
+let sameContextLodAuthorityFailed = false;
+let sameContextWorkerFallbackActive = false;
 
 function nextSameContextLodRequestId() {
   sameContextLodRequestId = sameContextLodRequestId >= 0xffffffff
@@ -707,7 +709,18 @@ function updateSameContextLodDiagnostics(snapshot) {
     Object.assign(sameContextLodDiagnostics, snapshot);
   }
   sameContextLodDiagnostics.requestedImplementation = LOD_IMPLEMENTATION;
-  sameContextLodDiagnostics.effectiveAuthority = 'worker';
+  const rendererAuthorityReady = LOD_IMPLEMENTATION === 'rust'
+    && !sameContextLodAuthorityFailed
+    && sameContextLodDiagnostics.ready === true
+    && sameContextLodDiagnostics.modelFingerprintMatch !== false;
+  sameContextLodDiagnostics.effectiveAuthority = rendererAuthorityReady
+    ? 'renderer-context' : 'worker';
+  if (LOD_IMPLEMENTATION === 'rust'
+      && !rendererAuthorityReady
+      && (sameContextLodAuthorityFailed
+        || sameContextLodDiagnostics.modelFingerprintMatch === false)) {
+    sameContextLodDiagnostics.state = 'worker-fallback';
+  }
   return sameContextLodDiagnostics;
 }
 
@@ -716,7 +729,8 @@ function refreshSameContextLodReadiness() {
   try {
     updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
     return sameContextLodDiagnostics.ready === true
-      && sameContextLodDiagnostics.modelFingerprintMatch !== false;
+      && sameContextLodDiagnostics.modelFingerprintMatch !== false
+      && !sameContextLodAuthorityFailed;
   } catch {
     // Model replacement retires context resources before the next composed
     // residency is uploaded. This is an expected lifecycle gap, not a shadow
@@ -735,6 +749,10 @@ function recordSameContextLodError(error) {
     sameContextLodDiagnostics.errors.splice(0, sameContextLodDiagnostics.errors.length - 16);
   }
   sameContextLodDiagnostics.state = 'shadow-error';
+  if (LOD_IMPLEMENTATION === 'rust') {
+    sameContextLodAuthorityFailed = true;
+    sameContextLodDiagnostics.effectiveAuthority = 'worker';
+  }
 }
 
 function absorbSameContextLodLifecycleGap(error) {
@@ -752,10 +770,96 @@ function scheduleSameContextLodPoll() {
   requestAnimationFrame(() => {
     sameContextLodPollScheduled = false;
     try {
-      const snapshot = updateSameContextLodDiagnostics(mr_pollSameContextLod());
+      const previousFailures = Number(sameContextLodDiagnostics.failures) || 0;
+      const previousPublications =
+        Number(sameContextLodDiagnostics.authoritative_publications) || 0;
+      if (LOD_IMPLEMENTATION === 'rust') clearBatchMeasures();
+      const snapshot = updateSameContextLodDiagnostics(
+        mr_pollSameContextLod(LOD_IMPLEMENTATION === 'rust'),
+      );
+      if (LOD_IMPLEMENTATION === 'rust'
+          && Number(snapshot.failures) > previousFailures) {
+        sameContextLodAuthorityFailed = true;
+        snapshot.effectiveAuthority = 'worker';
+        lodDirty = true;
+      }
+      if (LOD_IMPLEMENTATION === 'rust'
+          && Number(snapshot.authoritative_publications) > previousPublications) {
+        const batchGroupMs = consumeBatchMeasure(
+          'batch-group', 'batch-group-start', 'batch-group-end',
+        );
+        const batchRetainMs = consumeBatchMeasure(
+          'batch-retain', 'batch-retain-start', 'batch-retain-end',
+        );
+        const batchBalanceMs = consumeBatchMeasure(
+          'batch-balance', 'batch-balance-start', 'batch-balance-end',
+        );
+        const batchBucketMs = consumeBatchMeasure(
+          'batch-bucket', 'batch-bucket-start', 'batch-bucket-end',
+        );
+        const batchUploadMs = consumeBatchMeasure(
+          'batch-gpu-upload', 'batch-upload-start', 'batch-upload-end',
+        );
+        const batchMs = batchGroupMs + batchUploadMs;
+        const waitMs = Number(snapshot.last_fence_poll_latency_ms) || 0;
+        const readbackMs = Number(snapshot.last_readback_ms) || 0;
+        recordLodTiming(
+          waitMs + readbackMs + batchMs,
+          0,
+          batchMs,
+          batchGroupMs,
+          batchUploadMs,
+          batchRetainMs,
+          batchBalanceMs,
+          batchBucketMs,
+          0,
+          0,
+          0,
+          waitMs,
+          readbackMs,
+          Number(snapshot.last_authoritative_changed_faces) || 0,
+          0,
+          true,
+          true,
+          null,
+        );
+        lodTelemetry.poseCompletedRevision =
+          Number(snapshot.last_authoritative_pose_revision) || 0;
+        lodTelemetry.poseContinuityEpoch =
+          Number(snapshot.last_authoritative_pose_continuity_epoch) || 0;
+        const currentPose = animationPoseApplied;
+        lodTelemetry.poseLagRevisions = currentPose
+          && currentPose.continuityEpoch === lodTelemetry.poseContinuityEpoch
+          ? Math.max(0, currentPose.revision - lodTelemetry.poseCompletedRevision)
+          : 0;
+        if (presentationComposition.ready) {
+          const classifiedFaces = Number(snapshot.last_authoritative_faces) || 0;
+          const classificationScope =
+            classifiedFaces === presentationComposition.totalFaces
+              ? 'scene' : 'primary-animation';
+          rustPresentationDiagnostics.lastLodScope = classificationScope;
+          const cadence = rustPresentationDiagnostics.lodCadence;
+          const subjectRecords = Number(snapshot.last_subject_records) || 0;
+          cadence.lastSubjectRecords = subjectRecords;
+          cadence.lastGpuPasses = 1;
+          if (classificationScope === 'scene') {
+            cadence.sceneClassifications += 1;
+            cadence.lastSceneAt = performance.now();
+            cadence.lastSceneSubjectRecords = subjectRecords;
+            cadence.lastSceneGpuPasses = 1;
+          } else {
+            cadence.primaryAnimationClassifications += 1;
+            cadence.lastPrimaryAnimationAt = performance.now();
+            cadence.lastPrimaryAnimationSubjectRecords = subjectRecords;
+            cadence.lastPrimaryAnimationGpuPasses = 1;
+          }
+        }
+      }
       if (snapshot.pending_request_id != null) scheduleSameContextLodPoll();
+      else if (LOD_IMPLEMENTATION === 'rust' && lodDirty) queueMicrotask(recomputeLods);
     } catch (error) {
       if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
+      if (LOD_IMPLEMENTATION === 'rust') queueMicrotask(recomputeLods);
     }
   });
 }
@@ -3819,8 +3923,12 @@ function uploadSameContextLodResidency(totalVertices, primaryFaces) {
       typeof residency?.model_fingerprint === 'string'
       && residency.model_fingerprint.length > 0
       && residency.model_fingerprint === workerLodModelFingerprint;
+    if (sameContextLodDiagnostics.modelFingerprintMatch) {
+      sameContextLodAuthorityFailed = false;
+      sameContextWorkerFallbackActive = false;
+    }
     sameContextLodDiagnostics.state = LOD_IMPLEMENTATION === 'rust'
-      ? 'resident-authority-not-promoted'
+      ? 'resident-authority-ready'
       : 'resident-shadow';
     updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
     if (!sameContextLodDiagnostics.modelFingerprintMatch) {
@@ -7201,7 +7309,6 @@ async function recomputeLods() {
   adaptivePickedDiagnostics.syncFloor();
   lodInFlight = true;
   lodTelemetry.inFlight = true;
-  lodTelemetry.submitted += 1;
   lodDirty = false;
   lodTelemetry.dirty = false;
   const primaryOnly = presentationComposition.ready
@@ -7247,8 +7354,7 @@ async function recomputeLods() {
     const vp = mulM4(proj, view, lodVp);
     const tp = getTessParams();
 
-    const resetDelta = lodDeltaResetPending;
-    if (lodPose) lodTelemetry.poseSubmittedRevision = lodPose.revision;
+    let resetDelta = lodDeltaResetPending;
     const sameContextReady = refreshSameContextLodReadiness()
       && currentFaceNodes.length > 0
       && Number(sameContextLodDiagnostics.residency?.num_faces) === currentFaceNodes.length;
@@ -7277,6 +7383,34 @@ async function recomputeLods() {
         if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
       }
     }
+    if (LOD_IMPLEMENTATION === 'rust'
+        && sameContextReady
+        && !sameContextLodAuthorityFailed) {
+      // The renderer-context classifier is the sole live authority in this
+      // mode. Its fenced full prefix is admitted and uploaded inside Rust;
+      // no mesh-sized LOD payload crosses JavaScript. A busy pass retains one
+      // newest follow-up through `lodDirty` and the poll completion callback.
+      if (sameContextDispatched) {
+        sameContextWorkerFallbackActive = false;
+        lodTelemetry.submitted += 1;
+        if (lodPose) lodTelemetry.poseSubmittedRevision = lodPose.revision;
+      } else {
+        lodDirty = true;
+      }
+      lodInFlight = false;
+      lodTelemetry.inFlight = false;
+      return;
+    }
+    if (LOD_IMPLEMENTATION === 'rust' && !sameContextWorkerFallbackActive) {
+      // A dormant worker delta encoder cannot extend renderer-authoritative
+      // history. Restart both ends at one full snapshot before accepting
+      // sparse rollback publications.
+      sameContextWorkerFallbackActive = true;
+      lodDeltaResetPending = true;
+      resetDelta = true;
+    }
+    lodTelemetry.submitted += 1;
+    if (lodPose) lodTelemetry.poseSubmittedRevision = lodPose.revision;
     const resp = await workerCall('compute_animated_lods', {
       t: lodPose?.t ?? 0,
       poseSampleTime: lodPose?.sampleTime ?? 0,
@@ -7518,7 +7652,9 @@ async function recomputeLods() {
     if (!primaryOnly) lodFullSceneDirty = true;
     console.warn('LOD recompute error:', e);
   }
-  if (sameContextDispatched && !sameContextAuthorityRecorded) {
+  if (LOD_IMPLEMENTATION !== 'rust'
+      && sameContextDispatched
+      && !sameContextAuthorityRecorded) {
     try {
       mr_cancelSameContextLod(sameContextRequest);
       updateSameContextLodDiagnostics(mr_sameContextLodDiagnostics());
