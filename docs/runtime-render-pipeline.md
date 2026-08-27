@@ -313,8 +313,9 @@ into a shared scene or command model.
 
 ## WebGPU migration sequence
 
-1. Port the two handwritten GLSL LOD passes to WGSL and test their payloads
-   against the CPU conformance suite.
+1. **Completed:** port the two handwritten GLSL LOD passes to WGSL, validate
+   them with the pinned Naga compiler, and freeze their host payloads and
+   packed output against CPU conformance oracles.
 2. Implement patch preparation as a compute pass writing the same logical
    52-float record. Keep the WebGL transform-feedback implementation as the
    compatibility backend.
@@ -344,6 +345,58 @@ replacement, malformed visibility rejection, stale scene revisions, batch
 shape validation, and ABI size/alignment. This is a conformance oracle, not a
 WebGPU implementation: no `wgpu` device or storage buffer has been introduced,
 and WebGL2 continues to use current-pose degenerate-vertex rejection.
+
+### Frozen WebGPU LOD classifier boundary
+
+The classifier source now exists without changing runtime authority:
+
+- `compute/lod_types.wgsl` defines the storage/uniform ABI and the exact
+  packed-word helper;
+- `compute/lod_pass1.wgsl` runs one face per invocation in 64-thread groups,
+  including morph/skin evaluation, dense authored-subject selection,
+  conservative conformal image culling, intrinsic density demand, pixel-floor
+  capacity, and adaptive priority; and
+- `compute/lod_pass2.wgsl` reconciles only visible neighbors, canonicalizes the
+  S3 edge order, looks up the resident atlas, and emits the existing four-byte
+  classification word.
+
+The host contract is fixed as little-endian word arrays rather than relying on
+Rust padding. Face, position, morph, adjacency, and pass-one records are 16
+bytes; skinning records are 32 bytes; authored subject rows are 160 bytes; the
+dispatch uniform is 272 bytes; and final classifications remain four bytes.
+Scene-node IDs are compacted into deterministic dense subject rows, so sparse
+authored IDs do not inflate GPU buffers. Pass one binds one uniform and exactly
+eight storage buffers, staying within WebGPU's minimum per-stage storage-buffer
+limit. Pass two binds one uniform and four storage buffers.
+
+Naga validates both compute entries and the exact record layouts. Renderer
+tests freeze every host offset, all six S3 permutations, invisible standby
+records, visible-neighbor-only seam promotion, atlas lookup, and the final
+packed word. This is shader and payload conformance, not device evidence: no
+`wgpu` dependency, adapter, command encoder, or WebGPU buffer exists yet, and
+the WebGL2 GLSL programs remain untouched.
+
+The next device gate is deliberately narrow:
+
+1. Resolve and pin the current maintained `wgpu` release from primary project
+   documentation, then add a small backend-local executor rather than exposing
+   device handles through the scene model.
+2. Upload one `PreparedLodModel`, pose, dispatch packet, dense subject table,
+   and atlas LUT through the frozen word packers.
+3. Dispatch `ceil(face_count / 64)` groups for each pass and copy only the
+   final packed words into a diagnostic staging buffer.
+4. Compare every word with the CPU pass-two oracle and the established WebGL2
+   classifier over affine, finite-pole, pole-grazing, culled, skinned, morphed,
+   composed-scene, seam, permutation, and maximum-atlas fixtures.
+5. Keep the new executor shadow-only until those packed comparisons are exact
+   in browser Chrome and at least one native adapter. Floating pass-one
+   intermediates may be recorded for diagnosis, but authority is judged at the
+   validated packed semantic boundary.
+
+Only after that gate should same-device resident topology, visible-instance
+compaction, and indirect arguments be wired together. That later cut is what
+removes WebGL2's four-byte-per-face readback and rejected atlas vertex
+invocations; merely compiling WGSL does neither.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable

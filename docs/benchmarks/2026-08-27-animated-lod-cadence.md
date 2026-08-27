@@ -525,6 +525,37 @@ handling, counts, and overflow before WGSL becomes authoritative. WebGL2 keeps
 the current degenerate-vertex fallback; it cannot provide the same submission
 contract without a count readback or a universal maximum-topology draw.
 
+### WGSL classifier conformance checkpoint
+
+Commits `eb485a5`, `db1801b`, and `3c3a692` freeze the next backend slice while
+leaving the measured WebGL2 path unchanged. The two GLSL classifier passes were
+inventoried and expressed as WGSL compute entries with 64 invocations per work
+group. Pass one retains animation, composed-subject transforms, conservative
+complete-image culling, conformal interior demand, pixel-floor capacity, and
+the adaptive ranking byte. Pass two retains visible-neighbor coherence, the
+historical S3 permutation mapping, atlas lookup, invisible standby exponents,
+and the exact packed `u32` output.
+
+The storage boundary is now executable source plus host oracles rather than a
+diagram. Naga validates the 16-byte face/position/morph/adjacency/pass-one
+records, 32-byte skinning record, 160-byte subject row, and 272-byte dispatch
+uniform. CPU packing tests freeze every corresponding word offset. Authored
+node IDs become dense subject rows before upload. The pass-two oracle covers
+all six permutations and proves that an invisible neighbor cannot promote a
+visible face.
+
+The deterministic gate at this checkpoint is:
+
+- `cargo test -p quilting-shaders`: 14/14;
+- `cargo test -p quilting-renderer`: 62/62; and
+- `cargo check -p quilting-wasm --target wasm32-unknown-unknown --features leptos-ui`.
+
+This checkpoint contains no `wgpu` dependency and makes no GPU-performance or
+cross-backend numeric-parity claim. The next acceptable evidence is a real
+two-pass WebGPU dispatch over the frozen word payload, followed by exact final
+packed-word comparison with both the CPU oracle and the already-proven WebGL2
+classifier. Until then WebGL2 remains the only executing classifier backend.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
