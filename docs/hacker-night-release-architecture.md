@@ -323,7 +323,11 @@ The first application boundary is now explicit:
   unwrapped scene time, and signed finite speed. Frame events advance it from
   explicit deltas, cue activation replaces all three fields atomically, and
   invalid clock edits preserve the preceding application revision. Version
-  0.16 added selected-object aim without reinterpreting 0.15.
+  0.16 added selected-object aim without reinterpreting 0.15. Generated WASM
+  exposes atomic clock/seek/speed actions and a fixed three-`f64` write packet,
+  so a high-rate browser parity lane need not allocate or serialize a frame
+  object. Browser clip wrapping remains the incumbent until that lane is
+  measured and cut over.
   Version 0.9 records whether an asset request is independent or replaces the
   primary scene. A 0.8 trace keeps its historical per-asset meaning; it cannot
   smuggle a `primary_scene` request into the older schema.

@@ -237,6 +237,42 @@ assert.equal(app.snapshot().animationPlaying, false);
 const resumedAnimation = app.toggleAnimationPlaying(91);
 assert.equal(resumedAnimation.playing, true);
 assert.equal(app.snapshot().animationPlaying, true);
+const animationClockApp = new HyperscopeAppShadow();
+const restoredAnimation = animationClockApp.setAnimationClock(1, true, 2, -0.5);
+assert.deepEqual(
+  {
+    playing: restoredAnimation.playing,
+    timeSeconds: restoredAnimation.timeSeconds,
+    speed: restoredAnimation.speed,
+  },
+  { playing: true, timeSeconds: 2, speed: -0.5 },
+);
+const animationPacket = new Float64Array(3);
+animationClockApp.writeAnimationClock(animationPacket);
+assert.deepEqual(Array.from(animationPacket), [1, 2, -0.5]);
+animationClockApp.advanceFrameQuiet(0.5, 0.5);
+animationClockApp.writeAnimationClock(animationPacket);
+assert.deepEqual(Array.from(animationPacket), [1, 1.75, -0.5]);
+const soughtAnimation = animationClockApp.seekAnimation(2, 0.25);
+assert.equal(soughtAnimation.timeSeconds, 0.25);
+const spedAnimation = animationClockApp.setAnimationSpeed(3, 2);
+assert.equal(spedAnimation.speed, 2);
+assert.throws(
+  () => animationClockApp.setAnimationClock(4, true, Number.NaN, 1),
+  /animation time and speed/,
+);
+assert.throws(
+  () => animationClockApp.writeAnimationClock(new Float64Array(2)),
+  /exactly 3 numbers/,
+);
+assert.deepEqual(
+  {
+    playing: animationClockApp.snapshot().animationPlaying,
+    timeSeconds: animationClockApp.snapshot().animationTimeSeconds,
+    speed: animationClockApp.snapshot().animationSpeed,
+  },
+  { playing: true, timeSeconds: 0.25, speed: 2 },
+);
 const asset = 'f0000000-0000-4000-8000-000000000001';
 const first = 'e0000000-0000-4000-8000-000000000001';
 const second = 'e0000000-0000-4000-8000-000000000002';

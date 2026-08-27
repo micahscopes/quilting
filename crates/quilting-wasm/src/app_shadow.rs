@@ -16,7 +16,8 @@ use hyperscape_protocol::{
     RequestId, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
-    session_node_identity, AnimationAction, AppCommit, AppEffect, AppEvent, AppFrameSnapshot,
+    session_node_identity, AnimationAction, AnimationClock, AppCommit, AppEffect, AppEvent,
+    AppFrameSnapshot,
     AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus,
     AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick, LocalPeerDisposition,
     LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSynchronization,
@@ -976,6 +977,57 @@ impl HyperscopeAppShadow {
         self.dispatch_animation(sequence, AnimationAction::TogglePlaying)
     }
 
+    /// Seek the primary unwrapped scene clock without changing playback or
+    /// speed. Clip wrapping remains a renderer concern.
+    #[wasm_bindgen(js_name = seekAnimation)]
+    pub fn seek_animation(&self, sequence: u32, time_seconds: f64) -> Result<JsValue, JsValue> {
+        self.dispatch_animation(sequence, AnimationAction::Seek(time_seconds))
+    }
+
+    /// Change primary animation speed without changing time or playing state.
+    #[wasm_bindgen(js_name = setAnimationSpeed)]
+    pub fn set_animation_speed(&self, sequence: u32, speed: f64) -> Result<JsValue, JsValue> {
+        self.dispatch_animation(sequence, AnimationAction::SetSpeed(speed))
+    }
+
+    /// Restore primary animation transport as one reducer action.
+    #[wasm_bindgen(js_name = setAnimationClock)]
+    pub fn set_animation_clock(
+        &self,
+        sequence: u32,
+        playing: bool,
+        time_seconds: f64,
+        speed: f64,
+    ) -> Result<JsValue, JsValue> {
+        self.dispatch_animation(
+            sequence,
+            AnimationAction::SetClock(AnimationClock {
+                playing,
+                time_seconds,
+                speed,
+            }),
+        )
+    }
+
+    /// Write `[playing, unwrapped_time_seconds, speed]` without allocating a
+    /// per-frame JavaScript object. The browser can shadow or consume this
+    /// packet after `advanceFrameQuiet`.
+    #[wasm_bindgen(js_name = writeAnimationClock)]
+    pub fn write_animation_clock(&self, output: &mut [f64]) -> Result<(), JsValue> {
+        if output.len() != 3 {
+            return Err(JsValue::from_str(
+                "animation clock output must contain exactly 3 numbers",
+            ));
+        }
+        let animation = self.store.frame_snapshot().animation;
+        output.copy_from_slice(&[
+            if animation.playing { 1.0 } else { 0.0 },
+            animation.time_seconds,
+            animation.speed,
+        ]);
+        Ok(())
+    }
+
     /// Atomically admit one transport-neutral authored checkpoint. The
     /// revision travels as decimal text so JavaScript cannot truncate a u64;
     /// commands retain the canonical protocol JSON shape shared with Blender.
@@ -1241,6 +1293,8 @@ impl HyperscopeAppShadow {
         to_js(&ShadowSnapshot {
             revision: summary.revision.to_string(),
             animation_playing: summary.animation_playing,
+            animation_time_seconds: summary.animation_time_seconds,
+            animation_speed: summary.animation_speed,
             assets,
             loading_assets: summary.loading_assets,
             loading_primary_scene_asset: summary
@@ -1339,10 +1393,12 @@ impl HyperscopeAppShadow {
                 value: SemanticAction::Animate(action),
             }))
             .map_err(js_error)?;
-        let playing = self.store.summary_snapshot().animation_playing;
+        let animation = self.store.frame_snapshot().animation;
         to_js(&ShadowAnimationPlaybackReceipt {
             commit: shadow_commit(&commit),
-            playing,
+            playing: animation.playing,
+            time_seconds: animation.time_seconds,
+            speed: animation.speed,
         })
     }
 
@@ -1490,6 +1546,8 @@ enum ShadowEffect {
 struct ShadowSnapshot {
     revision: String,
     animation_playing: bool,
+    animation_time_seconds: f64,
+    animation_speed: f64,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
     loading_primary_scene_asset: Option<String>,
@@ -1506,6 +1564,8 @@ struct ShadowSnapshot {
 struct ShadowAnimationPlaybackReceipt {
     commit: ShadowCommit,
     playing: bool,
+    time_seconds: f64,
+    speed: f64,
 }
 
 #[derive(Serialize)]

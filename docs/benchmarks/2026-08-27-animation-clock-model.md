@@ -33,3 +33,18 @@ This checkpoint models authority only. The next measured slice exposes a
 compact high-rate clock through generated WASM, shadows the incumbent browser
 clock, and keeps JavaScript authority until cadence and clip-wrapping parity are
 proven.
+
+## Generated-WASM adapter follow-up
+
+The generated application facade now exposes atomic set/seek/speed actions and
+`writeAnimationClock(Float64Array)`. The high-rate method writes exactly three
+numbers—playing, unwrapped time, and speed—without serializing a JavaScript
+object. A direct Node/WASM smoke restored `[1, 2, -0.5]`, advanced 0.5 seconds
+to `[1, 1.75, -0.5]`, then exercised seek, speed, malformed-clock rejection,
+and output-length rejection. The complete existing application/WASM smoke
+remained green.
+
+The WASM32 build check passed. Strict whole-`quilting-wasm` Clippy remains
+blocked by 45 pre-existing warnings across renderer, adaptive-screen, surface,
+and legacy loader code; none point to the animation facade. The narrower
+`hyperscope-app` strict Clippy gate is green.
