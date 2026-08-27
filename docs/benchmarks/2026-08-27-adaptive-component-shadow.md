@@ -348,6 +348,75 @@ conformal integration tests pass, the WASM target check and generated-export
 smoke pass, Chrome reported no warnings or errors, and all temporary tabs were
 closed without modifying the user's chess tab or servers.
 
+## Fixed-boundary neighborhood shadow
+
+The bounded neighborhood is now integrated as a separately toggleable,
+read-only runtime oracle. Its edge radius is the worst-case grading chain:
+
+```text
+ceil(log(max atlas LoD) / log(max face-edge ratio))
+```
+
+Thus ratio 2 with atlas LoD 64 uses six edge hops, while ratio 4 uses three.
+The live atlas exercised below required seven ratio-2 hops. Selected and
+edge-neighborhood leaves remain mutable. The additional vertex-incidence ring
+is fixed to already-reconciled root residency; any attempted promotion of a
+fixed leaf is recorded as a boundary escape and cannot become authority.
+
+The first live horse comparison found zero leaf, request, or resident-edge
+differences but eight raw fixed-observer corner differences. This was useful
+shadow evidence, not a rendering failure. A fixed observer's outer corners can
+still receive maxima from retained faces outside the local frontier. The local
+corner result therefore must be max-composed with the already-reconciled
+baseline corner field. Raw differences remain counted diagnostically, while
+the composed field is the parity requirement. This is the same retained-state
+composition a future sparse overlay must perform.
+
+After that correction, one paused horse pose produced:
+
+| Horse term | Value |
+| --- | ---: |
+| Source / complete leaves | 984 / 984 |
+| Reconciliation faces | 393 |
+| Observed faces / local leaves | 585 / 585 |
+| Fixed observer roots | 192 |
+| Raw / composed corner mismatches | 8 / 0 |
+| Complete edge/request/leaf mismatches | 0 / 0 / 0 |
+| Boundary escapes / failures | 0 / 0 |
+| Exact | yes |
+
+The horse was then animated in the disposable tab. After 235 epochs the
+counters were 235 matches, zero mismatches, zero boundary escapes, and zero
+failures. The terminal selection used 354 reconciliation faces and 527 total
+observed faces. Its bounded plan, frontier, reconciliation, and proof
+comparison took 11.0 ms; the same-epoch complete path took 12.5 ms. Those warm
+horse timings are parity evidence rather than a claimed speedup, because the
+shadow deliberately pays for both paths.
+
+The pathological 94,628-face chess scene showed the intended scale separation:
+
+| Chess view | Reconciliation | Observed | Local leaves | Complete leaves | Neighborhood shadow | Complete path | Exact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Skinny inverted view | 341 | 505 | 631 | 94,754 | 77.5 ms | 581.3 ms | yes |
+| Broad inverted board | 210 | 276 | 276 | 94,628 | 49.3 ms | 467.6 ms | yes |
+
+The skinny view had eight raw fixed-observer corner differences and zero after
+baseline composition. The broad view had zero raw differences. Both had zero
+diagnostic, selected-face, leaf, request, resident-edge, or composed-corner
+mismatches, and zero boundary escapes or failures. Repeating the skinny request
+hit both the local frontier and fixed-boundary reconciliation caches and ended
+at three matches out of three.
+
+This checkpoint still grants the neighborhood no render or publication
+authority. A successfully staged neighborhood explicitly suppresses the
+certified-component hot-path shortcut so the complete oracle runs in the same
+epoch. The generated Node/WASM suite now passes 19 tests, including the
+worst-case radius derivation and a disconnected-source runtime comparison with
+a real dyadic replacement and fixed vertex-only observer. The normal and
+Leptos-enabled WASM target checks and generated-export smoke pass. Chrome
+reported no warnings or errors; the temporary horse and chess tabs were
+closed, and the user's chess tab and both user-run servers were untouched.
+
 ## Decision
 
 The exact component overlay now has physical publication authority. Unchanged
@@ -356,7 +425,9 @@ may do so between periodic exact samples. Whole-scene, oversized,
 order-sensitive, uncertified, revoked, or failed candidates retain the complete
 transactional path. Whole-scene and oversized closures are expected policy
 outcomes rather than false failures. Component identity and size are already
-preindexed, so another ineligibility cache is unwarranted. The next gate is a
-fixed-boundary neighborhood shadow that proves resident edge LoDs, corner
-observers, overlay membership, atlas residency, and triangle budget against the
-complete oracle before any local publication authority is considered.
+preindexed, so another ineligibility cache is unwarranted. Fixed-boundary
+neighborhood planning, resident edges, and baseline-composed corners now match
+the complete oracle in the initial static and animated gates. The next gate is
+exact sparse neighborhood overlay membership, atlas residency, and triangle
+budget, followed by sustained camera/inversion sampling, before any local
+publication authority is considered.
