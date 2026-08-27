@@ -258,6 +258,197 @@ impl RenderTimingDiagnostics {
     }
 }
 
+#[derive(Default)]
+struct IncrementalRootGroupShadow {
+    enabled: bool,
+    adjacency: Option<batch::VertexFaceAdjacency>,
+    vertex_max: Vec<u32>,
+    face_vertex_lods: Vec<[u32; 3]>,
+    vertex_refresh_scratch: batch::ResidentVertexLodRefreshScratch,
+    index: batch::RetainedRootGroupIndex,
+    groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    comparisons: u64,
+    exact_comparisons: u64,
+    mismatched_comparisons: u64,
+    full_rebuilds: u64,
+    incremental_refreshes: u64,
+    last_seed_faces: usize,
+    last_affected_faces: usize,
+    last_dirty_buckets: usize,
+    last_rebuilt_members: usize,
+    last_mismatched_buckets: usize,
+    last_refresh_ms: f64,
+    refresh_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    last_error: Option<String>,
+}
+
+impl IncrementalRootGroupShadow {
+    fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        *self = Self {
+            enabled,
+            ..Self::default()
+        };
+    }
+
+    fn reset_model(&mut self) {
+        let enabled = self.enabled;
+        *self = Self {
+            enabled,
+            ..Self::default()
+        };
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &mut self,
+        topology: &quilting_mesh::HalfEdgeMesh,
+        residents: &[Option<batch::ResidentLod>],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: batch::ResidentLod,
+        seed_faces: &[usize],
+        force_rebuild: bool,
+        reference: &BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        if force_rebuild
+            || self
+                .adjacency
+                .as_ref()
+                .is_none_or(|adjacency| !adjacency.matches(topology))
+        {
+            self.adjacency = Some(batch::VertexFaceAdjacency::from_topology(topology));
+            self.vertex_max.clear();
+            self.face_vertex_lods.clear();
+            self.index = batch::RetainedRootGroupIndex::default();
+            self.groups.clear();
+        }
+
+        let started_ms = browser_now_ms();
+        let adjacency = self
+            .adjacency
+            .as_ref()
+            .expect("an enabled incremental root shadow has topology adjacency");
+        let affected_faces = batch::refresh_resident_vertex_lods_from_faces(
+            residents,
+            topology,
+            adjacency,
+            initial,
+            seed_faces,
+            &mut self.vertex_max,
+            &mut self.face_vertex_lods,
+            &mut self.vertex_refresh_scratch,
+        );
+        let refresh = self.index.refresh_groups_from_faces(
+            residents,
+            &self.face_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            affected_faces,
+            &mut self.groups,
+        );
+        let elapsed_ms = browser_now_ms() - started_ms;
+        let mismatched_buckets = reference
+            .iter()
+            .filter(|(key, members)| self.groups.get(key) != Some(*members))
+            .count()
+            + self
+                .groups
+                .keys()
+                .filter(|key| !reference.contains_key(key))
+                .count();
+        let exact = mismatched_buckets == 0;
+        self.comparisons = self.comparisons.saturating_add(1);
+        self.exact_comparisons = self
+            .exact_comparisons
+            .saturating_add(u64::from(exact));
+        self.mismatched_comparisons = self
+            .mismatched_comparisons
+            .saturating_add(u64::from(!exact));
+        self.full_rebuilds = self
+            .full_rebuilds
+            .saturating_add(u64::from(refresh.full_rebuild));
+        self.incremental_refreshes = self
+            .incremental_refreshes
+            .saturating_add(u64::from(!refresh.full_rebuild));
+        self.last_seed_faces = seed_faces.len();
+        self.last_affected_faces = refresh.affected_faces;
+        self.last_dirty_buckets = refresh.dirty_buckets;
+        self.last_rebuilt_members = refresh.rebuilt_members;
+        self.last_mismatched_buckets = mismatched_buckets;
+        self.last_refresh_ms = elapsed_ms;
+        self.refresh_ms.record(elapsed_ms);
+        self.last_error = (!exact).then(|| {
+            format!(
+                "incremental root grouping differed in {mismatched_buckets} bucket(s)",
+            )
+        });
+    }
+
+    fn snapshot(&self) -> IncrementalRootGroupShadowSnapshot {
+        IncrementalRootGroupShadowSnapshot {
+            enabled: self.enabled,
+            ready: self.comparisons != 0,
+            comparisons: self.comparisons,
+            exact_comparisons: self.exact_comparisons,
+            mismatched_comparisons: self.mismatched_comparisons,
+            full_rebuilds: self.full_rebuilds,
+            incremental_refreshes: self.incremental_refreshes,
+            indexed_faces: self.index.indexed_faces(),
+            buckets: self.index.bucket_count(),
+            last_seed_faces: self.last_seed_faces,
+            last_affected_faces: self.last_affected_faces,
+            last_dirty_buckets: self.last_dirty_buckets,
+            last_rebuilt_members: self.last_rebuilt_members,
+            last_mismatched_buckets: self.last_mismatched_buckets,
+            last_refresh_ms: self.last_refresh_ms,
+            refresh_ms: self.refresh_ms.snapshot(),
+            adjacency_payload_capacity_bytes: self
+                .adjacency
+                .as_ref()
+                .map_or(0, batch::VertexFaceAdjacency::payload_capacity_bytes),
+            index_payload_capacity_bytes: self.index.payload_capacity_bytes(),
+            corner_payload_capacity_bytes: self.vertex_max.capacity()
+                * std::mem::size_of::<u32>()
+                + self.face_vertex_lods.capacity() * std::mem::size_of::<[u32; 3]>(),
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IncrementalRootGroupShadowSnapshot {
+    enabled: bool,
+    ready: bool,
+    comparisons: u64,
+    exact_comparisons: u64,
+    mismatched_comparisons: u64,
+    full_rebuilds: u64,
+    incremental_refreshes: u64,
+    indexed_faces: usize,
+    buckets: usize,
+    last_seed_faces: usize,
+    last_affected_faces: usize,
+    last_dirty_buckets: usize,
+    last_rebuilt_members: usize,
+    last_mismatched_buckets: usize,
+    last_refresh_ms: f64,
+    refresh_ms: TimingDistributionSnapshot,
+    adjacency_payload_capacity_bytes: usize,
+    index_payload_capacity_bytes: usize,
+    corner_payload_capacity_bytes: usize,
+    last_error: Option<String>,
+}
+
 struct MainState {
     renderer: Renderer,
     /// Authoritative drawable size, updated with the GL viewport by mr_resize.
@@ -352,6 +543,9 @@ struct MainState {
     screen_topology_cache: Option<ScreenMeshTopologyCache>,
     /// Opt-in all-root equivalence gate. It never mutates draw membership.
     adaptive_root_shadow: AdaptiveRootShadow,
+    /// Opt-in exact comparison of sparse retained-root reconstruction against
+    /// the live complete rebuild. It owns no GPU resources or authority.
+    incremental_root_group_shadow: IncrementalRootGroupShadow,
     /// Explicit, bounded live proof that replaces one picked source face with
     /// a reconciled dyadic frontier. Every failed candidate leaves the legacy
     /// root grouping live.
@@ -1780,6 +1974,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             lod_topology: None,
             screen_topology_cache: None,
             adaptive_root_shadow: AdaptiveRootShadow::default(),
+            incremental_root_group_shadow: IncrementalRootGroupShadow::default(),
             adaptive_picked: AdaptivePickedRuntime::default(),
             adaptive_retained_publication_enabled: false,
             adaptive_retained_publication_error: None,
@@ -4058,6 +4253,43 @@ pub fn mr_set_render_shadow_enabled(enabled: bool) -> JsValue {
     })
 }
 
+/// Enable the non-mutating incremental retained-root equivalence gate. The
+/// incumbent complete rebuild remains live authority while the sparse closure
+/// is compared byte-for-byte and timed below the WASM boundary.
+#[wasm_bindgen(js_name = "mr_setIncrementalRootGroupShadowEnabled")]
+pub fn mr_set_incremental_root_group_shadow_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        state.incremental_root_group_shadow.set_enabled(enabled);
+        if enabled
+            && state.num_faces > 0
+            && !state.batch_layout_dirty
+            && !state.batch_groups.is_empty()
+        {
+            compare_incremental_root_group_shadow(
+                state,
+                bounded_standby_resident_lod(),
+                true,
+            );
+        }
+        serde_wasm_bindgen::to_value(&state.incremental_root_group_shadow.snapshot())
+            .unwrap_or(JsValue::NULL)
+    })
+}
+
+#[wasm_bindgen(js_name = "mr_incrementalRootGroupShadowDiagnostics")]
+pub fn mr_incremental_root_group_shadow_diagnostics() -> JsValue {
+    STATE.with(|state| {
+        state.borrow().as_ref().map_or(JsValue::NULL, |state| {
+            serde_wasm_bindgen::to_value(&state.incremental_root_group_shadow.snapshot())
+                .unwrap_or(JsValue::NULL)
+        })
+    })
+}
+
 /// Enable the non-mutating all-root adaptive batch equivalence gate.
 ///
 /// This is deliberately independent of the render shadow: it compares the
@@ -4608,6 +4840,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
                 &st.face_nodes,
             );
             st.adaptive_root_shadow.reset_topology();
+            st.incremental_root_group_shadow.reset_model();
             // Picked face IDs and their captured animation pose are local to
             // one immutable asset epoch.
             st.adaptive_picked.clear();
@@ -7098,6 +7331,32 @@ fn mark_batch_layout_dirty(state: &mut MainState) {
     state.batch_layout_revision = state.batch_layout_revision.wrapping_add(1);
 }
 
+fn compare_incremental_root_group_shadow(
+    state: &mut MainState,
+    initial: batch::ResidentLod,
+    force_rebuild: bool,
+) {
+    if !state.incremental_root_group_shadow.enabled {
+        return;
+    }
+    let Some(topology) = state.lod_topology.as_ref() else {
+        state.incremental_root_group_shadow.last_error =
+            Some("incremental root grouping needs resident half-edge topology".into());
+        return;
+    };
+    state.incremental_root_group_shadow.observe(
+        topology,
+        &state.resident_face_lods,
+        &state.face_materials,
+        &state.face_nodes,
+        &state.face_render_nodes,
+        initial,
+        state.lod_balance_scratch.affected_component_faces(),
+        force_rebuild,
+        &state.batch_groups,
+    );
+}
+
 /// Reconstruct the complete source-face grouping from the last coherent
 /// classifier snapshot. Adaptive replanning always starts here so any CPU-side
 /// rejection can publish a known crack-free root fallback rather than retain a
@@ -7930,6 +8189,11 @@ fn update_batches_in_state(
                 state,
                 initial_resident,
                 LegacyBatchDestination::Live,
+            );
+            compare_incremental_root_group_shadow(
+                state,
+                initial_resident,
+                force_upload,
             );
             if state.adaptive_root_shadow.is_enabled() {
                 compare_adaptive_root_shadow(

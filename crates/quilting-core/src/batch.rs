@@ -680,6 +680,12 @@ impl VertexFaceAdjacency {
         };
         &self.faces[start..end]
     }
+
+    /// Retained CSR payload capacity, excluding the `Vec` headers themselves.
+    pub fn payload_capacity_bytes(&self) -> usize {
+        self.offsets.capacity() * std::mem::size_of::<usize>()
+            + self.faces.capacity() * std::mem::size_of::<u32>()
+    }
 }
 
 /// Reusable flags and sparse outputs for incremental vertex-density refresh.
@@ -985,7 +991,7 @@ pub struct RetainedRootGroupRefresh {
 /// exact corner-density closure while preserving byte-for-byte member order.
 #[derive(Default)]
 pub struct RetainedRootGroupIndex {
-    face_keys: Vec<Option<RenderBatchKey>>,
+    face_keys: Vec<RenderBatchKey>,
     buckets: BTreeMap<RenderBatchKey, Vec<u32>>,
     affected_faces: Vec<usize>,
     dirty_keys: Vec<RenderBatchKey>,
@@ -1003,13 +1009,30 @@ impl RetainedRootGroupIndex {
         self.buckets.len()
     }
 
+    /// Retained vector payload capacity. Allocator/B-tree node overhead is
+    /// deliberately excluded and reported separately by platform profilers.
+    pub fn payload_capacity_bytes(&self) -> usize {
+        self.face_keys.capacity() * std::mem::size_of::<RenderBatchKey>()
+            + self
+                .buckets
+                .values()
+                .map(|faces| faces.capacity() * std::mem::size_of::<u32>())
+                .sum::<usize>()
+            + self.affected_faces.capacity() * std::mem::size_of::<usize>()
+            + self.dirty_keys.capacity() * std::mem::size_of::<RenderBatchKey>()
+            + self.removals.capacity()
+                * std::mem::size_of::<(RenderBatchKey, u32)>()
+            + self.additions.capacity()
+                * std::mem::size_of::<(RenderBatchKey, u32)>()
+            + self.merge_scratch.capacity() * std::mem::size_of::<u32>()
+    }
+
     fn coherent_with(
         &self,
         num_faces: usize,
         groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     ) -> bool {
         self.face_keys.len() == num_faces
-            && self.face_keys.iter().all(Option::is_some)
             && self.buckets.len() == groups.len()
             && self.buckets.iter().all(|(key, faces)| {
                 groups.get(key).is_some_and(|members| members.len() == faces.len())
@@ -1028,7 +1051,7 @@ impl RetainedRootGroupIndex {
         groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     ) {
         self.face_keys.clear();
-        self.face_keys.resize(residents.len(), None);
+        self.face_keys.reserve(residents.len());
         for faces in self.buckets.values_mut() {
             faces.clear();
         }
@@ -1044,7 +1067,7 @@ impl RetainedRootGroupIndex {
                 initial,
                 face_index,
             );
-            self.face_keys[face_index] = Some(key);
+            self.face_keys.push(key);
             self.buckets.entry(key).or_default().push(face_index as u32);
             groups.entry(key).or_default().push(root_batch_member(
                 residents,
@@ -1108,8 +1131,7 @@ impl RetainedRootGroupIndex {
         self.removals.clear();
         self.additions.clear();
         for &face_index in &self.affected_faces {
-            let old_key = self.face_keys[face_index]
-                .expect("a coherent root group index covers every source face");
+            let old_key = self.face_keys[face_index];
             let new_key = root_batch_key(
                 residents,
                 face_materials,
@@ -1123,7 +1145,7 @@ impl RetainedRootGroupIndex {
             if old_key != new_key {
                 self.removals.push((old_key, face_index as u32));
                 self.additions.push((new_key, face_index as u32));
-                self.face_keys[face_index] = Some(new_key);
+                self.face_keys[face_index] = new_key;
             }
         }
         self.dirty_keys.sort_unstable();

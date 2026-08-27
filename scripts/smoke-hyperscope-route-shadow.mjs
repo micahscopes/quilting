@@ -21,6 +21,7 @@ assert.equal(specs.find(spec => spec.key === 'lodratio').kind, 'lod_ratio');
 assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'adaptiveshadow').kind, 'toggle');
+assert.equal(specs.find(spec => spec.key === 'rootgroupshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
@@ -249,6 +250,7 @@ const implicitBrowserDefaults = {
   appshadow: '0',
   rendershadow: '0',
   adaptiveshadow: '0',
+  rootgroupshadow: '0',
 };
 assert.deepEqual(
   Object.fromEntries(

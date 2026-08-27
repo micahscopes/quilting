@@ -406,6 +406,7 @@ import init, {
   mr_setLodGradingRatio,
   mr_setRoundShadowEnabled, mr_compareRoundShadow, mr_roundShadowDiagnostics,
   mr_setRenderShadowEnabled, mr_renderShadowDiagnostics,
+  mr_setIncrementalRootGroupShadowEnabled, mr_incrementalRootGroupShadowDiagnostics,
   mr_setAdaptiveRootShadowEnabled, mr_adaptiveRootShadowDiagnostics,
   mr_setAdaptivePickedFace, mr_setAdaptiveCurrentView,
   mr_setAdaptiveRetainedShadowEnabled,
@@ -556,6 +557,8 @@ const LOD_IMPLEMENTATION = implementationFromRoute(
 );
 const RUST_ADAPTIVE_ROOT_SHADOW_ENABLED =
   initialBrowserParams.get('adaptiveshadow') === '1';
+const INCREMENTAL_ROOT_GROUP_SHADOW_ENABLED =
+  initialBrowserParams.get('rootgroupshadow') === '1';
 const SURFACE_WALK_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'walkimpl', 'js',
 );
@@ -988,6 +991,20 @@ const adaptiveRootShadowDiagnostics = {
   snapshot: null,
 };
 globalThis.__hyperscopeAdaptiveRootShadow = adaptiveRootShadowDiagnostics;
+const incrementalRootGroupShadowDiagnostics = {
+  enabled: INCREMENTAL_ROOT_GROUP_SHADOW_ENABLED,
+  snapshot: null,
+  refresh() {
+    this.snapshot = mr_incrementalRootGroupShadowDiagnostics();
+    return this.snapshot;
+  },
+  setEnabled(enabled) {
+    this.enabled = Boolean(enabled);
+    this.snapshot = mr_setIncrementalRootGroupShadowEnabled(this.enabled);
+    return this.snapshot;
+  },
+};
+globalThis.__hyperscopeIncrementalRootGroupShadow = incrementalRootGroupShadowDiagnostics;
 
 // Explicit DevTools controller for bounded picked-face and automatic
 // current-view adaptation. It deliberately has no second render-state
@@ -1656,6 +1673,7 @@ function syncURL() {
     set('lodimpl', LOD_IMPLEMENTATION, PARAM_DEFAULTS.lodimpl);
     if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
     if (RUST_ADAPTIVE_ROOT_SHADOW_ENABLED) p.set('adaptiveshadow', '1');
+    if (INCREMENTAL_ROOT_GROUP_SHADOW_ENABLED) p.set('rootgroupshadow', '1');
     const rustRoute = compareRustRouteShadow(p);
     let committedParams = p;
     if (RUST_ROUTE_IMPLEMENTATION === 'rust') {
@@ -10552,6 +10570,9 @@ phase('wasm', [], async () => {
   renderShadowDiagnostics.snapshot = mr_setRenderShadowEnabled(RUST_RENDER_SHADOW_ENABLED);
   adaptiveRootShadowDiagnostics.snapshot = mr_setAdaptiveRootShadowEnabled(
     RUST_ADAPTIVE_ROOT_SHADOW_ENABLED,
+  );
+  incrementalRootGroupShadowDiagnostics.snapshot = mr_setIncrementalRootGroupShadowEnabled(
+    INCREMENTAL_ROOT_GROUP_SHADOW_ENABLED,
   );
   const rendererFinished = performance.now();
   startupDiagnostics.wasm = {

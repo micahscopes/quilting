@@ -19,6 +19,8 @@ const {
   load_patch_lab,
   mr_acceptLodDeltaSequence,
   mr_measureRootGrouping,
+  mr_incrementalRootGroupShadowDiagnostics,
+  mr_setIncrementalRootGroupShadowEnabled,
   mr_resetRuntimeTimingDiagnostics,
   mr_runtimeTimingDiagnostics,
   mr_uploadComposedLodModel,
@@ -28,6 +30,8 @@ await init({ module_or_path: readFileSync(wasmPath) });
 
 assert.equal(typeof mr_uploadComposedLodModel, 'function');
 assert.equal(typeof mr_measureRootGrouping, 'function');
+assert.equal(typeof mr_incrementalRootGroupShadowDiagnostics, 'function');
+assert.equal(typeof mr_setIncrementalRootGroupShadowEnabled, 'function');
 assert.equal(typeof mr_runtimeTimingDiagnostics, 'function');
 assert.equal(mr_measureRootGrouping(4), null);
 assert.equal(typeof mr_resetRuntimeTimingDiagnostics, 'function');

@@ -166,6 +166,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("lodimpl", "js", Implementation),
     spec!("rendershadow", "0", Toggle),
     spec!("adaptiveshadow", "0", Toggle),
+    spec!("rootgroupshadow", "0", Toggle),
 ];
 
 pub fn hyperscope_control_spec(key: &str) -> Option<&'static ControlSpec> {
