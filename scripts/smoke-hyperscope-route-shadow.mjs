@@ -26,6 +26,10 @@ assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'animclockimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'animclockimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'animtime').kind, 'number');
+assert.equal(specs.find(spec => spec.key === 'animtime').defaultValue, '0');
+assert.equal(specs.find(spec => spec.key === 'animspeed').kind, 'number');
+assert.equal(specs.find(spec => spec.key === 'animspeed').defaultValue, '1');
 assert.equal(specs.find(spec => spec.key === 'aim').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'aim').defaultValue, '0');
 assert.equal(specs.find(spec => spec.key === 'selasset').kind, 'optional_uuid');
@@ -178,11 +182,18 @@ for (const animationClockDefaultStep of [
   );
 }
 for (const animationClockAuthorityStep of [
-  "synchronizeRustAnimationClockFromBrowser('primary-model')",
+  "!pendingRouteAnimationClock\n        && (!RUST_PRESENTATION_ENABLED",
   "compareRustAnimationSample('frame')",
   "applyRustAnimationSample('frame')",
   'rustAppShadow.writeAnimationSample(',
   "ANIMATION_CLOCK_IMPLEMENTATION === 'rust'",
+  "restorePendingRouteAnimationClock('clip-switch')",
+  "restorePendingRouteAnimationClock('presentation-animation')",
+  '{ restoreRouteClock: false },',
+  'await selectAnimationIndex(animIdx);',
+  "restorePendingRouteAnimationClock('startup-animation')",
+  'animtimeProvided:',
+  'animspeedProvided:',
 ]) {
   assert.ok(
     browserSource.includes(animationClockAuthorityStep),
@@ -257,8 +268,8 @@ const syncSource = browserSource.match(
 assert.ok(syncSource, 'could not locate browser URL serializer');
 assert.equal(
   Array.from(syncSource.matchAll(/canonicalFixedRouteNumber\(/g)).length,
-  14,
-  'every camera value and default must canonicalize signed zero before comparison',
+  18,
+  'every camera/animation value and default must canonicalize signed zero before comparison',
 );
 const browserKeyOrder = Array.from(
   syncSource.matchAll(/(?:set|ss)\(\s*'([^']+)'/g),

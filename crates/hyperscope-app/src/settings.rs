@@ -101,6 +101,8 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("lodratio", "2", LodRatio),
     spec!("animate", "1", Toggle),
     spec!("anim", "-1", Number),
+    spec!("animtime", "0", Number),
+    spec!("animspeed", "1", Number),
     spec!("animclockimpl", "js", Implementation),
     spec!("fuzzy", "0", Toggle),
     spec!("fmode", "1", Number),
@@ -345,6 +347,34 @@ mod tests {
             invalid.diagnostics()[0].code,
             RouteDiagnosticCode::InvalidValue
         );
+    }
+
+    #[test]
+    fn animation_clock_route_is_numeric_ordered_and_optional() {
+        let route = HyperscopeRoute::from_pairs([
+            ("animspeed", "-0.5"),
+            ("animclockimpl", "shadow"),
+            ("animtime", "1.25"),
+        ]);
+        assert_eq!(
+            route.canonical_pairs(),
+            vec![
+                ("animtime", "1.25"),
+                ("animspeed", "-0.5"),
+                ("animclockimpl", "shadow"),
+            ]
+        );
+        assert!(route.diagnostics().is_empty());
+
+        let defaults = HyperscopeRoute::from_pairs([
+            ("animtime", "0.0"),
+            ("animspeed", "1.00"),
+        ]);
+        assert!(defaults.canonical_pairs().is_empty());
+
+        let invalid = HyperscopeRoute::from_pairs([("animtime", "NaN")]);
+        assert_eq!(invalid.diagnostics().len(), 1);
+        assert_eq!(invalid.diagnostics()[0].code, RouteDiagnosticCode::InvalidValue);
     }
 
     #[test]

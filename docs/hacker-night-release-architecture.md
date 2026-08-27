@@ -182,7 +182,7 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 80 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 82 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
@@ -210,6 +210,14 @@ The first application boundary is now explicit:
   face. These session selection IDs are ephemeral URL state, not durable HHHS
   commands; authored Blender identities remain stable across export while
   ordinary runtime assets receive deterministic IDs only for that load.
+  Animation links likewise carry clip-relative `animtime` and signed
+  `animspeed` rather than exposing the application's unwrapped clock. Explicit
+  values remain pending until the requested clip is resident, then one Rust
+  `SetAnimationClock` commit maps them into that clip and updates the browser
+  pose controls. Startup awaits this final clip selection before enabling URL
+  writes, preventing a default clip-reset from erasing an admitted route.
+  Wrapped time is intentional: a copied link restores the same visible pose
+  and playback direction without serializing an irrelevant loop count.
 - `quilting-core::render` owns retained scene snapshots, logical frame
   commands, indexed submission accounting, and the bounded backend-parity
   observer. `rendershadow=1` extracts WebGL state only when the retained scene

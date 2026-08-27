@@ -1313,7 +1313,8 @@ const PARAM_DEFAULTS = {
   mx: '5', my: '0', mz: '0', mr: '20',
   env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
   res: '0', density: '100', atten: '1', minpx: '16',
-  animate: '1', anim: '-1', animclockimpl: 'js', atlas: '7', lodratio: '2',
+  animate: '1', anim: '-1', animtime: '0', animspeed: '1',
+  animclockimpl: 'js', atlas: '7', lodratio: '2',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   aim: '0',
   selasset: '', selentity: '',
@@ -1347,6 +1348,10 @@ function readParams(p) {
     minpx: get('minpx'),
     animate: get('animate'),
     anim: get('anim'),
+    animtime: get('animtime'),
+    animspeed: get('animspeed'),
+    animtimeProvided: p.has('animtime'),
+    animspeedProvided: p.has('animspeed'),
     animclockimpl: get('animclockimpl'),
     atlas: get('atlas'),
     lodratio: get('lodratio'),
@@ -1418,6 +1423,17 @@ function syncURL() {
       ss('lodratio', lod.grading, PARAM_DEFAULTS.lodratio);
       set('animate', animating_sig.peek() ? '1' : '0', PARAM_DEFAULTS.animate);
       set('anim', $('anim-sel').value, PARAM_DEFAULTS.anim);
+      const animationTimeMin = Number(meshInfo?.time_min) || 0;
+      set(
+        'animtime',
+        canonicalFixedRouteNumber(animTime - animationTimeMin, 3),
+        canonicalFixedRouteNumber(PARAM_DEFAULTS.animtime, 3),
+      );
+      set(
+        'animspeed',
+        canonicalFixedRouteNumber(presentationAnimationSpeed, 3),
+        canonicalFixedRouteNumber(PARAM_DEFAULTS.animspeed, 3),
+      );
       set(
         'animclockimpl',
         ANIMATION_CLOCK_IMPLEMENTATION,
@@ -2834,7 +2850,10 @@ async function applyPresentationAnimationState(snapshot = rustPresentationSnapsh
       if (presentationComposition.ready) {
         throw new Error('presentation clip switching after scene packing is not supported');
       }
-      const switched = await selectAnimationIndex(clipIndex);
+      const switched = await selectAnimationIndex(
+        clipIndex,
+        { restoreRouteClock: false },
+      );
       if (!switched) throw new Error(`presentation animation clip ${animation.clip} failed to load`);
     }
     if (generation !== presentationAnimationGeneration || snapshot !== rustPresentationSnapshot) {
@@ -2852,6 +2871,7 @@ async function applyPresentationAnimationState(snapshot = rustPresentationSnapsh
     }
     presentationAnimationSpeed = Number(animation.speed);
     animTime = time;
+    restorePendingRouteAnimationClock('presentation-animation');
     $('time').value = animTime;
     $('time-v').textContent = animTime.toFixed(2);
     rebaseAnimationPoseContinuity();
@@ -4315,6 +4335,7 @@ let presentationAnimationSpeed = 1;
 let presentationAnimationGeneration = 0;
 let meshInfo = null;
 let animTime = 0;
+let pendingRouteAnimationClock = null;
 let animationPoseClockSeconds = 0;
 let animationPoseRevision = 0;
 let animationPoseContinuityEpoch = 1;
@@ -4336,6 +4357,7 @@ const animationClockDiagnostics = {
   maximumError: 0,
   authorityWrites: 0,
   fallbackWrites: 0,
+  routeRestores: 0,
   errors: 0,
   lastContext: null,
   lastError: null,
@@ -4372,6 +4394,48 @@ function synchronizeRustAnimationClockFromBrowser(context) {
     animationClockDiagnostics.errors += 1;
     animationClockDiagnostics.lastError = error?.message || String(error);
     animationClockDiagnostics.state = 'error';
+    return false;
+  }
+}
+
+function restorePendingRouteAnimationClock(context) {
+  if (!pendingRouteAnimationClock) return false;
+  const range = currentAnimationClipRange();
+  if (!range) return false;
+  try {
+    const app = ensureRustAppShadow('animation-route');
+    const requestedTime = pendingRouteAnimationClock.timeSeconds
+      ?? (animTime - range.timeMin);
+    const requestedSpeed = pendingRouteAnimationClock.speed
+      ?? presentationAnimationSpeed;
+    const receipt = app.setAnimationClock(
+      ++rustAppShadowSequence,
+      animating_sig.peek(),
+      requestedTime,
+      requestedSpeed,
+    );
+    rustAppShadowDiagnostics.lastCommit = receipt.commit;
+    app.writeAnimationSample(range.timeMin, range.duration, animationClockPacket);
+    animTime = animationClockPacket[1];
+    presentationAnimationSpeed = animationClockPacket[2];
+    const timeSlider = $('time');
+    timeSlider.value = animTime;
+    $('time-v').textContent = animTime.toFixed(2);
+    rebaseAnimationPoseContinuity();
+    pendingRouteAnimationClock = null;
+    animationClockDiagnostics.routeRestores += 1;
+    animationClockDiagnostics.lastContext = context;
+    if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
+      animationClockDiagnostics.synchronizations += 1;
+      animationClockDiagnostics.state = ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+        ? 'authoritative'
+        : 'shadowing';
+    }
+    return true;
+  } catch (error) {
+    animationClockDiagnostics.errors += 1;
+    animationClockDiagnostics.lastError = error?.message || String(error);
+    animationClockDiagnostics.state = 'route-error';
     return false;
   }
 }
@@ -6657,7 +6721,7 @@ effect(() => {
   syncURL();
 });
 
-async function selectAnimationIndex(idx) {
+async function selectAnimationIndex(idx, { restoreRouteClock = true } = {}) {
   if (idx < 0 || !meshInfo) return false;
   $('anim-sel').value = String(idx);
   const blockGeneration = ++animationPoseBlockGeneration;
@@ -6682,7 +6746,12 @@ async function selectAnimationIndex(idx) {
     timeSlider.step = (result.time_max - result.time_min) / 200;
     timeSlider.value = result.time_min;
     $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
-    if (!RUST_PRESENTATION_ENABLED || !rustPresentationSnapshot) {
+    const routeClockDeferred = !restoreRouteClock && Boolean(pendingRouteAnimationClock);
+    const restoredRouteClock = restoreRouteClock
+      ? restorePendingRouteAnimationClock('clip-switch')
+      : false;
+    if (!routeClockDeferred && !restoredRouteClock
+        && (!RUST_PRESENTATION_ENABLED || !rustPresentationSnapshot)) {
       synchronizeRustAnimationClockFromBrowser('clip-switch');
     }
 
@@ -7362,6 +7431,16 @@ applyParams = function(params) {
   lod.atlas.set(integer(params.atlas, 7, 3, 9));
   lod.grading.set(params.lodratio === '4' ? '4' : '2');
   setAnimationPlaybackIntent(params.animate !== '0');
+  pendingRouteAnimationClock = params.animtimeProvided || params.animspeedProvided
+    ? Object.freeze({
+      timeSeconds: params.animtimeProvided
+        ? finite(params.animtime, 0, -1e9, 1e9)
+        : null,
+      speed: params.animspeedProvided
+        ? finite(params.animspeed, 1, -1e6, 1e6)
+        : null,
+    })
+    : null;
   zoom = finite(params.zoom, 3, 0.1, 1000);
   rotX = finite(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
   rotY = finite(params.ry, 0.5, -1e6, 1e6);
@@ -8618,6 +8697,7 @@ function frame(ts) {
       lastAnimationUiAt = ts;
       $('time').value = animTime;
       $('time-v').textContent = animTime.toFixed(2);
+      syncURL();
     }
     tickAnimation(animTime, animationPoseClockSeconds);
     if (ANIMATION_CLOCK_IMPLEMENTATION === 'shadow') {
@@ -9512,13 +9592,17 @@ async function finishModelUpload(
     meshInfo.duration = 0;
   }
   gpuSkinned = modelHasAnimations;
-  if (gpuSkinned && (!RUST_PRESENTATION_ENABLED || !rustPresentationSnapshot)) {
-    synchronizeRustAnimationClockFromBrowser('primary-model');
+  if (gpuSkinned) {
+    // Startup selects the requested clip after the primary upload. Preserve an
+    // explicit route clock until that final clip range is resident; restoring
+    // it here would let the subsequent clip switch reset the browser pose
+    // while leaving Rust at the requested time.
+    if (!pendingRouteAnimationClock
+        && (!RUST_PRESENTATION_ENABLED || !rustPresentationSnapshot)) {
+      synchronizeRustAnimationClockFromBrowser('primary-model');
+    }
   }
   if (gpuSkinned) tickAnimation(animTime, animationPoseClockSeconds);
-  if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
-    void applyPresentationAnimationState(rustPresentationSnapshot);
-  }
   uploadTimings.animationSetupMs = performance.now() - sectionStarted;
   uploadTimings.totalMs = performance.now() - uploadStarted;
 
@@ -10781,10 +10865,15 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
     );
     if (installed && appAssetMayInstall(modelData.assetToken)) {
       activateHyperscape(modelData.buffer);
-      const animIdx = parseInt(initParams.anim);
-      if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
-        $('anim-sel').value = animIdx;
-        $('anim-sel').dispatchEvent(new Event('change'));
+      if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
+        await applyPresentationAnimationState(rustPresentationSnapshot);
+      } else {
+        const animIdx = parseInt(initParams.anim);
+        if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
+          await selectAnimationIndex(animIdx);
+        } else if (gpuSkinned && restorePendingRouteAnimationClock('startup-animation')) {
+          tickAnimation(animTime, animationPoseClockSeconds);
+        }
       }
     }
   } else {

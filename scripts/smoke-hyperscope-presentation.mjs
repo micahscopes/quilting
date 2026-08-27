@@ -167,7 +167,7 @@ assert.deepEqual(first.animations, presentation.cues[0].animations);
 
 for (const requiredAnimationAdapterStep of [
   'primaryPresentationAnimation(snapshot)',
-  'selectAnimationIndex(clipIndex)',
+  '{ restoreRouteClock: false },',
   'animTime = time;',
   'animating_sig.set(playing);',
   'deltaSeconds * presentationAnimationSpeed',
