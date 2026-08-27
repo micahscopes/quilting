@@ -673,6 +673,22 @@ impl HyperscopeAppShadow {
     #[wasm_bindgen(js_name = setFocusField)]
     pub fn set_focus_field(&self, coordinate: f64, angular_aperture: f64) -> Result<u64, JsValue> {
         self.dispatch_navigation(NavigationAction::SetFocusField {
+            enabled: None,
+            coordinate,
+            angular_aperture,
+        })
+    }
+
+    /// Commit the complete spheroidal focus field as one semantic action.
+    #[wasm_bindgen(js_name = setFocusFieldState)]
+    pub fn set_focus_field_state(
+        &self,
+        enabled: bool,
+        coordinate: f64,
+        angular_aperture: f64,
+    ) -> Result<u64, JsValue> {
+        self.dispatch_navigation(NavigationAction::SetFocusField {
+            enabled: Some(enabled),
             coordinate,
             angular_aperture,
         })

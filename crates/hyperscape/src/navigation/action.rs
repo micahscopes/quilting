@@ -60,7 +60,13 @@ pub enum NavigationAction {
     TranslateFocus([f64; 3]),
     ScaleFocusLog(f64),
     SetFocusEnabled(bool),
+    /// Replace the geometric field parameters and, when supplied, its enabled
+    /// state as one navigation transaction. `None` preserves the existing
+    /// enabled state for older adapters and replay fixtures; interactive views
+    /// should provide `Some` so a rejected field edit cannot partially toggle
+    /// focus.
     SetFocusField {
+        enabled: Option<bool>,
         coordinate: f64,
         angular_aperture: f64,
     },
@@ -506,6 +512,7 @@ fn apply_action(
         }
         NavigationAction::SetFocusEnabled(enabled) => focus.focus_enabled = enabled,
         NavigationAction::SetFocusField {
+            enabled,
             coordinate,
             angular_aperture,
         } => {
@@ -517,6 +524,9 @@ fn apply_action(
                 return Err(
                     "focus coordinate must be in [0,1] and aperture must be positive".into(),
                 );
+            }
+            if let Some(enabled) = enabled {
+                focus.focus_enabled = enabled;
             }
             focus.focus_coordinate = coordinate;
             focus.angular_aperture = angular_aperture;
@@ -956,6 +966,40 @@ mod tests {
         assert_eq!(controller.focus.transition.unwrap().duration_seconds, 0.7);
         assert!(controller.focus.focus_enabled);
         assert_eq!(controller.runtime.last_applied_sequence, Some(0));
+    }
+
+    #[test]
+    fn complete_focus_field_edit_commits_or_rolls_back_as_one_action() {
+        let mut controller = NavigationController::default();
+        controller
+            .push(NavigationAction::SetFocusField {
+                enabled: Some(true),
+                coordinate: 0.375,
+                angular_aperture: 0.08,
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert!(controller.focus.focus_enabled);
+        assert_eq!(controller.focus.focus_coordinate, 0.375);
+        assert_eq!(controller.focus.angular_aperture, 0.08);
+
+        let accepted = controller.focus.clone();
+        controller
+            .push(NavigationAction::SetFocusField {
+                enabled: Some(false),
+                coordinate: f64::NAN,
+                angular_aperture: 0.12,
+            })
+            .unwrap();
+        controller.tick(0.0).unwrap();
+
+        assert_eq!(controller.focus, accepted);
+        assert!(controller
+            .diagnostics
+            .0
+            .last()
+            .is_some_and(|message| message.contains("focus coordinate")));
     }
 
     #[test]

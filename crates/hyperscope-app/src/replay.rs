@@ -485,6 +485,7 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                     );
                 }
                 Ok(Self::SetFocusField {
+                    enabled: None,
                     coordinate,
                     angular_aperture,
                 })

@@ -648,6 +648,7 @@ impl PresentationRuntime {
         push_navigation(
             &mut staged_navigation,
             NavigationAction::SetFocusField {
+                enabled: None,
                 coordinate: target_focus.focus_coordinate,
                 angular_aperture: target_focus.angular_aperture,
             },
