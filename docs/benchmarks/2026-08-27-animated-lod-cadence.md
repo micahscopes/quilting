@@ -320,6 +320,33 @@ no fallbacks, no transition left pending, and no failures or errors. Thus
 view-dependent leaf refresh remains live even when root source-face admission
 is skipped.
 
+### Rejected WebGL2 scatter-upload experiment
+
+A retained source-face-to-slot map was prototyped for non-adaptive root
+batches so that only changed or swap-moved 40-byte topology records needed
+upload. Adaptive leaves deliberately remained on their transactional full
+publication path. The semantic algorithm and its removal/addition invariants
+were unit-tested, but the browser measurements rejected the design for the
+WebGL2 backend.
+
+The pre-experiment animated-horse profile uploaded about 947 of 984 records per
+batch build (465,066 records across 491 builds), with 0.83 ms mean WebGL upload
+work. Exact sparse ranges reduced traffic to about 76 records per build, but
+required about 21 `bufferSubData` calls per build and raised mean upload work to
+1.73 ms. Coalescing each changed bucket to one bounding span restored roughly
+one call per bucket, but the span covered about 893 records per build and still
+measured 1.27 ms mean upload work. Both variants reported zero shared-edge
+mismatches and zero GPU-batch failures; the rejection is about measured cost
+and complexity, not correctness.
+
+No implementation from this experiment is retained. WebGL2 keeps one compact
+full-prefix upload for each changed bucket. True sparse/scatter publication is
+reserved for the WebGPU compute/compaction/indirect-draw path, where it can be
+expressed without multiplying JavaScript/WebGL driver crossings. This also
+keeps the resident tessellation atlas unchanged: WebGPU work surrounds the
+atlas with GPU-side classification, reconciliation, culling, compaction, and
+submission rather than regenerating microgeometry every frame.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
