@@ -312,8 +312,10 @@ pub(crate) struct AdaptivePickedRuntime {
     component_shadow: AdaptiveComponentShadow,
     component_publication_enabled: bool,
     pending_component_publication: bool,
+    pending_component_authority: bool,
     published_component_publication: bool,
     component_publication_installs: u64,
+    component_authority_changed_installs: u64,
     component_publication_fallbacks: u64,
     component_publication_last_error: Option<String>,
     lod_scratch: ScreenMeshLeafLodScratch,
@@ -403,6 +405,13 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     component_shadow_reconciliation_cache_misses: u64,
     component_certified_reuses: u64,
     component_certified_misses: u64,
+    component_authority_oracle_interval: u64,
+    component_authority_oracle_samples: u64,
+    component_authority_oracle_skips: u64,
+    component_authority_sample_age: u64,
+    component_authority_revoked: bool,
+    component_authority_revocations: u64,
+    component_authority_changed_installs: u64,
     component_shadow_last_error: Option<&'a str>,
     component_shadow_last: Option<AdaptiveComponentShadowComparison>,
     component_publication_enabled: bool,
@@ -421,9 +430,20 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     last_timings: AdaptivePlanTimings,
 }
 
+const COMPONENT_AUTHORITY_ORACLE_INTERVAL: u64 = 16;
+const COMPONENT_AUTHORITY_MAX_FACES: usize = 4_096;
+const COMPONENT_AUTHORITY_LARGE_SCENE_FRACTION: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdaptiveGroupAuthority {
+    Complete,
+    Component,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AdaptiveGroupSignature {
-    reconciliation_generation: u64,
+    authority: AdaptiveGroupAuthority,
+    generation: u64,
     batch_layout_revision: u64,
 }
 
@@ -518,6 +538,8 @@ struct AdaptiveComponentShadowComparison {
     composed_triangles: u64,
     complete_triangles: u64,
     triangle_budget_match: bool,
+    oracle_sampled: bool,
+    authoritative: bool,
     exact: bool,
     plan_ms: f64,
     frontier_ms: f64,
@@ -534,6 +556,21 @@ struct AdaptiveComponentStageSignature {
     batch_layout_revision: u64,
 }
 
+type AdaptiveReconciliationDiagnostic = (u64, u64, u64);
+
+#[derive(Clone, Copy, Debug)]
+struct AdaptiveCertifiedComponent {
+    group_signature: AdaptiveGroupSignature,
+    triangles: u64,
+    reconciliation: AdaptiveReconciliationDiagnostic,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AdaptiveChangedComponentAuthority {
+    group_signature: AdaptiveGroupSignature,
+    reconciliation: AdaptiveReconciliationDiagnostic,
+}
+
 #[derive(Clone, Debug)]
 struct AdaptiveComponentCertificate {
     stage_signature: AdaptiveComponentStageSignature,
@@ -541,7 +578,7 @@ struct AdaptiveComponentCertificate {
     selected_faces: Vec<u32>,
     full_group_signature: AdaptiveGroupSignature,
     complete_triangles: u64,
-    complete_reconciliation: (u64, u64, u64),
+    complete_reconciliation: AdaptiveReconciliationDiagnostic,
 }
 
 #[derive(Default)]
@@ -564,6 +601,13 @@ struct AdaptiveComponentShadow {
     certificate: Option<AdaptiveComponentCertificate>,
     certified_reuses: u64,
     certified_misses: u64,
+    authority_basis: Option<(u64, u64)>,
+    authority_revoked: Option<(u64, u64)>,
+    authority_generation: u64,
+    authority_changed_since_oracle: u64,
+    authority_oracle_samples: u64,
+    authority_oracle_skips: u64,
+    authority_revocations: u64,
 }
 
 impl AdaptiveComponentShadow {
@@ -581,6 +625,13 @@ impl AdaptiveComponentShadow {
             self.certificate = None;
             self.certified_reuses = 0;
             self.certified_misses = 0;
+            self.authority_basis = None;
+            self.authority_revoked = None;
+            self.authority_generation = 0;
+            self.authority_changed_since_oracle = 0;
+            self.authority_oracle_samples = 0;
+            self.authority_oracle_skips = 0;
+            self.authority_revocations = 0;
         }
         changed
     }
@@ -590,6 +641,13 @@ impl AdaptiveComponentShadow {
             "disabled"
         } else if self.last_error.is_some() {
             "error"
+        } else if self
+            .last
+            .is_some_and(|comparison| {
+                comparison.authoritative && !comparison.oracle_sampled && !comparison.exact
+            })
+        {
+            "authoritative-unsampled"
         } else if self.last.is_some_and(|comparison| comparison.exact) {
             "match"
         } else if self
@@ -604,6 +662,107 @@ impl AdaptiveComponentShadow {
         }
     }
 
+    fn revoke_staged_authority(&mut self) {
+        self.certificate = None;
+        let Some(signature) = self.staged_signature else {
+            return;
+        };
+        let epoch = (
+            signature.root_topology_revision,
+            signature.batch_layout_revision,
+        );
+        if self.authority_revoked != Some(epoch) {
+            self.authority_revocations = self.authority_revocations.saturating_add(1);
+        }
+        self.authority_revoked = Some(epoch);
+    }
+
+    fn record_exact_oracle_match(&mut self) {
+        let Some(signature) = self.staged_signature else {
+            return;
+        };
+        self.authority_basis = Some((
+            signature.root_topology_revision,
+            signature.batch_layout_revision,
+        ));
+        self.authority_changed_since_oracle = 0;
+        self.authority_oracle_samples = self.authority_oracle_samples.saturating_add(1);
+    }
+
+    fn reset_authority_basis(&mut self) {
+        self.certificate = None;
+        self.authority_basis = None;
+        self.authority_revoked = None;
+        self.authority_changed_since_oracle = 0;
+    }
+
+    fn current_authority_revoked(&self) -> bool {
+        let current = self
+            .staged_signature
+            .map(|signature| {
+                (
+                    signature.root_topology_revision,
+                    signature.batch_layout_revision,
+                )
+            })
+            .or(self.authority_basis);
+        current.is_some() && current == self.authority_revoked
+    }
+
+    fn changed_authority_signature(
+        &mut self,
+    ) -> Result<Option<AdaptiveChangedComponentAuthority>, String> {
+        let Some(stage_signature) = self.staged_signature else {
+            return Ok(None);
+        };
+        let epoch = (
+            stage_signature.root_topology_revision,
+            stage_signature.batch_layout_revision,
+        );
+        if self.authority_basis != Some(epoch) || self.authority_revoked == Some(epoch) {
+            return Ok(None);
+        }
+        let source_faces = self.plan.mesh.diagnostic.source_faces as usize;
+        let component_faces = self.plan.component_faces.len();
+        let bounded = component_faces != 0
+            && component_faces < source_faces
+            && component_faces <= COMPONENT_AUTHORITY_MAX_FACES
+            && (source_faces <= COMPONENT_AUTHORITY_MAX_FACES
+                || component_faces
+                    .checked_mul(COMPONENT_AUTHORITY_LARGE_SCENE_FRACTION)
+                    .is_some_and(|weighted| weighted <= source_faces));
+        if !bounded {
+            return Ok(None);
+        }
+        let next_since_oracle = self.authority_changed_since_oracle.saturating_add(1);
+        if next_since_oracle >= COMPONENT_AUTHORITY_ORACLE_INTERVAL {
+            return Ok(None);
+        }
+        let resident = self
+            .reconciliation_cache
+            .result
+            .as_ref()
+            .ok_or_else(|| "adaptive component reconciliation disappeared".to_string())?;
+        self.authority_generation = self
+            .authority_generation
+            .checked_add(1)
+            .ok_or_else(|| "adaptive component authority generation overflow".to_string())?;
+        self.authority_changed_since_oracle = next_since_oracle;
+        self.authority_oracle_skips = self.authority_oracle_skips.saturating_add(1);
+        Ok(Some(AdaptiveChangedComponentAuthority {
+            group_signature: AdaptiveGroupSignature {
+                authority: AdaptiveGroupAuthority::Component,
+                generation: self.authority_generation,
+                batch_layout_revision: stage_signature.batch_layout_revision,
+            },
+            reconciliation: (
+                resident.shared_edge_promotions as u64,
+                resident.grading_promotions as u64,
+                resident.iterations as u64,
+            ),
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn stage_plan(
         &mut self,
@@ -613,7 +772,7 @@ impl AdaptiveComponentShadow {
         max_atlas_lod: u32,
         root_topology_revision: u64,
         batch_layout_revision: u64,
-    ) -> Result<Option<(AdaptiveGroupSignature, u64, (u64, u64, u64))>, String> {
+    ) -> Result<Option<AdaptiveCertifiedComponent>, String> {
         if !self.enabled {
             return Ok(None);
         }
@@ -658,6 +817,7 @@ impl AdaptiveComponentShadow {
             self.frontier_cache_misses = self.frontier_cache_misses.saturating_add(1);
         }
         let Some(component_frontier) = self.frontier.as_ref() else {
+            self.revoke_staged_authority();
             self.mismatches = self.mismatches.saturating_add(1);
             self.last_error = Some("adaptive component shadow frontier disappeared".into());
             return Err("adaptive component shadow frontier disappeared".into());
@@ -687,16 +847,19 @@ impl AdaptiveComponentShadow {
         };
         self.staged_signature = Some(stage_signature);
         let certified = self.certificate.as_ref().filter(|certificate| {
-            certificate.stage_signature == stage_signature
+            self.authority_revoked
+                != Some((
+                    stage_signature.root_topology_revision,
+                    stage_signature.batch_layout_revision,
+                ))
+                && certificate.stage_signature == stage_signature
                 && certificate.diagnostic == self.plan.mesh.diagnostic
                 && certificate.selected_faces == self.plan.mesh.selected_faces
         });
-        let certified_values = certified.map(|certificate| {
-            (
-                certificate.full_group_signature,
-                certificate.complete_triangles,
-                certificate.complete_reconciliation,
-            )
+        let certified_values = certified.map(|certificate| AdaptiveCertifiedComponent {
+            group_signature: certificate.full_group_signature,
+            triangles: certificate.complete_triangles,
+            reconciliation: certificate.complete_reconciliation,
         });
         let source_faces = request.source_requested_lods.len();
         let component_faces = self.plan.component_faces.len();
@@ -729,6 +892,8 @@ impl AdaptiveComponentShadow {
                 .map(|certificate| certificate.complete_triangles)
                 .unwrap_or(0),
             triangle_budget_match: false,
+            oracle_sampled: false,
+            authoritative: certified.is_some(),
             exact: false,
             plan_ms,
             frontier_ms,
@@ -755,6 +920,7 @@ impl AdaptiveComponentShadow {
             return;
         };
         let Some(component_resident) = self.reconciliation_cache.result.as_ref() else {
+            self.revoke_staged_authority();
             self.mismatches = self.mismatches.saturating_add(1);
             self.last_error = Some("adaptive component shadow reconciliation disappeared".into());
             return;
@@ -766,6 +932,7 @@ impl AdaptiveComponentShadow {
         ) {
             Ok(vertices) => vertices,
             Err(error) => {
+                self.revoke_staged_authority();
                 self.mismatches = self.mismatches.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return;
@@ -777,6 +944,7 @@ impl AdaptiveComponentShadow {
         ) {
             Ok(vertices) => vertices,
             Err(error) => {
+                self.revoke_staged_authority();
                 self.mismatches = self.mismatches.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return;
@@ -833,10 +1001,11 @@ impl AdaptiveComponentShadow {
         comparison.resident_mismatches = resident_mismatches as u64;
         comparison.vertex_mismatches = vertex_mismatches as u64;
         comparison.plan_exact = plan_exact;
+        comparison.oracle_sampled = true;
         comparison.compare_ms = compare_ms;
         comparison.total_ms += compare_ms;
         if !plan_exact {
-            self.certificate = None;
+            self.revoke_staged_authority();
             self.mismatches = self.mismatches.saturating_add(1);
         }
     }
@@ -890,7 +1059,7 @@ impl AdaptiveComponentShadow {
             &mut self.component_lod_scratch,
             &mut self.overlay,
         ) {
-            self.certificate = None;
+            self.revoke_staged_authority();
             self.mismatches = self.mismatches.saturating_add(1);
             self.last_error = Some(error.to_string());
             return;
@@ -910,7 +1079,7 @@ impl AdaptiveComponentShadow {
         ) {
             Ok(work) => work,
             Err(error) => {
-                self.certificate = None;
+                self.revoke_staged_authority();
                 self.mismatches = self.mismatches.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return;
@@ -929,8 +1098,12 @@ impl AdaptiveComponentShadow {
             && comparison.atlas_residency_valid
             && comparison.triangle_budget_match;
         if comparison.exact {
+            comparison.authoritative = true;
             self.matches = self.matches.saturating_add(1);
-            if let Some(stage_signature) = self.staged_signature {
+            if comparison.oracle_sampled {
+                let stage_signature = self
+                    .staged_signature
+                    .expect("sampled component comparison has a stage signature");
                 self.certificate = Some(AdaptiveComponentCertificate {
                     stage_signature,
                     diagnostic: self.plan.mesh.diagnostic,
@@ -939,11 +1112,95 @@ impl AdaptiveComponentShadow {
                     complete_triangles,
                     complete_reconciliation,
                 });
+                self.record_exact_oracle_match();
             }
         } else {
-            self.certificate = None;
+            self.revoke_staged_authority();
             self.mismatches = self.mismatches.saturating_add(1);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_authoritative_overlay(
+        &mut self,
+        target: &mut AdaptiveRenderOverlay,
+        baseline_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+        baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: ResidentLod,
+        atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+        max_triangles: u64,
+    ) -> Result<u64, String> {
+        if !self.enabled {
+            return Err("adaptive component authority is disabled".into());
+        }
+        let frontier = self
+            .frontier
+            .as_ref()
+            .ok_or_else(|| "adaptive component frontier disappeared".to_string())?;
+        let resident = self
+            .reconciliation_cache
+            .result
+            .as_ref()
+            .ok_or_else(|| "adaptive component reconciliation disappeared".to_string())?;
+        let overlay_start = browser_now_ms();
+        if let Err(error) = group_resident_screen_component_overlay_into(
+            frontier,
+            &resident.resident,
+            &self.plan.component_faces,
+            baseline_residents,
+            baseline_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            &mut self.component_lod_scratch,
+            &mut self.overlay,
+        ) {
+            self.revoke_staged_authority();
+            return Err(error.to_string());
+        }
+        let work = match measure_adaptive_render_work(
+            baseline_groups,
+            &self.overlay,
+            baseline_residents,
+            initial,
+            atlas_triangle_counts,
+        ) {
+            Ok(work) => work,
+            Err(error) => {
+                self.revoke_staged_authority();
+                return Err(error.to_string());
+            }
+        };
+        if work.composed_triangles > max_triangles {
+            return Err(format!(
+                "adaptive component authority needs {} triangles; budget is {max_triangles}",
+                work.composed_triangles,
+            ));
+        }
+        let Some(comparison) = self.last.as_mut() else {
+            self.revoke_staged_authority();
+            return Err("adaptive component authority lost its staged diagnostic".into());
+        };
+        comparison.overlay_ms = browser_now_ms() - overlay_start;
+        comparison.total_ms += comparison.overlay_ms;
+        comparison.overlay_compared = false;
+        comparison.atlas_residency_valid = true;
+        comparison.baseline_triangles = work.baseline_triangles;
+        comparison.suppressed_root_triangles = work.suppressed_root_triangles;
+        comparison.overlay_triangles = work.overlay_triangles;
+        comparison.composed_triangles = work.composed_triangles;
+        comparison.complete_triangles = 0;
+        comparison.triangle_budget_match = true;
+        comparison.oracle_sampled = false;
+        comparison.authoritative = true;
+        comparison.exact = false;
+        std::mem::swap(target, &mut self.overlay);
+        Ok(work.composed_triangles)
     }
 
     fn swap_exact_overlay(
@@ -1098,8 +1355,10 @@ impl AdaptivePickedRuntime {
         self.component_shadow = AdaptiveComponentShadow::default();
         self.component_publication_enabled = false;
         self.pending_component_publication = false;
+        self.pending_component_authority = false;
         self.published_component_publication = false;
         self.component_publication_installs = 0;
+        self.component_authority_changed_installs = 0;
         self.component_publication_fallbacks = 0;
         self.component_publication_last_error = None;
         self.retained_shadow_enabled = false;
@@ -1203,11 +1462,13 @@ impl AdaptivePickedRuntime {
         let changed = self.component_publication_enabled != enabled;
         self.component_publication_enabled = enabled;
         self.pending_component_publication = false;
+        self.pending_component_authority = false;
         self.component_publication_last_error = None;
         if changed {
             // Force one freshly component-derived overlay across the cutover
             // boundary instead of inheriting an equal complete-shadow cache.
             self.published_overlay_signature = None;
+            self.component_shadow.reset_authority_basis();
         }
         Ok(changed)
     }
@@ -1257,6 +1518,37 @@ impl AdaptivePickedRuntime {
             .ok_or_else(|| "staged adaptive group identity is unavailable".to_string())?;
         if signature.batch_layout_revision != batch_layout_revision {
             return Err("staged adaptive group identity does not match the batch layout".into());
+        }
+        if self.pending_component_authority {
+            if signature.authority != AdaptiveGroupAuthority::Component {
+                return Err("component authority staged a non-component group identity".into());
+            }
+            let max_triangles = self
+                .config
+                .ok_or_else(|| "adaptive screen mode is disabled".to_string())?
+                .max_triangles;
+            let stage_start = browser_now_ms();
+            let triangles = self.component_shadow.stage_authoritative_overlay(
+                &mut self.pending_overlay,
+                baseline_groups,
+                baseline_residents,
+                baseline_vertex_lods,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                atlas_triangle_counts,
+                max_triangles,
+            )?;
+            self.pending_triangles = triangles;
+            self.pending_overlay_signature = Some(signature);
+            self.pending_overlay_reuses_published = false;
+            self.pending_component_publication = true;
+            self.component_publication_last_error = None;
+            self.retained_shadow_cache_misses =
+                self.retained_shadow_cache_misses.saturating_add(1);
+            self.last_retained_shadow_stage_ms = browser_now_ms() - stage_start;
+            return Ok(false);
         }
         if self.published_overlay_signature == Some(signature) {
             self.pending_overlay_signature = Some(signature);
@@ -1418,6 +1710,7 @@ impl AdaptivePickedRuntime {
         self.pending_overlay_signature = None;
         self.pending_overlay_reuses_published = false;
         self.pending_component_publication = false;
+        self.pending_component_authority = false;
         self.pending_selected_faces.clear();
     }
 
@@ -1451,6 +1744,7 @@ impl AdaptivePickedRuntime {
 
     fn commit_publication_mode(&mut self, retained_gpu_publication: bool) {
         let component_candidate = self.pending_component_publication;
+        let component_authority = self.pending_component_authority;
         if let Some(plan) = self.pending_plan.take() {
             self.commit_pending_overlay();
             self.published_component_publication =
@@ -1458,6 +1752,11 @@ impl AdaptivePickedRuntime {
             if self.published_component_publication {
                 self.component_publication_installs =
                     self.component_publication_installs.saturating_add(1);
+                if component_authority {
+                    self.component_authority_changed_installs = self
+                        .component_authority_changed_installs
+                        .saturating_add(1);
+                }
             } else if component_candidate {
                 self.component_publication_fallbacks =
                     self.component_publication_fallbacks.saturating_add(1);
@@ -1479,7 +1778,12 @@ impl AdaptivePickedRuntime {
                 &mut self.last_published_faces,
                 &mut self.pending_selected_faces,
             );
-            self.published_group_signature = self.pending_group_signature.take();
+            let pending_signature = self.pending_group_signature.take();
+            if pending_signature
+                .is_some_and(|signature| signature.authority == AdaptiveGroupAuthority::Complete)
+            {
+                self.published_group_signature = pending_signature;
+            }
         } else if let Some(error) = self.pending_fallback_error.take() {
             self.clear_published_overlay();
             self.last_error = Some(error);
@@ -1569,10 +1873,19 @@ impl AdaptivePickedRuntime {
         if self.last_plan.is_none() {
             return Err("adaptive screen frontier has not been published".into());
         }
+        if self
+            .published_overlay_signature
+            .is_some_and(|signature| signature.authority == AdaptiveGroupAuthority::Component)
+        {
+            return Err(
+                "published adaptive epoch is awaiting its next complete grouping oracle".into(),
+            );
+        }
         let signature = self
             .published_group_signature
             .ok_or_else(|| "published adaptive group identity is unavailable".to_string())?;
-        if signature.reconciliation_generation != self.reconciliation_cache.generation
+        if signature.authority != AdaptiveGroupAuthority::Complete
+            || signature.generation != self.reconciliation_cache.generation
             || signature.batch_layout_revision != batch_layout_revision
         {
             return Err("cached adaptive frontier is not the published batch epoch".into());
@@ -1866,13 +2179,15 @@ impl AdaptivePickedRuntime {
                 };
             if component_hot_path_allowed {
                 let reusable_certificate = certified_component.filter(
-                    |(full_group_signature, _, _)| {
+                    |certificate| {
                         published_groups_are_live
-                            && self.published_group_signature == Some(*full_group_signature)
-                            && self.published_overlay_signature == Some(*full_group_signature)
+                            && self.published_group_signature
+                                == Some(certificate.group_signature)
+                            && self.published_overlay_signature
+                                == Some(certificate.group_signature)
                     },
                 );
-                if let Some((group_signature, triangles, reconciliation)) = reusable_certificate {
+                if let Some(certificate) = reusable_certificate {
                     self.component_shadow.certified_reuses =
                         self.component_shadow.certified_reuses.saturating_add(1);
                     self.group_cache_hits = self.group_cache_hits.saturating_add(1);
@@ -1892,15 +2207,44 @@ impl AdaptivePickedRuntime {
                     return Ok((
                         component.diagnostic,
                         component.selected_faces.clone(),
-                        reconciliation,
-                        group_signature,
+                        certificate.reconciliation,
+                        certificate.group_signature,
                         true,
-                        triangles,
+                        certificate.triangles,
                         timings,
                     ));
                 }
                 self.component_shadow.certified_misses =
                     self.component_shadow.certified_misses.saturating_add(1);
+                if certified_component.is_none() {
+                    if let Some(authority) =
+                        self.component_shadow.changed_authority_signature()?
+                    {
+                        self.pending_component_authority = true;
+                        let component = &self.component_shadow.plan.mesh;
+                        let comparison = self
+                            .component_shadow
+                            .last
+                            .expect("staged component-authority diagnostic");
+                        let timings = AdaptivePlanTimings {
+                            total_ms: comparison.total_ms,
+                            mesh_plan_ms: comparison.plan_ms,
+                            frontier_ms: comparison.frontier_ms,
+                            reconcile_ms: comparison.reconcile_ms,
+                            atlas_work_ms: 0.0,
+                            group_ms: 0.0,
+                        };
+                        return Ok((
+                            component.diagnostic,
+                            component.selected_faces.clone(),
+                            authority.reconciliation,
+                            authority.group_signature,
+                            true,
+                            0,
+                            timings,
+                        ));
+                    }
+                }
             }
             plan_adaptive_screen_mesh_into(plan_request, &mut self.plan_scratch)
                 .map_err(|error| error.to_string())?;
@@ -1953,7 +2297,8 @@ impl AdaptivePickedRuntime {
             let atlas_work_ms = browser_now_ms() - atlas_work_start;
             let group_start = browser_now_ms();
             let group_signature = AdaptiveGroupSignature {
-                reconciliation_generation,
+                authority: AdaptiveGroupAuthority::Complete,
+                generation: reconciliation_generation,
                 batch_layout_revision,
             };
             let groups_reused = if self.published_group_signature == Some(group_signature) {
@@ -2170,6 +2515,15 @@ impl AdaptivePickedRuntime {
                 .misses,
             component_certified_reuses: self.component_shadow.certified_reuses,
             component_certified_misses: self.component_shadow.certified_misses,
+            component_authority_oracle_interval: COMPONENT_AUTHORITY_ORACLE_INTERVAL,
+            component_authority_oracle_samples: self.component_shadow.authority_oracle_samples,
+            component_authority_oracle_skips: self.component_shadow.authority_oracle_skips,
+            component_authority_sample_age: self
+                .component_shadow
+                .authority_changed_since_oracle,
+            component_authority_revoked: self.component_shadow.current_authority_revoked(),
+            component_authority_revocations: self.component_shadow.authority_revocations,
+            component_authority_changed_installs: self.component_authority_changed_installs,
             component_shadow_last_error: self.component_shadow.last_error.as_deref(),
             component_shadow_last: self.component_shadow.last,
             component_publication_enabled: self.component_publication_enabled,
@@ -3010,6 +3364,52 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn changed_component_authority_samples_at_a_bounded_interval() {
+        let mut shadow = AdaptiveComponentShadow {
+            enabled: true,
+            staged_signature: Some(AdaptiveComponentStageSignature {
+                reconciliation_generation: 1,
+                root_topology_revision: 7,
+                batch_layout_revision: 9,
+            }),
+            authority_basis: Some((7, 9)),
+            ..AdaptiveComponentShadow::default()
+        };
+        shadow.plan.mesh.diagnostic.source_faces = 100;
+        shadow.plan.component_faces.extend(0..10);
+        shadow.reconciliation_cache.result = Some(ScreenLeafLodResult {
+            resident: vec![[1; 3]; 10],
+            iterations: 2,
+            shared_edge_promotions: 3,
+            grading_promotions: 4,
+            max_absolute_exponent: 0,
+        });
+
+        for _ in 1..COMPONENT_AUTHORITY_ORACLE_INTERVAL {
+            let authority = shadow
+                .changed_authority_signature()
+                .unwrap()
+                .expect("bounded changed component should skip the complete oracle");
+            assert_eq!(
+                authority.group_signature.authority,
+                AdaptiveGroupAuthority::Component,
+            );
+            assert_eq!(authority.reconciliation, (3, 4, 2));
+        }
+        assert!(shadow.changed_authority_signature().unwrap().is_none());
+        assert_eq!(
+            shadow.authority_oracle_skips,
+            COMPONENT_AUTHORITY_ORACLE_INTERVAL - 1,
+        );
+        shadow.record_exact_oracle_match();
+        assert_eq!(shadow.authority_oracle_samples, 1);
+        assert_eq!(shadow.authority_changed_since_oracle, 0);
+
+        shadow.plan.component_faces = (0..100).collect();
+        assert!(shadow.changed_authority_signature().unwrap().is_none());
+    }
+
+    #[wasm_bindgen_test]
     fn component_shadow_matches_a_complete_publication_across_disconnected_sources() {
         let positions = [
             [-0.8, -0.6, 0.0],
@@ -3203,6 +3603,98 @@ mod tests {
         assert_eq!(republished.component_publication_installs, 2);
         assert_eq!(republished.component_publication_fallbacks, 0);
 
+        let disconnected_patch = QBTriPatch::flat(positions[5], positions[6], positions[7]);
+        let changed = [SelectedScreenPatch {
+            source_face: 2,
+            transformed_patch: &disconnected_patch,
+        }];
+        let changed_groups_reused = runtime
+            .plan_selected_and_group(
+                &changed,
+                None,
+                4,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((5, 1)),
+                &[Some(resident); 3],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                0,
+                0,
+                true,
+                true,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+        assert!(changed_groups_reused);
+        let changed_staged = runtime.snapshot();
+        assert_eq!(changed_staged.component_authority_oracle_samples, 1);
+        assert_eq!(changed_staged.component_authority_oracle_skips, 1);
+        assert_eq!(changed_staged.component_authority_sample_age, 1);
+        assert!(!changed_staged.component_authority_revoked);
+        assert_eq!(changed_staged.frontier_cache_hits, 0);
+        assert_eq!(changed_staged.frontier_cache_misses, 1);
+        assert_eq!(changed_staged.reconciliation_cache_hits, 0);
+        assert_eq!(changed_staged.reconciliation_cache_misses, 1);
+        runtime
+            .stage_pending_overlay(
+                0,
+                &baseline_groups,
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                resident,
+                &atlas_triangles,
+            )
+            .unwrap();
+        let changed_overlay = runtime.snapshot();
+        assert_eq!(
+            changed_overlay.component_shadow_state,
+            "authoritative-unsampled",
+        );
+        let changed_comparison = changed_overlay.component_shadow_last.unwrap();
+        assert!(changed_comparison.authoritative);
+        assert!(!changed_comparison.oracle_sampled);
+        assert!(!changed_comparison.exact);
+        assert_eq!(changed_comparison.composed_triangles, 6);
+        runtime.commit_publication();
+        let changed_published = runtime.snapshot();
+        assert_eq!(changed_published.component_publication_state, "active");
+        assert_eq!(changed_published.component_publication_installs, 3);
+        assert_eq!(changed_published.component_authority_changed_installs, 1);
+        assert_eq!(
+            runtime.published_group_signature.unwrap().authority,
+            AdaptiveGroupAuthority::Complete,
+        );
+        assert_eq!(
+            runtime.published_overlay_signature.unwrap().authority,
+            AdaptiveGroupAuthority::Component,
+        );
+        assert_eq!(
+            runtime
+                .measure_published_overlay(
+                    0,
+                    &groups,
+                    &[Some(resident); 3],
+                    &[[1; 3]; 3],
+                    &[0; 3],
+                    &[0; 3],
+                    &[0; 3],
+                    resident,
+                )
+                .unwrap_err(),
+            "published adaptive epoch is awaiting its next complete grouping oracle",
+        );
+
         runtime.set_component_publication_enabled(false).unwrap();
         runtime.set_component_publication_enabled(true).unwrap();
         runtime
@@ -3249,9 +3741,11 @@ mod tests {
         runtime.commit_publication();
         let fallback = runtime.snapshot();
         assert_eq!(fallback.component_publication_state, "complete-fallback");
-        assert_eq!(fallback.component_publication_installs, 2);
+        assert_eq!(fallback.component_publication_installs, 3);
         assert_eq!(fallback.component_publication_fallbacks, 1);
         assert!(fallback.component_publication_last_error.is_some());
+        assert_eq!(fallback.component_authority_revocations, 1);
+        assert!(fallback.component_authority_revoked);
         assert!(runtime.component_shadow.certificate.is_none());
     }
 
