@@ -622,6 +622,213 @@ pub fn measure_adaptive_render_work(
     })
 }
 
+/// Compact vertex-to-source-face incidence for incremental resident-density
+/// refreshes. The CSR layout avoids one allocation per source vertex and is
+/// immutable for the lifetime of a loaded topology.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VertexFaceAdjacency {
+    source_vertices: usize,
+    source_faces: usize,
+    offsets: Vec<usize>,
+    faces: Vec<u32>,
+}
+
+impl VertexFaceAdjacency {
+    pub fn from_topology(topology: &HalfEdgeMesh) -> Self {
+        let source_vertices = topology.num_vertices as usize;
+        let source_faces = topology.num_faces as usize;
+        let mut offsets = vec![0usize; source_vertices.saturating_add(1)];
+        for face in 0..source_faces {
+            for vertex in topology.face_vertices(face as u32) {
+                if let Some(count) = offsets.get_mut(vertex as usize + 1) {
+                    *count += 1;
+                }
+            }
+        }
+        for vertex in 0..source_vertices {
+            offsets[vertex + 1] += offsets[vertex];
+        }
+        let mut cursors = offsets[..source_vertices].to_vec();
+        let mut faces = vec![0u32; offsets.last().copied().unwrap_or(0)];
+        for face in 0..source_faces {
+            for vertex in topology.face_vertices(face as u32) {
+                let vertex = vertex as usize;
+                if let Some(cursor) = cursors.get_mut(vertex) {
+                    faces[*cursor] = face as u32;
+                    *cursor += 1;
+                }
+            }
+        }
+        Self {
+            source_vertices,
+            source_faces,
+            offsets,
+            faces,
+        }
+    }
+
+    pub fn matches(&self, topology: &HalfEdgeMesh) -> bool {
+        self.source_vertices == topology.num_vertices as usize
+            && self.source_faces == topology.num_faces as usize
+            && self.offsets.len() == self.source_vertices.saturating_add(1)
+    }
+
+    pub fn incident_faces(&self, vertex: usize) -> &[u32] {
+        let Some((&start, &end)) = self.offsets.get(vertex).zip(self.offsets.get(vertex + 1))
+        else {
+            return &[];
+        };
+        &self.faces[start..end]
+    }
+}
+
+/// Reusable flags and sparse outputs for incremental vertex-density refresh.
+#[derive(Default)]
+pub struct ResidentVertexLodRefreshScratch {
+    vertex_dirty: Vec<bool>,
+    dirty_vertices: Vec<usize>,
+    face_dirty: Vec<bool>,
+    affected_faces: Vec<usize>,
+}
+
+impl ResidentVertexLodRefreshScratch {
+    fn begin(&mut self, num_vertices: usize, num_faces: usize) {
+        for vertex in self.dirty_vertices.drain(..) {
+            if let Some(dirty) = self.vertex_dirty.get_mut(vertex) {
+                *dirty = false;
+            }
+        }
+        self.vertex_dirty.resize(num_vertices, false);
+        for face in self.affected_faces.drain(..) {
+            if let Some(dirty) = self.face_dirty.get_mut(face) {
+                *dirty = false;
+            }
+        }
+        self.face_dirty.resize(num_faces, false);
+    }
+
+    fn mark_vertex(&mut self, vertex: usize) {
+        if !self.vertex_dirty[vertex] {
+            self.vertex_dirty[vertex] = true;
+            self.dirty_vertices.push(vertex);
+        }
+    }
+
+    fn mark_face(&mut self, face: usize) {
+        if !self.face_dirty[face] {
+            self.face_dirty[face] = true;
+            self.affected_faces.push(face);
+        }
+    }
+
+    pub fn affected_faces(&self) -> &[usize] {
+        &self.affected_faces
+    }
+}
+
+fn resident_corner_lod(
+    resident: ResidentLod,
+    vertices: [u32; 3],
+    vertex: usize,
+) -> u32 {
+    let [edge_a, edge_b, edge_c] = resident.edge_lods();
+    let mut maximum = 1;
+    if vertices[0] as usize == vertex {
+        maximum = maximum.max(edge_b).max(edge_c);
+    }
+    if vertices[1] as usize == vertex {
+        maximum = maximum.max(edge_a).max(edge_c);
+    }
+    if vertices[2] as usize == vertex {
+        maximum = maximum.max(edge_a).max(edge_b);
+    }
+    maximum
+}
+
+/// Refresh the resident corner-density field from a conservative set of faces
+/// whose resident records may have changed.
+///
+/// Each seed face marks its three compact vertices. A vertex maximum is
+/// recomputed from every incident face so demotions are exact, then every face
+/// incident to a changed maximum is included in the returned ordered closure.
+/// Seed faces remain included even when their maxima are unchanged because
+/// their batch key, edge tuple, or permutation may still have changed.
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_resident_vertex_lods_from_faces<'a>(
+    residents: &[Option<ResidentLod>],
+    topology: &HalfEdgeMesh,
+    adjacency: &VertexFaceAdjacency,
+    initial: ResidentLod,
+    seed_faces: &[usize],
+    vertex_max: &mut Vec<u32>,
+    face_vertex_lods: &mut Vec<[u32; 3]>,
+    scratch: &'a mut ResidentVertexLodRefreshScratch,
+) -> &'a [usize] {
+    let num_faces = residents.len().min(topology.num_faces as usize);
+    let num_vertices = topology.num_vertices as usize;
+    scratch.begin(num_vertices, num_faces);
+
+    if !adjacency.matches(topology)
+        || vertex_max.len() != num_vertices
+        || face_vertex_lods.len() != residents.len()
+    {
+        rebuild_resident_vertex_lods(
+            residents,
+            topology,
+            initial,
+            vertex_max,
+            face_vertex_lods,
+        );
+        for face in 0..num_faces {
+            scratch.mark_face(face);
+        }
+        return scratch.affected_faces();
+    }
+
+    for &face in seed_faces {
+        if face >= num_faces {
+            continue;
+        }
+        scratch.mark_face(face);
+        for vertex in topology.face_vertices(face as u32) {
+            scratch.mark_vertex(vertex as usize);
+        }
+    }
+
+    for dirty_index in 0..scratch.dirty_vertices.len() {
+        let vertex = scratch.dirty_vertices[dirty_index];
+        let mut maximum = 1;
+        for &face in adjacency.incident_faces(vertex) {
+            let face = face as usize;
+            if face >= num_faces {
+                continue;
+            }
+            maximum = maximum.max(resident_corner_lod(
+                residents[face].unwrap_or(initial),
+                topology.face_vertices(face as u32),
+                vertex,
+            ));
+        }
+        if vertex_max[vertex] != maximum {
+            vertex_max[vertex] = maximum;
+            for &face in adjacency.incident_faces(vertex) {
+                let face = face as usize;
+                if face < num_faces {
+                    scratch.mark_face(face);
+                }
+            }
+        }
+    }
+
+    scratch.affected_faces.sort_unstable();
+    for &face in &scratch.affected_faces {
+        face_vertex_lods[face] = topology
+            .face_vertices(face as u32)
+            .map(|vertex| vertex_max[vertex as usize]);
+    }
+    scratch.affected_faces()
+}
+
 /// Rebuild the C0-continuous resident LOD field used by diagnostic shading.
 ///
 /// Each compact topology vertex receives the maximum resolution of every
@@ -3209,6 +3416,81 @@ mod tests {
         assert_eq!(fused_vertex_max, reference_vertex_max);
         assert_eq!(fused_face_vertex_lods, reference_face_vertex_lods);
         assert_eq!(fused_groups, reference_groups);
+    }
+
+    #[test]
+    fn incremental_vertex_lod_refresh_matches_full_shared_vertex_closure() {
+        let topology = HalfEdgeMesh::from_triangles(
+            6,
+            &[[0, 1, 2], [2, 1, 3], [0, 4, 5]],
+        );
+        let adjacency = VertexFaceAdjacency::from_topology(&topology);
+        assert!(adjacency.matches(&topology));
+        assert_eq!(adjacency.incident_faces(0), [0, 2]);
+
+        let initial = ResidentLod::uniform(1);
+        let low = Some(ResidentLod::uniform(2));
+        let mut residents = vec![low; 3];
+        let mut vertex_max = Vec::new();
+        let mut face_vertex_lods = Vec::new();
+        let mut scratch = ResidentVertexLodRefreshScratch::default();
+        let affected = refresh_resident_vertex_lods_from_faces(
+            &residents,
+            &topology,
+            &adjacency,
+            initial,
+            &[],
+            &mut vertex_max,
+            &mut face_vertex_lods,
+            &mut scratch,
+        );
+        assert_eq!(affected, [0, 1, 2]);
+
+        residents[0] = Some(ResidentLod::uniform(16));
+        let affected = refresh_resident_vertex_lods_from_faces(
+            &residents,
+            &topology,
+            &adjacency,
+            initial,
+            &[0],
+            &mut vertex_max,
+            &mut face_vertex_lods,
+            &mut scratch,
+        );
+        assert_eq!(affected, [0, 1, 2]);
+        let mut expected_vertex_max = Vec::new();
+        let mut expected_face_vertex_lods = Vec::new();
+        rebuild_resident_vertex_lods(
+            &residents,
+            &topology,
+            initial,
+            &mut expected_vertex_max,
+            &mut expected_face_vertex_lods,
+        );
+        assert_eq!(vertex_max, expected_vertex_max);
+        assert_eq!(face_vertex_lods, expected_face_vertex_lods);
+
+        residents[0] = low;
+        let affected = refresh_resident_vertex_lods_from_faces(
+            &residents,
+            &topology,
+            &adjacency,
+            initial,
+            &[0],
+            &mut vertex_max,
+            &mut face_vertex_lods,
+            &mut scratch,
+        );
+        assert_eq!(affected, [0, 1, 2]);
+        rebuild_resident_vertex_lods(
+            &residents,
+            &topology,
+            initial,
+            &mut expected_vertex_max,
+            &mut expected_face_vertex_lods,
+        );
+        assert_eq!(vertex_max, expected_vertex_max);
+        assert_eq!(face_vertex_lods, expected_face_vertex_lods);
     }
 
     #[test]
