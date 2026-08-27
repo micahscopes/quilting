@@ -172,6 +172,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(report.compacted_source_words, 89);
         assert_eq!(report.compacted_range_words, 15);
         assert_eq!(report.indirect_argument_words, 15);
+        assert_eq!(report.indirect_draws, 3);
 
         let compaction_scene = RenderSceneSnapshot {
             revision: 19,

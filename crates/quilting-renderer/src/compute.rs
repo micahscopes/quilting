@@ -2705,7 +2705,7 @@ mod tests {
         );
         assert_eq!(
             oracle.indirect_arguments,
-            [[6, 1, 0, 0, 0], [12, 0, 0, 0, 1], [18, 1, 0, 0, 1]],
+            [[6, 1, 0, 0, 0], [12, 0, 0, 0, 0], [18, 1, 0, 0, 0]],
         );
         assert_eq!(std::mem::size_of_val(&oracle.compacted_ranges[0]), 20);
         assert_eq!(std::mem::size_of_val(&oracle.indirect_arguments[0]), 20);
@@ -2740,7 +2740,7 @@ mod tests {
         assert_eq!(oracle.compacted_source_instances, [1, 2]);
         assert_eq!(
             oracle.indirect_arguments,
-            [[8, 1, 0, 0, 0], [8, 1, 0, 0, 1]],
+            [[8, 1, 0, 0, 0], [8, 1, 0, 0, 0]],
         );
     }
 

@@ -78,6 +78,7 @@ pub struct LodDeviceConformance {
     pub compacted_source_words: usize,
     pub compacted_range_words: usize,
     pub indirect_argument_words: usize,
+    pub indirect_draws: usize,
 }
 
 /// Diagnostic copy of the exact same-device visibility outputs. The retained
@@ -125,9 +126,6 @@ pub struct VisibilityCompactionScene {
     compacted_source_instances: wgpu::Buffer,
     compacted_ranges: wgpu::Buffer,
     indirect_arguments: wgpu::Buffer,
-    source_readback: wgpu::Buffer,
-    range_readback: wgpu::Buffer,
-    indirect_readback: wgpu::Buffer,
     count_bind_group: wgpu::BindGroup,
     scan_bind_group: wgpu::BindGroup,
     scatter_bind_group: wgpu::BindGroup,
@@ -329,7 +327,7 @@ impl LodClassifierDevice {
             .collect::<Vec<_>>();
         expected_sources.extend([133, 135, 136]);
         let expected_ranges = vec![[0, 0, 130, 0, 86], [1, 130, 3, 86, 0], [2, 133, 4, 86, 3]];
-        let expected_indirect = vec![[6, 86, 0, 0, 0], [12, 0, 0, 0, 86], [18, 3, 0, 0, 86]];
+        let expected_indirect = vec![[6, 86, 0, 0, 0], [12, 0, 0, 0, 0], [18, 3, 0, 0, 0]];
         let mut compaction = self.upload_visibility_compaction_scene(compaction_words)?;
         let compacted = self
             .compact_visibility(&mut compaction, &source_visibility)
@@ -343,6 +341,9 @@ impl LodClassifierDevice {
                  {expected_ranges:?}, indirect {expected_indirect:?}; got {compacted:?}"
             )));
         }
+        let indirect_draws = self
+            .validate_indirect_draw_conformance(&compaction, &source_visibility)
+            .await?;
 
         Ok(LodDeviceConformance {
             full_pipeline_words,
@@ -350,6 +351,7 @@ impl LodClassifierDevice {
             compacted_source_words: compacted.compacted_source_instances.len(),
             compacted_range_words: compacted.compacted_ranges.len() * 5,
             indirect_argument_words: compacted.indirect_arguments.len() * 5,
+            indirect_draws,
         })
     }
 
@@ -469,25 +471,6 @@ impl LodClassifierDevice {
                 | wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::COPY_SRC,
         );
-        let source_readback = gpu_buffer(
-            &self.device,
-            "visibility source diagnostic readback",
-            source_bytes,
-            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        );
-        let range_readback = gpu_buffer(
-            &self.device,
-            "visibility range diagnostic readback",
-            range_bytes,
-            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        );
-        let indirect_readback = gpu_buffer(
-            &self.device,
-            "visibility indirect diagnostic readback",
-            indirect_bytes,
-            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        );
-
         let count_layout = self.visibility_count_pipeline.get_bind_group_layout(0);
         let count_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("visibility count bindings"),
@@ -533,43 +516,44 @@ impl LodClassifierDevice {
             compacted_source_instances,
             compacted_ranges,
             indirect_arguments,
-            source_readback,
-            range_readback,
-            indirect_readback,
             count_bind_group,
             scan_bind_group,
             scatter_bind_group,
         })
     }
 
-    /// Execute count, deterministic batch scan, and stable parallel scatter in
-    /// one submission. Readback is diagnostic only; all three output buffers
-    /// remain resident for direct downstream rendering.
-    pub async fn compact_visibility(
+    /// Validate and upload a CPU/shadow visibility fixture. A same-device
+    /// producer can write [`VisibilityCompactionScene::source_visibility_buffer`]
+    /// directly and skip this transfer.
+    pub fn write_source_visibility(
         &self,
-        scene: &mut VisibilityCompactionScene,
+        scene: &VisibilityCompactionScene,
         source_visibility: &[u8],
-    ) -> Result<VisibilityCompactionOutput, LodWebGpuError> {
+    ) -> Result<(), LodWebGpuError> {
         let visibility = pack_wgsl_source_visibility_words(source_visibility, scene.source_count)
             .map_err(LodWebGpuError::Payload)?;
-        if scene.batch_count == 0 {
-            return Ok(VisibilityCompactionOutput {
-                compacted_source_instances: Vec::new(),
-                compacted_ranges: Vec::new(),
-                indirect_arguments: Vec::new(),
-            });
+        if !visibility.is_empty() {
+            self.queue.write_buffer(
+                &scene.source_visibility,
+                0,
+                bytemuck::cast_slice(&visibility),
+            );
         }
-        self.queue.write_buffer(
-            &scene.source_visibility,
-            0,
-            bytemuck::cast_slice(&visibility),
-        );
+        Ok(())
+    }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("quilting visibility compaction"),
-            });
+    /// Append count, deterministic batch scan, and stable parallel scatter to
+    /// an application-owned command encoder. A caller can encode its visibility
+    /// producer before this and indirect render passes after this, preserving
+    /// one ordered GPU submission with no map/copy boundary.
+    pub fn encode_visibility_compaction(
+        &self,
+        scene: &VisibilityCompactionScene,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if scene.batch_count == 0 {
+            return;
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("quilting visibility count"),
@@ -597,42 +581,98 @@ impl LodClassifierDevice {
             pass.set_bind_group(0, &scene.scatter_bind_group, &[]);
             pass.dispatch_workgroups(scene.batch_count, 1, 1);
         }
+    }
+
+    /// Convenience submission for CPU/shadow visibility input. This method
+    /// returns immediately after queue submission and performs no readback.
+    pub fn compact_visibility_on_device(
+        &self,
+        scene: &VisibilityCompactionScene,
+        source_visibility: &[u8],
+    ) -> Result<(), LodWebGpuError> {
+        self.write_source_visibility(scene, source_visibility)?;
+        if scene.batch_count == 0 {
+            return Ok(());
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting visibility compaction"),
+            });
+        self.encode_visibility_compaction(scene, &mut encoder);
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    /// Diagnostic wrapper around the same no-readback encoder path. Temporary
+    /// staging buffers exist only for conformance calls and are not retained by
+    /// live scene residency.
+    pub async fn compact_visibility(
+        &self,
+        scene: &mut VisibilityCompactionScene,
+        source_visibility: &[u8],
+    ) -> Result<VisibilityCompactionOutput, LodWebGpuError> {
+        self.write_source_visibility(scene, source_visibility)?;
+        if scene.batch_count == 0 {
+            return Ok(VisibilityCompactionOutput {
+                compacted_source_instances: Vec::new(),
+                compacted_ranges: Vec::new(),
+                indirect_arguments: Vec::new(),
+            });
+        }
 
         let source_bytes = u64::from(scene.source_count) * PACKED_RECORD_BYTES;
         let range_bytes = u64::from(scene.batch_count) * VISIBILITY_RANGE_RECORD_BYTES;
         let indirect_bytes = u64::from(scene.batch_count) * INDEXED_INDIRECT_RECORD_BYTES;
+        let source_readback = gpu_buffer(
+            &self.device,
+            "visibility source diagnostic readback",
+            source_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let range_readback = gpu_buffer(
+            &self.device,
+            "visibility range diagnostic readback",
+            range_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let indirect_readback = gpu_buffer(
+            &self.device,
+            "visibility indirect diagnostic readback",
+            indirect_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting visibility diagnostic compaction"),
+            });
+        self.encode_visibility_compaction(scene, &mut encoder);
         if source_bytes != 0 {
             encoder.copy_buffer_to_buffer(
                 &scene.compacted_source_instances,
                 0,
-                &scene.source_readback,
+                &source_readback,
                 0,
                 source_bytes,
             );
         }
-        encoder.copy_buffer_to_buffer(
-            &scene.compacted_ranges,
-            0,
-            &scene.range_readback,
-            0,
-            range_bytes,
-        );
+        encoder.copy_buffer_to_buffer(&scene.compacted_ranges, 0, &range_readback, 0, range_bytes);
         encoder.copy_buffer_to_buffer(
             &scene.indirect_arguments,
             0,
-            &scene.indirect_readback,
+            &indirect_readback,
             0,
             indirect_bytes,
         );
         self.queue.submit([encoder.finish()]);
 
         let compacted_ranges = words_to_five_records(
-            self.readback_words(&scene.range_readback, range_bytes)
-                .await?,
+            self.readback_words(&range_readback, range_bytes).await?,
             "visibility range",
         )?;
         let indirect_arguments = words_to_five_records(
-            self.readback_words(&scene.indirect_readback, indirect_bytes)
+            self.readback_words(&indirect_readback, indirect_bytes)
                 .await?,
             "visibility indirect",
         )?;
@@ -647,8 +687,7 @@ impl LodClassifierDevice {
         let mut compacted_source_instances = if source_bytes == 0 {
             Vec::new()
         } else {
-            self.readback_words(&scene.source_readback, source_bytes)
-                .await?
+            self.readback_words(&source_readback, source_bytes).await?
         };
         compacted_source_instances.truncate(survivor_count as usize);
         Ok(VisibilityCompactionOutput {
@@ -656,6 +695,139 @@ impl LodClassifierDevice {
             compacted_ranges,
             indirect_arguments,
         })
+    }
+
+    /// Prove that portable zero-based arguments emitted by compaction can be
+    /// consumed immediately by real indexed-indirect draws on this device.
+    /// This is part of the shared native/browser conformance matrix only.
+    async fn validate_indirect_draw_conformance(
+        &self,
+        scene: &VisibilityCompactionScene,
+        source_visibility: &[u8],
+    ) -> Result<usize, LodWebGpuError> {
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("visibility indirect conformance shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+                    @vertex
+                    fn vertex_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+                        let positions = array<vec2<f32>, 3>(
+                            vec2<f32>(-0.5, -0.5),
+                            vec2<f32>(0.5, -0.5),
+                            vec2<f32>(0.0, 0.5),
+                        );
+                        return vec4<f32>(positions[vertex % 3u], 0.0, 1.0);
+                    }
+
+                    @fragment
+                    fn fragment_main() -> @location(0) vec4<f32> {
+                        return vec4<f32>(0.25, 0.75, 1.0, 1.0);
+                    }
+                "#
+                .into(),
+            ),
+        });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("visibility indirect conformance pipeline"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vertex_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fragment_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        let indices = [0u32, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2];
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("visibility indirect conformance indices"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("visibility indirect conformance target"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.write_source_visibility(scene, source_visibility)?;
+        let error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("visibility compaction to indirect draw conformance"),
+            });
+        self.encode_visibility_compaction(scene, &mut encoder);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("visibility indirect conformance pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            for batch_index in 0..scene.batch_count {
+                pass.draw_indexed_indirect(
+                    &scene.indirect_arguments,
+                    u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,
+                );
+            }
+        }
+        let submission = self.queue.submit([encoder.finish()]);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map_err(|error| LodWebGpuError::Poll(error.to_string()))?;
+        #[cfg(target_arch = "wasm32")]
+        let _ = submission;
+        if let Some(error) = error_scope.pop().await {
+            return Err(LodWebGpuError::Conformance(format!(
+                "compaction-to-indirect submission failed validation: {error}"
+            )));
+        }
+        Ok(scene.batch_count as usize)
     }
 
     /// Upload immutable geometry/topology once and allocate retained dynamic
@@ -998,6 +1170,10 @@ impl LodClassifierDevice {
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
 }
 
 impl VisibilityCompactionScene {
@@ -1007,6 +1183,12 @@ impl VisibilityCompactionScene {
 
     pub fn source_count(&self) -> u32 {
         self.source_count
+    }
+
+    /// One `u32` visibility flag per stable source instance. A culling or LOD
+    /// compute pass may bind this as writable storage before compaction.
+    pub fn source_visibility_buffer(&self) -> &wgpu::Buffer {
+        &self.source_visibility
     }
 
     /// Stable source-instance indirection consumed by a render vertex stage.
@@ -1114,7 +1296,8 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .map_err(browser_error)?;
     Ok(format!(
         "adapter={} backend={:?} full_pipeline_words={} coherence_words={} \
-         compacted_source_words={} compacted_range_words={} indirect_argument_words={}",
+         compacted_source_words={} compacted_range_words={} indirect_argument_words={} \
+         indirect_draws={}",
         adapter_info.name,
         adapter_info.backend,
         report.full_pipeline_words,
@@ -1122,6 +1305,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         report.compacted_source_words,
         report.compacted_range_words,
         report.indirect_argument_words,
+        report.indirect_draws,
     ))
 }
 

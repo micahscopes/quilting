@@ -337,16 +337,21 @@ current-pose visibility entry per flattened canonical batch member, removes
 disabled instances and suppressed retained roots, preserves visible adaptive
 replacements, and emits stable survivor source IDs plus one range per
 `RenderBatchKey`. `IndexedIndirectArguments` is the exact 20-byte, five-word
-indexed-indirect ABI. Its `first_instance` addresses the compacted survivor-ID
-stream; `first_index` and `base_vertex` remain zero while each batch binds its
-own canonical atlas entry and may later be patched by a packed-atlas backend.
+indexed-indirect ABI. Portable records keep `first_instance` zero because a
+nonzero indirect value requires WebGPU's optional `indirect-first-instance`
+feature. The corresponding range record retains `compacted_first_instance`;
+the vertex stage combines that prefix with its local instance index.
+`first_index` and `base_vertex` remain zero while each batch binds its own
+canonical atlas entry and may later be patched by a packed-atlas backend.
 
 Core tests freeze stable order, zero-instance buckets, retained-root/overlay
 replacement, malformed visibility rejection, stale scene revisions, batch
-shape validation, and ABI size/alignment. The classifier now has a WebGPU
-executor, but compaction does not: no storage-buffer compaction or indirect
-submission pipeline consumes this oracle yet, and WebGL2 continues to use
-current-pose degenerate-vertex rejection.
+shape validation, and ABI size/alignment. The shadow WebGPU executor now runs
+parallel count, deterministic batch scan, and stable chunked scatter passes;
+native Vulkan and browser WebGPU compare survivor, range, and indirect words
+exactly with this oracle. The buffers remain device-resident and expose an
+application-owned encoder seam; WebGL2 continues to use current-pose
+degenerate-vertex rejection until backend integration reaches parity.
 
 ### Frozen WebGPU LOD classifier boundary
 

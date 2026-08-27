@@ -31,7 +31,9 @@ fn scan_visible_batches(@builtin(global_invocation_id) invocation: vec3<u32>) {
             instance_count,
             0u,
             0,
-            compacted_first,
+            // WebGPU requires the optional indirect-first-instance feature for
+            // nonzero values. The vertex stage indexes from the range prefix.
+            0u,
         );
         compacted_first += instance_count;
     }

@@ -234,9 +234,11 @@ pub struct CompactedRenderBatchRange {
     pub compacted_instance_count: u32,
 }
 
-/// Exact WebGPU/WebGL indexed-indirect field order. A backend that binds one
-/// atlas entry per bucket uses zero `first_index` and `base_vertex`; a packed
-/// atlas may patch those two backend-local fields without changing compaction.
+/// Exact WebGPU/WebGL indexed-indirect field order. Portable records keep
+/// `first_instance` zero because nonzero indirect values require WebGPU's
+/// optional `indirect-first-instance` feature. The compacted prefix remains in
+/// [`CompactedRenderBatchRange`] for a vertex stage to add explicitly. A packed
+/// atlas may patch `first_index` and `base_vertex` without changing compaction.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -379,7 +381,7 @@ impl VisibilityCompactionPlan {
                     instance_count: range.compacted_instance_count,
                     first_index: 0,
                     base_vertex: 0,
-                    first_instance: range.compacted_first_instance,
+                    first_instance: 0,
                 })
             })
             .collect()
@@ -1421,14 +1423,14 @@ mod tests {
                     instance_count: 0,
                     first_index: 0,
                     base_vertex: 0,
-                    first_instance: 1,
+                    first_instance: 0,
                 },
                 IndexedIndirectArguments {
                     index_count: 6,
                     instance_count: 1,
                     first_index: 0,
                     base_vertex: 0,
-                    first_instance: 1,
+                    first_instance: 0,
                 },
             ],
         );
