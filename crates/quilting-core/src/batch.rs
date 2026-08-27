@@ -993,12 +993,15 @@ pub struct RetainedRootGroupRefresh {
 pub struct RetainedRootGroupIndex {
     face_tokens: Vec<u32>,
     token_keys: Vec<RenderBatchKey>,
+    token_face_counts: Vec<u32>,
     key_tokens: BTreeMap<RenderBatchKey, u32>,
+    free_tokens: Vec<u32>,
     buckets: BTreeMap<RenderBatchKey, Vec<u32>>,
     affected_faces: Vec<usize>,
     dirty_keys: Vec<RenderBatchKey>,
     removals: Vec<(u32, u32)>,
     additions: Vec<(u32, u32)>,
+    retire_candidates: Vec<u32>,
     merge_scratch: Vec<u32>,
 }
 
@@ -1016,6 +1019,8 @@ impl RetainedRootGroupIndex {
     pub fn payload_capacity_bytes(&self) -> usize {
         self.face_tokens.capacity() * std::mem::size_of::<u32>()
             + self.token_keys.capacity() * std::mem::size_of::<RenderBatchKey>()
+            + self.token_face_counts.capacity() * std::mem::size_of::<u32>()
+            + self.free_tokens.capacity() * std::mem::size_of::<u32>()
             + self
                 .buckets
                 .values()
@@ -1023,10 +1028,9 @@ impl RetainedRootGroupIndex {
                 .sum::<usize>()
             + self.affected_faces.capacity() * std::mem::size_of::<usize>()
             + self.dirty_keys.capacity() * std::mem::size_of::<RenderBatchKey>()
-            + self.removals.capacity()
-                * std::mem::size_of::<(RenderBatchKey, u32)>()
-            + self.additions.capacity()
-                * std::mem::size_of::<(RenderBatchKey, u32)>()
+            + self.removals.capacity() * std::mem::size_of::<(u32, u32)>()
+            + self.additions.capacity() * std::mem::size_of::<(u32, u32)>()
+            + self.retire_candidates.capacity() * std::mem::size_of::<u32>()
             + self.merge_scratch.capacity() * std::mem::size_of::<u32>()
     }
 
@@ -1055,6 +1059,11 @@ impl RetainedRootGroupIndex {
     ) {
         self.face_tokens.clear();
         self.face_tokens.reserve(residents.len());
+        self.token_keys.clear();
+        self.token_face_counts.clear();
+        self.key_tokens.clear();
+        self.free_tokens.clear();
+        self.retire_candidates.clear();
         for faces in self.buckets.values_mut() {
             faces.clear();
         }
@@ -1072,6 +1081,7 @@ impl RetainedRootGroupIndex {
             );
             let token = self.token_for_key(key);
             self.face_tokens.push(token);
+            self.increment_token_face_count(token);
             self.buckets.entry(key).or_default().push(face_index as u32);
             groups.entry(key).or_default().push(root_batch_member(
                 residents,
@@ -1089,11 +1099,44 @@ impl RetainedRootGroupIndex {
         if let Some(&token) = self.key_tokens.get(&key) {
             return token;
         }
-        let token = u32::try_from(self.token_keys.len())
-            .expect("retained root batch key count exceeds u32 indexing");
-        self.token_keys.push(key);
+        let token = if let Some(token) = self.free_tokens.pop() {
+            let token_index = token as usize;
+            debug_assert_eq!(self.token_face_counts[token_index], 0);
+            self.token_keys[token_index] = key;
+            token
+        } else {
+            let token = u32::try_from(self.token_keys.len())
+                .expect("retained root batch key count exceeds u32 indexing");
+            self.token_keys.push(key);
+            self.token_face_counts.push(0);
+            token
+        };
         self.key_tokens.insert(key, token);
         token
+    }
+
+    fn increment_token_face_count(&mut self, token: u32) {
+        let count = &mut self.token_face_counts[token as usize];
+        *count = count
+            .checked_add(1)
+            .expect("retained root batch token face count exceeds u32");
+    }
+
+    fn retire_empty_tokens(&mut self) {
+        self.retire_candidates.sort_unstable();
+        self.retire_candidates.dedup();
+        for &token in &self.retire_candidates {
+            let token_index = token as usize;
+            if self.token_face_counts[token_index] != 0 {
+                continue;
+            }
+            let key = self.token_keys[token_index];
+            if self.key_tokens.get(&key) == Some(&token) {
+                self.key_tokens.remove(&key);
+                self.free_tokens.push(token);
+            }
+        }
+        self.retire_candidates.clear();
     }
 
     /// Refresh exact ordered groups from a sparse, source-face-indexed closure.
@@ -1145,6 +1188,7 @@ impl RetainedRootGroupIndex {
         self.dirty_keys.clear();
         self.removals.clear();
         self.additions.clear();
+        self.retire_candidates.clear();
         for affected_index in 0..self.affected_faces.len() {
             let face_index = self.affected_faces[affected_index];
             let old_token = self.face_tokens[face_index];
@@ -1164,6 +1208,12 @@ impl RetainedRootGroupIndex {
                 self.removals.push((old_token, face_index as u32));
                 self.additions.push((new_token, face_index as u32));
                 self.face_tokens[face_index] = new_token;
+                let old_count = &mut self.token_face_counts[old_token as usize];
+                *old_count = old_count
+                    .checked_sub(1)
+                    .expect("retained root batch token lost an uncounted face");
+                self.increment_token_face_count(new_token);
+                self.retire_candidates.push(old_token);
             }
         }
         self.dirty_keys.sort_unstable();
@@ -1221,6 +1271,7 @@ impl RetainedRootGroupIndex {
             rebuilt_members += members.len();
         }
         self.merge_scratch = output;
+        self.retire_empty_tokens();
         RetainedRootGroupRefresh {
             full_rebuild: false,
             affected_faces: self.affected_faces.len(),
@@ -3969,6 +4020,7 @@ mod tests {
             .full_rebuild);
 
         let mut random = 0x5eed_cafe_u32;
+        let mut maximum_token_slots = index.token_keys.len();
         let mut next = || {
             random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             random
@@ -3993,6 +4045,10 @@ mod tests {
                 nodes[face] = next() as usize % 37;
                 affected.push(face);
             }
+            affected.sort_unstable();
+            affected.dedup();
+            maximum_token_slots =
+                maximum_token_slots.max(index.key_tokens.len() + affected.len());
             let refresh = index.refresh_groups_from_faces(
                 &residents,
                 &vertex_lods,
@@ -4015,6 +4071,21 @@ mod tests {
                     initial,
                 ),
                 "round {round}",
+            );
+            assert_eq!(index.key_tokens.len(), groups.len(), "round {round}");
+            assert_eq!(
+                index
+                    .token_face_counts
+                    .iter()
+                    .map(|&count| count as usize)
+                    .sum::<usize>(),
+                FACES,
+                "round {round}",
+            );
+            assert!(
+                index.token_keys.len() <= maximum_token_slots,
+                "round {round}: {} token slots exceed the {maximum_token_slots} active-plus-churn bound",
+                index.token_keys.len(),
             );
         }
     }
