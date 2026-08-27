@@ -119,6 +119,9 @@ pub enum ScreenLeafLodError {
         leaf_index: usize,
         source_face: u32,
     },
+    MissingSourceFace {
+        source_face: u32,
+    },
 }
 
 impl std::fmt::Display for ScreenLeafLodError {
@@ -169,6 +172,10 @@ impl std::fmt::Display for ScreenLeafLodError {
             } => write!(
                 formatter,
                 "adaptive leaf {leaf_index} references source face {source_face} without complete render metadata"
+            ),
+            Self::MissingSourceFace { source_face } => write!(
+                formatter,
+                "adaptive frontier does not cover source face {source_face}",
             ),
         }
     }
