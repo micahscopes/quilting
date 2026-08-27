@@ -23,7 +23,7 @@ assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'adaptiveshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').kind, 'implementation');
@@ -113,6 +113,15 @@ for (const routeDefaultStep of [
   assert.ok(
     browserSource.includes(routeDefaultStep),
     `browser route default is missing ${routeDefaultStep}`,
+  );
+}
+for (const selectionDefaultStep of [
+  "implementationFromRoute(\n  initialBrowserParams, 'selectionimpl', 'rust',\n)",
+  "selectionimpl: 'rust'",
+]) {
+  assert.ok(
+    browserSource.includes(selectionDefaultStep),
+    `browser selection default is missing ${selectionDefaultStep}`,
   );
 }
 const browserDefaultsSource = browserSource.match(

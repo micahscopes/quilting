@@ -129,7 +129,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("walkscale", "0", Number),
     spec!("walkheight", "0", Number),
     spec!("walkimpl", "js", Implementation),
-    spec!("selectionimpl", "js", Implementation),
+    spec!("selectionimpl", "rust", Implementation),
     spec!("lab", "0", Text),
     spec!("labfield", "edges", Text),
     spec!("laba", "3", Number),
@@ -393,6 +393,20 @@ mod tests {
         assert_eq!(
             rollback_route.canonical_pairs(),
             vec![("presentimpl", "js")]
+        );
+        assert!(rollback_route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rust_selection_authority_is_default_with_an_explicit_js_rollback() {
+        let default_route = HyperscopeRoute::from_pairs([("selectionimpl", "rust")]);
+        assert_eq!(default_route.value("selectionimpl"), Some("rust"));
+        assert!(default_route.canonical_pairs().is_empty());
+
+        let rollback_route = HyperscopeRoute::from_pairs([("selectionimpl", "js")]);
+        assert_eq!(
+            rollback_route.canonical_pairs(),
+            vec![("selectionimpl", "js")]
         );
         assert!(rollback_route.diagnostics().is_empty());
     }

@@ -361,7 +361,9 @@ the same coherent camera/focus snapshot adapter as presentation while retaining
 the selected identity and pole-safe derived pivot. No separate browser focus
 transition runs in the Rust branch.
 Unresolved assets and free/manual focus edits deliberately remain on the browser
-path; the release default stays `js` until the narrower cutover has soaked.
+path. Mapped selected-object focus crossed to the Rust default on 2026-08-27
+after exact live selection/inversion and explicit-JavaScript rollback gates;
+`selectionimpl=js|shadow` remains available for rollback and observation.
 
 The offline release gate also has source provenance now. A Trunk pre-build hook
 uses Rust to fingerprint the authoritative crate/shader, HTML/module, manifest,

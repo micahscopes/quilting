@@ -242,8 +242,10 @@ or sphere state.
    selected-fit
    clock also retains an event fence across delayed RAF callbacks whose
    timestamp predates the pick, preventing the pre-event interval from being
-   integrated twice. The default remains `js` pending broader interactive
-   soak and migration of free/manual focus edits.
+   integrated twice. As of 2026-08-27, mapped selected-object focus defaults to
+   `rust`; `selectionimpl=js` remains the explicit rollback and unresolved
+   assets still fall back locally. Free/manual focus edits remain a separate
+   browser-owned migration lane rather than a second selected-focus transition.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.

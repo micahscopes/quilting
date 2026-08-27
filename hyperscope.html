@@ -498,7 +498,7 @@ const RUST_PRESENTATION_IMPLEMENTATION = implementationFromRoute(
 const RUST_ROUND_SHADOW_ENABLED =
   initialBrowserParams.get('roundshadow') === '1';
 const RUST_SELECTION_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'selectionimpl', 'js',
+  initialBrowserParams, 'selectionimpl', 'rust',
 );
 const RUST_SCENE_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'sceneimpl', 'rust',
@@ -1296,7 +1296,7 @@ const PARAM_DEFAULTS = {
   smlock: '1', smswap: '0', smbackground: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
   fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
-  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'js',
+  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', selectionimpl: 'rust',
   presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'rust', routeimpl: 'rust',
   lodimpl: 'js',
   cue: '',
