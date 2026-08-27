@@ -85,12 +85,56 @@ pub enum SemanticAction {
     CancelAsset(AssetId),
 }
 
-/// Renderer-independent playback intent. Animation pose evaluation remains a
-/// render/runtime concern; this state only decides whether scene time advances.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Renderer-independent primary animation clock. The application owns scene
+/// time and transport intent; a renderer maps this unwrapped clock into the
+/// active clip's authored time range and evaluates the resulting pose.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimationClock {
+    pub playing: bool,
+    pub time_seconds: f64,
+    pub speed: f64,
+}
+
+impl Default for AnimationClock {
+    fn default() -> Self {
+        Self {
+            playing: true,
+            time_seconds: 0.0,
+            speed: 1.0,
+        }
+    }
+}
+
+impl AnimationClock {
+    fn validate(self) -> Result<Self, ReduceError> {
+        if !self.time_seconds.is_finite() || !self.speed.is_finite() {
+            Err(ReduceError::InvalidAnimationClock)
+        } else {
+            Ok(self)
+        }
+    }
+
+    fn advanced(self, delta_seconds: f64) -> Result<Self, ReduceError> {
+        if !self.playing {
+            return Ok(self);
+        }
+        Self {
+            time_seconds: self.time_seconds + delta_seconds * self.speed,
+            ..self
+        }
+        .validate()
+    }
+}
+
+/// Semantic animation transport edits. `SetClock` is the atomic restoration
+/// boundary used by presentation cues, routes, and future authored controls.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AnimationAction {
     SetPlaying(bool),
     TogglePlaying,
+    Seek(f64),
+    SetSpeed(f64),
+    SetClock(AnimationClock),
 }
 
 /// Concurrency policy for an asset acquisition request.
@@ -241,7 +285,7 @@ pub struct DiagnosticReadModel {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AppSummary {
     /// This is a commit fence: runtime asset, authored scene, and diagnostic
     /// SignalVec replacements are published before this revision changes.
@@ -260,12 +304,15 @@ pub struct AppSummary {
     pub presentation_loaded: bool,
     pub active_cue: Option<Uuid>,
     pub animation_playing: bool,
+    pub animation_time_seconds: f64,
+    pub animation_speed: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppFrameSnapshot {
     pub revision: u64,
     pub elapsed_seconds: f64,
+    pub animation: AnimationClock,
     pub navigation_preset: NavigationPreset,
     pub pending_navigation_actions: usize,
     pub last_applied_navigation_sequence: Option<u64>,
@@ -425,7 +472,7 @@ pub struct AppState {
     navigation: NavigationController,
     presentation: Option<PresentationRuntime>,
     active_presentation: Option<PresentationSnapshot>,
-    animation_playing: bool,
+    animation: AnimationClock,
     assets: BTreeMap<AssetId, AssetRecord>,
     primary_scene_load: Option<(RequestId, AssetId)>,
     presence: BTreeMap<PeerId, PresenceRecord>,
@@ -443,7 +490,7 @@ impl Default for AppState {
             navigation: NavigationController::default(),
             presentation: None,
             active_presentation: None,
-            animation_playing: true,
+            animation: AnimationClock::default(),
             assets: BTreeMap::new(),
             primary_scene_load: None,
             presence: BTreeMap::new(),
@@ -477,6 +524,7 @@ impl AppState {
         AppFrameSnapshot {
             revision: self.revision,
             elapsed_seconds: self.frame_elapsed_seconds,
+            animation: self.animation,
             navigation_preset: self.navigation.runtime.preset,
             pending_navigation_actions: self.navigation.queue.len(),
             last_applied_navigation_sequence: self.navigation.runtime.last_applied_sequence,
@@ -525,10 +573,27 @@ impl AppState {
                         if !input_may_run_now {
                             return Err(ReduceError::FutureAnimationInput);
                         }
-                        self.animation_playing = match action {
-                            AnimationAction::SetPlaying(playing) => playing,
-                            AnimationAction::TogglePlaying => !self.animation_playing,
-                        };
+                        let animation = match action {
+                            AnimationAction::SetPlaying(playing) => AnimationClock {
+                                playing,
+                                ..self.animation
+                            },
+                            AnimationAction::TogglePlaying => AnimationClock {
+                                playing: !self.animation.playing,
+                                ..self.animation
+                            },
+                            AnimationAction::Seek(time_seconds) => AnimationClock {
+                                time_seconds,
+                                ..self.animation
+                            },
+                            AnimationAction::SetSpeed(speed) => AnimationClock {
+                                speed,
+                                ..self.animation
+                            },
+                            AnimationAction::SetClock(clock) => clock,
+                        }
+                        .validate()?;
+                        self.animation = animation;
                     }
                     SemanticAction::RequestAsset {
                         request_id,
@@ -634,12 +699,14 @@ impl AppState {
                 {
                     return Err(ReduceError::InvalidTime);
                 }
+                let next_animation = self.animation.advanced(frame.delta_seconds)?;
                 self.navigation
                     .advance_to(frame.elapsed_seconds)
                     .map_err(ReduceError::Navigation)?;
                 if let Some(presentation) = self.presentation.as_mut() {
                     presentation.reconcile_navigation(&mut self.navigation);
                 }
+                self.animation = next_animation;
                 self.frame_elapsed_seconds = frame.elapsed_seconds;
                 self.presence
                     .retain(|_, record| record.expires_at_seconds > frame.elapsed_seconds);
@@ -801,11 +868,19 @@ impl AppState {
             PresentationAction::Clear => unreachable!("clear handled before transactional clone"),
         }
         .map_err(|error| ReduceError::Presentation(error.to_string()))?;
+        let animation = if let [animation] = snapshot.animations.as_slice() {
+            AnimationClock {
+                playing: animation.playing,
+                time_seconds: animation.time_seconds,
+                speed: animation.speed,
+            }
+            .validate()?
+        } else {
+            self.animation
+        };
         self.presentation = Some(presentation);
         self.navigation = navigation;
-        if let [animation] = snapshot.animations.as_slice() {
-            self.animation_playing = animation.playing;
-        }
+        self.animation = animation;
         self.active_presentation = Some(snapshot);
         Ok(())
     }
@@ -885,7 +960,9 @@ impl AppState {
                 .active_presentation
                 .as_ref()
                 .map(|snapshot| snapshot.cue_id),
-            animation_playing: self.animation_playing,
+            animation_playing: self.animation.playing,
+            animation_time_seconds: self.animation.time_seconds,
+            animation_speed: self.animation.speed,
         }
     }
 
@@ -1167,6 +1244,7 @@ impl AppStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReduceError {
     InvalidTime,
+    InvalidAnimationClock,
     FutureEffectInput,
     FuturePresentationInput,
     FutureAnimationInput,
@@ -1184,6 +1262,8 @@ impl fmt::Display for ReduceError {
             Self::InvalidTime => {
                 formatter.write_str("application time must be finite and monotonic")
             }
+            Self::InvalidAnimationClock => formatter
+                .write_str("animation time and speed must remain finite"),
             Self::FutureEffectInput => formatter.write_str(
                 "effect-producing input cannot be scheduled beyond the current app frame",
             ),
@@ -1293,6 +1373,8 @@ mod tests {
     fn animation_playback_is_reducer_owned_and_cue_initialized() {
         let store = AppStore::default();
         assert!(store.summary_snapshot().animation_playing);
+        assert_eq!(store.summary_snapshot().animation_time_seconds, 0.0);
+        assert_eq!(store.summary_snapshot().animation_speed, 1.0);
 
         store
             .dispatch(AppEvent::Input(Timed {
@@ -1322,11 +1404,60 @@ mod tests {
 
         let mut presentation = presentation_fixture();
         presentation.cues[0].animations[0].playing = false;
+        presentation.cues[0].animations[0].time_seconds = 0.375;
+        presentation.cues[0].animations[0].speed = -0.5;
         store
             .dispatch(AppEvent::PresentationLoaded(presentation))
             .unwrap();
         dispatch_presentation(&store, 4, 0.0, PresentationAction::Start).unwrap();
-        assert!(!store.summary_snapshot().animation_playing);
+        let summary = store.summary_snapshot();
+        assert!(!summary.animation_playing);
+        assert_eq!(summary.animation_time_seconds, 0.375);
+        assert_eq!(summary.animation_speed, -0.5);
+    }
+
+    #[test]
+    fn animation_clock_is_atomic_and_frame_partition_invariant() {
+        fn clock_after(deltas: &[f64]) -> AnimationClock {
+            let store = AppStore::default();
+            store
+                .dispatch(AppEvent::Input(Timed {
+                    sequence: 1,
+                    at_seconds: 0.0,
+                    value: SemanticAction::Animate(AnimationAction::SetClock(
+                        AnimationClock {
+                            playing: true,
+                            time_seconds: 2.0,
+                            speed: -0.5,
+                        },
+                    )),
+                }))
+                .unwrap();
+            let mut elapsed = 0.0;
+            for delta_seconds in deltas {
+                elapsed += delta_seconds;
+                store
+                    .dispatch(AppEvent::Frame(FrameTick {
+                        elapsed_seconds: elapsed,
+                        delta_seconds: *delta_seconds,
+                    }))
+                    .unwrap();
+            }
+            store.frame_snapshot().animation
+        }
+
+        assert_eq!(clock_after(&[1.0]), clock_after(&[0.25, 0.25, 0.5]));
+        assert_eq!(clock_after(&[1.0]).time_seconds, 1.5);
+
+        let store = AppStore::default();
+        let before = store.frame_snapshot().animation;
+        let rejected = store.dispatch(AppEvent::Input(Timed {
+            sequence: 1,
+            at_seconds: 0.0,
+            value: SemanticAction::Animate(AnimationAction::SetSpeed(f64::NAN)),
+        }));
+        assert_eq!(rejected, Err(ReduceError::InvalidAnimationClock));
+        assert_eq!(store.frame_snapshot().animation, before);
     }
 
     fn dispatch_presentation(

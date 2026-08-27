@@ -25,7 +25,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.16";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.17";
+pub const LEGACY_APP_REPLAY_VERSION_0_16: &str = "hyperscope-app-replay/0.16";
 pub const LEGACY_APP_REPLAY_VERSION_0_15: &str = "hyperscope-app-replay/0.15";
 pub const LEGACY_APP_REPLAY_VERSION_0_14: &str = "hyperscope-app-replay/0.14";
 pub const LEGACY_APP_REPLAY_VERSION_0_13: &str = "hyperscope-app-replay/0.13";
@@ -54,6 +55,7 @@ enum ReplaySchema {
     V0_14,
     V0_15,
     V0_16,
+    V0_17,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -132,11 +134,18 @@ pub enum AppReplayEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ReplayAnimationAction {
     SetPlaying { playing: bool },
     TogglePlaying,
+    Seek { time_seconds: f64 },
+    SetSpeed { speed: f64 },
+    SetClock {
+        playing: bool,
+        time_seconds: f64,
+        speed: f64,
+    },
 }
 
 impl From<ReplayAnimationAction> for AnimationAction {
@@ -144,6 +153,17 @@ impl From<ReplayAnimationAction> for AnimationAction {
         match action {
             ReplayAnimationAction::SetPlaying { playing } => Self::SetPlaying(playing),
             ReplayAnimationAction::TogglePlaying => Self::TogglePlaying,
+            ReplayAnimationAction::Seek { time_seconds } => Self::Seek(time_seconds),
+            ReplayAnimationAction::SetSpeed { speed } => Self::SetSpeed(speed),
+            ReplayAnimationAction::SetClock {
+                playing,
+                time_seconds,
+                speed,
+            } => Self::SetClock(crate::AnimationClock {
+                playing,
+                time_seconds,
+                speed,
+            }),
         }
     }
 }
@@ -752,6 +772,8 @@ pub struct AppReplayState {
     pub active_scene: Option<Uuid>,
     pub active_view: Option<Uuid>,
     pub animation_playing: bool,
+    pub animation_time_seconds: f64,
+    pub animation_speed: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loading_primary_scene_asset: Option<AssetId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -917,7 +939,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_13 => ReplaySchema::V0_13,
         LEGACY_APP_REPLAY_VERSION_0_14 => ReplaySchema::V0_14,
         LEGACY_APP_REPLAY_VERSION_0_15 => ReplaySchema::V0_15,
-        APP_REPLAY_VERSION => ReplaySchema::V0_16,
+        LEGACY_APP_REPLAY_VERSION_0_16 => ReplaySchema::V0_16,
+        APP_REPLAY_VERSION => ReplaySchema::V0_17,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1062,8 +1085,19 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_14
                     | ReplaySchema::V0_15
                     | ReplaySchema::V0_16
+                    | ReplaySchema::V0_17
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
+            }
+            if !matches!(schema, ReplaySchema::V0_17)
+                && matches!(
+                    action,
+                    ReplayAnimationAction::Seek { .. }
+                        | ReplayAnimationAction::SetSpeed { .. }
+                        | ReplayAnimationAction::SetClock { .. }
+                )
+            {
+                return Err("animation clock actions require app replay 0.17".to_owned());
             }
             Ok(AppEvent::Input(Timed {
                 sequence: *sequence,
@@ -1091,7 +1125,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_13
                     | ReplaySchema::V0_14
                     | ReplaySchema::V0_15
-                    | ReplaySchema::V0_16 => (*scope).into(),
+                    | ReplaySchema::V0_16
+                    | ReplaySchema::V0_17 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -1125,6 +1160,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_14
                     | ReplaySchema::V0_15
                     | ReplaySchema::V0_16
+                    | ReplaySchema::V0_17
             ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1170,6 +1206,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_14
             | ReplaySchema::V0_15
             | ReplaySchema::V0_16
+            | ReplaySchema::V0_17
     )
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
@@ -1177,18 +1214,24 @@ fn navigation_action_for_replay_version(
     }
     if !matches!(
         schema,
-        ReplaySchema::V0_14 | ReplaySchema::V0_15 | ReplaySchema::V0_16
+        ReplaySchema::V0_14
+            | ReplaySchema::V0_15
+            | ReplaySchema::V0_16
+            | ReplaySchema::V0_17
     )
         && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
     {
         return Err("atomic turntable intent requires replay 0.14".to_owned());
     }
-    if !matches!(schema, ReplaySchema::V0_15 | ReplaySchema::V0_16)
+    if !matches!(
+        schema,
+        ReplaySchema::V0_15 | ReplaySchema::V0_16 | ReplaySchema::V0_17
+    )
         && matches!(action, ReplayNavigationAction::ReframeSelection { .. })
     {
         return Err("selected camera reframe requires replay 0.15".to_owned());
     }
-    if schema != ReplaySchema::V0_16
+    if !matches!(schema, ReplaySchema::V0_16 | ReplaySchema::V0_17)
         && matches!(action, ReplayNavigationAction::AimAtSelection { .. })
     {
         return Err("selected camera aim requires replay 0.16".to_owned());
@@ -1211,6 +1254,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_14
             | ReplaySchema::V0_15
             | ReplaySchema::V0_16
+            | ReplaySchema::V0_17
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1241,6 +1285,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_14
             | ReplaySchema::V0_15
             | ReplaySchema::V0_16
+            | ReplaySchema::V0_17
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1286,7 +1331,9 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         active_cue: active.map(|snapshot| snapshot.cue_id),
         active_scene: active.map(|snapshot| snapshot.scene_id),
         active_view: active.map(|snapshot| snapshot.view_id),
-        animation_playing: state.animation_playing,
+        animation_playing: state.animation.playing,
+        animation_time_seconds: state.animation.time_seconds,
+        animation_speed: state.animation.speed,
         loading_primary_scene_asset: state.primary_scene_load.map(|(_, asset)| asset),
         loading_primary_scene_request: state.primary_scene_load.map(|(request, _)| request),
         assets: state
@@ -1423,6 +1470,8 @@ mod tests {
         assert_eq!(left.active_scene, right.active_scene);
         assert_eq!(left.active_view, right.active_view);
         assert_eq!(left.animation_playing, right.animation_playing);
+        assert_eq!(left.animation_time_seconds, right.animation_time_seconds);
+        assert_eq!(left.animation_speed, right.animation_speed);
         assert_eq!(
             left.loading_primary_scene_asset,
             right.loading_primary_scene_asset
@@ -1478,6 +1527,39 @@ mod tests {
             AppReplayOutcome::Rejected { error }
                 if error.contains("require app replay 0.11")
         )));
+    }
+
+    #[test]
+    fn replay_0_17_records_animation_clock_without_reinterpreting_0_16() {
+        let events = vec![AppReplayEvent::Animate {
+            sequence: 1,
+            at_seconds: 0.0,
+            action: ReplayAnimationAction::SetClock {
+                playing: true,
+                time_seconds: 2.0,
+                speed: -0.5,
+            },
+        }];
+        let current = run_app_replay(&AppReplayScript::new(events.clone())).unwrap();
+        assert!(matches!(
+            current.records[0].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
+        assert_eq!(current.records[0].state.animation_time_seconds, 2.0);
+        assert_eq!(current.records[0].state.animation_speed, -0.5);
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_16.to_owned(),
+            events,
+        })
+        .unwrap();
+        assert!(matches!(
+            &legacy.records[0].outcome,
+            AppReplayOutcome::Rejected { error }
+                if error.contains("require app replay 0.17")
+        ));
+        assert_eq!(legacy.records[0].state.animation_time_seconds, 0.0);
+        assert_eq!(legacy.records[0].state.animation_speed, 1.0);
     }
 
     fn committed_effects(record: &AppReplayRecord) -> &[AppReplayEffect] {
@@ -1601,7 +1683,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_16).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_17).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration

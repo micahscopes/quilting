@@ -314,11 +314,16 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.9 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.17 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane. It
   records the key-sorted authored asset/entity materialization as well as its
   atomic projection revision, so stale or invalid Blender-style checkpoints
   cannot silently mutate the scene oracle.
+  Version 0.17 adds the renderer-independent primary animation clock: playing,
+  unwrapped scene time, and signed finite speed. Frame events advance it from
+  explicit deltas, cue activation replaces all three fields atomically, and
+  invalid clock edits preserve the preceding application revision. Version
+  0.16 added selected-object aim without reinterpreting 0.15.
   Version 0.9 records whether an asset request is independent or replaces the
   primary scene. A 0.8 trace keeps its historical per-asset meaning; it cannot
   smuggle a `primary_scene` request into the older schema.
@@ -329,7 +334,7 @@ The first application boundary is now explicit:
   semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. The reader accepts 0.4 through 0.9 inputs,
+  clears only those derived values. The reader accepts 0.4 through 0.17 inputs,
   but only 0.4 migrates an omitted source pivot to the bound center.
   Versions 0.4 and 0.5 reject 0.6-only actions rather than silently changing
   their meaning; every pre-0.7 unscoped focus anchor is rejected. Action
@@ -346,10 +351,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The eight-cue golden is
-  `fnv1a-128-json:7afada676bfe2aaacdd1ec753ab1bdf8`;
+  `fnv1a-128-json:a9e80c56ba5cbb219b41405c70f84e21`;
   the navigation golden is
-  `fnv1a-128-json:632127d93ad2417225544b3d14819302`; the orchestration
-  golden is `fnv1a-128-json:9bc89c319883e25f7e91d001656d924b`.
+  `fnv1a-128-json:79d5531484ba00aee56d6666bab3cda9`; the orchestration
+  golden is `fnv1a-128-json:8607b176a788e02120433b9a8e56d74a`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.

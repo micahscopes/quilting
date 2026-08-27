@@ -267,7 +267,7 @@ or sphere state.
 5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
    focus-aware interaction range, and explicit visualization policies. The
    selection tint remains presentation; selection identity belongs to ECS.
-6. **Persistence and replay — native oracle complete.** Replay version 0.16
+6. **Persistence and replay — native oracle complete.** Replay version 0.17
    serializes asset-scoped stable entity references, selected source
    bounds/pivots, derived
    output-chart pivots/radii, detached spheres, camera rig state, and every
@@ -276,7 +276,8 @@ or sphere state.
    to the bound center, accepts 0.5 without that migration, accepts 0.6 camera
    policy actions, and rejects every pre-0.7 unscoped focus anchor rather than
    inventing asset scope. Checked navigation and
-   Version 0.16 adds selected-object aim without reinterpreting 0.15; selected
+   Version 0.17 adds a deterministic primary animation clock without
+   reinterpreting 0.16; version 0.16 added selected-object aim and selected
    reframe entered at 0.15. Checked navigation and orchestration fixtures cover
    transition cadence, asset effects,
    presence/authored lanes, deterministic authored asset/entity materialization,
