@@ -25,10 +25,10 @@ pub mod presentation;
 pub mod surface;
 
 pub use navigation::{
-    compose_surface_relative_forward, decompose_surface_relative_forward, map_pointer_turntable,
-    map_space_mouse_axes, map_space_mouse_camera, scale_relative_near_plane, AnimatedSurfaceAnchor,
-    CameraBasis, CameraError, CameraRig, CameraTransition, FocusAnchor, FocusNavigation,
-    FocusSphere, FocusSphereTransition, MappedSpaceMouseFrame, NavigationAction,
+    compose_surface_relative_forward, decompose_surface_relative_forward, framed_sphere_distance,
+    map_pointer_turntable, map_space_mouse_axes, map_space_mouse_camera, scale_relative_near_plane,
+    AnimatedSurfaceAnchor, CameraBasis, CameraError, CameraRig, CameraTransition, FocusAnchor,
+    FocusNavigation, FocusSphere, FocusSphereTransition, MappedSpaceMouseFrame, NavigationAction,
     NavigationActionQueue, NavigationAxes, NavigationController, NavigationFrame,
     NavigationPreset, NavigationRuntime, PerspectiveLens, PointerTurntableGesture,
     PointerTurntableInput, ReflectionTransport, ScheduledNavigationAction, SpaceMouseCameraInput,

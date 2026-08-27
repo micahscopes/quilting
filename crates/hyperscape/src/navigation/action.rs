@@ -48,6 +48,16 @@ pub enum NavigationAction {
         duration_seconds: f64,
         easing: TransitionEasing,
     },
+    /// Frame the selected source bound around its selected pivot after
+    /// projection into the active conformal chart. Selection projection,
+    /// perspective fit, point-target policy, and transition start are one
+    /// transaction.
+    ReframeSelection {
+        viewport_aspect: f64,
+        margin: f64,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
     /// Begin a minimum-jerk glide to a newly attached surface address.
     BeginSurfaceAnchorTransition {
         target: SurfaceAnchorTarget,
@@ -428,25 +438,38 @@ fn apply_action(
             target,
             duration_seconds,
             easing,
+        } => begin_camera_transition(
+            runtime,
+            surface_walk,
+            camera,
+            target,
+            duration_seconds,
+            easing,
+        )?,
+        NavigationAction::ReframeSelection {
+            viewport_aspect,
+            margin,
+            duration_seconds,
+            easing,
         } => {
-            target.validate().map_err(|error| error.to_string())?;
-            if !duration_seconds.is_finite() || duration_seconds < 0.0 {
-                return Err("camera transition duration must be finite and nonnegative".into());
-            }
-            if duration_seconds == 0.0 {
-                runtime.camera_transition = None;
-                surface_walk.cancel_anchor_transition();
-                *camera = target;
-            } else {
-                let transition = CameraTransition::new(*camera, target, duration_seconds, easing)
-                    .map_err(|error| error.to_string())?;
-                // `CameraTransition::new` may intentionally convert the start
-                // from a finite semantic target to an equivalent free tangent.
-                // Make the live state match before a same-timestamp reflection.
-                *camera = transition.start;
-                runtime.camera_transition = Some(transition);
-                surface_walk.cancel_anchor_transition();
-            }
+            let anchor = focus
+                .anchor
+                .ok_or_else(|| "camera reframe requires a selected focus anchor".to_owned())?;
+            let projected = SphereReflectionState::Identity
+                .transport_point_and_directions(runtime.reflection, anchor.source_pivot, [])
+                .map_err(|error| error.to_string())?;
+            let output_radius = anchor.source_bound.radius * projected.local_scale;
+            let target = camera
+                .framed_sphere_target(projected.point, output_radius, viewport_aspect, margin)
+                .map_err(|error| error.to_string())?;
+            begin_camera_transition(
+                runtime,
+                surface_walk,
+                camera,
+                target,
+                duration_seconds,
+                easing,
+            )?;
         }
         NavigationAction::BeginSurfaceAnchorTransition {
             target,
@@ -548,6 +571,35 @@ fn apply_action(
                 .map_err(str::to_owned)?;
             focus.toggle_inversion();
         }
+    }
+    Ok(())
+}
+
+fn begin_camera_transition(
+    runtime: &mut NavigationRuntime,
+    surface_walk: &mut SurfaceWalkRuntime,
+    camera: &mut CameraRig,
+    target: CameraRig,
+    duration_seconds: f64,
+    easing: TransitionEasing,
+) -> Result<(), String> {
+    target.validate().map_err(|error| error.to_string())?;
+    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
+        return Err("camera transition duration must be finite and nonnegative".into());
+    }
+    if duration_seconds == 0.0 {
+        runtime.camera_transition = None;
+        surface_walk.cancel_anchor_transition();
+        *camera = target;
+    } else {
+        let transition = CameraTransition::new(*camera, target, duration_seconds, easing)
+            .map_err(|error| error.to_string())?;
+        // `CameraTransition::new` may intentionally convert the start from a
+        // finite semantic target to an equivalent free tangent. Make the live
+        // state match before a same-timestamp reflection.
+        *camera = transition.start;
+        runtime.camera_transition = Some(transition);
+        surface_walk.cancel_anchor_transition();
     }
     Ok(())
 }
@@ -812,6 +864,103 @@ mod tests {
         let partitioned = run(&[0.1; 12].into_iter().chain([0.05]).collect::<Vec<_>>());
         assert_eq!(single, partitioned);
         assert_eq!(single.eye, [4.0, 2.0, -1.0]);
+    }
+
+    #[test]
+    fn selected_reframe_uses_output_chart_scale_and_is_cadence_independent() {
+        fn run(steps: &[f64]) -> NavigationController {
+            let mut controller = NavigationController::default();
+            controller
+                .focus
+                .anchor_to_pivot_with_easing(
+                    selection_identity(0x7001),
+                    FocusSphere::new([4.0, 0.0, 0.0], 1.0).unwrap(),
+                    [4.0, 0.0, 0.0],
+                    1.1,
+                    0.0,
+                    TransitionEasing::Linear,
+                )
+                .unwrap();
+            let reflection_sphere = FocusSphere::new([0.0; 3], 2.0).unwrap();
+            controller.focus.sphere = reflection_sphere;
+            controller.focus.inversion_enabled = true;
+            controller.runtime.reflection = SphereReflectionState::Sphere(reflection_sphere);
+            controller
+                .push(NavigationAction::ReframeSelection {
+                    viewport_aspect: 16.0 / 9.0,
+                    margin: 1.15,
+                    duration_seconds: 1.0,
+                    easing: TransitionEasing::SmootherStep,
+                })
+                .unwrap();
+            controller.tick(0.0).unwrap();
+            for seconds in steps {
+                controller.tick(*seconds).unwrap();
+            }
+            controller
+        }
+
+        let single = run(&[1.0]);
+        let partitioned = run(&[0.1; 10]);
+        assert_eq!(single.camera, partitioned.camera);
+        assert_eq!(single.camera.semantic_target, Some([1.0, 0.0, 0.0]));
+        let expected_distance = crate::framed_sphere_distance(
+            0.25,
+            16.0 / 9.0,
+            single.camera.lens.vertical_fov_radians,
+            1.15,
+        )
+        .unwrap()
+        .clamp(0.1, 100.0);
+        assert!((single.camera.control_distance - expected_distance).abs() < 1.0e-12);
+        assert_eq!(single.runtime.camera_transition, None);
+        assert!(single.diagnostics.0.is_empty());
+    }
+
+    #[test]
+    fn selected_reframe_rejects_missing_or_pole_projected_selection_atomically() {
+        let mut missing = NavigationController::default();
+        let missing_before = missing.clone();
+        missing
+            .push(NavigationAction::ReframeSelection {
+                viewport_aspect: 1.0,
+                margin: 1.15,
+                duration_seconds: 0.7,
+                easing: TransitionEasing::SmootherStep,
+            })
+            .unwrap();
+        missing.tick(0.0).unwrap();
+        assert_eq!(missing.camera, missing_before.camera);
+        assert_eq!(missing.focus, missing_before.focus);
+        assert!(missing.diagnostics.0[0].contains("requires a selected focus anchor"));
+
+        let mut pole = NavigationController::default();
+        pole.focus
+            .anchor_to_pivot_with_easing(
+                selection_identity(0x7002),
+                FocusSphere::new([4.0, 0.0, 0.0], 1.0).unwrap(),
+                [4.0, 0.0, 0.0],
+                1.1,
+                0.0,
+                TransitionEasing::Linear,
+            )
+            .unwrap();
+        let reflection_sphere = FocusSphere::new([4.0, 0.0, 0.0], 1.1).unwrap();
+        pole.focus.sphere = reflection_sphere;
+        pole.focus.inversion_enabled = true;
+        pole.runtime.reflection = SphereReflectionState::Sphere(reflection_sphere);
+        let pole_camera = pole.camera;
+        pole.push(NavigationAction::ReframeSelection {
+            viewport_aspect: 1.0,
+            margin: 1.15,
+            duration_seconds: 0.7,
+            easing: TransitionEasing::SmootherStep,
+        })
+        .unwrap();
+        pole.tick(0.0).unwrap();
+        assert_eq!(pole.camera, pole_camera);
+        assert_eq!(pole.runtime.camera_transition, None);
+        assert!(pole.diagnostics.0[0].contains("reflection pole"));
     }
 
     #[test]

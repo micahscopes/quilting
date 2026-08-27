@@ -25,7 +25,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.14";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.15";
+pub const LEGACY_APP_REPLAY_VERSION_0_14: &str = "hyperscope-app-replay/0.14";
 pub const LEGACY_APP_REPLAY_VERSION_0_13: &str = "hyperscope-app-replay/0.13";
 pub const LEGACY_APP_REPLAY_VERSION_0_12: &str = "hyperscope-app-replay/0.12";
 pub const LEGACY_APP_REPLAY_VERSION_0_11: &str = "hyperscope-app-replay/0.11";
@@ -50,6 +51,7 @@ enum ReplaySchema {
     V0_12,
     V0_13,
     V0_14,
+    V0_15,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -243,6 +245,12 @@ pub enum ReplayNavigationAction {
     },
     TransitionCamera {
         target: AuthoredCamera,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    },
+    ReframeSelection {
+        viewport_aspect: f64,
+        margin: f64,
         duration_seconds: f64,
         easing: TransitionEasing,
     },
@@ -445,6 +453,24 @@ impl TryFrom<ReplayNavigationAction> for NavigationAction {
                 nonnegative(duration_seconds, "camera transition duration")?;
                 Ok(Self::TransitionCamera {
                     target: target.to_camera_rig().map_err(|error| error.to_string())?,
+                    duration_seconds,
+                    easing,
+                })
+            }
+            ReplayNavigationAction::ReframeSelection {
+                viewport_aspect,
+                margin,
+                duration_seconds,
+                easing,
+            } => {
+                positive(viewport_aspect, "selection reframe viewport aspect")?;
+                if !margin.is_finite() || margin < 1.0 {
+                    return Err("selection reframe margin must be finite and at least one".into());
+                }
+                nonnegative(duration_seconds, "selection reframe transition duration")?;
+                Ok(Self::ReframeSelection {
+                    viewport_aspect,
+                    margin,
                     duration_seconds,
                     easing,
                 })
@@ -873,7 +899,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_11 => ReplaySchema::V0_11,
         LEGACY_APP_REPLAY_VERSION_0_12 => ReplaySchema::V0_12,
         LEGACY_APP_REPLAY_VERSION_0_13 => ReplaySchema::V0_13,
-        APP_REPLAY_VERSION => ReplaySchema::V0_14,
+        LEGACY_APP_REPLAY_VERSION_0_14 => ReplaySchema::V0_14,
+        APP_REPLAY_VERSION => ReplaySchema::V0_15,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1016,6 +1043,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_12
                     | ReplaySchema::V0_13
                     | ReplaySchema::V0_14
+                    | ReplaySchema::V0_15
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
@@ -1043,7 +1071,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_11
                     | ReplaySchema::V0_12
                     | ReplaySchema::V0_13
-                    | ReplaySchema::V0_14 => (*scope).into(),
+                    | ReplaySchema::V0_14
+                    | ReplaySchema::V0_15 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -1072,7 +1101,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                 ReplayAssetLoadOutcome::Loaded { metadata, .. } if !metadata.is_empty()
             ) && !matches!(
                 schema,
-                ReplaySchema::V0_12 | ReplaySchema::V0_13 | ReplaySchema::V0_14
+                ReplaySchema::V0_12
+                    | ReplaySchema::V0_13
+                    | ReplaySchema::V0_14
+                    | ReplaySchema::V0_15
             ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1112,15 +1144,23 @@ fn navigation_action_for_replay_version(
     mut action: ReplayNavigationAction,
     schema: ReplaySchema,
 ) -> Result<NavigationAction, String> {
-    if !matches!(schema, ReplaySchema::V0_13 | ReplaySchema::V0_14)
+    if !matches!(
+        schema,
+        ReplaySchema::V0_13 | ReplaySchema::V0_14 | ReplaySchema::V0_15
+    )
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
         return Err("atomic camera intent requires replay 0.13".to_owned());
     }
-    if schema != ReplaySchema::V0_14
+    if !matches!(schema, ReplaySchema::V0_14 | ReplaySchema::V0_15)
         && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
     {
         return Err("atomic turntable intent requires replay 0.14".to_owned());
+    }
+    if schema != ReplaySchema::V0_15
+        && matches!(action, ReplayNavigationAction::ReframeSelection { .. })
+    {
+        return Err("selected camera reframe requires replay 0.15".to_owned());
     }
     if matches!(schema, ReplaySchema::V0_4 | ReplaySchema::V0_5)
         && matches!(
@@ -1138,6 +1178,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_12
             | ReplaySchema::V0_13
             | ReplaySchema::V0_14
+            | ReplaySchema::V0_15
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1166,6 +1207,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_12
             | ReplaySchema::V0_13
             | ReplaySchema::V0_14
+            | ReplaySchema::V0_15
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1426,6 +1468,7 @@ mod tests {
                 "set_semantic_target_enabled"
             }
             ReplayNavigationAction::TransitionCamera { .. } => "transition_camera",
+            ReplayNavigationAction::ReframeSelection { .. } => "reframe_selection",
             ReplayNavigationAction::BeginSurfaceAnchorTransition { .. } => {
                 "begin_surface_anchor_transition"
             }
@@ -1463,6 +1506,7 @@ mod tests {
             NavigationAction::SetPerspectiveLens(_) => "set_perspective_lens",
             NavigationAction::SetSemanticTargetEnabled(_) => "set_semantic_target_enabled",
             NavigationAction::TransitionCamera { .. } => "transition_camera",
+            NavigationAction::ReframeSelection { .. } => "reframe_selection",
             NavigationAction::BeginSurfaceAnchorTransition { .. } => {
                 "begin_surface_anchor_transition"
             }
@@ -1522,7 +1566,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_14).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_15).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -1669,6 +1713,7 @@ mod tests {
                 "cancel_surface_anchor_transition",
                 "detach_focus",
                 "refit_focus_and_toggle_inversion",
+                "reframe_selection",
                 "scale_focus_log",
                 "set_camera",
                 "set_perspective_lens",
@@ -1688,7 +1733,7 @@ mod tests {
         assert_eq!(authoritative_covered, covered);
 
         let trace = run_app_replay(&script).unwrap();
-        assert_eq!(trace.records.len(), 37);
+        assert_eq!(trace.records.len(), 39);
         assert_eq!(trace.records[1].state.camera.eye, [0.0, 0.0, 4.0]);
         assert_eq!(trace.records[1].state.navigation.pending_actions, 1);
         assert_eq!(
@@ -1742,7 +1787,7 @@ mod tests {
         assert_semantic_state_eq(after, before);
         assert_eq!(after.navigation.preset, ReplayNavigationPreset::Fly);
         assert_eq!(after.navigation.pending_actions, 0);
-        assert_eq!(after.navigation.last_applied_sequence, Some(22));
+        assert_eq!(after.navigation.last_applied_sequence, Some(23));
         assert!(after.navigation.diagnostics.is_empty());
         assert_eq!(after.focus.selected, None);
         assert_eq!(after.reflection, ReplayReflection::Identity);
@@ -2110,6 +2155,71 @@ mod tests {
             legacy.records[0].outcome,
             AppReplayOutcome::Rejected { ref error }
                 if error.contains("requires replay 0.14")
+        ));
+        assert_eq!(legacy.records[0].state.revision, 0);
+    }
+
+    #[test]
+    fn replay_0_15_adds_selected_reframe_without_reinterpreting_0_14() {
+        let reframe = AppReplayEvent::Navigate {
+            sequence: 1,
+            at_seconds: 0.0,
+            action: ReplayNavigationAction::ReframeSelection {
+                viewport_aspect: 16.0 / 9.0,
+                margin: 1.15,
+                duration_seconds: 0.0,
+                easing: TransitionEasing::SmootherStep,
+            },
+        };
+        let events = vec![
+            AppReplayEvent::Navigate {
+                sequence: 0,
+                at_seconds: 0.0,
+                action: ReplayNavigationAction::AnchorFocus {
+                    asset_id: Some(
+                        Uuid::parse_str("60000000-0000-4000-8000-000000000001").unwrap(),
+                    ),
+                    entity: Uuid::parse_str("70000000-0000-4000-8000-000000000001")
+                        .unwrap(),
+                    source_bound: ReplayFocusSphere {
+                        center: [2.0, 0.0, 0.0],
+                        radius: 0.5,
+                    },
+                    source_pivot: Some([2.0, 0.0, 0.0]),
+                    margin: 1.1,
+                    duration_seconds: 0.0,
+                    easing: TransitionEasing::Linear,
+                },
+            },
+            AppReplayEvent::Frame {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            },
+            reframe.clone(),
+            AppReplayEvent::Frame {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            },
+        ];
+        let current = run_app_replay(&AppReplayScript::new(events)).unwrap();
+        assert!(current.records.iter().all(|record| matches!(
+            record.outcome,
+            AppReplayOutcome::Committed { .. }
+        )));
+        assert_eq!(
+            current.records[3].state.camera.semantic_target,
+            Some([2.0, 0.0, 0.0])
+        );
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_14.to_owned(),
+            events: vec![reframe],
+        })
+        .unwrap();
+        assert!(matches!(
+            legacy.records[0].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires replay 0.15")
         ));
         assert_eq!(legacy.records[0].state.revision, 0);
     }

@@ -12,6 +12,7 @@ pub enum CameraError {
     DegenerateBasis,
     InvalidLens,
     InvalidControlDistance,
+    InvalidFraming,
     InvalidTransition,
     ReflectionPole,
 }
@@ -23,6 +24,9 @@ impl fmt::Display for CameraError {
             Self::DegenerateBasis => "camera basis must contain independent forward and up axes",
             Self::InvalidLens => "camera lens values are invalid",
             Self::InvalidControlDistance => "camera control distance must be finite and positive",
+            Self::InvalidFraming => {
+                "camera framing radius, aspect, field of view, and margin are invalid"
+            }
             Self::InvalidTransition => "camera transition duration must be finite and positive",
             Self::ReflectionPole => "camera transport reached a spherical-reflection pole",
         })
@@ -207,6 +211,35 @@ impl CameraRig {
     pub fn view_target(&self) -> [f64; 3] {
         self.semantic_target
             .unwrap_or_else(|| add(self.eye, scale(self.basis().forward, self.control_distance)))
+    }
+
+    /// Build a point-target camera that contains an output-chart sphere in the
+    /// narrower perspective axis while preserving orientation and lens.
+    pub fn framed_sphere_target(
+        &self,
+        center: [f64; 3],
+        radius: f64,
+        viewport_aspect: f64,
+        margin: f64,
+    ) -> Result<Self, CameraError> {
+        if !finite3(center) {
+            return Err(CameraError::NonFinite);
+        }
+        let control_distance = framed_sphere_distance(
+            radius,
+            viewport_aspect,
+            self.lens.vertical_fov_radians,
+            margin,
+        )?
+        .clamp(0.1, 100.0);
+        let basis = self.basis();
+        CameraRig::new(
+            sub(center, scale(basis.forward, control_distance)),
+            basis,
+            control_distance,
+            Some(center),
+            self.lens,
+        )
     }
 
     pub fn translate_local(&mut self, delta: [f64; 3]) -> Result<(), CameraError> {
@@ -582,6 +615,36 @@ pub fn map_pointer_turntable(input: PointerTurntableInput) -> Result<TurntableFr
             ..TurntableFrame::default()
         },
     })
+}
+
+/// Perspective distance that contains a sphere in the narrower viewport axis.
+/// This is the backend-neutral form of the established Hyperscope framing
+/// rule and deliberately operates in the sphere's current output chart.
+pub fn framed_sphere_distance(
+    radius: f64,
+    viewport_aspect: f64,
+    vertical_fov_radians: f64,
+    margin: f64,
+) -> Result<f64, CameraError> {
+    if !radius.is_finite()
+        || !viewport_aspect.is_finite()
+        || !vertical_fov_radians.is_finite()
+        || !margin.is_finite()
+        || radius <= 0.0
+        || viewport_aspect <= 0.0
+        || vertical_fov_radians <= 0.0
+        || vertical_fov_radians >= std::f64::consts::PI
+        || margin < 1.0
+    {
+        return Err(CameraError::InvalidFraming);
+    }
+    let half_y = vertical_fov_radians * 0.5;
+    let half_x = (half_y.tan() * viewport_aspect).atan();
+    let distance = radius * margin / half_x.min(half_y).sin();
+    if !distance.is_finite() || distance <= 0.0 {
+        return Err(CameraError::InvalidFraming);
+    }
+    Ok(distance)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1141,6 +1204,54 @@ mod tests {
                     control_distance,
                 }),
                 Err(CameraError::InvalidControlDistance)
+            );
+        }
+    }
+
+    #[test]
+    fn sphere_framing_matches_the_narrower_perspective_axis() {
+        let radius = 2.0;
+        let fov = std::f64::consts::FRAC_PI_3;
+        let landscape = framed_sphere_distance(radius, 16.0 / 9.0, fov, 1.15).unwrap();
+        let portrait = framed_sphere_distance(radius, 0.5, fov, 1.15).unwrap();
+        let expected_landscape = radius * 1.15 / (fov * 0.5).sin();
+        assert!((landscape - expected_landscape).abs() < EPSILON);
+        assert!(portrait > landscape);
+
+        let camera = CameraRig::new(
+            [3.0, -1.0, 4.0],
+            CameraBasis::from_forward_up([-0.5, 0.25, -1.0], [0.2, 1.0, 0.1]).unwrap(),
+            4.0,
+            None,
+            PerspectiveLens {
+                vertical_fov_radians: fov,
+                ..PerspectiveLens::default()
+            },
+        )
+        .unwrap();
+        let target = camera
+            .framed_sphere_target([2.0, 3.0, -4.0], radius, 16.0 / 9.0, 1.15)
+            .unwrap();
+        assert_eq!(target.orientation, camera.orientation);
+        assert_eq!(target.lens, camera.lens);
+        assert_eq!(target.semantic_target, Some([2.0, 3.0, -4.0]));
+        assert!((target.control_distance - landscape).abs() < EPSILON);
+        assert_point_close(target.view_target(), [2.0, 3.0, -4.0]);
+    }
+
+    #[test]
+    fn sphere_framing_rejects_invalid_geometry_and_projection() {
+        for arguments in [
+            [0.0, 1.0, 1.0, 1.15],
+            [1.0, 0.0, 1.0, 1.15],
+            [1.0, 1.0, 0.0, 1.15],
+            [1.0, 1.0, std::f64::consts::PI, 1.15],
+            [1.0, 1.0, 1.0, 0.99],
+            [f64::NAN, 1.0, 1.0, 1.15],
+        ] {
+            assert_eq!(
+                framed_sphere_distance(arguments[0], arguments[1], arguments[2], arguments[3]),
+                Err(CameraError::InvalidFraming)
             );
         }
     }
