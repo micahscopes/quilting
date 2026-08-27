@@ -18,6 +18,7 @@ pub mod sources {
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
+    pub const LOD_TYPES: &str = include_str!("../shaders/compute/lod_types.wgsl");
 
     // Entry-point shaders (compiled to GLSL for WebGL2)
     pub const VERTEX_MAIN: &str = include_str!("../shaders/vertex/main.wgsl");
@@ -50,6 +51,7 @@ fn build_compiler_catalog_revision() -> Arc<str> {
         ("quilting::lighting::pbr", sources::PBR),
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
+        ("quilting::compute::lod_types", sources::LOD_TYPES),
     ];
     let capacity = COMPILER_CONFIGURATION.len()
         + modules
@@ -78,6 +80,7 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
         ("quilting::lighting::pbr", sources::PBR),
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
+        ("quilting::compute::lod_types", sources::LOD_TYPES),
     ];
 
     for (path, source) in modules {
@@ -271,6 +274,7 @@ mod tests {
             ("quilting::lighting::pbr", sources::PBR),
             ("quilting::lighting::matcap", sources::MATCAP),
             ("quilting::viz::density", sources::DENSITY),
+            ("quilting::compute::lod_types", sources::LOD_TYPES),
         ] {
             assert!(first.contains(path));
             assert!(first.contains(source));
@@ -281,6 +285,83 @@ mod tests {
     fn composer_loads_all_modules() {
         let composer = create_composer();
         assert!(composer.is_ok(), "Failed: {:?}", composer.err());
+    }
+
+    #[test]
+    fn lod_classifier_storage_contract_is_valid_and_exact() {
+        const PROBE: &str = r#"
+#import quilting::compute::lod_types::{LodFaceRecord, LodSkinningRecord, LodAdjacencyRecord, LodPass1Record, LodSubjectState, LodDispatchUniforms, pack_lod_classification}
+
+@group(0) @binding(0) var<storage, read> faces: array<LodFaceRecord>;
+@group(0) @binding(1) var<storage, read> skinning: array<LodSkinningRecord>;
+@group(0) @binding(2) var<storage, read> adjacency: array<LodAdjacencyRecord>;
+@group(0) @binding(3) var<storage, read_write> pass1: array<LodPass1Record>;
+@group(0) @binding(4) var<storage, read> subjects: array<LodSubjectState>;
+@group(0) @binding(5) var<uniform> dispatch: LodDispatchUniforms;
+@group(0) @binding(6) var<storage, read_write> packed: array<u32>;
+
+@compute @workgroup_size(1)
+fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    let face = faces[invocation.x];
+    let skin = skinning[face.vertex_indices.x];
+    let edge = adjacency[invocation.x * 3u];
+    let subject = subjects[0u];
+    let exponent = u32(pass1[invocation.x].exponents.x);
+    let retained = dispatch.counts.x + u32(subject.conformal.w);
+    packed[invocation.x] = pack_lod_classification(
+        vec3<u32>(exponent, edge.neighbor_edge, skin.joint_indices.x),
+        retained & 0u,
+        false,
+        0u,
+        0u,
+    );
+}
+"#;
+
+        let module = compile_shader(PROBE, HashMap::new()).expect("LOD ABI probe compiles");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("LOD ABI probe validates");
+
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).expect("LOD ABI lays out");
+        for (name, expected_size, expected_stride) in [
+            ("LodFaceRecord", 16, 16),
+            ("LodSkinningRecord", 32, 32),
+            ("LodAdjacencyRecord", 16, 16),
+            ("LodPass1Record", 16, 16),
+            ("LodSubjectState", 160, 160),
+            ("LodDispatchUniforms", 272, 272),
+        ] {
+            let (handle, ty) = module
+                .types
+                .iter()
+                .find(|(_, ty)| {
+                    ty.name
+                        .as_deref()
+                        .is_some_and(|candidate| candidate == name
+                            || candidate.starts_with(&format!("{name}X_naga_oil_mod_")))
+                })
+                .unwrap_or_else(|| {
+                    let names = module
+                        .types
+                        .iter()
+                        .filter_map(|(_, ty)| ty.name.as_deref())
+                        .collect::<Vec<_>>();
+                    panic!("missing {name}; module types: {names:?}")
+                });
+            let layout = layouter[handle];
+            assert_eq!(layout.size, expected_size, "{name} size");
+            assert_eq!(layout.to_stride(), expected_stride, "{name} stride");
+            if let naga::TypeInner::Struct { span, .. } = ty.inner {
+                assert_eq!(span, expected_size, "{name} declared span");
+            } else {
+                panic!("{name} is not a struct");
+            }
+        }
     }
 
     #[test]
