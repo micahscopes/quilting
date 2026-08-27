@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use quilting_core::batch::{
     group_resident_faces_into, group_resident_screen_leaves_into,
     group_resident_screen_component_overlay_into, group_resident_screen_overlay_into,
-    measure_adaptive_render_work, AdaptiveRenderOverlay, RenderBatchKey, RenderBatchMember,
-    ResidentLod,
+    group_resident_screen_neighborhood_overlay_into, measure_adaptive_render_work,
+    AdaptiveRenderOverlay, RenderBatchKey, RenderBatchMember, ResidentLod,
 };
 use quilting_core::patch::{QBPatchDomain, QBTriPatch};
 use quilting_core::permutation::canonical_form;
@@ -563,12 +563,25 @@ struct AdaptiveNeighborhoodShadowComparison {
     resident_mismatches: u64,
     raw_vertex_mismatches: u64,
     vertex_mismatches: u64,
+    plan_compared: bool,
+    plan_exact: bool,
+    overlay_compared: bool,
+    suppressed_faces_match: bool,
+    overlay_groups_match: bool,
+    atlas_residency_valid: bool,
+    baseline_triangles: u64,
+    suppressed_root_triangles: u64,
+    overlay_triangles: u64,
+    composed_triangles: u64,
+    complete_triangles: u64,
+    triangle_budget_match: bool,
     boundary_escape: bool,
     exact: bool,
     plan_ms: f64,
     frontier_ms: f64,
     reconcile_ms: f64,
     compare_ms: f64,
+    overlay_ms: f64,
     total_ms: f64,
 }
 
@@ -652,6 +665,7 @@ struct AdaptiveNeighborhoodShadow {
     reconciliation_cache: AdaptiveNeighborhoodReconciliationCache,
     complete_lod_scratch: ScreenMeshLeafLodScratch,
     neighborhood_lod_scratch: ScreenMeshLeafLodScratch,
+    overlay: AdaptiveRenderOverlay,
 }
 
 fn adaptive_neighborhood_edge_hops(max_face_edge_ratio: u32, max_atlas_lod: u32) -> u32 {
@@ -689,10 +703,16 @@ impl AdaptiveNeighborhoodShadow {
             "error"
         } else if self.last.as_ref().is_some_and(|last| last.exact) {
             "match"
-        } else if self.last.is_some() {
+        } else if self
+            .last
+            .as_ref()
+            .is_some_and(|last| (last.plan_compared && !last.plan_exact) || last.overlay_compared)
+        {
             "mismatch"
+        } else if self.last.as_ref().is_some_and(|last| last.plan_compared) {
+            "awaiting-overlay"
         } else {
-            "awaiting-plan"
+            "awaiting-complete-oracle"
         }
     }
 
@@ -964,10 +984,100 @@ impl AdaptiveNeighborhoodShadow {
         comparison.resident_mismatches = resident_mismatches as u64;
         comparison.raw_vertex_mismatches = raw_vertex_mismatches as u64;
         comparison.vertex_mismatches = vertex_mismatches as u64;
-        comparison.exact = exact;
+        comparison.plan_compared = true;
+        comparison.plan_exact = exact;
         comparison.compare_ms = compare_ms;
         comparison.total_ms += compare_ms;
-        if exact {
+        if !exact {
+            self.mismatches = self.mismatches.saturating_add(1);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compare_overlay(
+        &mut self,
+        complete_overlay: &AdaptiveRenderOverlay,
+        baseline_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+        baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: ResidentLod,
+        atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+        complete_triangles: u64,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(comparison) = self.last.as_mut() else {
+            return;
+        };
+        if comparison.overlay_compared || !comparison.plan_exact {
+            return;
+        }
+        let Some(frontier) = self.frontier.as_ref() else {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some("adaptive neighborhood frontier disappeared".into());
+            return;
+        };
+        let Some(resident) = self.reconciliation_cache.result.as_ref() else {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some("adaptive neighborhood reconciliation disappeared".into());
+            return;
+        };
+        let overlay_start = browser_now_ms();
+        if let Err(error) = group_resident_screen_neighborhood_overlay_into(
+            frontier,
+            &resident.resident,
+            &self.plan.observed_faces,
+            &self.plan.fixed_leaves,
+            baseline_residents,
+            baseline_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            &mut self.neighborhood_lod_scratch,
+            &mut self.overlay,
+        ) {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some(error.to_string());
+            return;
+        }
+        comparison.overlay_ms = browser_now_ms() - overlay_start;
+        comparison.total_ms += comparison.overlay_ms;
+        comparison.overlay_compared = true;
+        comparison.suppressed_faces_match =
+            self.overlay.suppressed_faces == complete_overlay.suppressed_faces;
+        comparison.overlay_groups_match = self.overlay.groups == complete_overlay.groups;
+        let work = match measure_adaptive_render_work(
+            baseline_groups,
+            &self.overlay,
+            baseline_residents,
+            initial,
+            atlas_triangle_counts,
+        ) {
+            Ok(work) => work,
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                self.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        comparison.atlas_residency_valid = true;
+        comparison.baseline_triangles = work.baseline_triangles;
+        comparison.suppressed_root_triangles = work.suppressed_root_triangles;
+        comparison.overlay_triangles = work.overlay_triangles;
+        comparison.composed_triangles = work.composed_triangles;
+        comparison.complete_triangles = complete_triangles;
+        comparison.triangle_budget_match = work.composed_triangles == complete_triangles;
+        comparison.exact = comparison.plan_exact
+            && comparison.suppressed_faces_match
+            && comparison.overlay_groups_match
+            && comparison.atlas_residency_valid
+            && comparison.triangle_budget_match;
+        if comparison.exact {
             self.matches = self.matches.saturating_add(1);
         } else {
             self.mismatches = self.mismatches.saturating_add(1);
@@ -1911,6 +2021,9 @@ impl AdaptivePickedRuntime {
         if !enabled && self.component_shadow.enabled {
             return Err("adaptive component shadow requires retained overlay shadow".into());
         }
+        if !enabled && self.neighborhood_shadow.enabled {
+            return Err("adaptive neighborhood shadow requires retained overlay shadow".into());
+        }
         let changed = self.retained_shadow_enabled != enabled;
         self.retained_shadow_enabled = enabled;
         self.pending_overlay_signature = None;
@@ -1943,6 +2056,9 @@ impl AdaptivePickedRuntime {
     ) -> Result<bool, String> {
         if self.has_pending_publication() {
             return Err("adaptive publication is already staged".into());
+        }
+        if enabled {
+            self.set_retained_shadow_enabled(true)?;
         }
         Ok(self.neighborhood_shadow.set_enabled(enabled))
     }
@@ -2076,6 +2192,18 @@ impl AdaptivePickedRuntime {
                     ),
                 );
             }
+            self.neighborhood_shadow.compare_overlay(
+                &self.published_overlay,
+                baseline_groups,
+                baseline_residents,
+                baseline_vertex_lods,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                atlas_triangle_counts,
+                self.pending_triangles,
+            );
             self.pending_component_publication = self.component_publication_enabled
                 && self.pending_component_shadow_staged
                 && self.published_component_publication;
@@ -2139,6 +2267,18 @@ impl AdaptivePickedRuntime {
                 ),
             );
         }
+        self.neighborhood_shadow.compare_overlay(
+            &self.pending_overlay,
+            baseline_groups,
+            baseline_residents,
+            baseline_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            atlas_triangle_counts,
+            self.pending_triangles,
+        );
         if self.component_publication_enabled && self.pending_component_shadow_staged {
             match self
                 .component_shadow
@@ -4259,6 +4399,18 @@ mod tests {
         assert_eq!(neighborhood.resident_mismatches, 0);
         assert_eq!(neighborhood.raw_vertex_mismatches, 0);
         assert_eq!(neighborhood.vertex_mismatches, 0);
+        assert!(neighborhood.plan_compared);
+        assert!(neighborhood.plan_exact);
+        assert!(neighborhood.overlay_compared);
+        assert!(neighborhood.suppressed_faces_match);
+        assert!(neighborhood.overlay_groups_match);
+        assert!(neighborhood.atlas_residency_valid);
+        assert_eq!(neighborhood.baseline_triangles, 3);
+        assert_eq!(neighborhood.suppressed_root_triangles, 2);
+        assert_eq!(neighborhood.overlay_triangles, 5);
+        assert_eq!(neighborhood.composed_triangles, 6);
+        assert_eq!(neighborhood.complete_triangles, 6);
+        assert!(neighborhood.triangle_budget_match);
         assert!(neighborhood.exact);
 
         runtime.commit_publication();

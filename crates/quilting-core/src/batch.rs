@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::screen_leaf_lod::{
-    ScreenLeafLodError, ScreenMeshLeafFrontier, ScreenMeshLeafLodScratch,
+    ScreenLeafLodError, ScreenMeshLeafFrontier, ScreenMeshLeafLodScratch, ScreenMeshLeafTopology,
 };
 use crate::screen_partition::ScreenPatchLeafId;
 
@@ -823,6 +823,7 @@ pub fn group_resident_screen_overlay_into(
         frontier,
         resident_edge_lods,
         AdaptiveOverlayCoverage::Complete(baseline_residents.len()),
+        None,
         baseline_residents,
         baseline_vertex_lods,
         face_materials,
@@ -859,6 +860,42 @@ pub fn group_resident_screen_component_overlay_into(
         frontier,
         resident_edge_lods,
         AdaptiveOverlayCoverage::Components(component_faces),
+        None,
+        baseline_residents,
+        baseline_vertex_lods,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        initial,
+        lod_scratch,
+        overlay,
+    )
+}
+
+/// Extract exact replacements for a bounded mutable neighborhood plus fixed
+/// root observers. Fixed observer corners max-compose the already-reconciled
+/// baseline field with local changes, preserving contributions from retained
+/// faces outside the local frontier.
+#[allow(clippy::too_many_arguments)]
+pub fn group_resident_screen_neighborhood_overlay_into(
+    frontier: &ScreenMeshLeafFrontier,
+    resident_edge_lods: &[[u32; 3]],
+    observed_faces: &[u32],
+    fixed_leaves: &[bool],
+    baseline_residents: &[Option<ResidentLod>],
+    baseline_vertex_lods: &[[u32; 3]],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    face_render_nodes: &[usize],
+    initial: ResidentLod,
+    lod_scratch: &mut ScreenMeshLeafLodScratch,
+    overlay: &mut AdaptiveRenderOverlay,
+) -> Result<(), ScreenLeafLodError> {
+    group_resident_screen_overlay_coverage_into(
+        frontier,
+        resident_edge_lods,
+        AdaptiveOverlayCoverage::Components(observed_faces),
+        Some(fixed_leaves),
         baseline_residents,
         baseline_vertex_lods,
         face_materials,
@@ -922,6 +959,7 @@ fn group_resident_screen_overlay_coverage_into(
     frontier: &ScreenMeshLeafFrontier,
     resident_edge_lods: &[[u32; 3]],
     coverage: AdaptiveOverlayCoverage<'_>,
+    fixed_leaves: Option<&[bool]>,
     baseline_residents: &[Option<ResidentLod>],
     baseline_vertex_lods: &[[u32; 3]],
     face_materials: &[usize],
@@ -934,6 +972,7 @@ fn group_resident_screen_overlay_coverage_into(
     let leaves = frontier.leaves();
     let source_faces = baseline_residents.len();
     if leaves.len() != resident_edge_lods.len()
+        || fixed_leaves.is_some_and(|fixed| fixed.len() != leaves.len())
         || baseline_vertex_lods.len() != source_faces
         || face_materials.len() != source_faces
         || face_nodes.len() != source_faces
@@ -958,6 +997,13 @@ fn group_resident_screen_overlay_coverage_into(
         .enumerate()
     {
         let source_face = leaf.source_face as usize;
+        let vertex_lods = compose_fixed_observer_vertex_lods(
+            leaf_index,
+            leaf,
+            vertex_lods,
+            fixed_leaves,
+            baseline_vertex_lods,
+        )?;
         let Some(local_face) = coverage.local_face(leaf.source_face) else {
             return Err(ScreenLeafLodError::MissingFaceMetadata {
                 leaf_index,
@@ -999,13 +1045,21 @@ fn group_resident_screen_overlay_coverage_into(
             );
         }
     }
-    for ((leaf, edge_lods), vertex_lods) in leaves
+    for (leaf_index, ((leaf, edge_lods), vertex_lods)) in leaves
         .iter()
         .copied()
         .zip(resident_edge_lods.iter().copied())
         .zip(leaf_vertex_lods.iter().copied())
+        .enumerate()
     {
         let source_face = leaf.source_face as usize;
+        let vertex_lods = compose_fixed_observer_vertex_lods(
+            leaf_index,
+            leaf,
+            vertex_lods,
+            fixed_leaves,
+            baseline_vertex_lods,
+        )?;
         let local_face = coverage
             .local_face(leaf.source_face)
             .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
@@ -1031,6 +1085,35 @@ fn group_resident_screen_overlay_coverage_into(
     }
     overlay.groups.retain(|_, members| !members.is_empty());
     Ok(())
+}
+
+fn compose_fixed_observer_vertex_lods(
+    leaf_index: usize,
+    leaf: ScreenMeshLeafTopology,
+    mut vertex_lods: [u32; 3],
+    fixed_leaves: Option<&[bool]>,
+    baseline_vertex_lods: &[[u32; 3]],
+) -> Result<[u32; 3], ScreenLeafLodError> {
+    if !fixed_leaves
+        .and_then(|fixed| fixed.get(leaf_index))
+        .copied()
+        .unwrap_or(false)
+    {
+        return Ok(vertex_lods);
+    }
+    if leaf.id != ScreenPatchLeafId::ROOT {
+        return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+    }
+    let baseline = baseline_vertex_lods.get(leaf.source_face as usize).ok_or(
+        ScreenLeafLodError::MissingFaceMetadata {
+            leaf_index,
+            source_face: leaf.source_face,
+        },
+    )?;
+    for corner in 0..3 {
+        vertex_lods[corner] = vertex_lods[corner].max(baseline[corner]);
+    }
+    Ok(vertex_lods)
 }
 
 /// Decode a visible request or choose the bounded offscreen standby topology.
@@ -2450,6 +2533,137 @@ mod tests {
         assert!(overlay.suppressed_faces.binary_search(&0).is_ok());
         assert!(overlay.suppressed_faces.binary_search(&2).is_err());
         assert_eq!(compose_root_groups_with_overlay(roots, &overlay), complete);
+    }
+
+    #[test]
+    fn neighborhood_overlay_composes_fixed_observer_corner_baselines() {
+        // Face 0 is replaced, face 1 observes its shared vertex, and retained
+        // face 2 contributes a larger baseline maximum at a different corner
+        // of face 1. A local rebuild alone cannot see that outer contribution.
+        let topology = HalfEdgeMesh::from_triangles(
+            7,
+            &[[0, 1, 2], [2, 3, 4], [4, 5, 6]],
+        );
+        let baseline_residents = [
+            Some(ResidentLod::uniform(1)),
+            Some(ResidentLod::uniform(1)),
+            Some(ResidentLod::uniform(8)),
+        ];
+        let mut baseline_vertex_lods = Vec::new();
+        let mut vertex_scratch = Vec::new();
+        rebuild_resident_vertex_lods(
+            &baseline_residents,
+            &topology,
+            ResidentLod::uniform(1),
+            &mut vertex_scratch,
+            &mut baseline_vertex_lods,
+        );
+        assert!(baseline_vertex_lods[1].contains(&8));
+        let face_materials = [3, 7, 11];
+        let face_nodes = [13, 17, 19];
+        let face_render_nodes = [23, 29, 31];
+        let roots = group_resident_faces(
+            &baseline_residents,
+            &baseline_vertex_lods,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+            ResidentLod::uniform(1),
+        );
+
+        let mut neighborhood_leaves = (0..4)
+            .map(|child| {
+                let id = ScreenPatchLeafId::ROOT.child(child).unwrap();
+                ScreenMeshLeafTopology {
+                    source_face: 0,
+                    id,
+                    domain: id.domain().unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        neighborhood_leaves.push(ScreenMeshLeafTopology {
+            source_face: 1,
+            id: ScreenPatchLeafId::ROOT,
+            domain: QBPatchDomain::FULL,
+        });
+        let mut complete_leaves = neighborhood_leaves.clone();
+        complete_leaves.push(ScreenMeshLeafTopology {
+            source_face: 2,
+            id: ScreenPatchLeafId::ROOT,
+            domain: QBPatchDomain::FULL,
+        });
+        let topology_cache = ScreenMeshTopologyCache::from_half_edge_mesh(&topology).unwrap();
+        let neighborhood_frontier =
+            ScreenMeshLeafFrontier::build(&neighborhood_leaves, &topology_cache).unwrap();
+        let complete_frontier =
+            ScreenMeshLeafFrontier::build(&complete_leaves, &topology_cache).unwrap();
+        let neighborhood_requested = vec![[1; 3]; 5];
+        let mut complete_requested = neighborhood_requested.clone();
+        complete_requested.push([8; 3]);
+        let fixed_leaves = [false, false, false, false, true];
+        let neighborhood_resident = neighborhood_frontier
+            .reconcile_lods_with_fixed_boundary(
+                &neighborhood_requested,
+                &fixed_leaves,
+                2,
+                64,
+            )
+            .unwrap();
+        let complete_resident = complete_frontier
+            .reconcile_lods(&complete_requested, 2, 64)
+            .unwrap();
+        let complete = group_resident_screen_leaves(
+            &complete_frontier,
+            &complete_resident.resident,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+        )
+        .unwrap();
+
+        let mut raw_overlay = AdaptiveRenderOverlay::default();
+        let mut lod_scratch = ScreenMeshLeafLodScratch::default();
+        group_resident_screen_component_overlay_into(
+            &neighborhood_frontier,
+            &neighborhood_resident.resident,
+            &[0, 1],
+            &baseline_residents,
+            &baseline_vertex_lods,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+            ResidentLod::uniform(1),
+            &mut lod_scratch,
+            &mut raw_overlay,
+        )
+        .unwrap();
+        assert_ne!(
+            compose_root_groups_with_overlay(roots.clone(), &raw_overlay),
+            complete,
+        );
+
+        let mut neighborhood_overlay = AdaptiveRenderOverlay::default();
+        group_resident_screen_neighborhood_overlay_into(
+            &neighborhood_frontier,
+            &neighborhood_resident.resident,
+            &[0, 1],
+            &fixed_leaves,
+            &baseline_residents,
+            &baseline_vertex_lods,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+            ResidentLod::uniform(1),
+            &mut lod_scratch,
+            &mut neighborhood_overlay,
+        )
+        .unwrap();
+        assert!(neighborhood_overlay.suppressed_faces.contains(&0));
+        assert!(neighborhood_overlay.suppressed_faces.contains(&1));
+        assert_eq!(
+            compose_root_groups_with_overlay(roots, &neighborhood_overlay),
+            complete,
+        );
     }
 
     #[test]
