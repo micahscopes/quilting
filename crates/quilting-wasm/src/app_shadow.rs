@@ -4,10 +4,10 @@ use crate::navigation::{
 };
 use hyperscape::{
     extract_packed_scene, map_space_mouse_camera, CameraBasis, CameraRig, FocusSphere,
-    LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame, PackedAssetInstance,
-    PackedNodeSource, PackedNodeTransformSource, PackedPresentationLayerBinding, Presentation,
-    PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
-    SurfaceAnchorTarget,
+    LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame, NavigationPreset,
+    PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
+    PackedPresentationLayerBinding, Presentation, PresentationAsset, PresentationSnapshot,
+    SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
@@ -540,6 +540,81 @@ impl HyperscopeAppShadow {
             preset: preset_name(mapped.preset),
             frame: ShadowNavigationFrame::from(mapped.frame),
         })
+    }
+
+    /// Map and integrate one browser-filtered SpaceMouse sample as a single
+    /// device-neutral camera intent, then copy the committed camera into a
+    /// retained numeric packet. This avoids allocating a serialized snapshot
+    /// on every report while preset, target policy, transition cancellation,
+    /// and quaternion integration remain one reducer transaction.
+    ///
+    /// Packet layout: eye[3], right[3], up[3], forward[3], control distance,
+    /// semantic-target-present, semantic target[3].
+    #[wasm_bindgen(js_name = stepSpaceMouseCamera)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_space_mouse_camera(
+        &self,
+        normalized_axes: &[f32],
+        preset: &str,
+        swap_yz: bool,
+        invert_pan: f64,
+        invert_rotate: f64,
+        delta_seconds: f64,
+        registered_linear_speed: f64,
+        move_gain: f64,
+        rotate_gain: f64,
+        horizon_lock_requested: bool,
+        output: &mut [f64],
+    ) -> Result<(), JsValue> {
+        const OUTPUT_LEN: usize = 17;
+        if output.len() != OUTPUT_LEN {
+            return Err(JsValue::from_str(
+                "SpaceMouse camera output must contain exactly 17 numbers",
+            ));
+        }
+        let mapped = space_mouse_camera_input(
+            normalized_axes,
+            preset,
+            swap_yz,
+            invert_pan,
+            invert_rotate,
+            delta_seconds,
+            registered_linear_speed,
+            move_gain,
+            rotate_gain,
+            horizon_lock_requested,
+        )?;
+        let elapsed_seconds = self.store.frame_snapshot().elapsed_seconds;
+        let diagnostic_count = self.store.navigation_diagnostic_count();
+        self.dispatch_navigation(NavigationAction::ApplyCameraIntent {
+            preset: mapped.preset,
+            semantic_target_enabled: mapped.preset == NavigationPreset::Object,
+            frame: mapped.frame,
+        })?;
+        self.advance_frame_quiet(elapsed_seconds, 0.0)?;
+        if self.store.navigation_diagnostic_count() != diagnostic_count {
+            return Err(JsValue::from_str(
+                &self
+                    .store
+                    .last_navigation_diagnostic()
+                    .unwrap_or_else(|| "SpaceMouse camera intent was rejected".to_owned()),
+            ));
+        }
+
+        let frame = self.store.frame_snapshot();
+        let basis = frame.camera.basis();
+        let mut packet = [0.0; OUTPUT_LEN];
+        packet[0..3].copy_from_slice(&frame.camera.eye);
+        packet[3..6].copy_from_slice(&basis.right);
+        packet[6..9].copy_from_slice(&basis.up);
+        packet[9..12].copy_from_slice(&basis.forward);
+        packet[12] = frame.camera.control_distance;
+        if let Some(target) = frame.camera.semantic_target {
+            packet[13] = 1.0;
+            packet[14..17].copy_from_slice(&target);
+        }
+        output.copy_from_slice(&packet);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = transitionCamera)]

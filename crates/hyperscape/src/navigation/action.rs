@@ -325,6 +325,7 @@ fn integrate_navigation_to(
         let changes_semantic_target_policy = matches!(
             &scheduled.action,
             NavigationAction::SetSemanticTargetEnabled(_)
+                | NavigationAction::ApplyCameraIntent { .. }
         );
         let result =
             apply_action(scheduled.action, runtime, surface_walk, camera, focus).and_then(|()| {
@@ -966,6 +967,10 @@ mod tests {
 
         assert_eq!(controller.runtime.preset, NavigationPreset::Object);
         assert!(controller.camera.semantic_target.is_some());
+        assert_eq!(
+            controller.runtime.last_semantic_target_policy_sequence,
+            Some(0)
+        );
         assert_ne!(controller.camera.eye, CameraRig::default().eye);
         assert_ne!(controller.camera.control_distance, CameraRig::default().control_distance);
 
@@ -985,6 +990,10 @@ mod tests {
         controller.tick(0.0).unwrap();
 
         assert_eq!(controller.runtime.preset, accepted_runtime.preset);
+        assert_eq!(
+            controller.runtime.last_semantic_target_policy_sequence,
+            Some(0)
+        );
         assert_eq!(controller.camera, accepted_camera);
         assert_eq!(controller.surface_walk, accepted_walk);
         assert!(controller

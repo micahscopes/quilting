@@ -1056,6 +1056,17 @@ impl AppStore {
         self.lock_state().navigation.diagnostics.0.clone()
     }
 
+    /// Inspect the high-rate navigation error fence without cloning the
+    /// diagnostic log. Input adapters use this around one atomic reducer step
+    /// and only copy the final message when that step rejected its intent.
+    pub fn navigation_diagnostic_count(&self) -> usize {
+        self.lock_state().navigation.diagnostics.0.len()
+    }
+
+    pub fn last_navigation_diagnostic(&self) -> Option<String> {
+        self.lock_state().navigation.diagnostics.0.last().cloned()
+    }
+
     pub fn summary_snapshot(&self) -> AppSummary {
         self.summary.get_cloned()
     }

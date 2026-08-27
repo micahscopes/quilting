@@ -658,10 +658,14 @@ const target = new Float64Array([0, 0, 0]);
 const focusCenter = new Float64Array([0.5, 0, 0]);
 const projectionLens = [1.25, 0.002, 25_000];
 function assertNavigationParity(actual, expected) {
-  assert.equal(actual.elapsed_seconds, expected.elapsed_seconds);
-  assert.equal(actual.preset, expected.preset);
+  assertNavigationContentParity(actual, expected);
   assert.equal(actual.pending_actions, expected.pending_actions);
   assert.equal(actual.last_applied_sequence, expected.last_applied_sequence);
+}
+
+function assertNavigationContentParity(actual, expected) {
+  assert.equal(actual.elapsed_seconds, expected.elapsed_seconds);
+  assert.equal(actual.preset, expected.preset);
   for (const field of ['eye', 'orientation', 'right', 'up', 'forward', 'semantic_target']) {
     assert.deepEqual(actual.camera[field], expected.camera[field]);
   }
@@ -682,6 +686,20 @@ function assertNavigationParity(actual, expected) {
   assert.deepEqual(actual.selected_focus, expected.selected_focus);
   assert.equal(actual.reflection, expected.reflection);
   assert.deepEqual(actual.diagnostics, expected.diagnostics);
+}
+
+function assertSpaceMouseCameraPacket(packet, snapshot) {
+  assert.equal(packet.length, 17);
+  assert.deepEqual(Array.from(packet.slice(0, 3)), snapshot.camera.eye);
+  assert.deepEqual(Array.from(packet.slice(3, 6)), snapshot.camera.right);
+  assert.deepEqual(Array.from(packet.slice(6, 9)), snapshot.camera.up);
+  assert.deepEqual(Array.from(packet.slice(9, 12)), snapshot.camera.forward);
+  assert.equal(packet[12], snapshot.camera.control_distance);
+  assert.equal(packet[13], snapshot.camera.semantic_target === undefined ? 0 : 1);
+  assert.deepEqual(
+    Array.from(packet.slice(14, 17)),
+    snapshot.camera.semantic_target ?? [0, 0, 0],
+  );
 }
 
 // A generated-WASM authority gate for the exact browser rollback oracle: the
@@ -1435,8 +1453,10 @@ const spaceMouseCameraStates = [
 for (const [caseIndex, sample] of spaceMouseCases.entries()) {
   const mappedApp = new HyperscopeAppShadow();
   const semanticApp = new HyperscopeAppShadow();
+  const intentApp = new HyperscopeAppShadow();
+  const decomposedIntentApp = new HyperscopeAppShadow();
   const camera = spaceMouseCameraStates[caseIndex];
-  for (const candidate of [mappedApp, semanticApp]) {
+  for (const candidate of [mappedApp, semanticApp, intentApp, decomposedIntentApp]) {
     candidate.synchronizeNavigation(
       camera.eye, camera.forward, camera.up, 3, camera.target,
       ...projectionLens, focusCenter, 2, false, false, 0.5, 0.1,
@@ -1471,8 +1491,40 @@ for (const [caseIndex, sample] of spaceMouseCases.entries()) {
   );
   assertNavigationParity(mappedApp.navigationSnapshot(), semanticApp.navigationSnapshot());
   assertNavigationParity(mappedApp.tickNavigation(0), semanticApp.tickNavigation(0));
+
+  const cameraPacket = new Float64Array(17);
+  intentApp.stepSpaceMouseCamera(
+    normalizedAxes,
+    sample.preset,
+    sample.swapYZ,
+    sample.invertPan,
+    sample.invertRotate,
+    sample.deltaSeconds,
+    sample.registeredLinearSpeed,
+    sample.moveGain,
+    sample.rotateGain,
+    sample.horizonLockRequested,
+    cameraPacket,
+  );
+  decomposedIntentApp.setPreset(sample.preset);
+  decomposedIntentApp.setSemanticTargetEnabled(sample.preset === 'object');
+  decomposedIntentApp.applyFrame(
+    new Float64Array(expectedFrame.translation),
+    new Float64Array(expectedFrame.rotation),
+    expectedFrame.dolly_log,
+    expectedFrame.horizon_locked,
+  );
+  const expectedIntent = decomposedIntentApp.tickNavigation(0);
+  const actualIntent = intentApp.navigationSnapshot();
+  assertNavigationContentParity(actualIntent, expectedIntent);
+  assert.equal(actualIntent.pending_actions, 0);
+  assert.equal(actualIntent.last_applied_sequence, 0);
+  assert.equal(actualIntent.camera.semantic_target !== undefined, sample.preset === 'object');
+  assertSpaceMouseCameraPacket(cameraPacket, actualIntent);
   mappedApp.free();
   semanticApp.free();
+  intentApp.free();
+  decomposedIntentApp.free();
 }
 
 const traceMappedApp = new HyperscopeAppShadow();
@@ -1537,6 +1589,25 @@ traceMappedApp.free();
 traceSemanticApp.free();
 
 const invalidSpaceMouseApp = new HyperscopeAppShadow();
+const unchangedCameraPacket = new Float64Array(17).fill(123);
+const shortCameraPacket = new Float64Array(16).fill(456);
+const beforeInvalidSpaceMouseStep = invalidSpaceMouseApp.navigationSnapshot();
+assert.throws(
+  () => invalidSpaceMouseApp.stepSpaceMouseCamera(
+    normalizedAxes, 'fly', false, 0, 0, 1, 1, 1, 1, false, shortCameraPacket,
+  ),
+  /exactly 17 numbers/,
+);
+assert.deepEqual(Array.from(shortCameraPacket), new Array(16).fill(456));
+assert.throws(
+  () => invalidSpaceMouseApp.stepSpaceMouseCamera(
+    new Float32Array([NaN, 0, 0, 0, 0, 0]),
+    'fly', false, 0, 0, 1, 1, 1, 1, false, unchangedCameraPacket,
+  ),
+  /remain finite/,
+);
+assert.deepEqual(Array.from(unchangedCameraPacket), new Array(17).fill(123));
+assertNavigationParity(invalidSpaceMouseApp.navigationSnapshot(), beforeInvalidSpaceMouseStep);
 assert.throws(
   () => invalidSpaceMouseApp.queueSpaceMouseCamera(
     new Float32Array(5), 'fly', false, 0, 0, 1, 1, 1, 1, false,
