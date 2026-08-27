@@ -3931,6 +3931,31 @@ pub fn mr_set_adaptive_retained_shadow_enabled(enabled: bool) -> JsValue {
     })
 }
 
+/// Compare an exact source-component plan and sparse overlay beside every
+/// complete adaptive publication. Enabling this observation gate also enables
+/// the retained-overlay shadow it compares against; neither changes drawing.
+#[wasm_bindgen(js_name = "mr_setAdaptiveComponentShadowEnabled")]
+pub fn mr_set_adaptive_component_shadow_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        match state
+            .adaptive_picked
+            .set_component_shadow_enabled(enabled)
+        {
+            Ok(changed) => {
+                if changed && enabled && state.adaptive_picked.is_enabled() {
+                    state.adaptive_batch_transition_pending = true;
+                }
+                adaptive_picked_snapshot_js(state, None)
+            }
+            Err(error) => adaptive_screen_diagnostic_error(error),
+        }
+    })
+}
+
 /// Opt into transactional retained-layer GPU publication. The persistent
 /// overlay shadow is forced on first; scenes containing order-sensitive PBR
 /// buckets remain on the complete path and report a diagnostic instead.

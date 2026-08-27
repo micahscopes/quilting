@@ -15,6 +15,7 @@ const {
   mr_renderShadowDiagnostics,
   mr_setAdaptiveCurrentView,
   mr_setAdaptivePickedFace,
+  mr_setAdaptiveComponentShadowEnabled,
   mr_setAdaptiveRetainedPublicationEnabled,
   mr_setAdaptiveRetainedShadowEnabled,
   mr_setLodGradingRatio,
@@ -54,6 +55,11 @@ assert.equal(
   mr_setAdaptiveRetainedShadowEnabled(true),
   null,
   'retained adaptive shadow should be inert before a renderer exists',
+);
+assert.equal(
+  mr_setAdaptiveComponentShadowEnabled(true),
+  null,
+  'adaptive component shadow should be inert before a renderer exists',
 );
 assert.equal(
   mr_setAdaptiveRetainedPublicationEnabled(true),
