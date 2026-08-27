@@ -544,17 +544,56 @@ node IDs become dense subject rows before upload. The pass-two oracle covers
 all six permutations and proves that an invisible neighbor cannot promote a
 visible face.
 
-The deterministic gate at this checkpoint is:
+The deterministic gate at that source-only checkpoint was:
 
-- `cargo test -p quilting-shaders`: 14/14;
+- `cargo test -p quilting-shaders`: 14/14 at that commit;
 - `cargo test -p quilting-renderer`: 62/62; and
 - `cargo check -p quilting-wasm --target wasm32-unknown-unknown --features leptos-ui`.
 
-This checkpoint contains no `wgpu` dependency and makes no GPU-performance or
-cross-backend numeric-parity claim. The next acceptable evidence is a real
-two-pass WebGPU dispatch over the frozen word payload, followed by exact final
-packed-word comparison with both the CPU oracle and the already-proven WebGL2
-classifier. Until then WebGL2 remains the only executing classifier backend.
+That checkpoint contained no `wgpu` dependency and made no GPU-performance or
+cross-backend numeric-parity claim. The following checkpoint adds the first
+device evidence without rewriting this historical gate.
+
+### Native WebGPU classifier execution checkpoint
+
+Commit `ef08819` adds the isolated `quilting-webgpu` shadow backend. It pins
+`wgpu` 29.0.1, the newest line verified to compile with the workspace's pinned
+wasm-bindgen 0.2.108 / js-sys 0.3.85 family. A trial of `wgpu` 30 compiled on
+native but failed the browser target because its generated backend expects the
+newer typed JavaScript binding API. Moving to 30 therefore remains a
+coordinated binding-stack and browser-regression task.
+
+The executor retains its two compute pipelines and immutable model/atlas
+buffers, uploads only dynamic dispatch/pose records, dispatches both 64-thread
+passes in one command encoder, and copies the final four-byte-per-face words to
+diagnostic staging. It does not own scene state, FRP state, or runtime
+authority. It also sizes joint storage to the highest nonzero referenced
+influence while accepting a complete glTF pose containing additional unused
+joints.
+
+The native conformance fixture executed on AMD Radeon 780M Graphics, RADV Mesa
+26.0.5, Vulkan. Its packed result was bit-exact with the CPU pass-two oracle.
+The gate is mandatory when `QUILTING_REQUIRE_WEBGPU=1`; without that variable a
+machine with no visible adapter records an explicit skip rather than a false
+failure. The corresponding deterministic checks are:
+
+- `cargo test -p quilting-shaders`: 15/15;
+- `cargo test -p quilting-renderer`: 62/62;
+- `cargo test -p quilting-webgpu`;
+- `QUILTING_REQUIRE_WEBGPU=1 cargo test -p quilting-webgpu --test native_lod
+  -- --nocapture` with a visible native adapter;
+- `cargo check -p quilting-webgpu --target wasm32-unknown-unknown`; and
+- `cargo check -p quilting-wasm --target wasm32-unknown-unknown --features
+  leptos-ui`.
+
+This proves native device execution and browser-target compilation, not Chrome
+execution, performance, or broad scene parity. The next gate must compare final
+packed words over conformal/pole, culling, animation, morph, composed-subject,
+seam, S3 permutation, and atlas-boundary fixtures in Chrome, then compare the
+same packets with the established WebGL2 classifier. WebGL2 remains runtime
+authority until that evidence exists. Compaction and indirect submission are
+still separate work; this diagnostic executor continues to read every packed
+face word back.
 
 ## Remaining promotion work
 

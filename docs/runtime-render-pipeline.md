@@ -313,14 +313,15 @@ into a shared scene or command model.
 
 ## WebGPU migration sequence
 
-1. **Completed:** port the two handwritten GLSL LOD passes to WGSL, validate
-   them with the pinned Naga compiler, and freeze their host payloads and
-   packed output against CPU conformance oracles.
+1. **Completed shadow slice:** port the two handwritten GLSL LOD passes to
+   WGSL, validate them with the pinned Naga compiler, freeze their host
+   payloads and packed output against CPU conformance oracles, and execute both
+   passes through a retained backend-local `wgpu` device on a native adapter.
 2. Implement patch preparation as a compute pass writing the same logical
    52-float record. Keep the WebGL transform-feedback implementation as the
    compatibility backend.
-3. Move edge reconciliation, configurable grading, resident-topology selection, and
-   visible-instance compaction into storage buffers.
+3. Move edge reconciliation, configurable grading, resident-topology
+   selection, and visible-instance compaction into storage buffers.
 4. Emit indirect draw arguments per `RenderBatchKey`. This removes the
    steady-state topology readback and avoids vertex invocation for invisible
    instances, while retaining the atlas rather than drawing one universal
@@ -342,9 +343,10 @@ own canonical atlas entry and may later be patched by a packed-atlas backend.
 
 Core tests freeze stable order, zero-instance buckets, retained-root/overlay
 replacement, malformed visibility rejection, stale scene revisions, batch
-shape validation, and ABI size/alignment. This is a conformance oracle, not a
-WebGPU implementation: no `wgpu` device or storage buffer has been introduced,
-and WebGL2 continues to use current-pose degenerate-vertex rejection.
+shape validation, and ABI size/alignment. The classifier now has a WebGPU
+executor, but compaction does not: no storage-buffer compaction or indirect
+submission pipeline consumes this oracle yet, and WebGL2 continues to use
+current-pose degenerate-vertex rejection.
 
 ### Frozen WebGPU LOD classifier boundary
 
@@ -372,26 +374,46 @@ limit. Pass two binds one uniform and four storage buffers.
 Naga validates both compute entries and the exact record layouts. Renderer
 tests freeze every host offset, all six S3 permutations, invisible standby
 records, visible-neighbor-only seam promotion, atlas lookup, and the final
-packed word. This is shader and payload conformance, not device evidence: no
-`wgpu` dependency, adapter, command encoder, or WebGPU buffer exists yet, and
-the WebGL2 GLSL programs remain untouched.
+packed word. The Naga WGSL writer renames the flattened entries with a trailing
+underscore; shader tests freeze those device-visible names so a compiler update
+cannot silently invalidate pipeline creation.
 
-The next device gate is deliberately narrow:
+`quilting-webgpu` is the first executing device shadow. It is deliberately
+outside the WebGL2 authority path and owns only backend resources: a device and
+queue supplied by the caller, two retained compute pipelines, immutable model
+and atlas buffers, retained dynamic pose/subject buffers, and diagnostic
+staging. Uploading a model uses the existing word packers. A dispatch writes
+only the current uniform, dense subject rows, referenced joint-matrix prefix,
+and morph weights; it then encodes both passes and one diagnostic copy into a
+single command buffer. Extra unused glTF skin joints do not inflate retained
+storage or invalidate the full pose.
 
-1. Resolve and pin the current maintained `wgpu` release from primary project
-   documentation, then add a small backend-local executor rather than exposing
-   device handles through the scene model.
-2. Upload one `PreparedLodModel`, pose, dispatch packet, dense subject table,
-   and atlas LUT through the frozen word packers.
-3. Dispatch `ceil(face_count / 64)` groups for each pass and copy only the
-   final packed words into a diagnostic staging buffer.
-4. Compare every word with the CPU pass-two oracle and the established WebGL2
-   classifier over affine, finite-pole, pole-grazing, culled, skinned, morphed,
-   composed-scene, seam, permutation, and maximum-atlas fixtures.
-5. Keep the new executor shadow-only until those packed comparisons are exact
-   in browser Chrome and at least one native adapter. Floating pass-one
-   intermediates may be recorded for diagnosis, but authority is judged at the
-   validated packed semantic boundary.
+The crate pins `wgpu` 29.0.1. That is the newest release line tested to compile
+against this workspace's exact wasm-bindgen 0.2.108 / js-sys 0.3.85 browser
+ABI. `wgpu` 30's browser backend uses newer typed JavaScript bindings, so a 30
+upgrade belongs to a coordinated binding-stack migration and browser
+regression gate rather than this isolated classifier cut.
+
+The narrow device gate now has two proven parts:
+
+- native Radeon 780M / RADV / Vulkan executed both passes and returned the
+  exact packed word produced by the CPU pass-two oracle; and
+- `cargo check -p quilting-webgpu --target wasm32-unknown-unknown` passes on
+  the repository's pinned browser ABI.
+
+Ordinary native tests report an explicit skip when no adapter is visible.
+Setting `QUILTING_REQUIRE_WEBGPU=1` makes that condition a failure for a
+hardware conformance lane. This is real native device evidence and browser
+compile evidence, but not yet browser execution or broad numeric parity. The
+current GPU fixture covers the complete two-pass path, atlas lookup, packed
+output, and unused skin joints; affine, finite-pole, pole-grazing, culled,
+skinned, morphed, composed-scene, seam, permutation, and maximum-atlas cases
+still need exact WebGPU-vs-CPU-vs-WebGL2 comparison in Chrome.
+
+The WebGL2 GLSL programs and runtime authority remain untouched. Readback in
+`quilting-webgpu` is intentionally full and diagnostic; an authoritative
+backend must consume packed classifications on-device and copy only bounded,
+delayed telemetry to the CPU.
 
 Only after that gate should same-device resident topology, visible-instance
 compaction, and indirect arguments be wired together. That later cut is what
