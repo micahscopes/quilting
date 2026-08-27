@@ -986,6 +986,139 @@ pub struct RetainedRootGroupRefresh {
     pub rebuilt_members: usize,
 }
 
+pub const RETAINED_ROOT_GROUP_MIN_INCREMENTAL_FACES: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedRootGroupingPath {
+    Complete,
+    Incremental,
+}
+
+impl RetainedRootGroupingPath {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Incremental => "incremental",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedRootGroupingReason {
+    ForcedRebuild,
+    UninitializedIndex,
+    SmallScene,
+    SeedClosureTooLarge,
+    AffectedClosureTooLarge,
+    RebuiltMembershipTooLarge,
+    SparseWork,
+}
+
+impl RetainedRootGroupingReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForcedRebuild => "forced-rebuild",
+            Self::UninitializedIndex => "uninitialized-index",
+            Self::SmallScene => "small-scene",
+            Self::SeedClosureTooLarge => "seed-closure-too-large",
+            Self::AffectedClosureTooLarge => "affected-closure-too-large",
+            Self::RebuiltMembershipTooLarge => "rebuilt-membership-too-large",
+            Self::SparseWork => "sparse-work",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetainedRootGroupingDecision {
+    pub path: RetainedRootGroupingPath,
+    pub reason: RetainedRootGroupingReason,
+}
+
+impl RetainedRootGroupingDecision {
+    const fn complete(reason: RetainedRootGroupingReason) -> Self {
+        Self {
+            path: RetainedRootGroupingPath::Complete,
+            reason,
+        }
+    }
+
+    const fn incremental() -> Self {
+        Self {
+            path: RetainedRootGroupingPath::Incremental,
+            reason: RetainedRootGroupingReason::SparseWork,
+        }
+    }
+}
+
+fn work_fraction_exceeds(work: usize, total: usize, numerator: usize, denominator: usize) -> bool {
+    (work as u128) * (denominator as u128) > (total as u128) * (numerator as u128)
+}
+
+/// Decide whether an initialized retained-root index is worth probing from the
+/// exact reconciliation seed available before incremental corner work begins.
+/// The deliberately conservative one-eighth gate admits the measured sparse
+/// chess closures while rejecting the horse's whole-component updates.
+pub fn preflight_retained_root_grouping(
+    total_faces: usize,
+    seed_faces: usize,
+    force_rebuild: bool,
+    index_ready: bool,
+) -> RetainedRootGroupingDecision {
+    if force_rebuild {
+        return RetainedRootGroupingDecision::complete(
+            RetainedRootGroupingReason::ForcedRebuild,
+        );
+    }
+    if !index_ready {
+        return RetainedRootGroupingDecision::complete(
+            RetainedRootGroupingReason::UninitializedIndex,
+        );
+    }
+    if total_faces < RETAINED_ROOT_GROUP_MIN_INCREMENTAL_FACES {
+        return RetainedRootGroupingDecision::complete(RetainedRootGroupingReason::SmallScene);
+    }
+    if work_fraction_exceeds(seed_faces, total_faces, 1, 8) {
+        return RetainedRootGroupingDecision::complete(
+            RetainedRootGroupingReason::SeedClosureTooLarge,
+        );
+    }
+    RetainedRootGroupingDecision::incremental()
+}
+
+/// Certify observed retained work after the exact shared-vertex closure and
+/// dirty buckets are known. This is a shadow/promotion policy, not a semantic
+/// correctness rule: either path must produce identical ordered groups.
+#[allow(clippy::too_many_arguments)]
+pub fn certify_retained_root_grouping(
+    total_faces: usize,
+    seed_faces: usize,
+    affected_faces: usize,
+    rebuilt_members: usize,
+    force_rebuild: bool,
+    index_ready: bool,
+) -> RetainedRootGroupingDecision {
+    let preflight = preflight_retained_root_grouping(
+        total_faces,
+        seed_faces,
+        force_rebuild,
+        index_ready,
+    );
+    if preflight.path == RetainedRootGroupingPath::Complete {
+        return preflight;
+    }
+    if work_fraction_exceeds(affected_faces, total_faces, 1, 4) {
+        return RetainedRootGroupingDecision::complete(
+            RetainedRootGroupingReason::AffectedClosureTooLarge,
+        );
+    }
+    if work_fraction_exceeds(rebuilt_members, total_faces, 3, 4) {
+        return RetainedRootGroupingDecision::complete(
+            RetainedRootGroupingReason::RebuiltMembershipTooLarge,
+        );
+    }
+    RetainedRootGroupingDecision::incremental()
+}
+
 /// Source-ordered root-bucket membership retained across sparse resident LOD
 /// updates. WebGL can rematerialize and upload only buckets touched by the
 /// exact corner-density closure while preserving byte-for-byte member order.
@@ -3997,6 +4130,60 @@ mod tests {
                 &nodes,
                 &render_nodes,
                 initial,
+            ),
+        );
+    }
+
+    #[test]
+    fn retained_root_grouping_policy_rejects_dense_or_unready_work() {
+        assert_eq!(
+            preflight_retained_root_grouping(94_628, 6_266, true, true),
+            RetainedRootGroupingDecision::complete(RetainedRootGroupingReason::ForcedRebuild),
+        );
+        assert_eq!(
+            preflight_retained_root_grouping(94_628, 6_266, false, false),
+            RetainedRootGroupingDecision::complete(
+                RetainedRootGroupingReason::UninitializedIndex,
+            ),
+        );
+        assert_eq!(
+            preflight_retained_root_grouping(984, 984, false, true),
+            RetainedRootGroupingDecision::complete(RetainedRootGroupingReason::SmallScene),
+        );
+        assert_eq!(
+            preflight_retained_root_grouping(94_628, 21_650, false, true),
+            RetainedRootGroupingDecision::complete(
+                RetainedRootGroupingReason::SeedClosureTooLarge,
+            ),
+        );
+        assert_eq!(
+            preflight_retained_root_grouping(usize::MAX, usize::MAX, false, true),
+            RetainedRootGroupingDecision::complete(
+                RetainedRootGroupingReason::SeedClosureTooLarge,
+            ),
+        );
+    }
+
+    #[test]
+    fn retained_root_grouping_policy_certifies_only_bounded_sparse_work() {
+        assert_eq!(
+            certify_retained_root_grouping(94_628, 6_266, 6_266, 47_172, false, true),
+            RetainedRootGroupingDecision::incremental(),
+        );
+        assert_eq!(
+            certify_retained_root_grouping(8_000, 1_000, 2_000, 6_000, false, true),
+            RetainedRootGroupingDecision::incremental(),
+        );
+        assert_eq!(
+            certify_retained_root_grouping(8_000, 1_000, 2_001, 6_000, false, true),
+            RetainedRootGroupingDecision::complete(
+                RetainedRootGroupingReason::AffectedClosureTooLarge,
+            ),
+        );
+        assert_eq!(
+            certify_retained_root_grouping(8_000, 1_000, 2_000, 6_001, false, true),
+            RetainedRootGroupingDecision::complete(
+                RetainedRootGroupingReason::RebuiltMembershipTooLarge,
             ),
         );
     }

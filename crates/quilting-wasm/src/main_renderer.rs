@@ -279,6 +279,14 @@ struct IncrementalRootGroupShadow {
     last_mismatched_buckets: usize,
     last_refresh_ms: f64,
     refresh_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    preflight_complete_recommendations: u64,
+    preflight_incremental_recommendations: u64,
+    certified_complete_recommendations: u64,
+    certified_incremental_recommendations: u64,
+    last_preflight_decision: Option<batch::RetainedRootGroupingDecision>,
+    last_certified_decision: Option<batch::RetainedRootGroupingDecision>,
+    certified_complete_candidate_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    certified_incremental_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
     last_error: Option<String>,
 }
 
@@ -317,6 +325,18 @@ impl IncrementalRootGroupShadow {
         if !self.enabled {
             return;
         }
+        let index_ready = self
+            .adjacency
+            .as_ref()
+            .is_some_and(|adjacency| adjacency.matches(topology))
+            && self.index.indexed_faces() == residents.len()
+            && self.index.bucket_count() == self.groups.len();
+        let preflight = batch::preflight_retained_root_grouping(
+            residents.len(),
+            seed_faces.len(),
+            force_rebuild,
+            index_ready,
+        );
         if force_rebuild
             || self
                 .adjacency
@@ -356,6 +376,14 @@ impl IncrementalRootGroupShadow {
             &mut self.groups,
         );
         let elapsed_ms = browser_now_ms() - started_ms;
+        let certified = batch::certify_retained_root_grouping(
+            residents.len(),
+            seed_faces.len(),
+            refresh.affected_faces,
+            refresh.rebuilt_members,
+            force_rebuild,
+            index_ready,
+        );
         let mismatched_buckets = reference
             .iter()
             .filter(|(key, members)| self.groups.get(key) != Some(*members))
@@ -386,6 +414,32 @@ impl IncrementalRootGroupShadow {
         self.last_mismatched_buckets = mismatched_buckets;
         self.last_refresh_ms = elapsed_ms;
         self.refresh_ms.record(elapsed_ms);
+        match preflight.path {
+            batch::RetainedRootGroupingPath::Complete => {
+                self.preflight_complete_recommendations =
+                    self.preflight_complete_recommendations.saturating_add(1);
+            }
+            batch::RetainedRootGroupingPath::Incremental => {
+                self.preflight_incremental_recommendations = self
+                    .preflight_incremental_recommendations
+                    .saturating_add(1);
+            }
+        }
+        match certified.path {
+            batch::RetainedRootGroupingPath::Complete => {
+                self.certified_complete_recommendations =
+                    self.certified_complete_recommendations.saturating_add(1);
+                self.certified_complete_candidate_ms.record(elapsed_ms);
+            }
+            batch::RetainedRootGroupingPath::Incremental => {
+                self.certified_incremental_recommendations = self
+                    .certified_incremental_recommendations
+                    .saturating_add(1);
+                self.certified_incremental_ms.record(elapsed_ms);
+            }
+        }
+        self.last_preflight_decision = Some(preflight);
+        self.last_certified_decision = Some(certified);
         self.last_error = (!exact).then(|| {
             format!(
                 "incremental root grouping differed in {mismatched_buckets} bucket(s)",
@@ -411,6 +465,24 @@ impl IncrementalRootGroupShadow {
             last_mismatched_buckets: self.last_mismatched_buckets,
             last_refresh_ms: self.last_refresh_ms,
             refresh_ms: self.refresh_ms.snapshot(),
+            preflight_complete_recommendations: self.preflight_complete_recommendations,
+            preflight_incremental_recommendations: self.preflight_incremental_recommendations,
+            certified_complete_recommendations: self.certified_complete_recommendations,
+            certified_incremental_recommendations: self.certified_incremental_recommendations,
+            last_preflight_path: self
+                .last_preflight_decision
+                .map(|decision| decision.path.as_str()),
+            last_preflight_reason: self
+                .last_preflight_decision
+                .map(|decision| decision.reason.as_str()),
+            last_certified_path: self
+                .last_certified_decision
+                .map(|decision| decision.path.as_str()),
+            last_certified_reason: self
+                .last_certified_decision
+                .map(|decision| decision.reason.as_str()),
+            certified_complete_candidate_ms: self.certified_complete_candidate_ms.snapshot(),
+            certified_incremental_ms: self.certified_incremental_ms.snapshot(),
             adjacency_payload_capacity_bytes: self
                 .adjacency
                 .as_ref()
@@ -443,6 +515,16 @@ struct IncrementalRootGroupShadowSnapshot {
     last_mismatched_buckets: usize,
     last_refresh_ms: f64,
     refresh_ms: TimingDistributionSnapshot,
+    preflight_complete_recommendations: u64,
+    preflight_incremental_recommendations: u64,
+    certified_complete_recommendations: u64,
+    certified_incremental_recommendations: u64,
+    last_preflight_path: Option<&'static str>,
+    last_preflight_reason: Option<&'static str>,
+    last_certified_path: Option<&'static str>,
+    last_certified_reason: Option<&'static str>,
+    certified_complete_candidate_ms: TimingDistributionSnapshot,
+    certified_incremental_ms: TimingDistributionSnapshot,
     adjacency_payload_capacity_bytes: usize,
     index_payload_capacity_bytes: usize,
     corner_payload_capacity_bytes: usize,
