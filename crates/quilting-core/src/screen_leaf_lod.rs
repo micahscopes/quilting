@@ -234,6 +234,8 @@ enum MeshLineKey {
     },
 }
 
+type MeshTopologyLines = Vec<(MeshLineKey, Vec<EdgeSpan>)>;
+
 #[derive(Clone, Copy, Debug)]
 struct EdgeSpan {
     leaf_index: usize,
@@ -354,8 +356,9 @@ fn topology_lines(
 
 fn mesh_topology_lines_with<F>(
     leaves: &[ScreenMeshLeafTopology],
+    source_half_edge_count: usize,
     mut face_edge: F,
-) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError>
+) -> Result<MeshTopologyLines, ScreenLeafLodError>
 where
     F: FnMut(u32, usize, usize) -> Result<CachedSourceEdge, ScreenLeafLodError>,
 {
@@ -370,10 +373,11 @@ where
             .map(|(index, leaf)| (index, leaf.id, leaf.domain)),
         global_depth,
     )?;
-    let mut lines = BTreeMap::<MeshLineKey, Vec<EdgeSpan>>::new();
+    let mut source_lines = vec![Vec::<EdgeSpan>::new(); source_half_edge_count];
+    let mut interior_lines = BTreeMap::<MeshLineKey, Vec<EdgeSpan>>::new();
     for edge in edges {
         let leaf = &leaves[edge.span.leaf_index];
-        let (key, span) = if edge.constant_numerator == 0 {
+        if edge.constant_numerator == 0 {
             let source_edge = usize::from(edge.constant_axis);
             let cached_edge = face_edge(leaf.source_face, source_edge, edge.span.leaf_index)?;
             let parameter_axis = (source_edge + 2) % 3;
@@ -386,26 +390,47 @@ where
             let mut span = edge.span;
             span.start = first.min(second);
             span.end = first.max(second);
-            (
-                MeshLineKey::SourceBoundary {
-                    canonical_half_edge: cached_edge.canonical_half_edge(),
-                },
-                span,
-            )
+            let canonical_half_edge = cached_edge.canonical_half_edge() as usize;
+            source_lines
+                .get_mut(canonical_half_edge)
+                .ok_or(ScreenLeafLodError::InvalidTopology {
+                    leaf_index: edge.span.leaf_index,
+                })?
+                .push(span);
         } else {
-            (
-                MeshLineKey::Interior {
+            interior_lines
+                .entry(MeshLineKey::Interior {
                     source_face: leaf.source_face,
                     constant_axis: edge.constant_axis,
                     constant_numerator: edge.constant_numerator,
-                },
-                edge.span,
-            )
-        };
-        lines.entry(key).or_default().push(span);
+                })
+                .or_default()
+                .push(edge.span);
+        }
     }
-    for spans in lines.values_mut() {
+    for spans in interior_lines.values_mut() {
         spans.sort_by_key(|span| (span.start, span.end, span.leaf_index, span.edge_index));
+    }
+    for spans in &mut source_lines {
+        spans.sort_by_key(|span| (span.start, span.end, span.leaf_index, span.edge_index));
+    }
+    let mut lines = interior_lines.into_iter().collect::<MeshTopologyLines>();
+    lines.reserve(
+        source_lines
+            .iter()
+            .filter(|spans| !spans.is_empty())
+            .count(),
+    );
+    for (canonical_half_edge, spans) in source_lines.into_iter().enumerate() {
+        if spans.is_empty() {
+            continue;
+        }
+        lines.push((
+            MeshLineKey::SourceBoundary {
+                canonical_half_edge: canonical_half_edge as u32,
+            },
+            spans,
+        ));
     }
     Ok(lines)
 }
@@ -413,25 +438,33 @@ where
 fn mesh_topology_lines(
     leaves: &[ScreenMeshLeafTopology],
     topology: &ScreenMeshTopologyCache,
-) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
-    mesh_topology_lines_with(leaves, |source_face, source_edge, leaf_index| {
-        topology.face_edge(source_face, source_edge, leaf_index)
-    })
+) -> Result<MeshTopologyLines, ScreenLeafLodError> {
+    mesh_topology_lines_with(
+        leaves,
+        topology.source_half_edge_count,
+        |source_face, source_edge, leaf_index| {
+            topology.face_edge(source_face, source_edge, leaf_index)
+        },
+    )
 }
 
 fn mesh_topology_lines_from_half_edge_mesh(
     leaves: &[ScreenMeshLeafTopology],
     source_topology: &quilting_mesh::HalfEdgeMesh,
-) -> Result<BTreeMap<MeshLineKey, Vec<EdgeSpan>>, ScreenLeafLodError> {
-    mesh_topology_lines_with(leaves, |source_face, source_edge, leaf_index| {
-        if source_face >= source_topology.num_faces {
-            return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
-        }
-        let half_edge = source_topology.face_half_edges(source_face)[(source_edge + 1) % 3];
-        let canonical_half_edge = source_topology.canonical_edge(half_edge);
-        CachedSourceEdge::new(canonical_half_edge, half_edge != canonical_half_edge)
-            .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })
-    })
+) -> Result<MeshTopologyLines, ScreenLeafLodError> {
+    mesh_topology_lines_with(
+        leaves,
+        source_topology.half_edges.len(),
+        |source_face, source_edge, leaf_index| {
+            if source_face >= source_topology.num_faces {
+                return Err(ScreenLeafLodError::InvalidTopology { leaf_index });
+            }
+            let half_edge = source_topology.face_half_edges(source_face)[(source_edge + 1) % 3];
+            let canonical_half_edge = source_topology.canonical_edge(half_edge);
+            CachedSourceEdge::new(canonical_half_edge, half_edge != canonical_half_edge)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index })
+        },
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -447,7 +480,7 @@ enum MeshVertexKey {
     },
 }
 
-/// Dense source vertices dominate an all-root frontier, while edge/interior
+/// Dense source vertices dominate a root-heavy frontier, while edge/interior
 /// vertices exist only around adaptively split faces. Index the former
 /// directly and reserve ordered lookup for the sparse refined remainder.
 struct MeshVertexIndex {
@@ -598,6 +631,7 @@ impl CachedSourceEdge {
 #[derive(Debug)]
 pub struct ScreenMeshTopologyCache {
     source_vertex_count: usize,
+    source_half_edge_count: usize,
     canonical_face_vertices: Vec<[u32; 3]>,
     face_edges: Vec<[CachedSourceEdge; 3]>,
 }
@@ -632,6 +666,7 @@ impl ScreenMeshTopologyCache {
         }
         Ok(Self {
             source_vertex_count: canonical_vertices.len(),
+            source_half_edge_count: source_topology.half_edges.len(),
             canonical_face_vertices,
             face_edges,
         })
@@ -779,7 +814,7 @@ fn mesh_line_vertex_key(
 pub struct ScreenMeshLeafFrontier {
     leaves: Vec<ScreenMeshLeafTopology>,
     depths: Vec<u8>,
-    lines: BTreeMap<MeshLineKey, Vec<EdgeSpan>>,
+    lines: MeshTopologyLines,
     corner_vertices: Vec<[usize; 3]>,
     hanging_offsets: Vec<u32>,
     hanging_sources: Vec<u32>,
@@ -830,7 +865,7 @@ impl ScreenMeshLeafFrontier {
 
         let mut hanging_pairs = Vec::<(usize, u32)>::new();
         let mut endpoints = Vec::<u32>::new();
-        for (&line, spans) in &lines {
+        for (line, spans) in &lines {
             if spans.len() < 2
                 || spans
                     .iter()
@@ -847,8 +882,12 @@ impl ScreenMeshLeafFrontier {
                 let first_interior = endpoints.partition_point(|&value| value <= span.start);
                 let after_interior = endpoints.partition_point(|&value| value < span.end);
                 for &parameter in &endpoints[first_interior..after_interior] {
-                    let key =
-                        mesh_line_vertex_key(line, parameter, global_denominator, span.leaf_index)?;
+                    let key = mesh_line_vertex_key(
+                        *line,
+                        parameter,
+                        global_denominator,
+                        span.leaf_index,
+                    )?;
                     let Some(vertex_index) = vertex_indices.get(&key) else {
                         return Err(ScreenLeafLodError::InvalidTopology {
                             leaf_index: span.leaf_index,
@@ -905,7 +944,7 @@ impl ScreenMeshLeafFrontier {
         max_face_edge_ratio: u32,
         max_lod: u32,
     ) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
-        reconcile_lods(
+        reconcile_mesh_lods(
             &self.depths,
             &self.lines,
             requested,
@@ -1058,13 +1097,13 @@ fn reconcile_component(
     Ok(promotions)
 }
 
-fn reconcile_lines<K: Ord>(
-    lines: &BTreeMap<K, Vec<EdgeSpan>>,
+fn reconcile_line_spans<'a>(
+    lines: impl IntoIterator<Item = &'a [EdgeSpan]>,
     resident: &mut [[u32; 3]],
     max_lod: u32,
 ) -> Result<usize, ScreenLeafLodError> {
     let mut promotions = 0;
-    for spans in lines.values() {
+    for spans in lines {
         let mut component_start = 0usize;
         while component_start < spans.len() {
             let mut component_end = component_start + 1;
@@ -1079,6 +1118,26 @@ fn reconcile_lines<K: Ord>(
         }
     }
     Ok(promotions)
+}
+
+fn reconcile_lines<K: Ord>(
+    lines: &BTreeMap<K, Vec<EdgeSpan>>,
+    resident: &mut [[u32; 3]],
+    max_lod: u32,
+) -> Result<usize, ScreenLeafLodError> {
+    reconcile_line_spans(lines.values().map(Vec::as_slice), resident, max_lod)
+}
+
+fn reconcile_mesh_lines(
+    lines: &MeshTopologyLines,
+    resident: &mut [[u32; 3]],
+    max_lod: u32,
+) -> Result<usize, ScreenLeafLodError> {
+    reconcile_line_spans(
+        lines.iter().map(|(_, spans)| spans.as_slice()),
+        resident,
+        max_lod,
+    )
 }
 
 fn apply_grading(
@@ -1108,12 +1167,12 @@ fn apply_grading(
     Ok(promotions)
 }
 
-fn reconcile_lods<K: Ord>(
+fn reconcile_lods_with(
     depths: &[u8],
-    lines: &BTreeMap<K, Vec<EdgeSpan>>,
     requested: &[[u32; 3]],
     max_face_edge_ratio: u32,
     max_lod: u32,
+    mut reconcile_shared: impl FnMut(&mut [[u32; 3]], u32) -> Result<usize, ScreenLeafLodError>,
 ) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
     if depths.len() != requested.len() {
         return Err(ScreenLeafLodError::LengthMismatch);
@@ -1142,7 +1201,7 @@ fn reconcile_lods<K: Ord>(
     let mut grading_promotions = 0usize;
     loop {
         iterations += 1;
-        let shared = reconcile_lines(lines, &mut resident, max_lod)?;
+        let shared = reconcile_shared(&mut resident, max_lod)?;
         let graded = apply_grading(&mut resident, max_face_edge_ratio, max_lod)?;
         shared_edge_promotions += shared;
         grading_promotions += graded;
@@ -1164,6 +1223,38 @@ fn reconcile_lods<K: Ord>(
         grading_promotions,
         max_absolute_exponent,
     })
+}
+
+fn reconcile_lods<K: Ord>(
+    depths: &[u8],
+    lines: &BTreeMap<K, Vec<EdgeSpan>>,
+    requested: &[[u32; 3]],
+    max_face_edge_ratio: u32,
+    max_lod: u32,
+) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
+    reconcile_lods_with(
+        depths,
+        requested,
+        max_face_edge_ratio,
+        max_lod,
+        |resident, max_lod| reconcile_lines(lines, resident, max_lod),
+    )
+}
+
+fn reconcile_mesh_lods(
+    depths: &[u8],
+    lines: &MeshTopologyLines,
+    requested: &[[u32; 3]],
+    max_face_edge_ratio: u32,
+    max_lod: u32,
+) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
+    reconcile_lods_with(
+        depths,
+        requested,
+        max_face_edge_ratio,
+        max_lod,
+        |resident, max_lod| reconcile_mesh_lines(lines, resident, max_lod),
+    )
 }
 
 /// Reconcile local leaf LoDs across one-to-many shared edges inside one source
@@ -1194,7 +1285,7 @@ pub fn reconcile_screen_mesh_leaf_lods(
     validate_screen_mesh_leaf_antichain(leaves)?;
     let lines = mesh_topology_lines_from_half_edge_mesh(leaves, source_topology)?;
     let depths = leaves.iter().map(|leaf| leaf.id.depth).collect::<Vec<_>>();
-    reconcile_lods(&depths, &lines, requested, max_face_edge_ratio, max_lod)
+    reconcile_mesh_lods(&depths, &lines, requested, max_face_edge_ratio, max_lod)
 }
 
 #[cfg(test)]
@@ -1352,7 +1443,7 @@ mod tests {
         assert_eq!(result.resident[4][2], 8);
 
         let lines = mesh_topology_lines(&leaves, &topology).unwrap();
-        for spans in lines.values() {
+        for (_, spans) in &lines {
             for (index, a) in spans.iter().enumerate() {
                 for b in &spans[index + 1..] {
                     if a.start < b.end && b.start < a.end {

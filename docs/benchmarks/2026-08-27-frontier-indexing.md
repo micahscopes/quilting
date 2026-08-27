@@ -45,6 +45,12 @@ that lookup with a general-purpose hash map. They are not treated as a formal
 benchmark distribution, but they rejected the hash-only approach and motivated
 the direct source-identity representation.
 
+The follow-up dense canonical-half-edge representation reported a 417.386 ms
+median in the same oracle, with samples `[485.012196, 417.385785, 423.784065,
+360.619436, 300.461260]`. The host variance is high enough that the native
+result is only directional; the exact browser scene below is the acceptance
+gate.
+
 ## Exact pathological chess view
 
 The browser gate used the same inverted chess URL and adaptive policy recorded
@@ -76,11 +82,38 @@ the semantic gates were exact:
   `4469402745bb9a394fb6a972cf7990f7ce5fe1536e82d03efc647f990329a0d8`;
 - Chrome reported no warning or error.
 
+## Dense source-edge follow-up
+
+The welded line builder had the same avoidable associative lookup as the former
+corner builder: canonical half-edge IDs already occupy a bounded dense source
+range. The accepted follow-up stores source-boundary spans directly by that ID,
+retains a `BTreeMap` only for sparse per-face interior split lines, and emits the
+same deterministic `Interior`-then-`SourceBoundary` line order as the former
+map.
+
+In a final clean fresh-tab run, the exact chess plan measured:
+
+| Stage | Direct vertices | Direct vertices and source edges |
+| --- | ---: | ---: |
+| Total adaptive plan | 568.1 ms | 476.7 ms |
+| Mesh plan | 36.6 ms | 41.4 ms |
+| Frontier build | 370.9 ms | 251.2 ms |
+| Reconciliation | 111.6 ms | 98.4 ms |
+| Atlas accounting | 6.9 ms | 12.7 ms |
+| Complete grouping | 40.0 ms | 70.5 ms |
+
+The non-frontier stage variation reinforces that this is not a frame-time
+distribution, while the 119.7 ms frontier reduction is attributable to the
+representation under test. Complete render-shadow parity remained 73 of 73,
+the ordered complete fingerprint stayed `9296deab9943fcc5`, and complete plus
+retained screenshots again matched the accepted digest exactly.
+
 ## Decision
 
-Keep the direct source-identity index and uniform-line fast path as a standalone
-optimization. They roughly halve the dominant build in this observed browser
-sample, but 370.9 ms remains far too expensive for camera-rate reconstruction.
-The next architectural step is still a bounded local frontier/closure that
-uses the retained root classification as fixed boundary state and expands or
-falls back when grading influence escapes its certified neighborhood.
+Keep the direct source-vertex index, direct canonical-half-edge buckets, and
+uniform-line fast path as standalone optimizations. Together they reduced the
+observed pathological frontier from 779.4 ms to 251.2 ms, but that remains far
+too expensive for camera-rate reconstruction. The next architectural step is
+still a bounded local frontier/closure that uses the retained root
+classification as fixed boundary state and expands or falls back when grading
+influence escapes its certified neighborhood.
