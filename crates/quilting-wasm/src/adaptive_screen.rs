@@ -319,6 +319,7 @@ pub(crate) struct AdaptivePickedRuntime {
     pending_component_publication: bool,
     pending_neighborhood_publication: bool,
     pending_component_authority: bool,
+    pending_neighborhood_authority: bool,
     published_component_publication: bool,
     published_neighborhood_publication: bool,
     component_publication_installs: u64,
@@ -326,6 +327,7 @@ pub(crate) struct AdaptivePickedRuntime {
     component_publication_fallbacks: u64,
     component_publication_last_error: Option<String>,
     neighborhood_publication_installs: u64,
+    neighborhood_authority_changed_installs: u64,
     neighborhood_publication_fallbacks: u64,
     neighborhood_publication_last_error: Option<String>,
     lod_scratch: ScreenMeshLeafLodScratch,
@@ -434,6 +436,13 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     neighborhood_shadow_boundary_escapes: u64,
     neighborhood_shadow_failures: u64,
     neighborhood_shadow_empty_selection_skips: u64,
+    neighborhood_authority_oracle_interval: u64,
+    neighborhood_authority_oracle_samples: u64,
+    neighborhood_authority_oracle_skips: u64,
+    neighborhood_authority_sample_age: u64,
+    neighborhood_authority_revoked: bool,
+    neighborhood_authority_revocations: u64,
+    neighborhood_authority_changed_installs: u64,
     neighborhood_shadow_frontier_cache_hits: u64,
     neighborhood_shadow_frontier_cache_misses: u64,
     neighborhood_shadow_reconciliation_cache_hits: u64,
@@ -462,6 +471,7 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
 }
 
 const COMPONENT_AUTHORITY_ORACLE_INTERVAL: u64 = 16;
+const NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL: u64 = 16;
 const COMPONENT_AUTHORITY_MAX_FACES: usize = 4_096;
 const COMPONENT_AUTHORITY_LARGE_SCENE_FRACTION: usize = 4;
 
@@ -480,6 +490,7 @@ fn component_authority_face_limit(source_faces: usize) -> usize {
 enum AdaptiveGroupAuthority {
     Complete,
     Component,
+    Neighborhood,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -589,6 +600,8 @@ struct AdaptiveNeighborhoodShadowComparison {
     complete_triangles: u64,
     triangle_budget_match: bool,
     boundary_escape: bool,
+    oracle_sampled: bool,
+    authoritative: bool,
     exact: bool,
     plan_ms: f64,
     frontier_ms: f64,
@@ -598,6 +611,25 @@ struct AdaptiveNeighborhoodShadowComparison {
     total_ms: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdaptiveNeighborhoodStageSignature {
+    reconciliation_generation: u64,
+    root_topology_revision: u64,
+    batch_layout_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AdaptiveChangedNeighborhoodAuthority {
+    group_signature: AdaptiveGroupSignature,
+    reconciliation: AdaptiveReconciliationDiagnostic,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AdaptiveNeighborhoodCertificate {
+    root_topology_revision: u64,
+    batch_layout_revision: u64,
+}
+
 #[derive(Default)]
 struct AdaptiveNeighborhoodReconciliationCache {
     requested_lods: Vec<[u32; 3]>,
@@ -605,6 +637,7 @@ struct AdaptiveNeighborhoodReconciliationCache {
     max_face_edge_ratio: u32,
     max_atlas_lod: u32,
     result: Option<ScreenLeafLodResult>,
+    generation: u64,
     hits: u64,
     misses: u64,
 }
@@ -623,7 +656,7 @@ impl AdaptiveNeighborhoodReconciliationCache {
         fixed_leaves: &[bool],
         max_face_edge_ratio: u32,
         max_atlas_lod: u32,
-    ) -> Result<(&'a ScreenLeafLodResult, bool), ScreenLeafLodError> {
+    ) -> Result<(&'a ScreenLeafLodResult, u64, bool), ScreenLeafLodError> {
         let reused = self.result.is_some()
             && self.max_face_edge_ratio == max_face_edge_ratio
             && self.max_atlas_lod == max_atlas_lod
@@ -645,21 +678,24 @@ impl AdaptiveNeighborhoodReconciliationCache {
             self.max_face_edge_ratio = max_face_edge_ratio;
             self.max_atlas_lod = max_atlas_lod;
             self.result = Some(result);
+            self.generation = self.generation.saturating_add(1);
             self.misses = self.misses.saturating_add(1);
         }
         Ok((
             self.result
                 .as_ref()
                 .expect("adaptive neighborhood reconciliation result"),
+            self.generation,
             reused,
         ))
     }
 }
 
-/// Disabled-by-default bounded recomputation observer. This never owns
-/// independent render authority: every successfully staged candidate forces
-/// the complete oracle to run in the same epoch before a match can be recorded.
-/// A separate publication gate may consume its exact overlay afterward.
+/// Disabled-by-default bounded recomputation observer. Exact complete-oracle
+/// matches may certify the bounded algorithm for the current topology and
+/// batch-layout epoch. Publication still rebuilds the current neighborhood on
+/// every changed pose, periodically re-samples the complete oracle, and
+/// revokes the epoch on the first escape, mismatch, or staging failure.
 #[derive(Default)]
 struct AdaptiveNeighborhoodShadow {
     enabled: bool,
@@ -682,6 +718,15 @@ struct AdaptiveNeighborhoodShadow {
     complete_lod_scratch: ScreenMeshLeafLodScratch,
     neighborhood_lod_scratch: ScreenMeshLeafLodScratch,
     overlay: AdaptiveRenderOverlay,
+    last_attempt_epoch: Option<(u64, u64)>,
+    staged_signature: Option<AdaptiveNeighborhoodStageSignature>,
+    certificate: Option<AdaptiveNeighborhoodCertificate>,
+    authority_revoked: Option<(u64, u64)>,
+    authority_generation: u64,
+    authority_changed_since_oracle: u64,
+    authority_oracle_samples: u64,
+    authority_oracle_skips: u64,
+    authority_revocations: u64,
 }
 
 fn adaptive_neighborhood_edge_hops(max_face_edge_ratio: u32, max_atlas_lod: u32) -> u32 {
@@ -708,6 +753,15 @@ impl AdaptiveNeighborhoodShadow {
             self.frontier_cache_hits = 0;
             self.frontier_cache_misses = 0;
             self.reconciliation_cache = AdaptiveNeighborhoodReconciliationCache::default();
+            self.last_attempt_epoch = None;
+            self.staged_signature = None;
+            self.certificate = None;
+            self.authority_revoked = None;
+            self.authority_generation = 0;
+            self.authority_changed_since_oracle = 0;
+            self.authority_oracle_samples = 0;
+            self.authority_oracle_skips = 0;
+            self.authority_revocations = 0;
         }
         changed
     }
@@ -721,6 +775,10 @@ impl AdaptiveNeighborhoodShadow {
             "boundary-escape"
         } else if self.last_error.is_some() {
             "error"
+        } else if self.last.is_some_and(|comparison| {
+            comparison.authoritative && !comparison.oracle_sampled && !comparison.exact
+        }) {
+            "authoritative-unsampled"
         } else if self.last.as_ref().is_some_and(|last| last.exact) {
             "match"
         } else if self
@@ -736,6 +794,125 @@ impl AdaptiveNeighborhoodShadow {
         }
     }
 
+    fn staged_epoch(&self) -> Option<(u64, u64)> {
+        self.staged_signature
+            .map(|signature| {
+                (
+                    signature.root_topology_revision,
+                    signature.batch_layout_revision,
+                )
+            })
+            .or(self.last_attempt_epoch)
+            .or_else(|| {
+                self.certificate.map(|certificate| {
+                    (
+                        certificate.root_topology_revision,
+                        certificate.batch_layout_revision,
+                    )
+                })
+            })
+    }
+
+    fn revoke_epoch(&mut self, epoch: (u64, u64)) {
+        self.certificate = None;
+        if self.authority_revoked != Some(epoch) {
+            self.authority_revocations = self.authority_revocations.saturating_add(1);
+        }
+        self.authority_revoked = Some(epoch);
+    }
+
+    fn revoke_staged_authority(&mut self) {
+        if let Some(epoch) = self.staged_epoch() {
+            self.revoke_epoch(epoch);
+        }
+    }
+
+    fn record_exact_oracle_match(&mut self) {
+        let Some(signature) = self.staged_signature else {
+            return;
+        };
+        let epoch = (
+            signature.root_topology_revision,
+            signature.batch_layout_revision,
+        );
+        self.authority_changed_since_oracle = 0;
+        self.authority_oracle_samples = self.authority_oracle_samples.saturating_add(1);
+        // A mismatch or boundary escape revokes this entire immutable source
+        // topology/batch-layout epoch. Later coincidental matches may be
+        // observed, but cannot silently restore authority for that epoch.
+        if self.authority_revoked == Some(epoch) {
+            return;
+        }
+        self.certificate = Some(AdaptiveNeighborhoodCertificate {
+            root_topology_revision: epoch.0,
+            batch_layout_revision: epoch.1,
+        });
+        // An exact sample for a genuinely new epoch supersedes the diagnostic
+        // marker retained from the old one.
+        self.authority_revoked = None;
+    }
+
+    fn reset_authority_basis(&mut self) {
+        self.staged_signature = None;
+        self.last_attempt_epoch = None;
+        self.certificate = None;
+        self.authority_revoked = None;
+        self.authority_changed_since_oracle = 0;
+    }
+
+    fn current_authority_revoked(&self) -> bool {
+        self.staged_epoch().is_some_and(|epoch| self.authority_revoked == Some(epoch))
+    }
+
+    fn changed_authority_signature(
+        &mut self,
+    ) -> Result<Option<AdaptiveChangedNeighborhoodAuthority>, String> {
+        let Some(stage_signature) = self.staged_signature else {
+            return Ok(None);
+        };
+        let epoch = (
+            stage_signature.root_topology_revision,
+            stage_signature.batch_layout_revision,
+        );
+        let certified = self.certificate.is_some_and(|certificate| {
+            (certificate.root_topology_revision, certificate.batch_layout_revision) == epoch
+        });
+        if !certified || self.authority_revoked == Some(epoch) {
+            return Ok(None);
+        }
+        let next_since_oracle = self.authority_changed_since_oracle.saturating_add(1);
+        if next_since_oracle >= NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL {
+            return Ok(None);
+        }
+        let Some(resident) = self.reconciliation_cache.result.as_ref() else {
+            self.revoke_epoch(epoch);
+            return Err("adaptive neighborhood reconciliation disappeared".into());
+        };
+        let Some(authority_generation) = self.authority_generation.checked_add(1) else {
+            self.revoke_epoch(epoch);
+            return Err("adaptive neighborhood authority generation overflow".into());
+        };
+        self.authority_generation = authority_generation;
+        self.authority_changed_since_oracle = next_since_oracle;
+        self.authority_oracle_skips = self.authority_oracle_skips.saturating_add(1);
+        if let Some(comparison) = self.last.as_mut() {
+            comparison.oracle_sampled = false;
+            comparison.authoritative = true;
+        }
+        Ok(Some(AdaptiveChangedNeighborhoodAuthority {
+            group_signature: AdaptiveGroupSignature {
+                authority: AdaptiveGroupAuthority::Neighborhood,
+                generation: self.authority_generation,
+                batch_layout_revision: stage_signature.batch_layout_revision,
+            },
+            reconciliation: (
+                resident.shared_edge_promotions as u64,
+                resident.grading_promotions as u64,
+                resident.iterations as u64,
+            ),
+        }))
+    }
+
     fn stage_plan(
         &mut self,
         request: AdaptiveScreenMeshPlanRequest<'_>,
@@ -745,6 +922,8 @@ impl AdaptiveNeighborhoodShadow {
         standby: ResidentLod,
         max_face_edge_ratio: u32,
         max_atlas_lod: u32,
+        root_topology_revision: u64,
+        batch_layout_revision: u64,
     ) -> bool {
         if !self.enabled {
             return false;
@@ -753,6 +932,8 @@ impl AdaptiveNeighborhoodShadow {
         self.last_error = None;
         self.last = None;
         self.last_empty_selection = false;
+        self.last_attempt_epoch = Some((root_topology_revision, batch_layout_revision));
+        self.staged_signature = None;
         if request.selected_patches.is_empty() {
             self.empty_selection_skips = self.empty_selection_skips.saturating_add(1);
             self.last_empty_selection = true;
@@ -769,6 +950,7 @@ impl AdaptiveNeighborhoodShadow {
         self.baseline_vertex_lods
             .extend_from_slice(baseline_vertex_lods);
         if self.baseline_vertex_lods.len() != request.source_requested_lods.len() {
+            self.revoke_epoch((root_topology_revision, batch_layout_revision));
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some("adaptive baseline corner LoD length differs from source faces".into());
             return false;
@@ -783,6 +965,7 @@ impl AdaptiveNeighborhoodShadow {
             &self.baseline_lods,
             &mut self.plan,
         ) {
+            self.revoke_epoch((root_topology_revision, batch_layout_revision));
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some(error.to_string());
             return false;
@@ -803,6 +986,7 @@ impl AdaptiveNeighborhoodShadow {
                     self.frontier_cache_misses = self.frontier_cache_misses.saturating_add(1);
                 }
                 Err(error) => {
+                    self.revoke_epoch((root_topology_revision, batch_layout_revision));
                     self.failures = self.failures.saturating_add(1);
                     self.last_error = Some(error.to_string());
                     return false;
@@ -811,20 +995,22 @@ impl AdaptiveNeighborhoodShadow {
         }
         let frontier_ms = browser_now_ms() - frontier_start;
         let Some(frontier) = self.frontier.as_ref() else {
+            self.revoke_staged_authority();
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some("adaptive neighborhood frontier disappeared".into());
             return false;
         };
         let reconcile_start = browser_now_ms();
-        let reconciliation_reused = match self.reconciliation_cache.resolve(
+        let (reconciliation_generation, reconciliation_reused) = match self.reconciliation_cache.resolve(
             frontier,
             &self.plan.mesh.requested_lods,
             &self.plan.fixed_leaves,
             max_face_edge_ratio,
             max_atlas_lod,
         ) {
-            Ok((_, reused)) => reused,
+            Ok((_, generation, reused)) => (generation, reused),
             Err(error @ ScreenLeafLodError::FixedBoundaryPromotion { .. }) => {
+                self.revoke_epoch((root_topology_revision, batch_layout_revision));
                 self.boundary_escapes = self.boundary_escapes.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 self.last = Some(AdaptiveNeighborhoodShadowComparison {
@@ -849,12 +1035,18 @@ impl AdaptiveNeighborhoodShadow {
                 return false;
             }
             Err(error) => {
+                self.revoke_epoch((root_topology_revision, batch_layout_revision));
                 self.failures = self.failures.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return false;
             }
         };
         let reconcile_ms = browser_now_ms() - reconcile_start;
+        self.staged_signature = Some(AdaptiveNeighborhoodStageSignature {
+            reconciliation_generation,
+            root_topology_revision,
+            batch_layout_revision,
+        });
         self.last = Some(AdaptiveNeighborhoodShadowComparison {
             source_faces: request.source_requested_lods.len() as u64,
             edge_hops,
@@ -891,11 +1083,13 @@ impl AdaptiveNeighborhoodShadow {
             return;
         }
         let Some(frontier) = self.frontier.as_ref() else {
+            self.revoke_staged_authority();
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some("adaptive neighborhood frontier disappeared".into());
             return;
         };
         let Some(resident) = self.reconciliation_cache.result.as_ref() else {
+            self.revoke_staged_authority();
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some("adaptive neighborhood reconciliation disappeared".into());
             return;
@@ -906,6 +1100,7 @@ impl AdaptiveNeighborhoodShadow {
         {
             Ok(vertices) => vertices,
             Err(error) => {
+                self.revoke_staged_authority();
                 self.failures = self.failures.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return;
@@ -916,6 +1111,7 @@ impl AdaptiveNeighborhoodShadow {
         {
             Ok(vertices) => vertices,
             Err(error) => {
+                self.revoke_staged_authority();
                 self.failures = self.failures.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return;
@@ -1012,9 +1208,11 @@ impl AdaptiveNeighborhoodShadow {
         comparison.vertex_mismatches = vertex_mismatches as u64;
         comparison.plan_compared = true;
         comparison.plan_exact = exact;
+        comparison.oracle_sampled = true;
         comparison.compare_ms = compare_ms;
         comparison.total_ms += compare_ms;
         if !exact {
+            self.revoke_staged_authority();
             self.mismatches = self.mismatches.saturating_add(1);
         }
     }
@@ -1043,11 +1241,13 @@ impl AdaptiveNeighborhoodShadow {
             return;
         }
         let Some(frontier) = self.frontier.as_ref() else {
+            self.revoke_staged_authority();
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some("adaptive neighborhood frontier disappeared".into());
             return;
         };
         let Some(resident) = self.reconciliation_cache.result.as_ref() else {
+            self.revoke_staged_authority();
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some("adaptive neighborhood reconciliation disappeared".into());
             return;
@@ -1067,6 +1267,7 @@ impl AdaptiveNeighborhoodShadow {
             &mut self.neighborhood_lod_scratch,
             &mut self.overlay,
         ) {
+            self.revoke_staged_authority();
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some(error.to_string());
             return;
@@ -1086,6 +1287,7 @@ impl AdaptiveNeighborhoodShadow {
         ) {
             Ok(work) => work,
             Err(error) => {
+                self.revoke_staged_authority();
                 self.failures = self.failures.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return;
@@ -1104,10 +1306,119 @@ impl AdaptiveNeighborhoodShadow {
             && comparison.atlas_residency_valid
             && comparison.triangle_budget_match;
         if comparison.exact {
+            comparison.authoritative = true;
             self.matches = self.matches.saturating_add(1);
+            if comparison.oracle_sampled {
+                self.record_exact_oracle_match();
+            }
         } else {
+            self.revoke_staged_authority();
             self.mismatches = self.mismatches.saturating_add(1);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_authoritative_overlay(
+        &mut self,
+        target: &mut AdaptiveRenderOverlay,
+        baseline_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+        baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: ResidentLod,
+        atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+        max_triangles: u64,
+    ) -> Result<u64, String> {
+        if !self.enabled {
+            return Err("adaptive neighborhood authority is disabled".into());
+        }
+        let Some(signature) = self.staged_signature else {
+            self.revoke_staged_authority();
+            return Err("adaptive neighborhood authority lost its staged identity".into());
+        };
+        let epoch = (
+            signature.root_topology_revision,
+            signature.batch_layout_revision,
+        );
+        if self.authority_revoked == Some(epoch)
+            || !self.certificate.is_some_and(|certificate| {
+                (certificate.root_topology_revision, certificate.batch_layout_revision) == epoch
+            })
+        {
+            self.revoke_epoch(epoch);
+            return Err("adaptive neighborhood authority is not certified for this epoch".into());
+        }
+        if self.reconciliation_cache.generation != signature.reconciliation_generation {
+            self.revoke_epoch(epoch);
+            return Err("adaptive neighborhood reconciliation changed after authority staging".into());
+        }
+        let Some(frontier) = self.frontier.as_ref() else {
+            self.revoke_epoch(epoch);
+            return Err("adaptive neighborhood frontier disappeared".into());
+        };
+        let Some(resident) = self.reconciliation_cache.result.as_ref() else {
+            self.revoke_epoch(epoch);
+            return Err("adaptive neighborhood reconciliation disappeared".into());
+        };
+        let overlay_start = browser_now_ms();
+        if let Err(error) = group_resident_screen_neighborhood_overlay_into(
+            frontier,
+            &resident.resident,
+            &self.plan.observed_faces,
+            &self.plan.fixed_leaves,
+            baseline_residents,
+            baseline_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            &mut self.neighborhood_lod_scratch,
+            &mut self.overlay,
+        ) {
+            self.revoke_staged_authority();
+            return Err(error.to_string());
+        }
+        let work = match measure_adaptive_render_work(
+            baseline_groups,
+            &self.overlay,
+            baseline_residents,
+            initial,
+            atlas_triangle_counts,
+        ) {
+            Ok(work) => work,
+            Err(error) => {
+                self.revoke_staged_authority();
+                return Err(error.to_string());
+            }
+        };
+        if work.composed_triangles > max_triangles {
+            self.revoke_staged_authority();
+            return Err(format!(
+                "adaptive neighborhood authority needs {} triangles; budget is {max_triangles}",
+                work.composed_triangles,
+            ));
+        }
+        let Some(comparison) = self.last.as_mut() else {
+            self.revoke_staged_authority();
+            return Err("adaptive neighborhood authority lost its staged diagnostic".into());
+        };
+        comparison.overlay_ms = browser_now_ms() - overlay_start;
+        comparison.total_ms += comparison.overlay_ms;
+        comparison.overlay_compared = false;
+        comparison.atlas_residency_valid = true;
+        comparison.baseline_triangles = work.baseline_triangles;
+        comparison.suppressed_root_triangles = work.suppressed_root_triangles;
+        comparison.overlay_triangles = work.overlay_triangles;
+        comparison.composed_triangles = work.composed_triangles;
+        comparison.complete_triangles = 0;
+        comparison.triangle_budget_match = true;
+        comparison.oracle_sampled = false;
+        comparison.authoritative = true;
+        comparison.exact = false;
+        std::mem::swap(target, &mut self.overlay);
+        Ok(work.composed_triangles)
     }
 
     fn swap_exact_overlay(&mut self, target: &mut AdaptiveRenderOverlay) -> Result<(), String> {
@@ -1993,6 +2304,7 @@ impl AdaptivePickedRuntime {
         self.pending_component_publication = false;
         self.pending_neighborhood_publication = false;
         self.pending_component_authority = false;
+        self.pending_neighborhood_authority = false;
         self.published_component_publication = false;
         self.published_neighborhood_publication = false;
         self.component_publication_installs = 0;
@@ -2000,6 +2312,7 @@ impl AdaptivePickedRuntime {
         self.component_publication_fallbacks = 0;
         self.component_publication_last_error = None;
         self.neighborhood_publication_installs = 0;
+        self.neighborhood_authority_changed_installs = 0;
         self.neighborhood_publication_fallbacks = 0;
         self.neighborhood_publication_last_error = None;
         self.retained_shadow_enabled = false;
@@ -2093,10 +2406,10 @@ impl AdaptivePickedRuntime {
         Ok(self.component_shadow.set_enabled(enabled))
     }
 
-    /// Toggle a read-only bounded-neighborhood oracle. This is intentionally
-    /// independent of component publication: a staged neighborhood forces the
-    /// complete plan to execute. Only the separate exact-publication gate may
-    /// consume its result.
+    /// Toggle the bounded-neighborhood oracle. Without publication it remains
+    /// read-only and compares every staged neighborhood. With the separate
+    /// publication gate enabled, an exact comparison may certify a bounded
+    /// number of current-pose publications before the next complete sample.
     pub(crate) fn set_neighborhood_shadow_enabled(
         &mut self,
         enabled: bool,
@@ -2135,6 +2448,7 @@ impl AdaptivePickedRuntime {
         self.pending_component_shadow_staged = false;
         self.pending_component_publication = false;
         self.pending_component_authority = false;
+        self.pending_neighborhood_authority = false;
         self.component_publication_last_error = None;
         if changed {
             // Force one freshly component-derived overlay across the cutover
@@ -2168,11 +2482,13 @@ impl AdaptivePickedRuntime {
         self.neighborhood_publication_enabled = enabled;
         self.pending_neighborhood_shadow_staged = false;
         self.pending_neighborhood_publication = false;
+        self.pending_neighborhood_authority = false;
         self.neighborhood_publication_last_error = None;
         if changed {
             // Force one freshly neighborhood-derived overlay across the
             // cutover boundary instead of inheriting an equal complete cache.
             self.published_overlay_signature = None;
+            self.neighborhood_shadow.reset_authority_basis();
         }
         Ok(changed)
     }
@@ -2265,6 +2581,49 @@ impl AdaptivePickedRuntime {
             .ok_or_else(|| "staged adaptive group identity is unavailable".to_string())?;
         if signature.batch_layout_revision != batch_layout_revision {
             return Err("staged adaptive group identity does not match the batch layout".into());
+        }
+        if self.pending_neighborhood_authority {
+            if signature.authority != AdaptiveGroupAuthority::Neighborhood {
+                return Err("neighborhood authority staged a non-neighborhood group identity".into());
+            }
+            let max_triangles = self
+                .config
+                .ok_or_else(|| "adaptive screen mode is disabled".to_string())?
+                .max_triangles;
+            let stage_start = browser_now_ms();
+            let triangles = match self.neighborhood_shadow.stage_authoritative_overlay(
+                &mut self.pending_overlay,
+                baseline_groups,
+                baseline_residents,
+                baseline_vertex_lods,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                atlas_triangle_counts,
+                max_triangles,
+            ) {
+                Ok(triangles) => triangles,
+                Err(error) => {
+                    self.neighborhood_shadow.failures =
+                        self.neighborhood_shadow.failures.saturating_add(1);
+                    self.neighborhood_shadow.last_error = Some(error.clone());
+                    self.neighborhood_publication_fallbacks = self
+                        .neighborhood_publication_fallbacks
+                        .saturating_add(1);
+                    self.neighborhood_publication_last_error = Some(error.clone());
+                    return Err(error);
+                }
+            };
+            self.pending_triangles = triangles;
+            self.pending_overlay_signature = Some(signature);
+            self.pending_overlay_reuses_published = false;
+            self.pending_neighborhood_publication = true;
+            self.neighborhood_publication_last_error = None;
+            self.retained_shadow_cache_misses =
+                self.retained_shadow_cache_misses.saturating_add(1);
+            self.last_retained_shadow_stage_ms = browser_now_ms() - stage_start;
+            return Ok(false);
         }
         if self.pending_component_authority {
             if signature.authority != AdaptiveGroupAuthority::Component {
@@ -2500,6 +2859,7 @@ impl AdaptivePickedRuntime {
         self.pending_component_publication = false;
         self.pending_neighborhood_publication = false;
         self.pending_component_authority = false;
+        self.pending_neighborhood_authority = false;
         self.pending_selected_faces.clear();
     }
 
@@ -2536,6 +2896,7 @@ impl AdaptivePickedRuntime {
         let component_candidate = self.pending_component_publication;
         let neighborhood_candidate = self.pending_neighborhood_publication;
         let component_authority = self.pending_component_authority;
+        let neighborhood_authority = self.pending_neighborhood_authority;
         if let Some(plan) = self.pending_plan.take() {
             self.commit_pending_overlay();
             self.published_component_publication =
@@ -2562,6 +2923,11 @@ impl AdaptivePickedRuntime {
                 self.neighborhood_publication_installs = self
                     .neighborhood_publication_installs
                     .saturating_add(1);
+                if neighborhood_authority {
+                    self.neighborhood_authority_changed_installs = self
+                        .neighborhood_authority_changed_installs
+                        .saturating_add(1);
+                }
             } else if neighborhood_candidate {
                 self.neighborhood_publication_fallbacks = self
                     .neighborhood_publication_fallbacks
@@ -2685,10 +3051,9 @@ impl AdaptivePickedRuntime {
         if self.last_plan.is_none() {
             return Err("adaptive screen frontier has not been published".into());
         }
-        if self
-            .published_overlay_signature
-            .is_some_and(|signature| signature.authority == AdaptiveGroupAuthority::Component)
-        {
+        if self.published_overlay_signature.is_some_and(|signature| {
+            signature.authority != AdaptiveGroupAuthority::Complete
+        }) {
             return Err(
                 "published adaptive epoch is awaiting its next complete grouping oracle".into(),
             );
@@ -2946,7 +3311,7 @@ impl AdaptivePickedRuntime {
         face_render_nodes: &[usize],
         batch_layout_revision: u64,
         root_topology_revision: u64,
-        component_hot_path_allowed: bool,
+        local_hot_path_allowed: bool,
         published_groups_are_live: bool,
         mut reusable_groups: Option<
             &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
@@ -2991,6 +3356,8 @@ impl AdaptivePickedRuntime {
                 standby,
                 max_face_edge_ratio,
                 max_atlas_lod,
+                root_topology_revision,
+                batch_layout_revision,
             );
             self.pending_neighborhood_shadow_staged = neighborhood_plan_staged;
             if self.neighborhood_shadow.last_empty_selection {
@@ -3010,7 +3377,39 @@ impl AdaptivePickedRuntime {
                     Err(_) => (false, None),
                 };
             self.pending_component_shadow_staged = component_plan_staged;
-            if component_hot_path_allowed && component_plan_staged && !neighborhood_plan_staged {
+            if local_hot_path_allowed
+                && self.neighborhood_publication_enabled
+                && neighborhood_plan_staged
+            {
+                if let Some(authority) =
+                    self.neighborhood_shadow.changed_authority_signature()?
+                {
+                    self.pending_neighborhood_authority = true;
+                    let neighborhood = &self.neighborhood_shadow.plan.mesh;
+                    let comparison = self
+                        .neighborhood_shadow
+                        .last
+                        .expect("staged neighborhood-authority diagnostic");
+                    let timings = AdaptivePlanTimings {
+                        total_ms: comparison.total_ms,
+                        mesh_plan_ms: comparison.plan_ms,
+                        frontier_ms: comparison.frontier_ms,
+                        reconcile_ms: comparison.reconcile_ms,
+                        atlas_work_ms: 0.0,
+                        group_ms: 0.0,
+                    };
+                    return Ok((
+                        neighborhood.diagnostic,
+                        neighborhood.selected_faces.clone(),
+                        authority.reconciliation,
+                        authority.group_signature,
+                        true,
+                        0,
+                        timings,
+                    ));
+                }
+            }
+            if local_hot_path_allowed && component_plan_staged && !neighborhood_plan_staged {
                 let reusable_certificate = certified_component.filter(
                     |certificate| {
                         published_groups_are_live
@@ -3380,6 +3779,24 @@ impl AdaptivePickedRuntime {
             neighborhood_shadow_empty_selection_skips: self
                 .neighborhood_shadow
                 .empty_selection_skips,
+            neighborhood_authority_oracle_interval: NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL,
+            neighborhood_authority_oracle_samples: self
+                .neighborhood_shadow
+                .authority_oracle_samples,
+            neighborhood_authority_oracle_skips: self
+                .neighborhood_shadow
+                .authority_oracle_skips,
+            neighborhood_authority_sample_age: self
+                .neighborhood_shadow
+                .authority_changed_since_oracle,
+            neighborhood_authority_revoked: self
+                .neighborhood_shadow
+                .current_authority_revoked(),
+            neighborhood_authority_revocations: self
+                .neighborhood_shadow
+                .authority_revocations,
+            neighborhood_authority_changed_installs: self
+                .neighborhood_authority_changed_installs,
             neighborhood_shadow_frontier_cache_hits: self.neighborhood_shadow.frontier_cache_hits,
             neighborhood_shadow_frontier_cache_misses: self
                 .neighborhood_shadow
@@ -4254,6 +4671,377 @@ mod tests {
         assert_eq!(adaptive_neighborhood_edge_hops(2, 64), 6);
         assert_eq!(adaptive_neighborhood_edge_hops(4, 64), 3);
         assert_eq!(adaptive_neighborhood_edge_hops(4, 256), 4);
+    }
+
+    #[wasm_bindgen_test]
+    fn changed_neighborhood_authority_samples_and_keeps_revocation_sticky() {
+        let mut shadow = AdaptiveNeighborhoodShadow {
+            enabled: true,
+            last_attempt_epoch: Some((7, 9)),
+            staged_signature: Some(AdaptiveNeighborhoodStageSignature {
+                reconciliation_generation: 1,
+                root_topology_revision: 7,
+                batch_layout_revision: 9,
+            }),
+            last: Some(AdaptiveNeighborhoodShadowComparison::default()),
+            ..AdaptiveNeighborhoodShadow::default()
+        };
+        shadow.reconciliation_cache.generation = 1;
+        shadow.reconciliation_cache.result = Some(ScreenLeafLodResult {
+            resident: vec![[1; 3]; 10],
+            iterations: 2,
+            shared_edge_promotions: 3,
+            grading_promotions: 4,
+            max_absolute_exponent: 0,
+        });
+
+        shadow.record_exact_oracle_match();
+        assert_eq!(shadow.authority_oracle_samples, 1);
+        assert_eq!(shadow.authority_changed_since_oracle, 0);
+        assert!(shadow.certificate.is_some());
+
+        for _ in 1..NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL {
+            let authority = shadow
+                .changed_authority_signature()
+                .unwrap()
+                .expect("certified neighborhood should skip the complete oracle");
+            assert_eq!(
+                authority.group_signature.authority,
+                AdaptiveGroupAuthority::Neighborhood,
+            );
+            assert_eq!(authority.reconciliation, (3, 4, 2));
+        }
+        assert!(shadow.changed_authority_signature().unwrap().is_none());
+        assert_eq!(
+            shadow.authority_oracle_skips,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL - 1,
+        );
+
+        shadow.record_exact_oracle_match();
+        assert_eq!(shadow.authority_oracle_samples, 2);
+        assert_eq!(shadow.authority_changed_since_oracle, 0);
+        shadow.revoke_epoch((7, 9));
+        shadow.record_exact_oracle_match();
+        assert_eq!(shadow.authority_oracle_samples, 3);
+        assert_eq!(shadow.authority_revocations, 1);
+        assert!(shadow.current_authority_revoked());
+        assert!(shadow.certificate.is_none());
+        assert!(shadow.changed_authority_signature().unwrap().is_none());
+
+        shadow.last_attempt_epoch = Some((8, 9));
+        shadow.staged_signature = Some(AdaptiveNeighborhoodStageSignature {
+            reconciliation_generation: 1,
+            root_topology_revision: 8,
+            batch_layout_revision: 9,
+        });
+        shadow.record_exact_oracle_match();
+        assert_eq!(shadow.authority_oracle_samples, 4);
+        assert!(!shadow.current_authority_revoked());
+        assert_eq!(
+            shadow.certificate.map(|certificate| (
+                certificate.root_topology_revision,
+                certificate.batch_layout_revision,
+            )),
+            Some((8, 9)),
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn neighborhood_publication_samples_complete_every_sixteenth_changed_epoch() {
+        let positions = [
+            [-0.8, -0.6, 0.0],
+            [-0.2, -0.6, 0.0],
+            [-0.5, 0.0, 0.0],
+            [-0.8, 0.6, 0.0],
+            [-0.2, 0.6, 0.0],
+            [0.2, -0.5, 0.0],
+            [0.8, -0.5, 0.0],
+            [0.5, 0.5, 0.0],
+        ];
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [2, 3, 4], [5, 6, 7]],
+        );
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let selected = [SelectedScreenPatch {
+            source_face: 0,
+            transformed_patch: &patch,
+        }];
+        let resident = ResidentLod::uniform(1);
+        let residents = [Some(resident); 3];
+        let vertex_lods = [[1; 3]; 3];
+        let face_domains = [0; 3];
+        let atlas_triangles = BTreeMap::from([([1; 3], 1)]);
+        let baseline_groups = quilting_core::batch::group_resident_faces(
+            &residents,
+            &vertex_lods,
+            &face_domains,
+            &face_domains,
+            &face_domains,
+            resident,
+        );
+        let mut groups = BTreeMap::new();
+        let mut runtime = AdaptivePickedRuntime::default();
+        runtime.configure(AdaptivePickedConfig {
+            selection: AdaptiveScreenSelection::Picked { face: 0 },
+            min_px_per_segment: 1.0,
+            max_px_per_segment: 10.0,
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_total_leaves: 6,
+            max_triangles: 6,
+        });
+        runtime
+            .set_neighborhood_publication_enabled(true)
+            .unwrap();
+
+        let plan_epoch = |runtime: &mut AdaptivePickedRuntime,
+                          selected: &[SelectedScreenPatch<'_>],
+                          pose_revision: u32,
+                          groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>| {
+            let groups_reused = runtime
+                .plan_selected_and_group(
+                    selected,
+                    None,
+                    4,
+                    &IDENTITY,
+                    [640.0, 480.0],
+                    Some((pose_revision, 1)),
+                    &residents,
+                    &residents,
+                    &vertex_lods,
+                    resident,
+                    &topology,
+                    1,
+                    4,
+                    &atlas_triangles,
+                    &face_domains,
+                    &face_domains,
+                    &face_domains,
+                    7,
+                    11,
+                    true,
+                    true,
+                    None,
+                    groups,
+                )
+                .unwrap();
+            let overlay_reused = runtime
+                .stage_pending_overlay(
+                    7,
+                    &baseline_groups,
+                    &residents,
+                    &vertex_lods,
+                    &face_domains,
+                    &face_domains,
+                    &face_domains,
+                    resident,
+                    &atlas_triangles,
+                )
+                .unwrap();
+            (groups_reused, overlay_reused)
+        };
+
+        let first = plan_epoch(&mut runtime, &selected, 1, &mut groups);
+        assert_eq!(
+            runtime.pending_group_signature.unwrap().authority,
+            AdaptiveGroupAuthority::Complete,
+        );
+        assert!(!first.0);
+        assert!(!first.1);
+        runtime.commit_publication();
+        let certified = runtime.snapshot();
+        assert_eq!(certified.neighborhood_authority_oracle_samples, 1);
+        assert_eq!(certified.neighborhood_authority_oracle_skips, 0);
+        assert_eq!(certified.neighborhood_authority_sample_age, 0);
+        assert!(!certified.neighborhood_authority_revoked);
+        assert_eq!(certified.neighborhood_publication_installs, 1);
+        let complete_frontier_hits = certified.frontier_cache_hits;
+        let complete_frontier_misses = certified.frontier_cache_misses;
+        let complete_reconciliation_hits = certified.reconciliation_cache_hits;
+        let complete_reconciliation_misses = certified.reconciliation_cache_misses;
+
+        for changed in 1..NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL {
+            let published = plan_epoch(
+                &mut runtime,
+                &selected,
+                changed as u32 + 1,
+                &mut groups,
+            );
+            assert!(published.0);
+            assert!(!published.1);
+            assert_eq!(
+                runtime.pending_group_signature.unwrap().authority,
+                AdaptiveGroupAuthority::Neighborhood,
+            );
+            assert_eq!(runtime.neighborhood_shadow.state(), "authoritative-unsampled");
+            runtime.commit_publication();
+            let skipped = runtime.snapshot();
+            assert_eq!(skipped.frontier_cache_hits, complete_frontier_hits);
+            assert_eq!(skipped.frontier_cache_misses, complete_frontier_misses);
+            assert_eq!(
+                skipped.reconciliation_cache_hits,
+                complete_reconciliation_hits,
+            );
+            assert_eq!(
+                skipped.reconciliation_cache_misses,
+                complete_reconciliation_misses,
+            );
+        }
+        let skipped = runtime.snapshot();
+        assert_eq!(
+            skipped.neighborhood_authority_oracle_skips,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL - 1,
+        );
+        assert_eq!(
+            skipped.neighborhood_authority_sample_age,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL - 1,
+        );
+        assert_eq!(
+            skipped.neighborhood_authority_changed_installs,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL - 1,
+        );
+
+        let sampled = plan_epoch(
+            &mut runtime,
+            &selected,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL as u32 + 1,
+            &mut groups,
+        );
+        assert!(sampled.0);
+        assert!(!sampled.1);
+        assert_eq!(
+            runtime.pending_group_signature.unwrap().authority,
+            AdaptiveGroupAuthority::Complete,
+        );
+        runtime.commit_publication();
+        let resampled = runtime.snapshot();
+        assert_eq!(resampled.neighborhood_authority_oracle_samples, 2);
+        assert_eq!(resampled.neighborhood_authority_sample_age, 0);
+        assert_eq!(resampled.frontier_cache_hits, complete_frontier_hits + 1);
+        assert_eq!(
+            resampled.reconciliation_cache_hits,
+            complete_reconciliation_hits + 1,
+        );
+        assert_eq!(
+            resampled.neighborhood_publication_installs,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL + 1,
+        );
+
+        plan_epoch(
+            &mut runtime,
+            &[],
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL as u32 + 2,
+            &mut groups,
+        );
+        runtime.commit_publication();
+        let empty = runtime.snapshot();
+        assert_eq!(empty.neighborhood_shadow_state, "empty-selection");
+        assert_eq!(empty.neighborhood_shadow_empty_selection_skips, 1);
+        assert_eq!(empty.neighborhood_authority_oracle_samples, 2);
+        assert_eq!(empty.neighborhood_authority_sample_age, 0);
+        assert!(!empty.neighborhood_authority_revoked);
+
+        plan_epoch(
+            &mut runtime,
+            &selected,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL as u32 + 3,
+            &mut groups,
+        );
+        assert_eq!(
+            runtime.pending_group_signature.unwrap().authority,
+            AdaptiveGroupAuthority::Neighborhood,
+        );
+        runtime.commit_publication();
+        let resumed = runtime.snapshot();
+        assert_eq!(resumed.neighborhood_authority_sample_age, 1);
+        assert_eq!(
+            resumed.neighborhood_authority_changed_installs,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL,
+        );
+
+        runtime.neighborhood_shadow.authority_changed_since_oracle =
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL - 1;
+        runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                4,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL as u32 + 4, 1)),
+                &residents,
+                &residents,
+                &vertex_lods,
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &face_domains,
+                &face_domains,
+                &face_domains,
+                7,
+                11,
+                true,
+                true,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.pending_group_signature.unwrap().authority,
+            AdaptiveGroupAuthority::Complete,
+        );
+        runtime.neighborhood_shadow.plan.observed_faces.clear();
+        runtime
+            .stage_pending_overlay(
+                7,
+                &baseline_groups,
+                &residents,
+                &vertex_lods,
+                &face_domains,
+                &face_domains,
+                &face_domains,
+                resident,
+                &atlas_triangles,
+            )
+            .unwrap();
+        runtime.commit_publication();
+        let revoked = runtime.snapshot();
+        assert!(revoked.neighborhood_authority_revoked);
+        assert_eq!(revoked.neighborhood_authority_revocations, 1);
+        assert_eq!(revoked.neighborhood_publication_fallbacks, 1);
+        assert!(runtime.neighborhood_shadow.certificate.is_none());
+
+        let complete_hits_before_revoked_retry = revoked.frontier_cache_hits;
+        plan_epoch(
+            &mut runtime,
+            &selected,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL as u32 + 5,
+            &mut groups,
+        );
+        assert_eq!(
+            runtime.pending_group_signature.unwrap().authority,
+            AdaptiveGroupAuthority::Complete,
+        );
+        runtime.commit_publication();
+        let retried = runtime.snapshot();
+        assert!(retried.neighborhood_authority_revoked);
+        assert!(runtime.neighborhood_shadow.certificate.is_none());
+        assert_eq!(
+            retried.neighborhood_authority_oracle_skips,
+            NEIGHBORHOOD_AUTHORITY_ORACLE_INTERVAL,
+        );
+        assert_eq!(
+            retried.frontier_cache_hits,
+            complete_hits_before_revoked_retry + 1,
+        );
     }
 
     #[wasm_bindgen_test]

@@ -3770,9 +3770,12 @@ fn apply_adaptive_screen_plan(
     let max_face_edge_ratio = state.lod_grading.ratio();
     let batch_layout_revision = state.batch_layout_revision;
     let root_topology_revision = state.root_topology_revision;
-    let component_hot_path_allowed = state
+    let local_hot_path_allowed = (state
         .adaptive_picked
         .component_publication_enabled()
+        || state
+            .adaptive_picked
+            .neighborhood_publication_enabled())
         && state.adaptive_retained_publication_enabled
         && retained_frontier_order_safe(state);
     let MainState {
@@ -3813,7 +3816,7 @@ fn apply_adaptive_screen_plan(
             face_render_nodes,
             batch_layout_revision,
             root_topology_revision,
-            component_hot_path_allowed,
+            local_hot_path_allowed,
             published_groups_are_live,
             reusable_groups,
             batch_groups,
