@@ -991,18 +991,20 @@ pub struct RetainedRootGroupRefresh {
 /// exact corner-density closure while preserving byte-for-byte member order.
 #[derive(Default)]
 pub struct RetainedRootGroupIndex {
-    face_keys: Vec<RenderBatchKey>,
+    face_tokens: Vec<u32>,
+    token_keys: Vec<RenderBatchKey>,
+    key_tokens: BTreeMap<RenderBatchKey, u32>,
     buckets: BTreeMap<RenderBatchKey, Vec<u32>>,
     affected_faces: Vec<usize>,
     dirty_keys: Vec<RenderBatchKey>,
-    removals: Vec<(RenderBatchKey, u32)>,
-    additions: Vec<(RenderBatchKey, u32)>,
+    removals: Vec<(u32, u32)>,
+    additions: Vec<(u32, u32)>,
     merge_scratch: Vec<u32>,
 }
 
 impl RetainedRootGroupIndex {
     pub fn indexed_faces(&self) -> usize {
-        self.face_keys.len()
+        self.face_tokens.len()
     }
 
     pub fn bucket_count(&self) -> usize {
@@ -1012,7 +1014,8 @@ impl RetainedRootGroupIndex {
     /// Retained vector payload capacity. Allocator/B-tree node overhead is
     /// deliberately excluded and reported separately by platform profilers.
     pub fn payload_capacity_bytes(&self) -> usize {
-        self.face_keys.capacity() * std::mem::size_of::<RenderBatchKey>()
+        self.face_tokens.capacity() * std::mem::size_of::<u32>()
+            + self.token_keys.capacity() * std::mem::size_of::<RenderBatchKey>()
             + self
                 .buckets
                 .values()
@@ -1032,7 +1035,7 @@ impl RetainedRootGroupIndex {
         num_faces: usize,
         groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     ) -> bool {
-        self.face_keys.len() == num_faces
+        self.face_tokens.len() == num_faces
             && self.buckets.len() == groups.len()
             && self.buckets.iter().all(|(key, faces)| {
                 groups.get(key).is_some_and(|members| members.len() == faces.len())
@@ -1050,8 +1053,8 @@ impl RetainedRootGroupIndex {
         initial: ResidentLod,
         groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     ) {
-        self.face_keys.clear();
-        self.face_keys.reserve(residents.len());
+        self.face_tokens.clear();
+        self.face_tokens.reserve(residents.len());
         for faces in self.buckets.values_mut() {
             faces.clear();
         }
@@ -1067,7 +1070,8 @@ impl RetainedRootGroupIndex {
                 initial,
                 face_index,
             );
-            self.face_keys.push(key);
+            let token = self.token_for_key(key);
+            self.face_tokens.push(token);
             self.buckets.entry(key).or_default().push(face_index as u32);
             groups.entry(key).or_default().push(root_batch_member(
                 residents,
@@ -1079,6 +1083,17 @@ impl RetainedRootGroupIndex {
         }
         self.buckets.retain(|_, faces| !faces.is_empty());
         groups.retain(|_, members| !members.is_empty());
+    }
+
+    fn token_for_key(&mut self, key: RenderBatchKey) -> u32 {
+        if let Some(&token) = self.key_tokens.get(&key) {
+            return token;
+        }
+        let token = u32::try_from(self.token_keys.len())
+            .expect("retained root batch key count exceeds u32 indexing");
+        self.token_keys.push(key);
+        self.key_tokens.insert(key, token);
+        token
     }
 
     /// Refresh exact ordered groups from a sparse, source-face-indexed closure.
@@ -1130,8 +1145,10 @@ impl RetainedRootGroupIndex {
         self.dirty_keys.clear();
         self.removals.clear();
         self.additions.clear();
-        for &face_index in &self.affected_faces {
-            let old_key = self.face_keys[face_index];
+        for affected_index in 0..self.affected_faces.len() {
+            let face_index = self.affected_faces[affected_index];
+            let old_token = self.face_tokens[face_index];
+            let old_key = self.token_keys[old_token as usize];
             let new_key = root_batch_key(
                 residents,
                 face_materials,
@@ -1143,23 +1160,37 @@ impl RetainedRootGroupIndex {
             self.dirty_keys.push(old_key);
             self.dirty_keys.push(new_key);
             if old_key != new_key {
-                self.removals.push((old_key, face_index as u32));
-                self.additions.push((new_key, face_index as u32));
-                self.face_keys[face_index] = new_key;
+                let new_token = self.token_for_key(new_key);
+                self.removals.push((old_token, face_index as u32));
+                self.additions.push((new_token, face_index as u32));
+                self.face_tokens[face_index] = new_token;
             }
         }
         self.dirty_keys.sort_unstable();
         self.dirty_keys.dedup();
-        self.removals.sort_unstable();
-        self.additions.sort_unstable();
+        let token_keys = &self.token_keys;
+        self.removals.sort_unstable_by_key(|entry| {
+            (token_keys[entry.0 as usize], entry.1)
+        });
+        self.additions.sort_unstable_by_key(|entry| {
+            (token_keys[entry.0 as usize], entry.1)
+        });
 
         let mut output = std::mem::take(&mut self.merge_scratch);
         let mut rebuilt_members = 0usize;
         for &key in &self.dirty_keys {
-            let removal_start = self.removals.partition_point(|entry| entry.0 < key);
-            let removal_end = self.removals.partition_point(|entry| entry.0 <= key);
-            let addition_start = self.additions.partition_point(|entry| entry.0 < key);
-            let addition_end = self.additions.partition_point(|entry| entry.0 <= key);
+            let removal_start = self
+                .removals
+                .partition_point(|entry| self.token_keys[entry.0 as usize] < key);
+            let removal_end = self
+                .removals
+                .partition_point(|entry| self.token_keys[entry.0 as usize] <= key);
+            let addition_start = self
+                .additions
+                .partition_point(|entry| self.token_keys[entry.0 as usize] < key);
+            let addition_end = self
+                .additions
+                .partition_point(|entry| self.token_keys[entry.0 as usize] <= key);
             output.clear();
             merge_root_bucket_faces(
                 self.buckets.get(&key).map(Vec::as_slice).unwrap_or(&[]),
@@ -1201,8 +1232,8 @@ impl RetainedRootGroupIndex {
 
 fn merge_root_bucket_faces(
     current: &[u32],
-    removals: &[(RenderBatchKey, u32)],
-    additions: &[(RenderBatchKey, u32)],
+    removals: &[(u32, u32)],
+    additions: &[(u32, u32)],
     output: &mut Vec<u32>,
 ) {
     let mut current_index = 0usize;
@@ -3911,6 +3942,81 @@ mod tests {
                 initial,
             ),
         );
+    }
+
+    #[test]
+    fn retained_root_group_index_survives_deterministic_sparse_churn() {
+        const FACES: usize = 257;
+        let initial = ResidentLod::uniform(1);
+        let mut residents = vec![Some(ResidentLod::uniform(2)); FACES];
+        let mut vertex_lods = vec![[2; 3]; FACES];
+        let mut materials = vec![0usize; FACES];
+        let mut nodes = (0..FACES).collect::<Vec<_>>();
+        let render_nodes = vec![0usize; FACES];
+        let mut groups = BTreeMap::new();
+        let mut index = RetainedRootGroupIndex::default();
+        assert!(index
+            .refresh_groups_from_faces(
+                &residents,
+                &vertex_lods,
+                &materials,
+                &nodes,
+                &render_nodes,
+                initial,
+                &[],
+                &mut groups,
+            )
+            .full_rebuild);
+
+        let mut random = 0x5eed_cafe_u32;
+        let mut next = || {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            random
+        };
+        for round in 0..256 {
+            let changed = 1 + next() as usize % 23;
+            let mut affected = Vec::with_capacity(changed);
+            for _ in 0..changed {
+                let face = next() as usize % FACES;
+                let edge_lods = [
+                    1 << (next() % 5),
+                    1 << (next() % 5),
+                    1 << (next() % 5),
+                ];
+                residents[face] = Some(ResidentLod::from_edge_lods(edge_lods));
+                vertex_lods[face] = [
+                    1 << (next() % 5),
+                    1 << (next() % 5),
+                    1 << (next() % 5),
+                ];
+                materials[face] = next() as usize % 4;
+                nodes[face] = next() as usize % 37;
+                affected.push(face);
+            }
+            let refresh = index.refresh_groups_from_faces(
+                &residents,
+                &vertex_lods,
+                &materials,
+                &nodes,
+                &render_nodes,
+                initial,
+                &affected,
+                &mut groups,
+            );
+            assert!(!refresh.full_rebuild, "round {round}");
+            assert_eq!(
+                groups,
+                group_resident_faces(
+                    &residents,
+                    &vertex_lods,
+                    &materials,
+                    &nodes,
+                    &render_nodes,
+                    initial,
+                ),
+                "round {round}",
+            );
+        }
     }
 
     #[test]
