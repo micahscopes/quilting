@@ -8,8 +8,9 @@
 use futures_channel::oneshot;
 use quilting_renderer::compute::{
     pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words,
-    pack_wgsl_lod_subject_words, LodAtlasLookup, LodDispatchState, PreparedLodModel,
-    WgslLodDispatchMetrics,
+    pack_wgsl_lod_subject_words, prepare_lod_atlas_lookup, prepare_lod_model,
+    reconcile_and_pack_wgsl_lod_pass2, LodAtlasLookup, LodDispatchState, LodModelData,
+    PreparedLodModel, WgslLodDispatchMetrics,
 };
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
@@ -21,10 +22,23 @@ const JOINT_MATRIX_BYTES: u64 = 64;
 const PASS1_RECORD_BYTES: u64 = 16;
 const PACKED_RECORD_BYTES: u64 = 4;
 
+fn identity_matrix() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+fn identity_mobius() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+    ]
+}
+
 #[derive(Debug)]
 pub enum LodWebGpuError {
     Shader(String),
     Payload(String),
+    Conformance(String),
     Mapping(String),
     Poll(String),
 }
@@ -34,6 +48,7 @@ impl std::fmt::Display for LodWebGpuError {
         match self {
             Self::Shader(message) => write!(formatter, "WebGPU LOD shader: {message}"),
             Self::Payload(message) => write!(formatter, "WebGPU LOD payload: {message}"),
+            Self::Conformance(message) => write!(formatter, "WebGPU LOD conformance: {message}"),
             Self::Mapping(message) => write!(formatter, "WebGPU LOD mapping: {message}"),
             Self::Poll(message) => write!(formatter, "WebGPU LOD poll: {message}"),
         }
@@ -49,6 +64,13 @@ pub struct LodPose<'a> {
     pub joint_matrices: &'a [f32],
     /// Exactly one weight per immutable morph target.
     pub morph_weights: &'a [f32],
+}
+
+/// Bounded evidence returned after the shared device conformance matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LodDeviceConformance {
+    pub full_pipeline_words: usize,
+    pub coherence_words: usize,
 }
 
 /// Device-local pipelines shared by every uploaded classifier model.
@@ -111,6 +133,106 @@ impl LodClassifierDevice {
             queue,
             pass1_pipeline,
             pass2_pipeline,
+        })
+    }
+
+    /// Run the same minimum exact matrix on native and browser devices.
+    ///
+    /// This covers one complete animated-capable two-pass dispatch plus all S3
+    /// permutations, visible-only neighbor promotion, invisible records,
+    /// priorities, and multiple atlas keys in the coherence pass.
+    pub async fn run_conformance_matrix(&self) -> Result<LodDeviceConformance, LodWebGpuError> {
+        let prepared = prepare_lod_model(LodModelData {
+            positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            faces: vec![[0, 1, 2]],
+            joint_indices: vec![[0; 4]; 3],
+            joint_weights: vec![[0.0; 4]; 3],
+            morph_deltas: Vec::new(),
+            num_morph_targets: 0,
+            face_nodes: vec![0],
+        })
+        .map_err(LodWebGpuError::Payload)?;
+        let atlas = prepare_lod_atlas_lookup([[1, 1, 2]]).map_err(LodWebGpuError::Payload)?;
+        let model_words = pack_wgsl_lod_model_words(&prepared).map_err(LodWebGpuError::Payload)?;
+        let atlas_words = pack_wgsl_lod_atlas_words(&atlas);
+        let expected = reconcile_and_pack_wgsl_lod_pass2(
+            &[[1.0, 0.0, 0.0, 1.0]],
+            &model_words.adjacency,
+            &atlas_words,
+        )
+        .map_err(LodWebGpuError::Payload)?;
+        let dispatch = LodDispatchState {
+            subjects: Vec::new(),
+            baseline_mobius: identity_mobius(),
+            baseline_model: identity_matrix(),
+            pole: [0.0; 4],
+            mobius_power: 0.0,
+            c_norm_sq: 0.0,
+            has_pole: 0.0,
+        };
+        let metrics = WgslLodDispatchMetrics {
+            view_projection: identity_matrix(),
+            density: 1.0,
+            pixel_floor: 0.0,
+            max_lod: atlas.max_lod,
+            viewport: [1024.0, 1024.0],
+            num_joints: 2,
+        };
+        let mut joint_matrices = Vec::with_capacity(32);
+        joint_matrices.extend_from_slice(&identity_matrix());
+        joint_matrices.extend_from_slice(&identity_matrix());
+        let mut resident = self.upload_model(prepared, &atlas)?;
+        let actual = self
+            .classify(
+                &mut resident,
+                &dispatch,
+                metrics,
+                LodPose {
+                    joint_matrices: &joint_matrices,
+                    morph_weights: &[],
+                },
+            )
+            .await?;
+        if actual != expected {
+            return Err(LodWebGpuError::Conformance(format!(
+                "full pipeline mismatch: expected {expected:?}, got {actual:?}"
+            )));
+        }
+        let full_pipeline_words = actual.len();
+
+        let pass1 = [
+            [1.0, 2.0, 3.0, 11.0],
+            [1.0, 3.0, 2.0, 12.0],
+            [2.0, 1.0, 3.0, 13.0],
+            [3.0, 1.0, 2.0, 14.0],
+            [2.0, 3.0, 1.0, 15.0],
+            [3.0, 2.0, 1.0, 16.0],
+            [4.0, 5.0, 6.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 4.0, 2.0],
+            [8.0, 8.0, 8.0, 0.0],
+        ];
+        let mut adjacency = vec![[u32::MAX, 0, 0, 0]; pass1.len() * 3];
+        adjacency[7 * 3] = [8, 2, 0, 0];
+        adjacency[7 * 3 + 1] = [9, 0, 0, 0];
+        let mut atlas_lut = vec![u8::MAX as u32; 1_200];
+        atlas_lut[321] = 17;
+        atlas_lut[411] = 29;
+        atlas_lut[654] = 31;
+        let expected = reconcile_and_pack_wgsl_lod_pass2(&pass1, &adjacency, &atlas_lut)
+            .map_err(LodWebGpuError::Payload)?;
+        let actual = self
+            .reconcile_conformance_records(&pass1, &adjacency, &atlas_lut)
+            .await?;
+        if actual != expected {
+            return Err(LodWebGpuError::Conformance(format!(
+                "coherence mismatch: expected {expected:?}, got {actual:?}"
+            )));
+        }
+
+        Ok(LodDeviceConformance {
+            full_pipeline_words,
+            coherence_words: actual.len(),
         })
     }
 
@@ -478,4 +600,38 @@ fn storage_buffer<T: bytemuck::Pod>(
         contents: bytemuck::cast_slice(records),
         usage,
     })
+}
+
+/// Request a browser WebGPU device and execute the same exact matrix as the
+/// native hardware gate. Enabled only for the standalone browser harness.
+#[cfg(all(target_arch = "wasm32", feature = "browser-conformance"))]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsValue> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .map_err(browser_error)?;
+    let adapter_info = adapter.get_info();
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("quilting browser LOD conformance"),
+            ..Default::default()
+        })
+        .await
+        .map_err(browser_error)?;
+    let classifier = LodClassifierDevice::new(device, queue).map_err(browser_error)?;
+    let report = classifier
+        .run_conformance_matrix()
+        .await
+        .map_err(browser_error)?;
+    Ok(format!(
+        "adapter={} backend={:?} full_pipeline_words={} coherence_words={}",
+        adapter_info.name, adapter_info.backend, report.full_pipeline_words, report.coherence_words,
+    ))
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-conformance"))]
+fn browser_error(error: impl std::fmt::Display) -> wasm_bindgen::JsValue {
+    wasm_bindgen::JsValue::from_str(&error.to_string())
 }

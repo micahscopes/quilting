@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Quilting WebGPU LOD conformance</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-monospace, monospace; }
+      body { margin: 2rem; background: #111; color: #ddd; }
+      [data-status="passed"] { color: #9eebae; }
+      [data-status="failed"] { color: #ff9b9b; }
+    </style>
+  </head>
+  <body>
+    <h1>Quilting WebGPU LOD conformance</h1>
+    <pre id="result" data-status="running">running</pre>
+    <script type="module">
+      const result = document.querySelector("#result");
+      const state = window.__quiltingWebGpuConformance = { status: "running" };
+      try {
+        const module = await import("/target/webgpu-conformance/quilting_webgpu.js");
+        await module.default();
+        state.report = await module.run_browser_lod_conformance();
+        state.status = "passed";
+      } catch (error) {
+        state.status = "failed";
+        state.error = error instanceof Error ? error.stack : String(error);
+      }
+      result.dataset.status = state.status;
+      result.textContent = JSON.stringify(state, null, 2);
+    </script>
+  </body>
+</html>

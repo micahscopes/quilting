@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "Shadow WebGPU backend and conformance executor for Quilting"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+browser-conformance = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
+
 [dependencies]
 bytemuck = "1"
 futures-channel = "0.3"
@@ -18,6 +24,8 @@ wgpu = { version = "=29.0.1", default-features = false, features = ["std", "park
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = { version = "=0.2.108", optional = true }
+wasm-bindgen-futures = { version = "=0.4.58", optional = true }
 wgpu = { version = "=29.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
 
 [dev-dependencies]

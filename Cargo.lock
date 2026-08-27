@@ -3096,6 +3096,8 @@ dependencies = [
  "quilting-core",
  "quilting-renderer",
  "quilting-shaders",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wgpu",
 ]
 
