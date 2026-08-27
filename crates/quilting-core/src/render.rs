@@ -453,7 +453,17 @@ impl RenderSubmissionStats {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderCommand {
+    /// Resolve the current source pose into the resident patch-instance
+    /// representation. Backends may elide this logical command when the pose,
+    /// topology, and entity transform match an already prepared result.
     PreparePatches {
+        batch_index: u32,
+        instance_count: u32,
+    },
+    /// Classify complete posed patches against the guarded current view.
+    /// WebGL2 lowers this to the retained one-float visibility stream; WebGPU
+    /// may instead compact visible instances and produce indirect arguments.
+    ResolveVisibility {
         batch_index: u32,
         instance_count: u32,
     },
@@ -564,9 +574,17 @@ fn expected_commands(
     options: RenderFrameOptions,
     batches: &[RenderBatchSnapshot],
 ) -> Result<Vec<RenderCommand>, RenderContractError> {
-    let mut commands = Vec::with_capacity(batches.len().saturating_mul(3).saturating_add(3));
+    let mut commands = Vec::with_capacity(batches.len().saturating_mul(4).saturating_add(3));
     for (batch_index, batch) in batches.iter().enumerate() {
         commands.push(RenderCommand::PreparePatches {
+            batch_index: batch_index
+                .try_into()
+                .map_err(|_| RenderContractError::BatchCountOverflow)?,
+            instance_count: batch.active_instance_count()?,
+        });
+    }
+    for (batch_index, batch) in batches.iter().enumerate() {
+        commands.push(RenderCommand::ResolveVisibility {
             batch_index: batch_index
                 .try_into()
                 .map_err(|_| RenderContractError::BatchCountOverflow)?,
@@ -879,7 +897,7 @@ mod tests {
             &scene,
         )
         .unwrap();
-        assert_eq!(frame.commands.len(), 8);
+        assert_eq!(frame.commands.len(), 11);
         assert!(matches!(
             frame.commands[0],
             RenderCommand::PreparePatches {
@@ -896,14 +914,28 @@ mod tests {
         ));
         assert!(matches!(
             frame.commands[3],
+            RenderCommand::ResolveVisibility {
+                batch_index: 0,
+                instance_count: 1
+            }
+        ));
+        assert!(matches!(
+            frame.commands[4],
+            RenderCommand::ResolveVisibility {
+                batch_index: 1,
+                instance_count: 0
+            }
+        ));
+        assert!(matches!(
+            frame.commands[6],
             RenderCommand::DrawPatches {
                 batch_index: 0,
                 pass: RenderPass::PbrOpaque,
                 ..
             }
         ));
-        assert_eq!(frame.commands[4], RenderCommand::BuildTransmissionPyramid);
-        assert_eq!(frame.commands[7], RenderCommand::FocusPostProcess);
+        assert_eq!(frame.commands[7], RenderCommand::BuildTransmissionPyramid);
+        assert_eq!(frame.commands[10], RenderCommand::FocusPostProcess);
         assert!(!frame
             .commands
             .iter()
@@ -941,23 +973,23 @@ mod tests {
             &scene,
         )
         .unwrap();
-        assert_eq!(frame.commands.len(), 7);
+        assert_eq!(frame.commands.len(), 9);
         assert!(matches!(
-            frame.commands[2],
+            frame.commands[4],
             RenderCommand::DrawPatches {
                 pass: RenderPass::Matcap,
                 ..
             }
         ));
         assert!(matches!(
-            frame.commands[4],
+            frame.commands[6],
             RenderCommand::DrawPatches {
                 pass: RenderPass::Wire,
                 ..
             }
         ));
         assert_eq!(
-            frame.commands[6],
+            frame.commands[8],
             RenderCommand::HighlightFace { face_index: 4 }
         );
         assert_eq!(

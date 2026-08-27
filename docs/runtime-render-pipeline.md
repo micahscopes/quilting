@@ -139,6 +139,14 @@ separate:
 | Submission | Instanced draw per non-empty material/node/LOD/parity bucket | Compacted visible instances plus indirect arguments per `RenderBatchKey` |
 | Selection focus | Source-space sphere in the PBR UBO and MRT B-channel mask | Same logical view packet and WGSL field classification |
 
+The backend-neutral `RenderCommand` stream names patch preparation and
+current-view visibility resolution separately. A backend is free to memoize
+unchanged preparation. WebGL2 resolves visibility into a retained scalar flag
+that makes rejected patches degenerate, whereas WebGPU may resolve the same
+command by compacting visible instances and emitting indirect draw counts.
+The command contract deliberately says nothing about transform feedback,
+storage buffers, or GPU handles.
+
 A negative visibility result must mean “the complete posed rational patch is
 outside the current guarded frustum.” Invalid bounds, a denominator region
 touching zero, or a source bound containing the Möbius pole all survive. The
