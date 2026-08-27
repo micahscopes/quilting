@@ -524,12 +524,16 @@ const RUST_SCENE_IMPLEMENTATION = implementationFromRoute(
 const RUST_ASSET_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'assetimpl', 'rust',
 );
+const ANIMATION_CLOCK_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'animclockimpl', 'js',
+);
 const EXPLICIT_RUST_APP_SHADOW_ENABLED =
   initialBrowserParams.get('appshadow') === '1';
 const RUST_APP_SHADOW_ENABLED =
   EXPLICIT_RUST_APP_SHADOW_ENABLED
   || RUST_NAVIGATION_IMPLEMENTATION !== 'js'
   || RUST_ASSET_IMPLEMENTATION !== 'js'
+  || ANIMATION_CLOCK_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
@@ -1309,7 +1313,7 @@ const PARAM_DEFAULTS = {
   mx: '5', my: '0', mz: '0', mr: '20',
   env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
   res: '0', density: '100', atten: '1', minpx: '16',
-  animate: '1', anim: '-1', atlas: '7', lodratio: '2',
+  animate: '1', anim: '-1', animclockimpl: 'js', atlas: '7', lodratio: '2',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   aim: '0',
   selasset: '', selentity: '',
@@ -1343,6 +1347,7 @@ function readParams(p) {
     minpx: get('minpx'),
     animate: get('animate'),
     anim: get('anim'),
+    animclockimpl: get('animclockimpl'),
     atlas: get('atlas'),
     lodratio: get('lodratio'),
     zoom: get('zoom'),
@@ -1413,6 +1418,11 @@ function syncURL() {
       ss('lodratio', lod.grading, PARAM_DEFAULTS.lodratio);
       set('animate', animating_sig.peek() ? '1' : '0', PARAM_DEFAULTS.animate);
       set('anim', $('anim-sel').value, PARAM_DEFAULTS.anim);
+      set(
+        'animclockimpl',
+        ANIMATION_CLOCK_IMPLEMENTATION,
+        PARAM_DEFAULTS.animclockimpl,
+      );
       set('fuzzy', fz.enabled.peek() ? '1' : '0', PARAM_DEFAULTS.fuzzy);
       ss('fmode', fz.mode, PARAM_DEFAULTS.fmode);
       ss('fradius', fz.radius, PARAM_DEFAULTS.fradius);
@@ -3514,6 +3524,9 @@ function setAnimationPlaybackIntent(playing) {
     const receipt = app.setAnimationPlaying(++rustAppShadowSequence, requested);
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
     rustAppShadowDiagnostics.animationPlaybackDispatches += 1;
+    if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
+      animationClockDiagnostics.dispatches += 1;
+    }
     animating_sig.set(Boolean(receipt.playing));
     refreshAppShadowSnapshot();
     return Boolean(receipt.playing);
@@ -3534,6 +3547,9 @@ function toggleAnimationPlaybackIntent() {
     const receipt = app.toggleAnimationPlaying(++rustAppShadowSequence);
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
     rustAppShadowDiagnostics.animationPlaybackDispatches += 1;
+    if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
+      animationClockDiagnostics.dispatches += 1;
+    }
     animating_sig.set(Boolean(receipt.playing));
     refreshAppShadowSnapshot();
     return Boolean(receipt.playing);
@@ -4308,6 +4324,112 @@ let animationPoseBlocked = false;
 let animationPoseBlockGeneration = 0;
 let animInFlight = false;
 let lastAnimationUiAt = -Infinity;
+const animationClockPacket = new Float64Array(3);
+const animationClockDiagnostics = {
+  implementation: ANIMATION_CLOCK_IMPLEMENTATION,
+  state: ANIMATION_CLOCK_IMPLEMENTATION === 'js' ? 'browser' : 'awaiting-model',
+  synchronizations: 0,
+  dispatches: 0,
+  samples: 0,
+  comparisons: 0,
+  mismatches: 0,
+  maximumError: 0,
+  authorityWrites: 0,
+  fallbackWrites: 0,
+  errors: 0,
+  lastContext: null,
+  lastError: null,
+};
+globalThis.__hyperscopeAnimationClockDiagnostics = animationClockDiagnostics;
+
+function currentAnimationClipRange() {
+  const timeMin = Number(meshInfo?.time_min);
+  const duration = Number(meshInfo?.duration);
+  if (!Number.isFinite(timeMin) || !Number.isFinite(duration) || duration <= 0) return null;
+  return { timeMin, duration };
+}
+
+function synchronizeRustAnimationClockFromBrowser(context) {
+  if (ANIMATION_CLOCK_IMPLEMENTATION === 'js') return false;
+  const range = currentAnimationClipRange();
+  if (!range) return false;
+  try {
+    const app = ensureRustAppShadow('animation-clock');
+    const receipt = app.setAnimationClock(
+      ++rustAppShadowSequence,
+      animating_sig.peek(),
+      animTime - range.timeMin,
+      presentationAnimationSpeed,
+    );
+    rustAppShadowDiagnostics.lastCommit = receipt.commit;
+    animationClockDiagnostics.synchronizations += 1;
+    animationClockDiagnostics.lastContext = context;
+    animationClockDiagnostics.state = ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+      ? 'authoritative'
+      : 'shadowing';
+    return true;
+  } catch (error) {
+    animationClockDiagnostics.errors += 1;
+    animationClockDiagnostics.lastError = error?.message || String(error);
+    animationClockDiagnostics.state = 'error';
+    return false;
+  }
+}
+
+function readRustAnimationSample(context) {
+  if (ANIMATION_CLOCK_IMPLEMENTATION === 'js' || !rustAppShadow) return false;
+  const range = currentAnimationClipRange();
+  if (!range) return false;
+  try {
+    rustAppShadow.writeAnimationSample(range.timeMin, range.duration, animationClockPacket);
+    if (!animationClockPacket.every(Number.isFinite)) {
+      throw new Error('Rust animation sample is non-finite');
+    }
+    animationClockDiagnostics.samples += 1;
+    animationClockDiagnostics.lastContext = context;
+    return true;
+  } catch (error) {
+    animationClockDiagnostics.errors += 1;
+    animationClockDiagnostics.lastError = error?.message || String(error);
+    animationClockDiagnostics.state = 'error';
+    return false;
+  }
+}
+
+function compareRustAnimationSample(context) {
+  if (!readRustAnimationSample(context)) return false;
+  const playingError = (animationClockPacket[0] >= 0.5) === animating ? 0 : Infinity;
+  const timeError = Math.abs(animationClockPacket[1] - animTime);
+  const speedError = Math.abs(animationClockPacket[2] - presentationAnimationSpeed);
+  const error = Math.max(playingError, timeError, speedError);
+  animationClockDiagnostics.comparisons += 1;
+  animationClockDiagnostics.maximumError = Math.max(
+    animationClockDiagnostics.maximumError,
+    error,
+  );
+  if (error > 2e-6) {
+    animationClockDiagnostics.mismatches += 1;
+    animationClockDiagnostics.lastError =
+      `${context}: time ${timeError}, speed ${speedError}, playing ${playingError}`;
+    return false;
+  }
+  animationClockDiagnostics.state = 'shadowing';
+  return true;
+}
+
+function applyRustAnimationSample(context) {
+  if (!readRustAnimationSample(context)) {
+    animationClockDiagnostics.fallbackWrites += 1;
+    return false;
+  }
+  const playing = animationClockPacket[0] >= 0.5;
+  if (animating_sig.peek() !== playing) animating_sig.set(playing);
+  animTime = animationClockPacket[1];
+  presentationAnimationSpeed = animationClockPacket[2];
+  animationClockDiagnostics.authorityWrites += 1;
+  animationClockDiagnostics.state = 'authoritative';
+  return true;
+}
 const ANIMATION_UI_INTERVAL_MS = 50;
 let currentInstances = null;
 let currentFaceNodes = new Int32Array(0);
@@ -6560,6 +6682,9 @@ async function selectAnimationIndex(idx) {
     timeSlider.step = (result.time_max - result.time_min) / 200;
     timeSlider.value = result.time_min;
     $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
+    if (!RUST_PRESENTATION_ENABLED || !rustPresentationSnapshot) {
+      synchronizeRustAnimationClockFromBrowser('clip-switch');
+    }
 
     const skinResp = await workerCall('get_skinning_data', {});
     if (blockGeneration !== animationPoseBlockGeneration) return;
@@ -6620,6 +6745,31 @@ $('time').addEventListener('input', () => {
   $('time-v').textContent = parseFloat($('time').value).toFixed(2);
   if (!animating) {
     animTime = parseFloat($('time').value);
+    if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
+      const range = currentAnimationClipRange();
+      if (range) {
+        try {
+          const app = ensureRustAppShadow('animation-clock-seek');
+          const receipt = app.seekAnimation(
+            ++rustAppShadowSequence,
+            animTime - range.timeMin,
+          );
+          rustAppShadowDiagnostics.lastCommit = receipt.commit;
+          animationClockDiagnostics.dispatches += 1;
+          if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
+            applyRustAnimationSample('seek');
+          } else {
+            compareRustAnimationSample('seek');
+          }
+        } catch (error) {
+          animationClockDiagnostics.errors += 1;
+          animationClockDiagnostics.lastError = error?.message || String(error);
+          if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
+            animationClockDiagnostics.fallbackWrites += 1;
+          }
+        }
+      }
+    }
     rebaseAnimationPoseContinuity();
     tickAnimation(animTime, animationPoseClockSeconds);
     debouncedLodRecompute();
@@ -8437,11 +8587,26 @@ function frame(ts) {
   // first synchronizes that edited view back into the controller.
   if (!patchLab.active) tickRustPresentation(deltaSeconds, ts, appFrame);
 
+  let rustAnimationClockReady = false;
+  let rustAnimationWrapped = false;
+  if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+      && !patchLab.active && gpuSkinned && meshInfo) {
+    const previousAnimationTime = animTime;
+    rustAnimationClockReady = applyRustAnimationSample('frame');
+    if (rustAnimationClockReady && animating) {
+      rustAnimationWrapped = presentationAnimationSpeed >= 0
+        ? animTime + 1e-12 < previousAnimationTime
+        : animTime - 1e-12 > previousAnimationTime;
+    }
+  }
+
   if (animating && !patchLab.active && gpuSkinned && meshInfo) {
     const duration = Number(meshInfo.duration) || 0;
     const timeMin = Number(meshInfo.time_min) || 0;
     animationPoseClockSeconds += deltaSeconds;
-    if (duration > 0) {
+    if (rustAnimationClockReady) {
+      if (rustAnimationWrapped) rebaseAnimationPoseContinuity();
+    } else if (duration > 0) {
       const unwrappedOffset = animTime - timeMin + deltaSeconds * presentationAnimationSpeed;
       if (unwrappedOffset >= duration || unwrappedOffset < 0) {
         rebaseAnimationPoseContinuity();
@@ -8455,6 +8620,9 @@ function frame(ts) {
       $('time-v').textContent = animTime.toFixed(2);
     }
     tickAnimation(animTime, animationPoseClockSeconds);
+    if (ANIMATION_CLOCK_IMPLEMENTATION === 'shadow') {
+      compareRustAnimationSample('frame');
+    }
     // The accepted renderer-pose callback schedules LOD from its exact stamped
     // pose. Do not independently sample this RAF clock here.
   }
@@ -9344,6 +9512,9 @@ async function finishModelUpload(
     meshInfo.duration = 0;
   }
   gpuSkinned = modelHasAnimations;
+  if (gpuSkinned && (!RUST_PRESENTATION_ENABLED || !rustPresentationSnapshot)) {
+    synchronizeRustAnimationClockFromBrowser('primary-model');
+  }
   if (gpuSkinned) tickAnimation(animTime, animationPoseClockSeconds);
   if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
     void applyPresentationAnimationState(rustPresentationSnapshot);

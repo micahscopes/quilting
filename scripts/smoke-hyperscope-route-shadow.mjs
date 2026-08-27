@@ -24,6 +24,8 @@ assert.equal(specs.find(spec => spec.key === 'adaptiveshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'animclockimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'animclockimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'aim').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'aim').defaultValue, '0');
 assert.equal(specs.find(spec => spec.key === 'selasset').kind, 'optional_uuid');
@@ -164,6 +166,27 @@ for (const selectionDefaultStep of [
   assert.ok(
     browserSource.includes(selectionDefaultStep),
     `browser selection default is missing ${selectionDefaultStep}`,
+  );
+}
+for (const animationClockDefaultStep of [
+  "implementationFromRoute(\n  initialBrowserParams, 'animclockimpl', 'js',\n)",
+  "animclockimpl: 'js'",
+]) {
+  assert.ok(
+    browserSource.includes(animationClockDefaultStep),
+    `browser animation-clock default is missing ${animationClockDefaultStep}`,
+  );
+}
+for (const animationClockAuthorityStep of [
+  "synchronizeRustAnimationClockFromBrowser('primary-model')",
+  "compareRustAnimationSample('frame')",
+  "applyRustAnimationSample('frame')",
+  'rustAppShadow.writeAnimationSample(',
+  "ANIMATION_CLOCK_IMPLEMENTATION === 'rust'",
+]) {
+  assert.ok(
+    browserSource.includes(animationClockAuthorityStep),
+    `browser animation-clock adapter is missing ${animationClockAuthorityStep}`,
   );
 }
 for (const navigationAuthorityStep of [

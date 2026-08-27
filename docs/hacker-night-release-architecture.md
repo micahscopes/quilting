@@ -182,7 +182,7 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 79 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 80 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
@@ -327,7 +327,12 @@ The first application boundary is now explicit:
   exposes atomic clock/seek/speed actions and a fixed three-`f64` write packet,
   so a high-rate browser parity lane need not allocate or serialize a frame
   object. Browser clip wrapping remains the incumbent until that lane is
-  measured and cut over.
+  measured and cut over. `animclockimpl=js|shadow|rust` is that independent
+  rollback boundary; the default remains `js`. Live ordinary-horse evidence
+  recorded 416 shadow comparisons with zero mismatches and `9.45e-14` maximum
+  error, then 432 Rust authority writes with no fallback or errors, including
+  pause and seek. Reverse playback, presentation cue switching, and background
+  cadence remain explicit cutover gates.
   Version 0.9 records whether an asset request is independent or replaces the
   primary scene. A 0.8 trace keeps its historical per-asset meaning; it cannot
   smuggle a `primary_scene` request into the older schema.

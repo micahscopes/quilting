@@ -101,6 +101,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("lodratio", "2", LodRatio),
     spec!("animate", "1", Toggle),
     spec!("anim", "-1", Number),
+    spec!("animclockimpl", "js", Implementation),
     spec!("fuzzy", "0", Toggle),
     spec!("fmode", "1", Number),
     spec!("fradius", "11", Number),
