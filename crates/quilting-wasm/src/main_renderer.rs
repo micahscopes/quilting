@@ -1418,6 +1418,9 @@ struct BatchUpdateStats {
     retain_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
     balance_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
     bucket_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    vertex_lod_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    render_node_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    group_member_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
     upload_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
 }
 
@@ -1428,6 +1431,9 @@ struct BatchUpdateTimingSnapshot {
     retain_ms: TimingDistributionSnapshot,
     balance_ms: TimingDistributionSnapshot,
     bucket_ms: TimingDistributionSnapshot,
+    vertex_lod_ms: TimingDistributionSnapshot,
+    render_node_ms: TimingDistributionSnapshot,
+    group_member_ms: TimingDistributionSnapshot,
     upload_ms: TimingDistributionSnapshot,
 }
 
@@ -1437,6 +1443,9 @@ impl BatchUpdateStats {
         self.retain_ms.clear();
         self.balance_ms.clear();
         self.bucket_ms.clear();
+        self.vertex_lod_ms.clear();
+        self.render_node_ms.clear();
+        self.group_member_ms.clear();
         self.upload_ms.clear();
     }
 
@@ -1446,6 +1455,9 @@ impl BatchUpdateStats {
             retain_ms: self.retain_ms.snapshot(),
             balance_ms: self.balance_ms.snapshot(),
             bucket_ms: self.bucket_ms.snapshot(),
+            vertex_lod_ms: self.vertex_lod_ms.snapshot(),
+            render_node_ms: self.render_node_ms.snapshot(),
+            group_member_ms: self.group_member_ms.snapshot(),
             upload_ms: self.upload_ms.snapshot(),
         }
     }
@@ -6952,6 +6964,7 @@ fn rebuild_legacy_batch_groups(
     destination: LegacyBatchDestination,
 ) {
     let nf = state.num_faces;
+    let vertex_lod_started_ms = browser_now_ms();
     if let Some(topology) = state.lod_topology.as_ref() {
         batch::rebuild_resident_vertex_lods(
             &state.resident_face_lods,
@@ -6973,7 +6986,17 @@ fn rebuild_legacy_batch_groups(
             ];
         }
     }
+    state
+        .batch_update_stats
+        .vertex_lod_ms
+        .record(browser_now_ms() - vertex_lod_started_ms);
+    let render_node_started_ms = browser_now_ms();
     rebuild_face_render_nodes(state);
+    state
+        .batch_update_stats
+        .render_node_ms
+        .record(browser_now_ms() - render_node_started_ms);
+    let group_member_started_ms = browser_now_ms();
     let groups = match destination {
         LegacyBatchDestination::Live => &mut state.batch_groups,
         LegacyBatchDestination::Baseline => &mut state.baseline_batch_groups,
@@ -6987,6 +7010,10 @@ fn rebuild_legacy_batch_groups(
         initial,
         groups,
     );
+    state
+        .batch_update_stats
+        .group_member_ms
+        .record(browser_now_ms() - group_member_started_ms);
 }
 
 /// Reuse the complete root grouping across camera/animation-only adaptive
