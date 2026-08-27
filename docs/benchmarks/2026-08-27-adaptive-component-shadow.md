@@ -55,6 +55,24 @@ fully cached plan measured 50.8 ms. The component result above was cold, so it
 is evidence for the intended frontier-size reduction, not a generalized
 frame-time claim.
 
+The retained-cache follow-up reran the identical request without changing the
+published view. Both component identities hit exactly:
+
+| Repeated component phase | Value |
+| --- | ---: |
+| Component planning | 10.8 ms |
+| Frontier lookup | 0.0 ms, cache hit |
+| Reconciliation lookup | 0.2 ms, cache hit |
+| Component overlay | 1.3 ms |
+| Shadow-only full-plan comparison | 17.7 ms |
+| Measured shadow total | 30.0 ms |
+
+The corresponding complete cached path measured 32.7 ms. Excluding the
+deliberate 17.7 ms complete-result comparison, the repeated component phases
+cost 12.3 ms. Cache counters ended at one hit and one miss for both frontier
+and reconciliation, with two exact component-publication matches and zero
+mismatches.
+
 Enabling and disabling the observation gate produced identical viewport PNGs:
 
 ```text

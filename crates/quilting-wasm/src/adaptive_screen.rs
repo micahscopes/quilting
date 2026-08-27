@@ -390,6 +390,10 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     component_shadow_attempts: u64,
     component_shadow_matches: u64,
     component_shadow_mismatches: u64,
+    component_shadow_frontier_cache_hits: u64,
+    component_shadow_frontier_cache_misses: u64,
+    component_shadow_reconciliation_cache_hits: u64,
+    component_shadow_reconciliation_cache_misses: u64,
     component_shadow_last_error: Option<&'a str>,
     component_shadow_last: Option<AdaptiveComponentShadowComparison>,
     retained_shadow_enabled: bool,
@@ -481,6 +485,8 @@ struct AdaptiveComponentShadowComparison {
     unaffected_faces: u64,
     complete_leaves: u64,
     component_leaves: u64,
+    frontier_reused: bool,
+    reconciliation_reused: bool,
     diagnostic_match: bool,
     selected_faces_match: bool,
     leaf_mismatches: u64,
@@ -510,7 +516,9 @@ struct AdaptiveComponentShadow {
     last: Option<AdaptiveComponentShadowComparison>,
     plan: AdaptiveScreenComponentPlan,
     frontier: Option<ScreenMeshLeafFrontier>,
-    resident: Option<ScreenLeafLodResult>,
+    frontier_cache_hits: u64,
+    frontier_cache_misses: u64,
+    reconciliation_cache: AdaptiveReconciliationCache,
     complete_lod_scratch: ScreenMeshLeafLodScratch,
     component_lod_scratch: ScreenMeshLeafLodScratch,
     overlay: AdaptiveRenderOverlay,
@@ -524,7 +532,9 @@ impl AdaptiveComponentShadow {
             self.last_error = None;
             self.last = None;
             self.frontier = None;
-            self.resident = None;
+            self.frontier_cache_hits = 0;
+            self.frontier_cache_misses = 0;
+            self.reconciliation_cache = AdaptiveReconciliationCache::default();
         }
         changed
     }
@@ -565,8 +575,6 @@ impl AdaptiveComponentShadow {
         self.attempts = self.attempts.saturating_add(1);
         self.last_error = None;
         self.last = None;
-        self.frontier = None;
-        self.resident = None;
         let total_start = browser_now_ms();
         let plan_start = browser_now_ms();
         if let Err(error) = plan_adaptive_screen_components_into(
@@ -581,26 +589,47 @@ impl AdaptiveComponentShadow {
         }
         let plan_ms = browser_now_ms() - plan_start;
         let frontier_start = browser_now_ms();
-        let component_frontier = match ScreenMeshLeafFrontier::build(&self.plan.mesh.leaves, topology)
-        {
-            Ok(frontier) => frontier,
-            Err(error) => {
-                self.mismatches = self.mismatches.saturating_add(1);
-                self.last_error = Some(error.to_string());
-                return;
-            }
+        let frontier_reused = self
+            .frontier
+            .as_ref()
+            .is_some_and(|frontier| frontier.leaves() == self.plan.mesh.leaves.as_slice());
+        if frontier_reused {
+            self.frontier_cache_hits = self.frontier_cache_hits.saturating_add(1);
+        } else {
+            let component_frontier = match ScreenMeshLeafFrontier::build(
+                &self.plan.mesh.leaves,
+                topology,
+            ) {
+                Ok(frontier) => frontier,
+                Err(error) => {
+                    self.mismatches = self.mismatches.saturating_add(1);
+                    self.last_error = Some(error.to_string());
+                    return;
+                }
+            };
+            self.frontier = Some(component_frontier);
+            self.reconciliation_cache.invalidate();
+            self.frontier_cache_misses = self.frontier_cache_misses.saturating_add(1);
+        }
+        let Some(component_frontier) = self.frontier.as_ref() else {
+            self.mismatches = self.mismatches.saturating_add(1);
+            self.last_error = Some("adaptive component shadow frontier disappeared".into());
+            return;
         };
         let frontier_ms = browser_now_ms() - frontier_start;
         let reconcile_start = browser_now_ms();
-        let component_resident = match component_frontier.reconcile_lods(
-            &self.plan.mesh.requested_lods,
-            max_face_edge_ratio,
-            max_atlas_lod,
-        ) {
+        let (component_resident, _, reconciliation_reused) = match self
+            .reconciliation_cache
+            .resolve(
+                component_frontier,
+                &self.plan.mesh.requested_lods,
+                max_face_edge_ratio,
+                max_atlas_lod,
+            ) {
             Ok(resident) => resident,
             Err(error) => {
                 self.mismatches = self.mismatches.saturating_add(1);
-                self.last_error = Some(error.to_string());
+                self.last_error = Some(error);
                 return;
             }
         };
@@ -679,6 +708,8 @@ impl AdaptiveComponentShadow {
             unaffected_faces: source_faces.saturating_sub(component_faces) as u64,
             complete_leaves: complete_plan.leaves.len() as u64,
             component_leaves: self.plan.mesh.leaves.len() as u64,
+            frontier_reused,
+            reconciliation_reused,
             diagnostic_match,
             selected_faces_match,
             leaf_mismatches: leaf_mismatches as u64,
@@ -700,8 +731,6 @@ impl AdaptiveComponentShadow {
         if !plan_exact {
             self.mismatches = self.mismatches.saturating_add(1);
         }
-        self.frontier = Some(component_frontier);
-        self.resident = Some(component_resident);
         self.last = Some(comparison);
     }
 
@@ -730,7 +759,7 @@ impl AdaptiveComponentShadow {
             self.last_error = Some("adaptive component shadow frontier disappeared".into());
             return;
         };
-        let Some(resident) = self.resident.as_ref() else {
+        let Some(resident) = self.reconciliation_cache.result.as_ref() else {
             self.mismatches = self.mismatches.saturating_add(1);
             self.last_error = Some("adaptive component shadow reconciliation disappeared".into());
             return;
@@ -1792,6 +1821,16 @@ impl AdaptivePickedRuntime {
             component_shadow_attempts: self.component_shadow.attempts,
             component_shadow_matches: self.component_shadow.matches,
             component_shadow_mismatches: self.component_shadow.mismatches,
+            component_shadow_frontier_cache_hits: self.component_shadow.frontier_cache_hits,
+            component_shadow_frontier_cache_misses: self.component_shadow.frontier_cache_misses,
+            component_shadow_reconciliation_cache_hits: self
+                .component_shadow
+                .reconciliation_cache
+                .hits,
+            component_shadow_reconciliation_cache_misses: self
+                .component_shadow
+                .reconciliation_cache
+                .misses,
             component_shadow_last_error: self.component_shadow.last_error.as_deref(),
             component_shadow_last: self.component_shadow.last,
             retained_shadow_enabled: self.retained_shadow_enabled,
@@ -2710,6 +2749,56 @@ mod tests {
         assert!(comparison.plan_exact);
         assert!(comparison.overlay_compared);
         assert!(comparison.exact);
+
+        runtime.commit_publication();
+        let reused_groups = runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                1,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((4, 1)),
+                &[Some(resident); 3],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                0,
+                true,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+        assert!(reused_groups);
+        runtime
+            .stage_pending_overlay(
+                0,
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                resident,
+            )
+            .unwrap();
+        let repeated = runtime.snapshot();
+        assert_eq!(repeated.component_shadow_state, "match");
+        assert_eq!(repeated.component_shadow_attempts, 2);
+        assert_eq!(repeated.component_shadow_matches, 2);
+        assert_eq!(repeated.component_shadow_mismatches, 0);
+        assert_eq!(repeated.component_shadow_frontier_cache_hits, 1);
+        assert_eq!(repeated.component_shadow_frontier_cache_misses, 1);
+        assert_eq!(repeated.component_shadow_reconciliation_cache_hits, 1);
+        assert_eq!(repeated.component_shadow_reconciliation_cache_misses, 1);
+        let repeated_comparison = repeated.component_shadow_last.unwrap();
+        assert!(repeated_comparison.frontier_reused);
+        assert!(repeated_comparison.reconciliation_reused);
+        assert!(repeated_comparison.exact);
     }
 
     #[wasm_bindgen_test]
