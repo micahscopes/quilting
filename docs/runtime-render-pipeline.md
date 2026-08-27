@@ -154,6 +154,14 @@ revision. A conformal uniform change does not rebuild the prepared 52-float
 record, but it still participates in the later patch evaluation and the batch
 revision that invalidates visibility.
 
+The opt-in render shadow compares more than aggregate workload. Expected
+commands and actual backend submissions stream the exact pass, batch index,
+geometry, index count, and instance count through the same deterministic
+rolling fingerprint. This catches reordered or misclassified draws without a
+per-frame trace allocation or GPU readback. Comparison remains in Rust; the
+bounded diagnostic snapshot exposes the 64-bit value as hexadecimal text so
+the browser never rounds it through JavaScript's number representation.
+
 A negative visibility result must mean “the complete posed rational patch is
 outside the current guarded frustum.” Invalid bounds, a denominator region
 touching zero, or a source bound containing the Möbius pole all survive. The

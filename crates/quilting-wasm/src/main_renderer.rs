@@ -37,7 +37,7 @@ use quilting_core::batch;
 use quilting_core::instance_layout;
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, FocusFieldPacket, PbrDrawClass,
-    RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderGeometry,
+    RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderGeometry, RenderPass,
     RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
@@ -7188,7 +7188,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 let mut active_vertex_state: Option<&RenderBatch> = None;
 
                 // Pass 1: opaque non-transmission
-                for batch in render_batches {
+                for (batch_index, batch) in render_batches.iter().enumerate() {
                     let (material_slot, mat) = pbr_material_for_index(
                         &state.materials,
                         &default_mat,
@@ -7246,6 +7246,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     }
                     record_indexed_submission(
                         &mut submission_stats,
+                        batch_index,
+                        RenderPass::PbrOpaque,
                         RenderGeometry::Triangles,
                         batch.mesh.num_tri_indices,
                         batch.mesh.num_instances,
@@ -7395,7 +7397,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 // Pass 2: transmission + transparent
                 active_material = None;
                 active_vertex_state = None;
-                for batch in render_batches {
+                for (batch_index, batch) in render_batches.iter().enumerate() {
                     let (material_slot, mat) = pbr_material_for_index(
                         &state.materials,
                         &default_mat,
@@ -7467,6 +7469,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     }
                     record_indexed_submission(
                         &mut submission_stats,
+                        batch_index,
+                        RenderPass::PbrTransparent,
                         RenderGeometry::Triangles,
                         batch.mesh.num_tri_indices,
                         batch.mesh.num_instances,

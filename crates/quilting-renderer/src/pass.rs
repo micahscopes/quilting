@@ -1,7 +1,7 @@
 //! Render passes: configure GL state and issue draw calls per render mode.
 
 use glow::HasContext;
-use quilting_core::render::{RenderGeometry, RenderSubmissionStats};
+use quilting_core::render::{RenderGeometry, RenderPass, RenderSubmissionStats};
 
 use crate::buffer::{MeshBuffers, MeshDraw, VertexUniformBuf, WireUniformBuf};
 use crate::shader::Programs;
@@ -199,11 +199,12 @@ fn draw_batches(
     camera: &Camera,
     batches: &[RenderBatch],
     vtx_ubo: &VertexUniformBuf,
+    pass: RenderPass,
     geometry: RenderGeometry,
 ) -> RenderSubmissionStats {
     let mut stats = RenderSubmissionStats::default();
     let mut vertex_state = None;
-    for batch in batches {
+    for (batch_index, batch) in batches.iter().enumerate() {
         apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
         upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
 
@@ -231,7 +232,14 @@ fn draw_batches(
                 batch.mesh.num_instances,
             );
         }
-        record_indexed_submission(&mut stats, geometry, count, batch.mesh.num_instances);
+        record_indexed_submission(
+            &mut stats,
+            batch_index,
+            pass,
+            geometry,
+            count,
+            batch.mesh.num_instances,
+        );
     }
     stats
 }
@@ -242,13 +250,19 @@ fn draw_batches(
 /// submission site.
 pub fn record_indexed_submission(
     stats: &mut RenderSubmissionStats,
+    batch_index: usize,
+    pass: RenderPass,
     geometry: RenderGeometry,
     index_count: i32,
     instance_count: i32,
 ) {
-    match (u32::try_from(index_count), u32::try_from(instance_count)) {
-        (Ok(index_count), Ok(instance_count)) => {
-            stats.record_indexed_draw(geometry, index_count, instance_count);
+    match (
+        u32::try_from(batch_index),
+        u32::try_from(index_count),
+        u32::try_from(instance_count),
+    ) {
+        (Ok(batch_index), Ok(index_count), Ok(instance_count)) => {
+            stats.record_patch_draw(batch_index, pass, geometry, index_count, instance_count);
         }
         _ => stats.record_invalid_draw(),
     }
@@ -285,6 +299,7 @@ pub fn render_frame(
             camera,
             batches,
             vtx_ubo,
+            RenderPass::PbrOpaque,
             RenderGeometry::Triangles,
         ));
     }
@@ -300,6 +315,11 @@ pub fn render_frame(
             camera,
             batches,
             vtx_ubo,
+            if mode == RenderMode::Lod {
+                RenderPass::Lod
+            } else {
+                RenderPass::Matcap
+            },
             RenderGeometry::Triangles,
         ));
     }
@@ -319,6 +339,7 @@ pub fn render_frame(
             camera,
             batches,
             vtx_ubo,
+            RenderPass::Wire,
             RenderGeometry::Lines,
         ));
     }
@@ -334,6 +355,7 @@ pub fn render_frame(
             camera,
             batches,
             vtx_ubo,
+            RenderPass::Normals,
             RenderGeometry::Triangles,
         ));
     }
@@ -349,6 +371,7 @@ pub fn render_frame(
             camera,
             batches,
             vtx_ubo,
+            RenderPass::Stretch,
             RenderGeometry::Triangles,
         ));
     }
@@ -416,10 +439,38 @@ mod tests {
     #[test]
     fn signed_submission_counts_are_validated_before_accounting() {
         let mut stats = RenderSubmissionStats::default();
-        record_indexed_submission(&mut stats, RenderGeometry::Triangles, 12, 2);
-        record_indexed_submission(&mut stats, RenderGeometry::Lines, 8, 0);
-        record_indexed_submission(&mut stats, RenderGeometry::Triangles, -1, 2);
-        record_indexed_submission(&mut stats, RenderGeometry::Triangles, 12, -1);
+        record_indexed_submission(
+            &mut stats,
+            0,
+            RenderPass::Matcap,
+            RenderGeometry::Triangles,
+            12,
+            2,
+        );
+        record_indexed_submission(
+            &mut stats,
+            1,
+            RenderPass::Wire,
+            RenderGeometry::Lines,
+            8,
+            0,
+        );
+        record_indexed_submission(
+            &mut stats,
+            2,
+            RenderPass::Normals,
+            RenderGeometry::Triangles,
+            -1,
+            2,
+        );
+        record_indexed_submission(
+            &mut stats,
+            3,
+            RenderPass::Stretch,
+            RenderGeometry::Triangles,
+            12,
+            -1,
+        );
 
         assert_eq!(stats.draw_calls, 4);
         assert_eq!(stats.zero_instance_draw_calls, 1);

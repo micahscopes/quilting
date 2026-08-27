@@ -7,7 +7,7 @@
 
 use crate::batch::{RenderBatchKey, RenderBatchMember};
 use crate::permutation::perm_sign;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
@@ -274,6 +274,17 @@ pub struct RenderSubmissionStats {
     pub triangles: u64,
     /// Line primitives implied by valid index and instance counts.
     pub lines: u64,
+    /// Deterministic rolling fingerprint of ordered patch submissions. Unlike
+    /// the aggregate counters, this distinguishes pass and batch reordering.
+    #[serde(serialize_with = "serialize_u64_hex")]
+    pub draw_sequence_hash: u64,
+}
+
+fn serialize_u64_hex<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("{value:016x}"))
 }
 
 /// Field-level difference between expected and actual submission work. Keeping
@@ -288,6 +299,7 @@ pub struct RenderSubmissionMismatch {
     pub submitted_instances: bool,
     pub triangles: bool,
     pub lines: bool,
+    pub draw_sequence: bool,
 }
 
 impl RenderSubmissionMismatch {
@@ -300,6 +312,7 @@ impl RenderSubmissionMismatch {
             submitted_instances: expected.submitted_instances != actual.submitted_instances,
             triangles: expected.triangles != actual.triangles,
             lines: expected.lines != actual.lines,
+            draw_sequence: expected.draw_sequence_hash != actual.draw_sequence_hash,
         }
     }
 
@@ -424,9 +437,47 @@ impl RenderParityObserver {
 }
 
 impl RenderSubmissionStats {
+    /// Record one valid indexed patch draw with its exact logical command
+    /// identity. This is the allocation-free execution oracle used to compare
+    /// backend submission order with [`RenderFrame::commands`].
+    pub fn record_patch_draw(
+        &mut self,
+        batch_index: u32,
+        pass: RenderPass,
+        geometry: RenderGeometry,
+        index_count: u32,
+        instance_count: u32,
+    ) {
+        self.append_draw_fingerprint(draw_fingerprint(
+            batch_index,
+            pass,
+            geometry,
+            index_count,
+            instance_count,
+        ));
+        self.record_indexed_draw_counts(geometry, index_count, instance_count);
+    }
+
     /// Record one valid indexed patch draw. Incomplete trailing indices do not
-    /// form a primitive, matching indexed triangle/line assembly.
+    /// form a primitive, matching indexed triangle/line assembly. Callers that
+    /// know the logical pass and batch should prefer [`Self::record_patch_draw`].
     pub fn record_indexed_draw(
+        &mut self,
+        geometry: RenderGeometry,
+        index_count: u32,
+        instance_count: u32,
+    ) {
+        self.append_draw_fingerprint(draw_fingerprint(
+            u32::MAX,
+            RenderPass::Matcap,
+            geometry,
+            index_count,
+            instance_count,
+        ));
+        self.record_indexed_draw_counts(geometry, index_count, instance_count);
+    }
+
+    fn record_indexed_draw_counts(
         &mut self,
         geometry: RenderGeometry,
         index_count: u32,
@@ -457,13 +508,25 @@ impl RenderSubmissionStats {
     /// Record a draw call whose signed backend counts could not be represented
     /// by the shared non-negative contract.
     pub fn record_invalid_draw(&mut self) {
+        self.append_draw_fingerprint(INVALID_DRAW_FINGERPRINT);
         self.draw_calls = self.draw_calls.saturating_add(1);
         self.invalid_draw_calls = self.invalid_draw_calls.saturating_add(1);
+    }
+
+    fn append_draw_fingerprint(&mut self, fingerprint: u64) {
+        self.draw_sequence_hash = self
+            .draw_sequence_hash
+            .wrapping_mul(DRAW_SEQUENCE_BASE)
+            .wrapping_add(fingerprint);
     }
 
     /// Accumulate another submission interval without allowing diagnostic
     /// counters to wrap during a long-running session.
     pub fn merge(&mut self, other: Self) {
+        self.draw_sequence_hash = self
+            .draw_sequence_hash
+            .wrapping_mul(wrapping_pow(DRAW_SEQUENCE_BASE, other.draw_calls))
+            .wrapping_add(other.draw_sequence_hash);
         self.draw_calls = self.draw_calls.saturating_add(other.draw_calls);
         self.zero_instance_draw_calls = self
             .zero_instance_draw_calls
@@ -577,8 +640,8 @@ impl RenderFrame {
             let RenderCommand::DrawPatches {
                 batch_index,
                 instance_count,
+                pass,
                 geometry,
-                ..
             } = *command
             else {
                 continue;
@@ -591,10 +654,64 @@ impl RenderFrame {
                 RenderGeometry::Triangles => batch.triangle_index_count,
                 RenderGeometry::Lines => batch.line_index_count,
             };
-            stats.record_indexed_draw(geometry, index_count, instance_count);
+            stats.record_patch_draw(
+                batch_index,
+                pass,
+                geometry,
+                index_count,
+                instance_count,
+            );
         }
         Ok(stats)
     }
+}
+
+const DRAW_SEQUENCE_BASE: u64 = 0x9e37_79b1_85eb_ca87;
+const INVALID_DRAW_FINGERPRINT: u64 = 0xd1ff_ffff_ffff_ffff;
+
+fn draw_fingerprint(
+    batch_index: u32,
+    pass: RenderPass,
+    geometry: RenderGeometry,
+    index_count: u32,
+    instance_count: u32,
+) -> u64 {
+    let pass = match pass {
+        RenderPass::PbrOpaque => 0_u64,
+        RenderPass::PbrTransparent => 1,
+        RenderPass::Matcap => 2,
+        RenderPass::Wire => 3,
+        RenderPass::Normals => 4,
+        RenderPass::Lod => 5,
+        RenderPass::Stretch => 6,
+    };
+    let geometry = match geometry {
+        RenderGeometry::Triangles => 0_u64,
+        RenderGeometry::Lines => 1,
+    };
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in [0xd1, pass as u8, geometry as u8]
+        .into_iter()
+        .chain(batch_index.to_le_bytes())
+        .chain(index_count.to_le_bytes())
+        .chain(instance_count.to_le_bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn wrapping_pow(mut base: u64, mut exponent: u64) -> u64 {
+    let mut result = 1_u64;
+    while exponent != 0 {
+        if exponent & 1 != 0 {
+            result = result.wrapping_mul(base);
+        }
+        base = base.wrapping_mul(base);
+        exponent >>= 1;
+    }
+    result
 }
 
 fn expected_commands(
@@ -989,17 +1106,23 @@ mod tests {
             .commands
             .iter()
             .any(|command| matches!(command, RenderCommand::HighlightFace { .. })));
-        assert_eq!(
-            frame.expected_submission_stats(&scene).unwrap(),
-            RenderSubmissionStats {
-                draw_calls: 3,
-                zero_instance_draw_calls: 1,
-                invalid_draw_calls: 0,
-                submitted_instances: 2,
-                triangles: 4,
-                lines: 0,
-            }
+        let mut expected = RenderSubmissionStats::default();
+        expected.record_patch_draw(0, RenderPass::PbrOpaque, RenderGeometry::Triangles, 6, 1);
+        expected.record_patch_draw(
+            1,
+            RenderPass::PbrTransparent,
+            RenderGeometry::Triangles,
+            6,
+            0,
         );
+        expected.record_patch_draw(
+            2,
+            RenderPass::PbrTransparent,
+            RenderGeometry::Triangles,
+            6,
+            1,
+        );
+        assert_eq!(frame.expected_submission_stats(&scene).unwrap(), expected);
         frame.validate(&scene).unwrap();
     }
 
@@ -1041,17 +1164,12 @@ mod tests {
             frame.commands[8],
             RenderCommand::HighlightFace { face_index: 4 }
         );
-        assert_eq!(
-            frame.expected_submission_stats(&scene).unwrap(),
-            RenderSubmissionStats {
-                draw_calls: 4,
-                zero_instance_draw_calls: 2,
-                invalid_draw_calls: 0,
-                submitted_instances: 2,
-                triangles: 2,
-                lines: 3,
-            }
-        );
+        let mut expected = RenderSubmissionStats::default();
+        expected.record_patch_draw(0, RenderPass::Matcap, RenderGeometry::Triangles, 6, 1);
+        expected.record_patch_draw(1, RenderPass::Matcap, RenderGeometry::Triangles, 6, 0);
+        expected.record_patch_draw(0, RenderPass::Wire, RenderGeometry::Lines, 6, 1);
+        expected.record_patch_draw(1, RenderPass::Wire, RenderGeometry::Lines, 6, 0);
+        assert_eq!(frame.expected_submission_stats(&scene).unwrap(), expected);
     }
 
     #[test]
@@ -1148,16 +1266,40 @@ mod tests {
         stats.record_indexed_draw(RenderGeometry::Triangles, 12, 0);
         stats.record_invalid_draw();
 
+        assert_eq!(stats.draw_calls, 4);
+        assert_eq!(stats.zero_instance_draw_calls, 1);
+        assert_eq!(stats.invalid_draw_calls, 1);
+        assert_eq!(stats.submitted_instances, 5);
+        assert_eq!(stats.triangles, 6);
+        assert_eq!(stats.lines, 8);
+        assert_ne!(stats.draw_sequence_hash, 0);
+
+        let mut prefix = RenderSubmissionStats::default();
+        prefix.record_indexed_draw(RenderGeometry::Triangles, 7, 3);
+        prefix.record_indexed_draw(RenderGeometry::Lines, 8, 2);
+        let mut suffix = RenderSubmissionStats::default();
+        suffix.record_indexed_draw(RenderGeometry::Triangles, 12, 0);
+        suffix.record_invalid_draw();
+        prefix.merge(suffix);
+        assert_eq!(prefix, stats);
+
+        let mut reordered = RenderSubmissionStats::default();
+        reordered.record_indexed_draw(RenderGeometry::Lines, 8, 2);
+        reordered.record_indexed_draw(RenderGeometry::Triangles, 7, 3);
+        reordered.record_indexed_draw(RenderGeometry::Triangles, 12, 0);
+        reordered.record_invalid_draw();
+        assert_ne!(reordered.draw_sequence_hash, stats.draw_sequence_hash);
+        let reordered_mismatch = RenderSubmissionMismatch::between(stats, reordered);
+        assert!(reordered_mismatch.draw_sequence);
+        assert!(!reordered_mismatch.draw_calls);
+        assert!(!reordered_mismatch.submitted_instances);
+        assert!(!reordered_mismatch.triangles);
+        assert!(!reordered_mismatch.lines);
+
+        let serialized = serde_json::to_value(stats).unwrap();
         assert_eq!(
-            stats,
-            RenderSubmissionStats {
-                draw_calls: 4,
-                zero_instance_draw_calls: 1,
-                invalid_draw_calls: 1,
-                submitted_instances: 5,
-                triangles: 6,
-                lines: 8,
-            }
+            serialized["drawSequenceHash"],
+            format!("{:016x}", stats.draw_sequence_hash),
         );
 
         let mut total = RenderSubmissionStats {
