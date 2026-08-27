@@ -125,6 +125,23 @@ pub fn emit_glsl(
     emit_glsl_with_options(module, stage, entry_point, true)
 }
 
+/// Emit a validated Naga module back to standalone WGSL.
+///
+/// This flattens naga-oil imports into source accepted directly by WebGPU's
+/// `createShaderModule`; no compositor directives remain at the device edge.
+pub fn emit_wgsl(module: &naga::Module) -> Result<String, Box<dyn std::error::Error>> {
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(module)?;
+    Ok(naga::back::wgsl::write_string(
+        module,
+        &info,
+        naga::back::wgsl::WriterFlags::empty(),
+    )?)
+}
+
 /// Emit GLSL for direct OpenGL/WebGL use (no coordinate space adjustment).
 ///
 /// Naga's default ADJUST_COORDINATE_SPACE flips Y and remaps Z for WebGPU conventions.
@@ -264,6 +281,16 @@ pub fn compile_lod_pass2_module() -> Result<naga::Module, Box<dyn std::error::Er
     )
     .validate(&module)?;
     Ok(module)
+}
+
+/// Standalone device WGSL for LOD pass one.
+pub fn compile_lod_pass1_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_lod_pass1_module()?)
+}
+
+/// Standalone device WGSL for LOD pass two.
+pub fn compile_lod_pass2_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_lod_pass2_module()?)
 }
 
 /// Compile a fragment shader to GLSL ES 300 for native OpenGL/WebGL
@@ -429,6 +456,25 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .count(),
             5,
         );
+    }
+
+    #[test]
+    fn flattened_lod_compute_wgsl_is_standalone_and_reparseable() {
+        for (entry_point, source) in [
+            ("classify_lod_pass1", compile_lod_pass1_wgsl().unwrap()),
+            ("classify_lod_pass2", compile_lod_pass2_wgsl().unwrap()),
+        ] {
+            assert!(!source.contains("#import"));
+            assert!(!source.contains("#define_import_path"));
+            assert!(source.contains(entry_point));
+            let module = naga::front::wgsl::parse_str(&source).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
     }
 
     #[test]

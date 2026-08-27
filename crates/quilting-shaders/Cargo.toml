@@ -8,5 +8,5 @@ repository.workspace = true
 description = "Modular WGSL shader library for QB surface rendering"
 
 [dependencies]
-naga = { version = "28", features = ["wgsl-in", "glsl-out", "spv-out"] }
+naga = { version = "28", features = ["wgsl-in", "wgsl-out", "glsl-out", "spv-out"] }
 naga_oil = "0.21"
