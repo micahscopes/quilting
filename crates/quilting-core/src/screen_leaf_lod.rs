@@ -129,6 +129,12 @@ pub enum ScreenLeafLodError {
         required: usize,
         maximum: usize,
     },
+    FixedBoundaryPromotion {
+        leaf_index: usize,
+        edge_index: usize,
+        current_lod: u32,
+        required_lod: u32,
+    },
 }
 
 impl std::fmt::Display for ScreenLeafLodError {
@@ -191,6 +197,15 @@ impl std::fmt::Display for ScreenLeafLodError {
             Self::NeighborhoodBudgetExceeded { required, maximum } => write!(
                 formatter,
                 "adaptive source neighborhood needs {required} faces; budget is {maximum}",
+            ),
+            Self::FixedBoundaryPromotion {
+                leaf_index,
+                edge_index,
+                current_lod,
+                required_lod,
+            } => write!(
+                formatter,
+                "adaptive fixed boundary leaf {leaf_index} edge {edge_index} needs LoD {required_lod}, has {current_lod}",
             ),
         }
     }
@@ -1307,6 +1322,27 @@ impl ScreenMeshLeafFrontier {
         )
     }
 
+    /// Reconcile a local frontier while treating caller-flagged leaves as
+    /// immutable observations from an already-reconciled enclosing scene.
+    /// Any promotion that would alter a fixed leaf fails closed instead of
+    /// silently allowing influence to escape the candidate neighborhood.
+    pub fn reconcile_lods_with_fixed_boundary(
+        &self,
+        requested: &[[u32; 3]],
+        fixed: &[bool],
+        max_face_edge_ratio: u32,
+        max_lod: u32,
+    ) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
+        reconcile_mesh_lods_with_fixed_boundary(
+            &self.depths,
+            &self.lines,
+            requested,
+            fixed,
+            max_face_edge_ratio,
+            max_lod,
+        )
+    }
+
     /// Physical-vertex corner overrides used beside the normative edge-density
     /// field. Conforming corners max-reduce all incident edges; a hanging
     /// corner inherits the absolute LoD of the coarser edge containing it.
@@ -1428,6 +1464,7 @@ fn required_local_lod(
 fn reconcile_component(
     component: &[EdgeSpan],
     resident: &mut [[u32; 3]],
+    fixed: Option<&[bool]>,
     max_lod: u32,
 ) -> Result<usize, ScreenLeafLodError> {
     let mut absolute_exponent = 0u8;
@@ -1444,6 +1481,14 @@ fn reconcile_component(
         let required = required_local_lod(absolute_exponent, *span, max_lod)?;
         let current = &mut resident[span.leaf_index][span.edge_index];
         if *current < required {
+            if fixed.is_some_and(|fixed| fixed[span.leaf_index]) {
+                return Err(ScreenLeafLodError::FixedBoundaryPromotion {
+                    leaf_index: span.leaf_index,
+                    edge_index: span.edge_index,
+                    current_lod: *current,
+                    required_lod: required,
+                });
+            }
             *current = required;
             promotions += 1;
         }
@@ -1454,6 +1499,7 @@ fn reconcile_component(
 fn reconcile_line_spans<'a>(
     lines: impl IntoIterator<Item = &'a [EdgeSpan]>,
     resident: &mut [[u32; 3]],
+    fixed: Option<&[bool]>,
     max_lod: u32,
 ) -> Result<usize, ScreenLeafLodError> {
     let mut promotions = 0;
@@ -1466,8 +1512,12 @@ fn reconcile_line_spans<'a>(
                 covered_until = covered_until.max(spans[component_end].end);
                 component_end += 1;
             }
-            promotions +=
-                reconcile_component(&spans[component_start..component_end], resident, max_lod)?;
+            promotions += reconcile_component(
+                &spans[component_start..component_end],
+                resident,
+                fixed,
+                max_lod,
+            )?;
             component_start = component_end;
         }
     }
@@ -1477,25 +1527,29 @@ fn reconcile_line_spans<'a>(
 fn reconcile_lines<K: Ord>(
     lines: &BTreeMap<K, Vec<EdgeSpan>>,
     resident: &mut [[u32; 3]],
+    fixed: Option<&[bool]>,
     max_lod: u32,
 ) -> Result<usize, ScreenLeafLodError> {
-    reconcile_line_spans(lines.values().map(Vec::as_slice), resident, max_lod)
+    reconcile_line_spans(lines.values().map(Vec::as_slice), resident, fixed, max_lod)
 }
 
 fn reconcile_mesh_lines(
     lines: &MeshTopologyLines,
     resident: &mut [[u32; 3]],
+    fixed: Option<&[bool]>,
     max_lod: u32,
 ) -> Result<usize, ScreenLeafLodError> {
     reconcile_line_spans(
         lines.iter().map(|(_, spans)| spans.as_slice()),
         resident,
+        fixed,
         max_lod,
     )
 }
 
 fn apply_grading(
     resident: &mut [[u32; 3]],
+    fixed: Option<&[bool]>,
     max_face_edge_ratio: u32,
     max_lod: u32,
 ) -> Result<usize, ScreenLeafLodError> {
@@ -1505,6 +1559,14 @@ fn apply_grading(
         let minimum = (largest / max_face_edge_ratio).max(1);
         for (edge_index, lod) in lods.iter_mut().enumerate() {
             if *lod < minimum {
+                if fixed.is_some_and(|fixed| fixed[leaf_index]) {
+                    return Err(ScreenLeafLodError::FixedBoundaryPromotion {
+                        leaf_index,
+                        edge_index,
+                        current_lod: *lod,
+                        required_lod: minimum,
+                    });
+                }
                 if minimum > max_lod {
                     return Err(ScreenLeafLodError::AtlasCapExceeded {
                         leaf_index,
@@ -1524,11 +1586,17 @@ fn apply_grading(
 fn reconcile_lods_with(
     depths: &[u8],
     requested: &[[u32; 3]],
+    fixed: Option<&[bool]>,
     max_face_edge_ratio: u32,
     max_lod: u32,
-    mut reconcile_shared: impl FnMut(&mut [[u32; 3]], u32) -> Result<usize, ScreenLeafLodError>,
+    mut reconcile_shared: impl FnMut(
+        &mut [[u32; 3]],
+        Option<&[bool]>,
+        u32,
+    ) -> Result<usize, ScreenLeafLodError>,
 ) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
-    if depths.len() != requested.len() {
+    if depths.len() != requested.len() || fixed.is_some_and(|fixed| fixed.len() != requested.len())
+    {
         return Err(ScreenLeafLodError::LengthMismatch);
     }
     if max_face_edge_ratio < 2
@@ -1555,8 +1623,8 @@ fn reconcile_lods_with(
     let mut grading_promotions = 0usize;
     loop {
         iterations += 1;
-        let shared = reconcile_shared(&mut resident, max_lod)?;
-        let graded = apply_grading(&mut resident, max_face_edge_ratio, max_lod)?;
+        let shared = reconcile_shared(&mut resident, fixed, max_lod)?;
+        let graded = apply_grading(&mut resident, fixed, max_face_edge_ratio, max_lod)?;
         shared_edge_promotions += shared;
         grading_promotions += graded;
         if shared == 0 && graded == 0 {
@@ -1589,9 +1657,10 @@ fn reconcile_lods<K: Ord>(
     reconcile_lods_with(
         depths,
         requested,
+        None,
         max_face_edge_ratio,
         max_lod,
-        |resident, max_lod| reconcile_lines(lines, resident, max_lod),
+        |resident, fixed, max_lod| reconcile_lines(lines, resident, fixed, max_lod),
     )
 }
 
@@ -1605,9 +1674,28 @@ fn reconcile_mesh_lods(
     reconcile_lods_with(
         depths,
         requested,
+        None,
         max_face_edge_ratio,
         max_lod,
-        |resident, max_lod| reconcile_mesh_lines(lines, resident, max_lod),
+        |resident, fixed, max_lod| reconcile_mesh_lines(lines, resident, fixed, max_lod),
+    )
+}
+
+fn reconcile_mesh_lods_with_fixed_boundary(
+    depths: &[u8],
+    lines: &MeshTopologyLines,
+    requested: &[[u32; 3]],
+    fixed: &[bool],
+    max_face_edge_ratio: u32,
+    max_lod: u32,
+) -> Result<ScreenLeafLodResult, ScreenLeafLodError> {
+    reconcile_lods_with(
+        depths,
+        requested,
+        Some(fixed),
+        max_face_edge_ratio,
+        max_lod,
+        |resident, fixed, max_lod| reconcile_mesh_lines(lines, resident, fixed, max_lod),
     )
 }
 
@@ -1879,6 +1967,62 @@ mod tests {
         // Both boundary leaves and the centre quarter share this physical
         // hanging point on the neighboring root edge.
         assert_eq!(hanging_corners, 3);
+    }
+
+    #[test]
+    fn fixed_boundary_reconciliation_matches_complete_or_fails_on_escape() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let source_topology = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [4, 3, 5]],
+        );
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source_topology).unwrap();
+        let leaves = [
+            ScreenMeshLeafTopology {
+                source_face: 0,
+                id: ScreenPatchLeafId::ROOT,
+                domain: QBPatchDomain::FULL,
+            },
+            ScreenMeshLeafTopology {
+                source_face: 1,
+                id: ScreenPatchLeafId::ROOT,
+                domain: QBPatchDomain::FULL,
+            },
+        ];
+        let frontier = ScreenMeshLeafFrontier::build(&leaves, &topology).unwrap();
+
+        let escape = frontier
+            .reconcile_lods_with_fixed_boundary(&[[64; 3], [1; 3]], &[false, true], 2, 64)
+            .unwrap_err();
+        assert!(matches!(
+            escape,
+            ScreenLeafLodError::FixedBoundaryPromotion {
+                leaf_index: 1,
+                current_lod: 1,
+                required_lod: 64,
+                ..
+            },
+        ));
+
+        let requested = [[1; 3], [64; 3]];
+        let complete = frontier.reconcile_lods(&requested, 2, 64).unwrap();
+        let bounded = frontier
+            .reconcile_lods_with_fixed_boundary(&requested, &[false, true], 2, 64)
+            .unwrap();
+        assert_eq!(bounded.resident, complete.resident);
+        assert_eq!(bounded.resident[1], [64; 3]);
+
+        assert_eq!(
+            frontier.reconcile_lods_with_fixed_boundary(&requested, &[false], 2, 64),
+            Err(ScreenLeafLodError::LengthMismatch),
+        );
     }
 
     #[test]
