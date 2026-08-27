@@ -105,13 +105,19 @@ The first application boundary is now explicit:
   mode 3; modes 0–2 remain renderer-only blur choices, and the retained shared
   sphere may stay active for inversion or editing without enabling focus.
   Browser signal changes to enablement, shell coordinate, and angular aperture
-  coalesce into one microtask and enqueue exactly two semantic actions per
-  active parity controller. Initial `AppStore` synchronization now includes
+  coalesce into one microtask and enqueue one atomic `SetFocusField` action per
+  active parity controller. The optional enabled-state field preserves the old
+  coordinate-only replay/API surface while ensuring an invalid aperture cannot
+  partially toggle focus. Initial `AppStore` synchronization now includes
   the complete camera lens, aim policy, focus field, inversion, and sphere, so
   a focus-only route cannot temporarily retain Rust defaults. Applying an
   authored presentation snapshot suppresses the reciprocal signal adapter and
-  cannot feed the same focus edit back into the queue. The browser renderer is
-  still live authority while this measured gate soaks.
+  cannot feed the same focus edit back into the queue. Under the default
+  `selectionimpl=rust` gate, browser values are intent only: WebGL retains the
+  last committed field until AppStore integrates the action, then the Rust
+  projection updates renderer, Leptos view, controls, and URL together.
+  `selectionimpl=shadow` observes without renderer writes and
+  `selectionimpl=js` bypasses this boundary.
 - `AppStore` now publishes a throttled navigation projection before its summary
   revision fence, separate from the immediate render/input frame snapshot. A
   read-only Leptos CSR island consumes that FRP signal to show anchor, chart,
@@ -367,10 +373,13 @@ whole action. Shadow mode compares the incumbent gesture; Rust mode consumes
 the same coherent camera/focus snapshot adapter as presentation while retaining
 the selected identity and pole-safe derived pivot. No separate browser focus
 transition runs in the Rust branch.
-Unresolved assets and free/manual focus edits deliberately remain on the browser
-path. Mapped selected-object focus crossed to the Rust default on 2026-08-27
-after exact live selection/inversion and explicit-JavaScript rollback gates;
-`selectionimpl=js|shadow` remains available for rollback and observation.
+Unresolved assets and free/manual focus-sphere geometry deliberately remain on
+the browser path. Mapped selected-object focus and the semantic spheroidal
+field crossed to the Rust default on 2026-08-27 after exact live
+selection/inversion, commit-order, and explicit JavaScript/shadow rollback
+gates; `selectionimpl=js|shadow` remains available for rollback and
+observation. Renderer-only blur modes 0–2 are not reinterpreted as scene
+semantics.
 
 The offline release gate also has source provenance now. A Trunk pre-build hook
 uses Rust to fingerprint the authoritative crate/shader, HTML/module, manifest,

@@ -1883,6 +1883,7 @@ let rustFocusFieldSyncReady = false;
 let rustFocusFieldSyncScheduled = false;
 let rustFocusFieldSyncGeneration = 0;
 let rustFocusFieldSignalApplyDepth = 0;
+let rustCommittedFocusField = null;
 const rustNavigationShadowDiagnostics = {
   enabled: RUST_NAVIGATION_SHADOW_ENABLED,
   ready: false,
@@ -1899,6 +1900,10 @@ const rustNavigationShadowDiagnostics = {
   surfaceAnchorLastDrift: null,
   focusFieldSynchronizations: 0,
   focusFieldBoundaryCalls: 0,
+  focusFieldAuthorityWrites: 0,
+  focusFieldAuthorityErrors: 0,
+  focusFieldComparisons: 0,
+  focusFieldMismatches: 0,
   error: null,
 };
 globalThis.__hyperscopeNavigationShadow = rustNavigationShadowDiagnostics;
@@ -1911,55 +1916,143 @@ function browserFocusFieldState() {
   };
 }
 
+function navigationFocusFieldState(navigation) {
+  const focus = navigation?.focus;
+  if (!focus) return null;
+  const field = {
+    enabled: Boolean(focus.focus_enabled),
+    coordinate: Number(focus.focus_coordinate),
+    angularAperture: Number(focus.angular_aperture),
+  };
+  return Number.isFinite(field.coordinate)
+      && field.coordinate >= 0 && field.coordinate <= 1
+      && Number.isFinite(field.angularAperture) && field.angularAperture > 0
+    ? field
+    : null;
+}
+
+function focusFieldStatesMatch(left, right, tolerance = 1e-12) {
+  return Boolean(left && right)
+    && left.enabled === right.enabled
+    && Math.abs(left.coordinate - right.coordinate) <= tolerance
+    && Math.abs(left.angularAperture - right.angularAperture) <= tolerance;
+}
+
+function rustOwnsSpheroidalFocus(mode = fz.mode.peek()) {
+  return RUST_SELECTION_IMPLEMENTATION === 'rust' && String(mode) === '3';
+}
+
+function rendererFocusFieldState() {
+  if (!rustOwnsSpheroidalFocus()) return browserFocusFieldState();
+  return rustCommittedFocusField || {
+    ...browserFocusFieldState(),
+    enabled: false,
+  };
+}
+
+function applyRustFocusFieldProjection(navigation) {
+  const field = navigationFocusFieldState(navigation);
+  if (!field) {
+    rustNavigationShadowDiagnostics.focusFieldAuthorityErrors += 1;
+    rustAppShadowDiagnostics.focusFieldAuthorityErrors += 1;
+    recordAppShadowMismatch('focus_field_projection', 'Rust returned an invalid focus field');
+    return false;
+  }
+  rustFocusFieldSyncGeneration += 1;
+  rustFocusFieldSyncScheduled = false;
+  rustCommittedFocusField = field;
+  focusSphere.active = field.enabled;
+  rustFocusFieldSignalApplyDepth += 1;
+  try {
+    batchSignals(() => {
+      if (field.enabled) {
+        fz.enabled.set(true);
+        fz.mode.set('3');
+      } else if (fz.mode.peek() === '3') {
+        fz.enabled.set(false);
+      }
+      fz.focus.set(field.coordinate * 100);
+      fz.bandwidth.set(field.angularAperture * 100);
+    });
+  } finally {
+    rustFocusFieldSignalApplyDepth -= 1;
+  }
+  applyFuzzyRendererState();
+  rustNavigationShadowDiagnostics.focusFieldAuthorityWrites += 1;
+  rustAppShadowDiagnostics.focusFieldAuthorityWrites += 1;
+  return true;
+}
+
 function synchronizeRustFocusField() {
-  if (!rustFocusFieldSyncReady) return false;
+  if (!rustFocusFieldSyncReady || RUST_SELECTION_IMPLEMENTATION === 'js') return false;
   const field = browserFocusFieldState();
   try {
     let boundaryCalls = 0;
     if (rustNavigationShadow) {
-      rustNavigationShadow.setFocusEnabled(field.enabled);
-      rustNavigationShadow.setFocusField(field.coordinate, field.angularAperture);
-      boundaryCalls += 2;
+      rustNavigationShadow.setFocusFieldState(
+        field.enabled, field.coordinate, field.angularAperture,
+      );
+      boundaryCalls += 1;
       rustNavigationShadowSnapshot = rustNavigationShadow.tick(0);
     }
-    let appSequences = null;
+    let appSequence = null;
     let appNavigation = null;
     if (rustAppShadow) {
-      appSequences = [
-        rustAppShadow.setFocusEnabled(field.enabled),
-        rustAppShadow.setFocusField(field.coordinate, field.angularAperture),
-      ];
-      boundaryCalls += 2;
+      appSequence = rustAppShadow.setFocusFieldState(
+        field.enabled, field.coordinate, field.angularAperture,
+      );
+      boundaryCalls += 1;
       appNavigation = rustAppShadow.tickNavigation(0);
       rustAppShadowDiagnostics.focusFieldSynchronizations += 1;
-      rustAppShadowDiagnostics.focusFieldBoundaryCalls += 2;
+      rustAppShadowDiagnostics.focusFieldBoundaryCalls += 1;
       refreshAppShadowSnapshot();
     }
     if (rustPresentationController && rustAppPresentationPoseReady) {
-      const incumbentSequences = [
-        rustPresentationController.setFocusEnabled(field.enabled),
-        rustPresentationController.setFocusField(field.coordinate, field.angularAperture),
-      ];
-      boundaryCalls += 2;
+      const incumbentSequence = rustPresentationController.setFocusFieldState(
+        field.enabled, field.coordinate, field.angularAperture,
+      );
+      boundaryCalls += 1;
       const incumbentNavigation = rustPresentationController.tick(0);
-      if (appSequences) {
-        for (let index = 0; index < appSequences.length; index++) {
-          if (incumbentSequences[index] !== appSequences[index]) {
-            recordAppShadowMismatch(
-              'focus_field_sequence',
-              `incumbent ${incumbentSequences[index]} != app ${appSequences[index]}`,
-            );
-          }
-        }
+      if (appSequence !== null && incumbentSequence !== appSequence) {
+        recordAppShadowMismatch(
+          'focus_field_sequence',
+          `incumbent ${incumbentSequence} != app ${appSequence}`,
+        );
       }
       if (appNavigation) {
         compareAppPresentationPose(incumbentNavigation, appNavigation);
       }
     }
+    if (RUST_SELECTION_IMPLEMENTATION === 'rust') {
+      if (!appNavigation) throw new Error('Rust application focus authority is unavailable');
+      const committed = navigationFocusFieldState(appNavigation);
+      rustNavigationShadowDiagnostics.focusFieldComparisons += 1;
+      rustAppShadowDiagnostics.focusFieldComparisons += 1;
+      if (!focusFieldStatesMatch(field, committed)) {
+        rustNavigationShadowDiagnostics.focusFieldMismatches += 1;
+        rustAppShadowDiagnostics.focusFieldMismatches += 1;
+        recordAppShadowMismatch(
+          'focus_field_rejected',
+          'Rust rejected the requested focus field; restored the committed projection',
+        );
+      }
+      applyRustFocusFieldProjection(appNavigation);
+    }
     rustNavigationShadowDiagnostics.focusFieldSynchronizations += 1;
     rustNavigationShadowDiagnostics.focusFieldBoundaryCalls += boundaryCalls;
     return true;
   } catch (error) {
+    if (RUST_SELECTION_IMPLEMENTATION === 'rust' && rustAppShadow) {
+      try {
+        applyRustFocusFieldProjection(rustAppShadow.navigationSnapshot());
+      } catch (rollbackError) {
+        recordAppShadowMismatch(
+          'focus_field_rollback', rollbackError?.message || String(rollbackError),
+        );
+      }
+    }
+    rustNavigationShadowDiagnostics.focusFieldAuthorityErrors += 1;
+    rustAppShadowDiagnostics.focusFieldAuthorityErrors += 1;
     rustNavigationShadowDiagnostics.error = error?.message || String(error);
     recordAppShadowMismatch('focus_field', error?.message || String(error));
     return false;
@@ -1967,7 +2060,8 @@ function synchronizeRustFocusField() {
 }
 
 function scheduleRustFocusFieldSynchronization() {
-  if (!rustFocusFieldSyncReady || rustFocusFieldSignalApplyDepth > 0
+  if (RUST_SELECTION_IMPLEMENTATION === 'js' || !rustFocusFieldSyncReady
+      || rustFocusFieldSignalApplyDepth > 0
       || rustFocusFieldSyncScheduled) return;
   rustFocusFieldSyncScheduled = true;
   const generation = ++rustFocusFieldSyncGeneration;
@@ -2821,25 +2915,14 @@ function applyRustNavigationSnapshot(snapshot, selection = null) {
       ? selectedFocus.output_radius
       : null;
   }
-  rustFocusFieldSyncGeneration += 1;
-  rustFocusFieldSyncScheduled = false;
-  rustFocusFieldSignalApplyDepth += 1;
-  try {
-    batchSignals(() => {
-      mob.mx.set(focus.center[0] * 10);
-      mob.my.set(focus.center[1] * 10);
-      mob.mz.set(focus.center[2] * 10);
-      mob.mr.set(focus.radius * 10);
-      mob.xform.set(focus.inversion_enabled ? 'sphere_reflection' : 'identity');
-      fz.enabled.set(focus.focus_enabled);
-      if (focus.focus_enabled) fz.mode.set('3');
-      fz.focus.set(focus.focus_coordinate * 100);
-      fz.bandwidth.set(focus.angular_aperture * 100);
-    });
-  } finally {
-    rustFocusFieldSignalApplyDepth -= 1;
-  }
-  pushFocusSphereState();
+  batchSignals(() => {
+    mob.mx.set(focus.center[0] * 10);
+    mob.my.set(focus.center[1] * 10);
+    mob.mz.set(focus.center[2] * 10);
+    mob.mr.set(focus.radius * 10);
+    mob.xform.set(focus.inversion_enabled ? 'sphere_reflection' : 'identity');
+  });
+  applyRustFocusFieldProjection(snapshot);
 
   const camera = snapshot.camera;
   manualCameraBasisState.set(camera.right, 0);
@@ -3158,6 +3241,10 @@ const rustAppShadowDiagnostics = {
   navigationSynchronizations: 0,
   focusFieldSynchronizations: 0,
   focusFieldBoundaryCalls: 0,
+  focusFieldAuthorityWrites: 0,
+  focusFieldAuthorityErrors: 0,
+  focusFieldComparisons: 0,
+  focusFieldMismatches: 0,
   mappedSelectionPicks: 0,
   unmappedSelectionPicks: 0,
   selectionDispatches: 0,
@@ -5023,7 +5110,7 @@ function setFocusSphereGeometry(sphere) {
 
 function pushFocusSphereState() {
   if (!wasmOk.peek()) return;
-  const fieldEnabled = spheroidalFocusEnabled(fz.enabled.peek(), fz.mode.peek());
+  const fieldEnabled = rendererFocusFieldState().enabled;
   mr_setFocusSphere(
     focusSphere.center[0], focusSphere.center[1], focusSphere.center[2],
     focusSphere.radius, fieldEnabled,
@@ -6122,6 +6209,40 @@ bindSlider('fuzzy-quality', fz.quality, v => v.toFixed(0));
 bindSlider('fuzzy-kawase', fz.kawase, v => v.toFixed(0));
 bindSlider('fuzzy-kawase-off', fz.kawaseOff, v => (v / 10).toFixed(2));
 
+function applyFuzzyRendererState() {
+  const mode = parseInt(fz.mode.peek());
+  const focusField = mode === 3 ? rendererFocusFieldState() : null;
+  if (rustOwnsSpheroidalFocus(mode) && rustFocusFieldSignalApplyDepth > 0) return false;
+  if (rustOwnsSpheroidalFocus(mode) && !rustCommittedFocusField) return false;
+  // Keep the last committed spheroidal renderer packet until the reducer has
+  // accepted leaving that mode. Otherwise the mode switch itself would still
+  // bypass Rust even though its derived `focus_enabled` edit is deferred.
+  if (RUST_SELECTION_IMPLEMENTATION === 'rust' && rustFocusFieldSyncScheduled
+      && rustCommittedFocusField?.enabled && mode !== 3) return false;
+
+  const enabled = mode === 3 ? focusField.enabled : fz.enabled.peek();
+  const focus = mode === 3 ? focusField.coordinate : fz.focus.peek() / 100.0;
+  const bandwidth = mode === 3
+    ? focusField.angularAperture
+    : fz.bandwidth.peek() / 100.0;
+  const normalize = fz.normalize.peek();
+  const wasSamplingEnabled = stretchSamplingEnabled;
+  stretchSamplingEnabled = enabled && normalize && (mode === 1 || mode === 2);
+  if (stretchSamplingEnabled && !wasSamplingEnabled) sampleStretchAsync();
+  if (wasmOk.peek()) {
+    mr_setFuzzy(
+      enabled, fz.radius.peek(), fz.strength.peek() / 10.0,
+      mode, focus, bandwidth, normalize, stretchRange.min, stretchRange.max,
+      fz.quality.peek(), fz.kawase.peek(), fz.kawaseOff.peek() / 10.0,
+    );
+  }
+  pushFocusSphereState();
+  if (!(RUST_SELECTION_IMPLEMENTATION === 'rust' && rustFocusFieldSyncScheduled)) {
+    syncURL();
+  }
+  return true;
+}
+
 // Coalesce one UI/SpaceMouse signal burst into the semantic Rust focus
 // boundary. Renderer-only blur radius, strength, quality, and normalization
 // remain separate settings and do not create navigation actions.
@@ -6130,25 +6251,25 @@ effect(() => {
   const mode = fz.mode.get();
   fz.focus.get();
   fz.bandwidth.get();
-  if (spheroidalFocusEnabled(enabled, mode)) focusSphere.active = true;
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust'
+      && spheroidalFocusEnabled(enabled, mode)) focusSphere.active = true;
   scheduleRustFocusFieldSynchronization();
 });
 
 // Single effect: any fuzzy signal change → push to WASM + sync URL
 effect(() => {
-  const mode = parseInt(fz.mode.get());
-  const focus = fz.focus.get() / 100.0;
-  const bw = fz.bandwidth.get() / 100.0;
-  const enabled = fz.enabled.get();
-  const normalize = fz.normalize.get();
-  const wasSamplingEnabled = stretchSamplingEnabled;
-  stretchSamplingEnabled = enabled && normalize && (mode === 1 || mode === 2);
-  if (stretchSamplingEnabled && !wasSamplingEnabled) sampleStretchAsync();
-  if (wasmOk.get()) mr_setFuzzy(enabled, fz.radius.get(), fz.strength.get() / 10.0,
-    mode, focus, bw, normalize, stretchRange.min, stretchRange.max, fz.quality.get(),
-    fz.kawase.get(), fz.kawaseOff.get() / 10.0);
-  pushFocusSphereState();
-  syncURL();
+  fz.mode.get();
+  fz.focus.get();
+  fz.bandwidth.get();
+  fz.enabled.get();
+  fz.normalize.get();
+  fz.radius.get();
+  fz.strength.get();
+  fz.quality.get();
+  fz.kawase.get();
+  fz.kawaseOff.get();
+  wasmOk.get();
+  applyFuzzyRendererState();
 });
 
 // --- LOD controls (signals) ---
@@ -9629,6 +9750,7 @@ phase('wasm', [], async () => {
   rustFocusFieldSyncReady = Boolean(
     rustNavigationShadow || rustAppShadow || rustPresentationController,
   );
+  synchronizeRustFocusField();
 });
 
 // Phase 2: Initialize workers (depends on wasm for shader compilation)

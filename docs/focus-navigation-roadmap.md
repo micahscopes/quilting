@@ -169,9 +169,14 @@ or sphere state.
    Rust `focus_enabled` means fuzzy post-processing is enabled in mode 3,
    while legacy blur modes and the retained shared sphere remain separate
    renderer/interaction state. Focus coordinate and angular aperture are
-   coalesced with enablement into one browser signal burst and dispatched
-   through both navigation and `AppStore` parity controllers before the next
-   microtask. Initial application synchronization includes the complete lens,
+   coalesced with enablement into one browser signal burst and one atomic
+   `SetFocusField` action per navigation/`AppStore` parity controller. The
+   default Rust path retains the prior renderer packet and URL until AppStore
+   integrates that action; the committed projection then updates WebGL,
+   controls, and the Leptos read model. An invalid field rolls enablement,
+   coordinate, and aperture back together. `selectionimpl=shadow` measures
+   without authoritative writes and `selectionimpl=js` bypasses the boundary.
+   Initial application synchronization includes the complete lens,
    aim, focus, inversion, and sphere packet, so a focus-only deep link no
    longer starts from Rust defaults. Presentation snapshot application is
    suppressed at the signal boundary and cannot echo semantic focus actions

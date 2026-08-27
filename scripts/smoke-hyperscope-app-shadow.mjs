@@ -1201,12 +1201,8 @@ assert.equal(
   navigationIncumbent.setFreeFocusSphere(new Float64Array([0.25, 0.5, -0.25]), 1.5),
 );
 assert.equal(
-  navigationApp.setFocusEnabled(true),
-  navigationIncumbent.setFocusEnabled(true),
-);
-assert.equal(
-  navigationApp.setFocusField(0.35, 0.075),
-  navigationIncumbent.setFocusField(0.35, 0.075),
+  navigationApp.setFocusFieldState(true, 0.35, 0.075),
+  navigationIncumbent.setFocusFieldState(true, 0.35, 0.075),
 );
 assert.equal(
   navigationApp.setInversionEnabled(true),
@@ -1226,6 +1222,17 @@ assert.equal(
 );
 assertNavigationParity(navigationApp.navigationSnapshot(), navigationIncumbent.snapshot());
 assertNavigationParity(navigationApp.tickNavigation(0), navigationIncumbent.tick(0));
+const acceptedFocusField = navigationApp.navigationSnapshot().focus;
+assert.equal(
+  navigationApp.setFocusFieldState(false, Number.NaN, 0.2),
+  navigationIncumbent.setFocusFieldState(false, Number.NaN, 0.2),
+);
+assertNavigationParity(navigationApp.tickNavigation(0), navigationIncumbent.tick(0));
+assert.deepEqual(
+  navigationApp.navigationSnapshot().focus,
+  acceptedFocusField,
+  'invalid field geometry must also roll back its enabled-state edit',
+);
 
 const anchorEye = new Float64Array([1, 0.5, 2]);
 const anchorForward = new Float64Array([0, 0, -1]);
