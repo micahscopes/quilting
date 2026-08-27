@@ -1249,6 +1249,13 @@ pub struct ResidentLodBalanceScratch {
 }
 
 impl ResidentLodBalanceScratch {
+    /// Complete twin-connected face closure reset by the most recent request
+    /// reconciliation. Callers may conservatively refresh retained derived
+    /// data over this set without rediscovering the same components.
+    pub fn affected_component_faces(&self) -> &[usize] {
+        &self.component_faces
+    }
+
     fn begin(&mut self, num_faces: usize) {
         self.queue.clear();
         self.queued.resize(num_faces, false);
@@ -3405,6 +3412,7 @@ mod tests {
                 &mut scratch,
                 grading,
             );
+            assert_eq!(scratch.affected_component_faces().len(), faces.len());
             assert!(residents.iter().any(|resident| *resident != low));
 
             requests[0] = low;
@@ -3416,6 +3424,7 @@ mod tests {
                 &mut scratch,
                 grading,
             );
+            assert_eq!(scratch.affected_component_faces().len(), faces.len());
             assert!(residents.iter().all(|resident| *resident == low));
         }
     }
