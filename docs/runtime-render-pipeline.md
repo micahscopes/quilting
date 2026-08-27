@@ -394,26 +394,30 @@ ABI. `wgpu` 30's browser backend uses newer typed JavaScript bindings, so a 30
 upgrade belongs to a coordinated binding-stack migration and browser
 regression gate rather than this isolated classifier cut.
 
-The narrow device gate now has two proven parts:
+The narrow device gate now has three proven parts:
 
 - native Radeon 780M / RADV / Vulkan executed both passes and returned the
   exact packed word produced by the CPU pass-two oracle; and
 - `cargo check -p quilting-webgpu --target wasm32-unknown-unknown` passes on
-  the repository's pinned browser ABI.
+  the repository's pinned browser ABI; and
+- Chromium 150 requested a real `BrowserWebGpu` adapter and executed the same
+  reusable minimum matrix, returning one exact full-pipeline word and ten exact
+  coherence words with no console warnings or errors.
 
 Ordinary native tests report an explicit skip when no adapter is visible.
 Setting `QUILTING_REQUIRE_WEBGPU=1` makes that condition a failure for a
-hardware conformance lane. This is real native device evidence and browser
-compile evidence, but not yet browser execution or broad numeric parity. The
-native matrix now covers the complete two-pass path; all six S3 permutations;
-visible-only neighbor promotion; invisible standby records; atlas and priority
-packing; unused skin joints; current-pose culling; dense authored-subject
-selection; morph and joint animation moving a face across the frustum; and
-maximum-LOD saturation when a sphere-reflection pole lies inside a triangle.
-Pass two is bit-exact with its CPU oracle. Pass-one cases currently freeze
-semantic invariants; finite non-interior poles, pole grazing, multi-face
-composed scenes, maximum-atlas boundaries, and exact WebGL2 comparison still
-need a Chrome device gate.
+hardware conformance lane. This is real native and browser device evidence for
+the shared minimum matrix, but not yet broad cross-backend numeric parity. The
+shared matrix covers a complete two-pass path; all six S3 permutations;
+visible-only neighbor promotion; invisible standby records; and atlas/priority
+packing. The larger native-only pass-one matrix additionally covers unused
+skin joints; current-pose culling; dense authored-subject selection; morph and
+joint animation moving a face across the frustum; and maximum-LOD saturation
+when a sphere-reflection pole lies inside a triangle. Pass two is bit-exact with
+its CPU oracle. Those pass-one cases currently freeze semantic invariants;
+finite non-interior poles, pole grazing, multi-face composed scenes,
+maximum-atlas boundaries, the expanded Chrome matrix, and exact WebGL2
+comparison remain promotion gates.
 
 The WebGL2 GLSL programs and runtime authority remain untouched. Readback in
 `quilting-webgpu` is intentionally full and diagnostic; an authoritative

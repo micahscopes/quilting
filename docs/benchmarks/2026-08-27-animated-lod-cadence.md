@@ -571,6 +571,12 @@ authority. It also sizes joint storage to the highest nonzero referenced
 influence while accepting a complete glTF pose containing additional unused
 joints.
 
+Commit `bdbea40` makes the minimum exact matrix reusable and exposes a
+feature-gated `cdylib` entry solely for browser conformance. The committed HTML
+harness loads that package, requests an adapter/device through wgpu, runs the
+same full-pipeline and coherence cases, and publishes a bounded result object.
+It is not linked into Hyperscope or selected as runtime authority.
+
 The native conformance matrix executed on AMD Radeon 780M Graphics, RADV Mesa
 26.0.5, Vulkan. The coherence cases cover all six S3 permutations,
 visible-only neighbor promotion, invisible standby records, adaptive priority,
@@ -589,14 +595,26 @@ deterministic checks are:
 - `cargo test -p quilting-webgpu`;
 - `QUILTING_REQUIRE_WEBGPU=1 cargo test -p quilting-webgpu --test native_lod
   -- --nocapture` with a visible native adapter;
-- `cargo check -p quilting-webgpu --target wasm32-unknown-unknown`; and
+- `cargo check -p quilting-webgpu --target wasm32-unknown-unknown --features
+  browser-conformance`;
+- `wasm-pack build --target web --dev --out-dir
+  ../../target/webgpu-conformance crates/quilting-webgpu --features
+  browser-conformance`; and
 - `cargo check -p quilting-wasm --target wasm32-unknown-unknown --features
   leptos-ui`.
 
-This proves native device execution and browser-target compilation, not Chrome
-execution, performance, or broad scene parity. The next gate must run the same
-matrix in Chrome, add finite non-interior and grazing poles, multi-face composed
-scenes, and maximum-atlas boundaries, then compare the final packets with the
+An isolated Chromium 150 instance with unsafe WebGPU enabled reported
+`navigator.gpu`, acquired the `BrowserWebGpu` backend, and returned
+`full_pipeline_words=1 coherence_words=10`. The Chrome DevTools MCP inspected
+the committed harness state and found zero console warnings or errors. The
+browser does not expose a useful adapter name in this configuration. This is a
+correctness observation, not a performance sample.
+
+This proves native and browser device execution for the reusable minimum
+matrix, not broad scene parity. The next gate must add the native pass-one
+culling/subject/morph/skin/interior-pole cases to the browser harness, then add
+finite non-interior and grazing poles, multi-face composed scenes, and
+maximum-atlas boundaries before comparing the final packets with the
 established WebGL2 classifier. WebGL2 remains runtime authority until that
 evidence exists. Compaction and indirect submission are still separate work;
 this diagnostic executor continues to read every packed face word back.
