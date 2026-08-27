@@ -609,40 +609,68 @@ impl PresentationRuntime {
         };
 
         let transition = cue.transition;
+        let mut staged_navigation = navigation.clone();
+        let inversion_was_enabled = staged_navigation.focus.inversion_enabled;
         push_navigation(
-            navigation,
+            &mut staged_navigation,
             NavigationAction::TransitionCamera {
                 target: camera_in_current_chart,
                 duration_seconds: transition.duration_seconds,
                 easing: transition.easing,
             },
         )?;
+        if !inversion_was_enabled && target_focus.inversion_enabled {
+            // Enter the requested chart around its authored sphere, never an
+            // unrelated sphere retained by the previous cue. The camera and
+            // its staged transition cross that one exact chart boundary.
+            push_navigation(
+                &mut staged_navigation,
+                NavigationAction::SetFreeFocusSphere(target_focus.sphere),
+            )?;
+        } else {
+            if inversion_was_enabled && !target_focus.inversion_enabled {
+                // Leave the current chart before freely moving its now
+                // inactive sphere toward the next cue's focus geometry.
+                push_navigation(
+                    &mut staged_navigation,
+                    NavigationAction::SetInversionEnabled(false),
+                )?;
+            }
+            push_navigation(
+                &mut staged_navigation,
+                NavigationAction::TransitionFreeFocusSphere {
+                    target: target_focus.sphere,
+                    duration_seconds: transition.duration_seconds,
+                    easing: transition.easing,
+                },
+            )?;
+        }
         push_navigation(
-            navigation,
-            NavigationAction::TransitionFreeFocusSphere {
-                target: target_focus.sphere,
-                duration_seconds: transition.duration_seconds,
-                easing: transition.easing,
-            },
-        )?;
-        push_navigation(
-            navigation,
+            &mut staged_navigation,
             NavigationAction::SetFocusField {
                 coordinate: target_focus.focus_coordinate,
                 angular_aperture: target_focus.angular_aperture,
             },
         )?;
         push_navigation(
-            navigation,
+            &mut staged_navigation,
             NavigationAction::SetFocusEnabled(target_focus.focus_enabled),
         )?;
-        push_navigation(
-            navigation,
-            NavigationAction::SetInversionEnabled(target_focus.inversion_enabled),
-        )?;
-        navigation
+        if !inversion_was_enabled && target_focus.inversion_enabled {
+            push_navigation(
+                &mut staged_navigation,
+                NavigationAction::SetInversionEnabled(true),
+            )?;
+        }
+        let diagnostic_count = staged_navigation.diagnostics.0.len();
+        staged_navigation
             .tick(0.0)
             .map_err(|error| PresentationError::Navigation(error.to_owned()))?;
+        if staged_navigation.diagnostics.0.len() != diagnostic_count {
+            let error = staged_navigation.diagnostics.0[diagnostic_count..].join(" | ");
+            return Err(PresentationError::Navigation(error));
+        }
+        *navigation = staged_navigation;
 
         self.pending_semantic_target = pending_semantic_target;
         self.pending_semantic_target_policy_sequence = navigation
@@ -1179,6 +1207,93 @@ mod tests {
             SphereReflectionState::Sphere(navigation.focus.sphere)
         );
         assert!(navigation.diagnostics.0.is_empty());
+    }
+
+    #[test]
+    fn inversion_cue_installs_its_authored_sphere_before_entering_the_chart() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let mut navigation = NavigationController::default();
+        let opening_duration = runtime.presentation().cues[0].transition.duration_seconds;
+        runtime.activate_index(0, &mut navigation).unwrap();
+        runtime
+            .tick_navigation(&mut navigation, opening_duration)
+            .unwrap();
+
+        let inversion_index = runtime
+            .presentation()
+            .cues
+            .iter()
+            .position(|cue| {
+                runtime
+                    .presentation()
+                    .views
+                    .iter()
+                    .find(|view| view.id == cue.view)
+                    .is_some_and(|view| view.focus.inversion_enabled)
+            })
+            .unwrap();
+        let inversion_view = runtime
+            .presentation()
+            .views
+            .iter()
+            .find(|view| view.id == runtime.presentation().cues[inversion_index].view)
+            .unwrap()
+            .clone();
+
+        runtime
+            .activate_index(inversion_index, &mut navigation)
+            .unwrap();
+
+        assert_eq!(
+            navigation.focus.sphere,
+            inversion_view.focus.to_focus_navigation().unwrap().sphere
+        );
+        assert!(navigation.focus.inversion_enabled);
+        assert_eq!(
+            navigation.runtime.reflection,
+            SphereReflectionState::Sphere(navigation.focus.sphere)
+        );
+        assert!(navigation.diagnostics.0.is_empty());
+    }
+
+    #[test]
+    fn cue_activation_rolls_back_when_its_target_chart_has_a_live_camera_pole() {
+        let mut runtime = PresentationRuntime::from_json(FIXTURE).unwrap();
+        let inversion_index = runtime
+            .presentation()
+            .cues
+            .iter()
+            .position(|cue| {
+                runtime
+                    .presentation()
+                    .views
+                    .iter()
+                    .find(|view| view.id == cue.view)
+                    .is_some_and(|view| view.focus.inversion_enabled)
+            })
+            .unwrap();
+        let target_sphere = runtime
+            .presentation()
+            .views
+            .iter()
+            .find(|view| view.id == runtime.presentation().cues[inversion_index].view)
+            .unwrap()
+            .focus
+            .to_focus_navigation()
+            .unwrap()
+            .sphere;
+        let mut navigation = NavigationController::default();
+        navigation.camera.eye = target_sphere.center;
+        navigation.camera.semantic_target = None;
+        let before = navigation.clone();
+
+        let error = runtime
+            .activate_index(inversion_index, &mut navigation)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("spherical-reflection pole"));
+        assert_eq!(navigation, before);
+        assert_eq!(runtime.active_cue_index(), None);
     }
 
     #[test]

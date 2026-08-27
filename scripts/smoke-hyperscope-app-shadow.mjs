@@ -647,7 +647,7 @@ const loadedPresentation = app.loadPresentation(presentationDocument);
 const incumbent = new HyperscopeNavigation();
 incumbent.loadPresentation(presentationDocument);
 assert.equal(loadedPresentation.disposition, 'applied');
-assert.equal(app.snapshot().presentation.cueCount, 6);
+assert.equal(app.snapshot().presentation.cueCount, presentation.cues.length);
 assert.deepEqual(app.snapshot().presentation.assets, presentation.assets);
 assert.equal(app.snapshot().presentation.active, undefined);
 
@@ -1055,7 +1055,10 @@ assert.equal(activeComposition.appRevision, app.snapshot().revision);
 assert.equal(activeComposition.authoredProjectionRevision, authoredProjectionRevision);
 assert.equal(activeComposition.cueId, activePresentation.cue_id);
 assert.equal(activeComposition.sceneId, activePresentation.scene_id);
-assert.deepEqual(activeComposition.nodes.map(node => node.packedNode), [20]);
+assert.deepEqual(
+  activeComposition.nodes.map(node => node.packedNode),
+  activePresentation.layers.map((_, index) => index + 20),
+);
 assert.equal(activeComposition.nodes[0].layer, activePresentation.layers[0].id);
 assert.equal(activeComposition.nodes[0].asset, activePresentation.layers[0].asset);
 assert.equal(activeComposition.nodes[0].source, 'authored_absolute');
@@ -1065,8 +1068,11 @@ assert.deepEqual(activeComposition.nodes[0].matrix, [
   0, 0, 1, 0,
   1, 2, 3, 1,
 ]);
-assert.equal(activeComposition.nodes[0].visible, true);
-assert.equal(activeComposition.nodes[0].opacity, 1);
+assert.equal(activeComposition.nodes[0].visible, activePresentation.layers[0].visible);
+assert.equal(
+  activeComposition.nodes[0].opacity,
+  activePresentation.layers[0].visible ? activePresentation.layers[0].opacity : 0,
+);
 assert.deepEqual(activeComposition.unmatchedAuthoredEntities, []);
 const beforeRejectedComposition = app.snapshot();
 assert.throws(
@@ -1088,13 +1094,19 @@ assert.ok(Math.abs(midTransition.camera.camera_transition_remaining - 0.35) < 1e
 assertNavigationParity(midTransition, incumbentMidTransition);
 assertNavigationParity(app.tickPresentation(0.35), incumbent.tick(0.35));
 
-const linkedCue = presentation.cues[4].id;
+const invertedView = presentation.views.find(view => view.focus?.inversion_enabled === true);
+const linkedCueRecord = presentation.cues.find(cue => cue.view === invertedView?.id);
+const linkedCue = linkedCueRecord?.id;
+assert.ok(linkedCueRecord, 'presentation fixture must retain one inverted-chart cue');
 const linkedApp = app.present(4, 'jump', linkedCue);
 const linkedIncumbent = incumbent.jumpToPresentationCue(linkedCue);
 assert.equal(linkedApp.disposition, 'applied');
 assert.deepEqual(app.snapshot().presentation.active, linkedIncumbent);
 assert.equal(app.snapshot().presentation.active.cue_id, linkedCue);
-for (let step = 0; step < 12; step++) {
+const linkedTransitionSteps = Math.ceil(
+  (linkedCueRecord.transition?.duration_seconds || 0) / 0.1,
+) + 1;
+for (let step = 0; step < linkedTransitionSteps; step++) {
   assertNavigationParity(app.tickPresentation(0.1), incumbent.tick(0.1));
 }
 const inverted = app.tickPresentation(0);
