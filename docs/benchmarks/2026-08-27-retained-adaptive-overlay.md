@@ -115,3 +115,18 @@ boundary.
 This optimization reduces CPU grouping, allocation, and upload work. It does
 not reduce the number of rendered patches or triangles; composed output remains
 exactly equal to the full adaptive frontier.
+
+## GPU suppression primitive
+
+The renderer now has the inert-by-default mechanism needed for the baseline
+layer. It owns a one-byte-per-source-face mask texture, updates only changed
+row-contiguous runs, and binds it as an explicit memoized shader resource. The
+camera-dependent visibility pass reads source face identity and applies the
+mask only when a batch is marked as a retained baseline-root batch. Adaptive
+overlay batches leave that flag disabled, including replacement leaves whose
+dyadic identity is the source root.
+
+Existing batches all keep suppression disabled, so this checkpoint changes no
+draw output. The generated visibility shader, binding plan, one-float output
+ABI, native renderer tests, WASM32 build, and live WebGL2 initialization were
+verified before the resource is connected to retained publication.

@@ -25,6 +25,9 @@ pub struct Camera {
 #[derive(Clone, Copy)]
 pub struct RenderBatch {
     pub mesh: MeshDraw,
+    /// Apply the renderer-owned source-root suppression mask during the
+    /// camera-dependent visibility pass.
+    pub suppress_source_roots: bool,
     /// Permutation parity (+1 or -1) for raster winding.
     pub perm_parity: f32,
     /// Material index (for PBR rendering).
@@ -109,7 +112,8 @@ pub fn camera_for_batch(camera: &Camera, batch: &RenderBatch) -> Camera {
 /// matrices and position are frame-global; winding and material state are
 /// handled separately, so neither belongs in this comparison.
 pub fn same_vertex_uniform_state(a: &RenderBatch, b: &RenderBatch) -> bool {
-    a.mobius == b.mobius
+    a.suppress_source_roots == b.suppress_source_roots
+        && a.mobius == b.mobius
         && a.euclidean_model == b.euclidean_model
         && a.euclidean_normal == b.euclidean_normal
 }
@@ -139,6 +143,7 @@ pub fn upload_batch_ubo(
     gl: &glow::Context,
     vtx_ubo: &VertexUniformBuf,
     camera: &Camera,
+    suppress_source_roots: bool,
     use_qb: i32,
     euclidean_model: &[f32; 16],
     euclidean_normal: &[f32; 16],
@@ -147,6 +152,7 @@ pub fn upload_batch_ubo(
         gl,
         &camera.mvp,
         &camera.mv,
+        suppress_source_roots,
         use_qb,
         &camera.mobius,
         &camera.camera_pos,
@@ -173,6 +179,7 @@ fn upload_batch_ubo_if_changed<'a>(
         gl,
         vtx_ubo,
         &batch_camera,
+        batch.suppress_source_roots,
         1,
         &batch.euclidean_model,
         &batch.euclidean_normal,
@@ -331,6 +338,7 @@ pub fn render_original_wireframe(
         gl,
         &camera.mvp,
         &camera.mv,
+        false,
         0, // use_qb=0 for original mesh
         &IDENTITY_MOBIUS,
         &camera.camera_pos,

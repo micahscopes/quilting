@@ -463,6 +463,17 @@ pub fn create_patch_visibility_input_vao(
             );
             gl.vertex_attrib_divisor(loc, 0);
         }
+        let (face_info_location, face_info_offset) = instance_layout::ATTR_MAP[7];
+        gl.enable_vertex_attrib_array(face_info_location);
+        gl.vertex_attrib_pointer_f32(
+            face_info_location,
+            4,
+            glow::FLOAT,
+            false,
+            instance_layout::STRIDE_BYTES as i32,
+            byte_offset + face_info_offset,
+        );
+        gl.vertex_attrib_divisor(face_info_location, 0);
         gl.bind_vertex_array(None);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
         Ok(vao)
@@ -572,7 +583,7 @@ impl PersistentBatchInstances {
 ///   mat4x4 mvp        (offset 0, 64 bytes)
 ///   mat4x4 mv         (offset 64, 64 bytes)
 ///   float reserved      (offset 128, 4 bytes)
-///   int reserved        (offset 132, 4 bytes)
+///   int suppress_source_roots (offset 132, 4 bytes)
 ///   int use_qb         (offset 136, 4 bytes)
 ///   float reserved     (offset 140, 4 bytes)
 ///   vec4 mob_a         (offset 144, 16 bytes)
@@ -606,6 +617,7 @@ impl VertexUniformBuf {
         gl: &glow::Context,
         mvp: &[f32; 16],
         mv: &[f32; 16],
+        suppress_source_roots: bool,
         use_qb: i32,
         mobius: &[f32; 16],
         camera_pos: &[f32; 3],
@@ -617,7 +629,8 @@ impl VertexUniformBuf {
         data[0..64].copy_from_slice(bytemuck_cast_slice(mvp));
         // mv: offset 64
         data[64..128].copy_from_slice(bytemuck_cast_slice(mv));
-        // Offsets 128..136 are reserved. Permutations are per-instance now.
+        // Offset 128 remains reserved. Permutations are per-instance now.
+        data[132..136].copy_from_slice(&i32::from(suppress_source_roots).to_le_bytes());
         // use_qb: offset 136
         data[136..140].copy_from_slice(&use_qb.to_le_bytes());
         // reserved: offset 140 (zeroed)
@@ -1139,6 +1152,144 @@ impl FaceDataTexture {
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
             Ok(Self { texture, num_faces })
         }
+    }
+
+    pub fn bind(&self, gl: &glow::Context, unit: u32) {
+        unsafe {
+            gl.active_texture(glow::TEXTURE0 + unit);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        unsafe { gl.delete_texture(self.texture); }
+    }
+}
+
+/// Renderer-owned one-byte source-face mask used to suppress retained roots
+/// that are replaced by an adaptive overlay. The texture is deliberately
+/// separate from immutable authored face data and updates only changed,
+/// row-contiguous runs.
+pub struct SuppressedFaceTexture {
+    pub texture: glow::Texture,
+    pub num_faces: usize,
+    width: usize,
+    data: Vec<u8>,
+    suppressed_faces: Vec<u32>,
+    dirty_faces: Vec<u32>,
+}
+
+impl SuppressedFaceTexture {
+    pub fn new(gl: &glow::Context, num_faces: usize) -> Result<Self, String> {
+        let max_texture_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(0) as usize };
+        if max_texture_size == 0 {
+            return Err("suppressed-face texture has no supported dimensions".into());
+        }
+        let storage_faces = num_faces.max(1);
+        let width = storage_faces.min(max_texture_size);
+        let height = storage_faces.div_ceil(width);
+        if height > max_texture_size {
+            return Err(format!(
+                "{num_faces} source faces exceed the suppressed-face texture capacity",
+            ));
+        }
+        let data = vec![0_u8; width * height];
+        unsafe {
+            let texture = gl
+                .create_texture()
+                .map_err(|error| format!("suppressed-face texture: {error}"))?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R8 as i32,
+                width as i32,
+                height as i32,
+                0,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&data)),
+            );
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            Ok(Self {
+                texture,
+                num_faces,
+                width,
+                data,
+                suppressed_faces: Vec::new(),
+                dirty_faces: Vec::new(),
+            })
+        }
+    }
+
+    /// Replace the exact sorted face set and upload only bytes whose state can
+    /// have changed. Runs never cross a texture row, so arbitrary model sizes
+    /// remain valid under WebGL's two-dimensional texture limits.
+    pub fn replace(&mut self, gl: &glow::Context, faces: &[u32]) -> Result<usize, String> {
+        if faces.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("suppressed source faces must be strictly increasing".into());
+        }
+        if faces
+            .last()
+            .is_some_and(|face| *face as usize >= self.num_faces)
+        {
+            return Err("suppressed source face exceeds the current model".into());
+        }
+        if self.suppressed_faces == faces {
+            return Ok(0);
+        }
+
+        self.dirty_faces.clear();
+        self.dirty_faces.extend_from_slice(&self.suppressed_faces);
+        self.dirty_faces.extend_from_slice(faces);
+        self.dirty_faces.sort_unstable();
+        self.dirty_faces.dedup();
+        for &face in &self.suppressed_faces {
+            self.data[face as usize] = 0;
+        }
+        for &face in faces {
+            self.data[face as usize] = 255;
+        }
+
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            let mut cursor = 0usize;
+            while cursor < self.dirty_faces.len() {
+                let start = self.dirty_faces[cursor] as usize;
+                let row = start / self.width;
+                let mut end = start;
+                cursor += 1;
+                while cursor < self.dirty_faces.len() {
+                    let next = self.dirty_faces[cursor] as usize;
+                    if next != end + 1 || next / self.width != row {
+                        break;
+                    }
+                    end = next;
+                    cursor += 1;
+                }
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    (start % self.width) as i32,
+                    row as i32,
+                    (end - start + 1) as i32,
+                    1,
+                    glow::RED,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&self.data[start..=end])),
+                );
+            }
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        }
+        self.suppressed_faces.clear();
+        self.suppressed_faces.extend_from_slice(faces);
+        Ok(self.dirty_faces.len())
     }
 
     pub fn bind(&self, gl: &glow::Context, unit: u32) {

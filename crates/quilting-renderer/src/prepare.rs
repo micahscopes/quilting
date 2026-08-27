@@ -259,7 +259,7 @@ mod tests {
     use super::*;
     use crate::shader::{
         FACE_DATA_TEX_UNIT, JOINT_MATRICES_BINDING, MORPH_TEX_UNIT,
-        SKINNING_TEX_UNIT, VERTEX_UNIFORMS_BINDING,
+        SKINNING_TEX_UNIT, SUPPRESSED_FACE_TEX_UNIT, VERTEX_UNIFORMS_BINDING,
     };
     use std::collections::HashSet;
 
@@ -278,6 +278,13 @@ mod tests {
                 .iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             VISIBILITY_VARYINGS,
         );
+        assert!(key.bindings().samplers().iter().any(|binding| {
+            binding.name.as_ref() == "_group_0_binding_5_vs"
+                && binding.texture_unit == SUPPRESSED_FACE_TEX_UNIT
+        }));
+        let source = quilting_shaders::compile_patch_visibility_glsl_native().unwrap();
+        assert!(source.contains("_group_0_binding_5_vs"));
+        assert!(source.contains("texelFetch"));
     }
 
     #[test]
@@ -309,6 +316,7 @@ mod tests {
                 ("_group_0_binding_2_vs", SKINNING_TEX_UNIT),
                 ("_group_0_binding_3_vs", MORPH_TEX_UNIT),
                 ("_group_0_binding_4_vs", FACE_DATA_TEX_UNIT),
+                ("_group_0_binding_5_vs", SUPPRESSED_FACE_TEX_UNIT),
             ]
         );
     }

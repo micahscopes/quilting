@@ -10,7 +10,7 @@ struct Uniforms {
     mvp: mat4x4<f32>,
     mv: mat4x4<f32>,
     _reserved_winding_parity: f32,
-    _reserved_perm_index: i32,
+    suppress_source_roots: i32,
     use_qb: i32,
     _reserved_face_offset: f32,
     // Möbius transform: p' = (a*p + b) * (c*p + d)^{-1}
@@ -71,6 +71,12 @@ var morph_tex: texture_2d<f32>;
 // topology record containing edge LODs, permutation, and source face ID.
 @group(0) @binding(4)
 var face_data_tex: texture_2d<f32>;
+
+// Sparse renderer-owned mask for baseline source roots replaced by an
+// adaptive overlay. Overlay batches disable the mask, so an affected face can
+// still publish a root leaf when only its topology or corner density changed.
+@group(0) @binding(5)
+var suppressed_face_tex: texture_2d<f32>;
 
 // Apply skeletal skinning to a position.
 // vertex_idx indexes into the skinning texture.
@@ -240,6 +246,7 @@ struct PatchVisibilityInput {
     @location(4) w0: vec4<f32>,
     @location(5) w1: vec4<f32>,
     @location(6) w2: vec4<f32>,
+    @location(8) face_info: vec4<f32>,
 }
 
 struct PatchVisibilityOutput {
@@ -650,10 +657,17 @@ fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
 
 @vertex
 fn classify_patch_visibility(in: PatchVisibilityInput) -> PatchVisibilityOutput {
-    let visible = !patch_outside_frustum(
+    var visible = !patch_outside_frustum(
         in.p0.yzw, in.p1.yzw, in.p2.yzw,
         in.w0, in.w1, in.w2,
     );
+    if visible && u.suppress_source_roots != 0 && in.p0.x >= -0.5 {
+        let face_id = max(i32(round(in.face_info.w)), 0);
+        let mask_size = textureDimensions(suppressed_face_tex);
+        let mask_width = max(i32(mask_size.x), 1);
+        let mask_coord = vec2<i32>(face_id % mask_width, face_id / mask_width);
+        visible = textureLoad(suppressed_face_tex, mask_coord, 0).x < 0.5;
+    }
     return PatchVisibilityOutput(
         vec4<f32>(0.0),
         select(0.0, 1.0, visible),

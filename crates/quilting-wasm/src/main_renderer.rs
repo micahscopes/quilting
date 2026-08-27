@@ -2032,6 +2032,7 @@ fn sync_render_batches(renderer: &mut MainState) {
         );
         render_batches.push(RenderBatch {
             mesh,
+            suppress_source_roots: false,
             perm_parity: batch.perm_parity,
             material_index: batch.material_index,
             pbr_class: pbr_draw_class(material),
@@ -2741,6 +2742,7 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
                 let vtx_ubo = state.renderer.vtx_ubo();
                 vtx_ubo.upload(
                     gl, &batch_camera.mvp, &batch_camera.mv,
+                    false,
                     1,
                     &batch_camera.mobius, &batch_camera.camera_pos,
                     &batch.euclidean_model, &batch.euclidean_normal,
@@ -7300,6 +7302,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         let batch_camera = camera_for_batch(&camera, batch);
                         quilting_renderer::pass::upload_batch_ubo(
                             gl, state.renderer.vtx_ubo(), &batch_camera,
+                            batch.suppress_source_roots,
                             1,
                             &batch.euclidean_model, &batch.euclidean_normal,
                         );
@@ -7523,6 +7526,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         let batch_camera = camera_for_batch(&camera, batch);
                         quilting_renderer::pass::upload_batch_ubo(
                             gl, state.renderer.vtx_ubo(), &batch_camera,
+                            batch.suppress_source_roots,
                             1,
                             &batch.euclidean_model, &batch.euclidean_normal,
                         );
@@ -7728,6 +7732,7 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
             );
             quilting_renderer::pass::upload_batch_ubo(
                 gl, state.renderer.vtx_ubo(), &batch_camera,
+                batch.suppress_source_roots,
                 1,
                 &batch.euclidean_model, &batch.euclidean_normal,
             );

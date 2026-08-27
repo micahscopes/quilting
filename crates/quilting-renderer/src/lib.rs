@@ -18,7 +18,7 @@ use glow::HasContext;
 
 use buffer::{
     VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf,
-    FaceDataTexture, SkinningTexture, MorphTargetTexture,
+    FaceDataTexture, SkinningTexture, MorphTargetTexture, SuppressedFaceTexture,
 };
 use shader::{Programs, WebGlProgramKey, WebGlProgramMemo, WebGlProgramMemoDiagnostics};
 use prepare::{PatchPreparer, PatchVisibilityClassifier};
@@ -40,6 +40,7 @@ pub struct Renderer {
     patch_preparer: PatchPreparer,
     patch_visibility: PatchVisibilityClassifier,
     face_data_texture: Option<FaceDataTexture>,
+    suppressed_face_texture: SuppressedFaceTexture,
     skinning_texture: Option<SkinningTexture>,
     morph_texture: Option<MorphTargetTexture>,
     width: i32,
@@ -64,6 +65,7 @@ impl Renderer {
         let mut joint_ubo: Option<JointMatricesBuf> = None;
         let mut patch_preparer: Option<PatchPreparer> = None;
         let mut patch_visibility: Option<PatchVisibilityClassifier> = None;
+        let mut suppressed_face_texture: Option<SuppressedFaceTexture> = None;
 
         let construction = (|| -> Result<(), String> {
             programs = Some(shader::compile_programs(&gl, &mut program_memo)?);
@@ -74,10 +76,14 @@ impl Renderer {
             joint_ubo = Some(JointMatricesBuf::new(&gl)?);
             patch_preparer = Some(PatchPreparer::new(&gl, &mut program_memo)?);
             patch_visibility = Some(PatchVisibilityClassifier::new(&gl, &mut program_memo)?);
+            suppressed_face_texture = Some(SuppressedFaceTexture::new(&gl, 0)?);
             Ok(())
         })();
 
         if let Err(error) = construction {
+            if let Some(resource) = suppressed_face_texture {
+                resource.destroy(&gl);
+            }
             if let Some(resource) = patch_visibility {
                 resource.destroy(&gl);
             }
@@ -117,6 +123,8 @@ impl Renderer {
             patch_visibility: patch_visibility
                 .expect("successful construction allocated patch visibility classifier"),
             face_data_texture: None,
+            suppressed_face_texture: suppressed_face_texture
+                .expect("successful construction allocated suppressed-face texture"),
             skinning_texture: None,
             morph_texture: None,
             width: 0,
@@ -182,6 +190,7 @@ impl Renderer {
             &self.gl,
             &self.vtx_ubo,
             &batch_camera,
+            false,
             1,
             &batch.euclidean_model,
             &batch.euclidean_normal,
@@ -210,6 +219,7 @@ impl Renderer {
             &self.gl,
             &self.vtx_ubo,
             &batch_camera,
+            batch.suppress_source_roots,
             1,
             &batch.euclidean_model,
             &batch.euclidean_normal,
@@ -300,6 +310,34 @@ impl Renderer {
         Ok(())
     }
 
+    /// Replace the exact source-root suppression mask. Reallocation is needed
+    /// only when model identity changes; ordinary adaptive updates touch sparse
+    /// row-contiguous bytes in the retained texture.
+    pub fn set_suppressed_source_faces(
+        &mut self,
+        num_faces: usize,
+        faces: &[u32],
+    ) -> Result<usize, String> {
+        if self.suppressed_face_texture.num_faces != num_faces {
+            let mut replacement = SuppressedFaceTexture::new(&self.gl, num_faces)?;
+            let changed = match replacement.replace(&self.gl, faces) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    replacement.destroy(&self.gl);
+                    return Err(error);
+                }
+            };
+            replacement.bind(&self.gl, shader::SUPPRESSED_FACE_TEX_UNIT);
+            let previous = std::mem::replace(&mut self.suppressed_face_texture, replacement);
+            previous.destroy(&self.gl);
+            return Ok(changed);
+        }
+        let changed = self.suppressed_face_texture.replace(&self.gl, faces)?;
+        self.suppressed_face_texture
+            .bind(&self.gl, shader::SUPPRESSED_FACE_TEX_UNIT);
+        Ok(changed)
+    }
+
     /// Replace the renderer's persistent per-vertex skinning resource.
     pub fn upload_skinning_texture(
         &mut self,
@@ -347,6 +385,11 @@ impl Renderer {
                 glow::TEXTURE_2D,
                 self.face_data_texture.as_ref().map(|texture| texture.texture),
             );
+            self.gl.active_texture(glow::TEXTURE0 + shader::SUPPRESSED_FACE_TEX_UNIT);
+            self.gl.bind_texture(
+                glow::TEXTURE_2D,
+                Some(self.suppressed_face_texture.texture),
+            );
         }
     }
 
@@ -377,6 +420,7 @@ impl Drop for Renderer {
         if let Some(texture) = self.face_data_texture.take() {
             texture.destroy(&self.gl);
         }
+        self.suppressed_face_texture.destroy(&self.gl);
         if let Some(texture) = self.skinning_texture.take() {
             texture.destroy(&self.gl);
         }

@@ -215,6 +215,10 @@ pub(crate) fn shared_vertex_binding_entries() -> (Vec<WebGlUniformBlockBinding>,
                 name: "_group_0_binding_4_vs".into(),
                 texture_unit: FACE_DATA_TEX_UNIT,
             },
+            WebGlSamplerBinding {
+                name: "_group_0_binding_5_vs".into(),
+                texture_unit: SUPPRESSED_FACE_TEX_UNIT,
+            },
         ],
     )
 }
@@ -677,6 +681,9 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
         if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_4_vs") {
             gl.uniform_1_i32(Some(&loc), FACE_DATA_TEX_UNIT as i32);
         }
+        if let Some(loc) = gl.get_uniform_location(program, "_group_0_binding_5_vs") {
+            gl.uniform_1_i32(Some(&loc), SUPPRESSED_FACE_TEX_UNIT as i32);
+        }
         // Fragment shader textures — bind to texture units matching the PBR layout.
         // PBR: bindings 2-17 → units 0-7 (base_color, mr, normal, emissive, occlusion, env, irrad, sheen)
         let fs_sampler_bindings: &[(u32, i32)] = &[
@@ -731,6 +738,7 @@ pub fn bind_uniform_blocks(gl: &glow::Context, program: glow::Program) {
 pub const SKINNING_TEX_UNIT: u32 = 15;
 pub const MORPH_TEX_UNIT: u32 = 14;
 pub const FACE_DATA_TEX_UNIT: u32 = 13;
+pub const SUPPRESSED_FACE_TEX_UNIT: u32 = 12;
 
 /// Compile all WGSL shaders to GLSL, create GL programs, and bind uniform blocks.
 pub fn compile_programs(
