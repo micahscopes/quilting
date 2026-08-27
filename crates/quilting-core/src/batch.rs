@@ -2275,6 +2275,17 @@ mod tests {
 
         assert!(high_lod_first_material < low_lod_later_material);
         assert!(high_lod_first_material < same_material_later_node);
+        let retained_root = RenderBatchId {
+            key: high_lod_first_material,
+            layer: RenderBatchLayer::RetainedRoot,
+        };
+        let adaptive_overlay = RenderBatchId {
+            key: high_lod_first_material,
+            layer: RenderBatchLayer::AdaptiveOverlay,
+        };
+        assert!(retained_root < adaptive_overlay);
+        assert!(adaptive_overlay
+            < RenderBatchId::complete(same_material_later_node));
     }
 
     #[test]

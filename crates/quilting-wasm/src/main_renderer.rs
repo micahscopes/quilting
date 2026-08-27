@@ -224,7 +224,7 @@ struct MainState {
     viewport_size: (i32, i32),
     texture_cache: TextureCache,
     env_maps: EnvironmentMaps,
-    batches: BTreeMap<batch::RenderBatchKey, GpuBatch>,
+    batches: BTreeMap<batch::RenderBatchId, GpuBatch>,
     /// Retained WebGL draw views derived from backend-neutral batch keys.
     /// Rebuilt only when membership or per-node conformal state changes.
     render_batches: Vec<RenderBatch>,
@@ -2014,7 +2014,7 @@ fn sync_render_batches(renderer: &mut MainState) {
     render_batches.clear();
     render_batches.reserve(renderer.batches.len());
     let default_material = PbrParams::default();
-    for batch in renderer.batches.values() {
+    for (&id, batch) in &renderer.batches {
         let conformal = conformal_state_for_node(renderer, batch.render_node_index);
         let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
         let mut mesh = MeshDraw::from(&batch.mesh);
@@ -2032,7 +2032,7 @@ fn sync_render_batches(renderer: &mut MainState) {
         );
         render_batches.push(RenderBatch {
             mesh,
-            suppress_source_roots: false,
+            suppress_source_roots: id.layer == batch::RenderBatchLayer::RetainedRoot,
             perm_parity: batch.perm_parity,
             material_index: batch.material_index,
             pbr_class: pbr_draw_class(material),
@@ -2058,7 +2058,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
         ));
     }
     let mut batches = Vec::with_capacity(renderer.batches.len());
-    for ((&key, gpu_batch), render_batch) in
+    for ((&id, gpu_batch), render_batch) in
         renderer.batches.iter().zip(&renderer.render_batches)
     {
         if gpu_batch.material_index != render_batch.material_index
@@ -2071,7 +2071,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
         let line_index_count = u32::try_from(render_batch.mesh.num_line_indices)
             .map_err(|_| "render batch has a negative line index count".to_string())?;
         batches.push(RenderBatchSnapshot {
-            id: batch::RenderBatchId::complete(key),
+            id,
             members: gpu_batch.members.clone(),
             triangle_index_count,
             line_index_count,
@@ -6222,8 +6222,8 @@ fn upload_batch_groups_transactionally(
 ) -> Result<TransactionalBatchUploadStats, TransactionalBatchUploadFailure> {
     let gl = state.renderer.gl();
     let mut previous_batches = std::mem::take(&mut state.batches);
-    let mut reused_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();
-    let mut staged_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();
+    let mut reused_batches = BTreeMap::<batch::RenderBatchId, GpuBatch>::new();
+    let mut staged_batches = BTreeMap::<batch::RenderBatchId, GpuBatch>::new();
     let mut stats = TransactionalBatchUploadStats::default();
     let stride = instance_layout::BATCH_TOPOLOGY_STRIDE;
     let max_batch_size = state.batch_groups.values().map(Vec::len).max().unwrap_or(0);
@@ -6232,24 +6232,25 @@ fn upload_batch_groups_transactionally(
     let attempt = TESS_CACHE.with(|cache| -> Result<(), TransactionalBatchUploadFailure> {
         let cache = cache.borrow();
         for (&key, members) in &state.batch_groups {
+            let id = batch::RenderBatchId::complete(key);
             let tess = cache.get(&key.lod).ok_or_else(|| TransactionalBatchUploadFailure {
                 message: format!("adaptive batch needs missing atlas patch {:?}", key.lod),
                 missing_atlas_entries: 1,
                 failures: 0,
             })?;
             let membership_changed = previous_batches
-                .get(&key)
+                .get(&id)
                 .is_none_or(|batch| batch.members != *members);
             if !force_upload && !membership_changed {
                 stats.retained += 1;
-                let previous = previous_batches.remove(&key).ok_or_else(|| {
+                let previous = previous_batches.remove(&id).ok_or_else(|| {
                     TransactionalBatchUploadFailure {
                         message: format!("retained adaptive batch {key:?} disappeared"),
                         missing_atlas_entries: 0,
                         failures: 1,
                     }
                 })?;
-                reused_batches.insert(key, previous);
+                reused_batches.insert(id, previous);
                 continue;
             }
 
@@ -6275,10 +6276,10 @@ fn upload_batch_groups_transactionally(
                 missing_atlas_entries: 0,
                 failures: 1,
             })?;
-            stats.reallocated += usize::from(previous_batches.contains_key(&key));
+            stats.reallocated += usize::from(previous_batches.contains_key(&id));
             stats.created += 1;
             stats.uploaded_instances += members.len();
-            staged_batches.insert(key, staged);
+            staged_batches.insert(id, staged);
         }
         Ok(())
     });
@@ -6834,7 +6835,7 @@ fn update_batches_in_state(
         }
         let gl = state.renderer.gl();
         let mut previous_batches = std::mem::take(&mut state.batches);
-        let mut next_batches = BTreeMap::<batch::RenderBatchKey, GpuBatch>::new();
+        let mut next_batches = BTreeMap::<batch::RenderBatchId, GpuBatch>::new();
         let mut retained = 0usize;
         let mut updated = 0usize;
         let mut created = 0usize;
@@ -6853,16 +6854,17 @@ fn update_batches_in_state(
         TESS_CACHE.with(|tc| {
             let tc = tc.borrow();
             for (&key, members) in &state.batch_groups {
+                let id = batch::RenderBatchId::complete(key);
                 let tess = match tc.get(&key.lod) {
                     Some(t) => t,
                     None => { missing += 1; continue; }
                 };
-                let previous = previous_batches.remove(&key);
+                let previous = previous_batches.remove(&id);
                 let membership_changed = previous.as_ref()
                     .is_none_or(|batch| batch.members != *members);
                 if !force_upload && !membership_changed {
                     retained += 1;
-                    next_batches.insert(key, previous.unwrap());
+                    next_batches.insert(id, previous.unwrap());
                     continue;
                 }
 
@@ -6887,7 +6889,7 @@ fn update_batches_in_state(
                             Ok(()) => {
                                 updated += 1;
                                 uploaded_instances += members.len();
-                                next_batches.insert(key, gpu_batch);
+                                next_batches.insert(id, gpu_batch);
                             }
                             Err(error) => {
                                 warn!("Failed to update retained batch {:?}: {error}", key);
@@ -6907,7 +6909,7 @@ fn update_batches_in_state(
                     Ok(gpu_batch) => {
                         created += 1;
                         uploaded_instances += members.len();
-                        next_batches.insert(key, gpu_batch);
+                        next_batches.insert(id, gpu_batch);
                     }
                     Err(error) => {
                         warn!("Failed to create retained batch {:?}: {error}", key);

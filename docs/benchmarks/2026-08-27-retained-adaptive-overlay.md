@@ -140,3 +140,12 @@ rejects unmasked replacements, and forbids mixing the incumbent complete path
 with retained layers. This permits WebGL2 to use a visibility mask while a
 future WebGPU backend compacts the same logical scene without inventing a
 different topology contract.
+
+WebGL2 GPU maps are now keyed by that shared batch identity as well. The
+behavior-preserving migration published every incumbent resource as
+`Complete`, leaving suppression disabled. A live animated horse render-shadow
+sample rebuilt three scene snapshots and observed four frames with exact
+submission parity: five draw calls, 984 submitted instances, 3,306 lines, the
+same ordered submission fingerprint, and zero extraction or observation
+errors. Retained-root and overlay resources can therefore be introduced
+without a second ad hoc key space.
