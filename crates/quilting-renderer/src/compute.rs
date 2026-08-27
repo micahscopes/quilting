@@ -67,6 +67,57 @@ pub struct LodModelResidency {
     pub mesh_radius: f32,
 }
 
+/// Canonical exponent lookup shared by WebGL2 and future WebGPU classifiers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LodAtlasLookup {
+    pub lut: Vec<u8>,
+    pub keys: Vec<[u32; 3]>,
+    pub max_lod: f32,
+}
+
+/// Validate canonical atlas keys and build the compact shader lookup.
+pub fn prepare_lod_atlas_lookup(
+    keys: impl IntoIterator<Item = [u32; 3]>,
+) -> Result<LodAtlasLookup, String> {
+    const LUT_SIZE: usize = 1_200;
+    const MISSING: u8 = u8::MAX;
+    let mut keys: Vec<[u32; 3]> = keys.into_iter().collect();
+    if keys.is_empty() {
+        return Err("LOD atlas contains no canonical patches".to_string());
+    }
+    keys.sort_unstable();
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("LOD atlas contains duplicate canonical patches".to_string());
+    }
+    if keys.len() > MISSING as usize {
+        return Err("LOD atlas exceeds the u8 classifier lookup".to_string());
+    }
+
+    let mut lut = vec![MISSING; LUT_SIZE];
+    let mut max_lod = 1u32;
+    for (index, key) in keys.iter().copied().enumerate() {
+        if key[0] > key[1] || key[1] > key[2] {
+            return Err(format!("LOD atlas key {key:?} is not canonical"));
+        }
+        let mut exponents = [0usize; 3];
+        for (edge, exponent) in key.into_iter().zip(&mut exponents) {
+            if !edge.is_power_of_two() || edge.trailing_zeros() > 9 {
+                return Err(format!("LOD atlas edge {edge} is outside the shader lookup"));
+            }
+            *exponent = edge.trailing_zeros() as usize;
+            max_lod = max_lod.max(edge);
+        }
+        let lut_key = exponents[0] + exponents[1] * 10 + exponents[2] * 100;
+        debug_assert!(lut_key < LUT_SIZE);
+        lut[lut_key] = index as u8;
+    }
+    Ok(LodAtlasLookup {
+        lut,
+        keys,
+        max_lod: max_lod as f32,
+    })
+}
+
 /// Validate and derive the topology shared by every LOD compute backend.
 pub fn prepare_lod_model(model: LodModelData) -> Result<PreparedLodModel, String> {
     let num_vertices = model.positions.len() / 3;
@@ -1817,6 +1868,40 @@ mod tests {
             prepare_lod_model(model).unwrap_err(),
             "LOD morph payload does not match model shape",
         );
+    }
+
+    #[test]
+    fn atlas_lookup_sorts_and_indexes_canonical_power_of_two_keys() {
+        let lookup = prepare_lod_atlas_lookup([[2, 4, 4], [1, 1, 1], [2, 2, 4]])
+            .unwrap();
+        assert_eq!(lookup.keys, [[1, 1, 1], [2, 2, 4], [2, 4, 4]]);
+        assert_eq!(lookup.max_lod, 4.0);
+        assert_eq!(lookup.lut[0], 0);
+        assert_eq!(lookup.lut[211], 1);
+        assert_eq!(lookup.lut[221], 2);
+        assert_eq!(lookup.lut[999], u8::MAX);
+    }
+
+    #[test]
+    fn atlas_lookup_rejects_ambiguous_or_unrepresentable_keys() {
+        for (keys, message) in [
+            (vec![], "LOD atlas contains no canonical patches"),
+            (
+                vec![[1, 1, 1], [1, 1, 1]],
+                "LOD atlas contains duplicate canonical patches",
+            ),
+            (vec![[2, 1, 2]], "LOD atlas key [2, 1, 2] is not canonical"),
+            (
+                vec![[1, 1, 3]],
+                "LOD atlas edge 3 is outside the shader lookup",
+            ),
+            (
+                vec![[1, 1, 1_024]],
+                "LOD atlas edge 1024 is outside the shader lookup",
+            ),
+        ] {
+            assert_eq!(prepare_lod_atlas_lookup(keys).unwrap_err(), message);
+        }
     }
 
     #[test]

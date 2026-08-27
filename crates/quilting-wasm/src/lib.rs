@@ -20,8 +20,9 @@ use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
 use quilting_renderer::compute::{
-    build_composed_lod_model, build_lod_subject_states, prepare_lod_model,
-    LodAnimationSource, LodCompute, LodModelData, LodModelResidency, StagedLodReadback,
+    build_composed_lod_model, build_lod_subject_states, prepare_lod_atlas_lookup,
+    prepare_lod_model, LodAnimationSource, LodAtlasLookup, LodCompute, LodModelData,
+    LodModelResidency, StagedLodReadback,
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -380,7 +381,7 @@ fn upload_lod_compute_model(upload: LodModelData) -> Result<bool, String> {
         let Some((gl, compute)) = gpu_compute.as_mut() else {
             return None;
         };
-        Some(compute.upload_model(gl, &prepared, &atlas.0))
+        Some(compute.upload_model(gl, &prepared, &atlas.lut))
     });
     let Some(residency) = residency else {
         return Ok(false);
@@ -390,35 +391,19 @@ fn upload_lod_compute_model(upload: LodModelData) -> Result<bool, String> {
     Ok(true)
 }
 
-fn lod_atlas_snapshot() -> Result<(Vec<u8>, Vec<[u32; 3]>, f32), String> {
+fn lod_atlas_snapshot() -> Result<LodAtlasLookup, String> {
     ATLAS.with(|atlas_cell| {
         let atlas_cell = atlas_cell.borrow();
         let atlas = atlas_cell
             .as_ref()
             .ok_or_else(|| "LOD atlas is not resident".to_string())?;
-        const LUT_SIZE: usize = 1200;
-        let mut lut = vec![255u8; LUT_SIZE];
-        let mut keys: Vec<[u32; 3]> = atlas.patches.keys().copied().collect();
-        keys.sort();
-        for (index, key) in keys.iter().enumerate().take(255) {
-            let ea = (key[0] as f64).log2().round() as usize;
-            let eb = (key[1] as f64).log2().round() as usize;
-            let ec = (key[2] as f64).log2().round() as usize;
-            let lut_key = ea + eb * 10 + ec * 100;
-            if lut_key < LUT_SIZE {
-                lut[lut_key] = index as u8;
-            }
-        }
-        let max_lod = keys.last()
-            .map(|key| *key.iter().max().expect("atlas key has three edges"))
-            .unwrap_or(512) as f32;
-        Ok((lut, keys, max_lod))
+        prepare_lod_atlas_lookup(atlas.patches.keys().copied())
     })
 }
 
-fn install_lod_atlas_snapshot(atlas: (Vec<u8>, Vec<[u32; 3]>, f32)) {
-    LOD_MAX.with(|max| *max.borrow_mut() = atlas.2);
-    LOD_ATLAS_KEYS.with(|keys| *keys.borrow_mut() = atlas.1);
+fn install_lod_atlas_snapshot(atlas: LodAtlasLookup) {
+    LOD_MAX.with(|max| *max.borrow_mut() = atlas.max_lod);
+    LOD_ATLAS_KEYS.with(|keys| *keys.borrow_mut() = atlas.keys);
     reset_animated_lod_delta();
 }
 
@@ -433,7 +418,7 @@ pub fn refresh_lod_compute_atlas() -> Result<bool, JsValue> {
         let Some((gl, compute)) = gpu_compute.as_mut() else {
             return false;
         };
-        compute.upload_atlas_lut(gl, &atlas.0);
+        compute.upload_atlas_lut(gl, &atlas.lut);
         true
     });
     if uploaded {
