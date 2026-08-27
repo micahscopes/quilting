@@ -125,6 +125,10 @@ pub enum ScreenLeafLodError {
         required: usize,
         maximum: usize,
     },
+    NeighborhoodBudgetExceeded {
+        required: usize,
+        maximum: usize,
+    },
 }
 
 impl std::fmt::Display for ScreenLeafLodError {
@@ -183,6 +187,10 @@ impl std::fmt::Display for ScreenLeafLodError {
             Self::ComponentClosureBudgetExceeded { required, maximum } => write!(
                 formatter,
                 "adaptive source-component closure needs {required} faces; budget is {maximum}",
+            ),
+            Self::NeighborhoodBudgetExceeded { required, maximum } => write!(
+                formatter,
+                "adaptive source neighborhood needs {required} faces; budget is {maximum}",
             ),
         }
     }
@@ -667,6 +675,58 @@ fn canonical_face_components(
     Ok((face_components, component_offsets, component_faces))
 }
 
+fn canonical_vertex_faces(
+    canonical_face_vertices: &[[u32; 3]],
+    source_vertex_count: usize,
+) -> Result<(Vec<u32>, Vec<u32>), ScreenLeafLodError> {
+    let mut vertex_offsets = vec![0u32; source_vertex_count + 1];
+    for vertices in canonical_face_vertices.iter().copied() {
+        let mut unique = vertices;
+        unique.sort_unstable();
+        for (index, vertex) in unique.iter().copied().enumerate() {
+            if index != 0 && vertex == unique[index - 1] {
+                continue;
+            }
+            let offset = vertex_offsets
+                .get_mut(vertex as usize + 1)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+            *offset = offset
+                .checked_add(1)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+        }
+    }
+    for vertex in 0..source_vertex_count {
+        vertex_offsets[vertex + 1] = vertex_offsets[vertex + 1]
+            .checked_add(vertex_offsets[vertex])
+            .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+    }
+    let face_slots = vertex_offsets.last().copied().unwrap_or(0) as usize;
+    let mut vertex_faces = vec![0u32; face_slots];
+    let mut cursors = vertex_offsets[..source_vertex_count].to_vec();
+    for (face, vertices) in canonical_face_vertices.iter().copied().enumerate() {
+        let face = u32::try_from(face)
+            .map_err(|_| ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+        let mut unique = vertices;
+        unique.sort_unstable();
+        for (index, vertex) in unique.iter().copied().enumerate() {
+            if index != 0 && vertex == unique[index - 1] {
+                continue;
+            }
+            let cursor = cursors
+                .get_mut(vertex as usize)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+            let slot = vertex_faces
+                .get_mut(*cursor as usize)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+            *slot = face;
+            *cursor = cursor
+                .checked_add(1)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+        }
+    }
+    Ok((vertex_offsets, vertex_faces))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CachedSourceEdge(u32);
 
@@ -699,9 +759,56 @@ pub struct ScreenMeshTopologyCache {
     source_half_edge_count: usize,
     canonical_face_vertices: Vec<[u32; 3]>,
     face_edges: Vec<[CachedSourceEdge; 3]>,
+    face_neighbors: Vec<[u32; 3]>,
+    vertex_face_offsets: Vec<u32>,
+    vertex_faces: Vec<u32>,
     face_components: Vec<u32>,
     component_offsets: Vec<u32>,
     component_faces: Vec<u32>,
+}
+
+/// Allocation-retaining work space for bounded source-face neighborhood
+/// queries. The query output remains caller-owned; this scratch only retains
+/// visitation, frontier, and vertex-deduplication storage across camera poses.
+#[derive(Debug, Default)]
+pub struct ScreenMeshNeighborhoodScratch {
+    marks: Vec<u32>,
+    generation: u32,
+    frontier: Vec<u32>,
+    next_frontier: Vec<u32>,
+    vertices: Vec<u32>,
+}
+
+impl ScreenMeshNeighborhoodScratch {
+    fn begin(&mut self, face_count: usize) -> u32 {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.marks.fill(0);
+            self.generation = 1;
+        }
+        self.marks.resize(face_count, 0);
+        self.frontier.clear();
+        self.next_frontier.clear();
+        self.vertices.clear();
+        self.generation
+    }
+}
+
+fn mark_neighborhood_face(
+    marks: &mut [u32],
+    generation: u32,
+    face: u32,
+    output: &mut Vec<u32>,
+) -> Result<bool, ScreenLeafLodError> {
+    let mark = marks
+        .get_mut(face as usize)
+        .ok_or(ScreenLeafLodError::MissingSourceFace { source_face: face })?;
+    if *mark == generation {
+        return Ok(false);
+    }
+    *mark = generation;
+    output.push(face);
+    Ok(true)
 }
 
 impl ScreenMeshTopologyCache {
@@ -711,6 +818,7 @@ impl ScreenMeshTopologyCache {
         let canonical_vertices = canonical_source_vertices(source_topology)?;
         let mut canonical_face_vertices = Vec::with_capacity(source_topology.num_faces as usize);
         let mut face_edges = Vec::with_capacity(source_topology.num_faces as usize);
+        let mut face_neighbors = Vec::with_capacity(source_topology.num_faces as usize);
         for source_face in 0..source_topology.num_faces {
             let vertices = source_topology.face_vertices(source_face);
             let mut canonical = [0u32; 3];
@@ -723,15 +831,25 @@ impl ScreenMeshTopologyCache {
             canonical_face_vertices.push(canonical);
             let half_edges = source_topology.face_half_edges(source_face);
             let mut cached_edges = [CachedSourceEdge(0); 3];
+            let mut cached_neighbors = [u32::MAX; 3];
             for source_edge in 0..3 {
                 let half_edge = half_edges[(source_edge + 1) % 3];
                 let canonical_half_edge = source_topology.canonical_edge(half_edge);
                 cached_edges[source_edge] =
                     CachedSourceEdge::new(canonical_half_edge, half_edge != canonical_half_edge)
                         .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+                if let Some(neighbor) = source_topology.adjacent_face(half_edge) {
+                    if neighbor >= source_topology.num_faces {
+                        return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
+                    }
+                    cached_neighbors[source_edge] = neighbor;
+                }
             }
             face_edges.push(cached_edges);
+            face_neighbors.push(cached_neighbors);
         }
+        let (vertex_face_offsets, vertex_faces) =
+            canonical_vertex_faces(&canonical_face_vertices, canonical_vertices.len())?;
         let (face_components, component_offsets, component_faces) =
             canonical_face_components(&canonical_face_vertices, canonical_vertices.len())?;
         Ok(Self {
@@ -739,6 +857,9 @@ impl ScreenMeshTopologyCache {
             source_half_edge_count: source_topology.half_edges.len(),
             canonical_face_vertices,
             face_edges,
+            face_neighbors,
+            vertex_face_offsets,
+            vertex_faces,
             face_components,
             component_offsets,
             component_faces,
@@ -755,6 +876,109 @@ impl ScreenMeshTopologyCache {
         output: &mut Vec<u32>,
     ) -> Result<(), ScreenLeafLodError> {
         self.collect_component_closure_from_faces(seeds.iter().copied(), max_faces, output)
+    }
+
+    /// Collect a deterministic bounded neighborhood around stable source-face
+    /// seeds without claiming that the chosen radius is an authority proof.
+    ///
+    /// `reconciliation_faces` contains the seeds and `edge_hops` rings of
+    /// half-edge-adjacent faces. `observed_faces` additionally contains one
+    /// non-recursive canonical-vertex incidence ring, which is the set whose
+    /// physical corner-density records may observe changes made inside the
+    /// reconciliation neighborhood. Both outputs are globally source ordered.
+    ///
+    /// This is a topology primitive for a separately certified incremental
+    /// planner. A caller must still provide fixed boundary state, compare with
+    /// the complete oracle, and fall back if influence escapes this set.
+    pub fn collect_face_neighborhood(
+        &self,
+        seeds: &[u32],
+        edge_hops: u32,
+        max_faces: usize,
+        reconciliation_faces: &mut Vec<u32>,
+        observed_faces: &mut Vec<u32>,
+        scratch: &mut ScreenMeshNeighborhoodScratch,
+    ) -> Result<(), ScreenLeafLodError> {
+        reconciliation_faces.clear();
+        observed_faces.clear();
+        if let Some(&source_face) = seeds
+            .iter()
+            .find(|&&source_face| source_face as usize >= self.face_edges.len())
+        {
+            return Err(ScreenLeafLodError::MissingSourceFace { source_face });
+        }
+        let generation = scratch.begin(self.face_edges.len());
+        for &seed in seeds {
+            if mark_neighborhood_face(&mut scratch.marks, generation, seed, reconciliation_faces)? {
+                scratch.frontier.push(seed);
+            }
+        }
+        for _ in 0..edge_hops {
+            scratch.next_frontier.clear();
+            for &face in &scratch.frontier {
+                let neighbors = self
+                    .face_neighbors
+                    .get(face as usize)
+                    .ok_or(ScreenLeafLodError::MissingSourceFace { source_face: face })?;
+                for &neighbor in neighbors {
+                    if neighbor != u32::MAX
+                        && mark_neighborhood_face(
+                            &mut scratch.marks,
+                            generation,
+                            neighbor,
+                            reconciliation_faces,
+                        )?
+                    {
+                        scratch.next_frontier.push(neighbor);
+                    }
+                }
+            }
+            std::mem::swap(&mut scratch.frontier, &mut scratch.next_frontier);
+            if scratch.frontier.is_empty() {
+                break;
+            }
+        }
+        reconciliation_faces.sort_unstable();
+        observed_faces.extend_from_slice(reconciliation_faces);
+        for &face in reconciliation_faces.iter() {
+            let vertices = self
+                .canonical_face_vertices
+                .get(face as usize)
+                .ok_or(ScreenLeafLodError::MissingSourceFace { source_face: face })?;
+            scratch.vertices.extend_from_slice(vertices);
+        }
+        scratch.vertices.sort_unstable();
+        scratch.vertices.dedup();
+        for &vertex in &scratch.vertices {
+            let start = *self
+                .vertex_face_offsets
+                .get(vertex as usize)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?
+                as usize;
+            let end = *self
+                .vertex_face_offsets
+                .get(vertex as usize + 1)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?
+                as usize;
+            for &face in self
+                .vertex_faces
+                .get(start..end)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?
+            {
+                mark_neighborhood_face(&mut scratch.marks, generation, face, observed_faces)?;
+            }
+        }
+        observed_faces.sort_unstable();
+        if observed_faces.len() > max_faces {
+            let required = observed_faces.len();
+            reconciliation_faces.clear();
+            observed_faces.clear();
+            return Err(ScreenLeafLodError::NeighborhoodBudgetExceeded {
+                required,
+                maximum: max_faces,
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn collect_component_closure_from_faces(
@@ -1748,6 +1972,82 @@ mod tests {
             Err(ScreenLeafLodError::MissingSourceFace { source_face: 3 }),
         );
         assert!(closure.is_empty());
+    }
+
+    #[test]
+    fn source_face_neighborhood_separates_edge_reconciliation_from_corner_observers() {
+        let source_topology = quilting_mesh::HalfEdgeMesh::from_triangles(
+            7,
+            &[
+                [0, 1, 2],
+                [2, 1, 3],
+                [2, 3, 4],
+                // Shares only vertex 4 with face 2.
+                [4, 5, 6],
+            ],
+        );
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source_topology).unwrap();
+        let mut reconciliation = vec![99];
+        let mut observed = vec![99];
+        let mut scratch = ScreenMeshNeighborhoodScratch::default();
+
+        topology
+            .collect_face_neighborhood(
+                &[0, 0],
+                0,
+                4,
+                &mut reconciliation,
+                &mut observed,
+                &mut scratch,
+            )
+            .unwrap();
+        assert_eq!(reconciliation, [0]);
+        assert_eq!(observed, [0, 1, 2]);
+
+        topology
+            .collect_face_neighborhood(&[0], 1, 4, &mut reconciliation, &mut observed, &mut scratch)
+            .unwrap();
+        assert_eq!(reconciliation, [0, 1]);
+        assert_eq!(observed, [0, 1, 2]);
+
+        topology
+            .collect_face_neighborhood(&[0], 2, 4, &mut reconciliation, &mut observed, &mut scratch)
+            .unwrap();
+        assert_eq!(reconciliation, [0, 1, 2]);
+        assert_eq!(observed, [0, 1, 2, 3]);
+
+        assert_eq!(
+            topology.collect_face_neighborhood(
+                &[0],
+                2,
+                3,
+                &mut reconciliation,
+                &mut observed,
+                &mut scratch,
+            ),
+            Err(ScreenLeafLodError::NeighborhoodBudgetExceeded {
+                required: 4,
+                maximum: 3,
+            }),
+        );
+        assert!(reconciliation.is_empty());
+        assert!(observed.is_empty());
+
+        reconciliation.push(99);
+        observed.push(99);
+        assert_eq!(
+            topology.collect_face_neighborhood(
+                &[4],
+                1,
+                4,
+                &mut reconciliation,
+                &mut observed,
+                &mut scratch,
+            ),
+            Err(ScreenLeafLodError::MissingSourceFace { source_face: 4 }),
+        );
+        assert!(reconciliation.is_empty());
+        assert!(observed.is_empty());
     }
 
     #[test]
