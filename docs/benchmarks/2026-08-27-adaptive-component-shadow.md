@@ -199,16 +199,64 @@ remained:
 ## Automated gates
 
 - 216 `quilting-core` unit tests and 15 integration tests pass.
-- 16 generated Node/WASM tests pass, including a disconnected-source component
+- 17 generated Node/WASM tests pass, including a disconnected-source component
   shadow with a real dyadic replacement, changed welded-neighbour C0 metadata,
   exact sparse triangle budget, and complete-publication parity.
 - The generated-export/inert-before-renderer Node smoke passes.
 
+## Bounded changed-component authority
+
+After one exact oracle sample for a root-topology/batch-layout epoch, a changed
+component may now publish directly from its certified welded closure. This lane
+has a distinct component group identity, so it cannot masquerade as the stale
+complete CPU grouping retained for rollback. It is eligible only when retained
+publication is active, all active PBR buckets are opaque, the component does
+not cover the whole scene, and it contains at most 4,096 faces. Above 4,096
+source faces it must also cover at most one quarter of the scene.
+
+The first 15 eligible changed epochs use component authority; the sixteenth
+runs the complete planner and overlay oracle. Topology or batch-layout changes
+require a new exact basis. Any sampled plan, resident LoD, corner-density,
+overlay, atlas-residency, or triangle-budget discrepancy revokes component
+authority for that exact topology/layout epoch. GPU publication remains
+transactional, and explicit disable/re-enable resets the basis before retry.
+
+On a 94,628-face pathological chess view, a controlled seven-face current-view
+request produced:
+
+| Work term | Value |
+| --- | ---: |
+| Welded component closure | 284 faces |
+| Unaffected retained roots | 94,344 faces |
+| Component frontier | 680 leaves |
+| Baseline triangles | 143,786 |
+| Suppressed root triangles | -24,388 |
+| Component overlay triangles | +10,780 |
+| Composed / complete triangles | 130,178 / 130,178 |
+| Cold complete planning | 549.9 ms |
+| Warm changed-component planning | 62.9 ms |
+| Warm component overlay extraction | 0.6 ms |
+
+The changed epoch reported `authoritative-unsampled`, one oracle skip, one
+changed-authority install, zero mismatches, zero revocations, and zero
+publication fallbacks. A clean complete-oracle tab reported exact plan,
+resident, vertex-density, overlay-group, atlas, and triangle parity for the
+same request. After revisiting that request through the changed-authority lane,
+the full viewport PNG matched the complete-oracle image byte-for-byte:
+
+```text
+08c08b6fb5e62c32e79bcdd20dbb789db59e3c38ac9fe375d67cb50e724dba49
+```
+
+Chrome reported no warnings or errors, the temporary tabs were closed, and the
+user's existing chess tab was not modified.
+
 ## Decision
 
-The exact component overlay now has physical publication authority, and an
-unchanged certified component epoch may bypass the complete CPU planner. New
-component identities still run the complete oracle before certification. The
-next gate is bounded authority for changed component epochs: oversized,
-uncertified, order-sensitive, or failed candidates must continue to fall back
-transactionally while measured exact samples retain the complete oracle.
+The exact component overlay now has physical publication authority. Unchanged
+certified epochs bypass the complete CPU planner, and bounded changed epochs
+may do so between periodic exact samples. Whole-scene, oversized,
+order-sensitive, uncertified, revoked, or failed candidates retain the complete
+transactional path. The next gate is representative animated-pose evidence and
+then moving the remaining component plan itself out of the frame-critical CPU
+lane.
