@@ -614,7 +614,6 @@ struct AdaptiveNeighborhoodShadowComparison {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AdaptiveNeighborhoodStageSignature {
     reconciliation_generation: u64,
-    root_topology_revision: u64,
     batch_layout_revision: u64,
 }
 
@@ -626,7 +625,6 @@ struct AdaptiveChangedNeighborhoodAuthority {
 
 #[derive(Clone, Copy, Debug)]
 struct AdaptiveNeighborhoodCertificate {
-    root_topology_revision: u64,
     batch_layout_revision: u64,
 }
 
@@ -692,10 +690,11 @@ impl AdaptiveNeighborhoodReconciliationCache {
 }
 
 /// Disabled-by-default bounded recomputation observer. Exact complete-oracle
-/// matches may certify the bounded algorithm for the current topology and
-/// batch-layout epoch. Publication still rebuilds the current neighborhood on
-/// every changed pose, periodically re-samples the complete oracle, and
-/// revokes the epoch on the first escape, mismatch, or staging failure.
+/// matches may certify the bounded algorithm for the current immutable source
+/// and batch-layout epoch. The mutable root LoD field is an input to each fresh
+/// neighborhood, not part of the certificate identity. Publication still
+/// periodically re-samples the complete oracle and revokes the epoch on the
+/// first escape, mismatch, or staging failure.
 #[derive(Default)]
 struct AdaptiveNeighborhoodShadow {
     enabled: bool,
@@ -718,10 +717,10 @@ struct AdaptiveNeighborhoodShadow {
     complete_lod_scratch: ScreenMeshLeafLodScratch,
     neighborhood_lod_scratch: ScreenMeshLeafLodScratch,
     overlay: AdaptiveRenderOverlay,
-    last_attempt_epoch: Option<(u64, u64)>,
+    last_attempt_epoch: Option<u64>,
     staged_signature: Option<AdaptiveNeighborhoodStageSignature>,
     certificate: Option<AdaptiveNeighborhoodCertificate>,
-    authority_revoked: Option<(u64, u64)>,
+    authority_revoked: Option<u64>,
     authority_generation: u64,
     authority_changed_since_oracle: u64,
     authority_oracle_samples: u64,
@@ -794,26 +793,14 @@ impl AdaptiveNeighborhoodShadow {
         }
     }
 
-    fn staged_epoch(&self) -> Option<(u64, u64)> {
+    fn staged_epoch(&self) -> Option<u64> {
         self.staged_signature
-            .map(|signature| {
-                (
-                    signature.root_topology_revision,
-                    signature.batch_layout_revision,
-                )
-            })
+            .map(|signature| signature.batch_layout_revision)
             .or(self.last_attempt_epoch)
-            .or_else(|| {
-                self.certificate.map(|certificate| {
-                    (
-                        certificate.root_topology_revision,
-                        certificate.batch_layout_revision,
-                    )
-                })
-            })
+            .or_else(|| self.certificate.map(|certificate| certificate.batch_layout_revision))
     }
 
-    fn revoke_epoch(&mut self, epoch: (u64, u64)) {
+    fn revoke_epoch(&mut self, epoch: u64) {
         self.certificate = None;
         if self.authority_revoked != Some(epoch) {
             self.authority_revocations = self.authority_revocations.saturating_add(1);
@@ -831,10 +818,7 @@ impl AdaptiveNeighborhoodShadow {
         let Some(signature) = self.staged_signature else {
             return;
         };
-        let epoch = (
-            signature.root_topology_revision,
-            signature.batch_layout_revision,
-        );
+        let epoch = signature.batch_layout_revision;
         self.authority_changed_since_oracle = 0;
         self.authority_oracle_samples = self.authority_oracle_samples.saturating_add(1);
         // A mismatch or boundary escape revokes this entire immutable source
@@ -844,8 +828,7 @@ impl AdaptiveNeighborhoodShadow {
             return;
         }
         self.certificate = Some(AdaptiveNeighborhoodCertificate {
-            root_topology_revision: epoch.0,
-            batch_layout_revision: epoch.1,
+            batch_layout_revision: epoch,
         });
         // An exact sample for a genuinely new epoch supersedes the diagnostic
         // marker retained from the old one.
@@ -870,12 +853,9 @@ impl AdaptiveNeighborhoodShadow {
         let Some(stage_signature) = self.staged_signature else {
             return Ok(None);
         };
-        let epoch = (
-            stage_signature.root_topology_revision,
-            stage_signature.batch_layout_revision,
-        );
+        let epoch = stage_signature.batch_layout_revision;
         let certified = self.certificate.is_some_and(|certificate| {
-            (certificate.root_topology_revision, certificate.batch_layout_revision) == epoch
+            certificate.batch_layout_revision == epoch
         });
         if !certified || self.authority_revoked == Some(epoch) {
             return Ok(None);
@@ -922,7 +902,6 @@ impl AdaptiveNeighborhoodShadow {
         standby: ResidentLod,
         max_face_edge_ratio: u32,
         max_atlas_lod: u32,
-        root_topology_revision: u64,
         batch_layout_revision: u64,
     ) -> bool {
         if !self.enabled {
@@ -932,7 +911,7 @@ impl AdaptiveNeighborhoodShadow {
         self.last_error = None;
         self.last = None;
         self.last_empty_selection = false;
-        self.last_attempt_epoch = Some((root_topology_revision, batch_layout_revision));
+        self.last_attempt_epoch = Some(batch_layout_revision);
         self.staged_signature = None;
         if request.selected_patches.is_empty() {
             self.empty_selection_skips = self.empty_selection_skips.saturating_add(1);
@@ -950,7 +929,7 @@ impl AdaptiveNeighborhoodShadow {
         self.baseline_vertex_lods
             .extend_from_slice(baseline_vertex_lods);
         if self.baseline_vertex_lods.len() != request.source_requested_lods.len() {
-            self.revoke_epoch((root_topology_revision, batch_layout_revision));
+            self.revoke_epoch(batch_layout_revision);
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some("adaptive baseline corner LoD length differs from source faces".into());
             return false;
@@ -965,7 +944,7 @@ impl AdaptiveNeighborhoodShadow {
             &self.baseline_lods,
             &mut self.plan,
         ) {
-            self.revoke_epoch((root_topology_revision, batch_layout_revision));
+            self.revoke_epoch(batch_layout_revision);
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some(error.to_string());
             return false;
@@ -986,7 +965,7 @@ impl AdaptiveNeighborhoodShadow {
                     self.frontier_cache_misses = self.frontier_cache_misses.saturating_add(1);
                 }
                 Err(error) => {
-                    self.revoke_epoch((root_topology_revision, batch_layout_revision));
+                    self.revoke_epoch(batch_layout_revision);
                     self.failures = self.failures.saturating_add(1);
                     self.last_error = Some(error.to_string());
                     return false;
@@ -1010,7 +989,7 @@ impl AdaptiveNeighborhoodShadow {
         ) {
             Ok((_, generation, reused)) => (generation, reused),
             Err(error @ ScreenLeafLodError::FixedBoundaryPromotion { .. }) => {
-                self.revoke_epoch((root_topology_revision, batch_layout_revision));
+                self.revoke_epoch(batch_layout_revision);
                 self.boundary_escapes = self.boundary_escapes.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 self.last = Some(AdaptiveNeighborhoodShadowComparison {
@@ -1035,7 +1014,7 @@ impl AdaptiveNeighborhoodShadow {
                 return false;
             }
             Err(error) => {
-                self.revoke_epoch((root_topology_revision, batch_layout_revision));
+                self.revoke_epoch(batch_layout_revision);
                 self.failures = self.failures.saturating_add(1);
                 self.last_error = Some(error.to_string());
                 return false;
@@ -1044,7 +1023,6 @@ impl AdaptiveNeighborhoodShadow {
         let reconcile_ms = browser_now_ms() - reconcile_start;
         self.staged_signature = Some(AdaptiveNeighborhoodStageSignature {
             reconciliation_generation,
-            root_topology_revision,
             batch_layout_revision,
         });
         self.last = Some(AdaptiveNeighborhoodShadowComparison {
@@ -1338,13 +1316,10 @@ impl AdaptiveNeighborhoodShadow {
             self.revoke_staged_authority();
             return Err("adaptive neighborhood authority lost its staged identity".into());
         };
-        let epoch = (
-            signature.root_topology_revision,
-            signature.batch_layout_revision,
-        );
+        let epoch = signature.batch_layout_revision;
         if self.authority_revoked == Some(epoch)
             || !self.certificate.is_some_and(|certificate| {
-                (certificate.root_topology_revision, certificate.batch_layout_revision) == epoch
+                certificate.batch_layout_revision == epoch
             })
         {
             self.revoke_epoch(epoch);
@@ -3356,7 +3331,6 @@ impl AdaptivePickedRuntime {
                 standby,
                 max_face_edge_ratio,
                 max_atlas_lod,
-                root_topology_revision,
                 batch_layout_revision,
             );
             self.pending_neighborhood_shadow_staged = neighborhood_plan_staged;
@@ -4677,10 +4651,9 @@ mod tests {
     fn changed_neighborhood_authority_samples_and_keeps_revocation_sticky() {
         let mut shadow = AdaptiveNeighborhoodShadow {
             enabled: true,
-            last_attempt_epoch: Some((7, 9)),
+            last_attempt_epoch: Some(9),
             staged_signature: Some(AdaptiveNeighborhoodStageSignature {
                 reconciliation_generation: 1,
-                root_topology_revision: 7,
                 batch_layout_revision: 9,
             }),
             last: Some(AdaptiveNeighborhoodShadowComparison::default()),
@@ -4720,7 +4693,7 @@ mod tests {
         shadow.record_exact_oracle_match();
         assert_eq!(shadow.authority_oracle_samples, 2);
         assert_eq!(shadow.authority_changed_since_oracle, 0);
-        shadow.revoke_epoch((7, 9));
+        shadow.revoke_epoch(9);
         shadow.record_exact_oracle_match();
         assert_eq!(shadow.authority_oracle_samples, 3);
         assert_eq!(shadow.authority_revocations, 1);
@@ -4728,21 +4701,19 @@ mod tests {
         assert!(shadow.certificate.is_none());
         assert!(shadow.changed_authority_signature().unwrap().is_none());
 
-        shadow.last_attempt_epoch = Some((8, 9));
+        shadow.last_attempt_epoch = Some(10);
         shadow.staged_signature = Some(AdaptiveNeighborhoodStageSignature {
             reconciliation_generation: 1,
-            root_topology_revision: 8,
-            batch_layout_revision: 9,
+            batch_layout_revision: 10,
         });
         shadow.record_exact_oracle_match();
         assert_eq!(shadow.authority_oracle_samples, 4);
         assert!(!shadow.current_authority_revoked());
         assert_eq!(
-            shadow.certificate.map(|certificate| (
-                certificate.root_topology_revision,
-                certificate.batch_layout_revision,
-            )),
-            Some((8, 9)),
+            shadow
+                .certificate
+                .map(|certificate| certificate.batch_layout_revision),
+            Some(10),
         );
     }
 
@@ -4824,7 +4795,7 @@ mod tests {
                     &face_domains,
                     &face_domains,
                     7,
-                    11,
+                    pose_revision as u64 + 11,
                     true,
                     true,
                     None,
