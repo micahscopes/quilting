@@ -45,6 +45,140 @@ pub struct LodModelData {
     pub face_nodes: Vec<usize>,
 }
 
+/// Validated, backend-neutral model payload prepared for classifier residency.
+///
+/// WebGL2 consumes `face_indices` and `adjacency` directly. A future WebGPU
+/// backend can instead upload the same source model and topology to storage
+/// buffers without rebuilding worker-specific metadata.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedLodModel {
+    pub model: LodModelData,
+    pub face_indices: Vec<f32>,
+    pub adjacency: Vec<f32>,
+    pub residency: LodModelResidency,
+}
+
+/// Small retained identity for one uploaded classifier model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LodModelResidency {
+    pub num_faces: usize,
+    pub num_vertices: u32,
+    pub node_first_faces: HashMap<usize, usize>,
+    pub mesh_radius: f32,
+}
+
+/// Validate and derive the topology shared by every LOD compute backend.
+pub fn prepare_lod_model(model: LodModelData) -> Result<PreparedLodModel, String> {
+    let num_vertices = model.positions.len() / 3;
+    if model.positions.len() != num_vertices * 3 || num_vertices == 0 {
+        return Err("LOD position payload is malformed".to_string());
+    }
+    let num_vertices_u32 = u32::try_from(num_vertices)
+        .map_err(|_| "LOD vertex count exceeds the classifier ABI".to_string())?;
+    if model.faces.is_empty() || model.faces.len() != model.face_nodes.len() {
+        return Err("LOD face ownership does not match topology".to_string());
+    }
+    if model.joint_indices.len() != num_vertices
+        || model.joint_weights.len() != num_vertices
+    {
+        return Err("LOD skinning payload does not match vertex count".to_string());
+    }
+    let expected_morph_scalars = model
+        .num_morph_targets
+        .checked_mul(num_vertices)
+        .and_then(|count| count.checked_mul(3))
+        .ok_or_else(|| "LOD morph payload size overflow".to_string())?;
+    if model.morph_deltas.len() != expected_morph_scalars {
+        return Err("LOD morph payload does not match model shape".to_string());
+    }
+    if !model.positions.iter().all(|value| value.is_finite())
+        || !model.joint_weights.iter().flatten().all(|value| value.is_finite())
+        || !model.morph_deltas.iter().all(|value| value.is_finite())
+    {
+        return Err("LOD model payload contains non-finite values".to_string());
+    }
+
+    let (position_rows, position_remainder) = model.positions.as_chunks::<3>();
+    debug_assert!(position_remainder.is_empty());
+    let topology_positions: Vec<[f64; 3]> = position_rows
+        .iter()
+        .map(|position| [position[0] as f64, position[1] as f64, position[2] as f64])
+        .collect();
+    let adjacency = build_scoped_lod_adjacency(
+        &topology_positions,
+        &model.faces,
+        &model.face_nodes,
+    )?;
+    let mesh_radius = lod_mesh_radius(&model.positions, &model.faces)? as f32;
+    let face_indices = model
+        .faces
+        .iter()
+        .flat_map(|face| face.map(|vertex| vertex as f32))
+        .collect();
+    let node_first_faces = model.face_nodes.iter().enumerate().fold(
+        HashMap::new(),
+        |mut first_faces, (face, &node)| {
+            first_faces.entry(node).or_insert(face);
+            first_faces
+        },
+    );
+    let residency = LodModelResidency {
+        num_faces: model.faces.len(),
+        num_vertices: num_vertices_u32,
+        node_first_faces,
+        mesh_radius,
+    };
+    Ok(PreparedLodModel {
+        model,
+        face_indices,
+        adjacency,
+        residency,
+    })
+}
+
+fn lod_mesh_radius(positions: &[f32], faces: &[[u32; 3]]) -> Result<f64, String> {
+    let num_vertices = positions.len() / 3;
+    let mut used = vec![false; num_vertices];
+    for face in faces {
+        for &vertex in face {
+            let vertex = vertex as usize;
+            if vertex >= num_vertices {
+                return Err(format!("LOD face references missing vertex {vertex}"));
+            }
+            used[vertex] = true;
+        }
+    }
+    let used_count = used.iter().filter(|&&is_used| is_used).count();
+    if used_count == 0 {
+        return Err("LOD model has no referenced vertices".to_string());
+    }
+    let mut center = [0.0f64; 3];
+    for (vertex, &is_used) in used.iter().enumerate() {
+        if is_used {
+            for axis in 0..3 {
+                center[axis] += positions[vertex * 3 + axis] as f64;
+            }
+        }
+    }
+    for coordinate in &mut center {
+        *coordinate /= used_count as f64;
+    }
+    let mut radius = 0.0f64;
+    for (vertex, &is_used) in used.iter().enumerate() {
+        if is_used {
+            let delta = [
+                positions[vertex * 3] as f64 - center[0],
+                positions[vertex * 3 + 1] as f64 - center[1],
+                positions[vertex * 3 + 2] as f64 - center[2],
+            ];
+            radius = radius.max(
+                (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt(),
+            );
+        }
+    }
+    Ok(radius.max(1e-6))
+}
+
 /// Primary-asset animation data embedded into a packed multi-asset LOD model.
 /// Static secondary vertices receive zero joint weights and zero morph deltas.
 #[derive(Clone, Copy, Debug)]
@@ -637,6 +771,36 @@ impl LodCompute {
             self.readback_buffer_reallocations,
             self.readback_vector_creations,
         )
+    }
+
+    /// Upload one fully prepared model into this context-local classifier.
+    /// The returned residency contains no GL handles and can therefore stamp
+    /// worker, main-context shadow, and future WebGPU jobs identically.
+    pub fn upload_model(
+        &mut self,
+        gl: &glow::Context,
+        prepared: &PreparedLodModel,
+        atlas_lut: &[u8],
+    ) -> LodModelResidency {
+        let model = &prepared.model;
+        let residency = &prepared.residency;
+        self.upload_positions_texture(gl, &model.positions, residency.num_vertices as usize);
+        self.upload_face_indices(gl, &prepared.face_indices);
+        self.upload_face_subjects(gl, &model.face_nodes);
+        self.upload_skinning_texture(gl, &model.joint_indices, &model.joint_weights);
+        if model.num_morph_targets > 0 {
+            self.upload_morph_deltas(
+                gl,
+                &model.morph_deltas,
+                residency.num_vertices as usize,
+                model.num_morph_targets,
+            );
+        } else {
+            self.upload_morph_deltas(gl, &[0.0; 3], 1, 1);
+        }
+        self.upload_atlas_lut(gl, atlas_lut);
+        self.upload_adjacency(gl, &prepared.adjacency, residency.num_faces);
+        residency.clone()
     }
 
     // --- Static data uploads (called once on model load) ---
@@ -1596,6 +1760,63 @@ mod tests {
         assert_eq!(model.joint_weights[3], [0.0; 4]);
         assert_eq!(&model.morph_deltas[..9], &morph_deltas);
         assert_eq!(model.morph_deltas[9..12], [0.0; 3]);
+    }
+
+    #[test]
+    fn prepared_model_freezes_backend_neutral_residency_metadata() {
+        let instances = two_face_instances();
+        let model = build_composed_lod_model(
+            &instances,
+            &[4, 9],
+            4,
+            1,
+            LodAnimationSource {
+                primary_vertices: 0,
+                joint_indices: None,
+                joint_weights: None,
+                morph_deltas: &[],
+                num_morph_targets: 0,
+            },
+        )
+        .unwrap();
+        let prepared = prepare_lod_model(model).unwrap();
+
+        assert_eq!(prepared.residency.num_faces, 2);
+        assert_eq!(prepared.residency.num_vertices, 4);
+        assert_eq!(
+            prepared.residency.node_first_faces,
+            HashMap::from([(4, 0), (9, 1)]),
+        );
+        assert!((prepared.residency.mesh_radius - 0.5_f32.sqrt()).abs() < 1.0e-6);
+        assert_eq!(
+            prepared.face_indices,
+            [0.0, 1.0, 2.0, 1.0, 3.0, 2.0],
+        );
+        assert_eq!(prepared.adjacency.len(), 2 * 3 * 4);
+        assert_eq!(adjacent_edges(&prepared.adjacency), 0);
+    }
+
+    #[test]
+    fn prepared_model_rejects_morph_shape_even_when_target_count_is_zero() {
+        let mut model = build_composed_lod_model(
+            &two_face_instances(),
+            &[0, 0],
+            4,
+            2,
+            LodAnimationSource {
+                primary_vertices: 0,
+                joint_indices: None,
+                joint_weights: None,
+                morph_deltas: &[],
+                num_morph_targets: 0,
+            },
+        )
+        .unwrap();
+        model.morph_deltas.push(1.0);
+        assert_eq!(
+            prepare_lod_model(model).unwrap_err(),
+            "LOD morph payload does not match model shape",
+        );
     }
 
     #[test]

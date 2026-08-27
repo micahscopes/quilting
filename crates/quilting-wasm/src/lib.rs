@@ -20,8 +20,8 @@ use wasm_bindgen::JsCast;
 use quilting_core::atlas::{TessellationAtlas, BuildMode};
 use quilting_core::batch;
 use quilting_renderer::compute::{
-    build_composed_lod_model, build_lod_subject_states, build_scoped_lod_adjacency,
-    LodAnimationSource, LodCompute, LodModelData, StagedLodReadback,
+    build_composed_lod_model, build_lod_subject_states, prepare_lod_model,
+    LodAnimationSource, LodCompute, LodModelData, LodModelResidency, StagedLodReadback,
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Quat, Mobius};
@@ -181,20 +181,13 @@ struct PendingLodPose {
     morph_weights: Vec<f32>,
 }
 
-#[derive(Clone)]
-struct LodComputeModel {
-    num_faces: usize,
-    num_vertices: u32,
-    node_first_faces: HashMap<usize, usize>,
-}
-
 thread_local! {
     static ATLAS: RefCell<Option<TessellationAtlas>> = RefCell::new(None);
     static GPU_COMPUTE: RefCell<Option<(glow::Context, LodCompute)>> = RefCell::new(None);
     static PENDING_ANIMATED_LODS: RefCell<Option<PendingAnimatedLods>> = RefCell::new(None);
     static ANIMATED_LOD_DELTA: RefCell<batch::FaceLodDeltaEncoder> =
         RefCell::new(batch::FaceLodDeltaEncoder::default());
-    static LOD_COMPUTE_MODEL: RefCell<Option<LodComputeModel>> = RefCell::new(None);
+    static LOD_COMPUTE_MODEL: RefCell<Option<LodModelResidency>> = RefCell::new(None);
     /// Track which (canonical_lod, perm_parity) tessellation keys have been sent to JS.
     /// JS caches the GPU buffers, so we skip re-sending the bary/triangle data.
     static SENT_TESS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
@@ -374,129 +367,25 @@ pub fn init_gpu_compute(max_faces: u32) -> bool {
 thread_local! {
     /// Sorted atlas keys — maps atlas_index back to canonical LOD triples.
     static LOD_ATLAS_KEYS: RefCell<Vec<[u32; 3]>> = RefCell::new(Vec::new());
-    /// Mesh bounding sphere radius (from rest-pose positions, for GPU density scaling).
-    static LOD_MESH_RADIUS: RefCell<f64> = RefCell::new(1.0);
     /// Maximum LOD the atlas supports — clamp here instead of falling to LOD 2.
     static LOD_MAX: RefCell<f32> = RefCell::new(512.0);
 }
 
-fn lod_mesh_radius(positions: &[f32], faces: &[[u32; 3]]) -> Result<f64, String> {
-    let num_vertices = positions.len() / 3;
-    let mut used = vec![false; num_vertices];
-    for face in faces {
-        for &vertex in face {
-            let vertex = vertex as usize;
-            if vertex >= num_vertices {
-                return Err(format!("LOD face references missing vertex {vertex}"));
-            }
-            used[vertex] = true;
-        }
-    }
-    let used_count = used.iter().filter(|&&is_used| is_used).count();
-    if used_count == 0 {
-        return Err("LOD model has no referenced vertices".to_string());
-    }
-    let mut center = [0.0f64; 3];
-    for (vertex, &is_used) in used.iter().enumerate() {
-        if is_used {
-            for axis in 0..3 {
-                center[axis] += positions[vertex * 3 + axis] as f64;
-            }
-        }
-    }
-    for coordinate in &mut center {
-        *coordinate /= used_count as f64;
-    }
-    let mut radius = 0.0f64;
-    for (vertex, &is_used) in used.iter().enumerate() {
-        if is_used {
-            let delta = [
-                positions[vertex * 3] as f64 - center[0],
-                positions[vertex * 3 + 1] as f64 - center[1],
-                positions[vertex * 3 + 2] as f64 - center[2],
-            ];
-            radius = radius.max(
-                (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt(),
-            );
-        }
-    }
-    Ok(radius.max(1e-6))
-}
-
 fn upload_lod_compute_model(upload: LodModelData) -> Result<bool, String> {
-    let num_vertices = upload.positions.len() / 3;
-    if upload.positions.len() != num_vertices * 3 || num_vertices == 0 {
-        return Err("LOD position payload is malformed".to_string());
-    }
-    if upload.faces.len() != upload.face_nodes.len() {
-        return Err("LOD face ownership does not match topology".to_string());
-    }
-    if upload.joint_indices.len() != num_vertices
-        || upload.joint_weights.len() != num_vertices
-    {
-        return Err("LOD skinning payload does not match vertex count".to_string());
-    }
-    if upload.num_morph_targets > 0
-        && upload.morph_deltas.len() != upload.num_morph_targets * num_vertices * 3
-    {
-        return Err("LOD morph payload does not match model shape".to_string());
-    }
-    let topology_positions: Vec<[f64; 3]> = upload.positions
-        .chunks_exact(3)
-        .map(|position| [position[0] as f64, position[1] as f64, position[2] as f64])
-        .collect();
-    let adjacency = build_scoped_lod_adjacency(
-        &topology_positions,
-        &upload.faces,
-        &upload.face_nodes,
-    )?;
-    let mesh_radius = lod_mesh_radius(&upload.positions, &upload.faces)?;
-    let face_indices: Vec<f32> = upload.faces.iter()
-        .flat_map(|face| face.map(|vertex| vertex as f32))
-        .collect();
+    let prepared = prepare_lod_model(upload)?;
     let atlas = lod_atlas_snapshot()?;
 
-    let uploaded = GPU_COMPUTE.with(|gpu_compute| {
+    let residency = GPU_COMPUTE.with(|gpu_compute| {
         let mut gpu_compute = gpu_compute.borrow_mut();
         let Some((gl, compute)) = gpu_compute.as_mut() else {
-            return false;
+            return None;
         };
-        compute.upload_positions_texture(gl, &upload.positions, num_vertices);
-        compute.upload_face_indices(gl, &face_indices);
-        compute.upload_face_subjects(gl, &upload.face_nodes);
-        compute.upload_skinning_texture(gl, &upload.joint_indices, &upload.joint_weights);
-        if upload.num_morph_targets > 0 {
-            compute.upload_morph_deltas(
-                gl,
-                &upload.morph_deltas,
-                num_vertices,
-                upload.num_morph_targets,
-            );
-        } else {
-            compute.upload_morph_deltas(gl, &[0.0; 3], 1, 1);
-        }
-        compute.upload_atlas_lut(gl, &atlas.0);
-        compute.upload_adjacency(gl, &adjacency, upload.faces.len());
-        true
+        Some(compute.upload_model(gl, &prepared, &atlas.0))
     });
-    if !uploaded {
+    let Some(residency) = residency else {
         return Ok(false);
-    }
-
-    let node_first_faces = upload.face_nodes.iter().enumerate().fold(
-        HashMap::new(),
-        |mut first_faces, (face, &node)| {
-            first_faces.entry(node).or_insert(face);
-            first_faces
-        },
-    );
-    let model = LodComputeModel {
-        num_faces: upload.faces.len(),
-        num_vertices: num_vertices as u32,
-        node_first_faces,
     };
-    LOD_COMPUTE_MODEL.with(|current| *current.borrow_mut() = Some(model));
-    LOD_MESH_RADIUS.with(|radius| *radius.borrow_mut() = mesh_radius);
+    LOD_COMPUTE_MODEL.with(|current| *current.borrow_mut() = Some(residency));
     install_lod_atlas_snapshot(atlas);
     Ok(true)
 }
@@ -814,7 +703,7 @@ pub fn dispatch_animated_lods(
             resident_faces.min(face_limit as usize)
         };
         let num_vertices = compute_model.num_vertices;
-        let mesh_radius = LOD_MESH_RADIUS.with(|r| *r.borrow()) as f32;
+        let mesh_radius = compute_model.mesh_radius;
         let extracted_states = build_lod_subject_states(
             subject_states,
             &compute_model.node_first_faces,
