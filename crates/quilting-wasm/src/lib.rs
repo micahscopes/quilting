@@ -8,6 +8,7 @@ mod round_shadow;
 mod route_shadow;
 mod surface_walk;
 mod surface_runtime;
+mod timing;
 
 pub use app_shadow::{
     encode_local_presence_envelope, map_pointer_turntable_frame, map_space_mouse_camera_frame,

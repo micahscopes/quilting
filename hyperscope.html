@@ -394,6 +394,7 @@ import init, {
   encodeLocalPresenceEnvelope,
   hyperscopeControlSpecs,
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
+  mr_runtimeTimingDiagnostics, mr_resetRuntimeTimingDiagnostics,
   mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_acceptLodDeltaSequence,
@@ -899,10 +900,49 @@ const frameTelemetry = {
   frames: 0,
   lastDeltaMs: 0,
   averageDeltaMs: 0,
+  minimumDeltaMs: 0,
   maximumDeltaMs: 0,
+  p50DeltaMs: 0,
+  p90DeltaMs: 0,
+  p95DeltaMs: 0,
+  p99DeltaMs: 0,
   lastRenderCpuMs: 0,
   averageRenderCpuMs: 0,
+  minimumRenderCpuMs: 0,
   maximumRenderCpuMs: 0,
+  p50RenderCpuMs: 0,
+  p90RenderCpuMs: 0,
+  p95RenderCpuMs: 0,
+  p99RenderCpuMs: 0,
+  distributions: null,
+  refresh() {
+    const snapshot = mr_runtimeTimingDiagnostics();
+    const delta = snapshot.frameDeltaMs;
+    const render = snapshot.renderCpuMs;
+    this.frames = render.totalSamples;
+    this.lastDeltaMs = delta.lastMs;
+    this.averageDeltaMs = delta.meanMs;
+    this.minimumDeltaMs = delta.minimumMs;
+    this.maximumDeltaMs = delta.maximumMs;
+    this.p50DeltaMs = delta.p50Ms;
+    this.p90DeltaMs = delta.p90Ms;
+    this.p95DeltaMs = delta.p95Ms;
+    this.p99DeltaMs = delta.p99Ms;
+    this.lastRenderCpuMs = render.lastMs;
+    this.averageRenderCpuMs = render.meanMs;
+    this.minimumRenderCpuMs = render.minimumMs;
+    this.maximumRenderCpuMs = render.maximumMs;
+    this.p50RenderCpuMs = render.p50Ms;
+    this.p90RenderCpuMs = render.p90Ms;
+    this.p95RenderCpuMs = render.p95Ms;
+    this.p99RenderCpuMs = render.p99Ms;
+    this.distributions = snapshot;
+    return this;
+  },
+  reset() {
+    mr_resetRuntimeTimingDiagnostics();
+    return this.refresh();
+  },
 };
 const modelPayloadTelemetry = {
   sourceInstanceBytes: 0,
@@ -919,8 +959,6 @@ const modelPayloadTelemetry = {
   avoidedFaceMetadataCopyBytes: 0,
   timings: {},
 };
-let frameDeltaSum = 0;
-let frameRenderCpuSum = 0;
 globalThis.__hyperscopeRuntimeDiagnostics = {
   lod: lodTelemetry,
   frame: frameTelemetry,
@@ -1178,21 +1216,6 @@ function setRendererInstanceData(instances, numFaces) {
   mr_setInstanceData(instances, numFaces);
   roundShadowUnsupportedKey = null;
   if (RUST_ROUND_SHADOW_ENABLED) updateRoundShadowDiagnostics();
-}
-
-function recordFrameTiming(deltaMs, renderCpuMs) {
-  frameTelemetry.frames += 1;
-  frameTelemetry.lastDeltaMs = deltaMs;
-  frameTelemetry.lastRenderCpuMs = renderCpuMs;
-  frameDeltaSum += deltaMs;
-  frameRenderCpuSum += renderCpuMs;
-  frameTelemetry.averageDeltaMs = frameDeltaSum / frameTelemetry.frames;
-  frameTelemetry.averageRenderCpuMs = frameRenderCpuSum / frameTelemetry.frames;
-  frameTelemetry.maximumDeltaMs = Math.max(frameTelemetry.maximumDeltaMs, deltaMs);
-  frameTelemetry.maximumRenderCpuMs = Math.max(
-    frameTelemetry.maximumRenderCpuMs,
-    renderCpuMs,
-  );
 }
 
 function updateLodMetric(name, value) {
@@ -9206,9 +9229,7 @@ function frame(ts) {
   const mvp = mulM4(proj, view, frameMvp);
   frameCameraPos[0] = ex; frameCameraPos[1] = ey; frameCameraPos[2] = ez;
 
-  const renderStarted = performance.now();
   mr_render(mvp, view, frameCameraPos);
-  recordFrameTiming(deltaSeconds * 1000, performance.now() - renderStarted);
 }
 
 // --- Load model ---

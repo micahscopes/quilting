@@ -60,6 +60,7 @@ use crate::surface_runtime::{
     SurfaceRuntimeSnapshot, SurfaceWalkReflectionTransportSnapshot,
 };
 use crate::surface_walk::{ComposedSurfaceWalkResultJs, SurfaceWalkReflectionTransportResultJs};
+use crate::timing::{TimingDistribution, TimingDistributionSnapshot};
 use hyperscape::interchange::{
     GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
 };
@@ -73,6 +74,7 @@ use std::time::Duration;
 
 /// Floats per material in the array `mr_setMaterials` receives.
 const MATERIAL_STRIDE: usize = 50;
+const RUNTIME_TIMING_WINDOW_CAPACITY: usize = 2_048;
 
 fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe {
@@ -219,6 +221,43 @@ impl FullscreenAuxResources {
     }
 }
 
+#[derive(Default)]
+struct RenderTimingDiagnostics {
+    previous_frame_started_ms: Option<f64>,
+    frame_delta_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    render_cpu_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderTimingSnapshot {
+    frame_delta_ms: TimingDistributionSnapshot,
+    render_cpu_ms: TimingDistributionSnapshot,
+}
+
+impl RenderTimingDiagnostics {
+    fn observe(&mut self, started_ms: f64, finished_ms: f64) {
+        if let Some(previous_ms) = self.previous_frame_started_ms {
+            self.frame_delta_ms.record(started_ms - previous_ms);
+        }
+        self.previous_frame_started_ms = Some(started_ms);
+        self.render_cpu_ms.record(finished_ms - started_ms);
+    }
+
+    fn clear(&mut self) {
+        self.previous_frame_started_ms = None;
+        self.frame_delta_ms.clear();
+        self.render_cpu_ms.clear();
+    }
+
+    fn snapshot(&self) -> RenderTimingSnapshot {
+        RenderTimingSnapshot {
+            frame_delta_ms: self.frame_delta_ms.snapshot(),
+            render_cpu_ms: self.render_cpu_ms.snapshot(),
+        }
+    }
+}
+
 struct MainState {
     renderer: Renderer,
     /// Authoritative drawable size, updated with the GL viewport by mr_resize.
@@ -233,6 +272,9 @@ struct MainState {
     render_commands_dirty: bool,
     render_command_builds: u64,
     render_calls: u64,
+    /// Derived backend telemetry. It is never semantic scene state and is
+    /// cleared explicitly before a promotion measurement window.
+    render_timing: RenderTimingDiagnostics,
     /// Prepared patch records depend on pose, retained batch membership, and
     /// per-entity affine transforms—not on the camera. Camera-dependent
     /// classification lives in a separate one-float visibility stream.
@@ -714,6 +756,11 @@ impl SameContextLod {
             last_dispatch_ms: self.diagnostics.last_dispatch_ms,
             last_fence_poll_latency_ms: self.diagnostics.last_fence_poll_latency_ms,
             last_readback_ms: self.diagnostics.last_readback_ms,
+            last_publication_ms: self.diagnostics.last_publication_ms,
+            dispatch_ms: self.diagnostics.dispatch_ms.snapshot(),
+            fence_poll_latency_ms: self.diagnostics.fence_poll_latency_ms.snapshot(),
+            readback_ms: self.diagnostics.readback_ms.snapshot(),
+            publication_ms: self.diagnostics.publication_ms.snapshot(),
             last_readback_bytes: self.diagnostics.last_readback_bytes,
             packed_readback_bytes_per_face: PACKED_LOD_OUTPUT_BYTES_PER_FACE,
             last_compared_faces: self.diagnostics.last_compared_faces,
@@ -1081,6 +1128,11 @@ struct SameContextLodDiagnostics {
     last_dispatch_ms: f64,
     last_fence_poll_latency_ms: f64,
     last_readback_ms: f64,
+    last_publication_ms: f64,
+    dispatch_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    fence_poll_latency_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    readback_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    publication_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
     last_readback_bytes: usize,
     last_compared_faces: usize,
     last_mismatched_faces: usize,
@@ -1107,6 +1159,19 @@ struct SameContextLodDiagnostics {
     last_exact: Option<bool>,
     mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
     last_error: Option<String>,
+}
+
+impl SameContextLodDiagnostics {
+    fn clear_timings(&mut self) {
+        self.last_dispatch_ms = 0.0;
+        self.last_fence_poll_latency_ms = 0.0;
+        self.last_readback_ms = 0.0;
+        self.last_publication_ms = 0.0;
+        self.dispatch_ms.clear();
+        self.fence_poll_latency_ms.clear();
+        self.readback_ms.clear();
+        self.publication_ms.clear();
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -1164,6 +1229,11 @@ struct SameContextLodShadowSnapshot {
     last_dispatch_ms: f64,
     last_fence_poll_latency_ms: f64,
     last_readback_ms: f64,
+    last_publication_ms: f64,
+    dispatch_ms: TimingDistributionSnapshot,
+    fence_poll_latency_ms: TimingDistributionSnapshot,
+    readback_ms: TimingDistributionSnapshot,
+    publication_ms: TimingDistributionSnapshot,
     last_readback_bytes: usize,
     packed_readback_bytes_per_face: usize,
     last_compared_faces: usize,
@@ -1611,6 +1681,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_commands_dirty: true,
             render_command_builds: 0,
             render_calls: 0,
+            render_timing: RenderTimingDiagnostics::default(),
             patch_prepare_dirty: true,
             patch_prepare_frames: 0,
             skipped_patch_prepare_frames: 0,
@@ -1724,6 +1795,37 @@ pub fn mr_resize(width: i32, height: i32) {
             st.renderer.resize(width, height);
         }
     });
+}
+
+/// Query bounded frame/render distributions. Recording stays entirely below
+/// the WASM boundary; serialization and percentile sorting happen only here.
+#[wasm_bindgen(js_name = "mr_runtimeTimingDiagnostics")]
+pub fn mr_runtime_timing_diagnostics() -> Result<JsValue, JsValue> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        serde_wasm_bindgen::to_value(&state.render_timing.snapshot())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    })
+}
+
+/// Begin a fresh promotion-measurement window without disturbing semantic
+/// scene, classifier, residency, or render state.
+#[wasm_bindgen(js_name = "mr_resetRuntimeTimingDiagnostics")]
+pub fn mr_reset_runtime_timing_diagnostics() -> Result<(), JsValue> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        state.render_timing.clear();
+        if let Some(lod) = state.same_context_lod.as_mut() {
+            lod.diagnostics.clear_timings();
+        }
+        Ok(())
+    })
 }
 
 #[wasm_bindgen(js_name = "mr_setRenderMode")]
@@ -5871,7 +5973,9 @@ pub fn mr_dispatch_same_context_lod(
         lod.diagnostics.last_request_id = request_id;
         lod.diagnostics.last_classified_faces = classified_faces;
         lod.diagnostics.last_subject_records = dispatch_state.subjects.len();
-        lod.diagnostics.last_dispatch_ms = fence_started_ms - dispatch_started_ms;
+        let dispatch_ms = fence_started_ms - dispatch_started_ms;
+        lod.diagnostics.last_dispatch_ms = dispatch_ms;
+        lod.diagnostics.dispatch_ms.record(dispatch_ms);
         lod.diagnostics.last_error = None;
         Ok(true)
     })
@@ -5931,8 +6035,14 @@ pub fn mr_poll_same_context_lod(authoritative: bool) -> Result<JsValue, JsValue>
             // This includes browser scheduling until the first signaling poll.
             // It is deliberately not labeled GPU time; WebGL2 exposes no
             // timestamp for the moment the fence became signaled.
-            lod.diagnostics.last_fence_poll_latency_ms = ready_ms - pending.fence_started_ms;
-            lod.diagnostics.last_readback_ms = readback_finished_ms - readback_started_ms;
+            let fence_poll_latency_ms = ready_ms - pending.fence_started_ms;
+            let readback_ms = readback_finished_ms - readback_started_ms;
+            lod.diagnostics.last_fence_poll_latency_ms = fence_poll_latency_ms;
+            lod.diagnostics.last_readback_ms = readback_ms;
+            lod.diagnostics
+                .fence_poll_latency_ms
+                .record(fence_poll_latency_ms);
+            lod.diagnostics.readback_ms.record(readback_ms);
             lod.diagnostics.last_readback_bytes = readback_bytes;
             lod.completed = Some(SameContextLodCompleted {
                 stamp: pending.stamp,
@@ -5945,11 +6055,19 @@ pub fn mr_poll_same_context_lod(authoritative: bool) -> Result<JsValue, JsValue>
                 }
             }
         }
+        let publication_started_ms = browser_now_ms();
         let publication = if authoritative {
             publish_same_context_lod_completion(state)
         } else {
             try_compare_same_context_lod_batches(state)
         };
+        if authoritative {
+            let publication_ms = browser_now_ms() - publication_started_ms;
+            if let Some(lod) = state.same_context_lod.as_mut() {
+                lod.diagnostics.last_publication_ms = publication_ms;
+                lod.diagnostics.publication_ms.record(publication_ms);
+            }
+        }
         if let Err(error) = publication {
             if let Some(lod) = state.same_context_lod.as_mut() {
                 lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
@@ -7755,6 +7873,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let state = match state.as_mut() { Some(s) => s, None => return };
         if state.batches.is_empty() { return; }
         state.render_calls += 1;
+        let render_started_ms = browser_now_ms();
 
         let camera = Camera {
             mvp: mvp[..16].try_into().unwrap_or([0.0; 16]),
@@ -8412,6 +8531,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.render_submission_totals.merge(submission_stats);
                 observe_render_submission(state, &camera, submission_stats);
                 state.renderer.end_frame();
+                state
+                    .render_timing
+                    .observe(render_started_ms, browser_now_ms());
                 return;
             }
             RenderStyle::Lod => {
@@ -8440,6 +8562,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.last_render_submission = submission_stats;
         state.render_submission_totals.merge(submission_stats);
         state.renderer.end_frame();
+        state
+            .render_timing
+            .observe(render_started_ms, browser_now_ms());
     });
 }
 

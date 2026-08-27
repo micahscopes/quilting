@@ -18,12 +18,18 @@ const {
   hyperscopeControlSpecs,
   load_patch_lab,
   mr_acceptLodDeltaSequence,
+  mr_resetRuntimeTimingDiagnostics,
+  mr_runtimeTimingDiagnostics,
   mr_uploadComposedLodModel,
   update_patch_lab_lods,
 } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
 
 assert.equal(typeof mr_uploadComposedLodModel, 'function');
+assert.equal(typeof mr_runtimeTimingDiagnostics, 'function');
+assert.equal(typeof mr_resetRuntimeTimingDiagnostics, 'function');
+assert.throws(() => mr_runtimeTimingDiagnostics(), /renderer is not initialized/);
+assert.throws(() => mr_resetRuntimeTimingDiagnostics(), /renderer is not initialized/);
 assert.deepEqual(
   hyperscopeControlSpecs().find(spec => spec.key === 'lodimpl'),
   { key: 'lodimpl', defaultValue: 'js', kind: 'implementation' },
@@ -293,6 +299,32 @@ for (const rustResidencyStep of [
   assert.ok(
     mainRendererSource.includes(rustResidencyStep),
     `Rust same-context residency is missing ${rustResidencyStep}`,
+  );
+}
+for (const promotionTelemetryStep of [
+  'mr_runtimeTimingDiagnostics, mr_resetRuntimeTimingDiagnostics',
+  'const snapshot = mr_runtimeTimingDiagnostics();',
+  'mr_resetRuntimeTimingDiagnostics();',
+]) {
+  assert.ok(
+    browserSource.includes(promotionTelemetryStep),
+    `browser promotion telemetry is missing ${promotionTelemetryStep}`,
+  );
+}
+assert.ok(
+  !browserSource.includes('function recordFrameTiming('),
+  'frame timing must not retain a duplicate JavaScript accumulator',
+);
+for (const rustTimingStep of [
+  'render_timing: RenderTimingDiagnostics',
+  'dispatch_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>',
+  'publication_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>',
+  'pub fn mr_runtime_timing_diagnostics()',
+  'pub fn mr_reset_runtime_timing_diagnostics()',
+]) {
+  assert.ok(
+    mainRendererSource.includes(rustTimingStep),
+    `Rust promotion telemetry is missing ${rustTimingStep}`,
   );
 }
 for (const requiredWorkerDeltaStep of [
