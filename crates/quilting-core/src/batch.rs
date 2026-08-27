@@ -683,6 +683,118 @@ pub fn group_resident_screen_overlay_into(
     lod_scratch: &mut ScreenMeshLeafLodScratch,
     overlay: &mut AdaptiveRenderOverlay,
 ) -> Result<(), ScreenLeafLodError> {
+    group_resident_screen_overlay_coverage_into(
+        frontier,
+        resident_edge_lods,
+        AdaptiveOverlayCoverage::Complete(baseline_residents.len()),
+        baseline_residents,
+        baseline_vertex_lods,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        initial,
+        lod_scratch,
+        overlay,
+    )
+}
+
+/// Extract replacements for complete, independently recomputable welded-source
+/// components. Faces outside `component_faces` remain represented by retained
+/// baseline roots and are neither scanned nor copied into the overlay.
+///
+/// `component_faces` must be the globally ordered certificate produced by
+/// [`ScreenMeshTopologyCache::collect_component_closure`]. The frontier must
+/// cover every certified face and no others.
+#[allow(clippy::too_many_arguments)]
+pub fn group_resident_screen_component_overlay_into(
+    frontier: &ScreenMeshLeafFrontier,
+    resident_edge_lods: &[[u32; 3]],
+    component_faces: &[u32],
+    baseline_residents: &[Option<ResidentLod>],
+    baseline_vertex_lods: &[[u32; 3]],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    face_render_nodes: &[usize],
+    initial: ResidentLod,
+    lod_scratch: &mut ScreenMeshLeafLodScratch,
+    overlay: &mut AdaptiveRenderOverlay,
+) -> Result<(), ScreenLeafLodError> {
+    group_resident_screen_overlay_coverage_into(
+        frontier,
+        resident_edge_lods,
+        AdaptiveOverlayCoverage::Components(component_faces),
+        baseline_residents,
+        baseline_vertex_lods,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        initial,
+        lod_scratch,
+        overlay,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum AdaptiveOverlayCoverage<'a> {
+    Complete(usize),
+    Components(&'a [u32]),
+}
+
+impl AdaptiveOverlayCoverage<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Complete(source_faces) => source_faces,
+            Self::Components(component_faces) => component_faces.len(),
+        }
+    }
+
+    fn source_face(self, local_face: usize) -> Option<u32> {
+        match self {
+            Self::Complete(source_faces) => (local_face < source_faces).then_some(local_face as u32),
+            Self::Components(component_faces) => component_faces.get(local_face).copied(),
+        }
+    }
+
+    fn local_face(self, source_face: u32) -> Option<usize> {
+        match self {
+            Self::Complete(source_faces) => {
+                ((source_face as usize) < source_faces).then_some(source_face as usize)
+            }
+            Self::Components(component_faces) => component_faces.binary_search(&source_face).ok(),
+        }
+    }
+
+    fn validate(self, source_faces: usize) -> Result<(), ScreenLeafLodError> {
+        let Self::Components(component_faces) = self else {
+            return Ok(());
+        };
+        let mut previous = None;
+        for &source_face in component_faces {
+            if source_face as usize >= source_faces
+                || previous.is_some_and(|previous| previous >= source_face)
+            {
+                return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
+            }
+            previous = Some(source_face);
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn group_resident_screen_overlay_coverage_into(
+    frontier: &ScreenMeshLeafFrontier,
+    resident_edge_lods: &[[u32; 3]],
+    coverage: AdaptiveOverlayCoverage<'_>,
+    baseline_residents: &[Option<ResidentLod>],
+    baseline_vertex_lods: &[[u32; 3]],
+    face_materials: &[usize],
+    face_nodes: &[usize],
+    face_render_nodes: &[usize],
+    initial: ResidentLod,
+    lod_scratch: &mut ScreenMeshLeafLodScratch,
+    overlay: &mut AdaptiveRenderOverlay,
+) -> Result<(), ScreenLeafLodError> {
     let leaves = frontier.leaves();
     let source_faces = baseline_residents.len();
     if leaves.len() != resident_edge_lods.len()
@@ -693,14 +805,15 @@ pub fn group_resident_screen_overlay_into(
     {
         return Err(ScreenLeafLodError::LengthMismatch);
     }
+    coverage.validate(source_faces)?;
     let leaf_vertex_lods = frontier.rebuild_vertex_lods_into(resident_edge_lods, lod_scratch)?;
 
     overlay.face_leaf_counts.clear();
-    overlay.face_leaf_counts.resize(source_faces, 0);
+    overlay.face_leaf_counts.resize(coverage.len(), 0);
     overlay.face_matches_baseline_root.clear();
     overlay
         .face_matches_baseline_root
-        .resize(source_faces, false);
+        .resize(coverage.len(), false);
     for (leaf_index, ((leaf, edge_lods), vertex_lods)) in leaves
         .iter()
         .copied()
@@ -709,16 +822,16 @@ pub fn group_resident_screen_overlay_into(
         .enumerate()
     {
         let source_face = leaf.source_face as usize;
-        if source_face >= source_faces {
+        let Some(local_face) = coverage.local_face(leaf.source_face) else {
             return Err(ScreenLeafLodError::MissingFaceMetadata {
                 leaf_index,
                 source_face: leaf.source_face,
             });
-        }
-        overlay.face_leaf_counts[source_face] += 1;
+        };
+        overlay.face_leaf_counts[local_face] += 1;
         if leaf.id == ScreenPatchLeafId::ROOT {
             let resident = ResidentLod::from_edge_lods(edge_lods);
-            overlay.face_matches_baseline_root[source_face] = resident
+            overlay.face_matches_baseline_root[local_face] = resident
                 == baseline_residents[source_face].unwrap_or(initial)
                 && vertex_lods == baseline_vertex_lods[source_face];
         }
@@ -729,7 +842,9 @@ pub fn group_resident_screen_overlay_into(
         .position(|&leaf_count| leaf_count == 0)
     {
         return Err(ScreenLeafLodError::MissingSourceFace {
-            source_face: source_face as u32,
+            source_face: coverage
+                .source_face(source_face)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?,
         });
     }
 
@@ -737,11 +852,15 @@ pub fn group_resident_screen_overlay_into(
     for members in overlay.groups.values_mut() {
         members.clear();
     }
-    for source_face in 0..source_faces {
-        if overlay.face_leaf_counts[source_face] != 1
-            || !overlay.face_matches_baseline_root[source_face]
+    for local_face in 0..coverage.len() {
+        if overlay.face_leaf_counts[local_face] != 1
+            || !overlay.face_matches_baseline_root[local_face]
         {
-            overlay.suppressed_faces.push(source_face as u32);
+            overlay.suppressed_faces.push(
+                coverage
+                    .source_face(local_face)
+                    .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?,
+            );
         }
     }
     for ((leaf, edge_lods), vertex_lods) in leaves
@@ -751,8 +870,11 @@ pub fn group_resident_screen_overlay_into(
         .zip(leaf_vertex_lods.iter().copied())
     {
         let source_face = leaf.source_face as usize;
-        if overlay.face_leaf_counts[source_face] == 1
-            && overlay.face_matches_baseline_root[source_face]
+        let local_face = coverage
+            .local_face(leaf.source_face)
+            .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+        if overlay.face_leaf_counts[local_face] == 1
+            && overlay.face_matches_baseline_root[local_face]
         {
             continue;
         }
@@ -2097,6 +2219,137 @@ mod tests {
 
         assert!(overlay.suppressed_faces.binary_search(&0).is_ok());
         assert_eq!(compose_root_groups_with_overlay(roots, &overlay), complete);
+    }
+
+    #[test]
+    fn component_overlay_composes_without_scanning_unaffected_components() {
+        let topology = HalfEdgeMesh::from_triangles(
+            8,
+            &[[0, 1, 2], [2, 3, 4], [5, 6, 7]],
+        );
+        let baseline_residents = vec![Some(ResidentLod::uniform(2)); 3];
+        let mut baseline_vertex_lods = Vec::new();
+        let mut vertex_scratch = Vec::new();
+        rebuild_resident_vertex_lods(
+            &baseline_residents,
+            &topology,
+            ResidentLod::uniform(1),
+            &mut vertex_scratch,
+            &mut baseline_vertex_lods,
+        );
+        let face_materials = [3, 7, 11];
+        let face_nodes = [13, 17, 19];
+        let face_render_nodes = [23, 29, 31];
+        let roots = group_resident_faces(
+            &baseline_residents,
+            &baseline_vertex_lods,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+            ResidentLod::uniform(1),
+        );
+
+        let mut component_leaves = (0..4)
+            .map(|child| {
+                let id = ScreenPatchLeafId::ROOT.child(child).unwrap();
+                ScreenMeshLeafTopology {
+                    source_face: 0,
+                    id,
+                    domain: id.domain().unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        component_leaves.push(ScreenMeshLeafTopology {
+            source_face: 1,
+            id: ScreenPatchLeafId::ROOT,
+            domain: QBPatchDomain::FULL,
+        });
+        let mut complete_leaves = component_leaves.clone();
+        complete_leaves.push(ScreenMeshLeafTopology {
+            source_face: 2,
+            id: ScreenPatchLeafId::ROOT,
+            domain: QBPatchDomain::FULL,
+        });
+        let topology_cache = ScreenMeshTopologyCache::from_half_edge_mesh(&topology).unwrap();
+        let component_frontier =
+            ScreenMeshLeafFrontier::build(&component_leaves, &topology_cache).unwrap();
+        let complete_frontier =
+            ScreenMeshLeafFrontier::build(&complete_leaves, &topology_cache).unwrap();
+        let component_requested = vec![[1; 3], [1; 3], [1; 3], [1; 3], [2; 3]];
+        let mut complete_requested = component_requested.clone();
+        complete_requested.push([2; 3]);
+        let component_resident = component_frontier
+            .reconcile_lods(&component_requested, 2, 64)
+            .unwrap();
+        let complete_resident = complete_frontier
+            .reconcile_lods(&complete_requested, 2, 64)
+            .unwrap();
+        let complete = group_resident_screen_leaves(
+            &complete_frontier,
+            &complete_resident.resident,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+        )
+        .unwrap();
+
+        let mut overlay = AdaptiveRenderOverlay::default();
+        let mut lod_scratch = ScreenMeshLeafLodScratch::default();
+        group_resident_screen_component_overlay_into(
+            &component_frontier,
+            &component_resident.resident,
+            &[0, 1],
+            &baseline_residents,
+            &baseline_vertex_lods,
+            &face_materials,
+            &face_nodes,
+            &face_render_nodes,
+            ResidentLod::uniform(1),
+            &mut lod_scratch,
+            &mut overlay,
+        )
+        .unwrap();
+
+        assert_eq!(overlay.face_leaf_counts.len(), 2);
+        assert!(overlay.suppressed_faces.binary_search(&0).is_ok());
+        assert!(overlay.suppressed_faces.binary_search(&2).is_err());
+        assert_eq!(compose_root_groups_with_overlay(roots, &overlay), complete);
+    }
+
+    #[test]
+    fn component_overlay_rejects_an_incomplete_certificate_atomically() {
+        let topology = HalfEdgeMesh::from_triangles(5, &[[0, 1, 2], [2, 3, 4]]);
+        let topology_cache = ScreenMeshTopologyCache::from_half_edge_mesh(&topology).unwrap();
+        let frontier = ScreenMeshLeafFrontier::build(
+            &[ScreenMeshLeafTopology {
+                source_face: 0,
+                id: ScreenPatchLeafId::ROOT,
+                domain: QBPatchDomain::FULL,
+            }],
+            &topology_cache,
+        )
+        .unwrap();
+        let mut overlay = AdaptiveRenderOverlay::default();
+        overlay.suppressed_faces.push(99);
+        let before = overlay.suppressed_faces.clone();
+        let mut lod_scratch = ScreenMeshLeafLodScratch::default();
+        let error = group_resident_screen_component_overlay_into(
+            &frontier,
+            &[[1; 3]],
+            &[0, 1],
+            &[Some(ResidentLod::uniform(1)); 2],
+            &[[1; 3]; 2],
+            &[0; 2],
+            &[0; 2],
+            &[0; 2],
+            ResidentLod::uniform(1),
+            &mut lod_scratch,
+            &mut overlay,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ScreenLeafLodError::MissingSourceFace { source_face: 1 });
+        assert_eq!(overlay.suppressed_faces, before);
     }
 
     #[test]
