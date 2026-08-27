@@ -929,9 +929,6 @@ assert.equal(
   selectionApp.navigationSnapshot().camera.camera_transition_remaining,
   reframeDuration,
 );
-assertNavigationParity(selectionApp.tickNavigation(0.35), selectionIncumbent.tick(0.35));
-assertNavigationParity(selectionApp.tickNavigation(0.35), selectionIncumbent.tick(0.35));
-const reframedSelection = selectionApp.navigationSnapshot();
 const expectedReframeDistance = Math.min(
   Math.max(
     framedSphereDistance(2, reframeAspect, projectionLens[0], reframeMargin),
@@ -939,6 +936,18 @@ const expectedReframeDistance = Math.min(
   ),
   100,
 );
+const midpointReframe = selectionApp.tickNavigation(0.35);
+assertNavigationParity(midpointReframe, selectionIncumbent.tick(0.35));
+const expectedMidpointDistance = Math.sqrt(
+  beforeSelectedReframe.camera.control_distance * expectedReframeDistance,
+);
+assertArrayClose(midpointReframe.camera.semantic_target, [2, 0, 0]);
+assertArrayClose(midpointReframe.camera.eye, [2, 0, expectedMidpointDistance]);
+assert.ok(
+  Math.abs(midpointReframe.camera.control_distance - expectedMidpointDistance) <= 1e-12,
+);
+assertNavigationParity(selectionApp.tickNavigation(0.35), selectionIncumbent.tick(0.35));
+const reframedSelection = selectionApp.navigationSnapshot();
 assertArrayClose(reframedSelection.camera.eye, [4, 0, expectedReframeDistance]);
 assertArrayClose(reframedSelection.camera.semantic_target, [4, 0, 0]);
 assert.ok(

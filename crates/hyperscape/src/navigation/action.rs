@@ -445,6 +445,7 @@ fn apply_action(
             target,
             duration_seconds,
             easing,
+            false,
         )?,
         NavigationAction::ReframeSelection {
             viewport_aspect,
@@ -469,6 +470,7 @@ fn apply_action(
                 target,
                 duration_seconds,
                 easing,
+                true,
             )?;
         }
         NavigationAction::BeginSurfaceAnchorTransition {
@@ -582,6 +584,7 @@ fn begin_camera_transition(
     target: CameraRig,
     duration_seconds: f64,
     easing: TransitionEasing,
+    target_orbit: bool,
 ) -> Result<(), String> {
     target.validate().map_err(|error| error.to_string())?;
     if !duration_seconds.is_finite() || duration_seconds < 0.0 {
@@ -592,8 +595,12 @@ fn begin_camera_transition(
         surface_walk.cancel_anchor_transition();
         *camera = target;
     } else {
-        let transition = CameraTransition::new(*camera, target, duration_seconds, easing)
-            .map_err(|error| error.to_string())?;
+        let transition = if target_orbit {
+            CameraTransition::new_target_orbit(*camera, target, duration_seconds, easing)
+        } else {
+            CameraTransition::new(*camera, target, duration_seconds, easing)
+        }
+        .map_err(|error| error.to_string())?;
         // `CameraTransition::new` may intentionally convert the start from a
         // finite semantic target to an equivalent free tangent. Make the live
         // state match before a same-timestamp reflection.

@@ -30,8 +30,10 @@ impl TransitionEasing {
 }
 
 /// A deterministic transition between complete semantic camera states.
-/// Positions and lens angle are linear, positive scale-like quantities are
-/// logarithmic, and orientation follows the shortest quaternion arc.
+/// General transitions interpolate positions and lens angle linearly;
+/// selection framing instead preserves its target-orbit path. Positive
+/// scale-like quantities are logarithmic and orientation follows the shortest
+/// quaternion arc.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CameraTransition {
     pub start: CameraRig,
@@ -39,6 +41,14 @@ pub struct CameraTransition {
     pub elapsed_seconds: f64,
     pub duration_seconds: f64,
     pub easing: TransitionEasing,
+    path: CameraTransitionPath,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CameraTransitionPath {
+    #[default]
+    LinearEye,
+    TargetOrbit,
 }
 
 /// A camera target sampled from an attached surface in the active output
@@ -183,7 +193,26 @@ impl CameraTransition {
             elapsed_seconds: 0.0,
             duration_seconds,
             easing,
+            path: CameraTransitionPath::LinearEye,
         })
+    }
+
+    /// Preserve the established Hyperscope framing path: interpolate the
+    /// visible target linearly and the positive camera distance logarithmically,
+    /// then derive the eye from that target and the interpolated orientation.
+    pub fn new_target_orbit(
+        mut start: CameraRig,
+        target: CameraRig,
+        duration_seconds: f64,
+        easing: TransitionEasing,
+    ) -> Result<Self, CameraError> {
+        if target.semantic_target.is_none() {
+            return Err(CameraError::InvalidTransition);
+        }
+        start.semantic_target = Some(start.view_target());
+        let mut transition = Self::new(start, target, duration_seconds, easing)?;
+        transition.path = CameraTransitionPath::TargetOrbit;
+        Ok(transition)
     }
 
     pub fn advance(&mut self, delta_seconds: f64, camera: &mut CameraRig) -> bool {
@@ -210,11 +239,16 @@ impl CameraTransition {
         let start_target = self.start.view_target();
         let target_target = self.target.view_target();
         let mut camera = interpolate_camera(self.start, self.target, t);
-        camera.semantic_target = self
-            .target
-            .semantic_target
-            .is_some()
-            .then(|| lerp3(start_target, target_target, t));
+        camera.semantic_target = self.target.semantic_target.is_some().then(|| {
+            let semantic_target = lerp3(start_target, target_target, t);
+            if self.path == CameraTransitionPath::TargetOrbit {
+                camera.eye = add3(
+                    semantic_target,
+                    scale3(camera.basis().forward, -camera.control_distance),
+                );
+            }
+            semantic_target
+        });
         camera
     }
 
@@ -360,6 +394,36 @@ mod tests {
         assert_eq!(midpoint.eye, [1.0, 2.0, 4.5]);
         assert!((midpoint.control_distance - 6.0).abs() < 1.0e-10);
         assert!((midpoint.orientation.norm() - 1.0).abs() < 1.0e-10);
+        assert_eq!(transition.sample(1.0), target);
+    }
+
+    #[test]
+    fn target_orbit_transition_matches_browser_framing_path() {
+        let start = CameraRig::default();
+        let target = CameraRig {
+            eye: [4.0, 0.0, 6.0],
+            control_distance: 6.0,
+            semantic_target: Some([4.0, 0.0, 0.0]),
+            ..CameraRig::default()
+        };
+        let transition = CameraTransition::new_target_orbit(
+            start,
+            target,
+            1.0,
+            TransitionEasing::Linear,
+        )
+        .unwrap();
+
+        let initial = transition.sample(0.0);
+        assert_eq!(initial.eye, start.eye);
+        assert_eq!(initial.semantic_target, Some([0.0, 0.0, 0.0]));
+        let midpoint = transition.sample(0.5);
+        let midpoint_distance = (start.control_distance * target.control_distance).sqrt();
+        assert_eq!(midpoint.semantic_target, Some([2.0, 0.0, 0.0]));
+        assert!((midpoint.control_distance - midpoint_distance).abs() < 1.0e-12);
+        assert_eq!(midpoint.eye[0], 2.0);
+        assert_eq!(midpoint.eye[1], 0.0);
+        assert!((midpoint.eye[2] - midpoint_distance).abs() < 1.0e-12);
         assert_eq!(transition.sample(1.0), target);
     }
 
