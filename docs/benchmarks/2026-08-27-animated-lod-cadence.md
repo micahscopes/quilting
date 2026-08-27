@@ -474,6 +474,30 @@ members while still sometimes winning. WebGL2 continues to upload one compact
 prefix per changed bucket. WebGPU remains the intended path for storage-buffer
 reconciliation, visible compaction, and indirect submission.
 
+Commit `3ee45cf` adds the first non-authoritative work classifier. A forced or
+uninitialized index uses the complete path. Scenes below 4,096 faces likewise
+stay complete. Larger scenes enter the retained candidate only when the exact
+reconciliation seed is at most one eighth of the scene; post-work certification
+also requires the shared-vertex closure to stay at or below one quarter and
+rebuilt membership at or below three quarters. These thresholds are promotion
+policy, not correctness invariants, and are tested at their exact boundaries.
+
+The same 64-gesture chess trace then separated into 29 certified-incremental
+and 36 complete-recommended samples. The candidate's certified-incremental
+samples measured 6.6 ms p50 and 8.1 ms p95. The samples rejected by the seed
+gate—still executed because this remains a shadow—measured 38.6 ms p50 and
+100.9 ms p95. All 65 ordered-group comparisons were exact. This cleanly
+separates the cheap and pathological populations that were mixed in the
+aggregate tail above.
+
+An animated-horse run reached 122/122 exact comparisons. All 122 were classified
+complete before incremental work because the 984-face scene is below the size
+gate; none were recommended incremental. Candidate work measured 0.3 ms p50,
+while incumbent vertex reconstruction plus grouping measured approximately
+0.2 ms p50. The selector therefore preserves the known small/full-component
+counterexample. It remains diagnostic-only until a rollback-safe authority path
+can skip rejected candidate work and periodically sample the complete oracle.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
