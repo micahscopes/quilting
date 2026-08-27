@@ -56,6 +56,41 @@ ordinary source chart before drawing its eye and tangent frame. The overlay is
 rebuilt from TTL-filtered samples, creates no Blender datablocks, and is never
 saved in the `.blend`.
 
+## Conformal geometry preview boundary
+
+Blender should remain an authoring peer rather than a forked Hyperscope
+renderer. A conformal preview therefore has two deliberately different quality
+levels:
+
+1. A generated Geometry Nodes modifier may provide an editable, non-destructive
+   authoring preview. It subdivides the ordinary input mesh to an explicit
+   fixed **Preview Quality**, evaluates the authored generator word pointwise,
+   and leaves the source mesh untouched. Preview topology and quality are local
+   editor settings; they are not exported as authored scene state or admitted
+   to HHHS. This mode is useful for composition, animation blocking, and
+   generator gizmos, but it does not claim screen-space, crack-free QB LOD.
+2. Hyperscope remains the exact preview and presentation renderer. The existing
+   live peer already shares stable object identity, camera, selection, focus,
+   inversion, and authored transforms. A later Blender `POST_VIEW` adapter may
+   extend the current presence overlay with an atlas-backed wire/debug surface,
+   but PBR, rational QB evaluation, pole handling, shared-edge reconciliation,
+   and adaptive LOD remain renderer responsibilities.
+
+The old [Hyperblender fork](https://github.com/micahscopes/hyperblender) is
+useful design archaeology, not an implementation dependency. Its durable idea
+is controlling a conformal modifier with ordinary Blender objects. Its sphere
+reflection path repeatedly mutated a CPU BMesh by subdividing edges near the
+inversion center and then transformed every resulting vertex. That refinement
+was view-independent and did not provide the current atlas's screen-space,
+permutation, seam, or rational-patch guarantees, so it should not be ported.
+
+WebGPU does not change this division. It has compute, vertex, and fragment
+shader stages rather than geometry or tessellation stages. The production
+backend should retain the immutable tessellation atlas and use compute for
+same-pose LOD reconciliation, visible-instance compaction, and indirect draw
+arguments. Regenerating tessellated vertex/index buffers every frame would add
+allocation and synchronization that the resident atlas was designed to avoid.
+
 This bridge is intentionally a direct, arrival-ordered single-writer demo. Its
 cursor detects delivery gaps and process restarts but is not a scene revision.
 It has no durable storage, repair, capability delegation, or multi-writer
