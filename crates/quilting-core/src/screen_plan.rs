@@ -10,7 +10,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::patch::{QBPatchDomain, QBTriPatch};
-use crate::screen_leaf_lod::ScreenMeshLeafTopology;
+use crate::screen_leaf_lod::{ScreenLeafLodError, ScreenMeshLeafTopology, ScreenMeshTopologyCache};
 use crate::screen_partition::{
     partition_screen_patch, ScreenPartitionError, ScreenPartitionPolicy, ScreenPatchLeafId,
 };
@@ -117,6 +117,23 @@ impl AdaptiveScreenMeshPlan {
         self.leaves.clear();
         self.requested_lods.clear();
         self.diagnostic = AdaptiveScreenMeshPlanDiagnostic::default();
+    }
+}
+
+/// One independently recomputable adaptive plan plus the exact welded-source
+/// components it covers. The mesh plan emits only these source faces, while
+/// its diagnostic and leaf budget continue to describe the composed scene
+/// including retained roots outside the closure.
+#[derive(Clone, Debug, Default)]
+pub struct AdaptiveScreenComponentPlan {
+    pub component_faces: Vec<u32>,
+    pub mesh: AdaptiveScreenMeshPlan,
+}
+
+impl AdaptiveScreenComponentPlan {
+    fn clear_retain_capacity(&mut self) {
+        self.component_faces.clear();
+        self.mesh.clear_retain_capacity();
     }
 }
 
@@ -340,6 +357,7 @@ pub enum PickedScreenMeshPlanError {
     PartitionBudgetExceeded { requested: usize, maximum: usize },
     LeafBudgetExceeded { requested: usize, maximum: usize },
     Partition(ScreenPartitionError),
+    ComponentClosure(ScreenLeafLodError),
     CountOverflow,
 }
 
@@ -399,6 +417,9 @@ impl std::fmt::Display for PickedScreenMeshPlanError {
                 "adaptive plan needs {requested} leaves; scene budget is {maximum}",
             ),
             Self::Partition(error) => write!(formatter, "adaptive partition failed: {error}"),
+            Self::ComponentClosure(error) => {
+                write!(formatter, "adaptive component closure failed: {error}")
+            }
             Self::CountOverflow => {
                 write!(formatter, "adaptive scene plan exceeds u32 identity limits")
             }
@@ -414,15 +435,30 @@ impl From<ScreenPartitionError> for PickedScreenMeshPlanError {
     }
 }
 
+impl From<ScreenLeafLodError> for PickedScreenMeshPlanError {
+    fn from(error: ScreenLeafLodError) -> Self {
+        Self::ComponentClosure(error)
+    }
+}
+
 fn validate_source_lods(
     source_requested_lods: &[[u32; 3]],
     max_atlas_lod: u32,
 ) -> Result<(), PickedScreenMeshPlanError> {
     for (face, lods) in source_requested_lods.iter().copied().enumerate() {
-        for (edge, lod) in lods.into_iter().enumerate() {
-            if !lod.is_power_of_two() || lod > max_atlas_lod {
-                return Err(PickedScreenMeshPlanError::InvalidSourceLod { face, edge });
-            }
+        validate_source_face_lods(face, lods, max_atlas_lod)?;
+    }
+    Ok(())
+}
+
+fn validate_source_face_lods(
+    face: usize,
+    lods: [u32; 3],
+    max_atlas_lod: u32,
+) -> Result<(), PickedScreenMeshPlanError> {
+    for (edge, lod) in lods.into_iter().enumerate() {
+        if !lod.is_power_of_two() || lod > max_atlas_lod {
+            return Err(PickedScreenMeshPlanError::InvalidSourceLod { face, edge });
         }
     }
     Ok(())
@@ -489,7 +525,59 @@ pub fn plan_adaptive_screen_mesh_into(
     output: &mut AdaptiveScreenMeshPlan,
 ) -> Result<(), AdaptiveScreenMeshPlanError> {
     output.clear_retain_capacity();
-    let result = plan_adaptive_screen_mesh_reusing(request, output);
+    let result = plan_adaptive_screen_mesh_reusing(request, None, output);
+    if result.is_err() {
+        output.clear_retain_capacity();
+    }
+    result
+}
+
+/// Build only the exact welded-source components touched by the selected
+/// patches. The topology cache supplies the certificate; callers cannot pass
+/// an arbitrary halo that might omit a shared edge or corner-density peer.
+///
+/// Unaffected source roots are not copied into `mesh.leaves`, but remain part
+/// of the scene-wide leaf budget and diagnostic. On failure both retained
+/// output allocations are cleared without exposing a partial closure or plan.
+pub fn plan_adaptive_screen_components(
+    request: AdaptiveScreenMeshPlanRequest<'_>,
+    topology: &ScreenMeshTopologyCache,
+    max_component_faces: usize,
+) -> Result<AdaptiveScreenComponentPlan, AdaptiveScreenMeshPlanError> {
+    let mut output = AdaptiveScreenComponentPlan::default();
+    plan_adaptive_screen_components_into(request, topology, max_component_faces, &mut output)?;
+    Ok(output)
+}
+
+/// Allocation-retaining form of [`plan_adaptive_screen_components`].
+pub fn plan_adaptive_screen_components_into(
+    request: AdaptiveScreenMeshPlanRequest<'_>,
+    topology: &ScreenMeshTopologyCache,
+    max_component_faces: usize,
+    output: &mut AdaptiveScreenComponentPlan,
+) -> Result<(), AdaptiveScreenMeshPlanError> {
+    output.clear_retain_capacity();
+    if topology.source_face_count() != request.source_requested_lods.len() {
+        return Err(ScreenLeafLodError::LengthMismatch.into());
+    }
+    let closure = topology.collect_component_closure_from_faces(
+        request
+            .selected_patches
+            .iter()
+            .map(|selected| selected.source_face),
+        max_component_faces,
+        &mut output.component_faces,
+    );
+    if let Err(error) = closure {
+        output.clear_retain_capacity();
+        return Err(error.into());
+    }
+    if output.component_faces.is_empty() {
+        output.clear_retain_capacity();
+        return Err(PickedScreenMeshPlanError::EmptyScene);
+    }
+    let result =
+        plan_adaptive_screen_mesh_reusing(request, Some(&output.component_faces), &mut output.mesh);
     if result.is_err() {
         output.clear_retain_capacity();
     }
@@ -498,6 +586,7 @@ pub fn plan_adaptive_screen_mesh_into(
 
 fn plan_adaptive_screen_mesh_reusing(
     request: AdaptiveScreenMeshPlanRequest<'_>,
+    component_faces: Option<&[u32]>,
     output: &mut AdaptiveScreenMeshPlan,
 ) -> Result<(), AdaptiveScreenMeshPlanError> {
     if request.source_requested_lods.is_empty() {
@@ -530,7 +619,19 @@ fn plan_adaptive_screen_mesh_reusing(
     if !request.max_atlas_lod.is_power_of_two() {
         return Err(PickedScreenMeshPlanError::InvalidAtlasLod);
     }
-    validate_source_lods(request.source_requested_lods, request.max_atlas_lod)?;
+    if let Some(component_faces) = component_faces {
+        for &source_face in component_faces {
+            let face = source_face as usize;
+            let lods = request
+                .source_requested_lods
+                .get(face)
+                .copied()
+                .ok_or(PickedScreenMeshPlanError::InvalidSelectedFace)?;
+            validate_source_face_lods(face, lods, request.max_atlas_lod)?;
+        }
+    } else {
+        validate_source_lods(request.source_requested_lods, request.max_atlas_lod)?;
+    }
 
     let maximum_partition_leaves = request
         .selected_patches
@@ -550,6 +651,12 @@ fn plan_adaptive_screen_mesh_reusing(
         .len()
         .checked_sub(selected_patches.len())
         .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
+    let planned_source_faces = component_faces
+        .map(<[u32]>::len)
+        .unwrap_or(request.source_requested_lods.len());
+    let planned_fixed_roots = planned_source_faces
+        .checked_sub(selected_patches.len())
+        .ok_or(PickedScreenMeshPlanError::CountOverflow)?;
 
     // Process selected patches in source order and write a viable plan
     // directly. The full metric partition is dropped before the next face is
@@ -566,7 +673,7 @@ fn plan_adaptive_screen_mesh_reusing(
     selected_faces.reserve(selected_patches.len());
     let retained_capacity = request
         .max_total_leaves
-        .min(fixed_roots.saturating_add(request.max_partition_leaves));
+        .min(planned_fixed_roots.saturating_add(request.max_partition_leaves));
     leaves.reserve(retained_capacity);
     requested_lods.reserve(retained_capacity);
     let mut output_viable =
@@ -580,9 +687,15 @@ fn plan_adaptive_screen_mesh_reusing(
     let mut fallback_roots = 0usize;
     let mut boundary_fallback_faces = 0usize;
 
-    for (source_face, source_lods) in request.source_requested_lods.iter().copied().enumerate() {
-        let source_face_u32 =
-            u32::try_from(source_face).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
+    for planned_face_index in 0..planned_source_faces {
+        let source_face_u32 = component_faces
+            .map_or_else(
+                || u32::try_from(planned_face_index),
+                |faces| Ok(faces[planned_face_index]),
+            )
+            .map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
+        let source_face = source_face_u32 as usize;
+        let source_lods = request.source_requested_lods[source_face];
         let Some(transformed_patch) = selected_patches.get(&source_face_u32) else {
             if output_viable {
                 leaves.push(ScreenMeshLeafTopology {
@@ -713,7 +826,7 @@ fn plan_adaptive_screen_mesh_reusing(
     let selected_leaf_count =
         u32::try_from(selected_leaves).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
     let total_leaves =
-        u32::try_from(leaves.len()).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
+        u32::try_from(total_capacity).map_err(|_| PickedScreenMeshPlanError::CountOverflow)?;
     *diagnostic = AdaptiveScreenMeshPlanDiagnostic {
         source_faces,
         selected_faces: selected_face_count,
@@ -1440,6 +1553,166 @@ mod tests {
             .reconcile_lods(&plan.requested_lods, 4, 64)
             .unwrap();
         assert_eq!(reconciled.resident.len(), 8);
+    }
+
+    #[test]
+    fn component_plan_matches_complete_plan_over_its_certified_closure() {
+        let positions = [
+            [-0.8, -0.6, 0.0],
+            [-0.2, -0.6, 0.0],
+            [-0.5, 0.0, 0.0],
+            [-0.8, 0.6, 0.0],
+            [-0.2, 0.6, 0.0],
+            [0.2, -0.5, 0.0],
+            [0.8, -0.5, 0.0],
+            [0.5, 0.5, 0.0],
+        ];
+        let triangles = [[0, 1, 2], [2, 3, 4], [5, 6, 7]];
+        let source =
+            quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(&positions, &triangles);
+        let topology =
+            crate::screen_leaf_lod::ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let selected = [SelectedScreenPatch {
+            source_face: 0,
+            transformed_patch: &patch,
+        }];
+        let source_lods = [[2, 4, 8], [8, 2, 4], [32, 16, 8]];
+        let request = AdaptiveScreenMeshPlanRequest {
+            selected_patches: &selected,
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 10_000.0,
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 4,
+            max_total_leaves: 6,
+            source_requested_lods: &source_lods,
+        };
+
+        let complete = plan_adaptive_screen_mesh(request).unwrap();
+        let component = plan_adaptive_screen_components(request, &topology, 2).unwrap();
+        assert_eq!(component.component_faces, [0, 1]);
+        assert_eq!(component.mesh.diagnostic, complete.diagnostic);
+        assert_eq!(component.mesh.diagnostic.source_faces, 3);
+        assert_eq!(component.mesh.diagnostic.total_leaves, 6);
+        assert_eq!(component.mesh.leaves.len(), 5);
+
+        let complete_frontier =
+            crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(&complete.leaves, &topology)
+                .unwrap();
+        let component_frontier = crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(
+            &component.mesh.leaves,
+            &topology,
+        )
+        .unwrap();
+        let complete_resident = complete_frontier
+            .reconcile_lods(&complete.requested_lods, 4, 64)
+            .unwrap();
+        let component_resident = component_frontier
+            .reconcile_lods(&component.mesh.requested_lods, 4, 64)
+            .unwrap();
+        let complete_vertices = complete_frontier
+            .rebuild_vertex_lods(&complete_resident.resident)
+            .unwrap();
+        let component_vertices = component_frontier
+            .rebuild_vertex_lods(&component_resident.resident)
+            .unwrap();
+        let complete_component = complete
+            .leaves
+            .iter()
+            .copied()
+            .zip(complete.requested_lods.iter().copied())
+            .zip(complete_resident.resident.iter().copied())
+            .zip(complete_vertices.iter().copied())
+            .filter(|(((leaf, _), _), _)| {
+                component
+                    .component_faces
+                    .binary_search(&leaf.source_face)
+                    .is_ok()
+            })
+            .collect::<Vec<_>>();
+        let local_component = component
+            .mesh
+            .leaves
+            .iter()
+            .copied()
+            .zip(component.mesh.requested_lods.iter().copied())
+            .zip(component_resident.resident.iter().copied())
+            .zip(component_vertices.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(local_component, complete_component);
+    }
+
+    #[test]
+    fn component_plan_fails_closed_before_exceeding_its_source_budget() {
+        let positions = [
+            [-0.8, -0.6, 0.0],
+            [-0.2, -0.6, 0.0],
+            [-0.5, 0.0, 0.0],
+            [-0.8, 0.6, 0.0],
+            [-0.2, 0.6, 0.0],
+        ];
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [2, 3, 4]],
+        );
+        let topology =
+            crate::screen_leaf_lod::ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let selected = [SelectedScreenPatch {
+            source_face: 0,
+            transformed_patch: &patch,
+        }];
+        let request = AdaptiveScreenMeshPlanRequest {
+            selected_patches: &selected,
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 64.0,
+            policy: ScreenPartitionPolicy::default(),
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 256,
+            max_total_leaves: 512,
+            source_requested_lods: &[[1; 3]; 2],
+        };
+        let mut output = AdaptiveScreenComponentPlan {
+            component_faces: vec![99],
+            mesh: AdaptiveScreenMeshPlan {
+                selected_faces: vec![99],
+                leaves: vec![ScreenMeshLeafTopology {
+                    source_face: 99,
+                    id: ScreenPatchLeafId::ROOT,
+                    domain: QBPatchDomain::FULL,
+                }],
+                requested_lods: vec![[1; 3]],
+                diagnostic: AdaptiveScreenMeshPlanDiagnostic::default(),
+            },
+        };
+
+        let error =
+            plan_adaptive_screen_components_into(request, &topology, 1, &mut output).unwrap_err();
+        assert_eq!(
+            error,
+            PickedScreenMeshPlanError::ComponentClosure(
+                ScreenLeafLodError::ComponentClosureBudgetExceeded {
+                    required: 2,
+                    maximum: 1,
+                },
+            ),
+        );
+        assert!(output.component_faces.is_empty());
+        assert!(output.mesh.selected_faces.is_empty());
+        assert!(output.mesh.leaves.is_empty());
+        assert!(output.mesh.requested_lods.is_empty());
     }
 
     #[test]

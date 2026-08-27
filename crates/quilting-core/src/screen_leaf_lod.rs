@@ -754,9 +754,18 @@ impl ScreenMeshTopologyCache {
         max_faces: usize,
         output: &mut Vec<u32>,
     ) -> Result<(), ScreenLeafLodError> {
+        self.collect_component_closure_from_faces(seeds.iter().copied(), max_faces, output)
+    }
+
+    pub(crate) fn collect_component_closure_from_faces(
+        &self,
+        seeds: impl IntoIterator<Item = u32>,
+        max_faces: usize,
+        output: &mut Vec<u32>,
+    ) -> Result<(), ScreenLeafLodError> {
         output.clear();
         let mut components = BTreeSet::<u32>::new();
-        for &source_face in seeds {
+        for source_face in seeds {
             let component = self
                 .face_components
                 .get(source_face as usize)
@@ -786,6 +795,11 @@ impl ScreenMeshTopologyCache {
         }
         output.sort_unstable();
         Ok(())
+    }
+
+    /// Number of stable source-face identities represented by this cache.
+    pub fn source_face_count(&self) -> usize {
+        self.face_edges.len()
     }
 
     fn face_vertices(
