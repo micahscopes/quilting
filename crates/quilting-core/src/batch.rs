@@ -486,6 +486,142 @@ pub struct AdaptiveRenderOverlay {
     face_matches_baseline_root: Vec<bool>,
 }
 
+/// Exact scene work represented by retained roots plus one sparse adaptive
+/// overlay. Counting root buckets is proportional to render-state diversity;
+/// only the explicitly suppressed faces require per-face lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveRenderWork {
+    pub baseline_triangles: u64,
+    pub suppressed_root_triangles: u64,
+    pub overlay_triangles: u64,
+    pub composed_triangles: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveRenderWorkError {
+    MissingAtlasPatch { lod: [u32; 3] },
+    BaselineCoverage { expected: usize, actual: usize },
+    SuppressedFaceOutOfBounds { source_face: u32 },
+    SuppressedFacesNotIncreasing { source_face: u32 },
+    TriangleCountOverflow,
+    SuppressedWorkExceedsBaseline,
+}
+
+impl std::fmt::Display for AdaptiveRenderWorkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingAtlasPatch { lod } => {
+                write!(formatter, "adaptive render work needs missing atlas patch {lod:?}")
+            }
+            Self::BaselineCoverage { expected, actual } => write!(
+                formatter,
+                "retained root groups cover {actual} faces; expected {expected}",
+            ),
+            Self::SuppressedFaceOutOfBounds { source_face } => write!(
+                formatter,
+                "suppressed source face {source_face} is outside the retained root field",
+            ),
+            Self::SuppressedFacesNotIncreasing { source_face } => write!(
+                formatter,
+                "suppressed source faces are not strictly increasing at {source_face}",
+            ),
+            Self::TriangleCountOverflow => {
+                write!(formatter, "adaptive render triangle count overflowed")
+            }
+            Self::SuppressedWorkExceedsBaseline => write!(
+                formatter,
+                "suppressed root work exceeds the complete retained baseline",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AdaptiveRenderWorkError {}
+
+fn grouped_triangle_count(
+    groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+) -> Result<(u64, usize), AdaptiveRenderWorkError> {
+    let mut triangles = 0u64;
+    let mut members = 0usize;
+    for (key, group) in groups {
+        let patch_triangles = atlas_triangle_counts
+            .get(&key.lod)
+            .copied()
+            .ok_or(AdaptiveRenderWorkError::MissingAtlasPatch { lod: key.lod })?;
+        let member_count = u64::try_from(group.len())
+            .map_err(|_| AdaptiveRenderWorkError::TriangleCountOverflow)?;
+        let group_triangles = patch_triangles
+            .checked_mul(member_count)
+            .ok_or(AdaptiveRenderWorkError::TriangleCountOverflow)?;
+        triangles = triangles
+            .checked_add(group_triangles)
+            .ok_or(AdaptiveRenderWorkError::TriangleCountOverflow)?;
+        members = members
+            .checked_add(group.len())
+            .ok_or(AdaptiveRenderWorkError::TriangleCountOverflow)?;
+    }
+    Ok((triangles, members))
+}
+
+/// Validate atlas residency and count the exact physical triangles drawn by a
+/// retained-root/overlay composition without scanning unaffected source faces.
+pub fn measure_adaptive_render_work(
+    baseline_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+    overlay: &AdaptiveRenderOverlay,
+    baseline_residents: &[Option<ResidentLod>],
+    initial: ResidentLod,
+    atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+) -> Result<AdaptiveRenderWork, AdaptiveRenderWorkError> {
+    let (baseline_triangles, baseline_members) =
+        grouped_triangle_count(baseline_groups, atlas_triangle_counts)?;
+    if baseline_members != baseline_residents.len() {
+        return Err(AdaptiveRenderWorkError::BaselineCoverage {
+            expected: baseline_residents.len(),
+            actual: baseline_members,
+        });
+    }
+
+    let mut suppressed_root_triangles = 0u64;
+    let mut previous_face = None;
+    for &source_face in &overlay.suppressed_faces {
+        if previous_face.is_some_and(|previous| previous >= source_face) {
+            return Err(AdaptiveRenderWorkError::SuppressedFacesNotIncreasing {
+                source_face,
+            });
+        }
+        let resident = baseline_residents
+            .get(source_face as usize)
+            .ok_or(AdaptiveRenderWorkError::SuppressedFaceOutOfBounds { source_face })?
+            .unwrap_or(initial);
+        let patch_triangles = atlas_triangle_counts
+            .get(&resident.canonical)
+            .copied()
+            .ok_or(AdaptiveRenderWorkError::MissingAtlasPatch {
+                lod: resident.canonical,
+            })?;
+        suppressed_root_triangles = suppressed_root_triangles
+            .checked_add(patch_triangles)
+            .ok_or(AdaptiveRenderWorkError::TriangleCountOverflow)?;
+        previous_face = Some(source_face);
+    }
+
+    let retained_triangles = baseline_triangles
+        .checked_sub(suppressed_root_triangles)
+        .ok_or(AdaptiveRenderWorkError::SuppressedWorkExceedsBaseline)?;
+    let (overlay_triangles, _) =
+        grouped_triangle_count(&overlay.groups, atlas_triangle_counts)?;
+    let composed_triangles = retained_triangles
+        .checked_add(overlay_triangles)
+        .ok_or(AdaptiveRenderWorkError::TriangleCountOverflow)?;
+    Ok(AdaptiveRenderWork {
+        baseline_triangles,
+        suppressed_root_triangles,
+        overlay_triangles,
+        composed_triangles,
+    })
+}
+
 /// Rebuild the C0-continuous resident LOD field used by diagnostic shading.
 ///
 /// Each compact topology vertex receives the maximum resolution of every
@@ -2314,6 +2450,98 @@ mod tests {
         assert!(overlay.suppressed_faces.binary_search(&0).is_ok());
         assert!(overlay.suppressed_faces.binary_search(&2).is_err());
         assert_eq!(compose_root_groups_with_overlay(roots, &overlay), complete);
+    }
+
+    #[test]
+    fn sparse_overlay_work_matches_the_composed_scene_without_source_scan() {
+        let baseline_residents = [
+            Some(ResidentLod::uniform(2)),
+            Some(ResidentLod::uniform(4)),
+        ];
+        let roots = group_resident_faces(
+            &baseline_residents,
+            &[[2; 3], [4; 3]],
+            &[0; 2],
+            &[0; 2],
+            &[0; 2],
+            ResidentLod::uniform(1),
+        );
+        let replacement = ResidentLod::uniform(1);
+        let replacement_key = RenderBatchKey::from_resident(replacement, 0, 0);
+        let mut overlay = AdaptiveRenderOverlay::default();
+        overlay.suppressed_faces.push(1);
+        overlay.groups.insert(
+            replacement_key,
+            [0, 1]
+                .map(|child| {
+                    let leaf_id = ScreenPatchLeafId::ROOT.child(child).unwrap();
+                    RenderBatchMember {
+                        face_index: 1,
+                        leaf_id,
+                        node_index: 0,
+                        edge_lods: [1; 3],
+                        permutation_index: 0,
+                        vertex_lods: [1; 3],
+                    }
+                })
+                .to_vec(),
+        );
+        let atlas = BTreeMap::from([([1; 3], 1), ([2; 3], 4), ([4; 3], 16)]);
+
+        let work = measure_adaptive_render_work(
+            &roots,
+            &overlay,
+            &baseline_residents,
+            ResidentLod::uniform(1),
+            &atlas,
+        )
+        .unwrap();
+
+        assert_eq!(work.baseline_triangles, 20);
+        assert_eq!(work.suppressed_root_triangles, 16);
+        assert_eq!(work.overlay_triangles, 2);
+        assert_eq!(work.composed_triangles, 6);
+    }
+
+    #[test]
+    fn sparse_overlay_work_fails_closed_on_invalid_residency_or_identity() {
+        let resident = ResidentLod::uniform(2);
+        let roots = group_resident_faces(
+            &[Some(resident)],
+            &[[2; 3]],
+            &[0],
+            &[0],
+            &[0],
+            resident,
+        );
+        let mut overlay = AdaptiveRenderOverlay::default();
+        overlay.suppressed_faces.extend([0, 0]);
+        let atlas = BTreeMap::from([([2; 3], 4)]);
+
+        assert_eq!(
+            measure_adaptive_render_work(
+                &roots,
+                &overlay,
+                &[Some(resident)],
+                resident,
+                &atlas,
+            ),
+            Err(AdaptiveRenderWorkError::SuppressedFacesNotIncreasing {
+                source_face: 0,
+            }),
+        );
+
+        overlay.suppressed_faces.truncate(1);
+        assert_eq!(
+            measure_adaptive_render_work(
+                &roots,
+                &overlay,
+                &[Some(resident)],
+                resident,
+                &BTreeMap::new(),
+            ),
+            Err(AdaptiveRenderWorkError::MissingAtlasPatch { lod: [2; 3] }),
+        );
     }
 
     #[test]

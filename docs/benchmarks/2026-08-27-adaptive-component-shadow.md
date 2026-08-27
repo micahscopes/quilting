@@ -109,11 +109,42 @@ measured shadow total was 28.6 ms. This removes another source-sized rebuild
 from an otherwise component-local adaptive refresh while keeping the complete
 baseline available for exact rollback.
 
+## Exact sparse triangle budget and atlas residency
+
+The backend-neutral sparse-work oracle now derives physical scene work as:
+
+```text
+retained baseline - suppressed component roots + component overlay
+```
+
+It visits baseline render buckets, suppressed component identities, and
+overlay buckets; it does not scan unaffected source faces. Missing atlas
+patches, incomplete root coverage, unordered or invalid suppression identity,
+and arithmetic overflow all fail closed before a result is accepted.
+
+The pathological chess view produced:
+
+| Sparse work term | Triangles |
+| --- | ---: |
+| Complete retained baseline | 204,456 |
+| Suppressed component roots | -11,732 |
+| Component overlay | +31,386 |
+| Sparse composed scene | 224,110 |
+| Complete adaptive planner | 224,110 |
+
+The component overlay suppressed 55 roots and emitted 181 members in 28
+render buckets. Every referenced atlas topology was resident. Sparse and
+complete totals matched exactly on both the cold and repeated request, while
+component-plan, selected-face, leaf, request, resident-edge, corner-density,
+suppression, group, and ordered-member parity also remained exact. Chrome
+reported no console messages and the temporary test tab was closed.
+
 ## Automated gates
 
-- 214 `quilting-core` unit tests and 15 integration tests pass.
+- 216 `quilting-core` unit tests and 15 integration tests pass.
 - 16 generated Node/WASM tests pass, including a disconnected-source component
-  shadow with exact complete-publication parity.
+  shadow with a real dyadic replacement, changed welded-neighbour C0 metadata,
+  exact sparse triangle budget, and complete-publication parity.
 - The generated-export/inert-before-renderer Node smoke passes.
 
 ## Decision

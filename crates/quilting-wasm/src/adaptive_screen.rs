@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use quilting_core::batch::{
     group_resident_faces_into, group_resident_screen_leaves_into,
     group_resident_screen_component_overlay_into, group_resident_screen_overlay_into,
-    AdaptiveRenderOverlay, RenderBatchKey, RenderBatchMember, ResidentLod,
+    measure_adaptive_render_work, AdaptiveRenderOverlay, RenderBatchKey, RenderBatchMember,
+    ResidentLod,
 };
 use quilting_core::patch::{QBPatchDomain, QBTriPatch};
 use quilting_core::permutation::canonical_form;
@@ -497,6 +498,13 @@ struct AdaptiveComponentShadowComparison {
     overlay_compared: bool,
     suppressed_faces_match: bool,
     overlay_groups_match: bool,
+    atlas_residency_valid: bool,
+    baseline_triangles: u64,
+    suppressed_root_triangles: u64,
+    overlay_triangles: u64,
+    composed_triangles: u64,
+    complete_triangles: u64,
+    triangle_budget_match: bool,
     exact: bool,
     plan_ms: f64,
     frontier_ms: f64,
@@ -720,6 +728,13 @@ impl AdaptiveComponentShadow {
             overlay_compared: false,
             suppressed_faces_match: false,
             overlay_groups_match: false,
+            atlas_residency_valid: false,
+            baseline_triangles: 0,
+            suppressed_root_triangles: 0,
+            overlay_triangles: 0,
+            composed_triangles: 0,
+            complete_triangles: 0,
+            triangle_budget_match: false,
             exact: false,
             plan_ms,
             frontier_ms,
@@ -738,12 +753,15 @@ impl AdaptiveComponentShadow {
     fn compare_overlay(
         &mut self,
         complete_overlay: &AdaptiveRenderOverlay,
+        baseline_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
         baseline_residents: &[Option<ResidentLod>],
         baseline_vertex_lods: &[[u32; 3]],
         face_materials: &[usize],
         face_nodes: &[usize],
         face_render_nodes: &[usize],
         initial: ResidentLod,
+        atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
+        complete_triangles: u64,
     ) {
         if !self.enabled {
             return;
@@ -788,9 +806,32 @@ impl AdaptiveComponentShadow {
         comparison.suppressed_faces_match =
             self.overlay.suppressed_faces == complete_overlay.suppressed_faces;
         comparison.overlay_groups_match = self.overlay.groups == complete_overlay.groups;
+        let work = match measure_adaptive_render_work(
+            baseline_groups,
+            &self.overlay,
+            baseline_residents,
+            initial,
+            atlas_triangle_counts,
+        ) {
+            Ok(work) => work,
+            Err(error) => {
+                self.mismatches = self.mismatches.saturating_add(1);
+                self.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        comparison.atlas_residency_valid = true;
+        comparison.baseline_triangles = work.baseline_triangles;
+        comparison.suppressed_root_triangles = work.suppressed_root_triangles;
+        comparison.overlay_triangles = work.overlay_triangles;
+        comparison.composed_triangles = work.composed_triangles;
+        comparison.complete_triangles = complete_triangles;
+        comparison.triangle_budget_match = work.composed_triangles == complete_triangles;
         comparison.exact = comparison.plan_exact
             && comparison.suppressed_faces_match
-            && comparison.overlay_groups_match;
+            && comparison.overlay_groups_match
+            && comparison.atlas_residency_valid
+            && comparison.triangle_budget_match;
         if comparison.exact {
             self.matches = self.matches.saturating_add(1);
         } else {
@@ -1023,12 +1064,14 @@ impl AdaptivePickedRuntime {
     pub(crate) fn stage_pending_overlay(
         &mut self,
         batch_layout_revision: u64,
+        baseline_groups: &BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
         baseline_residents: &[Option<ResidentLod>],
         baseline_vertex_lods: &[[u32; 3]],
         face_materials: &[usize],
         face_nodes: &[usize],
         face_render_nodes: &[usize],
         initial: ResidentLod,
+        atlas_triangle_counts: &BTreeMap<[u32; 3], u64>,
     ) -> Result<bool, String> {
         if !self.retained_shadow_enabled {
             self.pending_overlay_signature = None;
@@ -1052,12 +1095,15 @@ impl AdaptivePickedRuntime {
             self.last_retained_shadow_stage_ms = 0.0;
             self.component_shadow.compare_overlay(
                 &self.published_overlay,
+                baseline_groups,
                 baseline_residents,
                 baseline_vertex_lods,
                 face_materials,
                 face_nodes,
                 face_render_nodes,
                 initial,
+                atlas_triangle_counts,
+                self.pending_triangles,
             );
             return Ok(true);
         }
@@ -1091,12 +1137,15 @@ impl AdaptivePickedRuntime {
         self.last_retained_shadow_stage_ms = browser_now_ms() - stage_start;
         self.component_shadow.compare_overlay(
             &self.pending_overlay,
+            baseline_groups,
             baseline_residents,
             baseline_vertex_lods,
             face_materials,
             face_nodes,
             face_render_nodes,
             initial,
+            atlas_triangle_counts,
+            self.pending_triangles,
         );
         Ok(false)
     }
@@ -2341,12 +2390,14 @@ mod tests {
             runtime
                 .stage_pending_overlay(
                     0,
+                    &complete_groups,
                     &[Some(resident)],
                     &[[1; 3]],
                     &[0],
                     &[0],
                     &[0],
                     resident,
+                    &atlas_triangles,
                 )
                 .unwrap();
         };
@@ -2677,19 +2728,28 @@ mod tests {
         }];
         let resident = ResidentLod::uniform(1);
         let atlas_triangles = BTreeMap::from([([1; 3], 1)]);
+        let baseline_groups = quilting_core::batch::group_resident_faces(
+            &[Some(resident); 3],
+            &[[1; 3]; 3],
+            &[0; 3],
+            &[0; 3],
+            &[0; 3],
+            resident,
+        );
         let mut groups = BTreeMap::new();
         let mut runtime = AdaptivePickedRuntime::default();
         runtime.configure(AdaptivePickedConfig {
             selection: AdaptiveScreenSelection::Picked { face: 0 },
             min_px_per_segment: 1.0,
-            max_px_per_segment: 10_000.0,
+            max_px_per_segment: 10.0,
             policy: ScreenPartitionPolicy {
-                max_depth: 0,
-                max_leaves: 1,
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
                 ..ScreenPartitionPolicy::default()
             },
-            max_total_leaves: 3,
-            max_triangles: 3,
+            max_total_leaves: 6,
+            max_triangles: 6,
         });
         runtime.set_component_shadow_enabled(true).unwrap();
         assert_eq!(
@@ -2701,7 +2761,7 @@ mod tests {
             .plan_selected_and_group(
                 &selected,
                 None,
-                1,
+                4,
                 &IDENTITY,
                 [640.0, 480.0],
                 Some((3, 1)),
@@ -2723,12 +2783,14 @@ mod tests {
         runtime
             .stage_pending_overlay(
                 0,
+                &baseline_groups,
                 &[Some(resident); 3],
                 &[[1; 3]; 3],
                 &[0; 3],
                 &[0; 3],
                 &[0; 3],
                 resident,
+                &atlas_triangles,
             )
             .unwrap();
 
@@ -2744,10 +2806,20 @@ mod tests {
         assert_eq!(comparison.source_faces, 3);
         assert_eq!(comparison.component_faces, 2);
         assert_eq!(comparison.unaffected_faces, 1);
-        assert_eq!(comparison.complete_leaves, 3);
-        assert_eq!(comparison.component_leaves, 2);
+        assert_eq!(comparison.complete_leaves, 6);
+        assert_eq!(comparison.component_leaves, 5);
         assert!(comparison.plan_exact);
         assert!(comparison.overlay_compared);
+        assert!(comparison.atlas_residency_valid);
+        assert_eq!(comparison.baseline_triangles, 3);
+        // The selected face becomes four dyadic leaves. Its welded neighbour
+        // remains a root, but its C0 corner-density record changes and is
+        // therefore replaced in the overlay as well.
+        assert_eq!(comparison.suppressed_root_triangles, 2);
+        assert_eq!(comparison.overlay_triangles, 5);
+        assert_eq!(comparison.composed_triangles, 6);
+        assert_eq!(comparison.complete_triangles, 6);
+        assert!(comparison.triangle_budget_match);
         assert!(comparison.exact);
 
         runtime.commit_publication();
@@ -2755,7 +2827,7 @@ mod tests {
             .plan_selected_and_group(
                 &selected,
                 None,
-                1,
+                4,
                 &IDENTITY,
                 [640.0, 480.0],
                 Some((4, 1)),
@@ -2778,12 +2850,14 @@ mod tests {
         runtime
             .stage_pending_overlay(
                 0,
+                &baseline_groups,
                 &[Some(resident); 3],
                 &[[1; 3]; 3],
                 &[0; 3],
                 &[0; 3],
                 &[0; 3],
                 resident,
+                &atlas_triangles,
             )
             .unwrap();
         let repeated = runtime.snapshot();

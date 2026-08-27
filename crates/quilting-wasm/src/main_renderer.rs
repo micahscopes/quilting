@@ -3777,6 +3777,7 @@ fn apply_adaptive_screen_plan(
         face_nodes,
         face_render_nodes,
         batch_groups,
+        baseline_batch_groups,
         ..
     } = state;
     let Some(topology) = screen_topology_cache.as_ref() else {
@@ -3811,12 +3812,14 @@ fn apply_adaptive_screen_plan(
     };
     if let Err(error) = adaptive_picked.stage_pending_overlay(
         batch_layout_revision,
+        baseline_batch_groups,
         resident_face_lods,
         resident_vertex_lods,
         face_materials,
         face_nodes,
         face_render_nodes,
         initial,
+        &atlas_triangle_counts,
     ) {
         adaptive_picked.reject_staged_overlay(groups_reused, batch_groups, error);
         return false;
