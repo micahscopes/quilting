@@ -306,6 +306,13 @@ struct MainState {
     /// a reconciled dyadic frontier. Every failed candidate leaves the legacy
     /// root grouping live.
     adaptive_picked: AdaptivePickedRuntime,
+    /// Explicit opt-in cutover gate. Shadow staging remains independently
+    /// useful when this is false; when true, only order-safe scenes may publish
+    /// retained root and overlay GPU layers.
+    adaptive_retained_publication_enabled: bool,
+    adaptive_retained_publication_error: Option<String>,
+    /// Exact mask corresponding to the currently live GPU batch epoch.
+    active_suppressed_root_faces: Vec<u32>,
     /// Keep the next adaptive enable/disable handoff rollback-safe even when
     /// the configured mode is being cleared before legacy groups are rebuilt.
     adaptive_batch_transition_pending: bool,
@@ -1632,6 +1639,9 @@ pub fn mr_init(canvas_id: &str) -> bool {
             screen_topology_cache: None,
             adaptive_root_shadow: AdaptiveRootShadow::default(),
             adaptive_picked: AdaptivePickedRuntime::default(),
+            adaptive_retained_publication_enabled: false,
+            adaptive_retained_publication_error: None,
+            active_suppressed_root_faces: Vec::new(),
             adaptive_batch_transition_pending: false,
             surface_runtime: SurfaceRuntime::default(),
             batch_layout_dirty: true,
@@ -2093,7 +2103,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
     }
     Ok(RenderSceneSnapshot {
         revision: 0,
-        suppressed_root_faces: Vec::new(),
+        suppressed_root_faces: renderer.active_suppressed_root_faces.clone(),
         batches,
     })
 }
@@ -3921,6 +3931,36 @@ pub fn mr_set_adaptive_retained_shadow_enabled(enabled: bool) -> JsValue {
     })
 }
 
+/// Opt into transactional retained-layer GPU publication. The persistent
+/// overlay shadow is forced on first; scenes containing order-sensitive PBR
+/// buckets remain on the complete path and report a diagnostic instead.
+#[wasm_bindgen(js_name = "mr_setAdaptiveRetainedPublicationEnabled")]
+pub fn mr_set_adaptive_retained_publication_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        if state.adaptive_picked.has_pending_publication() {
+            return adaptive_screen_diagnostic_error("adaptive publication is already staged");
+        }
+        if enabled {
+            if let Err(error) = state.adaptive_picked.set_retained_shadow_enabled(true) {
+                return adaptive_screen_diagnostic_error(error);
+            }
+        }
+        let changed = state.adaptive_retained_publication_enabled != enabled;
+        state.adaptive_retained_publication_enabled = enabled;
+        if changed {
+            state.adaptive_retained_publication_error = None;
+            if state.adaptive_picked.is_enabled() {
+                state.adaptive_batch_transition_pending = true;
+            }
+        }
+        adaptive_picked_snapshot_js(state, None)
+    })
+}
+
 /// Configure the first live metric-adaptive path for one stable source face.
 ///
 /// The browser must request a normal LOD recomputation after configuration.
@@ -4242,6 +4282,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             // Picked face IDs and their captured animation pose are local to
             // one immutable asset epoch.
             st.adaptive_picked.clear();
+            st.adaptive_retained_publication_error = None;
+            st.active_suppressed_root_faces.clear();
             st.adaptive_batch_transition_pending = false;
             st.screen_topology_cache = None;
             if st.adaptive_root_shadow.is_enabled() {
@@ -4548,6 +4590,12 @@ fn adaptive_picked_snapshot_js(state: &MainState, refresh_published: Option<bool
     adaptive_browser_value(&AdaptivePickedRefreshSnapshot {
         snapshot: state.adaptive_picked.snapshot(),
         transition_pending: state.adaptive_batch_transition_pending,
+        retained_publication_enabled: state.adaptive_retained_publication_enabled,
+        retained_publication_active: state
+            .batches
+            .keys()
+            .any(|id| id.layer != batch::RenderBatchLayer::Complete),
+        retained_publication_error: state.adaptive_retained_publication_error.as_deref(),
         refresh_published,
     })
 }
@@ -6381,6 +6429,180 @@ fn upload_batch_groups_transactionally(
     if stats.created != 0 || stats.retired != 0 {
         state.render_commands_dirty = true;
     }
+    if !state.active_suppressed_root_faces.is_empty() {
+        match state.renderer.set_suppressed_source_faces(state.num_faces, &[]) {
+            Ok(changed) => {
+                if changed != 0 {
+                    state.last_visibility_mvp = None;
+                }
+            }
+            Err(error) => {
+                warn!("Could not clear inactive retained-root suppression mask: {error}");
+            }
+        }
+        // Complete batches never consult the mask, so even a diagnostic mask
+        // cleanup failure cannot alter this successfully published epoch.
+        state.active_suppressed_root_faces.clear();
+    }
+    Ok(stats)
+}
+
+/// Transactionally publish the stable complete root grouping plus the sparse
+/// adaptive replacement overlay. Existing layered resources are retained by
+/// exact `(key, layer, membership)` identity; the suppression mask changes only
+/// after every replacement bucket has staged successfully.
+fn upload_retained_batch_groups_transactionally(
+    state: &mut MainState,
+    force_upload: bool,
+) -> Result<TransactionalBatchUploadStats, TransactionalBatchUploadFailure> {
+    let MainState {
+        renderer,
+        batches,
+        baseline_batch_groups,
+        batch_staging,
+        adaptive_picked,
+        batch_layout_revision,
+        num_faces,
+        render_commands_dirty,
+        last_visibility_mvp,
+        active_suppressed_root_faces,
+        ..
+    } = state;
+    let overlay = adaptive_picked
+        .pending_overlay_for_publication(*batch_layout_revision)
+        .map_err(|message| TransactionalBatchUploadFailure {
+            message,
+            missing_atlas_entries: 0,
+            failures: 1,
+        })?;
+    let max_batch_size = baseline_batch_groups
+        .values()
+        .chain(overlay.groups.values())
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0);
+    let stride = instance_layout::BATCH_TOPOLOGY_STRIDE;
+    batch_staging.resize(max_batch_size * stride, 0.0);
+
+    let mut previous_batches = std::mem::take(batches);
+    let mut reused_batches = BTreeMap::<batch::RenderBatchId, GpuBatch>::new();
+    let mut staged_batches = BTreeMap::<batch::RenderBatchId, GpuBatch>::new();
+    let mut stats = TransactionalBatchUploadStats::default();
+    let attempt = {
+        let gl = renderer.gl();
+        TESS_CACHE.with(|cache| -> Result<(), TransactionalBatchUploadFailure> {
+            let cache = cache.borrow();
+            for (layer, groups) in [
+                (
+                    batch::RenderBatchLayer::RetainedRoot,
+                    &*baseline_batch_groups,
+                ),
+                (batch::RenderBatchLayer::AdaptiveOverlay, &overlay.groups),
+            ] {
+                for (&key, members) in groups {
+                    let id = batch::RenderBatchId { key, layer };
+                    let tess = cache.get(&key.lod).ok_or_else(|| {
+                        TransactionalBatchUploadFailure {
+                            message: format!(
+                                "retained adaptive batch needs missing atlas patch {:?}",
+                                key.lod,
+                            ),
+                            missing_atlas_entries: 1,
+                            failures: 0,
+                        }
+                    })?;
+                    let membership_changed = previous_batches
+                        .get(&id)
+                        .is_none_or(|batch| batch.members != *members);
+                    if !force_upload && !membership_changed {
+                        stats.retained += 1;
+                        let previous = previous_batches.remove(&id).ok_or_else(|| {
+                            TransactionalBatchUploadFailure {
+                                message: format!(
+                                    "retained adaptive batch {id:?} disappeared",
+                                ),
+                                missing_atlas_entries: 0,
+                                failures: 1,
+                            }
+                        })?;
+                        reused_batches.insert(id, previous);
+                        continue;
+                    }
+                    let batch_floats = fill_batch_instance_data(
+                        key,
+                        members,
+                        batch_staging,
+                    )
+                    .map_err(|error| TransactionalBatchUploadFailure {
+                        message: format!("could not pack retained adaptive batch {id:?}: {error}"),
+                        missing_atlas_entries: 0,
+                        failures: 1,
+                    })?;
+                    let staged = create_gpu_batch(
+                        gl,
+                        tess,
+                        key,
+                        members,
+                        &batch_staging[..batch_floats],
+                    )
+                    .map_err(|error| TransactionalBatchUploadFailure {
+                        message: format!("could not stage retained adaptive batch {id:?}: {error}"),
+                        missing_atlas_entries: 0,
+                        failures: 1,
+                    })?;
+                    stats.reallocated += usize::from(previous_batches.contains_key(&id));
+                    stats.created += 1;
+                    stats.uploaded_instances += members.len();
+                    staged_batches.insert(id, staged);
+                }
+            }
+            Ok(())
+        })
+    };
+
+    if let Err(failure) = attempt {
+        let gl = renderer.gl();
+        for (_, batch) in staged_batches {
+            batch.destroy(gl);
+        }
+        previous_batches.append(&mut reused_batches);
+        *batches = previous_batches;
+        return Err(failure);
+    }
+    let changed_mask_bytes = match renderer
+        .set_suppressed_source_faces(*num_faces, &overlay.suppressed_faces)
+    {
+        Ok(changed) => changed,
+        Err(message) => {
+            let gl = renderer.gl();
+            for (_, batch) in staged_batches {
+                batch.destroy(gl);
+            }
+            previous_batches.append(&mut reused_batches);
+            *batches = previous_batches;
+            return Err(TransactionalBatchUploadFailure {
+                message: format!("could not stage retained-root suppression: {message}"),
+                missing_atlas_entries: 0,
+                failures: 1,
+            });
+        }
+    };
+
+    reused_batches.append(&mut staged_batches);
+    stats.retired = previous_batches.len();
+    let gl = renderer.gl();
+    for (_, batch) in previous_batches {
+        batch.destroy(gl);
+    }
+    *batches = reused_batches;
+    active_suppressed_root_faces.clear();
+    active_suppressed_root_faces.extend_from_slice(&overlay.suppressed_faces);
+    if stats.created != 0 || stats.retired != 0 {
+        *render_commands_dirty = true;
+    }
+    if changed_mask_bytes != 0 {
+        *last_visibility_mvp = None;
+    }
     Ok(stats)
 }
 
@@ -6451,17 +6673,65 @@ struct AdaptiveBatchPublication {
     resources_changed: bool,
 }
 
+fn retained_gpu_publication_active(state: &MainState) -> bool {
+    state
+        .batches
+        .keys()
+        .any(|id| id.layer != batch::RenderBatchLayer::Complete)
+}
+
+fn retained_frontier_order_safe(state: &MainState) -> bool {
+    let default_material = PbrParams::default();
+    state.batch_groups.keys().all(|key| {
+        let (_, material) = pbr_material_for_index(
+            &state.materials,
+            &default_material,
+            key.material_index,
+        );
+        pbr_draw_class(material) == PbrDrawClass::Opaque
+    })
+}
+
+fn retained_publication_desired(state: &MainState) -> bool {
+    state.adaptive_retained_publication_enabled
+        && state.adaptive_picked.has_pending_plan()
+        && retained_frontier_order_safe(state)
+}
+
 fn publish_adaptive_batch_groups(
     state: &mut MainState,
     force_upload: bool,
-    previous_batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    previous_batch_groups: Option<
+        BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    >,
 ) -> AdaptiveBatchPublication {
-    match upload_batch_groups_transactionally(state, force_upload) {
+    let retained_requested = state.adaptive_retained_publication_enabled
+        && state.adaptive_picked.has_pending_plan();
+    let retained_order_safe = !retained_requested || retained_frontier_order_safe(state);
+    let retained_publication = retained_requested && retained_order_safe;
+    if retained_requested && !retained_order_safe {
+        state.adaptive_retained_publication_error = Some(
+            "retained publication requires every active PBR bucket to be opaque".into(),
+        );
+    }
+    let upload = if retained_publication {
+        upload_retained_batch_groups_transactionally(state, force_upload)
+    } else {
+        upload_batch_groups_transactionally(state, force_upload)
+    };
+    match upload {
         Ok(stats) => {
+            if retained_publication {
+                state.adaptive_retained_publication_error = None;
+            } else if !retained_requested {
+                state.adaptive_retained_publication_error = None;
+            }
             state.adaptive_picked.commit_publication();
-            state
-                .adaptive_picked
-                .recycle_group_scratch(previous_batch_groups);
+            if let Some(previous_batch_groups) = previous_batch_groups {
+                state
+                    .adaptive_picked
+                    .recycle_group_scratch(previous_batch_groups);
+            }
             state.batch_update_stats.retained_buckets += stats.retained as u64;
             state.batch_update_stats.created_buckets += stats.created as u64;
             state.batch_update_stats.reallocated_buckets += stats.reallocated as u64;
@@ -6472,8 +6742,10 @@ fn publish_adaptive_batch_groups(
             state.adaptive_batch_transition_pending = false;
             state.batch_layout_dirty = false;
             debug!(
-                "Transactionally published {} adaptive GPU batches ({} retained, {} staged, {} replacements, {} retired)",
-                state.batches.len(), stats.retained, stats.created,
+                "Transactionally published {} adaptive GPU batches in {} mode ({} retained, {} staged, {} replacements, {} retired)",
+                state.batches.len(),
+                if retained_publication { "layered" } else { "complete" },
+                stats.retained, stats.created,
                 stats.reallocated, stats.retired,
             );
             AdaptiveBatchPublication {
@@ -6482,6 +6754,9 @@ fn publish_adaptive_batch_groups(
             }
         }
         Err(failure) => {
+            if retained_publication {
+                state.adaptive_retained_publication_error = Some(failure.message.clone());
+            }
             warn!(
                 "Adaptive GPU batch publication rolled back: {}",
                 failure.message,
@@ -6497,8 +6772,10 @@ fn publish_adaptive_batch_groups(
             // The GL transaction restored the previous GPU epoch. Restore its
             // exact CPU membership map as well; a desired candidate is not
             // authoritative until every corresponding resource has published.
-            state.batch_groups = previous_batch_groups;
-            mark_batch_layout_dirty(state);
+            if let Some(previous_batch_groups) = previous_batch_groups {
+                state.batch_groups = previous_batch_groups;
+                mark_batch_layout_dirty(state);
+            }
             AdaptiveBatchPublication {
                 published: false,
                 resources_changed: false,
@@ -6558,8 +6835,28 @@ fn prepare_adaptive_batch_groups(
 
     if enabled {
         if apply_adaptive_screen_plan(state, initial, true, None) {
+            let retained_desired = retained_publication_desired(state);
+            if state.adaptive_retained_publication_enabled {
+                state.adaptive_retained_publication_error = if retained_desired {
+                    None
+                } else {
+                    Some(
+                        "retained publication requires every active PBR bucket to be opaque"
+                            .into(),
+                    )
+                };
+            }
+            if retained_gpu_publication_active(state) == retained_desired {
+                return AdaptiveGroupPreparation {
+                    reused_published: true,
+                    previous_groups: None,
+                };
+            }
+            // Complete membership is unchanged, but the physical publication
+            // mode is not. Upload the alternate resource layer without a CPU
+            // grouping rollback map; failure leaves this live map untouched.
             return AdaptiveGroupPreparation {
-                reused_published: true,
+                reused_published: false,
                 previous_groups: None,
             };
         }
@@ -6634,9 +6931,7 @@ fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
     let publication = publish_adaptive_batch_groups(
         state,
         false,
-        prepared
-            .previous_groups
-            .expect("non-reused adaptive preparation retains rollback groups"),
+        prepared.previous_groups,
     );
     if publication.published && !publication.resources_changed {
         state.batch_update_stats.adaptive_refresh_noops = state
@@ -6937,8 +7232,7 @@ fn update_batches_in_state(
         }
         if transactional_upload {
             let previous_batch_groups = adaptive_preparation
-                .and_then(|prepared| prepared.previous_groups)
-                .expect("non-reused adaptive preparation retains rollback groups");
+                .and_then(|prepared| prepared.previous_groups);
             let _ = publish_adaptive_batch_groups(
                 state,
                 force_upload,

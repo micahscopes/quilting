@@ -2,11 +2,12 @@
 
 Date: 2026-08-27
 
-This checkpoint measures the exact sparse replacement layer introduced by
-`AdaptiveRenderOverlay`. It does not change rendering. The live renderer still
-publishes the complete adaptive frontier; the new `measureOverlay()` diagnostic
-extracts the equivalent baseline-minus-suppression plus overlay composition on
-demand.
+This checkpoint first measured the exact sparse replacement layer introduced by
+`AdaptiveRenderOverlay`, then connected the same representation to an explicit
+opt-in WebGL2 publication gate. The default remains the complete adaptive
+frontier while the retained path is benchmarked. When enabled for an
+order-insensitive scene, the live renderer publishes baseline roots with an
+exact suppression mask plus independently retained overlay batches.
 
 The measurement is fail-closed. Rust reports only a fully published adaptive
 epoch whose reconciliation generation and batch-layout revision match the live
@@ -112,6 +113,74 @@ zero semantic group or member mismatches. Baseline-then-overlay order differed
 in one material-0 group, retaining the opaque-only cutover restriction. The
 parity comparison took 4.1 ms, and Chrome reported no warning or error.
 
+## Opt-in live GPU publication
+
+`mr_setAdaptiveRetainedPublicationEnabled(true)` now performs a transactional
+physical cutover. It forces persistent shadow staging on, refuses an already
+staged adaptive transaction, and publishes the new root and overlay resources
+before changing the active suppression mask. Upload or mask failure restores
+the former GPU resources and CPU membership. Disabling the gate transactionally
+returns to complete batches and clears the inactive mask.
+
+The cutover is deliberately restricted to scenes whose active PBR buckets are
+all opaque. A blended or transmissive bucket retains complete ordered
+publication and exposes the reason in the adaptive diagnostic. This is a
+material-semantics gate, not a render-mode shortcut: wire and diagnostic passes
+still inherit the safety classification of the underlying PBR material.
+
+### Static reflected horse
+
+The complete path submitted 1,038 instances in eight draws. The retained path
+submitted 984 physical roots plus 129 overlay members in nine draws; the
+visibility pass suppressed 75 roots, leaving the same 1,038 logical members.
+The retained composition reused 909 memberships, or 87.57% of the complete
+publication membership. Render-shadow observation remained exact before,
+during, and after cutover, with no browser warning or error.
+
+Complete, retained, and returned-complete viewport captures had the same
+SHA-256 digest:
+
+```text
+cc8fa578253a5e0cc154978385a16819d862989caecfa5434b16305fb103b27b
+```
+
+### Pathological inverted chess view
+
+The cold current-view plan took 825.2 ms in the final validation browser:
+50.0 ms mesh planning, 636.0 ms frontier construction, 96.0 ms reconciliation,
+6.5 ms atlas accounting, and 33.9 ms complete grouping. This reinforces that
+bounded frontier construction is the next performance target; atlas accounting
+is not the bottleneck in this sample.
+
+Enabling retained publication reused the existing frontier and reconciliation
+caches. The resulting refresh took 36.1 ms, including 24.3 ms mesh planning,
+2.1 ms frontier lookup, 2.9 ms reconciliation lookup, 5.0 ms atlas accounting,
+zero complete-grouping time, and 21.1 ms to stage the retained overlay during
+that transaction.
+
+The complete path contained 94,880 logical and physical members in 52 draws.
+The retained path submitted 94,628 physical roots plus 325 overlay members in
+72 draws; suppressing 73 roots left the same 94,880 logical members. The exact
+parity oracle reported:
+
+- 94,555 retained memberships, avoiding 99.657% of complete-frontier
+  publication membership;
+- zero semantic group mismatches and zero semantic member mismatches;
+- 16 baseline-then-overlay ordering differences, all in opaque material 0;
+- 633 of 633 observed frames matching the active extraction contract after the
+  reverse cutover, with zero extraction or observation errors.
+
+Complete, retained, and returned-complete viewport captures had the same
+SHA-256 digest:
+
+```text
+4469402745bb9a394fb6a972cf7990f7ce5fe1536e82d03efc647f990329a0d8
+```
+
+The complete submission returned to its original 52 draws, 94,880 instances,
+636,474 lines, and ordered fingerprint `9296deab9943fcc5`. Chrome reported no
+warning or error throughout the forward and reverse transition.
+
 ## Decision
 
 Use two retained renderer layers for order-insensitive passes:
@@ -121,8 +190,8 @@ Use two retained renderer layers for order-insensitive passes:
 
 Keep `RenderBatchKey` backend-neutral. WebGL2 and WebGPU may represent the two
 layers differently, but extraction must expose the same composition and draw
-ordering contract. Opaque PBR, matcap, wire, normals, LOD, and stretch can use
-the retained composition after image parity. Alpha-blended and transmissive
+ordering contract. Opaque PBR, matcap, wire, normals, LOD, and stretch now have
+an opt-in retained path with exact image parity. Alpha-blended and transmissive
 buckets remain on the complete ordered path until an order-preserving
 compaction strategy or OIT makes their equivalence explicit. Cut over behind
 shadow parity, then replace the diagnostic's complete scan with a bounded local
@@ -143,10 +212,11 @@ mask only when a batch is marked as a retained baseline-root batch. Adaptive
 overlay batches leave that flag disabled, including replacement leaves whose
 dyadic identity is the source root.
 
-Existing batches all keep suppression disabled, so this checkpoint changes no
-draw output. The generated visibility shader, binding plan, one-float output
-ABI, native renderer tests, WASM32 build, and live WebGL2 initialization were
-verified before the resource is connected to retained publication.
+Complete batches keep suppression disabled. Retained-root batches enable it;
+overlay batches do not, including replacements whose dyadic identity is the
+source root. The generated visibility shader, binding plan, one-float output
+ABI, native renderer tests, WASM32 build, and live WebGL2 cutover were verified
+together.
 
 The backend-neutral extraction contract now names the physical publication
 role of every batch as `Complete`, `RetainedRoot`, or `AdaptiveOverlay` and

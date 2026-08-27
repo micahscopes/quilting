@@ -502,6 +502,10 @@ pub(crate) struct AdaptivePickedRefreshSnapshot<'a> {
     #[serde(flatten)]
     pub snapshot: AdaptivePickedSnapshot<'a>,
     pub transition_pending: bool,
+    pub retained_publication_enabled: bool,
+    pub retained_publication_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_publication_error: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_published: Option<bool>,
 }
@@ -738,6 +742,28 @@ impl AdaptivePickedRuntime {
         self.fallbacks = self.fallbacks.saturating_add(1);
         self.clear_pending_publication();
         self.pending_fallback_error = Some(error.into());
+    }
+
+    pub(crate) fn pending_overlay_for_publication(
+        &self,
+        batch_layout_revision: u64,
+    ) -> Result<&AdaptiveRenderOverlay, String> {
+        let signature = self
+            .pending_overlay_signature
+            .ok_or_else(|| "retained adaptive overlay is not staged".to_string())?;
+        if signature.batch_layout_revision != batch_layout_revision
+            || self.pending_group_signature != Some(signature)
+        {
+            return Err("retained adaptive overlay does not match the staged batch epoch".into());
+        }
+        if self.pending_overlay_reuses_published {
+            if self.published_overlay_signature != Some(signature) {
+                return Err("retained adaptive overlay cache identity is stale".into());
+            }
+            Ok(&self.published_overlay)
+        } else {
+            Ok(&self.pending_overlay)
+        }
     }
 
     pub(crate) fn record_fallback(&mut self, error: impl Into<String>) {
@@ -1932,11 +1958,13 @@ mod tests {
 
         plan(&mut runtime, (7, 2), 4);
         assert_eq!(runtime.snapshot().state, "staged");
+        assert!(runtime.pending_overlay_for_publication(0).is_ok());
         assert_eq!(runtime.snapshot().frontier_cache_hits, 0);
         assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
         assert_eq!(runtime.snapshot().reconciliation_cache_hits, 0);
         assert_eq!(runtime.snapshot().reconciliation_cache_misses, 1);
         runtime.commit_publication();
+        assert!(runtime.pending_overlay_for_publication(0).is_err());
         assert_eq!(runtime.snapshot().pose_revision, Some(7));
         assert_eq!(runtime.snapshot().published_faces, [0]);
         assert_eq!(runtime.snapshot().last_plan.unwrap().selected_faces, 1);

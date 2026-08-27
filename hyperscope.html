@@ -408,6 +408,7 @@ import init, {
   mr_setAdaptiveRootShadowEnabled, mr_adaptiveRootShadowDiagnostics,
   mr_setAdaptivePickedFace, mr_setAdaptiveCurrentView,
   mr_setAdaptiveRetainedShadowEnabled,
+  mr_setAdaptiveRetainedPublicationEnabled,
   mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
   mr_adaptivePickedDiagnostics, mr_measureAdaptiveOverlay,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
@@ -1050,6 +1051,16 @@ const adaptivePickedDiagnostics = {
     }
     this.snapshot = mr_setAdaptiveRetainedShadowEnabled(Boolean(enabled));
     if (enabled && this.snapshot?.enabled && this.snapshot?.transitionPending) {
+      this.snapshot = mr_refreshAdaptivePicked();
+    }
+    return this.snapshot;
+  },
+  setRetainedPublication(enabled = true) {
+    if (lodInFlight) {
+      return { ok: false, error: 'Wait for the current LOD classification before changing retained publication' };
+    }
+    this.snapshot = mr_setAdaptiveRetainedPublicationEnabled(Boolean(enabled));
+    if (this.snapshot?.enabled && this.snapshot?.transitionPending) {
       this.snapshot = mr_refreshAdaptivePicked();
     }
     return this.snapshot;
