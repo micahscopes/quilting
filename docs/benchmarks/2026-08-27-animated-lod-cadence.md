@@ -347,6 +347,55 @@ keeps the resident tessellation atlas unchanged: WebGPU work surrounds the
 atlas with GPU-side classification, reconciliation, culling, compaction, and
 submission rather than regenerating microgeometry every frame.
 
+## Bounded distributions and rejected root fusion
+
+Runtime cadence and publication timing now use bounded 2,048-sample Rust
+windows. Recording is constant-time; p50/p90/p95/p99 are computed only when a
+diagnostic snapshot is requested. The browser no longer sorts per-frame timing
+arrays. Separate distributions cover frame interval, render CPU time, LOD
+dispatch, fence-poll latency, readback, retained publication, reconciliation,
+vertex-density reconstruction, render-node resolution, root-member grouping,
+and upload.
+
+A settled animated-horse window reported a 16.70 ms frame median, 17.20 ms p95,
+and 18.20 ms p99. Render CPU p95 was 0.30 ms. The signaled readback remained
+3,936 bytes and below 0.20 ms at p99; the roughly one-frame fence-poll latency
+was asynchronous rather than a blocking CPU wait. No publication, batch, or
+semantic failures were reported.
+
+The pathological 94,628-face inverted chess view exposed the retained CPU
+cost more clearly. Before the attempted fusion, a moving-camera sample reported
+16.7 ms frame p50, 37.1 ms p95, and 49.9 ms p99. Retained publication measured
+37.2 ms p50 and 49.2 ms p95. Within grouping, vertex-density reconstruction was
+8.1/10.6 ms p50/p95, render-node resolution 1.0/1.2 ms, root-member grouping
+11.5/19.7 ms, and changed-bucket upload 10.3/13.9 ms. The classifier readback
+was 378,512 bytes. Shared-edge mismatches, roundtrip failures, and GPU-batch
+failures remained zero.
+
+Removing one source-face walk by materializing corner densities during root
+grouping was then tested with the on-demand `mr_measureRootGrouping` oracle.
+The oracle runs the historical separate path and proposed fused path over the
+exact same resident state, primes retained scratch first, alternates execution
+order, and compares compact-vertex maxima, every face-corner density, and every
+ordered batch member.
+
+Across 64 paired rounds on the same 94,628-face state, all 64 results were
+exact. The separate path measured 21.8 ms p50, 24.7 ms p95, 28.0 ms p99, and
+21.41 ms mean. The fused path measured 22.2 ms p50, 25.6 ms p95, 27.3 ms p99,
+and 21.75 ms mean. Thus the fused path was about 1.8% slower at the median and
+1.6% slower by mean, with no useful tail improvement. Production returned to
+the separate path in `d8cb375`; the exact oracle and fused reference remain so
+future layout changes can be judged without cross-run scheduler or camera
+confounding. Cached render-node resolution and its explicit layout revision
+invalidation remain independent wins.
+
+The next WebGL2 target is therefore not another whole-scene loop fusion. It is
+an incremental root-membership representation driven by the already bounded
+changed component/neighborhood, while retaining one compact full-prefix upload
+per changed bucket. That design must account for vertex-corner density
+propagation and deterministic member order before it can replace the complete
+rebuild.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
