@@ -57,9 +57,9 @@ and the checked bundle size. It rejects a coherent but stale `dist/` as well as
 missing presentation/runtime assets. The three replay commands must print:
 
 ```text
-PASS fnv1a-128-json:7afada676bfe2aaacdd1ec753ab1bdf8
-PASS fnv1a-128-json:632127d93ad2417225544b3d14819302
-PASS fnv1a-128-json:9bc89c319883e25f7e91d001656d924b
+PASS fnv1a-128-json:8578becd15322dbc0ed0467a4a421a39
+PASS fnv1a-128-json:86d8f63f5d20bb014fa3427f0999e2ac
+PASS fnv1a-128-json:af66e5fb7a97c3235241d118ace5df9c
 ```
 
 They are deterministic regression oracles for the cue walkthrough,

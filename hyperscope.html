@@ -1750,6 +1750,7 @@ let manualCameraInputRevision = 0;
 function markManualCameraInput(preserveRustCamera = false) {
   manualCameraInputRevision += 1;
   cameraFocusTransition = null;
+  rustAppReframeTransitionActive = false;
   if (!preserveRustCamera) rustManualCameraActive = false;
   return manualCameraInputRevision;
 }
@@ -3018,8 +3019,31 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
   return true;
 }
 
+function applyRustCameraSnapshot(snapshot) {
+  const camera = snapshot?.camera;
+  if (!camera) return false;
+  manualCameraBasisState.set(camera.right, 0);
+  manualCameraBasisState.set(camera.up, 3);
+  manualCameraBasisState.set(camera.forward, 6);
+  manualCameraBasisReady = true;
+  zoom = camera.control_distance;
+  cameraFovDegrees.set(camera.vertical_fov_radians * 180 / Math.PI);
+  manualCameraSemanticTargetEnabled = camera.semantic_target != null;
+  const target = camera.semantic_target || [
+    camera.eye[0] + camera.forward[0] * zoom,
+    camera.eye[1] + camera.forward[1] * zoom,
+    camera.eye[2] + camera.forward[2] * zoom,
+  ];
+  panX = target[0];
+  panY = target[1];
+  panZ = target[2];
+  authoredCamera = null;
+  syncManualCameraEuler();
+  return true;
+}
+
 function applyRustNavigationSnapshot(snapshot, selection = null) {
-  if (!snapshot?.camera || !snapshot?.focus) return;
+  if (!snapshot?.camera || !snapshot?.focus) return false;
   const focus = snapshot.focus;
   focusSphere.active = focus.focus_enabled;
   focusSphere.center = Array.from(focus.center);
@@ -3045,25 +3069,7 @@ function applyRustNavigationSnapshot(snapshot, selection = null) {
     mob.xform.set(focus.inversion_enabled ? 'sphere_reflection' : 'identity');
   });
   applyRustFocusFieldProjection(snapshot);
-
-  const camera = snapshot.camera;
-  manualCameraBasisState.set(camera.right, 0);
-  manualCameraBasisState.set(camera.up, 3);
-  manualCameraBasisState.set(camera.forward, 6);
-  manualCameraBasisReady = true;
-  zoom = camera.control_distance;
-  cameraFovDegrees.set(camera.vertical_fov_radians * 180 / Math.PI);
-  manualCameraSemanticTargetEnabled = camera.semantic_target != null;
-  const target = camera.semantic_target || [
-    camera.eye[0] + camera.forward[0] * zoom,
-    camera.eye[1] + camera.forward[1] * zoom,
-    camera.eye[2] + camera.forward[2] * zoom,
-  ];
-  panX = target[0];
-  panY = target[1];
-  panZ = target[2];
-  authoredCamera = null;
-  syncManualCameraEuler();
+  return applyRustCameraSnapshot(snapshot);
 }
 
 function applyRustPresentationNavigation(snapshot) {
@@ -3328,6 +3334,7 @@ let rustAppShadowAssetOrdinal = 0;
 let rustAppPresentationPoseReady = false;
 let rustAppShadowSelectionQueued = false;
 let rustAppSelectionTransitionActive = false;
+let rustAppReframeTransitionActive = false;
 let rustAppSelectionEventAtMs = null;
 let rustAppFrameElapsedSeconds = 0;
 let rustAssetCreditsMountAttempted = false;
@@ -3391,6 +3398,15 @@ const rustAppShadowDiagnostics = {
   inversionGestureRejects: 0,
   inversionGestureComparisons: 0,
   inversionGestureMismatches: 0,
+  reframeDispatches: 0,
+  reframeAccepts: 0,
+  reframeRejects: 0,
+  reframeFrames: 0,
+  reframeComparisons: 0,
+  reframeMismatches: 0,
+  reframeMaximumError: 0,
+  reframeAuthorityWrites: 0,
+  reframeFallbackWrites: 0,
   rendererFocusPacketComparisons: 0,
   rendererFocusPacketMismatches: 0,
   rendererAuthorityWrites: 0,
@@ -3777,6 +3793,73 @@ function compareAppSelectionTransitionFrame(navigation, nowMs) {
   }
 }
 
+function appReframeTransitionError(navigation, nowMs) {
+  const camera = navigation?.camera;
+  if (!camera) return Infinity;
+  const browser = manualNavigationState();
+  let error = 0;
+  const scalar = (left, right) => {
+    const observed = Number(left);
+    const expected = Number(right);
+    error = Math.max(
+      error,
+      Number.isFinite(observed) && Number.isFinite(expected)
+        ? Math.abs(observed - expected)
+        : Infinity,
+    );
+  };
+  const vector = (left, right) => {
+    if (!left || !right || left.length !== right.length) {
+      error = Infinity;
+      return;
+    }
+    for (let axis = 0; axis < right.length; axis++) scalar(left[axis], right[axis]);
+  };
+  vector(camera.eye, browser.eye);
+  vector(camera.right, browser.right);
+  vector(camera.up, browser.up);
+  vector(camera.forward, browser.forward);
+  const rustTarget = camera.semantic_target ?? null;
+  if ((rustTarget == null) !== (browser.semanticTarget == null)) error = Infinity;
+  else if (rustTarget) vector(rustTarget, browser.semanticTarget);
+  scalar(camera.control_distance, browser.controlDistance);
+  scalar(camera.vertical_fov_radians, browser.verticalFovRadians);
+  scalar(camera.near, browser.near);
+  scalar(camera.far, browser.far);
+  const browserRemaining = cameraFocusTransition
+    ? Math.min(
+      cameraFocusTransition.durationMs / 1000,
+      Math.max(
+        0,
+        (cameraFocusTransition.durationMs
+          - (nowMs - cameraFocusTransition.startedAt)) / 1000,
+      ),
+    )
+    : 0;
+  scalar(camera.camera_transition_remaining || 0, browserRemaining);
+  return error;
+}
+
+function compareAppReframeTransitionFrame(navigation, nowMs) {
+  rustAppShadowDiagnostics.reframeFrames += 1;
+  rustAppShadowDiagnostics.reframeComparisons += 1;
+  const error = appReframeTransitionError(navigation, nowMs);
+  rustAppShadowDiagnostics.reframeMaximumError = Math.max(
+    rustAppShadowDiagnostics.reframeMaximumError,
+    error,
+  );
+  if (error > RUST_NAVIGATION_SHADOW_TOLERANCE) {
+    rustAppShadowDiagnostics.reframeMismatches += 1;
+    const count = rustAppShadowDiagnostics.reframeMismatches;
+    if (count === 1 || (count & (count - 1)) === 0) {
+      recordAppShadowMismatch(
+        'selection_reframe',
+        `Rust selected-camera reframe diverged by ${error}`,
+      );
+    }
+  }
+}
+
 function applyRustAppFocusToRenderer(navigation, selection = selectedObject) {
   if (RUST_SELECTION_IMPLEMENTATION !== 'rust' || !rustAppShadow || !navigation) {
     return false;
@@ -3833,7 +3916,7 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
   const deltaSeconds = selectionTransitionFrameDeltaSeconds(
     nowMs,
     selectionEventAtMs,
-    rustAppSelectionTransitionActive,
+    rustAppSelectionTransitionActive || rustAppReframeTransitionActive,
     rawFrameDeltaSeconds,
     frameDeltaSeconds,
   );
@@ -3855,6 +3938,7 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
       deltaSeconds,
     );
     const needsSnapshot = rustAppSelectionTransitionActive
+      || rustAppReframeTransitionActive
       || (rustPresentationTransitionActive && rustAppPresentationPoseReady);
     const navigation = needsSnapshot ? rustAppShadow.navigationSnapshot() : null;
     if (navigation) rustAppShadowDiagnostics.frameSnapshotCalls += 1;
@@ -3868,6 +3952,27 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
       rustAppSelectionTransitionActive =
         Number(navigation.focus?.focus_transition_remaining || 0) > 0;
       if (wasTransitionActive && !rustAppSelectionTransitionActive) {
+        refreshAppShadowSnapshot();
+      }
+    }
+    if (rustAppReframeTransitionActive && navigation) {
+      const wasTransitionActive = rustAppReframeTransitionActive;
+      if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
+        if (applyRustCameraSnapshot(navigation)) {
+          rustManualCameraActive = true;
+          rustAppShadowDiagnostics.reframeAuthorityWrites += 1;
+        }
+      } else if (RUST_NAVIGATION_IMPLEMENTATION === 'shadow') {
+        compareAppReframeTransitionFrame(navigation, nowMs);
+      }
+      rustAppReframeTransitionActive =
+        Number(navigation.camera?.camera_transition_remaining || 0) > 0;
+      if (wasTransitionActive && !rustAppReframeTransitionActive) {
+        if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
+          selectionLabel(`Reframed node ${selectedObject?.node ?? '?'}`);
+          debouncedLodRecompute();
+          syncURL();
+        }
         refreshAppShadowSnapshot();
       }
     }
@@ -5079,6 +5184,7 @@ function compareAppSelectedFocus(expected, actual) {
 function detachAppSelectionShadow(reason) {
   if (!rustAppShadowSelectionQueued) return false;
   rustAppSelectionTransitionActive = false;
+  rustAppReframeTransitionActive = false;
   if (!rustAppShadow) {
     rustAppShadowSelectionQueued = false;
     return false;
@@ -5196,9 +5302,43 @@ function dispatchAppSelectedInversionGesture(nowMs = performance.now()) {
   }
 }
 
+function dispatchAppSelectedReframe(nowMs = performance.now()) {
+  if (RUST_NAVIGATION_IMPLEMENTATION === 'js'
+      || !rustAppShadow || !rustAppShadowSelectionQueued || !selectedObject) {
+    return { observed: false, accepted: false, navigation: null };
+  }
+  try {
+    advanceRustApplicationClockToSelectionEvent(nowMs);
+    const diagnosticCount = rustAppShadow.navigationSnapshot().diagnostics.length;
+    rustAppShadow.reframeSelection(
+      canvas.width / Math.max(canvas.height, 1),
+      SELECTION_FRAME_MARGIN,
+      focusTransitionCentiseconds.peek() / 100,
+      'smootherstep',
+    );
+    const navigation = rustAppShadow.tickNavigation(0);
+    const accepted = navigation.diagnostics.length === diagnosticCount
+      && Number(navigation.camera?.camera_transition_remaining || 0) > 0;
+    rustAppReframeTransitionActive = accepted;
+    rustAppShadowDiagnostics.reframeDispatches += 1;
+    rustAppShadowDiagnostics[accepted ? 'reframeAccepts' : 'reframeRejects'] += 1;
+    refreshAppShadowSnapshot();
+    return { observed: true, accepted, navigation };
+  } catch (error) {
+    rustAppReframeTransitionActive = false;
+    rustAppShadowDiagnostics.reframeRejects += 1;
+    recordAppShadowMismatch(
+      'selection_reframe_exception',
+      error?.message || String(error),
+    );
+    return { observed: true, accepted: false, navigation: null, error };
+  }
+}
+
 function clearSelectedObject(message = '') {
   detachAppSelectionShadow(message || 'browser selection clear');
   rustAppSelectionTransitionActive = false;
+  rustAppReframeTransitionActive = false;
   selectedObject = null;
   manualCameraSemanticTargetEnabled = false;
   cameraFocusTransition = null;
@@ -5294,6 +5434,8 @@ function refreshSelectedObjectAnchor({ followObjectPivot = false } = {}) {
       cameraFocusTransition.targetZoom = Math.max(0.1, Math.min(100, framedSphereDistance(
         selectedObject.outputRadius,
         canvas.width / Math.max(canvas.height, 1),
+        cameraFovRadians(),
+        SELECTION_FRAME_MARGIN,
       )));
     }
   }
@@ -5318,8 +5460,26 @@ function beginObjectPivotFocus(target, nowMs = performance.now()) {
 }
 
 function reframeSelectedObject(nowMs = performance.now()) {
+  if (RUST_NAVIGATION_IMPLEMENTATION !== 'js') advanceFocusTransitions(nowMs);
   const target = refreshSelectedObjectAnchor();
   if (!selectedObject || !target) return false;
+  const rustReframe = dispatchAppSelectedReframe(nowMs);
+  if (RUST_NAVIGATION_IMPLEMENTATION === 'rust' && rustReframe.observed) {
+    if (rustReframe.accepted && applyRustCameraSnapshot(rustReframe.navigation)) {
+      cameraFocusTransition = null;
+      rustManualCameraActive = true;
+      rustAppShadowDiagnostics.reframeAuthorityWrites += 1;
+      selectionLabel(`Reframing node ${selectedObject.node}…`);
+      return true;
+    }
+    if (!rustReframe.error) {
+      selectionLabel(`Node ${selectedObject.node} · reframe unchanged at pole`);
+      return false;
+    }
+    rustAppShadowDiagnostics.reframeFallbackWrites += 1;
+  } else if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
+    rustAppShadowDiagnostics.reframeFallbackWrites += 1;
+  }
   const radius = Math.max(selectedObject.outputRadius || 0, 0.001);
   manualCameraSemanticTargetEnabled = true;
   cameraFocusTransition = {
@@ -5329,6 +5489,8 @@ function reframeSelectedObject(nowMs = performance.now()) {
     targetZoom: Math.max(0.1, Math.min(100, framedSphereDistance(
       radius,
       canvas.width / Math.max(canvas.height, 1),
+      cameraFovRadians(),
+      SELECTION_FRAME_MARGIN,
     ))),
     startedAt: nowMs,
     durationMs: focusTransitionCentiseconds.peek() * 10,
@@ -5658,6 +5820,7 @@ let currentMobius = null;
 let previousManualReflection = null;
 let restoringManualReflectionControls = false;
 const FOCUS_SPHERE_MARGIN = 1.10;
+const SELECTION_FRAME_MARGIN = 1.15;
 
 function manualReflectionState(type, center, radius) {
   return type === 'sphere_reflection' && radius > 0.01
@@ -5901,6 +6064,7 @@ function fitOrToggleInversionToSelection(nowMs = performance.now()) {
 // selection or navigation state is exposed through this object.
 globalThis.__hyperscopeSelection = Object.freeze({
   selectViewCenter: () => selectObjectAtViewCenter(),
+  reframe: () => reframeSelectedObject(performance.now()),
   toggleInversion: () => fitOrToggleInversionToSelection(performance.now()),
 });
 

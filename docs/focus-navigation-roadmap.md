@@ -130,17 +130,19 @@ or sphere state.
 2. **Camera/action core — complete.** Rust owns the quaternion camera,
    inversion transport, four navigation policies, explicit easing, virtual
    time, and frame-rate-independent action replay.
-3. **WASM shadow bridge — active.** `HyperscopeNavigation` exposes the shared
-   controller without a Bevy `App`. Add `navshadow=1` to a Hyperscope URL to
-   mirror SpaceMouse camera actions and surface re-anchor glides, then inspect
-   `globalThis.__hyperscopeNavigationShadow`. The surface observer separately
+3. **WASM authority bridge — active.** `HyperscopeNavigation` exposes the shared
+   controller without a Bevy `App`, while `HyperscopeAppShadow` routes the same
+   actions through application sequence and virtual-time authority. Use
+   `navimpl=js|shadow|rust` to retain the browser rollback, compare both paths,
+   or apply the Rust camera respectively; inspect
+   `globalThis.__hyperscopeAppShadowDiagnostics`. The surface observer separately
    reports samples, drift frames, maximum error, and the last Rust/browser
    pose pair. `HyperscopeAppShadow` now admits the same action set through the
    application reducer and an offline generated-WASM smoke compares both Rust
    boundaries through ordinary frames, focus/inversion edits, and animated
    surface re-anchor/retarget/cancel. Drift is recorded without changing the
-   rendered camera; removing `navshadow=1` is the immediate rollback. Remove
-   duplicate JavaScript authority only after representative all-mode,
+   rendered camera in shadow mode; `navimpl=js` is the immediate rollback. Remove
+   remaining duplicate JavaScript authority only after representative all-mode,
    all-scale parity runs are clean.
    The normalized SpaceMouse camera boundary is now frozen in Rust as
    `SpaceMouseCameraInput -> NavigationFrame`. The browser still owns WebHID
@@ -158,6 +160,17 @@ or sphere state.
    modifiers, authored-camera
    arbitration, and live browser cutover remain outside this slice; rotation
    cadence invariance is not inferred from same-trace parity.
+   SpaceMouse and pointer turntable camera integration now use the retained
+   Rust packet under `navimpl=rust`; shadow mode has exact live Chrome evidence.
+   Selected-object recovery framing is a semantic `ReframeSelection` action:
+   Rust projects the selected source pivot/radius into the active chart, fits
+   the narrower viewport axis using the live perspective lens, and follows the
+   established target-orbit/log-distance path. Replay 0.15, generated WASM,
+   invalid-geometry and reflection-pole rollback oracles, 40 clean live shadow
+   frames (maximum error `9.1e-12`), and 39 no-fallback Rust authority writes
+   gate that route. The browser's old implicit 60-degree framing assumption was
+   removed; both paths now consume the actual vertical FOV and an explicit 15%
+   camera framing margin.
    Focus/inversion actions and their reflection transport are now one staged
    Rust transaction: a camera, transition, or surface-follower pole consumes
    the ordered input exactly once while restoring the preceding camera, focus

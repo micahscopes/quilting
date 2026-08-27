@@ -80,8 +80,9 @@ The first application boundary is now explicit:
   synchronizes settled navigation through the reducer and makes exactly one
   compact comparison call per active cue-transition frame. The application
   clock now advances once per browser frame through a non-serializing boundary;
-  it takes a navigation snapshot only during an active cue or mapped-selection
-  transition and makes no call when shadowing is disabled. Mapped selection
+  it takes a navigation snapshot only during an active cue, mapped-selection,
+  or selected-camera reframe transition and makes no call when no Rust lane is
+  active. Mapped selection
   interpolation uses the incumbent wall-clock timestamp, including throttled
   frames, and compares both browser focus state and the renderer's retained CPU
   focus packet without a GPU readback. Bounded diagnostics are exposed at
@@ -89,9 +90,11 @@ The first application boundary is now explicit:
   authority. The same adapter now accepts the incumbent navigation shadow's
   device-neutral actions through `AppStore`; the shared navigation queue owns
   their sequence and the application owns virtual time. The adapter exposes a
-  parity-complete frame snapshot. This is an offline
-  cutover gate only: `navshadow=1` and the browser camera remain unchanged until
-  live Chrome parity is measured.
+  parity-complete frame snapshot. `navimpl=js|shadow|rust` is the navigation
+  rollback boundary. SpaceMouse, pointer turntable, and selected-camera reframe
+  have generated-WASM and live Chrome gates; JavaScript remains the default
+  until the remaining camera gestures and arbitration paths carry equivalent
+  evidence.
 - `presentimpl=js|shadow|rust` is the presentation-orchestration rollback
   boundary. AppStore is now the canonical default, while an explicit
   `presentimpl=js` remains the serialized rollback. Shadow mode advances both
@@ -132,12 +135,14 @@ The first application boundary is now explicit:
   `[-1, 1]`, computes translation/rotation/object-dolly response from virtual
   delta and user gains, applies preset/swap/inversion/horizon policy, and queues
   the resulting ordinary navigation actions through `AppStore`. It adds no
-  device-specific event to the application vocabulary and does not tick or
-  change live browser authority. Generated WASM matches the incumbent mapping
-  over 7,168 exhaustive mapping cases, 648 response-policy cases, four
-  `AppStore` camera initial states, and a 120-frame deterministic trace.
-  Modifier layers, surface-walk
-  input, and authored-transition arbitration remain explicit later cutovers.
+  device-specific event to the application vocabulary. Under `navimpl=rust`
+  its retained camera packet is authoritative; shadow and JavaScript routes
+  remain explicit measurement and rollback lanes. Generated WASM matches the
+  incumbent mapping over 7,168 exhaustive mapping cases, 648 response-policy
+  cases, four `AppStore` camera initial states, and a 120-frame deterministic
+  trace.
+  Modifier layers and surface-walk retain their own semantic routes;
+  authored-transition arbitration remains an explicit later cutover.
 - Surface walking now has one backend-neutral Rust aggregate:
   `SurfaceWalkRuntime` atomically owns `SurfaceWalker` topology and physical
   side, `SurfaceWalkController` metric locomotion and view response, animated
@@ -373,6 +378,15 @@ whole action. Shadow mode compares the incumbent gesture; Rust mode consumes
 the same coherent camera/focus snapshot adapter as presentation while retaining
 the selected identity and pole-safe derived pivot. No separate browser focus
 transition runs in the Rust branch.
+Selected recovery framing is likewise one replayable `ReframeSelection`
+action. It resolves the selected source sphere in the active conformal chart,
+uses the current aspect/FOV and narrower perspective axis, enables a semantic
+target without changing the initial visible pose, and interpolates target plus
+positive camera distance exactly as the incumbent did. `navimpl=shadow`
+measured 40 transition frames with zero mismatches and `9.1e-12` maximum error;
+`navimpl=rust` completed with 39 Rust camera writes, exact independently
+recomputed distance, zero fallback, and no console errors. Invalid framing or
+a selected pivot at the reflection pole leaves the camera unchanged.
 Unresolved assets and free/manual focus-sphere geometry deliberately remain on
 the browser path. Mapped selected-object focus and the semantic spheroidal
 field crossed to the Rust default on 2026-08-27 after exact live
