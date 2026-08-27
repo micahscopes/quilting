@@ -1747,9 +1747,10 @@ const manualCameraBasisState = new Float64Array(9);
 let manualCameraBasisReady = false;
 let manualCameraInputRevision = 0;
 
-function markManualCameraInput(preserveRustSpaceMouse = false) {
+function markManualCameraInput(preserveRustCamera = false) {
   manualCameraInputRevision += 1;
-  if (!preserveRustSpaceMouse) rustSpaceMouseCameraActive = false;
+  cameraFocusTransition = null;
+  if (!preserveRustCamera) rustManualCameraActive = false;
   return manualCameraInputRevision;
 }
 
@@ -1787,10 +1788,10 @@ function syncManualCameraEuler() {
   cameraRoll = Math.atan2(sinR, cosR);
 }
 
-function rotateManualCameraAboutAxis(axisX, axisY, axisZ, angle) {
+function rotateManualCameraAboutAxis(axisX, axisY, axisZ, angle, preserveRustCamera = false) {
   const axisLength = Math.hypot(axisX, axisY, axisZ);
   if (axisLength < 1e-12 || Math.abs(angle) < 1e-12) return;
-  markManualCameraInput();
+  markManualCameraInput(preserveRustCamera);
   const x = axisX / axisLength, y = axisY / axisLength, z = axisZ / axisLength;
   const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
   const m00 = t*x*x+c,   m01 = t*x*y-s*z, m02 = t*x*z+s*y;
@@ -1883,7 +1884,7 @@ const spaceMouseFlyAxes = new Float32Array(6);
 const spaceMouseNavigationAxes = new Float32Array(6);
 const spaceMouseWalkAxes = new Float32Array(6);
 const spaceMouseLocalRotation = new Float64Array(4);
-const rustSpaceMouseCameraPacket = new Float64Array(17);
+const rustManualCameraPacket = new Float64Array(17);
 const spaceMouseNavigationOptions = {
   mode: 'hyperscope',
   swapYZ: false,
@@ -1899,7 +1900,7 @@ const spaceMouseWalkOptions = {
 
 let rustNavigationShadow = null;
 let rustNavigationShadowSnapshot = null;
-let rustSpaceMouseCameraActive = false;
+let rustManualCameraActive = false;
 let rustFocusFieldSyncReady = false;
 let rustFocusFieldSyncScheduled = false;
 let rustFocusFieldSyncGeneration = 0;
@@ -2179,7 +2180,7 @@ function navigationCameraFrameError(snapshot, frame) {
   return error;
 }
 
-function rustSpaceMouseCameraPacketError(packet, state = manualNavigationState()) {
+function rustManualCameraPacketError(packet, state = manualNavigationState()) {
   if (!packet || packet.length !== 17) return Infinity;
   let error = Math.abs(packet[12] - state.controlDistance);
   const compare = (offset, expected) => {
@@ -2197,7 +2198,7 @@ function rustSpaceMouseCameraPacketError(packet, state = manualNavigationState()
   return error;
 }
 
-function synchronizeRustSpaceMouseCamera() {
+function synchronizeRustManualCamera() {
   if (RUST_NAVIGATION_IMPLEMENTATION === 'js' || authoredCamera) return false;
   const app = ensureRustAppShadow('navigation-camera');
   const state = manualNavigationState();
@@ -2218,11 +2219,11 @@ function synchronizeRustSpaceMouseCamera() {
       state.focusCoordinate,
       state.focusAngularAperture,
     );
-    rustSpaceMouseCameraActive = true;
+    rustManualCameraActive = true;
     rustAppShadowDiagnostics.cameraSynchronizations += 1;
     return true;
   } catch (error) {
-    rustSpaceMouseCameraActive = false;
+    rustManualCameraActive = false;
     rustAppShadowDiagnostics.cameraErrors += 1;
     recordAppShadowMismatch('camera_sync', error?.message || String(error));
     return false;
@@ -2231,7 +2232,7 @@ function synchronizeRustSpaceMouseCamera() {
 
 function stepRustSpaceMouseCamera(normalizedAxes, navigationMode, deltaSeconds) {
   if (RUST_NAVIGATION_IMPLEMENTATION === 'js') return false;
-  if (!rustSpaceMouseCameraActive && !synchronizeRustSpaceMouseCamera()) return false;
+  if (!rustManualCameraActive && !synchronizeRustManualCamera()) return false;
   try {
     rustAppShadow.stepSpaceMouseCamera(
       normalizedAxes,
@@ -2244,19 +2245,40 @@ function stepRustSpaceMouseCamera(normalizedAxes, navigationMode, deltaSeconds) 
       spaceMouseMove.peek() / 100,
       spaceMouseRotate.peek() / 100,
       spaceMouseLockHorizon.peek(),
-      rustSpaceMouseCameraPacket,
+      rustManualCameraPacket,
     );
     rustAppShadowDiagnostics.cameraSteps += 1;
     return true;
   } catch (error) {
-    rustSpaceMouseCameraActive = false;
+    rustManualCameraActive = false;
     rustAppShadowDiagnostics.cameraErrors += 1;
     recordAppShadowMismatch('camera_step', error?.message || String(error));
     return false;
   }
 }
 
-function applyRustSpaceMouseCameraPacket(packet) {
+function stepRustPointerCamera(deltaX, deltaY, gesture) {
+  if (RUST_NAVIGATION_IMPLEMENTATION === 'js') return false;
+  if (!rustManualCameraActive && !synchronizeRustManualCamera()) return false;
+  try {
+    rustAppShadow.stepPointerCamera(
+      deltaX,
+      deltaY,
+      gesture,
+      manualCameraSemanticTargetEnabled,
+      rustManualCameraPacket,
+    );
+    rustAppShadowDiagnostics.cameraSteps += 1;
+    return true;
+  } catch (error) {
+    rustManualCameraActive = false;
+    rustAppShadowDiagnostics.cameraErrors += 1;
+    recordAppShadowMismatch('pointer_camera_step', error?.message || String(error));
+    return false;
+  }
+}
+
+function applyRustManualCameraPacket(packet) {
   if (!packet || packet.length !== 17 || (packet[13] !== 0 && packet[13] !== 1)) {
     return false;
   }
@@ -2281,8 +2303,8 @@ function applyRustSpaceMouseCameraPacket(packet) {
   return true;
 }
 
-function recordRustSpaceMouseCameraComparison(packet) {
-  const error = rustSpaceMouseCameraPacketError(packet);
+function recordRustManualCameraComparison(packet, source = 'manual') {
+  const error = rustManualCameraPacketError(packet);
   rustAppShadowDiagnostics.cameraComparisons += 1;
   rustAppShadowDiagnostics.cameraLastError = error;
   rustAppShadowDiagnostics.cameraMaximumError = Math.max(
@@ -2295,11 +2317,59 @@ function recordRustSpaceMouseCameraComparison(packet) {
     if (count === 1 || (count & (count - 1)) === 0) {
       recordAppShadowMismatch(
         'camera_drift',
-        `Rust SpaceMouse camera drifted by ${error}`,
+        `Rust ${source} camera drifted by ${error}`,
       );
     }
   }
   return error;
+}
+
+function applyBrowserPointerCamera(deltaX, deltaY, gesture) {
+  if (gesture === 1) {
+    const basis = manualCameraBasis(inputCameraBasis);
+    const scale = 0.003 * zoom;
+    panX -= (deltaX * basis[0] + deltaY * basis[3]) * scale;
+    panY -= (deltaX * basis[1] + deltaY * basis[4]) * scale;
+    panZ -= (deltaX * basis[2] + deltaY * basis[5]) * scale;
+  } else if (gesture === 2) {
+    zoom *= deltaY > 0 ? 1.1 : 0.9;
+    zoom = Math.max(0.1, Math.min(100, zoom));
+  } else {
+    rotateManualCameraAboutAxis(0, 1, 0, deltaX * 0.005, true);
+    const basis = manualCameraBasis(inputCameraBasis);
+    rotateManualCameraAboutAxis(
+      basis[0], basis[1], basis[2], -deltaY * 0.005, true,
+    );
+    syncManualCameraEuler();
+  }
+}
+
+function integratePointerCamera(deltaX, deltaY, gesture) {
+  if (gesture !== 2 && deltaX === 0 && deltaY === 0) return false;
+  markManualCameraInput(true);
+  const rustCameraReady = stepRustPointerCamera(deltaX, deltaY, gesture);
+  let browserCameraAuthority = RUST_NAVIGATION_IMPLEMENTATION !== 'rust'
+    || !rustCameraReady;
+
+  if (!browserCameraAuthority) {
+    if (applyRustManualCameraPacket(rustManualCameraPacket)) {
+      recordRustManualCameraComparison(rustManualCameraPacket, 'pointer');
+      return true;
+    }
+    rustManualCameraActive = false;
+    rustAppShadowDiagnostics.cameraErrors += 1;
+    rustAppShadowDiagnostics.cameraFallbackWrites += 1;
+    recordAppShadowMismatch('pointer_camera_packet', 'Rust returned an invalid camera packet');
+    browserCameraAuthority = true;
+  } else if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
+    rustAppShadowDiagnostics.cameraFallbackWrites += 1;
+  }
+
+  applyBrowserPointerCamera(deltaX, deltaY, gesture);
+  if (RUST_NAVIGATION_IMPLEMENTATION === 'shadow' && rustCameraReady) {
+    recordRustManualCameraComparison(rustManualCameraPacket, 'pointer');
+  }
+  return true;
 }
 
 function synchronizeRustNavigationShadow() {
@@ -4593,7 +4663,7 @@ function claimManualCameraFromActiveView({ preserveSemanticTarget = false } = {}
 function beginSurfaceWalkAnchorTransition(startFrame) {
   if (!startFrame?.eye || !startFrame?.basis) return false;
   cancelSurfaceWalkAnchorTransition();
-  rustSpaceMouseCameraActive = false;
+  rustManualCameraActive = false;
   surfaceWalk.anchorTransition = {
     startEye: startFrame.eye.slice(),
     startBasis: startFrame.basis.slice(),
@@ -5417,6 +5487,9 @@ canvas.addEventListener('mousedown', e => {
   mouseDragDistance = 0;
   lx = e.clientX;
   ly = e.clientY;
+  if (RUST_NAVIGATION_IMPLEMENTATION !== 'js' && !authoredCamera) {
+    synchronizeRustManualCamera();
+  }
 });
 window.addEventListener('mouseup', () => drag = false);
 let camDebounce = null;
@@ -5425,23 +5498,7 @@ window.addEventListener('mousemove', e => {
   const dx = e.clientX - lx, dy = e.clientY - ly;
   mouseDragDistance += Math.hypot(dx, dy);
   lx = e.clientX; ly = e.clientY;
-  if (e.shiftKey) {
-    // Pan in screen plane
-    const basis = manualCameraBasis(inputCameraBasis);
-    const s = 0.003 * zoom;
-    panX -= (dx * basis[0] + dy * basis[3]) * s;
-    panY -= (dx * basis[1] + dy * basis[4]) * s;
-    panZ -= (dx * basis[2] + dy * basis[5]) * s;
-    if (dx !== 0 || dy !== 0) markManualCameraInput();
-  } else {
-    // Mouse drag remains an orbit about the target: world-up yaw followed by
-    // camera-local pitch. The persistent basis keeps working after SpaceMouse
-    // roll instead of snapping back to an Euler horizon.
-    rotateManualCameraAboutAxis(0, 1, 0, dx * 0.005);
-    const basis = manualCameraBasis(inputCameraBasis);
-    rotateManualCameraAboutAxis(basis[0], basis[1], basis[2], -dy * 0.005);
-    syncManualCameraEuler();
-  }
+  integratePointerCamera(dx, dy, e.shiftKey ? 1 : 0);
   clearTimeout(camDebounce);
   camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
 });
@@ -5525,9 +5582,7 @@ canvas.addEventListener('wheel', e => {
     syncURL();
     return;
   }
-  markManualCameraInput();
-  zoom *= e.deltaY > 0 ? 1.1 : 0.9;
-  zoom = Math.max(0.1, Math.min(100, zoom));
+  integratePointerCamera(0, e.deltaY, 2);
   clearTimeout(camDebounce);
   camDebounce = setTimeout(() => { debouncedLodRecompute(); syncURL(); }, 5);
 }, { passive: false });
@@ -5541,10 +5596,7 @@ canvas.addEventListener('touchmove', e => {
   if (!drag || e.touches.length !== 1) return;
   const dx = e.touches[0].clientX - lx, dy = e.touches[0].clientY - ly;
   lx = e.touches[0].clientX; ly = e.touches[0].clientY;
-  rotateManualCameraAboutAxis(0, 1, 0, dx * 0.005);
-  const basis = manualCameraBasis(inputCameraBasis);
-  rotateManualCameraAboutAxis(basis[0], basis[1], basis[2], -dy * 0.005);
-  syncManualCameraEuler();
+  integratePointerCamera(dx, dy, 0);
 }, { passive: true });
 
 // --- Button group helper ---
@@ -8087,7 +8139,7 @@ function frame(ts) {
       registeredInversionScale = Math.max(focusSphere.radius, 0.011);
     }
     previousSpaceMouseMode = spaceMouseMode;
-    rustSpaceMouseCameraActive = false;
+    rustManualCameraActive = false;
   }
   const spaceMouseAxes = spaceMouse.sample(ts, deltaSeconds);
   const flyAxes = mapSpaceMouseFlyAxes(spaceMouseAxes, spaceMouseFlyAxes);
@@ -8175,7 +8227,7 @@ function frame(ts) {
         // frame is surface-local: X/Z provide strafe/walk, Y changes the eye
         // offset, Rx/Ry provide relative pitch/yaw, and twist changes both
         // body height and walking speed multiplicatively.
-        rustSpaceMouseCameraActive = false;
+        rustManualCameraActive = false;
         spaceMouseTranslationActive = false;
         const walkNormal = surfaceWalk.filteredNormal
           || surfaceNormalize(Array.from(surfaceWalk.snapshot?.output_normal || []));
@@ -8295,20 +8347,20 @@ function frame(ts) {
           }
         }
         if (RUST_NAVIGATION_IMPLEMENTATION === 'rust' && rustCameraReady) {
-          if (!applyRustSpaceMouseCameraPacket(rustSpaceMouseCameraPacket)) {
-            rustSpaceMouseCameraActive = false;
+          if (!applyRustManualCameraPacket(rustManualCameraPacket)) {
+            rustManualCameraActive = false;
             rustAppShadowDiagnostics.cameraErrors += 1;
             recordAppShadowMismatch('camera_packet', 'Rust returned an invalid camera packet');
           } else {
-            recordRustSpaceMouseCameraComparison(rustSpaceMouseCameraPacket);
+            recordRustManualCameraComparison(rustManualCameraPacket, 'SpaceMouse');
           }
         } else if (RUST_NAVIGATION_IMPLEMENTATION === 'rust') {
           rustAppShadowDiagnostics.cameraFallbackWrites += 1;
         } else if (RUST_NAVIGATION_IMPLEMENTATION === 'shadow' && rustCameraReady) {
-          recordRustSpaceMouseCameraComparison(rustSpaceMouseCameraPacket);
+          recordRustManualCameraComparison(rustManualCameraPacket, 'SpaceMouse');
         }
       } else if (spaceMouseMode === 'inversion') {
-        rustSpaceMouseCameraActive = false;
+        rustManualCameraActive = false;
         if (mob.xform.peek() !== 'sphere_reflection') mob.xform.set('sphere_reflection');
         focusSphere.active = true;
         focusSphereTransition = null;
@@ -8342,7 +8394,7 @@ function frame(ts) {
         const accepted = setFocusSphereGeometry({ center: nextCenter, radius: nextRadius });
         if (anchored && accepted) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       } else if (spaceMouseMode === 'depth-of-field') {
-        rustSpaceMouseCameraActive = false;
+        rustManualCameraActive = false;
         fz.enabled.set(true);
         const moveSensitivity = spaceMouseMove.peek() / 100;
         const rotateSensitivity = spaceMouseRotate.peek() / 100;
@@ -8382,7 +8434,7 @@ function frame(ts) {
       }
     } else if (spaceMouseMode === 'camera') {
       spaceMouseTranslationActive = false;
-      rustSpaceMouseCameraActive = false;
+      rustManualCameraActive = false;
     }
   }
   if (spaceMouseMotionActive && ts - spaceMouseLastMotionAt >= 150) {

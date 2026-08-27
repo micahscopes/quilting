@@ -167,11 +167,14 @@ for (const navigationAuthorityStep of [
   "navimpl: 'js'",
   "RUST_NAVIGATION_IMPLEMENTATION !== 'js'",
   'rustAppShadow.stepSpaceMouseCamera(',
+  'rustAppShadow.stepPointerCamera(',
   'spaceMouseAxes,\n          navigationMode,',
   "RUST_NAVIGATION_IMPLEMENTATION === 'rust' && rustCameraReady",
-  'applyRustSpaceMouseCameraPacket(rustSpaceMouseCameraPacket)',
+  'applyRustManualCameraPacket(rustManualCameraPacket)',
   "RUST_NAVIGATION_IMPLEMENTATION === 'shadow' && rustCameraReady",
-  'recordRustSpaceMouseCameraComparison(rustSpaceMouseCameraPacket)',
+  "recordRustManualCameraComparison(rustManualCameraPacket, 'SpaceMouse')",
+  'integratePointerCamera(dx, dy, e.shiftKey ? 1 : 0);',
+  'integratePointerCamera(0, e.deltaY, 2);',
   'rustAppShadowDiagnostics.cameraFallbackWrites += 1;',
 ]) {
   assert.ok(
