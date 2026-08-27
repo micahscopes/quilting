@@ -4,6 +4,7 @@
 
 #import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
 #import quilting::surface::qb_eval::eval_qb
+#import quilting::surface::patch_prepare::{PreparedPatchRecord, PosedPatchControls, patch_leaf_depth, dyadic_leaf_domain, prepare_patch_record}
 #import quilting::viz::density::edge_log2_density
 
 struct Uniforms {
@@ -488,66 +489,6 @@ fn face_data_load(face_index: i32, slot: i32) -> vec4<f32> {
     return textureLoad(face_data_tex, vec2<i32>(texel % width, texel / width), 0);
 }
 
-struct PatchDomain {
-    c0: vec3<f32>,
-    c1: vec3<f32>,
-    c2: vec3<f32>,
-}
-
-// Reconstruct the exact dyadic source-barycentric domain carried by the
-// compact topology stream. Two child bits are appended per level; depth 12 is
-// the largest path exactly representable by the stream's f32 integer lane.
-fn dyadic_leaf_domain(leaf_meta: vec2<f32>) -> PatchDomain {
-    let depth = clamp(i32(round(leaf_meta.x)), 0, 12);
-    let path = u32(max(round(leaf_meta.y), 0.0));
-    var c0 = vec3<f32>(1.0, 0.0, 0.0);
-    var c1 = vec3<f32>(0.0, 1.0, 0.0);
-    var c2 = vec3<f32>(0.0, 0.0, 1.0);
-    for (var level = 0; level < 12; level = level + 1) {
-        if level >= depth { break; }
-        let shift = u32(2 * (depth - level - 1));
-        let child = (path >> shift) & 3u;
-        let c01 = 0.5 * (c0 + c1);
-        let c02 = 0.5 * (c0 + c2);
-        let c12 = 0.5 * (c1 + c2);
-        if child == 0u {
-            c1 = c01;
-            c2 = c02;
-        } else if child == 1u {
-            c0 = c01;
-            c2 = c12;
-        } else if child == 2u {
-            c0 = c02;
-            c1 = c12;
-        } else {
-            c0 = c01;
-            c1 = c12;
-            c2 = c02;
-        }
-    }
-    return PatchDomain(c0, c1, c2);
-}
-
-struct RestrictedControl {
-    position: vec3<f32>,
-    weight: vec4<f32>,
-}
-
-// Restrict numerator and denominator homogeneously. This is the degree-one
-// rational QB restriction, so evaluating the child reproduces the source
-// patch exactly rather than sampling a polynomial approximation.
-fn restrict_control(
-    source_bary: vec3<f32>,
-    p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>,
-    w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>,
-) -> RestrictedControl {
-    let numerator = source_bary.x * qmul(vec4<f32>(0.0, p0), w0)
-        + source_bary.y * qmul(vec4<f32>(0.0, p1), w1)
-        + source_bary.z * qmul(vec4<f32>(0.0, p2), w2);
-    let weight = source_bary.x * w0 + source_bary.y * w1 + source_bary.z * w2;
-    return RestrictedControl(q_to_point(qmul(numerator, qinv(weight))), weight);
-}
-
 fn posed_normal(normal: vec3<f32>, vertex_index: i32) -> vec3<f32> {
     var result = normal;
     if joints.num_joints > 0 {
@@ -559,99 +500,63 @@ fn posed_normal(normal: vec3<f32>, vertex_index: i32) -> vec3<f32> {
 @vertex
 fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
     let face_index = max(i32(round(in.face_info.x)), 0);
-    let source_p0 = face_data_load(face_index, 0);
-    let source_p1 = face_data_load(face_index, 1);
-    let source_p2 = face_data_load(face_index, 2);
-    let posed_p0 = posed_position(source_p0);
-    let posed_p1 = posed_position(source_p1);
-    let posed_p2 = posed_position(source_p2);
-    var p0 = vec4<f32>(source_p0.x, posed_p0);
-    var p1 = vec4<f32>(source_p1.x, posed_p1);
-    var p2 = vec4<f32>(source_p2.x, posed_p2);
-    let source_w0 = face_data_load(face_index, 3);
-    let source_w1 = face_data_load(face_index, 4);
-    let source_w2 = face_data_load(face_index, 5);
-    var w0 = source_w0;
-    var w1 = source_w1;
-    var w2 = source_w2;
-    let source_uv01 = face_data_load(face_index, 8);
-    let source_uv2 = face_data_load(face_index, 9);
-    var uv01 = source_uv01;
-    var uv2_prepare = vec4<f32>(source_uv2.xy, 0.0, 1.0);
-    let source_n0 = face_data_load(face_index, 10);
-    let source_n1 = face_data_load(face_index, 11);
-    let source_n2 = face_data_load(face_index, 12);
-    var smooth_n0 = source_n0;
-    var smooth_n1 = source_n1;
-    var smooth_n2 = source_n2;
-    let leaf_depth = clamp(i32(round(in.leaf_meta.x)), 0, 12);
+    // Slots 6 and 7 are supplied by the topology stream, so there is no
+    // reason to fetch their immutable source values from the face texture.
+    let source = PreparedPatchRecord(
+        face_data_load(face_index, 0),
+        face_data_load(face_index, 1),
+        face_data_load(face_index, 2),
+        face_data_load(face_index, 3),
+        face_data_load(face_index, 4),
+        face_data_load(face_index, 5),
+        vec4<f32>(0.0),
+        vec4<f32>(0.0),
+        face_data_load(face_index, 8),
+        face_data_load(face_index, 9),
+        face_data_load(face_index, 10),
+        face_data_load(face_index, 11),
+        face_data_load(face_index, 12),
+    );
+    let posed_p0 = posed_position(source.record_position_a);
+    let posed_p1 = posed_position(source.record_position_b);
+    let posed_p2 = posed_position(source.record_position_c);
+    var posed_n0 = source.record_normal_a.xyz;
+    var posed_n1 = source.record_normal_b.xyz;
+    var posed_n2 = source.record_normal_c.xyz;
+    let leaf_depth = patch_leaf_depth(in.leaf_meta);
     if leaf_depth > 0 {
-        let domain = dyadic_leaf_domain(in.leaf_meta);
-        let r0 = restrict_control(
-            domain.c0, posed_p0, posed_p1, posed_p2,
-            source_w0, source_w1, source_w2,
-        );
-        let r1 = restrict_control(
-            domain.c1, posed_p0, posed_p1, posed_p2,
-            source_w0, source_w1, source_w2,
-        );
-        let r2 = restrict_control(
-            domain.c2, posed_p0, posed_p1, posed_p2,
-            source_w0, source_w1, source_w2,
-        );
-        // A negative p0 tag distinguishes adaptive records without growing
-        // the prepared ABI. p1.x retains the exact dyadic path so the main
-        // pass can report source-face barycentrics for picking.
-        p0 = vec4<f32>(-f32(leaf_depth + 1), r0.position);
-        p1 = vec4<f32>(in.leaf_meta.y, r1.position);
-        p2 = vec4<f32>(0.0, r2.position);
-        w0 = r0.weight;
-        w1 = r1.weight;
-        w2 = r2.weight;
-
-        let source_uv0 = source_uv01.xy;
-        let source_uv1 = source_uv01.zw;
-        let source_uv2_value = source_uv2.xy;
-        let child_uv0 = domain.c0.x * source_uv0
-            + domain.c0.y * source_uv1 + domain.c0.z * source_uv2_value;
-        let child_uv1 = domain.c1.x * source_uv0
-            + domain.c1.y * source_uv1 + domain.c1.z * source_uv2_value;
-        let child_uv2 = domain.c2.x * source_uv0
-            + domain.c2.y * source_uv1 + domain.c2.z * source_uv2_value;
-        uv01 = vec4<f32>(child_uv0, child_uv1);
-        uv2_prepare = vec4<f32>(child_uv2, 0.0, 1.0);
-
         // Mid-edge controls have no source vertex ID. Pose the three authored
         // normals first, then restrict that linear field so adaptive records
         // never perform skinning lookups with fabricated indices.
-        let posed_n0 = posed_normal(source_n0.xyz, i32(source_p0.x));
-        let posed_n1 = posed_normal(source_n1.xyz, i32(source_p1.x));
-        let posed_n2 = posed_normal(source_n2.xyz, i32(source_p2.x));
-        smooth_n0 = vec4<f32>(
-            domain.c0.x * posed_n0 + domain.c0.y * posed_n1 + domain.c0.z * posed_n2,
-            source_n0.w,
-        );
-        smooth_n1 = vec4<f32>(
-            domain.c1.x * posed_n0 + domain.c1.y * posed_n1 + domain.c1.z * posed_n2,
-            source_n1.w,
-        );
-        smooth_n2 = vec4<f32>(
-            domain.c2.x * posed_n0 + domain.c2.y * posed_n1 + domain.c2.z * posed_n2,
-            source_n2.w,
-        );
+        posed_n0 = posed_normal(source.record_normal_a.xyz, i32(source.record_position_a.x));
+        posed_n1 = posed_normal(source.record_normal_b.xyz, i32(source.record_position_b.x));
+        posed_n2 = posed_normal(source.record_normal_c.xyz, i32(source.record_position_c.x));
     }
-    let vert_lod = vec4<f32>(in.face_info.yzw, f32(face_index));
+    let prepared = prepare_patch_record(
+        source,
+        in.lod_info,
+        in.face_info,
+        in.leaf_meta,
+        PosedPatchControls(
+            posed_p0, posed_p1, posed_p2,
+            posed_n0, posed_n1, posed_n2,
+        ),
+    );
     return PreparedPatchOutput(
         vec4<f32>(0.0),
-        p0, p1, p2,
-        w0, w1, w2,
-        in.lod_info,
-        vert_lod,
-        uv01,
-        uv2_prepare,
-        smooth_n0,
-        smooth_n1,
-        smooth_n2,
+        prepared.record_position_a,
+        prepared.record_position_b,
+        prepared.record_position_c,
+        prepared.record_weight_a,
+        prepared.record_weight_b,
+        prepared.record_weight_c,
+        prepared.record_lod_info,
+        prepared.record_vertex_lod,
+        prepared.record_uv_ab,
+        prepared.record_uv_c_prepare,
+        prepared.record_normal_a,
+        prepared.record_normal_b,
+        prepared.record_normal_c,
     );
 }
 
@@ -783,7 +688,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         let leaf_depth = -in.p0.x - 1.0;
         leaf_lod_scale = exp2(leaf_depth);
         let domain = dyadic_leaf_domain(vec2<f32>(leaf_depth, in.p1.x));
-        source_bary = bary.x * domain.c0 + bary.y * domain.c1 + bary.z * domain.c2;
+        source_bary = bary.x * domain.domain_corner_a
+            + bary.y * domain.domain_corner_b
+            + bary.z * domain.domain_corner_c;
     }
     if prepared && in.prepared_visibility < 0.5 {
         return culled_vertex_output();

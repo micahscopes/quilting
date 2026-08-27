@@ -23,6 +23,7 @@ pub mod sources {
     // Library modules (imported by other shaders)
     pub const QUATERNION: &str = include_str!("../shaders/math/quaternion.wgsl");
     pub const QB_EVAL: &str = include_str!("../shaders/surface/qb_eval.wgsl");
+    pub const PATCH_PREPARE: &str = include_str!("../shaders/surface/patch_prepare.wgsl");
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
@@ -62,6 +63,7 @@ fn build_compiler_catalog_revision() -> Arc<str> {
     let modules = [
         ("quilting::math::quaternion", sources::QUATERNION),
         ("quilting::surface::qb_eval", sources::QB_EVAL),
+        ("quilting::surface::patch_prepare", sources::PATCH_PREPARE),
         ("quilting::lighting::pbr", sources::PBR),
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
@@ -95,6 +97,7 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
     let modules = [
         ("quilting::math::quaternion", sources::QUATERNION),
         ("quilting::surface::qb_eval", sources::QB_EVAL),
+        ("quilting::surface::patch_prepare", sources::PATCH_PREPARE),
         ("quilting::lighting::pbr", sources::PBR),
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
@@ -385,6 +388,7 @@ mod tests {
         for (path, source) in [
             ("quilting::math::quaternion", sources::QUATERNION),
             ("quilting::surface::qb_eval", sources::QB_EVAL),
+            ("quilting::surface::patch_prepare", sources::PATCH_PREPARE),
             ("quilting::lighting::pbr", sources::PBR),
             ("quilting::lighting::matcap", sources::MATCAP),
             ("quilting::viz::density", sources::DENSITY),
@@ -403,6 +407,58 @@ mod tests {
     fn composer_loads_all_modules() {
         let composer = create_composer();
         assert!(composer.is_ok(), "Failed: {:?}", composer.err());
+    }
+
+    #[test]
+    fn prepared_patch_storage_contract_is_thirteen_contiguous_vec4s() {
+        const PROBE: &str = r#"
+#import quilting::surface::patch_prepare::PreparedPatchRecord
+
+@group(0) @binding(0) var<storage, read> source_records: array<PreparedPatchRecord>;
+@group(0) @binding(1) var<storage, read_write> prepared_records: array<PreparedPatchRecord>;
+
+@compute @workgroup_size(1)
+fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    prepared_records[invocation.x] = source_records[invocation.x];
+}
+"#;
+
+        let module = compile_shader(PROBE, HashMap::new()).expect("prepared-patch ABI compiles");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("prepared-patch ABI validates");
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("prepared-patch ABI lays out");
+        let (handle, ty) = module
+            .types
+            .iter()
+            .find(|(_, ty)| {
+                ty.name.as_deref().is_some_and(|candidate| {
+                    candidate == "PreparedPatchRecord"
+                        || candidate.starts_with("PreparedPatchRecordX_naga_oil_mod_")
+                })
+            })
+            .expect("prepared-patch record type");
+        let layout = layouter[handle];
+        assert_eq!(layout.size, 13 * 16);
+        assert_eq!(layout.to_stride(), 13 * 16);
+        let naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("prepared-patch record is not a struct");
+        };
+        assert_eq!(*span, 13 * 16);
+        assert_eq!(members.len(), 13);
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.offset)
+                .collect::<Vec<_>>(),
+            (0..13).map(|slot| slot * 16).collect::<Vec<_>>(),
+        );
     }
 
     #[test]
