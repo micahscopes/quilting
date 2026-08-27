@@ -3965,6 +3965,38 @@ pub fn mr_set_adaptive_component_shadow_enabled(enabled: bool) -> JsValue {
     })
 }
 
+/// Opt into component-derived retained-layer publication behind the exact
+/// complete-plan oracle. A mismatch keeps the complete overlay staged; a GPU
+/// failure keeps the prior GPU epoch. Enabling this also opts into retained
+/// physical publication, subject to the existing opaque-ordering gate.
+#[wasm_bindgen(js_name = "mr_setAdaptiveComponentPublicationEnabled")]
+pub fn mr_set_adaptive_component_publication_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        let changed = match state
+            .adaptive_picked
+            .set_component_publication_enabled(enabled)
+        {
+            Ok(changed) => changed,
+            Err(error) => return adaptive_screen_diagnostic_error(error),
+        };
+        let retained_changed = enabled && !state.adaptive_retained_publication_enabled;
+        if enabled {
+            state.adaptive_retained_publication_enabled = true;
+        }
+        if changed || retained_changed {
+            state.adaptive_retained_publication_error = None;
+            if state.adaptive_picked.is_enabled() {
+                state.adaptive_batch_transition_pending = true;
+            }
+        }
+        adaptive_picked_snapshot_js(state, None)
+    })
+}
+
 /// Opt into transactional retained-layer GPU publication. The persistent
 /// overlay shadow is forced on first; scenes containing order-sensitive PBR
 /// buckets remain on the complete path and report a diagnostic instead.
@@ -3977,6 +4009,11 @@ pub fn mr_set_adaptive_retained_publication_enabled(enabled: bool) -> JsValue {
         };
         if state.adaptive_picked.has_pending_publication() {
             return adaptive_screen_diagnostic_error("adaptive publication is already staged");
+        }
+        if !enabled && state.adaptive_picked.component_publication_enabled() {
+            return adaptive_screen_diagnostic_error(
+                "adaptive component publication requires retained GPU publication",
+            );
         }
         if enabled {
             if let Err(error) = state.adaptive_picked.set_retained_shadow_enabled(true) {
@@ -6790,7 +6827,9 @@ fn publish_adaptive_batch_groups(
             } else if !retained_requested {
                 state.adaptive_retained_publication_error = None;
             }
-            state.adaptive_picked.commit_publication();
+            state
+                .adaptive_picked
+                .commit_gpu_publication(retained_publication);
             if let Some(previous_batch_groups) = previous_batch_groups {
                 state
                     .adaptive_picked
@@ -6849,7 +6888,10 @@ fn publish_adaptive_batch_groups(
 }
 
 fn commit_reused_adaptive_groups(state: &mut MainState) {
-    state.adaptive_picked.commit_publication();
+    let retained_publication = retained_gpu_publication_active(state);
+    state
+        .adaptive_picked
+        .commit_gpu_publication(retained_publication);
     state.adaptive_batch_transition_pending = false;
     state.batch_layout_dirty = false;
     state.batch_update_stats.adaptive_refresh_noops = state

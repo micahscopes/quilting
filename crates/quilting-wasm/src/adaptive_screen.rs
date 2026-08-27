@@ -310,6 +310,12 @@ pub(crate) struct AdaptivePickedRuntime {
     group_cache_misses: u64,
     last_timings: AdaptivePlanTimings,
     component_shadow: AdaptiveComponentShadow,
+    component_publication_enabled: bool,
+    pending_component_publication: bool,
+    published_component_publication: bool,
+    component_publication_installs: u64,
+    component_publication_fallbacks: u64,
+    component_publication_last_error: Option<String>,
     lod_scratch: ScreenMeshLeafLodScratch,
     retained_shadow_enabled: bool,
     pending_overlay: AdaptiveRenderOverlay,
@@ -397,6 +403,11 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     component_shadow_reconciliation_cache_misses: u64,
     component_shadow_last_error: Option<&'a str>,
     component_shadow_last: Option<AdaptiveComponentShadowComparison>,
+    component_publication_enabled: bool,
+    component_publication_state: &'static str,
+    component_publication_installs: u64,
+    component_publication_fallbacks: u64,
+    component_publication_last_error: Option<&'a str>,
     retained_shadow_enabled: bool,
     retained_shadow_state: &'static str,
     retained_shadow_suppressed_faces: u64,
@@ -838,6 +849,20 @@ impl AdaptiveComponentShadow {
             self.mismatches = self.mismatches.saturating_add(1);
         }
     }
+
+    fn swap_exact_overlay(
+        &mut self,
+        target: &mut AdaptiveRenderOverlay,
+    ) -> Result<(), String> {
+        if let Some(error) = self.last_error.as_deref() {
+            return Err(error.to_string());
+        }
+        if !self.last.is_some_and(|comparison| comparison.exact) {
+            return Err("adaptive component publication did not match the complete oracle".into());
+        }
+        std::mem::swap(target, &mut self.overlay);
+        Ok(())
+    }
 }
 
 /// On-demand workload evidence for retaining unchanged root batches while
@@ -975,6 +1000,12 @@ impl AdaptivePickedRuntime {
         self.group_cache_misses = 0;
         self.last_timings = AdaptivePlanTimings::default();
         self.component_shadow = AdaptiveComponentShadow::default();
+        self.component_publication_enabled = false;
+        self.pending_component_publication = false;
+        self.published_component_publication = false;
+        self.component_publication_installs = 0;
+        self.component_publication_fallbacks = 0;
+        self.component_publication_last_error = None;
         self.retained_shadow_enabled = false;
         self.pending_overlay = AdaptiveRenderOverlay::default();
         self.pending_overlay_signature = None;
@@ -1054,10 +1085,53 @@ impl AdaptivePickedRuntime {
         if self.has_pending_publication() {
             return Err("adaptive publication is already staged".into());
         }
+        if !enabled && self.component_publication_enabled {
+            return Err("adaptive component publication requires its exact shadow oracle".into());
+        }
         if enabled {
             self.set_retained_shadow_enabled(true)?;
         }
         Ok(self.component_shadow.set_enabled(enabled))
+    }
+
+    pub(crate) fn set_component_publication_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        if self.has_pending_publication() {
+            return Err("adaptive publication is already staged".into());
+        }
+        if enabled {
+            self.set_component_shadow_enabled(true)?;
+        }
+        let changed = self.component_publication_enabled != enabled;
+        self.component_publication_enabled = enabled;
+        self.pending_component_publication = false;
+        self.component_publication_last_error = None;
+        if changed {
+            // Force one freshly component-derived overlay across the cutover
+            // boundary instead of inheriting an equal complete-shadow cache.
+            self.published_overlay_signature = None;
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn component_publication_enabled(&self) -> bool {
+        self.component_publication_enabled
+    }
+
+    fn component_publication_state(&self) -> &'static str {
+        if !self.component_publication_enabled {
+            "disabled"
+        } else if self.pending_component_publication {
+            "staged"
+        } else if self.published_component_publication {
+            "active"
+        } else if self.component_publication_last_error.is_some() {
+            "complete-fallback"
+        } else {
+            "awaiting-exact-component"
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1105,6 +1179,15 @@ impl AdaptivePickedRuntime {
                 atlas_triangle_counts,
                 self.pending_triangles,
             );
+            self.pending_component_publication = self.component_publication_enabled
+                && self.published_component_publication;
+            if self.component_publication_enabled && !self.pending_component_publication {
+                self.component_publication_fallbacks =
+                    self.component_publication_fallbacks.saturating_add(1);
+                self.component_publication_last_error = Some(
+                    "exact component overlay was not the published cache epoch".into(),
+                );
+            }
             return Ok(true);
         }
         let stage_start = browser_now_ms();
@@ -1147,6 +1230,23 @@ impl AdaptivePickedRuntime {
             atlas_triangle_counts,
             self.pending_triangles,
         );
+        if self.component_publication_enabled {
+            match self
+                .component_shadow
+                .swap_exact_overlay(&mut self.pending_overlay)
+            {
+                Ok(()) => {
+                    self.pending_component_publication = true;
+                    self.component_publication_last_error = None;
+                }
+                Err(error) => {
+                    self.pending_component_publication = false;
+                    self.component_publication_fallbacks =
+                        self.component_publication_fallbacks.saturating_add(1);
+                    self.component_publication_last_error = Some(error);
+                }
+            }
+        }
         Ok(false)
     }
 
@@ -1209,6 +1309,7 @@ impl AdaptivePickedRuntime {
         self.pending_group_signature = None;
         self.pending_overlay_signature = None;
         self.pending_overlay_reuses_published = false;
+        self.pending_component_publication = false;
         self.pending_selected_faces.clear();
     }
 
@@ -1226,13 +1327,37 @@ impl AdaptivePickedRuntime {
 
     fn clear_published_overlay(&mut self) {
         self.published_overlay_signature = None;
+        self.published_component_publication = false;
     }
 
     /// Commit diagnostics only after the renderer has published every staged
     /// GL bucket. CPU grouping alone is not a visible install.
+    #[cfg(test)]
     pub(crate) fn commit_publication(&mut self) {
+        self.commit_publication_mode(true);
+    }
+
+    pub(crate) fn commit_gpu_publication(&mut self, retained_gpu_publication: bool) {
+        self.commit_publication_mode(retained_gpu_publication);
+    }
+
+    fn commit_publication_mode(&mut self, retained_gpu_publication: bool) {
+        let component_candidate = self.pending_component_publication;
         if let Some(plan) = self.pending_plan.take() {
             self.commit_pending_overlay();
+            self.published_component_publication =
+                retained_gpu_publication && component_candidate;
+            if self.published_component_publication {
+                self.component_publication_installs =
+                    self.component_publication_installs.saturating_add(1);
+            } else if component_candidate {
+                self.component_publication_fallbacks =
+                    self.component_publication_fallbacks.saturating_add(1);
+                self.component_publication_last_error = Some(
+                    "retained GPU publication was unavailable; complete GPU epoch committed"
+                        .into(),
+                );
+            }
             self.installs = self.installs.saturating_add(1);
             self.last_error = None;
             self.last_plan = Some(plan);
@@ -1279,13 +1404,19 @@ impl AdaptivePickedRuntime {
     }
 
     pub(crate) fn record_publication_failure(&mut self, error: impl Into<String>) {
+        let error = error.into();
         if self.pending_plan.is_some() || self.pending_fallback_error.is_some() {
             self.fallbacks = self.fallbacks.saturating_add(1);
+        }
+        if self.pending_component_publication {
+            self.component_publication_fallbacks =
+                self.component_publication_fallbacks.saturating_add(1);
+            self.component_publication_last_error = Some(error.clone());
         }
         let retry_legacy = self.pending_legacy;
         self.clear_pending_publication();
         self.pending_legacy = retry_legacy;
-        self.last_publication_error = Some(error.into());
+        self.last_publication_error = Some(error);
     }
 
     pub(crate) fn record_refresh_failure(&mut self, error: impl Into<String>) {
@@ -1882,6 +2013,13 @@ impl AdaptivePickedRuntime {
                 .misses,
             component_shadow_last_error: self.component_shadow.last_error.as_deref(),
             component_shadow_last: self.component_shadow.last,
+            component_publication_enabled: self.component_publication_enabled,
+            component_publication_state: self.component_publication_state(),
+            component_publication_installs: self.component_publication_installs,
+            component_publication_fallbacks: self.component_publication_fallbacks,
+            component_publication_last_error: self
+                .component_publication_last_error
+                .as_deref(),
             retained_shadow_enabled: self.retained_shadow_enabled,
             retained_shadow_state,
             retained_shadow_suppressed_faces,
@@ -2751,7 +2889,7 @@ mod tests {
             max_total_leaves: 6,
             max_triangles: 6,
         });
-        runtime.set_component_shadow_enabled(true).unwrap();
+        runtime.set_component_publication_enabled(true).unwrap();
         assert_eq!(
             runtime.set_retained_shadow_enabled(false).unwrap_err(),
             "adaptive component shadow requires retained overlay shadow",
@@ -2797,6 +2935,11 @@ mod tests {
         let snapshot = runtime.snapshot();
         assert!(snapshot.retained_shadow_enabled);
         assert!(snapshot.component_shadow_enabled);
+        assert!(snapshot.component_publication_enabled);
+        assert_eq!(snapshot.component_publication_state, "staged");
+        assert_eq!(snapshot.component_publication_installs, 0);
+        assert_eq!(snapshot.component_publication_fallbacks, 0);
+        assert_eq!(snapshot.component_publication_last_error, None);
         assert_eq!(snapshot.component_shadow_state, "match");
         assert_eq!(snapshot.component_shadow_attempts, 1);
         assert_eq!(snapshot.component_shadow_matches, 1);
@@ -2823,6 +2966,9 @@ mod tests {
         assert!(comparison.exact);
 
         runtime.commit_publication();
+        let published = runtime.snapshot();
+        assert_eq!(published.component_publication_state, "active");
+        assert_eq!(published.component_publication_installs, 1);
         let reused_groups = runtime
             .plan_selected_and_group(
                 &selected,
@@ -2873,6 +3019,60 @@ mod tests {
         assert!(repeated_comparison.frontier_reused);
         assert!(repeated_comparison.reconciliation_reused);
         assert!(repeated_comparison.exact);
+        assert_eq!(repeated.component_publication_state, "staged");
+        runtime.commit_publication();
+        let republished = runtime.snapshot();
+        assert_eq!(republished.component_publication_state, "active");
+        assert_eq!(republished.component_publication_installs, 2);
+        assert_eq!(republished.component_publication_fallbacks, 0);
+
+        runtime.set_component_publication_enabled(false).unwrap();
+        runtime.set_component_publication_enabled(true).unwrap();
+        runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                4,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((5, 1)),
+                &[Some(resident); 3],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                0,
+                true,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+        // Corrupt only the component certificate after planning. The complete
+        // overlay remains staged and must become the physical fallback.
+        runtime.component_shadow.plan.component_faces.clear();
+        runtime
+            .stage_pending_overlay(
+                0,
+                &baseline_groups,
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                resident,
+                &atlas_triangles,
+            )
+            .unwrap();
+        runtime.commit_publication();
+        let fallback = runtime.snapshot();
+        assert_eq!(fallback.component_publication_state, "complete-fallback");
+        assert_eq!(fallback.component_publication_installs, 2);
+        assert_eq!(fallback.component_publication_fallbacks, 1);
+        assert!(fallback.component_publication_last_error.is_some());
     }
 
     #[wasm_bindgen_test]

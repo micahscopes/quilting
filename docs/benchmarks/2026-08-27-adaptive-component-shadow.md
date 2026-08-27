@@ -139,6 +139,30 @@ component-plan, selected-face, leaf, request, resident-edge, corner-density,
 suppression, group, and ordered-member parity also remained exact. Chrome
 reported no console messages and the temporary test tab was closed.
 
+## Shadow-backed physical cutover
+
+`setComponentPublication(true)` now opts into component-derived retained GPU
+layers. The complete planner remains an oracle at this checkpoint: only an
+exact component plan, overlay, atlas-residency result, and triangle budget may
+supply the staged overlay. A component mismatch publishes the already-staged
+complete overlay; a GPU staging failure retains the previous GPU epoch.
+
+The pathological chess scene reached `componentPublicationState: active` with
+one component install, zero component fallbacks, and retained physical layers
+active. Disabling component publication transactionally returned to the
+complete-derived retained overlay. Both physical paths produced the identical
+viewport PNG:
+
+```text
+6e06eaf27721069225789b875bae007b0aeb053b387849321750ce069d4e9e19
+```
+
+The WASM gate also corrupts a component certificate after planning. The
+component path is rejected, its install count does not advance, and the exact
+complete overlay commits with `componentPublicationState: complete-fallback`.
+This proves the cutover and fallback controls before the complete oracle is
+removed from the hot path.
+
 ## Automated gates
 
 - 216 `quilting-core` unit tests and 15 integration tests pass.
