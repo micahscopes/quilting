@@ -433,6 +433,7 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     neighborhood_shadow_mismatches: u64,
     neighborhood_shadow_boundary_escapes: u64,
     neighborhood_shadow_failures: u64,
+    neighborhood_shadow_empty_selection_skips: u64,
     neighborhood_shadow_frontier_cache_hits: u64,
     neighborhood_shadow_frontier_cache_misses: u64,
     neighborhood_shadow_reconciliation_cache_hits: u64,
@@ -667,6 +668,8 @@ struct AdaptiveNeighborhoodShadow {
     mismatches: u64,
     boundary_escapes: u64,
     failures: u64,
+    empty_selection_skips: u64,
+    last_empty_selection: bool,
     last_error: Option<String>,
     last: Option<AdaptiveNeighborhoodShadowComparison>,
     plan: AdaptiveScreenNeighborhoodPlan,
@@ -699,6 +702,8 @@ impl AdaptiveNeighborhoodShadow {
         if changed {
             self.last_error = None;
             self.last = None;
+            self.empty_selection_skips = 0;
+            self.last_empty_selection = false;
             self.frontier = None;
             self.frontier_cache_hits = 0;
             self.frontier_cache_misses = 0;
@@ -710,6 +715,8 @@ impl AdaptiveNeighborhoodShadow {
     fn state(&self) -> &'static str {
         if !self.enabled {
             "disabled"
+        } else if self.last_empty_selection {
+            "empty-selection"
         } else if self.last.as_ref().is_some_and(|last| last.boundary_escape) {
             "boundary-escape"
         } else if self.last_error.is_some() {
@@ -745,6 +752,12 @@ impl AdaptiveNeighborhoodShadow {
         self.attempts = self.attempts.saturating_add(1);
         self.last_error = None;
         self.last = None;
+        self.last_empty_selection = false;
+        if request.selected_patches.is_empty() {
+            self.empty_selection_skips = self.empty_selection_skips.saturating_add(1);
+            self.last_empty_selection = true;
+            return false;
+        }
         let total_start = browser_now_ms();
         self.baseline_lods.clear();
         self.baseline_lods.extend(
@@ -2193,6 +2206,8 @@ impl AdaptivePickedRuntime {
             "active"
         } else if self.neighborhood_publication_last_error.is_some() {
             "complete-fallback"
+        } else if self.neighborhood_shadow.last_empty_selection {
+            "complete-empty-selection"
         } else {
             "awaiting-exact-neighborhood"
         }
@@ -2978,6 +2993,9 @@ impl AdaptivePickedRuntime {
                 max_atlas_lod,
             );
             self.pending_neighborhood_shadow_staged = neighborhood_plan_staged;
+            if self.neighborhood_shadow.last_empty_selection {
+                self.neighborhood_publication_last_error = None;
+            }
             let (component_plan_staged, certified_component) =
                 match self.component_shadow.stage_plan(
                     plan_request,
@@ -3359,6 +3377,9 @@ impl AdaptivePickedRuntime {
             neighborhood_shadow_mismatches: self.neighborhood_shadow.mismatches,
             neighborhood_shadow_boundary_escapes: self.neighborhood_shadow.boundary_escapes,
             neighborhood_shadow_failures: self.neighborhood_shadow.failures,
+            neighborhood_shadow_empty_selection_skips: self
+                .neighborhood_shadow
+                .empty_selection_skips,
             neighborhood_shadow_frontier_cache_hits: self.neighborhood_shadow.frontier_cache_hits,
             neighborhood_shadow_frontier_cache_misses: self
                 .neighborhood_shadow
@@ -4913,6 +4934,67 @@ mod tests {
         assert!(neighborhood_fallback
             .neighborhood_publication_last_error
             .is_some());
+        let failures_before_empty = neighborhood_fallback.neighborhood_shadow_failures;
+
+        runtime
+            .plan_selected_and_group(
+                &[],
+                None,
+                4,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((8, 1)),
+                &[Some(resident); 3],
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                0,
+                0,
+                false,
+                true,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+        runtime
+            .stage_pending_overlay(
+                0,
+                &baseline_groups,
+                &[Some(resident); 3],
+                &[[1; 3]; 3],
+                &[0; 3],
+                &[0; 3],
+                &[0; 3],
+                resident,
+                &atlas_triangles,
+            )
+            .unwrap();
+        let empty_selection = runtime.snapshot();
+        assert_eq!(empty_selection.neighborhood_shadow_state, "empty-selection");
+        assert_eq!(
+            empty_selection.neighborhood_shadow_failures,
+            failures_before_empty,
+        );
+        assert_eq!(empty_selection.neighborhood_shadow_empty_selection_skips, 1);
+        assert_eq!(
+            empty_selection.neighborhood_publication_state,
+            "complete-empty-selection",
+        );
+        runtime.commit_publication();
+        let empty_published = runtime.snapshot();
+        assert_eq!(
+            empty_published.neighborhood_publication_state,
+            "complete-empty-selection",
+        );
+        assert_eq!(empty_published.neighborhood_publication_installs, 1);
+        assert_eq!(empty_published.neighborhood_publication_fallbacks, 1);
     }
 
     #[wasm_bindgen_test]
