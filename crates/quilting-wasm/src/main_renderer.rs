@@ -407,11 +407,24 @@ struct SameContextLod {
     authority_packed: Vec<u32>,
     authority_changed_indices: Vec<u32>,
     authority_changed_packed: Vec<u32>,
+    /// One byte per latest parity-accepted classifier face. This is a ranking
+    /// hint only; topology deltas deliberately ignore it.
+    adaptive_face_priorities: Vec<u8>,
     batch_shadow: SameContextLodBatchShadow,
     diagnostics: SameContextLodDiagnostics,
 }
 
 impl SameContextLod {
+    fn retain_adaptive_face_priorities(&mut self, packed: &[u32]) {
+        self.adaptive_face_priorities.clear();
+        self.adaptive_face_priorities.reserve(packed.len());
+        self.adaptive_face_priorities.extend(packed.iter().map(|&word| {
+            unpack_lod_classification_fields(word)
+                .expect("packed classifier words were validated at readback")
+                .adaptation_priority
+        }));
+    }
+
     fn try_compare(&mut self) -> Result<(), String> {
         if self.completed.is_none() || self.authority_candidate.is_none() {
             return Ok(());
@@ -432,13 +445,14 @@ impl SameContextLod {
                 return Err(error);
             }
         };
-        self.compute.recycle_readback_vector(completed.packed);
         self.diagnostics.legacy_float_decodes =
             self.diagnostics.legacy_float_decodes.saturating_add(1);
         self.diagnostics.last_legacy_float_decode_bytes =
             lods.len().saturating_mul(std::mem::size_of::<f32>());
+        let completed_stamp = completed.stamp;
+        let completed_packed = completed.packed;
         let completed = SameContextLodDecodedCompleted {
-            stamp: completed.stamp,
+            stamp: completed_stamp,
             lods,
         };
         if let (Some(completed_pose), Some(authority_pose)) =
@@ -486,6 +500,7 @@ impl SameContextLod {
             Ok(parity) => parity,
             Err(error) => {
                 self.compute.recycle_decoded_vector(completed.lods);
+                self.compute.recycle_readback_vector(completed_packed);
                 return Err(error);
             }
         };
@@ -507,14 +522,17 @@ impl SameContextLod {
         if parity.mismatched_fields == 0 {
             self.diagnostics.exact_comparisons =
                 self.diagnostics.exact_comparisons.saturating_add(1);
+            self.retain_adaptive_face_priorities(&completed_packed);
             if let Some(previous) = self.batch_candidate.replace(completed) {
                 self.compute.recycle_decoded_vector(previous.lods);
             }
         } else {
             self.diagnostics.mismatched_comparisons =
                 self.diagnostics.mismatched_comparisons.saturating_add(1);
+            self.adaptive_face_priorities.clear();
             self.compute.recycle_decoded_vector(completed.lods);
         }
+        self.compute.recycle_readback_vector(completed_packed);
         Ok(())
     }
 
@@ -3621,6 +3639,13 @@ fn apply_adaptive_screen_plan(
                         AdaptiveScreenFaceCandidate {
                             source_face,
                             visible,
+                            screen_metric_priority: state
+                                .same_context_lod
+                                .as_ref()
+                                .and_then(|lod| {
+                                    lod.adaptive_face_priorities.get(face_index).copied()
+                                })
+                                .unwrap_or(0),
                             requested_lods: requested,
                             root_triangles,
                         }
@@ -4905,6 +4930,7 @@ pub fn mr_upload_composed_lod_model(
             authority_packed: Vec::new(),
             authority_changed_indices: Vec::new(),
             authority_changed_packed: Vec::new(),
+            adaptive_face_priorities: Vec::new(),
             batch_shadow,
             diagnostics: SameContextLodDiagnostics::default(),
         });
@@ -5249,6 +5275,11 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
         lod.compute.recycle_readback_vector(candidate.packed);
         return Ok(());
     }
+    state
+        .same_context_lod
+        .as_mut()
+        .expect("same-context LOD residency was retained")
+        .retain_adaptive_face_priorities(&candidate.packed);
     let packed_delta = diff_packed_lod_classifications(
         &candidate.packed,
         &state

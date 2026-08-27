@@ -631,6 +631,16 @@ state per face, so one coherent two-pass classification and one staged
 readback cover the scene; the animated-primary prefix uses the same contract
 without touching static authored assets. This table is backend-neutral input,
 not a WebGL transform-feedback abstraction.
+
+Current-view adaptive selection also consumes a backend-neutral one-byte risk
+ranking. The classifier derives it from within-patch projected metric variation
+and normalized pole proximity, then carries it in the high byte of the existing
+packed word. Resident topology remains entirely in the low 24 bits, so priority
+changes do not become topology deltas or expand readback traffic. Shadow mode
+admits the hint only after exact worker parity; Rust authority admits it only
+after pose-continuity acceptance. The pure-JavaScript implementation remains a
+rollback oracle with its historical stable ranking.
+
 WebGPU will replace transform feedback with compute preparation, reconcile LOD
 in storage, compact visible instances, and emit indirect draw arguments. CPU
 readback becomes optional telemetry rather than a frame dependency.

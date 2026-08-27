@@ -474,6 +474,8 @@ struct AdaptiveScreenFaceSelectionDiagnosticSnapshot {
     selected_faces: u64,
     partition_face_capacity: u64,
     omitted_by_capacity: u64,
+    priority_candidates: u64,
+    selected_max_priority: u8,
     selected_root_triangles: u64,
 }
 
@@ -485,6 +487,8 @@ impl From<AdaptiveScreenFaceSelectionDiagnostic> for AdaptiveScreenFaceSelection
             selected_faces: diagnostic.selected_faces,
             partition_face_capacity: diagnostic.partition_face_capacity,
             omitted_by_capacity: diagnostic.omitted_by_capacity,
+            priority_candidates: diagnostic.priority_candidates,
+            selected_max_priority: diagnostic.selected_max_priority,
             selected_root_triangles: diagnostic.selected_root_triangles,
         }
     }
@@ -1623,6 +1627,8 @@ mod tests {
                     selected_faces: 2,
                     partition_face_capacity: 2,
                     omitted_by_capacity: 0,
+                    priority_candidates: 0,
+                    selected_max_priority: 0,
                     selected_root_triangles: 2,
                 }),
                 2,
@@ -1808,6 +1814,8 @@ mod tests {
                     selected_faces: 2,
                     partition_face_capacity: 2,
                     omitted_by_capacity: 0,
+                    priority_candidates: 0,
+                    selected_max_priority: 0,
                     selected_root_triangles: 2,
                 }),
                 2,

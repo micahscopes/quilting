@@ -25,7 +25,7 @@ fn log_info(msg: &str) {
     eprintln!("{}", msg);
 }
 
-/// Pass 1 FBO payload: raw LOD exponents plus conservative visibility.
+/// Pass 1 FBO payload: raw LOD exponents plus visibility/adaptation priority.
 pub const FLOATS_PER_FACE_PASS1: usize = 4;
 
 /// Retained CPU output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index).
@@ -34,17 +34,17 @@ pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
 /// Lossless GPU readback ABI for one classifier record.
 ///
 /// The three four-bit exponent fields, three-bit S3 permutation, one-bit
-/// visibility flag, and eight-bit atlas index occupy the low 24 bits. Parity
-/// is derived exactly from the permutation. This cuts the WebGL2 staging and
-/// readback payload from six `f32`s to one `u32` without changing the retained
-/// CPU classification consumed by batching.
+/// visibility flag, eight-bit atlas index, and eight-bit adaptive priority fit
+/// in one word. Parity is derived exactly from the permutation. The priority
+/// is selection metadata, not topology, and is omitted from the historical
+/// six-float batch projection.
 pub const PACKED_LOD_OUTPUT_BYTES_PER_FACE: usize = std::mem::size_of::<u32>();
 
 const PACKED_LOD_EXPONENT_MASK: u32 = 0x0f;
 const PACKED_LOD_PERMUTATION_MASK: u32 = 0x07;
 const PACKED_LOD_VISIBLE_BIT: u32 = 1 << 15;
 const PACKED_LOD_ATLAS_SHIFT: u32 = 16;
-const PACKED_LOD_USED_MASK: u32 = 0x00ff_ffff;
+const PACKED_LOD_TOPOLOGY_MASK: u32 = 0x00ff_ffff;
 
 /// Validated semantic fields carried by one packed classifier word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +53,7 @@ pub struct PackedLodClassification {
     pub permutation: u8,
     pub parity_bucket: u8,
     pub atlas_index: Option<u8>,
+    pub adaptation_priority: u8,
 }
 
 impl PackedLodClassification {
@@ -72,12 +73,14 @@ impl PackedLodClassification {
     }
 }
 
-/// Encode one shader-facing classifier record into the shared 24-bit ABI.
+/// Encode one shader-facing classifier record into the shared 32-bit ABI.
+/// Topology occupies the low 24 bits and adaptation priority the high byte.
 /// Exponents are stored rather than their exact power-of-two `f32` values.
 pub fn pack_lod_classification(
     exponents: [u32; 3],
     permutation: u32,
     atlas_index: Option<u32>,
+    adaptation_priority: u8,
 ) -> Result<u32, String> {
     if exponents.iter().any(|&exponent| exponent > 9) {
         return Err("packed LOD exponent exceeds the atlas ABI".to_string());
@@ -91,7 +94,8 @@ pub fn pack_lod_classification(
     let mut packed = exponents[0]
         | (exponents[1] << 4)
         | (exponents[2] << 8)
-        | (permutation << 12);
+        | (permutation << 12)
+        | (u32::from(adaptation_priority) << 24);
     if let Some(atlas_index) = atlas_index {
         packed |= PACKED_LOD_VISIBLE_BIT | (atlas_index << PACKED_LOD_ATLAS_SHIFT);
     }
@@ -102,9 +106,6 @@ pub fn pack_lod_classification(
 pub fn unpack_lod_classification_fields(
     packed: u32,
 ) -> Result<PackedLodClassification, String> {
-    if packed & !PACKED_LOD_USED_MASK != 0 {
-        return Err("packed LOD record uses reserved high bits".to_string());
-    }
     let exponents = [
         packed & PACKED_LOD_EXPONENT_MASK,
         (packed >> 4) & PACKED_LOD_EXPONENT_MASK,
@@ -131,6 +132,7 @@ pub fn unpack_lod_classification_fields(
         permutation: permutation as u8,
         parity_bucket: u8::from(matches!(permutation, 1 | 2 | 5)),
         atlas_index,
+        adaptation_priority: (packed >> 24) as u8,
     })
 }
 
@@ -191,7 +193,7 @@ pub fn diff_packed_lod_classifications(
     }
     debug_assert!(current.len() <= u32::MAX as usize);
     for (face, (&old, &new)) in previous.iter().zip(current).enumerate() {
-        if old != new {
+        if old & PACKED_LOD_TOPOLOGY_MASK != new & PACKED_LOD_TOPOLOGY_MASK {
             changed_faces.push(face as u32);
             changed_words.push(new);
         }
@@ -2198,6 +2200,16 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_priority_survives_without_expanding_the_readback() {
+        assert!(LOD_COMPUTE_VS.contains("float metric_variation = max("));
+        assert!(LOD_COMPUTE_VS.contains("float pole_octaves = 0.0"));
+        assert!(LOD_COMPUTE_VS.contains("1.0 + adaptive_priority"));
+        assert!(LOD_COHERENCE_VS.contains("int adaptive_priority = clamp("));
+        assert!(LOD_COHERENCE_VS.contains("uint(adaptive_priority) << 24u"));
+        assert_eq!(PACKED_LOD_OUTPUT_BYTES_PER_FACE, 4);
+    }
+
+    #[test]
     fn gpu_lod_pass_allows_the_source_triangle_level() {
         assert!(LOD_COMPUTE_VS.contains(
             "lod_a = min(lod_a, clamp(floor_pow2"
@@ -2403,47 +2415,55 @@ mod tests {
                 for c in 0..=9 {
                     for permutation in 0..=5 {
                         for atlas_index in [None, Some(0), Some(1), Some(254), Some(255)] {
-                            let packed = pack_lod_classification(
-                                [a, b, c],
-                                permutation,
-                                atlas_index,
-                            )
-                            .unwrap();
-                            let fields = unpack_lod_classification_fields(packed).unwrap();
-                            assert_eq!(
-                                fields.canonical,
-                                [1u32 << a, 1u32 << b, 1u32 << c],
-                            );
-                            assert_eq!(fields.permutation, permutation as u8);
-                            assert_eq!(
-                                fields.parity_bucket,
-                                u8::from(matches!(permutation, 1 | 2 | 5)),
-                            );
-                            assert_eq!(
-                                fields.atlas_index,
-                                atlas_index.map(|index| index as u8),
-                            );
-                            let semantic = fields.into_face_lod_classification();
-                            assert_eq!(semantic.requested.canonical, fields.canonical);
-                            assert_eq!(semantic.requested.perm_index, permutation as usize);
-                            assert_eq!(
-                                semantic.requested.parity_bucket,
-                                fields.parity_bucket as usize,
-                            );
-                            assert_eq!(semantic.visible, atlas_index.is_some());
-                            let decoded = unpack_lod_classification(packed).unwrap();
-                            assert_eq!(decoded[0], (1u32 << a) as f32);
-                            assert_eq!(decoded[1], (1u32 << b) as f32);
-                            assert_eq!(decoded[2], (1u32 << c) as f32);
-                            assert_eq!(decoded[3], permutation as f32);
-                            assert_eq!(
-                                decoded[4],
-                                if matches!(permutation, 1 | 2 | 5) { -1.0 } else { 1.0 },
-                            );
-                            assert_eq!(
-                                decoded[5],
-                                atlas_index.map_or(-1.0, |index| index as f32),
-                            );
+                            for adaptation_priority in [0, 1, 127, 255] {
+                                let packed = pack_lod_classification(
+                                    [a, b, c],
+                                    permutation,
+                                    atlas_index,
+                                    adaptation_priority,
+                                )
+                                .unwrap();
+                                let fields = unpack_lod_classification_fields(packed).unwrap();
+                                assert_eq!(
+                                    fields.canonical,
+                                    [1u32 << a, 1u32 << b, 1u32 << c],
+                                );
+                                assert_eq!(fields.permutation, permutation as u8);
+                                assert_eq!(
+                                    fields.parity_bucket,
+                                    u8::from(matches!(permutation, 1 | 2 | 5)),
+                                );
+                                assert_eq!(
+                                    fields.atlas_index,
+                                    atlas_index.map(|index| index as u8),
+                                );
+                                assert_eq!(fields.adaptation_priority, adaptation_priority);
+                                let semantic = fields.into_face_lod_classification();
+                                assert_eq!(semantic.requested.canonical, fields.canonical);
+                                assert_eq!(semantic.requested.perm_index, permutation as usize);
+                                assert_eq!(
+                                    semantic.requested.parity_bucket,
+                                    fields.parity_bucket as usize,
+                                );
+                                assert_eq!(semantic.visible, atlas_index.is_some());
+                                let decoded = unpack_lod_classification(packed).unwrap();
+                                assert_eq!(decoded[0], (1u32 << a) as f32);
+                                assert_eq!(decoded[1], (1u32 << b) as f32);
+                                assert_eq!(decoded[2], (1u32 << c) as f32);
+                                assert_eq!(decoded[3], permutation as f32);
+                                assert_eq!(
+                                    decoded[4],
+                                    if matches!(permutation, 1 | 2 | 5) {
+                                        -1.0
+                                    } else {
+                                        1.0
+                                    },
+                                );
+                                assert_eq!(
+                                    decoded[5],
+                                    atlas_index.map_or(-1.0, |index| index as f32),
+                                );
+                            }
                         }
                     }
                 }
@@ -2452,14 +2472,22 @@ mod tests {
     }
 
     #[test]
-    fn packed_lod_readback_has_a_stable_24_bit_layout() {
-        let packed = pack_lod_classification([1, 5, 9], 4, Some(254)).unwrap();
-        assert_eq!(packed, 1 | (5 << 4) | (9 << 8) | (4 << 12) | (1 << 15) | (254 << 16));
+    fn packed_lod_readback_has_a_stable_32_bit_layout() {
+        let packed = pack_lod_classification([1, 5, 9], 4, Some(254), 173).unwrap();
+        assert_eq!(
+            packed,
+            1 | (5 << 4) | (9 << 8) | (4 << 12) | (1 << 15) | (254 << 16) | (173 << 24),
+        );
         assert_eq!(PACKED_LOD_OUTPUT_BYTES_PER_FACE, 4);
-        assert!(pack_lod_classification([10, 0, 0], 0, None).is_err());
-        assert!(pack_lod_classification([0, 0, 0], 6, None).is_err());
-        assert!(pack_lod_classification([0, 0, 0], 0, Some(256)).is_err());
-        assert!(unpack_lod_classification(1 << 24).is_err());
+        assert!(pack_lod_classification([10, 0, 0], 0, None, 0).is_err());
+        assert!(pack_lod_classification([0, 0, 0], 6, None, 0).is_err());
+        assert!(pack_lod_classification([0, 0, 0], 0, Some(256), 0).is_err());
+        assert_eq!(
+            unpack_lod_classification_fields(1 << 24)
+                .unwrap()
+                .adaptation_priority,
+            1,
+        );
         assert!(unpack_lod_classification(10).is_err());
         assert!(unpack_lod_classification(6 << 12).is_err());
     }
@@ -2499,6 +2527,16 @@ mod tests {
         );
         assert_eq!(faces, vec![1, 3]);
         assert_eq!(words, vec![20, 40]);
+
+        let priority_only = diff_packed_lod_classifications(
+            &[1 | (9 << 24), 20 | (7 << 24), 3 | (5 << 24), 40 | (3 << 24)],
+            &[1, 20, 3, 40],
+            &mut faces,
+            &mut words,
+        );
+        assert!(priority_only.is_unchanged());
+        assert!(faces.is_empty());
+        assert!(words.is_empty());
 
         let unchanged = diff_packed_lod_classifications(
             &[1, 20, 3, 40],

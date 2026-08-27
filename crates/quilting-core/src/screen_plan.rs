@@ -125,6 +125,10 @@ impl AdaptiveScreenMeshPlan {
 pub struct AdaptiveScreenFaceCandidate {
     pub source_face: u32,
     pub visible: bool,
+    /// Quantized within-patch screen-metric variation / pole-proximity hint.
+    /// This ranks where subdivision is useful; root atlas cost remains the
+    /// secondary workload priority.
+    pub screen_metric_priority: u8,
     pub requested_lods: [u32; 3],
     /// Exact triangle count of the candidate's current root atlas patch.
     pub root_triangles: u64,
@@ -145,6 +149,8 @@ pub struct AdaptiveScreenFaceSelectionDiagnostic {
     pub selected_faces: u64,
     pub partition_face_capacity: u64,
     pub omitted_by_capacity: u64,
+    pub priority_candidates: u64,
+    pub selected_max_priority: u8,
     pub selected_root_triangles: u64,
 }
 
@@ -188,6 +194,7 @@ impl std::error::Error for AdaptiveScreenFaceSelectionError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RankedAdaptiveScreenFace {
     source_face: u32,
+    screen_metric_priority: u8,
     root_triangles: u64,
     maximum_lod: u32,
     lod_exponent_sum: u32,
@@ -195,8 +202,9 @@ struct RankedAdaptiveScreenFace {
 
 impl Ord for RankedAdaptiveScreenFace {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.root_triangles
-            .cmp(&other.root_triangles)
+        self.screen_metric_priority
+            .cmp(&other.screen_metric_priority)
+            .then_with(|| self.root_triangles.cmp(&other.root_triangles))
             .then_with(|| self.maximum_lod.cmp(&other.maximum_lod))
             .then_with(|| self.lod_exponent_sum.cmp(&other.lod_exponent_sum))
             // A lower stable source identity wins an otherwise exact tie.
@@ -210,7 +218,8 @@ impl PartialOrd for RankedAdaptiveScreenFace {
     }
 }
 
-/// Select the most expensive currently visible roots with bounded scratch.
+/// Select the most distortion-sensitive currently visible roots with bounded
+/// scratch, using current root cost to rank otherwise equal candidates.
 ///
 /// Candidates must be strictly ordered by stable source identity. The
 /// selector keeps only the best `k` entries in a min-heap, so a large scene
@@ -232,6 +241,7 @@ pub fn select_adaptive_screen_faces(
     let mut previous_face = None;
     let mut examined_faces = 0u64;
     let mut visible_faces = 0u64;
+    let mut priority_candidates = 0u64;
 
     for candidate in candidates {
         examined_faces = examined_faces.saturating_add(1);
@@ -248,6 +258,8 @@ pub fn select_adaptive_screen_faces(
             continue;
         }
         visible_faces = visible_faces.saturating_add(1);
+        priority_candidates = priority_candidates
+            .saturating_add(u64::from(candidate.screen_metric_priority != 0));
         for (edge, lod) in candidate.requested_lods.into_iter().enumerate() {
             if !lod.is_power_of_two() {
                 return Err(AdaptiveScreenFaceSelectionError::InvalidRequestedLod {
@@ -264,6 +276,7 @@ pub fn select_adaptive_screen_faces(
 
         let ranked = RankedAdaptiveScreenFace {
             source_face: candidate.source_face,
+            screen_metric_priority: candidate.screen_metric_priority,
             root_triangles: candidate.root_triangles,
             maximum_lod: candidate.requested_lods.into_iter().max().unwrap_or(1),
             lod_exponent_sum: candidate
@@ -288,6 +301,11 @@ pub fn select_adaptive_screen_faces(
     let selected_root_triangles = ranked.iter().fold(0u64, |total, candidate| {
         total.saturating_add(candidate.root_triangles)
     });
+    let selected_max_priority = ranked
+        .iter()
+        .map(|candidate| candidate.screen_metric_priority)
+        .max()
+        .unwrap_or(0);
     let selected_faces = ranked.len() as u64;
     Ok(AdaptiveScreenFaceSelection {
         faces: ranked
@@ -300,6 +318,8 @@ pub fn select_adaptive_screen_faces(
             selected_faces,
             partition_face_capacity: partition_face_capacity as u64,
             omitted_by_capacity: visible_faces.saturating_sub(selected_faces),
+            priority_candidates,
+            selected_max_priority,
             selected_root_triangles,
         },
     })
@@ -764,24 +784,28 @@ mod tests {
                 AdaptiveScreenFaceCandidate {
                     source_face: 0,
                     visible: true,
+                    screen_metric_priority: 0,
                     requested_lods: [2, 2, 2],
                     root_triangles: 8,
                 },
                 AdaptiveScreenFaceCandidate {
                     source_face: 1,
                     visible: false,
+                    screen_metric_priority: 0,
                     requested_lods: [64, 64, 64],
                     root_triangles: 8_192,
                 },
                 AdaptiveScreenFaceCandidate {
                     source_face: 2,
                     visible: true,
+                    screen_metric_priority: 0,
                     requested_lods: [8, 8, 8],
                     root_triangles: 128,
                 },
                 AdaptiveScreenFaceCandidate {
                     source_face: 3,
                     visible: true,
+                    screen_metric_priority: 0,
                     requested_lods: [4, 4, 4],
                     root_triangles: 32,
                 },
@@ -807,10 +831,47 @@ mod tests {
     }
 
     #[test]
+    fn face_selector_prefers_screen_metric_risk_over_equal_root_cost_ordering() {
+        let selection = select_adaptive_screen_faces(
+            [
+                AdaptiveScreenFaceCandidate {
+                    source_face: 0,
+                    visible: true,
+                    screen_metric_priority: 0,
+                    requested_lods: [64; 3],
+                    root_triangles: 8_192,
+                },
+                AdaptiveScreenFaceCandidate {
+                    source_face: 1,
+                    visible: true,
+                    screen_metric_priority: 200,
+                    requested_lods: [2; 3],
+                    root_triangles: 8,
+                },
+            ],
+            AdaptiveScreenFaceSelectionPolicy {
+                max_faces: 1,
+                partition_policy: ScreenPartitionPolicy {
+                    max_leaves: 8,
+                    ..ScreenPartitionPolicy::default()
+                },
+                max_partition_leaves: 8,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selection.faces, [1]);
+        assert_eq!(selection.diagnostic.priority_candidates, 1);
+        assert_eq!(selection.diagnostic.selected_max_priority, 200);
+        assert_eq!(selection.diagnostic.selected_root_triangles, 8);
+    }
+
+    #[test]
     fn face_selector_uses_partition_capacity_and_stable_ties() {
         let candidates = (0..4).map(|source_face| AdaptiveScreenFaceCandidate {
             source_face,
             visible: true,
+            screen_metric_priority: 0,
             requested_lods: [4, 4, 4],
             root_triangles: 32,
         });
@@ -847,12 +908,14 @@ mod tests {
                 AdaptiveScreenFaceCandidate {
                     source_face: 1,
                     visible: false,
+                    screen_metric_priority: 0,
                     requested_lods: [1; 3],
                     root_triangles: 1,
                 },
                 AdaptiveScreenFaceCandidate {
                     source_face: 1,
                     visible: true,
+                    screen_metric_priority: 0,
                     requested_lods: [1; 3],
                     root_triangles: 1,
                 },
@@ -872,6 +935,7 @@ mod tests {
             [AdaptiveScreenFaceCandidate {
                 source_face: 0,
                 visible: true,
+                screen_metric_priority: 0,
                 requested_lods: [1, 3, 1],
                 root_triangles: 1,
             }],
@@ -890,6 +954,7 @@ mod tests {
             [AdaptiveScreenFaceCandidate {
                 source_face: 0,
                 visible: false,
+                screen_metric_priority: 0,
                 requested_lods: [1; 3],
                 root_triangles: 0,
             }],

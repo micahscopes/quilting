@@ -322,6 +322,7 @@ void emit_face(vec4 payload) {
 
 void main() {
     float lod_a, lod_b, lod_c;
+    float adaptive_priority = 0.0;
 
     active_mob_a = mob_a;
     active_mob_b = mob_b;
@@ -538,10 +539,33 @@ void main() {
                 px_int_c = min(projected_peak * source_l_c, max_screen_extent);
             }
         }
+        // Quantize a bounded ranking hint for the Rust current-view adaptive
+        // selector. Root atlas cost alone produces enormous equal-cost classes
+        // on dense assets; this hint identifies patches whose interior metric
+        // or pole proximity makes dyadic subdivision materially more useful.
+        // It rides in the otherwise unused high byte of the existing packed
+        // readback word, so it adds no GPU/CPU transfer traffic.
+        float metric_variation = max(
+            max(px_int_a / max(px_a, 1.0), px_int_b / max(px_b, 1.0)),
+            px_int_c / max(px_c, 1.0)
+        );
+        float variation_octaves = log2(max(metric_variation, 1.0));
+        float pole_octaves = 0.0;
+        if (patch_valid) {
+            float source_scale = max(source_l_a, max(source_l_b, source_l_c));
+            float relative_pole_distance = sqrt(max(dT2, 1e-30))
+                / max(source_scale, 1e-15);
+            pole_octaves = max(0.0, -log2(max(relative_pole_distance, 1e-8)));
+        }
+        adaptive_priority = ceil(clamp(
+            max(variation_octaves, pole_octaves) * 32.0,
+            0.0,
+            255.0
+        ));
         lod_a = min(lod_a, clamp(floor_pow2(min(max(px_a, px_int_a), max_screen_extent) / min_px), 1.0, max_lod));
         lod_b = min(lod_b, clamp(floor_pow2(min(max(px_b, px_int_b), max_screen_extent) / min_px), 1.0, max_lod));
         lod_c = min(lod_c, clamp(floor_pow2(min(max(px_c, px_int_c), max_screen_extent) / min_px), 1.0, max_lod));
     }
 
-    emit_face(vec4(log2(lod_a), log2(lod_b), log2(lod_c), 1.0));
+    emit_face(vec4(log2(lod_a), log2(lod_b), log2(lod_c), 1.0 + adaptive_priority));
 }

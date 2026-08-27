@@ -8,8 +8,9 @@ precision highp int;
 // data (static texture), enforces shared-edge LOD agreement via max,
 // then sorts to canonical form and looks up the atlas index.
 
-// Pass 1 output: LOD exponents + visibility per face.
-// Tiled 4096-wide RGBA32F: texel = (lod_a, lod_b, lod_c, visible).
+// Pass 1 output: LOD exponents + visibility/adaptation priority per face.
+// Tiled 4096-wide RGBA32F. Alpha is zero when culled; a visible face stores
+// `1 + priority`, with priority quantized to one byte.
 uniform highp sampler2D u_pass1_lods;
 
 // Adjacency: for each face × 3 edges, (neighbor_face, neighbor_lod_idx, 0, 0).
@@ -23,16 +24,26 @@ uniform highp sampler2D u_atlas_lut;
 uniform int u_num_faces;
 
 // Lossless transform-feedback readback ABI. Exponents occupy 4 bits each,
-// permutation 3 bits, visibility 1 bit, and atlas index 8 bits. Rust derives
-// parity from the permutation and expands the word to the historical six-float
-// batch ABI after reading only four bytes per face.
+// permutation 3 bits, visibility 1 bit, atlas index 8 bits, and bounded
+// adaptation priority 8 bits. Rust derives parity from the permutation and
+// expands topology to the historical six-float batch ABI after reading only
+// four bytes per face.
 flat out highp uint out_packed;
 
-uint pack_lod(int ea, int eb, int ec, int perm, bool visible, int atlas_index) {
+uint pack_lod(
+    int ea,
+    int eb,
+    int ec,
+    int perm,
+    bool visible,
+    int atlas_index,
+    int adaptive_priority
+) {
     uint packed = uint(ea)
         | (uint(eb) << 4u)
         | (uint(ec) << 8u)
-        | (uint(perm) << 12u);
+        | (uint(perm) << 12u)
+        | (uint(adaptive_priority) << 24u);
     if (visible) {
         packed |= (1u << 15u) | (uint(atlas_index) << 16u);
     }
@@ -58,7 +69,7 @@ vec2 read_adj(int face_id, int edge) {
 void main() {
     int fi = gl_VertexID;
     if (fi >= u_num_faces) {
-        out_packed = pack_lod(0, 0, 0, 0, false, 0);
+        out_packed = pack_lod(0, 0, 0, 0, false, 0, 0);
         gl_Position = vec4(0.0);
         return;
     }
@@ -71,6 +82,7 @@ void main() {
             int(face.z + 0.5),
             0,
             false,
+            0,
             0
         );
         gl_Position = vec4(0.0);
@@ -119,7 +131,8 @@ void main() {
     int lut_x = key % 40;
     int lut_y = key / 40;
     int atlas_index = int(texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0 + 0.5);
-    out_packed = pack_lod(sa, sb, sc, perm, true, atlas_index);
+    int adaptive_priority = clamp(int(face.w - 1.0 + 0.5), 0, 255);
+    out_packed = pack_lod(sa, sb, sc, perm, true, atlas_index, adaptive_priority);
 
     gl_Position = vec4(0.0);
 }
