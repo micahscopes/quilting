@@ -152,14 +152,14 @@ impl Renderer {
     /// Render a full frame with the given mode, camera, and batches.
     pub fn render(
         &self,
-        mode: pass::RenderMode,
+        style: quilting_core::render::RenderStyle,
         camera: &pass::Camera,
         batches: &[pass::RenderBatch],
     ) -> quilting_core::render::RenderSubmissionStats {
         pass::render_frame(
             &self.gl,
             &self.programs,
-            mode,
+            style,
             camera,
             batches,
             &self.vtx_ubo,

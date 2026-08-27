@@ -29,7 +29,7 @@ use quilting_renderer::compute::{
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
     camera_for_batch, record_indexed_submission, same_vertex_uniform_state, Camera, RenderBatch,
-    RenderMode, IDENTITY_MATRIX,
+    IDENTITY_MATRIX,
 };
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
@@ -317,7 +317,7 @@ struct MainState {
     face_render_nodes: Vec<usize>,
     materials: Vec<PbrParams>,
     num_faces: usize,
-    render_mode: RenderMode,
+    render_style: RenderStyle,
     /// Analytic character-matcap profile selected by the browser shell.
     matcap_style: f32,
     mobius: [f32; 16],
@@ -1609,7 +1609,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             face_render_nodes: Vec::new(),
             materials: Vec::new(),
             num_faces: 0,
-            render_mode: RenderMode::Pbr,
+            render_style: RenderStyle::Pbr,
             matcap_style: 1.0,
             mobius: IDENTITY_MOBIUS,
             mobius_orientation: 1,
@@ -1674,11 +1674,12 @@ pub fn mr_resize(width: i32, height: i32) {
 pub fn mr_set_render_mode(mode: &str) {
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
-            st.render_mode = match mode {
-                "pbr" => RenderMode::Pbr, "matcap" => RenderMode::Matcap,
-                "wire" => RenderMode::Wire, "normals" => RenderMode::Normals,
-                "both" => RenderMode::Both, "lod" => RenderMode::Lod, "stretch" => RenderMode::Stretch,
-                _ => RenderMode::Pbr,
+            st.render_style = match mode {
+                "pbr" => RenderStyle::Pbr, "matcap" => RenderStyle::Matcap,
+                "wire" => RenderStyle::Wire, "normals" => RenderStyle::Normals,
+                "both" => RenderStyle::MatcapWire, "lod" => RenderStyle::Lod,
+                "stretch" => RenderStyle::Stretch,
+                _ => RenderStyle::Pbr,
             };
         }
     });
@@ -2079,18 +2080,6 @@ fn refresh_render_shadow_scene(renderer: &mut MainState) {
     }
 }
 
-fn render_style(mode: RenderMode) -> RenderStyle {
-    match mode {
-        RenderMode::Pbr => RenderStyle::Pbr,
-        RenderMode::Matcap => RenderStyle::Matcap,
-        RenderMode::Wire => RenderStyle::Wire,
-        RenderMode::Normals => RenderStyle::Normals,
-        RenderMode::Both => RenderStyle::MatcapWire,
-        RenderMode::Lod => RenderStyle::Lod,
-        RenderMode::Stretch => RenderStyle::Stretch,
-    }
-}
-
 fn observe_render_submission(
     renderer: &mut MainState,
     camera: &Camera,
@@ -2102,7 +2091,7 @@ fn observe_render_submission(
     let selected_node = usize::try_from(renderer.selected_node).ok();
     let highlight_face = u32::try_from(renderer.highlight_face).ok();
     renderer.render_shadow.observe(
-        render_style(renderer.render_mode),
+        renderer.render_style,
         RenderView {
             viewport: [
                 renderer.viewport_size.0.max(0) as u32,
@@ -7016,7 +7005,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.skipped_patch_visibility_frames.saturating_add(1);
             state.last_visibility_patch_instances = 0;
         }
-        let has_transmission = if matches!(state.render_mode, RenderMode::Pbr) {
+        let has_transmission = if state.render_style == RenderStyle::Pbr {
             let default_material = PbrParams::default();
             state.render_batches.iter().any(|batch| {
                 let (_, material) = pbr_material_for_index(
@@ -7090,8 +7079,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let black = state.texture_cache.placeholder_black();
         let cube = state.texture_cache.placeholder_cube();
 
-        match state.render_mode {
-            RenderMode::Pbr => {
+        match state.render_style {
+            RenderStyle::Pbr => {
                 // Env cubemaps: bind once (shared across all batches)
                 unsafe {
                     gl.active_texture(glow::TEXTURE0 + 5);
@@ -7596,7 +7585,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.renderer.end_frame();
                 return;
             }
-            RenderMode::Lod => {
+            RenderStyle::Lod => {
                 state
                     .renderer
                     .matcap_ubo()
@@ -7611,7 +7600,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         let submission_stats = state
             .renderer
-            .render(state.render_mode, &camera, render_batches);
+            .render(state.render_style, &camera, render_batches);
         observe_render_submission(state, &camera, submission_stats);
 
         // Highlight pass: overlay picked QB patch with cyan

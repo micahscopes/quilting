@@ -1,29 +1,10 @@
 //! Render passes: configure GL state and issue draw calls per render mode.
 
 use glow::HasContext;
-use quilting_core::render::{RenderGeometry, RenderPass, RenderSubmissionStats};
+use quilting_core::render::{RenderGeometry, RenderPass, RenderStyle, RenderSubmissionStats};
 
 use crate::buffer::{MeshBuffers, MeshDraw, VertexUniformBuf, WireUniformBuf};
 use crate::shader::Programs;
-
-/// Rendering modes supported by the quilting pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenderMode {
-    /// Matcap-style shading with density heatmap.
-    Matcap,
-    /// Wireframe overlay (with optional density coloring).
-    Wire,
-    /// Normal visualization (RGB-encoded normals).
-    Normals,
-    /// Combined: solid matcap + wireframe overlay.
-    Both,
-    /// Full PBR rendering (per-material texture binding).
-    Pbr,
-    /// LOD heatmap visualization.
-    Lod,
-    /// Möbius stretch heatmap (conformal distortion debug).
-    Stretch,
-}
 
 /// Camera, projection, and scene-level state needed for rendering.
 pub struct Camera {
@@ -272,7 +253,7 @@ pub fn record_indexed_submission(
 pub fn render_frame(
     gl: &glow::Context,
     programs: &Programs,
-    mode: RenderMode,
+    style: RenderStyle,
     camera: &Camera,
     batches: &[RenderBatch],
     vtx_ubo: &VertexUniformBuf,
@@ -281,13 +262,13 @@ pub fn render_frame(
     let mut stats = RenderSubmissionStats::default();
     vtx_ubo.bind(gl);
 
-    let draw_pbr = mode == RenderMode::Pbr;
+    let draw_pbr = style == RenderStyle::Pbr;
     let draw_matcap = matches!(
-        mode,
-        RenderMode::Matcap | RenderMode::Both | RenderMode::Lod
+        style,
+        RenderStyle::Matcap | RenderStyle::MatcapWire | RenderStyle::Lod
     );
-    let draw_wire = matches!(mode, RenderMode::Wire | RenderMode::Both);
-    let draw_normals = mode == RenderMode::Normals;
+    let draw_wire = matches!(style, RenderStyle::Wire | RenderStyle::MatcapWire);
+    let draw_normals = style == RenderStyle::Normals;
 
     // PBR pass (filled triangles with PBR shader)
     if draw_pbr {
@@ -315,7 +296,7 @@ pub fn render_frame(
             camera,
             batches,
             vtx_ubo,
-            if mode == RenderMode::Lod {
+            if style == RenderStyle::Lod {
                 RenderPass::Lod
             } else {
                 RenderPass::Matcap
@@ -361,7 +342,7 @@ pub fn render_frame(
     }
 
     // Stretch heatmap pass (filled triangles)
-    if mode == RenderMode::Stretch {
+    if style == RenderStyle::Stretch {
         unsafe {
             gl.use_program(Some(programs.stretch));
         }
