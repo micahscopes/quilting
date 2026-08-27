@@ -1414,6 +1414,53 @@ struct BatchUpdateStats {
     last_lod_corrections: u64,
     last_missing_atlas_entries: u64,
     last_gpu_failures: u64,
+    total_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    retain_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    balance_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    bucket_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+    upload_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchUpdateTimingSnapshot {
+    total_ms: TimingDistributionSnapshot,
+    retain_ms: TimingDistributionSnapshot,
+    balance_ms: TimingDistributionSnapshot,
+    bucket_ms: TimingDistributionSnapshot,
+    upload_ms: TimingDistributionSnapshot,
+}
+
+impl BatchUpdateStats {
+    fn clear_timings(&mut self) {
+        self.total_ms.clear();
+        self.retain_ms.clear();
+        self.balance_ms.clear();
+        self.bucket_ms.clear();
+        self.upload_ms.clear();
+    }
+
+    fn timing_snapshot(&self) -> BatchUpdateTimingSnapshot {
+        BatchUpdateTimingSnapshot {
+            total_ms: self.total_ms.snapshot(),
+            retain_ms: self.retain_ms.snapshot(),
+            balance_ms: self.balance_ms.snapshot(),
+            bucket_ms: self.bucket_ms.snapshot(),
+            upload_ms: self.upload_ms.snapshot(),
+        }
+    }
+}
+
+fn finish_batch_update_timing(
+    stats: &mut BatchUpdateStats,
+    total_started_ms: f64,
+    upload_started_ms: Option<f64>,
+) {
+    let finished_ms = browser_now_ms();
+    stats
+        .upload_ms
+        .record(upload_started_ms.map_or(0.0, |started_ms| finished_ms - started_ms));
+    stats.total_ms.record(finished_ms - total_started_ms);
 }
 
 struct GpuBatch {
@@ -1821,6 +1868,7 @@ pub fn mr_reset_runtime_timing_diagnostics() -> Result<(), JsValue> {
             .as_mut()
             .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
         state.render_timing.clear();
+        state.batch_update_stats.clear_timings();
         if let Some(lod) = state.same_context_lod.as_mut() {
             lod.diagnostics.clear_timings();
         }
@@ -4811,6 +4859,12 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
         }
         js_sys::Reflect::set(
             &result,
+            &"batchTiming".into(),
+            &serde_wasm_bindgen::to_value(&batch_stats.timing_snapshot())
+                .unwrap_or(JsValue::NULL),
+        ).ok();
+        js_sys::Reflect::set(
+            &result,
             &"maxSameMaxAdjacentTriangleRatio".into(),
             &JsValue::from(max_adjacent_triangle_ratio),
         ).ok();
@@ -7204,6 +7258,9 @@ fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
     state.batch_update_stats.calls = state.batch_update_stats.calls.saturating_add(1);
     state.batch_update_stats.adaptive_refresh_calls =
         state.batch_update_stats.adaptive_refresh_calls.saturating_add(1);
+    let total_started_ms = browser_now_ms();
+    state.batch_update_stats.retain_ms.record(0.0);
+    state.batch_update_stats.balance_ms.record(0.0);
     perf_mark("batch-group-start");
     perf_mark("batch-retain-start");
     perf_mark("batch-retain-end");
@@ -7216,16 +7273,27 @@ fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
         "batch-balance-end",
     );
     perf_mark("batch-bucket-start");
+    let bucket_started_ms = browser_now_ms();
     let initial = bounded_standby_resident_lod();
     let prepared = prepare_adaptive_batch_groups(state, initial);
+    state
+        .batch_update_stats
+        .bucket_ms
+        .record(browser_now_ms() - bucket_started_ms);
     perf_mark("batch-bucket-end");
     perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
     perf_mark("batch-group-end");
     perf_measure("batch-group", "batch-group-start", "batch-group-end");
     state.adaptive_batch_transition_pending = true;
     perf_mark("batch-upload-start");
+    let upload_started_ms = browser_now_ms();
     if prepared.reused_published {
         commit_reused_adaptive_groups(state);
+        finish_batch_update_timing(
+            &mut state.batch_update_stats,
+            total_started_ms,
+            Some(upload_started_ms),
+        );
         perf_mark("batch-upload-end");
         perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
         return true;
@@ -7241,6 +7309,11 @@ fn refresh_adaptive_picked_batches(state: &mut MainState) -> bool {
             .adaptive_refresh_noops
             .saturating_add(1);
     }
+    finish_batch_update_timing(
+        &mut state.batch_update_stats,
+        total_started_ms,
+        Some(upload_started_ms),
+    );
     perf_mark("batch-upload-end");
     perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
     publication.published
@@ -7521,11 +7594,13 @@ fn update_batches_in_state(
     publication_payload: RetainedLodPublication<'_>,
     face_indices: Option<&[u32]>,
 ) {
+        let total_started_ms = browser_now_ms();
         state.batch_update_stats.calls += 1;
 
         // Phase 1: bucket sort to get face groupings (fast O(n), no instance data copy)
         perf_mark("batch-group-start");
         perf_mark("batch-retain-start");
+        let retain_started_ms = browser_now_ms();
         let nf = state.num_faces;
         // Model metadata can arrive before its instance buffer. Validate at
         // the consumption boundary so a previous model's face count cannot
@@ -7583,12 +7658,23 @@ fn update_batches_in_state(
                 )
             }
         };
+        state
+            .batch_update_stats
+            .retain_ms
+            .record(browser_now_ms() - retain_started_ms);
         perf_mark("batch-retain-end");
         perf_measure("batch-retain", "batch-retain-start", "batch-retain-end");
         let publication = match publication {
             Ok(publication) => publication,
             Err(error) => {
                 warn!("Rejected malformed LOD publication: {error}");
+                state.batch_update_stats.balance_ms.record(0.0);
+                state.batch_update_stats.bucket_ms.record(0.0);
+                finish_batch_update_timing(
+                    &mut state.batch_update_stats,
+                    total_started_ms,
+                    None,
+                );
                 perf_mark("batch-group-end");
                 perf_measure("batch-group", "batch-group-start", "batch-group-end");
                 return;
@@ -7600,6 +7686,7 @@ fn update_batches_in_state(
         topology_changed |= admitted_topology_changed;
 
         perf_mark("batch-balance-start");
+        let balance_started_ms = browser_now_ms();
         let lod_corrections = if let Some(topology) = state.lod_topology.as_ref() {
             batch::reconcile_resident_lods_from_requests_with_grading(
                 &state.requested_face_lods,
@@ -7615,6 +7702,10 @@ fn update_batches_in_state(
             }
             0
         };
+        state
+            .batch_update_stats
+            .balance_ms
+            .record(browser_now_ms() - balance_started_ms);
         perf_mark("batch-balance-end");
         perf_measure(
             "batch-balance",
@@ -7634,6 +7725,12 @@ fn update_batches_in_state(
 
         if !topology_changed {
             state.batch_update_stats.unchanged_calls += 1;
+            state.batch_update_stats.bucket_ms.record(0.0);
+            finish_batch_update_timing(
+                &mut state.batch_update_stats,
+                total_started_ms,
+                None,
+            );
             perf_mark("batch-bucket-start");
             perf_mark("batch-bucket-end");
             perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
@@ -7646,6 +7743,7 @@ fn update_batches_in_state(
         let transactional_upload =
             state.adaptive_picked.is_enabled() || state.adaptive_batch_transition_pending;
         perf_mark("batch-bucket-start");
+        let bucket_started_ms = browser_now_ms();
         let adaptive_preparation = if transactional_upload {
             Some(prepare_adaptive_batch_groups(state, initial_resident))
         } else {
@@ -7663,6 +7761,10 @@ fn update_batches_in_state(
             }
             None
         };
+        state
+            .batch_update_stats
+            .bucket_ms
+            .record(browser_now_ms() - bucket_started_ms);
         perf_mark("batch-bucket-end");
         perf_measure("batch-bucket", "batch-bucket-start", "batch-bucket-end");
         perf_mark("batch-group-end");
@@ -7672,11 +7774,17 @@ fn update_batches_in_state(
         // membership remain valid. Only changed buckets repack or upload their
         // source streams; capacity growth rebuilds that bucket alone.
         perf_mark("batch-upload-start");
+        let upload_started_ms = browser_now_ms();
         if adaptive_preparation
             .as_ref()
             .is_some_and(|prepared| prepared.reused_published)
         {
             commit_reused_adaptive_groups(state);
+            finish_batch_update_timing(
+                &mut state.batch_update_stats,
+                total_started_ms,
+                Some(upload_started_ms),
+            );
             perf_mark("batch-upload-end");
             perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
             return;
@@ -7688,6 +7796,11 @@ fn update_batches_in_state(
                 state,
                 force_upload,
                 previous_batch_groups,
+            );
+            finish_batch_update_timing(
+                &mut state.batch_update_stats,
+                total_started_ms,
+                Some(upload_started_ms),
             );
             perf_mark("batch-upload-end");
             perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
@@ -7793,6 +7906,11 @@ fn update_batches_in_state(
         state.batch_update_stats.uploaded_instances += uploaded_instances as u64;
         state.batch_update_stats.last_missing_atlas_entries = missing as u64;
         state.batch_update_stats.last_gpu_failures = failed as u64;
+        finish_batch_update_timing(
+            &mut state.batch_update_stats,
+            total_started_ms,
+            Some(upload_started_ms),
+        );
         perf_mark("batch-upload-end");
         perf_measure("batch-gpu-upload", "batch-upload-start", "batch-upload-end");
 

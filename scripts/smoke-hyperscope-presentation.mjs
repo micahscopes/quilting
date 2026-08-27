@@ -319,6 +319,8 @@ for (const rustTimingStep of [
   'render_timing: RenderTimingDiagnostics',
   'dispatch_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>',
   'publication_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>',
+  'bucket_ms: TimingDistribution<RUNTIME_TIMING_WINDOW_CAPACITY>',
+  '&"batchTiming".into()',
   'pub fn mr_runtime_timing_diagnostics()',
   'pub fn mr_reset_runtime_timing_diagnostics()',
 ]) {
