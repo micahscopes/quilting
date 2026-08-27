@@ -86,16 +86,60 @@ The temporary tab was backgrounded and its mean worker/fence timings were much
 worse than the prior foreground baseline, so they are deliberately excluded as
 performance evidence.
 
+## Follow-on same-context shadow gate
+
+Commit `3d38877` (`Shadow same-context LOD dispatch`) installed the classifier
+on the renderer's own WebGL2 context behind `lodimpl=shadow`. It borrows the
+exact pose retained by `mr_uploadAnimationPose`, consumes the same prepared
+model, atlas lookup, subject table, camera matrix, and tessellation parameters,
+stages an independent GPU copy, polls a fence without blocking, and compares
+the complete six-float record for every classified face in Rust. It never
+applies its result to batches. The worker remains the explicit effective
+authority even when `lodimpl=rust` is requested.
+
+The first composed-scene comparison found a real context-state bug rather than
+being waved through. The renderer normally left alpha blending enabled. An
+invisible pass-one record has alpha zero but must still write its bounded
+standby exponents; inheriting blend state instead retained the clear sentinel
+and yielded `0.5` edge values. The shadow reported 1,513 mismatched faces and
+4,539 mismatched fields. Making the classifier pass explicitly disable
+blending restored exact worker parity. The transform-feedback output was also
+changed from the incorrect `DYNAMIC_READ` usage hint to `DYNAMIC_COPY`: it is
+GPU-written and GPU-copied, while only the fenced staging buffer is
+CPU-readable. This removed Chromium's repeated discarded-shadow-copy warning.
+
+The final foreground presentation run covered the 4,432-face composed scene,
+12 topology domains, full-scene classifications with 12 subject records, and
+animated 984-face primary-prefix classifications with one subject record. Its
+final diagnostics reported:
+
+- 55 same-context dispatches and 55 completions;
+- 54 exact comparisons and zero mismatched comparisons or fields;
+- nine intentional busy skips and one topology-lifecycle cancellation;
+- zero shadow failures and zero browser diagnostic errors;
+- zero worker pose or delta-sequence mismatches;
+- zero scene-extraction semantic mismatches;
+- no Chrome warning or error messages.
+
+The last observed main-context dispatch enqueue was 0.4 ms, the
+scheduling-inclusive fence-poll latency was 12.4 ms, and the signaled readback
+was 0.1 ms. WebGL2 cannot reveal when the fence became signaled, so poll latency
+is not labeled GPU time. This was a correctness run that deliberately executed
+both classifiers and retained a comparison snapshot; it is not evidence that
+shipping both is cheaper than the worker. Renderer tests passed 54/54, the
+WASM32 Leptos build check passed, the presentation/render/walk smokes passed,
+and the temporary tab was closed with the user's original chess URL preserved.
+
 ## Remaining promotion work
 
-The worker still owns a separate OffscreenCanvas/WebGL context and fence. The
-next candidate must reuse this exact model payload, delta sequence, and pose
-stamp on the main renderer context, first in shadow. Promotion requires:
+The same-context implementation has earned correctness shadowing, not live
+authority. Promotion still requires:
 
-- identical full and sparse records, including invisible standby topology;
-- identical seam reconciliation, permutation, and grading behavior;
-- zero retired-epoch publications and zero sequence mismatches;
-- a foreground moving-camera/animated-horse distribution of pose lag;
-- measured GPU dispatch, fence, readback, transfer bytes, and batch work;
-- an explicit rollback to the worker until the same-context path wins those
-  gates over a sustained run.
+- a foreground moving-camera distribution across the saved inverted-chess
+  views and animated horse, with frame percentiles rather than last values;
+- explicit accounting for duplicate-shadow overhead, full readback bytes,
+  retained comparison memory, sparse batch updates, and skipped submissions;
+- a Rust-owned full/sparse resident publication that can update batches without
+  transferring mesh-sized payloads through JavaScript;
+- sustained zero pose, seam, permutation, grading, and lifecycle mismatches;
+- an explicit worker rollback until the promoted path wins those gates.
