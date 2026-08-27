@@ -10,7 +10,8 @@ use quilting_renderer::compute::{
     pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words,
     pack_wgsl_lod_subject_words, pack_wgsl_source_visibility_words, prepare_lod_atlas_lookup,
     prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2, LodAtlasLookup, LodDispatchState,
-    LodModelData, PreparedLodModel, WgslLodDispatchMetrics, WgslVisibilityCompactionSceneWords,
+    LodModelData, PreparedLodModel, WgslLodDispatchMetrics, WgslPatchPreparationSceneWords,
+    WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
@@ -26,6 +27,11 @@ const VISIBILITY_BATCH_RECORD_BYTES: u64 = 16;
 const VISIBILITY_RANGE_RECORD_BYTES: u64 = 20;
 const INDEXED_INDIRECT_RECORD_BYTES: u64 = 20;
 const DRAW_BATCH_INDEX_BYTES: u64 = 16;
+const PATCH_PREPARE_UNIFORM_BYTES: u64 = 16;
+const PATCH_TOPOLOGY_RECORD_BYTES: u64 = 48;
+const PREPARED_PATCH_RECORD_WORDS: usize = 52;
+const PREPARED_PATCH_RECORD_BYTES: u64 = 208;
+const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -37,6 +43,121 @@ fn identity_mobius() -> [f32; 16] {
     [
         1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
     ]
+}
+
+fn translation_matrix(x: f32, y: f32, z: f32) -> [f32; 16] {
+    let mut matrix = identity_matrix();
+    matrix[12] = x;
+    matrix[13] = y;
+    matrix[14] = z;
+    matrix
+}
+
+fn patch_preparation_conformance_words() -> (
+    WgslPatchPreparationSceneWords,
+    Vec<[u32; PREPARED_PATCH_RECORD_WORDS]>,
+) {
+    let bits = |value: f32| value.to_bits();
+    let mut source = [0u32; PREPARED_PATCH_RECORD_WORDS];
+    for (corner, position) in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        .into_iter()
+        .enumerate()
+    {
+        let offset = corner * 4;
+        source[offset] = bits(corner as f32);
+        for (word, value) in source[offset + 1..offset + 4].iter_mut().zip(position) {
+            *word = bits(value);
+        }
+        source[12 + offset] = bits(1.0);
+        source[40 + offset + 2] = bits(1.0);
+    }
+    source[43] = bits(7.0);
+    for (word, value) in source[32..38]
+        .iter_mut()
+        .zip([0.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+    {
+        *word = bits(value);
+    }
+
+    let topology_record = |lod: [f32; 4], face: [f32; 4], leaf: [f32; 2]| {
+        let mut record = [0u32; 12];
+        for (word, value) in record[..4].iter_mut().zip(lod) {
+            *word = bits(value);
+        }
+        for (word, value) in record[4..8].iter_mut().zip(face) {
+            *word = bits(value);
+        }
+        for (word, value) in record[8..10].iter_mut().zip(leaf) {
+            *word = bits(value);
+        }
+        record
+    };
+    let topology = vec![
+        topology_record([2.0, 4.0, 8.0, 5.0], [0.0, 3.0, 6.0, 9.0], [0.0, 0.0]),
+        topology_record([1.0, 2.0, 4.0, 3.0], [0.0, 4.0, 5.0, 6.0], [1.0, 3.0]),
+    ];
+    let mut subject = [0u32; 32];
+    for (word, value) in subject[..16].iter_mut().zip(identity_matrix()) {
+        *word = bits(value);
+    }
+    for (word, value) in subject[16..].iter_mut().zip(identity_matrix()) {
+        *word = bits(value);
+    }
+
+    let mut root = source;
+    for (corner, position) in [[1.25, 0.0, 2.0], [2.25, 0.0, 2.0], [1.25, 1.0, 2.0]]
+        .into_iter()
+        .enumerate()
+    {
+        let offset = corner * 4;
+        for (word, value) in root[offset + 1..offset + 4].iter_mut().zip(position) {
+            *word = bits(value);
+        }
+    }
+    for (word, value) in root[24..28].iter_mut().zip([2.0, 4.0, 8.0, 5.0]) {
+        *word = bits(value);
+    }
+    for (word, value) in root[28..32].iter_mut().zip([3.0, 6.0, 9.0, 0.0]) {
+        *word = bits(value);
+    }
+    root[38] = bits(0.0);
+    root[39] = bits(1.0);
+
+    let mut child = source;
+    for (corner, tagged_position) in [
+        [-2.0, 1.75, 0.0, 2.0],
+        [3.0, 1.75, 0.5, 2.0],
+        [0.0, 1.25, 0.5, 2.0],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let offset = corner * 4;
+        for (word, value) in child[offset..offset + 4].iter_mut().zip(tagged_position) {
+            *word = bits(value);
+        }
+    }
+    for (word, value) in child[24..28].iter_mut().zip([1.0, 2.0, 4.0, 3.0]) {
+        *word = bits(value);
+    }
+    for (word, value) in child[28..32].iter_mut().zip([4.0, 5.0, 6.0, 0.0]) {
+        *word = bits(value);
+    }
+    for (word, value) in child[32..38].iter_mut().zip([0.5, 0.0, 0.5, 0.5, 0.0, 0.5]) {
+        *word = bits(value);
+    }
+    child[38] = bits(0.0);
+    child[39] = bits(1.0);
+
+    (
+        WgslPatchPreparationSceneWords {
+            uniform: [2, 3, 0, 1],
+            topology,
+            source_faces: vec![source],
+            subjects: vec![subject],
+        },
+        vec![root, child],
+    )
 }
 
 #[derive(Debug)]
@@ -76,6 +197,7 @@ pub struct LodPose<'a> {
 pub struct LodDeviceConformance {
     pub full_pipeline_words: usize,
     pub coherence_words: usize,
+    pub prepared_patch_words: usize,
     pub compacted_source_words: usize,
     pub compacted_range_words: usize,
     pub indirect_argument_words: usize,
@@ -98,6 +220,7 @@ pub struct LodClassifierDevice {
     queue: wgpu::Queue,
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
+    patch_prepare_pipeline: wgpu::ComputePipeline,
     visibility_count_pipeline: wgpu::ComputePipeline,
     visibility_scan_pipeline: wgpu::ComputePipeline,
     visibility_scatter_pipeline: wgpu::ComputePipeline,
@@ -109,13 +232,26 @@ pub struct LodClassifierModel {
     joint_capacity: usize,
     subject_rows: usize,
     uniform: wgpu::Buffer,
+    skinning: wgpu::Buffer,
     joint_matrices: wgpu::Buffer,
+    morph_deltas: wgpu::Buffer,
     morph_weights: wgpu::Buffer,
     subject_states: wgpu::Buffer,
     packed_records: wgpu::Buffer,
     readback: wgpu::Buffer,
     pass1_bind_group: wgpu::BindGroup,
     pass2_bind_group: wgpu::BindGroup,
+}
+
+/// Retained current-scene topology and prepared-patch output. Immutable source
+/// faces and affine subject rows are uploaded once; only pose buffers and the
+/// joint-count word change with animation.
+pub struct PatchPreparationScene {
+    patch_count: u32,
+    uniform_words: [u32; 4],
+    uniform: wgpu::Buffer,
+    prepared_records: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
 /// Retained scene shape and output buffers for deterministic visibility
@@ -142,6 +278,8 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let pass2_source = quilting_shaders::compile_lod_pass2_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let patch_prepare_source = quilting_shaders::compile_patch_prepare_compute_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_count_source = quilting_shaders::compile_visibility_count_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_scan_source = quilting_shaders::compile_visibility_scan_wgsl()
@@ -155,6 +293,10 @@ impl LodClassifierDevice {
         let pass2_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting LOD pass two"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(pass2_source)),
+        });
+        let patch_prepare_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting patch preparation"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(patch_prepare_source)),
         });
         let visibility_count_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting visibility count"),
@@ -184,6 +326,15 @@ impl LodClassifierDevice {
             compilation_options: Default::default(),
             cache: None,
         });
+        let patch_prepare_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting patch preparation"),
+                layout: None,
+                module: &patch_prepare_module,
+                entry_point: Some(quilting_shaders::PATCH_PREPARE_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let visibility_count_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("quilting visibility count"),
@@ -216,6 +367,7 @@ impl LodClassifierDevice {
             queue,
             pass1_pipeline,
             pass2_pipeline,
+            patch_prepare_pipeline,
             visibility_count_pipeline,
             visibility_scan_pipeline,
             visibility_scatter_pipeline,
@@ -316,6 +468,39 @@ impl LodClassifierDevice {
             )));
         }
 
+        let patch_prepared = prepare_lod_model(LodModelData {
+            positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            faces: vec![[0, 1, 2]],
+            joint_indices: vec![[0; 4]; 3],
+            joint_weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+            morph_deltas: vec![0.25, 0.5, 0.0, 0.25, 0.5, 0.0, 0.25, 0.5, 0.0],
+            num_morph_targets: 1,
+            face_nodes: vec![0],
+        })
+        .map_err(LodWebGpuError::Payload)?;
+        let patch_model = self.upload_model(patch_prepared, &atlas)?;
+        let (patch_words, expected_patches) = patch_preparation_conformance_words();
+        let patch_scene = self.upload_patch_preparation_scene(&patch_model, patch_words)?;
+        let patch_joint = translation_matrix(1.0, -0.5, 2.0);
+        let prepared_patches = self
+            .prepare_patches(
+                &patch_model,
+                &patch_scene,
+                LodPose {
+                    joint_matrices: &patch_joint,
+                    morph_weights: &[1.0],
+                },
+                1,
+            )
+            .await?;
+        if prepared_patches != expected_patches {
+            return Err(LodWebGpuError::Conformance(format!(
+                "patch preparation mismatch: expected {expected_patches:?}, got \
+                 {prepared_patches:?}"
+            )));
+        }
+        let prepared_patch_words = prepared_patches.len() * PREPARED_PATCH_RECORD_WORDS;
+
         let batch_zero_count = 130u32;
         let mut source_visibility = Vec::with_capacity(137);
         source_visibility.extend((0..batch_zero_count).map(|index| u8::from(index % 3 != 0)));
@@ -351,11 +536,297 @@ impl LodClassifierDevice {
         Ok(LodDeviceConformance {
             full_pipeline_words,
             coherence_words: actual.len(),
+            prepared_patch_words,
             compacted_source_words: compacted.compacted_source_instances.len(),
             compacted_range_words: compacted.compacted_ranges.len() * 5,
             indirect_argument_words: compacted.indirect_arguments.len() * 5,
             indirect_draws,
         })
+    }
+
+    /// Upload immutable source faces plus retained scene topology and affine
+    /// transforms. The output order matches visibility compaction's stable
+    /// source-instance order and can be consumed directly by a render vertex
+    /// stage through [`PatchPreparationScene::prepared_records_buffer`].
+    pub fn upload_patch_preparation_scene(
+        &self,
+        model: &LodClassifierModel,
+        words: WgslPatchPreparationSceneWords,
+    ) -> Result<PatchPreparationScene, LodWebGpuError> {
+        let patch_count = words.uniform[0];
+        let num_morph_targets = u32::try_from(model.prepared.model.num_morph_targets)
+            .map_err(|_| LodWebGpuError::Payload("patch morph target count exceeds u32".into()))?;
+        if words.uniform[1] != model.prepared.residency.num_vertices
+            || words.uniform[2] != 0
+            || words.uniform[3] != num_morph_targets
+            || words.topology.len() != patch_count as usize
+            || words.source_faces.len() != model.prepared.residency.num_faces
+            || words.subjects.is_empty()
+        {
+            return Err(LodWebGpuError::Payload(
+                "patch preparation scene shape is malformed".to_string(),
+            ));
+        }
+        for (patch_index, topology) in words.topology.iter().enumerate() {
+            let float_words: [f32; 10] = std::array::from_fn(|word| f32::from_bits(topology[word]));
+            let face = float_words[4];
+            let leaf_depth = float_words[8];
+            let leaf_path = float_words[9];
+            let integral_nonnegative = |value: f32| value >= 0.0 && value.fract() == 0.0;
+            if float_words.iter().any(|value| !value.is_finite())
+                || float_words[..8]
+                    .iter()
+                    .any(|&value| !integral_nonnegative(value))
+                || float_words[3] > 5.0
+                || face as usize >= words.source_faces.len()
+                || !integral_nonnegative(leaf_depth)
+                || leaf_depth > 12.0
+                || !integral_nonnegative(leaf_path)
+                || leaf_path >= (1u32 << (2 * leaf_depth as u32)) as f32
+                || topology[10] as usize >= words.subjects.len()
+                || topology[11] != 0
+            {
+                return Err(LodWebGpuError::Payload(format!(
+                    "patch preparation topology {patch_index} is malformed",
+                )));
+            }
+        }
+        for (face_index, (source, expected_vertices)) in words
+            .source_faces
+            .iter()
+            .zip(&model.prepared.model.faces)
+            .enumerate()
+        {
+            for (corner, &expected_vertex) in expected_vertices.iter().enumerate() {
+                let encoded_vertex = f32::from_bits(source[corner * 4]);
+                if !encoded_vertex.is_finite()
+                    || encoded_vertex < 0.0
+                    || encoded_vertex.fract() != 0.0
+                    || encoded_vertex as u32 != expected_vertex
+                {
+                    return Err(LodWebGpuError::Payload(format!(
+                        "patch preparation source face {face_index} corner {corner} does not match the resident model",
+                    )));
+                }
+            }
+        }
+        if words
+            .source_faces
+            .iter()
+            .flatten()
+            .chain(words.subjects.iter().flatten())
+            .copied()
+            .map(f32::from_bits)
+            .any(|value| !value.is_finite())
+        {
+            return Err(LodWebGpuError::Payload(
+                "patch preparation source contains non-finite values".to_string(),
+            ));
+        }
+
+        debug_assert_eq!(
+            std::mem::size_of_val(&words.uniform) as u64,
+            PATCH_PREPARE_UNIFORM_BYTES,
+        );
+        debug_assert!(words
+            .topology
+            .iter()
+            .all(|record| { std::mem::size_of_val(record) as u64 == PATCH_TOPOLOGY_RECORD_BYTES }));
+        debug_assert!(words
+            .source_faces
+            .iter()
+            .all(|record| { std::mem::size_of_val(record) as u64 == PREPARED_PATCH_RECORD_BYTES }));
+        debug_assert!(words
+            .subjects
+            .iter()
+            .all(|record| { std::mem::size_of_val(record) as u64 == PATCH_SUBJECT_RECORD_BYTES }));
+
+        let uniform = buffer_init_or_zero(
+            &self.device,
+            "patch preparation uniform",
+            bytemuck::cast_slice(&words.uniform),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let inert_topology = [[0u32; 12]];
+        let topology = buffer_init_or_zero(
+            &self.device,
+            "patch preparation topology",
+            if words.topology.is_empty() {
+                bytemuck::cast_slice(&inert_topology)
+            } else {
+                bytemuck::cast_slice(&words.topology)
+            },
+            wgpu::BufferUsages::STORAGE,
+        );
+        let source_faces = buffer_init_or_zero(
+            &self.device,
+            "patch preparation source faces",
+            bytemuck::cast_slice(&words.source_faces),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let subjects = buffer_init_or_zero(
+            &self.device,
+            "patch preparation subjects",
+            bytemuck::cast_slice(&words.subjects),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let prepared_bytes = u64::from(patch_count)
+            .checked_mul(PREPARED_PATCH_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("prepared patch buffer is too large".to_string())
+            })?;
+        let prepared_records = gpu_buffer(
+            &self.device,
+            "prepared patch records",
+            prepared_bytes.max(PREPARED_PATCH_RECORD_BYTES),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let layout = self.patch_prepare_pipeline.get_bind_group_layout(0);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("patch preparation bindings"),
+            layout: &layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &topology),
+                bind(2, &source_faces),
+                bind(3, &model.skinning),
+                bind(4, &model.joint_matrices),
+                bind(5, &model.morph_deltas),
+                bind(6, &model.morph_weights),
+                bind(7, &subjects),
+                bind(8, &prepared_records),
+            ],
+        });
+        Ok(PatchPreparationScene {
+            patch_count,
+            uniform_words: words.uniform,
+            uniform,
+            prepared_records,
+            bind_group,
+        })
+    }
+
+    fn write_dynamic_pose(
+        &self,
+        model: &LodClassifierModel,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<(), LodWebGpuError> {
+        let num_joints = num_joints as usize;
+        if pose.joint_matrices.len() != num_joints.saturating_mul(16) {
+            return Err(LodWebGpuError::Payload(
+                "joint pose does not match the dispatch joint count".to_string(),
+            ));
+        }
+        if pose.morph_weights.len() != model.prepared.model.num_morph_targets {
+            return Err(LodWebGpuError::Payload(
+                "morph weights do not match immutable targets".to_string(),
+            ));
+        }
+        let resident_joint_floats = num_joints.min(model.joint_capacity) * 16;
+        if resident_joint_floats != 0 {
+            self.queue.write_buffer(
+                &model.joint_matrices,
+                0,
+                bytemuck::cast_slice(&pose.joint_matrices[..resident_joint_floats]),
+            );
+        }
+        if !pose.morph_weights.is_empty() {
+            self.queue.write_buffer(
+                &model.morph_weights,
+                0,
+                bytemuck::cast_slice(pose.morph_weights),
+            );
+        }
+        Ok(())
+    }
+
+    /// Upload current pose state and the dynamic joint-count word. Applications
+    /// may then encode preparation and all subsequent passes in one command
+    /// encoder without any CPU-visible copy or map.
+    pub fn write_patch_pose(
+        &self,
+        model: &LodClassifierModel,
+        scene: &PatchPreparationScene,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<(), LodWebGpuError> {
+        self.write_dynamic_pose(model, pose, num_joints)?;
+        let mut uniform_words = scene.uniform_words;
+        uniform_words[2] = num_joints;
+        self.queue
+            .write_buffer(&scene.uniform, 0, bytemuck::cast_slice(&uniform_words));
+        Ok(())
+    }
+
+    pub fn encode_patch_preparation(
+        &self,
+        scene: &PatchPreparationScene,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if scene.patch_count == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("quilting patch preparation"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.patch_prepare_pipeline);
+        pass.set_bind_group(0, &scene.bind_group, &[]);
+        pass.dispatch_workgroups(scene.patch_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+    }
+
+    /// No-readback convenience submission for an authoritative backend.
+    pub fn prepare_patches_on_device(
+        &self,
+        model: &LodClassifierModel,
+        scene: &PatchPreparationScene,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<(), LodWebGpuError> {
+        self.write_patch_pose(model, scene, pose, num_joints)?;
+        if scene.patch_count == 0 {
+            return Ok(());
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting patch preparation"),
+            });
+        self.encode_patch_preparation(scene, &mut encoder);
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    /// Diagnostic wrapper over the same encoder path. The temporary staging
+    /// buffer exists only for native/browser parity gates.
+    pub async fn prepare_patches(
+        &self,
+        model: &LodClassifierModel,
+        scene: &PatchPreparationScene,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<Vec<[u32; PREPARED_PATCH_RECORD_WORDS]>, LodWebGpuError> {
+        self.write_patch_pose(model, scene, pose, num_joints)?;
+        if scene.patch_count == 0 {
+            return Ok(Vec::new());
+        }
+        let prepared_bytes = u64::from(scene.patch_count) * PREPARED_PATCH_RECORD_BYTES;
+        let readback = gpu_buffer(
+            &self.device,
+            "prepared patch diagnostic readback",
+            prepared_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting patch preparation diagnostic"),
+            });
+        self.encode_patch_preparation(scene, &mut encoder);
+        encoder.copy_buffer_to_buffer(&scene.prepared_records, 0, &readback, 0, prepared_bytes);
+        self.queue.submit([encoder.finish()]);
+        words_to_patch_records(self.readback_words(&readback, prepared_bytes).await?)
     }
 
     /// Upload retained batch shape and static eligibility once. Output buffers
@@ -1077,7 +1548,9 @@ impl LodClassifierDevice {
             joint_capacity,
             subject_rows,
             uniform,
+            skinning,
             joint_matrices,
+            morph_deltas,
             morph_weights,
             subject_states,
             packed_records,
@@ -1096,17 +1569,7 @@ impl LodClassifierDevice {
         metrics: WgslLodDispatchMetrics,
         pose: LodPose<'_>,
     ) -> Result<Vec<u32>, LodWebGpuError> {
-        let num_joints = metrics.num_joints as usize;
-        if pose.joint_matrices.len() != num_joints.saturating_mul(16) {
-            return Err(LodWebGpuError::Payload(
-                "joint pose does not match the dispatch joint count".to_string(),
-            ));
-        }
-        if pose.morph_weights.len() != model.prepared.model.num_morph_targets {
-            return Err(LodWebGpuError::Payload(
-                "morph weights do not match immutable targets".to_string(),
-            ));
-        }
+        self.write_dynamic_pose(model, pose, metrics.num_joints)?;
         let subject_words = pack_wgsl_lod_subject_words(&model.prepared, dispatch)
             .map_err(LodWebGpuError::Payload)?;
         if subject_words.len() != model.subject_rows {
@@ -1123,26 +1586,6 @@ impl LodClassifierDevice {
             0,
             bytemuck::cast_slice(&subject_words),
         );
-        // The retained buffer ends at the highest joint referenced by a
-        // nonzero influence. A glTF skin may contain additional unused joints;
-        // preserve the full dispatch count while uploading only the prefix the
-        // shader can actually index for this model.
-        let resident_joint_floats = num_joints.min(model.joint_capacity) * 16;
-        if resident_joint_floats != 0 {
-            self.queue.write_buffer(
-                &model.joint_matrices,
-                0,
-                bytemuck::cast_slice(&pose.joint_matrices[..resident_joint_floats]),
-            );
-        }
-        if !pose.morph_weights.is_empty() {
-            self.queue.write_buffer(
-                &model.morph_weights,
-                0,
-                bytemuck::cast_slice(pose.morph_weights),
-            );
-        }
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1346,6 +1789,32 @@ impl VisibilityCompactionScene {
     }
 }
 
+impl PatchPreparationScene {
+    pub fn patch_count(&self) -> u32 {
+        self.patch_count
+    }
+
+    /// Canonical 208-byte records written by the preparation pass. A render
+    /// pipeline can bind this directly as read-only storage without readback.
+    pub fn prepared_records_buffer(&self) -> &wgpu::Buffer {
+        &self.prepared_records
+    }
+}
+
+fn words_to_patch_records(
+    words: Vec<u32>,
+) -> Result<Vec<[u32; PREPARED_PATCH_RECORD_WORDS]>, LodWebGpuError> {
+    if !words.len().is_multiple_of(PREPARED_PATCH_RECORD_WORDS) {
+        return Err(LodWebGpuError::Mapping(format!(
+            "prepared-patch readback does not contain {PREPARED_PATCH_RECORD_WORDS}-word records"
+        )));
+    }
+    Ok(words
+        .chunks_exact(PREPARED_PATCH_RECORD_WORDS)
+        .map(|record| std::array::from_fn(|word| record[word]))
+        .collect())
+}
+
 fn words_to_five_records(words: Vec<u32>, label: &str) -> Result<Vec<[u32; 5]>, LodWebGpuError> {
     if !words.len().is_multiple_of(5) {
         return Err(LodWebGpuError::Mapping(format!(
@@ -1435,12 +1904,13 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .map_err(browser_error)?;
     Ok(format!(
         "adapter={} backend={:?} full_pipeline_words={} coherence_words={} \
-         compacted_source_words={} compacted_range_words={} indirect_argument_words={} \
-         indirect_draws={}",
+         prepared_patch_words={} compacted_source_words={} compacted_range_words={} \
+         indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
         adapter_info.backend,
         report.full_pipeline_words,
         report.coherence_words,
+        report.prepared_patch_words,
         report.compacted_source_words,
         report.compacted_range_words,
         report.indirect_argument_words,

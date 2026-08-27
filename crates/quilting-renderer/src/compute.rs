@@ -694,6 +694,163 @@ pub struct WgslLodModelWords {
     pub adjacency: Vec<[u32; 4]>,
 }
 
+/// Immutable and scene-retained words consumed by WebGPU patch preparation.
+///
+/// Source faces preserve the normative 52-float record bit-for-bit. Topology
+/// extends the backend-neutral ten-float stream with a dense subject row and
+/// one padding word, satisfying WebGPU storage alignment without changing the
+/// logical WebGL2 ABI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslPatchPreparationSceneWords {
+    /// `PatchPrepareDispatch`: patches, source vertices, joints, morph targets.
+    /// The joint count is filled at dynamic-pose dispatch time.
+    pub uniform: [u32; 4],
+    /// One 48-byte `PatchTopologyRecord` per flattened render-batch member.
+    pub topology: Vec<[u32; 12]>,
+    /// One canonical 208-byte `PreparedPatchRecord` per immutable source face.
+    pub source_faces: Vec<[u32; instance_layout::STRIDE]>,
+    /// Deduplicated 128-byte affine model/normal rows.
+    pub subjects: Vec<[u32; 32]>,
+}
+
+/// Pack one retained render scene into the exact WebGPU patch-preparation ABI.
+/// The flattened member order is the same stable source-instance order used by
+/// visibility compaction and indirect draw resolution.
+pub fn pack_wgsl_patch_preparation_scene_words(
+    prepared: &PreparedLodModel,
+    scene: &RenderSceneSnapshot,
+    source_instances: &[f32],
+) -> Result<WgslPatchPreparationSceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let num_faces = prepared.residency.num_faces;
+    let required_source_words = num_faces
+        .checked_mul(instance_layout::STRIDE)
+        .ok_or_else(|| "patch source-face size overflow".to_string())?;
+    if source_instances.len() != required_source_words {
+        return Err(format!(
+            "patch source contains {} floats; expected {required_source_words}",
+            source_instances.len(),
+        ));
+    }
+    if !source_instances.iter().all(|value| value.is_finite()) {
+        return Err("patch source contains non-finite values".to_string());
+    }
+    for (face_index, (source, expected_vertices)) in source_instances
+        .chunks_exact(instance_layout::STRIDE)
+        .zip(&prepared.model.faces)
+        .enumerate()
+    {
+        for (corner, &expected_vertex) in expected_vertices.iter().enumerate() {
+            let encoded = source[instance_layout::offset::POSITIONS + corner * 4];
+            if encoded < 0.0
+                || encoded.fract() != 0.0
+                || encoded as u32 != expected_vertex
+            {
+                return Err(format!(
+                    "patch source face {face_index} corner {corner} does not match LOD topology",
+                ));
+            }
+        }
+    }
+
+    let source_faces = source_instances
+        .chunks_exact(instance_layout::STRIDE)
+        .map(|source| std::array::from_fn(|word| source[word].to_bits()))
+        .collect::<Vec<_>>();
+    let patch_count = scene.batches.iter().try_fold(0u32, |total, batch| {
+        let count = u32::try_from(batch.members.len())
+            .map_err(|_| "patch instance count exceeds the WGSL ABI".to_string())?;
+        total
+            .checked_add(count)
+            .ok_or_else(|| "patch instance count exceeds the WGSL ABI".to_string())
+    })?;
+    let num_morph_targets = u32::try_from(prepared.model.num_morph_targets)
+        .map_err(|_| "patch morph target count exceeds the WGSL ABI".to_string())?;
+
+    let mut topology = Vec::with_capacity(patch_count as usize);
+    let mut subjects = Vec::<[u32; 32]>::new();
+    let mut subject_rows = std::collections::BTreeMap::<[u32; 32], u32>::new();
+    for batch in &scene.batches {
+        let mut subject = [0u32; 32];
+        for (word, value) in subject[..16]
+            .iter_mut()
+            .zip(batch.transform.euclidean_model)
+        {
+            *word = value.to_bits();
+        }
+        for (word, value) in subject[16..]
+            .iter_mut()
+            .zip(batch.transform.euclidean_normal)
+        {
+            *word = value.to_bits();
+        }
+        let subject_index = if let Some(&row) = subject_rows.get(&subject) {
+            row
+        } else {
+            let row = u32::try_from(subjects.len())
+                .map_err(|_| "patch subject count exceeds the WGSL ABI".to_string())?;
+            subjects.push(subject);
+            subject_rows.insert(subject, row);
+            row
+        };
+
+        for member in &batch.members {
+            if member.face_index as usize >= num_faces {
+                return Err(format!(
+                    "patch instance references missing source face {}",
+                    member.face_index,
+                ));
+            }
+            if member.face_index as f32 as u32 != member.face_index {
+                return Err(format!(
+                    "patch instance face {} is not exactly representable in the shared topology ABI",
+                    member.face_index,
+                ));
+            }
+            if member.leaf_id.depth > instance_layout::BATCH_LEAF_MAX_DEPTH
+                || member.leaf_id.domain().is_none()
+                || member.leaf_id.path as f32 as u32 != member.leaf_id.path
+            {
+                return Err(format!(
+                    "patch instance has unrepresentable dyadic leaf {}:{}",
+                    member.leaf_id.depth, member.leaf_id.path,
+                ));
+            }
+            let mut record = [0u32; 12];
+            for (word, value) in record[..3].iter_mut().zip(member.edge_lods) {
+                *word = (value as f32).to_bits();
+            }
+            record[3] = f32::from(member.permutation_index).to_bits();
+            record[4] = (member.face_index as f32).to_bits();
+            for (word, value) in record[5..8].iter_mut().zip(member.vertex_lods) {
+                *word = (value as f32).to_bits();
+            }
+            record[8] = f32::from(member.leaf_id.depth).to_bits();
+            record[9] = (member.leaf_id.path as f32).to_bits();
+            record[10] = subject_index;
+            topology.push(record);
+        }
+    }
+    debug_assert_eq!(topology.len(), patch_count as usize);
+    if subjects.is_empty() {
+        // WebGPU forbids zero-sized storage bindings. A valid scene with zero
+        // batches has no dispatches, but retaining one inert row keeps the
+        // residency constructible and the ABI deterministic.
+        subjects.push([0; 32]);
+    }
+    Ok(WgslPatchPreparationSceneWords {
+        uniform: [
+            patch_count,
+            prepared.residency.num_vertices,
+            0,
+            num_morph_targets,
+        ],
+        topology,
+        source_faces,
+        subjects,
+    })
+}
+
 /// Immutable scene-side words consumed by the WebGPU visibility compactor.
 ///
 /// Batch records and eligibility change only when retained render extraction
@@ -2656,6 +2813,104 @@ mod tests {
             enabled,
             pbr_class: PbrDrawClass::Opaque,
         }
+    }
+
+    fn patch_preparation_fixture() -> (PreparedLodModel, Vec<f32>, RenderSceneSnapshot) {
+        let positions = vec![
+            0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            1.0, 1.0, 0.0,
+        ];
+        let faces = vec![[0, 1, 2], [1, 3, 2]];
+        let prepared = prepare_lod_model(LodModelData {
+            positions: positions.clone(),
+            faces: faces.clone(),
+            joint_indices: vec![[0; 4]; 4],
+            joint_weights: vec![[0.0; 4]; 4],
+            morph_deltas: Vec::new(),
+            num_morph_targets: 0,
+            face_nodes: vec![0, 0],
+        })
+        .unwrap();
+        let mut instances = vec![0.0; 2 * instance_layout::STRIDE];
+        for (face_index, vertices) in faces.into_iter().enumerate() {
+            let mut writer = InstanceWriter::new(&mut instances, face_index);
+            for (corner, vertex) in vertices.into_iter().enumerate() {
+                writer.set_position(
+                    corner,
+                    vertex,
+                    [
+                        positions[vertex as usize * 3],
+                        positions[vertex as usize * 3 + 1],
+                        positions[vertex as usize * 3 + 2],
+                    ],
+                );
+                writer.set_normal(corner, [0.0, 0.0, 1.0]);
+            }
+            writer.set_uvs([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+            writer.set_node_id(17);
+        }
+        let first = visibility_batch(0, 0, true);
+        let mut second = visibility_batch(1, 1, true);
+        second.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(3).unwrap();
+        let scene = RenderSceneSnapshot {
+            revision: 51,
+            suppressed_root_faces: Vec::new(),
+            batches: vec![first, second],
+        };
+        (prepared, instances, scene)
+    }
+
+    #[test]
+    fn wgsl_patch_preparation_words_preserve_source_and_topology_abis() {
+        let (prepared, instances, scene) = patch_preparation_fixture();
+        let words = pack_wgsl_patch_preparation_scene_words(
+            &prepared,
+            &scene,
+            &instances,
+        )
+        .unwrap();
+        assert_eq!(words.uniform, [2, 4, 0, 0]);
+        assert_eq!(words.source_faces.len(), 2);
+        assert_eq!(std::mem::size_of_val(&words.source_faces[0]), 208);
+        assert_eq!(words.source_faces[0][0], 0.0f32.to_bits());
+        assert_eq!(words.source_faces[0][4], 1.0f32.to_bits());
+        assert_eq!(words.source_faces[0][8], 2.0f32.to_bits());
+        assert_eq!(words.source_faces[0][12], 1.0f32.to_bits());
+        assert_eq!(words.source_faces[0][43], 17.0f32.to_bits());
+
+        assert_eq!(words.topology.len(), 2);
+        assert_eq!(std::mem::size_of_val(&words.topology[0]), 48);
+        assert_eq!(words.topology[0][..4], [
+            2.0f32.to_bits(),
+            2.0f32.to_bits(),
+            2.0f32.to_bits(),
+            0.0f32.to_bits(),
+        ]);
+        assert_eq!(words.topology[0][4], 0.0f32.to_bits());
+        assert_eq!(words.topology[0][8], 0.0f32.to_bits());
+        assert_eq!(words.topology[0][9], 0.0f32.to_bits());
+        assert_eq!(words.topology[1][4], 1.0f32.to_bits());
+        assert_eq!(words.topology[1][8], 1.0f32.to_bits());
+        assert_eq!(words.topology[1][9], 3.0f32.to_bits());
+        assert_eq!(words.topology[0][10], 0);
+        assert_eq!(words.topology[1][10], 0);
+        assert_eq!(words.subjects.len(), 1, "identical affine rows deduplicate");
+        assert_eq!(std::mem::size_of_val(&words.subjects[0]), 128);
+        assert_eq!(words.subjects[0][0], 1.0f32.to_bits());
+        assert_eq!(words.subjects[0][16], 1.0f32.to_bits());
+    }
+
+    #[test]
+    fn wgsl_patch_preparation_rejects_a_mismatched_source_model() {
+        let (prepared, mut instances, scene) = patch_preparation_fixture();
+        instances[0] = 3.0;
+        assert_eq!(
+            pack_wgsl_patch_preparation_scene_words(&prepared, &scene, &instances)
+                .unwrap_err(),
+            "patch source face 0 corner 0 does not match LOD topology",
+        );
     }
 
     #[test]

@@ -169,6 +169,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let report = classifier.run_conformance_matrix().await.unwrap();
         assert_eq!(report.full_pipeline_words, 1);
         assert_eq!(report.coherence_words, 10);
+        assert_eq!(report.prepared_patch_words, 104);
         assert_eq!(report.compacted_source_words, 89);
         assert_eq!(report.compacted_range_words, 15);
         assert_eq!(report.indirect_argument_words, 15);
