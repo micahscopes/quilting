@@ -182,7 +182,7 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 77 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 79 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
@@ -201,7 +201,15 @@ The first application boundary is now explicit:
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model
-  cleanup cannot silently rewrite it.
+  cleanup cannot silently rewrite it. Selected-object links carry the stable
+  `(selasset, selentity)` UUID pair atomically; a partial pair is invalid and
+  no transient face or packed-node index enters the route. The browser retains
+  a valid unresolved pair only while the requested asset is loading, then
+  resolves it against Rust-issued packed identities after node bounds exist.
+  Missing or ambiguous identities fail closed instead of selecting a nearby
+  face. These session selection IDs are ephemeral URL state, not durable HHHS
+  commands; authored Blender identities remain stable across export while
+  ordinary runtime assets receive deterministic IDs only for that load.
 - `quilting-core::render` owns retained scene snapshots, logical frame
   commands, indexed submission accounting, and the bounded backend-parity
   observer. `rendershadow=1` extracts WebGL state only when the retained scene

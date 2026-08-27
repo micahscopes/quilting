@@ -150,6 +150,8 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("py", "0", Number),
     spec!("pz", "0", Number),
     spec!("aim", "0", Toggle),
+    spec!("selasset", "", OptionalUuid),
+    spec!("selentity", "", OptionalUuid),
     spec!("presentation", "0", Toggle),
     spec!("cue", "", OptionalUuid),
     spec!("presentimpl", "rust", Implementation),
@@ -236,7 +238,28 @@ impl HyperscopeRoute {
             }
             route.values.insert(spec.key, value);
         }
+        route.validate_selection_pair();
         route
+    }
+
+    fn validate_selection_pair(&mut self) {
+        let asset_present = self
+            .values
+            .get("selasset")
+            .is_some_and(|value| !value.is_empty());
+        let entity_present = self
+            .values
+            .get("selentity")
+            .is_some_and(|value| !value.is_empty());
+        if asset_present == entity_present {
+            return;
+        }
+        let missing_key = if asset_present { "selentity" } else { "selasset" };
+        self.diagnostics.push(RouteDiagnostic {
+            code: RouteDiagnosticCode::InvalidValue,
+            key: missing_key.to_owned(),
+            value: String::new(),
+        });
     }
 
     pub fn value(&self, key: &str) -> Option<&str> {
@@ -321,6 +344,33 @@ mod tests {
             invalid.diagnostics()[0].code,
             RouteDiagnosticCode::InvalidValue
         );
+    }
+
+    #[test]
+    fn selected_identity_route_is_atomic_and_canonical() {
+        let asset = "60000000-0000-4000-8000-000000000001";
+        let entity = "70000000-0000-4000-8000-000000000001";
+        let selected = HyperscopeRoute::from_pairs([
+            ("selentity", entity),
+            ("selasset", asset),
+        ]);
+        assert_eq!(selected.value("selasset"), Some(asset));
+        assert_eq!(selected.value("selentity"), Some(entity));
+        assert_eq!(
+            selected.canonical_pairs(),
+            vec![("selasset", asset), ("selentity", entity)]
+        );
+        assert!(selected.diagnostics().is_empty());
+
+        for (key, value, missing_key) in [
+            ("selasset", asset, "selentity"),
+            ("selentity", entity, "selasset"),
+        ] {
+            let partial = HyperscopeRoute::from_pairs([(key, value)]);
+            assert_eq!(partial.diagnostics().len(), 1);
+            assert_eq!(partial.diagnostics()[0].code, RouteDiagnosticCode::InvalidValue);
+            assert_eq!(partial.diagnostics()[0].key, missing_key);
+        }
     }
 
     #[test]

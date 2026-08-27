@@ -26,6 +26,8 @@ assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'aim').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'aim').defaultValue, '0');
+assert.equal(specs.find(spec => spec.key === 'selasset').kind, 'optional_uuid');
+assert.equal(specs.find(spec => spec.key === 'selentity').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
@@ -323,6 +325,22 @@ assert.deepEqual(
   [['aim', '1']],
   'canonical routes must retain an explicit finite camera target',
 );
+const selectedRoute = canonicalizeHyperscopeRoute([
+  ['selentity', '70000000-0000-4000-8000-000000000001'],
+  ['selasset', '60000000-0000-4000-8000-000000000001'],
+]);
+assert.deepEqual(selectedRoute.pairs, [
+  ['selasset', '60000000-0000-4000-8000-000000000001'],
+  ['selentity', '70000000-0000-4000-8000-000000000001'],
+]);
+assert.deepEqual(selectedRoute.diagnostics, []);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([
+    ['selasset', '60000000-0000-4000-8000-000000000001'],
+  ]).diagnostics.map(diagnostic => diagnostic.code),
+  ['invalid_value'],
+  'a route selection must carry asset and entity identity atomically',
+);
 for (const targetPolicyStep of [
   "set(\n      'aim',\n      manualCameraSemanticTargetEnabled ? '1' : '0',",
   "manualCameraSemanticTargetEnabled = initParams.aim === '1';",
@@ -331,6 +349,18 @@ for (const targetPolicyStep of [
   assert.ok(
     browserSource.includes(targetPolicyStep),
     `camera target-policy route is missing ${targetPolicyStep}`,
+  );
+}
+for (const selectedRouteStep of [
+  "set(\n      'selasset',",
+  "set(\n      'selentity',",
+  "restorePendingRouteSelection('primary-model');",
+  "restorePendingRouteSelection('presentation-composition');",
+  'retainRouteSelectionIdentity(selectedObject.identity);',
+]) {
+  assert.ok(
+    browserSource.includes(selectedRouteStep),
+    `selected-identity route is missing ${selectedRouteStep}`,
   );
 }
 const clearSelectionSource = browserSource.match(

@@ -1312,6 +1312,7 @@ const PARAM_DEFAULTS = {
   animate: '1', anim: '-1', atlas: '7', lodratio: '2',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   aim: '0',
+  selasset: '', selentity: '',
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
   smlock: '1', smswap: '0', smbackground: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
@@ -1350,6 +1351,7 @@ function readParams(p) {
     rz: get('rz'),
     px: get('px'), py: get('py'), pz: get('pz'),
     aim: get('aim'),
+    selasset: get('selasset'), selentity: get('selentity'),
     smmove: get('smmove'), smrotate: get('smrotate'), smnav: get('smnav'),
     smlock: get('smlock'), smswap: get('smswap'), smbackground: get('smbackground'),
     smpinv: get('smpinv'), smrinv: get('smrinv'),
@@ -1500,6 +1502,17 @@ function syncURL() {
       manualCameraSemanticTargetEnabled ? '1' : '0',
       PARAM_DEFAULTS.aim,
     );
+    const linkedSelection = selectedObject?.identity || pendingRouteSelection;
+    set(
+      'selasset',
+      linkedSelection?.assetId || '',
+      PARAM_DEFAULTS.selasset,
+    );
+    set(
+      'selentity',
+      linkedSelection?.entityId || '',
+      PARAM_DEFAULTS.selentity,
+    );
     if (RUST_PRESENTATION_ENABLED) {
       p.set('presentation', '1');
       set('cue', rustPresentationDiagnostics.activeCue || '', PARAM_DEFAULTS.cue);
@@ -1542,6 +1555,25 @@ function syncURL() {
 let applyParams = () => {};
 
 let currentGlb = PARAM_DEFAULTS.glb;
+let pendingRouteSelection = null;
+const routeSelectionDiagnostics = {
+  state: 'none',
+  requested: null,
+  attempts: 0,
+  restoredNode: null,
+  lastContext: null,
+};
+globalThis.__hyperscopeRouteSelectionDiagnostics = routeSelectionDiagnostics;
+
+function routeSelectionFromParams(params) {
+  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  const assetId = String(params.selasset || '').toLowerCase();
+  const entityId = String(params.selentity || '').toLowerCase();
+  if (!uuid.test(assetId) || !uuid.test(entityId)
+      || /^0{8}(?:-0{4}){3}-0{12}$/.test(assetId)
+      || /^0{8}(?:-0{4}){3}-0{12}$/.test(entityId)) return null;
+  return Object.freeze({ assetId, entityId });
+}
 
 // --- Sidebar toggle ---
 $('sidebar-toggle').onclick = () => {
@@ -5397,6 +5429,12 @@ function clearSelectedObject(message = '') {
   rustAppSelectionTransitionActive = false;
   rustAppSelectedCameraTransitionKind = null;
   selectedObject = null;
+  if (urlSyncReady) {
+    pendingRouteSelection = null;
+    routeSelectionDiagnostics.requested = null;
+    routeSelectionDiagnostics.state = 'cleared';
+    routeSelectionDiagnostics.restoredNode = null;
+  }
   cameraFocusTransition = null;
   focusSphereTransition = null;
   // Selection is an optional anchor, not ownership of the sphere. Dropping
@@ -5406,6 +5444,7 @@ function clearSelectedObject(message = '') {
   focusSphere.margin = null;
   mr_setSelectedNode(-1);
   selectionLabel(message);
+  syncURL();
 }
 
 function setFocusSphereGeometry(sphere) {
@@ -5589,6 +5628,52 @@ function reframeSelectedObject(nowMs = performance.now()) {
   return true;
 }
 
+function retainRouteSelectionIdentity(identity, state = 'selected') {
+  const selection = routeSelectionFromParams({
+    selasset: identity?.assetId,
+    selentity: identity?.entityId,
+  });
+  pendingRouteSelection = selection;
+  routeSelectionDiagnostics.requested = selection;
+  routeSelectionDiagnostics.state = selection ? state : 'unmapped';
+  return selection;
+}
+
+function restorePendingRouteSelection(context) {
+  if (!pendingRouteSelection || selectedObject) return false;
+  routeSelectionDiagnostics.attempts += 1;
+  routeSelectionDiagnostics.lastContext = context;
+  const matches = Array.from(packedNodeIdentities, ([node, identity]) => ({
+    node: Number(node),
+    identity,
+  })).filter(({ identity }) =>
+    String(identity?.assetId || '').toLowerCase() === pendingRouteSelection.assetId
+      && String(identity?.entityId || '').toLowerCase() === pendingRouteSelection.entityId);
+  if (matches.length !== 1) {
+    routeSelectionDiagnostics.state = matches.length > 1 ? 'ambiguous' : 'unresolved';
+    return false;
+  }
+  const node = matches[0].node;
+  if (!nodeFocusRecords.has(node)) {
+    routeSelectionDiagnostics.state = 'awaiting-bounds';
+    return false;
+  }
+  const face = currentFaceNodes.indexOf(node);
+  if (face < 0) {
+    routeSelectionDiagnostics.state = 'awaiting-face';
+    return false;
+  }
+  routeSelectionDiagnostics.state = 'restoring';
+  if (!selectObjectFromFace(face)) {
+    routeSelectionDiagnostics.state = 'rejected';
+    return false;
+  }
+  routeSelectionDiagnostics.state = 'restored';
+  routeSelectionDiagnostics.restoredNode = node;
+  syncURL();
+  return true;
+}
+
 function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   if (faceId < 0 || faceId >= currentFaceNodes.length || !currentInstances) {
     clearSelectedObject('No object at view center');
@@ -5623,6 +5708,7 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
     outputAnchor: applyMobiusPoint(currentMobius, sourceAnchor) || sourceAnchor.slice(),
     outputRadius: bound.radius,
   };
+  retainRouteSelectionIdentity(selectedObject.identity);
   refreshSelectedObjectAnchor();
   mr_setSelectedNode(node);
   mr_highlightFace(highlightFace ? faceId : -1);
@@ -5650,6 +5736,7 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
     bound.center,
     bound.radius,
   );
+  syncURL();
   return true;
 }
 
@@ -7133,6 +7220,9 @@ applyParams = function(params) {
   panY = finite(params.py, 0, -1e6, 1e6);
   panZ = finite(params.pz, 0, -1e6, 1e6);
   manualCameraSemanticTargetEnabled = params.aim === '1';
+  pendingRouteSelection = routeSelectionFromParams(params);
+  routeSelectionDiagnostics.requested = pendingRouteSelection;
+  routeSelectionDiagnostics.state = pendingRouteSelection ? 'pending' : 'none';
   setManualCameraBasisFromEuler();
   spaceMouseMove.set(finite(params.smmove, 300, 10, 900));
   spaceMouseRotate.set(finite(params.smrotate, 300, 10, 900));
@@ -9226,6 +9316,7 @@ async function finishModelUpload(
     panX = 0; panY = 0; panZ = 0;
     setManualCameraBasisFromEuler();
   }
+  restorePendingRouteSelection('primary-model');
 
   sectionStarted = performance.now();
   const computeUpload = await workerCall('upload_model_to_compute', {});
@@ -9696,7 +9787,11 @@ async function initializePresentationComposition() {
   presentationComposition.totalFaces = totalFaces;
   if (selectedObject && !selectedObject.identity) {
     selectedObject.identity = packedNodeIdentities.get(selectedObject.node) || null;
-    if (selectedObject.identity) mirrorSelectedObjectToApp();
+    if (selectedObject.identity) {
+      retainRouteSelectionIdentity(selectedObject.identity);
+      mirrorSelectedObjectToApp();
+      syncURL();
+    }
   }
   rustPresentationDiagnostics.assetsReady = true;
   rustPresentationDiagnostics.residentAssets = Array.from(
@@ -9717,6 +9812,7 @@ async function initializePresentationComposition() {
   modelPayloadTelemetry.retainedSourceInstanceBytes = instances.byteLength;
   modelPayloadTelemetry.retainedFaceNodeBytes = faceNodes.byteLength;
   applyPresentationLayerState();
+  restorePendingRouteSelection('presentation-composition');
   $('presentation-adapter-status').textContent =
     `${presentationComposition.assets.size} resident assets · ${totalFaces} packed faces`;
   console.info(
