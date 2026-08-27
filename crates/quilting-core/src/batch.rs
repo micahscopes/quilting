@@ -19,6 +19,60 @@ pub use crate::instance_layout::STRIDE as INSTANCE_STRIDE;
 /// Per-face LOD stride: 6 floats from GPU pass 2.
 pub const FACE_LOD_STRIDE: usize = 6;
 
+/// Structural failure while admitting one full or sparse classifier
+/// publication into retained renderer topology.
+///
+/// Validation completes before any retained vector is changed. This lets a
+/// WebGL worker, same-context WebGL classifier, or future WebGPU backend share
+/// one fail-closed semantic boundary instead of partially applying malformed
+/// topology.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceLodPublicationError {
+    PayloadLength,
+    FaceIndexOutOfBounds,
+    FaceIndicesNotIncreasing,
+}
+
+impl std::fmt::Display for FaceLodPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PayloadLength => write!(formatter, "face LOD publication has the wrong length"),
+            Self::FaceIndexOutOfBounds => {
+                write!(formatter, "face LOD publication index is out of bounds")
+            }
+            Self::FaceIndicesNotIncreasing => {
+                write!(formatter, "face LOD publication indices are not strictly increasing")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FaceLodPublicationError {}
+
+/// Reusable retained vectors changed by [`admit_face_lod_publication`].
+pub struct FaceLodAdmissionBuffers<'a> {
+    pub requested: &'a mut Vec<Option<ResidentLod>>,
+    pub resident: &'a mut Vec<Option<ResidentLod>>,
+    pub visible: &'a mut Vec<bool>,
+    pub dirty_faces: &'a mut Vec<usize>,
+}
+
+/// Result of validating and admitting one classifier publication before
+/// crack-free reconciliation and GPU resource publication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FaceLodAdmissionResult {
+    pub full_snapshot: bool,
+    pub records: usize,
+    pub changed_records: usize,
+    pub culled_faces: usize,
+}
+
+impl FaceLodAdmissionResult {
+    pub fn topology_changed(self) -> bool {
+        self.changed_records != 0
+    }
+}
+
 /// Compare a completed GPU classification with the previous snapshot and
 /// retain only changed face records. Returns `true` when the current payload
 /// must be treated as a full snapshot (initial result or a size change).
@@ -640,6 +694,97 @@ impl ResidentLodBalanceScratch {
     }
 }
 
+/// Admit one complete or sparse GPU classification into retained visibility
+/// and raw source-face requests. Crack-free reconciliation is the separately
+/// measured next phase.
+///
+/// `face_indices = None` denotes an exact `num_faces` snapshot. Sparse indices
+/// must be strictly increasing, matching the canonical delta encoder. The
+/// shape is validated before any retained vector changes, so malformed backend
+/// output cannot leave visibility, requests, and resident topology at
+/// different revisions.
+pub fn admit_face_lod_publication(
+    face_lods: &[f32],
+    face_indices: Option<&[u32]>,
+    num_faces: usize,
+    standby: ResidentLod,
+    previous_culled_faces: usize,
+    buffers: FaceLodAdmissionBuffers<'_>,
+) -> Result<FaceLodAdmissionResult, FaceLodPublicationError> {
+    let full_snapshot = face_indices.is_none();
+    let records = face_indices.map_or(num_faces, <[u32]>::len);
+    let expected_floats = records
+        .checked_mul(FACE_LOD_STRIDE)
+        .ok_or(FaceLodPublicationError::PayloadLength)?;
+    if face_lods.len() != expected_floats {
+        return Err(FaceLodPublicationError::PayloadLength);
+    }
+    if let Some(indices) = face_indices {
+        let mut previous = None;
+        for &face in indices {
+            let face = face as usize;
+            if face >= num_faces {
+                return Err(FaceLodPublicationError::FaceIndexOutOfBounds);
+            }
+            if previous.is_some_and(|previous| face <= previous) {
+                return Err(FaceLodPublicationError::FaceIndicesNotIncreasing);
+            }
+            previous = Some(face);
+        }
+    }
+
+    buffers.requested.resize(num_faces, None);
+    buffers.resident.resize(num_faces, None);
+    let visibility_shape_changed = buffers.visible.len() != num_faces;
+    if visibility_shape_changed {
+        buffers.visible.clear();
+        buffers.visible.resize(num_faces, false);
+    }
+    buffers.dirty_faces.clear();
+
+    let mut culled_faces = if full_snapshot {
+        0
+    } else if visibility_shape_changed {
+        num_faces
+    } else {
+        previous_culled_faces.min(num_faces)
+    };
+    let mut changed_records = 0;
+    for record_index in 0..records {
+        let face = face_indices.map_or(record_index, |indices| indices[record_index] as usize);
+        let visible = face_is_visible(face_lods, record_index);
+        if full_snapshot {
+            buffers.visible[face] = visible;
+            culled_faces += usize::from(!visible);
+        } else {
+            let previously_visible = buffers.visible[face];
+            if previously_visible != visible {
+                if visible {
+                    culled_faces = culled_faces.saturating_sub(1);
+                } else {
+                    culled_faces = culled_faces.saturating_add(1).min(num_faces);
+                }
+                buffers.visible[face] = visible;
+            }
+        }
+
+        let requested = requested_face_lod(face_lods, record_index, standby);
+        let request_changed = buffers.requested[face] != Some(requested);
+        buffers.requested[face] = Some(requested);
+        if request_changed || buffers.resident[face].is_none() {
+            changed_records += 1;
+            buffers.dirty_faces.push(face);
+        }
+    }
+
+    Ok(FaceLodAdmissionResult {
+        full_snapshot,
+        records,
+        changed_records,
+        culled_faces,
+    })
+}
+
 /// Reconcile and grade topology retained across asynchronous visibility results.
 ///
 /// The worker's GPU pass guarantees agreement when both neighboring faces are
@@ -1121,6 +1266,149 @@ mod tests {
     use crate::screen_leaf_lod::{
         ScreenMeshLeafFrontier, ScreenMeshLeafTopology, ScreenMeshTopologyCache,
     };
+
+    fn lod_record(edge_lods: [f32; 3], visible: bool) -> [f32; FACE_LOD_STRIDE] {
+        [
+            edge_lods[0],
+            edge_lods[1],
+            edge_lods[2],
+            0.0,
+            1.0,
+            if visible { 0.0 } else { -1.0 },
+        ]
+    }
+
+    #[test]
+    fn face_lod_publication_applies_full_sparse_and_demotion() {
+        let topology = HalfEdgeMesh::from_triangles(4, &[[0, 1, 2], [2, 1, 3]]);
+        let standby = ResidentLod::uniform(2);
+        let mut requested = Vec::new();
+        let mut resident = Vec::new();
+        let mut visible = Vec::new();
+        let mut dirty_faces = Vec::new();
+        let mut balance_scratch = ResidentLodBalanceScratch::default();
+        let mut full = Vec::new();
+        full.extend_from_slice(&lod_record([2.0; 3], true));
+        full.extend_from_slice(&lod_record([2.0; 3], false));
+
+        let initial = admit_face_lod_publication(
+            &full,
+            None,
+            2,
+            standby,
+            0,
+            FaceLodAdmissionBuffers {
+                requested: &mut requested,
+                resident: &mut resident,
+                visible: &mut visible,
+                dirty_faces: &mut dirty_faces,
+            },
+        )
+        .unwrap();
+        let initial_corrections = reconcile_resident_lods_from_requests_with_grading(
+            &requested,
+            &mut resident,
+            &topology,
+            &dirty_faces,
+            &mut balance_scratch,
+            FaceLodGrading::TwoToOne,
+        );
+        assert!(initial.full_snapshot);
+        assert_eq!(initial.records, 2);
+        assert_eq!(initial.changed_records, 2);
+        assert_eq!(initial.culled_faces, 1);
+        assert_eq!(initial_corrections, 0);
+        assert_eq!(resident, vec![Some(standby); 2]);
+
+        let raised = lod_record([8.0; 3], true);
+        let raised = admit_face_lod_publication(
+            &raised,
+            Some(&[1]),
+            2,
+            standby,
+            initial.culled_faces,
+            FaceLodAdmissionBuffers {
+                requested: &mut requested,
+                resident: &mut resident,
+                visible: &mut visible,
+                dirty_faces: &mut dirty_faces,
+            },
+        )
+        .unwrap();
+        let raised_corrections = reconcile_resident_lods_from_requests_with_grading(
+            &requested,
+            &mut resident,
+            &topology,
+            &dirty_faces,
+            &mut balance_scratch,
+            FaceLodGrading::TwoToOne,
+        );
+        assert!(!raised.full_snapshot);
+        assert!(raised.topology_changed());
+        assert!(raised_corrections > 0);
+        assert_eq!(raised.culled_faces, 0);
+        assert_eq!(requested[1], Some(ResidentLod::uniform(8)));
+        assert_eq!(resident[1], Some(ResidentLod::uniform(8)));
+
+        let demoted = admit_face_lod_publication(
+            &full,
+            None,
+            2,
+            standby,
+            raised.culled_faces,
+            FaceLodAdmissionBuffers {
+                requested: &mut requested,
+                resident: &mut resident,
+                visible: &mut visible,
+                dirty_faces: &mut dirty_faces,
+            },
+        )
+        .unwrap();
+        reconcile_resident_lods_from_requests_with_grading(
+            &requested,
+            &mut resident,
+            &topology,
+            &dirty_faces,
+            &mut balance_scratch,
+            FaceLodGrading::TwoToOne,
+        );
+        assert!(demoted.topology_changed());
+        assert_eq!(resident, vec![Some(standby); 2]);
+        assert_eq!(demoted.culled_faces, 1);
+    }
+
+    #[test]
+    fn malformed_face_lod_publication_is_atomic() {
+        let standby = ResidentLod::uniform(2);
+        let original = vec![Some(standby)];
+        let mut requested = original.clone();
+        let mut resident = original.clone();
+        let mut visible = vec![true];
+        let mut dirty_faces = vec![91];
+        let mut duplicate_payload = Vec::new();
+        duplicate_payload.extend_from_slice(&lod_record([4.0; 3], true));
+        duplicate_payload.extend_from_slice(&lod_record([8.0; 3], false));
+
+        let error = admit_face_lod_publication(
+            &duplicate_payload,
+            Some(&[0, 0]),
+            1,
+            standby,
+            0,
+            FaceLodAdmissionBuffers {
+                requested: &mut requested,
+                resident: &mut resident,
+                visible: &mut visible,
+                dirty_faces: &mut dirty_faces,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, FaceLodPublicationError::FaceIndicesNotIncreasing);
+        assert_eq!(requested, original);
+        assert_eq!(resident, original);
+        assert_eq!(visible, vec![true]);
+        assert_eq!(dirty_faces, vec![91]);
+    }
 
     #[test]
     fn face_lod_delta_emits_full_then_only_changed_records() {

@@ -5620,71 +5620,44 @@ fn update_batches(face_lods: &[f32], face_indices: Option<&[u32]>) {
             );
             state.face_nodes.resize(nf, 0);
         }
-        if state.requested_face_lods.len() != nf {
-            state.requested_face_lods.resize(nf, None);
-        }
-        if state.resident_face_lods.len() != nf {
-            state.resident_face_lods.resize(nf, None);
-        }
-        if state.classified_face_visibility.len() != nf {
-            state.classified_face_visibility = vec![false; nf];
-            state.classified_culled_faces = nf;
-        }
         // Keep conservatively offscreen faces at a small drawable standby LOD.
         // The current-pose render GPU can still resurrect one during an
         // asynchronous camera/animation frame, while avoiding the permanent
         // vertex cost and high-detail flash of arbitrary old topology.
         let initial_resident = bounded_standby_resident_lod();
-        let full_snapshot = face_indices.is_none();
-        let mut culled = if full_snapshot {
-            0
-        } else {
-            state.classified_culled_faces
-        };
         // A picked plan is view-dependent even when the worker's raw root
         // requests are unchanged. A pending enable/disable also needs one
         // publication even after the config itself has been cleared.
         let mut topology_changed = state.batch_layout_dirty
             || state.adaptive_picked.is_enabled()
             || state.adaptive_batch_transition_pending;
-        state.lod_dirty_faces.clear();
-        let record_count = face_indices.map_or(nf, <[u32]>::len);
-        for record_index in 0..record_count {
-            let fi = face_indices
-                .map_or(record_index, |indices| indices[record_index] as usize);
-            if fi >= nf {
-                continue;
-            }
-            let cpu_visible = batch::face_is_visible(face_lods, record_index);
-            if full_snapshot {
-                state.classified_face_visibility[fi] = cpu_visible;
-                culled += usize::from(!cpu_visible);
-            } else {
-                let previously_visible = state.classified_face_visibility[fi];
-                if previously_visible != cpu_visible {
-                    if cpu_visible {
-                        culled = culled.saturating_sub(1);
-                    } else {
-                        culled = culled.saturating_add(1).min(nf);
-                    }
-                    state.classified_face_visibility[fi] = cpu_visible;
-                }
-            }
-            let previous = state.requested_face_lods[fi];
-            let requested = batch::requested_face_lod(
-                face_lods,
-                record_index,
-                initial_resident,
-            );
-            state.requested_face_lods[fi] = Some(requested);
-            if previous != Some(requested) {
-                topology_changed = true;
-                state.lod_dirty_faces.push(fi);
-            }
-        }
-        state.classified_culled_faces = culled;
+        let publication = batch::admit_face_lod_publication(
+            face_lods,
+            face_indices,
+            nf,
+            initial_resident,
+            state.classified_culled_faces,
+            batch::FaceLodAdmissionBuffers {
+                requested: &mut state.requested_face_lods,
+                resident: &mut state.resident_face_lods,
+                visible: &mut state.classified_face_visibility,
+                dirty_faces: &mut state.lod_dirty_faces,
+            },
+        );
         perf_mark("batch-retain-end");
         perf_measure("batch-retain", "batch-retain-start", "batch-retain-end");
+        let publication = match publication {
+            Ok(publication) => publication,
+            Err(error) => {
+                warn!("Rejected malformed LOD publication: {error}");
+                perf_mark("batch-group-end");
+                perf_measure("batch-group", "batch-group-start", "batch-group-end");
+                return;
+            }
+        };
+        let culled = publication.culled_faces;
+        state.classified_culled_faces = culled;
+        topology_changed |= publication.topology_changed();
 
         perf_mark("batch-balance-start");
         let lod_corrections = if let Some(topology) = state.lod_topology.as_ref() {
