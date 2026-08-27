@@ -291,6 +291,63 @@ duplicate path is structurally visible in the zero component-work counters.
 Chrome reported no warnings or errors; the temporary horse tabs were closed
 and the user's chess tab and both user-run servers were left untouched.
 
+## Bounded face-neighborhood sizing
+
+An audit after the whole-component bypass found that component eligibility was
+already topology-indexed. `ScreenMeshTopologyCache` computes canonical
+vertex-connected components once and answers each closure query from component
+IDs and stored ranges; it does not walk all 984 horse faces every frame.
+Caching that answer again would duplicate authority without addressing the
+remaining complete-plan work.
+
+The next topology primitive therefore models a finer candidate boundary. It
+preindexes half-edge face neighbors and canonical-vertex face incidence, then
+reports two distinct sets:
+
+- reconciliation faces: selected seeds plus a requested number of half-edge
+  rings;
+- observed faces: reconciliation faces plus one non-recursive vertex-incidence
+  ring whose physical corner-density records may observe the change.
+
+The distinction is intentional. Edge-density fixed-point propagation crosses
+shared edges and within-face grading; a vertex-only peer observes the final
+corner maximum but does not itself justify recursively reconciling its whole
+vertex-connected component. The query retains allocation scratch, is globally
+source ordered, fails closed on invalid identities or explicit face budgets,
+and explicitly does **not** claim publication authority. A local planner must
+still use fixed boundary state and match the complete oracle.
+
+For one animated horse pose with selected faces
+`[6,10,507,508,596,597,716,733]`:
+
+| Edge hops | Reconciliation faces | Corner observers | Retained roots | Query |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 8 | 68 | 916 | 0.2 ms |
+| 3 | 89 | 210 | 774 | 0.2 ms |
+| 6 | 259 | 396 | 588 | 0.2 ms |
+
+The whole-component answer remained 984 faces. Thus even a conservative
+six-hop candidate avoids touching about 60% of the source roots, while a
+three-hop candidate avoids about 79%.
+
+For a fresh pathological chess pose with selected faces
+`[0,1,4,10,11,169,201,279]`:
+
+| Edge hops | Reconciliation faces | Corner observers | Retained roots | Query |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 8 | 41 | 94,587 | 0.2 ms |
+| 3 | 51 | 104 | 94,524 | 0.2 ms |
+| 6 | 123 | 180 | 94,448 | 0.2 ms |
+
+The complete adaptive plan at that pose measured 984 ms, including 612.4 ms
+of frontier construction and 186.6 ms of reconciliation. Its full welded
+component contained 284 faces. The six-hop query is therefore smaller than the
+component while retaining 99.81% of source roots, but this remains workload
+evidence rather than a correctness shortcut. The 217 core unit tests and 15
+conformal integration tests pass, the WASM target check and generated-export
+smoke pass, Chrome reported no warnings or errors, and all temporary tabs were
+closed without modifying the user's chess tab or servers.
+
 ## Decision
 
 The exact component overlay now has physical publication authority. Unchanged
@@ -298,7 +355,8 @@ certified epochs bypass the complete CPU planner, and bounded changed epochs
 may do so between periodic exact samples. Whole-scene, oversized,
 order-sensitive, uncertified, revoked, or failed candidates retain the complete
 transactional path. Whole-scene and oversized closures are expected policy
-outcomes rather than false failures. The next gate is avoiding repeated closure
-discovery for known-ineligible topology epochs, then finding a dependency unit
-finer than an entire welded component and moving eligible planning out of the
-frame-critical CPU lane.
+outcomes rather than false failures. Component identity and size are already
+preindexed, so another ineligibility cache is unwarranted. The next gate is a
+fixed-boundary neighborhood shadow that proves resident edge LoDs, corner
+observers, overlay membership, atlas residency, and triangle budget against the
+complete oracle before any local publication authority is considered.
