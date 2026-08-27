@@ -2071,7 +2071,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
         let line_index_count = u32::try_from(render_batch.mesh.num_line_indices)
             .map_err(|_| "render batch has a negative line index count".to_string())?;
         batches.push(RenderBatchSnapshot {
-            key,
+            id: batch::RenderBatchId::complete(key),
             members: gpu_batch.members.clone(),
             triangle_index_count,
             line_index_count,
@@ -2087,6 +2087,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
     }
     Ok(RenderSceneSnapshot {
         revision: 0,
+        suppressed_root_faces: Vec::new(),
         batches,
     })
 }

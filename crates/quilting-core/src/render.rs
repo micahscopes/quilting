@@ -5,7 +5,7 @@
 //! pose identity, and ordered logical commands. Neither type contains a GL
 //! handle, WebGPU resource, DOM object, or platform callback.
 
-use crate::batch::{RenderBatchKey, RenderBatchMember};
+use crate::batch::{RenderBatchId, RenderBatchLayer, RenderBatchMember};
 use crate::permutation::perm_sign;
 use serde::{Serialize, Serializer};
 use std::collections::BTreeSet;
@@ -42,7 +42,7 @@ pub enum PbrDrawClass {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderBatchSnapshot {
-    pub key: RenderBatchKey,
+    pub id: RenderBatchId,
     pub members: Vec<RenderBatchMember>,
     /// Backend-neutral cardinality of the resident tessellation entry. Both
     /// WebGL2 and WebGPU consume the same indexed atlas topology.
@@ -71,20 +71,55 @@ impl RenderBatchSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderSceneSnapshot {
     pub revision: u64,
+    /// Exact roots omitted from the logical retained layer and replaced by
+    /// adaptive overlay members. Physical WebGL2 root batches may still
+    /// dispatch these instances with a zero visibility scalar; WebGPU may
+    /// compact them away.
+    pub suppressed_root_faces: Vec<u32>,
     pub batches: Vec<RenderBatchSnapshot>,
 }
 
 impl RenderSceneSnapshot {
     pub fn validate(&self) -> Result<(), RenderContractError> {
+        if self
+            .suppressed_root_faces
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(RenderContractError::SuppressedFaceOrder);
+        }
+        let suppressed = self
+            .suppressed_root_faces
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let uses_complete = self
+            .batches
+            .iter()
+            .any(|batch| batch.id.layer == RenderBatchLayer::Complete);
+        let uses_retained = self
+            .batches
+            .iter()
+            .any(|batch| batch.id.layer != RenderBatchLayer::Complete);
+        if uses_complete && uses_retained {
+            return Err(RenderContractError::MixedBatchLayers);
+        }
+        if uses_complete && !suppressed.is_empty() {
+            return Err(RenderContractError::UnexpectedSuppression);
+        }
+
         let mut previous = None;
         let mut patches = BTreeSet::new();
+        let mut suppressed_roots = BTreeSet::new();
+        let mut overlay_faces = BTreeSet::new();
         for (batch_index, batch) in self.batches.iter().enumerate() {
-            if previous.is_some_and(|key| key >= batch.key) {
+            if previous.is_some_and(|id| id >= batch.id) {
                 return Err(RenderContractError::BatchOrder { batch_index });
             }
-            previous = Some(batch.key);
-            if batch.key.parity_bucket > 1
+            previous = Some(batch.id);
+            if batch.id.key.parity_bucket > 1
                 || batch
+                    .id
                     .key
                     .lod
                     .into_iter()
@@ -103,10 +138,10 @@ impl RenderSceneSnapshot {
             for member in &batch.members {
                 let member_lod = crate::batch::ResidentLod::from_edge_lods(member.edge_lods);
                 if member.permutation_index >= 6
-                    || member_lod.canonical != batch.key.lod
+                    || member_lod.canonical != batch.id.key.lod
                     || member_lod.perm_index.min(5) as u8 != member.permutation_index
                     || usize::from(perm_sign(member.permutation_index as usize) < 0)
-                        != usize::from(batch.key.parity_bucket)
+                        != usize::from(batch.id.key.parity_bucket)
                     || member
                         .vertex_lods
                         .into_iter()
@@ -117,6 +152,31 @@ impl RenderSceneSnapshot {
                         batch_index,
                         face_index: member.face_index,
                     });
+                }
+                match batch.id.layer {
+                    RenderBatchLayer::Complete => {}
+                    RenderBatchLayer::RetainedRoot => {
+                        if member.leaf_id
+                            != crate::screen_partition::ScreenPatchLeafId::ROOT
+                        {
+                            return Err(RenderContractError::InvalidLayerMember {
+                                batch_index,
+                                face_index: member.face_index,
+                            });
+                        }
+                        if suppressed.contains(&member.face_index) {
+                            suppressed_roots.insert(member.face_index);
+                            continue;
+                        }
+                    }
+                    RenderBatchLayer::AdaptiveOverlay => {
+                        if !suppressed.contains(&member.face_index) {
+                            return Err(RenderContractError::UnmaskedAdaptiveReplacement(
+                                member.face_index,
+                            ));
+                        }
+                        overlay_faces.insert(member.face_index);
+                    }
                 }
                 if !patches.insert(member.patch_id()) {
                     if member.leaf_id == crate::screen_partition::ScreenPatchLeafId::ROOT {
@@ -129,6 +189,16 @@ impl RenderSceneSnapshot {
                     });
                 }
             }
+        }
+        if let Some(face_index) = suppressed
+            .difference(&suppressed_roots)
+            .next()
+            .copied()
+        {
+            return Err(RenderContractError::MissingSuppressedRoot(face_index));
+        }
+        if let Some(face_index) = suppressed.difference(&overlay_faces).next().copied() {
+            return Err(RenderContractError::MissingAdaptiveReplacement(face_index));
         }
         for &(face_index, leaf_id) in &patches {
             for ancestor_depth in 0..leaf_id.depth {
@@ -870,7 +940,14 @@ pub enum RenderContractError {
     InvalidBatchKey { batch_index: usize },
     InvalidBatchGeometry { batch_index: usize },
     InvalidBatchMember { batch_index: usize, face_index: u32 },
+    InvalidLayerMember { batch_index: usize, face_index: u32 },
     BatchOrder { batch_index: usize },
+    SuppressedFaceOrder,
+    MixedBatchLayers,
+    UnexpectedSuppression,
+    MissingSuppressedRoot(u32),
+    MissingAdaptiveReplacement(u32),
+    UnmaskedAdaptiveReplacement(u32),
     DuplicateFace(u32),
     DuplicatePatch {
         face_index: u32,
@@ -912,9 +989,37 @@ impl fmt::Display for RenderContractError {
                 formatter,
                 "render batch {batch_index} has an invalid member for face {face_index}"
             ),
+            Self::InvalidLayerMember {
+                batch_index,
+                face_index,
+            } => write!(
+                formatter,
+                "render batch {batch_index} has an invalid layered member for face {face_index}"
+            ),
             Self::BatchOrder { batch_index } => write!(
                 formatter,
                 "render batch {batch_index} is duplicate or out of canonical order"
+            ),
+            Self::SuppressedFaceOrder => {
+                formatter.write_str("suppressed root faces are not strictly increasing")
+            }
+            Self::MixedBatchLayers => {
+                formatter.write_str("complete and retained render layers cannot be mixed")
+            }
+            Self::UnexpectedSuppression => {
+                formatter.write_str("complete render batches cannot suppress source roots")
+            }
+            Self::MissingSuppressedRoot(face_index) => write!(
+                formatter,
+                "suppressed source face {face_index} has no retained root instance"
+            ),
+            Self::MissingAdaptiveReplacement(face_index) => write!(
+                formatter,
+                "suppressed source face {face_index} has no adaptive replacement"
+            ),
+            Self::UnmaskedAdaptiveReplacement(face_index) => write!(
+                formatter,
+                "adaptive replacement for source face {face_index} is not masked in the root layer"
             ),
             Self::DuplicateFace(face) => {
                 write!(
@@ -996,12 +1101,12 @@ mod tests {
         enabled: bool,
     ) -> RenderBatchSnapshot {
         RenderBatchSnapshot {
-            key: RenderBatchKey {
+            id: RenderBatchId::complete(crate::batch::RenderBatchKey {
                 lod: [2, 2, 2],
                 parity_bucket: 0,
                 material_index,
                 render_node_index: 0,
-            },
+            }),
             members: vec![RenderBatchMember {
                 face_index,
                 leaf_id: crate::screen_partition::ScreenPatchLeafId::ROOT,
@@ -1021,6 +1126,7 @@ mod tests {
     fn scene() -> RenderSceneSnapshot {
         RenderSceneSnapshot {
             revision: 7,
+            suppressed_root_faces: Vec::new(),
             batches: vec![
                 batch(0, 0, PbrDrawClass::Opaque, true),
                 batch(1, 1, PbrDrawClass::Blend, false),
@@ -1271,6 +1377,82 @@ mod tests {
                 descendant_depth: first.depth,
                 descendant_path: first.path,
             })
+        );
+    }
+
+    #[test]
+    fn retained_layers_validate_logical_replacement_and_physical_dispatch() {
+        let mut roots = batch(0, 0, PbrDrawClass::Opaque, true);
+        roots.id.layer = RenderBatchLayer::RetainedRoot;
+        roots.members.push(RenderBatchMember {
+            face_index: 1,
+            ..roots.members[0]
+        });
+        let mut overlay = batch(0, 0, PbrDrawClass::Opaque, true);
+        overlay.id.layer = RenderBatchLayer::AdaptiveOverlay;
+        let first = crate::screen_partition::ScreenPatchLeafId::ROOT
+            .child(0)
+            .unwrap();
+        let second = crate::screen_partition::ScreenPatchLeafId::ROOT
+            .child(1)
+            .unwrap();
+        overlay.members[0].leaf_id = first;
+        overlay.members.push(RenderBatchMember {
+            leaf_id: second,
+            ..overlay.members[0]
+        });
+        let retained = RenderSceneSnapshot {
+            revision: 8,
+            suppressed_root_faces: vec![0],
+            batches: vec![roots, overlay],
+        };
+        assert_eq!(retained.validate(), Ok(()));
+
+        let frame = RenderFrame::build(
+            13,
+            RenderPoseIdentity {
+                asset_revision: 2,
+                pose_revision: 9,
+            },
+            RenderStyle::Matcap,
+            view(),
+            RenderFrameOptions::default(),
+            &retained,
+        )
+        .unwrap();
+        assert_eq!(
+            frame
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    RenderCommand::DrawPatches { instance_count, .. } => {
+                        Some(*instance_count)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![2, 2],
+        );
+
+        let mut missing_overlay = retained.clone();
+        missing_overlay.batches.pop();
+        assert_eq!(
+            missing_overlay.validate(),
+            Err(RenderContractError::MissingAdaptiveReplacement(0)),
+        );
+
+        let mut unmasked = retained.clone();
+        unmasked.suppressed_root_faces.clear();
+        assert_eq!(
+            unmasked.validate(),
+            Err(RenderContractError::UnmaskedAdaptiveReplacement(0)),
+        );
+
+        let mut mixed = retained;
+        mixed.batches[0].id.layer = RenderBatchLayer::Complete;
+        assert_eq!(
+            mixed.validate(),
+            Err(RenderContractError::MixedBatchLayers),
         );
     }
 

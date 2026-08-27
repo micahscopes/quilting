@@ -397,6 +397,49 @@ impl RenderBatchKey {
     }
 }
 
+/// Physical publication role of one backend-neutral draw bucket.
+///
+/// `Complete` is the incumbent monolithic frontier. A retained adaptive scene
+/// instead contains `RetainedRoot` buckets plus `AdaptiveOverlay` buckets and
+/// an exact scene-level source-root suppression set.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RenderBatchLayer {
+    #[default]
+    Complete,
+    RetainedRoot,
+    AdaptiveOverlay,
+}
+
+/// Stable resource identity shared by WebGL2 maps and future WebGPU
+/// extraction. Layer is ordered inside the ordinary material/node/topology
+/// key so equal state remains adjacent while root precedes overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RenderBatchId {
+    pub key: RenderBatchKey,
+    pub layer: RenderBatchLayer,
+}
+
+impl RenderBatchId {
+    pub const fn complete(key: RenderBatchKey) -> Self {
+        Self {
+            key,
+            layer: RenderBatchLayer::Complete,
+        }
+    }
+}
+
+impl Ord for RenderBatchId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.key, self.layer).cmp(&(other.key, other.layer))
+    }
+}
+
+impl PartialOrd for RenderBatchId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Minimal per-face record needed to detect whether a retained batch's source
 /// instance stream is still valid. Canonical LOD, parity, material, and node
 /// are already represented by [`RenderBatchKey`].

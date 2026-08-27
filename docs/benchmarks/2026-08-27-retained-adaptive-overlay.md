@@ -130,3 +130,13 @@ Existing batches all keep suppression disabled, so this checkpoint changes no
 draw output. The generated visibility shader, binding plan, one-float output
 ABI, native renderer tests, WASM32 build, and live WebGL2 initialization were
 verified before the resource is connected to retained publication.
+
+The backend-neutral extraction contract now names the physical publication
+role of every batch as `Complete`, `RetainedRoot`, or `AdaptiveOverlay` and
+carries the exact sorted root-suppression set at scene scope. Validation treats
+suppressed roots as physical dispatches but not logical patches, requires every
+suppressed root to exist in the baseline and have an overlay replacement,
+rejects unmasked replacements, and forbids mixing the incumbent complete path
+with retained layers. This permits WebGL2 to use a visibility mask while a
+future WebGPU backend compacts the same logical scene without inventing a
+different topology contract.
