@@ -24,6 +24,8 @@ assert.equal(specs.find(spec => spec.key === 'adaptiveshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'aim').kind, 'toggle');
+assert.equal(specs.find(spec => spec.key === 'aim').defaultValue, '0');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
@@ -310,6 +312,35 @@ assert.ok(
 assert.ok(
   browserSource.includes("if (EXPLICIT_RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');"),
   'implicit Rust asset authority must not pollute canonical URLs with appshadow=1',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['aim', '0']]).pairs,
+  [],
+  'canonical routes must omit the free-camera target-policy default',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['aim', '1']]).pairs,
+  [['aim', '1']],
+  'canonical routes must retain an explicit finite camera target',
+);
+for (const targetPolicyStep of [
+  "set(\n      'aim',\n      manualCameraSemanticTargetEnabled ? '1' : '0',",
+  "manualCameraSemanticTargetEnabled = initParams.aim === '1';",
+  "manualCameraSemanticTargetEnabled = params.aim === '1';",
+]) {
+  assert.ok(
+    browserSource.includes(targetPolicyStep),
+    `camera target-policy route is missing ${targetPolicyStep}`,
+  );
+}
+const clearSelectionSource = browserSource.match(
+  /function clearSelectedObject\(message = ''\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(clearSelectionSource, 'could not locate selection-clear adapter');
+assert.equal(
+  clearSelectionSource.includes('manualCameraSemanticTargetEnabled = false'),
+  false,
+  'selection detach must not silently rewrite independent camera target policy',
 );
 assert.deepEqual(
   canonicalizeHyperscopeRoute([['assetimpl', 'rust']]).pairs,

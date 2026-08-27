@@ -149,6 +149,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("px", "0", Number),
     spec!("py", "0", Number),
     spec!("pz", "0", Number),
+    spec!("aim", "0", Toggle),
     spec!("presentation", "0", Toggle),
     spec!("cue", "", OptionalUuid),
     spec!("presentimpl", "rust", Implementation),
@@ -299,6 +300,27 @@ mod tests {
             vec![("mode", "lod"), ("rx", "0.125"), ("routeimpl", "shadow")]
         );
         assert!(route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn finite_camera_target_policy_is_explicit_and_validated() {
+        let free = HyperscopeRoute::from_pairs([("aim", "0")]);
+        assert_eq!(free.value("aim"), Some("0"));
+        assert!(free.canonical_pairs().is_empty());
+
+        let aimed = HyperscopeRoute::from_pairs([("aim", "1")]);
+        assert_eq!(aimed.value("aim"), Some("1"));
+        assert_eq!(aimed.canonical_pairs(), vec![("aim", "1")]);
+        assert!(aimed.diagnostics().is_empty());
+
+        let invalid = HyperscopeRoute::from_pairs([("aim", "free")]);
+        assert_eq!(invalid.value("aim"), Some("free"));
+        assert_eq!(invalid.canonical_pairs(), vec![("aim", "free")]);
+        assert_eq!(invalid.diagnostics().len(), 1);
+        assert_eq!(
+            invalid.diagnostics()[0].code,
+            RouteDiagnosticCode::InvalidValue
+        );
     }
 
     #[test]

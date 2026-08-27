@@ -1311,6 +1311,7 @@ const PARAM_DEFAULTS = {
   res: '0', density: '100', atten: '1', minpx: '16',
   animate: '1', anim: '-1', atlas: '7', lodratio: '2',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
+  aim: '0',
   smmove: '300', smrotate: '300', smnav: 'hyperscope',
   smlock: '1', smswap: '0', smbackground: '0', smpinv: '2', smrinv: '1',
   smbpinv: '0', smbrinv: '0',
@@ -1348,6 +1349,7 @@ function readParams(p) {
     ry: get('ry'),
     rz: get('rz'),
     px: get('px'), py: get('py'), pz: get('pz'),
+    aim: get('aim'),
     smmove: get('smmove'), smrotate: get('smrotate'), smnav: get('smnav'),
     smlock: get('smlock'), smswap: get('smswap'), smbackground: get('smbackground'),
     smpinv: get('smpinv'), smrinv: get('smrinv'),
@@ -1492,6 +1494,11 @@ function syncURL() {
       'pz',
       canonicalFixedRouteNumber(panZ, 3),
       canonicalFixedRouteNumber(PARAM_DEFAULTS.pz, 3),
+    );
+    set(
+      'aim',
+      manualCameraSemanticTargetEnabled ? '1' : '0',
+      PARAM_DEFAULTS.aim,
     );
     if (RUST_PRESENTATION_ENABLED) {
       p.set('presentation', '1');
@@ -5390,7 +5397,6 @@ function clearSelectedObject(message = '') {
   rustAppSelectionTransitionActive = false;
   rustAppSelectedCameraTransitionKind = null;
   selectedObject = null;
-  manualCameraSemanticTargetEnabled = false;
   cameraFocusTransition = null;
   focusSphereTransition = null;
   // Selection is an optional anchor, not ownership of the sphere. Dropping
@@ -7126,6 +7132,7 @@ applyParams = function(params) {
   panX = finite(params.px, 0, -1e6, 1e6);
   panY = finite(params.py, 0, -1e6, 1e6);
   panZ = finite(params.pz, 0, -1e6, 1e6);
+  manualCameraSemanticTargetEnabled = params.aim === '1';
   setManualCameraBasisFromEuler();
   spaceMouseMove.set(finite(params.smmove, 300, 10, 900));
   spaceMouseRotate.set(finite(params.smrotate, 300, 10, 900));
@@ -10042,6 +10049,7 @@ let initialPatchLabShape = patchLabShape(initParams.lab);
   panX = pf(initParams.px, 0);
   panY = pf(initParams.py, 0);
   panZ = pf(initParams.pz, 0);
+  manualCameraSemanticTargetEnabled = initParams.aim === '1';
   setManualCameraBasisFromEuler();
 }
 
