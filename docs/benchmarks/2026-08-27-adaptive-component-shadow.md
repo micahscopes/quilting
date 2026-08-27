@@ -199,9 +199,10 @@ remained:
 ## Automated gates
 
 - 216 `quilting-core` unit tests and 15 integration tests pass.
-- 17 generated Node/WASM tests pass, including a disconnected-source component
+- 18 generated Node/WASM tests pass, including a disconnected-source component
   shadow with a real dyadic replacement, changed welded-neighbour C0 metadata,
-  exact sparse triangle budget, and complete-publication parity.
+  exact sparse triangle budget, complete-publication parity, and a whole-scene
+  closure that stays on the complete path without a false mismatch or fallback.
 - The generated-export/inert-before-renderer Node smoke passes.
 
 ## Bounded changed-component authority
@@ -251,12 +252,53 @@ the full viewport PNG matched the complete-oracle image byte-for-byte:
 Chrome reported no warnings or errors, the temporary tabs were closed, and the
 user's existing chess tab was not modified.
 
+## Animated whole-component eligibility
+
+The animated horse is one welded component containing all 984 source faces. A
+component publication therefore cannot retain an unaffected root layer, and a
+second component plan duplicates complete planning rather than reducing it.
+Before the eligibility gate, a 440-install animated sample remained exact but
+ended with 20.4 ms of complete planning plus a separate 12.3 ms component
+comparison. It accumulated 370 cold component samples and 70 certified reuses,
+with zero mismatches or fallbacks; correctness was not the problem.
+
+Component planning now receives the same bounded authority budget used by the
+publication policy. For a source of `N` faces the limit is at most `N - 1`; for
+large scenes it is additionally capped at 4,096 faces and one quarter of the
+scene. Exceeding that limit is recorded as `ineligible`, clears no valid
+complete state, and increments neither mismatch, certificate-miss, nor
+publication-fallback counters. Overlay comparison and component publication
+are not staged for that attempt.
+
+In a four-second foreground animation sample after the change:
+
+| Counter | Delta |
+| --- | ---: |
+| Complete attempts / installs | 106 / 106 |
+| Complete fallbacks | 0 |
+| Component eligibility attempts | 106 |
+| Expected ineligible outcomes | 106 |
+| Component comparisons / mismatches | 0 / 0 |
+| Component publications / fallbacks | 0 / 0 |
+
+The terminal diagnostic was `complete-ineligible` with the explicit reason
+`component closure needs 984 faces; authority limit is 983`. Complete planning
+ended at 17.8 ms in that sample. A fresh rebuilt-browser observation ended at
+11.5 ms with 70 complete installs, 55 expected ineligible component attempts,
+zero certificate misses, and no component frontier or reconciliation work.
+Those per-pose timings are not an A/B speed ratio, but the removed 12.3 ms
+duplicate path is structurally visible in the zero component-work counters.
+Chrome reported no warnings or errors; the temporary horse tabs were closed
+and the user's chess tab and both user-run servers were left untouched.
+
 ## Decision
 
 The exact component overlay now has physical publication authority. Unchanged
 certified epochs bypass the complete CPU planner, and bounded changed epochs
 may do so between periodic exact samples. Whole-scene, oversized,
 order-sensitive, uncertified, revoked, or failed candidates retain the complete
-transactional path. The next gate is representative animated-pose evidence and
-then moving the remaining component plan itself out of the frame-critical CPU
-lane.
+transactional path. Whole-scene and oversized closures are expected policy
+outcomes rather than false failures. The next gate is avoiding repeated closure
+discovery for known-ineligible topology epochs, then finding a dependency unit
+finer than an entire welded component and moving eligible planning out of the
+frame-critical CPU lane.
