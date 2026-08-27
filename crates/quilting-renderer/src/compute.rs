@@ -156,6 +156,52 @@ fn validate_packed_lod_classifications(packed: &[u32]) -> Result<(), String> {
     Ok(())
 }
 
+/// Shape and workload summary for one retained packed-classifier comparison.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PackedLodDeltaSummary {
+    pub full_snapshot: bool,
+    pub changed_records: usize,
+}
+
+impl PackedLodDeltaSummary {
+    pub const fn is_unchanged(self) -> bool {
+        !self.full_snapshot && self.changed_records == 0
+    }
+}
+
+/// Compare a complete packed publication with the previous publication and
+/// retain only changed words and their monotonically increasing face IDs.
+///
+/// A shape change is an explicit full snapshot; in that case the sparse output
+/// remains empty and the caller publishes `current` directly. Scratch vectors
+/// are always cleared and retain their allocations between calls.
+pub fn diff_packed_lod_classifications(
+    current: &[u32],
+    previous: &[u32],
+    changed_faces: &mut Vec<u32>,
+    changed_words: &mut Vec<u32>,
+) -> PackedLodDeltaSummary {
+    changed_faces.clear();
+    changed_words.clear();
+    if current.len() != previous.len() {
+        return PackedLodDeltaSummary {
+            full_snapshot: true,
+            changed_records: current.len(),
+        };
+    }
+    debug_assert!(current.len() <= u32::MAX as usize);
+    for (face, (&old, &new)) in previous.iter().zip(current).enumerate() {
+        if old != new {
+            changed_faces.push(face as u32);
+            changed_words.push(new);
+        }
+    }
+    PackedLodDeltaSummary {
+        full_snapshot: false,
+        changed_records: changed_faces.len(),
+    }
+}
+
 fn decode_packed_lod_classifications(
     packed: &[u32],
     decoded: &mut Vec<f32>,
@@ -2416,6 +2462,53 @@ mod tests {
         assert!(unpack_lod_classification(1 << 24).is_err());
         assert!(unpack_lod_classification(10).is_err());
         assert!(unpack_lod_classification(6 << 12).is_err());
+    }
+
+    #[test]
+    fn packed_lod_delta_distinguishes_full_sparse_and_noop_publications() {
+        let mut faces = vec![91];
+        let mut words = vec![92];
+        let full = diff_packed_lod_classifications(
+            &[1, 2, 3],
+            &[],
+            &mut faces,
+            &mut words,
+        );
+        assert_eq!(
+            full,
+            PackedLodDeltaSummary {
+                full_snapshot: true,
+                changed_records: 3,
+            },
+        );
+        assert!(faces.is_empty());
+        assert!(words.is_empty());
+
+        let sparse = diff_packed_lod_classifications(
+            &[1, 20, 3, 40],
+            &[1, 2, 3, 4],
+            &mut faces,
+            &mut words,
+        );
+        assert_eq!(
+            sparse,
+            PackedLodDeltaSummary {
+                full_snapshot: false,
+                changed_records: 2,
+            },
+        );
+        assert_eq!(faces, vec![1, 3]);
+        assert_eq!(words, vec![20, 40]);
+
+        let unchanged = diff_packed_lod_classifications(
+            &[1, 20, 3, 40],
+            &[1, 20, 3, 40],
+            &mut faces,
+            &mut words,
+        );
+        assert!(unchanged.is_unchanged());
+        assert!(faces.is_empty());
+        assert!(words.is_empty());
     }
 
     fn coincident_square() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {

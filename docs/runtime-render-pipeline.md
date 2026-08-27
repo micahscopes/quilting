@@ -90,11 +90,16 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
    packed readback vectors, and rollback-only decode vectors live in separate
    retained pools; the steady-state authority path does not create, resize, or
    write the mesh-sized float decode.
-5. The WASM worker expands and compares that snapshot with its retained previous result
-   before creating any JavaScript typed array. The first coherent result after
-   a model, animation, remesh, or compute-resource boundary transfers all
-   faces; later results cross into JavaScript and transfer only changed
-   `(face_index, six-float classification)` records. A classification with no
+   Renderer-context authority compares the packed words with its retained
+   snapshot before semantic admission. A model/scope shape change is a full
+   publication; otherwise only changed packed records enter reconciliation.
+   An exact no-op skips source admission entirely, while an enabled adaptive
+   screen frontier still refreshes from the current view.
+5. The WASM worker expands and compares that snapshot with its retained
+   previous result before creating any JavaScript typed array. The first
+   coherent result after a model, animation, remesh, or compute-resource
+   boundary transfers all faces; later results cross into JavaScript and
+   transfer only changed `(face_index, six-float classification)` records. A classification with no
    changed records does not enter main-renderer batch bookkeeping.
 6. The main-thread WASM layer retains the last valid topology for invisible
    faces, re-reconciles shared edges (including exact duplicate glTF seam

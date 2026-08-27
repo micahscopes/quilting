@@ -19,8 +19,9 @@ use quilting_renderer::buffer::{
 };
 use quilting_renderer::compute::{
     apply_lod_classification_publication, build_composed_lod_model,
-    compare_lod_classifications, exact_f32_slice_fingerprint, prepare_lod_atlas_lookup,
-    prepare_lod_dispatch_state, prepare_lod_model, prepared_lod_model_fingerprint,
+    compare_lod_classifications, diff_packed_lod_classifications,
+    exact_f32_slice_fingerprint, prepare_lod_atlas_lookup, prepare_lod_dispatch_state,
+    prepare_lod_model, prepared_lod_model_fingerprint,
     unpack_lod_classification_fields, LodAtlasLookup, LodCompute, LodModelResidency,
     StagedLodReadback,
     FLOATS_PER_FACE_OUTPUT, PACKED_LOD_OUTPUT_BYTES_PER_FACE,
@@ -393,6 +394,9 @@ struct SameContextLod {
     worker_batch_snapshot: Option<SameContextLodBatchAuthoritySnapshot>,
     last_authority_stamp: Option<SameContextLodRequestStamp>,
     authority_resident: Vec<f32>,
+    authority_packed: Vec<u32>,
+    authority_changed_indices: Vec<u32>,
+    authority_changed_packed: Vec<u32>,
     batch_shadow: SameContextLodBatchShadow,
     diagnostics: SameContextLodDiagnostics,
 }
@@ -604,6 +608,7 @@ impl SameContextLod {
                 .worker_batch_publication
                 .map(|stamp| stamp.request_id),
             authority_resident_faces: self.authority_resident.len() / FLOATS_PER_FACE_OUTPUT,
+            authority_packed_faces: self.authority_packed.len(),
             dispatches: self.diagnostics.dispatches,
             skipped_busy: self.diagnostics.skipped_busy,
             polls: self.diagnostics.polls,
@@ -646,6 +651,10 @@ impl SameContextLod {
                 .mismatched_batch_group_comparisons,
             skipped_adaptive_batch_groups: self.diagnostics.skipped_adaptive_batch_groups,
             authoritative_publications: self.diagnostics.authoritative_publications,
+            packed_publication_noops: self.diagnostics.packed_publication_noops,
+            packed_sparse_publications: self.diagnostics.packed_sparse_publications,
+            packed_changed_records: self.diagnostics.packed_changed_records,
+            packed_admission_skips: self.diagnostics.packed_admission_skips,
             stale_authoritative_completions: self
                 .diagnostics
                 .stale_authoritative_completions,
@@ -686,6 +695,14 @@ impl SameContextLod {
             last_authoritative_changed_faces: self
                 .diagnostics
                 .last_authoritative_changed_faces,
+            last_packed_publication_unchanged: self
+                .diagnostics
+                .last_packed_publication_unchanged,
+            last_packed_changed_records: self.diagnostics.last_packed_changed_records,
+            last_packed_full_snapshot: self.diagnostics.last_packed_full_snapshot,
+            last_packed_admission_skipped: self
+                .diagnostics
+                .last_packed_admission_skipped,
             last_authoritative_pose_revision: self
                 .diagnostics
                 .last_authoritative_pose_revision,
@@ -1003,6 +1020,10 @@ struct SameContextLodDiagnostics {
     mismatched_batch_group_comparisons: u64,
     skipped_adaptive_batch_groups: u64,
     authoritative_publications: u64,
+    packed_publication_noops: u64,
+    packed_sparse_publications: u64,
+    packed_changed_records: u64,
+    packed_admission_skips: u64,
     stale_authoritative_completions: u64,
     cancellations: u64,
     failures: u64,
@@ -1029,6 +1050,10 @@ struct SameContextLodDiagnostics {
     last_batch_group_mismatches: usize,
     last_authoritative_faces: usize,
     last_authoritative_changed_faces: usize,
+    last_packed_publication_unchanged: bool,
+    last_packed_changed_records: usize,
+    last_packed_full_snapshot: bool,
+    last_packed_admission_skipped: bool,
     last_authoritative_pose_revision: u32,
     last_authoritative_pose_continuity_epoch: u32,
     last_exact: Option<bool>,
@@ -1053,6 +1078,7 @@ struct SameContextLodShadowSnapshot {
     batch_candidate_request_id: Option<u32>,
     worker_batch_publication_request_id: Option<u32>,
     authority_resident_faces: usize,
+    authority_packed_faces: usize,
     dispatches: u64,
     skipped_busy: u64,
     polls: u64,
@@ -1077,6 +1103,10 @@ struct SameContextLodShadowSnapshot {
     mismatched_batch_group_comparisons: u64,
     skipped_adaptive_batch_groups: u64,
     authoritative_publications: u64,
+    packed_publication_noops: u64,
+    packed_sparse_publications: u64,
+    packed_changed_records: u64,
+    packed_admission_skips: u64,
     stale_authoritative_completions: u64,
     cancellations: u64,
     failures: u64,
@@ -1104,6 +1134,10 @@ struct SameContextLodShadowSnapshot {
     last_batch_group_mismatches: usize,
     last_authoritative_faces: usize,
     last_authoritative_changed_faces: usize,
+    last_packed_publication_unchanged: bool,
+    last_packed_changed_records: usize,
+    last_packed_full_snapshot: bool,
+    last_packed_admission_skipped: bool,
     last_authoritative_pose_revision: u32,
     last_authoritative_pose_continuity_epoch: u32,
     mismatch_examples: Vec<SameContextLodMismatchSnapshot>,
@@ -4894,6 +4928,9 @@ pub fn mr_upload_composed_lod_model(
             worker_batch_snapshot: None,
             last_authority_stamp: None,
             authority_resident: Vec::new(),
+            authority_packed: Vec::new(),
+            authority_changed_indices: Vec::new(),
+            authority_changed_packed: Vec::new(),
             batch_shadow,
             diagnostics: SameContextLodDiagnostics::default(),
         });
@@ -5185,7 +5222,13 @@ fn try_compare_same_context_lod_batches(state: &mut MainState) -> Result<(), Str
 /// CPU residency and GPU batches. The full classifier vector never crosses
 /// the WASM boundary; JavaScript observes only the bounded diagnostic summary.
 fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), String> {
-    let (candidate, mut prefix_indices, resident_faces) = {
+    let (
+        mut candidate,
+        mut prefix_indices,
+        mut changed_indices,
+        mut changed_packed,
+        resident_faces,
+    ) = {
         let lod = state
             .same_context_lod
             .as_mut()
@@ -5207,6 +5250,8 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
         (
             candidate,
             std::mem::take(&mut lod.batch_shadow.prefix_indices),
+            std::mem::take(&mut lod.authority_changed_indices),
+            std::mem::take(&mut lod.authority_changed_packed),
             resident_faces,
         )
     };
@@ -5221,6 +5266,8 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
             .as_mut()
             .ok_or_else(|| "same-context LOD model was retired during publication".to_string())?;
         lod.batch_shadow.prefix_indices = prefix_indices;
+        lod.authority_changed_indices = changed_indices;
+        lod.authority_changed_packed = changed_packed;
         lod.diagnostics.stale_authoritative_completions = lod
             .diagnostics
             .stale_authoritative_completions
@@ -5228,7 +5275,33 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
         lod.compute.recycle_readback_vector(candidate.packed);
         return Ok(());
     }
-    if classified_faces == resident_faces {
+    let packed_delta = diff_packed_lod_classifications(
+        &candidate.packed,
+        &state
+            .same_context_lod
+            .as_ref()
+            .expect("same-context LOD residency was retained")
+            .authority_packed,
+        &mut changed_indices,
+        &mut changed_packed,
+    );
+    let packed_full_snapshot = packed_delta.full_snapshot;
+    let packed_changed_records = packed_delta.changed_records;
+    let packed_unchanged = packed_delta.is_unchanged();
+    let skip_packed_admission = packed_unchanged && !state.batch_layout_dirty;
+    let use_sparse_packed = !packed_full_snapshot && !changed_indices.is_empty();
+    if skip_packed_admission {
+        state.lod_dirty_faces.clear();
+        if state.adaptive_picked.is_enabled() || state.adaptive_batch_transition_pending {
+            refresh_adaptive_picked_batches(state);
+        }
+    } else if use_sparse_packed {
+        update_batches_in_state(
+            state,
+            RetainedLodPublication::PackedWords(&changed_packed),
+            Some(&changed_indices),
+        );
+    } else if classified_faces == resident_faces {
         update_batches_in_state(
             state,
             RetainedLodPublication::PackedWords(&candidate.packed),
@@ -5252,13 +5325,44 @@ fn publish_same_context_lod_completion(state: &mut MainState) -> Result<(), Stri
         .same_context_lod
         .as_mut()
         .ok_or_else(|| "same-context LOD model was retired during publication".to_string())?;
+    if !packed_unchanged {
+        std::mem::swap(&mut lod.authority_packed, &mut candidate.packed);
+    }
     lod.batch_shadow.prefix_indices = prefix_indices;
+    lod.authority_changed_indices = changed_indices;
+    lod.authority_changed_packed = changed_packed;
     lod.diagnostics.authoritative_publications = lod
         .diagnostics
         .authoritative_publications
         .saturating_add(1);
+    lod.diagnostics.packed_changed_records = lod
+        .diagnostics
+        .packed_changed_records
+        .saturating_add(packed_changed_records as u64);
+    if packed_unchanged {
+        lod.diagnostics.packed_publication_noops = lod
+            .diagnostics
+            .packed_publication_noops
+            .saturating_add(1);
+    }
+    if use_sparse_packed {
+        lod.diagnostics.packed_sparse_publications = lod
+            .diagnostics
+            .packed_sparse_publications
+            .saturating_add(1);
+    }
+    if skip_packed_admission {
+        lod.diagnostics.packed_admission_skips = lod
+            .diagnostics
+            .packed_admission_skips
+            .saturating_add(1);
+    }
     lod.diagnostics.last_authoritative_faces = classified_faces;
     lod.diagnostics.last_authoritative_changed_faces = changed_faces;
+    lod.diagnostics.last_packed_publication_unchanged = packed_unchanged;
+    lod.diagnostics.last_packed_changed_records = packed_changed_records;
+    lod.diagnostics.last_packed_full_snapshot = packed_full_snapshot;
+    lod.diagnostics.last_packed_admission_skipped = skip_packed_admission;
     lod.diagnostics.last_authoritative_pose_revision =
         pose.map_or(0, |pose| pose.revision);
     lod.diagnostics.last_authoritative_pose_continuity_epoch =

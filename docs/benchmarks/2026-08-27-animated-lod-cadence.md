@@ -293,6 +293,33 @@ the expected 23,616 bytes for 984 faces. This proves both the cold production
 path and the still-live rollback oracle rather than inferring either from
 source structure.
 
+### Packed sparse admission
+
+Rust authority now retains the previous complete packed publication below the
+WASM boundary. Equal-length successors are diffed as `u32` words before
+semantic decoding: changed words and their monotonically increasing face IDs
+enter the same atomic sparse admission used by worker rollback, while exact
+no-ops skip source admission and, in the ordinary non-adaptive path,
+reconciliation, grouping, and batch upload.
+Model or classification-scope shape changes remain explicit full snapshots.
+The retained current/scratch vectors are swapped and reused rather than cloned.
+
+A six-second animated-horse Chrome window reported 390 publications: one full
+snapshot, 369 sparse packed publications, and 20 exact no-ops. Only 5,555
+records entered semantic admission in total—14.24 per publication rather than
+984, or 1.45% of the former full-prefix record workload. The last publication
+changed two records. Model fingerprints matched; failures, legacy float
+decodes, decoded-vector creations, and console errors remained zero. This does
+not reduce the four-byte-per-face GPU readback; it removes the subsequent
+per-face CPU semantic work when quantized topology is stable or sparse.
+
+The no-op branch was also exercised with automatic current-view adaptive
+partitioning enabled. During the four-second window exact-root no-ops advanced
+from 32 to 46 while the adaptive planner completed 230/230 installations, with
+no fallbacks, no transition left pending, and no failures or errors. Thus
+view-dependent leaf refresh remains live even when root source-face admission
+is skipped.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
