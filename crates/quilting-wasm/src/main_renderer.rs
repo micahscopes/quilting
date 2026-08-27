@@ -264,6 +264,12 @@ struct MainState {
     /// complete frontier so rollback and retained-layer extraction never
     /// confuse two CPU epochs.
     baseline_batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
+    /// Monotonic identity of the crack-free resident root field. Camera-only
+    /// adaptive refreshes do not advance it.
+    root_topology_revision: u64,
+    /// Exact baseline-root grouping epoch retained across adaptive pose
+    /// refreshes: `(root topology revision, batch layout revision)`.
+    baseline_group_signature: Option<(u64, u64)>,
     batch_staging: Vec<f32>,
     cached_instances: Vec<f32>,
     /// Raw classifier request before shared-edge and within-face promotion.
@@ -1324,6 +1330,8 @@ struct BatchUpdateStats {
     unchanged_calls: u64,
     adaptive_refresh_calls: u64,
     adaptive_refresh_noops: u64,
+    baseline_group_cache_hits: u64,
+    baseline_group_cache_misses: u64,
     retained_buckets: u64,
     updated_buckets: u64,
     created_buckets: u64,
@@ -1621,6 +1629,8 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_shadow_scene_dirty: true,
             batch_groups: BTreeMap::new(),
             baseline_batch_groups: BTreeMap::new(),
+            root_topology_revision: 0,
+            baseline_group_signature: None,
             batch_staging: Vec::new(),
             cached_instances: Vec::new(),
             requested_face_lods: Vec::new(),
@@ -3880,11 +3890,7 @@ pub fn mr_set_adaptive_root_shadow_enabled(enabled: bool) -> JsValue {
             && !state.batch_groups.is_empty()
         {
             let initial = bounded_standby_resident_lod();
-            rebuild_legacy_batch_groups(
-                state,
-                initial,
-                LegacyBatchDestination::Baseline,
-            );
+            ensure_baseline_batch_groups(state, initial);
             compare_adaptive_root_shadow(
                 state,
                 initial,
@@ -4289,6 +4295,8 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.surface_runtime.reset_geometry();
             st.batch_groups.clear();
             st.baseline_batch_groups.clear();
+            st.root_topology_revision = st.root_topology_revision.wrapping_add(1);
+            st.baseline_group_signature = None;
             st.batch_staging.clear();
             st.requested_face_lods = vec![None; st.num_faces];
             st.resident_face_lods = vec![None; st.num_faces];
@@ -4474,6 +4482,8 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ("unchangedBatchBuildCalls", batch_stats.unchanged_calls),
             ("adaptiveBatchRefreshCalls", batch_stats.adaptive_refresh_calls),
             ("adaptiveBatchRefreshNoops", batch_stats.adaptive_refresh_noops),
+            ("baselineGroupCacheHits", batch_stats.baseline_group_cache_hits),
+            ("baselineGroupCacheMisses", batch_stats.baseline_group_cache_misses),
             ("retainedBatchBuckets", batch_stats.retained_buckets),
             ("updatedBatchBuckets", batch_stats.updated_buckets),
             ("createdBatchBuckets", batch_stats.created_buckets),
@@ -6689,6 +6699,32 @@ fn rebuild_legacy_batch_groups(
     );
 }
 
+/// Reuse the complete root grouping across camera/animation-only adaptive
+/// refreshes. A classifier topology change or any material/node/atlas layout
+/// change advances one side of the signature and forces an exact rebuild.
+fn ensure_baseline_batch_groups(
+    state: &mut MainState,
+    initial: batch::ResidentLod,
+) -> bool {
+    let signature = (state.root_topology_revision, state.batch_layout_revision);
+    let retained_shape_is_complete = state.resident_vertex_lods.len() == state.num_faces
+        && (state.num_faces == 0 || !state.baseline_batch_groups.is_empty());
+    if state.baseline_group_signature == Some(signature) && retained_shape_is_complete {
+        state.batch_update_stats.baseline_group_cache_hits = state
+            .batch_update_stats
+            .baseline_group_cache_hits
+            .saturating_add(1);
+        return true;
+    }
+    rebuild_legacy_batch_groups(state, initial, LegacyBatchDestination::Baseline);
+    state.baseline_group_signature = Some(signature);
+    state.batch_update_stats.baseline_group_cache_misses = state
+        .batch_update_stats
+        .baseline_group_cache_misses
+        .saturating_add(1);
+    false
+}
+
 /// Publish the desired adaptive-or-fallback grouping and update diagnostics as
 /// one epoch. The upload routine preserves the exact prior GL map on failure;
 /// adaptive diagnostics become active only after the replacement map exists.
@@ -6849,7 +6885,7 @@ fn prepare_adaptive_batch_groups(
     // complete adaptive frontier. Planning may swap a candidate into the live
     // map, but neither root-shadow observation nor fallback construction may
     // overwrite the exact CPU epoch corresponding to the current GPU map.
-    rebuild_legacy_batch_groups(state, initial, LegacyBatchDestination::Baseline);
+    ensure_baseline_batch_groups(state, initial);
     if state.adaptive_root_shadow.is_enabled() {
         compare_adaptive_root_shadow(
             state,
@@ -7242,7 +7278,8 @@ fn update_batches_in_state(
         };
         let culled = publication.culled_faces;
         state.classified_culled_faces = culled;
-        topology_changed |= publication.topology_changed();
+        let admitted_topology_changed = publication.topology_changed();
+        topology_changed |= admitted_topology_changed;
 
         perf_mark("batch-balance-start");
         let lod_corrections = if let Some(topology) = state.lod_topology.as_ref() {
@@ -7266,7 +7303,12 @@ fn update_batches_in_state(
             "batch-balance-start",
             "batch-balance-end",
         );
-        topology_changed |= lod_corrections != 0;
+        let root_topology_changed = admitted_topology_changed || lod_corrections != 0;
+        topology_changed |= root_topology_changed;
+        if root_topology_changed {
+            state.root_topology_revision = state.root_topology_revision.wrapping_add(1);
+            state.baseline_group_signature = None;
+        }
         state.batch_update_stats.last_culled_faces = culled as u64;
         state.batch_update_stats.last_lod_corrections = lod_corrections as u64;
         state.batch_update_stats.last_missing_atlas_entries = 0;

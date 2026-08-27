@@ -82,6 +82,33 @@ Enabling and disabling the observation gate produced identical viewport PNGs:
 Chrome reported no console messages. The temporary test tab was closed and the
 user's existing chess tab was not selected or modified.
 
+## Retained baseline-root grouping
+
+The complete root grouping and its C0 corner field are now retained across
+camera-, animation-, and adaptive-configuration-only refreshes. Its exact
+identity is the pair of the crack-free root-topology revision and batch-layout
+revision. A changed admitted root request, a reconciliation correction, new
+geometry, or a material/node/atlas layout revision invalidates the cache.
+
+The pathological chess gate produced one cold miss followed by two exact cache
+hits:
+
+| Baseline-root grouping counter | Value |
+| --- | ---: |
+| Cache misses | 1 |
+| Cache hits | 2 |
+| Exact component matches | 2 / 2 |
+| Mismatched shared edges | 0 |
+| Missing residents | 0 |
+| Same-density seam jumps | 0 |
+
+On the final repeated request, the component planner took 10.6 ms, retained
+frontier and reconciliation lookup took 0.0 ms, component overlay extraction
+took 1.1 ms, and the deliberate complete-result comparison took 16.9 ms. The
+measured shadow total was 28.6 ms. This removes another source-sized rebuild
+from an otherwise component-local adaptive refresh while keeping the complete
+baseline available for exact rollback.
+
 ## Automated gates
 
 - 214 `quilting-core` unit tests and 15 integration tests pass.
