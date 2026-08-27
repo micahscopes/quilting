@@ -20,6 +20,7 @@ pub mod sources {
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
     pub const LOD_TYPES: &str = include_str!("../shaders/compute/lod_types.wgsl");
     pub const LOD_PASS1: &str = include_str!("../shaders/compute/lod_pass1.wgsl");
+    pub const LOD_PASS2: &str = include_str!("../shaders/compute/lod_pass2.wgsl");
 
     // Entry-point shaders (compiled to GLSL for WebGL2)
     pub const VERTEX_MAIN: &str = include_str!("../shaders/vertex/main.wgsl");
@@ -254,6 +255,17 @@ pub fn compile_lod_pass1_module() -> Result<naga::Module, Box<dyn std::error::Er
     Ok(module)
 }
 
+/// Compile and validate the backend-neutral coherence/packing LOD pass.
+pub fn compile_lod_pass2_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::LOD_PASS2, HashMap::new())?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)?;
+    Ok(module)
+}
+
 /// Compile a fragment shader to GLSL ES 300 for native OpenGL/WebGL
 /// (no coordinate space adjustment).
 pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -396,6 +408,26 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .count(),
             9,
             "one uniform plus eight storage buffers stay inside WebGPU minimum limits",
+        );
+    }
+
+    #[test]
+    fn compile_lod_pass2_compute_shader() {
+        let module = compile_lod_pass2_module().expect("LOD pass two compiles and validates");
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name == "classify_lod_pass2")
+            .expect("LOD pass two entry point");
+        assert_eq!(entry.stage, naga::ShaderStage::Compute);
+        assert_eq!(entry.workgroup_size, [64, 1, 1]);
+        assert_eq!(
+            module
+                .global_variables
+                .iter()
+                .filter(|(_, variable)| variable.binding.is_some())
+                .count(),
+            5,
         );
     }
 

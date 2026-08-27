@@ -892,6 +892,104 @@ pub fn pack_wgsl_lod_dispatch_words(
     Ok(words)
 }
 
+/// Expand the compact resident atlas lookup to the u32 storage words consumed
+/// by WGSL pass two. Missing entries retain the historical 255 sentinel.
+pub fn pack_wgsl_lod_atlas_words(lookup: &LodAtlasLookup) -> Vec<u32> {
+    lookup.lut.iter().copied().map(u32::from).collect()
+}
+
+fn canonicalize_lod_exponents(exponents: [u32; 3]) -> ([u32; 3], u32) {
+    let [a, b, c] = exponents;
+    if a <= b && b <= c {
+        ([a, b, c], 0)
+    } else if a <= c && c <= b {
+        ([a, c, b], 1)
+    } else if b <= a && a <= c {
+        ([b, a, c], 2)
+    } else if b <= c && c <= a {
+        ([b, c, a], 4)
+    } else if c <= a && a <= b {
+        ([c, a, b], 3)
+    } else {
+        ([c, b, a], 5)
+    }
+}
+
+/// CPU oracle for the WGSL coherence/packing pass.
+///
+/// This is intentionally not used by the live WebGL2 path. It freezes exact
+/// neighbor visibility, S3 canonicalization, atlas lookup, and packed-word
+/// semantics for device parity tests when a WebGPU executor is attached.
+pub fn reconcile_and_pack_wgsl_lod_pass2(
+    pass1: &[[f32; 4]],
+    adjacency: &[[u32; 4]],
+    atlas_lut: &[u32],
+) -> Result<Vec<u32>, String> {
+    if adjacency.len() != pass1.len().saturating_mul(3) {
+        return Err("WGSL pass-two adjacency shape does not match faces".to_string());
+    }
+    if atlas_lut.len() < 1_200 || atlas_lut.iter().any(|&index| index > u8::MAX as u32) {
+        return Err("WGSL pass-two atlas lookup is malformed".to_string());
+    }
+    for record in pass1 {
+        if record.iter().any(|value| !value.is_finite())
+            || record[..3]
+                .iter()
+                .any(|&exponent| exponent < 0.0 || exponent > 9.0 || exponent.fract() != 0.0)
+            || record[3] < 0.0
+            || record[3] > 256.0
+            || record[3].fract() != 0.0
+        {
+            return Err("WGSL pass-two intermediate record is malformed".to_string());
+        }
+    }
+
+    let mut packed = Vec::with_capacity(pass1.len());
+    for (face_index, face) in pass1.iter().enumerate() {
+        let visible = face[3] >= 0.5;
+        if !visible {
+            packed.push(pack_lod_classification(
+                [face[0] as u32, face[1] as u32, face[2] as u32],
+                0,
+                None,
+                0,
+            )?);
+            continue;
+        }
+
+        let mut reconciled = [face[0], face[1], face[2]];
+        for edge in 0..3 {
+            let neighbor = adjacency[face_index * 3 + edge];
+            let neighbor_face = neighbor[0] as i32;
+            if neighbor_face < 0 {
+                continue;
+            }
+            let neighbor_face = neighbor_face as usize;
+            let neighbor_edge = neighbor[1] as usize;
+            if neighbor_face >= pass1.len() || neighbor_edge >= 3 {
+                return Err("WGSL pass-two adjacency record is out of range".to_string());
+            }
+            let neighbor_record = pass1[neighbor_face];
+            if neighbor_record[3] >= 0.5 {
+                reconciled[edge] = reconciled[edge].max(neighbor_record[neighbor_edge]);
+            }
+        }
+        let exponents = reconciled.map(|exponent| exponent as u32);
+        let (canonical, permutation) = canonicalize_lod_exponents(exponents);
+        let key = canonical[0] as usize
+            + canonical[1] as usize * 10
+            + canonical[2] as usize * 100;
+        let priority = (face[3] - 1.0) as u8;
+        packed.push(pack_lod_classification(
+            canonical,
+            permutation,
+            Some(atlas_lut[key]),
+            priority,
+        )?);
+    }
+    Ok(packed)
+}
+
 /// One exact mismatch between two backend LOD classification records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LodClassificationMismatch {
@@ -2598,6 +2696,68 @@ mod tests {
         assert_eq!(uniform[61], 1080.0f32.to_bits());
         assert_eq!(&uniform[62..64], &[0, 0]);
         assert_eq!(&uniform[64..68], &[1, 3, 14, 1]);
+    }
+
+    #[test]
+    fn wgsl_pass_two_oracle_matches_every_s3_packed_word() {
+        let pass1 = [
+            [1.0, 2.0, 3.0, 11.0],
+            [1.0, 3.0, 2.0, 12.0],
+            [2.0, 1.0, 3.0, 13.0],
+            [3.0, 1.0, 2.0, 14.0],
+            [2.0, 3.0, 1.0, 15.0],
+            [3.0, 2.0, 1.0, 16.0],
+            [4.0, 5.0, 6.0, 0.0],
+        ];
+        let adjacency = vec![[u32::MAX, 0, 0, 0]; pass1.len() * 3];
+        let mut atlas = vec![u8::MAX as u32; 1_200];
+        atlas[321] = 77;
+        let actual = reconcile_and_pack_wgsl_lod_pass2(&pass1, &adjacency, &atlas).unwrap();
+        let permutations = [0, 1, 2, 4, 3, 5];
+        for (face, permutation) in permutations.into_iter().enumerate() {
+            assert_eq!(
+                actual[face],
+                pack_lod_classification(
+                    [1, 2, 3],
+                    permutation,
+                    Some(77),
+                    10 + face as u8,
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(
+            actual[6],
+            pack_lod_classification([4, 5, 6], 0, None, 0).unwrap(),
+        );
+    }
+
+    #[test]
+    fn wgsl_pass_two_oracle_reconciles_only_visible_neighbors() {
+        let pass1 = [
+            [1.0, 1.0, 1.0, 1.0],
+            [3.0, 2.0, 1.0, 2.0],
+            [8.0, 8.0, 8.0, 0.0],
+        ];
+        let mut adjacency = vec![[u32::MAX, 0, 0, 0]; pass1.len() * 3];
+        adjacency[0] = [1, 0, 0, 0];
+        adjacency[1] = [2, 0, 0, 0];
+        let mut atlas = vec![u8::MAX as u32; 1_200];
+        atlas[311] = 31;
+        atlas[321] = 32;
+        let actual = reconcile_and_pack_wgsl_lod_pass2(&pass1, &adjacency, &atlas).unwrap();
+        assert_eq!(
+            actual[0],
+            pack_lod_classification([1, 1, 3], 4, Some(31), 0).unwrap(),
+        );
+        assert_eq!(
+            actual[1],
+            pack_lod_classification([1, 2, 3], 5, Some(32), 1).unwrap(),
+        );
+        assert_eq!(
+            actual[2],
+            pack_lod_classification([8, 8, 8], 0, None, 0).unwrap(),
+        );
     }
 
     #[test]
